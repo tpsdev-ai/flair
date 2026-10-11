@@ -5,11 +5,21 @@
  * first:
  *
  *   - OAuth refresh vs revoke (resources/OAuth.ts). A rotation reads the
- *     refresh token, then takes its single-use claim, then issues a new pair.
- *     The revoke endpoint commits `revokedAt` for the same token. Each case
- *     holds the rotation between its read and its claim (the test-only pause
- *     point `oauth-refresh-pre-claim`) while a revoke of that token commits,
- *     then releases it: the rotation is REFUSED, and no token pair is issued.
+ *     refresh token, then — under a per-token lock it shares with a revoke of
+ *     that token — takes its single-use claim, re-reads the committed row,
+ *     writes the old row and issues a new pair. A revoke of the same token
+ *     takes that same lock before it records `revokedAt`, so the two are
+ *     serialized:
+ *       - `oauth-refresh-pre-claim` holds the rotation between its read and
+ *         its claim while a revoke commits. The rotation then takes the lock,
+ *         finds the token's claim already recorded, is REFUSED, and issues no
+ *         pair.
+ *       - `oauth-refresh-post-claim` holds the rotation after its claim and
+ *         committed-row re-read, between that re-read and its issuance, while a
+ *         revoke tries to commit. The revoke cannot take the lock the rotation
+ *         holds, so the rotation — the lock holder — issues its pair and the
+ *         revoke is refused: a committed revoke and an issued pair do not both
+ *         hold.
  *     A control rotation with no competing revoke still succeeds.
  *
  *   - XAA credential touch vs revoke/delete (resources/XAA.ts). A successful
@@ -17,8 +27,9 @@
  *     case holds the touch between its read and its write (the test-only pause
  *     point `xaa-credential-touch`) while the credential is revoked (status ->
  *     "revoked") or deleted, then releases it: the credential stays revoked /
- *     stays deleted. The grant still issues its tokens; the case asserts the
- *     stored credential, the fact the write would otherwise overwrite.
+ *     stays deleted, and the case asserts the stored row. The grant still issues
+ *     its tokens. (Measured: the touch's write does not overwrite the committed
+ *     revoke/delete, so the stored row is what the competing write left.)
  *
  * The pause points are resources/txn-pause-point.ts, armed through
  * FLAIR_ENABLE_TEST_FAULT_INJECTION / FLAIR_TEST_PAUSE_DIR, set for this file's
@@ -77,6 +88,14 @@ async function readRow(table: string, id: string): Promise<any> {
   const rows = await ops({
     operation: "search_by_value", database: "flair", table,
     search_attribute: "id", search_type: "equals", search_value: id, get_attributes: ["*"],
+  });
+  return Array.isArray(rows) ? (rows[0] ?? null) : null;
+}
+
+async function readTokenByHash(tokenHash: string): Promise<any> {
+  const rows = await ops({
+    operation: "search_by_value", database: "flair", table: "OAuthToken",
+    search_attribute: "tokenHash", search_type: "equals", search_value: tokenHash, get_attributes: ["*"],
   });
   return Array.isArray(rows) ? (rows[0] ?? null) : null;
 }
@@ -258,6 +277,34 @@ describe("flair#2333 slice 2 — a later credential lifecycle write does not und
     expect(body.access_token).toBeUndefined();
   }, 60_000);
 
+  it("a revoke running while the rotation is between its re-read and its issuance does not outrun it", async () => {
+    const raw = await seedRefreshToken("flair_cl_2333_post", "agent-2333-post");
+    const { response, competed, released } = await withPaused(
+      "oauth-refresh-post-claim",
+      () => postJson("/OAuthToken", { grant_type: "refresh_token", refresh_token: raw, client_id: "flair_cl_2333_post" }),
+      () => postJson("/OAuthRevoke", { token: raw }).then((r) => r.status),
+    );
+    const text = await response.text();
+    expect(released, "the rotation was not paused and released by this test").toBe("go");
+    const body = response.status === 200 ? JSON.parse(text) : undefined;
+    const rotationIssuedPair = typeof body?.access_token === "string";
+    const revokeCommitted = competed === 200;
+    // The rotation holds the token lock between its committed-row re-read and
+    // its issuance, so a revoke cannot commit there. Its two interleavings are:
+    // the revoke is refused and the rotation issues, or the rotation is refused,
+    // and never both a committed revoke and a usable pair. (Removing the lock
+    // from the rotation and the revoke, and keeping this pause point, makes the
+    // revoke commit here and the rotation issue anyway — this case fails.)
+    expect(
+      revokeCommitted && rotationIssuedPair,
+      `a usable pair was issued after a committed revoke (revoke ${competed}, rotation ${response.status}): the revoke was outrun`,
+    ).toBe(false);
+    if (rotationIssuedPair) {
+      const old = await readTokenByHash(sha256Hex(raw));
+      expect(old?.revokedAt, "the rotation issued a pair but left the presented token unrevoked").toBeTruthy();
+    }
+  }, 60_000);
+
   // ── XAA credential touch vs revoke / delete ────────────────────────────────
 
   it("CONTROL: an uncontended credential touch still records lastUsedAt", async () => {
@@ -296,7 +343,7 @@ describe("flair#2333 slice 2 — a later credential lifecycle write does not und
     expect(response.status, `grant returned ${response.status}: ${text.slice(0, 300)}`).toBe(200);
     const row = await readRow("Credential", credentialId);
     expect(row, "the revoked credential survived").not.toBeNull();
-    expect(row.status, "the committed revoke was undone by the touch").toBe("revoked");
+    expect(row.status, "the stored credential is not the committed revoke").toBe("revoked");
   }, 60_000);
 
   it("a deleted credential stays deleted", async () => {
@@ -318,6 +365,6 @@ describe("flair#2333 slice 2 — a later credential lifecycle write does not und
     const text = await response.text();
     expect(response.status, `grant returned ${response.status}: ${text.slice(0, 300)}`).toBe(200);
     const row = await readRow("Credential", credentialId);
-    expect(row, "the deleted credential was re-created by the touch").toBeNull();
+    expect(row, "the stored row is not the committed delete").toBeNull();
   }, 60_000);
 });

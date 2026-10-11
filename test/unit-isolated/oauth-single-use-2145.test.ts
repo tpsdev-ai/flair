@@ -58,8 +58,25 @@ function createAuthCodeTable() {
 
 function createTokenTable() {
   const rows = new Map<string, any>();
+  // The per-token lock resources/OAuth.ts takes across a rotation and a revoke
+  // (resources/key-lock.ts). Harper exposes it as OAuthToken.primaryStore; this
+  // fake mirrors its non-reentrant per-key tryLock/unlock.
+  const locks = new Set<string>();
+  const lockKey = (key: unknown) => JSON.stringify(key);
   return {
     rows,
+    locks,
+    primaryStore: {
+      tryLock(key: unknown): boolean {
+        const k = lockKey(key);
+        if (locks.has(k)) return false;
+        locks.add(k);
+        return true;
+      },
+      unlock(key: unknown): boolean {
+        return locks.delete(lockKey(key));
+      },
+    },
     async get(id: string) {
       const row = rows.get(id);
       return row ? { ...row } : null;
