@@ -17,6 +17,9 @@
  *     acceptance and one token pair;
  *   - a store error or a missing store primitive refuses with 503 and issues
  *     nothing;
+ *   - the revocation endpoint (OAuthRevoke) refuses with 503 and records no
+ *     `revokedAt` when it cannot record that claim, and records `revokedAt` on
+ *     the token alone when the store is available;
  *   - the row is written only after the request has validated;
  *   - the key is a SHA-256 in its own lock namespace, a successful grant flags
  *     the code's own row used, and the schema's expiration setting outlives
@@ -202,6 +205,14 @@ function redeemRefresh(raw: string, over: Record<string, any> = {}) {
   return postToken({ grant_type: REFRESH_GRANT, refresh_token: raw, client_id: CLIENT_ID, ...over });
 }
 
+/** POST /OAuthRevoke's handler (resources/OAuth.ts → OAuthRevoke.post). */
+function revoke(raw: string): Promise<{ status: number; body: any }> {
+  const inst: any = new (oauth.OAuthRevoke as any)();
+  return inst.post({ token: raw }).then(async (r: any) =>
+    r instanceof Response ? { status: r.status, body: await r.json() } : { status: 200, body: r },
+  );
+}
+
 const CODE_USED = { status: 400, body: { error: "invalid_grant", error_description: "code already used" } };
 const TOKEN_REVOKED = { status: 400, body: { error: "invalid_grant", error_description: "token revoked" } };
 const UNAVAILABLE = { status: 503, body: { error: "temporarily_unavailable", error_description: "replay_store_unavailable" } };
@@ -324,6 +335,44 @@ describe("a store error refuses with 503 and issues nothing", () => {
     expect(await redeemCode(mintCode())).toEqual(UNAVAILABLE);
     expect(singleUse.calls.tryLock).toBe(0); // assertion: the store is not touched
     expect(tokenRows()).toBe(1); // assertion: no pair issued (the refresh token's own minted row only)
+  });
+});
+
+// ─── the revocation endpoint fails closed ───────────────────────────────────
+
+describe("a revoke that cannot record its claim refuses with 503 and revokes nothing", () => {
+  const rowFor = (raw: string) => [...tokens.rows.values()].find((t) => t.tokenHash === sha256(raw));
+
+  for (const which of ["put", "getEntry", "tryLock"] as const) {
+    it(`a ${which} failure returns 503 (never 200) and records no revokedAt`, async () => {
+      const raw = mintRefresh();
+      singleUse.fail[which] = true;
+      expect(await revoke(raw)).toEqual(UNAVAILABLE); // assertion: the refusal is propagated, not discarded
+      expect(rowFor(raw)?.revokedAt).toBeUndefined(); // assertion: the token is left unrevoked
+      expect(singleUse.rows.size).toBe(0); // assertion: no claim recorded
+      singleUse.fail[which] = false;
+      expect(await revoke(raw)).toEqual({ status: 200, body: {} }); // assertion: nothing was recorded by the failed revoke
+      expect(typeof rowFor(raw)?.revokedAt).toBe("string");
+    });
+  }
+
+  it("a missing store primitive returns 503 and records no revokedAt", async () => {
+    const raw = mintRefresh();
+    (flairStub as any).OAuthSingleUse = undefined;
+    expect(await revoke(raw)).toEqual(UNAVAILABLE); // assertion: no store, no 200
+    const broken: any = createFakeReplayNonceTable();
+    delete broken.primaryStore.tryLock;
+    (flairStub as any).OAuthSingleUse = broken;
+    expect(await revoke(raw)).toEqual(UNAVAILABLE); // assertion: a broken store contract, no 200
+    expect(rowFor(raw)?.revokedAt).toBeUndefined(); // assertion: the token is left unrevoked
+  });
+
+  it("CONTROL: an uncontended revoke records revokedAt on the token and returns 200", async () => {
+    const raw = mintRefresh();
+    expect(await revoke(raw)).toEqual({ status: 200, body: {} });
+    expect(typeof rowFor(raw)?.revokedAt).toBe("string"); // assertion: the token alone is revoked
+    expect([...singleUse.rows.keys()]).toEqual([refreshKey(raw)]); // assertion: the revoke records the same claim a rotation would
+    expect(singleUse.locks.size).toBe(0); // assertion: nothing left locked
   });
 });
 

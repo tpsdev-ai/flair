@@ -12,6 +12,7 @@ import { decideRegistration } from "./dcr-gate.js";
 import { buildAuthorizationServerMetadata } from "./oauth-discovery.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 import { withKeyLock } from "./key-lock.js";
+import { withOwnedTransaction } from "./request-transaction.js";
 import { esc } from "./admin-layout.js";
 
 /**
@@ -650,7 +651,9 @@ export class OAuthToken extends Resource {
     // Test-only: valid names are inert unless fault injection is enabled and
     // armed (resources/txn-pause-point.ts). Holds this rotation between the
     // read above and the claim below — the interleaving where a revoke of the
-    // same token commits first.
+    // same token commits first. Such a revoke records the token's single-use
+    // claim (`r:<hash>`), so the rotation's own claim below is a replay and
+    // refuses it there, before the committed-row re-read is reached.
     const pause = txnPausePoint("oauth-refresh-pre-claim");
     if (pause) await pause;
 
@@ -674,35 +677,67 @@ export class OAuthToken extends Resource {
         });
       }
 
-      // Re-read the COMMITTED row (explicit fresh context: never this request's
-      // snapshot) and refuse unless it is still this token, unrevoked. A revoke
-      // holds this lock to commit, so it cannot have committed since the read
-      // above without this rotation having seen the lock free first.
-      const committed = await (databases as any).flair.OAuthToken.get(refreshRecord.id, {});
-      if (!committed || committed.tokenHash !== tokenHash || committed.revokedAt) {
-        return new Response(JSON.stringify({ error: "invalid_grant", error_description: "token revoked" }), {
-          status: 400, headers: { "content-type": "application/json" },
-        });
-      }
+      // Test-only: holds this rotation between its single-use claim above and
+      // its committed-row re-read below, while it holds the token lock. A
+      // competing write of `revokedAt` that does NOT take this lock and does
+      // NOT record the claim (so the claim above could not refuse it) can
+      // commit here; the re-read below is then the only check that refuses the
+      // rotation.
+      const midClaimPause = txnPausePoint("oauth-refresh-mid-claim");
+      if (midClaimPause) await midClaimPause;
 
-      // Test-only: holds this rotation between the re-read above and the write
-      // and issuance below, while it holds the token lock — the interleaving
-      // where a revoke of this token would commit between them.
-      const postClaimPause = txnPausePoint("oauth-refresh-post-claim");
-      if (postClaimPause) await postClaimPause;
+      // The committed-row re-read, the old row's write and the new pair's
+      // issuance run in a FRESH OWNED transaction (withOwnedTransaction,
+      // resources/request-transaction.ts) that COMMITS before this token's lock
+      // releases. Harper wraps this POST in a REQUEST transaction that commits
+      // only after the handler returns, so writes that joined it would still be
+      // invisible when the lock frees — a request that looked at the row right
+      // after release would read it unrevoked. The re-read reads the row IN that
+      // owned transaction: committed state, never this request's earlier
+      // snapshot. (The single-use claim above is its own awaited transaction.)
+      const ctx = (this as any).getContext?.() ?? {};
+      return await withOwnedTransaction(ctx, async (owned) => {
+        // Re-read the COMMITTED row and refuse unless it is still this token,
+        // unrevoked. A revoke holds this lock to commit, so it cannot have
+        // committed since the read above without this rotation having seen the
+        // lock free first.
+        const committed = await (databases as any).flair.OAuthToken.get(refreshRecord.id, owned);
+        if (!committed || committed.tokenHash !== tokenHash || committed.revokedAt) {
+          return new Response(JSON.stringify({ error: "invalid_grant", error_description: "token revoked" }), {
+            status: 400, headers: { "content-type": "application/json" },
+          });
+        }
 
-      // Rotate: revoke old refresh token, issue new pair
-      await (databases as any).flair.OAuthToken.put({
-        ...committed,
-        revokedAt: nowISO(),
+        // Test-only: holds this rotation between the re-read above and the write
+        // and issuance below, while it holds the token lock — the interleaving
+        // where a revoke of this token would commit between them.
+        const postClaimPause = txnPausePoint("oauth-refresh-post-claim");
+        if (postClaimPause) await postClaimPause;
+
+        // Rotate: revoke old refresh token, issue new pair — both in `owned`, so
+        // they commit before the lock releases.
+        await (databases as any).flair.OAuthToken.put({
+          ...committed,
+          revokedAt: nowISO(),
+        }, owned);
+
+        return this.issueTokenPair(committed.clientId, committed.principalId, committed.scope, owned);
       });
-
-      return this.issueTokenPair(committed.clientId, committed.principalId, committed.scope);
     });
+
+    // Test-only: inert unless the fault-injection env opt-in is set and armed.
+    // Pauses AFTER the token lock released (and, with the owned transaction
+    // above, after the rotation's writes committed) but BEFORE this request's own
+    // transaction commits (Harper commits it when the handler returns). A request
+    // that looks at the token right here must see the committed revocation.
+    const claimDone = txnPausePoint("oauth-refresh-claim-done");
+    if (claimDone) await claimDone;
     return outcome.ok ? outcome.value : outcome.response;
   }
 
-  private async issueTokenPair(clientId: string, principalId: string, scope: string) {
+  private async issueTokenPair(clientId: string, principalId: string, scope: string, ctx?: any) {
+    const put = (row: any) =>
+      ctx ? (databases as any).flair.OAuthToken.put(row, ctx) : (databases as any).flair.OAuthToken.put(row);
     const now = nowISO();
     const accessTokenRaw = randomToken("flair_at_");
     const refreshTokenRaw = randomToken("flair_rt_");
@@ -710,7 +745,7 @@ export class OAuthToken extends Resource {
     const accessId = `at_${randomBytes(8).toString("hex")}`;
     const refreshId = `rt_${randomBytes(8).toString("hex")}`;
 
-    await (databases as any).flair.OAuthToken.put({
+    await put({
       id: accessId,
       tokenHash: sha256(accessTokenRaw),
       tokenType: "access",
@@ -721,7 +756,7 @@ export class OAuthToken extends Resource {
       createdAt: now,
     });
 
-    await (databases as any).flair.OAuthToken.put({
+    await put({
       id: refreshId,
       tokenHash: sha256(refreshTokenRaw),
       tokenType: "refresh",
@@ -773,7 +808,11 @@ export class OAuthRevoke extends Resource {
       // revoke still records `revokedAt` below. An access token has no rotation
       // to serialize with.
       if (t.tokenType === "refresh") {
-        const outcome = await withTokenLifecycleLock(tokenHash, async () => {
+        const outcome = await withTokenLifecycleLock<Response | undefined>(tokenHash, async () => {
+          // A claim the store cannot record (unavailable) must not be discarded:
+          // without the claim this revoke cannot serialise with an in-flight
+          // rotation, so it REFUSES — the 503 is returned, never a bare 200, and
+          // `revokedAt` is left unwritten.
           const claim = await claimOAuthSingleUse("refresh", tokenHash, REFRESH_TOKEN_TTL_MS);
           if (claim === "unavailable") return storeUnavailable();
           await (databases as any).flair.OAuthToken.put({
@@ -783,6 +822,7 @@ export class OAuthRevoke extends Resource {
           return undefined;
         });
         if (!outcome.ok) return outcome.response;
+        if (outcome.value) return outcome.value;
         continue;
       }
       await (databases as any).flair.OAuthToken.put({

@@ -14,12 +14,23 @@
  *         its claim while a revoke commits. The rotation then takes the lock,
  *         finds the token's claim already recorded, is REFUSED, and issues no
  *         pair.
+ *       - `oauth-refresh-mid-claim` holds the rotation between its claim and
+ *         its committed-row re-read while a write of `revokedAt` that takes
+ *         neither the token lock nor the claim commits (the claim is already
+ *         recorded, so it cannot be what refuses the rotation). The re-read
+ *         finds the row revoked and REFUSES the rotation: a committed revoke
+ *         is not outrun.
  *       - `oauth-refresh-post-claim` holds the rotation after its claim and
  *         committed-row re-read, between that re-read and its issuance, while a
  *         revoke tries to commit. The revoke cannot take the lock the rotation
  *         holds, so the rotation — the lock holder — issues its pair and the
  *         revoke is refused: a committed revoke and an issued pair do not both
  *         hold.
+ *       - `oauth-refresh-claim-done` holds the rotation after its token lock has
+ *         released (its writes committed) but before this request's own
+ *         transaction commits, while a second request looks at the token. The
+ *         committed revocation is visible; a write left in the request
+ *         transaction would not be.
  *     A control rotation with no competing revoke still succeeds.
  *
  *   - XAA credential touch vs revoke/delete (resources/XAA.ts). A successful
@@ -33,8 +44,8 @@
  *
  * The pause points are resources/txn-pause-point.ts, armed through
  * FLAIR_ENABLE_TEST_FAULT_INJECTION / FLAIR_TEST_PAUSE_DIR, set for this file's
- * Harper only. Unchanged rows are the control cases (the ordinary path is
- * unchanged).
+ * Harper only. The control cases exercise the ordinary, uncontended path: a
+ * rotation still exchanges, and a credential touch still records `lastUsedAt`.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
@@ -289,12 +300,13 @@ describe("flair#2333 slice 2 — a later credential lifecycle write does not und
     const body = response.status === 200 ? JSON.parse(text) : undefined;
     const rotationIssuedPair = typeof body?.access_token === "string";
     const revokeCommitted = competed === 200;
-    // The rotation holds the token lock between its committed-row re-read and
-    // its issuance, so a revoke cannot commit there. Its two interleavings are:
-    // the revoke is refused and the rotation issues, or the rotation is refused,
-    // and never both a committed revoke and a usable pair. (Removing the lock
-    // from the rotation and the revoke, and keeping this pause point, makes the
-    // revoke commit here and the rotation issue anyway — this case fails.)
+    // The rotation holds the token lock across its committed-row re-read, this
+    // pause and its issuance, so a revoke of the same token cannot commit here:
+    // it cannot take the lock, is refused, and the rotation — the lock holder —
+    // issues its pair. Never both a committed revoke and a usable pair.
+    // (Removing the lock from the rotation and the revoke, and keeping this
+    // pause point, makes the revoke commit here and the rotation issue anyway —
+    // this case fails.)
     expect(
       revokeCommitted && rotationIssuedPair,
       `a usable pair was issued after a committed revoke (revoke ${competed}, rotation ${response.status}): the revoke was outrun`,
@@ -303,6 +315,65 @@ describe("flair#2333 slice 2 — a later credential lifecycle write does not und
       const old = await readTokenByHash(sha256Hex(raw));
       expect(old?.revokedAt, "the rotation issued a pair but left the presented token unrevoked").toBeTruthy();
     }
+  }, 60_000);
+
+  it("a revoke that commits between the rotation's claim and its committed-row re-read refuses the rotation", async () => {
+    const raw = await seedRefreshToken("flair_cl_2333_mid", "agent-2333-mid");
+    const row = await readTokenByHash(sha256Hex(raw));
+    expect(row, "the seeded refresh token is readable").not.toBeNull();
+    const { response, competed, released } = await withPaused(
+      "oauth-refresh-mid-claim",
+      () => postJson("/OAuthToken", { grant_type: "refresh_token", refresh_token: raw, client_id: "flair_cl_2333_mid" }),
+      // A revoke that writes `revokedAt` on the row directly — it takes neither
+      // the token lock nor the single-use claim, so the claim the rotation has
+      // already recorded cannot be what refuses it. Only the committed-row
+      // re-read can. Commit it, and wait until the row is observably revoked
+      // before releasing the rotation.
+      async () => {
+        await ops({
+          operation: "update", database: "flair", table: "OAuthToken",
+          records: [{ id: row.id, revokedAt: new Date().toISOString() }],
+        });
+        const deadline = Date.now() + 5_000;
+        while (Date.now() < deadline) {
+          if ((await readTokenByHash(sha256Hex(raw)))?.revokedAt) return 200;
+          await new Promise((r) => setTimeout(r, 25));
+        }
+        throw new Error("the direct revoke's revokedAt did not commit");
+      },
+    );
+    expect(released, "the rotation was not paused and released by this test").toBe("go");
+    expect(competed, "the competing revoke did not commit").toBe(200);
+    const text = await response.text();
+    expect(
+      response.status,
+      `rotation after a revoke committed between its claim and its re-read returned ${response.status}: ${text.slice(0, 300)}`,
+    ).toBe(400);
+    const body = JSON.parse(text);
+    expect(body.error).toBe("invalid_grant");
+    expect(body.access_token).toBeUndefined();
+    const old = await readTokenByHash(sha256Hex(raw));
+    expect(old?.revokedAt, "the committed revoke is recorded").toBeTruthy();
+  }, 60_000);
+
+  it("the rotation's writes commit before its lock releases: a look at the token right after release sees it revoked", async () => {
+    const raw = await seedRefreshToken("flair_cl_2333_done", "agent-2333-done");
+    const { response, competed, released } = await withPaused(
+      "oauth-refresh-claim-done",
+      () => postJson("/OAuthToken", { grant_type: "refresh_token", refresh_token: raw, client_id: "flair_cl_2333_done" }),
+      // A second request looks at the token while the rotation has released its
+      // lock but before this request's own transaction commits (Harper commits
+      // it when the handler returns). With the rotation's writes committed under
+      // the lock it reads the row revoked; a write left in the request
+      // transaction would still be invisible here.
+      async () => ((await readTokenByHash(sha256Hex(raw)))?.revokedAt ? 200 : 500),
+    );
+    expect(released, "the rotation was not paused and released by this test").toBe("go");
+    const text = await response.text();
+    const body = response.status === 200 ? JSON.parse(text) : undefined;
+    expect(response.status, `the rotation returned ${response.status}: ${text.slice(0, 300)}`).toBe(200);
+    expect(typeof body?.refresh_token).toBe("string");
+    expect(competed, "the token was not revoked when the rotation released its lock: its writes had not committed").toBe(200);
   }, 60_000);
 
   // ── XAA credential touch vs revoke / delete ────────────────────────────────
