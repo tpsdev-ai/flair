@@ -313,9 +313,9 @@ describe("flair#2465 — a re-embed keeps a concurrent owner edit (real Harper)"
     // Harper orders by first read: this PUT's transaction is OLDER than the
     // re-embed's write. Harper reconciles the older full update best-effort —
     // folding the newer write into it (the edit survives) or superseding it (the
-    // edit does not). Both 200s above always hold; which row state results is NOT
-    // asserted (it depends on Harper's audit walk, not on this PR's write). The
-    // deterministic case above is what this PR guarantees.
+    // edit does not). Both 200s above always hold. This case does not assert edit
+    // survival: the result depends on the re-embed's write type and Harper's
+    // reconciliation. The deterministic case above is what this PR guarantees.
     const row = await readRow(id);
     expect(row, "the row vanished entirely").not.toBeNull();
     expect([ORIGINAL, EDITED], `row.content was neither the original nor the edit: ${JSON.stringify(row?.content)}`).toContain(row?.content);
