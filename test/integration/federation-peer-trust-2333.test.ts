@@ -411,8 +411,14 @@ describe("flair#2333 — a peer revoked during a re-pair is not brought back (re
 // lock releases. A second pairing that takes the just-freed lock then reads the
 // token UNCONSUMED and pairs a second peer. The fix runs the consume (re-read of
 // the token) and the Peer write in a FRESH OWNED transaction (withOwnedTransaction,
-// resources/request-transaction.ts) that commits BEFORE the lock releases. These
-// two cases FAIL on b0fed5fa, where both paths write in the request transaction.
+// resources/request-transaction.ts) that commits BEFORE the lock releases.
+//
+// On the heads, exactly: the RE-PAIR case is RED on pristine b0fed5fa, where the
+// re-pair's consume joins the request transaction and the competing new-peer
+// pairing returns 200 paired. The FIRST-PAIR case's pause point
+// (`federation-pair-claim-done`) does not exist on b0fed5fa, so it is RED only
+// under the mutation that writes back in the request transaction (its pause point
+// present, the write reverted); it is not a pristine-head red.
 
 describe("flair#2333 — the token lock releases only after the consume commits: first-pair path (real Harper)", () => {
   it("a pairing that takes the lock right after the first releases it is refused; one peer (federation-pair-claim-done)", async () => {
