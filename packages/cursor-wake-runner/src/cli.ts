@@ -86,17 +86,53 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       code = 1;
     }
   };
-  await tick();
-  const timer = setInterval(tick, config.intervalSec * 1000);
+  const serial = startSerialTicks(tick, config.intervalSec);
   await new Promise<void>((resolve) => {
     const stop = () => {
-      clearInterval(timer);
+      serial.stop();
       resolve();
     };
     process.once("SIGINT", stop);
     process.once("SIGTERM", stop);
   });
   return code;
+}
+
+/**
+ * flair#1944 round 2 — run `tick` now, then again only AFTER the previous tick
+ * has settled. A fixed `setInterval` starts a new tick on a wall-clock schedule
+ * whether or not the last cycle finished, so one runner can overlap its own
+ * cycles (a slow drain or launch still in flight when the next begins). Here the
+ * next tick is scheduled from the previous tick's completion, so at most one
+ * cycle is ever in flight.
+ *
+ * `schedule`/`cancel` are injectable so a test can drive the clock; the CLI uses
+ * real timers.
+ */
+export function startSerialTicks(
+  tick: () => Promise<void>,
+  intervalSec: number,
+  schedule: (fn: () => void, ms: number) => unknown = (fn, ms) => setTimeout(fn, ms),
+  cancel: (handle: unknown) => void = (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+): { stop: () => void } {
+  let stopped = false;
+  let handle: unknown;
+  const run = (): void => {
+    void Promise.resolve()
+      .then(tick)
+      // tick owns its own error reporting; a throw must not stop the loop.
+      .catch(() => {})
+      .finally(() => {
+        if (!stopped) handle = schedule(run, intervalSec * 1000);
+      });
+  };
+  run();
+  return {
+    stop: () => {
+      stopped = true;
+      cancel(handle);
+    },
+  };
 }
 
 function invokedAsCli(): boolean {

@@ -8,14 +8,20 @@
  * launched Cursor agent id, and a `hostSource` `{ host: "cursor", kind:
  * "launch", id: <cursorAgentId>, url?: <url> }` claiming where the launch lives.
  *
- * The id and url reach other agents' bootstrap as an unverified citation
- * (flair#2446). The id is the Cursor agent id: on create, the id Cursor
- * returned (the requested id when the response carries none); on a 409 replay,
- * the requested id, which Cursor reported as already in use. The url is set
- * only on create, and only as Cursor returned it. A value the server's
- * host-source grammar would refuse is omitted — never rewritten — so the
- * receipt still lands; the server checks and stores each value's NFC form, and
- * so does this mirror's check. The grammar is mirrored from
+ * Scope: the write is PRIVATE and omits `hostSourceScope`, so the server's read
+ * projection keeps the pointer AUTHOR-ONLY — a non-author who can read this
+ * memory sees `hostSource: "withheld"` — and this branch's bootstrap does not
+ * render host-source pointers at all. The id and url therefore do not reach
+ * other agents' bootstrap; a `hostSource` is the writer's claim, not verified
+ * host authorship.
+ *
+ * The id is the Cursor agent id: on create, the id Cursor returned (the
+ * requested id when the response carries none); on a 409 replay, the requested
+ * id, which Cursor reported as already in use. The url is set only on create,
+ * and only as Cursor returned it. A value the server's host-source grammar would
+ * refuse is omitted — never rewritten — so the receipt still lands IF THE
+ * REMAINING WRITE SUCCEEDS; the server checks and stores each value's NFC form,
+ * and so does this mirror's check. The grammar is mirrored from
  * resources/host-source.ts (packages never import server code);
  * test/host-source-parity.test.ts runs this mirror and the server's
  * validateHostSource over the same inputs and asserts they agree.
@@ -150,14 +156,15 @@ export function buildLaunchReceipt(
 }
 
 /**
- * HTTP statuses that mean the server will refuse the SAME receipt write again
+ * HTTP statuses the runner treats as a NON-RETRYABLE receipt-write refusal
  * (flair#1944): a malformed or invalid request (400), a conflict (409), a body
- * too large (413), an unprocessable request (422). Retrying such a write can
- * never succeed, and because a replay reaches the same write (Cursor 409 ->
- * "already" -> no receipt yet -> write), holding the watermark for it would
- * block every later dispatch for this agent forever. Every other failure —
- * a network error, a timeout, 401/403, 408, 429, any 5xx, any other status —
- * is treated as transient or a configuration fault and retried next cycle.
+ * too large (413), an unprocessable request (422). This is the runner's POLICY,
+ * not proof the server would refuse every replay: the runner does not retry
+ * these because a replay reaches the same write (Cursor 409 -> "already" -> no
+ * receipt yet -> write) and holding the watermark for one would block every
+ * later dispatch for this agent forever. Every other failure — a network error,
+ * a timeout, 401/403, 408, 429, any 5xx, any other status — is treated as
+ * transient or a configuration fault and retried next cycle.
  */
 export const RECEIPT_PERMANENT_REFUSAL_STATUSES: ReadonlySet<number> = new Set([400, 409, 413, 422]);
 

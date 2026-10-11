@@ -4,14 +4,15 @@
  * the watermark.
  *
  * Ack happens AFTER handoff and AFTER the receipt, and only through the last
- * successful event. A failed launch, or a receipt write that failed for a
- * transient or configuration reason, does not advance the cursor — the event
- * stays queued (at-least-once). Redelivery of an already-launched event hits
- * Cursor 409 and is treated as success, then the receipt is retried and the
- * event acked — no second launch. A receipt the server PERMANENTLY refuses
- * (400/409/413/422) is not retried: the launch is real and the receipt is
- * provenance, not control, so the event is acked without it and the refusal is
- * reported as `receiptRefused`.
+ * successful event — EXCEPT for a receipt the server PERMANENTLY refuses
+ * (400/409/413/422): that event is acked WITHOUT a receipt (the launch is real
+ * and the receipt is provenance, not control) and the refusal is reported as
+ * `receiptRefused`. Otherwise a failed launch, or a receipt write that failed
+ * for a transient or configuration reason, does not advance the cursor — the
+ * event stays queued (at-least-once). Redelivery of an already-launched event
+ * hits Cursor 409 and is treated as success, then the receipt is retried and
+ * the event acked — no second launch. The receipt store is REQUIRED for a live
+ * cycle (flair#1944 round 2): a handoff is never acked with no receipt attempt.
  */
 
 import { wakeAgentId } from "./agent-id.js";
@@ -55,8 +56,13 @@ export interface WakeDeps {
   agentId: string;
   catchup: CatchupPort;
   cursor: CursorAgentClient;
-  /** flair#1944 — where launch receipts are recorded. Omitted: no receipt is written. */
-  receipts?: ReceiptStore;
+  /**
+   * flair#1944 — where launch receipts are recorded. REQUIRED for a live
+   * (non-dry-run) cycle: a handoff must never be acked with no receipt attempt.
+   * A dry-run records nothing and never reads this, but must still supply one
+   * for the type.
+   */
+  receipts: ReceiptStore;
   /** One line for a receipt that omits a value the server's grammar would refuse, and one for a receipt the server refused. */
   log?: (line: string) => void;
   /** When true, classify only — no Cursor create, no receipt, no watermark ack. */
@@ -107,12 +113,11 @@ async function recordLaunchReceipt(
   dispatch: DirectedDispatch,
   launch: LaunchResult,
 ): Promise<
-  | { status: "written" | "unchanged" | "none" }
+  | { status: "written" | "unchanged" }
   | { status: "failed"; error: string }
   | { status: "refused"; refusal: ReceiptRefusal }
 > {
   const store = deps.receipts;
-  if (!store) return { status: "none" };
   const { receipt, omittedUrl, omittedSource } = buildLaunchReceipt(dispatch.id, launch);
   if (omittedSource) {
     deps.log?.(`cursor-wake: receipt for ${dispatch.id} omits its host source: the server's host-source grammar would refuse the Cursor agent id`);
@@ -139,6 +144,12 @@ async function recordLaunchReceipt(
 }
 
 export async function runWakeCycle(deps: WakeDeps): Promise<WakeResult> {
+  if (!deps.dryRun && !deps.receipts) {
+    // flair#1944 round 2: a live cycle must be able to record its receipt.
+    // `receipts` is required by the type, but a JS caller could still omit it;
+    // refuse rather than ack a handoff with no receipt attempt.
+    throw new Error("runWakeCycle requires deps.receipts for a live cycle; pass dryRun to classify only");
+  }
   const result = emptyResult();
   let after: string | undefined;
   let lastAckable: string | null = null;
@@ -196,7 +207,7 @@ export async function runWakeCycle(deps: WakeDeps): Promise<WakeResult> {
         // Both are named outcomes, not a thrown crash.
         if (launch.outcome === "created" || launch.outcome === "already") {
           const receipt = await recordLaunchReceipt(deps, dispatch, launch);
-          if (receipt.status !== "none") result.items[result.items.length - 1].receipt = receipt.status;
+          result.items[result.items.length - 1].receipt = receipt.status;
           if (receipt.status === "refused") {
             const { status, code } = receipt.refusal;
             result.receiptRefused.push({ eventId: dispatch.id, status, code });

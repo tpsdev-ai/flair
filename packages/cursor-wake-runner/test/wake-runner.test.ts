@@ -29,6 +29,8 @@ import {
   type CursorAgentClient,
   type LaunchInput,
   type LaunchResult,
+  type ReceiptStore,
+  type WakeDeps,
 } from "../src/index.ts";
 
 const CREW = "anvil";
@@ -253,6 +255,22 @@ function recordingCursor(handler: (input: LaunchInput) => Promise<LaunchResult> 
   };
 }
 
+/**
+ * A receipt store that accepts every write. flair#1944 round 2 makes the store
+ * REQUIRED for a live cycle; these cases are about drain/launch/ack, so the
+ * receipt just needs to land. A fresh store per cycle, so no case inherits
+ * another's ids.
+ */
+function acceptingReceiptStore(): ReceiptStore {
+  const written = new Set<string>();
+  return {
+    has: async (id) => written.has(id),
+    write: async (receipt) => {
+      written.add(receipt.id);
+    },
+  };
+}
+
 describe("runWakeCycle — drain, launch, ack, no double-launch", () => {
   test("directed dispatch is launched, then the watermark is acked", async () => {
     const event = dispatchEvent();
@@ -262,7 +280,7 @@ describe("runWakeCycle — drain, launch, ack, no double-launch", () => {
       cursorAgentId: input.cursorAgentId,
       url: "https://cursor.com/agents/" + input.cursorAgentId,
     }));
-    const result = await runWakeCycle({ agentId: CREW, catchup: port, cursor: client });
+    const result = await runWakeCycle({ agentId: CREW, catchup: port, cursor: client, receipts: acceptingReceiptStore() });
     expect(result.launched).toBe(1);
     expect(result.acked).toBe("p1");
     expect(acks).toEqual(["p1"]);
@@ -283,8 +301,8 @@ describe("runWakeCycle — drain, launch, ack, no double-launch", () => {
     };
     const a = recordingCursor(handler);
     const b = recordingCursor(handler);
-    const one = await runWakeCycle({ agentId: CREW, catchup: first.port, cursor: a.client });
-    const two = await runWakeCycle({ agentId: CREW, catchup: second.port, cursor: b.client });
+    const one = await runWakeCycle({ agentId: CREW, catchup: first.port, cursor: a.client, receipts: acceptingReceiptStore() });
+    const two = await runWakeCycle({ agentId: CREW, catchup: second.port, cursor: b.client, receipts: acceptingReceiptStore() });
     expect(one.launched).toBe(1);
     expect(two.launched).toBe(0);
     expect(two.reused).toBe(1);
@@ -297,7 +315,7 @@ describe("runWakeCycle — drain, launch, ack, no double-launch", () => {
     const { client, calls } = recordingCursor(() => {
       throw new Error("should not launch");
     });
-    const result = await runWakeCycle({ agentId: CREW, catchup: port, cursor: client });
+    const result = await runWakeCycle({ agentId: CREW, catchup: port, cursor: client, receipts: acceptingReceiptStore() });
     expect(result.drained).toBe(0);
     expect(result.launched).toBe(0);
     expect(result.acked).toBeNull();
@@ -317,7 +335,7 @@ describe("runWakeCycle — drain, launch, ack, no double-launch", () => {
     const { client, calls } = recordingCursor(() => {
       throw new Error("should not launch");
     });
-    const result = await runWakeCycle({ agentId: CREW, catchup: port, cursor: client });
+    const result = await runWakeCycle({ agentId: CREW, catchup: port, cursor: client, receipts: acceptingReceiptStore() });
     expect(result.skipped).toBe(2);
     expect(result.launched).toBe(0);
     expect(result.acked).toBe("p2");
@@ -339,7 +357,7 @@ describe("runWakeCycle — drain, launch, ack, no double-launch", () => {
       if (input.dispatch.id === "fail") throw new Error("cursor down");
       return { outcome: "created", cursorAgentId: input.cursorAgentId };
     });
-    const result = await runWakeCycle({ agentId: CREW, catchup: port, cursor: client });
+    const result = await runWakeCycle({ agentId: CREW, catchup: port, cursor: client, receipts: acceptingReceiptStore() });
     expect(result.launched).toBe(1);
     expect(result.blocked).toContain("fail");
     expect(result.acked).toBe("p1");
@@ -354,7 +372,7 @@ describe("runWakeCycle — drain, launch, ack, no double-launch", () => {
       },
     ]);
     const { client, calls } = recordingCursor(() => ({ outcome: "created", cursorAgentId: "nope" }));
-    const result = await runWakeCycle({ agentId: CREW, catchup: port, cursor: client });
+    const result = await runWakeCycle({ agentId: CREW, catchup: port, cursor: client, receipts: acceptingReceiptStore() });
     expect(result.blocked).toMatch(/missing an id/);
     expect(result.launched).toBe(0);
     expect(result.acked).toBeNull();
@@ -368,11 +386,24 @@ describe("runWakeCycle — drain, launch, ack, no double-launch", () => {
       outcome: "dry-run",
       cursorAgentId: input.cursorAgentId,
     }));
-    const result = await runWakeCycle({ agentId: CREW, catchup: port, cursor: client, dryRun: true });
+    const result = await runWakeCycle({ agentId: CREW, catchup: port, cursor: client, dryRun: true, receipts: acceptingReceiptStore() });
     expect(result.items[0]?.action).toBe("dry-run");
     expect(result.acked).toBeNull();
     expect(acks).toEqual([]);
     expect(calls).toHaveLength(0);
+  });
+
+  test("a live cycle with no receipt store is refused and never acked (flair#1944 round 2)", async () => {
+    const { port, acks } = memoryCatchup([{ events: [dispatchEvent()], hasMore: false }]);
+    const { client, calls } = recordingCursor(() => ({ outcome: "created", cursorAgentId: "bc-x" }));
+    // `receipts` is required by the type; a JS caller can still omit it. A live
+    // handoff must never be acked with no receipt attempt, so the cycle refuses
+    // before it launches anything.
+    await expect(
+      runWakeCycle({ agentId: CREW, catchup: port, cursor: client } as unknown as WakeDeps),
+    ).rejects.toThrow(/requires deps\.receipts/);
+    expect(calls).toHaveLength(0);
+    expect(acks).toEqual([]);
   });
 
   test("pages until hasMore is false", async () => {
@@ -384,7 +415,7 @@ describe("runWakeCycle — drain, launch, ack, no double-launch", () => {
       outcome: "created",
       cursorAgentId: input.cursorAgentId,
     }));
-    const result = await runWakeCycle({ agentId: CREW, catchup: port, cursor: client });
+    const result = await runWakeCycle({ agentId: CREW, catchup: port, cursor: client, receipts: acceptingReceiptStore() });
     expect(result.launched).toBe(2);
     expect(result.acked).toBe("p2");
     expect(calls).toHaveLength(2);
