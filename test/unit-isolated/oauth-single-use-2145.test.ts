@@ -18,8 +18,9 @@
  *   - a store error or a missing store primitive refuses with 503 and issues
  *     nothing;
  *   - a refresh-token revoke taking the claim (OAuthRevoke) refuses with 503
- *     and records no `revokedAt` when it cannot record that claim, and records
- *     `revokedAt` on the token alone when the store is available;
+ *     and records no `revokedAt` when it cannot record that claim; an
+ *     uncontended revoke whose claim and token-row write both succeed records
+ *     `revokedAt` on that token alone;
  *   - the row is written only after the request has validated;
  *   - the key is a SHA-256 in its own lock namespace, a successful grant flags
  *     the code's own row used, and the schema's expiration setting outlives
