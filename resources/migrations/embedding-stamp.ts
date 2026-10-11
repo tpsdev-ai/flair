@@ -266,26 +266,19 @@ const defaultContentSuffixRegenDeps: ContentSuffixRegenDeps = {
  * field-only write Memory's own re-embed branch uses (flair#2465), never a
  * full-row put — and the write touches no other field of the committed row.
  * Then it CONFIRMS the committed row (an explicit fresh context) is still the
- * row this transaction read and embedded; a row gone or replaced since that
- * read aborts the owned transaction.
+ * row this transaction read and embedded; a row gone or distinguishably changed
+ * at confirmation aborts the owned transaction and returns false.
  *
- * Harper 5.2.8 has no compare-and-set on a table write: a transaction does not
- * fail when a row it read is changed by another write before it commits;
- * Harper applies both writes, ordered by transaction timestamp. So once the
- * write is staged, and before the transaction commits, the row is re-read
- * outside the transaction (an empty context: Harper's latest committed state,
- * not this transaction's snapshot or its staged write); if it is no longer the
- * row read inside the transaction, the transaction is aborted and the staged
- * write discarded. A change committed after that re-read and before the commit
- * is not seen by it; Harper orders the two writes by timestamp. The re-read
- * compares the WHOLE committed row with the row read (the supersede-close
- * pattern), which is stronger than the identity list alone: a content-only
- * change with no stored incarnation token (a legacy row has none) still fails
- * it, so this migration never stamps a vector for text the row no longer
- * carries.
+ * Harper has no compare-and-set: a change committed after confirmation and
+ * before commit is not seen. The confirmation compares the WHOLE committed row
+ * with the row read (the supersede-close pattern), which is stronger than the
+ * identity list alone: a content-only change with no stored incarnation token
+ * (a legacy row has none) still fails
+ * it. The vector is computed for text unchanged through confirmation.
  *
- * Returns true iff it wrote. Otherwise this migration does not stamp the row;
- * a row that still exists with a stale stamp stays pending for the next batch
+ * Returns true when the update is staged, confirmation passes and the owned
+ * transaction completes; otherwise false.
+ * A row that still exists with a stale stamp stays pending for the next batch
  * or cycle.
  */
 async function regenContentSuffixRow(
@@ -313,9 +306,9 @@ async function regenContentSuffixRow(
       const pause = txnPausePoint("embedding-stamp-content-suffix");
       if (pause) await pause;
       // Stage first, then confirm the COMMITTED row is still the row this
-      // transaction read and embedded; gone or replaced aborts (the staged write
-      // is discarded). Harper has no compare-and-set: a change committed after
-      // this re-read and before the commit is not seen.
+      // transaction read and embedded; gone or distinguishably changed at
+      // confirmation aborts (the staged write is discarded). A change committed
+      // after this re-read and before the commit is not seen.
       await confirmCommittedRow(table, id, (committed) => isDeepStrictEqual(committed, fresh));
       return true;
     });

@@ -3,12 +3,12 @@
  * migration's re-embed of a stale row whose id ends in `.content`.
  *
  * That row is re-embedded through the raw table handle (the loopback
- * `PUT /Memory/:id` cannot address it), from the text Memory's write paths
+ * `PATCH /Memory/:id` cannot address it), from the text Memory's write paths
  * embed for it (a skill row's `trigger`, else `content`). The re-embed stages an
  * incremental `update` of only the embedding fields, then confirms the committed
- * row is still the one it read; a row gone or replaced at that confirm aborts,
- * and a change committed after the confirm and before the commit is not seen
- * (Harper has no compare-and-set; see the PR residual-gap note).
+ * row is still the one it read; a row gone or distinguishably changed at
+ * confirmation aborts. A change committed after the confirm and before commit
+ * is not seen (Harper has no compare-and-set; see the PR residual-gap note).
  *
  * Runs in its own process (test/unit-isolated): it mocks
  * resources/embeddings-provider.ts, which other unit files import for real.

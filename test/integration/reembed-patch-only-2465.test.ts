@@ -17,7 +17,7 @@
  * `memory-put` holds an owner PUT inside its own transaction, after its first
  * read and before its write. An edit is started there (so its transaction opens
  * FIRST), the re-embed runs to completion while it is held, then the PUT is
- * released: the edit's write is ordered after the re-embed's.
+ * released: the edit's write is ordered earlier than the re-embed's.
  *
  * `memory-reembed-staged` holds the re-embed's own owned transaction AFTER it
  * has STAGED its field-only update and BEFORE it confirms the committed row (and
@@ -28,8 +28,8 @@
  *   - (b) a DELETE + same-id RE-CREATE by another owner: the committed row is a
  *     different incarnation, so the re-embed aborts and the replacement row is
  *     left exactly as re-created (its embedding fields are not patched onto it).
- * Dropping the post-staging confirm fails both (the staged write lands on the
- * absent/replacement row and the re-embed answers 2xx instead of 409).
+ * With audit logging on (Harper's default), dropping the post-staging confirm
+ * changes the response from 409 to 2xx; the competitor's row state stands.
  *
  * Throwaway HOME + data dir, ephemeral ports.
  */

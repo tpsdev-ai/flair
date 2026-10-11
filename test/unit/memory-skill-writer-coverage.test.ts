@@ -105,7 +105,7 @@ add("promotion-stamp", ["writer:writeBackCommittedRow#1"],
 add("promotion-stamp", ["writer:table.put#1"],
   "Promotion status stamp in the manual promotion's own write transaction — non-skill.");
 add("migrations/embedding-stamp", ["writer:table.update#1"],
-  "Content-suffix migration embeds skillEmbedText(row) and stages an incremental update of only embedding/embeddingModel/updatedAt (flair#2465) — never a full-row put; a row gone or replaced at the committed-row confirm, staged before it, aborts. A change committed after that confirm and before the commit is not seen (no compare-and-set; PR residual-gap note).");
+  "Content-suffix migration embeds skillEmbedText(row) and stages an incremental update of only embedding/embeddingModel/updatedAt (flair#2465); confirmation compares the whole committed row. A change committed after confirmation and before commit is not seen.");
 add("migrations/synthetic-test-migration", ["alias-source:(databases as unknown as { flair: { Memory: MemoryTableLike } }).flair.Memory#1", "writer:writeBackCommittedRow#1"],
   "Migration backfill through the shared write-back helper — non-skill (flair#2354).");
 add("migrations/visibility-backfill", ["alias-source:(databases as unknown as { flair: { Memory: MemoryTableLike } }).flair.Memory#1", "writer:writeBackCommittedRow#1"],

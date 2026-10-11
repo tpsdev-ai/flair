@@ -1166,9 +1166,8 @@ type ReembedOutcome =
  * re-checked against the row's CURRENT owner.
  *
  * If the stored text is no longer the text the vector was computed from, this
- * recomputes from the stored text rather than stamping a vector for text the row
- * no longer carries (at most REEMBED_WRITE_ATTEMPTS times). If the text keeps
- * changing across the REEMBED_WRITE_ATTEMPTS attempts, it returns
+ * recomputes from the stored text (at most REEMBED_WRITE_ATTEMPTS times).
+ * If the text keeps changing across the REEMBED_WRITE_ATTEMPTS attempts, it returns
  * reembed_row_changed (409) and writes nothing. A row absent at the attempt's
  * own re-read, a row with no text, or a caller no longer authorized for the row
  * is refused the same way the first read refused it.
@@ -1176,11 +1175,11 @@ type ReembedOutcome =
  * flair#2465: the attempt STAGES the field-only incremental update, then
  * confirms the COMMITTED row (an explicit fresh context) is still the row this
  * transaction read and re-authorized — the same identity (id, agentId,
- * instanceToken, contentHash, createdAt). A row gone or replaced since that read
- * aborts the owned transaction (the staged write is discarded) and the caller
- * answers stored_row_changed (409), the named refusal Memory.put uses for the
- * same condition. Harper has no compare-and-set on a table write, so a change
- * committed after that confirm and before the commit is not seen by it.
+ * instanceToken, contentHash, createdAt). A row gone or distinguishably changed
+ * at confirmation aborts the owned transaction (the staged write is discarded)
+ * and the caller answers stored_row_changed (409). An indistinguishable legacy
+ * same-id replacement passes this identity check. Harper has no compare-and-set:
+ * a change committed after that confirm and before the commit is not seen by it.
  */
 async function reembedStoredRow(
   id: string,
@@ -1218,10 +1217,10 @@ async function reembedStoredRow(
         // fresh context — never contextless, which joins this transaction and
         // sees its snapshot or its staged write) is still the row this transaction
         // read and re-authorized: the same identity (id, agentId, instanceToken,
-        // contentHash, createdAt). A row gone or replaced since that read aborts
-        // this owned transaction — the staged write is discarded and the caller
-        // answers stored_row_changed (409). Harper has no compare-and-set: a
-        // change committed after this confirm and before the commit is not seen.
+        // contentHash, createdAt). A row gone or distinguishably changed at
+        // confirmation aborts this owned transaction, discarding the staged write;
+        // the caller answers stored_row_changed (409). A change committed after
+        // this confirm and before the commit is not seen (no compare-and-set).
         await confirmCommittedRow((databases as any).flair.Memory, id, (committed) => sameStoredRow(committed, stored));
         return { kind: "written" as const, model, updatedAt };
       });
@@ -1917,9 +1916,9 @@ export class Memory extends (databases as any).flair.Memory {
     // re-reads the committed row inside its own transaction (reembedStoredRow),
     // re-checks the owner and the text, stages ONLY embedding/embeddingModel/
     // updatedAt (flair#2465), then confirms the committed row is still the one it
-    // read (flair#2465) — a row gone or replaced aborts the write with the named
-    // 409 stored_row_changed — so an edit committed while the vector was computed
-    // is kept, and the vector written is the one for the text of the re-read row.
+    // read (flair#2465). A row gone or distinguishably changed at confirmation
+    // aborts with 409 stored_row_changed. The vector is computed for the re-read
+    // text; a change committed after confirmation and before commit is not seen.
     if (reembedRequest) {
       if (!existingForSkill) return NOT_FOUND();
       const auth = await resolveAgentAuth((this as any).getContext?.());
