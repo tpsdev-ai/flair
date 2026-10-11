@@ -1,18 +1,11 @@
 /**
  * owner-guard-load-failure-component.ts — flair#2468.
  *
- * Composes a PRIVATE copy of the built component whose TABLE LOAD PATH is
- * patched so that reading a stored row whose id carries a marker fails, exactly
- * where Harper's REST layer loads the row for a request — `Table.getResource` →
- * `resource._loadRecord` (harper 5.3.1, dist/resources/Table.js ~1631/1640) —
- * i.e. BEFORE any resource method (`put`/`patch`) runs.
- *
- * Why this seam: the unit tests in this PR mock `() => super.get()` rejecting.
- * On a real Harper request that thunk never performs a fresh read — the row was
- * already loaded into `this.#record` at getResource time and a no-argument
- * `super.get()` just returns the cached record. So the real failure a client can
- * hit is at the LOAD, one layer up. This module lets a real-Harper integration
- * test inject that failure and record what the client actually sees.
+ * Composes a private built component whose marker-id `_loadRecord` throws.
+ * For addressed single-record HTTP PUT/PATCH, Harper calls this initial load
+ * through `Table.getResource` before the resource method runs; the guard's
+ * no-argument `super.get()` then returns the cached row. The integration test
+ * checks Harper's own 500 at this seam, separately from a guard-thunk failure.
  *
  * The failure is ARMED by a sentinel file under the instance ROOTPATH
  * (`ARM_FILE`), so the same Harper can seed rows (via the ops API, which writes

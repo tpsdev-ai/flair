@@ -1,23 +1,13 @@
 // owner-field-guard-read-failure.test.ts
 //
-// The shared owner-field guard (resources/owner-field-guard.ts) reads the stored
-// record through a `getExisting` thunk. A read that RESOLVED to null/undefined is
-// "no stored record" (a create, which the rule leaves alone). A read that THREW
-// or rejected is a FAILURE: the guard must refuse with a named refusal, never
-// read the failure as "no stored record" and let the write through.
+// A non-admin agent's throwing/rejecting `getExisting` thunk returns
+// `owner_check_unavailable`: a numeric 4xx `statusCode` maps to 400, otherwise
+// 503. A resolved absent row is unchanged; admin/internal callers bypass the
+// thunk, and unauthenticated callers receive 401 before it.
 //
-// The refusal STATUS is chosen by the error: a client-status error (`statusCode`
-// in 400..499, e.g. a 404 from a bad id) answers 400 — a retry with the same
-// input fails the same way; anything else answers 503, since a retry can
-// succeed. Both are refusals (`owner_check_unavailable`) and the write does not
-// happen.
-//
-// This exercises the guard's OWN read. On the HTTP path a real Harper loads the
-// row before the resource runs and a no-arg `super.get()` returns the cached
-// record, so this seam is reachable only off that path (in-process calls, or a
-// resource that reads the row itself). The real-Harper behaviour — an unreadable
-// row is refused one layer up with Harper's own 500 — is measured in
-// test/integration/owner-guard-2468-real-harper-load.test.ts.
+// The real-Harper test separately injects an initial row-load failure on
+// addressed single-record PUT/PATCH and expects Harper's own 500 before the
+// resource method runs. It does not cover collection paths.
 //
 // Lives in test/unit-isolated/ because importing the guard pulls in the auth
 // helper, which imports "harper"; this file mocks that module so the real
@@ -42,7 +32,7 @@ const { guardOwnerFieldImmutable, OWNER_CHECK_UNAVAILABLE_ERROR } = await import
 /** A `self` whose context resolves to a non-admin agent. */
 const agentSelf = () => ({ getContext: () => ({ tpsAgent: "agent-a", tpsAgentIsAdmin: false }) });
 
-describe("the owner-field guard refuses a write whose stored-row read FAILS", () => {
+describe("the owner-field guard refuses a non-admin agent write when its thunk fails", () => {
   test("a rejecting getExisting returns the named refusal (503 owner_check_unavailable)", async () => {
     const res = await guardOwnerFieldImmutable(
       agentSelf(),
