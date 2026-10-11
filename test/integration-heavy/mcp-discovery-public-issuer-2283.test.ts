@@ -224,10 +224,33 @@ describe("flair#2283 — a configured instance whose document advertises a PUBLI
     180_000,
   );
 
+  // The legacy value FLAIR_MCP_OAUTH=1 is the one the '@harperfast/oauth' component
+  // DELETES (its coerceConfigBoolean accepts only true/false), so a legacy instance
+  // that ACTUALLY honors "1" mounts no authorization server — and, because flair's
+  // own /mcp handler reads the same variable with the WIDER 1/true/yes/on vocabulary,
+  // it also stands flair's own discovery handlers down (resources/oauth-wellknown.ts).
+  // Such an instance advertises NOTHING at the well-known path (404; pinned by
+  // test/integration-heavy/mcp-oauth-boot-safety.test.ts case 6). Serving flair's own
+  // document from a raw "1" instance is therefore impossible, which is why the
+  // original expectation here (200 advertising flair's AS) did not hold.
+  //
+  // This case pins the DRIFT the discovery check exists for: the component .env on
+  // disk — the durable on/off channel flair#1152 introduced, and the file doctor and
+  // deploy read — carries the legacy 1, while the RUNNING instance serves flair's own
+  // AS. Harper's loadEnv does not override a variable already set on process.env, so
+  // the running instance's flag (here OFF) wins over the component .env; doctor, whose
+  // child environment carries neither the flag nor the issuers, must infer "enabled"
+  // from the .env and name the mismatch. If doctor stopped reading the component .env
+  // it would lose BOTH the local inference and FLAIR_PUBLIC_URL as a caller-known
+  // issuer, and this case would report "could not be confirmed" instead.
   test(
     "doctor infers the legacy flag from the component .env and reports flair's own advertised endpoint",
     async () => {
       clearMcpEnv();
+      // The running instance's flag is OFF: the process environment (which wins over
+      // the component .env — Harper's loadEnv only fills in keys not already set)
+      // decides the effective value, while the .env written below is what doctor reads.
+      process.env.FLAIR_MCP_OAUTH = "false";
       const workDir = makeWorkDir("flair-2283-env-legacy-", true);
       writeFileSync(
         join(workDir, ".env"),
@@ -241,10 +264,12 @@ describe("flair#2283 — a configured instance whose document advertises a PUBLI
       const harper = await startHarper({ cwd: workDir, harperBinDir: REPO_ROOT });
       instances.push(harper);
 
+      // Flag off in the process environment -> flair serves its OWN AS document.
       const doc = await wellKnown(harper.httpURL);
       expect(doc.issuer).toBe(FLAIR_PUBLIC);
       expect(doc.token_endpoint).toBe(`${FLAIR_PUBLIC}/OAuthToken`);
 
+      clearMcpEnv();
       const doctor = runDoctor(harper.httpURL, {}, join(workDir, "src", "cli.ts"));
       expect(doctor.stdout).toContain("MCP OAuth discovery: local configuration implies FLAIR_MCP_OAUTH is enabled, but the document advertises flair's own token endpoint");
       expect(doctor.stdout).toContain(`token_endpoint="${FLAIR_PUBLIC}/OAuthToken"`);
