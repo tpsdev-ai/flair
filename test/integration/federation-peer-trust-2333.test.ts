@@ -216,13 +216,10 @@ describe("flair#2333 — a pairing token pairs at most one peer (real Harper)", 
   }, 60_000);
 });
 
-describe("flair#2333 — a token supplied to a re-pair is spent by that re-pair (real Harper)", () => {
-  // The defect: an EXISTING peer takes the re-pair path, which did not check or
-  // consume the token it was handed. A fresh token used on a re-pair therefore
-  // stayed live and could pair a DIFFERENT new peer later — two peers from one
-  // token. The fix validates and consumes the supplied token exactly as the
-  // first-pair path does.
-  it("a re-pair with a token consumes it, so the token cannot then pair a new peer", async () => {
+describe("flair#2333 — an otherwise valid, non-revoked re-pair consumes its supplied token (real Harper)", () => {
+  // An otherwise valid, non-revoked re-pair validates and consumes its supplied
+  // token as the first-pair path does, under this node's token lock.
+  it("an otherwise valid, non-revoked re-pair consumes its supplied token, preventing later reuse on this node", async () => {
     const k = nacl.sign.keyPair();
     const peer = `h1b-peer-${sfx}`;
     const pub = b64url(k.publicKey);
@@ -237,7 +234,7 @@ describe("flair#2333 — a token supplied to a re-pair is spent by that re-pair 
     // RED on 5dc7c7d4, where the re-pair ignored the token and left it unconsumed.
     expect((await readToken(token))?.consumedBy, "the re-pair consumed the supplied token").toBe(peer);
 
-    // The spent token cannot pair a NEW peer: it is single-use across both paths.
+    // The spent token cannot pair a NEW peer on this node: both paths consume it.
     const k2 = nacl.sign.keyPair();
     const peer2 = `h1b-peer-new-${sfx}`;
     const res2 = await pairRequest(pairBody(peer2, b64url(k2.publicKey), k2.secretKey, token));
@@ -248,7 +245,7 @@ describe("flair#2333 — a token supplied to a re-pair is spent by that re-pair 
     expect(await readPeer(peer2), "a spent token pairs no new peer").toBeNull();
   }, 60_000);
 
-  it("CONTROL: a re-pair with NO token still succeeds (the protocol requires none)", async () => {
+  it("CONTROL: an otherwise valid, non-revoked re-pair with NO token succeeds", async () => {
     const k = nacl.sign.keyPair();
     const peer = `h1b-peer-notok-${sfx}`;
     const pub = b64url(k.publicKey);
@@ -265,7 +262,8 @@ describe("flair#2333 — a signed Basic-auth pairing binds the bootstrap user to
   // The binding (PR-4) used to have only a unit test that DUPLICATED the
   // validator. This drives it through the real path: a signed pairing request
   // carrying Basic credentials. The token's own bootstrap user pairs; a
-  // different, non-admin bootstrap user is refused and changes nothing.
+  // different, non-admin bootstrap user is refused without changing the Peer
+  // row or a pairing token; the signed request records its replay nonce.
   it("the token's own bootstrap user pairs; a different bootstrap user is refused", async () => {
     await ensureFlairPairInitiatorRole(harper.opsURL, harper.admin.username, harper.admin.password);
 
@@ -374,20 +372,22 @@ describe("flair#2333 — a peer revoked during a re-pair is not brought back (re
     const k = nacl.sign.keyPair();
     const peer = `h3-peer-static-${sfx}`;
     const pub = b64url(k.publicKey);
+    const token = `pt-h3-static-${sfx}`;
     await seedPeer(peer, pub, "revoked");
-    // The refusal's whole claim is "changes nothing": capture the row so the
-    // test can assert it, byte for byte, after the request.
+    await seedToken(token);
+    // Neither the Peer row nor the supplied pairing token changes; the signed
+    // request records its replay nonce before refusal. Capture both full rows.
     const before = await readPeer(peer);
-    const res = await pairRequest(pairBody(peer, pub, k.secretKey));
+    const tokenBefore = await readToken(token);
+    expect(tokenBefore).not.toBeNull();
+    expect(tokenBefore.consumedBy).toBeFalsy();
+    const res = await pairRequest(pairBody(peer, pub, k.secretKey, token));
     const resBody = await res.json() as any;
     console.log("H3 static re-pair body:", JSON.stringify(resBody));
     expect(res.status, JSON.stringify(resBody)).toBe(403);
     expect(resBody.error).toBe("peer_revoked");
-    // A valid signed re-pair DOES record an anti-replay nonce before this
-    // refusal (resources/replay-store.ts, via verifyFederationRequestBody), so
-    // "writes nothing" is false. What it changes is NEITHER the Peer row NOR a
-    // pairing token — the nonce is not the peer row.
-    expect(await readPeer(peer), "the Peer row is unchanged" ).toEqual(before);
+    expect(await readPeer(peer), "the Peer row is unchanged").toEqual(before);
+    expect(await readToken(token), "the full pairing token row is unchanged").toEqual(tokenBefore);
   }, 60_000);
 
   it("CONTROL: a re-pair of a paired peer succeeds and keeps it paired", async () => {

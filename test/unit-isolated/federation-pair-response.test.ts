@@ -211,7 +211,7 @@ describe("FederationPair.post — several Instance rows refuse BEFORE the token,
   }
 
   it("refuses a RE-PAIR the same way, leaving the existing peer row untouched", async () => {
-    // A re-pair needs no token and WRITES the existing peer row (endpoint/status)
+    // An otherwise valid, non-revoked re-pair needs no token and updates the Peer row.
     // — so the refusal has to come before that write too.
     instanceRows = [ROW_A, ROW_B];
     const instanceId = "flair_spoke_already_paired";

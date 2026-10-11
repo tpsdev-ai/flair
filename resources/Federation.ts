@@ -558,7 +558,7 @@ export class FederationPair extends Resource {
       );
     }
 
-    // Check if already paired (re-pairing doesn't need a token)
+    // Check for an existing peer; an otherwise valid, non-revoked re-pair needs no token.
     const existing = await (databases as any).flair.Peer.get(instanceId);
     if (existing) {
       // Re-pairing: verify public key matches (prevents impersonation)
@@ -569,15 +569,13 @@ export class FederationPair extends Resource {
       }
       // A revoked peer does not re-pair (flair#2333): a revoke is a local
       // decision, and a re-pair does not restore it. This runs BEFORE any token
-      // is consumed, so a refused re-pair spends nothing.
+      // is consumed, so this refusal changes neither the Peer row nor a token.
       if (existing.status === "revoked") return peerRevokedRefusal();
 
-      // A pairing token the request supplies on a re-pair is validated and
-      // consumed exactly as the first-pair path does (flair#2333): a token is
-      // used by at most one pairing, whether that pairing is a first pair or a
-      // re-pair, so a token that arrives here is spent here and cannot pair a
-      // LATER new peer. A re-pair that supplies NO token still proceeds — the
-      // protocol does not require one for an existing peer (docs/federation.md,
+      // An otherwise valid, non-revoked re-pair validates and consumes a supplied
+      // token as the first-pair path does (flair#2333), under this node's token
+      // lock; a consumed token cannot pair a later new peer. Such a re-pair with
+      // NO token still proceeds — the protocol requires none (docs/federation.md,
       // "Pairing tokens"). The supplied token is not the request's credential;
       // the request still has to prove key ownership above (`verifyResult`).
       if (pairingToken) {
@@ -611,9 +609,9 @@ export class FederationPair extends Resource {
       }
 
       // Consume the token under its per-key lock (flair#2333): the claim is
-      // check-then-consume, so two pairings of the same token must not both see
-      // it unconsumed. The lock is this ONE Flair node's PairingToken store
-      // lock, so this excludes concurrent pairings within one Harper node; it
+      // check-then-consume, so two pairings on this node using the same token
+      // must not both see it unconsumed. The lock is this ONE Flair node's
+      // PairingToken store lock, so it excludes concurrent pairings on this node; it
       // is not shared across the nodes of a Fabric instance (see the PR body).
       // The first pairing consumes the token and records the peer; a pairing
       // that presents the same, now-consumed token is refused.
@@ -678,11 +676,9 @@ type PairingTokenClaim =
 /** The per-token lock namespace (resources/key-lock.ts); a token's lock key is its own. */
 const PAIRING_TOKEN_LOCK_NAMESPACE = "flair-pairing-token";
 /**
- * A contended pairing token's lock is retried `PAIR_LOCK_ATTEMPTS` times,
- * `PAIR_LOCK_WAIT_MS` nominally apart; after the last retry the pairing is
- * refused. These configure the retry COUNT and the nominal spacing only: the
- * spacing is a timer, which gives no bound on the elapsed time, so there is no
- * maximum-elapsed-time claim.
+ * The token lock gets up to `PAIR_LOCK_ATTEMPTS` acquisition attempts, with
+ * at most one fewer waits of `PAIR_LOCK_WAIT_MS` nominally between attempts.
+ * Exhaustion refuses the pairing; timer spacing does not bound elapsed time.
  */
 const PAIR_LOCK_ATTEMPTS = 200;
 const PAIR_LOCK_WAIT_MS = 10;

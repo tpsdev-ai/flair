@@ -228,10 +228,10 @@ describe("federation pairing token lifecycle", () => {
   });
 });
 
-// Test the re-pairing path still works without token
+// Test an otherwise valid, non-revoked re-pair without a token.
 describe("federation re-pairing", () => {
-  test("re-pairing skips token check when peer already exists", () => {
-    // Simulate: existing peer found, same public key → skip token
+  test("an otherwise valid, non-revoked re-pair requires no token", () => {
+    // Existing non-revoked peer, same public key, no supplied token.
     const existingPeer = { id: "spoke_1", publicKey: "same_pubkey", status: "paired" };
     const incomingPublicKey = "same_pubkey";
     expect(existingPeer.publicKey === incomingPublicKey).toBe(true);
