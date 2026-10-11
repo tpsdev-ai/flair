@@ -3,6 +3,18 @@
  * Cloud Agent for each directed dispatch, attempt a launch receipt, then ack
  * the watermark.
  *
+ * ONE signed client, ONE runner identity (flair#1944 round 7). The cycle takes a
+ * single Flair client and BUILDS the catchup feed reader and the receipt store
+ * from that same client; the runner identity IS the client's signing identity.
+ * There is no separate `agentId` label to trust and no caller-supplied store, so
+ * a receipt can never be signed as a different agent than the feed it drains —
+ * the "store labelled A writing as B" combination is unrepresentable rather than
+ * guarded. The Cursor client is likewise chosen by the runner from `dryRun`
+ * (live -> the real client built from the config; dry-run -> `dryRunCursorClient`),
+ * and a `dry-run` outcome observed in a LIVE cycle is refused, by name, before
+ * anything is acked (defence in depth against a dry-run client reaching a live
+ * cycle).
+ *
  * Ack happens AFTER handoff and AFTER a receipt — a successful write, or an
  * existing row VERIFIED as this runner's own receipt — and only through the last
  * successful event. ONE receipt outcome is acked WITHOUT one: a receipt the
@@ -16,17 +28,15 @@
  * event hits Cursor 409 and is treated as success, then the receipt is retried;
  * a 409 redelivery is retried and acked when its receipt write succeeds, a
  * verified receipt exists, or the receipt is a classified non-retryable refusal
- * (which is acked without one) — no second launch. The receipt store is REQUIRED
- * for a live cycle (flair#1944 round
- * 2): a handoff is never acked with no receipt attempt. The store must sign as
- * EXACTLY the runner's agent (round 6): a store whose signing identity differs
- * from `deps.agentId` is refused, by name, before anything is read or acked.
+ * (which is acked without one) — no second launch.
  */
 
+import type { FlairClient } from "@tpsdev-ai/flair-client";
 import { wakeAgentId } from "./agent-id.js";
-import type { CatchupPort } from "./catchup.js";
-import type { CursorAgentClient, LaunchResult } from "./cursor-api.js";
+import { createCatchupPort, type CatchupPort } from "./catchup.js";
+import { createCursorAgentClient, dryRunCursorClient, type CursorAgentClient, type CursorLaunchConfig, type LaunchResult } from "./cursor-api.js";
 import { classifyDispatch, type DirectedDispatch } from "./dispatch.js";
+import { createMemoryReceiptStore } from "./receipt-store.js";
 import { buildLaunchReceipt, isStoredReceipt, permanentReceiptRefusal, type LaunchReceipt, type ReceiptRefusal, type ReceiptStore, type StoredReceipt } from "./receipt.js";
 
 export interface WakeItem {
@@ -68,22 +78,43 @@ export interface WakeResult {
 }
 
 export interface WakeDeps {
-  agentId: string;
-  catchup: CatchupPort;
-  cursor: CursorAgentClient;
   /**
-   * flair#1944 — where launch receipts are recorded. REQUIRED for a live
-   * (non-dry-run) cycle: a handoff must never be acked with no receipt attempt.
-   * A dry-run records nothing and never reads this, but must still supply one
-   * for the type.
+   * The runner's OWN signed Flair client. Its signing identity IS the runner
+   * identity: the catchup feed reader and the receipt store are BOTH built from
+   * THIS client, so a receipt is always signed as exactly the agent whose feed
+   * was drained. There is no separate `agentId` and no caller-supplied store to
+   * disagree with it.
    */
-  receipts: ReceiptStore;
+  client: FlairClient;
+  /**
+   * Cursor Cloud Agents launch config. The runner builds its Cursor client from
+   * this for a LIVE cycle; a dry-run cycle uses `dryRunCursorClient` instead and
+   * never touches the network.
+   */
+  cursor: CursorLaunchConfig;
   /** One line for a receipt that omits a value the server's grammar would refuse, and one for a receipt the server refused. */
   log?: (line: string) => void;
   /** When true, classify only — no Cursor create, no receipt, no watermark ack. */
   dryRun?: boolean;
   pageLimit?: number;
+  /**
+   * TEST-ONLY seam — the shipped CLI never sets it. `runWakeCycle` builds the
+   * feed reader, the receipt store and the Cursor client from `client`/`cursor`
+   * alone; a test uses this to supply a canned catchup feed and/or a fake Cursor
+   * client without a network. It can NEVER supply a receipt store or an agent
+   * id: the runner identity and the signer are always the client's, so a
+   * mismatched signer is unrepresentable here.
+   */
+  __test?: {
+    catchup?: CatchupPort;
+    cursor?: CursorAgentClient;
+  };
 }
+
+/** flair#1944 round 7 — a `dry-run` launch outcome seen in a LIVE cycle. Thrown,
+ *  not swallowed into `blocked`: it is a construction fault (a dry-run client
+ *  reached a live cycle), refused by name before anything is recorded or acked. */
+class DryRunInLiveCycleError extends Error {}
 
 function emptyResult(): WakeResult {
   return {
@@ -137,27 +168,29 @@ function mismatchReason(stored: StoredReceipt, agentId: string, receipt: LaunchR
  * retries). Never a thrown crash.
  */
 async function recordLaunchReceipt(
-  deps: WakeDeps,
+  agentId: string,
+  store: ReceiptStore,
   dispatch: DirectedDispatch,
   launch: LaunchResult,
+  log?: (line: string) => void,
 ): Promise<
   | { status: "written" | "unchanged" }
   | { status: "failed"; error: string }
   | { status: "refused"; refusal: ReceiptRefusal }
   | { status: "mismatched"; detail: string }
 > {
-  const store = deps.receipts;
   // flair#1944 round 6 — the url is written ONLY for a create. An `already`
   // (409) result can carry a url too, but the receipt's url belongs to the
-  // ORIGINAL create; a replay must not rewrite the stored one.
+  // ORIGINAL create; a serialized replay that reads the existing receipt must
+  // not rewrite the stored one.
   const { receipt, omittedUrl, omittedSource } = buildLaunchReceipt(dispatch.id, {
     cursorAgentId: launch.cursorAgentId,
     ...(launch.outcome === "created" && launch.url !== undefined ? { url: launch.url } : {}),
   });
   if (omittedSource) {
-    deps.log?.(`cursor-wake: receipt for ${dispatch.id} omits its host source: the server's host-source grammar would refuse the Cursor agent id`);
+    log?.(`cursor-wake: receipt for ${dispatch.id} omits its host source: the server's host-source grammar would refuse the Cursor agent id`);
   } else if (omittedUrl) {
-    deps.log?.(`cursor-wake: receipt for ${dispatch.id} omits the agent url: the server's host-source grammar would refuse it`);
+    log?.(`cursor-wake: receipt for ${dispatch.id} omits the agent url: the server's host-source grammar would refuse it`);
   }
   const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
   let stored: StoredReceipt | null;
@@ -172,10 +205,10 @@ async function recordLaunchReceipt(
     // "unchanged"; a foreign author, a different content or a different host
     // source is not verified as this receipt — refuse WITHOUT overwriting it and
     // WITHOUT acking.
-    if (isStoredReceipt(stored, deps.agentId, receipt)) return { status: "unchanged" };
+    if (isStoredReceipt(stored, agentId, receipt)) return { status: "unchanged" };
     return {
       status: "mismatched",
-      detail: `receipt id ${receipt.id} is not verified as this receipt: ${mismatchReason(stored, deps.agentId, receipt)}`,
+      detail: `receipt id ${receipt.id} is not verified as this receipt: ${mismatchReason(stored, agentId, receipt)}`,
     };
   }
   try {
@@ -189,34 +222,28 @@ async function recordLaunchReceipt(
 }
 
 export async function runWakeCycle(deps: WakeDeps): Promise<WakeResult> {
-  if (!deps.dryRun && !deps.receipts) {
-    // flair#1944 round 2: a live cycle must be able to record its receipt.
-    // `receipts` is required by the type, but a JS caller could still omit it;
-    // refuse rather than ack a handoff with no receipt attempt.
-    throw new Error("runWakeCycle requires deps.receipts for a live cycle; pass dryRun to classify only");
-  }
-  if (deps.receipts && deps.receipts.agentId !== deps.agentId) {
-    // flair#1944 round 6: the runner identity (deps.agentId) and the store's
-    // signing identity must be the same agent, or a receipt would be signed by
-    // an identity the cycle does not claim. Refuse by name before anything is
-    // read, written or acked.
-    throw new Error(
-      `runWakeCycle: the receipt store signs as '${deps.receipts.agentId}' but the runner is '${deps.agentId}'; ` +
-        "a live receipt must be signed as the runner's own agent",
-    );
-  }
+  // flair#1944 round 7 — ONE client, ONE identity. The runner identity is the
+  // client's signing identity; the catchup feed reader and the receipt store are
+  // built from that same client, so a receipt can never be signed as a different
+  // agent than the feed drained, and there is no store to supply.
+  const client = deps.client;
+  const agentId = client.agentId;
+  const catchup = deps.__test?.catchup ?? createCatchupPort(client);
+  const store = createMemoryReceiptStore(client);
+  const cursor = deps.__test?.cursor ?? (deps.dryRun ? dryRunCursorClient() : createCursorAgentClient(deps.cursor));
+
   const result = emptyResult();
   let after: string | undefined;
   let lastAckable: string | null = null;
 
   for (;;) {
-    const page = await deps.catchup.drain(after, deps.pageLimit);
+    const page = await catchup.drain(after, deps.pageLimit);
     const events = Array.isArray(page.events) ? page.events : [];
     result.drained += events.length;
 
     for (const event of events) {
       const position = typeof event.position === "string" ? event.position : null;
-      const dispatch = classifyDispatch(event, deps.agentId);
+      const dispatch = classifyDispatch(event, agentId);
 
       if (!dispatch) {
         const kind = typeof event.kind === "string" ? event.kind : "?";
@@ -231,7 +258,7 @@ export async function runWakeCycle(deps: WakeDeps): Promise<WakeResult> {
               action: "blocked",
               reason: result.blocked,
             });
-            if (!deps.dryRun && lastAckable) await deps.catchup.ack(lastAckable);
+            if (!deps.dryRun && lastAckable) await catchup.ack(lastAckable);
             result.acked = deps.dryRun ? null : lastAckable;
             return result;
           }
@@ -244,13 +271,21 @@ export async function runWakeCycle(deps: WakeDeps): Promise<WakeResult> {
 
       try {
         const cursorAgentId = wakeAgentId(dispatch.id);
-        const launch = deps.dryRun
-          ? { outcome: "dry-run" as const, cursorAgentId }
-          : await deps.cursor.create({
-              cursorAgentId,
-              dispatch,
-              crewAgentId: deps.agentId,
-            });
+        const launch = await cursor.create({
+          cursorAgentId,
+          dispatch,
+          crewAgentId: agentId,
+        });
+        // flair#1944 round 7 — defence in depth: the runner picks the Cursor
+        // client from `dryRun`, so a live cycle can only see `dry-run` through a
+        // test seam. Refuse it, by name, BEFORE anything is recorded or acked —
+        // a live handoff must be a real launch, not a dry-run classification.
+        if (!deps.dryRun && launch.outcome === "dry-run") {
+          throw new DryRunInLiveCycleError(
+            `runWakeCycle: the Cursor client reported a \`dry-run\` outcome for ${dispatch.id} in a live cycle; ` +
+              "a live cycle must launch for real (the dry-run client is only for --dry-run)",
+          );
+        }
         recordLaunch(result, dispatch, launch);
 
         // flair#1944: after a handoff (never on dry-run), ATTEMPT one sourced
@@ -263,7 +298,7 @@ export async function runWakeCycle(deps: WakeDeps): Promise<WakeResult> {
         // reported and left untouched. All are named outcomes, not a thrown
         // crash.
         if (launch.outcome === "created" || launch.outcome === "already") {
-          const receipt = await recordLaunchReceipt(deps, dispatch, launch);
+          const receipt = await recordLaunchReceipt(agentId, store, dispatch, launch, deps.log);
           result.items[result.items.length - 1].receipt = receipt.status;
           if (receipt.status === "refused") {
             const { status, code } = receipt.refusal;
@@ -274,19 +309,21 @@ export async function runWakeCycle(deps: WakeDeps): Promise<WakeResult> {
           }
           if (receipt.status === "failed") {
             result.receiptFailed = `receipt not recorded for ${dispatch.id}: ${receipt.error}`;
-            if (!deps.dryRun && lastAckable) await deps.catchup.ack(lastAckable);
+            if (!deps.dryRun && lastAckable) await catchup.ack(lastAckable);
             result.acked = deps.dryRun ? null : lastAckable;
             return result;
           }
           if (receipt.status === "mismatched") {
             result.receiptMismatched = receipt.detail;
-            if (!deps.dryRun && lastAckable) await deps.catchup.ack(lastAckable);
+            if (!deps.dryRun && lastAckable) await catchup.ack(lastAckable);
             result.acked = deps.dryRun ? null : lastAckable;
             return result;
           }
         }
         if (dispatch.position) lastAckable = dispatch.position;
       } catch (err) {
+        // A construction fault is not a launch failure: re-raise it untouched.
+        if (err instanceof DryRunInLiveCycleError) throw err;
         const message = err instanceof Error ? err.message : String(err);
         result.blocked = `launch failed for ${dispatch.id}: ${message}`;
         result.items.push({
@@ -296,7 +333,7 @@ export async function runWakeCycle(deps: WakeDeps): Promise<WakeResult> {
           action: "blocked",
           reason: result.blocked,
         });
-        if (!deps.dryRun && lastAckable) await deps.catchup.ack(lastAckable);
+        if (!deps.dryRun && lastAckable) await catchup.ack(lastAckable);
         result.acked = deps.dryRun ? null : lastAckable;
         return result;
       }
@@ -309,7 +346,7 @@ export async function runWakeCycle(deps: WakeDeps): Promise<WakeResult> {
     break;
   }
 
-  if (!deps.dryRun && lastAckable) await deps.catchup.ack(lastAckable);
+  if (!deps.dryRun && lastAckable) await catchup.ack(lastAckable);
   result.acked = deps.dryRun ? null : lastAckable;
   return result;
 }

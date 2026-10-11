@@ -8,16 +8,20 @@
   when the response carries none); on a 409 replay, the requested id, which
   Cursor reported as already in use. The `url` is set only on create, and only
   as Cursor returned it (an `already` result that carries a url never writes one,
-  so a replay cannot rewrite the create's stored url). Neither is derived from
+  so a serialized replay that reads the existing receipt cannot rewrite the
+  create's stored url — the two-runner race is disclosed, not claimed away).
+  Neither is derived from
   the dispatch text; the write is
   private and omits `hostSourceScope`, so the pointer stays author-only. Only a
   live run signed with the agent's own key writes the receipt, and that signing
   requirement is enforced WHERE THE WRITE HAPPENS: the production receipt store
   requires the key, and the client fails closed (no admin Basic fallback) when
   none resolves at send time; a key the client already loaded is cached and still
-  signs, so removing the key file cannot cause a Basic fallback. The store signs
-  as exactly the runner's agent: it is bound to the runner's id and a client
-  whose signing identity differs is refused. When the memory is
+  signs, so removing the key file cannot cause a Basic fallback. The cycle runs
+  on ONE signed client: the runner builds the catchup reader and the receipt
+  store from it, so the store signs as exactly the runner's agent and a receipt
+  signed as another agent is unrepresentable (no separate agent id, no store to
+  supply). When the memory is
   selected for bootstrap, bootstrap prose cites the pointer to the author as
   `[via cursor/launch <id8> (unverified)]`, and shows `[via withheld]` only to a
   non-author who can read the record after its visibility changes — an ordinary

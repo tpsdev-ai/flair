@@ -22,29 +22,21 @@
  * and when no key resolves at send time the client refuses rather than sending
  * Basic.
  *
- * flair#1944 round 6: the store signs as EXACTLY the runner's agent. It takes
- * the `agentId` it must sign as and refuses, by name, a client whose signing
- * identity differs, so the runner's `deps.agentId` and the store's signing
- * identity are bound together and cannot drift apart.
+ * flair#1944 round 7: the store signs as EXACTLY the client's agent — it takes
+ * the client and uses the client's OWN `agentId` as its signing identity. There
+ * is no second agent label to supply or disagree with, so a store that signs as
+ * a different agent than the runner is unrepresentable: whoever builds the
+ * runner from a client gets a store bound to that same client.
  */
 
 import { MissingSigningKeyError } from "@tpsdev-ai/flair-client";
 import type { FlairClient } from "@tpsdev-ai/flair-client";
 import type { CursorLaunchSource, ReceiptStore } from "./receipt.js";
 
-export function createMemoryReceiptStore(client: FlairClient, agentId: string): ReceiptStore {
-  // flair#1944 round 6 — bind the store's signing identity to the runner's
-  // agent. A store that would sign as a DIFFERENT agent is refused here, by
-  // name, so a live receipt can never be written by an identity other than the
-  // one the cycle claims.
-  if (client.agentId !== agentId) {
-    throw new Error(
-      `cursor-wake: refusing a receipt store that signs as '${client.agentId}' for runner '${agentId}': ` +
-        "a live receipt must be signed as the runner's own agent",
-    );
-  }
+export function createMemoryReceiptStore(client: FlairClient): ReceiptStore {
   return {
-    agentId,
+    // The store's signing identity IS the client's — no separate label to trust.
+    agentId: client.agentId,
     read: async (id) => {
       const existing = await client.memory.get(id);
       if (existing === null) return null;

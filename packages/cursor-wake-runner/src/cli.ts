@@ -9,10 +9,7 @@
  */
 
 import { FlairClient, inspectKeyLookup } from "@tpsdev-ai/flair-client";
-import { createCatchupPort } from "./catchup.js";
 import { HELP, loadConfig, parseArgs, type WakeConfig } from "./config.js";
-import { createCursorAgentClient, dryRunCursorClient } from "./cursor-api.js";
-import { createMemoryReceiptStore } from "./receipt-store.js";
 import { runWakeCycle, type WakeResult } from "./run.js";
 
 function printResult(result: WakeResult): void {
@@ -71,10 +68,15 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     keyPath: config.keyPath,
     claimedClient: "cursor-wake",
   });
-  const catchup = createCatchupPort(flair);
-  const cursor = config.dryRun
-    ? dryRunCursorClient()
-    : createCursorAgentClient({
+
+  const runOnce = async (): Promise<number> => {
+    const result = await runWakeCycle({
+      // ONE client: the runner identity IS this client's signing identity, and
+      // `runWakeCycle` builds the catchup reader and the receipt store from it.
+      client: flair,
+      // The runner builds its Cursor client from this for a live cycle; a
+      // dry-run cycle uses the dry-run client and touches no network.
+      cursor: {
         apiBase: config.cursorApiBase,
         apiKey: config.cursorApiKey,
         repoUrl: config.repoUrl,
@@ -82,14 +84,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
         envName: config.envName,
         envType: config.envType,
         autoCreatePr: config.autoCreatePr,
-      });
-
-  const runOnce = async (): Promise<number> => {
-    const result = await runWakeCycle({
-      agentId: config.agentId,
-      catchup,
-      cursor,
-      receipts: createMemoryReceiptStore(flair, config.agentId),
+      },
       log: (line) => console.error(line),
       dryRun: config.dryRun,
       pageLimit: config.pageLimit,

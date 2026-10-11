@@ -4,23 +4,27 @@
  *
  * Real-Harper coverage that the Cursor wake runner ATTEMPTS A SOURCED LAUNCH
  * RECEIPT through the production memory path on a successful handoff (a
- * classified refusal is acked without one). The cycles run through
- * `runWakeCycle` with a fake Cursor client (no network) and
- * a fake catchup feed, but the receipt store is the REAL production client
- * writing to a REAL Harper: the receipt reads back with its stable id,
- * deterministic content and the `hostSource` the server validated and stored;
- * a replay leaves the url-bearing receipt unchanged and writes no second one;
- * a url the server's grammar would refuse (http, empty userinfo) is omitted
- * with one log line and the receipt still lands; a receipt the runner treats as a
- * non-retryable refusal (a real 400) is acked and reported as `receiptRefused`
- * without holding later dispatches; a refusal from an identity the server does
- * not know (a real 401) is `receiptFailed` and does NOT advance the watermark;
- * a row already at the receipt id that is NOT this runner's own receipt (another
- * agent's memory, or the runner's own row with different content) is a named
- * `receiptMismatched`, left untouched, and NOT acked; a foreign PRIVATE row at
- * the id reads as absent, so the runner attempts the write and the SERVER refuses
- * it — a named `receiptFailed`, row untouched, not acked; a source id the server
- * stores NFC-normalised is still verified on replay; a dry-run records nothing.
+ * classified refusal is acked without one). Each cycle runs through
+ * `runWakeCycle` on ONE real Flair client — the runner builds the catchup reader
+ * and the receipt store from that client (flair#1944 round 7), and a fake Cursor
+ * client and canned catchup feed are supplied through the `__test` seam (no
+ * network). The receipt reads back with its stable id, deterministic content and
+ * the `hostSource` the server validated and stored; a replay leaves the url-bearing
+ * receipt unchanged and writes no second one; a url the server's grammar would
+ * refuse (http, empty userinfo) is omitted with one log line and the receipt
+ * still lands; a client the server does not know (a real 401) is `receiptFailed`
+ * and does NOT advance the watermark; a row already at the receipt id that is NOT
+ * this runner's own receipt (another agent's memory, or the runner's own row with
+ * different content) is a named `receiptMismatched`, left untouched, and NOT
+ * acked; a foreign PRIVATE row at the id reads as absent, so the runner attempts
+ * the write and the SERVER refuses it — a named `receiptFailed`, row untouched,
+ * not acked; a source id the server stores NFC-normalised is still verified on
+ * replay; a dry-run records nothing.
+ *
+ * A receipt write the runner treats as a non-retryable refusal (a real 400) is
+ * covered by the unit cases in `packages/cursor-wake-runner/test/launch-receipt.test.ts`:
+ * the production path only ever submits a receipt whose host-source mirrors the
+ * server's grammar, so a real server 400 is not reachable through it.
  *
  * MUTATION (flair#1944 round 3): make the existing-receipt path existence-only
  * (`read` returns a bare boolean, or ignores the row's identity). The two
@@ -34,18 +38,19 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HarperInstance, startHarper, stopHarper } from "../helpers/harper-lifecycle";
-import { FlairClient, FlairError } from "../../packages/flair-client/src/client";
+import { FlairClient } from "../../packages/flair-client/src/client";
 import {
-  createMemoryReceiptStore,
   launchReceiptId,
   runWakeCycle,
   wakeAgentId,
   type CatchupPage,
   type CatchupPort,
   type CursorAgentClient,
+  type CursorLaunchConfig,
   type LaunchResult,
-  type ReceiptStore,
 } from "../../packages/cursor-wake-runner/src/index.ts";
+
+const CURSOR_CONFIG: CursorLaunchConfig = { apiBase: "https://api.cursor.com", apiKey: "k" };
 
 interface TestAgent {
   id: string;
@@ -146,10 +151,9 @@ describe("flair#1944 — the Cursor wake runner records a sourced launch receipt
     const { port, acks } = catchupWith([{ events: [event], hasMore: false }]);
 
     const result = await runWakeCycle({
-      agentId: agent.id,
-      catchup: port,
-      cursor: cursorReturning({ outcome: "created", cursorAgentId, url }),
-      receipts: createMemoryReceiptStore(client, agent.id),
+      client,
+      cursor: CURSOR_CONFIG,
+      __test: { catchup: port, cursor: cursorReturning({ outcome: "created", cursorAgentId, url }) },
     });
 
     expect(result.receiptFailed, "a created launch that stored its receipt must not report a receipt failure").toBeNull();
@@ -171,23 +175,20 @@ describe("flair#1944 — the Cursor wake runner records a sourced launch receipt
     const event = dispatchEvent(agent.id);
     const cursorAgentId = "bc-11112222-3333-8444-9555-666677778888";
     const url = "https://cursor.example/agents/bc-11112222-3333-8444-9555-666677778888";
-    const store = createMemoryReceiptStore(client, agent.id);
 
     const first = catchupWith([{ events: [event], hasMore: false }]);
     const created = await runWakeCycle({
-      agentId: agent.id,
-      catchup: first.port,
-      cursor: cursorReturning({ outcome: "created", cursorAgentId, url }),
-      receipts: store,
+      client,
+      cursor: CURSOR_CONFIG,
+      __test: { catchup: first.port, cursor: cursorReturning({ outcome: "created", cursorAgentId, url }) },
     });
     expect(created.receiptFailed).toBeNull();
 
     const second = catchupWith([{ events: [event], hasMore: false }]);
     const replay = await runWakeCycle({
-      agentId: agent.id,
-      catchup: second.port,
-      cursor: cursorReturning({ outcome: "already", cursorAgentId }),
-      receipts: store,
+      client,
+      cursor: CURSOR_CONFIG,
+      __test: { catchup: second.port, cursor: cursorReturning({ outcome: "already", cursorAgentId }) },
     });
     expect(replay.items[0]?.receipt).toBe("unchanged");
     expect(second.acks).toEqual(["p1"]);
@@ -199,46 +200,29 @@ describe("flair#1944 — the Cursor wake runner records a sourced launch receipt
     expect(listed.length, "the replay must not add a second receipt").toBe(1);
   }, 120_000);
 
-  test("a write from an identity the server does not know (HTTP 401) is receiptFailed, retried, and does not ack", async () => {
-    const agent = mkAgent(`agent-c-${randomUUID()}`);
-    // Registered client for the idempotency READ; an UNREGISTERED identity whose
-    // write the server refuses simulates the store failing at the write. That
-    // refusal is about the credential, not the receipt — a configuration fault
-    // the next cycle retries — so the watermark must stay put.
-    const reader = await clientFor(agent);
-    const refused = await clientFor(mkAgent(`agent-z-${randomUUID()}`), false);
-    let seen: unknown;
-    const store: ReceiptStore = {
-      agentId: agent.id,
-      read: createMemoryReceiptStore(reader, agent.id).read,
-      write: async (receipt) => {
-        try {
-          await createMemoryReceiptStore(refused, refused.agentId).write(receipt);
-        } catch (err) {
-          seen = err;
-          throw err;
-        }
-      },
-    };
-    const event = dispatchEvent(agent.id);
+  test("a client the server does not know (HTTP 401): the idempotency read fails, receiptFailed, nothing acked", async () => {
+    const unknown = mkAgent(`agent-z-${randomUUID()}`);
+    // A client whose agent the server does not know — its idempotency READ (the
+    // first thing the store does) is refused as unauthenticated. Under round 7
+    // there is one client for the whole cycle, so the read and the write share
+    // that identity; the old "registered reader, UNREGISTERED writer" split is
+    // unrepresentable. The refusal is a configuration fault the next cycle
+    // retries, so the watermark must stay put and nothing is written.
+    const client = await clientFor(unknown, false);
+    const event = dispatchEvent(unknown.id);
     const { port, acks } = catchupWith([{ events: [event], hasMore: false }]);
 
     const result = await runWakeCycle({
-      agentId: agent.id,
-      catchup: port,
-      cursor: cursorReturning({ outcome: "created", cursorAgentId: "bc-99998888-7777-8666-9555-444433332222" }),
-      receipts: store,
+      client,
+      cursor: CURSOR_CONFIG,
+      __test: { catchup: port, cursor: cursorReturning({ outcome: "created", cursorAgentId: `bc-${randomUUID()}` }) },
     });
 
-    expect(seen, "the server's refusal reaches the runner as a FlairError").toBeInstanceOf(FlairError);
-    expect((seen as FlairError).status, "an unknown signing identity is refused as unauthenticated").toBe(401);
-    expect(result.receiptFailed, "a refused receipt write must be a named outcome").toContain(String(event.id));
-    expect(result.receiptRefused, "401 is not a permanent refusal of the receipt").toEqual([]);
+    expect(result.receiptFailed, "a refused receipt read must be a named outcome").toContain(String(event.id));
+    expect(result.receiptRefused, "an unknown identity is not a permanent refusal of the receipt").toEqual([]);
     expect(result.items[0]?.receipt).toBe("failed");
     expect(result.acked).toBeNull();
     expect(acks, "the watermark must not advance past an unrecorded receipt").toEqual([]);
-    const got = await reader.memory.get(launchReceiptId(String(event.id)));
-    expect(got, "nothing was written, so there is no receipt").toBeNull();
   }, 120_000);
 
   for (const [name, url] of [
@@ -254,10 +238,9 @@ describe("flair#1944 — the Cursor wake runner records a sourced launch receipt
       const lines: string[] = [];
 
       const result = await runWakeCycle({
-        agentId: agent.id,
-        catchup: port,
-        cursor: cursorReturning({ outcome: "created", cursorAgentId, url }),
-        receipts: createMemoryReceiptStore(client, agent.id),
+        client,
+        cursor: CURSOR_CONFIG,
+        __test: { catchup: port, cursor: cursorReturning({ outcome: "created", cursorAgentId, url }) },
         log: (line) => lines.push(line),
       });
 
@@ -274,66 +257,6 @@ describe("flair#1944 — the Cursor wake runner records a sourced launch receipt
     }, 120_000);
   }
 
-  test("a receipt the runner treats as a non-retryable refusal (HTTP 400) is acked as receiptRefused, and later dispatches still launch and record", async () => {
-    const agent = mkAgent(`agent-f-${randomUUID()}`);
-    const client = await clientFor(agent);
-    const production = createMemoryReceiptStore(client, agent.id);
-    const refusedEvent = dispatchEvent(agent.id, { position: "p1" });
-    const nextEvent = dispatchEvent(agent.id, { position: "p2" });
-    const refusedId = launchReceiptId(String(refusedEvent.id));
-    // The first receipt goes to the REAL server through the production client
-    // with a host/kind pair outside the server's closed set — standing in for a
-    // server whose grammar is stricter than the runner's mirror, the case where
-    // every replay would be refused the same way. The 400 is the server's own.
-    let seen: unknown;
-    const store: ReceiptStore = {
-      agentId: agent.id,
-      read: production.read,
-      write: async (receipt) => {
-        if (receipt.id !== refusedId) return production.write(receipt);
-        try {
-          await client.memory.write(receipt.content, {
-            id: receipt.id,
-            hostSource: { ...receipt.hostSource!, kind: "run" } as never,
-          });
-        } catch (err) {
-          seen = err;
-          throw err;
-        }
-      },
-    };
-    const launched: string[] = [];
-    const cursorAgentId = `bc-${randomUUID()}`;
-    const lines: string[] = [];
-    const { port, acks } = catchupWith([{ events: [refusedEvent, nextEvent], hasMore: false }]);
-
-    const result = await runWakeCycle({
-      agentId: agent.id,
-      catchup: port,
-      cursor: {
-        create: async (input) => {
-          launched.push(input.dispatch.id);
-          return { outcome: "created", cursorAgentId };
-        },
-      },
-      receipts: store,
-      log: (line) => lines.push(line),
-    });
-
-    expect((seen as FlairError).status, "the server refused the receipt as a bad request").toBe(400);
-    expect(result.receiptFailed).toBeNull();
-    expect(result.receiptRefused).toEqual([{ eventId: String(refusedEvent.id), status: 400, code: "invalid_host_source" }]);
-    expect(result.items.map((item) => item.receipt)).toEqual(["refused", "written"]);
-    expect(launched, "the later dispatch still launched").toEqual([String(refusedEvent.id), String(nextEvent.id)]);
-    expect(result.acked, "the refusal does not hold the watermark").toBe("p2");
-    expect(acks).toEqual(["p2"]);
-    expect(lines, "one log line for the refusal").toHaveLength(1);
-    expect(lines[0]).toContain("400 invalid_host_source");
-    expect(await client.memory.get(refusedId), "the refused receipt was not stored").toBeNull();
-    const next = await client.memory.get(launchReceiptId(String(nextEvent.id)));
-    expect(next?.hostSource).toEqual({ v: 1, host: "cursor", kind: "launch", id: cursorAgentId });
-  }, 120_000);
-
   test("a row at the receipt id that is ANOTHER agent's memory is not this runner's receipt: named mismatch, no ack, row untouched", async () => {
     const runner = mkAgent(`agent-m-${randomUUID()}`);
     const other = mkAgent(`agent-n-${randomUUID()}`);
@@ -347,10 +270,9 @@ describe("flair#1944 — the Cursor wake runner records a sourced launch receipt
     const { port, acks } = catchupWith([{ events: [event], hasMore: false }]);
 
     const result = await runWakeCycle({
-      agentId: runner.id,
-      catchup: port,
-      cursor: cursorReturning({ outcome: "created", cursorAgentId: "bc-abcdef01-2345-8678-89ab-cdef01234567" }),
-      receipts: createMemoryReceiptStore(runnerClient, runner.id),
+      client: runnerClient,
+      cursor: CURSOR_CONFIG,
+      __test: { catchup: port, cursor: cursorReturning({ outcome: "created", cursorAgentId: "bc-abcdef01-2345-8678-89ab-cdef01234567" }) },
     });
 
     expect(result.items[0]?.receipt, "a foreign row is not this runner's receipt").toBe("mismatched");
@@ -375,10 +297,9 @@ describe("flair#1944 — the Cursor wake runner records a sourced launch receipt
     const { port, acks } = catchupWith([{ events: [event], hasMore: false }]);
 
     const result = await runWakeCycle({
-      agentId: agent.id,
-      catchup: port,
-      cursor: cursorReturning({ outcome: "already", cursorAgentId: wakeAgentId(String(event.id)) }),
-      receipts: createMemoryReceiptStore(client, agent.id),
+      client,
+      cursor: CURSOR_CONFIG,
+      __test: { catchup: port, cursor: cursorReturning({ outcome: "already", cursorAgentId: wakeAgentId(String(event.id)) }) },
     });
 
     expect(result.items[0]?.receipt).toBe("mismatched");
@@ -406,10 +327,9 @@ describe("flair#1944 — the Cursor wake runner records a sourced launch receipt
     const { port, acks } = catchupWith([{ events: [event], hasMore: false }]);
 
     const result = await runWakeCycle({
-      agentId: runner.id,
-      catchup: port,
-      cursor: cursorReturning({ outcome: "created", cursorAgentId: "bc-22223333-4444-8555-9666-777788889999" }),
-      receipts: createMemoryReceiptStore(runnerClient, runner.id),
+      client: runnerClient,
+      cursor: CURSOR_CONFIG,
+      __test: { catchup: port, cursor: cursorReturning({ outcome: "created", cursorAgentId: "bc-22223333-4444-8555-9666-777788889999" }) },
     });
 
     expect(result.items[0]?.receipt, "the server refused the write; the receipt is not recorded").toBe("failed");
@@ -427,7 +347,6 @@ describe("flair#1944 — the Cursor wake runner records a sourced launch receipt
     const agent = mkAgent(`agent-p-${randomUUID()}`);
     const client = await clientFor(agent);
     const event = dispatchEvent(agent.id);
-    const store = createMemoryReceiptStore(client, agent.id);
     // The Cursor id carries a KELVIN-SIGN `K` (U+212A); the server stores its NFC
     // form (ASCII `K`). The replay reuses the raw id, so the source comparison
     // must normalise both sides or it would call this legitimate replay a mismatch.
@@ -437,10 +356,9 @@ describe("flair#1944 — the Cursor wake runner records a sourced launch receipt
 
     const first = catchupWith([{ events: [event], hasMore: false }]);
     const created = await runWakeCycle({
-      agentId: agent.id,
-      catchup: first.port,
-      cursor: cursorReturning({ outcome: "created", cursorAgentId: rawId }),
-      receipts: store,
+      client,
+      cursor: CURSOR_CONFIG,
+      __test: { catchup: first.port, cursor: cursorReturning({ outcome: "created", cursorAgentId: rawId }) },
     });
     expect(created.receiptFailed).toBeNull();
     expect(created.acked).toBe("p1");
@@ -450,10 +368,9 @@ describe("flair#1944 — the Cursor wake runner records a sourced launch receipt
 
     const second = catchupWith([{ events: [event], hasMore: false }]);
     const replay = await runWakeCycle({
-      agentId: agent.id,
-      catchup: second.port,
-      cursor: cursorReturning({ outcome: "already", cursorAgentId: rawId }),
-      receipts: store,
+      client,
+      cursor: CURSOR_CONFIG,
+      __test: { catchup: second.port, cursor: cursorReturning({ outcome: "already", cursorAgentId: rawId }) },
     });
     expect(replay.items[0]?.receipt, "the raw id verifies against the normalised stored id").toBe("unchanged");
     expect(replay.receiptMismatched).toBeNull();
@@ -468,10 +385,9 @@ describe("flair#1944 — the Cursor wake runner records a sourced launch receipt
     const { port, acks } = catchupWith([{ events: [event], hasMore: false }]);
 
     const result = await runWakeCycle({
-      agentId: agent.id,
-      catchup: port,
-      cursor: cursorReturning({ outcome: "dry-run", cursorAgentId: "bc-00000000-0000-8000-8000-000000000000" }),
-      receipts: createMemoryReceiptStore(client, agent.id),
+      client,
+      cursor: CURSOR_CONFIG,
+      __test: { catchup: port, cursor: cursorReturning({ outcome: "dry-run", cursorAgentId: "bc-00000000-0000-8000-8000-000000000000" }) },
       dryRun: true,
     });
 

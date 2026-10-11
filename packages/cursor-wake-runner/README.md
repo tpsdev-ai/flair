@@ -27,7 +27,7 @@ FLAIR_AGENT_ID=anvil CURSOR_API_KEY=… \
 FLAIR_AGENT_ID=anvil bun packages/cursor-wake-runner/src/cli.ts --once --dry-run
 ```
 
-A live run requires the Ed25519 key for `FLAIR_AGENT_ID`: the key is the signing identity and its feed is drained. Admin Basic credentials (`FLAIR_ADMIN_USER` / `FLAIR_ADMIN_PASSWORD`) with no key are accepted only for a read-only run (`--dry-run`) — a live receipt run needs the agent's signing key, because under Basic the server would stamp the written pointer with the Basic username while the row's `agentId` is `FLAIR_AGENT_ID`, so the receipt could not be verified on replay. The requirement is enforced where the write happens, not only at startup: the production receipt store requires the signing key, and the client fails closed — no admin Basic fallback — when no key resolves at send time. Removing the key file cannot cause a Basic fallback: a key the client has already loaded is cached and still signs (the file is not re-read); only when no key resolves at send time does the client refuse. The receipt store is bound to the runner's agent (it takes the runner's id and refuses, by name, a client whose signing identity differs), and `runWakeCycle` refuses, by name, a store that signs as another agent. The client refuses to send admin Basic credentials over plain HTTP to a non-loopback host. There is no `--participant` flag.
+A live run requires the Ed25519 key for `FLAIR_AGENT_ID`: the key is the signing identity and its feed is drained. Admin Basic credentials (`FLAIR_ADMIN_USER` / `FLAIR_ADMIN_PASSWORD`) with no key are accepted only for a read-only run (`--dry-run`) — a live receipt run needs the agent's signing key, because under Basic the server would stamp the written pointer with the Basic username while the row's `agentId` is `FLAIR_AGENT_ID`, so the receipt could not be verified on replay. The requirement is enforced where the write happens, not only at startup: the production receipt store requires the signing key, and the client fails closed — no admin Basic fallback — when no key resolves at send time. Removing the key file cannot cause a Basic fallback: a key the client has already loaded is cached and still signs (the file is not re-read); only when no key resolves at send time does the client refuse. The cycle runs on ONE signed client: `runWakeCycle` builds the catchup reader, the receipt store and (from `--dry-run`) the Cursor client from that one client, so the runner identity IS the signing identity and a receipt signed as another agent is unrepresentable — there is no separate agent id and no store to supply. The client refuses to send admin Basic credentials over plain HTTP to a non-loopback host. There is no `--participant` flag.
 
 | Variable | Required | Notes |
 |---|---|---|
@@ -56,8 +56,10 @@ the runner treats as a non-retryable refusal is acked without one (see
 the Cursor agent id: on create, the id Cursor returned (the requested id when the
 response carries none); on a 409 replay, the requested id, which Cursor reported
 as already in use. The `url` is written only on create, and only as Cursor
-returned it (an `already` result that carries a url never writes one, so a replay
-cannot rewrite the create's stored url). Neither is derived from the dispatch
+returned it (an `already` result that carries a url never writes one, so a
+serialized replay that reads the existing receipt cannot rewrite the create's
+stored url — the two-runner race is disclosed, not claimed away). Neither is
+derived from the dispatch
 text. The write is private and omits `hostSourceScope`, so the server's read
 projection keeps the pointer author-only. An ordinary non-author cannot read this
 private row at all — it answers 404 to them — so they never see the pointer; an

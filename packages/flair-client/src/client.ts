@@ -309,10 +309,14 @@ export class FlairClient {
       headers["Authorization"] = signRequest(this.agentId, key, method, signedPath);
     } else if (opts.requireSigningKey) {
       // flair#1944 round 5 — a request that MUST be signed refuses to fall back
-      // to admin Basic when no key resolves. Resolved HERE, at send time (not at
-      // construction), so a key file that vanished after an earlier existence
-      // check fails CLOSED instead of silently changing the writer identity the
-      // server would stamp (the Basic username in place of the agent's).
+      // to admin Basic when no key resolves. A key that has ALREADY loaded is
+      // CACHED (see resolveKey) and still signs, so removing the key file after
+      // it was read cannot cause a Basic fallback; the refusal happens ONLY when
+      // no key resolves at send time. Resolving HERE, at send time (not at
+      // construction), means a key written after this client was built is still
+      // picked up, and a still-unresolvable key fails CLOSED rather than silently
+      // changing the writer identity the server would stamp (the Basic username
+      // in place of the agent's).
       throw new MissingSigningKeyError(this.agentId, describeKeyLookup(this.lastKeyLookup));
     } else if (this.basicAuth) {
       // flair#1951: never send admin Basic credentials over plain http to a

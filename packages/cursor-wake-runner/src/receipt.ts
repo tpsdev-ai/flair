@@ -101,10 +101,10 @@ export interface StoredReceipt {
  */
 export interface ReceiptStore {
   /**
-   * The agent this store signs receipts AS — its signing identity. `runWakeCycle`
-   * binds it to the runner's `deps.agentId` and refuses, by name, a store that
-   * signs as a different agent, so a receipt is always signed as EXACTLY the
-   * runner's own agent rather than by an independently supplied client.
+   * The agent this store signs receipts AS — its signing identity. The store is
+   * built from ONE client and takes that client's OWN `agentId`, so it is always
+   * signed as EXACTLY the agent whose feed the runner drained; there is no
+   * separate label to supply and a mismatched signer is unrepresentable.
    */
   readonly agentId: string;
   read: (id: string) => Promise<StoredReceipt | null>;
@@ -179,8 +179,9 @@ export function cursorLaunchHostSource(
  * deterministic content (dispatch id + Cursor agent id only — never dispatch
  * text or the prompt), and the host source, omitting a url the grammar would
  * refuse. The caller gates the url on a `created` outcome (flair#1944 round 6):
- * an `already` (409) replay contributes no url, so it cannot overwrite the
- * create's stored url.
+ * an `already` (409) replay contributes no url, so a serialized replay that reads
+ * the existing receipt cannot overwrite the create's stored url (the two-runner
+ * race is disclosed, not claimed away).
  */
 export function buildLaunchReceipt(
   dispatchId: string,
