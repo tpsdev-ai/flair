@@ -726,9 +726,12 @@ const SUPERSEDE_CLOSE_ATTEMPTS = 3;
  *
  * flair#2333 (H10): `granteeId` is set for a CROSS-agent close that a "write"
  * memory grant authorized. The grant is re-checked on committed state inside the
- * transaction (the same empty-context read the target row uses), so a grant
- * revoked before the close commits aborts it (GrantedCloseRevoked, not retried)
- * instead of letting the grantee close the owner's memory.
+ * transaction, AFTER the write is staged — the same write-back confirm the target
+ * row gets above, over the same empty-context read. A grant revoked and committed
+ * before that re-check aborts the close (GrantedCloseRevoked, not retried) instead
+ * of letting the grantee close the owner's memory. As with the target-row re-read,
+ * a revocation committed after this re-check and before the transaction commits is
+ * not seen by it; Harper orders the two writes by timestamp.
  */
 async function closeSupersededRecord(ctx: any, oldId: string, patch: Record<string, unknown>, expectedOwner?: string, granteeId?: string): Promise<void> {
   for (let attempt = 1; ; attempt++) {
@@ -745,17 +748,24 @@ async function closeSupersededRecord(ctx: any, oldId: string, patch: Record<stri
         // Test-only: inert unless the fault-injection env opt-in is set and armed.
         const pause = txnPausePoint("supersede-close");
         if (pause) await pause;
-        // flair#2333 (H10): a cross-agent close stands on the grant checked at
-        // authorization time. Re-read it on committed state (empty context, the
-        // same read the target row uses below); a revoked grant stops the close.
-        if (granteeId !== undefined) {
-          if (!(await hasWriteGrant(granteeId, expectedOwner as string, {}))) throw new GrantedCloseRevoked();
-        }
         const closed = { ...existing, ...patch };
         stripUndeclaredMemoryAttributes(closed);
         await (databases as any).flair.Memory.put(closed, c);
+        // Test-only: inert unless armed — here the write is staged, so a
+        // competing write and the committed-state re-reads below can be exercised
+        // in either order.
+        const stagedPause = txnPausePoint("supersede-close-staged");
+        if (stagedPause) await stagedPause;
         const committed = await (databases as any).flair.Memory.get(oldId, {});
         if (!isDeepStrictEqual(committed, existing)) throw new CloseTargetChanged();
+        // flair#2333 (H10): a cross-agent close stands on the grant checked at
+        // authorization time. Re-read it on committed state HERE — after the write
+        // is staged, as the last read before this transaction commits — so a grant
+        // revoked and committed before this point aborts the close (a revoked grant
+        // cannot come back by retrying, so the loop rethrows it immediately).
+        if (granteeId !== undefined && !(await hasWriteGrant(granteeId, expectedOwner as string, {}))) {
+          throw new GrantedCloseRevoked();
+        }
         return closed;
       });
     } catch (err) {

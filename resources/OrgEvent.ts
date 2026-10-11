@@ -59,7 +59,8 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
 
     // flair#2333 (H9): the default id embedded the wall clock at millisecond
     // resolution, so two events posted by one author in the same millisecond
-    // collided and one was lost. A random suffix makes the minted id unique; the
+    // collided and one was lost. The random suffix removes the millisecond as the
+    // sole discriminator, so two same-millisecond posts mint different ids; the
     // catch-up order is `${createdAt}\t${id}` (agent-read-position-lib.ts), where
     // the id is a same-instant tie-break.
     if (!content.id) content.id = `${content.authorId}-${new Date().toISOString()}-${randomUUID()}`;
@@ -73,12 +74,16 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
 
     // flair#2333 (N2): the middleware's record-owner-guard resolves only
     // `/<Table>/<id>`, so a collection POST is not covered by it. Without this, a
-    // caller-supplied id that already names another agent's event was written
-    // straight through and overwrote it. authorId is stamped from the signature
-    // above, so the shared owner-field delegate (owner-field-guard.ts) compares
-    // the STORED row's authorId against the caller and refuses when they differ —
-    // the same rule put()/patch() apply. Creation (no stored row) and a re-post of
-    // the caller's own id are untouched; admin/internal callers pass through.
+    // caller-supplied id that already named another agent's event was written
+    // straight through and replaced the stored row. authorId is stamped from the
+    // signature above, so the shared owner-field delegate (owner-field-guard.ts)
+    // compares the STORED row's authorId against the caller and refuses when they
+    // differ — the same rule put()/patch() apply. This is the same read-then-write
+    // shape the delegate uses elsewhere: it refuses a POST that names a row stored
+    // and owned by another agent AT THE GUARD'S LOOKUP; it is not an atomic check,
+    // so a row that first appears after that lookup is not covered. Creation (no
+    // stored row) and a re-post of the caller's own id are untouched; admin/internal
+    // callers pass through.
     const ownerDenial = await guardOwnerFieldImmutable(
       this,
       () => (databases as any).flair.OrgEvent.get(content.id, {}),

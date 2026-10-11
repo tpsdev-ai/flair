@@ -224,7 +224,7 @@ describe("OrgEvent.post() — agent-self attribution (no forging)", () => {
 });
 
 // ─── OrgEvent.post() id ownership + uniqueness (flair#2333 N2/H9) ───────────────
-describe("OrgEvent.post() — a non-admin caller cannot overwrite another agent's event with a supplied id (N2)", () => {
+describe("OrgEvent.post() — a non-admin caller's POST naming an event stored and owned by another agent is refused (N2)", () => {
   it("refuses a POST whose id already names another agent's event, leaving it unchanged", async () => {
     orgEventStore.set("owned-1", { id: "owned-1", authorId: "agent-a", kind: "status", summary: "original" });
     const oe = makeOrgEvent(agentCtx("agent-b"));

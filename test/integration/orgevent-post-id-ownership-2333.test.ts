@@ -15,6 +15,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import nacl from "tweetnacl";
 import { HarperInstance, startHarper, stopHarper } from "../helpers/harper-lifecycle";
 
@@ -72,6 +73,17 @@ async function readEvent(harper: HarperInstance, id: string): Promise<any> {
   expect(res.status, `search_by_hash returned ${res.status}: ${text.slice(0, 200)}`).toBe(200);
   return (JSON.parse(text) as any[])[0] ?? null;
 }
+/** Every OrgEvent authored by `authorId`. A POST's response body is empty, so
+ *  this is how the tests recover the id/createdAt of a minted event. */
+async function eventsByAuthor(harper: HarperInstance, authorId: string): Promise<any[]> {
+  const res = await adminOp(harper, {
+    operation: "search_by_value", database: "flair", table: "OrgEvent",
+    search_attribute: "authorId", search_value: authorId, get_attributes: ["*"],
+  });
+  const text = await res.text();
+  expect(res.status, `search_by_value returned ${res.status}: ${text.slice(0, 200)}`).toBe(200);
+  return JSON.parse(text) as any[];
+}
 
 let harper: HarperInstance;
 const owner = mkAgent("oep-owner");
@@ -80,7 +92,26 @@ const other = mkAgent("oep-other");
 const OWNED_ID = "oep-owner-event";
 
 beforeAll(async () => {
-  harper = await startHarper();
+  // This file's Harper runs on a FROZEN clock (test/helpers/harper-freeze-clock.cjs,
+  // opt-in via FLAIR_TEST_FROZEN_NOW on the child's env), so two no-id POSTs land
+  // in the same millisecond deterministically — see the H9 case. The test process
+  // keeps the real clock, so its request timestamps stay inside agent-auth's 30 s
+  // window. The env is restored right after spawn so no other test inherits it.
+  const clockPreload = fileURLToPath(new URL("../helpers/harper-freeze-clock.cjs", import.meta.url));
+  const saved = {
+    frozen: process.env.FLAIR_TEST_FROZEN_NOW,
+    nodeOptions: process.env.NODE_OPTIONS,
+  };
+  process.env.FLAIR_TEST_FROZEN_NOW = String(Date.now());
+  process.env.NODE_OPTIONS = `${saved.nodeOptions ?? ""} --require=${clockPreload}`.trim();
+  try {
+    harper = await startHarper();
+  } finally {
+    if (saved.frozen === undefined) delete process.env.FLAIR_TEST_FROZEN_NOW;
+    else process.env.FLAIR_TEST_FROZEN_NOW = saved.frozen;
+    if (saved.nodeOptions === undefined) delete process.env.NODE_OPTIONS;
+    else process.env.NODE_OPTIONS = saved.nodeOptions;
+  }
   assertOwnInstance(harper);
   await seedAgent(harper, owner);
   await seedAgent(harper, other);
@@ -95,7 +126,7 @@ beforeAll(async () => {
 
 afterAll(async () => { if (harper) await stopHarper(harper); });
 
-describe("flair#2333 N2 — a non-admin agent cannot overwrite another agent's OrgEvent", () => {
+describe("flair#2333 N2 — a non-admin agent's POST naming another agent's OrgEvent is refused", () => {
   it("a POST naming another agent's existing event id is refused and leaves the event unchanged", async () => {
     const res = await authSend(harper, other, "POST", "/OrgEvent", {
       id: OWNED_ID, kind: "coord.claim", summary: "overwrite attempt by another agent",
@@ -117,13 +148,48 @@ describe("flair#2333 N2 — a non-admin agent cannot overwrite another agent's O
     expect(row?.summary).toBe("the owner's original event");
   }, 30_000);
 
-  it("control: a POST with a fresh id still writes as the caller", async () => {
+  it("control: a POST with a fresh (minted) id still writes as the caller", async () => {
     const res = await authSend(harper, other, "POST", "/OrgEvent", {
       kind: "status", summary: "a fresh event from the other agent",
     });
     expect(res.status, (await res.text()).slice(0, 300)).toBeLessThan(300);
-    const row = await readEvent(harper, OWNED_ID);
+    // Read back the event the POST actually created (by author+summary — the POST
+    // body is empty) so the fresh write is shown to land as the caller's own event.
+    const mine = (await eventsByAuthor(harper, other.id)).filter(
+      (r) => r.summary === "a fresh event from the other agent",
+    );
+    expect(mine.length, "the fresh POST was not stored as the caller's own event").toBe(1);
+    expect(mine[0].authorId).toBe(other.id);
     // The owner's row is still intact after a legitimate write by another agent.
+    const row = await readEvent(harper, OWNED_ID);
     expect(row?.summary).toBe("the owner's original event");
+  }, 30_000);
+});
+
+describe("flair#2333 H9 — two events posted in the same millisecond are both stored (real Harper)", () => {
+  // This file's Harper runs on a frozen clock (see beforeAll), so both posts are
+  // stamped with the SAME millisecond deterministically — no reliance on a burst
+  // landing two requests in one ms. (The POST body is empty, so the rows are
+  // recovered by author.) Under the old millisecond-only id those two shared one
+  // id, so the second replaced the first and only one row survived.
+  it("two no-id posts in the same millisecond are stored under two distinct, readable ids", async () => {
+    const summaries = [`h9-same-ms-a-${randomUUID()}`, `h9-same-ms-b-${randomUUID()}`];
+    for (const summary of summaries) {
+      const res = await authSend(harper, other, "POST", "/OrgEvent", { kind: "status", summary });
+      expect(res.status, (await res.text()).slice(0, 200)).toBeLessThan(300);
+    }
+    const rows = (await eventsByAuthor(harper, other.id)).filter((r) => summaries.includes(String(r.summary)));
+    // Both same-millisecond posts are stored...
+    expect(rows.length, "a same-millisecond post reused another event's id").toBe(2);
+    // ...under one server millisecond...
+    expect(new Set(rows.map((r) => String(r.createdAt))).size, "the two posts did not share a millisecond").toBe(1);
+    // ...with two distinct ids, each readable back by id.
+    const ids = rows.map((r) => String(r.id));
+    expect(new Set(ids).size).toBe(2);
+    for (const id of ids) {
+      const row = await readEvent(harper, id);
+      expect(row, `same-millisecond event ${id} was not stored`).toBeTruthy();
+      expect(summaries.includes(String(row.summary))).toBe(true);
+    }
   }, 30_000);
 });

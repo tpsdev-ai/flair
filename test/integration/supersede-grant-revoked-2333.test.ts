@@ -5,9 +5,12 @@
  * authorization check and the close that follows it are separate reads: if the
  * grant is revoked after the check but before the close commits, the close used
  * to land anyway and closed the owner's memory. These cases hold the close inside
- * its transaction (the existing "supersede-close" test pause), revoke the grant
- * so the revocation is committed, release the close, and assert the target row is
- * NOT closed. A control case shows that with the grant intact the close lands.
+ * its transaction (the "supersede-close" test pause, before the write is staged),
+ * revoke the grant so the revocation is committed, release the close, and assert
+ * the target row is NOT closed. The third case pauses at "supersede-close-staged"
+ * instead — after the close has staged its write, so the revocation lands in the
+ * window the write-back confirm covers — and asserts the same refusal. A control
+ * case shows that with the grant intact the close lands.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
@@ -107,22 +110,22 @@ async function waitFor(path: string, timeoutMs: number): Promise<boolean> {
 }
 
 /**
- * Arm the pause, start `write`, and once the close is paused run `compete`, then
- * release. Returns the write response and how the pause ended.
+ * Arm the pause at `point`, start `write`, and once the close is paused run
+ * `compete`, then release. Returns the write response and how the pause ended.
  */
-async function withPausedClose<T>(write: () => Promise<Response>, compete: () => Promise<T>) {
-  for (const marker of ["claimed", "paused", "go", "released"]) rmSync(join(pauseDir, `${marker}.${POINT}`), { force: true });
-  writeFileSync(join(pauseDir, `arm.${POINT}`), "");
+async function withPausedClose<T>(write: () => Promise<Response>, compete: () => Promise<T>, point: string = POINT) {
+  for (const marker of ["claimed", "paused", "go", "released"]) rmSync(join(pauseDir, `${marker}.${point}`), { force: true });
+  writeFileSync(join(pauseDir, `arm.${point}`), "");
   const pending = write();
-  const paused = await waitFor(join(pauseDir, `paused.${POINT}`), 15_000);
+  const paused = await waitFor(join(pauseDir, `paused.${point}`), 15_000);
   let competed: T | undefined;
   try {
     if (paused) competed = await compete();
   } finally {
-    writeFileSync(join(pauseDir, `go.${POINT}`), "");
+    writeFileSync(join(pauseDir, `go.${point}`), "");
   }
   const response = await pending;
-  const released = paused ? readFileSync(join(pauseDir, `released.${POINT}`), "utf8") : "never paused";
+  const released = paused ? readFileSync(join(pauseDir, `released.${point}`), "utf8") : "never paused";
   return { response, competed, released };
 }
 
@@ -152,6 +155,7 @@ beforeAll(async () => {
   await seedAgent(harper, grantee);
   await insertRow(harper, "h10-revoked-target", owner.id, "A memory the owner shared before revoking the grant.");
   await insertRow(harper, "h10-kept-target", owner.id, "A memory whose writer keeps the grant.");
+  await insertRow(harper, "h10-staged-target", owner.id, "A memory whose close is revoked while its write is staged.");
   await grantWrite(harper, owner.id, grantee.id);
 }, 240_000);
 
@@ -187,5 +191,24 @@ describe("flair#2333 H10 — a grant revoked before the close commits stops the 
     expect(res.status, (await res.text()).slice(0, 300)).toBeLessThan(300);
     const target = await readRow(harper, "h10-kept-target");
     expect(target?.validTo, "the close did not land under an intact grant").toBeTruthy();
+  }, 60_000);
+
+  it("a grant revoked while the close's write is staged leaves the owner's memory open", async () => {
+    await grantWrite(harper, owner.id, grantee.id);
+    const { response, competed, released } = await withPausedClose(
+      () => authSend(harper, grantee, "PUT", "/Memory/h10-staged-successor", {
+        id: "h10-staged-successor", agentId: grantee.id, supersedes: "h10-staged-target",
+        content: "Successor whose close is held after staging, long enough for the gate.",
+      }),
+      () => revokeWrite(harper, owner.id, grantee.id),
+      "supersede-close-staged",
+    );
+    expect(released, "the staged close was not paused and released by this test").toBe("go");
+    expect(competed, "the competing grant revocation failed").toBe(200);
+    expect(response.status, (await response.text()).slice(0, 300)).toBeLessThan(300);
+    const successor = await readRow(harper, "h10-staged-successor");
+    expect(successor?.supersedes).toBe("h10-staged-target");
+    const target = await readRow(harper, "h10-staged-target");
+    expect(target?.validTo ?? null, "the close landed after the authorizing grant was revoked while its write was staged").toBeNull();
   }, 60_000);
 });
