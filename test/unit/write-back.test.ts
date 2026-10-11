@@ -17,7 +17,7 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { isDeepStrictEqual } from "node:util";
-import { WRITE_BACK_ATTEMPTS, WRITE_BACK_IDENTITY_FIELDS, WriteBackConflictError, writeBackCommittedRow, writeBackIdentity } from "../../resources/write-back";
+import { WRITE_BACK_ATTEMPTS, WRITE_BACK_IDENTITY_FIELDS, WriteBackConflictError, WriteBackPreconditionError, writeBackCommittedRow, writeBackIdentity } from "../../resources/write-back";
 
 type Row = { id: string } & Record<string, unknown>;
 
@@ -56,6 +56,13 @@ function stagedTable(seed: Row[]) {
       staged = { ...row };
       competing?.();
       return row;
+    },
+    async update(id: string, patch: Record<string, unknown>, _ctx?: unknown): Promise<Row | null> {
+      puts++;
+      const current = store.get(id);
+      staged = current ? { ...current, ...patch } : null;
+      competing?.();
+      return staged;
     },
   };
   return { store, table, commits, puts: () => puts };
@@ -126,6 +133,56 @@ describe("writeBackCommittedRow — abort and retry from the committed row", () 
     expect(store.get("m1")?.content).toBe(`competing-${n - 1}`); // the last competing value, never our write
     expect(WRITE_BACK_ATTEMPTS).toBe(3);
     expect(n).toBe(WRITE_BACK_ATTEMPTS); // one attempt per bounded try
+  });
+});
+
+describe("writeBackCommittedRow — the decision's precondition is confirmed on the committed row, by name", () => {
+  test("a competing write to the decision's own field aborts by NAME and nothing is written", async () => {
+    const { table, store, commits } = stagedTable([{ id: "m1", content: "a" }]);
+    // A competing writer sets a visibility in the window between this write's
+    // read and its committed re-read (the field the backfill's decision named).
+    table.setCompeting(() => {
+      table.setCompeting(undefined);
+      store.set("m1", { id: "m1", content: "a", visibility: "private" });
+    });
+    await expect(
+      writeBackCommittedRow(table, "m1", () => ({ update: { visibility: "shared" } }), {
+        label: "visibility-backfill",
+        precondition: { label: "visibility-backfill", holds: (c: any) => c.visibility === undefined || c.visibility === null },
+      }),
+    ).rejects.toThrow(WriteBackPreconditionError);
+    expect(store.get("m1")?.visibility).toBe("private"); // the other writer's value stands
+    expect(commits).toHaveLength(0);
+  });
+
+  test("without the precondition the same shape retries as an ordinary conflict and overwrites — the check is load-bearing", async () => {
+    const { table, store } = stagedTable([{ id: "m1", content: "a" }]);
+    table.setCompeting(() => {
+      table.setCompeting(undefined);
+      store.set("m1", { id: "m1", content: "a", visibility: "private" });
+    });
+    const outcome = await writeBackCommittedRow(table, "m1", () => ({ update: { visibility: "shared" } }), { label: "visibility-backfill" });
+    expect(outcome).toEqual({ update: { visibility: "shared" } });
+    expect(store.get("m1")?.visibility).toBe("shared"); // the field-only write proceeds over the competing value
+  });
+
+  test("an auto-promotion stamp whose reviewed content hash changed aborts by name; no verdict is written", async () => {
+    const basis = { id: "m1", agentId: "owner", content: "reviewed", contentHash: "h-reviewed", createdAt: "2026-01-01T00:00:00.000Z" };
+    const { table, store, commits } = stagedTable([basis]);
+    let reviewedHash: unknown;
+    table.setCompeting(() => {
+      table.setCompeting(undefined);
+      store.set("m1", { ...basis, content: "edited", contentHash: "h-edited" });
+    });
+    await expect(
+      writeBackCommittedRow(table, "m1", (row: Row) => { reviewedHash = row.contentHash; return { update: { promotionStatus: "approved" } }; }, {
+        label: "promotion-stamp",
+        expectedRow: basis,
+        precondition: { label: "promotion-stamp", holds: (c: any) => c.contentHash === reviewedHash },
+      }),
+    ).rejects.toThrow(WriteBackPreconditionError);
+    expect(store.get("m1")?.promotionStatus).toBeUndefined(); // no verdict over the edited row
+    expect(commits).toHaveLength(0);
   });
 });
 

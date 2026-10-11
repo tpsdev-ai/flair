@@ -90,7 +90,7 @@ const CLASSIFICATIONS: Array<{ file: string; via: WriterVia; needle: string; kin
   { file: "resources/Memory.ts", via: "direct-put", needle: "embedding, embeddingModel: model, updatedAt }, owned)", kind: "echo" },
   { file: "resources/Memory.ts", via: "direct-put", needle: "flair.Memory.put(content, c)", kind: "trusted-stamp" },
   { file: "resources/Memory.ts", via: "patchRecord", needle: "reflectPatch", kind: "single-field" },
-  { file: "resources/MemoryMaintenance.ts", via: "direct-update", needle: "archivedRow, c", kind: "echo" },
+  { file: "resources/MemoryMaintenance.ts", via: "direct-update", needle: "archivePatch, c", kind: "echo" },
   { file: "resources/usage-recording.ts", via: "write-back", needle: 'label: "usage-recording"', kind: "echo" },
   { file: "resources/AgentSeed.ts", via: "direct-put", needle: "put(record)", kind: "seed" },
   { file: "resources/auth-middleware.ts", via: "write-back", needle: 'label: "backfillEmbedding"', kind: "single-field" },

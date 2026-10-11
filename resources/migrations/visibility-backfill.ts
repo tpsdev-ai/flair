@@ -128,7 +128,7 @@
  * omitting it.
  */
 import { databases } from "harper";
-import { writeBackCommittedRow as writeBackCommittedRowImpl, type WriteBackFn } from "../write-back.js";
+import { writeBackCommittedRow as writeBackCommittedRowImpl, WriteBackPreconditionError, type WriteBackFn } from "../write-back.js";
 import { txnPausePoint } from "../txn-pause-point.js";
 import type { Migration, RunBatchResult } from "./types.js";
 
@@ -216,40 +216,66 @@ export function createVisibilityBackfillMigration(
       for (const row of candidates) {
         const id = String((row as { id?: unknown }).id ?? "");
         if (!id) continue;
-        const outcome = await writeBackCommittedRow(
-          table as unknown as Parameters<WriteBackFn>[0],
-          id,
-          (existing: any) => {
-            if (!existing) return { skip: true } as const; // deleted since the search above — nothing to fix
+        let outcome: Awaited<ReturnType<WriteBackFn>>;
+        try {
+          outcome = await writeBackCommittedRow(
+            table as unknown as Parameters<WriteBackFn>[0],
+            id,
+            (existing: any) => {
+              if (!existing) return { skip: true } as const; // deleted since the search above — nothing to fix
 
-            // The write-gate: this is what actually enforces "never overwrite an
-            // existing visibility value", independent of how precisely the
-            // candidate query above narrowed things (see module doc — a
-            // garbage third value would still be pulled in as a candidate).
-            if (existing.visibility !== undefined && existing.visibility !== null) return { skip: true } as const;
+              // The write-gate: this is what actually enforces "never overwrite an
+              // existing visibility value", independent of how precisely the
+              // candidate query above narrowed things (see module doc — a
+              // garbage third value would still be pulled in as a candidate).
+              if (existing.visibility !== undefined && existing.visibility !== null) return { skip: true } as const;
 
-            const derived = deriveVisibilityFromDurability(existing.durability);
-            // Never-widen invariant, asserted, not just tested: the only two
-            // values `deriveVisibilityFromDurability` can ever produce are
-            // "private"/"shared" (see its own doc), so this can never fire
-            // today — it exists to fail loudly (halting this migration via the
-            // runner's mid-batch-throw path, never a silent bad write) if a
-            // future edit to that function ever widens its return type or is
-            // bypassed via a type-unsafe call.
-            if (derived !== "private" && derived !== "shared") {
-              throw new Error(
-                `visibility-backfill: derived an invalid visibility for row ${id} — refusing to write`,
-              );
-            }
+              const derived = deriveVisibilityFromDurability(existing.durability);
+              // Never-widen invariant, asserted, not just tested: the only two
+              // values `deriveVisibilityFromDurability` can ever produce are
+              // "private"/"shared" (see its own doc), so this can never fire
+              // today — it exists to fail loudly (halting this migration via the
+              // runner's mid-batch-throw path, never a silent bad write) if a
+              // future edit to that function ever widens its return type or is
+              // bypassed via a type-unsafe call.
+              if (derived !== "private" && derived !== "shared") {
+                throw new Error(
+                  `visibility-backfill: derived an invalid visibility for row ${id} — refusing to write`,
+                );
+              }
 
-            // ONLY the field this migration owns: an incremental update, never a
-            // full-row put of the row read above. A full-row put carries every
-            // field of `existing`, so a concurrent owner edit committed after this
-            // read would be reverted by it (flair#2470).
-            return { update: { visibility: derived } };
-          },
-          { label: "visibility-backfill", pausePre: () => txnPausePoint("visibility-backfill-pre"), pausePoint: () => txnPausePoint("visibility-backfill"), expectedRow: row },
-        );
+              // ONLY the field this migration owns: an incremental update, never a
+              // full-row put of the row read above. A full-row put carries every
+              // field of `existing`, so a concurrent owner edit committed after this
+              // read would be reverted by it (flair#2470).
+              return { update: { visibility: derived } };
+            },
+            {
+              label: "visibility-backfill",
+              pausePre: () => txnPausePoint("visibility-backfill-pre"),
+              pausePoint: () => txnPausePoint("visibility-backfill"),
+              expectedRow: row,
+              // flair#2470 (cheap narrowing): the decision used "this row's
+              // visibility is still absent". Re-check that on the COMMITTED row
+              // after the write is staged, so a writer that set a visibility in
+              // this transaction's window skips the row by name instead of
+              // overwriting the value it decided to leave alone. This does NOT
+              // cover an owner write that started first and commits after this
+              // migration's commit — flair#2478.
+              precondition: {
+                label: "visibility-backfill-precondition",
+                holds: (committed: any) => committed == null ||
+                  committed.visibility === undefined || committed.visibility === null,
+              },
+            },
+          );
+        } catch (err) {
+          // Skip by name: the preconditions above no longer held on the committed
+          // row. The row is left exactly as the other writer left it; the batch
+          // continues (this is a hygiene pass, not a fail-closed gate).
+          if (err instanceof WriteBackPreconditionError) continue;
+          throw err;
+        }
         if (!("skip" in outcome)) touchedIds.push(id);
       }
 

@@ -150,18 +150,12 @@ export async function recordUsageContribution(
   // exactly what PUT (upsert) is for, not an auto-generated-id insert.
   await withDetachedTxn(ctx, () => (databases as any).flair.MemoryUsage.put(ledgerRecord));
 
-  // Targeted usageCount-ONLY bump: read-full-record, merge just this one
-  // field, write — against the RAW Memory table, NEVER Memory.put() (the
-  // resource class): that would 403 this cross-agent write via its
-  // ownership check, and bypassing that check directly would risk letting
+  // Targeted usageCount-ONLY bump: an INCREMENTAL update of exactly this one
+  // field through the shared helper, against the RAW Memory table, NEVER
+  // Memory.put() (the resource class): that would 403 this cross-agent write via
+  // its ownership check, and bypassing that check directly would risk letting
   // this write path smuggle OTHER field changes through instead of just the
-  // count (RecordUsage.ts module doc's "WHY THIS IS ITS OWN ENDPOINT").
-  // Targeted usageCount-ONLY bump: a full-row read-modify-write through the
-  // shared helper, against the RAW Memory table, NEVER Memory.put() (the
-  // resource class): that would 403 this cross-agent write via its ownership
-  // check, and bypassing that check directly would risk letting this write
-  // path smuggle OTHER field changes through instead of just the count
-  // (RecordUsage.ts module doc's "WHY THIS IS ITS OWN ENDPOINT"). The helper
+  // count (RecordUsage.ts module doc's "WHY THIS IS ITS OWN ENDPOINT"). The helper
   // confirms, inside its own transaction, that the stored row is still the one
   // this contribution was checked against (flair#2441): a row deleted or purged
   // after the read is not re-created (the plan skips an absent row), a same-id

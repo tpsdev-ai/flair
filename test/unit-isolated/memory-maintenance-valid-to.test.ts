@@ -55,12 +55,14 @@ const deletePointer = mock(async (id: string, ctx: Context) => {
   pointers.delete(id);
 });
 let failingId: string | undefined;
-const update = mock(async (id: string, row: Row, ctx: Context) => {
+const update = mock(async (id: string, patch: Row, ctx: Context) => {
   expectOwned(ctx);
   events.push(`update:${id}`);
   if (id === failingId) throw new Error("fixture update failed");
   if (!rows.has(id)) throw new Error("update requires an existing row");
-  rows.set(id, structuredClone(row));
+  // Harper's `update` merges the patch into the stored row (flair#2470 made the
+  // maintenance archive patch only `archived`/`archivedAt`).
+  rows.set(id, { ...rows.get(id), ...structuredClone(patch) });
 });
 const remove = mock(async (id: string, ctx: Context) => {
   expectOwned(ctx);
@@ -147,7 +149,8 @@ test("archives validTo-expired rows across durability tiers, preserving their da
   for (const original of originals) {
     const archived = { ...original, archived: true, archivedAt: NOW.toISOString() };
     expect(rows.get(original.id)).toEqual(archived);
-    expect(update).toHaveBeenCalledWith(original.id, archived, expect.any(Object));
+    // flair#2470: the archive patches only the fields it owns.
+    expect(update).toHaveBeenCalledWith(original.id, { archived: true, archivedAt: NOW.toISOString() }, expect.any(Object));
     expect(noteMemoryUpsert).toHaveBeenCalledWith(archived);
   }
   expect(remove).not.toHaveBeenCalled();
@@ -254,7 +257,7 @@ test("failed archival is counted as an error, retains the row and allows subsequ
 });
 
 
-test("validTo archival guards attributes, preserves provenance and commits before notifying the index", async () => {
+test("validTo archival patches only `archived`/`archivedAt`, leaves every stored field, preserves provenance and commits before notifying the index", async () => {
   const provenance = JSON.stringify({ v: 1, verified: { agentId: AGENT }, claimed: { model: "fixture" } });
   const original = seed("expired-with-pointer", {
     validTo: PAST, provenance, instanceToken: "stored-token", visibility: "private",
@@ -262,13 +265,15 @@ test("validTo archival guards attributes, preserves provenance and commits befor
   });
   pointers.set(original.id, { memoryId: original.id });
   const result = await maintain();
-  const { hostSource, hostSourceScope, undeclared, ...retained } = original;
-  const archived = { ...retained, archived: true, archivedAt: NOW.toISOString() };
   expect(result.archived).toBe(1);
   expect(result.orphans).toBe(0);
-  expect(rows.get(original.id)).toEqual(archived);
+  // The archive is an incremental update of exactly the fields it owns: every
+  // other stored field — including a legacy `hostSource`/`hostSourceScope` and
+  // an undeclared attribute — stands exactly as stored (flair#2470); only the
+  // pointer row it cascades is removed.
+  expect(rows.get(original.id)).toEqual({ ...original, archived: true, archivedAt: NOW.toISOString() });
   expect(rows.get(original.id)?.provenance).toBe(provenance);
-  expect(update).toHaveBeenCalledWith(original.id, archived, expect.any(Object));
+  expect(update).toHaveBeenCalledWith(original.id, { archived: true, archivedAt: NOW.toISOString() }, expect.any(Object));
   expect(pointers.has(original.id)).toBe(false);
   expect(transaction).toHaveBeenCalledTimes(1);
   expect(events).toEqual([

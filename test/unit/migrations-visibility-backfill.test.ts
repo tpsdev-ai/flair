@@ -422,3 +422,25 @@ describe("visibility-backfill migration — simulated write-back retry (flair#23
     expect(store.get("m1")?.agentId).toBe("replacement-owner");
     expect(store.get("m1")?.visibility).toBeUndefined();
   });
+
+describe("visibility-backfill migration — the decision's precondition is confirmed on the committed row (flair#2470)", () => {
+  it("a competing writer that sets a visible value in the window makes run() skip the row by name, never overwrite it", async () => {
+    const { table, store } = makeFakeMemoryTable([
+      { id: "m1", content: "a", durability: "standard" },
+    ]);
+    // The other writer commits a visibility after this migration's read but
+    // before its committed re-read: the migration's decision ("visibility is
+    // still absent") no longer holds, so it must skip by name.
+    const writeBack = makeFakeWriteBack({
+      conflict: (attempt) => {
+        if (attempt === 1) store.set("m1", { ...store.get("m1")!, visibility: "shared" });
+      },
+    });
+    const m = makeMigration(() => table, writeBack);
+    const result = await m.run(50);
+
+    expect(result.processed).toBe(0);
+    expect(result.touchedIds).toEqual([]);
+    expect(store.get("m1")!.visibility).toBe("shared"); // the other writer's explicit choice stands
+  });
+});

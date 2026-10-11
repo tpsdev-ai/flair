@@ -145,9 +145,30 @@ function recordUsage(agent: TestAgent, memoryIds: string[]): Promise<Response> {
     signal: AbortSignal.timeout(60_000),
   });
 }
+/** A signed POST /MemoryMaintenance (the archive worker's trigger). */
+function runMaintenance(agent: TestAgent): Promise<Response> {
+  const path = "/MemoryMaintenance";
+  return fetch(`${harper.httpURL}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: ed25519Header(agent, "POST", path) },
+    body: JSON.stringify({}),
+    signal: AbortSignal.timeout(60_000),
+  });
+}
+/** Wait until the maintenance archive flip on `id` has committed. */
+async function waitForArchived(id: string, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const row = await readRow(id);
+    if (row?.archived === true) return true;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return false;
+}
 
 const CANDIDATE_ID = "bwr-candidate";
 const USAGE_ID = "bwr-usage";
+const ARCHIVE_ID = "bwr-archive";
 
 beforeAll(async () => {
   if (process.env.HARPER_HTTP_URL) throw new Error("requires an isolated Harper; unset HARPER_HTTP_URL");
@@ -183,6 +204,17 @@ beforeAll(async () => {
       id: USAGE_ID, agentId: owner.id, content: ORIGINAL, durability: "standard", visibility: "shared",
       embedding: [0.1, 0.2, 0.3], embeddingModel: SEED_MODEL_ID, instanceToken: randomUUID(),
       usageCount: 0, createdAt: new Date().toISOString(),
+    }],
+  });
+  await opsCall({
+    operation: "insert", database: "flair", table: "Memory",
+    records: [{
+      id: ARCHIVE_ID, agentId: owner.id, content: ORIGINAL, durability: "standard", visibility: "shared",
+      // An archive candidate by validTo (already ended). Set from the start of
+      // boot 2 so the request-driven maintenance can archive it.
+      validTo: new Date(Date.now() - 60_000).toISOString(),
+      embedding: [0.1, 0.2, 0.3], embeddingModel: SEED_MODEL_ID, instanceToken: randomUUID(),
+      createdAt: new Date().toISOString(),
     }],
   });
   await stopHarper(first, { keepInstallDir: true });
@@ -287,6 +319,39 @@ describe("flair#2470 — a background field-only writer keeps an earlier-started
 
     const row = await readRow(USAGE_ID);
     expect(row.usageCount, "the usage-count bump did not land").toBe(1);
+    expect(row.content, "the background write reverted the owner's committed edit").toBe(EDITED);
+  }, 120_000);
+
+  it("the maintenance archive's newer field-only write folds around the older owner PUT; the edit survives and archived lands", async () => {
+    // Hold the maintenance archive before its own transaction opens.
+    for (const marker of ["claimed", "paused", "go", "released"]) rmSync(join(pauseDir, `${marker}.maintenance-archive-pre`), { force: true });
+    writeFileSync(join(pauseDir, "arm.maintenance-archive-pre"), "");
+    const pendingMaintenance = runMaintenance(owner);
+    const maintenancePaused = await waitFor(join(pauseDir, "paused.maintenance-archive-pre"), 30_000);
+    expect(maintenancePaused, "the maintenance archive never reached its pre-transaction pause").toBe(true);
+
+    // Start the owner PUT; its transaction opens FIRST and is held before its write.
+    for (const marker of ["claimed", "paused", "go", "released"]) rmSync(join(pauseDir, `${marker}.${PUT_POINT}`), { force: true });
+    writeFileSync(join(pauseDir, `arm.${PUT_POINT}`), "");
+    const pendingPut = editAs(owner, ARCHIVE_ID, EDITED);
+    const putPaused = await waitFor(join(pauseDir, `paused.${PUT_POINT}`), 30_000);
+    expect(putPaused, "the owner PUT never reached its in-transaction pause").toBe(true);
+
+    // Let the archive commit first (its newer field-only write), THEN release the
+    // PUT — its older full update commits last; Harper's out-of-order
+    // reconciliation is the case under test. A full-row archive write here would
+    // revert the PUT's content.
+    writeFileSync(join(pauseDir, "go.maintenance-archive-pre"), "");
+    await waitFor(join(pauseDir, "released.maintenance-archive-pre"), 30_000);
+    const archived = await waitForArchived(ARCHIVE_ID, 30_000);
+    expect(archived, "the maintenance did not commit its archived flip").toBe(true);
+    writeFileSync(join(pauseDir, `go.${PUT_POINT}`), "");
+    const [put] = await Promise.all([pendingPut, pendingMaintenance]);
+
+    expect(put.status, `the owner PUT did not answer 200: ${await put.clone().text()}`).toBe(200);
+    const row = await readRow(ARCHIVE_ID);
+    expect(row, "the row vanished").not.toBeNull();
+    expect(row.archived, "the maintenance's own field did not land").toBe(true);
     expect(row.content, "the background write reverted the owner's committed edit").toBe(EDITED);
   }, 120_000);
 });

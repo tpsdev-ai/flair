@@ -1,7 +1,7 @@
 import { databases } from "harper";
 import { stripUndeclaredMemoryAttributes } from "./memory-declared-attributes.js";
 import { noteMemoryUpsert } from "./bm25-index-service.js";
-import { writeBackCommittedRow } from "./write-back.js";
+import { writeBackCommittedRow, WriteBackPreconditionError } from "./write-back.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 import { isJoinableTransaction } from "./request-transaction.js";
 
@@ -60,12 +60,38 @@ export async function stampMemoryPromotion(
   if (!selected) throw new Error(`Promotion memory ${id} was not written`);
   if (!isWrittenRow(selected, written)) throw new PromotedRowChangedError(id);
   let stampedRow: any;
-  const outcome = await writeBackCommittedRow(
-    table,
-    id,
-    (stored) => { stampedRow = stamp(stored); return { update: stampPatch }; },
-    { ctx: enumerationContext, label: "promotion-stamp", pausePre: () => txnPausePoint("promotion-stamp-pre"), pausePoint: () => txnPausePoint("promotion-stamp"), matchFields: ["content"], expectedRow: selected },
-  );
+  let reviewedContentHash: unknown;
+  let outcome: Awaited<ReturnType<typeof writeBackCommittedRow>>;
+  try {
+    outcome = await writeBackCommittedRow(
+      table,
+      id,
+      (stored) => { reviewedContentHash = stored?.contentHash; stampedRow = stamp(stored); return { update: stampPatch }; },
+      {
+        ctx: enumerationContext,
+        label: "promotion-stamp",
+        pausePre: () => txnPausePoint("promotion-stamp-pre"),
+        pausePoint: () => txnPausePoint("promotion-stamp"),
+        matchFields: ["content"],
+        expectedRow: selected,
+        // flair#2470 (cheap narrowing): the decision approved the row whose
+        // `contentHash` this transaction read. Re-check that hash on the
+        // COMMITTED row after the stamp is staged, so a verdict is never written
+        // over content that changed to something other than the reviewed row
+        // (skip by name). This does NOT cover an owner write that started first
+        // and commits after this stamp's commit — flair#2478.
+        precondition: {
+          label: "promotion-stamp-precondition",
+          holds: (committed: any) => committed == null || committed.contentHash === reviewedContentHash,
+        },
+      },
+    );
+  } catch (err) {
+    // Skip by name: the content this verdict reviewed is no longer the committed
+    // content, so no stamp is written (the promotion's own write stands).
+    if (err instanceof WriteBackPreconditionError) return;
+    throw err;
+  }
   if ("update" in outcome) noteMemoryUpsert(stampedRow);
 }
 
