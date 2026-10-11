@@ -79,13 +79,13 @@ interface RawMemoryWriter {
 
 const CLASSIFICATIONS: Array<{ file: string; via: WriterVia; needle: string; kind: WriterKind }> = [
   { file: "resources/MemoryFeed.ts", via: "write-back", needle: 'label: "MemoryFeed.ingest"', kind: "strip" },
-  { file: "resources/MemoryFeed.ts", via: "direct-put", needle: "put(row, c)", kind: "echo" },
+  { file: "resources/MemoryFeed.ts", via: "direct-update", needle: "update(id, { expiresAt", kind: "echo" },
   // flair#2441: a Memory merge runs through the write-back helper; every other
   // synced table's merge stays the plain `table.put(mergedData)`.
   { file: "resources/Federation.ts", via: "write-back", needle: "mergedData", kind: "federation-merge" },
   { file: "resources/Federation.ts", via: "alias-source", needle: "put(mergedData)", kind: "federation-merge" },
   { file: "resources/promotion-stamp.ts", via: "write-back", needle: 'label: "promotion-stamp"', kind: "trusted-stamp" },
-  { file: "resources/promotion-stamp.ts", via: "alias-source", needle: "put(row, stagedContext)", kind: "trusted-stamp" },
+  { file: "resources/promotion-stamp.ts", via: "alias-source", needle: "table.update(id, stampPatch", kind: "trusted-stamp" },
   { file: "resources/Memory.ts", via: "direct-put", needle: "put(closed, c)", kind: "echo" },
   { file: "resources/Memory.ts", via: "direct-put", needle: "embedding, embeddingModel: model, updatedAt }, owned)", kind: "echo" },
   { file: "resources/Memory.ts", via: "direct-put", needle: "flair.Memory.put(content, c)", kind: "trusted-stamp" },

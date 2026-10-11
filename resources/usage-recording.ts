@@ -54,7 +54,6 @@
  *     unfiltered.
  */
 import { databases } from "harper";
-import { stripUndeclaredMemoryAttributes } from "./memory-declared-attributes.js";
 import { withDetachedTxn } from "./table-helpers.js";
 import { WriteBackConflictError, writeBackCommittedRow } from "./write-back.js";
 import { txnPausePoint } from "./txn-pause-point.js";
@@ -176,9 +175,9 @@ export async function recordUsageContribution(
       // above stays). The count is only ever bumped on a row in the agent's
       // read scope.
       if (!row || !canRead(row)) return { skip: true };
-      const usageRow = { ...row, usageCount: (row.usageCount ?? 0) + 1 };
-      stripUndeclaredMemoryAttributes(usageRow);
-      return { write: usageRow };
+      // ONLY the field this contribution owns: an incremental update, never a
+      // full-row put of the row read above (flair#2470).
+      return { update: { usageCount: (row.usageCount ?? 0) + 1 } };
     },
     {
       ctx,

@@ -38,15 +38,18 @@ export async function stampMemoryPromotion(
   written?: PromotedRowIdentity,
 ): Promise<void> {
   const table = (databases as any).flair.Memory;
+  const stampPatch = { promotionStatus: "approved", promotedBy: reviewerId, promotedAt: decidedAt };
+  // The full row the incremental stamp produces, for the BM25 note; ONLY
+  // `stampPatch` is written (flair#2470).
   const stamp = (stored: any) => {
     if (!stored) throw new Error(`Promotion memory ${id} was not written`);
-    const row = { ...stored, promotionStatus: "approved", promotedBy: reviewerId, promotedAt: decidedAt };
+    const row = { ...stored, ...stampPatch };
     stripUndeclaredMemoryAttributes(row);
     return row;
   };
   if (isJoinableTransaction(stagedContext)) {
     const row = stamp(await table.get(id, stagedContext));
-    await table.put(row, stagedContext);
+    await table.update(id, stampPatch, stagedContext);
     noteMemoryUpsert(row);
     return;
   }
@@ -56,13 +59,14 @@ export async function stampMemoryPromotion(
   const selected = await table.get(id, {});
   if (!selected) throw new Error(`Promotion memory ${id} was not written`);
   if (!isWrittenRow(selected, written)) throw new PromotedRowChangedError(id);
+  let stampedRow: any;
   const outcome = await writeBackCommittedRow(
     table,
     id,
-    (stored) => ({ write: stamp(stored) }),
+    (stored) => { stampedRow = stamp(stored); return { update: stampPatch }; },
     { ctx: enumerationContext, label: "promotion-stamp", pausePre: () => txnPausePoint("promotion-stamp-pre"), pausePoint: () => txnPausePoint("promotion-stamp"), matchFields: ["content"], expectedRow: selected },
   );
-  if ("write" in outcome) noteMemoryUpsert(outcome.write);
+  if ("update" in outcome) noteMemoryUpsert(stampedRow);
 }
 
 /** Stamp after a successful Memory write. Failures must not abort a sweep or

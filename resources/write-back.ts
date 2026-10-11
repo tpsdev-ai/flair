@@ -2,18 +2,27 @@ import { isDeepStrictEqual } from "node:util";
 import { withOwnedTransaction } from "./request-transaction.js";
 
 /** The narrow surface the helper needs of a Harper table: a primary-key read
- *  that accepts a context, and a full-record write that accepts one. */
+ *  that accepts a context, and a full-record write that accepts one. A plan that
+ *  writes only the fields it owns needs the table's incremental `update` too. */
 export interface WriteBackTable {
   get(id: string, ctx?: any): Promise<any>;
   put(row: any, ctx?: any): Promise<any>;
+  update?(id: string, patch: Record<string, unknown>, ctx?: any): Promise<any>;
 }
 
 /** A call site's test-only pause: its own `txnPausePoint("<name>")` call. */
 export type WriteBackPause = () => Promise<void> | undefined;
 
-/** What the `plan` callback decides for the row it was handed. */
+/** What the `plan` callback decides for the row it was handed.
+ *
+ * `write` is a full-record replacement (Harper `put`): it carries every field of
+ * the row, so a stale field it read can revert a concurrent edit. `update` is
+ * an incremental write of only the fields named (Harper `update`): a writer that
+ * owns a subset of a Memory row returns its own fields here, so the fields it
+ * does not own are never carried into its write. */
 export type WriteBackPlan =
   | { write: Record<string, unknown> }
+  | { update: Record<string, unknown> }
   | { skip: true };
 
 export interface WriteBackOptions {
@@ -139,6 +148,25 @@ export async function confirmCommittedRow(
  *  transaction-owning one. */
 export type WriteBackFn = typeof writeBackCommittedRow;
 
+/**
+ * Write an incremental update of exactly `patch`'s fields, in the caller's
+ * transaction. Refuses by name when the table cannot write incrementally
+ * (a fake or a stub without `update`): falling back to a full-row `put` here
+ * would reintroduce the very full-row write this helper's `update` plan exists
+ * to avoid.
+ */
+async function applyFieldUpdate(
+  table: WriteBackTable,
+  id: string,
+  patch: Record<string, unknown>,
+  ctx: any,
+): Promise<void> {
+  if (typeof table.update !== "function") {
+    throw new Error("write-back: the table has no incremental update; refusing to fall back to a full-row put");
+  }
+  await table.update(id, patch, ctx);
+}
+
 export async function writeBackCommittedRow(
   table: WriteBackTable,
   id: string,
@@ -168,7 +196,8 @@ export async function writeBackCommittedRow(
           const pause = opts.pausePoint();
           if (pause) await pause;
         }
-        await table.put(decision.write, c);
+        if ("update" in decision) await applyFieldUpdate(table, id, decision.update, c);
+        else await table.put(decision.write, c);
         await confirmCommittedRow(table, id, (committed) => isDeepStrictEqual(committed, row));
         return decision;
       });

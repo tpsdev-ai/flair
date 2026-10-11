@@ -361,6 +361,7 @@ export class FeedMemories extends Resource {
     }
     if (refusal) return refusal;
     if ("skip" in outcome) return feedTargetChanged(record.id);
+    if (!("write" in outcome)) throw new Error("MemoryFeed.ingest: expected a full-record write plan");
     const written = outcome.write;
     // flair#1357 — raw-table write: hook it explicitly (see bm25-index-service).
     noteMemoryUpsert(written);
@@ -629,7 +630,9 @@ async function repairDeduplicatedExpiry(ctx: unknown, match: any): Promise<any> 
         delete row.expiresAt;
         const error = stampEphemeralExpiry(row);
         if (error) throw new Error(`flair: deduplicated ephemeral row ${id} could not be repaired (${error})`);
-        await (databases as any).flair.Memory.put(row, c);
+        // ONLY the field this repair owns: an incremental update, never a
+        // full-row put of the row read above (flair#2470).
+        await (databases as any).flair.Memory.update(id, { expiresAt: row.expiresAt }, c);
         return { kind: "written" as const, row };
       });
     if (outcome.kind === "retry") continue;

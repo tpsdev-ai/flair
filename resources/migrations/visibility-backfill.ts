@@ -110,19 +110,13 @@
  * file's module doc for the full, empirically-confirmed mechanism. This
  * migration needs NO subclass business logic (no dedup, no regen, no
  * provenance stamping, no rate limiting) — it is a narrow, single-field
- * patch, which is exactly the shape `resources/table-helpers.ts`'s
- * `patchRecord` documents and this codebase already uses directly against
- * the RAW table for the same kind of narrow metadata write:
- * `resources/auth-middleware.ts`'s `backfillEmbedding()` (patches
- * `embedding`), `resources/MemoryReflect.ts` and `resources/Memory.ts`
- * itself (both patch `lastReflected` this exact way). Per that file's own
- * warning, Harper's raw `.put()` is FULL RECORD REPLACEMENT — a partial
- * object silently deletes every field not included — so `run()` below
- * always spreads the freshly-read `existing` record before adding
- * `visibility`, the same read-modify-write shape `patchRecord` implements
- * (inlined here rather than calling that helper directly only because
- * `run()` already needs its own `.get()` for the write-gate check above,
- * and re-using that same read avoids a second, redundant round-trip).
+ * patch, written through the shared write-back helper
+ * (`resources/write-back.ts`) as an INCREMENTAL update of `visibility`
+ * only, the same shape `resources/table-helpers.ts`'s `patchRecord` uses:
+ * a full-row `put` of the row read would carry every other field it read
+ * and could revert a concurrent owner edit (flair#2470). The helper re-reads
+ * the row inside its own transaction and confirms the committed row before
+ * committing, so a row deleted or replaced since the search above is skipped.
  *
  * NO `recheckPending()`: that hook exists specifically to catch a stale
  * SECONDARY INDEX diverging from live values (flair#807, `embedding-stamp`
@@ -134,7 +128,6 @@
  * omitting it.
  */
 import { databases } from "harper";
-import { stripUndeclaredMemoryAttributes } from "../memory-declared-attributes.js";
 import { writeBackCommittedRow as writeBackCommittedRowImpl, type WriteBackFn } from "../write-back.js";
 import { txnPausePoint } from "../txn-pause-point.js";
 import type { Migration, RunBatchResult } from "./types.js";
@@ -145,6 +138,7 @@ export interface MemoryTableLike {
   search(query: unknown): AsyncIterable<Record<string, unknown>>;
   get(id: string): Promise<Record<string, unknown> | null>;
   put(content: Record<string, unknown>): Promise<unknown>;
+  update?(id: string, patch: Record<string, unknown>, ctx?: unknown): Promise<unknown>;
 }
 
 function defaultMemoryTable(): MemoryTableLike {
@@ -248,13 +242,15 @@ export function createVisibilityBackfillMigration(
               );
             }
 
-            const backfillRow = { ...existing, visibility: derived };
-            stripUndeclaredMemoryAttributes(backfillRow);
-            return { write: backfillRow };
+            // ONLY the field this migration owns: an incremental update, never a
+            // full-row put of the row read above. A full-row put carries every
+            // field of `existing`, so a concurrent owner edit committed after this
+            // read would be reverted by it (flair#2470).
+            return { update: { visibility: derived } };
           },
           { label: "visibility-backfill", pausePre: () => txnPausePoint("visibility-backfill-pre"), pausePoint: () => txnPausePoint("visibility-backfill"), expectedRow: row },
         );
-        if ("write" in outcome) touchedIds.push(id);
+        if (!("skip" in outcome)) touchedIds.push(id);
       }
 
       return { processed: touchedIds.length, touchedIds };

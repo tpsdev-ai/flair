@@ -2,9 +2,9 @@
  * migrations-visibility-backfill.test.ts —
  * resources/migrations/visibility-backfill.ts. Exercises detect/
  * countPending/run against an in-memory fake Memory table (no real Harper
- * needed — the write path here is a direct table.put(), unlike
- * embedding-stamp's HTTP loopback, so there is no separate mechanism left
- * to fake). Proves: the durability -> visibility derivation table
+ * needed — the write path here is a direct table.update(), the incremental
+ * write, so there is no separate mechanism left to fake). Proves: the
+ * durability -> visibility derivation table
  * (including every absent/garbage durability -> "private"), that an
  * existing visibility value is NEVER overwritten (including a garbage
  * third value), idempotency, and the exact query-condition shape.
@@ -72,6 +72,13 @@ function makeFakeMemoryTable(seed: Row[]) {
       async put(content: Row) {
         store.set(content.id, { ...content });
         return content;
+      },
+      async update(id: string, patch: Record<string, unknown>) {
+        const current = store.get(id);
+        if (!current) return null;
+        const merged = { ...current, ...patch } as Row;
+        store.set(id, merged);
+        return merged;
       },
       search(query: any): AsyncIterable<Row> {
         const conditions = Array.isArray(query?.conditions) ? query.conditions : [];
@@ -207,7 +214,7 @@ describe("visibility-backfill migration — run() derives and writes visibility"
     expect(await m.countPending()).toBe(0);
   });
 
-  it("preserves every OTHER field on the row — full read-modify-write, never a partial put()", async () => {
+  it("preserves every OTHER field on the row — an incremental update of only `visibility`", async () => {
     const { table, store } = makeFakeMemoryTable([
       {
         id: "m1",

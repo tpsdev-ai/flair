@@ -26,7 +26,10 @@ export async function patchRecord(
     id,
     (existing) => {
       if (!existing) throw new Error(`Record ${id} not found`);
-      return { write: { ...existing, ...patch } };
+      // An incremental update of exactly the patch's fields: a background stamp
+      // (lastReflected, derivedFrom) must never write back the whole row it read,
+      // or it can revert a concurrent edit that committed after this read.
+      return { update: patch };
     },
     { ...opts, label: opts.label ?? "patchRecord" },
   );

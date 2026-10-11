@@ -186,11 +186,13 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
         if (record.embedding?.length > 100) return { skip: true };
         const embedding = await getEmbedding(record.content, "document");
         if (!embedding) return { skip: true };
-        return { write: { ...record, embedding } };
+        // ONLY the field this backfill owns: an incremental update, never a
+        // full-row put of the row read above (flair#2470).
+        return { update: { embedding } };
       },
       { label: "backfillEmbedding", pausePre: () => txnPausePoint("backfill-embedding-pre"), pausePoint: () => txnPausePoint("backfill-embedding") },
     );
-    if ("write" in outcome) console.log(`[auto-embed] ${memoryId}: ${(outcome.write.embedding as number[]).length}d`);
+    if ("update" in outcome) console.log(`[auto-embed] ${memoryId}: ${(outcome.update.embedding as number[]).length}d`);
   } catch (err: any) {
     console.error(`[auto-embed] Failed for ${memoryId}: ${err.message}`);
   }
