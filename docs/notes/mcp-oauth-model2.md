@@ -180,12 +180,16 @@ registered identities.
    flair mcp enable --instance https://your-public-origin --refresh-flag
    ```
 
-   It pushes an encrypted `FLAIR_MCP_OAUTH=true` update, checks the secret row's
-   `processEnv` marker, verifies a restart by PID change, and checks discovery
+   It first stages a 0600 one-var bundle, then ATTEMPTS an encrypted
+   `FLAIR_MCP_OAUTH=true` push: it probes whether the target can take a pushed
+   secret, and only then pushes the update, checks the secret row's `processEnv`
+   marker, verifies a restart by PID change, and checks discovery
    metadata: the target's own discovery document must advertise that issuer with
    the MCP token endpoint, and
    the public document read at that issuer must match the same normalized issuer and its token
-   endpoint.
+   endpoint. When the target cannot take the secret (an older Harper, or no secrets
+   custody on the node), it leaves that 0600 file for manual application and exits
+   non-zero.
 
 ## Sherlock's 4 requirements — how they are met
 

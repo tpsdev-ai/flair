@@ -11,10 +11,20 @@
  * bound to an issuer the caller knows. It does not run the IdP-credential intake
  * nor apply CIMD changes.
  *
- * These drive `refreshMcpOAuthFlag` with an injected fetch: ops calls go to a
- * stub (a real RSA public key, so the value is sealed through the real
- * `pushSecrets` path), and the discovery read is delegated to a REAL HTTP
- * server that answers each document shape on the wire.
+ * These drive `refreshMcpOAuthFlag` with an injected fetch. Ops calls always go to
+ * a stub (a real RSA public key, so the value is sealed through the real
+ * `pushSecrets` path; `disablePush` makes the capability probe fail). The discovery
+ * read is served per case in one of three ways:
+ *
+ *   - the local HTTP `Bun.serve` above, selected by `shape` — the happy path (a
+ *     `plugin-live` document) and the target-binding refusal (`plugin-absent`);
+ *   - a SYNTHETIC `Response` built inside the stub — the mismatched-`--issuer` case
+ *     (`otherIssuer`) and the public-document-names-a-`STRANGER` case (`discovery`);
+ *   - not at all — the push-failure fallback stops at `secrets-provisioning`, and
+ *     `--dry-run` issues no request.
+ *
+ * The full refresh path against the REAL Harper harness lives in
+ * test/integration-heavy/mcp-refresh-real-harper-2283.test.ts.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";

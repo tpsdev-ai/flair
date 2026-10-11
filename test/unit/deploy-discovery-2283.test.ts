@@ -132,7 +132,7 @@ describe("verifyDeployedMcpDiscovery (real HTTP)", () => {
     while (temps.length) rmSync(temps.pop()!, { recursive: true, force: true });
   });
 
-  function synthPkgRoot(dotEnv: string | null): string {
+  function synthPkgRoot(dotEnv: string | null, harperJs = "process.exit(0);\n"): string {
     const dir = mkdtempSync(join(tmpdir(), "flair-deploy-discovery-"));
     temps.push(dir);
     for (const f of REQUIRED_PACKAGE_FILES) {
@@ -151,7 +151,7 @@ describe("verifyDeployedMcpDiscovery (real HTTP)", () => {
     if (dotEnv !== null) writeFileSync(join(dir, ".env"), dotEnv);
     const binDir = join(dir, "node_modules", "harper", "dist", "bin");
     mkdirSync(binDir, { recursive: true });
-    writeFileSync(join(binDir, "harper.js"), "process.exit(0);\n");
+    writeFileSync(join(binDir, "harper.js"), harperJs);
     return dir;
   }
 
@@ -195,6 +195,47 @@ describe("verifyDeployedMcpDiscovery (real HTTP)", () => {
             verifyTimeoutMs: 40_000,
           } as any),
         ).rejects.toThrow(/document advertises flair's own token endpoint/);
+      } finally {
+        globalThis.fetch = origFetch;
+      }
+    },
+    120_000,
+  );
+
+  // flair#2283 round 6: a staged component `.env` that EXISTS but cannot be READ
+  // must fail the verification BY NAME, never default to "not configured / no known
+  // issuers" — that empty default would let a deploy return success against an
+  // instance serving flair's own AS, which is the whole class this check closes.
+  //
+  // The stub harper replaces the staged `.env` with a DIRECTORY so readFileSync
+  // throws (EISDIR) regardless of the runner's uid: a chmod-0000 file is still
+  // readable as root, which would make this control vacuous in CI containers.
+  test(
+    "deploy() fails by name when the staged .env cannot be read",
+    async () => {
+      const UNREADABLE_ENV = [
+        'const fs = require("node:fs");',
+        'try { fs.rmSync(".env", { force: true, recursive: true }); } catch {}',
+        'fs.mkdirSync(".env");',
+        "process.exit(0);",
+        "",
+      ].join("\n");
+      const pkgRoot = synthPkgRoot("FLAIR_MCP_OAUTH=true\n", UNREADABLE_ENV);
+      const origFetch = globalThis.fetch;
+      // A plugin-live document with NO known issuers would pass if the read failure
+      // silently became "not configured" — so this case fails exactly when the fix
+      // is reverted to the empty defaults.
+      globalThis.fetch = routedTarget("plugin-live");
+      try {
+        await expect(
+          deploy({
+            target: TARGET,
+            fabricUser: "admin",
+            fabricPassword: "pw",
+            packageRoot: pkgRoot,
+            verifyTimeoutMs: 40_000,
+          } as any),
+        ).rejects.toThrow(/could not read the staged \.env; discovery not verified/);
       } finally {
         globalThis.fetch = origFetch;
       }
