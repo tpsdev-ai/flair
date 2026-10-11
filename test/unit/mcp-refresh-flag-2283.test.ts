@@ -2,7 +2,7 @@
  * mcp-refresh-flag-2283.test.ts — flair#2283 item 2.
  *
  * `flair mcp enable --refresh-flag` is the one-shot migration for an instance
- * enabled before 0.46.0 that still holds `FLAIR_MCP_OAUTH=1` — a value the
+ * that still holds the old staged value (`FLAIR_MCP_OAUTH=1`) — a value the
  * `@harperfast/oauth` component deletes, leaving its authorization server
  * unmounted. The flag sets that ONE variable to `true` in the target's process
  * environment (the env-secrets primitive), restarts, and confirms the MCP
@@ -61,14 +61,20 @@ afterAll(() => {
   server.stop(true);
 });
 
-/** An ops-API stub + a delegating fetch. `disablePush` makes the capability probe fail. */
-function opsFetch(opts: { disablePush?: boolean } = {}) {
+/** An ops-API stub + a delegating fetch. `disablePush` makes the capability probe fail.
+ *  `otherIssuer` answers the discovery path for any host that is NOT `INSTANCE` with
+ *  a live MCP document advertising that other issuer — the "a live AS elsewhere"
+ *  shape blocker 2 describes. */
+function opsFetch(opts: { disablePush?: boolean; otherIssuer?: string } = {}) {
   const sent: any[] = [];
   let pid = 100;
   const impl = (async (input: any, init: any) => {
     const url = new URL(typeof input === "string" ? input : input.url);
     // The discovery read goes to the REAL server; everything else is the ops stub.
     if (url.pathname === "/.well-known/oauth-authorization-server") {
+      if (opts.otherIssuer && url.hostname !== new URL(INSTANCE).hostname) {
+        return Response.json({ issuer: opts.otherIssuer, token_endpoint: `${opts.otherIssuer}/oauth/mcp/token` });
+      }
       return fetch(`http://127.0.0.1:${server.port}/.well-known/oauth-authorization-server`);
     }
     const body = JSON.parse(init.body);
@@ -125,13 +131,33 @@ describe("refreshMcpOAuthFlag (flair#2283 item 2)", () => {
     expect(result.secretsPath).toBe(base().secretsStagingPath);
   });
 
-  test("refuses a success claim when the AS still does not answer", async () => {
+  test("refuses a success claim when the target still serves flair's own AS", async () => {
     shape = "plugin-absent";
     const { impl } = opsFetch();
     const result = await refreshMcpOAuthFlag(base(), { fetchImpl: impl, ...FAST });
     expect(result.ok).toBe(false);
-    expect(result.failedStep).toBe("self-verify");
-    expect(result.steps.find((s) => s.step === "self-verify")?.detail).toContain("FLAIR_MCP_OAUTH is set but the MCP authorization server is absent");
+    expect(result.refused).toBeDefined();
+    expect(result.failedStep).toBe("issuer-target-binding");
+    expect(result.steps.find((s) => s.step === "issuer-target-binding")?.detail).toContain(
+      "not the MCP authorization server's token endpoint",
+    );
+  });
+
+  // flair#2283 blocker 2: --refresh-flag must BIND the verification to the target,
+  // as the enable path does. Reading --issuer alone let a live AS elsewhere make a
+  // broken target report ok. Here the target at INSTANCE still serves flair's own
+  // AS while a DIFFERENT live MCP AS answers at OTHER; --issuer OTHER must be refused.
+  test("a mismatched --issuer is refused, not reported ok", async () => {
+    shape = "plugin-absent";
+    const OTHER = "https://live-elsewhere.example.com";
+    const { impl } = opsFetch({ otherIssuer: OTHER });
+    const result = await refreshMcpOAuthFlag({ ...base(), issuer: OTHER }, { fetchImpl: impl, ...FAST });
+    expect(result.ok).toBe(false);
+    expect(result.failedStep).toBe("issuer-target-binding");
+    // The refusal names the mismatch: the target advertises INSTANCE, not OTHER.
+    expect(result.refused?.message ?? "").toContain(INSTANCE);
+    expect(result.refused?.message ?? "").toContain(OTHER);
+    expect(result.steps.find((s) => s.step === "self-verify")?.ok).not.toBe(true);
   });
 
   test("a target that cannot take a pushed secret leaves the staged file and names it", async () => {

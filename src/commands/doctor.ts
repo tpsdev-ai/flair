@@ -912,10 +912,14 @@ program
       // doctor reports which authorization server actually answers the instance's
       // discovery document. A configured instance whose discovery names flair's
       // own AS is a named failure; an unreadable document is reported as
-      // unverified, never as a pass. "Configured" is the effective FLAIR_MCP_OAUTH
-      // the component .env carries (Harper's loadEnv), overlaid with the operator
-      // environment.
-      const discovery = await discriminateMcpOAuthDiscovery(baseUrl);
+      // unverified, never as a pass. "Configured" is the locally inferred
+      // FLAIR_MCP_OAUTH the instance ships (Harper's loadEnv reads the component
+      // `.env`), overlaid with the operator environment. The configured public
+      // URL is passed alongside so the discriminator compares the document's
+      // token endpoint against the issuer it advertises, not the probed address.
+      const discovery = await discriminateMcpOAuthDiscovery(baseUrl, {
+        expectedIssuer: componentEnvValue ?? process.env.FLAIR_PUBLIC_URL ?? undefined,
+      });
       const discoveryReport = reportMcpOAuthDiscovery(discovery, mcpOAuthEnabledFromComponentEnv(componentEnvText, process.env));
       const discoveryIcons: Record<McpOAuthDiscoverySeverity, string> = {
         ok: render.icons.ok,

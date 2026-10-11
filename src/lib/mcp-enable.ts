@@ -2093,7 +2093,7 @@ export interface SelfVerifyResult {
 async function fetchOAuthMetadata(
   origin: string,
   deps: { fetchImpl?: typeof fetch; redirect?: RequestRedirect } = {},
-): Promise<{ ok: true; url: string; body: any } | { ok: false; detail: string; unreachable?: true; status?: number }> {
+): Promise<{ ok: true; url: string; status: number; body: any } | { ok: false; detail: string; unreachable?: true; status?: number }> {
   const url = `${origin.replace(/\/+$/, "")}/.well-known/oauth-authorization-server`;
   const fetchImpl = deps.fetchImpl ?? fetch;
   let res: Response;
@@ -2112,7 +2112,7 @@ async function fetchOAuthMetadata(
     return { ok: false, status: res.status, detail: `${url} returned HTTP ${res.status} — is FLAIR_MCP_OAUTH actually set on the restarted instance?` };
   }
   try {
-    return { ok: true, url, body: await res.json() };
+    return { ok: true, url, status: res.status, body: await res.json() };
   } catch {
     return { ok: false, status: res.status, detail: `${url} did not return JSON` };
   }
@@ -2127,17 +2127,34 @@ function mcpTokenEndpoint(issuer: string): string {
   return `${issuer.replace(/\/+$/, "")}/oauth/mcp/token`;
 }
 
-/** Which authorization server a discovery document's `token_endpoint` names.
- *  flair's own OAuth 2.1 AS answers `<issuer>/OAuthToken`
- *  (resources/oauth-discovery.ts); the `@harperfast/oauth` plugin answers
- *  `<issuer>/oauth/mcp/token`. Anything else is neither. One implementation,
- *  so the self-verify, the discriminator below and `flair doctor`/`flair
- *  deploy` cannot drift. */
+/** Which authorization server a discovery document's `token_endpoint` names,
+ *  read against the `issuer` the DOCUMENT advertises — flair can publish
+ *  `FLAIR_PUBLIC_URL` as its issuer while a probe reaches it over loopback, so
+ *  the probed address is not the issuer. flair's own OAuth 2.1 AS answers
+ *  `<issuer>/OAuthToken` (resources/oauth-discovery.ts); the `@harperfast/oauth`
+ *  plugin answers `<issuer>/oauth/mcp/token`. Anything else is neither. One
+ *  implementation, so the self-verify, the discriminator below and `flair
+ *  doctor`/`flair deploy` share the endpoint comparison. */
 export function mcpAuthServerOwner(issuer: string, tokenEndpoint: unknown): "plugin" | "flair-own" | "other" {
   const normalized = issuer.replace(/\/+$/, "");
   if (tokenEndpoint === `${normalized}/OAuthToken`) return "flair-own";
   if (tokenEndpoint === mcpTokenEndpoint(normalized)) return "plugin";
   return "other";
+}
+
+/** Apply `mcpAuthServerOwner` across the candidate issuer origins a document's
+ *  endpoints could be derived from. The document's own `issuer` comes first, then
+ *  any configured public URL the caller knows, then the probed address as a
+ *  fallback for a document that names no issuer. A plugin match anywhere wins;
+ *  otherwise a flair-own match anywhere; otherwise neither. */
+function mcpAuthServerOwnerAcross(candidates: string[], tokenEndpoint: unknown): "plugin" | "flair-own" | "other" {
+  let flairOwn = false;
+  for (const candidate of candidates) {
+    const owner = mcpAuthServerOwner(candidate, tokenEndpoint);
+    if (owner === "plugin") return "plugin";
+    if (owner === "flair-own") flairOwn = true;
+  }
+  return flairOwn ? "flair-own" : "other";
 }
 
 async function verifyTargetIssuer(
@@ -2165,13 +2182,17 @@ async function verifyTargetIssuer(
 // ─── The discovery discriminator (flair#2283) ─────────────────────────────────
 //
 // Which authorization server answers an origin's RFC 8414 discovery document?
-// flair serves its OWN OAuth 2.1 AS at `<origin>/.well-known/oauth-authorization-
-// server` (resources/oauth-discovery.ts, token_endpoint `<origin>/OAuthToken`)
+// flair serves its OWN OAuth 2.1 AS at `<issuer>/.well-known/oauth-authorization-
+// server` (resources/oauth-discovery.ts, token_endpoint `<issuer>/OAuthToken`)
 // whenever FLAIR_MCP_OAUTH is off; with the flag on, flair's handler defers and
-// the `@harperfast/oauth` plugin answers (token_endpoint `<origin>/oauth/mcp/
-// token`). The document's `token_endpoint` therefore names which one answered,
-// and that is the whole discriminator. It lives here once: `flair mcp enable`'s
-// self-verify, `flair doctor` and `flair deploy`'s self-verify all read it.
+// the `@harperfast/oauth` plugin answers, when the plugin loads and mounts
+// (token_endpoint `<issuer>/oauth/mcp/token`). The `issuer` is the one the
+// DOCUMENT advertises — flair can publish FLAIR_PUBLIC_URL while a probe reaches
+// it over loopback — so the `token_endpoint` is compared against that issuer
+// (and any configured public URL the caller passes), never against the probed
+// address. That comparison names which one answered, and it is the whole
+// discriminator. It lives here once: `flair mcp enable`'s self-verify, `flair
+// doctor` and `flair deploy`'s self-verify all read it.
 
 export type McpOAuthDiscoveryState = "plugin-live" | "plugin-absent" | "unreachable" | "unrecognized";
 
@@ -2209,7 +2230,13 @@ export interface McpOAuthDiscovery {
  */
 export async function discriminateMcpOAuthDiscovery(
   origin: string,
-  deps: { fetchImpl?: typeof fetch } = {},
+  deps: {
+    fetchImpl?: typeof fetch;
+    /** The configured public origin for the instance, when the caller knows it
+     *  (e.g. doctor's FLAIR_PUBLIC_URL). Compared alongside the document's own
+     *  `issuer`, never instead of it. */
+    expectedIssuer?: string;
+  } = {},
 ): Promise<McpOAuthDiscovery> {
   const normalized = origin.replace(/\/+$/, "");
   const read = await fetchOAuthMetadata(normalized, deps);
@@ -2224,11 +2251,28 @@ export async function discriminateMcpOAuthDiscovery(
   }
   const body = read.body;
   const tokenEndpoint = body?.token_endpoint;
-  const owner = mcpAuthServerOwner(normalized, tokenEndpoint);
+  // Compare the document's `token_endpoint` against the issuer the DOCUMENT
+  // advertises (flair#2283), plus any configured public URL the caller knows,
+  // and fall back to the probed address only when the document names no issuer.
+  // Comparing against the probed address alone misread a configured instance
+  // serving flair's own AS (issuer = FLAIR_PUBLIC_URL, reached over loopback) as
+  // "unrecognized" instead of the named failure.
+  const docIssuer =
+    typeof body?.issuer === "string" && body.issuer.trim() !== ""
+      ? body.issuer.trim().replace(/\/+$/, "")
+      : undefined;
+  const candidates = [
+    ...new Set(
+      [docIssuer, deps.expectedIssuer ? deps.expectedIssuer.replace(/\/+$/, "") : undefined, normalized].filter(
+        (c): c is string => Boolean(c),
+      ),
+    ),
+  ];
+  const owner = mcpAuthServerOwnerAcross(candidates, tokenEndpoint);
   const common = {
     origin: normalized,
     url: read.url,
-    status: 200,
+    status: read.status,
     issuer: typeof body?.issuer === "string" ? body.issuer : undefined,
     tokenEndpoint: typeof tokenEndpoint === "string" ? tokenEndpoint : undefined,
     body,
@@ -2250,7 +2294,7 @@ export async function discriminateMcpOAuthDiscovery(
   return {
     ...common,
     state: "unrecognized",
-    detail: `${read.url} answered with an unrecognized token endpoint (token_endpoint=${JSON.stringify(tokenEndpoint)})`,
+    detail: `${read.url} answered with an unrecognized token endpoint (token_endpoint=${JSON.stringify(tokenEndpoint)}, issuer=${JSON.stringify(body?.issuer)})`,
   };
 }
 
@@ -2281,12 +2325,13 @@ export interface McpOAuthDiscoveryReport {
  * doctor` and `flair deploy` so both word it identically.
  *
  * `mcpConfigured` is whether the instance is configured for MCP OAuth (the
- * effective `FLAIR_MCP_OAUTH` the CLI can see — the component `.env` Harper's
- * loadEnv reads, overlaid with the operator environment). Its only effect is on
- * the `plugin-absent` case: a configured instance whose discovery names flair's
- * own AS is a named failure with a remedy, while an unconfigured instance is a
- * plain informational line. An `unreachable` or `unrecognized` observation is
- * never a pass, and never an error — it says the surface could not be confirmed.
+ * locally inferred `FLAIR_MCP_OAUTH` the CLI can see — the shipped component
+ * `.env` Harper's loadEnv reads, overlaid with the operator environment). Its
+ * only effect is on the `plugin-absent` case: a configured instance whose
+ * discovery names flair's own AS is a named failure with a remedy, while an
+ * unconfigured instance is a plain informational line. An `unreachable` or
+ * `unrecognized` observation is never a pass, and never an error — it says the
+ * surface could not be confirmed.
  */
 export function reportMcpOAuthDiscovery(
   observation: McpOAuthDiscovery,
@@ -2297,7 +2342,7 @@ export function reportMcpOAuthDiscovery(
       return {
         severity: "ok",
         pass: true,
-        lines: [`MCP OAuth discovery: the MCP authorization server is live (${observation.url}).`],
+        lines: [`MCP OAuth discovery: the metadata advertises the expected token endpoint (${observation.url}).`],
       };
     case "plugin-absent":
       if (!mcpConfigured) {
@@ -2358,7 +2403,7 @@ export async function selfVerifyMcpMetadata(
   // This used to be an inline token_endpoint comparison here. flair#2283 lifted
   // it into `discriminateMcpOAuthDiscovery` so `flair doctor` and `flair deploy`
   // run the SAME function instead of re-deriving the comparison.
-  const observation = await discriminateMcpOAuthDiscovery(normalizedIssuer, deps);
+  const observation = await discriminateMcpOAuthDiscovery(normalizedIssuer, { ...deps, expectedIssuer: normalizedIssuer });
   if (observation.state === "unreachable") {
     // A failed request read nothing, so the caller must not read it as a verdict
     // (flair#2116). `status` is absent only when no response came back at all.
@@ -3294,13 +3339,12 @@ export interface RefreshMcpFlagResult {
 }
 
 /**
- * flair#2283 — the one-shot migration for an instance enabled before the
- * shipped `config.yaml` referenced `FLAIR_MCP_OAUTH` (the pre-0.46.0 staging
- * recorded by `buildSecretsBundle`; flair#1284 changed it to `true`). Such an
- * instance holds `FLAIR_MCP_OAUTH=1`: flair's own reader accepts `1`, but the
- * `@harperfast/oauth` component coerces only `true`/`false` and deletes it, so
- * the MCP authorization server never mounts and every connector handshake fails
- * with no cause named.
+ * flair#2283 — the one-shot migration for an instance that still holds the old
+ * staged value (`FLAIR_MCP_OAUTH=1`, recorded by `buildSecretsBundle` before
+ * flair#1284 changed the staged value to `true`). Flair's own reader accepts
+ * `1`, but the `@harperfast/oauth` component coerces only `true`/`false` and
+ * deletes it, so the MCP authorization server never mounts and every connector
+ * handshake fails with no cause named.
  *
  * This sets that ONE variable to `true` in the target's process environment —
  * the same env-secrets primitive `flair mcp enable` uses — and restarts, WITHOUT
@@ -3378,9 +3422,21 @@ export async function refreshMcpOAuthFlag(
     );
     push(true, `process restarted: pid changed ${pre.pid} -> ${post.pid}`);
 
+    // Bind the verification to the target EXACTLY as the enable path does: the
+    // target's OWN document must advertise the issuer we are about to verify, and
+    // its token endpoint must be the MCP one. Without this, an unrelated live AS
+    // at --issuer could let a broken target report ok (flair#2283).
+    currentStep = "issuer-target-binding";
+    const binding = await verifyTargetIssuer(params.instance, issuer, { fetchImpl: deps.fetchImpl });
+    if (!binding.ok) {
+      push(false, binding.detail);
+      return { ok: false, dryRun, refused: { message: binding.detail }, steps, failedStep: "issuer-target-binding", secretsPath: stagedPath };
+    }
+    push(true, binding.detail);
+
     // Self-verify with the SAME discriminator `enable`, `doctor` and `deploy` run.
     currentStep = "self-verify";
-    const observation = await discriminateMcpOAuthDiscovery(issuer, { fetchImpl: deps.fetchImpl });
+    const observation = await discriminateMcpOAuthDiscovery(issuer, { fetchImpl: deps.fetchImpl, expectedIssuer: issuer });
     const report = reportMcpOAuthDiscovery(observation, true);
     if (report.severity !== "ok") {
       push(false, report.lines.join(" "));

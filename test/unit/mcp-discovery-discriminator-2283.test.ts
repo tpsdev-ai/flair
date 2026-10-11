@@ -30,22 +30,30 @@ let server: ReturnType<typeof Bun.serve>;
 let origin: string;
 let shape: Shape;
 
+/** When set, the document advertises THIS issuer instead of the probed origin —
+ *  the shape a configured instance serving flair's own AS presents while doctor
+ *  probes it over loopback (FLAIR_PUBLIC_URL ≠ the probed address). */
+let advertisedIssuer: string | null = null;
+/** When true, the document omits `issuer` entirely — the fallback shape. */
+let omitIssuer = false;
+
 function documentFor(o: string, s: Shape): Response {
+  const base = advertisedIssuer ?? o;
   const json = (body: unknown, status = 200) =>
     new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+  const withIssuer = (body: Record<string, unknown>) => json(omitIssuer ? body : { issuer: base, ...body });
   switch (s) {
     case "plugin-live":
-      return json({
-        issuer: o,
-        registration_endpoint: `${o}/oauth/mcp/register`,
-        token_endpoint: `${o}/oauth/mcp/token`,
+      return withIssuer({
+        registration_endpoint: `${base}/oauth/mcp/register`,
+        token_endpoint: `${base}/oauth/mcp/token`,
         client_id_metadata_document_supported: true,
         token_endpoint_auth_methods_supported: ["none", "client_secret_basic"],
       });
     case "plugin-absent":
-      return json({ issuer: o, token_endpoint: `${o}/OAuthToken` });
+      return withIssuer({ token_endpoint: `${base}/OAuthToken` });
     case "unrecognized":
-      return json({ issuer: o, token_endpoint: `${o}/weird/token` });
+      return withIssuer({ token_endpoint: `${base}/weird/token` });
     case "non-json":
       return new Response("<html>nope</html>", { status: 200, headers: { "content-type": "text/html" } });
     case "not-found":
@@ -112,6 +120,55 @@ describe("discriminateMcpOAuthDiscovery (real HTTP)", () => {
     expect(result.state).toBe("unreachable");
     expect(result.status).toBe(200);
     expect(result.detail).toContain("did not return JSON");
+  });
+
+  // flair#2283 blocker 1: Flair can advertise FLAIR_PUBLIC_URL as its issuer while
+  // doctor probes loopback. Comparing the token endpoint against the PROBED
+  // address turned a configured instance serving flair's own AS into
+  // "unrecognized" (and, symmetrically, let an unrelated endpoint read "live").
+  // These drive the document's OWN issuer, distinct from the probed address.
+  test("plugin-absent when the document advertises a PUBLIC issuer distinct from the probed address", async () => {
+    shape = "plugin-absent";
+    advertisedIssuer = "https://public.flair.example.com";
+    try {
+      const result = await discriminateMcpOAuthDiscovery(origin);
+      expect(result.state).toBe("plugin-absent");
+      expect(result.issuer).toBe("https://public.flair.example.com");
+      expect(result.tokenEndpoint).toBe("https://public.flair.example.com/OAuthToken");
+    } finally {
+      advertisedIssuer = null;
+    }
+  });
+
+  test("plugin-live when the document advertises a PUBLIC issuer distinct from the probed address", async () => {
+    shape = "plugin-live";
+    advertisedIssuer = "https://public.flair.example.com";
+    try {
+      const result = await discriminateMcpOAuthDiscovery(origin);
+      expect(result.state).toBe("plugin-live");
+      expect(result.tokenEndpoint).toBe("https://public.flair.example.com/oauth/mcp/token");
+    } finally {
+      advertisedIssuer = null;
+    }
+  });
+
+  test("an issuer-less document is judged against the configured public URL the caller passes", async () => {
+    shape = "plugin-live";
+    omitIssuer = true;
+    advertisedIssuer = "https://public.flair.example.com";
+    try {
+      const withExpected = await discriminateMcpOAuthDiscovery(origin, {
+        expectedIssuer: "https://public.flair.example.com",
+      });
+      expect(withExpected.state).toBe("plugin-live");
+      // With neither a document issuer nor a configured URL, only the probed
+      // address remains — and this document's endpoints are not derived from it.
+      const withoutExpected = await discriminateMcpOAuthDiscovery(origin);
+      expect(withoutExpected.state).toBe("unrecognized");
+    } finally {
+      omitIssuer = false;
+      advertisedIssuer = null;
+    }
   });
 
   test("unreachable (a named non-2xx) when the answer is a 404", async () => {
@@ -238,8 +295,24 @@ describe("flair doctor runs the discriminator through the real command", () => {
     async () => {
       shape = "plugin-live";
       const result = await runDoctor({ FLAIR_MCP_OAUTH: "true" });
-      expect(result.stdout).toContain("the MCP authorization server is live");
+      expect(result.stdout).toContain("the metadata advertises the expected token endpoint");
       expect(result.stdout).not.toContain("FLAIR_MCP_OAUTH is set but the MCP authorization server is absent");
+    },
+    60_000,
+  );
+
+  test(
+    "a configured instance whose document advertises a public issuer (distinct from the probed address) is a named failure",
+    async () => {
+      shape = "plugin-absent";
+      advertisedIssuer = "https://public.flair.example.com";
+      try {
+        const result = await runDoctor({ FLAIR_MCP_OAUTH: "true" });
+        expect(result.stdout).toContain("FLAIR_MCP_OAUTH is set but the MCP authorization server is absent");
+        expect(result.status).not.toBe(0);
+      } finally {
+        advertisedIssuer = null;
+      }
     },
     60_000,
   );

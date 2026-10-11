@@ -1186,7 +1186,7 @@ export async function verifyDeployedMcpDiscovery(o: {
   onProgress?: (msg: string) => void;
   fetchImpl?: typeof fetch;
 }): Promise<void> {
-  const discovery = await discriminateMcpOAuthDiscovery(o.url, { fetchImpl: o.fetchImpl });
+  const discovery = await discriminateMcpOAuthDiscovery(o.url, { fetchImpl: o.fetchImpl, expectedIssuer: o.url });
   const report = reportMcpOAuthDiscovery(discovery, o.mcpOAuthConfigured);
   if (report.severity === "error") {
     throw new Error(`deploy verification: ${report.lines.join(" ")}`);
@@ -1255,7 +1255,7 @@ export async function deploy(opts: DeployOptions): Promise<DeployResult> {
   let replicationWarning: boolean;
   let convergedAfterReplicationError: boolean;
   // flair#2283: whether this deploy is shipping an instance configured for MCP
-  // OAuth — the effective FLAIR_MCP_OAUTH in the component `.env` Harper's
+  // OAuth — the shipped FLAIR_MCP_OAUTH in the component `.env` Harper's
   // loadEnv reads, captured before the staged tree is cleaned up. The deploy
   // cannot read the TARGET's environment, so the shipped `.env` is the one fact
   // it can stand on; a target enabled only through Fabric's environment panel is
