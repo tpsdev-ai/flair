@@ -26,24 +26,22 @@ async function op(body: Record<string, unknown>) {
 async function seed(table: string, records: Record<string, unknown>[]) {
   return op({ operation: "upsert", database: "flair", table, records });
 }
-/** Seed an approved row through the trusted review workflow. The promotion is a
- *  resource request, and its 200 implies the committed row: it writes the Memory
- *  and its promotion stamp in one request transaction. `PUT`/`PATCH
- *  /Memory/<id>` refuse the authority stamps (403, asserted in this file). An ops
- *  `upsert` on the Memory row instead can answer 200 before its commit lands, and
- *  that deferred commit then supersedes a later write to the same row while the
- *  later request still answers 200 (flair#2445). */
+/** Seed an approved row through the trusted review workflow. */
 async function seedApproved(claim: string): Promise<string> {
   const candidateId = `authority-echo-${randomUUID()}`;
   await seed("MemoryCandidate", [{ id: candidateId, agentId: owner.id, claim, status: "pending", generatedAt: now, createdAt: now, sourceMemoryIds: [], visibilityRuling: "private" }]);
   const promoted = await request(owner, "POST", "/PromoteMemoryCandidate", { candidateId, rationale: "verified" });
   expect(promoted.status, await promoted.clone().text()).toBe(200);
-  return ((await promoted.json()) as { memoryId: string }).memoryId;
+  const { memoryId, decidedAt } = (await promoted.json()) as { memoryId: string; decidedAt: string };
+  const stored = await readUntil(memoryId, (row) => row?.promotionStatus === "approved" && row?.promotedAt === decidedAt && row?.promotedBy === owner.id);
+  expect(stored).toBeDefined();
+  expect(stored.promotionStatus).toBe("approved");
+  expect(stored.promotedAt).toBeTruthy();
+  expect(stored.promotedAt).toBe(decidedAt);
+  expect(stored.promotedBy).toBe(owner.id);
+  return memoryId;
 }
 const read = async (id: string) => (await op({ operation: "search_by_id", database: "flair", table: "Memory", ids: [id], get_attributes: ["*"] }))[0];
-/** HTTP PUT/PATCH can 200 before ops search_by_id sees the commit (native-spawn
- *  deferred-txn / ops-wumd class). Poll the same ops read the assertions use;
- *  the expected content/stamps do not change. */
 async function readUntil(id: string, pred: (row: any) => boolean): Promise<any> {
   const deadline = Date.now() + 5_000;
   let row = await read(id);
@@ -61,7 +59,7 @@ beforeAll(async () => {
 afterAll(async () => { if (harper) await stopHarper(harper); });
 
 describe("Memory authority fields over HTTP", () => {
-  test("direct PUT and PATCH cannot forge, clear or replace workflow stamps", async () => {
+  test("PUT and PATCH reject changed authority-field values", async () => {
     await seed("Memory", [{ id: "stamped", agentId: owner.id, content: "original", durability: "persistent", createdAt: now, promotionStatus: "approved", promotedAt: now, promotedBy: "trusted-reviewer" }]);
     for (const method of ["PUT", "PATCH"]) {
       for (const field of ["promotionStatus", "promotedAt", "promotedBy"]) {
