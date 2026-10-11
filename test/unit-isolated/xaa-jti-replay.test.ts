@@ -66,6 +66,25 @@ const harperMock: any = {
         put: async (r: any) => {
           credentials.set(r.id, { ...r });
         },
+        // The credential table's per-key lock (resources/key-lock.ts): an
+        // in-memory stand-in for Harper's non-blocking primary-store
+        // tryLock/unlock, so resolveOrCreatePrincipal's serialized
+        // check-and-write runs here.
+        primaryStore: (() => {
+          const held = new Set<string>();
+          return {
+            tryLock: (key: unknown) => {
+              const k = JSON.stringify(key);
+              if (held.has(k)) return false;
+              held.add(k);
+              return true;
+            },
+            unlock: (key: unknown) => {
+              held.delete(JSON.stringify(key));
+            },
+            resetReadTxn: () => {},
+          };
+        })(),
       },
       Agent: {
         get: async (id: string) => agentRows.get(id) ?? null,

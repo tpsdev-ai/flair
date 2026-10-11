@@ -6,6 +6,8 @@ import { createHash, randomBytes } from "node:crypto";
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
 import { stampOriginatorOnCreate } from "./originator-instance.js";
 import { invalidAgentIdMessage, isValidAgentId } from "../src/lib/agent-id-rule.js";
+import { withKeyLock } from "./key-lock.js";
+import { txnPausePoint } from "./txn-pause-point.js";
 import { claimIdJagJti, idJagReplayDeps, ReplayStoreUnavailable, reportReplayStoreGapsAtBoot, type ReplayStoreBootStore } from "./replay-store.js";
 
 /**
@@ -173,8 +175,48 @@ export async function validateIdJag(
 
 /**
  * Resolve or JIT-create a Principal from validated ID-JAG claims.
+ *
+ * The credential lookup and the JIT create it may fall back to are one
+ * check-and-write: two grants for one new subject must not both find no
+ * principal and both provision. They run under the subject's per-key lock
+ * (resources/key-lock.ts); a grant that cannot take the lock is refused (503)
+ * rather than provision a second principal for the subject.
  */
 async function resolveOrCreatePrincipal(
+  payload: any,
+  idpConfig: any,
+): Promise<string> {
+  const store = (databases as any)?.flair?.Credential?.primaryStore;
+  const outcome = await withKeyLock(
+    store,
+    [XAA_PRINCIPAL_LOCK_NAMESPACE, idpConfig.id, String(payload.sub)],
+    () => resolveOrCreatePrincipalLocked(payload, idpConfig),
+    XAA_PRINCIPAL_LOCK_ATTEMPTS,
+    XAA_PRINCIPAL_LOCK_WAIT_MS,
+  );
+  if (outcome.kind === "done") return outcome.value;
+  throw new PrincipalProvisionBusy();
+}
+
+/** The subject's principal-provision lock namespace and wait (resources/key-lock.ts). */
+const XAA_PRINCIPAL_LOCK_NAMESPACE = "flair-xaa-principal";
+const XAA_PRINCIPAL_LOCK_ATTEMPTS = 200;
+const XAA_PRINCIPAL_LOCK_WAIT_MS = 10;
+
+/** The named refusal of a grant that lost the principal-provision lock: refused, not retried into a second principal. */
+export class PrincipalProvisionBusy extends Error {
+  constructor() {
+    super("principal provisioning for this subject is in progress; retry");
+    this.name = "PrincipalProvisionBusy";
+  }
+}
+
+/**
+ * `resolveOrCreatePrincipal`'s check-and-write, run while holding the subject's
+ * lock: the credential lookup, and the JIT principal + credential create it
+ * falls back to. Never called outside the lock.
+ */
+async function resolveOrCreatePrincipalLocked(
   payload: any,
   idpConfig: any,
 ): Promise<string> {
@@ -202,6 +244,11 @@ async function resolveOrCreatePrincipal(
   if (!idpConfig.jitProvision) {
     throw new Error(`no principal for IdP subject ${idpSubject} and JIT provisioning is disabled`);
   }
+
+  // Test-only: arms between the lookup above (which found no principal) and the
+  // create below, the interleaving where a concurrent grant provisions first.
+  const pause = txnPausePoint("xaa-principal-provision");
+  if (pause) await pause;
 
   const principalId = `usr_${idpSubject.replace(/[^a-zA-Z0-9]/g, "_").slice(0, 20)}_${randomBytes(4).toString("hex")}`;
   // flair#2359 — the shared agent-ID rule. The id above is built to conform,
@@ -337,6 +384,12 @@ export async function handleJwtBearerGrant(data: any): Promise<Response | object
       return new Response(JSON.stringify({
         error: "temporarily_unavailable",
         error_description: "replay_store_unavailable",
+      }), { status: 503, headers: { "content-type": "application/json" } });
+    }
+    if (err instanceof PrincipalProvisionBusy) {
+      return new Response(JSON.stringify({
+        error: "temporarily_unavailable",
+        error_description: "principal_provision_in_progress",
       }), { status: 503, headers: { "content-type": "application/json" } });
     }
     return new Response(JSON.stringify({

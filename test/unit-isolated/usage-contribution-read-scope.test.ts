@@ -48,6 +48,24 @@ mock.module("harper", () => ({
         put: async (row: any) => {
           usage.set(row.id, { ...row });
         },
+        // The ledger's per-key lock (resources/key-lock.ts): an in-memory
+        // stand-in for Harper's non-blocking primary-store tryLock/unlock, so
+        // recordUsageContribution's serialized check-and-write runs here.
+        primaryStore: (() => {
+          const held = new Set<string>();
+          return {
+            tryLock: (key: unknown) => {
+              const k = JSON.stringify(key);
+              if (held.has(k)) return false;
+              held.add(k);
+              return true;
+            },
+            unlock: (key: unknown) => {
+              held.delete(JSON.stringify(key));
+            },
+            resetReadTxn: () => {},
+          };
+        })(),
       },
     },
   },

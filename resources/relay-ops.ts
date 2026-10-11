@@ -11,7 +11,9 @@
  */
 
 import type { AgentAuthVerdict } from "./agent-auth.js";
+import { withKeyLock } from "./key-lock.js";
 import { isForbiddenOwnerMutation, ownerMutationRefusal, OWNER_FIELDS } from "./record-owner-guard.js";
+import { txnPausePoint } from "./txn-pause-point.js";
 import {
   capDecision,
   computeContentHash,
@@ -58,6 +60,23 @@ const CONFLICT = (error: string): Response => json(409, { error, reason: "seq_co
 /** Over-cap: a synchronous 4xx that names the reason — backpressure that fails loud. */
 const INBOX_FULL = (scope: "recipient" | "sender"): Response =>
   json(429, { error: "inbox full", reason: "inbox_full", scope });
+/** The message-id lock stayed held for the whole wait: another send that must be
+ *  serialized with this one is in progress. Refused, not remembered. */
+const SEND_BUSY = (): Response => json(409, { error: "send in progress", reason: "send_contended" });
+/** The Message store has no per-key lock, so the check-and-write cannot be
+ *  serialized against a concurrent send: refused (fail closed). */
+const SEND_LOCK_UNAVAILABLE = (): Response =>
+  json(503, { error: "send lock unavailable", message: "the Message store has no per-key lock; the send was refused" });
+
+// ─── send-time serialization ────────────────────────────────────────────────
+
+/** First element of every relay-send lock key (resources/key-lock.ts), so a send
+ *  lock never collides with another lock on the database. */
+const SEND_LOCK_NAMESPACE = "flair-relay-send";
+/** The wait for another send that must be serialized: at most
+ *  SEND_LOCK_ATTEMPTS × SEND_LOCK_WAIT_MS. */
+const SEND_LOCK_ATTEMPTS = 200;
+const SEND_LOCK_WAIT_MS = 10;
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -174,6 +193,44 @@ export async function relaySend(
   // Store the server-recomputed canonical hash (verified equal above).
   content.contentHash = computeContentHash(content);
 
+  // The id-ownership check, the content dedup, the per-thread seq check and the
+  // cap check each READ the table and then the send WRITES to it. Two sends that
+  // run concurrently must not both pass a check on state the other is about to
+  // change — both see an id free, a thread's last seq, or an inbox below its cap.
+  // Hold the message id's per-key lock and the sender's per-key lock
+  // (resources/key-lock.ts) across the check and the write: the id covers the
+  // id-ownership check, the sender the per-thread seq and the per-sender sub-cap.
+  const store = (deps.messages as any)?.primaryStore;
+  const outer = await withKeyLock(
+    store,
+    [SEND_LOCK_NAMESPACE, "id", String(content.id)],
+    () =>
+      withKeyLock(
+        store,
+        [SEND_LOCK_NAMESPACE, "from", String(content.from)],
+        () => storeAndDeliver(deps, content),
+        SEND_LOCK_ATTEMPTS,
+        SEND_LOCK_WAIT_MS,
+      ),
+    SEND_LOCK_ATTEMPTS,
+    SEND_LOCK_WAIT_MS,
+  );
+  const outcome = outer.kind === "done" ? outer.value : outer;
+  if (outcome.kind === "busy") return SEND_BUSY();
+  if (outcome.kind === "unavailable") return SEND_LOCK_UNAVAILABLE();
+  return outcome.value;
+}
+
+/**
+ * The delivery half of relaySend, run while holding the send locks (the
+ * message id's and the sender's): the id-ownership answer, the content dedup,
+ * the per-thread seq check, the cap check and the store. Extracted so the whole
+ * check-and-write runs under those locks; it is never called outside them.
+ */
+async function storeAndDeliver(
+  deps: RelayDeps,
+  content: MessageEnvelope,
+): Promise<Response | MessageEnvelope> {
   // Retry-dedup: an identical resend — same primary id, or the same content
   // hash from this sender to this recipient — returns the already-accepted
   // envelope. No second row, and (critically) no second charge against the cap.
@@ -218,7 +275,7 @@ export async function relaySend(
     if (r.from !== content.from || r.threadId !== content.threadId) continue;
     if (typeof r.seq === "number" && r.seq > prevMaxSeq) prevMaxSeq = r.seq;
   }
-  if (content.seq <= prevMaxSeq) {
+  if ((content.seq as number) <= prevMaxSeq) {
     return CONFLICT(`seq ${content.seq} is not ahead of the last seq (${prevMaxSeq}) for this (from, threadId)`);
   }
 
@@ -245,6 +302,10 @@ export async function relaySend(
     state: "delivered",
     deliveredAt: now,
   };
+  // Test-only: arms between the checks above and the store below, the
+  // interleaving where a concurrent send commits its own row first.
+  const pause = txnPausePoint("relay-send-write");
+  if (pause) await pause;
   await deps.messages.put(row);
   return acceptedView(row);
 }

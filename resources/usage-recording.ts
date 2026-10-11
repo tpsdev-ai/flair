@@ -55,6 +55,7 @@
  */
 import { databases } from "harper";
 import { stripUndeclaredMemoryAttributes } from "./memory-declared-attributes.js";
+import { withKeyLock } from "./key-lock.js";
 import { withDetachedTxn } from "./table-helpers.js";
 import { WriteBackConflictError, writeBackCommittedRow } from "./write-back.js";
 import { txnPausePoint } from "./txn-pause-point.js";
@@ -123,6 +124,43 @@ export async function recordUsageContribution(
   now: string,
   canRead: CanReadMemory,
 ): Promise<void> {
+  // The check-and-write below reads the ledger, then writes it, then bumps the
+  // count. Two contributions for the same (agentId, memoryId) that run
+  // concurrently must not both see no ledger row and both bump. Hold the
+  // ledger's per-key lock (resources/key-lock.ts) across the whole contribution:
+  // the second call re-reads the ledger the first committed and no-ops.
+  const store = (databases as any)?.flair?.MemoryUsage?.primaryStore;
+  const outcome = await withKeyLock(
+    store,
+    [USAGE_LEDGER_LOCK_NAMESPACE, agentId, memoryId],
+    () => recordUsageContributionLocked(ctx, agentId, memoryId, attribution, now, canRead),
+    USAGE_LOCK_ATTEMPTS,
+    USAGE_LOCK_WAIT_MS,
+  );
+  // Not recorded when the lock stayed held or the store has none — the same
+  // silent no-op as every other failure here (no ledger row, no count change).
+  if (outcome.kind !== "done") return;
+}
+
+/** The per-(agentId, memoryId) lock namespace and wait (resources/key-lock.ts). */
+const USAGE_LEDGER_LOCK_NAMESPACE = "flair-usage-ledger";
+const USAGE_LOCK_ATTEMPTS = 200;
+const USAGE_LOCK_WAIT_MS = 10;
+
+/**
+ * The ledger check, the ledger create and the count bump, run while holding the
+ * (agentId, memoryId) lock: see `recordUsageContribution` for the whole contract.
+ * Split out so the whole check-and-write runs under the lock; it is never called
+ * outside it.
+ */
+async function recordUsageContributionLocked(
+  ctx: any,
+  agentId: string,
+  memoryId: string,
+  attribution: string | undefined,
+  now: string,
+  canRead: CanReadMemory,
+): Promise<void> {
   const ledgerId = `${agentId}:${memoryId}`;
 
   // Bypasses resources/MemoryUsage.ts's own auth wrapper by design — this
@@ -133,6 +171,13 @@ export async function recordUsageContribution(
     (databases as any).flair.MemoryUsage.get(ledgerId),
   ).catch(() => null);
   if (existingContribution) return; // already counted by this agent — silent no-op
+
+  // Test-only: arms between the ledger check above and the ledger create below,
+  // the interleaving where a concurrent contribution commits its row and bump
+  // first. Only a call that found no row reaches here, so it is the call that
+  // creates the row and performs the bump (see the fix's lock).
+  const pause = txnPausePoint("usage-contribution-claim");
+  if (pause) await pause;
 
   // Absent, unreadable, or a failed read: ONE silent no-op branch (no
   // enumeration). A read failure is never evidence the memory is readable.

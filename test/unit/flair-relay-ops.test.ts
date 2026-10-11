@@ -28,8 +28,25 @@ const ORG = "flair-test-instance";
 
 function messagesTable() {
   const store = new Map<string, any>();
+  const held = new Set<string>();
   return {
     store,
+    // The Message table's primary-store lock (resources/key-lock.ts). The send
+    // path serializes its check-and-write on the message id and the sender; a
+    // plain in-memory store stands in for Harper's per-key tryLock (no Harper,
+    // no contention in these single-threaded tests).
+    primaryStore: {
+      tryLock: (key: unknown) => {
+        const k = JSON.stringify(key);
+        if (held.has(k)) return false;
+        held.add(k);
+        return true;
+      },
+      unlock: (key: unknown) => {
+        held.delete(JSON.stringify(key));
+      },
+      resetReadTxn: () => {},
+    },
     get: async (id: string) => store.get(id) ?? null,
     put: async (row: any) => {
       store.set(row.id, { ...row });
