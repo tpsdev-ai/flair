@@ -28,7 +28,8 @@
 import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
 import nacl from "tweetnacl";
 import { signBody, signBodyFresh } from "../../resources/federation-crypto.js";
-import { createFakeReplayNonceTable, ensureGlobalHarperTransaction } from "../helpers/fake-replay-store.ts";
+import { createFakeReplayNonceTable } from "../helpers/fake-replay-store.ts";
+import { installFakeHarperTransaction } from "../helpers/fake-harper-txn.ts";
 
 const PEER_ID = "inst-remote";
 const ORIGIN = "instance-origin";
@@ -52,6 +53,11 @@ function table(name: string) {
       if (name === "Memory") {
         for (const field of ["agentId", "content", "createdAt"]) expect(typeof r[field]).toBe("string");
       }
+      // flair#2441: the merge's row write is a write-back inside an owned
+      // transaction — stage it so the committed re-read still sees the committed
+      // store row (as real Harper does), then commit it when the transaction
+      // resolves.
+      if (harperTxn.stage(r.id, { table: name, row: r })) return r;
       stores[name].set(r.id, JSON.parse(JSON.stringify(r)));
       return r;
     },
@@ -59,7 +65,9 @@ function table(name: string) {
   };
 }
 
-ensureGlobalHarperTransaction();
+const harperTxn = installFakeHarperTransaction((id: string, payload: { table: string; row: any }) => {
+  stores[payload.table].set(id, JSON.parse(JSON.stringify(payload.row)));
+});
 
 mock.module("harper", () => ({
   Resource: class {},

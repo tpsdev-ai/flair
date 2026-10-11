@@ -46,8 +46,10 @@ add("AgentSeed", ["writer:(databases as any).flair.Memory.put#1"],
   "Skill-writer: REJECTS skill-tagged starter memories (400 skill_write_path) — admin-only seed bypasses the gate (flair#1542).");
 
 // ── SKIPPING skill-writer sinks (skill_not_federated) ──
-add("Federation", ["writer:table.put#1"],
+add("Federation", ["writer:writeBackCommittedRow#1"],
   "Skill-writer: SKIPS skill-tagged rows (skill_not_federated) — skills are local, never synced (flair#1542).");
+add("Federation", ["writer:table.put#1"],
+  "Not a Memory writer: the merge of every OTHER synced table, the `else` of `record.table === \"Memory\"` (flair#2441); a Memory merge is the write-back above, after the skill_not_federated skip.");
 
 // ── Existing-row writes preserving content and tags ──
 add("MemoryFeed", ["writer:(databases as any).flair.Memory.put#1"],
@@ -65,8 +67,8 @@ add("Memory", ["writer:patchRecord#1"],
   "derivedFrom/lastReflected bookkeeping patch — never writes skill content.");
 add("Memory", ["writer:(databases as any).flair.Memory.delete#1"],
   "Memory.delete(): removal, not a write.");
-add("Memory", ["alias-source:(databases as any).flair.Memory#1", "alias-source:(databases as any).flair.Memory#2"],
-  "Read-only table alias (get/search) — no write through this handle.");
+add("Memory", ["alias-source:(databases as any).flair.Memory#1", "alias-source:(databases as any).flair.Memory#2", "alias-source:(databases as any).flair.Memory#3"],
+  "Read-only table alias (get/search; #3 is Memory.put's committed-row re-check, confirmCommittedRow, which takes only `get`, flair#2441) — no write through this handle.");
 
 // ── Non-skill writers in other modules ──
 add("MemoryFeed", ["alias-source:(databases as any).flair.Memory#1", "writer:writeBackCommittedRow#1"],
@@ -96,8 +98,8 @@ add("hit-tracking", [
 ], "MemoryHitStat ledger and in-memory maps — not a Memory/skill writer.");
 add("auth-middleware", ["writer:writeBackCommittedRow#1"],
   "Auth bookkeeping (embedding backfill) — non-skill, through the shared write-back helper (flair#2354).");
-add("usage-recording", ["writer:(databases as any).flair.Memory.put#1"],
-  "usageCount increment (targeted get-then-put) — non-skill.");
+add("usage-recording", ["alias-source:(databases as any).flair.Memory#1", "writer:writeBackCommittedRow#1"],
+  "usageCount increment through the shared write-back helper (flair#2441) — non-skill.");
 add("promotion-stamp", ["writer:writeBackCommittedRow#1"],
   "Promotion status stamp — non-skill, through the shared write-back helper (flair#2354).");
 add("promotion-stamp", ["writer:table.put#1"],

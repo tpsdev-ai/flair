@@ -12,7 +12,14 @@
  * (Memory, MemoryUsage), with the REAL resolveReadScope predicate. Isolated
  * lane: the `harper` module mock below is process-global.
  */
-import { describe, it, expect, beforeEach, mock } from "bun:test";
+import { afterAll, describe, it, expect, beforeEach, mock } from "bun:test";
+import { installFakeHarperTransaction } from "../helpers/fake-harper-txn";
+
+/** Commits a staged Memory write into the in-memory store when its owned
+ *  transaction resolves (flair#2441: the count bump is a write-back). */
+const txn = installFakeHarperTransaction((id, row) => memory.set(id, row));
+
+afterAll(() => txn.restore());
 
 const memory = new Map<string, any>();
 const usage = new Map<string, any>();
@@ -31,7 +38,9 @@ mock.module("harper", () => ({
           return memory.has(id) ? { ...memory.get(id) } : null;
         },
         put: async (row: any) => {
+          if (txn.stage(row.id, row)) return row.id;
           memory.set(row.id, { ...row });
+          return row.id;
         },
       },
       MemoryUsage: {

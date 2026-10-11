@@ -24,7 +24,8 @@ import nacl from "tweetnacl";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { signBody, signBodyFresh } from "../../resources/federation-crypto.js";
-import { createFakeReplayNonceTable, ensureGlobalHarperTransaction } from "../helpers/fake-replay-store.ts";
+import { createFakeReplayNonceTable } from "../helpers/fake-replay-store.ts";
+import { installFakeHarperTransaction } from "../helpers/fake-harper-txn.ts";
 
 const PEER_ID = "inst-remote";
 let peerStore: Map<string, any>;
@@ -36,7 +37,9 @@ function emptyGen() {
   return gen();
 }
 
-ensureGlobalHarperTransaction();
+const harperTxn = installFakeHarperTransaction((id: string, payload: { row: any }) => {
+  memoryStore.set(id, { ...payload.row });
+});
 
 mock.module("harper", () => ({
   Resource: class {},
@@ -54,6 +57,10 @@ mock.module("harper", () => ({
       Memory: {
         get: async (id: string) => memoryStore.get(id) ?? null,
         put: async (r: any) => {
+          // flair#2441: the merge's Memory write is a write-back inside an owned
+          // transaction — stage it so the committed re-read still sees the
+          // committed store row (as real Harper does).
+          if (harperTxn.stage(r.id, { row: r })) return r;
           memoryStore.set(r.id, { ...r });
           return r;
         },
