@@ -10,11 +10,13 @@
  * `receiptRefused` (the launch is real and the receipt is provenance, not
  * control). Otherwise nothing advances the cursor — a failed launch, a receipt
  * write that failed for a transient or configuration reason, or a row already at
- * the receipt id that is NOT this runner's receipt (a foreign author, content or
- * source identity), reported as `receiptMismatched` — the event stays queued
- * (at-least-once). Redelivery of an already-launched event hits Cursor 409 and is
- * treated as success, then the receipt is retried and the event acked — no
- * second launch. The receipt store is REQUIRED for a live cycle (flair#1944 round
+ * the receipt id not verified as this receipt (a foreign author, a different
+ * content, or a different host-source identity), reported as `receiptMismatched`
+ * — the event stays queued (at-least-once). Redelivery of an already-launched
+ * event hits Cursor 409 and is treated as success, then the receipt is retried;
+ * a 409 redelivery is retried and acked only when its receipt write succeeds or
+ * a verified receipt exists — no second launch. The receipt store is REQUIRED for
+ * a live cycle (flair#1944 round
  * 2): a handoff is never acked with no receipt attempt.
  */
 
@@ -32,7 +34,7 @@ export interface WakeItem {
   cursorAgentId?: string;
   url?: string;
   reason?: string;
-  /** flair#1944 — the launch receipt this handoff recorded: "written" or "unchanged" (a VERIFIED existing receipt), "refused" (a non-retryable refusal; acked without it), "failed" (transient or configuration; not acked), or "mismatched" (the id is held by a different record; not acked). */
+  /** flair#1944 — the launch receipt this handoff recorded: "written" or "unchanged" (a VERIFIED existing receipt), "refused" (a non-retryable refusal; acked without it), "failed" (transient or configuration; not acked), or "mismatched" (the id is held by a row not verified as this receipt; not acked). */
   receipt?: "written" | "unchanged" | "failed" | "refused" | "mismatched";
 }
 
@@ -51,9 +53,10 @@ export interface WakeResult {
   /** flair#1944 — set when a launch receipt could not be written for a transient or configuration reason; the watermark is not advanced past it. */
   receiptFailed: string | null;
   /**
-   * flair#1944 round 3 — set when a row already at the receipt id is NOT this
-   * runner's receipt (a foreign author, a different content, or a different host
-   * source); the row is left untouched and the watermark is not advanced past it.
+   * flair#1944 round 3 — set when a row already at the receipt id is NOT
+   * verified as this receipt (a foreign author, a different content, or a
+   * different host-source identity); the row is left untouched and the watermark
+   * is not advanced past it.
    */
   receiptMismatched: string | null;
   /** flair#1944 — receipts the runner treats as non-retryable refusals (status + error code, when present); each event was acked without its receipt. */
@@ -108,7 +111,8 @@ function recordLaunch(result: WakeResult, dispatch: DirectedDispatch, launch: La
   });
 }
 
-/** Name, for the mismatch failure, WHY a stored row is not this runner's receipt. */
+/** Name, for the mismatch failure, the COMPARISON that failed — why a stored row
+ *  is not verified as this receipt. */
 function mismatchReason(stored: StoredReceipt, agentId: string, receipt: LaunchReceipt): string {
   if (stored.author !== agentId) return `another agent (${stored.author})`;
   if (stored.content !== receipt.content) return "different content";
@@ -122,7 +126,7 @@ function mismatchReason(stored: StoredReceipt, agentId: string, receipt: LaunchR
  * VERIFIES as this runner's own receipt (isStoredReceipt — same author, same
  * deterministic content, same host-source identity); a replay that reuses the
  * agent (409) carries no url, and the stored receipt stands. A row that fails
- * that check is a DIFFERENT record holding the id, surfaces as `"mismatched"` and
+ * that check is not verified as this receipt: it surfaces as `"mismatched"` and
  * the caller does NOT ack it. A write the runner treats as a non-retryable
  * refusal (permanentReceiptRefusal) surfaces as `"refused"` with its status and
  * error code; the caller acks past it. Any other read or write failure surfaces
@@ -157,12 +161,12 @@ async function recordLaunchReceipt(
   if (stored !== null) {
     // A row IS there. Only a receipt that VERIFIES as this runner's own is
     // "unchanged"; a foreign author, a different content or a different host
-    // source is a DIFFERENT record — refuse WITHOUT overwriting it and WITHOUT
-    // acking.
+    // source is not verified as this receipt — refuse WITHOUT overwriting it and
+    // WITHOUT acking.
     if (isStoredReceipt(stored, deps.agentId, receipt)) return { status: "unchanged" };
     return {
       status: "mismatched",
-      detail: `receipt id ${receipt.id} is held by ${mismatchReason(stored, deps.agentId, receipt)}; it is not this runner's receipt`,
+      detail: `receipt id ${receipt.id} is not verified as this receipt: ${mismatchReason(stored, deps.agentId, receipt)}`,
     };
   }
   try {

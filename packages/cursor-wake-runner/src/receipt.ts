@@ -86,9 +86,13 @@ export interface StoredReceipt {
 
 /**
  * Read/decide the launch receipt store. `read` returns the stored row's
- * identity (see {@link StoredReceipt}) — or null when NO row exists at the id (a
+ * identity (see {@link StoredReceipt}) — or null when none is READABLE at the id:
+ * missing, or HIDDEN from this reader (a foreign PRIVATE row reads as a 404). A
  * `get` that returns null on 404 and THROWS on any other failure — an unknown
- * read must never license a write); `write` puts the record.
+ * read must never license a write; `write` puts the record. A live `write` must
+ * be signed as the runner's own agent: the production store sets
+ * `requireSigningKey`, and the client fails closed (no Basic fallback) when no
+ * Ed25519 key resolves.
  */
 export interface ReceiptStore {
   read: (id: string) => Promise<StoredReceipt | null>;
@@ -207,7 +211,11 @@ export function isStoredReceipt(
 }
 
 /** The host-source IDENTITY (`host`/`kind`/`id`) of two pointers matches: a
- *  `"withheld"` pointer never matches, and absence matches only absence. */
+ *  `"withheld"` pointer never matches, and absence matches only absence. The id
+ *  is compared on its NFC form (the form the server's validator STORES): the
+ *  runner builds the expected id from the value Cursor returned, while a
+ *  read-back row carries the server's normalised form, so a raw `===` would call
+ *  a legitimate replay of a normalisable id (e.g. a KELVIN-SIGN `K`) a mismatch. */
 function sameSourceIdentity(
   expected: CursorLaunchSource | undefined,
   stored: CursorLaunchSource | "withheld" | undefined,
@@ -215,7 +223,9 @@ function sameSourceIdentity(
   if (stored === "withheld") return false;
   if (expected === undefined) return stored === undefined;
   if (stored === undefined) return false;
-  return expected.host === stored.host && expected.kind === stored.kind && expected.id === stored.id;
+  // The server stores host/kind/id in NFC; compare the same form on both sides.
+  const nfc = (s: string) => s.normalize("NFC");
+  return nfc(expected.host) === nfc(stored.host) && nfc(expected.kind) === nfc(stored.kind) && nfc(expected.id) === nfc(stored.id);
 }
 
 /**

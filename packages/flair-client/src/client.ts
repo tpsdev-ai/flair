@@ -281,7 +281,7 @@ export class FlairClient {
     method: string,
     path: string,
     body?: unknown,
-    opts: { signal?: AbortSignal; maxResponseBytes?: number } = {},
+    opts: { signal?: AbortSignal; maxResponseBytes?: number; requireSigningKey?: boolean } = {},
   ): Promise<T> {
     if (opts.maxResponseBytes !== undefined && (!Number.isFinite(opts.maxResponseBytes) || opts.maxResponseBytes <= 0)) {
       throw new RangeError("flair-client: invalid maxResponseBytes; expected a finite positive number");
@@ -307,6 +307,13 @@ export class FlairClient {
     const key = await this.resolveKey();
     if (key) {
       headers["Authorization"] = signRequest(this.agentId, key, method, signedPath);
+    } else if (opts.requireSigningKey) {
+      // flair#1944 round 5 — a request that MUST be signed refuses to fall back
+      // to admin Basic when no key resolves. Resolved HERE, at send time (not at
+      // construction), so a key file that vanished after an earlier existence
+      // check fails CLOSED instead of silently changing the writer identity the
+      // server would stamp (the Basic username in place of the agent's).
+      throw new MissingSigningKeyError(this.agentId, describeKeyLookup(this.lastKeyLookup));
     } else if (this.basicAuth) {
       // flair#1951: never send admin Basic credentials over plain http to a
       // non-loopback host. Refuse BEFORE any request is made.
@@ -446,6 +453,12 @@ class MemoryApi {
     /** Optional caller-owned abort signal, forwarded to
      *  `FlairClient.request` so an in-flight write can be cancelled. */
     signal?: AbortSignal;
+    /** flair#1944 round 5 — require the agent's own Ed25519 signing key for this
+     *  write. The client resolves the key at SEND time and, when none is
+     *  available, refuses the request with a `MissingSigningKeyError` instead of
+     *  falling back to admin Basic credentials. A live receipt write sets this so
+     *  it fails closed even if the key file disappears after an earlier check. */
+    requireSigningKey?: boolean;
   } = {}): Promise<Memory> {
     const id = opts.id ?? `${this.client.agentId}-${crypto.randomUUID()}`;
     const record: Record<string, unknown> = {
@@ -487,6 +500,7 @@ class MemoryApi {
 
     const response = await this.client.request<Record<string, unknown>>("PUT", `/Memory/${encodeRecordId(id)}`, record, {
       signal: opts.signal,
+      requireSigningKey: opts.requireSigningKey,
     });
     // Merge the server response (deduplicated/matchedId/matchConfidence/
     // written, plus any echoed fields) over the locally-constructed record —
@@ -871,6 +885,35 @@ class TeamDirectoryApi {
 }
 
 // ─── Error ──────────────────────────────────────────────────────────────────
+
+/** A compact description of what a key lookup found, for a refusal message.
+ *  Names only key-file paths, never credentials. */
+function describeKeyLookup(state: KeyLookupState | undefined): string {
+  if (!state) return "no signing key was looked up for this request";
+  if (state.resolvedPath) return `the key resolved at ${state.resolvedPath} could not be loaded`;
+  if (state.candidates.length === 0) return "no candidate key path could be resolved for this home";
+  return `checked ${state.candidates.map((c) => `${c.path} (${c.exists ? "found" : "missing"})`).join(", ")}`;
+}
+
+/**
+ * flair#1944 round 5 — thrown when a request carried `requireSigningKey` and no
+ * Ed25519 key could be resolved. The request is refused BEFORE it is sent: a
+ * live receipt write must fail closed rather than fall back to admin Basic
+ * credentials, whose username the server would stamp in place of the agent's
+ * signing identity (so the written pointer could not be verified on replay).
+ */
+export class MissingSigningKeyError extends Error {
+  constructor(
+    public readonly agentId: string,
+    public readonly detail: string,
+  ) {
+    super(
+      `flair-client: refusing a request that requires the agent's Ed25519 signing key: no key is available for agent '${agentId}' (${detail}); ` +
+        "admin Basic credentials are not a signing identity",
+    );
+    this.name = "MissingSigningKeyError";
+  }
+}
 
 export class FlairError extends Error {
   constructor(

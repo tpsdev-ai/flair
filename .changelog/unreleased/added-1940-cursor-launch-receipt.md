@@ -9,12 +9,17 @@
   Cursor reported as already in use. The `url` is set only on create, and only
   as Cursor returned it. Neither is derived from the dispatch text; the write is
   private and omits `hostSourceScope`, so the pointer stays author-only. Only a
-  live run signed with the agent's own key writes the receipt. When the memory is
+  live run signed with the agent's own key writes the receipt, and that signing
+  requirement is enforced WHERE THE WRITE HAPPENS: the production receipt store
+  requires the key, and the client fails closed (no admin Basic fallback) when
+  none resolves — including a key file that disappears after the startup check.
+  When the memory is
   selected for bootstrap, bootstrap prose cites the pointer to the author as
   `[via cursor/launch <id8> (unverified)]`, and shows `[via withheld]` to another
   reader who may read the record — flair#2446. A receipt already present under
   that id is left unchanged only when it VERIFIES as this runner's own receipt
-  (same author, content and host-source identity), so a replay that reuses the
+  (same author, content and host-source identity — the id compared on its NFC
+  form, the form the server stores), so a replay that reuses the
   agent (Cursor 409) retries the receipt without rewriting the one already
   stored; a row that fails that check is not verified as this runner's receipt:
   it is reported as `receiptMismatched`, left untouched, and not acked (a

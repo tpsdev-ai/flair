@@ -275,6 +275,26 @@ describe("isStoredReceipt — a row is this runner's receipt only if it VERIFIES
     ).toBe(true);
   });
 
+  test("a source id the server stored NFC-normalised still matches the raw id (flair#1944 round 5)", () => {
+    // Cursor can return an id whose NFC form is what the server stores and what a
+    // read-back row carries — e.g. a KELVIN-SIGN `K` (U+212A) normalises to ASCII
+    // `K`. The runner builds the expected id from the raw value; comparing raw
+    // would call a legitimate replay a mismatch.
+    const rawId = "bc-\u212A1e2d3c";
+    const normalizedId = rawId.normalize("NFC");
+    expect(normalizedId, "the id actually changes under NFC").not.toBe(rawId);
+    const rawReceipt = buildLaunchReceipt("evt-1", { cursorAgentId: rawId }).receipt;
+    expect(rawReceipt.hostSource?.id, "the receipt carries the raw id").toBe(rawId);
+    expect(
+      isStoredReceipt(
+        { author: CREW, content: rawReceipt.content, hostSource: { host: "cursor", kind: "launch", id: normalizedId } },
+        CREW,
+        rawReceipt,
+      ),
+      "the stored (normalised) id verifies against the raw id on the same source",
+    ).toBe(true);
+  });
+
   test("a different author, content, source id, a withheld pointer, or no row does NOT match", () => {
     expect(isStoredReceipt(null, CREW, receipt)).toBe(false);
     expect(isStoredReceipt({ author: "agent-b", content: receipt.content, hostSource: receipt.hostSource }, CREW, receipt)).toBe(false);
@@ -291,7 +311,7 @@ describe("isStoredReceipt — a row is this runner's receipt only if it VERIFIES
   });
 });
 
-describe("runWakeCycle — a row at the receipt id that is NOT this runner's receipt (flair#1944 round 3)", () => {
+describe("runWakeCycle — a row at the receipt id not verified as this receipt (flair#1944 round 3)", () => {
   const id = launchReceiptId("evt-1");
 
   test("another agent's memory at the id: no ack, a named mismatch, row untouched", async () => {

@@ -17,7 +17,10 @@
  * not know (a real 401) is `receiptFailed` and does NOT advance the watermark;
  * a row already at the receipt id that is NOT this runner's own receipt (another
  * agent's memory, or the runner's own row with different content) is a named
- * `receiptMismatched`, left untouched, and NOT acked; a dry-run records nothing.
+ * `receiptMismatched`, left untouched, and NOT acked; a foreign PRIVATE row at
+ * the id reads as absent, so the runner attempts the write and the SERVER refuses
+ * it — a named `receiptFailed`, row untouched, not acked; a source id the server
+ * stores NFC-normalised is still verified on replay; a dry-run records nothing.
  *
  * MUTATION (flair#1944 round 3): make the existing-receipt path existence-only
  * (`read` returns a bare boolean, or ignores the row's identity). The two
@@ -382,6 +385,78 @@ describe("flair#1944 — the Cursor wake runner records a sourced launch receipt
     expect(acks).toEqual([]);
     const got = await client.memory.get(id);
     expect(got?.content, "the row is left untouched").toBe("a stale receipt naming a different launch");
+  }, 120_000);
+
+  test("a foreign PRIVATE row at the receipt id reads as absent: the runner's write is refused, the row untouched, the event not acked (flair#1944 round 5)", async () => {
+    const runner = mkAgent(`agent-q-${randomUUID()}`);
+    const other = mkAgent(`agent-r-${randomUUID()}`);
+    const runnerClient = await clientFor(runner);
+    const otherClient = await clientFor(other);
+    const event = dispatchEvent(runner.id);
+    const id = launchReceiptId(String(event.id));
+    // Another agent's PRIVATE row occupies the receipt id. A PRIVATE row is not
+    // readable by the runner, so its `memory.get` gets a 404 and reads as absent —
+    // the runner does not SEE a row to verify, and attempts the write. The server
+    // refuses that write (only the row's owner may modify it), so the runner
+    // reports a retryable `receiptFailed` and does NOT ack.
+    const written = await otherClient.memory.write("another agent's private note", { id });
+    expect((written as { visibility?: string }).visibility, "the row a plain write stamps is private").toBe("private");
+    const { port, acks } = catchupWith([{ events: [event], hasMore: false }]);
+
+    const result = await runWakeCycle({
+      agentId: runner.id,
+      catchup: port,
+      cursor: cursorReturning({ outcome: "created", cursorAgentId: "bc-22223333-4444-8555-9666-777788889999" }),
+      receipts: createMemoryReceiptStore(runnerClient),
+    });
+
+    expect(result.items[0]?.receipt, "the server refused the write; the receipt is not recorded").toBe("failed");
+    expect(result.receiptFailed, "the failure names the receipt id").toContain(id);
+    expect(result.receiptMismatched, "the runner never saw the row, so this is not a mismatch").toBeNull();
+    expect(result.receiptRefused, "a refusal of the write is not a non-retryable receipt refusal").toEqual([]);
+    expect(result.acked, "the event must not be acked").toBeNull();
+    expect(acks).toEqual([]);
+    const got = await otherClient.memory.get(id);
+    expect(got?.content, "the foreign private row is left untouched").toBe("another agent's private note");
+    expect(got?.agentId).toBe(other.id);
+  }, 120_000);
+
+  test("a source id the server stores NFC-normalised verifies on replay and acks (flair#1944 round 5)", async () => {
+    const agent = mkAgent(`agent-p-${randomUUID()}`);
+    const client = await clientFor(agent);
+    const event = dispatchEvent(agent.id);
+    const store = createMemoryReceiptStore(client);
+    // The Cursor id carries a KELVIN-SIGN `K` (U+212A); the server stores its NFC
+    // form (ASCII `K`). The replay reuses the raw id, so the source comparison
+    // must normalise both sides or it would call this legitimate replay a mismatch.
+    const rawId = "bc-\u212A0f1e2d3c-4b5a-8978-8675-4433221100aa";
+    const normalizedId = rawId.normalize("NFC");
+    expect(normalizedId, "the id actually changes under NFC").not.toBe(rawId);
+
+    const first = catchupWith([{ events: [event], hasMore: false }]);
+    const created = await runWakeCycle({
+      agentId: agent.id,
+      catchup: first.port,
+      cursor: cursorReturning({ outcome: "created", cursorAgentId: rawId }),
+      receipts: store,
+    });
+    expect(created.receiptFailed).toBeNull();
+    expect(created.acked).toBe("p1");
+    const id = launchReceiptId(String(event.id));
+    const got = await client.memory.get(id);
+    expect(got?.hostSource, "the server stored the normalised id").toEqual({ v: 1, host: "cursor", kind: "launch", id: normalizedId });
+
+    const second = catchupWith([{ events: [event], hasMore: false }]);
+    const replay = await runWakeCycle({
+      agentId: agent.id,
+      catchup: second.port,
+      cursor: cursorReturning({ outcome: "already", cursorAgentId: rawId }),
+      receipts: store,
+    });
+    expect(replay.items[0]?.receipt, "the raw id verifies against the normalised stored id").toBe("unchanged");
+    expect(replay.receiptMismatched).toBeNull();
+    expect(second.acks).toEqual(["p1"]);
+    expect((await client.memory.list()).length, "the replay wrote no second receipt").toBe(1);
   }, 120_000);
 
   test("a dry-run records no receipt and acks nothing", async () => {
