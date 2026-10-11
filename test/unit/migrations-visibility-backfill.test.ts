@@ -2,9 +2,9 @@
  * migrations-visibility-backfill.test.ts —
  * resources/migrations/visibility-backfill.ts. Exercises detect/
  * countPending/run against an in-memory fake Memory table (no real Harper
- * needed — the write path here is a direct table.update(), the incremental
- * write, so there is no separate mechanism left to fake). Proves: the
- * durability -> visibility derivation table
+ * needed — the write path here is a direct table.put(), unlike
+ * embedding-stamp's HTTP loopback, so there is no separate mechanism left
+ * to fake). Proves: the durability -> visibility derivation table
  * (including every absent/garbage durability -> "private"), that an
  * existing visibility value is NEVER overwritten (including a garbage
  * third value), idempotency, and the exact query-condition shape.
@@ -72,13 +72,6 @@ function makeFakeMemoryTable(seed: Row[]) {
       async put(content: Row) {
         store.set(content.id, { ...content });
         return content;
-      },
-      async update(id: string, patch: Record<string, unknown>) {
-        const current = store.get(id);
-        if (!current) return null;
-        const merged = { ...current, ...patch } as Row;
-        store.set(id, merged);
-        return merged;
       },
       search(query: any): AsyncIterable<Row> {
         const conditions = Array.isArray(query?.conditions) ? query.conditions : [];
@@ -214,7 +207,7 @@ describe("visibility-backfill migration — run() derives and writes visibility"
     expect(await m.countPending()).toBe(0);
   });
 
-  it("preserves every OTHER field on the row — an incremental update of only `visibility`", async () => {
+  it("preserves every OTHER field on the row — full read-modify-write, never a partial put()", async () => {
     const { table, store } = makeFakeMemoryTable([
       {
         id: "m1",
@@ -422,25 +415,3 @@ describe("visibility-backfill migration — simulated write-back retry (flair#23
     expect(store.get("m1")?.agentId).toBe("replacement-owner");
     expect(store.get("m1")?.visibility).toBeUndefined();
   });
-
-describe("visibility-backfill migration — the decision's precondition is confirmed on the committed row (flair#2470)", () => {
-  it("a competing writer that sets a visible value in the window makes run() skip the row by name, never overwrite it", async () => {
-    const { table, store } = makeFakeMemoryTable([
-      { id: "m1", content: "a", durability: "standard" },
-    ]);
-    // The other writer commits a visibility after this migration's read but
-    // before its committed re-read: the migration's decision ("visibility is
-    // still absent") no longer holds, so it must skip by name.
-    const writeBack = makeFakeWriteBack({
-      conflict: (attempt) => {
-        if (attempt === 1) store.set("m1", { ...store.get("m1")!, visibility: "shared" });
-      },
-    });
-    const m = makeMigration(() => table, writeBack);
-    const result = await m.run(50);
-
-    expect(result.processed).toBe(0);
-    expect(result.touchedIds).toEqual([]);
-    expect(store.get("m1")!.visibility).toBe("shared"); // the other writer's explicit choice stands
-  });
-});

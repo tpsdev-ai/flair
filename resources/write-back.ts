@@ -25,51 +25,12 @@ export type WriteBackPlan =
   | { update: Record<string, unknown> }
   | { skip: true };
 
-/** The precondition a writer's decision used, re-checked against the COMMITTED
- *  row after the write is staged and before the transaction commits. `holds`
- *  returns false when the committed row no longer satisfies it (e.g. the
- *  visibility backfill's target has gained a `visibility`; the auto-promotion
- *  stamp's reviewed `contentHash` has changed). The helper then throws
- *  {@link WriteBackPreconditionError} — a NAMED abort — so the caller skips the
- *  row by name instead of writing a field its decision did not cover.
- *
- *  This narrows, but does not close, the owner-first interleaving: an owner
- *  write whose transaction opened FIRST and commits AFTER this writer's own
- *  commit is ordered by Harper before this writer's write and is not seen by
- *  this confirmation — this writer's field still wins for the fields it names.
- *  That interleaving is tracked by flair#2478 (per-id serialization), not here. */
-export interface WriteBackPrecondition {
-  /** Names the abort (and the decision it guards) in the thrown error. */
-  label: string;
-  /** Does the committed row still satisfy the precondition the plan decided on? */
-  holds: (committed: any) => boolean;
-}
-
-/** The NAMED abort for a write whose decision's precondition no longer holds on
- *  the committed row (see {@link WriteBackPrecondition}): nothing is written, and
- *  the caller skips the row by `label` rather than treating it as a conflict to
- *  retry. Distinct from {@link WriteBackConflictError}, which names a row that
- *  kept changing across every attempt. */
-export class WriteBackPreconditionError extends Error {
-  readonly id: string;
-  readonly label: string;
-  constructor(label: string, id: string) {
-    super(`${label}: the committed row no longer satisfies the decision's precondition; nothing written`);
-    this.name = "WriteBackPreconditionError";
-    this.label = label;
-    this.id = id;
-  }
-}
-
 export interface WriteBackOptions {
   /** The request context, if any. Its transaction is detached for the owned
    *  one (withOwnedTransaction): one item's write-back commits on its own. */
   ctx?: any;
   /** Name for the refusal thrown when the row keeps changing. */
   label: string;
-  /** The precondition the decision used, re-checked on the committed row; a
-   *  failure aborts by name with {@link WriteBackPreconditionError}. */
-  precondition?: WriteBackPrecondition;
   /** Bounded attempts before the named refusal. Default {@link WRITE_BACK_ATTEMPTS}. */
   attempts?: number;
   expectedRow?: any;
@@ -177,13 +138,8 @@ export async function confirmCommittedRow(
   table: Pick<WriteBackTable, "get">,
   id: string,
   same: (committed: any) => boolean,
-  precondition?: WriteBackPrecondition,
 ): Promise<void> {
   const committed = await table.get(id, {});
-  // The decision's own precondition is checked FIRST: a change to the field the
-  // decision named aborts by name (WriteBackPreconditionError), while a change
-  // to any other field is the ordinary committed-row conflict below.
-  if (precondition && !precondition.holds(committed)) throw new WriteBackPreconditionError(precondition.label, id);
   if (!same(committed)) throw new CommittedRowChanged();
 }
 
@@ -242,7 +198,7 @@ export async function writeBackCommittedRow(
         }
         if ("update" in decision) await applyFieldUpdate(table, id, decision.update, c);
         else await table.put(decision.write, c);
-        await confirmCommittedRow(table, id, (committed) => isDeepStrictEqual(committed, row), opts.precondition);
+        await confirmCommittedRow(table, id, (committed) => isDeepStrictEqual(committed, row));
         return decision;
       });
     } catch (err) {

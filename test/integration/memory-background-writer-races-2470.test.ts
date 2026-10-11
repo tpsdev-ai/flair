@@ -3,37 +3,35 @@
  * only some fields of a Memory row must not supersede an earlier-started owner
  * PUT that still answers 200 (flair#2470), real Harper.
  *
- * Harper orders a transaction by its FIRST READ. The boot `visibility-backfill`
- * migration used to write back the WHOLE row it read (`{ ...existing, visibility }`
- * through the shared write-back helper), so an owner PUT whose transaction opened
- * FIRST — and therefore committed as an OLDER full update — was dropped by
- * Harper's out-of-order reconciliation while the PUT still answered 200
- * (measured during flair#2469 round 5, with audit logging on). The migration now
- * writes an INCREMENTAL update of `visibility` only, which Harper folds around
- * the older PUT instead of superseding it.
+ * Harper orders a transaction by its FIRST READ. The converted writers below
+ * (the usage-count bump and the maintenance archive) used to write back the
+ * WHOLE row they read; an owner PUT whose transaction opened FIRST — and
+ * therefore committed as an OLDER full update — was dropped by Harper's
+ * out-of-order reconciliation while the PUT still answered 200 (measured during
+ * flair#2469 round 5, with audit logging on). Each now writes an INCREMENTAL
+ * update of only the fields it owns, which Harper folds around the older PUT
+ * instead of superseding it.
  *
  * DETERMINISTIC ORDERING via the existing pause-point helpers
  * (resources/txn-pause-point.ts, enabled by FLAIR_ENABLE_TEST_FAULT_INJECTION and
  * FLAIR_TEST_PAUSE_DIR, set in this process's environment while it starts its
- * Harper, then restored):
- *   - `visibility-backfill-pre` holds the migration BEFORE its owned transaction
- *     opens (before its read);
- *   - `memory-put` holds the owner PUT inside its own transaction, after its first
- *     read and before its write, so its transaction opens FIRST.
- * The migration's pre-pause is released only once the PUT is held, so the
- * migration's transaction opens AFTER the PUT's read and commits BEFORE the PUT's
- * write: the PUT is the OLDER full update, the migration's write the NEWER one.
+ * Harper, then restored): each writer pauses at its own `*-pre` point BEFORE its
+ * owned transaction opens (before its read), and `memory-put` holds the owner PUT
+ * inside its own transaction, after its first read and before its write, so the
+ * PUT's transaction opens FIRST. The writer's pre-pause is released only once the
+ * PUT is held, so the writer's transaction opens AFTER the PUT's read and commits
+ * BEFORE the PUT's write: the PUT is the OLDER full update, the writer's write the
+ * NEWER one.
  *
- * Boot-keyed migration means exactly that: one cycle per boot. A row seeded into
- * an already-booted instance is not seen by that boot's cycle, so the candidate
- * row is seeded in a first boot, Harper is stopped and restarted against the same
- * data dir, and the second boot's cycle — armed to pause — is the one under test.
+ * The rows are seeded in a first boot; Harper is then stopped and restarted
+ * against the same data dir with the pause points armed, and the second boot's
+ * request-driven writers are the ones under test.
  *
  * Throwaway HOME + data dir, ephemeral ports.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import nacl from "tweetnacl";
@@ -41,7 +39,6 @@ import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-
 import { getModelId } from "../../resources/embeddings-provider.ts";
 import { stripEnginePrefix } from "../../resources/embedding-space-guard.ts";
 
-const PRE_POINT = "visibility-backfill-pre";
 const PUT_POINT = "memory-put";
 // A bare (engine-prefix-stripped) current stamp: the boot embedding-stamp
 // migration treats the seeded row as current-space and never re-embeds it, so
@@ -115,16 +112,6 @@ async function waitForCycleDone(timeoutMs: number): Promise<boolean> {
   }
   return false;
 }
-/** Wait until the migration's incremental write to `id` has committed. */
-async function waitForVisibility(id: string, timeoutMs: number): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const row = await readRow(id);
-    if (row?.visibility === "shared") return true;
-    await new Promise((r) => setTimeout(r, 100));
-  }
-  return false;
-}
 /** Wait until the usage-count bump on `id` has committed. */
 async function waitForUsageCount(id: string, expected: number, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
@@ -166,7 +153,6 @@ async function waitForArchived(id: string, timeoutMs: number): Promise<boolean> 
   return false;
 }
 
-const CANDIDATE_ID = "bwr-candidate";
 const USAGE_ID = "bwr-usage";
 const ARCHIVE_ID = "bwr-archive";
 
@@ -176,7 +162,7 @@ beforeAll(async () => {
   pauseDir = mkdtempSync(join(tmpdir(), "flair-2470-pause-"));
 
   // Boot 1: no fault injection. Wait for the boot migration cycle to finish
-  // BEFORE seeding, so that cycle can never see (and process) the candidate.
+  // BEFORE seeding, so that cycle can never see (and process) the seeded rows.
   const first = await startHarper({ homeDir: home });
   authHeader = "Basic " + Buffer.from(`${first.admin.username}:${first.admin.password}`).toString("base64");
   harper = first;
@@ -186,16 +172,6 @@ beforeAll(async () => {
     records: [{
       id: owner.id, name: owner.id, role: "agent",
       publicKey: Buffer.from(owner.publicKey).toString("base64"), createdAt: new Date().toISOString(),
-    }],
-  });
-  await opsCall({
-    operation: "insert", database: "flair", table: "Memory",
-    records: [{
-      id: CANDIDATE_ID, agentId: owner.id, content: ORIGINAL, durability: "permanent",
-      // No `visibility` — the migration's candidate. A current bare stamp so the
-      // boot embedding-stamp migration never touches it.
-      embedding: [0.1, 0.2, 0.3], embeddingModel: SEED_MODEL_ID, instanceToken: randomUUID(),
-      createdAt: new Date().toISOString(),
     }],
   });
   await opsCall({
@@ -219,16 +195,14 @@ beforeAll(async () => {
   });
   await stopHarper(first, { keepInstallDir: true });
 
-  // Boot 2: fault injection on; the migration's pre-transaction pause is armed
-  // before the spawn, so its cycle pauses before opening its transaction.
+  // Boot 2: fault injection on, so the request-driven writers' pause points are
+  // live for the cases below to arm at run time.
   const saved = {
     FLAIR_ENABLE_TEST_FAULT_INJECTION: process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION,
     FLAIR_TEST_PAUSE_DIR: process.env.FLAIR_TEST_PAUSE_DIR,
   };
   process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION = "1";
   process.env.FLAIR_TEST_PAUSE_DIR = pauseDir;
-  for (const marker of ["claimed", "paused", "go", "released"]) rmSync(join(pauseDir, `${marker}.${PRE_POINT}`), { force: true });
-  writeFileSync(join(pauseDir, `arm.${PRE_POINT}`), "");
   try {
     harper = await startHarper({ installDir: first.installDir, homeDir: home });
   } finally {
@@ -258,38 +232,6 @@ afterAll(async () => {
 });
 
 describe("flair#2470 — a background field-only writer keeps an earlier-started owner PUT (real Harper)", () => {
-  it("the visibility-backfill migration's newer incremental write folds around the older owner PUT; the edit survives and visibility lands", async () => {
-    // Hold the migration before its own transaction opens.
-    const migrationPaused = await waitFor(join(pauseDir, `paused.${PRE_POINT}`), 45_000);
-    expect(migrationPaused, "the migration never reached its pre-transaction pause").toBe(true);
-
-    // Start the owner PUT; its transaction opens FIRST and is held before its write.
-    for (const marker of ["claimed", "paused", "go", "released"]) rmSync(join(pauseDir, `${marker}.${PUT_POINT}`), { force: true });
-    writeFileSync(join(pauseDir, `arm.${PUT_POINT}`), "");
-    const pendingPut = editAs(owner, CANDIDATE_ID, EDITED);
-    const putPaused = await waitFor(join(pauseDir, `paused.${PUT_POINT}`), 30_000);
-    expect(putPaused, "the owner PUT never reached its in-transaction pause").toBe(true);
-
-    // Let the migration run to completion (its newer incremental write commits
-    // first), THEN release the PUT — so the PUT's older full update commits last
-    // and Harper's out-of-order reconciliation is the case under test.
-    writeFileSync(join(pauseDir, `go.${PRE_POINT}`), "");
-    await waitFor(join(pauseDir, `released.${PRE_POINT}`), 30_000);
-    const stamped = await waitForVisibility(CANDIDATE_ID, 30_000);
-    expect(stamped, "the migration did not commit its visibility write").toBe(true);
-    writeFileSync(join(pauseDir, `go.${PUT_POINT}`), "");
-    const put = await pendingPut;
-    const released = readFileSync(join(pauseDir, `released.${PUT_POINT}`), "utf8");
-
-    expect(released, "the PUT pause ended by timeout, not by this test").toBe("go");
-    expect(put.status, `the owner PUT did not answer 200: ${await put.clone().text()}`).toBe(200);
-
-    const row = await readRow(CANDIDATE_ID);
-    expect(row, "the row vanished").not.toBeNull();
-    expect(row.visibility, "the migration's own field did not land").toBe("shared");
-    expect(row.content, "the background write reverted the owner's committed edit").toBe(EDITED);
-  }, 120_000);
-
   it("the usage-count bump's newer incremental write folds around the older owner PUT; the edit survives and the count lands", async () => {
     // Hold the usage-count bump before its own transaction opens.
     for (const marker of ["claimed", "paused", "go", "released"]) rmSync(join(pauseDir, `${marker}.usage-count-pre`), { force: true });

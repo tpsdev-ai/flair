@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
-import { WriteBackPreconditionError, type WriteBackFn, type WriteBackPlan, type WriteBackOptions } from "../../resources/write-back.js";
+import type { WriteBackFn, WriteBackPlan, WriteBackOptions } from "../../resources/write-back.js";
 
 export interface FakeWriteBackOptions {
   /** Bounded attempts before the named refusal. Default 3. */
@@ -51,12 +51,6 @@ export function makeFakeWriteBack(opts: FakeWriteBackOptions = {}): WriteBackFn 
       if (!sameTarget(row)) throw new Error(`write-back: target ${id} changed`);
       if (opts.conflict) await opts.conflict(attempt);
       const committed = await table.get(id);
-      // The decision's precondition is checked on the committed row FIRST, the
-      // way the real helper does: a failed precondition aborts by name rather
-      // than retrying as an ordinary committed-row conflict.
-      if (options.precondition && !options.precondition.holds(committed)) {
-        throw new WriteBackPreconditionError(options.precondition.label, id);
-      }
       if (!isDeepStrictEqual(committed, row)) {
         if (attempt >= attempts) throw new Error(`write-back: row ${id} changed during each of ${attempts} attempts; write not applied`);
         continue;

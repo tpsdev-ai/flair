@@ -86,7 +86,7 @@ add("promotion-stamp", ["writer:writeBackCommittedRow#1"], "ECHO",
 add("promotion-stamp", ["writer:table.put#1"], "ECHO",
   "Promotion status stamp in the manual promotion's own write transaction: get-then-put re-writes the row it staged.");
 add("migrations/visibility-backfill", ["writer:writeBackCommittedRow#1"], "ECHO",
-  "Boot migration incremental update of existing rows' `visibility` through the shared write-back helper (flair#2354/#2470); the boot scan also runs.");
+  "Boot migration re-PUT of existing rows through the shared write-back helper (flair#2354); the boot scan also runs.");
 add("migrations/synthetic-test-migration", ["writer:writeBackCommittedRow#1"], "ECHO",
   "Test-only migration incremental update of existing rows (flair#2354/#2470) through the shared write-back helper.");
 add("skill-version-write", ["writer:(databases as any).flair.Memory.put#1"], "ECHO",
