@@ -12,8 +12,8 @@
  * through the native bridge and does not call `_loadRecord`) and serve normal
  * traffic before the test arms it.
  *
- * Production ships NO failure switch: nothing under resources/ is changed; only
- * this test composes a copy with the extra built module.
+ * Production ships NO failure switch: the failure injection exists only in the
+ * component copy this helper composes with the extra built module.
  */
 import { cpSync, existsSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -25,8 +25,9 @@ export const LOAD_FAILURE_MARKER = "load-fail-2468";
 
 /**
  * Sentinel file, created under the Harper instance ROOTPATH, that arms the
- * injected failure. Present → a marker-id load throws; absent → nothing is
- * touched. Lets the test seed data first, then flip the switch.
+ * injected failure. The wrapper is installed either way; present → a marker-id
+ * load throws; absent → every load is delegated to the original method. Lets
+ * the test seed data first, then flip the switch.
  */
 export const ARM_FILE = "owner-guard-load-fail-armed";
 

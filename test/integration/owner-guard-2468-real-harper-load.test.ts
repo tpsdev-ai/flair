@@ -1,7 +1,7 @@
 /**
  * owner-guard-2468-real-harper-load.test.ts — flair#2468.
  *
- * CI-only here: starts real Harper and binds loopback listeners.
+ * Needs loopback listeners: starts real Harper (runs in CI's integration shards).
  * Addressed single-record PUT/PATCH loads the row at `Table.getResource` →
  * `resource._loadRecord` before the resource method; a no-argument `super.get()`
  * returns the cached row. An injected initial load failure returns Harper's
