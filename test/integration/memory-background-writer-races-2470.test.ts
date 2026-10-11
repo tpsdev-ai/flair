@@ -101,14 +101,24 @@ async function waitFor(path: string, timeoutMs: number): Promise<boolean> {
   }
   return false;
 }
+/**
+ * A boot migration cycle that finished cleanly: phase "done", no cycle error,
+ * a migrations list, and no migration failed, halted or still in progress.
+ * "idle" means the boot trigger never loaded (migration-boot.ts), and the
+ * runner can mark a cycle "done" after a migration failed or halted
+ * (runner.ts), so neither counts.
+ */
+export function cycleCompletedCleanly(migrations: any): boolean {
+  if (migrations?.cyclePhase !== "done" || migrations?.lastCycleError) return false;
+  if (!Array.isArray(migrations?.migrations)) return false;
+  const unfinished = new Set(["failed", "halted", "checking", "preflight", "snapshotting", "running", "completing"]);
+  return migrations.migrations.every((m: any) => !unfinished.has(m?.state));
+}
 async function waitForCycleDone(timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const detail = await healthDetail();
-    const phase = detail?.migrations?.cyclePhase;
-    // "idle" means the boot trigger never loaded (migration-boot.ts), so it is
-    // not completion; a cycle that ended with an error does not count either.
-    if (phase === "done") return !detail?.migrations?.lastCycleError;
+    if (detail?.migrations?.cyclePhase === "done") return cycleCompletedCleanly(detail.migrations);
     await new Promise((r) => setTimeout(r, 250));
   }
   return false;
@@ -241,6 +251,29 @@ afterAll(async () => {
   if (harper) await stopHarper(harper).catch(() => {});
   if (home) rmSync(home, { recursive: true, force: true });
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
+});
+
+
+describe("cycleCompletedCleanly (the first-boot guard)", () => {
+  const ok = { id: "m", rowsDone: 0, rowsRemaining: 0, state: "completed" };
+  it("accepts a clean completed cycle", () => {
+    expect(cycleCompletedCleanly({ cyclePhase: "done", migrations: [ok] })).toBe(true);
+  });
+  it("rejects an idle cycle (the boot trigger never loaded)", () => {
+    expect(cycleCompletedCleanly({ cyclePhase: "idle", migrations: [] })).toBe(false);
+  });
+  it("rejects a cycle that ended with an error", () => {
+    expect(cycleCompletedCleanly({ cyclePhase: "done", lastCycleError: "x", migrations: [ok] })).toBe(false);
+  });
+  it("rejects a done cycle with a failed migration", () => {
+    expect(cycleCompletedCleanly({ cyclePhase: "done", migrations: [ok, { ...ok, id: "f", state: "failed" }] })).toBe(false);
+  });
+  it("rejects a done cycle with a halted migration", () => {
+    expect(cycleCompletedCleanly({ cyclePhase: "done", migrations: [{ ...ok, state: "halted" }] })).toBe(false);
+  });
+  it("rejects a snapshot without a migrations list", () => {
+    expect(cycleCompletedCleanly({ cyclePhase: "done" })).toBe(false);
+  });
 });
 
 describe("flair#2470 — usage-count and archive patches preserve an earlier-started owner content edit (real Harper)", () => {
