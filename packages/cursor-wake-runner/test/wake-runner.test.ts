@@ -264,6 +264,7 @@ function recordingCursor(handler: (input: LaunchInput) => Promise<LaunchResult> 
 function acceptingReceiptStore(agentId = CREW): ReceiptStore {
   const written = new Map<string, { author: string; content: string; hostSource?: { host: string; kind: string; id: string } }>();
   return {
+    agentId,
     read: async (id) => written.get(id) ?? null,
     write: async (receipt) => {
       written.set(receipt.id, {

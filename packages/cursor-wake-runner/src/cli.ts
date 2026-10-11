@@ -89,7 +89,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       agentId: config.agentId,
       catchup,
       cursor,
-      receipts: createMemoryReceiptStore(flair),
+      receipts: createMemoryReceiptStore(flair, config.agentId),
       log: (line) => console.error(line),
       dryRun: config.dryRun,
       pageLimit: config.pageLimit,

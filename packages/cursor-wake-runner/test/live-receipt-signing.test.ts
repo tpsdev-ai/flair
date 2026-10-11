@@ -16,6 +16,13 @@
  * receipt-store.ts's write. The Basic case then sends Basic and the unsigned case
  * sends an unsigned write; both land as "written" and ack, so the first test
  * fails. Run and restored.
+ *
+ * flair#1944 round 6 binds the store's signing identity to the runner's
+ * `deps.agentId`: `createMemoryReceiptStore(client, agentId)` refuses, by name, a
+ * client whose signing identity differs, and `runWakeCycle` refuses, by name, a
+ * store that signs as another agent. MUTATION (round 6): drop the
+ * `deps.receipts.agentId !== deps.agentId` guard in run.ts — the mismatch case
+ * then reads, writes and acks, so its test fails. Run and restored.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import nacl from "tweetnacl";
@@ -34,6 +41,7 @@ import {
   type CatchupPort,
   type CursorAgentClient,
   type LaunchResult,
+  type ReceiptStore,
 } from "../src/index.ts";
 
 function mkAgent(id: string): { id: string; publicKey: string; secretKey: Uint8Array } {
@@ -124,7 +132,7 @@ describe("flair#1944 round 5 — a live receipt write is refused unless it signs
       agentId,
       catchup: port,
       cursor: cursorReturning({ outcome: "created", cursorAgentId: `bc-${randomUUID()}` }),
-      receipts: createMemoryReceiptStore(client),
+      receipts: createMemoryReceiptStore(client, agentId),
     });
 
     expect(result.items[0].receipt, "an unsigned live write must not be recorded").toBe("failed");
@@ -154,7 +162,7 @@ describe("flair#1944 round 5 — a live receipt write is refused unless it signs
       agentId: agent.id,
       catchup: port,
       cursor: cursorReturning({ outcome: "created", cursorAgentId: `bc-${randomUUID()}` }),
-      receipts: createMemoryReceiptStore(client),
+      receipts: createMemoryReceiptStore(client, agent.id),
     });
 
     expect(result.items[0].receipt, "a vanished key must fail closed, not fall back").toBe("failed");
@@ -164,5 +172,47 @@ describe("flair#1944 round 5 — a live receipt write is refused unless it signs
     expect(requests, "the write was refused before it was sent").toEqual([
       `GET /Memory/${launchReceiptId("evt-1")}`,
     ]);
+  });
+});
+
+describe("flair#1944 round 6 — the store signs as EXACTLY the runner's agent", () => {
+  test("createMemoryReceiptStore refuses, by name, a client whose signing identity differs", () => {
+    const runner = `agent-runner-${randomUUID()}`;
+    const signer = `agent-signer-${randomUUID()}`;
+    const client = new FlairClient({ agentId: signer, url: base, keyPath: join(keyDir, `absent-${randomUUID()}.key`) });
+    expect(() => createMemoryReceiptStore(client, runner)).toThrow(
+      new RegExp(`signs as '${signer}' for runner '${runner}'`),
+    );
+    // The matched pair is accepted, and the store carries the identity it signs as.
+    const store = createMemoryReceiptStore(client, signer);
+    expect(store.agentId).toBe(signer);
+  });
+
+  test("runWakeCycle refuses a store that signs as another agent: nothing read, written or acked", async () => {
+    requests = [];
+    const runner = `agent-runner-${randomUUID()}`;
+    const signer = `agent-signer-${randomUUID()}`;
+    let read = false;
+    let wrote = false;
+    const store: ReceiptStore = {
+      agentId: signer,
+      read: async () => {
+        read = true;
+        return null;
+      },
+      write: async () => {
+        wrote = true;
+      },
+    };
+    const { port, acks } = catchupWith([{ events: [dispatchEvent(runner)], hasMore: false }]);
+    const cursor = cursorReturning({ outcome: "created", cursorAgentId: `bc-${randomUUID()}` });
+
+    await expect(runWakeCycle({ agentId: runner, catchup: port, cursor, receipts: store })).rejects.toThrow(
+      new RegExp(`signs as '${signer}' but the runner is '${runner}'`),
+    );
+    expect(read, "the store is refused before the idempotency read").toBe(false);
+    expect(wrote, "nothing is written").toBe(false);
+    expect(acks, "nothing is acked").toEqual([]);
+    expect(requests, "nothing reached the stub").toEqual([]);
   });
 });

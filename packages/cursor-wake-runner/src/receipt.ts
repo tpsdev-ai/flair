@@ -16,14 +16,19 @@
  * credentials are accepted only for the read-only modes (`--dry-run`).
  *
  * Scope: the write is PRIVATE and omits `hostSourceScope`, so the server's read
- * projection keeps the pointer AUTHOR-ONLY — a non-author who can read this
- * memory sees `hostSource: "withheld"`. When the memory is selected for
- * bootstrap, bootstrap PROSE cites a pointer the reader may see (flair#2446):
- * this memory's author sees the short `[via cursor/launch <id8> (unverified)]`
- * citation (host/kind and the first 8 id characters, display-only — the full url
- * never appears there), and a reader who may read the memory but not the pointer
- * sees `[via withheld]`; an admin bootstrap takes no pointer join. A `hostSource`
- * is the writer's claim, not verified host authorship.
+ * projection keeps the pointer AUTHOR-ONLY. An ordinary non-author cannot read
+ * this private row at all — it answers 404 to them — so they never see the
+ * pointer; an admin CAN read the row, but an admin/operator bootstrap takes no
+ * pointer join for it. `withheld` applies only to a non-author who can read the
+ * row after its visibility changes (for instance it is later shared): they read
+ * the record but not the pointer, and see `hostSource: "withheld"`. When the
+ * memory is selected for bootstrap, bootstrap PROSE cites a pointer the reader
+ * may see (flair#2446): this memory's author sees the short
+ * `[via cursor/launch <id8> (unverified)]` citation (host/kind and the first 8 id
+ * characters, display-only — the full url never appears there), and a reader who
+ * may read the memory but not the pointer sees `[via withheld]`; an admin
+ * bootstrap takes no pointer join. A `hostSource` is the writer's claim, not
+ * verified host authorship.
  *
  * The id is the Cursor agent id: on create, the id Cursor returned (the
  * requested id when the response carries none); on a 409 replay, the requested
@@ -95,6 +100,13 @@ export interface StoredReceipt {
  * Ed25519 key resolves.
  */
 export interface ReceiptStore {
+  /**
+   * The agent this store signs receipts AS — its signing identity. `runWakeCycle`
+   * binds it to the runner's `deps.agentId` and refuses, by name, a store that
+   * signs as a different agent, so a receipt is always signed as EXACTLY the
+   * runner's own agent rather than by an independently supplied client.
+   */
+  readonly agentId: string;
   read: (id: string) => Promise<StoredReceipt | null>;
   write: (receipt: LaunchReceipt) => Promise<void>;
 }
@@ -166,7 +178,9 @@ export function cursorLaunchHostSource(
  * Build the receipt for a handed-off dispatch: the stable id, the
  * deterministic content (dispatch id + Cursor agent id only — never dispatch
  * text or the prompt), and the host source, omitting a url the grammar would
- * refuse.
+ * refuse. The caller gates the url on a `created` outcome (flair#1944 round 6):
+ * an `already` (409) replay contributes no url, so it cannot overwrite the
+ * create's stored url.
  */
 export function buildLaunchReceipt(
   dispatchId: string,

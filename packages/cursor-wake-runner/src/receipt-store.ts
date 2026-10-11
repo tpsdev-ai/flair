@@ -15,18 +15,36 @@
  * flair#1944 round 5: a live receipt `write` REQUIRES the agent's own Ed25519
  * signing key. The production store passes `requireSigningKey` so the client
  * fails closed at SEND time rather than falling back to admin Basic credentials
- * (whose username the server would stamp in place of the agent's identity) —
- * including when the key file disappears after an earlier existence check. The
+ * (whose username the server would stamp in place of the agent's identity). The
  * refusal is named and the caller keeps the watermark back, so the next cycle
- * retries it.
+ * retries it. Removing the key file cannot cause a Basic fallback: a key the
+ * client has already loaded is CACHED and still signs (the file is not re-read),
+ * and when no key resolves at send time the client refuses rather than sending
+ * Basic.
+ *
+ * flair#1944 round 6: the store signs as EXACTLY the runner's agent. It takes
+ * the `agentId` it must sign as and refuses, by name, a client whose signing
+ * identity differs, so the runner's `deps.agentId` and the store's signing
+ * identity are bound together and cannot drift apart.
  */
 
 import { MissingSigningKeyError } from "@tpsdev-ai/flair-client";
 import type { FlairClient } from "@tpsdev-ai/flair-client";
 import type { CursorLaunchSource, ReceiptStore } from "./receipt.js";
 
-export function createMemoryReceiptStore(client: FlairClient): ReceiptStore {
+export function createMemoryReceiptStore(client: FlairClient, agentId: string): ReceiptStore {
+  // flair#1944 round 6 — bind the store's signing identity to the runner's
+  // agent. A store that would sign as a DIFFERENT agent is refused here, by
+  // name, so a live receipt can never be written by an identity other than the
+  // one the cycle claims.
+  if (client.agentId !== agentId) {
+    throw new Error(
+      `cursor-wake: refusing a receipt store that signs as '${client.agentId}' for runner '${agentId}': ` +
+        "a live receipt must be signed as the runner's own agent",
+    );
+  }
   return {
+    agentId,
     read: async (id) => {
       const existing = await client.memory.get(id);
       if (existing === null) return null;

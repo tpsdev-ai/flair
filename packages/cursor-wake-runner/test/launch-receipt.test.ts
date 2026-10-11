@@ -60,6 +60,7 @@ function fakeStore(
 ): { store: ReceiptStore; records: Map<string, Stored> } {
   const records = opts.seed ?? new Map<string, Stored>();
   const store: ReceiptStore = {
+    agentId: CREW,
     read: async (id) => {
       order.push(`read:${id}`);
       if (opts.readError !== undefined) throw opts.readError;
@@ -204,6 +205,27 @@ describe("runWakeCycle — the launch receipt (flair#1944)", () => {
     expect(records.get(launchReceiptId("evt-1"))?.hostSource?.url).toBe("https://cursor.example/agents/bc-1");
     expect(replay.items[0].receipt).toBe("unchanged");
     expect(second.acks).toEqual(["p1"]);
+  });
+
+  test("an `already` result that carries a url does NOT write it (flair#1944 round 6)", async () => {
+    // The url belongs to the ORIGINAL create; a 409 replay that reports a url
+    // must not put one on the receipt. On a fresh id (no stored row) the write
+    // lands, but with no url.
+    const order: string[] = [];
+    const { store, records } = fakeStore(order);
+    const { port, acks } = catchupWith(order, [{ events: [dispatchEvent()], hasMore: false }]);
+    const { client } = cursorReturning({
+      outcome: "already",
+      cursorAgentId: "bc-1",
+      url: "https://cursor.example/agents/bc-1",
+    });
+    const result = await runWakeCycle({ agentId: CREW, catchup: port, cursor: client, receipts: store });
+    expect(result.items[0].receipt).toBe("written");
+    const stored = records.get(launchReceiptId("evt-1"))?.hostSource;
+    expect(stored, "the receipt carries the source but not the replay's url").toEqual({ host: "cursor", kind: "launch", id: "bc-1" });
+    expect(stored?.url, "an `already` url is never written").toBeUndefined();
+    expect(result.acked).toBe("p1");
+    expect(acks).toEqual(["p1"]);
   });
 
   test("a receipt write failure is a named outcome and does not ack", async () => {

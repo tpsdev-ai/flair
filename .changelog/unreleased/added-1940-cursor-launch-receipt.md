@@ -7,16 +7,22 @@
   is the Cursor agent id: on create, the id Cursor returned (the requested id
   when the response carries none); on a 409 replay, the requested id, which
   Cursor reported as already in use. The `url` is set only on create, and only
-  as Cursor returned it. Neither is derived from the dispatch text; the write is
+  as Cursor returned it (an `already` result that carries a url never writes one,
+  so a replay cannot rewrite the create's stored url). Neither is derived from
+  the dispatch text; the write is
   private and omits `hostSourceScope`, so the pointer stays author-only. Only a
   live run signed with the agent's own key writes the receipt, and that signing
   requirement is enforced WHERE THE WRITE HAPPENS: the production receipt store
   requires the key, and the client fails closed (no admin Basic fallback) when
-  none resolves — including a key file that disappears after the startup check.
-  When the memory is
+  none resolves at send time; a key the client already loaded is cached and still
+  signs, so removing the key file cannot cause a Basic fallback. The store signs
+  as exactly the runner's agent: it is bound to the runner's id and a client
+  whose signing identity differs is refused. When the memory is
   selected for bootstrap, bootstrap prose cites the pointer to the author as
-  `[via cursor/launch <id8> (unverified)]`, and shows `[via withheld]` to another
-  reader who may read the record — flair#2446. A receipt already present under
+  `[via cursor/launch <id8> (unverified)]`, and shows `[via withheld]` only to a
+  non-author who can read the record after its visibility changes — an ordinary
+  non-author cannot read this private row at all, and an admin can read it but
+  takes no pointer join — flair#2446. A receipt already present under
   that id is left unchanged only when it VERIFIES as this runner's own receipt
   (same author, content and host-source identity — the id compared on its NFC
   form, the form the server stores), so a replay that reuses the

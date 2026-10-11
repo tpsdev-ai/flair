@@ -14,10 +14,13 @@
  * content, or a different host-source identity), reported as `receiptMismatched`
  * — the event stays queued (at-least-once). Redelivery of an already-launched
  * event hits Cursor 409 and is treated as success, then the receipt is retried;
- * a 409 redelivery is retried and acked only when its receipt write succeeds or
- * a verified receipt exists — no second launch. The receipt store is REQUIRED for
- * a live cycle (flair#1944 round
- * 2): a handoff is never acked with no receipt attempt.
+ * a 409 redelivery is retried and acked when its receipt write succeeds, a
+ * verified receipt exists, or the receipt is a classified non-retryable refusal
+ * (which is acked without one) — no second launch. The receipt store is REQUIRED
+ * for a live cycle (flair#1944 round
+ * 2): a handoff is never acked with no receipt attempt. The store must sign as
+ * EXACTLY the runner's agent (round 6): a store whose signing identity differs
+ * from `deps.agentId` is refused, by name, before anything is read or acked.
  */
 
 import { wakeAgentId } from "./agent-id.js";
@@ -144,7 +147,13 @@ async function recordLaunchReceipt(
   | { status: "mismatched"; detail: string }
 > {
   const store = deps.receipts;
-  const { receipt, omittedUrl, omittedSource } = buildLaunchReceipt(dispatch.id, launch);
+  // flair#1944 round 6 — the url is written ONLY for a create. An `already`
+  // (409) result can carry a url too, but the receipt's url belongs to the
+  // ORIGINAL create; a replay must not rewrite the stored one.
+  const { receipt, omittedUrl, omittedSource } = buildLaunchReceipt(dispatch.id, {
+    cursorAgentId: launch.cursorAgentId,
+    ...(launch.outcome === "created" && launch.url !== undefined ? { url: launch.url } : {}),
+  });
   if (omittedSource) {
     deps.log?.(`cursor-wake: receipt for ${dispatch.id} omits its host source: the server's host-source grammar would refuse the Cursor agent id`);
   } else if (omittedUrl) {
@@ -185,6 +194,16 @@ export async function runWakeCycle(deps: WakeDeps): Promise<WakeResult> {
     // `receipts` is required by the type, but a JS caller could still omit it;
     // refuse rather than ack a handoff with no receipt attempt.
     throw new Error("runWakeCycle requires deps.receipts for a live cycle; pass dryRun to classify only");
+  }
+  if (deps.receipts && deps.receipts.agentId !== deps.agentId) {
+    // flair#1944 round 6: the runner identity (deps.agentId) and the store's
+    // signing identity must be the same agent, or a receipt would be signed by
+    // an identity the cycle does not claim. Refuse by name before anything is
+    // read, written or acked.
+    throw new Error(
+      `runWakeCycle: the receipt store signs as '${deps.receipts.agentId}' but the runner is '${deps.agentId}'; ` +
+        "a live receipt must be signed as the runner's own agent",
+    );
   }
   const result = emptyResult();
   let after: string | undefined;
