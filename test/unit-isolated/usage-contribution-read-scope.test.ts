@@ -42,6 +42,14 @@ mock.module("harper", () => ({
           memory.set(row.id, { ...row });
           return row.id;
         },
+        // flair#2470: the count bump is an incremental update of `usageCount`.
+        update: async (id: string, patch: Record<string, unknown>) => {
+          const current = memory.get(id) ?? { id };
+          const merged = { ...current, ...patch };
+          if (txn.stage(id, merged)) return id;
+          memory.set(id, merged);
+          return id;
+        },
       },
       MemoryUsage: {
         get: async (id: string) => usage.get(id) ?? null,
