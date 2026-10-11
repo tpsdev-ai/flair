@@ -568,8 +568,26 @@ export class FederationPair extends Resource {
         }), { status: 409, headers: { "content-type": "application/json" } });
       }
       // A revoked peer does not re-pair (flair#2333): a revoke is a local
-      // decision, and a re-pair does not restore it.
+      // decision, and a re-pair does not restore it. This runs BEFORE any token
+      // is consumed, so a refused re-pair spends nothing.
       if (existing.status === "revoked") return peerRevokedRefusal();
+
+      // A pairing token the request supplies on a re-pair is validated and
+      // consumed exactly as the first-pair path does (flair#2333): a token is
+      // used by at most one pairing, whether that pairing is a first pair or a
+      // re-pair, so a token that arrives here is spent here and cannot pair a
+      // LATER new peer. A re-pair that supplies NO token still proceeds — the
+      // protocol does not require one for an existing peer (docs/federation.md,
+      // "Pairing tokens"). The supplied token is not the request's credential;
+      // the request still has to prove key ownership above (`verifyResult`).
+      if (pairingToken) {
+        const ctx = (this as any).getContext?.() ?? {};
+        const refusal = await withPairingTokenClaim(pairingToken, () =>
+          consumePairingToken(pairingToken, instanceId, ctx),
+        );
+        if (refusal) return refusal;
+      }
+
       // Update endpoint and status. The interleaving where a revoke commits
       // between this read and the write below is driven by the pause point here
       // (the guard test); the write below is unchanged.
@@ -594,37 +612,30 @@ export class FederationPair extends Resource {
 
       // Consume the token under its per-key lock (flair#2333): the claim is
       // check-then-consume, so two pairings of the same token must not both see
-      // it unconsumed. One writer per token: the second pairing is refused.
+      // it unconsumed. The lock is this ONE Flair node's PairingToken store
+      // lock, so this excludes concurrent pairings within one Harper node; it
+      // is not shared across the nodes of a Fabric instance (see the PR body).
+      // The first pairing consumes the token and records the peer; a pairing
+      // that presents the same, now-consumed token is refused.
       const ctx = (this as any).getContext?.() ?? {};
-      const claim = await withKeyLock(
-        (databases as any).flair.PairingToken?.primaryStore,
-        [PAIRING_TOKEN_LOCK_NAMESPACE, pairingToken],
-        () => claimPairingToken(pairingToken, { instanceId, publicKey, role, endpoint }, ctx),
-        PAIR_LOCK_ATTEMPTS,
-        PAIR_LOCK_WAIT_MS,
-      );
-      if (claim.kind === "busy") {
-        return new Response(JSON.stringify({
-          error: "pairing_in_progress",
-          message: "another pairing of this token is still in progress; retry",
-        }), { status: 409, headers: { "content-type": "application/json" } });
-      }
-      if (claim.kind === "unavailable") {
-        return new Response(JSON.stringify({
-          error: "pairing_lock_unavailable",
-          message: "this instance's PairingToken store has no per-key lock, so the pairing was refused",
-        }), { status: 503, headers: { "content-type": "application/json" } });
-      }
-      if (claim.value.kind === "refused") {
-        return new Response(JSON.stringify({ error: "invalid_or_expired_pairing_token" }), {
-          status: 401, headers: { "content-type": "application/json" },
+      const refusal = await withPairingTokenClaim(pairingToken, async () => {
+        const claim = await consumePairingToken(pairingToken, instanceId, ctx);
+        if (claim.kind !== "consumed") return claim;
+        const at = new Date().toISOString();
+        await (databases as any).flair.Peer.put({
+          id: instanceId,
+          publicKey,
+          role: role ?? "spoke",
+          endpoint: endpoint ?? null,
+          status: "paired",
+          relayOnly: false,
+          pairedAt: at,
+          createdAt: at,
+          updatedAt: at,
         });
-      }
-      if (claim.value.kind === "bootstrap_mismatch") {
-        return new Response(JSON.stringify({
-          error: "bootstrap_user_token_mismatch",
-        }), { status: 401, headers: { "content-type": "application/json" } });
-      }
+        return claim;
+      });
+      if (refusal) return refusal;
 
       // Drop the bootstrap user that was created alongside this pairing token.
       // Failure here is non-fatal: the cleanup sweep (PR-5) will catch stragglers.
@@ -658,15 +669,21 @@ export class FederationPair extends Resource {
 
 // ─── Sync endpoint ───────────────────────────────────────────────────────────
 
-/** One pairing's one-time token claim: the check-then-consume itself (FederationPair.post runs it under the token's lock). */
+/** One pairing's one-time token claim: the check-then-consume of a token (FederationPair.post runs it under the token's lock). */
 type PairingTokenClaim =
-  | { kind: "paired" }
+  | { kind: "consumed" }
   | { kind: "refused" }
   | { kind: "bootstrap_mismatch" };
 
 /** The per-token lock namespace (resources/key-lock.ts); a token's lock key is its own. */
 const PAIRING_TOKEN_LOCK_NAMESPACE = "flair-pairing-token";
-/** The wait for another pairing of the same token: at most `PAIR_LOCK_ATTEMPTS × PAIR_LOCK_WAIT_MS`. */
+/**
+ * A contended pairing token's lock is retried `PAIR_LOCK_ATTEMPTS` times,
+ * `PAIR_LOCK_WAIT_MS` nominally apart; after the last retry the pairing is
+ * refused. These configure the retry COUNT and the nominal spacing only: the
+ * spacing is a timer, which gives no bound on the elapsed time, so there is no
+ * maximum-elapsed-time claim.
+ */
 const PAIR_LOCK_ATTEMPTS = 200;
 const PAIR_LOCK_WAIT_MS = 10;
 
@@ -679,14 +696,65 @@ function peerRevokedRefusal(): Response {
 }
 
 /**
- * The check-then-consume of one pairing token, run while holding that token's
- * per-key lock (FederationPair.post), so at most one pairing consumes it. The
- * token is re-read on entry: a pairing that consumed it first makes this one
- * refuse.
+ * Run one pairing token's check-and-consume under that token's per-key lock
+ * (flair#2333), and map the outcome to the refusal the caller returns. `fn`
+ * runs only when the lock is held and the store has a lock; `undefined` means
+ * `fn` ran (its own claim decides refusal through its return value, mapped by
+ * `pairingTokenRefusal`).
+ *
+ * The lock is the PairingToken store's per-key lock (resources/key-lock.ts): it
+ * is shared by this ONE Harper node's threads, so it excludes concurrent
+ * pairings of the same token WITHIN one Flair node. Harper can run several
+ * nodes for one instance; the lock is not shared across them (see the PR body).
  */
-async function claimPairingToken(
+async function withPairingTokenClaim(
   pairingToken: string,
-  peer: { instanceId: string; publicKey: string; role?: string | null; endpoint?: string | null },
+  fn: () => Promise<PairingTokenClaim>,
+): Promise<Response | undefined> {
+  const outcome = await withKeyLock(
+    (databases as any).flair.PairingToken?.primaryStore,
+    [PAIRING_TOKEN_LOCK_NAMESPACE, pairingToken],
+    fn,
+    PAIR_LOCK_ATTEMPTS,
+    PAIR_LOCK_WAIT_MS,
+  );
+  if (outcome.kind === "busy") {
+    return new Response(JSON.stringify({
+      error: "pairing_in_progress",
+      message: "another pairing of this token is still in progress; retry",
+    }), { status: 409, headers: { "content-type": "application/json" } });
+  }
+  if (outcome.kind === "unavailable") {
+    return new Response(JSON.stringify({
+      error: "pairing_lock_unavailable",
+      message: "this instance's PairingToken store has no per-key lock, so the pairing was refused",
+    }), { status: 503, headers: { "content-type": "application/json" } });
+  }
+  return pairingTokenRefusal(outcome.value);
+}
+
+/** The refusal a finished pairing-token claim maps to, or `undefined` when it consumed the token. */
+function pairingTokenRefusal(claim: PairingTokenClaim): Response | undefined {
+  if (claim.kind === "consumed") return undefined;
+  if (claim.kind === "bootstrap_mismatch") {
+    return new Response(JSON.stringify({
+      error: "bootstrap_user_token_mismatch",
+    }), { status: 401, headers: { "content-type": "application/json" } });
+  }
+  return new Response(JSON.stringify({ error: "invalid_or_expired_pairing_token" }), {
+    status: 401, headers: { "content-type": "application/json" },
+  });
+}
+
+/**
+ * The check-then-consume of one pairing token, run while holding that token's
+ * per-key lock (FederationPair.post). The token is re-read on entry: a pairing
+ * that consumed it first makes this one refuse. On success the token records
+ * `consumerInstanceId` and is consumed.
+ */
+async function consumePairingToken(
+  pairingToken: string,
+  consumerInstanceId: string,
   ctx: any,
 ): Promise<PairingTokenClaim> {
   // Fetch the token record for consumption
@@ -705,9 +773,13 @@ async function claimPairingToken(
     return { kind: "refused" };
   }
 
-  // PR-4: bind authenticated bootstrap user to specific pairing token
-  const authedUser = ctx?.request?.tpsAgent;
-  const isAdmin = ctx?.request?.tpsAgentIsAdmin === true;
+  // PR-4: bind authenticated bootstrap user to specific pairing token.
+  // The middleware annotates the REQUEST (request.tpsAgent); getContext() IS
+  // that request (resources/Resource.js getResource), not a wrapper with a
+  // `.request` field — the same read A2AAdapter uses (`ctx.request ?? ctx`).
+  const ctxRequest: any = ctx?.request ?? ctx ?? {};
+  const authedUser = ctxRequest.tpsAgent;
+  const isAdmin = ctxRequest.tpsAgentIsAdmin === true;
   if (!isAdmin && authedUser) {
     const expectedBootstrap = `pair-bootstrap-${pairingToken.slice(0, 8)}`;
     if (authedUser !== expectedBootstrap) {
@@ -715,26 +787,13 @@ async function claimPairingToken(
     }
   }
 
-  const at = new Date().toISOString();
   // Consume the token
   await (databases as any).flair.PairingToken.put({
     ...tokenRecord,
-    consumedBy: peer.instanceId,
-    consumedAt: at,
+    consumedBy: consumerInstanceId,
+    consumedAt: new Date().toISOString(),
   });
-
-  await (databases as any).flair.Peer.put({
-    id: peer.instanceId,
-    publicKey: peer.publicKey,
-    role: peer.role ?? "spoke",
-    endpoint: peer.endpoint ?? null,
-    status: "paired",
-    relayOnly: false,
-    pairedAt: at,
-    createdAt: at,
-    updatedAt: at,
-  });
-  return { kind: "paired" };
+  return { kind: "consumed" };
 }
 
 /**

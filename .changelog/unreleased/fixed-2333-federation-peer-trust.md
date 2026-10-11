@@ -2,5 +2,10 @@
 
   `POST /FederationPair` runs a pairing token's check-and-consume under a
   per-token lock, so two pairings that present the same token cannot both see it
-  unconsumed: another pairing that presents a consumed token is refused. A re-pair
-  of a peer whose row is revoked is refused and writes nothing.
+  unconsumed: another pairing that presents a consumed token is refused. A
+  re-pair that supplies a token consumes it the same way, so a token spent on a
+  re-pair cannot pair a later new peer. The lock is one Flair node's PairingToken
+  store lock: it excludes concurrent pairings within one Harper node, not across
+  the several nodes a Fabric instance can run. A re-pair of a peer whose row is
+  revoked is refused and changes neither the Peer row nor a pairing token (the
+  anti-replay nonce a signed request records is still written).

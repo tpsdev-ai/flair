@@ -304,7 +304,16 @@ server.http(async (request: any, nextLayer: any) => {
     // by the resource itself (allowCreate=true on the Resource lets anonymous
     // POST through Harper's role gate). Bearer can't be used here because
     // Harper's auth layer claims any "Bearer X" Authorization header for itself.
-    url.pathname === "/FederationPair" ||
+    //
+    // A Basic-credentialled pair request is NOT passed through here. The Basic
+    // block below is what authenticates the token's bootstrap user
+    // (pair-bootstrap-<id>, Path 3) and annotates `tpsAgent`; passing straight
+    // through skipped that annotation, so the resource's bootstrap-user binding
+    // (PR-4, resources/Federation.ts) could never see a caller and never
+    // refused a mismatch. An anonymous pair request (no Authorization header)
+    // still passes through, and an invalid Basic credential is refused by
+    // Harper's own auth before this middleware runs.
+    (url.pathname === "/FederationPair" && !header.startsWith("Basic ")) ||
     // OAuth 2.1 public endpoints (spec requires no pre-auth)
     url.pathname === "/OAuthRegister" ||
     url.pathname === "/OAuthAuthorize" ||

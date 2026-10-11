@@ -212,8 +212,11 @@ describe("pairing token body auth", () => {
     expect(notFound).toBe(true);
   });
 
-  test("re-pairing path skips token (existing peer found)", () => {
-    // Existing peer with matching pubkey — re-pair without token.
+  test("re-pairing path proceeds with no token (existing peer found)", () => {
+    // Existing peer with matching pubkey — a re-pair WITH NO token proceeds
+    // (the protocol does not require one). A re-pair WITH a token consumes it;
+    // that is exercised end-to-end in
+    // test/integration/federation-peer-trust-2333.test.ts.
     // Body signature still required to prove key ownership.
     const existing = { id: "spoke_1", publicKey: "same_pubkey" };
     const incoming = { instanceId: "spoke_1", publicKey: "same_pubkey" };

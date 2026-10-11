@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import nacl from "tweetnacl";
 import { signBodyFresh } from "../../resources/federation-crypto.js";
+import { ensureFlairPairInitiatorRole } from "../../src/cli";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 
 const sfx = Date.now().toString(36);
@@ -61,7 +62,8 @@ async function readPeer(id: string): Promise<any> {
   return (rows as any[])[0] ?? null;
 }
 
-async function revokePeer(id: string): Promise<number> {
+/** The competing operation's own RESULT — its HTTP status AND the peer row it left. */
+async function revokePeer(id: string): Promise<{ status: number; row: any }> {
   const res = await fetch(harper.opsURL, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: opsAuth() },
@@ -71,7 +73,7 @@ async function revokePeer(id: string): Promise<number> {
     }),
     signal: AbortSignal.timeout(30_000),
   });
-  return res.status;
+  return { status: res.status, row: await readPeer(id) };
 }
 
 async function seedToken(token: string): Promise<void> {
@@ -99,6 +101,16 @@ function pairBody(instanceId: string, publicKey: string, secretKey: Uint8Array, 
 function pairRequest(body: Record<string, unknown>): Promise<Response> {
   return fetch(`${harper.httpURL}/FederationPair`, {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    signal: AbortSignal.timeout(60_000),
+  });
+}
+
+/** A pairing request carrying a Basic credential (the token's bootstrap user). */
+function pairRequestBasic(body: Record<string, unknown>, user: string, pass: string): Promise<Response> {
+  return fetch(`${harper.httpURL}/FederationPair`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: "Basic " + btoa(`${user}:${pass}`) },
+    body: JSON.stringify(body),
     signal: AbortSignal.timeout(60_000),
   });
 }
@@ -204,6 +216,95 @@ describe("flair#2333 — a pairing token pairs at most one peer (real Harper)", 
   }, 60_000);
 });
 
+describe("flair#2333 — a token supplied to a re-pair is spent by that re-pair (real Harper)", () => {
+  // The defect: an EXISTING peer takes the re-pair path, which did not check or
+  // consume the token it was handed. A fresh token used on a re-pair therefore
+  // stayed live and could pair a DIFFERENT new peer later — two peers from one
+  // token. The fix validates and consumes the supplied token exactly as the
+  // first-pair path does.
+  it("a re-pair with a token consumes it, so the token cannot then pair a new peer", async () => {
+    const k = nacl.sign.keyPair();
+    const peer = `h1b-peer-${sfx}`;
+    const pub = b64url(k.publicKey);
+    await seedPeer(peer, pub); // peer exists → the re-pair path
+    const token = `pt-h1b-${sfx}`;
+    await seedToken(token);
+
+    const res = await pairRequest(pairBody(peer, pub, k.secretKey, token));
+    const body = await res.json() as any;
+    expect(res.status, JSON.stringify(body)).toBe(200);
+    expect(body.paired).toBe(true);
+    // RED on 5dc7c7d4, where the re-pair ignored the token and left it unconsumed.
+    expect((await readToken(token))?.consumedBy, "the re-pair consumed the supplied token").toBe(peer);
+
+    // The spent token cannot pair a NEW peer: it is single-use across both paths.
+    const k2 = nacl.sign.keyPair();
+    const peer2 = `h1b-peer-new-${sfx}`;
+    const res2 = await pairRequest(pairBody(peer2, b64url(k2.publicKey), k2.secretKey, token));
+    const body2 = await res2.json() as any;
+    console.log("h1b spent-token new-pair body:", JSON.stringify(body2));
+    expect(res2.status, JSON.stringify(body2)).toBe(401);
+    expect(body2.error).toBe("invalid_or_expired_pairing_token");
+    expect(await readPeer(peer2), "a spent token pairs no new peer").toBeNull();
+  }, 60_000);
+
+  it("CONTROL: a re-pair with NO token still succeeds (the protocol requires none)", async () => {
+    const k = nacl.sign.keyPair();
+    const peer = `h1b-peer-notok-${sfx}`;
+    const pub = b64url(k.publicKey);
+    await seedPeer(peer, pub);
+    const res = await pairRequest(pairBody(peer, pub, k.secretKey));
+    const body = await res.json() as any;
+    expect(res.status, JSON.stringify(body)).toBe(200);
+    expect(body.paired).toBe(true);
+    expect((await readPeer(peer))?.status).toBe("paired");
+  }, 60_000);
+});
+
+describe("flair#2333 — a signed Basic-auth pairing binds the bootstrap user to the token (real Harper)", () => {
+  // The binding (PR-4) used to have only a unit test that DUPLICATED the
+  // validator. This drives it through the real path: a signed pairing request
+  // carrying Basic credentials. The token's own bootstrap user pairs; a
+  // different, non-admin bootstrap user is refused and changes nothing.
+  it("the token's own bootstrap user pairs; a different bootstrap user is refused", async () => {
+    await ensureFlairPairInitiatorRole(harper.opsURL, harper.admin.username, harper.admin.password);
+
+    // (a) matching bootstrap user → pairs, consumes the token, records the peer.
+    const token = `pt-bind-ok-${sfx}`;
+    const k = nacl.sign.keyPair();
+    const peer = `bind-peer-ok-${sfx}`;
+    await seedToken(token);
+    const user = `pair-bootstrap-${token.slice(0, 8)}`;
+    const pass = "bind-pass-ok";
+    await ops({ operation: "add_user", username: user, password: pass, role: "flair_pair_initiator", active: true });
+    const res = await pairRequestBasic(pairBody(peer, b64url(k.publicKey), k.secretKey, token), user, pass);
+    const body = await res.json() as any;
+    console.log("bind matching-user body:", JSON.stringify(body));
+    expect(res.status, JSON.stringify(body)).toBe(200);
+    expect(body.paired).toBe(true);
+    expect((await readPeer(peer))?.status).toBe("paired");
+    expect((await readToken(token))?.consumedBy).toBe(peer);
+
+    // (b) a DIFFERENT (valid, non-admin) bootstrap user carrying this token → 401.
+    const token2 = `pt-bind-bad-${sfx}`;
+    const k2 = nacl.sign.keyPair();
+    const peer2 = `bind-peer-bad-${sfx}`;
+    await seedToken(token2);
+    const otherUser = "pair-bootstrap-mismatch0";
+    const otherPass = "bind-pass-bad";
+    await ops({ operation: "add_user", username: otherUser, password: otherPass, role: "flair_pair_initiator", active: true });
+    const res2 = await pairRequestBasic(
+      pairBody(peer2, b64url(k2.publicKey), k2.secretKey, token2), otherUser, otherPass,
+    );
+    const body2 = await res2.json() as any;
+    console.log("bind mismatched-user body:", JSON.stringify(body2));
+    expect(res2.status, JSON.stringify(body2)).toBe(401);
+    expect(body2.error).toBe("bootstrap_user_token_mismatch");
+    expect(await readPeer(peer2), "a mismatched bootstrap user writes no peer").toBeNull();
+    expect((await readToken(token2))?.consumedBy, "a mismatched bootstrap user consumes no token").toBeFalsy();
+  }, 90_000);
+});
+
 describe("flair#2333 — a federation sync does not leave a revoked peer connected (real Harper)", () => {
   // Guard, driven through the EXISTING memory-merge pause point, so it runs as
   // written against the unmodified code too: the revoke is committed while the
@@ -226,7 +327,8 @@ describe("flair#2333 — a federation sync does not leave a revoked peer connect
       const { response, competed, released, paused } = await withPaused(point, () => syncRequest(body), () => revokePeer(peer));
       expect(paused, "the sync's memory merge was not paused").toBe(true);
       expect(released, "the sync's memory merge was not released by this test").toBe("go");
-      expect(competed, "the competing revoke was not applied").toBe(200);
+      expect(competed?.status, "the competing revoke was not applied").toBe(200);
+      expect(competed?.row?.status, "the competing revoke's own row state is revoked").toBe("revoked");
       const resBody = await response.json() as any;
       console.log(`${point} sync body:`, JSON.stringify(resBody));
       expect((await readPeer(peer))?.status, "the concurrent revoke is kept").toBe("revoked");
@@ -262,22 +364,30 @@ describe("flair#2333 — a peer revoked during a re-pair is not brought back (re
     );
     expect(paused, "the re-pair was not paused").toBe(true);
     expect(released, "the re-pair was not released by this test").toBe("go");
-    expect(competed, "the competing revoke was not applied").toBe(200);
+    expect(competed?.status, "the competing revoke was not applied").toBe(200);
+    expect(competed?.row?.status, "the competing revoke's own row state is revoked").toBe("revoked");
     console.log("federation-pair-repair-pre re-pair body:", JSON.stringify(await response.clone().json()));
     expect((await readPeer(peer))?.status, "the concurrent revoke is kept").toBe("revoked");
   }, 60_000);
 
-  it("a re-pair of a peer revoked before the request is refused and leaves it revoked", async () => {
+  it("a re-pair of a peer revoked before the request is refused, changing neither the peer row nor a token", async () => {
     const k = nacl.sign.keyPair();
     const peer = `h3-peer-static-${sfx}`;
     const pub = b64url(k.publicKey);
     await seedPeer(peer, pub, "revoked");
+    // The refusal's whole claim is "changes nothing": capture the row so the
+    // test can assert it, byte for byte, after the request.
+    const before = await readPeer(peer);
     const res = await pairRequest(pairBody(peer, pub, k.secretKey));
     const resBody = await res.json() as any;
     console.log("H3 static re-pair body:", JSON.stringify(resBody));
-    expect((await readPeer(peer))?.status, "a revoked peer stays revoked").toBe("revoked");
     expect(res.status, JSON.stringify(resBody)).toBe(403);
     expect(resBody.error).toBe("peer_revoked");
+    // A valid signed re-pair DOES record an anti-replay nonce before this
+    // refusal (resources/replay-store.ts, via verifyFederationRequestBody), so
+    // "writes nothing" is false. What it changes is NEITHER the Peer row NOR a
+    // pairing token — the nonce is not the peer row.
+    expect(await readPeer(peer), "the Peer row is unchanged" ).toEqual(before);
   }, 60_000);
 
   it("CONTROL: a re-pair of a paired peer succeeds and keeps it paired", async () => {
