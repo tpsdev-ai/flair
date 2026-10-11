@@ -17,9 +17,9 @@
  *     acceptance and one token pair;
  *   - a store error or a missing store primitive refuses with 503 and issues
  *     nothing;
- *   - the revocation endpoint (OAuthRevoke) refuses with 503 and records no
- *     `revokedAt` when it cannot record that claim, and records `revokedAt` on
- *     the token alone when the store is available;
+ *   - a refresh-token revoke taking the claim (OAuthRevoke) refuses with 503
+ *     and records no `revokedAt` when it cannot record that claim, and records
+ *     `revokedAt` on the token alone when the store is available;
  *   - the row is written only after the request has validated;
  *   - the key is a SHA-256 in its own lock namespace, a successful grant flags
  *     the code's own row used, and the schema's expiration setting outlives
@@ -61,9 +61,8 @@ function createAuthCodeTable() {
 
 function createTokenTable() {
   const rows = new Map<string, any>();
-  // The per-token lock resources/OAuth.ts takes across a rotation and a revoke
-  // (resources/key-lock.ts). Harper exposes it as OAuthToken.primaryStore; this
-  // fake mirrors its non-reentrant per-key tryLock/unlock.
+  // Harper exposes the process's per-token lock as OAuthToken.primaryStore.
+  // This fake mirrors its non-reentrant per-key tryLock/unlock.
   const locks = new Set<string>();
   const lockKey = (key: unknown) => JSON.stringify(key);
   return {
@@ -340,7 +339,7 @@ describe("a store error refuses with 503 and issues nothing", () => {
 
 // ─── the revocation endpoint fails closed ───────────────────────────────────
 
-describe("a revoke that cannot record its claim refuses with 503 and revokes nothing", () => {
+describe("a refresh-token revoke that cannot record its claim refuses with 503 and revokes nothing", () => {
   const rowFor = (raw: string) => [...tokens.rows.values()].find((t) => t.tokenHash === sha256(raw));
 
   for (const which of ["put", "getEntry", "tryLock"] as const) {

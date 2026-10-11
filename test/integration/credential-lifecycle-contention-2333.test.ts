@@ -9,7 +9,7 @@
  *     that token — takes its single-use claim, re-reads the committed row,
  *     writes the old row and issues a new pair. A revoke of the same token
  *     takes that same lock before it records `revokedAt`, so the two are
- *     serialized:
+ *     serialized within one Harper process:
  *       - `oauth-refresh-pre-claim` holds the rotation between its read and
  *         its claim while a revoke commits. The rotation then takes the lock,
  *         finds the token's claim already recorded, is REFUSED, and issues no
@@ -24,8 +24,8 @@
  *         committed-row re-read, between that re-read and its issuance, while a
  *         revoke tries to commit. The revoke cannot take the lock the rotation
  *         holds, so the rotation — the lock holder — issues its pair and the
- *         revoke is refused: a committed revoke and an issued pair do not both
- *         hold.
+ *         revoke returns 503 with `temporarily_unavailable` and
+ *         `token_lifecycle_in_progress`.
  *       - `oauth-refresh-claim-done` holds the rotation after its token lock has
  *         released (its writes committed) but before this request's own
  *         transaction commits, while a second request looks at the token. The
@@ -259,7 +259,7 @@ afterAll(async () => {
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
 });
 
-describe("flair#2333 slice 2 — a later credential lifecycle write does not undo a committed revoke (real Harper)", () => {
+describe("flair#2333 slice 2 — credential lifecycle writes preserve committed revocations within one Harper process (real Harper)", () => {
   // ── OAuth refresh vs revoke ────────────────────────────────────────────────
 
   it("CONTROL: an uncontended rotation still exchanges", async () => {
@@ -288,33 +288,31 @@ describe("flair#2333 slice 2 — a later credential lifecycle write does not und
     expect(body.access_token).toBeUndefined();
   }, 60_000);
 
-  it("a revoke running while the rotation is between its re-read and its issuance does not outrun it", async () => {
+  it("within one Harper process, a rotation holding the lock issues a pair and the competing revoke returns 503", async () => {
     const raw = await seedRefreshToken("flair_cl_2333_post", "agent-2333-post");
     const { response, competed, released } = await withPaused(
       "oauth-refresh-post-claim",
       () => postJson("/OAuthToken", { grant_type: "refresh_token", refresh_token: raw, client_id: "flair_cl_2333_post" }),
-      () => postJson("/OAuthRevoke", { token: raw }).then((r) => r.status),
+      async () => {
+        const res = await postJson("/OAuthRevoke", { token: raw });
+        return { status: res.status, body: await res.json() };
+      },
     );
     const text = await response.text();
     expect(released, "the rotation was not paused and released by this test").toBe("go");
-    const body = response.status === 200 ? JSON.parse(text) : undefined;
-    const rotationIssuedPair = typeof body?.access_token === "string";
-    const revokeCommitted = competed === 200;
-    // The rotation holds the token lock across its committed-row re-read, this
-    // pause and its issuance, so a revoke of the same token cannot commit here:
-    // it cannot take the lock, is refused, and the rotation — the lock holder —
-    // issues its pair. Never both a committed revoke and a usable pair.
-    // (Removing the lock from the rotation and the revoke, and keeping this
-    // pause point, makes the revoke commit here and the rotation issue anyway —
-    // this case fails.)
-    expect(
-      revokeCommitted && rotationIssuedPair,
-      `a usable pair was issued after a committed revoke (revoke ${competed}, rotation ${response.status}): the revoke was outrun`,
-    ).toBe(false);
-    if (rotationIssuedPair) {
-      const old = await readTokenByHash(sha256Hex(raw));
-      expect(old?.revokedAt, "the rotation issued a pair but left the presented token unrevoked").toBeTruthy();
-    }
+    expect(response.status, `rotation returned ${response.status}: ${text.slice(0, 300)}`).toBe(200);
+    const body = JSON.parse(text);
+    expect(typeof body.access_token).toBe("string");
+    expect(typeof body.refresh_token).toBe("string");
+    expect(competed).toEqual({
+      status: 503,
+      body: {
+        error: "temporarily_unavailable",
+        error_description: "token_lifecycle_in_progress",
+      },
+    });
+    const old = await readTokenByHash(sha256Hex(raw));
+    expect(old?.revokedAt, "the rotation issued a pair but left the presented token unrevoked").toBeTruthy();
   }, 60_000);
 
   it("a revoke that commits between the rotation's claim and its committed-row re-read refuses the rotation", async () => {

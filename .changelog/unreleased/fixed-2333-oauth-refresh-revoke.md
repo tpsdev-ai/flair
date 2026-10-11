@@ -1,4 +1,4 @@
-- **A refresh-token rotation and a revoke of the same token are serialized, so a commit of one is not outrun by the other (#2333).**
+- **A refresh-token rotation and a revoke of the same token are serialized within one Harper process (#2333).**
 
   The revocation endpoint takes the same per-token lock a rotation holds across
   its single-use claim, its committed-row re-read, the old row's write and the
@@ -19,4 +19,6 @@
   `invalid_grant` (`token revoked`): the token row's own revocation is checked
   before its expiry and its client, so neither preempts it. Only the token
   endpoint's shared rate limiter (429) can answer first. If the single-use store
-  is unavailable, the revoke endpoint answers 503 and records nothing.
+  is unavailable, a refresh-token revoke taking the claim answers 503 and records
+  nothing. Unknown tokens and access tokens do not take the claim and keep their
+  existing responses.
