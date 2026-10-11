@@ -181,3 +181,38 @@ export function componentWithConcurrentWrites(opts: { sourceRoot?: string } = {}
 export function componentWithFailingPromotionStamp(opts: { sourceRoot?: string } = {}): FailingComponent {
   return composeComponent({ [FAILING_STAMP_MODULE_REL]: FAILING_STAMP_MODULE_SRC }, opts.sourceRoot ?? repoRoot());
 }
+
+/** Where a composed copy writes the failing re-pair Peer-write module: a
+ *  top-level built resource file, loaded with the rest of `dist/resources`. */
+export const FAILING_REPAIR_PEER_WRITE_MODULE_REL = join("dist", "resources", "zz-test-failing-repair-peer-write.js");
+
+/** A test-only module for a composed copy (see
+ *  `componentWithFailingRepairPeerWrite`): one `Peer.put` is failed ON DEMAND,
+ *  when the test arms a marker file named `arm.repair-peer-write-fail.<peerId>`
+ *  under FLAIR_TEST_PAUSE_DIR. The arm file is CONSUMED (one-shot), so the retry
+ *  after the refusal succeeds. In Federation.ts's re-pair path the write lands
+ *  INSIDE the owned transaction, after the token consume has been staged. */
+export const FAILING_REPAIR_PEER_WRITE_MODULE_SRC = `import { existsSync, unlinkSync } from "node:fs";
+import { join } from "node:path";
+import { databases } from "harper";
+const { Peer } = databases.flair;
+const peerPut = Peer.put;
+Peer.put = function (record, ...rest) {
+  const dir = process.env.FLAIR_TEST_PAUSE_DIR;
+  const id = record?.id;
+  if (dir && typeof id === "string") {
+    const arm = join(dir, "arm.repair-peer-write-fail." + id);
+    if (existsSync(arm)) {
+      unlinkSync(arm);
+      throw new Error("test component: forced re-pair Peer write failure");
+    }
+  }
+  return peerPut.call(this, record, ...rest);
+};
+`;
+
+/** A composed copy that keeps every built resource and adds the failing
+ *  re-pair Peer-write module (FAILING_REPAIR_PEER_WRITE_MODULE_SRC). */
+export function componentWithFailingRepairPeerWrite(opts: { sourceRoot?: string } = {}): FailingComponent {
+  return composeComponent({ [FAILING_REPAIR_PEER_WRITE_MODULE_REL]: FAILING_REPAIR_PEER_WRITE_MODULE_SRC }, opts.sourceRoot ?? repoRoot());
+}

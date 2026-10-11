@@ -1,20 +1,23 @@
 /**
- * federation-pair-repair-atomic-2333.test.ts — flair#2333 slice 1, round 4.
+ * federation-pair-repair-atomic-2333.test.ts — flair#2333 slice 1.
  *
  * The re-pair path's supplied-token consume and its Peer write must COMMIT
  * TOGETHER (or neither), inside the SAME owned transaction, before the token
- * lock releases. If the Peer write fails, the token must be left UNCONSUMED
- * (still usable) and the request refused by name — not left spent with no peer.
+ * lock releases. If a Peer write that rejects INSIDE the transaction callback
+ * fails, the token must be left UNCONSUMED and retryable while valid, and the
+ * request refused by name (503 peer_write_failed) — not left spent with no peer.
+ * (A commit-time error propagates unnamed.)
  *
- * Isolated counterpart of test/integration/federation-peer-trust-2333.test.ts:
- * this models Harper's `transaction()` with commit/abort (a throw discards the
- * writes staged during the callback), so the ATOMICITY — not only the lock
- * ordering — is observable without a real Harper.
+ * The MODEL in this file: it fakes Harper's `transaction()` with commit/abort (a
+ * throw discards the writes staged during the callback), so the ATOMICITY — not
+ * only the lock ordering — is observable without a real Harper. The REAL-Harper
+ * case lives in test/integration/federation-peer-trust-2333.test.ts, which fails
+ * the Peer write through a composed test-only component.
  *
- * On HEAD (before this round) the re-pair peer write ran in the request
- * transaction, after the lock: the consume committed alone, so a failed peer
- * write left the token spent. Mutation — move the peer write back out of the
- * owned transaction — turns the "the token is NOT consumed" assertion red.
+ * On the round-4 head the re-pair peer write ran in the request transaction,
+ * after the lock: the consume committed alone, so a failed peer write left the
+ * token spent. Mutation — move the peer write back out of the owned transaction —
+ * turns the "the token is NOT consumed" assertion red.
  */
 import { beforeEach, describe, expect, it, mock } from "bun:test";
 import nacl from "tweetnacl";
@@ -150,7 +153,8 @@ describe("flair#2333 — a re-pair's token consume and Peer write commit togethe
     expect(res.status).toBe(503);
     expect(json.error).toBe("peer_write_failed");
 
-    // The consume rolled back with the failed peer write: the token is still usable.
+    // The consume rolled back with the failed peer write: the token is unconsumed
+    // and retryable while valid.
     expect(tokens.get(token)?.consumedBy).toBeUndefined();
     expect(tokens.get(token)?.consumedAt).toBeUndefined();
     // And no peer write landed (the row keeps its earlier updatedAt).

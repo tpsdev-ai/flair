@@ -590,29 +590,41 @@ export class FederationPair extends Resource {
       // returns, so a consume that joined it would still be invisible when the lock
       // frees and a pairing taking the lock right after would read the token
       // unconsumed. The consume and the peer write commit together or neither does:
-      // a failed peer write aborts the owned transaction, so the token is left
-      // unconsumed (still usable) and this re-pair is refused by name.
+      // a Peer write that REJECTS inside this transaction callback aborts the owned
+      // transaction, so the token is left unconsumed and this re-pair is refused by
+      // name (a commit-time error propagates unnamed).
       //
-      // The peer write is one closure so the token path (inside the owned
-      // transaction) and the no-token path (in the request transaction, below)
-      // write the same row.
-      const writeRePairedPeer = (owned?: any) => (databases as any).flair.Peer.put({
-        ...existing,
-        endpoint: endpoint ?? existing.endpoint,
+      // The token path re-reads the Peer row INSIDE its owned transaction: the row
+      // above was read before it, so a revoke committed in between would otherwise
+      // be overwritten. Both paths write the same row.
+      const writeRePairedPeer = (owned?: any, base: any = existing) => (databases as any).flair.Peer.put({
+        ...base,
+        endpoint: endpoint ?? base.endpoint,
         status: "paired",
         updatedAt: new Date().toISOString(),
       }, owned);
 
       if (pairingToken) {
         const ctx = (this as any).getContext?.() ?? {};
+        // Test-only: inert unless the fault-injection env opt-in is set and armed.
+        // Pause AFTER the pre-transaction read of the Peer row and BEFORE the owned
+        // transaction, so a competing revoke can commit in between (flair#2333).
+        const tokenRepairPause = txnPausePoint("federation-pair-repair-token-pre");
+        if (tokenRepairPause) await tokenRepairPause;
         let refusal: Response | undefined;
         try {
           refusal = await withPairingTokenClaim(pairingToken, () =>
             withOwnedTransaction(ctx, async (owned) => {
               const claim = await consumePairingToken(pairingToken, instanceId, owned);
               if (claim.kind !== "consumed") return claim;
+              // Re-read the Peer row INSIDE the owned transaction (see above): a
+              // revoke committed before this read must be SEEN and refused, not
+              // overwritten. Throwing aborts the owned transaction, so the consume
+              // rolls back with it.
+              const current = await (databases as any).flair.Peer.get(instanceId, owned);
+              if (current?.status === "revoked") throw new PeerRevokedDuringRepairError();
               try {
-                await writeRePairedPeer(owned);
+                await writeRePairedPeer(owned, current ?? existing);
               } catch (err) {
                 // Rethrow so the owned transaction ABORTS: the consume rolls back
                 // with the peer write (both commit or neither does). Tagged so the
@@ -626,10 +638,16 @@ export class FederationPair extends Resource {
           if (err instanceof PeerWriteFailedError) {
             const cause: any = err.cause;
             console.error(
-              `[federation] POST /FederationPair re-pair: the Peer write failed; the owned transaction aborted, so the pairing token is NOT consumed (still usable). ` +
+              `[federation] POST /FederationPair re-pair: the Peer write failed; the owned transaction aborted, so the pairing token is NOT consumed (unconsumed and retryable while valid). ` +
                 `${cause?.constructor?.name ?? "Error"}: ${cause?.message ?? cause}`,
             );
             return peerWriteFailedRefusal();
+          }
+          if (err instanceof PeerRevokedDuringRepairError) {
+            console.error(
+              "[federation] POST /FederationPair re-pair: the Peer row was revoked before the owned transaction read it; the owned transaction aborted, so the pairing token is NOT consumed.",
+            );
+            return peerRevokedRefusal();
           }
           throw err;
         }
@@ -657,11 +675,11 @@ export class FederationPair extends Resource {
 
       // Consume the token under its per-key lock (flair#2333): the claim is
       // check-then-consume, so two pairings on this node using the same token
-      // must not both see it unconsumed. The lock is this ONE Flair node's
+      // cannot both commit a successful claim. The lock is this ONE Flair node's
       // PairingToken store lock, so it excludes concurrent pairings on this node; it
       // is not shared across the nodes of a Fabric instance (see the PR body).
-      // The first pairing consumes the token and records the peer; a pairing
-      // that presents the same, now-consumed token is refused.
+      // The first pairing consumes the token and records the peer; the second
+      // pairing is refused after the first commits.
       //
       // The consume AND the Peer write run in a FRESH OWNED transaction that is
       // COMMITTED before the lock releases (withOwnedTransaction). Harper wraps
@@ -771,14 +789,28 @@ class PeerWriteFailedError extends Error {
 }
 
 /**
+ * A re-pair's Peer row was revoked before its owned transaction re-read it
+ * (flair#2333). The transaction aborts, so the token claim that ran with it
+ * rolls back and the token is left unconsumed; the caller answers the revoked
+ * refusal, not a bare 500.
+ */
+class PeerRevokedDuringRepairError extends Error {
+  constructor() {
+    super("re-pair Peer row revoked inside the owned transaction");
+    this.name = "PeerRevokedDuringRepairError";
+  }
+}
+
+/**
  * 503 for a re-pair whose Peer write failed: the owned transaction aborted, so
- * nothing committed — the pairing token is unconsumed and still usable, and no
- * peer write landed. Retry.
+ * NEITHER the token consume nor the Peer write committed (the request's replay
+ * nonce commits earlier, separately) — the pairing token is unconsumed and
+ * retryable while valid, and no peer write landed. Retry.
  */
 function peerWriteFailedRefusal(): Response {
   return new Response(JSON.stringify({
     error: "peer_write_failed",
-    message: "the re-pair's Peer write failed; nothing was committed — the pairing token is unconsumed and still usable, retry",
+    message: "the re-pair's Peer write failed; neither the token consume nor the Peer write committed — the pairing token is unconsumed and retryable while valid, retry",
   }), { status: 503, headers: { "content-type": "application/json" } });
 }
 

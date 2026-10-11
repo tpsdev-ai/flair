@@ -202,7 +202,7 @@ describe("FederationPair.post — several Instance rows refuse BEFORE the token,
       expect(log).toContain(ROW_A.id);
       expect(log).toContain(ROW_B.id);
 
-      // The check ran FIRST: the one-time token is still usable...
+      // The check ran FIRST: the one-time token is unconsumed and retryable while valid...
       expect(tokens.get(token)?.consumedBy).toBeUndefined();
       expect(tokens.get(token)?.consumedAt).toBeUndefined();
       // ...and no peer was recorded from a pairing that did not happen.

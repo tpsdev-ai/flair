@@ -12,6 +12,7 @@ import nacl from "tweetnacl";
 import { signBodyFresh } from "../../resources/federation-crypto.js";
 import { ensureFlairPairInitiatorRole } from "../../src/cli";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { componentWithFailingRepairPeerWrite, type FailingComponent } from "../helpers/host-pointer-failing-component";
 
 const sfx = Date.now().toString(36);
 const now = () => new Date().toISOString();
@@ -19,6 +20,7 @@ const later = (ms: number) => new Date(Date.now() + ms).toISOString();
 const b64url = (bytes: Uint8Array) => Buffer.from(bytes).toString("base64url");
 
 let harper: HarperInstance;
+let component: FailingComponent;
 let pauseDir: string;
 
 /** Refuse any target that is not the ephemeral instance this file started. */
@@ -160,7 +162,12 @@ beforeAll(async () => {
   process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION = "1";
   process.env.FLAIR_TEST_PAUSE_DIR = pauseDir;
   try {
-    harper = await startHarper();
+    // The whole file runs against a composed copy of the built component that
+    // adds the failing re-pair Peer-write module (test/helpers/
+    // host-pointer-failing-component.ts). The module is inert until a test arms
+    // its marker file, so every other case runs production code paths.
+    component = componentWithFailingRepairPeerWrite();
+    harper = await startHarper({ cwd: component.dir });
   } finally {
     for (const [key, value] of Object.entries(saved)) {
       if (value === undefined) delete process.env[key];
@@ -172,6 +179,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (harper) await stopHarper(harper);
+  if (component) component.cleanup();
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
 });
 
@@ -443,7 +451,7 @@ describe("flair#2333 — the token lock releases only after the consume commits:
     const bBody = await (competed as Response).json() as any;
     console.log("H1c pair bodies:", JSON.stringify({ a: aBody, b: bBody }));
     expect(aBody?.paired, `the first pairing paired its peer: ${JSON.stringify(aBody)}`).toBe(true);
-    expect((competed as Response).status, `the second pairing is refused: ${JSON.stringify(bBody)}`).toBe(401);
+    expect((competed as Response).status, `the second pairing is refused after the first commits: ${JSON.stringify(bBody)}`).toBe(401);
     expect(bBody?.error).toBe("invalid_or_expired_pairing_token");
     const rows = [await readPeer(peerA), await readPeer(peerB)].filter(Boolean);
     expect(rows.length, "exactly one peer row is written").toBe(1);
@@ -481,4 +489,106 @@ describe("flair#2333 — the token lock releases only after the consume commits:
     expect(await readPeer(peer2), "the token spent on the re-pair pairs no new peer").toBeNull();
     expect((await readToken(token))?.consumedBy, "the token records the re-paired peer").toBe(peer);
   }, 90_000);
+});
+
+// ─── A re-pair's token consume and Peer write commit TOGETHER (flair#2333) ─────
+//
+// The consume AND the Peer write run in one OWNED transaction that commits before
+// the token lock releases. This drives a REAL Peer-write failure there through the
+// composed test-only component (a zz-test module that fails one Peer.put when the
+// test arms a marker file) — the unit-isolated Map model in
+// test/unit-isolated/federation-pair-repair-atomic-2333.test.ts is not enough. The
+// failing write lands AFTER the token consume is STAGED, so "the token is left
+// unconsumed" only holds when the consume rolls back WITH it. Mutation — move the
+// Peer write out of the owned transaction (into the request transaction) — makes
+// the consume commit alone and turns this case red.
+
+describe("flair#2333 — a failed re-pair Peer write leaves the token unconsumed (real Harper)", () => {
+  it("Peer.put rejecting after the consume is staged → 503 peer_write_failed, both rows unchanged, then the retry with the same token pairs once", async () => {
+    const k = nacl.sign.keyPair();
+    const peer = `repair-fail-${sfx}`;
+    const pub = b64url(k.publicKey);
+    await seedPeer(peer, pub); // peer exists → the re-pair path
+    const token = `pt-repair-fail-${sfx}`;
+    await seedToken(token);
+    const peerBefore = await readPeer(peer);
+    const tokenBefore = await readToken(token);
+    expect(tokenBefore, "the pairing token was seeded").not.toBeNull();
+    expect(tokenBefore.consumedBy, "the pairing token starts unconsumed").toBeFalsy();
+
+    // Arm the composed seam: the NEXT Peer.put for this peer fails, inside the
+    // owned transaction, after the token consume has been staged.
+    writeFileSync(join(pauseDir, `arm.repair-peer-write-fail.${peer}`), "");
+
+    const res = await pairRequest(pairBody(peer, pub, k.secretKey, token));
+    const body = await res.json() as any;
+    console.log("re-pair failed-write body:", JSON.stringify(body));
+    // Refused by name — not a bare 500.
+    expect(res.status, JSON.stringify(body)).toBe(503);
+    expect(body.error).toBe("peer_write_failed");
+    // The consume rolled back WITH the failed write: BOTH full rows are unchanged.
+    expect(await readPeer(peer), "the full Peer row is unchanged").toEqual(peerBefore);
+    expect(await readToken(token), "the full PairingToken row is unchanged (unconsumed)").toEqual(tokenBefore);
+
+    // A retry with the SAME token, still valid, pairs once (the one-shot seam is spent).
+    const retry = await pairRequest(pairBody(peer, pub, k.secretKey, token));
+    const retryBody = await retry.json() as any;
+    console.log("re-pair retry body:", JSON.stringify(retryBody));
+    expect(retry.status, JSON.stringify(retryBody)).toBe(200);
+    expect(retryBody.paired).toBe(true);
+    expect((await readPeer(peer))?.status).toBe("paired");
+    expect((await readToken(token))?.consumedBy, "the retry consumed the token").toBe(peer);
+  }, 90_000);
+
+  it("CONTROL: a re-pair with the seam unarmed pairs normally and consumes the token (real Harper)", async () => {
+    const k = nacl.sign.keyPair();
+    const peer = `repair-ok-${sfx}`;
+    const pub = b64url(k.publicKey);
+    await seedPeer(peer, pub);
+    const token = `pt-repair-ok-${sfx}`;
+    await seedToken(token);
+    const res = await pairRequest(pairBody(peer, pub, k.secretKey, token));
+    const body = await res.json() as any;
+    expect(res.status, JSON.stringify(body)).toBe(200);
+    expect(body.paired).toBe(true);
+    expect((await readPeer(peer))?.status).toBe("paired");
+    expect((await readToken(token))?.consumedBy).toBe(peer);
+  }, 60_000);
+});
+
+// ─── A re-pair re-reads the Peer row INSIDE its owned transaction (flair#2333) ─
+//
+// The token-supplying re-pair reads the Peer row before its owned transaction. If
+// it reused that row, a revoke committed in between would be overwritten to
+// "paired". The token path re-reads the row inside the owned transaction, so the
+// revoke is SEEN and refused; refusing throws, which aborts the owned transaction
+// and rolls the staged consume back. Mutation — drop the in-transaction re-read —
+// makes the re-pair resurrect the revoked row and turns this case red.
+
+describe("flair#2333 — a re-pair re-reads the Peer row inside its owned transaction (real Harper)", () => {
+  it("a revoke committed before the owned read is refused 403, and the token stays unconsumed (federation-pair-repair-token-pre)", async () => {
+    const k = nacl.sign.keyPair();
+    const peer = `h3b-peer-${sfx}`;
+    const pub = b64url(k.publicKey);
+    await seedPeer(peer, pub); // peer exists → the re-pair path
+    const token = `pt-h3b-${sfx}`;
+    await seedToken(token);
+    // The pause sits AFTER the re-pair's pre-transaction read of the Peer row and
+    // BEFORE its owned transaction; the competitor's revoke commits here.
+    const { response, competed, released, paused } = await withPaused(
+      "federation-pair-repair-token-pre",
+      () => pairRequest(pairBody(peer, pub, k.secretKey, token)),
+      () => revokePeer(peer),
+    );
+    expect(paused, "the re-pair was not paused before its owned transaction").toBe(true);
+    expect(released, "the re-pair was not released by this test").toBe("go");
+    expect(competed?.status, "the competing revoke was not applied").toBe(200);
+    expect(competed?.row?.status, "the competing revoke's own row state is revoked").toBe("revoked");
+    const resBody = await response.json() as any;
+    console.log("federation-pair-repair-token-pre re-pair body:", JSON.stringify(resBody));
+    expect(response.status, JSON.stringify(resBody)).toBe(403);
+    expect(resBody.error).toBe("peer_revoked");
+    expect((await readPeer(peer))?.status, "the concurrent revoke is kept").toBe("revoked");
+    expect((await readToken(token))?.consumedBy, "the refused re-pair consumed no token").toBeFalsy();
+  }, 60_000);
 });
