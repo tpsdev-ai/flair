@@ -2,9 +2,13 @@
  * deploy-discovery-2283.test.ts — flair#2283.
  *
  * `flair deploy`'s self-verify must run the SAME discovery discriminator
- * `flair mcp enable` runs (src/lib/mcp-enable.ts), so a deploy that ships an
- * instance configured for MCP OAuth cannot report success while the MCP
- * authorization server is absent.
+ * `flair mcp enable` runs (src/lib/mcp-enable.ts). It compares the target's
+ * discovery-document strings against the origin the deploy shipped to — an issuer
+ * the deploy knows independently of the document — plus the probed address, so a
+ * deploy that ships an instance configured for MCP OAuth cannot report success
+ * while the document names flair's own authorization server. A document naming an
+ * unknown token endpoint, or one that is not JSON, is reported as a warning, never
+ * as a failure and never as a pass.
  *
  * Part A drives `verifyDeployedMcpDiscovery` — the deploy self-verify's check —
  * against a REAL HTTP server answering each document shape.
@@ -63,12 +67,12 @@ afterAll(() => {
 });
 
 describe("verifyDeployedMcpDiscovery (real HTTP)", () => {
-  test("a live MCP authorization server passes", async () => {
+  test("a document advertising the MCP token endpoint of the shipped origin passes", async () => {
     shape = "plugin-live";
     await expect(verifyDeployedMcpDiscovery({ url: origin, mcpOAuthConfigured: true })).resolves.toBeUndefined();
   });
 
-  test("a configured target whose discovery names flair's own AS fails, naming the remedy", async () => {
+  test("a configured target whose document names flair's own AS fails, naming the remedy", async () => {
     shape = "plugin-absent";
     await expect(verifyDeployedMcpDiscovery({ url: origin, mcpOAuthConfigured: true })).rejects.toThrow(
       /MCP authorization server is absent/,
@@ -80,7 +84,7 @@ describe("verifyDeployedMcpDiscovery (real HTTP)", () => {
     await expect(verifyDeployedMcpDiscovery({ url: origin, mcpOAuthConfigured: false })).resolves.toBeUndefined();
   });
 
-  test("an unrecognized document warns rather than throwing", async () => {
+  test("a document naming an unrecognized token endpoint warns rather than throwing", async () => {
     shape = "unrecognized";
     await expect(verifyDeployedMcpDiscovery({ url: origin, mcpOAuthConfigured: true })).resolves.toBeUndefined();
   });

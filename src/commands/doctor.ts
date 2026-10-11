@@ -8,7 +8,7 @@
  */
 import { Command } from "commander";
 import { makeReadInstanceIds } from "./keys.js";
-import { COMPONENT_ENV_FILENAME, PUBLIC_URL_KEY, describePublicUrlFinding, readEnvValue } from "../component-env.js";
+import { COMPONENT_ENV_FILENAME, MCP_ISSUER_KEY, PUBLIC_URL_KEY, describePublicUrlFinding, readEnvValue } from "../component-env.js";
 import { readTargetMcpRedirectFinding, mcpOAuthEnabledFromComponentEnv } from "../lib/mcp-oauth-env.js";
 import { AgentGateState, checkClaudeMdBootstrap, checkContinuityCaptureHooks, continuityWriteBlockers, describeAgentGateFinding, describeAgentHomeFinding, describeAgentIdRuleFinding, effectiveFlairUrl, embeddingsSkipRemedy, fixClaudeMdBootstrap, fixCommandAgentHint, fixContinuityCaptureHooks, fixSessionStartHook, inspectSessionStartHook, orphanInstanceSeedAdvisory, partitionKeyIds, planAgentIterations, readClientMcpBlock, resolveFixAgentId, resolveWireFlairUrl, upgradeSessionStartHookCommand } from "../doctor-client.js";
 import { FleetPresenceRow, markStale, sortOldestVersionFirst } from "../fleet-presence.js";
@@ -877,6 +877,7 @@ program
         if (existsSync(componentEnvPath)) componentEnvText = readFileSync(componentEnvPath, "utf-8");
       } catch { /* unreadable → treat as absent */ }
       const componentEnvValue = readEnvValue(componentEnvText, PUBLIC_URL_KEY);
+      const componentMcpIssuer = readEnvValue(componentEnvText, MCP_ISSUER_KEY);
 
       const finding = describePublicUrlFinding({
         advertisedIssuer,
@@ -908,17 +909,19 @@ program
       }
 
       // 3e. MCP OAuth discovery (flair#2283) — the SAME discriminator `flair mcp
-      // enable` runs (src/lib/mcp-enable.ts), imported rather than re-derived, so
-      // doctor reports which authorization server actually answers the instance's
-      // discovery document. A configured instance whose discovery names flair's
-      // own AS is a named failure; an unreadable document is reported as
-      // unverified, never as a pass. "Configured" is the locally inferred
-      // FLAIR_MCP_OAUTH the instance ships (Harper's loadEnv reads the component
-      // `.env`), overlaid with the operator environment. The configured public
-      // URL is passed alongside so the discriminator compares the document's
-      // token endpoint against the issuer it advertises, not the probed address.
+      // enable` runs (src/lib/mcp-enable.ts), imported rather than re-derived. It
+      // compares the instance's discovery-document strings against the issuer(s)
+      // the CLI knows independently of the document — the shipped/ambient
+      // FLAIR_PUBLIC_URL and FLAIR_MCP_ISSUER, plus the probed origin — so a
+      // configured instance whose document is flair's own AS is a named failure
+      // and an unreadable or unrecognized document is reported as unverified,
+      // never as a pass. "Configured" is the locally inferred FLAIR_MCP_OAUTH the
+      // instance ships (Harper's loadEnv reads the component `.env`), overlaid
+      // with the operator environment.
       const discovery = await discriminateMcpOAuthDiscovery(baseUrl, {
-        expectedIssuer: componentEnvValue ?? process.env.FLAIR_PUBLIC_URL ?? undefined,
+        expectedIssuers: [componentMcpIssuer, componentEnvValue, process.env.FLAIR_MCP_ISSUER, process.env.FLAIR_PUBLIC_URL].filter(
+          (issuer): issuer is string => typeof issuer === "string" && issuer.trim() !== "",
+        ),
       });
       const discoveryReport = reportMcpOAuthDiscovery(discovery, mcpOAuthEnabledFromComponentEnv(componentEnvText, process.env));
       const discoveryIcons: Record<McpOAuthDiscoverySeverity, string> = {

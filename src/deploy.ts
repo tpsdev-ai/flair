@@ -1165,16 +1165,18 @@ export async function verifyDeployServing(o: VerifyDeployOptions): Promise<void>
 }
 
 /**
- * flair#2283 — post-deploy verification that the target's OAuth discovery names
- * the `@harperfast/oauth` MCP authorization server.
+ * flair#2283 — post-deploy verification that the target's OAuth discovery
+ * advertises the MCP token endpoint of the origin the deploy shipped to.
  *
  * Runs the SAME discriminator `flair mcp enable` runs (src/lib/mcp-enable.ts),
- * imported rather than re-derived. A target whose shipped component `.env` sets
- * `FLAIR_MCP_OAUTH` (so this deploy is configured for MCP OAuth) but whose
- * discovery names flair's own AS is a named failure — the deploy must not report
- * success on a surface a client cannot authorize against. An unreadable document,
- * or one naming an unrecognized token endpoint, is reported as unverified, never
- * as a pass.
+ * imported rather than re-derived: it compares the discovery document's strings
+ * against the origin the deploy shipped to (an issuer this deploy knows
+ * independently of the document) plus the probed address. A target whose shipped
+ * component `.env` sets `FLAIR_MCP_OAUTH` (so this deploy is configured for MCP
+ * OAuth) but whose document names flair's own authorization server is a named
+ * failure — the deploy must not report success on a surface a client cannot
+ * authorize against. An unreadable, non-JSON, or unrecognized document is
+ * reported as unverified, never as a pass.
  *
  * The deploy cannot read the TARGET's environment; `mcpOAuthConfigured` is the
  * `.env` it shipped, so a target enabled only through Fabric's environment panel
@@ -1186,7 +1188,7 @@ export async function verifyDeployedMcpDiscovery(o: {
   onProgress?: (msg: string) => void;
   fetchImpl?: typeof fetch;
 }): Promise<void> {
-  const discovery = await discriminateMcpOAuthDiscovery(o.url, { fetchImpl: o.fetchImpl, expectedIssuer: o.url });
+  const discovery = await discriminateMcpOAuthDiscovery(o.url, { fetchImpl: o.fetchImpl, expectedIssuers: [o.url] });
   const report = reportMcpOAuthDiscovery(discovery, o.mcpOAuthConfigured);
   if (report.severity === "error") {
     throw new Error(`deploy verification: ${report.lines.join(" ")}`);

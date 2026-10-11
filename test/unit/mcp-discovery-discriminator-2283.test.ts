@@ -1,16 +1,20 @@
 /**
  * mcp-discovery-discriminator-2283.test.ts — flair#2283.
  *
- * The discovery discriminator answers one question: which authorization server
- * answers an origin's RFC 8414 document? flair serves its own OAuth 2.1 AS
- * (`<origin>/OAuthToken`) when the MCP flag is off; the `@harperfast/oauth`
- * plugin answers (`<origin>/oauth/mcp/token`) when it is on. `flair mcp enable`
- * runs the check inside `selfVerifyMcpMetadata`; `flair doctor` and `flair
- * deploy` import `discriminateMcpOAuthDiscovery` so all three read one function.
+ * The discovery discriminator compares an RFC 8414 document's STRINGS against an
+ * issuer the CALLER knows independently of the document — the configured
+ * FLAIR_PUBLIC_URL / FLAIR_MCP_ISSUER, or the origin the caller verifies. flair
+ * serves its own OAuth 2.1 AS (`<issuer>/OAuthToken`) when the MCP flag is off;
+ * the `@harperfast/oauth` plugin answers (`<issuer>/oauth/mcp/token`) when it is
+ * on. A positive result requires the document's OWN `issuer` to equal a
+ * caller-known candidate; the document's own `issuer` is never a candidate on its
+ * own. `flair mcp enable` runs the check inside `selfVerifyMcpMetadata`; `flair
+ * doctor` and `flair deploy` import `discriminateMcpOAuthDiscovery` so all three
+ * read one function.
  *
  * These drive it against a REAL HTTP server that answers each of the document
  * shapes on the wire — not a stubbed `fetch` — so the parse, the HTTP-status
- * handling and the classification are exercised together.
+ * handling and the comparison are exercised together.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
@@ -127,11 +131,13 @@ describe("discriminateMcpOAuthDiscovery (real HTTP)", () => {
   // address turned a configured instance serving flair's own AS into
   // "unrecognized" (and, symmetrically, let an unrelated endpoint read "live").
   // These drive the document's OWN issuer, distinct from the probed address.
-  test("plugin-absent when the document advertises a PUBLIC issuer distinct from the probed address", async () => {
+  test("plugin-absent when the document advertises a public issuer the caller knows, distinct from the probed address", async () => {
     shape = "plugin-absent";
     advertisedIssuer = "https://public.flair.example.com";
     try {
-      const result = await discriminateMcpOAuthDiscovery(origin);
+      const result = await discriminateMcpOAuthDiscovery(origin, {
+        expectedIssuers: ["https://public.flair.example.com"],
+      });
       expect(result.state).toBe("plugin-absent");
       expect(result.issuer).toBe("https://public.flair.example.com");
       expect(result.tokenEndpoint).toBe("https://public.flair.example.com/OAuthToken");
@@ -140,11 +146,13 @@ describe("discriminateMcpOAuthDiscovery (real HTTP)", () => {
     }
   });
 
-  test("plugin-live when the document advertises a PUBLIC issuer distinct from the probed address", async () => {
+  test("plugin-live when the document advertises a public issuer the caller knows, distinct from the probed address", async () => {
     shape = "plugin-live";
     advertisedIssuer = "https://public.flair.example.com";
     try {
-      const result = await discriminateMcpOAuthDiscovery(origin);
+      const result = await discriminateMcpOAuthDiscovery(origin, {
+        expectedIssuers: ["https://public.flair.example.com"],
+      });
       expect(result.state).toBe("plugin-live");
       expect(result.tokenEndpoint).toBe("https://public.flair.example.com/oauth/mcp/token");
     } finally {
@@ -152,17 +160,37 @@ describe("discriminateMcpOAuthDiscovery (real HTTP)", () => {
     }
   });
 
-  test("an issuer-less document is judged against the configured public URL the caller passes", async () => {
+  // flair#2283 round 2: the document's OWN issuer is not a trust anchor. A fully
+  // "plugin-shaped" document (issuer = X, token_endpoint = X/oauth/mcp/token) whose
+  // X is not an issuer the caller knows is NOT plugin-live — the caller must know X
+  // independently of the document. Re-adding the document's issuer as a candidate
+  // (the mutation this pins) makes this case read "plugin-live".
+  test("a plugin-shaped document whose issuer the caller does not know is not plugin-live", async () => {
+    shape = "plugin-live"; // issuer = advertised; token = advertised/oauth/mcp/token
+    advertisedIssuer = "https://stranger.flair.example.com";
+    try {
+      const result = await discriminateMcpOAuthDiscovery(origin, {
+        expectedIssuers: ["https://expected.flair.example.com"],
+      });
+      expect(result.state).not.toBe("plugin-live");
+      expect(result.state).toBe("unrecognized");
+      expect(result.detail).toContain("https://stranger.flair.example.com");
+    } finally {
+      advertisedIssuer = null;
+    }
+  });
+
+  test("an issuer-less document cannot be positively classified, even when the caller supplies the public issuer", async () => {
     shape = "plugin-live";
     omitIssuer = true;
     advertisedIssuer = "https://public.flair.example.com";
     try {
+      // The document's endpoints derive from the public URL, but with no `issuer`
+      // string of its own there is nothing to bind to a caller-known issuer.
       const withExpected = await discriminateMcpOAuthDiscovery(origin, {
-        expectedIssuer: "https://public.flair.example.com",
+        expectedIssuers: ["https://public.flair.example.com"],
       });
-      expect(withExpected.state).toBe("plugin-live");
-      // With neither a document issuer nor a configured URL, only the probed
-      // address remains — and this document's endpoints are not derived from it.
+      expect(withExpected.state).toBe("unrecognized");
       const withoutExpected = await discriminateMcpOAuthDiscovery(origin);
       expect(withoutExpected.state).toBe("unrecognized");
     } finally {
@@ -291,7 +319,7 @@ describe("flair doctor runs the discriminator through the real command", () => {
   );
 
   test(
-    "a live MCP authorization server is reported as a pass",
+    "a document advertising the MCP token endpoint of the probed origin is reported as a pass",
     async () => {
       shape = "plugin-live";
       const result = await runDoctor({ FLAIR_MCP_OAUTH: "true" });
@@ -307,7 +335,7 @@ describe("flair doctor runs the discriminator through the real command", () => {
       shape = "plugin-absent";
       advertisedIssuer = "https://public.flair.example.com";
       try {
-        const result = await runDoctor({ FLAIR_MCP_OAUTH: "true" });
+        const result = await runDoctor({ FLAIR_MCP_OAUTH: "true", FLAIR_PUBLIC_URL: "https://public.flair.example.com" });
         expect(result.stdout).toContain("FLAIR_MCP_OAUTH is set but the MCP authorization server is absent");
         expect(result.status).not.toBe(0);
       } finally {

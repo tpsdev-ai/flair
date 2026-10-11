@@ -183,8 +183,10 @@ registered identities.
    ```
 
    It sets `FLAIR_MCP_OAUTH=true` in the target's process environment, restarts,
-   and confirms the metadata advertises the expected token endpoint, using the
-   same discovery check as `flair doctor` and `flair deploy`.
+   and verifies the target's and the public document's issuer: the target's own
+   discovery document must advertise that issuer with the MCP token endpoint, and
+   the public document read at that issuer must name the SAME issuer and its token
+   endpoint. FLAIR_MCP_OAUTH reads back `true` only as far as that read-back shows.
 
 ## Sherlock's 4 requirements — how they are met
 

@@ -5,9 +5,11 @@
  * that still holds the old staged value (`FLAIR_MCP_OAUTH=1`) — a value the
  * `@harperfast/oauth` component deletes, leaving its authorization server
  * unmounted. The flag sets that ONE variable to `true` in the target's process
- * environment (the env-secrets primitive), restarts, and confirms the MCP
- * authorization server answers, without re-running the IdP credentials or the
- * identity mapping.
+ * environment (the env-secrets primitive), restarts, and verifies both the
+ * target's own discovery document and the PUBLIC document read at the verified
+ * issuer name that issuer with the MCP token endpoint — the shared discriminator,
+ * bound to an issuer the caller knows. It does not run the IdP-credential intake
+ * nor apply CIMD changes.
  *
  * These drive `refreshMcpOAuthFlag` with an injected fetch: ops calls go to a
  * stub (a real RSA public key, so the value is sealed through the real
@@ -61,17 +63,30 @@ afterAll(() => {
   server.stop(true);
 });
 
-/** An ops-API stub + a delegating fetch. `disablePush` makes the capability probe fail.
- *  `otherIssuer` answers the discovery path for any host that is NOT `INSTANCE` with
- *  a live MCP document advertising that other issuer — the "a live AS elsewhere"
- *  shape blocker 2 describes. */
-function opsFetch(opts: { disablePush?: boolean; otherIssuer?: string } = {}) {
+/** An ops-API stub + a delegating fetch.
+ *  - `disablePush` makes the capability probe fail.
+ *  - `otherIssuer` answers the discovery path for any host that is NOT `INSTANCE`
+ *    with a live MCP document advertising that other issuer — the "a live AS
+ *    elsewhere" shape blocker 2 describes.
+ *  - `discovery(url)` answers the discovery path first when it returns a Response.
+ *  - `restartWithoutEffect` acknowledges a restart but never changes the PID, so
+ *    the restart verification must fail.
+ *
+ *  The ops fake advances the Harper PID ONLY when a `restart` was actually
+ *  requested: a run that never restarts (or restarts ineffectively) sees an
+ *  unchanged PID, so the verification cannot pass on a no-op. */
+function opsFetch(
+  opts: { disablePush?: boolean; otherIssuer?: string; discovery?: (url: URL) => Response | undefined; restartWithoutEffect?: boolean } = {},
+) {
   const sent: any[] = [];
-  let pid = 100;
+  let restarts = 0;
   const impl = (async (input: any, init: any) => {
     const url = new URL(typeof input === "string" ? input : input.url);
-    // The discovery read goes to the REAL server; everything else is the ops stub.
+    // The discovery read is answered by `discovery`, `otherIssuer`, or the REAL
+    // server; everything else is the ops stub.
     if (url.pathname === "/.well-known/oauth-authorization-server") {
+      const custom = opts.discovery?.(url);
+      if (custom) return custom;
       if (opts.otherIssuer && url.hostname !== new URL(INSTANCE).hostname) {
         return Response.json({ issuer: opts.otherIssuer, token_endpoint: `${opts.otherIssuer}/oauth/mcp/token` });
       }
@@ -86,7 +101,11 @@ function opsFetch(opts: { disablePush?: boolean; otherIssuer?: string } = {}) {
         : Response.json({ public_key: PUB });
     }
     if (op === "search_by_value") return Response.json([{ name: body.search_value, processEnv: true }]);
-    if (op === "system_information") return Response.json({ harperdb_processes: { core: [{ pid: pid++ }] } });
+    if (op === "restart") {
+      if (!opts.restartWithoutEffect) restarts++;
+      return Response.json({ ok: true });
+    }
+    if (op === "system_information") return Response.json({ harperdb_processes: { core: [{ pid: 100 + restarts }] } });
     return Response.json({ ok: true });
   }) as unknown as typeof fetch;
   return { impl, sent };
@@ -112,7 +131,7 @@ function base() {
 const FAST = { waitForOpsApiTimeoutMs: 500, waitForOpsApiPollMs: 10 };
 
 describe("refreshMcpOAuthFlag (flair#2283 item 2)", () => {
-  test("pushes FLAIR_MCP_OAUTH=true, restarts, and confirms the MCP AS is live", async () => {
+  test("pushes FLAIR_MCP_OAUTH=true, restarts, and the public document names the MCP token endpoint", async () => {
     shape = "plugin-live";
     const { impl, sent } = opsFetch();
     const result = await refreshMcpOAuthFlag(base(), { fetchImpl: impl, ...FAST });
@@ -175,5 +194,46 @@ describe("refreshMcpOAuthFlag (flair#2283 item 2)", () => {
     expect(result.ok).toBe(true);
     expect(result.dryRun).toBe(true);
     expect(sent).toEqual([]);
+  });
+
+  // flair#2283 round 2: after the target binding, the PUBLIC document must name
+  // the SAME verified issuer and its token endpoint. Here the target is fine (its
+  // document advertises PUBLIC with the MCP token endpoint) but the public document
+  // names a DIFFERENT issuer — a check that trusted the document's own issuer would
+  // call this ok. It must be refused, not ok:true.
+  test("a public document naming a different issuer than the verified target is refused, not ok:true", async () => {
+    const PUBLIC = "https://public.example.com";
+    const STRANGER = "https://stranger.example.com";
+    const { impl } = opsFetch({
+      discovery: (url) => {
+        if (url.hostname === new URL(INSTANCE).hostname) {
+          // The target's own document advertises the issuer being verified.
+          return Response.json({ issuer: PUBLIC, token_endpoint: `${PUBLIC}/oauth/mcp/token` });
+        }
+        if (url.hostname === new URL(PUBLIC).hostname) {
+          // The public document names a different issuer entirely.
+          return Response.json({ issuer: STRANGER, token_endpoint: `${STRANGER}/oauth/mcp/token` });
+        }
+        return undefined;
+      },
+    });
+    const result = await refreshMcpOAuthFlag({ ...base(), issuer: PUBLIC }, { fetchImpl: impl, ...FAST });
+    expect(result.ok).toBe(false);
+    expect(result.failedStep).toBe("self-verify");
+    // The target binding passed; the refusal names the public document's issuer.
+    expect(result.steps.find((s) => s.step === "issuer-target-binding")?.ok).toBe(true);
+    expect(result.steps.find((s) => s.step === "self-verify")?.ok).not.toBe(true);
+    expect(result.steps.find((s) => s.step === "self-verify")?.detail).toContain(STRANGER);
+  });
+
+  // flair#2283 item 2: the ops fake advances the PID only on a real restart, so an
+  // acknowledged-but-ineffective restart must fail the PID check rather than pass.
+  test("an acknowledged but ineffective restart fails the PID check", async () => {
+    shape = "plugin-live";
+    const { impl } = opsFetch({ restartWithoutEffect: true });
+    const result = await refreshMcpOAuthFlag(base(), { fetchImpl: impl, ...FAST });
+    expect(result.ok).toBe(false);
+    expect(result.failedStep).toBe("verify-restart");
+    expect(result.steps.find((s) => s.step === "verify-restart")?.ok).not.toBe(true);
   });
 });

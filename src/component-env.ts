@@ -46,6 +46,10 @@ export const COMPONENT_ENV_FILENAME = ".env";
 /** The one key `flair deploy` supplies. */
 export const PUBLIC_URL_KEY = "FLAIR_PUBLIC_URL";
 
+/** The component's MCP issuer origin, when the operator set one — the issuer the
+ *  `@harperfast/oauth` authorization server advertises. */
+export const MCP_ISSUER_KEY = "FLAIR_MCP_ISSUER";
+
 /**
  * Key names that must never appear in a `.env` flair GENERATES.
  *

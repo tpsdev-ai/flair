@@ -2,22 +2,22 @@
  * mcp-discovery-public-issuer-2283.test.ts — flair#2283, blocker 1, against REAL
  * Harper.
  *
- * The discriminator must classify a discovery document by the `issuer` the
- * DOCUMENT advertises, not by the address it was probed through. Flair advertises
- * `FLAIR_PUBLIC_URL` (its own AS) and `FLAIR_MCP_ISSUER` (the @harperfast/oauth
- * plugin's AS) — both PUBLIC origins — while doctor and deploy reach the instance
- * over loopback. Comparing the token endpoint against the probed loopback address
- * turned a configured instance serving flair's own AS into "unrecognized" instead
- * of the named failure, and a live plugin document into "unrecognized" too.
+ * The discriminator compares a discovery document's strings against an issuer the
+ * CALLER knows independently of the document (the configured `FLAIR_PUBLIC_URL` /
+ * `FLAIR_MCP_ISSUER`), while doctor and deploy reach the instance over loopback.
+ * Flair advertises `FLAIR_PUBLIC_URL` (its own AS) and `FLAIR_MCP_ISSUER` (the
+ * @harperfast/oauth plugin's AS) — both PUBLIC origins. Comparing the token
+ * endpoint against the probed loopback address alone turned a configured instance
+ * serving flair's own AS into "unrecognized" instead of the named failure, and a
+ * live plugin document into "unrecognized" too.
  *
  * This boots the SHIPPED component against a public issuer distinct from its local
  * address — the repo's hermetic Harper boot harness — and drives both the
- * discriminator directly and the real `flair doctor` command. Reverting the blocker
- * 1 fix (comparing against `origin` instead of the document's issuer) makes both
- * cases fail: the document reads "unrecognized" and doctor reports unconfirmed.
+ * discriminator (with the public issuer supplied as a caller-known candidate) and
+ * the real `flair doctor` command.
  */
 import { describe, test, expect, beforeAll, afterEach, afterAll } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync, copyFileSync, cpSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, copyFileSync, cpSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -134,18 +134,19 @@ describe("flair#2283 — a configured instance whose document advertises a PUBLI
       expect(doc.issuer).toBe(FLAIR_PUBLIC);
       expect(doc.token_endpoint).toBe(`${FLAIR_PUBLIC}/OAuthToken`);
 
-      // The discriminator, probed over loopback, must still recognise flair's own
-      // AS by the issuer the document advertises.
-      const observation = await discriminateMcpOAuthDiscovery(harper.httpURL);
+      // The discriminator, probed over loopback, recognises flair's own AS by the
+      // issuer the document advertises — supplied here as a caller-known candidate.
+      const observation = await discriminateMcpOAuthDiscovery(harper.httpURL, { expectedIssuers: [FLAIR_PUBLIC] });
       expect(observation.issuer).toBe(FLAIR_PUBLIC);
       expect(observation.state).toBe("plugin-absent");
       const report = reportMcpOAuthDiscovery(observation, true);
       expect(report.severity).toBe("error");
 
       // And the whole doctor command, run against the real instance, reports the
-      // named failure (not an unconfirmed "unrecognized" warning).
+      // named failure (not an unconfirmed "unrecognized" warning). The public
+      // origin is supplied to doctor's environment as the caller-known issuer.
       clearMcpEnv();
-      const doctor = runDoctor(harper.httpURL, { FLAIR_MCP_OAUTH: "true" });
+      const doctor = runDoctor(harper.httpURL, { FLAIR_MCP_OAUTH: "true", FLAIR_PUBLIC_URL: FLAIR_PUBLIC });
       expect(doctor.stdout).toContain("FLAIR_MCP_OAUTH is set but the MCP authorization server is absent");
       expect(doctor.stdout).not.toContain("could not be confirmed");
       expect(doctor.status).not.toBe(0);
@@ -170,14 +171,48 @@ describe("flair#2283 — a configured instance whose document advertises a PUBLI
       expect(doc.issuer).toBe(PLUGIN_ISSUER);
       expect(doc.token_endpoint).toBe(`${PLUGIN_ISSUER}/oauth/mcp/token`);
 
-      const observation = await discriminateMcpOAuthDiscovery(harper.httpURL);
+      const observation = await discriminateMcpOAuthDiscovery(harper.httpURL, { expectedIssuers: [PLUGIN_ISSUER] });
       expect(observation.issuer).toBe(PLUGIN_ISSUER);
       expect(observation.state).toBe("plugin-live");
 
       clearMcpEnv();
-      const doctor = runDoctor(harper.httpURL, { FLAIR_MCP_OAUTH: "true" });
+      const doctor = runDoctor(harper.httpURL, { FLAIR_MCP_OAUTH: "true", FLAIR_MCP_ISSUER: PLUGIN_ISSUER });
       expect(doctor.stdout).toContain("the metadata advertises the expected token endpoint");
       expect(doctor.stdout).not.toContain("FLAIR_MCP_OAUTH is set but the MCP authorization server is absent");
+    },
+    180_000,
+  );
+
+  // Item 3: the flag and the public issuers supplied through the component `.env`
+  // file — the file Harper's `loadEnv` reads (shipped config.yaml declares
+  // `loadEnv.files: .env`) — rather than this test's process environment. This
+  // proves the real instance reads them from the component directory and serves the
+  // plugin's document with that public issuer.
+  test(
+    "the flag and public issuers supplied through the component .env file (not process.env)",
+    async () => {
+      clearMcpEnv();
+      const workDir = makeWorkDir("flair-2283-env-");
+      writeFileSync(
+        join(workDir, ".env"),
+        [
+          "FLAIR_MCP_OAUTH=true",
+          `FLAIR_MCP_ISSUER=${PLUGIN_ISSUER}`,
+          "OAUTH_GITHUB_CLIENT_ID=public-issuer-2283-client",
+          "OAUTH_GITHUB_CLIENT_SECRET=public-issuer-2283-secret",
+          `OAUTH_GITHUB_REDIRECT_URI=${PLUGIN_ISSUER}/oauth`,
+          "",
+        ].join("\n"),
+      );
+      const harper = await startHarper({ cwd: workDir, harperBinDir: REPO_ROOT });
+      instances.push(harper);
+
+      const doc = await wellKnown(harper.httpURL);
+      expect(doc.issuer).toBe(PLUGIN_ISSUER);
+      expect(doc.token_endpoint).toBe(`${PLUGIN_ISSUER}/oauth/mcp/token`);
+
+      const observation = await discriminateMcpOAuthDiscovery(harper.httpURL, { expectedIssuers: [PLUGIN_ISSUER] });
+      expect(observation.state).toBe("plugin-live");
     },
     180_000,
   );

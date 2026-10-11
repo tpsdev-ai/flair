@@ -505,7 +505,7 @@ function printRefreshFlagSteps(result: RefreshMcpFlagResult): void {
   }
   console.log("");
   if (result.ok && !result.dryRun) {
-    console.log(`${render.icons.ok} ${render.wrap(render.c.bold, "FLAIR_MCP_OAUTH is now true on the target.")} Confirm with \`flair mcp status\`.`);
+    console.log(`${render.icons.ok} ${render.wrap(render.c.bold, "FLAIR_MCP_OAUTH reads back true in the target's process environment.")} Confirm with \`flair mcp status\`.`);
     console.log("");
   }
 }
