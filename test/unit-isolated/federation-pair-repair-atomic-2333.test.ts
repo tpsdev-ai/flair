@@ -14,9 +14,7 @@
  * case lives in test/integration/federation-peer-trust-2333.test.ts, which fails
  * the Peer write through a composed test-only component.
  *
- * On the round-4 head the re-pair peer write ran in the request transaction,
- * after the lock: the consume committed alone, so a failed peer write left the
- * token spent. Mutation — move the peer write back out of the owned transaction —
+ * Mutation — move the peer write back out of the owned transaction —
  * turns the "the token is NOT consumed" assertion red.
  */
 import { beforeEach, describe, expect, it, mock } from "bun:test";

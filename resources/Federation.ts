@@ -594,9 +594,7 @@ export class FederationPair extends Resource {
       // transaction, so the token is left unconsumed and this re-pair is refused by
       // name (a commit-time error propagates unnamed).
       //
-      // The token path re-reads the Peer row INSIDE its owned transaction: the row
-      // above was read before it, so a revoke committed in between would otherwise
-      // be overwritten. Both paths write the same row.
+      // Both paths write the same row.
       const writeRePairedPeer = (owned?: any, base: any = existing) => (databases as any).flair.Peer.put({
         ...base,
         endpoint: endpoint ?? base.endpoint,
@@ -617,10 +615,10 @@ export class FederationPair extends Resource {
             withOwnedTransaction(ctx, async (owned) => {
               const claim = await consumePairingToken(pairingToken, instanceId, owned);
               if (claim.kind !== "consumed") return claim;
-              // Re-read the Peer row INSIDE the owned transaction (see above): a
-              // revoke committed before this read must be SEEN and refused, not
-              // overwritten. Throwing aborts the owned transaction, so the consume
-              // rolls back with it.
+              // A revoke committed before the owned transaction's first read (its
+              // token read) is seen by the Peer re-read and refused with 403
+              // peer_revoked; a revoke committed after that read is not covered by
+              // this re-read. Throwing aborts the transaction and rolls back the consume.
               const current = await (databases as any).flair.Peer.get(instanceId, owned);
               if (current?.status === "revoked") throw new PeerRevokedDuringRepairError();
               try {
@@ -789,8 +787,8 @@ class PeerWriteFailedError extends Error {
 }
 
 /**
- * A re-pair's Peer row was revoked before its owned transaction re-read it
- * (flair#2333). The transaction aborts, so the token claim that ran with it
+ * A re-pair's Peer re-read found a revoked row (flair#2333).
+ * The transaction aborts, so the token claim that ran with it
  * rolls back and the token is left unconsumed; the caller answers the revoked
  * refusal, not a bare 500.
  */

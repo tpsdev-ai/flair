@@ -558,15 +558,14 @@ describe("flair#2333 — a failed re-pair Peer write leaves the token unconsumed
 
 // ─── A re-pair re-reads the Peer row INSIDE its owned transaction (flair#2333) ─
 //
-// The token-supplying re-pair reads the Peer row before its owned transaction. If
-// it reused that row, a revoke committed in between would be overwritten to
-// "paired". The token path re-reads the row inside the owned transaction, so the
-// revoke is SEEN and refused; refusing throws, which aborts the owned transaction
+// A revoke committed before the owned transaction's first read (its token read)
+// is seen by the Peer re-read and refused with 403 peer_revoked; a revoke committed
+// after that read is not covered by this re-read. Refusing aborts the transaction
 // and rolls the staged consume back. Mutation — drop the in-transaction re-read —
 // makes the re-pair resurrect the revoked row and turns this case red.
 
 describe("flair#2333 — a re-pair re-reads the Peer row inside its owned transaction (real Harper)", () => {
-  it("a revoke committed before the owned read is refused 403, and the token stays unconsumed (federation-pair-repair-token-pre)", async () => {
+  it("a revoke committed after the pre-transaction Peer read and before the owned transaction is refused 403 peer_revoked (federation-pair-repair-token-pre)", async () => {
     const k = nacl.sign.keyPair();
     const peer = `h3b-peer-${sfx}`;
     const pub = b64url(k.publicKey);
