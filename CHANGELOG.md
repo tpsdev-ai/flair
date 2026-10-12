@@ -18,6 +18,265 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.61.0] - 2026-10-12
+
+### Added
+
+- **The flair-client accepts host-source fields on memory writes and returns bound sources on non-admin agent reads (flair#1940).**
+
+  `memory.write()` gains the optional `hostSource`, `hostSourceScope` and
+  `sessionId` fields, forwarded only when supplied. For non-admin agent reads,
+  `search()`, `get()` and `list()` return a bound host source when one exists,
+  or `withheld` when the reader cannot see it. Read results carry stored
+  `sessionId` and `provenance` when present; `search()` also carries the record's
+  `author`. A `hostSource` is the writer's unverified claim
+  about an external source, stored with the writer's authenticated agent id;
+  Flair does not verify it.
+
+- **The Cursor wake runner attempts a launch receipt per handoff; the ack follows a successful write, a verified existing receipt, or a classified refusal (flair#1940).**
+
+  After a dispatch is handed to a Cursor Cloud Agent ("created" or "already"),
+  the runner attempts one memory as its own agent: a stable id derived from the
+  OrgEvent id, content naming only the dispatch id and the launched Cursor agent
+  id, and — when the Cursor agent id passes the server's host-source grammar —
+  `hostSource` `{ host: "cursor", kind: "launch", id, url? }` claiming where the
+  launch lives. The receipt is "sourced" only when that pointer was STORED: an
+  id the grammar refuses stores no pointer (an unsourced receipt, no host-source
+  citation), and a read or write failure can prevent the receipt entirely. The
+  `id` is the Cursor agent id: on create, the id Cursor returned (the requested
+  id when the response has no string id); on a 409 classified as an agent-id
+  conflict, the requested id. When the Cursor agent id and URL pass validation,
+  a create response adds the URL to the source pointer; a verified existing
+  receipt is left unchanged. Neither is derived from the dispatch text; the
+  write is private by default for a new receipt and omits `hostSourceScope`, so
+  its bound pointer is author-only. Live cycles validate a private Ed25519 key
+  before reading the feed and require signed Flair requests throughout; missing
+  or unusable signing credentials stop the cycle. Admin Basic credentials are
+  accepted only for the `--dry-run` mode, which performs no Cursor create, no
+  receipt write and no ack; its catchup read may create an `AgentReadPosition`.
+  Cursor launches use Cursor API Basic authentication with `CURSOR_API_KEY`. A
+  live cycle uses one signed Flair client for catchup and receipts; the exported
+  cycle takes no separate agent id or receipt store. The Cursor client is
+  selected from `--dry-run` and the Cursor config, not built from the Flair
+  client (a dry-run cycle performs no Cursor create, receipt write or ack). When
+  an active memory with a bound pointer is selected for bootstrap, bootstrap
+  prose cites that pointer to the author as `[via cursor/launch <id8>
+  (unverified)]`, and shows `[via withheld]` only to a non-author who can read
+  the active record with a bound pointer after its visibility changes — an
+  ordinary non-author cannot read this private row at all, and an admin can read
+  it but takes no pointer join — flair#2446. An existing readable row is verified as this runner's receipt only when its author, content, and host-source identity match.
+  A readable mismatch is reported as `receiptMismatched`, left untouched, and
+  not acknowledged. The ack follows a successful write or a verified existing
+  receipt — except for a receipt the runner treats as a non-retryable refusal
+  (400, 409, 413 or 422): the event is ackable without its receipt and reported
+  as `receiptRefused` with the status and an error token, when present. Skipped
+  events are ackable without a launch or receipt; a later failure can still ack
+  earlier successful or skipped events. Any other failed write leaves that event
+  unacknowledged and is reported as `receiptFailed`; it can be retried if
+  another cycle runs. `--once` schedules no retry. An invalid id omits the
+  pointer; when the id is valid, an invalid URL omits only the URL. Omissions
+  are logged through the supplied callback. Read or write failure can still
+  prevent the receipt.
+
+- **Native `/mcp` accepts host-source pointers and renders them in non-admin agent search results; bootstrap cites sources for non-admin agents (flair#1940).**
+
+  Native `/mcp` `memory_store` takes an optional `hostSource`
+  (`{ v: 1, host, kind, id, url? }`) plus `hostSourceScope` and `sessionId`; the server
+  validates the pointer with the same validator the REST write uses, and a store without them
+  is unchanged. For non-admin agents, native `/mcp` search results render a bound
+  pointer to a reader allowed to see it, or `withheld` when the reader cannot see it.
+  The stdio adapter does not expose these write fields or render sources in search text.
+  For a non-admin agent caller, bootstrap cites
+  each recalled item that has a visible source, short form `[via <host>/<kind> <id8> (unverified)]`;
+  an item with no source renders exactly as before. hostSource is the writer's unverified claim about an external source, stored with the writer's authenticated agent id; Flair does not verify it.
+
+- **A capture whose run id is within the server's grammar keeps it as an unverified host source (flair#1940).**
+
+  The OpenClaw capture path writes `hostSource` `{ host: "openclaw", kind: "run",
+  id: <run id> }` — the host's run id as sent (Flair stores its NFC form), never derived from
+  captured text —
+  along with the host's session id when the hook carries one. A run id outside
+  the grammar is omitted and logs a warning. `hostSource`
+  is the writer's claim, not verified host authorship. Writes outside the
+  capture path are unchanged.
+
+### Changed
+
+- **Semantic-search results now carry `provenance`, like the by-id and list reads.** The
+  semantic-search projection includes the stored `provenance` blob (the server-stamped author
+  and receipt time). `includeTrust` and `abstain` stay opt-in.
+
+- **The integrity scan bounds and count-brackets deletion-history reads, and `flair integrity prune-history` can reclaim older history rows with `--apply` (flair#2229, flair#2435).**
+
+  `flair integrity check` reads deletion history at or after the checkpoint's
+  watermark minus a five-minute margin. A checkpoint with no readable watermark
+  reads the whole table. A new checkpoint records the watermark, never advancing
+  it past a history row the checkpoint still needs.
+
+  The bounded read is bracketed by SQL counts of the same range. A result that
+  differs from the range's count, or a count that changes during the read,
+  reports UNKNOWN (exit 3).
+
+  `flair integrity prune-history` is a separate, opt-in, one-shot command. With
+  `--apply` it deletes history rows older than the OLDEST named checkpoint
+  watermark minus the same margin, at most `--max` (default 500) rows per run;
+  without `--apply` it reports what it would prune and deletes nothing. The
+  command reads no Memory rows. It prunes nothing — and says why — when a
+  checkpoint is missing or a watermark is unreadable. The deletion-history table
+  declares `replicate: true` explicitly,
+  stating the database default.
+
+### Fixed
+
+- **Feed ingest, administrator reindex, last-reflected and auto-promotion stamps, and visibility and synthetic migrations confirm Memory write-back targets.**
+
+  `POST /FeedMemories` refuses a body that sets `embedding` or `embeddingModel`
+  (400 `feed_embedding_not_writable`), and refuses a write whose target row
+  fails its confirmation (a retryable 409 `feed_target_changed`, or 403 when
+  the row's owner changed). `POST /Memory`
+  refuses a `derivedFrom` entry equal to the memory's own id (400
+  `derived_from_self`). A manual promotion
+  (`POST /PromoteMemoryCandidate`) whose verdict stamp fails now fails the
+  request and leaves no promoted Memory row. The administrator reindex builds
+  each row with the rules of `Memory.put()`'s `_reindex` re-PUT, so the
+  `_reindex` flag is not stored.
+
+- **`flair start`'s unconfirmed-launchd warning reports what the confirmation probe saw (#2422).**
+  The warning reports the confirmation probe's result and the failed check,
+  and claims Flair is running only for a Flair-shaped answer. The launchd state
+  (for example "is loaded but not running") is printed on its own line.
+
+- **Memory PATCH updates the embedding-space guard when it stores an embedding stamp (#2425).**
+
+  Recall and dedup continue to refuse incompatible embedding spaces.
+
+- **The clean-VM CI gate reports `flair doctor` findings on failure (#2438).**
+  When `flair doctor` exited non-zero the gate printed a fixed message blaming the
+  embeddings showstopper, whatever doctor had actually counted. It prints `✗` findings
+  when they account for doctor's issue count; otherwise it prints all `✗` and `⚠`
+  findings, including their detail lines. It adds #538 detail when a `✗` finding
+  contains `Semantic search DEGRADED`.
+
+- **Background re-embedding via Memory PATCH and the migration fallback updates only `embedding`, `embeddingModel` and `updatedAt`, confirming the target before commit (#2465).**
+
+  HTTP re-embedding returns `409 stored_row_changed` when confirmation fails;
+  the embedding-stamp migration skips that row.
+
+- **Each converted Memory write names only its patch fields; it does not write the rest of the row.**
+
+  The embedding backfill, usage-count bump, maintenance archive, feed dedup
+  repair, last-reflected stamp, and synthetic boot migration now update only
+  their respective Memory fields. Each still confirms the committed row before
+  committing.
+
+  The re-embed and the embedding-stamp fallback are converted separately
+  (#2465): they write only `embedding`, `embeddingModel` and `updatedAt`.
+
+- **An embedding-space scan's verdict never survives a foreign-stamp write noted during the scan; the next consult rescans (#2481).**
+
+- **Non-skill `memory.update()` preserves stored host-source pointers on same-ID writes unless the caller supplies a replacement (#2482).**
+  The client omits read-projected pointer fields; a `preserveHistory` successor carries a
+  pointer only for a host source the caller supplies.
+
+### Security
+
+- **`flair doctor` and `flair deploy` self-verify now run the MCP OAuth discovery discriminator that `flair mcp enable` runs.**
+
+  Both commands compare MCP OAuth discovery with an issuer and endpoint known
+  independently of the metadata. Unreachable or unrecognized metadata is
+  reported as unconfirmed. A recognized mismatch is an error when configuration
+  implies MCP OAuth is enabled; deploy verification fails.
+
+- **`flair mcp enable --refresh-flag` attempts an encrypted flag update and checks restart and discovery metadata.**
+
+  It attempts an encrypted `FLAIR_MCP_OAUTH=true` update and confirms the secret
+  marker. On a confirmed push, it requests a restart and checks target and
+  public discovery metadata. If it cannot push and confirm the flag, it attempts
+  a separate 0600 fallback file and exits non-zero. Existing destination files
+  are preserved; IdP credentials and CIMD settings are not changed.
+
+  > **Heads-up:** If an instance has `FLAIR_MCP_OAUTH=1`, run
+  > `flair mcp enable --instance <your-public-origin> --refresh-flag --admin-pass <target-admin-password>`.
+  > Apply any staged fallback file and restart before checking MCP OAuth status.
+
+- **Basic authentication scheme matching is case-insensitive, including during federation pairing.**
+  Authenticated pairing bootstrap users are checked against the supplied token;
+  a mismatch is refused.
+
+- **Relay sends, usage feedback, and IdP principal provisioning commit their guarded decisions under per-key locks within one Harper process (#2333).**
+
+- **Federation pairing consumes a token at most once per Harper node and refuses peers found revoked during re-pairing.**
+  A supplied token is consumed with the peer write. A non-revoked peer may
+  re-pair without supplying a token.
+
+- **Refresh-token rotation is refused after a committed revoke within one Harper process (#2333).**
+
+  A refresh-token rotation is refused after a committed revoke within one Harper
+  process, without issuing a new pair. A revoked refresh token returns
+  `invalid_grant`; an unavailable lifecycle store returns a retryable 503.
+
+- **The bake-time gate classifies dependency ranges and names applied exemptions (flair#2405).**
+
+  The gate reports range declarations as unchecked, rejects unsupported
+  specifiers before registry queries, checks aliases by target, and names dated
+  exemptions used by a passing run. An unreadable or invalid workspace manifest
+  fails the gate.
+
+- **Flair-managed local Agent creation records the home when one canonical Instance row resolves (#2433).**
+  Agents created through the operations API — `flair agent add`, `flair init`, `flair
+  import`, `flair principal add` and IdP identity mapping — now carry
+  `originatorInstanceId` set to the local instance's federation id when one canonical
+  Instance row resolves, as on a REST create. A request-supplied home is ignored, and
+  the Agent resource and `flair principal add` do not change a stored home.
+
+  `flair doctor` lists Agent rows with no home. On an instance with one Instance row it
+  prints an advisory (not counted as an issue) naming the dry-run remedy `flair agent
+  stamp-home`; `flair agent stamp-home --apply` stamps the local id on home-less rows
+  that carry no federation-sync provenance and lists rows with that provenance without
+  stamping them. On an instance with no Instance row, or with several,
+  it prints an info line (not counted):
+  homes stay unset, the local-origin state, until the instance has one identity.
+  `flair doctor` now counts an unreadable agent roster as an issue, and reports the Agent
+  homes check as skipped, not counted, when no admin credential is available. The Agent
+  resource keeps the stored federation bookkeeping fields (`_syncedFrom`,
+  `_originatorInstanceId`) on update and drops them from a create.
+
+- **Usage accounting, federation Memory merges, and Memory PUT updates confirm their target record before committing (#2441).**
+
+  A detected target mismatch leaves the target unchanged. Memory PUT returns 409
+  `stored_row_changed`; a federation Memory merge skips the record as
+  `merge_target_changed`. A usage-count conflict leaves the count unchanged and
+  is logged as `stored_row_changed`.
+
+- **Administrator reindex writes and federation merges refuse detected changes to their stored targets.**
+  A missing or changed Memory identity returns 409 `stored_row_changed` for
+  `_reindex`. Planned federation Memory writes skip changed target identities;
+  planned Soul, Agent, Relationship, and Message writes skip changed stored rows
+  as `merge_target_changed`.
+
+- **Relay sends enforce the recipient inbox cap across concurrent senders within one Harper process.**
+
+- **XAA refuses jwt-bearer grants for matched IdP credentials not marked active.**
+  It returns `invalid_grant` without issuing an OAuth token or updating the
+  credential's `lastUsedAt`. A detected revoke or deletion during the grant also
+  refuses issuance.
+
+- **`flair agent stamp-home` and `flair principal add` guard a stored Agent home on their write paths (#2472, #2473, #2474).**
+
+  `flair agent stamp-home --apply` checks the current instance identity and
+  Agent eligibility during the write, and counts only confirmed stamps.
+
+  `flair principal add` assigns a resolved home on insert; its updates preserve
+  the stored home and federation bookkeeping fields.
+
+  Both commands now apply the same local port-pair check before writing.
+
+- **`flair agent remove` confines automatic key-file deletion to the intended agent's canonical key paths (#2479).**
+  For stored IDs ineligible for automatic key cleanup, the command reports manual cleanup
+  when deletion was requested; `flair doctor` gives the same guidance.
+
+- **The owner-field guard refuses non-admin agent writes when its stored-row check fails.**
+
 ## [0.60.0] - 2026-10-09
 
 ### Added

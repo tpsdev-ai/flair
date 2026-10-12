@@ -1,1 +1,0 @@
-- **An embedding-space scan's verdict never survives a foreign-stamp write noted during the scan; the next consult rescans (#2481).**
