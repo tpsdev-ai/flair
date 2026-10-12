@@ -156,15 +156,21 @@ export interface GrantReadTable {
 }
 
 /**
- * The refusal a close answers when the "write" grant that authorized it is gone
- * on committed state (flair#2333 H10). The error code and the {@link
- * GrantedCloseRevoked} class name carry it, so the Memory close and the
- * skill-version close refuse by the same name.
+ * The name for a close whose authorizing "write" grant is gone at the
+ * committed-state re-check (flair#2333 H10 / flair#2511). The two closes share
+ * the re-check ({@link writeGrantHeld}) and this name, but only the
+ * skill-version close answers its caller with it. The skill-version close
+ * (skill-version-write.ts) returns {@link grantedCloseRevokedRefusal}, a 409
+ * carrying this code. The non-skill close (Memory.ts closeSupersededRecord) runs
+ * after its successor is written and throws {@link GrantedCloseRevoked}, which
+ * its caller logs: the predecessor stays open, the successor stays written, and
+ * the caller's response is a success.
  */
 export const GRANTED_CLOSE_REVOKED = "granted_close_revoked";
 
-/** The named 409 for a close whose authorizing "write" grant is gone at the
- *  committed-state re-check. Nothing was written. */
+/** The skill-version close's named 409 for a close whose authorizing "write"
+ *  grant is gone at the committed-state re-check. Returned from inside the
+ *  version transaction, which then rolls back: nothing is written. */
 export function grantedCloseRevokedRefusal(): Response {
   return new Response(
     JSON.stringify({
@@ -175,8 +181,10 @@ export function grantedCloseRevokedRefusal(): Response {
   );
 }
 
-/** Aborts a close's transaction: the "write" grant that authorized a
- *  cross-agent close is gone on committed state (flair#2333 H10). */
+/** Aborts the non-skill close's owned transaction (Memory.ts
+ *  closeSupersededRecord): the "write" grant that authorized a cross-agent close
+ *  is gone on committed state (flair#2333 H10). The predecessor is not closed;
+ *  the caller logs this after its successor is already written. */
 export class GrantedCloseRevoked extends Error {
   constructor() {
     super(`${GRANTED_CLOSE_REVOKED}: the write grant authorizing the close was revoked`);
@@ -191,10 +199,11 @@ export class GrantedCloseRevoked extends Error {
  * applies to a row. Fail-closed: a search that rejects reads as no grant, so an
  * unreadable grant does not close the owner's row.
  *
- * The shared committed-state grant re-check both the Memory close
- * (Memory.ts closeSupersededRecord) and the skill-version close
- * (skill-version-write.ts) run after staging their close (flair#2333 H10 /
- * flair#2511).
+ * The committed-state grant re-check both closes run after staging a
+ * grant-authorized cross-agent close: the non-skill close (Memory.ts
+ * closeSupersededRecord, flair#2333 H10) and the shared skill-version writer
+ * (skill-version-write.ts, flair#2511), whose every caller passes the grant a
+ * cross-agent close stands on.
  */
 export async function writeGrantHeld(
   table: GrantReadTable,

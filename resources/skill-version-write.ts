@@ -209,14 +209,21 @@ export async function authorizeSkillOwners(ctx: any, auth: AgentAuthVerdict, row
   return null;
 }
 
+/** flair#2511: the "write" grant a cross-agent close stands on. */
+export interface GrantedClose {
+  granteeId: string;
+  ownerId: string;
+}
+
 /**
  * flair#2511: the "write" grant a cross-agent close of `closed` stands on, or
  * null when the close is not a grant-authorized cross-agent one — an operator,
  * internal or same-agent caller. The same predicate {@link authorizeSkillOwners}
- * uses to demand the grant; the close re-checks it on committed state after the
- * close is staged.
+ * uses to demand the grant; the shared writer re-checks it on committed state
+ * after the close is staged. Every plan that closes a row passes this for the
+ * row it closes.
  */
-export function grantedSkillClose(closed: Record<string, any> | null | undefined, ctx: any, auth: AgentAuthVerdict): { granteeId: string; ownerId: string } | null {
+export function grantedSkillClose(closed: Record<string, any> | null | undefined, ctx: any, auth: AgentAuthVerdict): GrantedClose | null {
   if (!closed || typeof closed.agentId !== "string" || !closed.agentId.trim()) return null;
   if (skillWriteSource(ctx, auth) !== "agent" || auth.kind !== "agent") return null;
   if (closed.agentId === auth.agentId) return null;
@@ -245,13 +252,15 @@ export interface SkillSuccessorPlan {
   /** The effective visibility stamped on the version row. */
   visibility: string | null;
   /**
-   * flair#2511: set when this successor's close is a CROSS-agent close a "write"
-   * grant authorized (a non-admin agent caller closing another agent's row). The
-   * close re-checks the grant on committed state after it stages the write, and
-   * the whole write is refused — no close, no successor, no version — when the
-   * grant is gone. Unset for a same-agent, operator or internal close.
+   * flair#2511: {@link grantedSkillClose} of `predecessor` — the grant a CROSS-agent
+   * close of it stands on (an agent caller, not the operator's Basic admin or an
+   * internal call, closing another agent's row), else null (no predecessor, or a
+   * same-agent, operator or internal close).
+   * Required, so every plan states it. When set, the shared writer re-checks the
+   * grant on committed state after it stages the close and refuses the whole
+   * write — no close, no successor, no version — when the grant is gone.
    */
-  grantedClose?: { granteeId: string; ownerId: string } | null;
+  grantedClose: GrantedClose | null;
 }
 
 /** The plan for a logical delete. */
@@ -261,6 +270,13 @@ export interface SkillDeletePlan {
   closePatch: Record<string, unknown>;
   value: null;
   visibility: string | null;
+  /**
+   * flair#2511: {@link grantedSkillClose} of the head this delete closes — set
+   * when that head is another agent's row a "write" grant authorizes the caller
+   * to close. The shared writer re-checks it after staging the close, as for a
+   * supersede.
+   */
+  grantedClose: GrantedClose | null;
 }
 
 export type SkillWritePlan = SkillSuccessorPlan | SkillDeletePlan;
@@ -309,12 +325,21 @@ export interface RunSkillVersionWriteArgs {
 }
 
 /**
- * flair#2511: re-check a grant-authorized close's "write" grant on committed
- * state, after the close is staged. Returns the named refusal when the grant is
- * gone, else null. The read is the shared write-back helper
- * (resources/write-back.ts), the same one the Memory close uses.
+ * flair#2511: run once a close's write is staged — a supersede's predecessor
+ * close or a delete's head close. A grant-authorized cross-agent close stands on
+ * the grant read at authorization time; re-read it on committed state HERE,
+ * after the close is staged, through the shared write-back helper the non-skill
+ * close uses (Memory.ts closeSupersededRecord, flair#2333 H10). Returns the named
+ * 409 when the grant is gone — the caller returns it, so the whole transaction
+ * rolls back: no close, no successor, no version — else null. A plan with no
+ * grant (same-agent, operator, internal) reads nothing.
  */
-async function stagedCloseGrantRevoked(granted: { granteeId: string; ownerId: string } | null | undefined): Promise<Response | null> {
+async function afterCloseStaged(granted: GrantedClose | null | undefined): Promise<Response | null> {
+  // Test-only: inert unless armed — here the close write is staged, so a
+  // competing grant revocation and the committed-state re-check below can be
+  // exercised in either order (Memory's "supersede-close-staged").
+  const stagedPause = txnPausePoint("skill-close-staged");
+  if (stagedPause) await stagedPause;
   if (!granted) return null;
   const held = await writeGrantHeld((databases as any).flair.MemoryGrant, granted.granteeId, granted.ownerId, {});
   return held ? null : grantedCloseRevokedRefusal();
@@ -386,24 +411,17 @@ async function runSkillVersionWriteInner(args: RunSkillVersionWriteArgs): Promis
       if (writePlan.kind === "delete") {
         maybeThrowSkillWriteFault("close", owner);
         await args.hooks.closePredecessor!(writePlan.predecessor, writePlan.closePatch, shared);
+        // flair#2511: the grant re-check, after the close is staged.
+        const revoked = await afterCloseStaged(writePlan.grantedClose);
+        if (revoked) return revoked;
       } else {
         maybeThrowSkillWriteFault("successor", owner);
         await args.hooks.createSuccessor!(writePlan.successor, shared);
         if (writePlan.predecessor) {
           maybeThrowSkillWriteFault("close", owner);
           await args.hooks.closePredecessor!(writePlan.predecessor, writePlan.closePatch, shared);
-          // Test-only: inert unless armed — here the close write is staged, so a
-          // competing grant revocation and the committed-state re-check below can
-          // be exercised in either order (Memory's "supersede-close-staged").
-          const stagedPause = txnPausePoint("skill-close-staged");
-          if (stagedPause) await stagedPause;
-          // flair#2511: a grant-authorized cross-agent close stands on the grant
-          // checked at authorization time. Re-read it on committed state HERE —
-          // after the close is staged — through the shared write-back helper the
-          // Memory close uses (Memory.ts closeSupersededRecord, flair#2333 H10).
-          // A revocation visible now refuses the write and aborts the whole
-          // transaction: no close, no successor, no version.
-          const revoked = await stagedCloseGrantRevoked(writePlan.grantedClose);
+          // flair#2511: the grant re-check, after the close is staged.
+          const revoked = await afterCloseStaged(writePlan.grantedClose);
           if (revoked) return revoked;
         }
       }

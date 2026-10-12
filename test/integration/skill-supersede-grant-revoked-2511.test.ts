@@ -1,23 +1,25 @@
 /**
  * skill-supersede-grant-revoked-2511.test.ts — flair#2511, real Harper.
  *
- * A grant-authorized, non-admin cross-agent supersede of a SKILL version stands
- * on a "write" MemoryGrant the authorization check reads once. The close that
- * follows it runs in the same version transaction and stages its write before
- * that transaction commits; a grant revoked and committed in that window is
- * invisible to the authorization read. The skill-version close therefore
- * re-checks the grant on committed state after it stages the write — the shared
- * write-back helper the non-skill close uses (flair#2333 H10) — and refuses the
- * whole write when a revocation is visible: no predecessor close, no successor,
- * no version row.
+ * A grant-authorized cross-agent close of a SKILL version stands on a
+ * "write" MemoryGrant the authorization check reads once. The close runs in the
+ * version transaction and stages its write before that transaction commits; a
+ * grant revoked and committed in that window is invisible to the authorization
+ * read. Every caller of the shared skill-version writer passes the grant a
+ * cross-agent close stands on, and the writer re-checks it on committed state
+ * after it stages the close — through the shared write-back helper the non-skill
+ * close uses (flair#2333 H10) — and refuses the whole write when a revocation is
+ * visible: no close, no successor, no version row.
  *
  * These cases hold the skill close after its write is staged (the
  * "skill-close-staged" test pause, enabled by FLAIR_ENABLE_TEST_FAULT_INJECTION
  * and FLAIR_TEST_PAUSE_DIR, set for this file's Harper only), revoke the grant so
  * the revocation is committed, release the close, and assert the refusal and
- * that nothing was written. Control cases show the same supersede with the grant
- * intact, a same-agent supersede and an operator (Basic admin) supersede still
- * land.
+ * that nothing was written. They cover each caller of the writer that can close
+ * another agent's row: a supersede through PUT /Memory, a supersede through
+ * POST /FeedMemories, and a DELETE whose live head is another agent's row.
+ * Control cases show that each lands with the grant intact, and that a
+ * same-agent supersede and an operator (Basic admin) supersede still land.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
@@ -94,6 +96,10 @@ async function revokeWrite(harper: HarperInstance, ownerId: string, granteeId: s
     operation: "delete", database: "flair", table: "MemoryGrant", ids: [`${ownerId}:${granteeId}:write`],
   });
   return res.status;
+}
+async function changeOwner(harper: HarperInstance, id: string, agentId: string): Promise<void> {
+  const res = await adminOp(harper, { operation: "update", database: "flair", table: "Memory", records: [{ id, agentId }] });
+  expect(res.status, `owner change of ${id} returned ${res.status}`).toBe(200);
 }
 async function readMemory(harper: HarperInstance, id: string): Promise<any> {
   const res = await adminOp(harper, { operation: "search_by_id", database: "flair", table: "Memory", ids: [id], get_attributes: ["*"] });
@@ -174,7 +180,7 @@ beforeAll(async () => {
   await seedAgent(harper, owner);
   await seedAgent(harper, grantee);
   // Each case gets its own owner-owned skill head to supersede.
-  for (const label of ["control", "revoked", "same-agent", "operator"]) {
+  for (const label of ["control", "revoked", "same-agent", "operator", "feed-control", "feed-revoked"]) {
     const id = `s2511-${label}`;
     const created = await authSend(harper, owner, "PUT", `/Memory/${id}`, skillBody(id, `first ${label} skill version`));
     const text = await created.text();
@@ -236,5 +242,96 @@ describe("flair#2511 — a grant-authorized cross-agent skill-version supersede 
     expect(res.status, `operator supersede returned ${res.status}: ${text.slice(0, 300)}`).toBeLessThan(300);
     expect((await readMemory(harper, skills.operator))?.validTo, "the operator close did not land").toBeTruthy();
     expect(await versionCount(harper, skills.operator), "the operator supersede appended no version").toBe(2);
+  }, 60_000);
+});
+
+describe("flair#2511 — a grant-authorized cross-agent skill supersede through POST /FeedMemories re-checks its write grant (real Harper)", () => {
+  const feedBody = (id: string, supersedes: string, content: string) => ({
+    id, agentId: grantee.id, supersedes, content, trigger: `when to ${content}`, tags: ["skill"], durability: "persistent",
+  });
+
+  it("control: with the grant intact the feed's cross-agent supersede closes the predecessor and appends a version", async () => {
+    await grantWrite(harper, owner.id, grantee.id);
+    const successorId = "s2511-feed-control-successor";
+    const res = await authSend(harper, grantee, "POST", "/FeedMemories", feedBody(successorId, skills["feed-control"], "second feed-control skill version"));
+    const text = await res.text();
+    expect(res.status, `granted feed supersede returned ${res.status}: ${text.slice(0, 300)}`).toBeLessThan(300);
+    expect(JSON.parse(text).id).toBe(successorId);
+    expect((await readMemory(harper, skills["feed-control"]))?.validTo, "the predecessor was not closed under an intact grant").toBeTruthy();
+    const successor = await readMemory(harper, successorId);
+    expect(successor, "the successor row was not written").not.toBeNull();
+    expect(successor?.agentId, "the successor does not keep the skill owner").toBe(owner.id);
+    expect(await versionCount(harper, skills["feed-control"]), "the feed supersede appended no version").toBe(2);
+  }, 60_000);
+
+  it("a grant revocation committed before the staged re-check refuses the feed write: no close, no successor, no version", async () => {
+    await grantWrite(harper, owner.id, grantee.id);
+    const successorId = "s2511-feed-revoked-successor";
+    const { response, competed, released } = await withPausedClose(
+      () => authSend(harper, grantee, "POST", "/FeedMemories", feedBody(successorId, skills["feed-revoked"], "second feed-revoked skill version")),
+      () => revokeWrite(harper, owner.id, grantee.id),
+    );
+    expect(released, "the feed's skill close was not paused and released by this test").toBe("go");
+    expect(competed, "the competing grant revocation failed").toBe(200);
+    const text = await response.text();
+    expect(response.status, `revoked feed supersede returned ${response.status}: ${text.slice(0, 300)}`).toBe(409);
+    expect(JSON.parse(text).error, "revoked feed supersede refusal error").toBe("granted_close_revoked");
+    expect((await readMemory(harper, skills["feed-revoked"]))?.validTo ?? null, "the feed's close landed after the authorizing grant was revoked").toBeNull();
+    expect(await readMemory(harper, successorId), "the feed's successor row was written despite the revoked grant").toBeNull();
+    expect(await versionCount(harper, skills["feed-revoked"]), "the feed appended a version row despite the revoked grant").toBe(1);
+  }, 60_000);
+});
+
+describe("flair#2511 — a grant-authorized DELETE that closes another agent's skill head re-checks its write grant (real Harper)", () => {
+  /**
+   * The grantee creates a skill and updates it, so its first row is closed (a
+   * stale id) and the update's successor is the live head; an operator then
+   * reassigns the head to the owner. A DELETE of the stale id closes the live
+   * head — another agent's row — which the owner's "write" grant authorizes.
+   */
+  async function lineageWithOwnerHead(label: string): Promise<{ staleId: string; headId: string }> {
+    const staleId = `s2511-${label}`;
+    const body = (content: string) => ({
+      id: staleId, agentId: grantee.id, content, trigger: `when to ${content}`, tags: ["skill"], durability: "persistent",
+    });
+    const created = await authSend(harper, grantee, "PUT", `/Memory/${staleId}`, body(`first ${label} skill version`));
+    expect(created.status, `skill create returned ${created.status}: ${(await created.text()).slice(0, 300)}`).toBeLessThan(300);
+    const updated = await authSend(harper, grantee, "PUT", `/Memory/${staleId}`, body(`second ${label} skill version`));
+    const text = await updated.text();
+    expect(updated.status, `skill update returned ${updated.status}: ${text.slice(0, 300)}`).toBeLessThan(300);
+    const headId = String(JSON.parse(text).id);
+    expect(headId, "the update did not write a successor row").not.toBe(staleId);
+    expect((await readMemory(harper, staleId))?.validTo, "the addressed row is not closed").toBeTruthy();
+    await changeOwner(harper, headId, owner.id);
+    return { staleId, headId };
+  }
+
+  it("control: with the grant intact the delete closes the other agent's head and appends a version", async () => {
+    const { staleId, headId } = await lineageWithOwnerHead("delete-control");
+    await grantWrite(harper, owner.id, grantee.id);
+    const res = await authSend(harper, grantee, "DELETE", `/Memory/${staleId}`);
+    const text = await res.text();
+    expect(res.status, `granted DELETE returned ${res.status}: ${text.slice(0, 300)}`).toBe(200);
+    expect(JSON.parse(text).id, "the delete closed a row other than the live head").toBe(headId);
+    expect((await readMemory(harper, headId))?.validTo, "the head was not closed under an intact grant").toBeTruthy();
+    expect(await versionCount(harper, staleId), "the delete appended no version").toBe(3);
+  }, 60_000);
+
+  it("a grant revocation committed before the staged re-check refuses the delete: the head stays open, no version", async () => {
+    const { staleId, headId } = await lineageWithOwnerHead("delete-revoked");
+    await grantWrite(harper, owner.id, grantee.id);
+    const { response, competed, released } = await withPausedClose(
+      () => authSend(harper, grantee, "DELETE", `/Memory/${staleId}`),
+      () => revokeWrite(harper, owner.id, grantee.id),
+    );
+    expect(released, "the delete's close was not paused and released by this test").toBe("go");
+    expect(competed, "the competing grant revocation failed").toBe(200);
+    const text = await response.text();
+    expect(response.status, `revoked DELETE returned ${response.status}: ${text.slice(0, 300)}`).toBe(409);
+    expect(JSON.parse(text).error, "revoked DELETE refusal error").toBe("granted_close_revoked");
+    const head = await readMemory(harper, headId);
+    expect(head, "the head row is gone").not.toBeNull();
+    expect(head?.validTo ?? null, "the delete closed the head after the authorizing grant was revoked").toBeNull();
+    expect(await versionCount(harper, staleId), "the delete appended a version row despite the revoked grant").toBe(2);
   }, 60_000);
 });

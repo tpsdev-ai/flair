@@ -1068,10 +1068,10 @@ async function writeSkillCreateOrUpdate(
       const visibility = skillVersionVisibility(successor);
       if (inPlaceId || reembedInPlace) {
         return liveHead
-          ? { kind: "update", predecessor: null, successor, closePatch: {}, value, visibility }
-          : { kind: "create", predecessor: null, successor, closePatch: {}, value, visibility };
+          ? { kind: "update", predecessor: null, successor, closePatch: {}, value, visibility, grantedClose: null }
+          : { kind: "create", predecessor: null, successor, closePatch: {}, value, visibility, grantedClose: null };
       }
-      if (!liveHead) return { kind: "create", predecessor: null, successor, closePatch: {}, value, visibility };
+      if (!liveHead) return { kind: "create", predecessor: null, successor, closePatch: {}, value, visibility, grantedClose: null };
       captured.closed = liveHead;
       return { kind: "update", predecessor: liveHead, successor, closePatch: { skillSubjectId: subjectId, validTo: now, updatedAt: now }, value, visibility, grantedClose: grantedSkillClose(liveHead, ctx, auth) };
     },
@@ -1140,7 +1140,10 @@ async function writeSkillDelete(args: { ctx: any; auth: AgentAuthVerdict; record
       if (!head) return skillWriteConflict("skill_head_missing");
       const liveHead = head;
       closedId = String(liveHead.id);
-      return { kind: "delete", predecessor: liveHead, closePatch: { skillSubjectId: subjectId, validTo: now, updatedAt: now }, value: null, visibility: skillVersionVisibility(liveHead) };
+      // flair#2511: a stale id resolves the live head, which can be another
+      // agent's row a "write" grant authorizes this caller to close; the writer
+      // re-checks that grant after the close is staged.
+      return { kind: "delete", predecessor: liveHead, closePatch: { skillSubjectId: subjectId, validTo: now, updatedAt: now }, value: null, visibility: skillVersionVisibility(liveHead), grantedClose: grantedSkillClose(liveHead, ctx, auth) };
     },
     hooks: { ...defaultSkillHooks, pointer: async (shared) => deletePointerRow(closedId, shared) },
   });
