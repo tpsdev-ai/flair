@@ -2,12 +2,13 @@
  * principal-add-home-2433.test.ts — flair#2433, flair#2473.
  *
  * `flair principal add` writes the Agent row through the operations API. The
- * write is CREATE-ONLY: the resolved home rides on the `insert` itself (so a row
- * created at write time carries it, even one deleted since the read), and an
- * existing row keeps its stored home — the insert is skipped and the row is
- * written back WITHOUT the home field, or a differing non-null stored home is
- * refused. A stored `originatorInstanceId` is never changed, whatever appears
- * between the read and the write.
+ * HOME ASSIGNMENT on the `insert` is CREATE-ONLY: the resolved home rides on that
+ * insert itself (so a row created at write time carries it, even one deleted
+ * since the read). An existing row's insert is SKIPPED, so its stored home
+ * stands; the write-back that follows writes back only an allow-list of the
+ * row's other fields and omits the home field, and a differing non-null stored
+ * home is refused. A stored `originatorInstanceId` is not changed by this
+ * command, whatever appears between the read and the write.
  *
  * Isolated because it drives the process-global commander `program` and stands
  * up an HTTP server in place of the operations API.

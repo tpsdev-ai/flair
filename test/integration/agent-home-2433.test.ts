@@ -23,8 +23,8 @@
  * for THIS file's Harper by FLAIR_ENABLE_TEST_FAULT_INJECTION +
  * FLAIR_TEST_PAUSE_DIR) — BETWEEN the staged write and the confirmation read — so
  * a decision made from the request's read snapshot (taken before the override
- * ran) would miss it: a competing home, a competing merge, and another writer's
- * SAME local home. `flair principal add`'s guarded write-back runs the same way
+ * ran) would miss it: a competing home, a competing raw provenance update, and
+ * another writer's SAME local home. `flair principal add`'s guarded write-back runs the same way
  * (see AGENT_PRINCIPAL_WRITE_BACK_PAUSE_POINT).
  *
  * Build prerequisite: dist/cli.js and dist/resources/*.js
@@ -48,7 +48,8 @@ import {
   resolveTargetInstanceId,
   runAgentHomeStamp,
 } from "../../src/lib/agent-home.js";
-import { AGENT_HOME_STAMP_FIELD, AGENT_HOME_STAMP_PAUSE_POINT, AGENT_PRINCIPAL_WRITE_BACK_PAUSE_POINT } from "../../src/lib/agent-home-fields.js";
+import { AGENT_HOME_STAMP_FIELD, AGENT_HOME_STAMP_PAUSE_POINT, AGENT_PRINCIPAL_WRITE_BACK_FIELD, AGENT_PRINCIPAL_WRITE_BACK_NO_ROW_ERROR, AGENT_PRINCIPAL_WRITE_BACK_PAUSE_POINT } from "../../src/lib/agent-home-fields.js";
+import { randomUUID } from "node:crypto";
 
 const ADMIN_PASS = "test123"; // harper-lifecycle's seeded admin pass
 const CLI = join(process.cwd(), "dist", "cli.js");
@@ -77,6 +78,29 @@ function assertOwnInstance(h: HarperInstance): void {
 
 const basic = () => "Basic " + btoa(`${harper.admin.username}:${harper.admin.password}`);
 const opsPort = () => Number(new URL(harper.opsURL).port);
+
+interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
+
+/** An Ed25519 agent identity whose public key is stored on its Agent row, so the
+ *  Agent resource resolves a signed request to a VERIFIED (non-admin) agent. */
+function mkAgent(id: string): TestAgent {
+  const kp = nacl.sign.keyPair();
+  return { id, publicKey: Buffer.from(kp.publicKey).toString("base64"), secretKey: kp.secretKey };
+}
+
+/** `Authorization: TPS-Ed25519 <id>:<ts>:<nonce>:<sig>` over `<id>:<ts>:<nonce>:<METHOD>:<pathname>`. */
+async function sendAs(agent: TestAgent, method: string, path: string, body: unknown): Promise<{ status: number; raw: string }> {
+  const ts = Date.now().toString();
+  const nonce = randomUUID();
+  const sig = nacl.sign.detached(new TextEncoder().encode(`${agent.id}:${ts}:${nonce}:${method}:${path}`), agent.secretKey);
+  const auth = `TPS-Ed25519 ${agent.id}:${ts}:${nonce}:${Buffer.from(sig).toString("base64")}`;
+  const res = await fetch(`${harper.httpURL}${path}`, {
+    method,
+    headers: { "Content-Type": "application/json", Authorization: auth },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  return { status: res.status, raw: (await res.text()).slice(0, 600) };
+}
 
 async function ops(op: Record<string, unknown>): Promise<any> {
   const res = await fetch(harper.opsURL, {
@@ -450,7 +474,7 @@ describe("flair#2433 — the home a create stamps, on a real Harper", () => {
     expect((await rowIn("Agent", id)).originatorInstanceId, "the gained home was overwritten").toBe(PEER_ID);
   }, 60_000);
 
-  test("a merged row committed after the resource's first read is listed, never stamped", async () => {
+  test("a raw provenance update committed after the resource's first read is listed, never stamped", async () => {
     const id = `race-sync-${sfx}`;
     await ops({
       operation: "insert",
@@ -464,7 +488,7 @@ describe("flair#2433 — the home a create stamps, on a real Harper", () => {
     expect(released, "the stamp never reached its in-transaction pause").toBe("go");
     expect(result.stamped).not.toContain(id);
     const row = await rowIn("Agent", id);
-    expect(row.originatorInstanceId ?? null, "the merged row was stamped").toBeNull();
+    expect(row.originatorInstanceId ?? null, "the provenance-updated row was stamped").toBeNull();
     expect(row._syncedFrom).toBe(PEER_ID);
   }, 60_000);
 
@@ -490,7 +514,7 @@ describe("flair#2433 — the home a create stamps, on a real Harper", () => {
   test("provenance committed after the staged stamp, before the confirmation read, aborts it (no home written)", async () => {
     // The resource STAGES the home-only write, then re-reads the COMMITTED row
     // and aborts (discarding the staged write) when that row gained provenance.
-    // The competing merge lands in exactly that gap.
+    // The competing raw provenance update lands in exactly that gap.
     const id = `race-staged-${sfx}`;
     await ops({
       operation: "insert",
@@ -613,4 +637,91 @@ describe("flair#2433 — the doctor roster read is the remedy's input", () => {
     const syncRow = rows!.find((r) => r.id === `synced-nohome-${sfx}`)!;
     expect(syncRow._syncedFrom).toBe(PEER_ID);
   }, 30_000);
+});
+
+describe("flair#2473 — the guarded principal write-back cannot change a stored home", () => {
+  // The write-back is the ONE write `flair principal add` sends when its
+  // create-only insert was SKIPPED. It runs in the Agent resource's owned
+  // transaction and writes back only an EXPLICIT ALLOW-LIST of fields (never a
+  // home, never a federation stamp, never `publicKey`), and it is honoured only
+  // for an administrator or a trusted internal call. Every one of these cases
+  // hits the REAL resource; the first two fail if the body is written unfiltered,
+  // the last two fail if a missing row is allowed to be re-created.
+
+  test("a verified non-admin agent's write-back flag is stripped — its own stored home is unchanged", async () => {
+    const agent = mkAgent(`wb-agent-${sfx}`);
+    const now = new Date().toISOString();
+    await ops({
+      operation: "insert",
+      table: "Agent",
+      records: [{ id: agent.id, name: agent.id, role: "agent", admin: false, status: "active", publicKey: agent.publicKey, originatorInstanceId: LOCAL_ID, createdAt: now }],
+    });
+    // A non-admin agent PATCHing its OWN row with the control field, a DIFFERENT
+    // home, and a forged publicKey. It is not `flair principal add`, so it gets
+    // the ordinary PATCH path: the flag is dropped and the home and publicKey a
+    // body carries are stripped.
+    const r = await sendAs(agent, "PATCH", `/Agent/${agent.id}`, {
+      [AGENT_PRINCIPAL_WRITE_BACK_FIELD]: true,
+      originatorInstanceId: PEER_ID,
+      publicKey: "forged-key-wb-2433",
+    });
+    expect(r.status, r.raw).toBeLessThan(300);
+    const row = await rowIn("Agent", agent.id);
+    expect(row.originatorInstanceId, "a non-admin caller changed a stored home through the write-back flag").toBe(LOCAL_ID);
+    expect(row.publicKey, "the body's publicKey was written by a non-admin").toBe(agent.publicKey);
+  }, 30_000);
+
+  test("the write-back never accepts a home or a publicKey from the body, even from an administrator", async () => {
+    const id = `wb-admin-${sfx}`;
+    const now = new Date().toISOString();
+    await ops({
+      operation: "insert",
+      table: "Agent",
+      records: [{ id, name: id, role: "agent", admin: false, status: "active", publicKey: "pk-wb-admin-2433", originatorInstanceId: LOCAL_ID, createdAt: now }],
+    });
+    // An administrator (the caller `flair principal add` is) supplying a different
+    // home and a forged publicKey alongside an allow-listed field. The home and the
+    // key stand; the display name is written back.
+    const r = await send("PATCH", `/Agent/${id}`, {
+      [AGENT_PRINCIPAL_WRITE_BACK_FIELD]: true,
+      originatorInstanceId: PEER_ID,
+      publicKey: "forged-wb-admin",
+      displayName: "wb-renamed",
+    });
+    expect(r.status, r.raw).toBeLessThan(300);
+    const row = await rowIn("Agent", id);
+    expect(row.originatorInstanceId, "the write-back accepted a home from the body").toBe(LOCAL_ID);
+    expect(row.publicKey, "the write-back accepted a publicKey from the body").toBe("pk-wb-admin-2433");
+    expect(row.displayName, "an allow-listed field was not written back").toBe("wb-renamed");
+  }, 30_000);
+
+  test("a write-back on a missing row is refused by name and does not re-create the row", async () => {
+    const id = `wb-missing-${sfx}`;
+    const r = await send("PATCH", `/Agent/${id}`, { [AGENT_PRINCIPAL_WRITE_BACK_FIELD]: true, displayName: id });
+    expect(r.status, r.raw).toBe(404);
+    expect(r.raw, "the refusal was not by its own name").toContain(AGENT_PRINCIPAL_WRITE_BACK_NO_ROW_ERROR);
+    expect(await rowIn("Agent", id), "the write-back re-created a row that was not there").toBeNull();
+  }, 30_000);
+
+  test("a row deleted between the write-back's staging and its confirmation is not re-created", async () => {
+    const id = `wb-del-${sfx}`;
+    const now = new Date().toISOString();
+    await ops({
+      operation: "insert",
+      table: "Agent",
+      records: [{ id, name: id, role: "agent", admin: false, status: "active", publicKey: "pk-wb-del-2433", originatorInstanceId: LOCAL_ID, createdAt: now }],
+    });
+    // Delete the row in the gap between the STAGED write-back and the confirmation
+    // read. The resource re-reads the COMMITTED row, finds it gone, and aborts —
+    // so the staged `table.update` (which would INSERT the row) is discarded.
+    const { result, released } = await withPausedPoint(
+      AGENT_PRINCIPAL_WRITE_BACK_PAUSE_POINT,
+      () => send("PATCH", `/Agent/${id}`, { [AGENT_PRINCIPAL_WRITE_BACK_FIELD]: true, displayName: id }),
+      () => ops({ operation: "delete", table: "Agent", ids: [id] }),
+    );
+    expect(released, "the write-back never reached its in-transaction pause").toBe("go");
+    expect(result.status, result.raw).toBe(404);
+    expect(result.raw).toContain(AGENT_PRINCIPAL_WRITE_BACK_NO_ROW_ERROR);
+    expect(await rowIn("Agent", id), "the staged write-back re-created the deleted row").toBeNull();
+  }, 60_000);
 });

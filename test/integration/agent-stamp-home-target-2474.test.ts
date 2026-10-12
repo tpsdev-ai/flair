@@ -6,10 +6,12 @@
  * the two ports INDEPENDENTLY let `--ops-port` name one instance and `--port`
  * another, so the roster was read from the first and the stamp written to the
  * second — carrying the first instance's id. src/cli.ts's
- * `resolveAgentHomeTarget` pairs them: the derived port must come from the same
- * recorded pair as the named one, so an HTTP port that disagrees with the ops
- * port's instance is refused, while a pair the caller names for BOTH ports is
- * taken as given.
+ * `resolveAgentHomeTarget` pairs them: a CONFIGURED pair is CHECKED — the derived
+ * port must come from the same recorded pair as the named one, so an HTTP port
+ * that disagrees with the ops port's instance is refused, and an explicit
+ * `--ops-port` that disagrees with that instance's record is refused too — while
+ * a pair the caller names for BOTH ports is TRUSTED WITHOUT VERIFICATION (the
+ * resolver takes it as given).
  *
  * Two real instances and a real `~/.flair/config.yaml` (the default install's
  * recorded pair) make the ambiguity concrete: an explicit `--ops-port` that
@@ -61,6 +63,49 @@ function runStampHome(extra: string[]): Promise<{ code: number | null; stdout: s
 const httpPort = (h: HarperInstance) => new URL(h.httpURL).port;
 const opsPort = (h: HarperInstance) => new URL(h.opsURL).port;
 
+/** Run `flair principal add <id>` with the given port flags against an isolated HOME. */
+function runPrincipalAdd(id: string, extra: string[]): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const args = ["principal", "add", id, "--admin-pass", a.admin.password, "--keys-dir", join(cliHome(), "keys"), ...extra];
+    const child = spawn(process.execPath, [CLI, ...args], {
+      env: { ...process.env, HOME: cliHome(), FLAIR_URL: "", FLAIR_OPS_PORT: "", FLAIR_TOKEN: "", NO_COLOR: "1" },
+      timeout: 30_000,
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.on("data", (d: Buffer) => { stdout += d.toString(); });
+    child.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
+    child.on("error", reject);
+    child.on("exit", (code, signal) => {
+      if (signal !== null) { reject(new Error(`principal add overran: ${signal}`)); return; }
+      resolve({ code, stdout, stderr });
+    });
+  });
+}
+
+/** Seed an Agent row straight through an instance's operations API. */
+async function seedAgent(h: HarperInstance, records: Record<string, unknown>[]): Promise<void> {
+  const res = await fetch(h.opsURL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: "Basic " + btoa(`${h.admin.username}:${h.admin.password}`) },
+    body: JSON.stringify({ operation: "insert", database: "flair", table: "Agent", records }),
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!res.ok) throw new Error(`seed insert returned ${res.status}: ${await res.text()}`);
+}
+
+/** Read one Agent row (the given attributes) straight through an instance's ops API. */
+async function readAgentRow(h: HarperInstance, id: string, attributes: string[]): Promise<Record<string, unknown> | null> {
+  const res = await fetch(h.opsURL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: "Basic " + btoa(`${h.admin.username}:${h.admin.password}`) },
+    body: JSON.stringify({ operation: "search_by_id", database: "flair", table: "Agent", ids: [id], get_attributes: attributes }),
+    signal: AbortSignal.timeout(15_000),
+  });
+  const rows = await res.json() as Array<Record<string, unknown>>;
+  return Array.isArray(rows) ? rows[0] ?? null : null;
+}
+
 beforeAll(async () => {
   [a, b] = await Promise.all([startHarper(), startHarper()]);
   home = mkdtempSync(join(tmpdir(), "flair-2474-target-"));
@@ -79,7 +124,7 @@ afterAll(async () => {
   if (home) rmSync(home, { recursive: true, force: true });
 });
 
-describe("flair#2474 — stamp-home addresses ONE instance", () => {
+describe("flair#2474 — stamp-home pairs the two ports of ONE instance", () => {
   test("an ops port that disagrees with the HTTP port's instance is refused by name", async () => {
     const r = await runStampHome(["--port", httpPort(a), "--ops-port", opsPort(b)]);
     expect(r.code, `${r.stdout}\n${r.stderr}`).toBe(1);
@@ -108,10 +153,34 @@ describe("flair#2474 — stamp-home addresses ONE instance", () => {
   }, 40_000);
 
   test("an explicit pair for another instance is accepted", async () => {
-    // Both ports named for ONE other instance: the caller verified the pair, so
-    // the config's pair for A is not a contradiction.
+    // Both ports named for ONE other instance: the resolver trusts an explicit
+    // pair for BOTH ports without verification, so the config's pair for A is not
+    // a contradiction.
     const r = await runStampHome(["--port", httpPort(b), "--ops-port", opsPort(b)]);
     expect(r.code, `${r.stdout}\n${r.stderr}`).toBe(0);
     expect(r.stderr).toBe("");
   }, 40_000);
+});
+
+describe("flair#2474 — principal add pairs the two ports of ONE instance", () => {
+  test("an ops port that disagrees with the HTTP port's instance is refused by name before anything is written", async () => {
+    const r = await runPrincipalAdd(`pa-target-${Date.now().toString(36)}`, ["--port", httpPort(a), "--ops-port", opsPort(b)]);
+    expect(r.code, `${r.stdout}\n${r.stderr}`).toBe(1);
+    expect(r.stderr).toContain("ambiguous_instance_target");
+  }, 40_000);
+
+  test("a consistent pair runs the SKIPPED-insert write-back and leaves the stored home as it was", async () => {
+    // The row already exists on A, so the create-only insert is skipped and the
+    // record is written back through A's Agent resource (a real REST PATCH on the
+    // HTTP port). The two ports name ONE instance, so the write-back lands where
+    // the read came from.
+    const id = `pa-two-${Date.now().toString(36)}`;
+    await seedAgent(a, [{ id, name: id, role: "agent", admin: false, status: "active", publicKey: "pk-pa-two-2474", originatorInstanceId: null, createdAt: new Date().toISOString() }]);
+    const r = await runPrincipalAdd(id, ["--port", httpPort(a), "--ops-port", opsPort(a)]);
+    expect(r.code, `${r.stdout}\n${r.stderr}`).toBe(0);
+    expect(r.stderr).toBe("");
+    // The stored home is untouched (the write-back never accepts one from the body).
+    const row = await readAgentRow(a, id, ["id", "originatorInstanceId"]);
+    expect(row?.originatorInstanceId ?? null).toBeNull();
+  }, 120_000);
 });

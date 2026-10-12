@@ -83,20 +83,23 @@ test("the Agent resource and its raw creators stamp through the one delegate", (
  * the ops-API create literal (cli.ts). A creation path that creates its Agent
  * row by CALLING the shared seed is invisible to it: it could switch to the
  * home-less `seedAgentViaOpsApi` and no test would notice (a real-Harper audit
- * did exactly that to `flair init` and `flair import`). This pins the routing:
- * every seed-based creation path reaches the STAMPING seed
- * (`seedAgentWithLocalHome`), never the home-less one directly. The rows those
- * paths create are asserted by test/unit-isolated/agent-home-creation-paths-2474
- * (agent add, import), the remote-init isolated test, and
- * test/integration/agent-home-2433 (the seed itself).
+ * did exactly that to `flair init` and `flair import`). This pins the routing of
+ * the THREE seed-based creation paths it names by file
+ * (`src/commands/agent.ts`, `src/commands/init.ts`, `src/commands/import.ts`) by
+ * TEXT: each must reach the STAMPING seed (`seedAgentWithLocalHome`), never the
+ * home-less one directly. The rows those paths create are asserted by
+ * test/unit-isolated/agent-home-creation-paths-2474 (agent add, import), the
+ * remote-init isolated test, and test/integration/agent-home-2433 (the seed
+ * itself). The check is a text match over the RAW source, so it does NOT by
+ * itself exclude a commented-out or otherwise unreachable `await
+ * seedAgentWithLocalHome(` from satisfying it, and it says nothing about any
+ * seed-based creation path NOT in that list.
  */
-test("every seed-based CLI Agent creation path reaches the home-stamping seed", () => {
+test("the named seed-based CLI Agent creation paths reach the home-stamping seed", () => {
   const paths = ["src/commands/agent.ts", "src/commands/init.ts", "src/commands/import.ts"];
   for (const file of paths) {
     const src = readFileSync(file, "utf8");
-    // The home-stamping seed must be CALLED — a definition, a type member or a
-    // wrapper (`toContain("seedAgentWithLocalHome(")`) is not enough: `await
-    // seedAgentWithLocalHome(` matches only an executed call site.
+    // The home-stamping seed must appear as an AWAITED call in the file's text.
     expect(src, `${file} calls the home-stamping seed`).toContain("await seedAgentWithLocalHome(");
     // The home-less seed may survive ONLY as its own passthrough definition
     // (`function seedAgentViaOpsApi(...args) { return cli.seedAgentViaOpsApi(...args); }`).

@@ -1549,24 +1549,24 @@ function resolveOpsPort(opts: { opsPort?: string | number; port?: string | numbe
 export const AMBIGUOUS_INSTANCE_TARGET_ERROR = "ambiguous_instance_target";
 
 /**
- * The ONE instance `flair agent stamp-home` addresses (flair#2474). The command
- * talks to an ops API (the roster read and the resource PATCH's read-back) AND
- * sends the guarded PATCH to that instance's HTTP port. Resolving the two
- * INDEPENDENTLY — `resolveOpsPort(opts)` and `resolveHttpPort(opts)` — lets
- * `--ops-port` name one instance and `--port` another, so the roster is read
- * from the first and the stamp is written to the second, carrying the first
- * instance's id.
+ * The ONE instance `flair agent stamp-home` and `flair principal add` address
+ * (flair#2474). Each command talks to an ops API (the roster/stored-home read and
+ * the resource PATCH's read-back) AND sends the guarded PATCH to that instance's
+ * HTTP port. Resolving the two INDEPENDENTLY — `resolveOpsPort(opts)` and
+ * `resolveHttpPort(opts)` — lets `--ops-port` name one instance and `--port`
+ * another, so the read lands on the first and the write on the second.
  *
  * The instance's OWN config pairs the two ports: Harper's config in its data
  * directory records `http.port` and `operationsApi.network.port`, and for the
  * default install `~/.flair/config.yaml` records `port`/`opsPort` for the same
- * instance. An explicit ops port (`--ops-port` or `FLAIR_OPS_PORT`) that
- * DISAGREES with the pair that instance's config records is refused by name; an
- * HTTP port that DISAGREES with the pair the derived ops port came from is
- * refused too. A pair the caller named for BOTH ports is taken as given (the
- * caller verified both belong to one instance); when only one port is named it
- * must come from the config the other one came from, or the override is
- * ambiguous and is REFUSED by name.
+ * instance. A CONFIGURED pair is checked: an explicit ops port (`--ops-port` or
+ * `FLAIR_OPS_PORT`) that DISAGREES with the pair that instance's config records
+ * is refused by name, and an HTTP port that DISAGREES with the pair the derived
+ * ops port came from is refused too. A pair the caller names for BOTH ports is
+ * TRUSTED WITHOUT VERIFICATION — the resolver takes it as given (nothing here
+ * contacts an instance to confirm the two ports belong together); when only one
+ * port is named it must come from the config the other one came from, or the
+ * override is ambiguous and is REFUSED by name.
  */
 export function resolveAgentHomeTarget(opts: { port?: string | number; opsPort?: string | number; dataDir?: string }): {
   httpPort: number;
@@ -4857,6 +4857,7 @@ bindPrincipalCli({
   relativeTime,
   resolveOpsPort,
   resolveHttpPort,
+  resolveAgentHomeTarget,
 });
 registerPrincipal(program);
 

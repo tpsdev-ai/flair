@@ -50,10 +50,12 @@ export {
   AGENT_HOME_STAMP_FIELD,
   AGENT_HOME_STAMP_PAUSE_POINT,
   AGENT_PRINCIPAL_WRITE_BACK_FIELD,
+  AGENT_PRINCIPAL_WRITE_BACK_NO_ROW_ERROR,
   AGENT_PRINCIPAL_WRITE_BACK_PAUSE_POINT,
   isForeignAgentHome,
   isHomeLessAgentRow,
   isSyncOriginatedAgentRow,
+  pickPrincipalWriteBackFields,
 } from "./agent-home-fields.js";
 
 /** The ops endpoint of an instance the CLI is about to write to. */

@@ -32,7 +32,7 @@ import {
 } from "../lib/auth-resolve.js";
 import { resolveOpsUrl } from "../lib/mcp-enable.js";
 import { writeConfirmed } from "../lib/instance-identity-row.js";
-import { agentHomeEndpoint, planAgentHomeWrite, readStoredAgentHome, resolveTargetInstanceId, AGENT_HOME_IMMUTABLE_ERROR, AGENT_PRINCIPAL_WRITE_BACK_FIELD } from "../lib/agent-home.js";
+import { agentHomeEndpoint, planAgentHomeWrite, readStoredAgentHome, resolveTargetInstanceId, AGENT_HOME_IMMUTABLE_ERROR, AGENT_PRINCIPAL_WRITE_BACK_FIELD, AGENT_PRINCIPAL_WRITE_BACK_NO_ROW_ERROR } from "../lib/agent-home.js";
 import { fetchErrorLabel, redactUrl } from "./federation.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
 import { invalidAgentIdMessage, isValidAgentId } from "../lib/agent-id-rule.js";
@@ -51,6 +51,7 @@ export type PrincipalCli = {
   relativeTime: (iso: string | null | undefined) => string;
   resolveOpsPort: (opts: { opsPort?: string | number; port?: string | number }) => number;
   resolveHttpPort: (opts: { port?: string | number; dataDir?: string }, mode?: "address" | "create") => number;
+  resolveAgentHomeTarget: (opts: { port?: string | number; opsPort?: string | number; dataDir?: string }) => { httpPort: number; opsPort: number };
 };
 
 let cli: PrincipalCli;
@@ -68,6 +69,8 @@ const pubKeyPath = (agentId: string, keysDir: string): string => cli.pubKeyPath(
 const relativeTime = (iso: string | null | undefined): string => cli.relativeTime(iso);
 const resolveOpsPort = (opts: { opsPort?: string | number; port?: string | number }): number =>
   cli.resolveOpsPort(opts);
+const resolveAgentHomeTarget = (opts: { port?: string | number; opsPort?: string | number; dataDir?: string }): { httpPort: number; opsPort: number } =>
+  cli.resolveAgentHomeTarget(opts);
 
 const PRINCIPAL_OPS_TIMEOUT_MS = 10_000;
 
@@ -276,7 +279,21 @@ export function register(program: Command): void {
         console.error(`Error: ${invalidAgentIdMessage(id)}`);
         process.exit(1);
       }
-      const opsPort = resolveOpsPort(opts);
+      // flair#2474 — the ops port and the HTTP port must address the SAME
+      // instance. `principal add` reads the stored home through the ops API and
+      // sends its guarded write-back to the Agent RESOURCE on the HTTP port;
+      // resolving the two INDEPENDENTLY would let `--ops-port` name one instance
+      // and `--port` another, so the home is read from the first and written to
+      // the second. The instance's own config pairs them; a disagreement is
+      // refused by name BEFORE any key file is written or any insert attempted.
+      let target: { httpPort: number; opsPort: number };
+      try {
+        target = resolveAgentHomeTarget(opts);
+      } catch (err: any) {
+        console.error(`Error: ${err.message}`);
+        process.exit(1);
+      }
+      const opsPort = target.opsPort;
       const keysDir: string = opts.keysDir ?? defaultKeysDir();
       const adminUser = resolveAdminUser(opts.adminUser);
       const kind: string = opts.kind ?? "agent";
@@ -328,20 +345,22 @@ export function register(program: Command): void {
       // Insert via operations API with Principal fields
       const auth = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
 
-      // flair#2433 / flair#2473 — a NEW row's home is THIS instance's federation
-      // id, resolved through the one shared rule. The write is CREATE-ONLY: the
-      // resolved home rides on the `insert` itself, so a row created at write
-      // time carries it — even one deleted since this read. An insert over a row
-      // that already exists is SKIPPED by Harper (create-only), so a stored home
-      // is never replaced. A row that appeared with a home that differs from this
-      // instance's is refused with `originator_instance_immutable`, never
-      // silently updated; a write Harper skips is a failure named by its result,
-      // not a success. A failed read is UNREADABLE, not "no home", and refused.
+      // flair#2433 / flair#2473 — the HOME ASSIGNMENT on a create is THIS
+      // instance's federation id, resolved through the one shared rule, and it
+      // rides on the `insert` itself — so a row created at write time carries it,
+      // even one deleted since this read. That assignment is CREATE-ONLY: an
+      // insert over a row that already exists is SKIPPED by Harper, so the stored
+      // home is never replaced (other fields of an existing row may still be
+      // updated by the write-back below). A row that appeared with a home that
+      // DIFFERS from this instance's is refused with `originator_instance_immutable`,
+      // never silently updated; a write Harper skips is a failure named by its
+      // result, not a success. A failed read is UNREADABLE, not "no home", and refused.
       const opsUrl = `http://127.0.0.1:${opsPort}/`;
       // The instance's HTTP port, where the Agent RESOURCE lives. The write-back
       // goes to the resource (a guarded REST PATCH), not the raw ops API, so it
-      // runs in an owned transaction (flair#2473).
-      const httpUrl = `http://127.0.0.1:${cli.resolveHttpPort(opts)}/`;
+      // runs in an owned transaction (flair#2473). `target` pairs this with the
+      // ops port above (flair#2474).
+      const httpUrl = `http://127.0.0.1:${target.httpPort}/`;
       const home = await resolveTargetInstanceId(agentHomeEndpoint(opsPort, adminUser, adminPass));
       const existingHome = await readStoredAgentHome({ opsUrl, authHeader: auth, id });
       const homePlan = planAgentHomeWrite(existingHome, home, id);
@@ -406,14 +425,18 @@ export function register(program: Command): void {
           console.error(`Error: ${livePlan.message}`);
           process.exit(1);
         }
-        // Write back WITHOUT the home field, so a home this command did not
-        // create is never changed. The write goes to the Agent RESOURCE (a REST
-        // PATCH, never the raw ops API): the resource runs it in its OWN owned
-        // transaction, STAGES it, then re-reads the COMMITTED row and ABORTS
-        // with `originator_instance_immutable` if that row's home became a
-        // peer's — so a row this command did not create is never changed
-        // (flair#2473). Harper has no compare-and-set, so this narrows the race
-        // rather than closing it (per-id serialization: flair#2478).
+        // Write back WITHOUT the home field, so a stored home this command did
+        // not create is not changed by THIS write (other fields, such as a display
+        // name or trust tier, are). The write goes to the Agent RESOURCE (a REST
+        // PATCH, never the raw ops API): the resource runs it in a fresh owned
+        // transaction (the request's transaction is detached), writes ONLY an
+        // allow-list of fields (a home or a federation stamp in the body is never
+        // carried), STAGES it, then re-reads the COMMITTED row and ABORTS — with
+        // `originator_instance_immutable` if that row's home became a peer's, or
+        // `agent_principal_write_back_no_row` if it is gone — so a row this
+        // command did not create is not changed, and a deleted row is not
+        // re-created (flair#2473). Harper has no compare-and-set, so this narrows
+        // the race rather than closing it (per-id serialization: flair#2478).
         const writeBackRes = await fetch(`${httpUrl}Agent/${encodeURIComponent(id)}`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json", Authorization: auth },
@@ -423,6 +446,10 @@ export function register(program: Command): void {
           const body = (await writeBackRes.json().catch(() => null)) as { error?: unknown; message?: unknown } | null;
           if (body?.error === AGENT_HOME_IMMUTABLE_ERROR) {
             console.error(`Error: ${typeof body.message === "string" && body.message.length > 0 ? body.message : AGENT_HOME_IMMUTABLE_ERROR}`);
+          } else if (body?.error === AGENT_PRINCIPAL_WRITE_BACK_NO_ROW_ERROR) {
+            console.error(
+              `Error: the write-back for principal '${id}' was refused: the agent row is gone (deleted between this command's read and its write-back), so it was not changed and not re-created. Re-run 'flair principal add ${id}' to create it afresh.`,
+            );
           } else {
             console.error(
               `Error: the write-back for principal '${id}' failed (${writeBackRes.status}${body?.message ? `: ${String(body.message)}` : ""}); no row is known to have been changed. Re-run 'flair principal add ${id}'.`,

@@ -16,8 +16,9 @@ export const AGENT_HOME_FIELD = "originatorInstanceId";
 /**
  * The request-body control field the remedy sends to the Agent resource
  * (flair#2472): a guarded home stamp. The resource reads it, applies the stamp
- * inside its own request transaction, and drops it before the write — it is a
- * control field, not a stored column.
+ * inside a FRESH OWNED transaction — the request's own transaction is detached
+ * for that scope (resources/request-transaction.ts's withOwnedTransaction) — and
+ * drops the field before the write. It is a control field, not a stored column.
  */
 export const AGENT_HOME_STAMP_FIELD = "flairStampHome";
 
@@ -46,6 +47,56 @@ export const AGENT_HOME_STAMP_PAUSE_POINT = "agent-home-stamp";
  * not a stored column.
  */
 export const AGENT_PRINCIPAL_WRITE_BACK_FIELD = "flairPrincipalWriteBack";
+
+/**
+ * The named refusal the Agent resource answers for a guarded principal write-back
+ * (flair#2473) whose row is ABSENT — before the staging and again at the
+ * confirmation read (HTTP 404). A write-back never re-creates a row (Harper's
+ * `table.update` would), so a row deleted between the caller's read and this write
+ * stays deleted rather than coming back home-less.
+ */
+export const AGENT_PRINCIPAL_WRITE_BACK_NO_ROW_ERROR = "agent_principal_write_back_no_row";
+
+/**
+ * The fields `flair principal add`'s write-back may set on an EXISTING Agent row
+ * (flair#2473). An EXPLICIT allow-list, not a deny-list: a field a future caller
+ * adds to the request body is NOT carried by this path until it is named here.
+ *
+ * `originatorInstanceId` is deliberately ABSENT — a stored home is never accepted
+ * from a request body (a create stamps it; an update keeps the stored value).
+ * `publicKey` and `createdAt` are absent too: both are immutable after create
+ * (key rotation and creation time have their own paths). The receiver-side
+ * federation stamps (`_syncedFrom`, `_originatorInstanceId`, `_syncedAt`) are
+ * absent as well — they are never client-settable.
+ */
+export const AGENT_PRINCIPAL_WRITE_BACK_FIELDS = [
+  "name",
+  "displayName",
+  "kind",
+  "type",
+  "status",
+  "defaultTrustTier",
+  "role",
+  "admin",
+  "runtime",
+  "updatedAt",
+] as const;
+
+/**
+ * The allow-listed subset of a write-back body: exactly the fields
+ * {@link AGENT_PRINCIPAL_WRITE_BACK_FIELDS} names, copied as-is. Never a home
+ * and never a federation stamp, because neither is on the list. PURE; a
+ * non-object body yields an empty object.
+ */
+export function pickPrincipalWriteBackFields(content: unknown): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (content == null || typeof content !== "object") return out;
+  const src = content as Record<string, unknown>;
+  for (const field of AGENT_PRINCIPAL_WRITE_BACK_FIELDS) {
+    if (field in src) out[field] = src[field];
+  }
+  return out;
+}
 
 /**
  * The named pause point the write-back test arms (flair#2473), inside the
