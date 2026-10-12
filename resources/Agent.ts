@@ -435,7 +435,7 @@ export class Agent extends (databases as any).flair.Agent {
         if (stored === null) return { kind: "no-row" as const };
         if (!eligible(stored)) return { kind: "ineligible" as const };
         if (!table || typeof table.update !== "function") return { kind: "no-row" as const };
-        // STAGE the home-only write in this transaction's own scope.
+        // STAGE the write of the home and updatedAt in this transaction's own scope.
         await table.update(id, stampBody, c);
         // Test-only: inert unless the fault-injection env opt-in is set and armed.
         // The name is a DIRECT string literal at the call site (flair#2382's

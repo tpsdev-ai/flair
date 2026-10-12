@@ -6,7 +6,7 @@
   read, not a process-cached id — and if it could not confirm a single canonical
   Instance row the write is refused by name
   (`agent_home_stamp_no_instance`) with nothing written. It then reads the row,
-  STAGES the home-only write when the row is still home-less and carries no
+  STAGES the write of the home and `updatedAt` when the row is still home-less and carries no
   federation-sync provenance, re-reads the COMMITTED row, and ABORTS (discarding
   the staged write) if that read sees a home or provenance, or no row. A row
   either read finds deleted is not re-created, and an ineligible row is returned

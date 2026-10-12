@@ -16,7 +16,7 @@
  * doctor` CLI subprocess — all against this test's own ephemeral instance.
  *
  * The stamp's decision lives in the Agent resource's OWNED transaction
- * (resources/Agent.ts): the resource STAGES the home-only write, then re-reads
+ * (resources/Agent.ts): the resource STAGES the write of the home and updatedAt, then re-reads
  * the COMMITTED row and aborts (discarding the staged write) when that row gained
  * a home or provenance. The interleaving cases inject a competing commit at the
  * resource's in-transaction pause point (resources/txn-pause-point.ts, enabled
@@ -591,7 +591,7 @@ describe("flair#2433 — the home a create stamps, on a real Harper", () => {
   }, 60_000);
 
   test("provenance committed after the staged stamp, before the confirmation read, aborts it (no home written)", async () => {
-    // The resource STAGES the home-only write, then re-reads the COMMITTED row
+    // The resource STAGES the write of the home and updatedAt, then re-reads the COMMITTED row
     // and aborts (discarding the staged write) when that row gained provenance.
     // The competing raw provenance update lands in exactly that gap.
     const id = `race-staged-${sfx}`;
