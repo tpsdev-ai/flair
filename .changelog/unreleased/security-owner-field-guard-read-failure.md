@@ -1,1 +1,1 @@
-- **The owner-field guard refuses non-admin writes when it cannot read stored ownership.**
+- **The owner-field guard refuses non-admin agent writes when its stored-row check fails.**

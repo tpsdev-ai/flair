@@ -29,8 +29,7 @@
   (unverified)]`, and shows `[via withheld]` only to a non-author who can read
   the active record with a bound pointer after its visibility changes — an
   ordinary non-author cannot read this private row at all, and an admin can read
-  it but takes no pointer join — flair#2446. An existing readable receipt is
-  left unchanged only when its author, content, and host-source identity match.
+  it but takes no pointer join — flair#2446. An existing readable row is verified as this runner's receipt only when its author, content, and host-source identity match.
   A readable mismatch is reported as `receiptMismatched`, left untouched, and
   not acknowledged. The ack follows a successful write or a verified existing
   receipt — except for a receipt the runner treats as a non-retryable refusal

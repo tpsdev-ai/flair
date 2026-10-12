@@ -1,1 +1,1 @@
-- **Embedding-space scans preserve a newer guard verdict (#2481).**
+- **Embedding-space scans preserve guard verdicts from newer foreign-stamp write notes (#2481).**
