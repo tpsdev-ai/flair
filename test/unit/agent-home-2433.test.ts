@@ -92,10 +92,15 @@ describe("runAgentHomeStamp — sync provenance is checked at write time", () =>
         const id = decodeURIComponent(url.split("/Agent/")[1]);
         writes.push({ id, body });
         const cur = rows[id];
-        // The resource's guard: absent -> 404; not home-less or provenance -> no write.
-        if (!cur) return new Response("", { status: 404 });
-        if (isHomeLessAgentRow(cur) && !isSyncOriginatedAgentRow(cur)) cur.originatorInstanceId = "inst-local";
-        return new Response("", { status: 200 });
+        // The resource's guard: absent -> 404; not home-less or provenance ->
+        // an explicit `stamped: false` (no write); else the home is applied and
+        // the resource confirms `stamped: true`.
+        if (!cur) return jsonResponse({ error: "agent_home_stamp_no_row" }, 404);
+        if (isHomeLessAgentRow(cur) && !isSyncOriginatedAgentRow(cur)) {
+          cur.originatorInstanceId = "inst-local";
+          return jsonResponse({ id, stamped: true });
+        }
+        return jsonResponse({ id, stamped: false, reason: "ineligible" });
       }
       throw new Error(`unexpected request ${opts.method ?? "POST"} ${body.operation ?? url}`);
     }) as unknown as typeof fetch;
@@ -190,10 +195,34 @@ describe("runAgentHomeStamp — sync provenance is checked at write time", () =>
       if (body.operation === "search_by_id") {
         return jsonResponse(patched ? [{ id: "a", originatorInstanceId: "peer-1", _syncedFrom: "peer-1" }] : [{ id: "a" }]);
       }
-      if (opts.method === "PATCH") { patched = true; return new Response("", { status: 200 }); }
+      if (opts.method === "PATCH") { patched = true; return jsonResponse({ id: "a", stamped: true }); }
       throw new Error(`unexpected ${opts.method}`);
     }) as unknown as typeof fetch;
     const result = await runAgentHomeStamp({ ...base, fetchImpl });
+    expect(result.stamped).toEqual([]);
+    expect(result.skipped).toEqual(["a"]);
+  });
+
+  test("a stamp the resource did not apply is not counted, even if the read-back shows this instance's home", async () => {
+    // Another writer set the SAME local home between the CLI's re-read and the
+    // resource's write. The resource's guard sees a stored home and reports
+    // `stamped: false` WITHOUT patching; the read-back equals the local id, so a
+    // read-back-only check would wrongly count it. The resource's confirmation
+    // is what keeps it out of `stamped`.
+    let patched = false;
+    const fetchImpl = (async (_url: any, opts: any) => {
+      const body = JSON.parse(String(opts.body));
+      if (body.operation === "search_by_value") return jsonResponse([{ id: "a" }]);
+      if (body.operation === "search_by_id") {
+        // Home-less at the CLI's pre-PATCH re-read; after the resource reports
+        // ineligible, a competing writer's SAME local home is visible.
+        return jsonResponse(patched ? [{ id: "a", originatorInstanceId: "inst-local" }] : [{ id: "a" }]);
+      }
+      if (opts.method === "PATCH") { patched = true; return jsonResponse({ id: "a", stamped: false, reason: "ineligible" }); }
+      throw new Error(`unexpected ${opts.method}`);
+    }) as unknown as typeof fetch;
+    const result = await runAgentHomeStamp({ ...base, fetchImpl });
+    expect(patched).toBe(true);
     expect(result.stamped).toEqual([]);
     expect(result.skipped).toEqual(["a"]);
   });

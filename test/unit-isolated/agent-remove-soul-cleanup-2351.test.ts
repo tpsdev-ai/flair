@@ -94,6 +94,7 @@ beforeEach(() => {
     },
     resolveOpsPort,
     resolveHttpPort,
+    resolveAgentHomeTarget: (opts: { port?: string | number; opsPort?: string | number }) => ({ httpPort: resolveHttpPort(), opsPort: resolveOpsPort(opts) }),
     b64url: () => "",
     privKeyPath: () => "",
     pubKeyPath: () => "",

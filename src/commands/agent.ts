@@ -55,6 +55,7 @@ export type AgentCli = {
   ) => boolean;
   resolveHttpPort: (opts: { port?: string | number; dataDir?: string }, mode?: "address" | "create") => number;
   resolveOpsPort: (opts: { opsPort?: string | number; port?: string | number }) => number;
+  resolveAgentHomeTarget: (opts: { port?: string | number; opsPort?: string | number; dataDir?: string }) => { httpPort: number; opsPort: number };
   resolveEffectiveOpsUrl: (opts: { target?: string; opsTarget?: string }) => string | undefined;
   seedAgentViaOpsApi: (
     opsPortOrUrl: number | string,
@@ -95,6 +96,8 @@ const resolveHttpPort = (opts: { port?: string | number; dataDir?: string }, mod
   cli.resolveHttpPort(opts, mode);
 const resolveOpsPort = (opts: { opsPort?: string | number; port?: string | number }): number =>
   cli.resolveOpsPort(opts);
+const resolveAgentHomeTarget = (opts: { port?: string | number; opsPort?: string | number; dataDir?: string }): { httpPort: number; opsPort: number } =>
+  cli.resolveAgentHomeTarget(opts);
 const resolveEffectiveOpsUrl = (opts: { target?: string; opsTarget?: string }): string | undefined =>
   cli.resolveEffectiveOpsUrl(opts);
 const seedAgentWithLocalHome = (
@@ -817,7 +820,15 @@ export function register(program: Command): void {
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--apply", "Write the home; without it the command is a dry run and writes nothing")
     .action(async (opts) => {
-      const opsPort = resolveOpsPort(opts);
+      let target: { httpPort: number; opsPort: number };
+      try {
+        // The ops port and the HTTP port must address the SAME instance (flair#2474).
+        target = resolveAgentHomeTarget(opts);
+      } catch (err: any) {
+        console.error(`Error: ${err.message}`);
+        process.exit(1);
+      }
+      const opsPort = target.opsPort;
       const adminUser = resolveAdminUser(opts.adminUser);
       let explicitPass: string | undefined;
       try {
@@ -845,7 +856,7 @@ export function register(program: Command): void {
         process.exit(1);
       }
       const opsUrl = `http://127.0.0.1:${opsPort}/`;
-      const httpUrl = `http://127.0.0.1:${resolveHttpPort(opts)}/`;
+      const httpUrl = `http://127.0.0.1:${target.httpPort}/`;
       const auth = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
 
       const localInstanceId = await resolveTargetInstanceId(agentHomeEndpoint(opsUrl, adminUser, adminPass));

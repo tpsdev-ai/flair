@@ -48,6 +48,7 @@ export const AGENT_HOME_STAMP_REMEDY = `${AGENT_HOME_STAMP_COMMAND} (dry run; ad
 export {
   AGENT_HOME_FIELD,
   AGENT_HOME_STAMP_FIELD,
+  AGENT_HOME_STAMP_PAUSE_POINT,
   isHomeLessAgentRow,
   isSyncOriginatedAgentRow,
 } from "./agent-home-fields.js";
@@ -423,14 +424,19 @@ export async function runAgentHomeStamp(args: {
       const text = await res.text().catch(() => "");
       throw new Error(`Failed to stamp the home on agent '${id}' (${res.status}): ${text}`);
     }
-    // Verify the write landed: an unconfirmed stamp is not a stamp. A row that
-    // a later merge owns (provenance) or that carries another home is reported
-    // as skipped, never as stamped.
+    // The resource confirms whether IT applied the stamp (`stamped: true`), and
+    // the decision is made inside its own write transaction. A read-back that
+    // merely shows this instance's home is NOT that confirmation: another writer
+    // may have set the same home, or a later merge may own the row. Count a row
+    // stamped only when the resource applied it AND the read-back still shows
+    // this instance's home with no provenance.
+    const body = (await res.json().catch(() => null)) as { stamped?: unknown } | null;
+    const applied = body?.stamped === true;
     const back = await readAgentRowForStamp({ opsUrl: args.opsUrl, authHeader: args.authHeader, id, fetchImpl, timeoutMs });
     if (back === "unreadable") {
       throw new Error(`The home stamp for agent '${id}' was not confirmed (the read-back failed).`);
     }
-    if (back !== null && !isSyncOriginatedAgentRow(back) && back.originatorInstanceId === args.localInstanceId) {
+    if (applied && back !== null && !isSyncOriginatedAgentRow(back) && back.originatorInstanceId === args.localInstanceId) {
       stamped.push(id);
     } else {
       skipped.push(id);

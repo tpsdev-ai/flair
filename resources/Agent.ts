@@ -5,7 +5,9 @@ import { admitPrincipalWrite, statusWriteRefusal } from "./agent-status-guard.js
 import { applyFederationBookkeeping, applyOriginatorInstanceId, dropClientFederationBookkeeping, resolveStoredRow, stampOriginatorOnCreate } from "./originator-instance.js";
 import { localInstanceId } from "./instance-identity.js";
 import { AGENT_ID_ERROR, invalidAgentIdMessage, isValidAgentId } from "../src/lib/agent-id-rule.js";
-import { AGENT_HOME_STAMP_FIELD, isHomeLessAgentRow, isSyncOriginatedAgentRow } from "../src/lib/agent-home-fields.js";
+import { AGENT_HOME_STAMP_FIELD, AGENT_HOME_STAMP_PAUSE_POINT, isHomeLessAgentRow, isSyncOriginatedAgentRow } from "../src/lib/agent-home-fields.js";
+import { withOwnedTransaction } from "./request-transaction.js";
+import { txnPausePoint } from "./txn-pause-point.js";
 
 /**
  * The id this write lands on: the URL-bound target (`getId()`) when there is
@@ -254,6 +256,16 @@ export class Agent extends (databases as any).flair.Agent {
     const denial = await this.authorizePrincipalWrite(content);
     if (denial) return denial;
 
+    // flair#2472 — the guarded home stamp, the write `flair agent stamp-home
+    // --apply` sends. This is NOT an ordinary merge: it decides and writes
+    // inside a FRESH OWNED transaction (see applyGuardedHomeStamp), never from
+    // the request's pinned read snapshot. Handled before the generic merge so
+    // it never re-stamps a stored home or re-creates a deleted row.
+    if (content != null && typeof content === "object" && content[AGENT_HOME_STAMP_FIELD] === true) {
+      delete content[AGENT_HOME_STAMP_FIELD];
+      return this.applyGuardedHomeStamp(content, query);
+    }
+
     if (content != null && typeof content === "object") {
       // A partial update must not be able to leave the record's two admin
       // fields disagreeing, so reconcile against the MERGED result rather than
@@ -278,35 +290,95 @@ export class Agent extends (databases as any).flair.Agent {
       if (resolvedOriginRow.denial) return resolvedOriginRow.denial;
       await applyOriginatorInstanceId(content, resolvedOriginRow.row);
       applyFederationBookkeeping(content, resolvedOriginRow.row);
-      // flair#2472 — the guarded home stamp, the write `flair agent stamp-home
-      // --apply` sends. Read inside THIS request's transaction: a stamp is
-      // applied only when the row, at write time, is still home-less and carries
-      // no federation-sync provenance; the value stamped is this instance's own
-      // id, never the body's. A row that already has a home, or carries
-      // provenance, keeps its stored home. A stamp NEVER creates: an absent row
-      // is refused, so a row deleted since the caller's read is not re-created.
-      // Gated to an administrator or a trusted internal caller; the field is a
-      // control field, dropped before the write.
-      if (content[AGENT_HOME_STAMP_FIELD] === true) {
-        delete content[AGENT_HOME_STAMP_FIELD];
-        const admission = admitPrincipalWrite(await resolveAgentAuth((this as any).getContext?.()));
-        if (admission === "admin" || admission === "internal") {
-          if (resolvedOriginRow.row == null) {
-            return new Response(
-              JSON.stringify({ error: "agent_home_stamp_no_row", message: "no stored agent row to stamp" }),
-              { status: 404, headers: { "content-type": "application/json" } },
-            );
-          }
-          if (isHomeLessAgentRow(resolvedOriginRow.row) && !isSyncOriginatedAgentRow(resolvedOriginRow.row)) {
-            content.originatorInstanceId = await localInstanceId();
-          }
-        }
-      }
       content.updatedAt = new Date().toISOString();
     }
 
     const result = await super.patch(content, query);
     invalidateAdminCache();
     return result;
+  }
+
+  /**
+   * The guarded home stamp (flair#2472), the ONE write `flair agent stamp-home
+   * --apply` sends. It is decided and applied inside a FRESH OWNED transaction,
+   * never from the request's pinned read snapshot.
+   *
+   * Harper loads `/Agent/:id` before this override runs, so the request context
+   * already carries this row in its read snapshot. A decision made from that
+   * snapshot is stale: a federation merge or another creator that commits in
+   * between is invisible. `withOwnedTransaction` detaches the request's
+   * transaction for this call and reads the row in a scope this call OWNS, so
+   * the decision is over the row as it is at write time.
+   *
+   * The rules, all evaluated against the committed row:
+   *   - an absent row is refused (404); a stamp NEVER creates, so a row deleted
+   *     since the caller's read is not re-created;
+   *   - a row that is not home-less, or that carries federation-sync provenance,
+   *     is reported `stamped: false` (a 200, NO patch, no `updatedAt` change);
+   *   - the value stamped is THIS instance's own id, never the request body's;
+   *   - between the first read and the staged write, the row is re-read in an
+   *     explicit fresh context (the COMMITTED row, not this transaction's
+   *     snapshot): a competing home or provenance that landed in the gap is
+   *     reported `stamped: false`, never overwritten.
+   *
+   * The CLI reports a row `stamped` only when this resource confirms it applied
+   * the stamp (`stamped: true`): a read-back that merely shows this instance's
+   * home is not enough — another writer may have set it.
+   */
+  private async applyGuardedHomeStamp(content: any, query?: any): Promise<Response> {
+    const admission = admitPrincipalWrite(await resolveAgentAuth((this as any).getContext?.()));
+    if (admission !== "admin" && admission !== "internal") {
+      return new Response(
+        JSON.stringify({ error: "agent_home_stamp_forbidden", message: "the home stamp is an administrator or trusted-internal write" }),
+        { status: 403, headers: { "content-type": "application/json" } },
+      );
+    }
+    const target = writeTargetId(this, content);
+    const id = target.present && (typeof target.value === "string" || typeof target.value === "number")
+      ? String(target.value)
+      : null;
+    const noRow = () => new Response(
+      JSON.stringify({ error: "agent_home_stamp_no_row", message: "no stored agent row to stamp" }),
+      { status: 404, headers: { "content-type": "application/json" } },
+    );
+    if (id === null) return noRow();
+
+    const table = (databases as any).flair?.Agent;
+    const readRow = async (context: unknown): Promise<Record<string, any> | null> => {
+      if (!table || typeof table.get !== "function") return null;
+      const row = await table.get(id, context);
+      return row && typeof row === "object" && !(row instanceof Response) ? row : null;
+    };
+
+    const outcome = await withOwnedTransaction((this as any).getContext?.(), async (c: unknown) => {
+      // The row as this call OWNS it — a scope the request's snapshot does not pin.
+      const stored = await readRow(c);
+      if (stored === null) return { kind: "no-row" as const };
+      if (!isHomeLessAgentRow(stored) || isSyncOriginatedAgentRow(stored)) return { kind: "ineligible" as const };
+      // Test-only: inert unless the fault-injection env opt-in is set and armed.
+      const pause = txnPausePoint(AGENT_HOME_STAMP_PAUSE_POINT);
+      if (pause) await pause;
+      // Confirmation read: the COMMITTED row in an explicit fresh context (never
+      // this transaction's snapshot, never the request's pinned read).
+      const confirmed = await readRow({});
+      if (confirmed === null) return { kind: "no-row" as const };
+      if (!isHomeLessAgentRow(confirmed) || isSyncOriginatedAgentRow(confirmed)) return { kind: "ineligible" as const };
+      // Field-only: the home, never the request body's other fields.
+      await super.patch({ id, originatorInstanceId: await localInstanceId(), updatedAt: new Date().toISOString() }, query);
+      return { kind: "applied" as const };
+    });
+
+    invalidateAdminCache();
+    if (outcome.kind === "no-row") return noRow();
+    if (outcome.kind === "ineligible") {
+      return new Response(
+        JSON.stringify({ id, stamped: false, reason: "ineligible" }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+    return new Response(
+      JSON.stringify({ id, stamped: true }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
   }
 }

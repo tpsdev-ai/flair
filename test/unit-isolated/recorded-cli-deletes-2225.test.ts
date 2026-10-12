@@ -82,6 +82,7 @@ beforeEach(() => {
     parseEntitiesOptionOrExit: () => [], ENTITIES_OPTION_DESCRIPTION: "entities",
   } satisfies MemoryCli);
   bindAgent({ api, resolveOpsPort, resolveHttpPort,
+    resolveAgentHomeTarget: (opts: { port?: string | number; opsPort?: string | number }) => ({ httpPort: resolveHttpPort(), opsPort: resolveOpsPort(opts) }),
     b64url: () => "", privKeyPath: () => "", pubKeyPath: () => "",
     shouldShowInlineSecretWarning: () => false, resolveEffectiveOpsUrl: () => undefined,
     seedAgentViaOpsApi: async () => {}, seedAgentWithLocalHome: async () => {}, agentRecordIsAdmin: () => false,

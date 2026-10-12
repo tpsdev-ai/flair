@@ -21,6 +21,14 @@ export const AGENT_HOME_FIELD = "originatorInstanceId";
  */
 export const AGENT_HOME_STAMP_FIELD = "flairStampHome";
 
+/**
+ * The named pause point the home-stamp test arms (flair#2472), inside the
+ * stamp's OWNED transaction, after the resource's first read of the row and
+ * before its confirmation read. Inert unless the fault-injection env opt-in is
+ * set and armed (resources/txn-pause-point.ts).
+ */
+export const AGENT_HOME_STAMP_PAUSE_POINT = "agent-home-stamp";
+
 /** A row is home-less when `originatorInstanceId` is null, absent or empty. */
 export function isHomeLessAgentRow(row: Record<string, unknown>): boolean {
   const home = row[AGENT_HOME_FIELD];

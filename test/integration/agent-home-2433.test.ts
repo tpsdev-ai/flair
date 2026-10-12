@@ -15,11 +15,21 @@
  * federation merge (a sync-originated home-less row), and the real `flair
  * doctor` CLI subprocess — all against this test's own ephemeral instance.
  *
+ * The stamp's decision lives in the Agent resource's OWNED transaction
+ * (resources/Agent.ts). The interleaving cases inject a competing commit at the
+ * resource's in-transaction pause point (resources/txn-pause-point.ts, enabled
+ * for THIS file's Harper by FLAIR_ENABLE_TEST_FAULT_INJECTION +
+ * FLAIR_TEST_PAUSE_DIR) — AFTER the resource's first read and BEFORE its
+ * confirmation read — so a decision made from the request's read snapshot (taken
+ * before the override ran) would miss it: a competing home, a competing merge,
+ * and another writer's SAME local home.
+ *
  * Build prerequisite: dist/cli.js and dist/resources/*.js
  * (`bun run build && bun run build:cli`).
  */
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { spawn } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -35,6 +45,7 @@ import {
   resolveTargetInstanceId,
   runAgentHomeStamp,
 } from "../../src/lib/agent-home.js";
+import { AGENT_HOME_STAMP_PAUSE_POINT } from "../../src/lib/agent-home-fields.js";
 
 const ADMIN_PASS = "test123"; // harper-lifecycle's seeded admin pass
 const CLI = join(process.cwd(), "dist", "cli.js");
@@ -44,6 +55,7 @@ const sfx = Date.now().toString(36);
 
 let harper: HarperInstance;
 let cliHome: string;
+let pauseDir: string;
 
 /** Refuse to talk to anything but this test's own ephemeral instance. */
 function assertOwnInstance(h: HarperInstance): void {
@@ -158,8 +170,69 @@ async function closedPort(): Promise<string> {
   });
 }
 
+/** The four marker paths the stamp's in-transaction pause point uses (resources/txn-pause-point.ts). */
+function pausePoints(point: string) {
+  return {
+    arm: join(pauseDir, `arm.${point}`),
+    paused: join(pauseDir, `paused.${point}`),
+    released: join(pauseDir, `released.${point}`),
+    go: join(pauseDir, `go.${point}`),
+  };
+}
+
+async function waitForFile(path: string, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (existsSync(path)) return true;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  return false;
+}
+
+/**
+ * Arm the stamp's in-transaction pause (AFTER the resource's first read of the
+ * row, BEFORE its confirmation read), run `stamp`, and once it is paused commit
+ * `compete` then release it. The competing commit therefore lands where a
+ * decision made from the request's read snapshot would miss it. Returns the
+ * stamp's result and whether the pause actually fired.
+ */
+async function withPausedStamp<T, R>(
+  stamp: () => Promise<R>,
+  compete: () => Promise<T>,
+): Promise<{ result: R; released: string }> {
+  const p = pausePoints(AGENT_HOME_STAMP_PAUSE_POINT);
+  for (const marker of ["claimed", "paused", "go", "released"]) {
+    rmSync(join(pauseDir, `${marker}.${AGENT_HOME_STAMP_PAUSE_POINT}`), { force: true });
+  }
+  writeFileSync(p.arm, "");
+  const pending = stamp();
+  const paused = await waitForFile(p.paused, 20_000);
+  try {
+    if (paused) await compete();
+  } finally {
+    writeFileSync(p.go, "");
+  }
+  const result = await pending;
+  return { result, released: paused ? readFileSync(p.released, "utf8") : "never paused" };
+}
+
 beforeAll(async () => {
-  harper = await startHarper();
+  pauseDir = mkdtempSync(join(tmpdir(), "flair-2433-pause-"));
+  const saved = {
+    FLAIR_ENABLE_TEST_FAULT_INJECTION: process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION,
+    FLAIR_TEST_PAUSE_DIR: process.env.FLAIR_TEST_PAUSE_DIR,
+  };
+  process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION = "1";
+  process.env.FLAIR_TEST_PAUSE_DIR = pauseDir;
+  try {
+    harper = await startHarper();
+  } finally {
+    // The spawned Harper has its copy; no later Harper in this process inherits it.
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
   assertOwnInstance(harper);
   cliHome = await mkdtemp(join(tmpdir(), "flair-2433-home-"));
   // Make this instance's identity unambiguous: exactly one Instance row.
@@ -176,6 +249,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (harper) await stopHarper(harper);
+  if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
   if (cliHome) await rm(cliHome, { recursive: true, force: true, maxRetries: 4 });
 }, 30_000);
 
@@ -314,52 +388,61 @@ describe("flair#2433 — the home a create stamps, on a real Harper", () => {
     expect((await rowIn("Agent", syncId))._syncedFrom).toBe(PEER_ID);
   }, 60_000);
 
-  test("a row that gains a home between the CLI's re-read and its write is not stamped", async () => {
-    // The stamp's decision is made INSIDE the Agent resource's request
-    // transaction. Here another writer commits a home in the gap between the
-    // CLI's re-read and the resource's write: the resource re-reads, sees a
-    // stored home, and leaves it — the CLI cannot stamp over it.
+  test("a home committed after the resource's first read is not overwritten (pause inside the override)", async () => {
+    // The stamp's decision is made INSIDE the Agent resource's OWNED transaction.
+    // The competing commit is injected at the pause point AFTER the resource's
+    // first read and BEFORE its confirmation read — a decision made from the
+    // request's read snapshot (taken before this override ran) would miss it.
     const id = `race-home-${sfx}`;
     await ops({
       operation: "insert",
       table: "Agent",
       records: [{ id, name: id, role: "agent", status: "active", publicKey: "pk-race-h-2433", createdAt: new Date().toISOString() }],
     });
-    const injecting = (async (url: any, opts: any) => {
-      if (opts?.method === "PATCH" && String(url).includes("/Agent/")) {
-        await ops({ operation: "update", table: "Agent", records: [{ id, originatorInstanceId: PEER_ID }] });
-      }
-      return fetch(url, opts);
-    }) as typeof fetch;
-    const result = await runAgentHomeStamp({
-      opsUrl: harper.opsURL, httpUrl: harper.httpURL, authHeader: basic(), localInstanceId: LOCAL_ID,
-      timeoutMs: 10_000, apply: true, fetchImpl: injecting,
-    });
-    expect(result.stamped).not.toContain(id);
+    const { result, released } = await withPausedStamp(
+      () => runAgentHomeStamp({ opsUrl: harper.opsURL, httpUrl: harper.httpURL, authHeader: basic(), localInstanceId: LOCAL_ID, timeoutMs: 15_000, apply: true }),
+      () => ops({ operation: "update", table: "Agent", records: [{ id, originatorInstanceId: PEER_ID }] }),
+    );
+    expect(released, "the stamp never reached its in-transaction pause").toBe("go");
+    expect(result.stamped, "the gained home was overwritten").not.toContain(id);
     expect((await rowIn("Agent", id)).originatorInstanceId, "the gained home was overwritten").toBe(PEER_ID);
   }, 60_000);
 
-  test("a merged row that lands between the CLI's re-read and its write is listed, never stamped", async () => {
+  test("a merged row committed after the resource's first read is listed, never stamped", async () => {
     const id = `race-sync-${sfx}`;
     await ops({
       operation: "insert",
       table: "Agent",
       records: [{ id, name: id, role: "agent", status: "active", publicKey: "pk-race-s-2433", createdAt: new Date().toISOString() }],
     });
-    const injecting = (async (url: any, opts: any) => {
-      if (opts?.method === "PATCH" && String(url).includes("/Agent/")) {
-        await ops({ operation: "update", table: "Agent", records: [{ id, _syncedFrom: PEER_ID, _originatorInstanceId: PEER_ID }] });
-      }
-      return fetch(url, opts);
-    }) as typeof fetch;
-    const result = await runAgentHomeStamp({
-      opsUrl: harper.opsURL, httpUrl: harper.httpURL, authHeader: basic(), localInstanceId: LOCAL_ID,
-      timeoutMs: 10_000, apply: true, fetchImpl: injecting,
-    });
+    const { result, released } = await withPausedStamp(
+      () => runAgentHomeStamp({ opsUrl: harper.opsURL, httpUrl: harper.httpURL, authHeader: basic(), localInstanceId: LOCAL_ID, timeoutMs: 15_000, apply: true }),
+      () => ops({ operation: "update", table: "Agent", records: [{ id, _syncedFrom: PEER_ID, _originatorInstanceId: PEER_ID }] }),
+    );
+    expect(released, "the stamp never reached its in-transaction pause").toBe("go");
     expect(result.stamped).not.toContain(id);
     const row = await rowIn("Agent", id);
     expect(row.originatorInstanceId ?? null, "the merged row was stamped").toBeNull();
     expect(row._syncedFrom).toBe(PEER_ID);
+  }, 60_000);
+
+  test("another writer's SAME local home is not reported as this command's stamp", async () => {
+    // The row ends with THIS instance's id either way, so the value cannot tell
+    // the two apart — only the resource's own `stamped` confirmation can. A
+    // read-back that merely sees this instance's home would wrongly count it.
+    const id = `race-same-${sfx}`;
+    await ops({
+      operation: "insert",
+      table: "Agent",
+      records: [{ id, name: id, role: "agent", status: "active", publicKey: "pk-race-same-2433", createdAt: new Date().toISOString() }],
+    });
+    const { result, released } = await withPausedStamp(
+      () => runAgentHomeStamp({ opsUrl: harper.opsURL, httpUrl: harper.httpURL, authHeader: basic(), localInstanceId: LOCAL_ID, timeoutMs: 15_000, apply: true }),
+      () => ops({ operation: "update", table: "Agent", records: [{ id, originatorInstanceId: LOCAL_ID }] }),
+    );
+    expect(released, "the stamp never reached its in-transaction pause").toBe("go");
+    expect(result.stamped, "another writer's home was claimed as this stamp").not.toContain(id);
+    expect((await rowIn("Agent", id)).originatorInstanceId).toBe(LOCAL_ID);
   }, 60_000);
 
   test("flair doctor reports the home-less row it can see, with the named remedy", async () => {

@@ -1545,6 +1545,56 @@ function resolveOpsPort(opts: { opsPort?: string | number; port?: string | numbe
   return resolveHttpPort(opts) - 1;
 }
 
+/** The named error a stamp-home target whose two ports do not address the same instance is refused with (flair#2474). */
+export const AMBIGUOUS_INSTANCE_TARGET_ERROR = "ambiguous_instance_target";
+
+/**
+ * The ONE instance `flair agent stamp-home` addresses (flair#2474). The command
+ * talks to an ops API (the roster read and the resource PATCH's read-back) AND
+ * sends the guarded PATCH to that instance's HTTP port. Resolving the two
+ * INDEPENDENTLY — `resolveOpsPort(opts)` and `resolveHttpPort(opts)` — lets
+ * `--ops-port` name one instance and `--port` another, so the roster is read
+ * from the first and the stamp is written to the second, carrying the first
+ * instance's id.
+ *
+ * The instance's OWN config pairs the two ports: Harper's config in its data
+ * directory records `http.port` and `operationsApi.network.port`, and for the
+ * default install `~/.flair/config.yaml` records `port`/`opsPort` for the same
+ * instance. When the caller explicitly names an ops port (`--ops-port` or
+ * `FLAIR_OPS_PORT`) that DISAGREES with the pair that instance's config records,
+ * the override is ambiguous and is REFUSED by name. When the instance's config
+ * records no ops port there is nothing to contradict, so the named port stands.
+ */
+export function resolveAgentHomeTarget(opts: { port?: string | number; opsPort?: string | number; dataDir?: string }): {
+  httpPort: number;
+  opsPort: number;
+} {
+  const httpPort = resolveHttpPort(opts);
+  const dataDir = instanceDataDir(opts);
+  const fromHarper = harperPortValue(readHarperConfig(dataDir)?.operationsApi?.network?.port);
+  const configuredOps = fromHarper ?? (isDefaultDataDir(dataDir) ? readOpsPortFromConfig() : null);
+  let namedOps: number | null = null;
+  if (opts.opsPort !== undefined && opts.opsPort !== null) {
+    const n = Number(opts.opsPort);
+    if (!(Number.isInteger(n) && n >= 1 && n <= 65535)) {
+      // An invalid --ops-port is refused by resolveOpsPort below, which exits.
+      return { httpPort, opsPort: resolveOpsPort(opts) };
+    }
+    namedOps = n;
+  } else if (process.env.FLAIR_OPS_PORT) {
+    const n = Number(process.env.FLAIR_OPS_PORT);
+    namedOps = Number.isInteger(n) && n >= 1 && n <= 65535 ? n : null;
+  }
+  if (namedOps !== null && configuredOps !== null && namedOps !== configuredOps) {
+    throw new Error(
+      `${AMBIGUOUS_INSTANCE_TARGET_ERROR}: the ops port ${namedOps} and the HTTP port ${httpPort} do not address the same instance — `
+        + `that instance's own config pairs HTTP ${httpPort} with ops ${configuredOps}. `
+        + "Pass both ports for one instance, or omit one so it is derived.",
+    );
+  }
+  return { httpPort, opsPort: namedOps ?? resolveOpsPort(opts) };
+}
+
 // Ops API bind-host resolution (flair#670, #863): --ops-bind flag >
 // FLAIR_OPS_BIND env > persisted `opsBind` in ~/.flair/config.yaml > loopback
 // default. This is the escape hatch — deployments that genuinely need remote
@@ -4736,6 +4786,7 @@ bindAgentCli({
   shouldShowInlineSecretWarning,
   resolveHttpPort,
   resolveOpsPort,
+  resolveAgentHomeTarget,
   resolveEffectiveOpsUrl,
   seedAgentViaOpsApi,
   seedAgentWithLocalHome,

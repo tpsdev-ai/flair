@@ -94,15 +94,20 @@ test("every seed-based CLI Agent creation path reaches the home-stamping seed", 
   const paths = ["src/commands/agent.ts", "src/commands/init.ts", "src/commands/import.ts"];
   for (const file of paths) {
     const src = readFileSync(file, "utf8");
-    expect(src, `${file} seeds through the home-stamping seed`).toContain("seedAgentWithLocalHome(");
-    // The home-less seed may remain only as a passthrough: its own definition
-    // (`function seedAgentViaOpsApi(`) and its call (`cli.seedAgentViaOpsApi(`).
-    // Any other call site is a creation path that would write a row with no
-    // home — the flair#2474 regression. Read the RAW source (not through
-    // stripComments) so that a mis-stripped block cannot hide the call.
-    const rest = src
-      .replace(/function\s+seedAgentViaOpsApi\(/g, "\u0000")
-      .replace(/cli\.seedAgentViaOpsApi\(/g, "\u0000");
+    // The home-stamping seed must be CALLED — a definition, a type member or a
+    // wrapper (`toContain("seedAgentWithLocalHome(")`) is not enough: `await
+    // seedAgentWithLocalHome(` matches only an executed call site.
+    expect(src, `${file} calls the home-stamping seed`).toContain("await seedAgentWithLocalHome(");
+    // The home-less seed may survive ONLY as its own passthrough definition
+    // (`function seedAgentViaOpsApi(...args) { return cli.seedAgentViaOpsApi(...args); }`).
+    // Strip EXACTLY that definition, then any remaining call — including a
+    // `cli.seedAgentViaOpsApi(` call, which the old blanket strip used to hide
+    // (flair#2474) — fails: it is a creation path that would write a row with no
+    // home. Read the RAW source so a mis-stripped block cannot hide the call.
+    const rest = src.replace(
+      /function\s+seedAgentViaOpsApi\s*\([^)]*\)\s*(?::\s*[^\{]+)?\{\s*return\s+cli\.seedAgentViaOpsApi\([^)]*\);\s*\}/g,
+      "\u0000",
+    );
     expect(rest.includes("seedAgentViaOpsApi("), `${file} calls the home-less seed directly`).toBe(false);
   }
 });

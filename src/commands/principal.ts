@@ -327,15 +327,15 @@ export function register(program: Command): void {
       // Insert via operations API with Principal fields
       const auth = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
 
-      // flair#2433 — a NEW row's home is THIS instance's federation id,
-      // resolved through the one shared rule. The write is CREATE-ONLY
-      // (flair#2473): an `insert` carries the home, and a row that already
-      // exists at the write keeps its stored home — the create is skipped and
-      // the row is written back WITHOUT the home field, or a differing non-null
-      // stored home is refused with the named error. A stored
-      // originatorInstanceId is never changed, whatever commits between the
-      // read and the write. A failed read is UNREADABLE, not "no home", and is
-      // refused the same way.
+      // flair#2433 / flair#2473 — a NEW row's home is THIS instance's federation
+      // id, resolved through the one shared rule. The write is CREATE-ONLY: the
+      // resolved home rides on the `insert` itself, so a row created at write
+      // time carries it — even one deleted since this read. An insert over a row
+      // that already exists is SKIPPED by Harper (create-only), so a stored home
+      // is never replaced. A row that appeared with a home that differs from this
+      // instance's is refused with `originator_instance_immutable`, never
+      // silently updated; a write Harper skips is a failure named by its result,
+      // not a success. A failed read is UNREADABLE, not "no home", and refused.
       const opsUrl = `http://127.0.0.1:${opsPort}/`;
       const home = await resolveTargetInstanceId(agentHomeEndpoint(opsPort, adminUser, adminPass));
       const existingHome = await readStoredAgentHome({ opsUrl, authHeader: auth, id });
@@ -365,11 +365,10 @@ export function register(program: Command): void {
         updatedAt: new Date().toISOString(),
       };
 
-      // 1) Create-only. The home rides ONLY on this insert: a row that already
-      //    exists at the write is skipped, never overwritten.
-      const createRecord = { ...record };
-      const homePlanOk = homePlan as Extract<typeof homePlan, { refuse: false }>;
-      if (homePlanOk.stamp) createRecord.originatorInstanceId = homePlanOk.home;
+      // 1) Create-only. The home rides on THIS insert (so a row the insert
+      //    creates at write time carries it); over an existing row the insert is
+      //    skipped and the stored home stands.
+      const createRecord = { ...record, originatorInstanceId: home };
       const createRes = await fetch(opsUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: auth },
@@ -383,14 +382,27 @@ export function register(program: Command): void {
       const createBody = (await createRes.json().catch(() => null)) as
         | { inserted_hashes?: unknown[]; skipped_hashes?: unknown[] }
         | null;
-      const created = Array.isArray(createBody?.inserted_hashes) && createBody.inserted_hashes.includes(id);
-      if (!created) {
-        // The row already exists (it appeared between the read above and this
-        // write, or was found). Its stored home STANDS: write back WITHOUT the
-        // home field, so a home this command did not create is never changed. A
-        // differing non-null stored home was already refused above from the
-        // pre-read; a row that appeared since carried its home in from its own
-        // creation, which this update cannot change because it omits the field.
+      const inserted = Array.isArray(createBody?.inserted_hashes) && createBody.inserted_hashes.map(String).includes(id);
+      const createSkipped = Array.isArray(createBody?.skipped_hashes) && createBody.skipped_hashes.map(String).includes(id);
+      if (!inserted) {
+        if (!createSkipped) {
+          console.error(
+            `Error: the create for principal '${id}' was not confirmed by the operations API (${JSON.stringify(createBody)}); no row is known to have been written.`,
+          );
+          process.exit(1);
+        }
+        // The row already exists — the one this read found, or one that APPEARED
+        // since. Its stored home STANDS. Re-read it now: a row that appeared with
+        // a home that differs from this instance's is refused, never silently
+        // updated; an unreadable re-read is refused too.
+        const liveHome = await readStoredAgentHome({ opsUrl, authHeader: auth, id });
+        const livePlan = planAgentHomeWrite(liveHome, home, id);
+        if (livePlan.refuse) {
+          console.error(`Error: ${livePlan.message}`);
+          process.exit(1);
+        }
+        // Write back WITHOUT the home field, so a home this command did not
+        // create is never changed.
         const updateRes = await fetch(opsUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json", Authorization: auth },
@@ -399,6 +411,13 @@ export function register(program: Command): void {
         if (!updateRes.ok) {
           const text = await updateRes.text().catch(() => "");
           console.error(`Error: ${updateRes.status} ${text}`);
+          process.exit(1);
+        }
+        const updateBody = await updateRes.json().catch(() => null);
+        if (!writeConfirmed(updateBody, "update_hashes", id)) {
+          console.error(
+            `Error: the write for principal '${id}' was skipped by the operations API (${JSON.stringify(updateBody)}); no row was changed. Re-run 'flair principal add ${id}'.`,
+          );
           process.exit(1);
         }
       }
