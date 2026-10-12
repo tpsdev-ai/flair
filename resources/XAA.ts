@@ -241,10 +241,13 @@ async function resolveOrCreatePrincipalLocked(
         { attribute: "idpProvider", comparator: "equals", value: idpConfig.id },
       ],
     }, owned)) {
-      // A matched credential whose status is not the schema's "active"
-      // (schemas/agent.graphql: "active" | "revoked"; the revoke path writes
-      // "revoked") completes no grant. Refuse it by name, before anything is
-      // written, so no token is issued and its lastUsedAt is left untouched.
+      // A matched credential whose status is not "active" completes no grant.
+      // `status` is a nullable String on schemas/agent.graphql whose documented
+      // values are "active" and "revoked" (a comment, not an enforced enum); the
+      // revoke path writes "revoked". Refuse it by name: no credential touch and
+      // no OAuth token is written, so its lastUsedAt is left untouched. A present
+      // `jti` is claimed — and consumed — before this status check, in its own
+      // transaction (the claim above, before the owned transaction).
       if (cred.status !== "active") {
         throw new Error(`IdP credential for this subject has status "${cred.status}"; the jwt-bearer grant is refused`);
       }

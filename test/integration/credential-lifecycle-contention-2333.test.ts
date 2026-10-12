@@ -35,14 +35,17 @@
  *
  *   - XAA credential touch vs revoke/delete (resources/XAA.ts). A jwt-bearer
  *     grant reads the matched IdP credential and touches its `lastUsedAt`. A
- *     matched credential whose status is not "active" is refused by name and
- *     nothing is written. Each contended case holds the touch between its read
- *     and its write (the test-only pause point `xaa-credential-touch`) while the
- *     credential is revoked (status -> "revoked"), deleted, or re-pointed at a
- *     different principal, then releases it: the committed-row confirmation
- *     refuses the grant and aborts the touch, so the credential keeps the
- *     committed revoke / delete / re-point and the case asserts the stored row
- *     and that no token was issued.
+ *     matched credential whose status is not "active" is refused by name: no
+ *     credential touch and no OAuth token is written, and the refusal names the
+ *     credential's stored status (a present `jti` is claimed — and consumed —
+ *     before the status check, in its own transaction). Each contended case
+ *     holds the touch between its read and its write (the test-only pause point
+ *     `xaa-credential-touch`) while the credential is revoked (status ->
+ *     "revoked"), deleted, or re-pointed at a different principal, then releases
+ *     it: the committed-row confirmation refuses the grant and aborts the touch,
+ *     so the credential keeps the committed revoke / delete / re-point, and the
+ *     case asserts the stored row and that no token was issued (the re-point and
+ *     revoke cases also assert the prior `lastUsedAt` is unchanged).
  *
  * The pause points are resources/txn-pause-point.ts, armed through
  * FLAIR_ENABLE_TEST_FAULT_INJECTION / FLAIR_TEST_PAUSE_DIR, set for this file's
@@ -417,7 +420,7 @@ describe("flair#2333 slice 2 — credential lifecycle writes preserve committed 
     expect(res.status, `grant returned ${res.status}: ${text.slice(0, 300)}`).toBe(400);
     const body = JSON.parse(text);
     expect(body.error).toBe("invalid_grant");
-    expect(body.error_description, "the refusal does not name the credential's non-active status").toContain('"revoked"');
+    expect(body.error_description, "the refusal names the credential's stored status").toContain('"revoked"');
     expect(body.access_token).toBeUndefined();
     expect(await readTokensForPrincipal(principalId), "the refused grant issued a token").toEqual([]);
     const row = await readRow("Credential", credentialId);
@@ -430,9 +433,10 @@ describe("flair#2333 slice 2 — credential lifecycle writes preserve committed 
     const principalId = `agent-2333-repl-${randomUUID().slice(0, 8)}`;
     const otherPrincipalId = `agent-2333-other-${randomUUID().slice(0, 8)}`;
     const credentialId = `cred_idp_repl_${randomUUID().slice(0, 8)}`;
+    const lastUsedAt = "2020-01-02T03:04:05.000Z";
     await ops({
       operation: "insert", database: "flair", table: "Credential",
-      records: [{ id: credentialId, principalId, kind: "idp", label: "repl", status: "active", idpProvider: IDP_ID, idpSubject: subject, createdAt: new Date().toISOString() }],
+      records: [{ id: credentialId, principalId, kind: "idp", label: "repl", status: "active", idpProvider: IDP_ID, idpSubject: subject, createdAt: new Date().toISOString(), lastUsedAt }],
     });
     const assertion = await jwtBearerAssertion(subject);
     const { response, competed, released } = await withPaused(
@@ -451,15 +455,17 @@ describe("flair#2333 slice 2 — credential lifecycle writes preserve committed 
     expect(await readTokensForPrincipal(otherPrincipalId), "the refused grant issued a token").toEqual([]);
     const row = await readRow("Credential", credentialId);
     expect(row?.principalId, "the stored row is not the committed re-point").toBe(otherPrincipalId);
+    expect(row?.lastUsedAt, "the refused grant touched lastUsedAt").toBe(lastUsedAt);
   }, 60_000);
 
   it("a revoke committed while the credential touch is held refuses the grant", async () => {
     const subject = `user-rev-${randomUUID()}`;
     const principalId = `agent-2333-rev-${randomUUID().slice(0, 8)}`;
     const credentialId = `cred_idp_rev_${randomUUID().slice(0, 8)}`;
+    const lastUsedAt = "2020-01-02T03:04:05.000Z";
     await ops({
       operation: "insert", database: "flair", table: "Credential",
-      records: [{ id: credentialId, principalId, kind: "idp", label: "rev", status: "active", idpProvider: IDP_ID, idpSubject: subject, createdAt: new Date().toISOString() }],
+      records: [{ id: credentialId, principalId, kind: "idp", label: "rev", status: "active", idpProvider: IDP_ID, idpSubject: subject, createdAt: new Date().toISOString(), lastUsedAt }],
     });
     const assertion = await jwtBearerAssertion(subject);
     const { response, competed, released } = await withPaused(
@@ -478,6 +484,7 @@ describe("flair#2333 slice 2 — credential lifecycle writes preserve committed 
     const row = await readRow("Credential", credentialId);
     expect(row, "the revoked credential survived").not.toBeNull();
     expect(row.status, "the stored credential is not the committed revoke").toBe("revoked");
+    expect(row.lastUsedAt, "the refused grant touched lastUsedAt").toBe(lastUsedAt);
   }, 60_000);
 
   it("a delete committed while the credential touch is held refuses the grant", async () => {
