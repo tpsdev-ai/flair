@@ -211,7 +211,7 @@ describe("flair#2441 — the usage-recording count bump confirms the stored row 
   // committed-row re-check sees the committed row gone and aborts the bump, so
   // the row stays deleted. Without that re-check the bump's newer transaction
   // commits and re-creates the row.
-  it("a DELETE by an earlier transaction, committed while the count bump is staged, leaves the row deleted", async () => {
+  it("a DELETE by an earlier transaction, committed while the count bump's newer transaction is paused after reading and before staging its write, leaves the row deleted", async () => {
     const id = `csr-usage-del-${Date.now()}`;
     await seed(id, randomUUID());
     armPoint("memory-delete");

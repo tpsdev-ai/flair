@@ -18,7 +18,8 @@
  * withMCPAuth verifies against) so tokens are minted here with `jose`. The token
  * subject is linked to an Agent through a `Credential(kind:"idp")` row, the same
  * mapping `resolveMapping` reads. Every call goes to THIS test's loopback
- * instance on its OS-assigned ports, over the real `/mcp` HTTP route.
+ * instance on its OS-assigned ports: the tools/list and tools/call cases over
+ * the real `/mcp` HTTP route; setup and storage inspection over its ops API.
  *
  * Names are neutral; no fleet host or agent is named.
  */
@@ -102,8 +103,9 @@ describe("the /mcp public surface carries the memory_store host-source envelope 
     privateKeyPem = privateKey;
     publicKeyPem = publicKey;
 
-    // startHarper copies process.env into the spawned Harper; restore it
-    // immediately so no other file sees the change.
+    // startHarper copies process.env into the spawned Harper. These variables
+    // stay set for the awaited startup; the finally block restores them (it
+    // guarantees restoration, not isolation from concurrent code).
     const envKeys = ["FLAIR_MCP_OAUTH", "FLAIR_MCP_ISSUER", "OAUTH_GITHUB_CLIENT_ID", "OAUTH_GITHUB_CLIENT_SECRET", "OAUTH_GITHUB_REDIRECT_URI"] as const;
     const prior = envKeys.map((key) => [key, process.env[key]] as const);
     process.env.FLAIR_MCP_OAUTH = "true";
@@ -115,7 +117,8 @@ describe("the /mcp public surface carries the memory_store host-source envelope 
       harper = await startHarper();
       // Talk only to this test's own ephemeral instance: loopback, the
       // OS-assigned ports it started on, never a shared/production port, and a
-      // data directory under the temp dir — checked before the first call.
+      // data directory under the temp dir — checked before this test's first
+      // request (startHarper's own health probes run before it returns).
       const http = new URL(harper.httpURL);
       const ops = new URL(harper.opsURL);
       for (const u of [http, ops]) {
