@@ -1,15 +1,30 @@
 /**
  * orgevent-post-id-ownership-2333.test.ts — flair#2333 slice 4, real Harper.
  *
- * Checks ownership refusal for a row observed at the guard's lookup, creation,
- * and random UUID ids with a frozen child clock over real HTTP.
+ * Checks ownership refusal for a row observed at the guard's lookup, a
+ * refused POST when that lookup FAILS (nothing is written), creation, and
+ * random UUID ids with a frozen child clock over real HTTP.
+ *
+ * The lookup-failure case runs against a private copy of the built component
+ * whose stored-row load throws for marker ids (test/helpers/
+ * owner-guard-load-failure-component.ts, the flair#2468 mechanism), armed by a
+ * sentinel under the instance ROOTPATH. The copy also carries this file's
+ * frozen-clock preload, so the same-millisecond case is unaffected.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
+import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import nacl from "tweetnacl";
 import { HarperInstance, startHarper, stopHarper } from "../helpers/harper-lifecycle";
+import {
+  componentWithOwnerGuardLoadFailure,
+  LOAD_FAILURE_MARKER,
+  ARM_FILE,
+  type FailingComponent,
+} from "../helpers/owner-guard-load-failure-component";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
 function mkAgent(id: string): TestAgent {
@@ -78,15 +93,26 @@ async function eventsByAuthor(harper: HarperInstance, authorId: string): Promise
 }
 
 let harper: HarperInstance;
+let component: FailingComponent;
 const owner = mkAgent("oep-owner");
 const other = mkAgent("oep-other");
 
 const OWNED_ID = "oep-owner-event";
 
+/** Arm / disarm the injected stored-row load failure via the ROOTPATH sentinel. */
+function armLookupFailure(): void { writeFileSync(join(harper.installDir, ARM_FILE), "1"); }
+function disarmLookupFailure(): void {
+  const p = join(harper.installDir, ARM_FILE);
+  if (existsSync(p)) rmSync(p, { force: true });
+}
+
 beforeAll(async () => {
+  // Private built-component copy that can fail a marker id's stored-row load.
+  component = componentWithOwnerGuardLoadFailure();
   // Freeze only this instance's child clock for the same-millisecond case.
   const clockPreload = fileURLToPath(new URL("../helpers/harper-freeze-clock.cjs", import.meta.url));
   harper = await startHarper({
+    cwd: component.dir,
     env: {
       FLAIR_TEST_FROZEN_NOW: String(Date.now()),
       NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --require=${clockPreload}`.trim(),
@@ -104,7 +130,10 @@ beforeAll(async () => {
   expect(row?.authorId, "owner event was not created").toBe(owner.id);
 }, 240_000);
 
-afterAll(async () => { if (harper) await stopHarper(harper); });
+afterAll(async () => {
+  if (harper) { disarmLookupFailure(); await stopHarper(harper); }
+  if (component) component.cleanup();
+});
 
 describe("flair#2333 N2 — a non-admin POST is refused for an OrgEvent observed at the guard's lookup as owned by another agent", () => {
   it("refuses a POST for a row observed at the guard's lookup as owned by another agent", async () => {
@@ -143,6 +172,30 @@ describe("flair#2333 N2 — a non-admin POST is refused for an OrgEvent observed
     // The owner's row is still intact after a legitimate write by another agent.
     const row = await readEvent(harper, OWNED_ID);
     expect(row?.summary).toBe("the owner's original event");
+  }, 30_000);
+});
+
+describe("flair#2333 — a POST whose guard lookup fails is refused and writes nothing", () => {
+  it("refuses the POST with owner_check_unavailable and stores no row", async () => {
+    const id = `${LOAD_FAILURE_MARKER}-post-lookup-${randomUUID()}`;
+    const before = (await eventsByAuthor(harper, other.id)).map((r) => String(r.id)).sort();
+    armLookupFailure();
+    let res: Response;
+    try {
+      res = await authSend(harper, other, "POST", "/OrgEvent", {
+        id, kind: "coord.claim", summary: "a post whose ownership lookup cannot be read",
+      });
+    } finally {
+      disarmLookupFailure();
+    }
+    const text = await res.text();
+    // The guard's named refusal — not a create — answers the failed lookup.
+    expect(res.status, text.slice(0, 300)).toBe(503);
+    expect(JSON.parse(text).error).toBe("owner_check_unavailable");
+    // No put: the id is absent, and the caller's own events are unchanged.
+    expect(await readEvent(harper, id), "the refused POST stored a row").toBeNull();
+    const after = (await eventsByAuthor(harper, other.id)).map((r) => String(r.id)).sort();
+    expect(after).toEqual(before);
   }, 30_000);
 });
 

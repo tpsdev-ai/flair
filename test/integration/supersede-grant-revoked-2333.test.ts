@@ -1,11 +1,11 @@
 /**
  * supersede-grant-revoked-2333.test.ts — flair#2333 slice 4 (H10), real Harper.
  *
- * A cross-agent Memory supersede is authorized by a "write" MemoryGrant. The
- * authorization check and the close that follows it are separate reads: if the
- * grant is revoked after the check but before the close commits, the close used
- * to land anyway and closed the owner's memory. These cases hold the close inside
- * its transaction (the "supersede-close" test pause, before the write is staged),
+ * A grant-authorized, non-admin cross-agent Memory supersede stands on a "write"
+ * MemoryGrant. The authorization check and the close that follows it are separate
+ * reads: if the grant is revoked after the check but before the close commits, the
+ * close used to land anyway and closed the owner's memory. These cases hold the
+ * close inside its transaction (the "supersede-close" test pause, before the write is staged),
  * revoke the grant so the revocation is committed, release the close, and assert
  * the target row is NOT closed. The third case pauses at "supersede-close-staged"
  * instead — after the close has staged its write, so the revocation lands in the

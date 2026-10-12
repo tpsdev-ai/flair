@@ -271,7 +271,7 @@ describe("flair workspace set / flair orgevent — real Harper (#679)", () => {
     expect(typeof ev.createdAt).toBe("string");
   }, CASE_BUDGET_MS);
 
-  test("orgevent generates a fresh id per call — two publishes never collide", async () => {
+  test("orgevent generates a fresh id per call — two publishes are collision-resistant", async () => {
     const r1 = await runCli(["orgevent", "--kind", "status", "--summary", "first"], { FLAIR_AGENT_ID: AGENT_ID });
     const r2 = await runCli(["orgevent", "--kind", "status", "--summary", "second"], { FLAIR_AGENT_ID: AGENT_ID });
     expect(r1.code).toBe(0);

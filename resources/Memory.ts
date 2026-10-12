@@ -758,11 +758,11 @@ async function closeSupersededRecord(ctx: any, oldId: string, patch: Record<stri
         if (stagedPause) await stagedPause;
         const committed = await (databases as any).flair.Memory.get(oldId, {});
         if (!isDeepStrictEqual(committed, existing)) throw new CloseTargetChanged();
-        // flair#2333 (H10): a cross-agent close stands on the grant checked at
-        // authorization time. Re-read it on committed state HERE — after the write
-        // is staged, as the last read before this transaction commits — so a grant
-        // revoked and committed before this point aborts the close; this close
-        // attempt does not retry.
+        // flair#2333 (H10): a grant-authorized, non-admin cross-agent close stands
+        // on the grant checked at authorization time. Re-read it on committed state
+        // HERE — after the write is staged, as the last read before this transaction
+        // commits — so a grant revoked and committed before this point aborts the
+        // close; this close attempt does not retry.
         if (granteeId !== undefined && !(await hasWriteGrant(granteeId, expectedOwner as string, {}))) {
           throw new GrantedCloseRevoked();
         }
