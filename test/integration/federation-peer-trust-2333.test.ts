@@ -865,23 +865,30 @@ describe("flair#2333 — a token re-pair whose Peer row was deleted pairs as a f
   }, 90_000);
 });
 
-// ─── A first-time pair confirms the Peer row INSIDE its token transaction (#2512) ───
+// ─── A first-time pair confirms its Peer row is still absent in committed state (#2512) ───
 //
 // The first-pair branch decided from a Peer read taken OUTSIDE the token
-// transaction and wrote the paired row there without re-reading: a pair or revoke
-// committed for the instance in the window between that read and the write was
-// overwritten, and the request reported `paired` for a row it did not store. The
-// write now re-reads the Peer row inside its owned transaction, after the token
-// consume is staged, and refuses by name when the row is no longer absent; the
-// refusal aborts the transaction, so the staged consume rolls back and the token
-// stays unconsumed.
+// transaction and wrote the paired row without confirming that read: a pair or
+// revoke committed for the instance after it did not stop the request from
+// answering `paired` and consuming the token. The write is now staged with the
+// token consume in one owned transaction and then confirmed against COMMITTED
+// state (confirmCommittedRow, a fresh-context read): a row there is refused by
+// name, the transaction aborts, the request writes no Peer row and the token
+// stays unconsumed. Two windows are driven: before the owned transaction
+// (federation-pair-first-pre) and after its token read (federation-pair-token),
+// when that transaction's own read snapshot is already pinned. A change committed
+// after the confirm read and before the commit is not covered: Harper has no
+// compare-and-set on a table write.
 //
-// Mutation: keep the pause point and the in-transaction Peer read, drop only the
-// refusal (`if (current) throw ...`) — the request overwrites the competing row
-// and reports `paired`, and the assertions below fail.
+// Mutation: drop only the confirm (the `confirmCommittedRow(... Peer ...)` call).
+// All four interleavings then answer `200 paired` with the token consumed, and
+// the assertions below fail. Measured on Harper 5.3.1 under that mutation: before
+// the owned transaction, the stored row carried the request's key in place of the
+// competing one; after the token read, the competing row stayed and the request
+// answered `paired` for a row it did not store.
 
-describe("flair#2512 — a first-time pair confirms the Peer row inside its token transaction (real Harper)", () => {
-  it("a pair committed during the pause: refused, the committed row and key unchanged, the token unconsumed (federation-pair-first-pre)", async () => {
+describe("flair#2512 — a first-time pair confirms its Peer row is still absent in committed state (real Harper)", () => {
+  it("a pair committed before the owned transaction: refused, the committed row and key unchanged, the token unconsumed (federation-pair-first-pre)", async () => {
     const token = `pt-2512-pair-${sfx}`;
     const a = nacl.sign.keyPair();
     const b = nacl.sign.keyPair();
@@ -898,15 +905,17 @@ describe("flair#2512 — a first-time pair confirms the Peer row inside its toke
     expect(released, "the first pairing was not released by this test").toBe("go");
     expect(competed?.publicKey, "the competing pair committed its own key").toBe(b64url(b.publicKey));
     const resBody = await response.json() as any;
-    console.log("f2512 pair-in-window body:", JSON.stringify(resBody));
+    const rowAfter = await readPeer(peer);
+    const tokenAfter = await readToken(token);
+    console.log("f2512 pre pair body/row/token:", JSON.stringify({ status: response.status, body: resBody, keyIsCompetitor: rowAfter?.publicKey === b64url(b.publicKey), rowUnchanged: JSON.stringify(rowAfter) === JSON.stringify(competed), consumedBy: tokenAfter?.consumedBy ?? null }));
     expect(response.status, JSON.stringify(resBody)).toBe(409);
     expect(resBody.error).toBe("peer_row_appeared");
-    expect(resBody.paired, "the request stored no row, so it does not report paired").toBeUndefined();
-    expect(await readPeer(peer), "the committed row is unchanged").toEqual(competed);
-    expect(await readToken(token), "the refused first pair consumed no token").toEqual(tokenBefore);
+    expect(resBody.paired, "this request wrote no Peer row, so it does not report paired").toBeUndefined();
+    expect(rowAfter, "the committed row is unchanged").toEqual(competed);
+    expect(tokenAfter, "the refused first pair consumed no token").toEqual(tokenBefore);
   }, 60_000);
 
-  it("a revoke committed during the pause: refused, the committed revoked row and key unchanged, the token unconsumed (federation-pair-first-pre)", async () => {
+  it("a revoke committed before the owned transaction: refused, the committed revoked row and key unchanged, the token unconsumed (federation-pair-first-pre)", async () => {
     const token = `pt-2512-revoke-${sfx}`;
     const a = nacl.sign.keyPair();
     const b = nacl.sign.keyPair();
@@ -914,7 +923,7 @@ describe("flair#2512 — a first-time pair confirms the Peer row inside its toke
     await seedToken(token);
     const tokenBefore = await readToken(token);
     expect(tokenBefore?.consumedBy, "the pairing token starts unconsumed").toBeFalsy();
-    // A pair then a revoke for the instance, both committed in the window.
+    // A pair then a revoke for the instance, both committed before the owned transaction.
     const { response, competed, released, paused } = await withPaused(
       "federation-pair-first-pre",
       () => pairRequest(pairBody(peer, b64url(a.publicKey), a.secretKey, token)),
@@ -927,12 +936,74 @@ describe("flair#2512 — a first-time pair confirms the Peer row inside its toke
     expect(released, "the first pairing was not released by this test").toBe("go");
     expect(competed?.status, "the competing revoke committed its own revoked row").toBe("revoked");
     const resBody = await response.json() as any;
-    console.log("f2512 revoke-in-window body:", JSON.stringify(resBody));
+    const rowAfter = await readPeer(peer);
+    const tokenAfter = await readToken(token);
+    console.log("f2512 pre revoke body/row/token:", JSON.stringify({ status: response.status, body: resBody, keyIsCompetitor: rowAfter?.publicKey === b64url(b.publicKey), rowStatus: rowAfter?.status ?? null, rowUnchanged: JSON.stringify(rowAfter) === JSON.stringify(competed), consumedBy: tokenAfter?.consumedBy ?? null }));
     expect(response.status, JSON.stringify(resBody)).toBe(409);
     expect(resBody.error).toBe("peer_row_appeared");
-    expect(await readPeer(peer), "the committed revoked row is unchanged").toEqual(competed);
-    expect(await readPeer(peer), "the committed key is unchanged").toHaveProperty("publicKey", b64url(b.publicKey));
-    expect(await readToken(token), "the refused first pair consumed no token").toEqual(tokenBefore);
+    expect(resBody.paired, "this request wrote no Peer row, so it does not report paired").toBeUndefined();
+    expect(rowAfter, "the committed revoked row is unchanged").toEqual(competed);
+    expect(rowAfter, "the committed key is unchanged").toHaveProperty("publicKey", b64url(b.publicKey));
+    expect(tokenAfter, "the refused first pair consumed no token").toEqual(tokenBefore);
+  }, 60_000);
+
+  it("a pair committed after the token read: refused, the committed row and key unchanged, the token unconsumed (federation-pair-token)", async () => {
+    const token = `pt-2512-late-pair-${sfx}`;
+    const a = nacl.sign.keyPair();
+    const b = nacl.sign.keyPair();
+    const peer = `f2512-late-peer-${sfx}`;
+    await seedToken(token);
+    const tokenBefore = await readToken(token);
+    expect(tokenBefore?.consumedBy, "the pairing token starts unconsumed").toBeFalsy();
+    const { response, competed, released, paused } = await withPaused(
+      "federation-pair-token",
+      () => pairRequest(pairBody(peer, b64url(a.publicKey), a.secretKey, token)),
+      async () => { await seedPeer(peer, b64url(b.publicKey)); return readPeer(peer); },
+    );
+    expect(paused, "the first pairing was not paused after its token read").toBe(true);
+    expect(released, "the first pairing was not released by this test").toBe("go");
+    expect(competed?.publicKey, "the competing pair committed its own key").toBe(b64url(b.publicKey));
+    const resBody = await response.json() as any;
+    const rowAfter = await readPeer(peer);
+    const tokenAfter = await readToken(token);
+    console.log("f2512 late pair body/row/token:", JSON.stringify({ status: response.status, body: resBody, keyIsCompetitor: rowAfter?.publicKey === b64url(b.publicKey), rowUnchanged: JSON.stringify(rowAfter) === JSON.stringify(competed), consumedBy: tokenAfter?.consumedBy ?? null }));
+    expect(response.status, JSON.stringify(resBody)).toBe(409);
+    expect(resBody.error).toBe("peer_row_appeared");
+    expect(resBody.paired, "this request wrote no Peer row, so it does not report paired").toBeUndefined();
+    expect(rowAfter, "the committed row is unchanged").toEqual(competed);
+    expect(tokenAfter, "the refused first pair consumed no token").toEqual(tokenBefore);
+  }, 60_000);
+
+  it("a revoke committed after the token read: refused, the committed revoked row and key unchanged, the token unconsumed (federation-pair-token)", async () => {
+    const token = `pt-2512-late-revoke-${sfx}`;
+    const a = nacl.sign.keyPair();
+    const b = nacl.sign.keyPair();
+    const peer = `f2512-late-peer-rev-${sfx}`;
+    await seedToken(token);
+    const tokenBefore = await readToken(token);
+    expect(tokenBefore?.consumedBy, "the pairing token starts unconsumed").toBeFalsy();
+    // A pair then a revoke for the instance, both committed after the token read.
+    const { response, competed, released, paused } = await withPaused(
+      "federation-pair-token",
+      () => pairRequest(pairBody(peer, b64url(a.publicKey), a.secretKey, token)),
+      async () => {
+        await seedPeer(peer, b64url(b.publicKey));
+        return (await updatePeer(peer, { status: "revoked" })).row;
+      },
+    );
+    expect(paused, "the first pairing was not paused after its token read").toBe(true);
+    expect(released, "the first pairing was not released by this test").toBe("go");
+    expect(competed?.status, "the competing revoke committed its own revoked row").toBe("revoked");
+    const resBody = await response.json() as any;
+    const rowAfter = await readPeer(peer);
+    const tokenAfter = await readToken(token);
+    console.log("f2512 late revoke body/row/token:", JSON.stringify({ status: response.status, body: resBody, keyIsCompetitor: rowAfter?.publicKey === b64url(b.publicKey), rowStatus: rowAfter?.status ?? null, rowUnchanged: JSON.stringify(rowAfter) === JSON.stringify(competed), consumedBy: tokenAfter?.consumedBy ?? null }));
+    expect(response.status, JSON.stringify(resBody)).toBe(409);
+    expect(resBody.error).toBe("peer_row_appeared");
+    expect(resBody.paired, "this request wrote no Peer row, so it does not report paired").toBeUndefined();
+    expect(rowAfter, "the committed revoked row is unchanged").toEqual(competed);
+    expect(rowAfter, "the committed key is unchanged").toHaveProperty("publicKey", b64url(b.publicKey));
+    expect(tokenAfter, "the refused first pair consumed no token").toEqual(tokenBefore);
   }, 60_000);
 
   it("CONTROL: with no competitor the first pair stores the row and consumes the token", async () => {

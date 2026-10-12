@@ -9,7 +9,7 @@
 import { describe, it, expect, mock, beforeEach, spyOn } from "bun:test";
 import nacl from "tweetnacl";
 import { signBodyFresh } from "../../resources/federation-crypto.ts";
-import { createFakeReplayNonceTable, ensureGlobalHarperTransaction } from "../helpers/fake-replay-store.ts";
+import { createFakeReplayNonceTable } from "../helpers/fake-replay-store.ts";
 
 process.env.FLAIR_RATE_LIMIT_ENABLED = "false";
 
@@ -27,6 +27,29 @@ let instanceRows: Record<string, unknown>[] = [
 const peers = new Map<string, Record<string, unknown>>();
 const tokens = new Map<string, Record<string, unknown>>();
 
+// Harper's transaction(), with a commit boundary: while a callback runs, Peer and
+// PairingToken writes are STAGED and land only when it resolves; a throw discards
+// them. Reads return committed rows. A first-time pair confirms against committed
+// state that its Peer row is still absent before it commits (flair#2512), so a
+// fake whose writes land immediately would show the request its own staged row.
+// The replay-nonce fake writes through its own put, unstaged: a signed request's
+// nonce is recorded even on refusal.
+type Staged = { tokens: Map<string, Record<string, unknown>>; peers: Map<string, Record<string, unknown>> };
+let staged: Staged | null = null;
+(globalThis as any).transaction = async (_ctx: unknown, cb: (ctx: any) => any) => {
+  const mine: Staged = { tokens: new Map(), peers: new Map() };
+  const prev = staged;
+  staged = mine;
+  try {
+    const out = await cb({});
+    for (const [id, row] of mine.tokens) tokens.set(id, { ...row });
+    for (const [id, row] of mine.peers) peers.set(id, { ...row });
+    return out;
+  } finally {
+    staged = prev;
+  }
+};
+
 function asyncRows<T>(items: T[]) {
   return {
     async *[Symbol.asyncIterator]() {
@@ -43,6 +66,7 @@ const databasesMock = {
     Peer: {
       get: async (id: string) => peers.get(id) ?? null,
       put: async (row: Record<string, unknown>) => {
+        if (staged) { staged.peers.set(String(row.id), { ...row }); return row; }
         peers.set(String(row.id), { ...row });
         return row;
       },
@@ -50,6 +74,7 @@ const databasesMock = {
     PairingToken: {
       get: async (id: string) => tokens.get(id) ?? null,
       put: async (row: Record<string, unknown>) => {
+        if (staged) { staged.tokens.set(String(row.id), { ...row }); return row; }
         tokens.set(String(row.id), { ...row });
         return row;
       },
@@ -65,8 +90,6 @@ const databasesMock = {
     ReplayNonce: createFakeReplayNonceTable(),
   },
 };
-
-ensureGlobalHarperTransaction();
 
 mock.module("harper", () => ({
   databases: databasesMock,
