@@ -149,6 +149,74 @@ export async function confirmCommittedRow(
   if (!same(committed)) throw new CommittedRowChanged();
 }
 
+/** The MemoryGrant surface the committed grant re-check reads: a scoped
+ *  search that accepts a context. */
+export interface GrantReadTable {
+  search(query: any, ctx?: any): AsyncIterable<any>;
+}
+
+/**
+ * The refusal a close answers when the "write" grant that authorized it is gone
+ * on committed state (flair#2333 H10). The error code and the {@link
+ * GrantedCloseRevoked} class name carry it, so the Memory close and the
+ * skill-version close refuse by the same name.
+ */
+export const GRANTED_CLOSE_REVOKED = "granted_close_revoked";
+
+/** The named 409 for a close whose authorizing "write" grant is gone at the
+ *  committed-state re-check. Nothing was written. */
+export function grantedCloseRevokedRefusal(): Response {
+  return new Response(
+    JSON.stringify({
+      error: GRANTED_CLOSE_REVOKED,
+      message: "the write grant authorizing this close was revoked; not written",
+    }),
+    { status: 409, headers: { "content-type": "application/json" } },
+  );
+}
+
+/** Aborts a close's transaction: the "write" grant that authorized a
+ *  cross-agent close is gone on committed state (flair#2333 H10). */
+export class GrantedCloseRevoked extends Error {
+  constructor() {
+    super(`${GRANTED_CLOSE_REVOKED}: the write grant authorizing the close was revoked`);
+    this.name = "GrantedCloseRevoked";
+  }
+}
+
+/**
+ * Does `table` hold a "write" grant from `ownerId` to `granteeId`? A caller that
+ * re-checks on committed state passes an explicit fresh context (`{}`) rather
+ * than its own transaction — the same discipline {@link confirmCommittedRow}
+ * applies to a row. Fail-closed: a search that rejects reads as no grant, so an
+ * unreadable grant does not close the owner's row.
+ *
+ * The shared committed-state grant re-check both the Memory close
+ * (Memory.ts closeSupersededRecord) and the skill-version close
+ * (skill-version-write.ts) run after staging their close (flair#2333 H10 /
+ * flair#2511).
+ */
+export async function writeGrantHeld(
+  table: GrantReadTable,
+  granteeId: string,
+  ownerId: string,
+  ctx?: any,
+): Promise<boolean> {
+  try {
+    for await (const grant of table.search({
+      conditions: [
+        { attribute: "granteeId", comparator: "equals", value: granteeId },
+        { attribute: "ownerId", comparator: "equals", value: ownerId },
+      ],
+    }, ctx)) {
+      if (grant?.scope === "write") return true;
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
+
 /** The shared helper's own signature — so a migration can inject a plain fake
  *  in unit tests (embedding-stamp's DI style) while production uses the real,
  *  transaction-owning one. */

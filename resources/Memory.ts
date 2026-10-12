@@ -27,11 +27,11 @@ import {
 import { putPointerRow, deletePointerRowViaTable } from "./host-pointer-adapter.js";
 import { DECLARED_MEMORY_ATTRIBUTES, stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./memory-declared-attributes.js";
 import { isJoinableTransaction, withOwnedTransaction, withSharedWriteTransaction } from "./request-transaction.js";
-import { CommittedRowChanged, confirmCommittedRow, sameStoredRow, storedRowChangedRefusal } from "./write-back.js";
+import { CommittedRowChanged, GrantedCloseRevoked, confirmCommittedRow, sameStoredRow, storedRowChangedRefusal, writeGrantHeld } from "./write-back.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 import { assertValidDurability, stampEphemeralExpiry } from "./memory-durability.js";
 import { embedTextField, enforceSkillDurability, isSkillWrite, type MemoryEmbeddingInputField, rejectSkillWritePath, refuseSkillWriteSource, skillEmbedText, skillScanGate } from "./skill-write.js";
-import { buildSkillSuccessorRow, closedSkillPayloadReadable, defaultSkillHooks, resolveSkillHead, rowIsSkill, runSkillVersionWrite, skillVersionVisibility, skillPayloadUnchanged, prepareSkillBody, validateSkillSnapshots, authorizeSkillOwners, skillWriteConflict } from "./skill-version-write.js";
+import { buildSkillSuccessorRow, closedSkillPayloadReadable, defaultSkillHooks, grantedSkillClose, resolveSkillHead, rowIsSkill, runSkillVersionWrite, skillVersionVisibility, skillPayloadUnchanged, prepareSkillBody, validateSkillSnapshots, authorizeSkillOwners, skillWriteConflict } from "./skill-version-write.js";
 import { deriveSkillSubjectId } from "./skill-subject.js";
 import {
   DEDUP_COSINE_THRESHOLD_DEFAULT,
@@ -689,13 +689,6 @@ export function buildReindexRow(
 /** Aborts the close's owned transaction: the row changed after the transaction read it. */
 class CloseTargetChanged extends Error {}
 
-/**
- * Aborts the close's owned transaction: a cross-agent close authorized by a
- * "write" grant found that grant revoked on committed state before it committed
- * (flair#2333 H10). This close attempt does not retry.
- */
-class GrantedCloseRevoked extends Error {}
-
 /** Attempts of the close before it gives up on a row that keeps changing. */
 const SUPERSEDE_CLOSE_ATTEMPTS = 3;
 
@@ -763,7 +756,7 @@ async function closeSupersededRecord(ctx: any, oldId: string, patch: Record<stri
         // HERE — after the write is staged, as the last read before this transaction
         // commits — so a grant revoked and committed before this point aborts the
         // close; this close attempt does not retry.
-        if (granteeId !== undefined && !(await hasWriteGrant(granteeId, expectedOwner as string, {}))) {
+        if (granteeId !== undefined && !(await writeGrantHeld((databases as any).flair.MemoryGrant, granteeId, expectedOwner as string, {}))) {
           throw new GrantedCloseRevoked();
         }
         return closed;
@@ -810,19 +803,7 @@ async function markDerivedSourcesReflected(content: any): Promise<void> {
  *  consult MemoryGrant); it survives here for the "write" scope that gates
  *  cross-agent supersede. */
 async function hasWriteGrant(granteeId: string, ownerId: string, ctx?: unknown): Promise<boolean> {
-  try {
-    for await (const grant of (databases as any).flair.MemoryGrant.search({
-      conditions: [
-        { attribute: "granteeId", comparator: "equals", value: granteeId },
-        { attribute: "ownerId", comparator: "equals", value: ownerId },
-      ],
-    }, ctx)) {
-      if (grant.scope === "write") return true;
-    }
-  } catch {
-    /* MemoryGrant table not yet populated — no grant */
-  }
-  return false;
+  return writeGrantHeld((databases as any).flair.MemoryGrant, granteeId, ownerId, ctx);
 }
 
 /**
@@ -1092,7 +1073,7 @@ async function writeSkillCreateOrUpdate(
       }
       if (!liveHead) return { kind: "create", predecessor: null, successor, closePatch: {}, value, visibility };
       captured.closed = liveHead;
-      return { kind: "update", predecessor: liveHead, successor, closePatch: { skillSubjectId: subjectId, validTo: now, updatedAt: now }, value, visibility };
+      return { kind: "update", predecessor: liveHead, successor, closePatch: { skillSubjectId: subjectId, validTo: now, updatedAt: now }, value, visibility, grantedClose: grantedSkillClose(liveHead, ctx, auth) };
     },
     hooks: {
       ...defaultSkillHooks,
