@@ -152,8 +152,11 @@ export class BaseMemory {
     return { ...harnessState.memoryStore.get(id) };
   }
   async update(id: string, row: any, ctx?: any) {
-    stageOrRun(ctx, () => harnessState.memoryStore.set(id, { ...row }));
-    return { ...row };
+    // Real Harper's `update` is an INCREMENTAL patch: it merges `row` into the
+    // stored record. Model it (flair#2465: the re-embed writes only
+    // embedding/embeddingModel/updatedAt through `update`).
+    stageOrRun(ctx, () => harnessState.memoryStore.set(id, { ...(harnessState.memoryStore.get(id) ?? {}), ...row }));
+    return { ...harnessState.memoryStore.get(id) };
   }
   async delete(id: any, ctx?: any) {
     stageOrRun(ctx, () => harnessState.memoryStore.delete(typeof id === "string" ? id : id?.id));

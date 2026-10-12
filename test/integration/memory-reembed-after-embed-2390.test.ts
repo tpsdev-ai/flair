@@ -24,10 +24,18 @@ import { join } from "node:path";
 import nacl from "tweetnacl";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 import { getModelId } from "../../resources/embeddings-provider.ts";
+import { stripEnginePrefix } from "../../resources/embedding-space-guard.ts";
 
 const POINT = "memory-reembed";
 const CURRENT_MODEL_ID = getModelId();
-const STALE_MODEL = "some-ancient-model-v0";
+// The seed stamp is the CURRENT model's BARE (engine-prefix-stripped) equivalent
+// — the same stamp test/integration/reembed-preserves-fields-2296.test.ts uses.
+// The boot embedding-stamp migration treats it as current-space (see
+// resources/migrations/embedding-stamp.ts's staleCondition), so none of its
+// cycles — the boot pass or a delayed follow-up — ever re-embeds a seeded row
+// and races the PATCH under test. It is NOT the current id, so a landed re-embed
+// (which stamps the engine-qualified `CURRENT_MODEL_ID`) is still visible.
+const SEED_MODEL_ID = stripEnginePrefix(CURRENT_MODEL_ID);
 const STALE_EMBEDDING = [0.01, 0.02, 0.03];
 const ORIGINAL = "the original text about a quiet walk through the produce market";
 const EDITED = "an edit about quantum computing research grants and their deadlines";
@@ -102,11 +110,15 @@ function cosine(a: number[], b: number[]): number {
   return dot / Math.sqrt(na * nb);
 }
 
-/** Seed a stale-stamped row this file's re-embed PATCH targets. */
+/** Seed a row this file's re-embed PATCH targets (with the current model's bare,
+ *  migration-inert stamp — see SEED_MODEL_ID). `visibility` is set so the boot
+ *  visibility-backfill migration treats the row as already-stamped and never
+ *  re-puts it (a full-row put with a newer transaction timestamp than a case's
+ *  own write) while a case runs. */
 async function seedRow(id: string, agentId: string, extra: Record<string, unknown> = {}): Promise<void> {
   await opsCall({
     operation: "insert", database: "flair", table: "Memory",
-    records: [{ id, agentId, content: ORIGINAL, embedding: STALE_EMBEDDING, embeddingModel: STALE_MODEL, createdAt: new Date().toISOString(), ...extra }],
+    records: [{ id, agentId, content: ORIGINAL, embedding: STALE_EMBEDDING, embeddingModel: SEED_MODEL_ID, visibility: "shared", createdAt: new Date().toISOString(), ...extra }],
   });
 }
 
@@ -218,7 +230,7 @@ describe("flair#2390 — a re-embed PATCH writes from the row it re-reads (real 
     expect(response.status, await response.clone().text()).toBe(403);
     const row = await readRow(id);
     expect(row.agentId).toBe(other.id);
-    expect(row.embeddingModel).toBe(STALE_MODEL); // the re-embed did not land
+    expect(row.embeddingModel).toBe(SEED_MODEL_ID); // the re-embed did not land
     expect(row.embedding).toEqual(STALE_EMBEDDING);
   }, 120_000);
 });

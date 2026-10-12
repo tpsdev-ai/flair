@@ -64,6 +64,7 @@
     "@tpsdev-ai/flair-client": "0.60.0"
   },
   "devDependencies": {
+    "openclaw-supported": "npm:openclaw@2026.9.6",
     "typescript": "5.9.3"
   }
 }

@@ -1452,3 +1452,43 @@ describe("formatMemory bytes", () => {
     expect(formatMemory({ content: "body", hostSource })).toBe("\u{1F4DD} body [via openclaw/run run-1234 (unverified)]");
   });
 });
+
+// flair#2448 item 2 — bootstrap's `?? m` fallback. The gated pointer join maps
+// each input row through the pointer projection (it does not drop rows), so the
+// reachable trigger for the fallback is a caller the join does not run for:
+// pointerRenders() then returns an empty map and the lookup is undefined. This
+// drives the REAL BootstrapMemories.post() for such a caller and asserts the
+// memory still renders, uncited, byte-identical to the unsourced format
+// (formatMemory with no hostSource).
+describe("flair#2448 — bootstrap renders a memory the pointer join yields no row for, uncited", () => {
+  it("post() renders the row as read (`?? m`) when the join does not run", async () => {
+    reset();
+    const createdAt = new Date().toISOString();
+    const day = createdAt.slice(0, 10);
+    memoryStore.set("m-fallback", {
+      id: "m-fallback",
+      agentId: "agent-fb",
+      content: "FALLBACK-VALUE-MEMORY",
+      durability: "standard",
+      createdAt,
+    });
+    // An admin/operator context is a caller the gated join does not run for
+    // (MemoryBootstrap: `hostSourceReader = authenticatedAgent && !callerIsAdmin
+    // ? authenticatedAgent : undefined`); pointerRenders() then returns an empty
+    // map, so the lookup falls through to `?? m`.
+    const b = makeBootstrap(agentCtx("agent-fb", true));
+    const res: any = await b.post({ agentId: "agent-fb", includeSoul: false });
+    const line = String(res.context ?? "")
+      .split("\n")
+      .find((l) => l.includes("FALLBACK-VALUE-MEMORY")) ?? "";
+    expect(line, "the memory the join yields no row for still renders").not.toBe("");
+    // Byte-for-byte the unsourced format: no citation appended.
+    expect(line).toBe(`\u{1F4DD} FALLBACK-VALUE-MEMORY (${day})`);
+  });
+
+  it("the `?? m` fallback value formats to the unsourced bytes (real formatMemory)", () => {
+    expect(formatMemory({ content: "FALLBACK-VALUE-MEMORY", durability: "standard", createdAt: "2026-01-01T00:00:00.000Z" })).toBe(
+      "\u{1F4DD} FALLBACK-VALUE-MEMORY (2026-01-01)",
+    );
+  });
+});

@@ -3,10 +3,12 @@
  * migration's re-embed of a stale row whose id ends in `.content`.
  *
  * That row is re-embedded through the raw table handle (the loopback
- * `PUT /Memory/:id` cannot address it), from the text Memory's write paths
- * embed for it (a skill row's `trigger`, else `content`). A change visible at
- * the committed re-read aborts; later changes follow Harper's timestamp order
- * (see the PR residual-gap note).
+ * `PATCH /Memory/:id` cannot address it), from the text Memory's write paths
+ * embed for it (a skill row's `trigger`, else `content`). The re-embed stages an
+ * incremental `update` of only the embedding fields, then confirms the committed
+ * row is still the one it read; a row gone or distinguishably changed at
+ * confirmation aborts. A change committed after the confirm and before commit
+ * is not seen (Harper has no compare-and-set; see the PR residual-gap note).
  *
  * Runs in its own process (test/unit-isolated): it mocks
  * resources/embeddings-provider.ts, which other unit files import for real.
@@ -37,10 +39,10 @@ mock.module("../../resources/embeddings-provider.ts", () => ({
 // meanwhile (Harper has no compare-and-set); a callback that throws discards
 // them (an abort).
 (globalThis as any).transaction = async (ctx: any, cb: (ctx: any) => any) => {
-  const staged: Row[] = [];
+  const staged: { id: string; patch: Row }[] = [];
   ctx.transaction = { staged };
   const result = await cb(ctx);
-  for (const row of staged) commitRow(row);
+  for (const { id, patch } of staged) commitPatch(id, patch);
   return result;
 };
 
@@ -51,14 +53,15 @@ const LEGACY_ID = "legacy-row.content";
 const STALE = { embedding: [0.1, 0.1, 0.1], embeddingModel: "ancient-model" };
 
 let store: Map<string, Row>;
-/** Rows committed to the store by a put (a staged put counts once its transaction commits). */
+/** Rows committed to the store by an update (a staged update counts once its transaction commits). */
 let puts: Row[];
-/** Runs after a put is staged in a transaction, before that transaction commits. */
+/** Runs after an update is staged in a transaction, before that transaction commits. */
 let afterStage: (() => void) | null = null;
 
-function commitRow(row: Row): void {
-  puts.push(structuredClone(row));
-  store.set(row.id, structuredClone(row));
+function commitPatch(id: string, patch: Row): void {
+  const merged = { ...(store.get(id) ?? {}), ...structuredClone(patch), id };
+  puts.push(structuredClone(merged));
+  store.set(id, merged);
 }
 
 function matches(row: Row, cond: any): boolean {
@@ -77,9 +80,17 @@ const table = {
     return row ? structuredClone(row) : null;
   },
   async put(row: Row, ctx?: any) {
+    // The migration no longer uses a full-row put; kept so an accidental
+    // reintroduction would still stage/commit predictably in this fake.
     const staged = ctx?.transaction?.staged;
-    if (!Array.isArray(staged)) return commitRow(row);
-    staged.push(structuredClone(row));
+    if (!Array.isArray(staged)) return commitPatch(row.id, row);
+    staged.push({ id: row.id, patch: structuredClone(row) });
+    afterStage?.();
+  },
+  async update(id: string, patch: Row, ctx?: any) {
+    const staged = ctx?.transaction?.staged;
+    if (!Array.isArray(staged)) return commitPatch(id, patch);
+    staged.push({ id, patch: structuredClone(patch) });
     afterStage?.();
   },
   search(query: any): AsyncIterable<Row> {
@@ -115,7 +126,10 @@ describe("flair#2307 — the content-suffix re-embed validates the vector and co
   it("a usable vector is stamped current, and the rest of the row is kept", async () => {
     const result = await migration().run(10);
     expect(result).toEqual({ processed: 1, touchedIds: [LEGACY_ID] });
-    expect(store.get(LEGACY_ID)).toEqual({ id: LEGACY_ID, agentId: "a", content: "legacy body", embedding: [0.5, 0.25, 0.125], embeddingModel: CURRENT });
+    expect(store.get(LEGACY_ID)).toMatchObject({ id: LEGACY_ID, agentId: "a", content: "legacy body", embedding: [0.5, 0.25, 0.125], embeddingModel: CURRENT });
+    // flair#2465: an incremental update, never a full-row put — updatedAt is the
+    // only other field the write touches.
+    expect(Object.keys(store.get(LEGACY_ID)!).sort()).toEqual(["agentId", "content", "embedding", "embeddingModel", "id", "updatedAt"]);
     expect(await migration().countPending()).toBe(0);
   });
 
@@ -160,7 +174,7 @@ describe("flair#2307 — the content-suffix re-embed validates the vector and co
     ["edited", () => store.set(LEGACY_ID, { ...store.get(LEGACY_ID)!, content: "edited after the read" })],
     ["deleted", () => store.delete(LEGACY_ID)],
   ] as const) {
-    it(`a row ${name} before the committed re-read aborts the stamp`, async () => {
+    it(`a row ${name} after its write is staged aborts the stamp`, async () => {
       afterStage = () => {
         afterStage = null;
         change(); // a competing write commits while this transaction's write is staged
@@ -176,6 +190,19 @@ describe("flair#2307 — the content-suffix re-embed validates the vector and co
       }
     });
   }
+
+  it("a row re-created under the same id by another owner after staging is not patched", async () => {
+    afterStage = () => {
+      afterStage = null;
+      // Delete + same-id re-create: a fresh incarnation the migration never read.
+      store.set(LEGACY_ID, { id: LEGACY_ID, agentId: "b", content: "replacement", ...STALE });
+    };
+    const result = await migration().run(10);
+    expect(result.processed).toBe(0);
+    expect(puts).toEqual([]); // assertion: the staged update was discarded, not patched onto the replacement
+    // The replacement keeps exactly what re-created it — no embedding fields patched on.
+    expect(store.get(LEGACY_ID)).toMatchObject({ agentId: "b", content: "replacement", ...STALE });
+  });
 
   it("a row deleted while its embedding was computed is not recreated", async () => {
     embedImpl = async () => {

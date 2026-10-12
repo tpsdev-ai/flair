@@ -38,7 +38,7 @@ add("Memory", [
   "writer:cls.create#1", "writer:(databases as any).flair.Memory.post#1",
   "writer:(databases as any).flair.Memory.put#2",
   "writer:(databases as any).flair.Memory.put#3",
-  "writer:(databases as any).flair.Memory.put#4",
+  "writer:(databases as any).flair.Memory.update#1",
   "writer:super.patch#1",
   "writer:(databases as any).flair.Memory.delete#1",
 ], "GUARDED: Memory.post/put/patch/delete call the decision on the URL and body ids first (the put _reindex branch included).");
@@ -81,8 +81,8 @@ add("promotion-stamp", ["alias-source:(databases as any).flair.Memory#1", "write
 add("promotion-stamp", ["writer:table.put#1"],
   "SERVER: stamps, in the manual promotion's own write transaction, the row it staged through Memory.put under a server-generated id.");
 add("migrations/embedding-stamp", [
-  "writer:table.put#1",
-], "SERVER: the migration re-embeds a server-selected row through the raw table handle when its id ends in the `.content` property suffix — an id the by-id HTTP regen path cannot address.");
+  "writer:table.update#1",
+], "SERVER: the migration re-embeds a server-selected row through the raw table handle when its id ends in the `.content` property suffix — an id the by-id HTTP regen path cannot address; an incremental update of only the embedding fields (flair#2465).");
 add("migrations/graph-heal", ["writer:table.put#1"], "SERVER: boot migration over server-selected rows.");
 add("migrations/synthetic-test-migration", ["alias-source:(databases as unknown as { flair: { Memory: MemoryTableLike } }).flair.Memory#1", "writer:writeBackCommittedRow#1"], "SERVER: boot migration over server-selected rows, through the shared write-back helper (flair#2354).");
 add("migrations/visibility-backfill", ["alias-source:(databases as unknown as { flair: { Memory: MemoryTableLike } }).flair.Memory#1", "writer:writeBackCommittedRow#1"], "SERVER: boot migration over server-selected rows, through the shared write-back helper (flair#2354).");
@@ -109,9 +109,11 @@ add("usage-recording", ["writer:(databases as any).flair.MemoryUsage.put#1"], "S
 for (const [file, alias] of [
   ["Memory", "alias-source:(databases as any).flair.Memory#1"],
   ["Memory", "alias-source:(databases as any).flair.Memory#2"],
-  // flair#2441 / flair#2450: Memory.put's committed-row re-checks (confirmCommittedRow takes only `get`).
   ["Memory", "alias-source:(databases as any).flair.Memory#3"],
+  // The committed-row re-checks (confirmCommittedRow takes only `get`): #2 the
+  // re-embed's (flair#2465), #4 the _reindex re-PUT's (flair#2450), #5 Memory.put's (flair#2441).
   ["Memory", "alias-source:(databases as any).flair.Memory#4"],
+  ["Memory", "alias-source:(databases as any).flair.Memory#5"],
   ["AdminMemory", "alias-source:(databases as any).flair.Memory#1"],
   ["Federation", "alias-source:(databases as any).flair.Memory#1"],
   ["MemoryReflect", "alias-source:(databases as any).flair.Memory#1"],

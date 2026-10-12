@@ -118,24 +118,40 @@ async function waitFor(path: string, timeoutMs: number): Promise<boolean> {
 /**
  * Arm `point`, start `run` (the maintenance pass), and once it is paused at that
  * point (inside its owned transaction, or before it opens for a `-pre` point)
- * run `compete` (the competing write), then release it.
+ * run `compete` (the competing write), wait for its expected content or pointer
+ * token to be visible, then release it.
  * Returns the pass's result, the competing step's result and how the pause
  * ended.
  */
-async function withPausedAction<T>(point: string, run: () => Promise<any>, compete: () => Promise<T>) {
+async function withPausedAction<T>(point: string, run: () => Promise<any>, compete: () => Promise<T>, competingWriteVisible: () => Promise<boolean>) {
   for (const marker of ["claimed", "paused", "go", "released"]) rmSync(join(pauseDir, `${marker}.${point}`), { force: true });
   writeFileSync(join(pauseDir, `arm.${point}`), "");
   const pending = run();
   const paused = await waitFor(join(pauseDir, `paused.${point}`), 15_000);
   let competed: T | undefined;
   try {
-    if (paused) competed = await compete();
+    if (paused) {
+      competed = await compete();
+      await awaitCompetingWriteVisible(point, competingWriteVisible);
+    }
   } finally {
     writeFileSync(join(pauseDir, `go.${point}`), "");
   }
   const result = await pending;
   const released = paused ? readFileSync(join(pauseDir, `released.${point}`), "utf8") : "never paused";
   return { result, competed, released };
+}
+
+/** Wait for the competing row's expected content or pointer token. */
+async function awaitCompetingWriteVisible(point: string, isVisible: () => Promise<boolean>): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  for (;;) {
+    if (await isVisible()) return;
+    if (Date.now() >= deadline) {
+      throw new Error(`competing write was not visible before the pause was released (${point})`);
+    }
+    await new Promise((r) => setTimeout(r, 10));
+  }
 }
 
 beforeAll(async () => {
@@ -178,6 +194,7 @@ describe("flair#2275 — MemoryMaintenance acts on the current row (real Harper)
       "maintenance-expiry",
       () => maintain("mc-exp-pause"),
       () => updateMemory([{ id: "mc-exp-pause", content: EDITED }]),
+      async () => (await readMemory("mc-exp-pause"))?.content === EDITED,
     );
     expect(released, "maintenance was not paused and released by this test").toBe("go");
     expect(result.expired, JSON.stringify(result)).toBe(0);
@@ -194,6 +211,7 @@ describe("flair#2275 — MemoryMaintenance acts on the current row (real Harper)
       "maintenance-expiry-pre",
       () => maintain("mc-exp-pre"),
       () => updateMemory([{ id: "mc-exp-pre", content: EDITED }]),
+      async () => (await readMemory("mc-exp-pre"))?.content === EDITED,
     );
     expect(released, "maintenance was not paused and released by this test").toBe("go");
     expect(result.expired, JSON.stringify(result)).toBe(0);
@@ -217,6 +235,7 @@ describe("flair#2275 — MemoryMaintenance acts on the current row (real Harper)
       "maintenance-archive",
       () => maintain("mc-arch-pause"),
       () => updateMemory([{ id: "mc-arch-pause", content: EDITED }]),
+      async () => (await readMemory("mc-arch-pause"))?.content === EDITED,
     );
     expect(released, "maintenance was not paused and released by this test").toBe("go");
     expect(result.archived, JSON.stringify(result)).toBe(0);
@@ -233,6 +252,7 @@ describe("flair#2275 — MemoryMaintenance acts on the current row (real Harper)
       "maintenance-archive-pre",
       () => maintain("mc-arch-pre"),
       () => updateMemory([{ id: "mc-arch-pre", content: EDITED }]),
+      async () => (await readMemory("mc-arch-pre"))?.content === EDITED,
     );
     expect(released, "maintenance was not paused and released by this test").toBe("go");
     expect(result.archived, JSON.stringify(result)).toBe(0);
@@ -261,6 +281,7 @@ describe("flair#2275 — MemoryMaintenance orphan sweep acts on the current row 
         "maintenance-orphan",
         () => maintain("mc-orph-pause"),
         () => updateMemory([{ id: "mc-orph-pause", content: EDITED }]),
+        async () => (await readMemory("mc-orph-pause"))?.content === EDITED,
       );
       expect(released, "maintenance was not paused and released by this test").toBe("go");
       expect(result.skipped, JSON.stringify(result)).toBeGreaterThanOrEqual(1);
@@ -280,6 +301,7 @@ describe("flair#2275 — MemoryMaintenance orphan sweep acts on the current row 
         "maintenance-orphan-pre",
         () => maintain("mc-orph-pre"),
         () => updateMemory([{ id: "mc-orph-pre", content: EDITED }]),
+        async () => (await readMemory("mc-orph-pre"))?.content === EDITED,
       );
       expect(released, "maintenance was not paused and released by this test").toBe("go");
       expect(result.skipped, JSON.stringify(result)).toBeGreaterThanOrEqual(1);
@@ -299,6 +321,7 @@ describe("flair#2275 — MemoryMaintenance orphan sweep acts on the current row 
         "maintenance-orphan",
         () => maintain("mc-ptr-pause"),
         () => replacePointer("mc-ptr-pause", REPLACEMENT),
+        async () => (await readPointers("mc-ptr-pause"))[0]?.memoryInstanceToken === REPLACEMENT,
       );
       expect(released, "maintenance was not paused and released by this test").toBe("go");
       expect(result.skipped, JSON.stringify(result)).toBeGreaterThanOrEqual(1);
@@ -320,6 +343,7 @@ describe("flair#2275 — MemoryMaintenance orphan sweep acts on the current row 
         "maintenance-orphan-pre",
         () => maintain("mc-ptr-pre"),
         () => replacePointer("mc-ptr-pre", REPLACEMENT),
+        async () => (await readPointers("mc-ptr-pre"))[0]?.memoryInstanceToken === REPLACEMENT,
       );
       expect(released, "maintenance was not paused and released by this test").toBe("go");
       expect(result.skipped, JSON.stringify(result)).toBeGreaterThanOrEqual(1);
