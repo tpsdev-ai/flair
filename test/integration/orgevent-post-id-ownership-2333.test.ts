@@ -8,8 +8,9 @@
  * The lookup-failure case runs against a private copy of the built component
  * whose stored-row load throws for marker ids (test/helpers/
  * owner-guard-load-failure-component.ts, the flair#2468 mechanism), armed by a
- * sentinel under the instance ROOTPATH. The copy also carries this file's
- * frozen-clock preload, so the same-millisecond case is unaffected.
+ * sentinel under the instance ROOTPATH. The instance started from the copy also
+ * runs this file's frozen-clock preload (passed through `startHarper({ env })`),
+ * so the same-millisecond case is unaffected.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";

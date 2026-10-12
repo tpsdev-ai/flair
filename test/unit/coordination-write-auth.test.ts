@@ -223,7 +223,7 @@ describe("OrgEvent.post() — agent-self attribution (no forging)", () => {
   });
 });
 
-// ─── OrgEvent.post() id ownership + uniqueness (flair#2333 N2/H9) ───────────────
+// ─── OrgEvent.post() id ownership + collision-resistant ids (flair#2333 N2/H9) ───────────────
 describe("OrgEvent.post() — refuses a non-admin POST for a row observed at the guard's lookup as owned by another agent (N2)", () => {
   it("refuses a POST for a row observed at the guard's lookup as owned by another agent", async () => {
     orgEventStore.set("owned-1", { id: "owned-1", authorId: "agent-a", kind: "status", summary: "original" });
