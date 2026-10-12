@@ -8,10 +8,11 @@
   `instanceToken`, `contentHash`, `createdAt` or `agentId` — changed, or the row
   is gone (a delete or a purge): the re-PUT answers 409 `stored_row_changed`, the
   merge skips the record as `merge_target_changed`. `Soul`, `Agent`,
-  `Relationship` and `Message` carry no incarnation token or content hash, so
-  their planned writes compare the whole stored row against the row the merge
-  read. A same-id replace that keeps the identity fields and changes only a
-  data value is refused too. The `Agent` status guard (flair#2108) can skip as
+  `Relationship` and `Message` carry no incarnation token. `Message` has a
+  content hash but no `agentId`; its hash excludes mutable lifecycle fields.
+  These tables' planned writes compare the whole stored row against the row
+  the merge read, refusing changes even when the identity fields match.
+  The `Agent` status guard (flair#2108) can skip as
   `agent_status_not_federated` before this comparison. That guard and the `Message`
   consumed-state reconcile (flair#1521) use the in-transaction row. This
   extends flair#2441's Memory-only merge confirmation to every synced table.

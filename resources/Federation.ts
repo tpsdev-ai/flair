@@ -935,15 +935,10 @@ export class FederationSync extends Resource {
         // A change committed after that final read is not seen: Harper has no
         // compare-and-set (write-back.ts).
         //
-        // flair#2450 (`wholeRow`): Soul, Agent, Relationship and Message carry
-        // no instanceToken and no contentHash, so the helper's sameStoredRow
-        // check reduces to id/agentId/createdAt for them. A same-id REPLACE that
-        // keeps those fields and changes a data value would pass that identity
-        // check and let the stale merge (built from `local`) overwrite the
-        // competitor. Planned writes for these tables therefore compare the
-        // WHOLE stored row against `local`. Memory
-        // carries the server-stamped token (and a content hash); its identity
-        // check is sameStoredRow's, covering a replace that changed either.
+        // flair#2450 (`wholeRow`): Soul, Agent and Relationship have no
+        // instanceToken or contentHash; Message has contentHash but no
+        // instanceToken or agentId. Its hash excludes mutable lifecycle fields,
+        // so planned writes to these tables compare the whole row against `local`.
         let outcome: any;
         try {
           outcome = await writeBackCommittedRow(
@@ -993,10 +988,8 @@ export class FederationSync extends Resource {
             },
           );
         } catch (err) {
-          // The target row was superseded (deleted, purged, or replaced with a
-          // new token) between the merge's read and its write, or changed after
-          // the write was staged (one attempt, no retry): nothing was written,
-          // and the record is skipped by name.
+          // The target disappeared or failed the applicable identity or whole-row
+          // comparison. The transaction aborts; one attempt, no retry.
           if (err instanceof WriteBackConflictError) {
             recordSkip("merge_target_changed");
             continue;

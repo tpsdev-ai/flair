@@ -30,11 +30,10 @@ export interface WriteBackOptions {
   /**
    * Before a planned write, require the in-transaction row to equal `expectedRow`
    * (the row the caller read) as a WHOLE row, not only in the fields
-   * {@link sameStoredRow} compares. A caller whose table carries no
-   * instanceToken or contentHash (Soul/Agent/Relationship/Message) needs this:
-   * for such a table sameStoredRow reduces to id/agentId/createdAt, so a same-id
-   * REPLACE that keeps those fields and changes a data value passes the identity
-   * check and the stale write-back would overwrite the competitor (flair#2450).
+   * {@link sameStoredRow} compares. Soul, Agent and Relationship have no
+   * instanceToken or contentHash; Message has contentHash but no instanceToken
+   * or agentId. Message's hash excludes mutable lifecycle fields, so an
+   * identity check alone misses their changes (flair#2450).
    * The comparison spreads `row` first: a Harper row read has a different
    * prototype from the plain `{ ...selected }` basis, so a bare
    * isDeepStrictEqual(row, basis) could differ on prototype alone.

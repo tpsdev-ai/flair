@@ -1,8 +1,7 @@
 /**
  * confirm-stored-row-2450.test.ts — flair#2450 items 1 and 2 (real Harper).
  *
- * Two read-then-write paths that carry a row's server-stamped incarnation token
- * (or re-write a full row) did not confirm, in the SAME transaction as the write,
+ * Two stored-row write-back paths did not confirm, in the SAME transaction as the write,
  * that the stored row is still the one they read:
  *
  *   - Memory.put's admin-only `_reindex` re-PUT (item 1);
@@ -13,11 +12,11 @@
  * before and after staging; item 2 through the shared write-back helper, one
  * attempt). Planned merge writes to Soul, Agent, Relationship and Message
  * compare the WHOLE stored row against the row the merge read (the helper's
- * `wholeRow` option), because those tables carry no instanceToken or
- * contentHash and sameStoredRow's identity check reduces to id/agentId/createdAt
- * for them; a same-id REPLACE that keeps those fields and changes only a data
- * value is invisible to the identity check alone (see the "pre-window" cases
- * below). For Memory and the `_reindex` re-PUT (which carry a server-stamped
+ * `wholeRow` option). Soul, Agent and Relationship have no instanceToken or
+ * contentHash; Message has contentHash but no instanceToken or agentId. Its hash
+ * excludes mutable lifecycle fields, whose changes an identity check misses
+ * (see the "pre-window" cases below). For Memory and the `_reindex` re-PUT
+ * (which carry a server-stamped
  * incarnation token and a content hash) the identity check is sameStoredRow's: a
  * DELETE, a PURGE (Memory has one) or a same-id REPLACE that changed the row's
  * identity (incarnation token, content hash, creation time or owner) or removed
@@ -38,6 +37,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import nacl from "tweetnacl";
 import { signBodyFresh } from "../../resources/federation-crypto.js";
+import { computeContentHash } from "../../resources/relay-lib.js";
 import { runFederationSyncOnce } from "../../src/cli.js";
 import { keystore } from "../../src/keystore.js";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
@@ -282,12 +282,10 @@ interface TableCase {
   replace: (id: string) => Record<string, unknown>;
   /**
    * A same-id REPLACE that KEEPS the identity fields sameStoredRow compares for
-   * this table (id, agentId, createdAt — Soul/Agent/Relationship/Message carry
-   * no instanceToken or contentHash) and changes only a data field. It is the
-   * interleaving where the merge's own identity check, on its own, cannot tell
-   * the row changed: only a WHOLE-ROW comparison against the row the merge read
-   * catches it. Committed at `federation-merge-pre` (after the merge's read,
-   * before the helper's in-transaction read).
+   * this table and changes a data field (Message changes lifecycle fields,
+   * keeping its contentHash). Only a WHOLE-ROW comparison against the row the
+   * merge read catches it. Committed at `federation-merge-pre`, after the merge's
+   * read and before the helper's in-transaction read.
    */
   staleReplace: (id: string, stored: any) => Record<string, unknown>;
   /** A field the merge is expected to land on a control run. */
@@ -321,11 +319,14 @@ const CASES: TableCase[] = [
   },
   {
     table: "Message",
-    seed: (id, marker) => ({ id, from: owner.id, to: PEER, threadId: id, seq: 1, kind: "message", body: marker, state: "delivered", createdAt: new Date(Date.now() - 60_000).toISOString() }),
-    replace: (id) => ({ id, body: "replaced" }),
-    staleReplace: (id, stored) => ({ id, createdAt: stored.createdAt, from: stored.from, to: stored.to, threadId: stored.threadId, seq: stored.seq, kind: stored.kind, state: "delivered", body: "replaced" }),
-    landed: (id) => ({ body: `merged ${id}` }),
-    readField: (row) => row?.body,
+    seed: (id, marker) => {
+      const row = { id, from: owner.id, to: PEER, threadId: id, seq: 1, kind: "message", body: marker, state: "delivered" as const, createdAt: new Date(Date.now() - 60_000).toISOString() };
+      return { ...row, contentHash: computeContentHash(row) };
+    },
+    replace: (id) => ({ id, state: "failed", failureReason: "replaced" }),
+    staleReplace: (id, stored) => ({ id, contentHash: stored.contentHash, state: "failed", failureReason: "replaced" }),
+    landed: (id) => ({ state: "failed", failureReason: `merged ${id}` }),
+    readField: (row) => row?.failureReason,
   },
 ];
 
@@ -383,17 +384,12 @@ for (const c of CASES) {
 }
 
 // ── item 2 (pre-window): the merge confirms the WHOLE stored row, not just the
-// identity fields, for a table that carries no instanceToken/contentHash ──────
+// identity fields, for tables without instanceToken ─────────────────────────
 //
-// Soul/Agent/Relationship/Message have no instanceToken and no contentHash, so
-// sameStoredRow's comparison reduces to id/agentId/createdAt for them. A
-// same-id REPLACE that keeps those three and changes only a data field is
-// therefore invisible to the identity check. Committed at `federation-merge-pre`
-// — after the merge read `local` and before the helper's in-transaction read —
-// the stale merge (built from `local`, LWW decided against `local`) commits over
-// the competitor and the row is overwritten. The whole-row check (the helper's
-// WHOLE_ROW option) catches it. On the pre-fix head 44425196 each case below
-// fails: the merge lands (`merged: 1`) and the competitor's value is gone.
+// These replacements preserve sameStoredRow's identity fields. Message has a
+// contentHash but no agentId; its lifecycle change keeps the hash stable.
+// The wholeRow comparison catches changes committed at `federation-merge-pre`,
+// after the merge read `local` and before the helper's in-transaction read.
 for (const c of CASES) {
   describe(`flair#2450 — the ${c.table} merge confirms the WHOLE stored row (pre-window, real Harper)`, () => {
     const push = (id: string) => federatedPush({
@@ -417,6 +413,11 @@ for (const c of CASES) {
       expect(body.skippedReasons?.merge_target_changed, JSON.stringify(body)).toBe(1);
       const row = await readRow(c.table, id);
       expect(c.readField(row), `the competing ${c.table} row is overwritten by the stale merge`).toBe("replaced");
+      if (c.table === "Message") {
+        expect(row?.contentHash).toBe(stored.contentHash);
+        expect(row?.contentHash).toBe(computeContentHash(row));
+        expect(row?.state).toBe("failed");
+      }
       expect(paused, "(diagnostic) the pre-window pause was not hit").toBe(true);
     }, 60_000);
   });
