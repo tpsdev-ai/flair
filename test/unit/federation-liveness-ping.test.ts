@@ -1,4 +1,4 @@
-import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, mock, beforeEach, afterEach, setSystemTime } from "bun:test";
 import nacl from "tweetnacl";
 
 /**
@@ -35,6 +35,12 @@ function res(ok: boolean, status: number, body: any) {
 
 const testKp = nacl.sign.keyPair();
 
+// flair#2514 — the spoke cursor must carry the timestamp captured BEFORE the
+// table queries, not the time the write lands. The mock advances a frozen
+// clock once the queries begin, so a write-time stamp is observably later.
+const PRE_QUERY_STAMP = "2026-10-12T12:00:00.000Z";
+const POST_QUERY_STAMP = "2026-10-12T12:00:05.000Z";
+
 describe("federation liveness ping on no-change sync", () => {
   let capturedCalls: Array<{ url: string; body?: any; method?: string }> = [];
 
@@ -44,9 +50,11 @@ describe("federation liveness ping on no-change sync", () => {
 
   afterEach(() => {
     globalThis.fetch = origFetch;
+    setSystemTime();
   });
 
-  function installNoChangeMock(pingStatus: number = 200) {
+  function installNoChangeMock(pingStatus: number = 200, onFirstTableQuery?: () => void) {
+    let advanced = false;
     globalThis.fetch = mock(async (urlInput: string | URL | Request, init?: RequestInit) => {
       const url = typeof urlInput === "string" ? urlInput : urlInput.toString();
       const method = init?.method ?? "GET";
@@ -60,6 +68,7 @@ describe("federation liveness ping on no-change sync", () => {
         return res(true, 200, { id: "spoke-alpha", publicKey: Buffer.from(testKp.publicKey).toString("base64url"), role: "spoke" });
       }
       if (body?.operation === "search_by_conditions") {
+        if (!advanced) { advanced = true; onFirstTableQuery?.(); }
         return res(true, 200, []);
       }
       if (body?.operation === "search_by_value" && body.table === "Peer") {
@@ -159,9 +168,9 @@ describe("federation liveness ping on no-change sync", () => {
     expect(peerUpserts()).toHaveLength(0);
   });
 
-  it("ping ok → lastSyncAt is written AFTER the ping, at completion time", async () => {
-    const t0 = Date.now();
-    installNoChangeMock(200);
+  it("ping ok → lastSyncAt is stamped after the ping with the pre-query timestamp (flair#2514)", async () => {
+    setSystemTime(new Date(PRE_QUERY_STAMP));
+    installNoChangeMock(200, () => setSystemTime(new Date(POST_QUERY_STAMP)));
 
     const { runFederationSyncOnce } = await import("../../src/cli");
     await runFederationSyncOnce({
@@ -174,8 +183,7 @@ describe("federation liveness ping on no-change sync", () => {
     expect(pingIdx).toBeGreaterThan(-1);
     expect(cursorIdx).toBeGreaterThan(pingIdx);
     const stamp = capturedCalls[cursorIdx]?.body?.records?.[0]?.lastSyncAt;
-    expect(typeof stamp).toBe("string");
-    expect(Date.parse(stamp)).toBeGreaterThanOrEqual(t0);
+    expect(stamp).toBe(PRE_QUERY_STAMP);
   });
 });
 
@@ -226,10 +234,11 @@ describe("flair#2450 — spoke cursor update requests after successful and faile
   const kp = nacl.sign.keyPair();
 
   beforeEach(() => { calls = []; });
-  afterEach(() => { globalThis.fetch = origFetch; });
+  afterEach(() => { globalThis.fetch = origFetch; setSystemTime(); });
 
-  function installBatchMock(batchStatuses: number[], rowCount = 1) {
+  function installBatchMock(batchStatuses: number[], rowCount = 1, onFirstTableQuery?: () => void) {
     let post = 0;
+    let advanced = false;
     globalThis.fetch = mock(async (urlInput: string | URL | Request, init?: RequestInit) => {
       const url = typeof urlInput === "string" ? urlInput : urlInput.toString();
       const method = init?.method ?? "GET";
@@ -243,6 +252,7 @@ describe("flair#2450 — spoke cursor update requests after successful and faile
         return res(true, 200, { id: INSTANCE, publicKey: Buffer.from(kp.publicKey).toString("base64url"), role: "spoke" });
       }
       if (body?.operation === "search_by_conditions") {
+        if (!advanced) { advanced = true; onFirstTableQuery?.(); }
         if (body.table !== "Memory") return res(true, 200, []);
         // Only the `updatedAt > cursor` query yields rows; the `updatedAt == null`
         // query yields none, so the row count is exactly `rowCount`.
@@ -272,9 +282,9 @@ describe("flair#2450 — spoke cursor update requests after successful and faile
 
   const cursorWrites = () => calls.filter((c) => c.body?.operation === "update" && c.body?.table === "Peer");
 
-  it("one batch, 200 → stampLocalContact runs once, after the batch, at queriedAt", async () => {
-    const t0 = Date.now();
-    installBatchMock([200]);
+  it("one batch, 200 → the cursor is stamped once, after the batch, at the pre-query timestamp", async () => {
+    setSystemTime(new Date(PRE_QUERY_STAMP));
+    installBatchMock([200], 1, () => setSystemTime(new Date(POST_QUERY_STAMP)));
     const { runFederationSyncOnce } = await import("../../src/cli");
     const result = await runFederationSyncOnce({ adminPass: "test-admin-pass", opsPort: "9925" });
 
@@ -288,8 +298,7 @@ describe("flair#2450 — spoke cursor update requests after successful and faile
     const writeIdx = calls.findIndex((c) => c.body?.operation === "update" && c.body?.table === "Peer");
     expect(writeIdx, "the cursor was stamped before the batch").toBeGreaterThan(batchIdx);
     const stamp = writes[0]?.body?.records?.[0]?.lastSyncAt;
-    expect(typeof stamp).toBe("string");
-    expect(Date.parse(stamp), "the cursor was not set to the pre-query timestamp").toBeGreaterThanOrEqual(t0);
+    expect(stamp, "the cursor was not the pre-query timestamp").toBe(PRE_QUERY_STAMP);
     expect(writes[0]?.body?.records?.[0]?.id).toBe(HUB);
   });
 
