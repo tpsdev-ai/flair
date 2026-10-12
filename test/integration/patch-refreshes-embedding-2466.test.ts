@@ -8,8 +8,9 @@
  * edited memory still matched searches for the text it no longer held. A
  * non-re-embed PATCH refreshes when its body changes the compared row's
  * effective embedding text (embedTextField/skillEmbedText), from that text as
- * its body carries it, and only when `embedding` is absent after redaction, the way
- * Memory.put() embeds a write that carries no vector. A fresh committed-row
+ * its body carries it, and only when `embedding` is absent after redaction (an
+ * own-property check; Memory.put() instead computes when `embedding` is falsy).
+ * Both paths use the same embedding engine. A fresh committed-row
  * read runs only when the initial comparison selected no embedding, a stored
  * row exists, and the body omits `embedding` and carries the embedding-text field. Other
  * paths write without that confirmation. Skill writes are refused before this
