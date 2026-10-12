@@ -18,5 +18,5 @@
   auto-promotion stamp (still whole-row here; its field decision depends on
   the owner-controlled content).
 
-  The re-embed and embedding-stamp fallback still use whole-row `put`; #2469
-  targets their conversion.
+  The re-embed and the embedding-stamp fallback are converted separately
+  (#2465): they write only `embedding`, `embeddingModel` and `updatedAt`.
