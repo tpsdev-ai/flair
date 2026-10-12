@@ -73,7 +73,7 @@ import { harperPortValue } from "./lib/harper-port-value.js";
 import { flairConfigPath, flairDataDir } from "./lib/flair-paths.js";
 import { encodeRecordId } from "./lib/record-id-path.js";
 import { invalidAgentIdMessage, isValidAgentId } from "./lib/agent-id-rule.js";
-import { agentHomeEndpoint, resolveTargetInstanceId, stampAgentHome } from "./lib/agent-home.js";
+import { agentHomeEndpoint, decideProbedPairIdentity, readHttpInstanceIdentity, resolveTargetInstanceId, resolveTargetInstanceIdentity, stampAgentHome } from "./lib/agent-home.js";
 import {
   httpBind,
   httpCorsAccessList,
@@ -1646,11 +1646,14 @@ export function decideAgentHomeTarget(i: AgentHomeTargetInputs): { httpPort: num
  * ports when there is no complete pair) are used as given, without
  * verification. Every refusal is `ambiguous_instance_target`.
  */
-export function resolveAgentHomeTarget(opts: { port?: string | number; opsPort?: string | number; dataDir?: string }): {
+export function resolveAgentHomeTarget(opts: { port?: string | number; opsPort?: string | number; dataDir?: string }, httpPortOverride?: number): {
   httpPort: number;
   opsPort: number;
 } {
-  const httpPort = resolveHttpPort(opts);
+  // `flair doctor` probes the port it actually reached (a PID-discovered
+  // `effectivePort` can differ from the configured one), so it passes that port
+  // here; every other caller lets the resolver resolve it.
+  const httpPort = httpPortOverride ?? resolveHttpPort(opts);
   const dataDir = instanceDataDir(opts);
   const fromHarper = harperPortValue(readHarperConfig(dataDir)?.operationsApi?.network?.port);
   const configuredOps = fromHarper ?? (isDefaultDataDir(dataDir) ? readOpsPortFromConfig() : null);
@@ -1682,8 +1685,8 @@ export function resolveAgentHomeTarget(opts: { port?: string | number; opsPort?:
  * endpoint belongs to the instance it probed (flair#2483).
  */
 export const DOCTOR_ROSTER_TARGET_REMEDY =
-  "Pass --port with the HTTP port the instance's config pairs with its ops port, "
-  + "or record that HTTP/ops pair in the instance's config.";
+  "Pass --port with the HTTP port of the instance to inspect and unset or correct FLAIR_OPS_PORT if it is set, "
+  + "or record that HTTP/ops port pair in the instance's config.";
 
 /** Whether `flair doctor` may read the Agent roster and home rows, and from which ops endpoint. */
 export type DoctorRosterTargetDecision =
@@ -1691,26 +1694,26 @@ export type DoctorRosterTargetDecision =
   | { kind: "not-run"; reason: string; remedy: string };
 
 /**
- * The ops endpoint `flair doctor` may read the Agent roster and home rows from
- * (flair#2483).
+ * The candidate ops endpoint for `flair doctor`'s Agent roster and home reads
+ * (flair#2483), picked by {@link resolveAgentHomeTarget}'s pairing rule
+ * (flair#2474/#2491) against the HTTP port doctor actually probed.
  *
- * Doctor probes one instance over HTTP and reads those rows through the ops
- * API. Resolving the two INDEPENDENTLY (the probed `resolveHttpPort` and
- * `resolveOpsPort`) let the probe address one instance and the read another, so
- * doctor reported a DIFFERENT instance's roster and homes as this one's. The
- * ops endpoint is therefore resolved through the SAME pairing rule
- * {@link resolveAgentHomeTarget} applies (flair#2474/#2491): the pair the
- * addressed instance's config records binds the ops port to the probed HTTP
- * port, and the resolver's refusal — a probed port that conflicts with that
- * pair, or a port named when the config records no complete pair to complete
- * it — stops the read instead of taking it from another instance.
- *
- * A refusal is NOT a pass and NOT a finding about another instance: the caller
- * reports the checks as ones that did not run, naming this reason and remedy.
+ * This only picks the candidate: the pairing rule works from config and named
+ * ports and cannot prove which live instance an ops port addresses — it
+ * DELIBERATELY trusts two ports the caller names. Doctor therefore VERIFIES the
+ * candidate before either read (see doctor's same-instance check): that the port
+ * returned here and the probed HTTP port report the same instance identity, or
+ * both checks report NOT RUN. A refusal here (a probed port that conflicts with
+ * the configured pair, or exactly one port named with no complete pair to
+ * complete it) is likewise NOT RUN, naming the reason and the remedy — never a
+ * read from, or a finding about, another instance.
  */
-export function resolveDoctorRosterTarget(opts: { port?: string | number; opsPort?: string | number; dataDir?: string }): DoctorRosterTargetDecision {
+export function resolveDoctorRosterTarget(
+  opts: { port?: string | number; opsPort?: string | number; dataDir?: string },
+  probedHttpPort?: number,
+): DoctorRosterTargetDecision {
   try {
-    return { kind: "run", opsPort: resolveAgentHomeTarget(opts).opsPort };
+    return { kind: "run", opsPort: resolveAgentHomeTarget(opts, probedHttpPort).opsPort };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     // The resolver's refusal ends with the stamp-home-shaped remedy; doctor has
@@ -1720,6 +1723,42 @@ export function resolveDoctorRosterTarget(opts: { port?: string | number; opsPor
       : message;
     return { kind: "not-run", reason, remedy: DOCTOR_ROSTER_TARGET_REMEDY };
   }
+}
+
+/**
+ * The ops endpoint `flair doctor` may read the Agent roster and home rows from,
+ * or a refusal naming why it may not (flair#2483).
+ *
+ * Picks the candidate with {@link resolveDoctorRosterTarget} against the HTTP
+ * port doctor actually probed, then VERIFIES it before either read: the probed
+ * HTTP port and the candidate ops endpoint must report the same
+ * `flair.Instance` identity. The pairing rule alone cannot prove that — it
+ * trusts two ports the caller names, and a config pair cannot say which live
+ * instance an ops port addresses — so this decides `run` only on two single,
+ * equal ids. Every other identity outcome, and the resolver's own refusal, is
+ * `not-run`: the caller reports the checks as NOT RUN and reads nothing.
+ */
+export async function verifyDoctorRosterInstance(
+  opts: { port?: string | number; opsPort?: string | number; dataDir?: string },
+  probedHttpPort: number,
+  adminPass: string,
+): Promise<DoctorRosterTargetDecision> {
+  const candidate = resolveDoctorRosterTarget(opts, probedHttpPort);
+  if (candidate.kind === "not-run") return candidate;
+  const adminUser = resolveAdminUser(undefined);
+  const [httpIdentity, opsIdentity] = await Promise.all([
+    readHttpInstanceIdentity(`http://127.0.0.1:${probedHttpPort}`, adminUser, adminPass),
+    resolveTargetInstanceIdentity(agentHomeEndpoint(candidate.opsPort, adminUser, adminPass)),
+  ]);
+  const pair = decideProbedPairIdentity(httpIdentity, opsIdentity);
+  if (pair.kind === "same") return candidate;
+  return {
+    kind: "not-run",
+    reason: pair.kind === "different"
+      ? "the probed HTTP port and the resolved ops port report different instances, so the ops port is not the probed instance's"
+      : `the probed HTTP port and the ops endpoint could not be shown to be the same instance (${pair.detail})`,
+    remedy: DOCTOR_ROSTER_TARGET_REMEDY,
+  };
 }
 
 // Ops API bind-host resolution (flair#670, #863): --ops-bind flag >
@@ -8868,7 +8907,7 @@ bindDoctorCli({
   repairLaunchdManagement,
   repointMainServiceUnit,
   resolveHttpPort,
-  resolveDoctorRosterTarget,
+  verifyDoctorRosterInstance,
   restartFlair,
   resolveOpsPort,
   verifyAuditLog,

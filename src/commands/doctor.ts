@@ -125,7 +125,7 @@ export type DoctorCli = {
   repairLaunchdManagement: (...args: any[]) => any;
   repointMainServiceUnit: (...args: any[]) => any;
   resolveHttpPort: (...args: any[]) => any;
-  resolveDoctorRosterTarget: (...args: any[]) => any;
+  verifyDoctorRosterInstance: (...args: any[]) => any;
   restartFlair: (...args: any[]) => any;
   resolveOpsPort: (...args: any[]) => any;
   verifyAuditLog: (...args: any[]) => any;
@@ -200,8 +200,8 @@ function resolveHttpPort(...args: any[]): any {
   return cli.resolveHttpPort(...args);
 }
 
-function resolveDoctorRosterTarget(...args: any[]): any {
-  return cli.resolveDoctorRosterTarget(...args);
+function verifyDoctorRosterInstance(...args: any[]): any {
+  return cli.verifyDoctorRosterInstance(...args);
 }
 
 function resolveOpsPort(...args: any[]): any {
@@ -2038,12 +2038,16 @@ program
       } catch (err: unknown) {
         agentListCredIssue = err instanceof Error ? err.message : String(err);
       }
-      // flair#2483: the ops endpoint for the roster and home reads is resolved
-      // through the same pairing rule `flair agent stamp-home` uses; when it
-      // cannot be established to be the probed instance, both checks are reported
-      // as NOT RUN rather than read from — or reported against — the other one.
+      // flair#2483: doctor VERIFIES that the ops endpoint belongs to the
+      // instance it actually probed (effectivePort — a PID-discovered port, or
+      // one --fix just re-recorded) before either read. The pairing rule only
+      // PICKS a candidate; it trusts ports the caller names and cannot prove
+      // which live instance an ops port addresses, so both endpoints must
+      // report the same instance identity. When they cannot be shown to be the
+      // same instance, both checks report NOT RUN (counted as an issue) and
+      // nothing is read.
       const rosterTarget = agentListAdminPass
-        ? (resolveDoctorRosterTarget(opts) as { kind: "run"; opsPort: number } | { kind: "not-run"; reason: string; remedy: string })
+        ? (await verifyDoctorRosterInstance(opts, effectivePort, agentListAdminPass) as { kind: "run"; opsPort: number } | { kind: "not-run"; reason: string; remedy: string })
         : null;
       const rosterNotRun = rosterTarget?.kind === "not-run" ? rosterTarget : null;
       const rosterOpsPort = rosterTarget?.kind === "run" ? rosterTarget.opsPort : null;
@@ -2057,8 +2061,10 @@ program
         });
       }
       if (rosterNotRun) {
-        // A check that did not run is not a clean result and not a finding about
-        // another instance: count it, and name why and the remedy.
+        // A pair-refused check is not a clean result and not a finding about
+        // another instance: count it, and name why and the remedy. (The Agent
+        // homes no-credential skip below is different: it reads nothing and
+        // counts nothing.)
         issues++;
         console.log(`  ${render.icons.warn} Agent IDs: NOT RUN — ${rosterNotRun.reason}`);
         console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${rosterNotRun.remedy}`);

@@ -20,6 +20,7 @@
  */
 import {
   decideInstanceAnswer,
+  readableInstanceRows,
   readInstanceRows,
   type InstanceIdentityRow,
   type OpsEndpoint,
@@ -114,6 +115,90 @@ export async function resolveTargetInstanceIdentity(endpoint: OpsEndpoint): Prom
   if (decision.kind === "answer") return { kind: "one", id: decision.row.id };
   if (decision.kind === "refuse-multiple") return { kind: "multiple", count: decision.rows.length };
   return { kind: "none" };
+}
+
+/**
+ * Every `flair.Instance` row an HTTP endpoint reports, read through its REST
+ * `/Instance/` resource with admin Basic auth. Throws on a non-2xx, a body that
+ * is not a row list, or an entry without a usable id — a read that established
+ * nothing, never a read of zero rows (the same rule `readInstanceRows` follows
+ * on the ops side). Uses the ONE reader (`readableInstanceRows`).
+ */
+export async function readInstanceRowsViaHttp(
+  httpBase: string,
+  adminUser: string,
+  adminPass: string,
+  fetchImpl?: typeof fetch,
+): Promise<InstanceIdentityRow[]> {
+  const fetchFn = fetchImpl ?? fetch;
+  const res = await fetchFn(`${httpBase.replace(/\/+$/, "")}/Instance/`, {
+    headers: { Authorization: `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}` },
+    signal: AbortSignal.timeout(5000),
+  });
+  if (!res.ok) throw new Error(`GET /Instance/ answered HTTP ${res.status}`);
+  const data = await res.json();
+  const rows = Array.isArray(data) ? data : Array.isArray(data?.results) ? data.results : null;
+  if (rows === null) throw new Error("GET /Instance/ answered a body that is not a row list");
+  return readableInstanceRows(rows);
+}
+
+/**
+ * The instance identity an HTTP endpoint reports (flair#2483), decided by the
+ * SAME rule as the ops-API read: exactly one nameable `flair.Instance` row is an
+ * identity; no row, several rows, or a read that did not happen is not.
+ */
+export async function readHttpInstanceIdentity(
+  httpBase: string,
+  adminUser: string,
+  adminPass: string,
+  fetchImpl?: typeof fetch,
+): Promise<TargetInstanceIdentity> {
+  let rows: InstanceIdentityRow[];
+  try {
+    rows = await readInstanceRowsViaHttp(httpBase, adminUser, adminPass, fetchImpl);
+  } catch {
+    return { kind: "unreadable" };
+  }
+  const decision = decideInstanceAnswer(rows);
+  if (decision.kind === "answer") return { kind: "one", id: decision.row.id };
+  if (decision.kind === "refuse-multiple") return { kind: "multiple", count: decision.rows.length };
+  return { kind: "none" };
+}
+
+/** Whether two endpoints report the same instance: one id, two different ids, or not establishable (flair#2483). */
+export type ProbedPairIdentity =
+  | { kind: "same"; id: string }
+  | { kind: "different"; httpId: string; opsId: string }
+  | { kind: "unestablished"; detail: string };
+
+/** A one-line description of a single endpoint's identity state, for a refusal reason. */
+function describeIdentityState(id: TargetInstanceIdentity): string {
+  switch (id.kind) {
+    case "one": return "one instance identity";
+    case "none": return "no instance identity";
+    case "multiple": return `${id.count} instance identity rows`;
+    case "unreadable": return "an instance identity it could not read";
+  }
+}
+
+/**
+ * The same-instance decision behind doctor's roster and home reads (flair#2483):
+ * the identity the probed HTTP port reports against the identity the candidate
+ * ops endpoint reports. Only two SINGLE, EQUAL ids are `same`. Two different
+ * single ids are `different`. Anything else — no row, several rows, or an
+ * unreadable read on either side — is `unestablished`, and the caller refuses on
+ * it rather than reading either endpoint.
+ */
+export function decideProbedPairIdentity(http: TargetInstanceIdentity, ops: TargetInstanceIdentity): ProbedPairIdentity {
+  if (http.kind === "one" && ops.kind === "one") {
+    return http.id === ops.id
+      ? { kind: "same", id: http.id }
+      : { kind: "different", httpId: http.id, opsId: ops.id };
+  }
+  return {
+    kind: "unestablished",
+    detail: `the probed HTTP port reports ${describeIdentityState(http)}, the ops endpoint reports ${describeIdentityState(ops)}`,
+  };
 }
 
 /**
