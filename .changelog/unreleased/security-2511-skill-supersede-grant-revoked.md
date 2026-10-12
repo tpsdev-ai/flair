@@ -4,4 +4,5 @@
   "write" grant on committed state — the shared write-back helper the non-skill
   close already uses — and, when a revocation is visible, refuses the write and
   rolls the whole transaction back: no predecessor close, no successor and no
-  version row. Admin and same-agent supersedes are unchanged.
+  version row. Supersedes that carry no write grant — operator, internal and
+  same-agent — are unchanged.
