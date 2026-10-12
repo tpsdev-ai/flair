@@ -79,7 +79,7 @@ interface RawMemoryWriter {
 
 const CLASSIFICATIONS: Array<{ file: string; via: WriterVia; needle: string; kind: WriterKind }> = [
   { file: "resources/MemoryFeed.ts", via: "write-back", needle: 'label: "MemoryFeed.ingest"', kind: "strip" },
-  { file: "resources/MemoryFeed.ts", via: "direct-put", needle: "put(row, c)", kind: "echo" },
+  { file: "resources/MemoryFeed.ts", via: "direct-update", needle: "update(id, { expiresAt", kind: "echo" },
   // flair#2450: every synced table's merge runs through the write-back helper.
   { file: "resources/Federation.ts", via: "write-back", needle: "mergedData", kind: "federation-merge" },
   { file: "resources/promotion-stamp.ts", via: "write-back", needle: 'label: "promotion-stamp"', kind: "trusted-stamp" },
@@ -89,7 +89,7 @@ const CLASSIFICATIONS: Array<{ file: string; via: WriterVia; needle: string; kin
   { file: "resources/Memory.ts", via: "direct-put", needle: "flair.Memory.put(content, c)", kind: "trusted-stamp" },
   { file: "resources/Memory.ts", via: "direct-put", needle: "flair.Memory.put(reindexRow, c)", kind: "admin-restate" },
   { file: "resources/Memory.ts", via: "patchRecord", needle: "reflectPatch", kind: "single-field" },
-  { file: "resources/MemoryMaintenance.ts", via: "direct-update", needle: "archivedRow, c", kind: "echo" },
+  { file: "resources/MemoryMaintenance.ts", via: "direct-update", needle: "archivePatch, c", kind: "echo" },
   { file: "resources/usage-recording.ts", via: "write-back", needle: 'label: "usage-recording"', kind: "echo" },
   { file: "resources/AgentSeed.ts", via: "direct-put", needle: "put(record)", kind: "seed" },
   { file: "resources/auth-middleware.ts", via: "write-back", needle: 'label: "backfillEmbedding"', kind: "single-field" },

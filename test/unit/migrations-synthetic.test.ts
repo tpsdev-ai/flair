@@ -42,6 +42,13 @@ function makeFakeMemoryTable(seed: Row[]) {
         puts.push({ ...content });
         return content;
       },
+      async update(id: string, patch: Record<string, unknown>) {
+        const current = store.get(id) ?? { id };
+        const merged = { ...current, ...patch } as Row;
+        store.set(id, { ...merged });
+        puts.push({ ...merged });
+        return merged;
+      },
       search(query: any): AsyncIterable<Row> {
         const conditions = Array.isArray(query?.conditions) ? query.conditions : [];
         const limit = typeof query?.limit === "number" ? query.limit : Infinity;

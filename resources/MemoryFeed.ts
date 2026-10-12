@@ -323,17 +323,21 @@ export class FeedMemories extends Resource {
             }
           }
           written.instanceToken = priorById?.instanceToken ?? randomUUID();
-          // Feed ingest is a full-row write: it REPLACES the stored row, so a
-          // re-ingest with new content is a semantic re-authoring. Re-stamp
-          // provenance from the resolved (trusted) identity and ONE server clock
-          // read (inside buildProvenance) rather than carrying the stored blob
-          // forward — a legacy row whose `verified.timestamp` came from a client
-          // `createdAt` must not keep presenting that value after a new write
-          // (flair#1960 r2). The feed body's own `createdAt` is recorded only as
-          // the CLAIM `provenance.claimed.createdAt`, never as a verified
-          // timestamp. The incarnation token is retained above when present (a
-          // re-ingest is not a reincarnation), so only `provenance` is
-          // re-derived.
+          // Feed ingest writes the INCOMING authored record as a full row (a
+          // semantic re-authoring on POST /FeedMemories): the stored row is
+          // REPLACED, not patched, and provenance is re-stamped from the resolved
+          // (trusted) identity and ONE server clock read (inside buildProvenance)
+          // rather than carrying the stored blob forward — a legacy row whose
+          // `verified.timestamp` came from a client `createdAt` must not keep
+          // presenting that value after a new write (flair#1960 r2). The feed
+          // body's own `createdAt` is recorded only as the CLAIM
+          // `provenance.claimed.createdAt`, never as a verified timestamp. The
+          // values this re-authoring derives from the stored row (the incarnation
+          // token, an omitted visibility, a carried expiry, the originator-instance and
+          // federation bookkeeping) are carried across; it never writes back a
+          // stale echo of the content it read, and it is a foreground client
+          // write, so the field-only rule for background stamps (flair#2470) does
+          // not apply to it.
           written.provenance = buildProvenance(auth, written.createdAt, content);
           // flair#1965 r2: this raw table write REPLACES the row, bypassing the
           // Memory resource's write methods, so the create/update rule is
@@ -361,6 +365,7 @@ export class FeedMemories extends Resource {
     }
     if (refusal) return refusal;
     if ("skip" in outcome) return feedTargetChanged(record.id);
+    if (!("write" in outcome)) throw new Error("MemoryFeed.ingest: expected a full-record write plan");
     const written = outcome.write;
     // flair#1357 — raw-table write: hook it explicitly (see bm25-index-service).
     noteMemoryUpsert(written);
@@ -629,7 +634,9 @@ async function repairDeduplicatedExpiry(ctx: unknown, match: any): Promise<any> 
         delete row.expiresAt;
         const error = stampEphemeralExpiry(row);
         if (error) throw new Error(`flair: deduplicated ephemeral row ${id} could not be repaired (${error})`);
-        await (databases as any).flair.Memory.put(row, c);
+        // Only `expiresAt`: an incremental update, never a
+        // full-row put of the row read above (flair#2470).
+        await (databases as any).flair.Memory.update(id, { expiresAt: row.expiresAt }, c);
         return { kind: "written" as const, row };
       });
     if (outcome.kind === "retry") continue;

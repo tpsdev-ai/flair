@@ -11,7 +11,10 @@
  */
 
 import type { AgentAuthVerdict } from "./agent-auth.js";
+import { withKeyLock } from "./key-lock.js";
+import { withOwnedTransaction } from "./request-transaction.js";
 import { isForbiddenOwnerMutation, ownerMutationRefusal, OWNER_FIELDS } from "./record-owner-guard.js";
+import { txnPausePoint } from "./txn-pause-point.js";
 import {
   capDecision,
   computeContentHash,
@@ -27,11 +30,13 @@ import {
 
 // ─── Injected dependencies ──────────────────────────────────────────────────
 
-/** The subset of a Harper static table accessor relay-ops uses. */
+/** The subset of a Harper static table accessor relay-ops uses. Each read and
+ *  write carries the transaction context it must run in (the fresh OWNED one
+ *  the send holds across its check-and-write). */
 export interface RelayTable {
-  get(id: string): Promise<any> | any;
-  put(row: any): Promise<any> | any;
-  search(query?: any): AsyncIterable<any> | Iterable<any> | Promise<any[]>;
+  get(id: string, ctx?: any): Promise<any> | any;
+  put(row: any, ctx?: any): Promise<any> | any;
+  search(query?: any, ctx?: any): AsyncIterable<any> | Iterable<any> | Promise<any[]>;
 }
 
 export interface RelayDeps {
@@ -41,6 +46,16 @@ export interface RelayDeps {
   resolveOrg: () => Promise<string | null>;
   /** Injectable clock for deterministic tests. */
   now?: () => Date;
+  /**
+   * The request context, when the send is driven by a Harper request (the
+   * Message resource passes `getContext()`). The send's check-and-write runs in
+   * a FRESH OWNED transaction detached from it (withOwnedTransaction,
+   * resources/request-transaction.ts) so its write COMMITS before the send's
+   * key locks release — Harper commits a request transaction only after the
+   * handler returns. Absent for a direct in-process call (unit tests), where
+   * Harper's `transaction()` is still the global the owned transaction needs.
+   */
+  ctx?: any;
 }
 
 // ─── HTTP responses (Response is a web global, not a Harper import) ──────────
@@ -58,6 +73,21 @@ const CONFLICT = (error: string): Response => json(409, { error, reason: "seq_co
 /** Over-cap: a synchronous 4xx that names the reason — backpressure that fails loud. */
 const INBOX_FULL = (scope: "recipient" | "sender"): Response =>
   json(429, { error: "inbox full", reason: "inbox_full", scope });
+/** The message-id or sender lock could not be acquired: the send is refused. */
+const SEND_BUSY = (): Response => json(409, { error: "send in progress", reason: "send_contended" });
+/** Without a per-key lock, serialization within one Harper process is
+ *  unavailable: the send is refused. */
+const SEND_LOCK_UNAVAILABLE = (): Response =>
+  json(503, { error: "send lock unavailable", message: "the Message store has no per-key lock; the send was refused" });
+
+// ─── send-time serialization ────────────────────────────────────────────────
+
+/** First element of every relay-send lock key (resources/key-lock.ts), so a send
+ *  lock never collides with another lock on the database. */
+const SEND_LOCK_NAMESPACE = "flair-relay-send";
+/** Per-lock retry schedule: SEND_LOCK_ATTEMPTS attempts, SEND_LOCK_WAIT_MS apart. */
+const SEND_LOCK_ATTEMPTS = 200;
+const SEND_LOCK_WAIT_MS = 10;
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -73,12 +103,13 @@ const INBOX_FULL = (scope: "recipient" | "sender"): Response =>
 async function queryRows(
   table: RelayTable,
   conditions: ReadonlyArray<{ attribute: string; value: unknown }> = [],
+  ctx?: any,
 ): Promise<any[]> {
   const query =
     conditions.length > 0
       ? { operator: "and", conditions: conditions.map((c) => ({ attribute: c.attribute, comparator: "equals", value: c.value })) }
       : undefined;
-  const res = table.search(query);
+  const res = table.search(query, ctx);
   const iter: any = res && typeof (res as any).then === "function" ? await res : res;
   const out: any[] = [];
   for await (const row of iter) out.push(row);
@@ -174,6 +205,46 @@ export async function relaySend(
   // Store the server-recomputed canonical hash (verified equal above).
   content.contentHash = computeContentHash(content);
 
+  // Within one Harper process, the message-id lock serializes id ownership;
+  // the sender lock serializes content dedup, thread sequence and per-sender
+  // cap checks with the write. The recipient-wide cap is not serialized.
+  const store = (deps.messages as any)?.primaryStore;
+  const outer = await withKeyLock(
+    store,
+    [SEND_LOCK_NAMESPACE, "id", String(content.id)],
+    () =>
+      withKeyLock(
+        store,
+        [SEND_LOCK_NAMESPACE, "from", String(content.from)],
+        () => withOwnedTransaction(deps.ctx, (owned) => storeAndDeliver(deps, content, owned)),
+        SEND_LOCK_ATTEMPTS,
+        SEND_LOCK_WAIT_MS,
+      ),
+    SEND_LOCK_ATTEMPTS,
+    SEND_LOCK_WAIT_MS,
+  );
+  const outcome = outer.kind === "done" ? outer.value : outer;
+  if (outcome.kind === "busy") return SEND_BUSY();
+  if (outcome.kind === "unavailable") return SEND_LOCK_UNAVAILABLE();
+
+  // Test-only: pause after the send locks release and the owned transaction
+  // commits, before this request's transaction commits (flair#2333).
+  const committed = txnPausePoint("relay-send-lock-released");
+  if (committed) await committed;
+  return outcome.value;
+}
+
+/**
+ * The delivery half of relaySend, run while holding the send locks (the
+ * message id's and the sender's): the id-ownership answer, the content dedup,
+ * the per-thread seq check, the cap check and the store. Extracted so the whole
+ * check-and-write runs under those locks; it is never called outside them.
+ */
+async function storeAndDeliver(
+  deps: RelayDeps,
+  content: MessageEnvelope,
+  ctx: any,
+): Promise<Response | MessageEnvelope> {
   // Retry-dedup: an identical resend — same primary id, or the same content
   // hash from this sender to this recipient — returns the already-accepted
   // envelope. No second row, and (critically) no second charge against the cap.
@@ -189,7 +260,7 @@ export async function relaySend(
   // cannot be read, the send is refused the same way, never written over it.
   let existingById: MessageEnvelope | null;
   try {
-    existingById = (await Promise.resolve(deps.messages.get(String(content.id)))) ?? null;
+    existingById = (await Promise.resolve(deps.messages.get(String(content.id), ctx))) ?? null;
   } catch {
     return ownerMutationRefusal("Message");
   }
@@ -202,7 +273,7 @@ export async function relaySend(
 
   // The recipient's inbox — queried by the @indexed `to`, never the whole table
   // (Sherlock P0). Serves both dedup (same content from this sender) and the cap.
-  const recipientRows = await queryRows(deps.messages, [{ attribute: "to", value: content.to }]);
+  const recipientRows = await queryRows(deps.messages, [{ attribute: "to", value: content.to }], ctx);
   const dup = recipientRows.find(
     (r) => r.from === content.from && r.to === content.to && r.contentHash === content.contentHash,
   );
@@ -212,13 +283,13 @@ export async function relaySend(
   // STRICTLY ahead of the thread's last seq (Sherlock P1). Checked AFTER dedup so
   // a legitimate retry (same content, caught above) is never rejected. Queried by
   // the @indexed `threadId`, then filtered to this sender in-code.
-  const threadRows = await queryRows(deps.messages, [{ attribute: "threadId", value: content.threadId }]);
+  const threadRows = await queryRows(deps.messages, [{ attribute: "threadId", value: content.threadId }], ctx);
   let prevMaxSeq = -1;
   for (const r of threadRows) {
     if (r.from !== content.from || r.threadId !== content.threadId) continue;
     if (typeof r.seq === "number" && r.seq > prevMaxSeq) prevMaxSeq = r.seq;
   }
-  if (content.seq <= prevMaxSeq) {
+  if ((content.seq as number) <= prevMaxSeq) {
     return CONFLICT(`seq ${content.seq} is not ahead of the last seq (${prevMaxSeq}) for this (from, threadId)`);
   }
 
@@ -245,7 +316,10 @@ export async function relaySend(
     state: "delivered",
     deliveredAt: now,
   };
-  await deps.messages.put(row);
+  // Test-only: pause between the checks above and the store below.
+  const pause = txnPausePoint("relay-send-write");
+  if (pause) await pause;
+  await deps.messages.put(row, ctx);
   return acceptedView(row);
 }
 

@@ -9,7 +9,7 @@
  * `from`; the no-existence-oracle response; and the same-id retry answered only
  * for the original sender.
  */
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { sealMessage, type MessageEnvelope } from "../../resources/relay-lib.js";
 import {
@@ -21,6 +21,14 @@ import {
   type RelayDeps,
 } from "../../resources/relay-ops.js";
 import type { AgentAuthVerdict } from "../../resources/agent-auth.js";
+import { ensureGlobalHarperTransaction } from "../helpers/fake-replay-store";
+
+// The send's check-and-write runs in a fresh OWNED transaction
+// (withOwnedTransaction, resources/request-transaction.ts), which needs Harper's
+// global `transaction()`. In a real Harper process that global exists; here we
+// install the shared fake (a passthrough), as the write-back unit tests do.
+const restoreHarperTransaction = ensureGlobalHarperTransaction();
+afterAll(() => restoreHarperTransaction());
 
 const ORG = "flair-test-instance";
 
@@ -28,8 +36,22 @@ const ORG = "flair-test-instance";
 
 function messagesTable() {
   const store = new Map<string, any>();
+  const held = new Set<string>();
   return {
     store,
+    // Fake per-key lock for serialization within one Harper process.
+    primaryStore: {
+      tryLock: (key: unknown) => {
+        const k = JSON.stringify(key);
+        if (held.has(k)) return false;
+        held.add(k);
+        return true;
+      },
+      unlock: (key: unknown) => {
+        held.delete(JSON.stringify(key));
+      },
+      resetReadTxn: () => {},
+    },
     get: async (id: string) => store.get(id) ?? null,
     put: async (row: any) => {
       store.set(row.id, { ...row });

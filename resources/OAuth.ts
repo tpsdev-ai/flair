@@ -515,7 +515,7 @@ export class OAuthToken extends Resource {
     } else if (grantType === "refresh_token") {
       return this.handleRefreshToken(data);
     } else if (grantType === "urn:ietf:params:oauth:grant-type:jwt-bearer") {
-      return handleJwtBearerGrant(data);
+      return handleJwtBearerGrant(data, (this as any).getContext?.());
     }
 
     return new Response(JSON.stringify({ error: "unsupported_grant_type" }), {

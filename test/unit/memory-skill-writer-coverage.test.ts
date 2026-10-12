@@ -50,8 +50,8 @@ add("Federation", ["writer:writeBackCommittedRow#1"],
   "Skill-writer: SKIPS skill-tagged rows (skill_not_federated) — skills are local, never synced (flair#1542); every synced table's merge is the write-back above.");
 
 // ── Existing-row writes preserving content and tags ──
-add("MemoryFeed", ["writer:(databases as any).flair.Memory.put#1"],
-  "Dedup expiry repair (flair#2358): re-writes the row read in its transaction with expiresAt set; content and tags stay as stored.");
+add("MemoryFeed", ["writer:(databases as any).flair.Memory.update#1"],
+  "Dedup expiry repair (flair#2358): an incremental update of only `expiresAt`, content and tags stay as stored (flair#2470).");
 add("skill-version-write", ["writer:(databases as any).flair.Memory.put#2"],
   "Skill predecessor close: preserves stored content and tags.");
 add("Memory", ["writer:(databases as any).flair.Memory.update#1"],
