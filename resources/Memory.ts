@@ -1975,18 +1975,12 @@ export class Memory extends (databases as any).flair.Memory {
     dropClientFederationBookkeeping(content);
     const expiryError = stampEphemeralExpiry(content, existingForSkill);
     if (expiryError) return Response.json({ error: "invalid_expiry", message: expiryError }, { status: 400 });
-    // flair#2466, and flair#2407's redaction branch: keep the vector a PATCH
-    // leaves on the row aligned with the text it leaves there. A PATCH computes
-    // a vector only when its write CHANGES the row's effective embedding text
-    // (embedTextField, the field skillEmbedText embeds the row from), only from
-    // that text as this body carries it, and only when the body has no vector of
-    // its own to store — none supplied, or the supplied one removed by redaction
-    // (flair#2407). Skill rows are refused above (rejectSkillWritePath), so that
-    // field is `content` here. A body whose `content` is absent (a `trigger`-only
-    // PATCH, say) or equal to the stored text computes nothing and stamps
-    // nothing: the row keeps its stored vector — also when redaction removed a
-    // supplied vector — or takes the vector the body supplies when redaction
-    // left it in place.
+    // flair#2466: this non-re-embed branch refreshes the embedding when the
+    // body's `content` changes the compared row's text and no non-null supplied
+    // vector survives redaction. Skill writes are refused above. A surviving
+    // supplied vector is stored as supplied, without text/vector validation.
+    // Without a refresh, the stored vector survives only if the body omits
+    // `embedding` (including when redaction removed it); an explicit null clears it.
     //
     // The vector is computed the way put() embeds a write that carries no vector
     // (same engine, `getEmbedding(..., "document")`; same stamps, embeddingModel
@@ -1994,16 +1988,15 @@ export class Memory extends (databases as any).flair.Memory {
     // embeddingModel are written as null: the row keeps no vector for text it no
     // longer holds, and the embedding-stamp re-embed selects a null stamp.
     //
-    // The decision is made against the row read above and made AGAIN against the
-    // COMMITTED row (an explicit fresh context) immediately before the write, so
-    // a body that left the read row's text unchanged but would change the row the
-    // write replaces gets a vector for its own text. A vector, once computed, is
-    // for text this same write stores, so it needs no second check. As elsewhere
-    // in this file, Harper has no compare-and-set: a change committed after that
-    // confirmation and before the commit is not seen.
+    // A fresh committed-row read runs only when the initial comparison selected
+    // no embedding, a stored row exists, and the vectorless body carries the
+    // embedding-text field. If that comparison finds changed text, refresh from
+    // the body's text. Other paths write without this confirmation. Harper has
+    // no compare-and-set: changes after the fresh read are not seen by it.
     //
     // A PATCH whose URL target has no stored row (a create, admin or internal
-    // only) computes a vector only when redaction removed a supplied one.
+    // only) refreshes only when redaction removed a supplied embedding field
+    // and the body carries `content`.
     const body: Record<string, any> = content != null && typeof content === "object" ? content : {};
     /** The field to embed this body's text from, if writing it over `stored` needs a vector; else null. */
     const vectorFieldOver = (stored: any): MemoryEmbeddingInputField | null => {
@@ -2023,8 +2016,8 @@ export class Memory extends (databases as any).flair.Memory {
     const readField = vectorFieldOver(existingForSkill);
     if (readField) await storeVectorFor(readField);
     // Test-only: inert unless the fault-injection env opt-in is set and armed.
-    // Holds the PATCH after its stored-row read and any embed, before it
-    // confirms the committed row and writes.
+    // Holds the PATCH after its stored-row read and any embed, before the
+    // conditional committed-row read and the write.
     const beforePatchWrite = txnPausePoint("memory-patch");
     if (beforePatchWrite) await beforePatchWrite;
     if (!readField && existingForSkill != null && body.embedding == null &&

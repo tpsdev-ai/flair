@@ -66,8 +66,7 @@ export function embedTextField(row: any): MemoryEmbeddingInputField {
 }
 
 /**
- * The text a row embeds from: the value of embedTextField(row). Returns
- * `undefined` only when there is no usable text at all.
+ * The value of embedTextField(row).
  */
 export function skillEmbedText(content: any): string | undefined {
   return content[embedTextField(content)];

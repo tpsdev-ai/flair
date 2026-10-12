@@ -1,23 +1,17 @@
 /**
- * patch-refreshes-embedding-2466.test.ts — a PATCH that changes the text a
- * memory's embedding is computed from refreshes the embedding (flair#2466).
+ * patch-refreshes-embedding-2466.test.ts — ordinary PATCH embedding cases (flair#2466).
  *
  * Calls resources/Memory.ts patch() directly against a mocked harper (same
  * technique as memory-write-redaction-2407.test.ts). The real-Harper counterpart,
  * including semantic search, the overlapping-edit cases and an actual embedding
  * backend failure, is test/integration/patch-refreshes-embedding-2466.test.ts.
  *
- * A PATCH that changes the row's effective embedding text (`content` for every
- * row that reaches this branch: skill rows are refused on PATCH first) and has
- * no vector of its own to store recomputes the vector from that text, the way
- * put() embeds a write with no vector. A PATCH that leaves that text unchanged
- * or absent computes nothing and keeps the stored vector — a `trigger`-only
- * PATCH, with or without a supplied vector that redaction removes, and one that
- * echoes the unchanged `content` beside a redacted `trigger` and a supplied
- * vector. When the engine returns no vector for a changed text the PATCH writes
- * embedding/embeddingModel as null instead of keeping the earlier text's
- * vector. This file owns its harper + embeddings mock in its own process
- * (test/unit-isolated/).
+ * These non-re-embed cases cover changed `content` with no surviving supplied
+ * vector, retention when unchanged/absent `content` accompanies an omitted or
+ * redaction-removed `embedding`, and storage of a surviving supplied vector as
+ * supplied. An engine returning no vector for changed text yields null
+ * embedding/embeddingModel. This file owns its harper + embeddings mock in its
+ * own process (test/unit-isolated/).
  */
 import { describe, it, expect, beforeEach, mock } from "bun:test";
 import { agentStore, middlewareCapture } from "../helpers/harper-mock.js";
@@ -239,7 +233,7 @@ function seed(id: string, content: string): void {
   });
 }
 
-describe("flair#2466 — a text-changing PATCH refreshes the embedding", () => {
+describe("flair#2466 — ordinary PATCH embedding cases", () => {
   it("a redacting PATCH of content with no vector computes the REDACTED text's vector", async () => {
     seed("mem-1", "the deploy checklist before the patch");
     const m = memoryFor("mem-1");
@@ -254,7 +248,7 @@ describe("flair#2466 — a text-changing PATCH refreshes the embedding", () => {
     expect(res).toBeDefined();
   });
 
-  it("a PATCH of a field no embedding is computed from (summary) keeps the vector and embeds nothing", async () => {
+  it("a summary-only PATCH keeps the vector and embeds nothing", async () => {
     seed("mem-2", "a note whose vector survives a summary edit");
     const m = memoryFor("mem-2");
     await m.patch({ summary: "an edited summary with no credential" });
@@ -277,7 +271,7 @@ describe("flair#2466 — a text-changing PATCH refreshes the embedding", () => {
     expect(embedInputs).toEqual([]);
   });
 
-  it("a trigger-only PATCH of an ordinary row keeps the vector and embeds nothing", async () => {
+  it("a trigger-only PATCH without embedding fields keeps the vector and embeds nothing", async () => {
     seed("mem-5", "an ordinary note; its trigger does not feed its vector");
     const m = memoryFor("mem-5");
     await m.patch({ trigger: "when the deploy job fails" });
@@ -302,7 +296,7 @@ describe("flair#2466 — a text-changing PATCH refreshes the embedding", () => {
     expect(embedInputs).toEqual([]);
   });
 
-  it("a PATCH carrying the unchanged content, a credential in trigger and a vector keeps the stored vector and embeds nothing", async () => {
+  it("unchanged content with a redaction-removed vector keeps the stored vector and embeds nothing", async () => {
     seed("mem-7", "an ordinary note echoed unchanged");
     embedImpl = () => null; // a failing engine must not be consulted at all
     const m = memoryFor("mem-7");
@@ -316,7 +310,7 @@ describe("flair#2466 — a text-changing PATCH refreshes the embedding", () => {
     expect(embedInputs).toEqual([]);
   });
 
-  it("when the embedding engine returns no vector the PATCH clears the embedding instead of keeping the old one", async () => {
+  it("a content-changing PATCH without a supplied vector clears the embedding when the engine returns none", async () => {
     seed("mem-4", "a note edited while the embedding engine is down");
     embedImpl = () => null;
     const m = memoryFor("mem-4");

@@ -1,26 +1,26 @@
 /**
- * patch-refreshes-embedding-2466.test.ts — a PATCH that changes the text a
- * memory's embedding is computed from, and has no vector of its own to store,
- * refreshes the embedding (flair#2466), real Harper.
+ * patch-refreshes-embedding-2466.test.ts — ordinary PATCH embedding cases
+ * (flair#2466), real Harper.
  *
  * Memory.patch() merges the write body into the stored row. Before this fix a
- * PATCH that changed `content` without supplying a vector left the stored
- * vector — the one computed from the EARLIER text — in place, so a redacted or
- * edited memory still matched searches for the text it no longer held. A PATCH
- * now computes a vector when its write changes the row's effective embedding
- * text (resources/skill-write.ts, embedTextField/skillEmbedText), from that
- * text as its body carries it, and only when it has no vector of its own to
+ * PATCH that changed `content` without supplying embedding fields could leave
+ * the stored vector — the one computed from the EARLIER text — in place, so a redacted or
+ * edited memory still matched searches for the text it no longer held. A
+ * non-re-embed PATCH refreshes when its body changes the compared row's
+ * effective embedding text (embedTextField/skillEmbedText), from that text as
+ * its body carries it, and only when it has no vector of its own to
  * store (none supplied, or the supplied one removed by redaction), the way
- * Memory.put() embeds a write that carries no vector. The decision is made
- * against the row the PATCH read and again against the committed row just
- * before its write. Skill rows are refused on PATCH before this branch, so
- * every row here embeds from `content`; a `trigger` edit never changes it.
+ * Memory.put() embeds a write that carries no vector. A fresh committed-row
+ * read runs only when the initial comparison selected no embedding, a stored
+ * row exists, and the vectorless body carries the embedding-text field. Other
+ * paths write without that confirmation. Skill writes are refused before this
+ * branch, so every row here embeds from `content`.
  *
  * Cases (one Harper with a working embedding engine):
  *   (a) a redacting PATCH of `content` with no vector stores the vector of the
  *       REDACTED text, not the pre-PATCH vector;
- *   (b) semantic search for the removed text no longer scores the memory by its
- *       old vector (the absolute `_score` collapses to the new text's similarity);
+ *   (b) semantic search for the removed text no longer yields the old vector's
+ *       high score (the absolute `_score` collapses to the new text's similarity);
  *   (c) a PATCH of a field no embedding is computed from (`summary`) keeps the vector;
  *   (d) a PATCH that SUPPLIES a vector stores that vector, unchanged;
  *   (e) a `trigger`-only PATCH of an ordinary row — plain, or carrying a vector
@@ -29,8 +29,7 @@
  *       of the same row is held before its write ends with the vector of the
  *       EDITED text, never one for the earlier content;
  *   (g) the same overlap with a `content` PATCH ends with the row's text and
- *       vector both from that PATCH — the vector it stores is for the text it
- *       stores;
+ *       vector both from that PATCH;
  *   (i) a PATCH carrying the unchanged `content`, a credential in `trigger` and
  *       a supplied vector (which redaction removes) keeps the stored vector,
  *       `embeddingModel` and `updatedAt`;
@@ -40,9 +39,9 @@
  * On a second Harper whose embedding backend fails (its model file is absent,
  * so getEmbedding returns null):
  *   (h) a text-changing PATCH of a row with a stored, searchable vector clears
- *       `embedding`/`embeddingModel`, semantic search no longer scores the row
- *       by the old vector, and the null stamp is selected by the embedding-stamp
- *       re-embed's pending condition;
+ *       `embedding`/`embeddingModel`, semantic search no longer gives the row
+ *       the old vector's high score, and the null stamp is selected by the
+ *       embedding-stamp re-embed's pending condition;
  *   (j) the PATCH of (i) keeps the valid stored vector, its stamp and
  *       `updatedAt` (the engine is never asked).
  *
@@ -52,8 +51,8 @@
  * `memory-put` holds the editing PUT (sent as the administrator) after its first
  * read and its embed and before its write, so its transaction opens FIRST;
  * `memory-patch` holds the PATCH after its stored-row read (which sees the
- * pre-edit text) and any embed, before it confirms the committed row and
- * writes. The PUT is released and commits, then the PATCH. The PATCH's
+ * pre-edit text) and any embed, before the conditional committed-row read and
+ * the write. The PUT is released and commits, then the PATCH. The PATCH's
  * transaction opened after the PUT's, so Harper orders its write after the
  * edit — the ordering flair#2465's deterministic case relies on.
  *
@@ -79,7 +78,7 @@ const SLACK_TOKEN = `xoxb-${"c".repeat(12)}`;
 const REDACTED = "[redacted]";
 const AGENT = "pre-agent";
 const DIM = 768;
-/** A one-hot vector, distinct from the corpus embeddings → no ranking pollution. */
+/** A caller-supplied one-hot vector. */
 const SUPPLIED = Array.from({ length: DIM }, (_, i) => (i === 0 ? 1 : 0));
 /** Test-only pauses (resources/Memory.ts): the PUT's, and the PATCH's before its write. */
 const PUT_POINT = "memory-put";
@@ -279,7 +278,7 @@ afterAll(async () => {
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
 });
 
-describe("flair#2466 — a text-changing PATCH refreshes the embedding (real Harper)", () => {
+describe("flair#2466 — ordinary PATCH embedding cases (real Harper)", () => {
   it("(a) a redacting PATCH of content with no vector stores the vector of the redacted text", async () => {
     const id = "pre-case-a";
     await seedRow(id, "the deploy checklist lived here before the patch");
@@ -296,7 +295,7 @@ describe("flair#2466 — a text-changing PATCH refreshes the embedding (real Har
       .toBeGreaterThan(0.9999);
   }, 120_000);
 
-  it("(c) a PATCH of a field no embedding is computed from keeps the vector", async () => {
+  it("(c) a summary-only PATCH keeps the vector", async () => {
     const id = "pre-case-c";
     await seedRow(id, "a note whose vector must survive a summary edit");
     const res = await patch(id, { summary: "an edited summary that mentions no credential" });
@@ -308,7 +307,7 @@ describe("flair#2466 — a text-changing PATCH refreshes the embedding (real Har
     expect(row.embeddingModel).toBe(SEED_MODEL_ID);
   }, 120_000);
 
-  it("(b) semantic search for the removed text no longer scores the memory by its old vector", async () => {
+  it("(b) semantic search for the removed text no longer yields the old vector's high score", async () => {
     const id = "pre-case-b";
     const REMOVED = "the quarterly budget spreadsheet for the marketing team";
     const NEW = "a binary search tree rotation preserves the in-order traversal";
@@ -349,7 +348,7 @@ describe("flair#2466 — a text-changing PATCH refreshes the embedding (real Har
     expect(row.embedding, "the supplied vector was not stored").toEqual(SUPPLIED);
   }, 120_000);
 
-  it("(e) a trigger-only PATCH of an ordinary row keeps the stored vector and its stamps", async () => {
+  it("(e) a trigger-only PATCH with no surviving supplied vector keeps the stored vector and its stamps", async () => {
     // An ordinary row embeds from `content`; a `trigger` edit does not change
     // that text, so the PATCH computes nothing — with or without a supplied
     // vector that redaction removes from the body.
@@ -414,7 +413,7 @@ describe("flair#2466 — a text-changing PATCH refreshes the embedding (real Har
       .toBeGreaterThan(0.9999);
   }, 180_000);
 
-  it("(i) a PATCH carrying the unchanged content, a credential in trigger and a vector keeps the stored vector and its stamps", async () => {
+  it("(i) unchanged content with a redaction-removed vector keeps the stored vector and its stamps", async () => {
     // Redaction removes the supplied vector (the trigger changed), but the row's
     // embedding text — its content — does not change, so nothing is computed.
     const id = "pre-case-i";
@@ -460,7 +459,7 @@ describe("flair#2466 — a text-changing PATCH refreshes the embedding (real Har
   }, 180_000);
 });
 
-describe("flair#2466 — when the embedding engine returns no vector, the PATCH clears the vector (real Harper, failing backend)", () => {
+describe("flair#2466 — ordinary PATCH cases with a failing backend (real Harper)", () => {
   beforeAll(async () => {
     failingHome = mkdtempSync(join(tmpdir(), "flair-2466-nomodel-home-"));
     // resources/embeddings-boot.ts registers the embedding backend from this
@@ -490,7 +489,7 @@ describe("flair#2466 — when the embedding engine returns no vector, the PATCH 
     expect(row.embeddingModel ?? null, "the PATCH kept the earlier model stamp").toBeNull();
 
     // A bounded wait for the vector index to drop the cleared vector; the
-    // assertion is that the row is not scored by the old vector at all.
+    // assertion is that the old vector no longer yields a high score.
     let score: number | undefined = 1;
     const deadline = Date.now() + 20_000;
     while (Date.now() < deadline) {
@@ -511,7 +510,7 @@ describe("flair#2466 — when the embedding engine returns no vector, the PATCH 
     expect(pendingIds, "the null stamp is not selected by the re-embed's pending condition").toContain(id);
   }, 180_000);
 
-  it("(j) a PATCH carrying the unchanged content, a credential in trigger and a vector keeps a valid stored vector", async () => {
+  it("(j) unchanged content with a redaction-removed vector keeps a valid stored vector", async () => {
     const t = failing!;
     const id = "pre-case-j";
     const TEXT = "a note whose text a PATCH echoes while the engine is down";
