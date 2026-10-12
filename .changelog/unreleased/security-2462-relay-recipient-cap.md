@@ -1,0 +1,1 @@
+- **Relay sends enforce the recipient inbox cap across concurrent senders within one Harper process.**
