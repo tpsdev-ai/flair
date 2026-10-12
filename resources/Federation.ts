@@ -1312,9 +1312,9 @@ export class FederationSync extends Resource {
               attempts: 1,
               // Planned writes compare the whole stored row, not just
               // sameStoredRow's identity fields: Memory's identity fields do not
-              // move on a field-only update (flair#2475), and the other tables
-              // carry no instanceToken or a hash that excludes mutable lifecycle
-              // fields (flair#2450 — see above).
+              // move on a field-only update (flair#2475), and the other tables'
+              // identity fields do not move on one either (flair#2450 — see
+              // above).
               wholeRow: true,
               pausePre: () => txnPausePoint("federation-merge-pre"),
               pausePoint: () => txnPausePoint("federation-merge"),
