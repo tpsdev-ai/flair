@@ -5,7 +5,7 @@ import { admitPrincipalWrite, statusWriteRefusal } from "./agent-status-guard.js
 import { applyFederationBookkeeping, applyOriginatorInstanceId, dropClientFederationBookkeeping, resolveStoredRow, stampOriginatorOnCreate } from "./originator-instance.js";
 import { localInstanceId } from "./instance-identity.js";
 import { AGENT_ID_ERROR, invalidAgentIdMessage, isValidAgentId } from "../src/lib/agent-id-rule.js";
-import { AGENT_HOME_STAMP_FIELD, AGENT_HOME_STAMP_PAUSE_POINT, isHomeLessAgentRow, isSyncOriginatedAgentRow } from "../src/lib/agent-home-fields.js";
+import { AGENT_HOME_STAMP_FIELD, isHomeLessAgentRow, isSyncOriginatedAgentRow } from "../src/lib/agent-home-fields.js";
 import { withOwnedTransaction } from "./request-transaction.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 
@@ -356,7 +356,11 @@ export class Agent extends (databases as any).flair.Agent {
       if (stored === null) return { kind: "no-row" as const };
       if (!isHomeLessAgentRow(stored) || isSyncOriginatedAgentRow(stored)) return { kind: "ineligible" as const };
       // Test-only: inert unless the fault-injection env opt-in is set and armed.
-      const pause = txnPausePoint(AGENT_HOME_STAMP_PAUSE_POINT);
+      // The name is a DIRECT string literal at the call site (flair#2382's
+      // checker scans resources/ and src/ and resolves only literals); it must
+      // stay equal to AGENT_HOME_STAMP_PAUSE_POINT, which the integration test
+      // arms (test/integration/agent-home-2433.test.ts).
+      const pause = txnPausePoint("agent-home-stamp");
       if (pause) await pause;
       // Confirmation read: the COMMITTED row in an explicit fresh context (never
       // this transaction's snapshot, never the request's pinned read).

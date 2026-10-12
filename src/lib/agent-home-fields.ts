@@ -26,6 +26,13 @@ export const AGENT_HOME_STAMP_FIELD = "flairStampHome";
  * stamp's OWNED transaction, after the resource's first read of the row and
  * before its confirmation read. Inert unless the fault-injection env opt-in is
  * set and armed (resources/txn-pause-point.ts).
+ *
+ * The resource names this point as a DIRECT string literal at its call site
+ * (`txnPausePoint("agent-home-stamp")` in resources/Agent.ts), not through this
+ * constant: flair#2382's checker scans resources/ and src/ and resolves only
+ * direct literals or `spec.point`. This export is the single source the
+ * integration test arms (test/integration/agent-home-2433.test.ts), and it must
+ * stay equal to the literal.
  */
 export const AGENT_HOME_STAMP_PAUSE_POINT = "agent-home-stamp";
 
