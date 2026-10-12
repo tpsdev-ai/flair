@@ -430,16 +430,16 @@ export function register(program: Command): void {
           process.exit(1);
         }
         // Write back WITHOUT the home field, so THIS write does not change a
-        // stored home (other fields, such as a display name or trust tier, are
-        // written). The write goes to the Agent RESOURCE (a REST PATCH, never the
+        // stored home; other fields are written when the write-back is admitted
+        // and succeeds. The write goes to the Agent RESOURCE (a REST PATCH, never the
         // raw ops API): the resource runs it in a fresh owned transaction (the
         // request's transaction is detached), writes ONLY an allow-list of fields
         // (a home or a federation stamp in the body is never carried), STAGES it,
         // then re-reads the COMMITTED row and ABORTS — with
-        // `originator_instance_immutable` if that read sees the row's home as a
-        // peer's, or `agent_principal_write_back_no_row` if it finds the row gone —
-        // so a row whose home the resource's reads see as a peer's is not changed,
-        // and a row they find deleted is not re-created (flair#2473). Harper has no
+        // `originator_instance_immutable` if a non-empty string stored home differs from
+        // the resolved local ID, or `agent_principal_write_back_no_row` if no row
+        // is returned — so a differing stored home seen by those reads is not changed,
+        // and a row they find deleted is not re-created (flair#2473). This write uses no
         // compare-and-set, so a change committed after that confirmation read and
         // before the commit is not seen: this narrows the race rather than closing
         // it (per-id serialization: flair#2478).
@@ -454,7 +454,7 @@ export function register(program: Command): void {
             console.error(`Error: ${typeof body.message === "string" && body.message.length > 0 ? body.message : AGENT_HOME_IMMUTABLE_ERROR}`);
           } else if (body?.error === AGENT_PRINCIPAL_WRITE_BACK_NO_ROW_ERROR) {
             console.error(
-              `Error: the write-back for principal '${id}' was refused: the agent row is gone (deleted between this command's read and its write-back), so it was not changed and not re-created. Re-run 'flair principal add ${id}' to create it afresh.`,
+              `Error: the write-back for principal '${id}' was refused: could not confirm a stored agent row, so it was not changed and not re-created. Re-run 'flair principal add ${id}' to create it afresh.`,
             );
           } else {
             console.error(

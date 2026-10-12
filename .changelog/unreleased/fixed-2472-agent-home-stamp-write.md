@@ -3,8 +3,8 @@
   `flair agent stamp-home --apply` now decides inside a FRESH OWNED transaction in
   the Agent resource (the request's own transaction is detached for that scope).
   It reads this instance's id from the CURRENT `Instance` table there — a fresh
-  read, not a process-cached id — and when that read finds no canonical Instance
-  row (none, or several) the write is refused by name
+  read, not a process-cached id — and if it could not confirm a single canonical
+  Instance row the write is refused by name
   (`agent_home_stamp_no_instance`) with nothing written. It then reads the row,
   STAGES the home-only write when the row is still home-less and carries no
   federation-sync provenance, re-reads the COMMITTED row, and ABORTS (discarding
@@ -22,10 +22,11 @@
   which writes back only an EXPLICIT ALLOW-LIST of fields — never a home and never
   a federation stamp, whatever the body carried — stages the update in a fresh
   owned transaction, and refuses with `originator_instance_immutable` when its
-  owned read or its confirmation read sees the row's home as a peer's, and with
+  owned read or its confirmation read sees a non-empty string stored home differing from
+  the resolved local ID, and with
   `agent_principal_write_back_no_row` when either read finds the row gone. Other
-  fields of an existing row (its display name, trust tier, runtime) are still
-  updated; the stored home is not, and a row those reads find deleted is not
+  fields of an existing row (its display name, trust tier, runtime) are updated
+  when the write-back is admitted and succeeds; the stored home is not, and a row those reads find deleted is not
   re-created. That write-back is honoured only for an administrator or a trusted
   internal call; an authorized non-admin PATCH caller that sends it takes the
   ordinary PATCH path, which strips a client-supplied home and the federation
@@ -35,14 +36,13 @@
   HTTP port against the ports the instance's config records. With a complete
   configured pair, a port that matches its side binds the other to that pair: a
   target where exactly one of the two matches is refused, and a port left out is
-  taken from the pair. With no complete configured pair, a target that names only
+  taken from the pair. When no complete configured pair is resolved, a target that names only
   one of the two ports is refused. Both refusals are `ambiguous_instance_target`
-  and come before the command contacts either port. Two ports the caller names
-  that match neither side of the configured pair (or when there is no complete
-  pair) are used as given, without verification.
+  errors. Two ports the caller names that match neither side of the configured
+  pair (or when there is no complete pair) are used as given, without verification.
 
-  Harper has no compare-and-set: a home or provenance committed, a deletion, or an
-  `Instance` table change made after the read that checked it and before the
+  These writes use no compare-and-set: a home or provenance committed, a deletion,
+  or an `Instance` table change made after the read that checked it and before the
   transaction's commit is still not seen (the residual window; per-id
   serialization is tracked as #2478).
 

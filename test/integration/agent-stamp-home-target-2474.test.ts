@@ -13,7 +13,7 @@
  *     is refused by name (`ambiguous_instance_target`); a port left out is taken
  *     from the pair;
  *   - with NO complete configured pair, a target with only ONE port named is
- *     refused by name, before anything is read or written;
+ *     refused by name;
  *   - two named ports that match neither side of the configured pair (or with
  *     no complete pair) are used as given, WITHOUT VERIFICATION — nothing
  *     contacts an instance to confirm they belong together.
@@ -135,10 +135,11 @@ afterAll(async () => {
 });
 
 describe("flair#2474 — stamp-home checks its two ports against a complete configured pair", () => {
-  test("an ops port that disagrees with the HTTP port's instance is refused by name", async () => {
+  test("an ops port that conflicts with the configured pair is refused by name", async () => {
     const r = await runStampHome(["--port", httpPort(a), "--ops-port", opsPort(b)]);
     expect(r.code, `${r.stdout}\n${r.stderr}`).toBe(1);
     expect(r.stderr).toContain("ambiguous_instance_target");
+    expect(r.stderr).toContain("conflicts with the configured pair");
   }, 40_000);
 
   test("a consistent pair proceeds", async () => {
@@ -153,13 +154,14 @@ describe("flair#2474 — stamp-home checks its two ports against a complete conf
     expect(r.stderr).toBe("");
   }, 40_000);
 
-  test("an HTTP port that disagrees with the ops port's instance is refused by name", async () => {
+  test("an HTTP port that conflicts with the configured pair is refused by name", async () => {
     // The config pairs A. Naming B's HTTP port with no ops override would derive
     // the ops port from A's config — the roster read and the stamp would address
     // different instances.
     const r = await runStampHome(["--port", httpPort(b)]);
     expect(r.code, `${r.stdout}\n${r.stderr}`).toBe(1);
     expect(r.stderr).toContain("ambiguous_instance_target");
+    expect(r.stderr).toContain("conflicts with the configured pair");
   }, 40_000);
 
   test("an explicit pair for another instance is accepted", async () => {
@@ -172,10 +174,11 @@ describe("flair#2474 — stamp-home checks its two ports against a complete conf
 });
 
 describe("flair#2474 — principal add checks its two ports against a complete configured pair", () => {
-  test("an ops port that disagrees with the HTTP port's instance is refused by name before anything is written", async () => {
+  test("an ops port that conflicts with the configured pair is refused before key files or rows are written", async () => {
     const r = await runPrincipalAdd(`pa-target-${Date.now().toString(36)}`, ["--port", httpPort(a), "--ops-port", opsPort(b)]);
     expect(r.code, `${r.stdout}\n${r.stderr}`).toBe(1);
     expect(r.stderr).toContain("ambiguous_instance_target");
+    expect(r.stderr).toContain("conflicts with the configured pair");
   }, 40_000);
 
   test("a consistent pair runs the SKIPPED-insert write-back and leaves the stored home as it was", async () => {

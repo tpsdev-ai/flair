@@ -825,7 +825,7 @@ export function register(program: Command): void {
         // flair#2474 — pair the ops port (the roster read) with the HTTP port (the
         // guarded PATCH). A target the configured pair contradicts, or one with a
         // single port named and no complete configured pair, is refused by name
-        // before anything is read or written; see resolveAgentHomeTarget.
+        // (see resolveAgentHomeTarget).
         target = resolveAgentHomeTarget(opts);
       } catch (err: any) {
         console.error(`Error: ${err.message}`);
@@ -889,7 +889,7 @@ export function register(program: Command): void {
       }
       if (result.reason === "no-canonical-id") {
         console.error(
-          "Error: this instance has no single canonical Instance row, so there is no id to stamp; nothing was written.",
+          "Error: could not confirm a single canonical Instance row to stamp as the home; nothing was written.",
         );
         process.exitCode = 1;
         return;

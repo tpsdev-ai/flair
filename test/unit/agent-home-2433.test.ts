@@ -16,6 +16,7 @@ import {
   agentHomeEndpoint,
   agentRowId,
   isHomeLessAgentRow,
+  isForeignAgentHome,
   isSyncOriginatedAgentRow,
   planAgentHomeStamps,
   planAgentHomeWrite,
@@ -27,6 +28,14 @@ import {
 } from "../../src/lib/agent-home.js";
 import { describeAgentHomeFinding } from "../../src/doctor-client.js";
 import { INSTANCE_ROW_PRUNE_REMEDY } from "../../src/lib/instance-identity-row.js";
+
+describe("guarded write-back home comparison", () => {
+  test("a non-empty stored home differs from an unresolved local ID", () => {
+    expect(isForeignAgentHome({ originatorInstanceId: "stored-home" }, null)).toBe(true);
+    expect(isForeignAgentHome({ originatorInstanceId: "local" }, "local")).toBe(false);
+    expect(isForeignAgentHome({ originatorInstanceId: "" }, null)).toBe(false);
+  });
+});
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -132,6 +141,7 @@ describe("runAgentHomeStamp — sync provenance is checked at write time", () =>
     expect(writes.map((w) => w.id)).toEqual(["still-local"]);
     expect(result.stamped).toEqual(["still-local"]);
     expect(result.skipped).toEqual(["late-home"]);
+    expect(stampLeftoverLines(result)).toEqual(["     not counted as stamped: late-home"]);
     expect(rows["late-home"].originatorInstanceId).toBe("peer-1");
   });
 

@@ -310,7 +310,7 @@ export interface AgentHomeStampResult {
   plan: AgentHomePlan;
   /** The ids whose home was stamped and read back (empty on a dry run). */
   stamped: string[];
-  /** The planned ids left unwritten because the row, re-read just before its write, carried sync provenance. */
+  /** The planned ids not counted as stamped, excluding `vanished`. */
   skipped: string[];
   /** The planned ids whose row was gone when re-read just before its write. */
   vanished: string[];
@@ -319,7 +319,7 @@ export interface AgentHomeStampResult {
 /** The lines `flair agent stamp-home --apply` prints for the rows it left unwritten. */
 export function stampLeftoverLines(result: Pick<AgentHomeStampResult, "skipped" | "vanished">): string[] {
   return [
-    ...result.skipped.map((id) => `     list only (sync-originated): ${id}`),
+    ...result.skipped.map((id) => `     not counted as stamped: ${id}`),
     ...result.vanished.map((id) => `     skipped (no longer present): ${id}`),
   ];
 }
@@ -359,7 +359,7 @@ async function readAgentRowForStamp(args: {
  * (the request's own transaction is detached for that scope): the resource reads
  * the row there and stamps only when it is still home-less and carries no
  * federation-sync provenance, writing the id the CURRENT `Instance` table names
- * (a write with no single canonical Instance row is refused by name); it then
+ * (failure to confirm a single canonical Instance row is refused by name); it then
  * re-reads the committed row and aborts if that read sees a home, provenance, or
  * no row. The CLI's own read is a plan/report, never the write's authority: a
  * row the resource's reads see gain a home or provenance is left alone, and a
@@ -421,8 +421,7 @@ export async function runAgentHomeStamp(args: {
     }
     // The guarded write: the Agent resource re-checks home-lessness and
     // provenance inside a fresh owned transaction and stamps the id the current
-    // Instance table names. A 404 means the resource found the row gone (a stamp
-    // never creates).
+    // Instance table names. A 404 is reported as vanished.
     const res = await fetchImpl(`${stampUrl}${encodeURIComponent(id)}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json", Authorization: args.authHeader },

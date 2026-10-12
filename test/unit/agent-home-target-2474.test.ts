@@ -2,9 +2,9 @@
  * agent-home-target-2474.test.ts — flair#2474, the port pairing
  * `flair agent stamp-home` and `flair principal add` resolve through.
  *
- * Each command reads through an ops API and writes through the HTTP port, so the
- * two ports must not address different instances. `decideAgentHomeTarget` is the
- * pure rule; `resolveAgentHomeTarget` feeds it from Harper's config in a data
+ * Each command reads through an ops API and writes through the HTTP port.
+ * `decideAgentHomeTarget` checks the configured pair, without verifying live
+ * instance identity; `resolveAgentHomeTarget` feeds it from Harper's config in a data
  * directory (and, for the default install only, the per-user config).
  *
  * The cases here pin:
@@ -22,7 +22,7 @@
  * The real two-Harper seam is test/integration/agent-stamp-home-target-2474.test.ts.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -82,7 +82,7 @@ describe("decideAgentHomeTarget — a complete configured pair", () => {
   });
 
   test("an HTTP port named alone that disagrees with the pair is refused (the derived ops port is the pair's)", () => {
-    expect(() => decide({ httpPort: 8926, httpNamed: true, configuredHttp: 7926, configuredOps: 7925 })).toThrow(AMBIGUOUS_INSTANCE_TARGET_ERROR);
+    expect(() => decide({ httpPort: 8926, httpNamed: true, configuredHttp: 7926, configuredOps: 7925 })).toThrow("conflicts with the configured pair");
   });
 
   test("an ops port named alone that disagrees with the pair is refused", () => {
@@ -92,8 +92,8 @@ describe("decideAgentHomeTarget — a complete configured pair", () => {
 
 describe("decideAgentHomeTarget — two named ports (behaviour unchanged by the one-sided rule)", () => {
   test("a named pair where exactly one port matches the configured pair is refused, either way round", () => {
-    expect(() => decide({ httpPort: 7926, httpNamed: true, namedOps: 8925, configuredHttp: 7926, configuredOps: 7925 })).toThrow(AMBIGUOUS_INSTANCE_TARGET_ERROR);
-    expect(() => decide({ httpPort: 8926, httpNamed: true, namedOps: 7925, configuredHttp: 7926, configuredOps: 7925 })).toThrow(AMBIGUOUS_INSTANCE_TARGET_ERROR);
+    expect(() => decide({ httpPort: 7926, httpNamed: true, namedOps: 8925, configuredHttp: 7926, configuredOps: 7925 })).toThrow("conflicts with the configured pair");
+    expect(() => decide({ httpPort: 8926, httpNamed: true, namedOps: 7925, configuredHttp: 7926, configuredOps: 7925 })).toThrow("conflicts with the configured pair");
   });
 
   test("a named pair that matches neither side of the configured pair is used as given", () => {
@@ -131,6 +131,11 @@ describe("resolveAgentHomeTarget — reading Harper's config in a data directory
       else process.env[key] = value;
     }
     rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  test("a config read failure reports an unresolved pair", () => {
+    mkdirSync(join(dataDir, "harper-config.yaml"));
+    expect(() => resolveAgentHomeTarget({ dataDir, port: "7926" })).toThrow("no complete port pair could be resolved from config");
   });
 
   test("Harper's config records only the HTTP port: --ops-port alone is refused by name", () => {

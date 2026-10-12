@@ -314,6 +314,7 @@ describe("flair#2433 — the home a create stamps, on a real Harper", () => {
       const r = await send("PATCH", `/Agent/${id}`, { id, [AGENT_HOME_STAMP_FIELD]: true });
       expect(r.status, r.raw).toBe(409);
       expect(r.raw).toContain("agent_home_stamp_no_instance");
+      expect(r.raw).toContain("could not confirm a single canonical Instance row");
       expect(r.raw, "the refused stamp still reported the row stamped").not.toContain("\"stamped\":true");
       expect((await rowIn("Agent", id)).originatorInstanceId ?? null, "the row was stamped with no canonical instance").toBeNull();
     } finally {
@@ -515,6 +516,7 @@ describe("flair#2433 — the home a create stamps, on a real Harper", () => {
     const { r, before, after } = await stampAfterInstanceChange("inst-removed", () => setInstanceRows([]));
     expect(r.status, r.raw).toBe(409);
     expect(r.raw).toContain("agent_home_stamp_no_instance");
+    expect(r.raw).toContain("could not confirm a single canonical Instance row");
     expect(r.raw, "the refused stamp still reported the row stamped").not.toContain("\"stamped\":true");
     expect(after.originatorInstanceId ?? null, "the row was stamped with no Instance row").toBeNull();
     expect(after, "the refused stamp wrote to the row").toEqual(before);
@@ -525,6 +527,7 @@ describe("flair#2433 — the home a create stamps, on a real Harper", () => {
     const { r, before, after } = await stampAfterInstanceChange("inst-several", () => setInstanceRows([LOCAL_ID, `inst-second-${sfx}`]));
     expect(r.status, r.raw).toBe(409);
     expect(r.raw).toContain("agent_home_stamp_no_instance");
+    expect(r.raw).toContain("could not confirm a single canonical Instance row");
     expect(r.raw, "the refused stamp still reported the row stamped").not.toContain("\"stamped\":true");
     expect(after.originatorInstanceId ?? null, "the row was stamped with several Instance rows").toBeNull();
     expect(after, "the refused stamp wrote to the row").toEqual(before);
@@ -678,12 +681,12 @@ describe("flair#2433 — `flair principal add` over an existing row (real subpro
     expect(await rowIn("Agent", id), "a row was written").toBeNull();
   }, 60_000);
 
-  test("a home that becomes a peer's between the write-back's staging and its confirmation aborts it", async () => {
+  test("a stored home differing from the resolved local ID at write-back confirmation aborts it", async () => {
     // The row exists, so the create-only insert is skipped and the record is
     // written back to the Agent RESOURCE in an owned transaction. The competing
     // commit lands between the STAGED write-back and the confirmation read: the
     // resource aborts (`originator_instance_immutable`) and discards the staged
-    // write, so neither the home nor any other field of the peer's row is changed.
+    // write, so neither the home nor any other field of that row is changed.
     const id = `pa-race-${sfx}`;
     await ops({
       operation: "insert",
@@ -698,8 +701,9 @@ describe("flair#2433 — `flair principal add` over an existing row (real subpro
     expect(released, "the write-back never reached its in-transaction pause").toBe("go");
     expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(1);
     expect(result.stderr).toContain("originator_instance_immutable");
+    expect(result.stderr).toContain("the stored home differs from the resolved local ID");
     const row = await rowIn("Agent", id);
-    expect(row.originatorInstanceId, "the peer's home was overwritten").toBe(PEER_ID);
+    expect(row.originatorInstanceId, "the stored home was overwritten").toBe(PEER_ID);
     expect(row.publicKey, "the aborted write-back still changed the row").toBe("pk-pa-race-2433");
   }, 60_000);
 });
@@ -735,7 +739,7 @@ describe("flair#2473 — the guarded principal write-back cannot change a stored
       records: [{ id: agent.id, name: agent.id, role: "agent", admin: false, status: "active", publicKey: agent.publicKey, originatorInstanceId: LOCAL_ID, createdAt: now }],
     });
     // A non-admin agent PATCHing its OWN row with the control field, a DIFFERENT
-    // home, and a forged publicKey. It is not `flair principal add`, so it gets
+    // home, and a forged publicKey. As an admitted non-admin, it gets
     // the ordinary PATCH path: the flag is dropped and the home and publicKey a
     // body carries are stripped.
     const r = await sendAs(agent, "PATCH", `/Agent/${agent.id}`, {
@@ -778,6 +782,7 @@ describe("flair#2473 — the guarded principal write-back cannot change a stored
     const r = await send("PATCH", `/Agent/${id}`, { [AGENT_PRINCIPAL_WRITE_BACK_FIELD]: true, displayName: id });
     expect(r.status, r.raw).toBe(404);
     expect(r.raw, "the refusal was not by its own name").toContain(AGENT_PRINCIPAL_WRITE_BACK_NO_ROW_ERROR);
+    expect(r.raw).toContain("could not confirm a stored agent row");
     expect(await rowIn("Agent", id), "the write-back re-created a row that was not there").toBeNull();
   }, 30_000);
 
@@ -800,6 +805,7 @@ describe("flair#2473 — the guarded principal write-back cannot change a stored
     expect(released, "the write-back never reached its in-transaction pause").toBe("go");
     expect(result.status, result.raw).toBe(404);
     expect(result.raw).toContain(AGENT_PRINCIPAL_WRITE_BACK_NO_ROW_ERROR);
+    expect(result.raw).toContain("could not confirm a stored agent row");
     expect(await rowIn("Agent", id), "the staged write-back re-created the deleted row").toBeNull();
   }, 60_000);
 });

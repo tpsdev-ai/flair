@@ -141,7 +141,7 @@ export async function localInstanceId(): Promise<string | null> {
  * {@link localInstanceId}, but never answered from that function's cache and
  * never written into it (flair#2472).
  *
- * For a guard that must refuse when the table no longer holds exactly one
+ * For a guard that must refuse when it could not confirm a single canonical
  * Instance row. `localInstanceId()` keeps a successful id for the process
  * lifetime, so after that row is removed, or a second row is added, it still
  * answers the old id. This returns null when the read finds no row, several

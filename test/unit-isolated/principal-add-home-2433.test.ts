@@ -5,8 +5,8 @@
  * HOME ASSIGNMENT on the `insert` is CREATE-ONLY: the resolved home rides on that
  * insert itself (so a row created at write time carries it, even one deleted
  * since the read). An existing row's insert is SKIPPED, so its stored home
- * stands; the write-back that follows (to the Agent resource, mocked here) writes
- * back only an allow-list of the row's other fields and omits the home field.
+ * stands; the following request goes to the Agent resource (mocked here) and
+ * omits the home field.
  * A row that appears with a differing non-null home after the read, a differing
  * non-null stored home, and a write-back the resource refuses are each refused by
  * name. The resource's own refusal covers what its confirmation read sees; a
@@ -54,7 +54,7 @@ beforeEach(async () => {
         const record = JSON.parse(raw);
         updates.push({ records: [record] });
         const answer = writeBackRefused
-          ? { error: "originator_instance_immutable", message: "the agent row's home is a peer's; refusing to change it" }
+          ? { error: "originator_instance_immutable", message: "originator_instance_immutable: the stored home differs from the resolved local ID; refusing to change it" }
           : { writtenBack: true };
         res.writeHead(writeBackRefused ? 409 : 200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(answer));
@@ -90,9 +90,12 @@ afterEach(async () => {
   rmSync(tmpHome, { recursive: true, force: true });
 });
 
+let lastErrors: string[] = [];
+
 async function principalAdd(id: string, opsPort: number): Promise<number> {
   const logSpy = spyOn(console, "log").mockImplementation(() => {});
-  const errSpy = spyOn(console, "error").mockImplementation(() => {});
+  lastErrors = [];
+  const errSpy = spyOn(console, "error").mockImplementation((...args: unknown[]) => { lastErrors.push(args.map(String).join(" ")); });
   const origExit = process.exit;
   process.exit = ((code?: number) => {
     throw new Error(`process.exit(${code ?? 0})`);
@@ -178,12 +181,12 @@ describe("flair#2433/#2473 — principal add's home assignment on insert is crea
     expect(updates).toHaveLength(0);
   });
 
-  test("a write-back the resource refuses as a foreign home fails by name", async () => {
+  test("a write-back the resource refuses for a differing stored home fails by name", async () => {
     storedRows = [{ id: "known-id", originatorInstanceId: null }];
-    // The resource's owned-transaction confirmation sees the home became a peer's
-    // and aborts the staged write with `originator_instance_immutable`.
+    // Mock the resource's differing-home refusal (`originator_instance_immutable`).
     writeBackRefused = true;
     expect(await principalAdd("known-id", opsPort())).toBe(1);
+    expect(lastErrors.join("\n")).toContain("originator_instance_immutable: the stored home differs from the resolved local ID");
     expect(updates).toHaveLength(1);
     expect(storedRows[0].originatorInstanceId, "the row's home changed").toBeNull();
   });

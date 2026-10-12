@@ -43,7 +43,8 @@ export const AGENT_HOME_STAMP_PAUSE_POINT = "agent-home-stamp";
  * `insert` is SKIPPED because the row already exists: the resource then writes
  * back only the allow-listed fields (never the home) in a fresh owned
  * transaction, refusing `originator_instance_immutable` when its owned read or
- * its confirmation read sees the row's home as a peer's, and
+ * its confirmation read sees a non-empty stored home differing from the resolved
+ * local ID, and
  * `agent_principal_write_back_no_row` when either read finds the row absent. The
  * resource reads the field and drops it before the write — it is a control
  * field, not a stored column.
@@ -112,11 +113,8 @@ export function pickPrincipalWriteBackFields(content: unknown): Record<string, u
 export const AGENT_PRINCIPAL_WRITE_BACK_PAUSE_POINT = "agent-principal-write-back";
 
 /**
- * Whether a stored row's home is FOREIGN to `localId`: a non-empty
- * `originatorInstanceId` that is not this instance's own. A home-less row (null,
- * absent or empty) is not foreign, and neither is a row stamped with this
- * instance's id. Used by `flair principal add`'s guarded write-back (flair#2473):
- * a row whose home became a peer's must not be changed.
+ * Whether a non-empty string stored home differs from the resolved local ID
+ * (which may be null). Used by the guarded principal write-back (flair#2473).
  */
 export function isForeignAgentHome(row: Record<string, unknown> | null | undefined, localId: string | null): boolean {
   if (!row || typeof row !== "object") return false;
@@ -131,10 +129,8 @@ export function isHomeLessAgentRow(row: Record<string, unknown>): boolean {
 }
 
 /**
- * Whether an inbound federation merge wrote this row (`_syncedFrom`,
- * `_originatorInstanceId` — resources/Federation.ts's receiver-side stamps).
- * Such a row did NOT originate on this instance, so nothing here may stamp a
- * home on it: that would attribute a peer's row to this instance.
+ * Whether the row carries a non-empty string `_syncedFrom` or
+ * `_originatorInstanceId` (receiver-side federation bookkeeping).
  */
 export function isSyncOriginatedAgentRow(row: Record<string, unknown> | null | undefined): boolean {
   if (!row) return false;
