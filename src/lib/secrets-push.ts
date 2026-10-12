@@ -129,11 +129,8 @@ export interface PushedSecret {
   name: string;
   ok: boolean;
   detail?: string;
-  /** Which stage decided the outcome: `"push"` when `set_secret` itself did not
-   *  answer 200 (it failed or threw) — a failed push; `"confirm"` when it answered
-   *  200 but the read-back could not confirm the stored row carries
-   *  `processEnv=true` — either it read a row WITHOUT the marker, or it threw — so
-   *  storage is unconfirmed, not "not pushed" (flair#2283). Absent when `ok`. */
+  /** "push" when set_secret fails or throws; "confirm" when read-back does not
+   *  confirm processEnv=true after a successful set_secret response. Absent when ok. */
   kind?: "push" | "confirm";
 }
 
@@ -174,12 +171,8 @@ export async function pushSecrets(
       continue;
      }
 
-    // set_secret answered 200. Everything past this point is about CONFIRMING the
-    // stored row, so any failure here is `kind: "confirm"` — storage that could
-    // not be confirmed — and NOT a failed push: the row may well be
-    // stored. Read back one pushed row to verify processEnv actually materialised;
-    // a 200 from set_secret is not proof — core silently ignores unknown params, so
-    // the row can be accepted and still land inert.
+    // A successful set_secret response does not confirm storage with processEnv=true.
+    // Read-back failures belong to the confirm stage.
     let verify;
     try {
       verify = await opsCall(

@@ -34,10 +34,9 @@
  * "full" refresh path: it does not run IdP intake or apply CIMD changes here
  * either, and discovery reads on the push-success branch stay at the served origin.
  *
- * flair#2283 round 8 adds the two staging-file cases: refresh's own DEFAULT filename
- * is distinct from `mcp enable`'s, so a refresh fallback never truncates a staged IdP
- * credentials bundle; and an EXPLICIT `--secrets-path` that already holds a file is
- * refused by name rather than truncated.
+ * Refresh has a separate default filename; an explicit `--secrets-path` can select
+ * `mcp enable`'s path. Fallback creation is attempted only when the update could not
+ * be pushed or confirmed; an occupied path is refused without writing a file.
  *
  * flair#2283 round 9 pins `result.secretsPath`: it is returned ONLY when a fallback
  * file was actually written. A successful push and every later refusal (target
@@ -55,7 +54,7 @@
  * is reported as storage that "could not be confirmed", not "was not pushed".
  *
  * flair#2283 round 11 splits the push from the read-back in `pushSecrets`: a throw
- * BEFORE `set_secret` answered 200 is a failed push, while a throw AFTER it — the
+ * before a successful `set_secret` response is a failed push; a throw after it — the
  * read-back threw — is the confirm stage, so refresh reports storage that "could not
  * be confirmed" and makes no claim whether the row landed. The case below drives that
  * thrown read-back.
@@ -117,8 +116,8 @@ afterAll(() => {
  *    the restart verification must fail.
  *  - `failPush` makes the capability probe succeed but the `set_secret` push fail,
  *    so refresh takes its fallback AFTER the push rather than at the probe.
- *  - `inertPush` makes `set_secret` return 200 but the read-back report
- *    `processEnv:false`, so the push was STORED but its storage is unconfirmed.
+ *  - `inertPush` makes `set_secret` answer successfully and returns a read-back
+ *    row with `processEnv:false`; storage with `processEnv=true` is unconfirmed.
  *  - `throwOn` throws the named ops operation, so refresh hits its unexpected-error
  *    catch after the push.
  *
@@ -246,7 +245,7 @@ describe("refreshMcpOAuthFlag (flair#2283 item 2)", () => {
     expect(result.secretsPath).toBeUndefined();
   });
 
-  test("a target that cannot take a pushed secret leaves the staged file and names it", async () => {
+  test("a failed capability probe creates fallback at an unoccupied explicit path", async () => {
     shape = "plugin-live";
     const { impl } = opsFetch({ disablePush: true });
     const stagedPath = base().secretsStagingPath;
@@ -268,7 +267,7 @@ describe("refreshMcpOAuthFlag (flair#2283 item 2)", () => {
   // flair#2283 round 9: the OTHER fallback branch. The capability probe SUCCEEDS
   // (so this is not the probe-refusal path) but the `set_secret` push fails, so the
   // fallback file is written AFTER the push — and the result carries that path.
-  test("a push that fails after a good probe writes the staged file and returns its path", async () => {
+  test("a failed push creates fallback at an unoccupied explicit path", async () => {
     shape = "plugin-live";
     const { impl, sent } = opsFetch({ failPush: true });
     const stagedPath = base().secretsStagingPath;
@@ -285,10 +284,8 @@ describe("refreshMcpOAuthFlag (flair#2283 item 2)", () => {
     expect(result.secretsPath).toBe(stagedPath);
   });
 
-  // flair#2283 round 10: a `set_secret` that returned 200 but whose read-back could
-  // not confirm processEnv=true was STORED — refresh must not call that "not pushed".
-  // It reports storage that "could not be confirmed" and still stages the fallback.
-  test("a stored push whose processEnv read-back is unconfirmed is reported as unconfirmed, not as not pushed", async () => {
+  // `set_secret` answered successfully; the returned row lacks processEnv=true.
+  test("a successful set_secret response with processEnv=false read-back is reported as unconfirmed", async () => {
     shape = "plugin-live";
     const { impl, sent } = opsFetch({ inertPush: true });
     const stagedPath = base().secretsStagingPath;
@@ -307,13 +304,8 @@ describe("refreshMcpOAuthFlag (flair#2283 item 2)", () => {
     expect(result.secretsPath).toBe(stagedPath);
   });
 
-  // flair#2283 round 11: the try around `set_secret` ALSO covered the read-back, so a
-  // `search_by_value` that THREW after a successful `set_secret` was caught by the push
-  // handler and reported kind "push" -> "was not pushed". The push may well have stored
-  // the row; only its CONFIRMATION is missing. Refresh must report storage that "could
-  // not be confirmed" and, deliberately, make NO claim either way about whether the row
-  // landed — hence this case asserts the OUTCOME wording and nothing about the row.
-  test("a read-back that throws after a successful push is reported as unconfirmed, not as not pushed", async () => {
+  // A thrown read-back after a successful set_secret response is unconfirmed.
+  test("a read-back that throws after a successful set_secret response is reported as unconfirmed", async () => {
     shape = "plugin-live";
     const { impl, sent } = opsFetch({ throwOn: "search_by_value" });
     const stagedPath = base().secretsStagingPath;
@@ -327,8 +319,7 @@ describe("refreshMcpOAuthFlag (flair#2283 item 2)", () => {
     const detail = result.steps.find((s) => s.step === "secrets-provisioning")?.detail ?? "";
     expect(detail).toContain("could not be confirmed");
     expect(detail).not.toContain("was not pushed");
-    // This case deliberately asserts NOTHING about whether the row was stored: a thrown
-    // read-back leaves that unknown, and neither the code nor this file claims it.
+    // A thrown read-back leaves storage unknown.
     // The fallback is still staged and named.
     expect(readFileSync(stagedPath, "utf8")).toBe("FLAIR_MCP_OAUTH=true\n");
     expect(result.secretsPath).toBe(stagedPath);

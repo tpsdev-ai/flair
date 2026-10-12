@@ -140,7 +140,7 @@
 
 import { isLoopbackUrl } from "../component-env.js";
 import { probeSecretsCapability, pushSecrets, PROCESS_ENV_TIER } from "./secrets-push.js";
-import { existsSync, mkdirSync, writeFileSync, chmodSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, writeFileSync, chmodSync, readFileSync, realpathSync } from "node:fs";
 import { hostname as osHostname } from "node:os";
 
 import { join, dirname, resolve } from "node:path";
@@ -2327,9 +2327,7 @@ export async function discriminateMcpOAuthDiscovery(
   };
 }
 
-/** The one sentence `flair mcp enable`'s self-verify prints for a `plugin-absent`
- *  observation (flair#756/#1000). Kept as one function so the wording cannot
- *  drift from the check. */
+/** The detail `flair mcp enable`'s self-verify prints for a `plugin-absent` observation. */
 function mcpAbsentDetail(url: string, tokenEndpoint: unknown): string {
   return (
     `${url} advertises flair's own token endpoint (token_endpoint=${tokenEndpoint}). ` +
@@ -3370,30 +3368,16 @@ export interface RefreshMcpFlagResult {
  * `1`, but the `@harperfast/oauth` component coerces only `true`/`false` and
  * deletes that value, leaving the component's MCP AS disabled.
  *
- * This ATTEMPTS an encrypted `FLAIR_MCP_OAUTH=true` push, and only when the target
- * can take the secret does it check the secret row's processEnv marker and verify a
- * restart by PID change; when the target cannot, it leaves a file when it can create
- * one; an occupied path is refused and no file is written — and returns `{ ok: false }`
- * — the failure signal the `flair mcp enable` CLI
- * turns into a non-zero exit. That fallback RETURN happens BEFORE the two discovery
- * checks below. The fallback file is written only when the update could not be pushed
- * or confirmed — after a
- * failed capability probe, a failed push, or a push whose read-back could not confirm
- * the stored value — never before probing — and to this command's OWN default filename
- * (`defaultRefreshSecretsStagingPath`, never the `mcp enable` one). An occupied explicit
- * path is refused before probing; an occupied default path is refused when the fallback
- * is needed — in both cases by name, not truncated (the writer
- * opens exclusively), so a full IdP bundle an operator staged at that path survives
- * byte-identical
- * (flair#2283). It does
- * NOT run the IdP-credential intake nor apply CIMD changes, and it reads and
- * writes no IdP secret value. Only after a landed push and a PID-verified restart does
- * it verify two documents by name: the
- * target's own discovery document must advertise the issuer being verified with
- * the MCP token endpoint, and the PUBLIC document read at that issuer must
- * match the same normalized issuer and its token endpoint — the shared discriminator
- * `enable`, `doctor` and `deploy` run, bound to an issuer this caller knows
- * (flair#2283).
+ * Attempts an encrypted `FLAIR_MCP_OAUTH=true` push and checks the processEnv marker.
+ * After a confirmed push and PID-verified restart, checks target and public
+ * discovery against the requested issuer and its MCP token endpoint.
+ * A failed capability probe, failed push or unconfirmed read-back attempts a 0600
+ * one-var fallback file and returns `{ ok: false }` before discovery checks; the CLI
+ * exits non-zero. An occupied path is refused without writing a file. Refresh has
+ * a separate default filename; `--secrets-path` can select `mcp enable`'s path.
+ * An occupied explicit path is refused before probing; an occupied default path
+ * is refused when fallback is needed. The fallback writer opens exclusively.
+ * Does not run IdP intake, apply CIMD changes or read or write IdP secret values.
  */
 export async function refreshMcpOAuthFlag(
   params: RefreshMcpFlagParams,
@@ -3451,15 +3435,13 @@ export async function refreshMcpOAuthFlag(
     // An EXPLICIT staging path is the operator's own target. Refuse an occupied one
     // BEFORE probing, so no request is made and the file is left byte-identical
     // (flair#2283).
-    if (params.secretsStagingPath && existsSync(params.secretsStagingPath)) {
+    if (params.secretsStagingPath && lstatSync(params.secretsStagingPath, { throwIfNoEntry: false })) {
       const message = occupiedMessage(params.secretsStagingPath);
       push(false, message);
       return { ok: false, dryRun, steps, refused: { message }, failedStep: "secrets-provisioning" };
     }
-    // Probe FIRST: the staged one-var file is a FALLBACK, written only when the
-    // target cannot take the secret — after the capability probe fails, the push
-    // fails, or the push is stored but its read-back cannot confirm it — never an
-    // unconditional truncating write ahead of the probe (flair#2283).
+    // Attempt fallback creation after a failed capability probe, failed push or
+    // unconfirmed read-back.
     const cap = await probeSecretsCapability(
       resolveOpsUrl(params.instance),
       basicAuthHeader(params.adminUser, params.adminPass),
@@ -3484,9 +3466,8 @@ export async function refreshMcpOAuthFlag(
     if (!pushed.allOk) {
       const failedResults = pushed.results.filter((r) => !r.ok);
       const failed = failedResults.map((r) => `${r.name} (${r.detail})`).join("; ");
-      // A `set_secret` that returned 200 but whose read-back did not confirm the
-      // stored row with processEnv=true is NOT "not pushed": it was stored, but its
-      // storage could not be confirmed (flair#2283).
+      // A confirm-stage failure means set_secret answered successfully, but
+      // storage with processEnv=true was not confirmed.
       const lead = failedResults.every((r) => r.kind === "confirm")
         ? "FLAIR_MCP_OAUTH=true was pushed, but its storage with processEnv=true could not be confirmed"
         : "FLAIR_MCP_OAUTH=true was not pushed";

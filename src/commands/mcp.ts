@@ -845,7 +845,7 @@ export function register(program: Command): void {
     .option("--confirm-secrets-applied", "Confirm the staged secrets are already live on the target instance's environment (skips the interactive confirm)")
     .option("--fabric", "Use the Fabric branch and default to Fabric secrets staging; refused for a localhost, *.localhost, 127/8, ::1, ::ffff:127/8, 0.0.0.0 or :: target host")
     .option("--dry-run", "Check target syntax, issuer hostname/IP literal, IdP credential presence and any CIMD list/local config. Write no file and make no remote call. Skip process/config matching and live checks; a custom remote target can pass dry run and be refused without --dry-run")
-    .option("--refresh-flag", "One-shot migration (flair#2283): attempt the encrypted FLAIR_MCP_OAUTH=true push, check the secret row's processEnv marker, restart and check discovery metadata; when the target cannot take the secret, leave a 0600 file to apply by hand and exit non-zero. Does not re-run IdP intake or apply identity mapping or CIMD changes. Use it to correct FLAIR_MCP_OAUTH=1, which the @harperfast/oauth component deletes")
+    .option("--refresh-flag", "One-shot migration (flair#2283): attempt the encrypted FLAIR_MCP_OAUTH=true push, check the secret row's processEnv marker, restart and check discovery metadata; when the update could not be pushed or confirmed, attempt a 0600 fallback file and exit non-zero; an occupied path is refused without writing. Uses a separate default filename; --secrets-path can select mcp enable's path. Does not re-run IdP intake or apply identity mapping or CIMD changes. Use it to correct FLAIR_MCP_OAUTH=1, which the @harperfast/oauth component deletes")
     .option("--json", "Print machine-readable JSON instead of a human summary")
     .action(async (opts) => {
       const instance: string | undefined = opts.instance ?? process.env.FLAIR_URL;
@@ -889,8 +889,9 @@ export function register(program: Command): void {
       }
 
       // flair#2283 — attempt the encrypted flag update push, then restart.
-      // When the target cannot take the secret, leave a 0600 file to apply by
-      // hand and exit non-zero. Does not run IdP intake or apply CIMD changes.
+      // If the update could not be pushed or confirmed, attempt a 0600 fallback
+      // and exit non-zero; refuse an occupied path without writing. Refresh uses
+      // a separate default filename; --secrets-path can select the enable path.
       if (opts.refreshFlag) {
         const refreshed = await refreshMcpOAuthFlag(
           {

@@ -104,29 +104,21 @@ describe("env parsing", () => {
   });
 });
 
-// flair#2283 round 7: the value doctor and deploy act on is the one HARPER loads.
-// Harper's `.env` loader is `dotenv`, which is LAST-wins, so an operator who
-// corrected a value by appending a second line had the running instance use the
-// corrected line while flair's own scan took the FIRST. Both call sites read
-// through `readEnvValue` — doctor feeds it into `describePublicUrlFinding`
-// (src/commands/doctor.ts), deploy builds `deployedKnownIssuers` from it
-// (src/deploy.ts) — so this pins the shared read AND both consumers.
-describe("duplicate assignments — doctor and deploy act on the value Harper loads", () => {
+// File parsing is last-wins; Harper's process environment can override the file.
+// These cases call the doctor helper and reproduce deploy's issuer expression.
+describe("duplicate assignments — helper and issuer-expression checks", () => {
   // The operator's file: the stale/loopback value first, the corrected public URL
   // appended below it.
   const text =
     "FLAIR_PUBLIC_URL=http://127.0.0.1:9980\n" +
     "FLAIR_PUBLIC_URL=https://actual.example.com\n";
 
-  test("readEnvValue returns the LAST assignment, exactly as Harper's dotenv does", () => {
+  test("readEnvValue returns the last assignment in the file", () => {
     expect(readEnvValue(text, PUBLIC_URL_KEY)).toBe("https://actual.example.com");
   });
 
-  test("flair doctor decides from the last value — src/commands/doctor.ts feeds readEnvValue into describePublicUrlFinding", () => {
-    // The instance still advertises loopback, and the FILE now holds the public
-    // URL: doctor must see the corrected value and report drift (the file is set
-    // but not reaching process.env). Taking the first value, which is still
-    // loopback, would fall through to the benign "not set" warning instead.
+  test("describePublicUrlFinding reports drift from the last file value with no process override", () => {
+    // The helper sees the last file value and no process-environment override.
     const finding = describePublicUrlFinding({
       advertisedIssuer: "http://127.0.0.1:9980",
       componentEnvValue: readEnvValue(text, PUBLIC_URL_KEY),
@@ -138,7 +130,7 @@ describe("duplicate assignments — doctor and deploy act on the value Harper lo
     expect(finding.message).toContain("/opt/flair/.env");
   });
 
-  test("flair deploy binds discovery to the last value — src/deploy.ts reads it into deployedKnownIssuers", () => {
+  test("deploy's issuer expression selects the last file value", () => {
     // The exact expression deploy() evaluates over its shipped `.env`.
     const deployedKnownIssuers = [
       readEnvValue(text, PUBLIC_URL_KEY),

@@ -228,10 +228,9 @@ describe("stageDeployRoot — what harper actually uploads", () => {
     expect(readEnvValue(await packedEnvText(staged.dir), PUBLIC_URL_KEY)).toBe("https://cdn.example.com");
   });
 
-  test("a duplicated FLAIR_PUBLIC_URL is kept at its LAST value, as Harper's dotenv loads it", async () => {
-    // flair#2283 round 7. Staging calls planComponentEnv -> readEnvValue, so this is
-    // the deploy path deciding which value to keep. Harper's loader is LAST-wins;
-    // the old first-wins scan would keep the stale loopback line and ship it.
+  test("staging preserves duplicate FLAIR_PUBLIC_URL assignments and plans from the last value", async () => {
+    // Staging preserves both assignments; the plan uses the last file value.
+    // Harper's process environment can override the file.
     const root = makePackageRoot();
     writeFileSync(
       join(root, COMPONENT_ENV_FILENAME),

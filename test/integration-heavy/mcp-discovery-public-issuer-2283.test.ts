@@ -4,7 +4,7 @@
  *
  * The discriminator compares a discovery document's strings against an issuer the
  * CALLER knows independently of the document (the configured `FLAIR_PUBLIC_URL` /
- * `FLAIR_MCP_ISSUER`), while doctor and deploy reach the instance over loopback.
+ * `FLAIR_MCP_ISSUER`). These cases reach the booted instance over loopback.
  * Flair advertises `FLAIR_PUBLIC_URL` (its own AS) and `FLAIR_MCP_ISSUER` (the
  * @harperfast/oauth plugin's AS) — both PUBLIC origins. Comparing the token
  * endpoint against the probed loopback address alone turned a configured instance
@@ -302,7 +302,7 @@ describe("flair#2283 — a configured instance whose document advertises a PUBLI
         [
           "FLAIR_MCP_OAUTH=1",
           `FLAIR_PUBLIC_URL=${DECOY}`,
-          `FLAIR_PUBLIC_URL=${FLAIR_PUBLIC}`, // LAST wins — what Harper loads
+          `FLAIR_PUBLIC_URL=${FLAIR_PUBLIC}`, // Last file assignment; process environment can override it
           "",
         ].join("\n"),
       );
