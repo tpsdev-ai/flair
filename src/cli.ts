@@ -1561,6 +1561,9 @@ function resolveOpsPort(opts: { opsPort?: string | number; port?: string | numbe
 /** The named refusal for a configured-pair conflict or an unpaired one-sided target (flair#2474). */
 export const AMBIGUOUS_INSTANCE_TARGET_ERROR = "ambiguous_instance_target";
 
+/** The remedy appended to an {@link AMBIGUOUS_INSTANCE_TARGET_ERROR} refusal. */
+export const INSTANCE_TARGET_REMEDY = "Pass both ports (--port and --ops-port) for one instance.";
+
 /** Inputs to {@link decideAgentHomeTarget}. */
 export interface AgentHomeTargetInputs {
   /** The HTTP port `resolveHttpPort` resolved. */
@@ -1598,7 +1601,7 @@ export interface AgentHomeTargetInputs {
  */
 export function decideAgentHomeTarget(i: AgentHomeTargetInputs): { httpPort: number; opsPort: number } {
   const { httpPort, httpNamed, namedOps, configuredHttp, configuredOps } = i;
-  const remedy = "Pass both ports (--port and --ops-port) for one instance.";
+  const remedy = INSTANCE_TARGET_REMEDY;
   if (configuredHttp !== null && configuredOps !== null) {
     const opsPort = namedOps ?? configuredOps;
     const httpMatches = httpPort === configuredHttp;
@@ -1672,6 +1675,51 @@ export function resolveAgentHomeTarget(opts: { port?: string | number; opsPort?:
     configuredOps,
     deriveOps: () => resolveOpsPort(opts),
   });
+}
+
+/**
+ * The remedy `flair doctor` prints when it cannot establish that the ops
+ * endpoint belongs to the instance it probed (flair#2483).
+ */
+export const DOCTOR_ROSTER_TARGET_REMEDY =
+  "Pass --port with the HTTP port the instance's config pairs with its ops port, "
+  + "or record that HTTP/ops pair in the instance's config.";
+
+/** Whether `flair doctor` may read the Agent roster and home rows, and from which ops endpoint. */
+export type DoctorRosterTargetDecision =
+  | { kind: "run"; opsPort: number }
+  | { kind: "not-run"; reason: string; remedy: string };
+
+/**
+ * The ops endpoint `flair doctor` may read the Agent roster and home rows from
+ * (flair#2483).
+ *
+ * Doctor probes one instance over HTTP and reads those rows through the ops
+ * API. Resolving the two INDEPENDENTLY (the probed `resolveHttpPort` and
+ * `resolveOpsPort`) let the probe address one instance and the read another, so
+ * doctor reported a DIFFERENT instance's roster and homes as this one's. The
+ * ops endpoint is therefore resolved through the SAME pairing rule
+ * {@link resolveAgentHomeTarget} applies (flair#2474/#2491): the pair the
+ * addressed instance's config records binds the ops port to the probed HTTP
+ * port, and the resolver's refusal — a probed port that conflicts with that
+ * pair, or a port named when the config records no complete pair to complete
+ * it — stops the read instead of taking it from another instance.
+ *
+ * A refusal is NOT a pass and NOT a finding about another instance: the caller
+ * reports the checks as ones that did not run, naming this reason and remedy.
+ */
+export function resolveDoctorRosterTarget(opts: { port?: string | number; opsPort?: string | number; dataDir?: string }): DoctorRosterTargetDecision {
+  try {
+    return { kind: "run", opsPort: resolveAgentHomeTarget(opts).opsPort };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    // The resolver's refusal ends with the stamp-home-shaped remedy; doctor has
+    // no --ops-port flag, so drop it and let the caller print doctor's own.
+    const reason = message.endsWith(INSTANCE_TARGET_REMEDY)
+      ? message.slice(0, -INSTANCE_TARGET_REMEDY.length).trimEnd()
+      : message;
+    return { kind: "not-run", reason, remedy: DOCTOR_ROSTER_TARGET_REMEDY };
+  }
 }
 
 // Ops API bind-host resolution (flair#670, #863): --ops-bind flag >
@@ -8820,6 +8868,7 @@ bindDoctorCli({
   repairLaunchdManagement,
   repointMainServiceUnit,
   resolveHttpPort,
+  resolveDoctorRosterTarget,
   restartFlair,
   resolveOpsPort,
   verifyAuditLog,
