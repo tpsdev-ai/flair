@@ -135,6 +135,10 @@ let _uniform: boolean | undefined = undefined;
 let _activeStamps: string[] = []; // normalized, capped — for the degrade diagnostic only
 let _lastScanAt = 0;
 let _scanning: Promise<void> | undefined;
+// flair#2481 — bumped every time a FOREIGN-space stamp is noted. A scan captures
+// this at its start and publishes its verdict only when it is unchanged, so a
+// scan that began before a foreign write was noted never reopens the latch.
+let _writeEpoch = 0;
 
 // While the latch is TRIPPED, re-verify at most this often, so a completed
 // re-embed reopens the gate without paying a scan on every degraded query.
@@ -143,6 +147,7 @@ const RECHECK_MS = 30_000;
 const MAX_DIAG_STAMPS = 12;
 
 async function scan(): Promise<void> {
+  const startEpoch = _writeEpoch;
   const current = normalizeStamp(_modelIdGetter());
   const seen = new Set<string>();
   let uniform = true;
@@ -155,6 +160,15 @@ async function scan(): Promise<void> {
       if (n === null) continue;
       if (seen.size < MAX_DIAG_STAMPS) seen.add(n);
       if (n !== current) uniform = false;
+    }
+    // A foreign-space write noted AFTER this scan started may not have been
+    // visible to the rows above (its row can commit mid-scan), so this clean
+    // verdict cannot be trusted to reopen the latch. Leave the latch as-is and
+    // force a fresh scan on the next consult; only a scan that started after
+    // that write was noted can reopen it.
+    if (_writeEpoch !== startEpoch) {
+      _lastScanAt = 0;
+      return;
     }
     _activeStamps = [...seen];
     _uniform = uniform;
@@ -198,6 +212,7 @@ export function noteWriteStamp(stamp: string | null | undefined): void {
   if (n !== normalizeStamp(_modelIdGetter())) {
     if (!_activeStamps.includes(n) && _activeStamps.length < MAX_DIAG_STAMPS) _activeStamps.push(n);
     _uniform = false;
+    _writeEpoch++;
   }
 }
 
@@ -246,6 +261,7 @@ export function _resetGuardForTests(): void {
   _activeStamps = [];
   _lastScanAt = 0;
   _scanning = undefined;
+  _writeEpoch = 0;
   _prewarmScheduled = false;
 }
 

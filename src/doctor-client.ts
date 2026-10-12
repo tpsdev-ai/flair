@@ -2858,7 +2858,7 @@ export function describeAgentIdRuleFinding(rows: Array<{ id?: unknown }>): Agent
     fixHint:
       "after any needed data migration and registration with `flair agent add <new-id>`, " +
       "remove the old row with `flair agent remove <id>`, or remove it alone if stale; " +
-      "`flair agent remove` also deletes the agent's Memory and Soul data",
+      "`flair agent remove` also deletes the agent's Memory and Soul data, but not the key files of an id outside the rule — clean those up manually",
   };
 }
 

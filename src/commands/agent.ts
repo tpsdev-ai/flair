@@ -20,7 +20,7 @@
  */
 import { Command } from "commander";
 import nacl from "tweetnacl";
-import { existsSync, mkdirSync, writeFileSync, readFileSync, chmodSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, readFileSync, chmodSync, unlinkSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import * as render from "../render.js";
 import {
@@ -85,6 +85,39 @@ const api = (method: string, path: string, body?: any, options?: any): Promise<a
 const b64url = (bytes: Uint8Array): string => cli.b64url(bytes);
 const privKeyPath = (agentId: string, keysDir: string): string => cli.privKeyPath(agentId, keysDir);
 const pubKeyPath = (agentId: string, keysDir: string): string => cli.pubKeyPath(agentId, keysDir);
+
+/**
+ * flair#2479 — the ONE key-file cleanup for `flair agent remove`.
+ *
+ * Deletes ONLY the three files named for exactly `agentId` (`.key`, `.pub`,
+ * `.key.bak`) and ONLY when each one resolves INSIDE `keysDir`. An id outside
+ * the agent-ID rule names no file this command may claim, so nothing is
+ * deleted and the caller says the cleanup is manual. Because the id is never
+ * allowed to steer a path out of `keysDir`, a `.`-segment id cannot reach a
+ * sibling or a parent directory, and a symlinked key that points elsewhere is
+ * left in place. Returns the paths actually removed.
+ */
+export function removeAgentKeyFiles(agentId: string, keysDir: string): { removed: string[]; manual: boolean } {
+  if (!isValidAgentId(agentId)) return { removed: [], manual: true };
+  let root: string;
+  try {
+    root = realpathSync(keysDir);
+  } catch {
+    return { removed: [], manual: false }; // no keys directory — nothing to remove
+  }
+  const removed: string[] = [];
+  for (const name of [`${agentId}.key`, `${agentId}.pub`, `${agentId}.key.bak`]) {
+    let real: string;
+    try {
+      real = realpathSync(join(keysDir, name));
+    } catch {
+      continue; // absent, or unreadable — there is nothing to delete
+    }
+    if (real !== join(root, name)) continue; // resolves outside the keys dir — never delete it
+    try { unlinkSync(real); removed.push(real); } catch { /* best effort */ }
+  }
+  return { removed, manual: false };
+}
 const shouldShowInlineSecretWarning = (
   optValue: string | undefined,
   fromEnv: boolean,
@@ -791,15 +824,12 @@ export function register(program: Command): void {
 
       // Delete key files (unless --keep-keys)
       if (!opts.keepKeys) {
-        const privPath = privKeyPath(id, keysDir);
-        const pubPath = pubKeyPath(id, keysDir);
-        const backupPath = privPath + ".bak";
-        for (const p of [privPath, pubPath, backupPath]) {
-          if (existsSync(p)) {
-            try { const { unlinkSync: ul } = await import("node:fs"); ul(p); } catch { /* best effort */ }
-          }
-        }
-        console.log("Key files deleted.");
+        const keys = removeAgentKeyFiles(id, keysDir);
+        console.log(
+          keys.manual
+            ? `Key files for '${id}' are not deleted by this command (the id is outside the agent-ID rule); clean them up manually.`
+            : "Key files deleted.",
+        );
       } else {
         console.log("Key files preserved (--keep-keys).");
       }
