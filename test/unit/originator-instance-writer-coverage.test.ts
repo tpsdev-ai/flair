@@ -120,13 +120,10 @@ const POLICY: Record<string, PolicyEntry | PolicyEntry[]> = {
   "resources/table-helpers.ts|?|write-back": { count: 1, disposition: "update-only", note: "patchRecord: merges a patch into an EXISTING row of the table its caller passes; it throws when the row is absent" },
   "resources/migrations/visibility-backfill.ts|?|write-back": { count: 1, disposition: "update-only", note: "boot migration re-PUT of EXISTING rows of its injected table" },
   "resources/migrations/synthetic-test-migration.ts|?|write-back": { count: 1, disposition: "update-only", note: "test-only boot migration re-PUT of EXISTING rows of its injected table" },
-  "resources/MemoryFeed.ts|Memory|put": [
-    { count: 1, disposition: "update-only", note: "dedup expiry repair of an EXISTING row (flair#2358)" },
-  ],
   "resources/skill-version-write.ts|Memory|put": { count: 2, disposition: "resource-internal", note: "Memory and FeedMemories stamp successors in their transaction plans; predecessor closes retain stored stamps." },
   // Update-only / resource-internal raw writes — they re-write an existing row.
   "resources/Memory.ts|Memory|post": { count: 1, disposition: "resource-internal", note: "Memory writeMemoryRowPost fallback (content already stamped)" },
-  "resources/Memory.ts|Memory|put": { count: 3, disposition: "resource-internal", note: "Memory.put shared-txn persist + closeSupersededRecord + re-embed" },
+  "resources/Memory.ts|Memory|put": { count: 2, disposition: "resource-internal", note: "Memory.put shared-txn persist + closeSupersededRecord" },
   "resources/Memory.ts|Memory|delete": { count: 1, disposition: "resource-internal", note: "Memory.delete raw table delete" },
   "resources/MemoryMaintenance.ts|Memory|delete": { count: 1, disposition: "resource-internal", note: "reap/delete of existing rows" },
   "resources/usage-recording.ts|Memory|write-back": { count: 1, disposition: "update-only", note: "usage counters on an EXISTING row, through the shared write-back helper (flair#2441)" },

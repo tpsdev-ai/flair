@@ -26,7 +26,8 @@ export async function patchRecord(
     id,
     (existing) => {
       if (!existing) throw new Error(`Record ${id} not found`);
-      return { write: { ...existing, ...patch } };
+      // The lastReflected stamp updates only the patch's fields.
+      return { update: patch };
     },
     { ...opts, label: opts.label ?? "patchRecord" },
   );

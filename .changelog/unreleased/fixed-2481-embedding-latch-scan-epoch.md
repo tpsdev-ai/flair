@@ -1,0 +1,1 @@
+- **An embedding-space scan discards its verdict when a foreign-stamp write is noted during the scan (#2481).**

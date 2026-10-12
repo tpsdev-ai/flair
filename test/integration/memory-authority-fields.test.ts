@@ -26,10 +26,22 @@ async function op(body: Record<string, unknown>) {
 async function seed(table: string, records: Record<string, unknown>[]) {
   return op({ operation: "upsert", database: "flair", table, records });
 }
+/** Seed an approved row through the trusted review workflow. */
+async function seedApproved(claim: string): Promise<string> {
+  const candidateId = `authority-echo-${randomUUID()}`;
+  await seed("MemoryCandidate", [{ id: candidateId, agentId: owner.id, claim, status: "pending", generatedAt: now, createdAt: now, sourceMemoryIds: [], visibilityRuling: "private" }]);
+  const promoted = await request(owner, "POST", "/PromoteMemoryCandidate", { candidateId, rationale: "verified" });
+  expect(promoted.status, await promoted.clone().text()).toBe(200);
+  const { memoryId, decidedAt } = (await promoted.json()) as { memoryId: string; decidedAt: string };
+  const stored = await readUntil(memoryId, (row) => row?.promotionStatus === "approved" && row?.promotedAt === decidedAt && row?.promotedBy === owner.id);
+  expect(stored).toBeDefined();
+  expect(stored.promotionStatus).toBe("approved");
+  expect(stored.promotedAt).toBeTruthy();
+  expect(stored.promotedAt).toBe(decidedAt);
+  expect(stored.promotedBy).toBe(owner.id);
+  return memoryId;
+}
 const read = async (id: string) => (await op({ operation: "search_by_id", database: "flair", table: "Memory", ids: [id], get_attributes: ["*"] }))[0];
-/** HTTP PUT/PATCH can 200 before ops search_by_id sees the commit (native-spawn
- *  deferred-txn / ops-wumd class). Poll the same ops read the assertions use;
- *  the expected content/stamps do not change. */
 async function readUntil(id: string, pred: (row: any) => boolean): Promise<any> {
   const deadline = Date.now() + 5_000;
   let row = await read(id);
@@ -47,7 +59,7 @@ beforeAll(async () => {
 afterAll(async () => { if (harper) await stopHarper(harper); });
 
 describe("Memory authority fields over HTTP", () => {
-  test("direct PUT and PATCH cannot forge, clear or replace workflow stamps", async () => {
+  test("PUT and PATCH reject changed authority-field values", async () => {
     await seed("Memory", [{ id: "stamped", agentId: owner.id, content: "original", durability: "persistent", createdAt: now, promotionStatus: "approved", promotedAt: now, promotedBy: "trusted-reviewer" }]);
     for (const method of ["PUT", "PATCH"]) {
       for (const field of ["promotionStatus", "promotedAt", "promotedBy"]) {
@@ -87,21 +99,21 @@ describe("Memory authority fields over HTTP", () => {
   }, 120_000);
   test("a content-changing write cannot keep an echoed approved verdict", async () => {
     // Own row — do not reuse "stamped" after the prior test's ops-blob PUT.
-    await seed("Memory", [{ id: "stamped-echo", agentId: owner.id, content: "original", durability: "persistent", createdAt: now, promotionStatus: "approved", promotedAt: now, promotedBy: "trusted-reviewer" }]);
-    const existing = await read("stamped-echo");
-    const put = await request(owner, "PUT", "/Memory/stamped-echo", {
-      id: "stamped-echo", agentId: owner.id, content: "unreviewed claim under an echoed stamp",
+    const echoId = await seedApproved("original");
+    const existing = await read(echoId);
+    const put = await request(owner, "PUT", `/Memory/${echoId}`, {
+      id: echoId, agentId: owner.id, content: "unreviewed claim under an echoed stamp",
       durability: "persistent", promotionStatus: existing.promotionStatus, promotedAt: existing.promotedAt, promotedBy: existing.promotedBy,
     });
     expect(put.status, await put.clone().text()).toBe(200);
-    const afterPut = await readUntil("stamped-echo", (row) => row?.content === "unreviewed claim under an echoed stamp");
+    const afterPut = await readUntil(echoId, (row) => row?.content === "unreviewed claim under an echoed stamp");
     expect(afterPut.content).toBe("unreviewed claim under an echoed stamp");
     expect(afterPut.promotionStatus).toBeFalsy();
     expect(afterPut.promotedBy).toBeFalsy();
-    await seed("Memory", [{ id: "stamped-patch", agentId: owner.id, content: "original", durability: "persistent", createdAt: now, promotionStatus: "approved", promotedAt: now, promotedBy: "trusted-reviewer" }]);
-    const patch = await request(owner, "PATCH", "/Memory/stamped-patch", { content: "patched unreviewed claim" });
+    const patchId = await seedApproved("original");
+    const patch = await request(owner, "PATCH", `/Memory/${patchId}`, { content: "patched unreviewed claim" });
     expect(patch.status, await patch.clone().text()).toBe(204);
-    const afterPatch = await readUntil("stamped-patch", (row) => row?.content === "patched unreviewed claim");
+    const afterPatch = await readUntil(patchId, (row) => row?.content === "patched unreviewed claim");
     expect(afterPatch.content).toBe("patched unreviewed claim");
     expect(afterPatch.promotionStatus).toBeFalsy();
   }, 120_000);

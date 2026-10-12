@@ -60,11 +60,13 @@ mock.module("harper", () => ({
         yield* rows;
       },
       get: async (id: string) => rows.find((r) => r.id === id) ?? null,
-      update: async (id: string, row: Record<string, unknown>, ctx: any) => {
+      update: async (id: string, patch: Record<string, unknown>, ctx: any) => {
         expect(ctx?.transaction?.open).toBe(1);
         const index = rows.findIndex((r) => r.id === id);
         if (index < 0) throw new Error("update requires an existing row");
-        rows[index] = structuredClone(row);
+        // Harper's `update` merges the patch into the stored row (flair#2470
+        // made the maintenance archive patch only `archived`/`archivedAt`).
+        rows[index] = { ...rows[index], ...structuredClone(patch) };
       },
       delete: async () => { throw new Error("validTo cleanup must not delete"); },
     },

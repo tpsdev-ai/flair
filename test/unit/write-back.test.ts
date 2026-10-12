@@ -57,6 +57,13 @@ function stagedTable(seed: Row[]) {
       competing?.();
       return row;
     },
+    async update(id: string, patch: Record<string, unknown>, _ctx?: unknown): Promise<Row | null> {
+      puts++;
+      const current = store.get(id);
+      staged = current ? { ...current, ...patch } : null;
+      competing?.();
+      return staged;
+    },
   };
   return { store, table, commits, puts: () => puts };
 }
@@ -126,6 +133,27 @@ describe("writeBackCommittedRow — abort and retry from the committed row", () 
     expect(store.get("m1")?.content).toBe(`competing-${n - 1}`); // the last competing value, never our write
     expect(WRITE_BACK_ATTEMPTS).toBe(3);
     expect(n).toBe(WRITE_BACK_ATTEMPTS); // one attempt per bounded try
+  });
+});
+
+describe("writeBackCommittedRow — an update plan writes only the fields it names", () => {
+  test("an update plan lands its patch and leaves the stored row's other fields untouched", async () => {
+    const { table, store, commits } = stagedTable([{ id: "m1", content: "a", durability: "standard" }]);
+    const outcome = await writeBackCommittedRow(table, "m1", () => ({ update: { usageCount: 1 } }), opts("update-only"));
+    expect(outcome).toEqual({ update: { usageCount: 1 } });
+    expect(store.get("m1")).toEqual({ id: "m1", content: "a", durability: "standard", usageCount: 1 });
+    expect(commits).toHaveLength(1);
+  });
+
+  test("an update plan on a table without update refuses rather than falling back to a full-row put", async () => {
+    const store = new Map<string, Row>([["m1", { id: "m1", content: "a" }]]);
+    const table = {
+      async get(id: string): Promise<Row | null> { const row = store.get(id); return row ? { ...row } : null; },
+      async put(): Promise<never> { throw new Error("must not fall back to a full-row put"); },
+    };
+    await expect(
+      writeBackCommittedRow(table, "m1", () => ({ update: { usageCount: 1 } }), opts("no-update")),
+    ).rejects.toThrow("no incremental update");
   });
 });
 

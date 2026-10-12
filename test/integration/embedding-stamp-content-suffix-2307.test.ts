@@ -37,6 +37,7 @@ const CURRENT_MODEL_ID = getModelId();
 let harper: HarperInstance;
 let installDir: string;
 let authHeader: string;
+let legacyCreatedAt: string;
 
 async function opsCall(body: Record<string, unknown>): Promise<any> {
   const res = await fetch(harper.opsURL, {
@@ -82,6 +83,7 @@ describe("flair#2307 item 5 — a `.content`-suffixed legacy row converges (real
 
     // A legacy row whose id already ends in `.content` and whose embedding
     // stamp is stale.
+    legacyCreatedAt = new Date().toISOString();
     await opsCall({
       operation: "insert",
       database: "flair",
@@ -93,7 +95,7 @@ describe("flair#2307 item 5 — a `.content`-suffixed legacy row converges (real
           content: "embedding-stamp-content-suffix-marker",
           embedding: [0.1, 0.1, 0.1],
           embeddingModel: "some-ancient-model-v0",
-          createdAt: new Date().toISOString(),
+          createdAt: legacyCreatedAt,
         },
         {
           id: SKILL_ID,
@@ -159,6 +161,12 @@ describe("flair#2307 item 5 — a `.content`-suffixed legacy row converges (real
     expect(record.embeddingModel).toBe(CURRENT_MODEL_ID);
     expect(Array.isArray(record.embedding)).toBe(true);
     expect(record.content).toBe("embedding-stamp-content-suffix-marker"); // derived-only
+    // flair#2465: the content-suffix re-embed writes only the embedding fields —
+    // an incremental update, not the full-row put it used to stage — so it stamps
+    // `updatedAt` (which the old full-row put never wrote) and the seeded
+    // `createdAt` is still the row's.
+    expect(typeof record.updatedAt, "the content-suffix re-embed did not stamp updatedAt (full-row put?)").toBe("string");
+    expect(record.createdAt, "the content-suffix re-embed changed the seeded createdAt").toBe(legacyCreatedAt);
 
     const detail = await healthDetail();
     const named = (detail?.warnings ?? []).some((w: any) => String(w?.message ?? "").includes(`migration '${EMBEDDING_STAMP_ID}' is outstanding`));

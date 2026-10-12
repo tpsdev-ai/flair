@@ -11,6 +11,11 @@
  * Driven against an in-memory double of the two raw tables it touches
  * (Memory, MemoryUsage), with the REAL resolveReadScope predicate. Isolated
  * lane: the `harper` module mock below is process-global.
+ *
+ * flair#2333: the ledger row READ decides whether this (agent, memory) pair
+ * already has a row, so a read that FAILS is not "no row" — the contribution
+ * aborts (named UsageLedgerReadError, no ledger write, no count bump) rather
+ * than upsert over the stored row and bump the count a second time.
  */
 import { afterAll, describe, it, expect, beforeEach, mock } from "bun:test";
 import { installFakeHarperTransaction } from "../helpers/fake-harper-txn";
@@ -23,6 +28,10 @@ afterAll(() => txn.restore());
 
 const memory = new Map<string, any>();
 const usage = new Map<string, any>();
+/** Ledger ids whose read throws, to pin the fail-closed ledger read (flair#2333). */
+const usageReadThrow = new Set<string>();
+/** Every ledger id written through MemoryUsage.put, to prove none is overwritten. */
+const usageWrites: string[] = [];
 /** Per-id queue of rows Memory.get returns before falling back to `memory`,
  *  so a test can change a row between the core's two reads of it. */
 const memoryReadScript = new Map<string, any[]>();
@@ -42,19 +51,47 @@ mock.module("harper", () => ({
           memory.set(row.id, { ...row });
           return row.id;
         },
+        // flair#2470: the count bump is an incremental update of `usageCount`.
+        update: async (id: string, patch: Record<string, unknown>) => {
+          const current = memory.get(id) ?? { id };
+          const merged = { ...current, ...patch };
+          if (txn.stage(id, merged)) return id;
+          memory.set(id, merged);
+          return id;
+        },
       },
       MemoryUsage: {
-        get: async (id: string) => usage.get(id) ?? null,
+        get: async (id: string) => {
+          if (usageReadThrow.has(id)) throw new Error("simulated ledger read failure");
+          return usage.get(id) ?? null;
+        },
         put: async (row: any) => {
+          usageWrites.push(row.id);
           usage.set(row.id, { ...row });
         },
+        // Fake per-key lock for serialization within one Harper process.
+        primaryStore: (() => {
+          const held = new Set<string>();
+          return {
+            tryLock: (key: unknown) => {
+              const k = JSON.stringify(key);
+              if (held.has(k)) return false;
+              held.add(k);
+              return true;
+            },
+            unlock: (key: unknown) => {
+              held.delete(JSON.stringify(key));
+            },
+            resetReadTxn: () => {},
+          };
+        })(),
       },
     },
   },
   Resource: class {},
 }));
 
-const { recordUsageContribution } = await import("../../resources/usage-recording.ts");
+const { recordUsageContribution, UsageLedgerReadError } = await import("../../resources/usage-recording.ts");
 const { resolveReadScope } = await import("../../resources/memory-read-scope.ts");
 
 const REPORTER = "agt_reporter";
@@ -64,6 +101,8 @@ const NOW = "2026-09-29T00:00:00.000Z";
 beforeEach(() => {
   memory.clear();
   usage.clear();
+  usageReadThrow.clear();
+  usageWrites.length = 0;
   memoryReadScript.clear();
   memory.set("own-private", { id: "own-private", agentId: REPORTER, visibility: "private", content: "own" });
   memory.set("other-shared", { id: "other-shared", agentId: OWNER, visibility: "shared", content: "shared" });
@@ -116,5 +155,19 @@ describe("recordUsageContribution — the contributing agent's read scope", () =
     await expect(recordUsageContribution({}, REPORTER, "other-shared", undefined, NOW, throwing)).rejects.toThrow();
     expect([...usage.keys()]).toEqual([]);
     expect(memory.get("other-shared").usageCount).toBeUndefined();
+  });
+
+  it("a ledger READ that fails is not 'no row': the contribution aborts, leaving the stored row and the count untouched", async () => {
+    // The read is the decision "does this pair already have a row?". An ERROR is
+    // not evidence there is none: swallowing it as "no row" would overwrite the
+    // stored ledger row below and bump usageCount a second time.
+    const ledgerId = `${REPORTER}:own-private`;
+    const storedRow = { id: ledgerId, agentId: REPORTER, memoryId: "own-private", createdAt: NOW, attribution: "earlier" };
+    usage.set(ledgerId, { ...storedRow }); // an existing ledger row
+    usageReadThrow.add(ledgerId);
+    await expect(contribute("own-private")).rejects.toThrow(UsageLedgerReadError);
+    expect(usageWrites, "an aborted contribution writes no ledger row").toEqual([]);
+    expect(usage.get(ledgerId), "the stored ledger row is not overwritten").toEqual(storedRow);
+    expect(memory.get("own-private").usageCount, "the count is not bumped").toBeUndefined();
   });
 });

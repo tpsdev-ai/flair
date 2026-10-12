@@ -3,17 +3,21 @@
  *
  * The embedding-stamp migration re-embeds a stale Memory row whose id ends in
  * `.content` through the raw table handle (regenContentSuffixRow in
- * resources/migrations/embedding-stamp.ts): it re-reads the row, compares it
- * with the row it embedded, and writes the new vector in one owned
- * transaction. This case changes the row's content AFTER that transaction has
- * read it and BEFORE it writes: the spawned Harper carries the test-only pause
+ * resources/migrations/embedding-stamp.ts): it re-reads the row, STAGES an
+ * incremental update of only the embedding fields, then confirms the committed
+ * row is still the one it read — all in one owned transaction. This case changes
+ * the row's content while that transaction is paused AFTER staging its write and
+ * BEFORE its confirm: the confirm reads the committed row, which is no longer
+ * the row the migration read and embedded, so the transaction aborts and nothing
+ * is written. A change committed after that confirm and before the commit is not
+ * seen (Harper has no compare-and-set; PR residual-gap note).
+ *
+ * The spawned Harper carries the test-only pause
  * (resources/txn-pause-point.ts, enabled by FLAIR_ENABLE_TEST_FAULT_INJECTION
  * and FLAIR_TEST_PAUSE_DIR, set in the test process's environment while this
  * file starts its Harper, then restored), the test arms it
  * before the row exists, waits until a migration cycle is paused inside that
- * transaction, commits a competing content change, then releases it. The change
- * is visible at the committed re-read, which aborts; a change after that re-read
- * and before commit follows Harper's timestamp order (PR residual-gap note).
+ * transaction, commits a competing content change, then releases it.
  *
  * The competing content is kept, and the row stays pending: it keeps its stale
  * stamp and vector rather than being stamped current with the vector of the

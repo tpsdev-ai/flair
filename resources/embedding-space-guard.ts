@@ -135,6 +135,8 @@ let _uniform: boolean | undefined = undefined;
 let _activeStamps: string[] = []; // normalized, capped — for the degrade diagnostic only
 let _lastScanAt = 0;
 let _scanning: Promise<void> | undefined;
+// flair#2481 — foreign-space write notes invalidate an in-flight scan's verdict.
+let _writeEpoch = 0;
 
 // While the latch is TRIPPED, re-verify at most this often, so a completed
 // re-embed reopens the gate without paying a scan on every degraded query.
@@ -143,6 +145,7 @@ const RECHECK_MS = 30_000;
 const MAX_DIAG_STAMPS = 12;
 
 async function scan(): Promise<void> {
+  const startEpoch = _writeEpoch;
   const current = normalizeStamp(_modelIdGetter());
   const seen = new Set<string>();
   let uniform = true;
@@ -155,6 +158,11 @@ async function scan(): Promise<void> {
       if (n === null) continue;
       if (seen.size < MAX_DIAG_STAMPS) seen.add(n);
       if (n !== current) uniform = false;
+    }
+    // A changed epoch discards this scan's verdict and makes the next consult rescan.
+    if (_writeEpoch !== startEpoch) {
+      _lastScanAt = 0;
+      return;
     }
     _activeStamps = [...seen];
     _uniform = uniform;
@@ -198,6 +206,7 @@ export function noteWriteStamp(stamp: string | null | undefined): void {
   if (n !== normalizeStamp(_modelIdGetter())) {
     if (!_activeStamps.includes(n) && _activeStamps.length < MAX_DIAG_STAMPS) _activeStamps.push(n);
     _uniform = false;
+    _writeEpoch++;
   }
 }
 
@@ -246,6 +255,7 @@ export function _resetGuardForTests(): void {
   _activeStamps = [];
   _lastScanAt = 0;
   _scanning = undefined;
+  _writeEpoch = 0;
   _prewarmScheduled = false;
 }
 

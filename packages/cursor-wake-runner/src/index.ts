@@ -33,7 +33,34 @@ export {
   type LaunchOutcome,
   type LaunchResult,
 } from "./cursor-api.js";
-export { runWakeCycle, type WakeDeps, type WakeItem, type WakeResult } from "./run.js";
+export {
+  // flair#1944 round 8 — the PUBLIC entry exports `runWakeCycle` ALONE (production
+  // parts only). The internal core that takes the test seams (`runWakeCycleCore`,
+  // `WakeCycleParts`) is deliberately NOT re-exported here; tests import it from
+  // `./run.js` directly.
+  runWakeCycle,
+  type WakeDeps,
+  type WakeItem,
+  type WakeReceiptRefusal,
+  type WakeResult,
+} from "./run.js";
+export {
+  buildLaunchReceipt,
+  cursorLaunchHostSource,
+  isAcceptableHostSourceId,
+  isAcceptableHostSourceUrl,
+  isStoredReceipt,
+  launchReceiptId,
+  permanentReceiptRefusal,
+  RECEIPT_NAMESPACE,
+  RECEIPT_PERMANENT_REFUSAL_STATUSES,
+  type CursorLaunchSource,
+  type LaunchReceipt,
+  type ReceiptRefusal,
+  type ReceiptStore,
+  type StoredReceipt,
+} from "./receipt.js";
+export { createMemoryReceiptStore } from "./receipt-store.js";
 export {
   HELP,
   loadConfig,

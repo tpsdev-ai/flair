@@ -1875,6 +1875,17 @@ jobs:
             echo "::error::One or more workspace packages have type errors or are untypechecked"
             exit 1
           fi
+      # flair#1944 round 9 — packages/cursor-wake-runner's TEST directory was
+      # typechecked by NOTHING: its tsconfig.json includes only `src`, and the
+      # root tsconfig.test.check.json includes only the root `test/**`. So a
+      # `@ts-expect-error` guard (the exported `runWakeCycle` takes no test seam)
+      # could rot silently — restore the typed field it guards and the now-unused
+      # directive would go unnoticed. Its own tsconfig.test.json checks `src` +
+      # `test` together (noEmit; the tests import `.ts` specifiers). Needs the
+      # built flair-client above for emitted types. Reached through the loop's
+      # tsconfig.json for `src`; this adds the tests on top.
+      - name: Type check cursor-wake-runner tests (flair#1944)
+        run: npx tsc --noEmit -p packages/cursor-wake-runner/tsconfig.test.json
 
   audit:
     name: Dependency Audit

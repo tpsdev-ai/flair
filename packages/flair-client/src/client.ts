@@ -170,6 +170,15 @@ export class FlairClient {
   private timeoutMs: number;
   private basicAuth: string | null = null;
   private authMode: "auto" | "basic";
+  /**
+   * flair#1944 round 10 — set by `loadSigningKey()`. While true, EVERY request
+   * this client makes MUST be signed with the loaded Ed25519 key: the client
+   * never falls back to admin Basic (nor sends unsigned) for any path. A live
+   * wake cycle turns it on at the start so its catchup read, receipt operations
+   * and ack sign as the agent's own identity, even if the key file
+   * later vanishes (the loaded key is cached).
+   */
+  private signingKeyRequired = false;
 
   constructor(config: FlairClientConfig) {
     // Every env fallback below goes through readEnvOrUnset (flair#1254): a
@@ -241,6 +250,64 @@ export class FlairClient {
   }
 
   /**
+   * Existence-only pre-check; does not load or validate a key.
+   * Returns false in Basic mode or when no in-memory key or key file is found.
+   * Use `loadSigningKey()` to validate and cache an Ed25519 key and require signing.
+   */
+  hasSigningKey(): boolean {
+    if (this.authMode === "basic") return false;
+    if (this.privateKey || this.rawPrivateKey) return true;
+    return inspectKeyLookup(this.agentId, this.keyPath).resolvedPath !== null;
+  }
+
+  /**
+   * Resolve, validate and cache a private Ed25519 key, then require signed requests.
+   * Removing or replacing its file after loading does not replace the cached key.
+   * Throws MissingSigningKeyError for Basic mode, no resolved key or a load error
+   * (lookup detail and the underlying error), or a public, secret or non-Ed25519 key (key type,
+   * without its file path). Returns the loaded key.
+   */
+  async loadSigningKey(): Promise<KeyObject> {
+    if (this.authMode === "basic") {
+      throw new MissingSigningKeyError(this.agentId, "this client is in authMode \"basic\", which never signs");
+    }
+    let key: KeyObject | null;
+    try {
+      key = await this.resolveKey();
+    } catch (err) {
+      // Wrap key resolution/load errors in the signing-requirement error.
+      throw new MissingSigningKeyError(
+        this.agentId,
+        `the key at ${describeKeyLookup(this.lastKeyLookup)} could not be loaded: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    if (!key) {
+      throw new MissingSigningKeyError(this.agentId, describeKeyLookup(this.lastKeyLookup));
+    }
+    if (key.type !== "private") {
+      throw new MissingSigningKeyError(
+        this.agentId,
+        `the key resolved for this agent is ${key.type}, not a private signing key`,
+      );
+    }
+    if (key.asymmetricKeyType !== "ed25519") {
+      throw new MissingSigningKeyError(
+        this.agentId,
+        `the key resolved for this agent is ${key.asymmetricKeyType ?? "an unknown type"}, not Ed25519`,
+      );
+    }
+    // Only NOW, with a key loaded into memory, does the client lock to signed-
+    // only. From here EVERY request signs with this key; nothing falls back.
+    this.signingKeyRequired = true;
+    return key;
+  }
+
+  /** flair#1944 round 10 — true once `loadSigningKey()` has loaded a key and locked this client to signed-only requests. */
+  get signingRequired(): boolean {
+    return this.signingKeyRequired;
+  }
+
+  /**
    * flair#1987 — the FINAL request URL: `path` joined onto the base URL's OWN
    * path with exactly one slash between them (whether or not the base ends in
    * "/"). Parsed with `new URL` so the path sent is the path the base names.
@@ -281,7 +348,7 @@ export class FlairClient {
     method: string,
     path: string,
     body?: unknown,
-    opts: { signal?: AbortSignal; maxResponseBytes?: number } = {},
+    opts: { signal?: AbortSignal; maxResponseBytes?: number; requireSigningKey?: boolean } = {},
   ): Promise<T> {
     if (opts.maxResponseBytes !== undefined && (!Number.isFinite(opts.maxResponseBytes) || opts.maxResponseBytes <= 0)) {
       throw new RangeError("flair-client: invalid maxResponseBytes; expected a finite positive number");
@@ -307,6 +374,20 @@ export class FlairClient {
     const key = await this.resolveKey();
     if (key) {
       headers["Authorization"] = signRequest(this.agentId, key, method, signedPath);
+    } else if (opts.requireSigningKey || this.signingKeyRequired) {
+      // flair#1944 round 5/10 — a request that MUST be signed refuses to fall back
+      // to admin Basic when no key resolves. It is required either per request
+      // (`opts.requireSigningKey`) or for EVERY request once the client is locked
+      // (`this.signingKeyRequired`, set by `loadSigningKey()` at the start of a
+      // live wake cycle). A key that has ALREADY loaded is CACHED (see resolveKey)
+      // and still signs, so removing the key file after it was read cannot cause a
+      // Basic fallback; the refusal happens ONLY when no key resolves at send
+      // time. Resolving HERE, at send time (not at construction), means a key
+      // written after this client was built is still picked up, and a
+      // still-unresolvable key fails CLOSED rather than silently changing the
+      // writer identity the server would stamp (the Basic username in place of
+      // the agent's).
+      throw new MissingSigningKeyError(this.agentId, describeKeyLookup(this.lastKeyLookup));
     } else if (this.basicAuth) {
       // flair#1951: never send admin Basic credentials over plain http to a
       // non-loopback host. Refuse BEFORE any request is made.
@@ -446,6 +527,9 @@ class MemoryApi {
     /** Optional caller-owned abort signal, forwarded to
      *  `FlairClient.request` so an in-flight write can be cancelled. */
     signal?: AbortSignal;
+    /** Require a resolved signing key for this write; refuse without Basic fallback
+     *  when none resolves. Cached keys still sign after their files are removed. */
+    requireSigningKey?: boolean;
   } = {}): Promise<Memory> {
     const id = opts.id ?? `${this.client.agentId}-${crypto.randomUUID()}`;
     const record: Record<string, unknown> = {
@@ -487,6 +571,7 @@ class MemoryApi {
 
     const response = await this.client.request<Record<string, unknown>>("PUT", `/Memory/${encodeRecordId(id)}`, record, {
       signal: opts.signal,
+      requireSigningKey: opts.requireSigningKey,
     });
     // Merge the server response (deduplicated/matchedId/matchConfidence/
     // written, plus any echoed fields) over the locally-constructed record —
@@ -514,13 +599,35 @@ class MemoryApi {
    * old record is owned by a DIFFERENT agent, the server requires a "write"
    * MemoryGrant from that owner — otherwise it denies the request (cross-agent
    * write).
+   *
+   * flair#2482: ordinary, non-skill, same-ID updates without `hostSource`
+   * preserve the stored pointer row.
    */
-  async update(id: string, content: string, opts: { preserveHistory?: boolean; usedMemoryIds?: string[]; metadata?: Record<string, unknown> } = {}): Promise<Memory> {
+  async update(id: string, content: string, opts: {
+    preserveHistory?: boolean;
+    usedMemoryIds?: string[];
+    metadata?: Record<string, unknown>;
+    /** flair#2482 — the host pointer this update CLAIMS as the memory's source.
+     *  Forwarded only when supplied; see {@link MemoryApi.write} for the shape. */
+    hostSource?: HostSource;
+    /** flair#2482 — opt the pointer into the record's read scope; forwarded only
+     *  when supplied. */
+    hostSourceScope?: "record";
+  } = {}): Promise<Memory> {
     const existing = await this.get(id);
     if (!existing) {
       throw new FlairError("PUT", `/Memory/${encodeRecordId(id)}`, 404, `memory ${id} not found`);
     }
     const metadata = opts.metadata === undefined ? existing.metadata : mergeMetadata(existing.metadata, opts.metadata);
+    // flair#2482 — drop read-projected pointer fields; forward hostSource and
+    // hostSourceScope only when supplied.
+    const applyPointerFields = (record: Record<string, unknown>): void => {
+      delete record.hostSource;
+      delete record.hostSourceScope;
+      delete record.hostSourceVisibility;
+      if (opts.hostSource !== undefined) record.hostSource = { v: 1, ...opts.hostSource };
+      if (opts.hostSourceScope !== undefined) record.hostSourceScope = opts.hostSourceScope;
+    };
 
     if (opts.preserveHistory) {
       const newId = `${this.client.agentId}-${crypto.randomUUID()}`;
@@ -555,6 +662,7 @@ class MemoryApi {
       if (Array.isArray(opts.usedMemoryIds) && opts.usedMemoryIds.length > 0) {
         record.usedMemoryIds = opts.usedMemoryIds;
       }
+      applyPointerFields(record);
       // The Memory schema does not expose a working HTTP POST route (see
       // resources/Memory.ts) — Memory.post() is only reachable in-process
       // (resources/mcp-tools.ts). So the supersede-link write goes through
@@ -579,6 +687,7 @@ class MemoryApi {
     if (Array.isArray(opts.usedMemoryIds) && opts.usedMemoryIds.length > 0) {
       merged.usedMemoryIds = opts.usedMemoryIds;
     }
+    applyPointerFields(merged);
     const response = await this.client.request<Record<string, unknown>>("PUT", `/Memory/${encodeRecordId(id)}`, merged);
     return { ...merged, id, ...(response ?? {}) } as unknown as Memory;
   }
@@ -871,6 +980,29 @@ class TeamDirectoryApi {
 }
 
 // ─── Error ──────────────────────────────────────────────────────────────────
+
+/** A compact description of what a key lookup found, for a refusal message.
+ *  Names only key-file paths, never credentials. */
+function describeKeyLookup(state: KeyLookupState | undefined): string {
+  if (!state) return "no signing key was looked up for this request";
+  if (state.resolvedPath) return `the key resolved at ${state.resolvedPath} could not be loaded`;
+  if (state.candidates.length === 0) return "no candidate key path could be resolved for this home";
+  return `checked ${state.candidates.map((c) => `${c.path} (${c.exists ? "found" : "missing"})`).join(", ")}`;
+}
+
+/** A signing requirement or key-load refusal, raised before sending a request. */
+export class MissingSigningKeyError extends Error {
+  constructor(
+    public readonly agentId: string,
+    public readonly detail: string,
+  ) {
+    super(
+      `flair-client: refusing a request that requires the agent's Ed25519 signing key: no key is available for agent '${agentId}' (${detail}); ` +
+        "admin Basic credentials are not a signing identity",
+    );
+    this.name = "MissingSigningKeyError";
+  }
+}
 
 export class FlairError extends Error {
   constructor(

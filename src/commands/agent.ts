@@ -20,7 +20,7 @@
  */
 import { Command } from "commander";
 import nacl from "tweetnacl";
-import { existsSync, mkdirSync, writeFileSync, readFileSync, chmodSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, readFileSync, chmodSync, unlinkSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import * as render from "../render.js";
 import {
@@ -85,6 +85,32 @@ const api = (method: string, path: string, body?: any, options?: any): Promise<a
 const b64url = (bytes: Uint8Array): string => cli.b64url(bytes);
 const privKeyPath = (agentId: string, keysDir: string): string => cli.privKeyPath(agentId, keysDir);
 const pubKeyPath = (agentId: string, keysDir: string): string => cli.pubKeyPath(agentId, keysDir);
+
+/**
+ * flair#2479 — check each key's canonical target before unlinking.
+ * Return successful unlinks; invalid ids require manual cleanup.
+ */
+export function removeAgentKeyFiles(agentId: string, keysDir: string): { removed: string[]; manual: boolean } {
+  if (!isValidAgentId(agentId)) return { removed: [], manual: true };
+  let root: string;
+  try {
+    root = realpathSync(keysDir);
+  } catch {
+    return { removed: [], manual: false }; // directory resolution failed
+  }
+  const removed: string[] = [];
+  for (const name of [`${agentId}.key`, `${agentId}.pub`, `${agentId}.key.bak`]) {
+    let real: string;
+    try {
+      real = realpathSync(join(keysDir, name));
+    } catch {
+      continue; // candidate resolution failed
+    }
+    if (real !== join(root, name)) continue; // unexpected canonical target; skip
+    try { unlinkSync(real); removed.push(real); } catch { /* best effort */ }
+  }
+  return { removed, manual: false };
+}
 const shouldShowInlineSecretWarning = (
   optValue: string | undefined,
   fromEnv: boolean,
@@ -791,15 +817,12 @@ export function register(program: Command): void {
 
       // Delete key files (unless --keep-keys)
       if (!opts.keepKeys) {
-        const privPath = privKeyPath(id, keysDir);
-        const pubPath = pubKeyPath(id, keysDir);
-        const backupPath = privPath + ".bak";
-        for (const p of [privPath, pubPath, backupPath]) {
-          if (existsSync(p)) {
-            try { const { unlinkSync: ul } = await import("node:fs"); ul(p); } catch { /* best effort */ }
-          }
-        }
-        console.log("Key files deleted.");
+        const keys = removeAgentKeyFiles(id, keysDir);
+        console.log(
+          keys.manual
+            ? `Key files for '${id}' are not deleted by this command (the id is outside the agent-ID rule); clean them up manually.`
+            : `Removed ${keys.removed.length} key file(s).`,
+        );
       } else {
         console.log("Key files preserved (--keep-keys).");
       }
