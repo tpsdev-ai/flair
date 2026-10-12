@@ -6,8 +6,7 @@
  * call the embedding provider from inside the plan callback the shared
  * write-back helper runs while its owned write transaction is open, holding
  * that transaction across the slow model call. It now reads the row and
- * computes the vector before the transaction opens, and the helper re-checks
- * (inside the transaction) that the text has not changed.
+ * computes the vector before the transaction opens.
  *
  * Isolation: `test/unit-isolated/` — the file owns the `harper` mock and the
  * `embeddings-provider` mock for its own bun process. `auth-middleware.ts` is a
@@ -154,7 +153,7 @@ async function runBackfill(id: string): Promise<void> {
   // backfillEmbedding asynchronously (not awaited by the request).
   const res: Response = await mw(makeRequest(`/Memory/${id}`, "PUT", "agent-a"), nextLayer);
   expect(res.status, "the write was passed to the next layer").toBe(200);
-  // Wait for the asynchronous backfill to call the provider and finish.
+  // Wait for the provider call and a stored embedding, each up to its deadline.
   const deadline = Date.now() + 5_000;
   while (embedCalls.length === 0 && Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 5));

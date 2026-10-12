@@ -179,13 +179,13 @@ function getAdminPass(): string | null {
 async function backfillEmbedding(memoryId: string): Promise<void> {
   try {
     const table = (databases as any).flair.Memory;
-    // flair#2484: the vector is computed OUTSIDE the write transaction, so the
-    // slow model call does not hold the owned transaction open. Inside the
-    // transaction the helper re-confirms the committed row and (via
-    // `matchFields`) that the text the vector was computed from is still the
-    // row's text; a drift aborts the transaction and this loop recomputes,
-    // within a bounded number of attempts, rather than storing the vector
-    // against a text it did not embed.
+    // flair#2484: compute the vector before the owned write transaction opens.
+    // Rows without content or with an embedding longer than 100 entries skip
+    // before content comparison. For eligible rows, `matchFields` compares
+    // content before staging; the helper confirms the committed row afterward.
+    // Drift observed by either check aborts the attempt; remaining outer
+    // attempts re-read and may recompute. Changes after confirmation and before
+    // commit are not detected by these checks.
     for (let attempt = 1; attempt <= WRITE_BACK_ATTEMPTS; attempt++) {
       const record = await table.get(memoryId, {});
       if (!record?.content) return;
@@ -207,8 +207,7 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
           {
             label: "backfillEmbedding",
             expectedRow: record,
-            // The text the vector was computed from must still be the row's
-            // text after the write is staged; a drift is retried here.
+            // Compare content before staging, after the plan's skip checks.
             matchFields: ["content"],
             pausePre: () => txnPausePoint("backfill-embedding-pre"),
             pausePoint: () => txnPausePoint("backfill-embedding"),

@@ -1,19 +1,15 @@
 /**
- * backfill-embedding-outside-txn-2484.test.ts — the embedding backfill
- * computes its vector OUTSIDE its write transaction and, inside the
- * transaction, re-confirms both the committed row and that the text the
- * vector was computed from is unchanged (flair#2484), real Harper.
+ * backfill-embedding-outside-txn-2484.test.ts — concurrent text edits after
+ * vector computation, before or during the write transaction (flair#2484),
+ * real Harper.
  *
- * The backfill (auth-middleware's `backfillEmbedding`, the path a successful
- * HTTP Memory write runs in the background) used to call the embedding
- * provider from inside the plan callback the shared write-back helper runs
- * while its owned write transaction is open, holding that transaction across
- * the slow model call. It now reads the row and computes the vector before
- * the transaction opens; the transaction then re-confirms the committed row
- * and that the row's text is still the text the vector was computed from. A
- * text change that commits while the vector is being computed aborts that
- * attempt and the backfill recomputes (bounded attempts), rather than writing
- * the vector against the changed text.
+ * The backfill computes the vector before its owned write transaction opens.
+ * Rows without content or with an embedding longer than 100 entries skip
+ * before content comparison. For eligible rows, content is compared before
+ * staging and the committed row is confirmed afterward. Drift observed by
+ * either check aborts the attempt; remaining outer attempts re-read and may
+ * recompute. Changes after confirmation and before commit are not detected by
+ * these checks.
  *
  * The spawned Harper carries the test-only pause (resources/txn-pause-point.ts,
  * enabled by FLAIR_ENABLE_TEST_FAULT_INJECTION and FLAIR_TEST_PAUSE_DIR).
@@ -145,7 +141,7 @@ async function withPaused(point: string, trigger: () => Promise<Response>, compe
   return { response, competed, released, paused };
 }
 
-/** Wait until a backfill has stored an embedding on the row (or the deadline passes). */
+/** Wait for an embedding longer than 100 entries (or the deadline). */
 async function waitForEmbedding(id: string): Promise<any> {
   const deadline = Date.now() + 120_000;
   let row = await readRow(harper, id);
@@ -223,8 +219,8 @@ describe("flair#2484 — the embedding backfill and a concurrent text change (re
       expect(row?.content, "the competing content edit is kept").toBe(NEW_TEXT);
       expect(row?.embedding?.length, "the backfill wrote a computed embedding").toBeGreaterThan(100);
 
-      // The stored vector must be for the text that is actually stored (the
-      // NEW text), not for the text that was superseded while it was computed.
+      // The edit commits after computation, before or during the write
+      // transaction. Check that the stored vector matches the NEW text.
       const newVector = await serverEmbedding(harper, NEW_TEXT);
       const oldVector = await serverEmbedding(harper, OLD_TEXT);
       console.log(`${point} cosines:`, JSON.stringify({
