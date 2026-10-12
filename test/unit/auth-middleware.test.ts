@@ -356,7 +356,6 @@ describe("auth middleware: the Basic scheme name is case-insensitive (RFC 9110)"
     expect(src).toContain('url.pathname === "/FederationPair" && !isBasic');
     expect(src).toContain("if (isBasic) {");
     expect(src).not.toContain('startsWith("Basic ")');
-    // Semantics: every spelling of the scheme matches; a non-Basic scheme does not.
     const isBasic = (h: string) => /^Basic /i.test(h);
     for (const scheme of ["Basic", "basic", "BASIC", "BaSiC"]) {
       expect(isBasic(`${scheme} dXNlcjpwYXNz`)).toBe(true);
