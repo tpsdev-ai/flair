@@ -135,9 +135,7 @@ let _uniform: boolean | undefined = undefined;
 let _activeStamps: string[] = []; // normalized, capped — for the degrade diagnostic only
 let _lastScanAt = 0;
 let _scanning: Promise<void> | undefined;
-// flair#2481 — bumped every time a FOREIGN-space stamp is noted. A scan captures
-// this at its start and publishes its verdict only when it is unchanged, so a
-// scan that began before a foreign write was noted never reopens the latch.
+// flair#2481 — foreign-space write notes invalidate an in-flight scan's verdict.
 let _writeEpoch = 0;
 
 // While the latch is TRIPPED, re-verify at most this often, so a completed
@@ -161,11 +159,7 @@ async function scan(): Promise<void> {
       if (seen.size < MAX_DIAG_STAMPS) seen.add(n);
       if (n !== current) uniform = false;
     }
-    // A foreign-space write noted AFTER this scan started may not have been
-    // visible to the rows above (its row can commit mid-scan), so this clean
-    // verdict cannot be trusted to reopen the latch. Leave the latch as-is and
-    // force a fresh scan on the next consult; only a scan that started after
-    // that write was noted can reopen it.
+    // A changed epoch discards this scan's verdict and makes the next consult rescan.
     if (_writeEpoch !== startEpoch) {
       _lastScanAt = 0;
       return;

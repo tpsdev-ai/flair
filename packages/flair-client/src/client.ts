@@ -515,9 +515,8 @@ class MemoryApi {
    * MemoryGrant from that owner — otherwise it denies the request (cross-agent
    * write).
    *
-   * flair#2482: neither path carries a host pointer unless the caller supplies
-   * one here, so an update with no `hostSource` leaves the stored pointer row
-   * (its full URL and `scopeAtWrite`) byte-identical.
+   * flair#2482: ordinary, non-skill, same-ID updates without `hostSource`
+   * preserve the stored pointer row.
    */
   async update(id: string, content: string, opts: {
     preserveHistory?: boolean;
@@ -535,12 +534,8 @@ class MemoryApi {
       throw new FlairError("PUT", `/Memory/${encodeRecordId(id)}`, 404, `memory ${id} not found`);
     }
     const metadata = opts.metadata === undefined ? existing.metadata : mergeMetadata(existing.metadata, opts.metadata);
-    // flair#2482 — `existing` is a RENDERED read: its `hostSource` is the
-    // server's projected pointer (URL query and fragment stripped), not the
-    // stored value. Spreading it into a full update would make the server treat
-    // that render as a NEW pointer claim and replace the stored pointer row
-    // (losing the full URL and its `scopeAtWrite`). Drop every pointer field the
-    // read carried, and forward one only when the caller supplied it.
+    // flair#2482 — drop read-projected pointer fields; forward hostSource and
+    // hostSourceScope only when supplied.
     const applyPointerFields = (record: Record<string, unknown>): void => {
       delete record.hostSource;
       delete record.hostSourceScope;

@@ -87,15 +87,8 @@ const privKeyPath = (agentId: string, keysDir: string): string => cli.privKeyPat
 const pubKeyPath = (agentId: string, keysDir: string): string => cli.pubKeyPath(agentId, keysDir);
 
 /**
- * flair#2479 — the ONE key-file cleanup for `flair agent remove`.
- *
- * Deletes ONLY the three files named for exactly `agentId` (`.key`, `.pub`,
- * `.key.bak`) and ONLY when each one resolves INSIDE `keysDir`. An id outside
- * the agent-ID rule names no file this command may claim, so nothing is
- * deleted and the caller says the cleanup is manual. Because the id is never
- * allowed to steer a path out of `keysDir`, a `.`-segment id cannot reach a
- * sibling or a parent directory, and a symlinked key that points elsewhere is
- * left in place. Returns the paths actually removed.
+ * flair#2479 — check each key's canonical target before unlinking.
+ * Return successful unlinks; invalid ids require manual cleanup.
  */
 export function removeAgentKeyFiles(agentId: string, keysDir: string): { removed: string[]; manual: boolean } {
   if (!isValidAgentId(agentId)) return { removed: [], manual: true };
@@ -103,7 +96,7 @@ export function removeAgentKeyFiles(agentId: string, keysDir: string): { removed
   try {
     root = realpathSync(keysDir);
   } catch {
-    return { removed: [], manual: false }; // no keys directory — nothing to remove
+    return { removed: [], manual: false }; // directory resolution failed
   }
   const removed: string[] = [];
   for (const name of [`${agentId}.key`, `${agentId}.pub`, `${agentId}.key.bak`]) {
@@ -111,9 +104,9 @@ export function removeAgentKeyFiles(agentId: string, keysDir: string): { removed
     try {
       real = realpathSync(join(keysDir, name));
     } catch {
-      continue; // absent, or unreadable — there is nothing to delete
+      continue; // candidate resolution failed
     }
-    if (real !== join(root, name)) continue; // resolves outside the keys dir — never delete it
+    if (real !== join(root, name)) continue; // unexpected canonical target; skip
     try { unlinkSync(real); removed.push(real); } catch { /* best effort */ }
   }
   return { removed, manual: false };
@@ -828,7 +821,7 @@ export function register(program: Command): void {
         console.log(
           keys.manual
             ? `Key files for '${id}' are not deleted by this command (the id is outside the agent-ID rule); clean them up manually.`
-            : "Key files deleted.",
+            : `Removed ${keys.removed.length} key file(s).`,
         );
       } else {
         console.log("Key files preserved (--keep-keys).");

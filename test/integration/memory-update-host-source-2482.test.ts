@@ -1,17 +1,9 @@
 /**
  * memory-update-host-source-2482.test.ts — flair#2482, against a REAL Harper.
  *
- * `memory.update()` is a full-record PUT: it reads the record first and merges
- * the new content on top. That read is a RENDERED projection whose `hostSource`
- * is the server's stripped pointer (URL query and fragment removed). Spreading
- * it back into the write body made the server treat the render as a NEW pointer
- * claim and replace the stored pointer row — the full URL and its `scopeAtWrite`
- * were lost. A same-id update with no host source must leave the stored pointer
- * byte-identical, and a `preserveHistory` successor carries a pointer only for a
+ * Ordinary, non-skill, same-ID updates without a host source preserve the
+ * stored pointer. A `preserveHistory` successor carries a pointer only for a
  * host source the caller supplies.
- *
- * The pointer is read back through the operations API (the MemoryHostSource row
- * itself), so the assertion is on the STORED bytes, not on the rendered read.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import nacl from "tweetnacl";
@@ -87,7 +79,7 @@ const HOST_SOURCE = {
   url: "https://host-a.example/things/42?page=7#frag",
 };
 
-describe("flair#2482 — a same-id memory.update() without a host source leaves the stored pointer alone (real Harper)", () => {
+describe("flair#2482 — ordinary, non-skill memory.update() host pointers (real Harper)", () => {
   beforeAll(async () => {
     harper = await startHarper();
     keyDir = await mkdtemp(join(tmpdir(), "flair-2482-keys-"));
@@ -99,7 +91,7 @@ describe("flair#2482 — a same-id memory.update() without a host source leaves 
     if (keyDir) await rm(keyDir, { recursive: true, force: true, maxRetries: 4 });
   });
 
-  test("update() without a host source leaves the stored pointer row byte-identical", async () => {
+  test("an ordinary, non-skill, same-ID update without a host source preserves the stored pointer", async () => {
     const client = await clientFor(agent);
     const id = `${agent.id}-${randomUUID()}`;
     await client.memory.write("original content", {
@@ -116,7 +108,7 @@ describe("flair#2482 — a same-id memory.update() without a host source leaves 
     expect(JSON.stringify(await pointerRows(id))).toBe(before); // assertion: the stored pointer is byte-identical
   }, 120_000);
 
-  test("a preserveHistory successor without a host source carries no pointer; the superseded pointer is unchanged", async () => {
+  test("an ordinary, non-skill preserveHistory successor without a host source carries no pointer; the predecessor pointer is unchanged", async () => {
     const client = await clientFor(agent);
     const id = `${agent.id}-${randomUUID()}`;
     await client.memory.write("v1", { id, hostSource: HOST_SOURCE, hostSourceScope: "record", visibility: "shared" });
@@ -129,7 +121,7 @@ describe("flair#2482 — a same-id memory.update() without a host source leaves 
     expect(JSON.stringify(await pointerRows(id))).toBe(before); // assertion: the superseded pointer is unchanged
   }, 120_000);
 
-  test("a preserveHistory successor carries a pointer when the caller supplies one with its scope", async () => {
+  test("an ordinary, non-skill preserveHistory successor carries a supplied pointer", async () => {
     const client = await clientFor(agent);
     const id = `${agent.id}-${randomUUID()}`;
     await client.memory.write("v1", { id });

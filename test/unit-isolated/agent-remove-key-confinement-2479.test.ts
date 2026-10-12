@@ -1,12 +1,8 @@
 /**
  * agent-remove-key-confinement-2479.test.ts — flair#2479.
  *
- * `flair agent remove` touches key files only inside the keys directory, and
- * only files named for exactly the removed agent id. Before the fix it built a
- * path from the raw id and unlinked whatever it named, so an id with a `.`
- * segment reached a sibling or a parent directory; an id outside the agent-ID
- * rule also had its `<id>.key` deleted inside the keys dir instead of being
- * reported as manual cleanup.
+ * `flair agent remove` checks key candidates against their expected canonical
+ * paths. An out-of-rule id requires manual key cleanup.
  *
  * Isolated because it drives the process-global commander `program` and stands
  * up an HTTP server in place of the operations API. The command deletes keys
@@ -14,7 +10,7 @@
  * answers `get_configuration` too.
  */
 import { describe, test, expect, beforeEach, afterEach, spyOn } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, symlinkSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from "node:http";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -133,6 +129,7 @@ describe("flair#2479 — agent remove key confinement", () => {
     const result = await agentRemove("agent-a");
 
     expect(result.code).toBe(0);
+    expect(result.stdout).toContain("Removed 3 key file(s).");
     for (const p of own) expect(existsSync(p)).toBe(false); // assertion: its own key files are gone
     for (const p of other) expect(existsSync(p)).toBe(true); // assertion: another agent's key files survive
     expect(existsSync(outsidePath)).toBe(true); // assertion: a file outside the keys dir survives
@@ -157,4 +154,33 @@ describe("flair#2479 — agent remove key confinement", () => {
     expect(existsSync(victim)).toBe(true); // assertion: the outside file is untouched
     expect(result.stdout.toLowerCase()).toContain("manually"); // assertion: nothing was deleted, cleanup is manual
   });
+
+  test("a symlink to another filename inside the keys dir reports zero removals", async () => {
+    const target = putKey("agent-b.key");
+    const link = join(keysDir, "agent-a.key");
+    symlinkSync(target, link);
+
+    const result = await agentRemove("agent-a");
+
+    expect(result.code).toBe(0);
+    expect(existsSync(link)).toBe(true);
+    expect(existsSync(target)).toBe(true);
+    expect(result.stdout).toContain("Removed 0 key file(s).");
+    expect(result.stdout).not.toContain("Key files deleted.");
+  });
+
+  test("a failed unlink reports zero removals", async () => {
+    const candidate = join(keysDir, "agent-a.key");
+    mkdirSync(candidate);
+    const contents = join(candidate, "contents");
+    writeFileSync(contents, "not-a-real-secret");
+
+    const result = await agentRemove("agent-a");
+
+    expect(result.code).toBe(0);
+    expect(existsSync(contents)).toBe(true);
+    expect(result.stdout).toContain("Removed 0 key file(s).");
+    expect(result.stdout).not.toContain("Key files deleted.");
+  });
+
 });

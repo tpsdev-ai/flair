@@ -1,12 +1,7 @@
 /**
  * embedding-space-latch-scan-race-2481.test.ts — flair#2481.
  *
- * The embedding-space latch reopens only after a scan that STARTED after a
- * foreign-stamp write was noted finds no foreign stamp. Before the fix
- * `scan()` assigned its verdict unconditionally, so a scan that began before a
- * foreign write landed (and therefore never saw that write's row) reopened the
- * latch — a mixed-space corpus serving silently-wrong recall until the next
- * recheck.
+ * A scan must not reopen the latch if a foreign-stamp write is noted during it.
  * Runs in test/unit-isolated (its own bun process) so the `mock.module("harper")`
  * below never collides with another file's harper import/mock in a shared
  * `bun test test/unit` process.
@@ -72,7 +67,7 @@ describe("embedding-space-guard — concurrent scan/write (flair#2481)", () => {
     _setGuardModelIdForTests(() => CURRENT);
   });
 
-  it("a scan that started before a foreign write was noted does NOT reopen the latch", async () => {
+  it("a scan does not reopen the latch when a foreign write is noted during it", async () => {
     const g = gatedTableOver([]); // the scan will find no foreign stamp
     _setGuardTableGetterForTests(g.getter);
 
@@ -80,13 +75,13 @@ describe("embedding-space-guard — concurrent scan/write (flair#2481)", () => {
     const scan = recomputeLatch(); // a scan starts and parks mid-read
     await g.parked;
 
-    noteWriteStamp(FOREIGN); // a SECOND foreign write lands while the scan reads
+    noteWriteStamp(FOREIGN); // a SECOND foreign write is noted while the scan reads
     g.release();
 
     expect(await scan).toBe(false); // assertion: the raced scan did not reopen the latch
   });
 
-  it("a scan that started after the foreign write reopens the latch when it finds no foreign stamp", async () => {
+  it("a scan with no concurrent write notes reopens the latch when it finds no foreign stamp", async () => {
     _setGuardTableGetterForTests(fakeTableOver([])); // the corpus converged (no foreign stamp)
     noteWriteStamp(FOREIGN); // the latch is tripped
 
