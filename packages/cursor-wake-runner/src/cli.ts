@@ -40,7 +40,13 @@ function printResult(result: WakeResult): void {
  * `agentId` is `FLAIR_AGENT_ID`, so the receipt cannot be verified on replay
  * (the identity check compares the row's author to the runner's agent id).
  * Refuse a live cycle with no signing key BEFORE anything is read or acked;
- * Basic credentials stay allowed for the read-only modes (`--dry-run`).
+ * Basic credentials stay allowed for `--dry-run`, which performs no Cursor
+ * create, no receipt write and no ack (it still reads the agent's Flair feed).
+ *
+ * flair#1944 round 10 — this is the CLI's fast EXISTENCE pre-check; the runner
+ * itself LOADS AND VALIDATES the key and LOCKS the client to signed-only at the
+ * start of the exported `runWakeCycle` (see `run.js`), so an unparsable key file is
+ * refused there too and no request in a live cycle can fall back to Basic.
  */
 export function assertLiveSigningKey(config: WakeConfig): void {
   if (config.dryRun) return;
@@ -74,10 +80,12 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       // ONE client: on a live cycle the runner identity IS this client's signing
       // identity, and `runWakeCycle` builds the catchup reader and the receipt
       // store from it. The Cursor client is selected from `dryRun` + the Cursor
-      // config, not built from this client (a dry-run cycle writes nothing).
+      // config, not built from this client (a dry-run cycle performs no Cursor
+      // create, receipt write or ack).
       client: flair,
       // The runner builds its Cursor client from this for a live cycle; a
-      // dry-run cycle uses the dry-run client and touches no network.
+      // dry-run cycle uses the dry-run client, which never CALLS Cursor (the
+      // cycle still reads the agent's Flair feed).
       cursor: {
         apiBase: config.cursorApiBase,
         apiKey: config.cursorApiKey,

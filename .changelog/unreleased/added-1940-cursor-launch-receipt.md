@@ -19,19 +19,22 @@
   private and omits `hostSourceScope`, so the pointer stays author-only. Only a
   live run signed with the agent's own key writes the receipt, and that signing
   requirement is enforced at the START of the exported runner — `runWakeCycle`
-  refuses a live cycle whose client cannot sign, by name, before it reads the feed
-  or launches Cursor — and again WHERE THE WRITE HAPPENS: the production receipt
-  store requires the key, and the client fails closed (no admin Basic fallback)
-  when none resolves at send time; a key the client already loaded is cached and
+  LOADS AND VALIDATES the agent's Ed25519 key into the client and LOCKS it to
+  signed-only, by name, before it reads the feed or launches Cursor, so EVERY
+  request in the cycle is signed with that loaded key (an unparsable or non-Ed25519
+  key file is refused there, by name) — and again WHERE THE WRITE HAPPENS: the
+  production receipt store requires the key, and the client fails closed (no admin
+  Basic fallback) when none resolves at send time; the loaded key is cached and
   still signs, so removing the key file cannot cause a Basic fallback. Admin Basic
-  credentials are accepted only for the read-only `--dry-run` mode, which writes
-  nothing. The cycle runs
+  credentials are accepted only for the `--dry-run` mode, which performs no Cursor
+  create, no receipt write and no ack (it still reads the agent's Flair feed). The
+  cycle runs
   on ONE signed client: the runner builds the catchup reader and the receipt
   store from it, so on a live cycle the receipt is signed as exactly the runner's
   agent and a receipt signed as another agent is unrepresentable (no separate
   agent id, no store to supply); the Cursor client, by contrast, is selected from
   `--dry-run` and the Cursor config, not built from the Flair client (a dry-run
-  cycle writes nothing). When a pointer was stored AND the memory is
+  cycle performs no Cursor create, receipt write or ack). When a pointer was stored AND the memory is
   selected for bootstrap, bootstrap prose cites that pointer to the author as
   `[via cursor/launch <id8> (unverified)]`, and shows `[via withheld]` only to a
   non-author who can read the record after its visibility changes — an ordinary

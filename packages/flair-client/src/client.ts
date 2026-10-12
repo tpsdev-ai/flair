@@ -170,6 +170,15 @@ export class FlairClient {
   private timeoutMs: number;
   private basicAuth: string | null = null;
   private authMode: "auto" | "basic";
+  /**
+   * flair#1944 round 10 — set by `loadSigningKey()`. While true, EVERY request
+   * this client makes MUST be signed with the loaded Ed25519 key: the client
+   * never falls back to admin Basic (nor sends unsigned) for any path. A live
+   * wake cycle turns it on at the start so its catchup read, its launch path and
+   * its receipt write all sign as the agent's own identity, even if the key file
+   * later vanishes (the loaded key is cached).
+   */
+  private signingKeyRequired = false;
 
   constructor(config: FlairClientConfig) {
     // Every env fallback below goes through readEnvOrUnset (flair#1254): a
@@ -241,19 +250,80 @@ export class FlairClient {
   }
 
   /**
-   * flair#1944 round 9 — whether a request from this client would be SIGNED with
-   * the agent's own Ed25519 identity rather than fall back to admin Basic.
-   * Mirrors `resolveKey`'s precedence WITHOUT loading the key file: an in-memory
-   * key, or a key file that resolves NOW (the same `inspectKeyLookup` the CLI's
-   * startup check uses). Synchronous, so a caller (the cursor wake-runner) can
-   * refuse a live cycle BEFORE it makes any request — the feed read, the Cursor
-   * launch, or the receipt write. `false` when `authMode` is "basic" (that mode
-   * never signs), regardless of a configured key path.
+   * flair#1944 round 9/10 — whether a request from this client would be SIGNED
+   * with the agent's own Ed25519 identity rather than fall back to admin Basic.
+   * This is the SYNCHRONOUS, EXISTENCE-ONLY pre-check: it mirrors `resolveKey`'s
+   * precedence without loading the key file — an in-memory key, or a key file
+   * that resolves NOW (the same `inspectKeyLookup` the CLI's startup check uses).
+   * It answers "would this client LIKELY sign", not "can it sign": a key file
+   * that exists but cannot be parsed, or that DISAPPEARS before the first
+   * request, still reports `true`. `false` only when `authMode` is "basic" (that
+   * mode never signs), regardless of a configured key path.
+   *
+   * flair#1944 round 10 — a caller that needs a GUARANTEE (a live cycle that must
+   * sign EVERY request) must call `loadSigningKey()`, which loads and VALIDATES
+   * the key into memory and locks the client to signed-only. This predicate is
+   * kept for cheap, synchronous pre-checks only.
    */
   hasSigningKey(): boolean {
     if (this.authMode === "basic") return false;
     if (this.privateKey || this.rawPrivateKey) return true;
     return inspectKeyLookup(this.agentId, this.keyPath).resolvedPath !== null;
+  }
+
+  /**
+   * flair#1944 round 10 — LOAD and VALIDATE the agent's Ed25519 signing key into
+   * this client NOW, and put the client in a mode where EVERY subsequent request
+   * MUST be signed with that loaded key (no admin Basic fallback and no unsigned
+   * request, for any path). Returns the loaded key.
+   *
+   * This is the guarantee `hasSigningKey()` cannot give: it resolves the key at
+   * THIS moment (in-memory key, else the key file), PARSES it (`createPrivateKey`
+   * — an unparsable file throws), CHECKS it is Ed25519, and CACHES it (see
+   * `resolveKey`), so the loaded key signs every later request even if the key
+   * file is then removed or replaced. A live wake cycle calls this at the START
+   * so its catchup read, its launch path and its receipt write all sign as the
+   * agent's own identity — a key that disappears after the check can no longer
+   * cause a Basic fallback on ANY of them.
+   *
+   * Throws a `MissingSigningKeyError` when no key resolves (missing file, or
+   * `authMode: "basic"`), and an error naming the file when one resolves but
+   * does not load as an Ed25519 key. Either way the caller is refused BEFORE it
+   * makes any request.
+   */
+  async loadSigningKey(): Promise<KeyObject> {
+    if (this.authMode === "basic") {
+      throw new MissingSigningKeyError(this.agentId, "this client is in authMode \"basic\", which never signs");
+    }
+    let key: KeyObject | null;
+    try {
+      key = await this.resolveKey();
+    } catch (err) {
+      // The key file resolved, but could not be parsed into a private key. Fail
+      // closed with the same class as a missing key (the caller names the mode).
+      throw new MissingSigningKeyError(
+        this.agentId,
+        `the key at ${describeKeyLookup(this.lastKeyLookup)} could not be loaded: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    if (!key) {
+      throw new MissingSigningKeyError(this.agentId, describeKeyLookup(this.lastKeyLookup));
+    }
+    if (key.asymmetricKeyType !== "ed25519") {
+      throw new MissingSigningKeyError(
+        this.agentId,
+        `the key resolved for this agent is ${key.asymmetricKeyType ?? "an unknown type"}, not Ed25519`,
+      );
+    }
+    // Only NOW, with a key loaded into memory, does the client lock to signed-
+    // only. From here EVERY request signs with this key; nothing falls back.
+    this.signingKeyRequired = true;
+    return key;
+  }
+
+  /** flair#1944 round 10 — true once `loadSigningKey()` has loaded a key and locked this client to signed-only requests. */
+  get signingRequired(): boolean {
+    return this.signingKeyRequired;
   }
 
   /**
@@ -323,16 +393,19 @@ export class FlairClient {
     const key = await this.resolveKey();
     if (key) {
       headers["Authorization"] = signRequest(this.agentId, key, method, signedPath);
-    } else if (opts.requireSigningKey) {
-      // flair#1944 round 5 — a request that MUST be signed refuses to fall back
-      // to admin Basic when no key resolves. A key that has ALREADY loaded is
-      // CACHED (see resolveKey) and still signs, so removing the key file after
-      // it was read cannot cause a Basic fallback; the refusal happens ONLY when
-      // no key resolves at send time. Resolving HERE, at send time (not at
-      // construction), means a key written after this client was built is still
-      // picked up, and a still-unresolvable key fails CLOSED rather than silently
-      // changing the writer identity the server would stamp (the Basic username
-      // in place of the agent's).
+    } else if (opts.requireSigningKey || this.signingKeyRequired) {
+      // flair#1944 round 5/10 — a request that MUST be signed refuses to fall back
+      // to admin Basic when no key resolves. It is required either per request
+      // (`opts.requireSigningKey`) or for EVERY request once the client is locked
+      // (`this.signingKeyRequired`, set by `loadSigningKey()` at the start of a
+      // live wake cycle). A key that has ALREADY loaded is CACHED (see resolveKey)
+      // and still signs, so removing the key file after it was read cannot cause a
+      // Basic fallback; the refusal happens ONLY when no key resolves at send
+      // time. Resolving HERE, at send time (not at construction), means a key
+      // written after this client was built is still picked up, and a
+      // still-unresolvable key fails CLOSED rather than silently changing the
+      // writer identity the server would stamp (the Basic username in place of
+      // the agent's).
       throw new MissingSigningKeyError(this.agentId, describeKeyLookup(this.lastKeyLookup));
     } else if (this.basicAuth) {
       // flair#1951: never send admin Basic credentials over plain http to a

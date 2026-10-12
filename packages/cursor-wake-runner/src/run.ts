@@ -12,18 +12,23 @@
  * than the feed it drains — the "store labelled A writing as B" combination is
  * unrepresentable rather than guarded.
  *
- * flair#1944 round 9: that signed client is REQUIRED for a live cycle, and the
+ * flair#1944 round 9/10: that signed client is REQUIRED for a live cycle, and the
  * requirement is enforced at the START of the exported `runWakeCycle` — BEFORE the
  * first catchup read, the first Cursor launch or the receipt write — by name
- * ("live receipts need the agent's signing key"). A live cycle whose client
- * cannot resolve an Ed25519 key is refused before anything happens; admin Basic
- * credentials are accepted only for the read-only `--dry-run` mode (which writes
- * nothing). This closes the gap where a live `runWakeCycle` driven directly with
- * Basic-only credentials would drain the feed and LAUNCH Cursor, and the receipt
- * write would fail only afterwards for lack of a signing key.
+ * ("live receipts need the agent's signing key"). Round 10: the check LOADS AND
+ * VALIDATES the agent's Ed25519 key into the client and LOCKS it to signed-only, so
+ * EVERY request in the cycle signs with that loaded key — an unparsable or
+ * non-Ed25519 key file is refused here, and a key file that disappears after this
+ * check cannot cause a Basic fallback on the catchup read, the launch path or the
+ * receipt write. Admin Basic credentials are accepted only for the `--dry-run`
+ * mode (no Cursor create, no receipt write, no ack; the cycle still reads the
+ * agent's Flair feed). This closes the gap where a live `runWakeCycle` driven
+ * directly with Basic-only credentials would drain the feed and LAUNCH Cursor, and
+ * the receipt write would fail only afterwards for lack of a signing key.
  * The Cursor client is chosen by the runner
  * from `dryRun` AND the Cursor config — NOT built from the Flair client (a live
- * cycle -> the real client from the config; a dry-run cycle -> `dryRunCursorClient`).
+ * cycle -> the real client from the config; a dry-run cycle -> `dryRunCursorClient`,
+ * which never CALLS Cursor).
  * A construction fault in
  * EITHER direction is refused, by name, BEFORE anything is recorded or acked:
  * a `dry-run` outcome observed in a LIVE cycle (a dry-run client reached a live
@@ -56,6 +61,7 @@
  */
 
 import type { FlairClient } from "@tpsdev-ai/flair-client";
+import { MissingSigningKeyError } from "@tpsdev-ai/flair-client";
 import { wakeAgentId } from "./agent-id.js";
 import { createCatchupPort, type CatchupPort } from "./catchup.js";
 import { createCursorAgentClient, dryRunCursorClient, type CursorAgentClient, type CursorLaunchConfig, type LaunchResult } from "./cursor-api.js";
@@ -114,7 +120,8 @@ export interface WakeDeps {
    * Cursor Cloud Agents launch config. The runner builds its Cursor client from
    * THIS and the mode, never from the Flair client: a LIVE cycle builds
    * `createCursorAgentClient(config)` from these fields; a dry-run cycle uses
-   * `dryRunCursorClient` instead and never touches the network.
+   * `dryRunCursorClient` instead, which never CALLS Cursor (the cycle still reads
+   * the agent's Flair feed).
    */
   cursor: CursorLaunchConfig;
   /** One line for a receipt that omits a value the server's grammar would refuse, and one for a receipt the server refused. */
@@ -259,7 +266,7 @@ async function recordLaunchReceipt(
 }
 
 /**
- * flair#1944 round 9 — a LIVE cycle must SIGN its receipt as the agent's own
+ * flair#1944 round 9/10 — a LIVE cycle must SIGN its receipt as the agent's own
  * identity, so the runner refuses a live cycle whose client cannot sign BEFORE it
  * builds any part or makes any request. Without this, a live `runWakeCycle` driven
  * directly with admin Basic credentials (or a client with no resolvable Ed25519
@@ -267,26 +274,43 @@ async function recordLaunchReceipt(
  * write when the store asks the client to REQUIRE the key — a real launch left
  * unrecorded and the watermark unadvanced. The check lives in the EXPORTED
  * `runWakeCycle`, so a caller that drives the cycle directly gets the same
- * guarantee the CLI's own startup guard gives. A dry-run cycle reads only and
- * writes nothing, so admin Basic credentials stay allowed there.
+ * guarantee the CLI's own startup guard gives. A dry-run cycle performs no Cursor
+ * create, no receipt write and no ack (it still reads the agent's Flair feed), so
+ * admin Basic credentials stay allowed there.
+ *
+ * flair#1944 round 10 — the check LOADS AND VALIDATES the key, and LOCKS the
+ * client to signed-only, rather than only confirming a key file EXISTS. It calls
+ * `client.loadSigningKey()`, which resolves the key at this moment, parses it and
+ * checks it is Ed25519, CACHES it, and makes every later request sign with it (no
+ * admin Basic fallback, no unsigned request, for ANY path — the catchup read, the
+ * Cursor launch path or the receipt write). A key file that is present but
+ * unparsable or not Ed25519 is refused HERE, and a key file that disappears after
+ * this check can no longer cause a Basic fallback: the loaded key signs every
+ * request in the cycle.
  */
-export function assertLiveCycleSigningKey(client: FlairClient): void {
-  if (!client.hasSigningKey()) {
+export async function assertLiveCycleSigningKey(client: FlairClient): Promise<void> {
+  try {
+    await client.loadSigningKey();
+  } catch (err) {
+    const detail = err instanceof MissingSigningKeyError ? err.detail : err instanceof Error ? err.message : String(err);
     throw new Error(
-      `cursor-wake: live receipts need the agent's signing key — no Ed25519 key resolved for FLAIR_AGENT_ID=${client.agentId} ` +
-        "(checked FLAIR_KEY_PATH and ~/.flair/keys/<id>.key); set FLAIR_KEY_PATH to the agent's .key file " +
+      `cursor-wake: live receipts need the agent's signing key — for FLAIR_AGENT_ID=${client.agentId} ` +
+        `the client could not load a usable Ed25519 key (${detail}); set FLAIR_KEY_PATH to the agent's .key file ` +
         "(admin Basic credentials are only for --dry-run)",
     );
   }
 }
 
 export async function runWakeCycle(deps: WakeDeps): Promise<WakeResult> {
-  // flair#1944 round 9 — refuse a LIVE cycle that cannot sign, by name, BEFORE
+  // flair#1944 round 9/10 — refuse a LIVE cycle that cannot sign, by name, BEFORE
   // building any part or making any request: no catchup read, no Cursor launch,
-  // no receipt write. The exported entry is the shipped path, so a caller that
-  // drives `runWakeCycle` directly gets the same guarantee the CLI's own startup
-  // check gives.
-  if (!deps.dryRun) assertLiveCycleSigningKey(deps.client);
+  // no receipt write. Round 10: the check LOADS AND VALIDATES the agent's Ed25519
+  // key into the client and LOCKS it to signed-only, so EVERY request in the cycle
+  // signs with that loaded key — a key that vanishes after this check cannot cause
+  // a Basic fallback on the catchup read, the launch path or the receipt write.
+  // The exported entry is the shipped path, so a caller that drives `runWakeCycle`
+  // directly gets the same guarantee the CLI's own startup check gives.
+  if (!deps.dryRun) await assertLiveCycleSigningKey(deps.client);
   // flair#1944 round 8 — PRODUCTION PARTS ONLY. The exported entry builds every
   // part from the inputs it is given and nothing else: the catchup reader from
   // the runner's own client, the receipt store from that same client (inside the
