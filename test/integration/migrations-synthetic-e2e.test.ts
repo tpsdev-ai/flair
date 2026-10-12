@@ -17,7 +17,7 @@
  *
  * Seeded rows carry a STUB embedding/embeddingModel up front so
  * Memory.put()'s regen branch never fires when the migration's own writes
- * touch them (`{...existing, source: MARKER}` — embedding already present)
+ * touch them (a source-only update — the embedding is already present)
  * — keeps this test fast and deterministic, independent of the local
  * embeddings model. (The embeddings REGEN path itself is covered by
  * test/integration/migrations-embedding-stamp-e2e.test.ts.)

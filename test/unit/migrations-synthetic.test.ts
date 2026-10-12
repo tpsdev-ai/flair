@@ -132,7 +132,7 @@ describe("synthetic migration — detect/run/marker convergence (the full runner
     expect(await m.countPending()).toBe(1);
   });
 
-  it("run() stamps `source` to the target marker via a full-record merge, preserving other fields", async () => {
+  it("run() stamps `source` to the target marker with a source-only update, preserving other fields", async () => {
     const { table, store } = makeFakeMemoryTable([
       { id: "s1", content: "x", agentId: RESERVED_TEST_AGENT_ID, tags: ["keep-me"], source: "not-yet" },
     ]);

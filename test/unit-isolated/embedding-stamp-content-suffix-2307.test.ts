@@ -136,8 +136,8 @@ describe("flair#2307 — the content-suffix re-embed validates the vector and co
     // only other field the write touches.
     expect(Object.keys(store.get(LEGACY_ID)!).sort()).toEqual(["agentId", "content", "embedding", "embeddingModel", "id", "updatedAt"]);
     // Exactly one update, naming only the embedding fields and updatedAt; no
-    // full-row put (flair#2494). A plan carrying the whole re-read row here
-    // would name every field and land as a put.
+    // full-row put (flair#2494). A whole-row update would name extra fields and
+    // fail this assertion; a full-row put would fail the method check.
     expect(writeCalls).toEqual([{ method: "update", id: LEGACY_ID, fields: ["embedding", "embeddingModel", "updatedAt"] }]);
     expect(await migration().countPending()).toBe(0);
   });
