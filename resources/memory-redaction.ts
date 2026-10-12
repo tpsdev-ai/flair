@@ -31,6 +31,7 @@
 import { redactSecretsWithCount } from "../packages/flair-mcp/src/secret-redaction.js";
 import type { AgentAuthVerdict } from "./agent-auth.js";
 import { isReservedSeedId } from "./seed-reservation.js";
+import { MEMORY_EMBEDDING_INPUT_FIELDS } from "./skill-write.js";
 import { skillWriteSource } from "./skill-write-policy.js";
 
 /** The Memory fields redacted on a write. */
@@ -54,8 +55,9 @@ export interface MemoryWriteRedaction {
   embeddingDiscarded: boolean;
 }
 
-/** The redacted fields a stored embedding is computed from (resources/skill-write.ts, skillEmbedText). */
-const EMBEDDING_SOURCE_FIELDS: ReadonlySet<string> = new Set(["content", "trigger"]);
+/** The redacted fields a stored embedding is computed from — the ONE list, in
+ *  resources/skill-write.ts next to skillEmbedText (the read side). */
+const EMBEDDING_SOURCE_FIELDS: ReadonlySet<string> = new Set(MEMORY_EMBEDDING_INPUT_FIELDS);
 
 /**
  * Redact REDACTED_MEMORY_FIELDS of a write body IN PLACE. When the redaction

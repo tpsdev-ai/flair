@@ -30,7 +30,7 @@ import { isJoinableTransaction, withOwnedTransaction, withSharedWriteTransaction
 import { CommittedRowChanged, confirmCommittedRow, sameStoredRow, storedRowChangedRefusal } from "./write-back.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 import { assertValidDurability, stampEphemeralExpiry } from "./memory-durability.js";
-import { enforceSkillDurability, isSkillWrite, rejectSkillWritePath, refuseSkillWriteSource, skillEmbedText, skillScanGate } from "./skill-write.js";
+import { enforceSkillDurability, isSkillWrite, MEMORY_EMBEDDING_INPUT_FIELDS, rejectSkillWritePath, refuseSkillWriteSource, skillEmbedText, skillScanGate } from "./skill-write.js";
 import { buildSkillSuccessorRow, closedSkillPayloadReadable, defaultSkillHooks, resolveSkillHead, rowIsSkill, runSkillVersionWrite, skillVersionVisibility, skillPayloadUnchanged, prepareSkillBody, validateSkillSnapshots, authorizeSkillOwners, skillWriteConflict } from "./skill-version-write.js";
 import { deriveSkillSubjectId } from "./skill-subject.js";
 import {
@@ -1984,6 +1984,25 @@ export class Memory extends (databases as any).flair.Memory {
       const computed = Array.isArray(vec) && vec.length > 0;
       content.embedding = computed ? vec : null;
       content.embeddingModel = computed ? getModelId() : null;
+      content.updatedAt = new Date().toISOString();
+    } else if (isSemanticPatch(content, existingForSkill, MEMORY_EMBEDDING_INPUT_FIELDS) &&
+      content?.embedding == null) {
+      // flair#2466: a PATCH that changes an embedding-input field (`content`, or
+      // `trigger` on a skill row — MEMORY_EMBEDDING_INPUT_FIELDS, the fields
+      // skillEmbedText reads) and supplies no vector must not keep the vector
+      // computed from the earlier text. Compute the replacement from the patched
+      // row the way put() embeds a write that carries no vector: same engine
+      // (`getEmbedding(..., "document")`), same stamp fields (embeddingModel and
+      // updatedAt). When the engine returns no vector the row is stored with the
+      // embedding CLEARED (embedding/embeddingModel null) — the state put() leaves
+      // a fresh row in when its embed fails — so the existing re-embed path picks
+      // it up, rather than it keeping a vector for text it no longer holds.
+      const embedText = skillEmbedText({ ...(existingForSkill ?? {}), ...content });
+      const vec = typeof embedText === "string" && embedText.length > 0 ? await getEmbedding(embedText, "document") : null;
+      const computed = Array.isArray(vec) && vec.length > 0;
+      content.embedding = computed ? vec : null;
+      content.embeddingModel = computed ? getModelId() : null;
+      content.updatedAt = new Date().toISOString();
     }
     const patched = await super.patch(content, query);
     // embedding-space-guard slice 1 (flair#2425): a PATCH that stores an

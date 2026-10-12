@@ -57,6 +57,14 @@ export function skillEmbedText(content: any): string | undefined {
 }
 
 /**
+ * The write-body fields a stored embedding is computed from: exactly the fields
+ * skillEmbedText reads — `content`, plus `trigger` for a skill-tagged row. A
+ * write that changes one of these and supplies no vector must refresh the
+ * vector (see Memory.put/patch; resources/memory-redaction.ts shares this set).
+ */
+export const MEMORY_EMBEDDING_INPUT_FIELDS = Object.freeze(["content", "trigger"] as const);
+
+/**
  * Force a skill-tagged write to durability=persistent. Rejects an explicit
  * ephemeral/session durability (a skill that expires is a contradiction);
  * every other value — including the "standard" default and "permanent" — is
