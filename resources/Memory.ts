@@ -1980,7 +1980,9 @@ export class Memory extends (databases as any).flair.Memory {
     // after redaction. Skill writes are refused above. A surviving
     // supplied vector is stored as supplied, without text/vector validation.
     // Without a refresh, the stored vector survives only if the body omits
-    // `embedding` (including when redaction removed it); an explicit null clears it.
+    // `embedding` after redaction; an explicit `embedding: null` that survives
+    // redaction clears it. Redaction that changes `content` or `trigger` removes
+    // both embedding fields when either is non-null, so such a null does not survive.
     //
     // The vector is computed the way put() embeds a write that carries no vector
     // (same engine, `getEmbedding(..., "document")`; same stamps, embeddingModel
