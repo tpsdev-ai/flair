@@ -17,7 +17,8 @@
  *
  * The first block runs with NO Instance row on either instance, as on a fresh
  * install: the default paired case must run, and every refusal there comes
- * from the configuration check alone. The second block seeds one Instance row
+ * from the configuration check alone, except recorded-pair PID drift, which
+ * the pairing rule refuses earlier. The second block seeds one Instance row
  * on each instance: the paired case still runs, and an ops endpoint whose
  * configuration names the probed port but which reports a different Instance
  * id is refused by the identity comparison.
@@ -185,7 +186,7 @@ async function seedInstanceRows(): Promise<void> {
   instanceRowsSeeded = true;
 }
 
-describe("flair#2483 — no Instance row on either instance (a fresh install): the configuration check decides", () => {
+describe("flair#2483 — no Instance row on either instance (a fresh install): no Instance id to compare", () => {
   test("the default paired config with no Instance row: both checks run and read the probed instance's rows", async () => {
     // The shape of the clean-VM gate's doctor step: `flair doctor --port P`, the
     // per-user config `flair init` writes, no FLAIR_OPS_PORT, no Instance row.

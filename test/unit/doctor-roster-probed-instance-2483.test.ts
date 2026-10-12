@@ -122,7 +122,7 @@ describe("resolveDoctorRosterTarget — one port named with no complete pair to 
 });
 
 describe("decideProbedPairIdentity — the identities the probed HTTP port and the ops endpoint report", () => {
-  test("two single, equal identities are the same instance", () => {
+  test("two single, equal identities decide same", () => {
     expect(decideProbedPairIdentity({ kind: "one", id: "inst-a" }, { kind: "one", id: "inst-a" }))
       .toEqual({ kind: "same", id: "inst-a" });
   });
@@ -243,7 +243,7 @@ describe("decideDoctorRosterPair — run only when the ops endpoint's configured
     const decision = decideDoctorRosterPair(8925, 7926, { kind: "proven", httpPort: 8926 });
     expect(decision).toEqual({
       kind: "not-run",
-      reason: "the ops endpoint on port 8925 is configured with HTTP port 8926, not the probed HTTP port 7926, so it is not the probed instance's",
+      reason: "the configured HTTP/ops pair does not match: the ops endpoint on port 8925 is configured with HTTP port 8926, not the probed HTTP port 7926, so this check cannot be established",
       remedy: DOCTOR_ROSTER_TARGET_REMEDY,
     });
   });
@@ -252,7 +252,7 @@ describe("decideDoctorRosterPair — run only when the ops endpoint's configured
     const decision = decideDoctorRosterPair(8925, 7926, { kind: "unproven", status: null, detail: "the configuration request got no answer" });
     expect(decision).toEqual({
       kind: "not-run",
-      reason: "the ops endpoint on port 8925 could not be shown to belong to the probed HTTP port 7926 (the configuration request got no answer)",
+      reason: "the ops endpoint on port 8925 did not report a usable configured HTTP/ops pair (the configuration request got no answer), so this check cannot be established for the probed HTTP port 7926",
       remedy: DOCTOR_ROSTER_TARGET_REMEDY,
     });
   });

@@ -1,7 +1,7 @@
 /**
- * local-instance-pair.ts — the ONE check that an operations API endpoint and an
- * HTTP port belong to one local Flair instance, from that instance's own
- * configuration.
+ * local-instance-pair.ts — the ONE check of an operations API endpoint's own
+ * configured HTTP/ops port pair, used to pair that endpoint with an HTTP port on
+ * this host.
  *
  * Shared by the local delete paths (`memory hygiene --apply`, `agent remove`,
  * via src/lib/local-delete-instance.ts, flair#2225) and by `flair doctor`'s
@@ -14,14 +14,15 @@
  *   - binds that HTTP port on loopback or on all interfaces (127.0.0.1,
  *     localhost, 0.0.0.0, [::], or a bare port), and
  *   - records `operationsApi.network.port` equal to `opsPort`, the port asked.
- * It then reports the configured HTTP port; the caller compares it with the
- * HTTP port it addresses. A failed request, a non-2xx answer, a body that is
- * not JSON, or any of the three conditions unmet is `unproven`, with a detail
- * naming which.
+ * It then reports the configured HTTP port. `flair doctor` requires it to equal
+ * the HTTP port doctor probed. The delete paths compare it with `--port` only
+ * when `--port` is given; otherwise they address that configured port. A failed
+ * request, a non-2xx answer, a body that is not JSON, or any of the three
+ * conditions unmet is `unproven`, with a detail naming which.
  *
- * Its limit: `get_configuration` reports the instance's CONFIGURED ports (Harper
- * reads them from its config file). It does not observe which process is
- * listening on a port.
+ * Its limit: configured ports are not proof of the live process.
+ * `get_configuration` reports the ports the instance's config file records
+ * (Harper reads them from that file), not which process is listening on a port.
  */
 import { harperPortValue } from "./harper-port-value.js";
 
@@ -34,8 +35,8 @@ export type LocalInstancePairProof =
   | { kind: "unproven"; status: number | null; detail: string };
 
 /**
- * Ask the loopback ops endpoint on `opsPort` for its configuration and decide
- * whether it pairs with a local HTTP port (see the module comment).
+ * Ask the loopback ops endpoint on `opsPort` for its configuration and report
+ * the HTTP port it records with that ops port (see the module comment).
  * `authorization` is the full `Authorization` header value. `status` is the
  * HTTP status of a non-2xx answer, else null.
  */
