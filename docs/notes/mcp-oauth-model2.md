@@ -175,7 +175,7 @@ registered identities.
    using `FLAIR_MCP_OAUTH=1` leave the component's MCP AS disabled: it accepts only
    `true`/`false` and deletes `1`. Correct the value without re-running IdP intake
    or changing the identity mapping — the command ATTEMPTS the push, and when the
-   target cannot take the secret it leaves a 0600 file to apply by hand and exits
+   push does not land it leaves a 0600 file to apply by hand and exits
    non-zero:
 
    ```bash
@@ -189,10 +189,13 @@ registered identities.
    metadata: the target's own discovery document must advertise that issuer with
    the MCP token endpoint, and
    the public document read at that issuer must match the same normalized issuer and its token
-   endpoint. When the target cannot take the secret (an older Harper, or no secrets
-   custody on the node), it writes its own 0600 one-var file — a path distinct from
-   `mcp enable`'s, written only after a failed capability probe or a failed push, so it
-   never truncates a bundle a previous `mcp enable` staged — leaves it for manual
+   endpoint. When the push does not land — a failed capability probe, a failed push, or
+   a push whose read-back could not confirm the stored value — it writes its own 0600
+   one-var file, a path distinct from
+   `mcp enable`'s, written only when the push did not land, so it
+   never truncates a bundle a previous `mcp enable` staged. ANY occupied fallback path,
+   the default included, is refused by name rather than truncated (the writer opens
+   exclusively). It leaves the file for manual
    application and exits
    non-zero.
 

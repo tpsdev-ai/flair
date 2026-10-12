@@ -1067,11 +1067,20 @@ export function defaultRefreshSecretsStagingPath(issuer: string): string {
 /** Write the secrets bundle to a 0600 staging file, `KEY=VALUE` per line.
  *  This file legitimately carries secret material (like `grant`'s 0600 key
  *  files) — the "never print secret values" rule is about stdout/returned
- *  result objects, not this deliberately-created, permission-locked file. */
-export function writeSecretsStagingFile(path: string, bundle: Record<string, string>): void {
+ *  result objects, not this deliberately-created, permission-locked file.
+ *
+ *  `exclusive` opens with `O_CREAT|O_EXCL` (flag `wx`): the write FAILS rather
+ *  than truncate a file that is already there. The refresh fallback uses it so a
+ *  pre-existing file at the target path — including the full IdP credentials
+ *  bundle an operator may have staged there — can never be erased (flair#2283). */
+export function writeSecretsStagingFile(
+  path: string,
+  bundle: Record<string, string>,
+  opts: { exclusive?: boolean } = {},
+): void {
   mkdirSync(dirname(path), { recursive: true });
   const body = Object.entries(bundle).map(([k, v]) => `${k}=${v}`).join("\n") + "\n";
-  writeFileSync(path, body, { mode: 0o600 });
+  writeFileSync(path, body, { mode: 0o600, flag: opts.exclusive ? "wx" : "w" });
   chmodSync(path, 0o600);
 }
 
@@ -3365,14 +3374,18 @@ export interface RefreshMcpFlagResult {
  * can take the secret does it check the secret row's processEnv marker and verify a
  * restart by PID change; when the target cannot, it leaves a 0600 file to apply by
  * hand and returns `{ ok: false }` — the failure signal the `flair mcp enable` CLI
- * turns into a non-zero exit. That fallback file is written only after a failed
- * capability probe or a failed push, never before probing and never on a push that
- * landed, and to this command's OWN default filename
- * (`defaultRefreshSecretsStagingPath`, never the `mcp enable` one); an EXPLICIT
- * `secretsStagingPath` that already holds a file is refused by name, not truncated
+ * turns into a non-zero exit. That fallback RETURN happens BEFORE the two discovery
+ * checks below. The fallback file is written only when the push did not land — after a
+ * failed capability probe, a failed push, or a push whose read-back could not confirm
+ * the stored value — never before probing — and to this command's OWN default filename
+ * (`defaultRefreshSecretsStagingPath`, never the `mcp enable` one). ANY occupied
+ * fallback path, the default INCLUDED, is refused by name, not truncated (the writer
+ * opens exclusively), so a full IdP bundle an operator staged at that path survives
+ * byte-identical
  * (flair#2283). It does
  * NOT run the IdP-credential intake nor apply CIMD changes, and it reads and
- * writes no IdP secret value. It then verifies two documents by name: the
+ * writes no IdP secret value. Only after a landed push and a PID-verified restart does
+ * it verify two documents by name: the
  * target's own discovery document must advertise the issuer being verified with
  * the MCP token endpoint, and the PUBLIC document read at that issuer must
  * match the same normalized issuer and its token endpoint — the shared discriminator
@@ -3403,6 +3416,27 @@ export async function refreshMcpOAuthFlag(
   const issuer = (params.issuer ?? params.instance).replace(/\/+$/, "");
   const stagedPath = params.secretsStagingPath ?? defaultRefreshSecretsStagingPath(params.instance);
 
+  // The one-var fallback is written EXCLUSIVELY. An occupied path — the target's
+  // OWN default INCLUDED — is refused by name, never truncated, because it may be
+  // the full IdP credentials bundle a prior `mcp enable --secrets-path` staged
+  // there (flair#2283). Returns the refusal message instead of writing in that
+  // case; `stagedFallbackPath` is set only when a file was really created.
+  const occupiedMessage = (path: string) =>
+    `refusing to write the one-var bundle over the existing file at ${path}; remove it or name a path that does not exist`;
+  // Returns the refusal message when the target path is already occupied, or null
+  // when the file was really created; `stagedFallbackPath` is set only in the latter
+  // case (flair#2283).
+  const writeFallback = (): string | null => {
+    try {
+      writeSecretsStagingFile(stagedPath, { FLAIR_MCP_OAUTH: "true" }, { exclusive: true });
+      stagedFallbackPath = stagedPath;
+      return null;
+    } catch (err: any) {
+      if (err?.code === "EEXIST") return occupiedMessage(stagedPath);
+      throw err;
+    }
+  };
+
   if (dryRun) {
     currentStep = "secrets-provisioning";
     push(true, `--dry-run: would push an encrypted FLAIR_MCP_OAUTH=true update to ${params.instance}, check the secret row's processEnv marker, restart and check discovery metadata; nothing was changed.`);
@@ -3411,27 +3445,29 @@ export async function refreshMcpOAuthFlag(
 
   try {
     currentStep = "secrets-provisioning";
-    // An EXPLICIT staging path is the operator's own target. Never truncate a file
-    // that is already there — it may be the full IdP credentials bundle a prior
-    // `flair mcp enable` staged — so REFUSE by name and leave it byte-identical
+    // An EXPLICIT staging path is the operator's own target. Refuse an occupied one
+    // BEFORE probing, so no request is made and the file is left byte-identical
     // (flair#2283).
     if (params.secretsStagingPath && existsSync(params.secretsStagingPath)) {
-      const message = `refusing to write the one-var bundle over the existing file at ${params.secretsStagingPath}; remove it or name a path that does not exist`;
+      const message = occupiedMessage(params.secretsStagingPath);
       push(false, message);
       return { ok: false, dryRun, steps, refused: { message }, failedStep: "secrets-provisioning" };
     }
     // Probe FIRST: the staged one-var file is a FALLBACK, written only when the
-    // target cannot take the secret — after the capability probe fails or the push
-    // fails — never an unconditional truncating write ahead of the probe
-    // (flair#2283).
+    // target cannot take the secret — after the capability probe fails, the push
+    // fails, or the push is stored but its read-back cannot confirm it — never an
+    // unconditional truncating write ahead of the probe (flair#2283).
     const cap = await probeSecretsCapability(
       resolveOpsUrl(params.instance),
       basicAuthHeader(params.adminUser, params.adminPass),
       { fetchImpl: deps.fetchImpl },
     );
     if (!cap.available || !cap.publicKeyPem) {
-      writeSecretsStagingFile(stagedPath, { FLAIR_MCP_OAUTH: "true" });
-      stagedFallbackPath = stagedPath;
+      const refusal = writeFallback();
+      if (refusal) {
+        push(false, refusal);
+        return { ok: false, dryRun, steps, refused: { message: refusal }, failedStep: "secrets-provisioning" };
+      }
       push(false, `cannot set FLAIR_MCP_OAUTH over the ops API: ${cap.reason}. The one-var bundle is staged at ${stagedPath} (0600); apply it to ${params.instance}'s process environment and restart.`);
       return { ok: false, dryRun, steps, failedStep: "secrets-provisioning", secretsPath: stagedFallbackPath };
     }
@@ -3443,10 +3479,20 @@ export async function refreshMcpOAuthFlag(
       { fetchImpl: deps.fetchImpl },
     );
     if (!pushed.allOk) {
-      const failed = pushed.results.filter((r) => !r.ok).map((r) => `${r.name} (${r.detail})`).join("; ");
-      writeSecretsStagingFile(stagedPath, { FLAIR_MCP_OAUTH: "true" });
-      stagedFallbackPath = stagedPath;
-      push(false, `FLAIR_MCP_OAUTH=true was not pushed: ${failed}. The one-var bundle is staged at ${stagedPath} (0600); apply it and restart.`);
+      const failedResults = pushed.results.filter((r) => !r.ok);
+      const failed = failedResults.map((r) => `${r.name} (${r.detail})`).join("; ");
+      // A `set_secret` that returned 200 but whose read-back did not confirm the
+      // stored row with processEnv=true is NOT "not pushed": it was stored, but its
+      // storage could not be confirmed (flair#2283).
+      const lead = failedResults.every((r) => r.kind === "confirm")
+        ? "FLAIR_MCP_OAUTH=true was pushed, but its storage with processEnv=true could not be confirmed"
+        : "FLAIR_MCP_OAUTH=true was not pushed";
+      const refusal = writeFallback();
+      if (refusal) {
+        push(false, refusal);
+        return { ok: false, dryRun, steps, refused: { message: refusal }, failedStep: "secrets-provisioning" };
+      }
+      push(false, `${lead}: ${failed}. The one-var bundle is staged at ${stagedPath} (0600); apply it and restart.`);
       return { ok: false, dryRun, steps, failedStep: "secrets-provisioning", secretsPath: stagedFallbackPath };
     }
     push(true, `FLAIR_MCP_OAUTH=true pushed to the target as an enc:v1 env-secret (tier ${PROCESS_ENV_TIER}); the value was sealed locally.`);

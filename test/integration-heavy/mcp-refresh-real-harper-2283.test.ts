@@ -26,7 +26,8 @@
  * actual ops API is exercised. Discovery reads (only reached on the push-success
  * branch) stay at the served origin, which is also real.
  *
- * The routing fetch also RECORDS every ops exchange, so the assertions below are
+ * The routing fetch also RECORDS every ops exchange whose fetch COMPLETES (a router
+ * that threw before its fetch resolved records nothing), so the assertions below are
  * made against the request refresh ITSELF issues — its own capability probe — and
  * against Harper's own answer to it, rather than a probe this file runs separately.
  * A fetch that broke the ops route (rejecting every ops request) would leave no such

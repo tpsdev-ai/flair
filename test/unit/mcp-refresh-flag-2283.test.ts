@@ -43,6 +43,14 @@
  * binding, self-verify, an ineffective restart, an unexpected error) leave no file
  * and therefore no `secretsPath`; only the two fallback branches — a failed
  * capability probe and a failed push — carry the path they really staged.
+ *
+ * flair#2283 round 10 makes the fallback writer EXCLUSIVE (`wx`): an occupied path —
+ * refresh's OWN default INCLUDED, not just an explicit `--secrets-path` — is refused
+ * by name and left byte-identical, so a full IdP bundle an operator staged at the
+ * default path via `mcp enable --secrets-path` survives a refresh that needs the
+ * fallback. A push that stored the row but whose read-back could not confirm
+ * `processEnv=true` is reported as storage that "could not be confirmed", not "was
+ * not pushed".
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -101,6 +109,8 @@ afterAll(() => {
  *    the restart verification must fail.
  *  - `failPush` makes the capability probe succeed but the `set_secret` push fail,
  *    so refresh takes its fallback AFTER the push rather than at the probe.
+ *  - `inertPush` makes `set_secret` return 200 but the read-back report
+ *    `processEnv:false`, so the push was STORED but its storage is unconfirmed.
  *  - `throwOn` throws the named ops operation, so refresh hits its unexpected-error
  *    catch after the push.
  *
@@ -108,7 +118,7 @@ afterAll(() => {
  *  requested: a run that never restarts (or restarts ineffectively) sees an
  *  unchanged PID, so the verification cannot pass on a no-op. */
 function opsFetch(
-  opts: { disablePush?: boolean; failPush?: boolean; otherIssuer?: string; throwOn?: string; discovery?: (url: URL) => Response | undefined; restartWithoutEffect?: boolean } = {},
+  opts: { disablePush?: boolean; failPush?: boolean; inertPush?: boolean; otherIssuer?: string; throwOn?: string; discovery?: (url: URL) => Response | undefined; restartWithoutEffect?: boolean } = {},
 ) {
   const sent: any[] = [];
   let restarts = 0;
@@ -138,7 +148,7 @@ function opsFetch(
         ? Response.json({ error: "set_secret refused by fixture" }, { status: 400 })
         : Response.json({ ok: true });
     }
-    if (op === "search_by_value") return Response.json([{ name: body.search_value, processEnv: true }]);
+    if (op === "search_by_value") return Response.json([{ name: body.search_value, processEnv: !opts.inertPush }]);
     if (op === "restart") {
       if (!opts.restartWithoutEffect) restarts++;
       return Response.json({ ok: true });
@@ -263,6 +273,28 @@ describe("refreshMcpOAuthFlag (flair#2283 item 2)", () => {
     expect(sent.some((b) => b.operation === "get_secrets_public_key")).toBe(true);
     expect(sent.some((b) => b.operation === "set_secret")).toBe(true);
     expect(result.steps.find((s) => s.step === "secrets-provisioning")?.detail).toContain(stagedPath);
+    expect(readFileSync(stagedPath, "utf8")).toBe("FLAIR_MCP_OAUTH=true\n");
+    expect(result.secretsPath).toBe(stagedPath);
+  });
+
+  // flair#2283 round 10: a `set_secret` that returned 200 but whose read-back could
+  // not confirm processEnv=true was STORED — refresh must not call that "not pushed".
+  // It reports storage that "could not be confirmed" and still stages the fallback.
+  test("a stored push whose processEnv read-back is unconfirmed is reported as unconfirmed, not as not pushed", async () => {
+    shape = "plugin-live";
+    const { impl, sent } = opsFetch({ inertPush: true });
+    const stagedPath = base().secretsStagingPath;
+    rmSync(stagedPath, { force: true });
+    const result = await refreshMcpOAuthFlag(base(), { fetchImpl: impl, ...FAST });
+    expect(result.ok).toBe(false);
+    expect(result.failedStep).toBe("secrets-provisioning");
+    // The push was attempted and read back; the row just did not show processEnv=true.
+    expect(sent.some((b) => b.operation === "set_secret")).toBe(true);
+    expect(sent.some((b) => b.operation === "search_by_value")).toBe(true);
+    const detail = result.steps.find((s) => s.step === "secrets-provisioning")?.detail ?? "";
+    expect(detail).toContain("could not be confirmed");
+    expect(detail).not.toContain("was not pushed");
+    // The fallback is still left on disk and named.
     expect(readFileSync(stagedPath, "utf8")).toBe("FLAIR_MCP_OAUTH=true\n");
     expect(result.secretsPath).toBe(stagedPath);
   });
@@ -405,5 +437,51 @@ describe("refreshMcpOAuthFlag (flair#2283 item 2)", () => {
     expect(readFileSync(explicit, "utf8")).toBe(existing);
     expect(sent).toEqual([]);
     expect(result.secretsPath).toBeUndefined();
+  });
+
+  // flair#2283 round 10: refresh's OWN default filename can be occupied too — an
+  // operator may name `defaultRefreshSecretsStagingPath` in `mcp enable
+  // --secrets-path`, staging the full IdP bundle there. When refresh then needs its
+  // fallback, it must refuse BY NAME and write nothing, never truncating that bundle;
+  // the writer opens exclusively (`wx`), so the file is byte-identical afterwards and
+  // the result names the refusal instead of a path it did not write.
+  test("a pre-existing file at refresh's DEFAULT staging path is refused by name, not truncated", async () => {
+    shape = "plugin-live";
+    const home = mkdtempSync(join(tmpdir(), "flair-2283-refresh-home-occ-"));
+    const prevHome = process.env.HOME;
+    const prevProfile = process.env.USERPROFILE;
+    process.env.HOME = home;
+    process.env.USERPROFILE = home;
+    try {
+      const refreshPath = defaultRefreshSecretsStagingPath(INSTANCE);
+      mkdirSync(join(home, ".flair"), { recursive: true });
+      const idpBundle =
+        "FLAIR_MCP_OAUTH=true\n" +
+        "OAUTH_GITHUB_CLIENT_ID=idp-client\n" +
+        "OAUTH_GITHUB_CLIENT_SECRET=idp-secret\n" +
+        "OAUTH_GITHUB_REDIRECT_URI=https://agent-a.harperfabric.com/oauth\n";
+      writeFileSync(refreshPath, idpBundle, { mode: 0o600 });
+
+      // disablePush => the capability probe fails => refresh needs its fallback,
+      // whose path IS the file above. A truncating writer would erase the bundle.
+      const { impl } = opsFetch({ disablePush: true });
+      const result = await refreshMcpOAuthFlag(
+        { instance: INSTANCE, adminUser: "admin", adminPass: "pw" },
+        { fetchImpl: impl, ...FAST },
+      );
+
+      expect(result.ok).toBe(false);
+      expect(result.failedStep).toBe("secrets-provisioning");
+      // The refusal names the occupied path, and nothing was written.
+      expect(result.refused?.message ?? "").toContain(refreshPath);
+      expect(readFileSync(refreshPath, "utf8")).toBe(idpBundle);
+      expect(result.secretsPath).toBeUndefined();
+    } finally {
+      if (prevHome === undefined) delete process.env.HOME;
+      else process.env.HOME = prevHome;
+      if (prevProfile === undefined) delete process.env.USERPROFILE;
+      else process.env.USERPROFILE = prevProfile;
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });

@@ -129,6 +129,11 @@ export interface PushedSecret {
   name: string;
   ok: boolean;
   detail?: string;
+  /** Which stage decided the outcome: `"push"` when `set_secret` itself failed
+   *  (or threw), `"confirm"` when it returned 200 but the read-back could not
+   *  confirm the stored row carries `processEnv=true` — the row was stored, but
+   *  its storage is unconfirmed, not "not pushed" (flair#2283). Absent when `ok`. */
+  kind?: "push" | "confirm";
 }
 
 /**
@@ -155,7 +160,7 @@ export async function pushSecrets(
        );
       const err = String(r.json?.error ?? "").slice(0, 140);
       if (!r.ok) {
-        results.push({ name, ok: false, detail: `HTTP ${r.status}${err ? `: ${err}` : ""}` });
+        results.push({ name, ok: false, kind: "push", detail: `HTTP ${r.status}${err ? `: ${err}` : ""}` });
         continue;
        }
 
@@ -169,17 +174,17 @@ export async function pushSecrets(
         fetchImpl,
         );
       if (!verify.ok) {
-        results.push({ name, ok: false, detail: `push returned 200 but verify failed HTTP ${verify.status}` });
+        results.push({ name, ok: false, kind: "confirm", detail: `push returned 200 but verify failed HTTP ${verify.status}` });
         continue;
         }
       const row = Array.isArray(verify.json) ? verify.json[0] : verify.json?.[0];
       if (!row || (row as Record<string, unknown>).processEnv !== true) {
-        results.push({ name, ok: false, detail: `push returned 200 but read-back shows processEnv is ${row?.processEnv ?? "missing"}, not true — secret is inert` });
+        results.push({ name, ok: false, kind: "confirm", detail: `push returned 200 but read-back shows processEnv is ${row?.processEnv ?? "missing"}, not true — secret is inert` });
         continue;
         }
       results.push({ name, ok: true });
      } catch (err: any) {
-      results.push({ name, ok: false, detail: String(err?.message ?? err).slice(0, 140) });
+      results.push({ name, ok: false, kind: "push", detail: String(err?.message ?? err).slice(0, 140) });
      }
     }
   return { allOk: results.every((x) => x.ok), results };
