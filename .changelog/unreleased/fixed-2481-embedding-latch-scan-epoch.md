@@ -1,1 +1,1 @@
-- **An embedding-space scan discards its verdict when a foreign-stamp write is noted during the scan (#2481).**
+- **Embedding-space scans preserve a newer guard verdict (#2481).**

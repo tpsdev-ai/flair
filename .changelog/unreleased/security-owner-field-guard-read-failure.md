@@ -1,0 +1,1 @@
+- **The owner-field guard refuses non-admin writes when it cannot read stored ownership.**
