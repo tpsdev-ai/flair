@@ -4,7 +4,7 @@
  *
  * Real-Harper coverage that the Cursor wake runner ATTEMPTS A SOURCED LAUNCH
  * RECEIPT through the production memory path on a successful handoff (a
- * classified refusal is acked without one). Each cycle runs through the
+ * classified refusal is ackable without one). Each cycle runs through the
  * internal `runWakeCycleCore` (flair#1944 round 8 — the EXPORTED `runWakeCycle`
  * takes no test seam; the core it delegates to does) on ONE real Flair client —
  * the runner builds the receipt store from that client (flair#1944 round 7) —

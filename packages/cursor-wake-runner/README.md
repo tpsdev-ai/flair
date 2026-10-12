@@ -28,10 +28,10 @@ FLAIR_AGENT_ID=anvil CURSOR_API_KEY=… \
 FLAIR_AGENT_ID=anvil bun packages/cursor-wake-runner/src/cli.ts --once --dry-run
 ```
 
-A live cycle loads and validates the Ed25519 key for `FLAIR_AGENT_ID` before
+A live cycle loads and validates the private Ed25519 key for `FLAIR_AGENT_ID` before
 reading the feed, launching Cursor or writing a receipt. Every FlairClient
 request uses that cached key, with no admin Basic fallback. A key missing before
-loading, unparsable or not Ed25519 is refused by name; removing its file after
+loading, unparsable, public or not Ed25519 is refused by name; removing its file after
 loading does not stop signed requests. The receipt store also requires signing.
 The catchup reader and receipt store use the same Flair client and agent id.
 Cursor launches use Cursor API Basic authentication with `CURSOR_API_KEY`.
@@ -119,8 +119,8 @@ without one (see **Refused**) — and a failed write is classified:
   the row untouched, not acked.
 - **Failed** — anything else: a network error or timeout, 401, 403, 408, 429,
   a 5xx, or a failed read. The event is not acked, `receiptFailed`
-  is set, the next cycle can retry the receipt, and a one-shot run (`--once`)
-  exits 2 (a poller under `--interval` keeps polling).
+  is set, and it can be retried if another cycle runs. A one-shot run (`--once`)
+  exits 2 without scheduling a retry; `--interval` keeps polling.
 
 Covered by `test/integration/host-source-cursor-launch-receipt-1940.test.ts`
 (the runner cycle against a real Harper — it also pins that an unrelated memory at

@@ -214,8 +214,8 @@ describe("flair#1944 round 10 — a live cycle signs every FlairClient request",
       `POST /OrgEventCatchup/${agent.id}`,
     ]);
     expect(client.signingRequired, "the start check LOCKED the client to signed-only").toBe(true);
-    expect(result.items[0]?.action, "the dispatch was really launched (created)").toBe("launched");
-    expect(result.items[0]?.receipt, "the receipt landed through the client's own memory").toBe("written");
+    expect(result.items[0]?.action, "the Cursor stub returned a created outcome").toBe("launched");
+    expect(result.items[0]?.receipt, "the receipt PUT was accepted through the client").toBe("written");
     expect(
       recorded.some((r) => r.method === "POST" && r.url === "/v1/agents"),
       "the live cycle calls Cursor",

@@ -244,7 +244,7 @@ function sameSourceIdentity(
  * too large (413), an unprocessable request (422). The runner treats these
  * statuses as non-retryable. Every other failure — a network error, a timeout,
  * 401/403, 408, 429, any 5xx, any other status — is treated as transient or a
- * configuration fault and retried next cycle.
+ * configuration fault; the event remains unacked and can be retried if another cycle runs.
  */
 export const RECEIPT_PERMANENT_REFUSAL_STATUSES: ReadonlySet<number> = new Set([400, 409, 413, 422]);
 
@@ -277,7 +277,7 @@ function errorCodeFrom(body: unknown): string | null {
  * Classify a receipt WRITE failure. Returns the refusal when the error carries
  * an HTTP `status` (flair-client's FlairError exposes `status` and the response
  * `body`) in {@link RECEIPT_PERMANENT_REFUSAL_STATUSES}; otherwise null, and the
- * caller keeps the watermark back and retries. Only the status and the named
+ * caller leaves the event unacked; it can be retried if another cycle runs. Only the status and the named
  * error code, when present, are returned — never the server's message, which can
  * echo the submitted values.
  */

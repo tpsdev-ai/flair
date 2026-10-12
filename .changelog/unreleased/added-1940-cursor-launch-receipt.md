@@ -19,10 +19,10 @@
   private by default for a new receipt and omits `hostSourceScope`, so its bound pointer is author-only. Only a
   live run signed with the agent's own key writes the receipt, and that signing
   requirement is enforced at the START of the exported runner — `runWakeCycle`
-  LOADS AND VALIDATES the agent's Ed25519 key into the client and LOCKS it to
+  LOADS AND VALIDATES the agent's private Ed25519 key into the client and LOCKS it to
   signed-only, by name, before it reads the feed or launches Cursor, so every
-  FlairClient request in the cycle is signed with that loaded key (an unparsable or non-Ed25519
-  key file is refused there, by name) — and again WHERE THE WRITE HAPPENS: the
+  FlairClient request in the cycle is signed with that loaded key (a public, unparsable or non-Ed25519
+  key is refused there, by name) — and again WHERE THE WRITE HAPPENS: the
   production receipt store requires the key, and the client fails closed (no admin
   Basic fallback) when none resolves at send time; the loaded key is cached and
   still signs, so removing the key file cannot cause a Basic fallback. Admin Basic
@@ -53,7 +53,7 @@
   reported as `receiptRefused` with the status and an error token, when present.
   Skipped events are ackable without a launch or receipt; a later failure can
   still ack earlier successful or skipped events. Any other failed write leaves
-  that event unacknowledged for the next cycle and
-  is reported as `receiptFailed`. An invalid id omits the pointer; an invalid
+  that event unacknowledged and is reported as `receiptFailed`; it can be retried
+  if another cycle runs. `--once` schedules no retry. An invalid id omits the pointer; an invalid
   url omits only the url. Omissions are logged through the supplied callback.
   Read or write failure can still prevent the receipt.

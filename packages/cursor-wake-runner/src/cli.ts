@@ -3,8 +3,8 @@
  * cursor-flair-wake — the #1613 consume + wake runner.
  *
  * Drains the configured agent's OrgEventCatchup (signed on live cycles) and launches
- * one Cursor Cloud Agent per directed coord.dispatch / a2a.message. Live cycles
- * ack skipped events and handoffs whose receipt succeeds, verifies or is refused.
+ * one Cursor Cloud Agent per directed coord.dispatch / a2a.message. Skipped events
+ * and handoffs with written, verified or classified-refused receipts are ackable.
  * Reuses the client-supplied agentId on redelivery.
  */
 
@@ -21,7 +21,7 @@ function printResult(result: WakeResult): void {
   if (result.receiptFailed) lines.push(`receipt failed: ${result.receiptFailed}`);
   if (result.receiptMismatched) lines.push(`receipt id conflict: ${result.receiptMismatched}`);
   for (const refused of result.receiptRefused) {
-    lines.push(`receipt refused: ${refused.eventId} (HTTP ${refused.status}${refused.code ? ` ${refused.code}` : ""}; acked without it)`);
+    lines.push(`receipt refused: ${refused.eventId} (HTTP ${refused.status}${refused.code ? ` ${refused.code}` : ""}; ackable without it)`);
   }
   for (const item of result.items) {
     const cursor = item.cursorAgentId ? ` ${item.cursorAgentId}` : "";

@@ -214,7 +214,7 @@ describe("buildLaunchReceipt — content + host source, omitting what the gramma
     expect(built.omittedSource).toBe(true);
   });
 
-  test("isAcceptableHostSourceUrl accepts https and rejects http and empty userinfo", () => {
+  test("isAcceptableHostSourceUrl accepts the tested https URL and rejects http and empty userinfo", () => {
     expect(isAcceptableHostSourceUrl("https://cursor.example/x")).toBe(true);
     expect(isAcceptableHostSourceUrl("http://cursor.example/x")).toBe(false);
     expect(isAcceptableHostSourceUrl("https://@cursor.example/x")).toBe(false);
@@ -289,7 +289,7 @@ describe("runWakeCycleCore — the launch receipt (flair#1944)", () => {
     expect(acks).toEqual(["p1"]);
   });
 
-  test("a receipt write failure is a named outcome and does not ack", async () => {
+  test("an unclassified write error is receiptFailed and leaves the event unacked", async () => {
     const order: string[] = [];
     const { store } = fakeStore(order, { failWrite: true });
     const { port, acks } = catchupWith(order, [{ events: [dispatchEvent()], hasMore: false }]);
@@ -490,7 +490,7 @@ describe("permanentReceiptRefusal — which receipt write failures are non-retry
     }
   });
 
-  test("the code is only a named token: free text, non-JSON and a missing error read as null", () => {
+  test("the tested free-text, non-JSON and missing-error bodies yield no code", () => {
     expect(permanentReceiptRefusal(serverError(400, JSON.stringify({ error: "supersedes must be a string (memory ID)" })))?.code).toBeNull();
     expect(permanentReceiptRefusal(serverError(400, "Bad Request"))?.code).toBeNull();
     expect(permanentReceiptRefusal(serverError(400, ""))?.code).toBeNull();

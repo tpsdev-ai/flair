@@ -36,12 +36,11 @@ describe("startSerialTicks — a delayed cycle is never overlapped (flair#1944 r
     expect(starts, "the interval loop must keep ticking").toBeGreaterThanOrEqual(3);
   });
 
-  test("the first tick runs immediately, and stop() ends the loop", async () => {
+  test("the first tick runs without waiting for the interval, and stop() ends the loop", async () => {
     let starts = 0;
     const serial = startSerialTicks(async () => {
       starts += 1;
     }, 0.005);
-    // The first tick is scheduled, not awaited; one microtask flush is enough.
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(starts).toBe(1);
     serial.stop();

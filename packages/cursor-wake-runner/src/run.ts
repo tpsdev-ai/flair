@@ -37,7 +37,7 @@ export interface WakeItem {
   cursorAgentId?: string;
   url?: string;
   reason?: string;
-  /** flair#1944 — the launch receipt this handoff recorded: "written" or "unchanged" (a VERIFIED existing receipt), "refused" (a non-retryable refusal; ackable without it), "failed" (transient or configuration; not acked), or "mismatched" (the id is held by a row not verified as this receipt; not acked). */
+  /** flair#1944 — the handoff's receipt outcome: "written" or "unchanged" (a VERIFIED existing receipt), "refused" (a non-retryable refusal; ackable without it), "failed" (transient or configuration; not acked), or "mismatched" (the id is held by a row not verified as this receipt; not acked). */
   receipt?: "written" | "unchanged" | "failed" | "refused" | "mismatched";
 }
 
@@ -79,7 +79,7 @@ export interface WakeDeps {
    * the agent's Flair feed).
    */
   cursor: CursorLaunchConfig;
-  /** One line for a receipt that omits a value the server's grammar would refuse, and one for a receipt the server refused. */
+  /** One line for a receipt that omits a value the server's grammar would refuse, and one for a classified non-retryable refusal. */
   log?: (line: string) => void;
   /** When true, no Cursor create, receipt write or ack; catchup may persist its position. */
   dryRun?: boolean;
@@ -153,7 +153,7 @@ function mismatchReason(stored: StoredReceipt, agentId: string, receipt: LaunchR
 }
 
 /**
- * Attempt the launch receipt for a handed-off dispatch, idempotently.
+ * Attempt the launch receipt for a handed-off dispatch.
  *
  * A row already present under the stable id is LEFT UNCHANGED only when it
  * VERIFIES as this runner's own receipt (isStoredReceipt — same author, same
@@ -163,8 +163,7 @@ function mismatchReason(stored: StoredReceipt, agentId: string, receipt: LaunchR
  * the caller does NOT ack it. A write the runner treats as a non-retryable
  * refusal (permanentReceiptRefusal) surfaces as `"refused"` with its status and
  * error code; that event is ackable. Any other read or write failure surfaces
- * as `"failed"` (the caller keeps the watermark back and the next cycle
- * retries).
+ * as `"failed"` (the event remains unacked and can be retried if another cycle runs).
  */
 async function recordLaunchReceipt(
   agentId: string,
@@ -196,7 +195,7 @@ async function recordLaunchReceipt(
   try {
     stored = await store.read(receipt.id);
   } catch (err) {
-    // An unknown read never licenses a write, and is retried next cycle.
+    // A failed read leaves the event unacked; it can be retried if another cycle runs.
     return { status: "failed", error: message(err) };
   }
   if (stored !== null) {
@@ -340,8 +339,8 @@ export async function runWakeCycleCore(deps: WakeDeps, parts: WakeCycleParts): P
         // failure can prevent the receipt entirely. The ack follows a successful
         // write OR
         // an existing row VERIFIED as this runner's receipt. A transient or
-        // configuration failure does not ack, so the next cycle retries the
-        // receipt. A refusal the runner treats as non-retryable is reported and
+        // configuration failure leaves the event unacked; it can be retried if
+        // another cycle runs. A refusal the runner treats as non-retryable is reported and
         // the event is ackable without its receipt. A row
         // at the id that is NOT this runner's receipt does not ack either — it is
         // reported and left untouched.
@@ -352,7 +351,7 @@ export async function runWakeCycleCore(deps: WakeDeps, parts: WakeCycleParts): P
             const { status, code } = receipt.refusal;
             result.receiptRefused.push({ eventId: dispatch.id, status, code });
             deps.log?.(
-              `cursor-wake: receipt for ${dispatch.id} refused (HTTP ${status}${code ? ` ${code}` : ""}); the runner treats it as non-retryable and acks the event without it — the launch stands`,
+              `cursor-wake: receipt for ${dispatch.id} refused (HTTP ${status}${code ? ` ${code}` : ""}); the runner treats it as non-retryable and the event is ackable without it — the launch stands`,
             );
           }
           if (receipt.status === "failed") {

@@ -261,10 +261,10 @@ export class FlairClient {
   }
 
   /**
-   * Resolve, validate and cache an Ed25519 key, then require signed requests.
+   * Resolve, validate and cache a private Ed25519 key, then require signed requests.
    * Removing or replacing its file after loading does not replace the cached key.
    * Throws MissingSigningKeyError for Basic mode, no resolved key or a load error
-   * (lookup detail and the underlying error), or a non-Ed25519 key (key type,
+   * (lookup detail and the underlying error), or a public, secret or non-Ed25519 key (key type,
    * without its file path). Returns the loaded key.
    */
   async loadSigningKey(): Promise<KeyObject> {
@@ -283,6 +283,12 @@ export class FlairClient {
     }
     if (!key) {
       throw new MissingSigningKeyError(this.agentId, describeKeyLookup(this.lastKeyLookup));
+    }
+    if (key.type !== "private") {
+      throw new MissingSigningKeyError(
+        this.agentId,
+        `the key resolved for this agent is ${key.type}, not a private signing key`,
+      );
     }
     if (key.asymmetricKeyType !== "ed25519") {
       throw new MissingSigningKeyError(
