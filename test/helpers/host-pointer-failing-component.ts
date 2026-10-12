@@ -189,8 +189,8 @@ export const FAILING_REPAIR_PEER_WRITE_MODULE_REL = join("dist", "resources", "z
 /** A test-only module for a composed copy (see
  *  `componentWithFailingRepairPeerWrite`): one `Peer.put` is failed ON DEMAND,
  *  when the test arms a marker file named `arm.repair-peer-write-fail.<peerId>`
- *  under FLAIR_TEST_PAUSE_DIR. The arm file is CONSUMED (one-shot), so the retry
- *  after the refusal succeeds. On Federation.ts's token re-pair path the write
+ *  under FLAIR_TEST_PAUSE_DIR. The arm file is CONSUMED (one-shot).
+ *  On Federation.ts's token re-pair path the write
  *  lands INSIDE the owned transaction, after the token consume has been staged. */
 export const FAILING_REPAIR_PEER_WRITE_MODULE_SRC = `import { existsSync, unlinkSync } from "node:fs";
 import { join } from "node:path";

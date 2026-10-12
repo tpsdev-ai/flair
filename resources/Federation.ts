@@ -470,10 +470,10 @@ export class FederationInstance extends Resource {
  * existing peer — though it validates and consumes a supplied one. A re-pair of
  * a revoked peer is refused.
  *
- * A re-pair compares the peer row's pinned key and status twice: on the read
- * before its owned transaction, and again on the owned transaction's re-read of
- * the row, before the write. A key that differs is refused (409) and a revoked
- * row is refused (403 peer_revoked); either refusal writes no Peer row and
+ * Before writing, a re-pair rechecks the pinned key and status inside its owned
+ * transaction; a supplied token must pass validation before that Peer re-read.
+ * A key that differs is refused (409); otherwise a revoked
+ * row is refused (403 peer_revoked). Either refusal writes no Peer row and
  * consumes no token. A row deleted before that re-read is no longer an existing
  * peer: with a valid token the request is paired as a first-time pair with that
  * token; without one it is refused (401, a pairing token is required). On the
@@ -592,7 +592,7 @@ export class FederationPair extends Resource {
       // "Pairing tokens"). The supplied token is not the request's credential;
       // the request still has to prove key ownership above (`verifyResult`).
       //
-      // As on the first-pair path, the consume AND this peer write run in a FRESH
+      // With a supplied token, the consume AND this peer write run in a FRESH
       // OWNED transaction committed BEFORE the lock releases (withOwnedTransaction).
       // Harper commits the request's own transaction only after this handler
       // returns, so a consume that joined it would still be invisible when the lock
@@ -602,9 +602,8 @@ export class FederationPair extends Resource {
       // transaction, so the token is left unconsumed and this re-pair is refused by
       // name (a commit-time error propagates unnamed).
       //
-      // Both paths build the re-paired row from the row their owned transaction
-      // re-read (never from the pre-transaction read above), and write it through
-      // this one Peer write inside that transaction.
+      // Both paths build an existing peer's updated row from their transactional
+      // re-read, never from the pre-transaction read above.
       const rePairedRow = (base: any) => ({
         ...base,
         endpoint: endpoint ?? base.endpoint,
@@ -677,8 +676,7 @@ export class FederationPair extends Resource {
           throw err;
         }
         if (refusal) return refusal;
-        // Paired as a first-time pair: drop the token's bootstrap user, as the
-        // first-pair path does.
+        // Paired as a first-time pair: attempt bootstrap-user cleanup.
         if (pairedAsFirst) await dropPairBootstrapUser(pairingToken, ctx);
       }
 
@@ -720,8 +718,9 @@ export class FederationPair extends Resource {
       // cannot both commit a successful claim. The lock is this ONE Flair node's
       // PairingToken store lock, so it excludes concurrent pairings on this node; it
       // is not shared across the nodes of a Fabric instance (see the PR body).
-      // The first pairing consumes the token and records the peer; the second
-      // pairing is refused after the first commits.
+      // A contender exhausting lock attempts while the lock is held gets 409;
+      // one acquiring it after a successful claim commits sees the consumed
+      // token and gets 401.
       //
       // The consume AND the Peer write run in a FRESH OWNED transaction that is
       // COMMITTED before the lock releases (withOwnedTransaction). Harper wraps
@@ -801,7 +800,7 @@ function publicKeyMismatchRefusal(): Response {
   }), { status: 409, headers: { "content-type": "application/json" } });
 }
 
-/** The Peer row a first-time pair writes, built from the verified request alone. */
+/** The Peer row a first-time pair builds without an earlier Peer row. */
 function firstPairPeerRow(instanceId: string, publicKey: string, role: unknown, endpoint: unknown) {
   const at = new Date().toISOString();
   return {
@@ -819,8 +818,7 @@ function firstPairPeerRow(instanceId: string, publicKey: string, role: unknown, 
 
 /**
  * Drop the bootstrap user that was created alongside this pairing token, after a
- * first-time pair consumed it. Failure here is non-fatal: the cleanup sweep
- * (PR-5) will catch stragglers.
+ * first-time pair consumed it. Failure here is logged and non-fatal.
  */
 async function dropPairBootstrapUser(pairingToken: string, ctx: any): Promise<void> {
   try {
@@ -844,10 +842,8 @@ function peerRevokedRefusal(): Response {
 }
 
 /**
- * A re-pair's Peer write failed inside its owned transaction (flair#2333). The
- * transaction aborts, so the token claim that ran with it rolls back and the
- * token is left unconsumed. Rethrown out of the owned transaction and caught so
- * the request answers a NAMED refusal rather than a bare 500.
+ * Tag a token-supplying re-pair's Peer.put rejection inside the owned transaction
+ * callback (flair#2333), so it aborts before the caller returns peer_write_failed.
  */
 class PeerWriteFailedError extends Error {
   constructor(readonly cause: unknown) {
@@ -857,7 +853,7 @@ class PeerWriteFailedError extends Error {
 }
 
 /**
- * A re-pair's Peer re-read found a revoked row (flair#2333).
+ * A token-supplying re-pair's Peer re-read found a revoked row (flair#2333).
  * The transaction aborts, so the token claim that ran with it
  * rolls back and the token is left unconsumed; the caller answers the revoked
  * refusal, not a bare 500.
@@ -870,7 +866,7 @@ class PeerRevokedDuringRepairError extends Error {
 }
 
 /**
- * A re-pair's Peer re-read found a pinned key that is not the signed request's
+ * A token-supplying re-pair's Peer re-read found a pinned key unlike the request's
  * key (flair#2333). The transaction aborts, so the token claim that ran with it
  * rolls back and the token is left unconsumed; the caller answers the key-mismatch
  * refusal, not a bare 500.
@@ -883,10 +879,9 @@ class PeerKeyChangedDuringRepairError extends Error {
 }
 
 /**
- * 503 for a re-pair whose Peer write failed: the owned transaction aborted, so
- * NEITHER the token consume nor the Peer write committed (the request's replay
- * nonce commits earlier, separately) — the pairing token is unconsumed and
- * retryable while valid, and no peer write landed. Retry.
+ * 503 for a token-supplying re-pair whose Peer.put rejected inside the owned
+ * transaction callback. The token consume and Peer write rolled back; the
+ * replay nonce remains recorded. The token is retryable while valid.
  */
 function peerWriteFailedRefusal(): Response {
   return new Response(JSON.stringify({

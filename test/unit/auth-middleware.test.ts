@@ -345,9 +345,8 @@ describe("Basic auth super_user path", () => {
 // the /FederationPair public-bypass test and by the Basic branch itself. With a
 // case-SENSITIVE test (`startsWith("Basic ")`), a lower- or mixed-case
 // credential on /FederationPair would take the public bypass and skip the
-// Basic branch. That branch authenticates the caller and annotates the request
-// with it; FederationPair then compares an authenticated bootstrap Basic caller
-// with the pairing token's bootstrap user.
+// Basic branch. For an authenticated bootstrap Basic caller supplying a valid
+// token, FederationPair compares the annotated caller with the token's bootstrap user.
 describe("auth middleware: the Basic scheme name is case-insensitive (RFC 9110)", () => {
   test("basic/BASIC select the Basic branch — the middleware's scheme check is case-insensitive, in both places", () => {
     const src = readFileSync(join(import.meta.dir, "../../resources/auth-middleware.ts"), "utf8");

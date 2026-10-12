@@ -132,7 +132,7 @@ beforeEach(() => {
 });
 
 describe("flair#2333 — a re-pair's token consume and Peer write commit together (isolated)", () => {
-  it("a failed re-pair Peer write leaves the token UNCONSUMED and refuses by name", async () => {
+  it("a token-supplying re-pair's Peer.put rejection inside the callback leaves the token UNCONSUMED and refuses by name", async () => {
     const k = nacl.sign.keyPair();
     const peer = "flair_spoke_repair_atomic";
     const publicKey = Buffer.from(k.publicKey).toString("base64url");

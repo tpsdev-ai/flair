@@ -24,12 +24,12 @@ let harper: HarperInstance;
 let component: FailingComponent;
 let pauseDir: string;
 
-/** Refuse any target that is not the ephemeral instance this file started. */
+/** Require loopback hostnames, exclude ports 9925/9926, and check the installDir temp-path prefix. */
 function assertOwnInstance(h: HarperInstance): void {
   for (const url of [h.httpURL, h.opsURL]) {
     const u = new URL(url);
     expect(["127.0.0.1", "localhost"], url).toContain(u.hostname);
-    expect(["9925", "9926"], `${url} must be this test's own Harper`).not.toContain(u.port);
+    expect(["9925", "9926"], `${url} must exclude ports 9925/9926`).not.toContain(u.port);
   }
   if (!h.installDir.startsWith(tmpdir())) throw new Error(`refusing to run: ${h.installDir} is not a temp tree`);
 }
@@ -79,7 +79,7 @@ async function revokePeer(id: string): Promise<{ status: number; row: any }> {
   return { status: res.status, row: await readPeer(id) };
 }
 
-/** The competing operation's own RESULT — its HTTP status AND the (now absent) peer row. */
+/** The competing delete's HTTP status and the subsequent Peer read. */
 async function deletePeer(id: string): Promise<{ status: number; row: any }> {
   const res = await fetch(harper.opsURL, {
     method: "POST",
@@ -190,8 +190,7 @@ beforeAll(async () => {
   try {
     // The whole file runs against a composed copy of the built component that
     // adds the failing re-pair Peer-write module (test/helpers/
-    // host-pointer-failing-component.ts). The module is inert until a test arms
-    // its marker file, so every other case runs production code paths.
+    // host-pointer-failing-component.ts). It throws only for an armed peer ID.
     component = componentWithFailingRepairPeerWrite();
     harper = await startHarper({ cwd: component.dir });
   } finally {
@@ -292,7 +291,7 @@ describe("flair#2333 — an otherwise valid, non-revoked re-pair consumes its su
   }, 60_000);
 });
 
-describe("flair#2333 — a signed Basic-auth pairing binds the bootstrap user to the token (real Harper)", () => {
+describe("flair#2333 — authenticated bootstrap Basic callers supplying valid tokens (real Harper)", () => {
   // The binding (PR-4) used to have only a unit test that DUPLICATED the
   // validator. This drives it through the real path: a signed pairing request
   // carrying Basic credentials. The token's own bootstrap user pairs; a
@@ -360,7 +359,7 @@ describe("flair#2333 — a signed Basic-auth pairing binds the bootstrap user to
   }, 90_000);
 });
 
-describe("flair#2333 — a federation sync does not leave a revoked peer connected (real Harper)", () => {
+describe("flair#2333 — revokes at the sync's memory-merge pauses (real Harper)", () => {
   // Guard, driven through the EXISTING memory-merge pause point, so it runs as
   // written against the unmodified code too: the revoke is committed while the
   // sync is merging, and the peer row must not be left connected afterwards.
@@ -404,7 +403,7 @@ describe("flair#2333 — a federation sync does not leave a revoked peer connect
   }, 60_000);
 });
 
-describe("flair#2333 — a peer revoked during a re-pair is not brought back (real Harper)", () => {
+describe("flair#2333 — re-pair revocation and deletion interleavings (real Harper)", () => {
   // Guard: the revoke is committed after the re-pair's read of the peer row,
   // while the re_pair is paused. The re_pair must not leave the row paired.
   it("a re-pair of a concurrently revoked peer is refused 403 peer_revoked and leaves it revoked (federation-pair-repair-pre)", async () => {
@@ -488,10 +487,10 @@ describe("flair#2333 — a peer revoked during a re-pair is not brought back (re
   }, 60_000);
 });
 
-// ─── The token lock releases only AFTER the consume commits (flair#2333) ──────
+// ─── A successful token claim commits BEFORE the lock releases (flair#2333) ───
 //
 // Harper wraps POST /FederationPair in a REQUEST transaction that commits only
-// after the handler returns (harper server/REST.ts ~284), so a token consume that
+// after the handler returns (harper server/REST.ts), so a token consume that
 // JOINED that request transaction is still invisible when the token's per-key
 // lock releases. A second pairing that takes the just-freed lock then reads the
 // token UNCONSUMED and pairs a second peer. The fix runs the consume (re-read of
@@ -505,7 +504,7 @@ describe("flair#2333 — a peer revoked during a re-pair is not brought back (re
 // under the mutation that writes back in the request transaction (its pause point
 // present, the write reverted); it is not a pristine-head red.
 
-describe("flair#2333 — the token lock releases only after the consume commits: first-pair path (real Harper)", () => {
+describe("flair#2333 — a successful claim commits before lock release: first-pair path (real Harper)", () => {
   it("a pairing that takes the lock right after the first releases it is refused; one peer (federation-pair-claim-done)", async () => {
     const token = `pt-h1c-${sfx}`;
     const a = nacl.sign.keyPair();
@@ -536,7 +535,7 @@ describe("flair#2333 — the token lock releases only after the consume commits:
   }, 90_000);
 });
 
-describe("flair#2333 — the token lock releases only after the consume commits: re-pair path (real Harper)", () => {
+describe("flair#2333 — a successful claim commits before lock release: re-pair path (real Harper)", () => {
   it("a new-peer pairing that takes the lock as the re-pair releases it is refused (federation-pair-repair-pre)", async () => {
     const k = nacl.sign.keyPair();
     const peer = `h1d-peer-${sfx}`;
@@ -580,7 +579,7 @@ describe("flair#2333 — the token lock releases only after the consume commits:
 // Peer write out of the owned transaction (into the request transaction) — makes
 // the consume commit alone and turns this case red.
 
-describe("flair#2333 — a failed re-pair Peer write leaves the token unconsumed (real Harper)", () => {
+describe("flair#2333 — a token-supplying re-pair's Peer.put rejection inside the callback (real Harper)", () => {
   it("Peer.put rejecting after the consume is staged → 503 peer_write_failed, both rows unchanged, then the retry with the same token pairs once", async () => {
     const k = nacl.sign.keyPair();
     const peer = `repair-fail-${sfx}`;
@@ -635,13 +634,14 @@ describe("flair#2333 — a failed re-pair Peer write leaves the token unconsumed
 
 // ─── A re-pair re-reads the Peer row INSIDE its owned transaction (flair#2333) ─
 //
-// A revoke committed before the owned transaction's first read (its token read)
+// With a valid supplied token and matching pinned key, a revoke committed before
+// the owned transaction's first read (its token read)
 // is seen by the Peer re-read and refused with 403 peer_revoked; a revoke committed
 // after that read is not covered by this re-read. Refusing aborts the transaction
 // and rolls the staged consume back. Mutation — drop the in-transaction re-read —
 // makes the re-pair resurrect the revoked row and turns this case red.
 
-describe("flair#2333 — a re-pair re-reads the Peer row inside its owned transaction (real Harper)", () => {
+describe("flair#2333 — a re-pair with a valid token re-reads the Peer row inside its owned transaction (real Harper)", () => {
   it("a revoke committed after the pre-transaction Peer read and before the owned transaction is refused 403 peer_revoked (federation-pair-repair-token-pre)", async () => {
     const k = nacl.sign.keyPair();
     const peer = `h3b-peer-${sfx}`;
@@ -786,7 +786,7 @@ describe("flair#2333 — a re-pair rechecks the pinned key inside its owned tran
 // re-reads it, the request is no longer a re-pair: with a valid token it is paired
 // exactly as a first-time pair with that token — the row is built from the
 // verified request the way the first-pair path builds it (no field of the deleted
-// row survives) and the token's bootstrap user is dropped. Mutation — write the
+// row survives). Bootstrap-user cleanup is attempted. Mutation — write the
 // deleted row's pre-transaction fields back — turns this case red.
 
 describe("flair#2333 — a token re-pair whose Peer row was deleted pairs as a first-time pair (real Harper)", () => {
@@ -859,7 +859,7 @@ describe("flair#2333 — a token re-pair whose Peer row was deleted pairs as a f
     expect(firstPairShape(row), "the row matches a plain first pair's").toEqual(firstPairShape(firstRow));
     expect(setFields(row), "the row sets exactly the fields a plain first pair sets").toEqual(setFields(firstRow));
 
-    // The token's bootstrap user is dropped, as a first pair drops it.
+    // Assert that the best-effort bootstrap-user cleanup succeeded in this case.
     const users = await ops({ operation: "list_users" }) as any[];
     expect(users.map((u) => u.username), "the token's bootstrap user is dropped").not.toContain(bootstrapUser);
   }, 90_000);

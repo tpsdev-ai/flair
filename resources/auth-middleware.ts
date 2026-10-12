@@ -315,8 +315,7 @@ server.http(async (request: any, nextLayer: any) => {
     // through skipped that annotation, so the resource's bootstrap-user binding
     // (PR-4, resources/Federation.ts) could never see a caller and never
     // refused a mismatch. An anonymous pair request (no Authorization header)
-    // still passes through. Harper 5.3.1 defers invalid Basic credential
-    // rejection; REST settles it after this middleware, before resource dispatch.
+    // still passes through.
     (url.pathname === "/FederationPair" && !isBasic) ||
     // OAuth 2.1 public endpoints (spec requires no pre-auth)
     url.pathname === "/OAuthRegister" ||
