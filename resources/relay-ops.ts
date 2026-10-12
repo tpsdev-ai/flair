@@ -11,7 +11,7 @@
  */
 
 import type { AgentAuthVerdict } from "./agent-auth.js";
-import { withKeyLock } from "./key-lock.js";
+import { withKeyLock, type KeyLockOutcome } from "./key-lock.js";
 import { withOwnedTransaction } from "./request-transaction.js";
 import { isForbiddenOwnerMutation, ownerMutationRefusal, OWNER_FIELDS } from "./record-owner-guard.js";
 import { txnPausePoint } from "./txn-pause-point.js";
@@ -88,6 +88,31 @@ const SEND_LOCK_NAMESPACE = "flair-relay-send";
 /** Per-lock retry schedule: SEND_LOCK_ATTEMPTS attempts, SEND_LOCK_WAIT_MS apart. */
 const SEND_LOCK_ATTEMPTS = 200;
 const SEND_LOCK_WAIT_MS = 10;
+
+/**
+ * Run `fn` while holding every key in `keys`, acquired in the array's order
+ * (resources/key-lock.ts). A send holds its locks in ONE fixed order — message
+ * id, then recipient, then sender — and only ever waits for a lock later in
+ * that order than every lock it already holds, so no wait-for cycle (deadlock)
+ * is possible. Returns the innermost outcome: `{kind:"done", value}` when every
+ * lock was held and `fn` ran, `{kind:"busy"}` if any lock stayed held, or
+ * `{kind:"unavailable"}` if the store has no lock — in the last two cases `fn`
+ * never runs.
+ */
+async function withKeyLocks<T>(
+  store: unknown,
+  keys: ReadonlyArray<unknown[]>,
+  fn: () => Promise<T>,
+  attempts: number,
+  waitMs: number,
+): Promise<KeyLockOutcome<T>> {
+  const run = async (i: number): Promise<KeyLockOutcome<T>> => {
+    if (i >= keys.length) return { kind: "done", value: await fn() };
+    const held = await withKeyLock<KeyLockOutcome<T>>(store, keys[i], () => run(i + 1), attempts, waitMs);
+    return held.kind === "done" ? held.value : held;
+  };
+  return run(0);
+}
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -205,25 +230,27 @@ export async function relaySend(
   // Store the server-recomputed canonical hash (verified equal above).
   content.contentHash = computeContentHash(content);
 
-  // Within one Harper process, the message-id lock serializes id ownership;
-  // the sender lock serializes content dedup, thread sequence and per-sender
-  // cap checks with the write. The recipient-wide cap is not serialized.
+  // Within one Harper process, three per-key locks serialize a send's
+  // check-and-write, and are always acquired in ONE fixed order — message id,
+  // then recipient, then sender — so two sends can never deadlock: a send only
+  // ever waits for a lock that comes AFTER every lock it already holds, so no
+  // wait-for cycle exists. The id lock serializes id ownership; the recipient
+  // lock serializes the recipient-wide inbox cap; the sender lock serializes
+  // content dedup, thread sequence and the per-sender sub-cap. Cross-process
+  // coordination is out of scope: the lock is ONE Harper process's
+  // primary-store lock (flair#2333/#2461/#2462).
   const store = (deps.messages as any)?.primaryStore;
-  const outer = await withKeyLock(
+  const outcome = await withKeyLocks(
     store,
-    [SEND_LOCK_NAMESPACE, "id", String(content.id)],
-    () =>
-      withKeyLock(
-        store,
-        [SEND_LOCK_NAMESPACE, "from", String(content.from)],
-        () => withOwnedTransaction(deps.ctx, (owned) => storeAndDeliver(deps, content, owned)),
-        SEND_LOCK_ATTEMPTS,
-        SEND_LOCK_WAIT_MS,
-      ),
+    [
+      [SEND_LOCK_NAMESPACE, "id", String(content.id)],
+      [SEND_LOCK_NAMESPACE, "recipient", String(content.to)],
+      [SEND_LOCK_NAMESPACE, "from", String(content.from)],
+    ],
+    () => withOwnedTransaction(deps.ctx, (owned) => storeAndDeliver(deps, content, owned)),
     SEND_LOCK_ATTEMPTS,
     SEND_LOCK_WAIT_MS,
   );
-  const outcome = outer.kind === "done" ? outer.value : outer;
   if (outcome.kind === "busy") return SEND_BUSY();
   if (outcome.kind === "unavailable") return SEND_LOCK_UNAVAILABLE();
 
@@ -236,9 +263,10 @@ export async function relaySend(
 
 /**
  * The delivery half of relaySend, run while holding the send locks (the
- * message id's and the sender's): the id-ownership answer, the content dedup,
- * the per-thread seq check, the cap check and the store. Extracted so the whole
- * check-and-write runs under those locks; it is never called outside them.
+ * message id's, the recipient's and the sender's): the id-ownership answer, the
+ * content dedup, the per-thread seq check, the recipient-wide cap check and the
+ * store. Extracted so the whole check-and-write runs under those locks; it is
+ * never called outside them.
  */
 async function storeAndDeliver(
   deps: RelayDeps,
