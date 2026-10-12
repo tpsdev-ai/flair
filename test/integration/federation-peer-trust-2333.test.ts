@@ -78,6 +78,17 @@ async function revokePeer(id: string): Promise<{ status: number; row: any }> {
   return { status: res.status, row: await readPeer(id) };
 }
 
+/** The competing operation's own RESULT — its HTTP status AND the (now absent) peer row. */
+async function deletePeer(id: string): Promise<{ status: number; row: any }> {
+  const res = await fetch(harper.opsURL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: opsAuth() },
+    body: JSON.stringify({ operation: "delete", database: "flair", table: "Peer", ids: [id] }),
+    signal: AbortSignal.timeout(30_000),
+  });
+  return { status: res.status, row: await readPeer(id) };
+}
+
 async function seedToken(token: string): Promise<void> {
   await ops({
     operation: "insert", database: "flair", table: "PairingToken",
@@ -107,11 +118,11 @@ function pairRequest(body: Record<string, unknown>): Promise<Response> {
   });
 }
 
-/** A pairing request carrying a Basic credential (the token's bootstrap user). */
-function pairRequestBasic(body: Record<string, unknown>, user: string, pass: string): Promise<Response> {
+/** A pairing request carrying a Basic credential (the token's bootstrap user), under a chosen scheme spelling. */
+function pairRequestBasic(body: Record<string, unknown>, user: string, pass: string, scheme = "Basic"): Promise<Response> {
   return fetch(`${harper.httpURL}/FederationPair`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: "Basic " + btoa(`${user}:${pass}`) },
+    headers: { "Content-Type": "application/json", Authorization: `${scheme} ` + btoa(`${user}:${pass}`) },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(60_000),
   });
@@ -309,6 +320,29 @@ describe("flair#2333 — a signed Basic-auth pairing binds the bootstrap user to
     expect(await readPeer(peer2), "a mismatched bootstrap user writes no peer").toBeNull();
     expect((await readToken(token2))?.consumedBy, "a mismatched bootstrap user consumes no token").toBeFalsy();
   }, 90_000);
+
+  it("a mismatched bootstrap user is refused under a lower/mixed-case Basic scheme too — the binding is not skipped by scheme case", async () => {
+    await ensureFlairPairInitiatorRole(harper.opsURL, harper.admin.username, harper.admin.password);
+    const otherUser = "pair-bootstrap-case-guard";
+    const otherPass = "bind-pass-case";
+    await ops({ operation: "add_user", username: otherUser, password: otherPass, role: "flair_pair_initiator", active: true });
+    // Scheme names are case-insensitive (RFC 9110). Each spelling must reach the
+    // Basic branch (annotating tpsAgent) so the token consume path applies the
+    // bootstrap-user binding and refuses the mismatch — never consuming the token.
+    for (const scheme of ["basic", "BASIC", "BaSiC"]) {
+      const token = `pt-bind-case-${scheme}-${sfx}`;
+      const k = nacl.sign.keyPair();
+      const peer = `bind-peer-case-${scheme}-${sfx}`;
+      await seedToken(token);
+      const res = await pairRequestBasic(pairBody(peer, b64url(k.publicKey), k.secretKey, token), otherUser, otherPass, scheme);
+      const body = await res.json() as any;
+      console.log(`bind ${scheme}-scheme mismatched-user body:`, JSON.stringify(body));
+      expect(res.status, `${scheme}: ${JSON.stringify(body)}`).toBe(401);
+      expect(body.error).toBe("bootstrap_user_token_mismatch");
+      expect(await readPeer(peer), `${scheme}: a mismatched bootstrap user writes no peer`).toBeNull();
+      expect((await readToken(token))?.consumedBy, `${scheme}: a mismatched bootstrap user consumes no token`).toBeFalsy();
+    }
+  }, 90_000);
 });
 
 describe("flair#2333 — a federation sync does not leave a revoked peer connected (real Harper)", () => {
@@ -358,7 +392,7 @@ describe("flair#2333 — a federation sync does not leave a revoked peer connect
 describe("flair#2333 — a peer revoked during a re-pair is not brought back (real Harper)", () => {
   // Guard: the revoke is committed after the re-pair's read of the peer row,
   // while the re_pair is paused. The re_pair must not leave the row paired.
-  it("a re-pair of a concurrently revoked peer leaves it revoked (federation-pair-repair-pre)", async () => {
+  it("a re-pair of a concurrently revoked peer is refused 403 peer_revoked and leaves it revoked (federation-pair-repair-pre)", async () => {
     const k = nacl.sign.keyPair();
     const peer = `h3-peer-repair-pre-${sfx}`;
     const pub = b64url(k.publicKey);
@@ -372,8 +406,36 @@ describe("flair#2333 — a peer revoked during a re-pair is not brought back (re
     expect(released, "the re-pair was not released by this test").toBe("go");
     expect(competed?.status, "the competing revoke was not applied").toBe(200);
     expect(competed?.row?.status, "the competing revoke's own row state is revoked").toBe("revoked");
-    console.log("federation-pair-repair-pre re-pair body:", JSON.stringify(await response.clone().json()));
+    const resBody = await response.json() as any;
+    console.log("federation-pair-repair-pre re-pair body:", JSON.stringify(resBody));
+    // The no-token re-pair re-reads the row inside its owned transaction and refuses
+    // the now-revoked row by name — it does not report success over a stale row.
+    expect(response.status, JSON.stringify(resBody)).toBe(403);
+    expect(resBody.error).toBe("peer_revoked");
     expect((await readPeer(peer))?.status, "the concurrent revoke is kept").toBe("revoked");
+  }, 60_000);
+
+  it("a no-token re-pair of a peer deleted during the pause is refused and does not re-create the row (federation-pair-repair-pre)", async () => {
+    const k = nacl.sign.keyPair();
+    const peer = `h3-peer-repair-gone-${sfx}`;
+    const pub = b64url(k.publicKey);
+    await seedPeer(peer, pub);
+    const { response, competed, released, paused } = await withPaused(
+      "federation-pair-repair-pre",
+      () => pairRequest(pairBody(peer, pub, k.secretKey)),
+      () => deletePeer(peer),
+    );
+    expect(paused, "the re-pair was not paused").toBe(true);
+    expect(released, "the re-pair was not released by this test").toBe("go");
+    expect(competed?.status, "the competing delete was not applied").toBe(200);
+    expect(competed?.row, "the competing delete removed the row").toBeNull();
+    const resBody = await response.json() as any;
+    console.log("federation-pair-repair-pre deleted re-pair body:", JSON.stringify(resBody));
+    // The row is gone, so this is no longer a re-pair: it is refused like a
+    // first-time pair (a token is required) and the deleted row is not re-created.
+    expect(response.status, JSON.stringify(resBody)).toBe(401);
+    expect(resBody.error).toBe("pairingToken required in body for first-time pair");
+    expect(await readPeer(peer), "the deleted row is not re-created").toBeNull();
   }, 60_000);
 
   it("a re-pair of a peer revoked before the request is refused, changing neither the peer row nor a token", async () => {

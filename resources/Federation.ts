@@ -654,22 +654,33 @@ export class FederationPair extends Resource {
 
       // The NO-token re-pair's peer write: the token path wrote the row inside the
       // owned transaction above, so its consume and write committed together before
-      // the lock released. The interleaving where a revoke commits between this read
-      // and the write below is driven by the pause point here (the guard test); the
-      // write below is unchanged.
+      // the lock released. This path spends no token, but the same shape applies: the
+      // write runs in a FRESH OWNED transaction (withOwnedTransaction) that RE-READS
+      // the Peer row the pre-transaction read above decided on. A row that is now
+      // revoked is refused with the token path's 403 peer_revoked; a row that is now
+      // gone means this is no longer a re-pair, so it is refused like a first-time
+      // pair (401, a pairing token is required). Neither writes a row. The pause below
+      // still sits BEFORE that owned transaction, so a competing revoke or delete
+      // commits in between (the guard test).
       const repairPause = txnPausePoint("federation-pair-repair-pre");
       if (repairPause) await repairPause;
-      if (!pairingToken) await writeRePairedPeer();
+      if (!pairingToken) {
+        const ctx = (this as any).getContext?.() ?? {};
+        const refusal = await withOwnedTransaction(ctx, async (owned) => {
+          const current = await (databases as any).flair.Peer.get(instanceId, owned);
+          if (current?.status === "revoked") return peerRevokedRefusal();
+          if (!current) return pairingTokenRequiredRefusal();
+          await writeRePairedPeer(owned, current);
+          return undefined;
+        });
+        if (refusal) return refusal;
+      }
     } else {
       // New peer — require a valid pairing token in the request body.
       // The handler self-validates because the endpoint is public at the
       // Harper-auth and middleware layers (Bearer is not usable on Harper —
       // its auth layer claims unknown Bearer values and 401s).
-      if (!pairingToken) {
-        return new Response(JSON.stringify({
-          error: "pairingToken required in body for first-time pair",
-        }), { status: 401, headers: { "content-type": "application/json" } });
-      }
+      if (!pairingToken) return pairingTokenRequiredRefusal();
 
       // Consume the token under its per-key lock (flair#2333): the claim is
       // check-then-consume, so two pairings on this node using the same token
@@ -764,6 +775,13 @@ const PAIRING_TOKEN_LOCK_NAMESPACE = "flair-pairing-token";
  */
 const PAIR_LOCK_ATTEMPTS = 200;
 const PAIR_LOCK_WAIT_MS = 10;
+
+/** 401 for a pair with no pairing token: a first-time pair, and a re-pair whose Peer row was deleted, both require one. */
+function pairingTokenRequiredRefusal(): Response {
+  return new Response(JSON.stringify({
+    error: "pairingToken required in body for first-time pair",
+  }), { status: 401, headers: { "content-type": "application/json" } });
+}
 
 /** 403 for a re-pair of a revoked peer: a revoke is a local decision, and a re-pair does not restore it. */
 function peerRevokedRefusal(): Response {

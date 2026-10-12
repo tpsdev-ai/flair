@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { b64ToArrayBuffer } from "../../resources/b64.js";
 
 // Test the auth header regex parsing (same pattern used in auth-middleware.ts)
@@ -334,5 +336,31 @@ describe("Basic auth super_user path", () => {
     expect(adminPass !== null).toBe(false);
     // Path 2 can still match
     expect(harperUser?.role?.permission?.super_user === true).toBe(true);
+  });
+});
+
+// RFC 9110 §11.1: authentication scheme names are case-insensitive, so
+// "basic", "BASIC" and "Basic" must all select the Basic branch. The
+// middleware reads this through ONE case-insensitive predicate, used both by
+// the /FederationPair public-bypass test and by the Basic branch itself. A
+// case-SENSITIVE test (the old `startsWith("Basic ")`) sent a lower- or
+// mixed-case credential down the public bypass instead, so the Basic branch —
+// which binds a pairing token to its bootstrap user — did not run for it.
+describe("auth middleware: the Basic scheme name is case-insensitive (RFC 9110)", () => {
+  test("basic/BASIC select the Basic branch — the middleware's scheme check is case-insensitive, in both places", () => {
+    const src = readFileSync(join(import.meta.dir, "../../resources/auth-middleware.ts"), "utf8");
+    // ONE case-insensitive predicate…
+    expect(src).toContain("const isBasic = /^Basic /i.test(header)");
+    // …used by BOTH the /FederationPair bypass and the Basic branch, and the
+    // case-sensitive exact match is gone.
+    expect(src).toContain('url.pathname === "/FederationPair" && !isBasic');
+    expect(src).toContain("if (isBasic) {");
+    expect(src).not.toContain('startsWith("Basic ")');
+    // Semantics: every spelling of the scheme matches; a non-Basic scheme does not.
+    const isBasic = (h: string) => /^Basic /i.test(h);
+    for (const scheme of ["Basic", "basic", "BASIC", "BaSiC"]) {
+      expect(isBasic(`${scheme} dXNlcjpwYXNz`)).toBe(true);
+    }
+    expect(isBasic("Bearer dXNlcjpwYXNz")).toBe(false);
   });
 });

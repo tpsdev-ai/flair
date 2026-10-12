@@ -16,4 +16,7 @@
   pairings within one Harper node, not across the several nodes a Fabric instance
   can run. A re-pair of a peer whose row is revoked when read is refused and
   changes neither the Peer row nor a pairing token (the anti-replay nonce a signed
-  request records is still written).
+  request records is still written). An otherwise valid, non-revoked re-pair that
+  supplies NO token still proceeds; it re-reads the peer row inside a fresh owned
+  transaction before writing, so a row revoked or deleted before that read is
+  refused (403 peer_revoked, or 401 when the row is gone) rather than overwritten.

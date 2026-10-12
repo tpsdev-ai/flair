@@ -290,6 +290,10 @@ server.http(async (request: any, nextLayer: any) => {
   // and read all internal Beads issues unauthenticated.
   const header = request.headers.get("authorization") || request.headers?.asObject?.authorization || "";
   const isTpsEd25519 = /^TPS-Ed25519(?:\s|$)/i.test(header);
+  // Scheme names are case-insensitive (RFC 9110): "basic"/"BASIC"/"Basic" all
+  // select the Basic branch below, exactly as "Basic" does. Used for both the
+  // /FederationPair public-bypass test and the Basic branch itself.
+  const isBasic = /^Basic /i.test(header);
   const isA2APath = url.pathname === "/a2a" || url.pathname === "/A2AAdapter" || url.pathname.startsWith("/A2AAdapter/");
   if (!isTpsEd25519 && (
     url.pathname === "/health" ||
@@ -313,7 +317,7 @@ server.http(async (request: any, nextLayer: any) => {
     // refused a mismatch. An anonymous pair request (no Authorization header)
     // still passes through. Harper 5.3.1 defers invalid Basic credential
     // rejection; REST settles it after this middleware, before resource dispatch.
-    (url.pathname === "/FederationPair" && !header.startsWith("Basic ")) ||
+    (url.pathname === "/FederationPair" && !isBasic) ||
     // OAuth 2.1 public endpoints (spec requires no pre-auth)
     url.pathname === "/OAuthRegister" ||
     url.pathname === "/OAuthAuthorize" ||
@@ -371,7 +375,7 @@ server.http(async (request: any, nextLayer: any) => {
   // 1. HDB_ADMIN_PASSWORD env-var fast-path (user must be "admin" with exact pass)
   // 2. Harper super_user check — any user with super_user:true permission accepted
   // Checked BEFORE Ed25519 so admin tools can use simple auth.
-  if (header.startsWith("Basic ")) {
+  if (isBasic) {
     try {
       const decoded = Buffer.from(header.slice(6), "base64").toString("utf-8");
       const colonIdx = decoded.indexOf(":");
