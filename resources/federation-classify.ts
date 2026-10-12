@@ -71,11 +71,10 @@ export type SkipReason =
   | "invalid_expiry"
   // Emitted by FederationSync.post when row confirmation fails for a planned
   // merge write.
-  // The initial check compares presence and identity fields for Memory, and
-  // the whole row for Soul, Agent, Relationship and Message; the final check
-  // compares the committed row with the in-transaction read. A change committed
-  // after that final check is not seen. Nothing was written on a refusal
-  // (flair#2441, flair#2450).
+  // The initial check compares the whole stored row for every synced table;
+  // the final check compares the committed row with the in-transaction read. A
+  // change committed after that final check is not seen. Nothing was written on
+  // a refusal (flair#2441, flair#2450, flair#2475).
   | "merge_target_changed";
 
 /**

@@ -1254,20 +1254,23 @@ export class FederationSync extends Resource {
               : randomUUID();
         }
 
-        // flair#2441 / flair#2450: every synced table uses the write-back helper
-        // (one attempt, no retry). The plan reads the in-transaction row. The
-        // Agent status guard can skip as agent_status_not_federated before row
-        // comparison. For planned writes, Memory checks presence and identity
-        // (instanceToken, contentHash, createdAt, agentId); the other tables
-        // compare the whole row against `local`. A mismatch skips the record as
+        // flair#2441 / flair#2450 / flair#2475: every synced table uses the
+        // write-back helper (one attempt, no retry). The plan reads the
+        // in-transaction row. The Agent status guard can skip as
+        // agent_status_not_federated before row comparison. For planned writes,
+        // every table compares the WHOLE stored row against `local` (the row the
+        // merge read and built from): a change to any field committed between that
+        // read and the helper's in-transaction read skips the record as
         // merge_target_changed. The committed row is checked again before commit.
         // A change committed after that final read is not seen: Harper has no
         // compare-and-set (write-back.ts).
         //
-        // flair#2450 (`wholeRow`): Soul, Agent and Relationship have no
-        // instanceToken or contentHash; Message has contentHash but no
-        // instanceToken or agentId. Its hash excludes mutable lifecycle fields,
-        // so planned writes to these tables compare the whole row against `local`.
+        // flair#2450 set `wholeRow` for Soul, Agent, Relationship and Message;
+        // flair#2475 extends it to Memory: Memory's identity fields
+        // (instanceToken, contentHash, createdAt, agentId) do not move on a
+        // field-only update, and the merge writes the whole row, so an
+        // identity-only check let it put back the changed field's pre-change
+        // value.
         let outcome: any;
         try {
           outcome = await writeBackCommittedRow(
@@ -1307,10 +1310,12 @@ export class FederationSync extends Resource {
               label: "FederationSync",
               expectedRow: local,
               attempts: 1,
-              // Every table but Memory carries no instanceToken: planned writes
-              // compare the whole stored row, not just sameStoredRow's identity fields
-              // (flair#2450 — see above).
-              wholeRow: record.table !== "Memory",
+              // Planned writes compare the whole stored row, not just
+              // sameStoredRow's identity fields: Memory's identity fields do not
+              // move on a field-only update (flair#2475), and the other tables
+              // carry no instanceToken or a hash that excludes mutable lifecycle
+              // fields (flair#2450 — see above).
+              wholeRow: true,
               pausePre: () => txnPausePoint("federation-merge-pre"),
               pausePoint: () => txnPausePoint("federation-merge"),
             },
