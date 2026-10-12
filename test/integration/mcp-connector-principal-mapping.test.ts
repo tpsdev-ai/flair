@@ -463,10 +463,10 @@ describe("flair#1280 — connector principal mapping (distinct-by-default, forma
   // Not a #1317 regression — #1317's supersede is only worth anything if
   // "revoked" is a real denial. This pins the resolver's fail-closed property
   // directly: the revoked credential is the ONLY credential for its subject, so
-  // "not returned first" cannot mask a pass. flair#2503 tightened it: a
-  // non-active mapping is now REFUSED by name (the credential, its stored status
-  // and the remedy), not skipped and not reported as an unmapped subject — and
-  // never handed to JIT provisioning.
+  // "not returned first" cannot mask a pass. flair#2503 tightened it: a subject
+  // whose only row is non-active is now REFUSED by name (the credential, its
+  // stored status and the remedy), not skipped and not reported as an unmapped
+  // subject, and JIT provisioning does not run for it.
   test("(f) flair#1317 fail-closed — a REVOKED credential does not resolve AT ALL, even as its subject's only credential", async () => {
     const revokedSub = `pm-idp-revoked-${sfx}`;
     const mapping = await provisionIdpIdentityMapping({

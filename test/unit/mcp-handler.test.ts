@@ -329,10 +329,11 @@ describe("resolveAgentFromSub", () => {
   // A Credential is usable only when its status is exactly "active"
   // (src/lib/credential-status-rule.ts, the same predicate the linker uses and
   // XAA's jwt-bearer grant applies). A matching row whose status is "revoked",
-  // missing, empty or any other value maps nothing: resolution is refused by
-  // name and nothing is linked or resolved. On origin/main a revoked row was
-  // SKIPPED — returning null, which let JIT re-create the mapping — and a
-  // missing/unknown status was served as a live mapping.
+  // missing, empty or any other value maps nothing. When it is the subject's
+  // only row, as here, resolution is refused by name and nothing is linked or
+  // resolved. On origin/main a revoked row was SKIPPED (returning null, so JIT,
+  // when enabled, could re-create the mapping) and a missing/unknown status was
+  // served as a live mapping.
   for (const [label, status] of [["revoked", "revoked"], ["missing", undefined], ["unknown", "disabled"]] as const) {
     it(`${label} status → refused by name, nothing linked or resolved`, async () => {
       process.env.FLAIR_MCP_JIT_PROVISION = "1"; // JIT ON: a non-active row must not fall through to it
@@ -349,6 +350,40 @@ describe("resolveAgentFromSub", () => {
       expect(credentials[0].status, "the mapping row is unchanged").toBe(status);
     });
   }
+
+  // A matching row that names no principal ends resolution too, whatever its
+  // status: it maps nothing, it is refused by name, and JIT provisioning runs
+  // only when NO Credential row matches the subject. The schema requires
+  // principalId; the resolver does not rely on that to exclude such a row (the
+  // integration suite exercises the empty-string form real storage accepts).
+  for (const [label, status] of [["revoked", "revoked"], ["missing", undefined], ["active", "active"]] as const) {
+    it(`principal-less row, ${label} status, JIT ON → refused by name; no Agent or Credential written`, async () => {
+      process.env.FLAIR_MCP_JIT_PROVISION = "1";
+      const row = { id: `cred-nop-${label}`, kind: "idp", idpSubject: "sub-nop", ...(status === undefined ? {} : { status }) };
+      credentials = [{ ...row }];
+      const err = (await resolveAgentFromSub("sub-nop").then(() => null, (e) => e)) as (Error & { rpcCode?: number }) | null;
+      expect(err, "a principal-less row must be refused, not resolved or provisioned").toBeInstanceOf(PrincipalRefusedError);
+      expect(err!.rpcCode).toBe(-32001);
+      expect(err!.message).toContain(row.id); // the actor
+      expect(err!.message).toContain("names no principal"); // the state
+      expect(err!.message).toContain(status === undefined ? "no status" : `status "${status}"`);
+      expect(err!.message).toMatch(/re-link/); // the remedy
+      expect(puts, "no Agent and no Credential were written (JIT did not run)").toHaveLength(0);
+      expect(agents, "no principal was created").toEqual({});
+      expect(credentials, "the row is unchanged and still the only one").toEqual([row]);
+    });
+  }
+
+  it("a principal-less row does not hide an ACTIVE principal-bearing mapping for the same subject", async () => {
+    process.env.FLAIR_MCP_JIT_PROVISION = "1";
+    credentials = [
+      { id: "cred-nop", kind: "idp", idpSubject: "sub-alice", status: "active" },
+      { id: "cred-alice", principalId: "agt_alice", kind: "idp", idpSubject: "sub-alice", status: "active" },
+    ];
+    agents["agt_alice"] = { id: "agt_alice", status: "active" };
+    expect(await resolveAgentFromSub("sub-alice")).toEqual({ agentId: "agt_alice", isAdmin: false });
+    expect(puts).toHaveLength(0);
+  });
 
   it("unknown sub, JIT OFF → null (DENY, no provisioning)", async () => {
     expect(await resolveAgentFromSub("nobody")).toBeNull();

@@ -6,6 +6,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
 import { stampOriginatorOnCreate } from "./originator-instance.js";
 import { invalidAgentIdMessage, isValidAgentId } from "../src/lib/agent-id-rule.js";
+import { isUsableCredential } from "../src/lib/credential-status-rule.js";
 import { withKeyLock } from "./key-lock.js";
 import { withOwnedTransaction } from "./request-transaction.js";
 import { CommittedRowChanged, confirmCommittedRow, sameStoredRow } from "./write-back.js";
@@ -244,11 +245,13 @@ async function resolveOrCreatePrincipalLocked(
       // A matched credential whose status is not "active" completes no grant.
       // `status` is a nullable String on schemas/agent.graphql whose documented
       // values are "active" and "revoked" (a comment, not an enforced enum); the
-      // revoke path writes "revoked". Refuse it by name: no credential touch and
-      // no OAuth token is written, so its lastUsedAt is left untouched. A present
-      // `jti` is claimed — and consumed — before this status check, in its own
+      // revoke path writes "revoked". The test is the shared allowlist
+      // (src/lib/credential-status-rule.ts, also used by the MCP resolver and the
+      // principal linker). Refuse it by name: no credential touch and no OAuth
+      // token is written, so its lastUsedAt is left untouched. A present `jti` is
+      // claimed — and consumed — before this status check, in its own
       // transaction (the claim above, before the owned transaction).
-      if (cred.status !== "active") {
+      if (!isUsableCredential(cred)) {
         throw new Error(`IdP credential for this subject has status "${cred.status}"; the jwt-bearer grant is refused`);
       }
       // Test-only: valid names are inert unless fault injection is enabled and
@@ -275,7 +278,7 @@ async function resolveOrCreatePrincipalLocked(
         await confirmCommittedRow(
           (databases as any).flair.Credential,
           cred.id,
-          (committed) => committed != null && committed.status === "active" &&
+          (committed) => committed != null && isUsableCredential(committed) &&
             sameStoredRow(committed, cred) &&
             committed.principalId === cred.principalId &&
             committed.kind === cred.kind &&

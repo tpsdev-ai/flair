@@ -6,8 +6,10 @@
 // `provisionIdpIdentityMapping` (src/lib/mcp-enable.ts) is the supported writer
 // of that mapping. Before this change both accepted every status except
 // "revoked", so a legacy row with no status — or any unknown value — was served
-// as a live mapping. And a revoked row was SKIPPED by the resolver, which let
-// JIT provisioning re-create the principal the revocation was meant to stop.
+// as a live mapping. And a revoked row was SKIPPED by the resolver, so JIT
+// provisioning, when enabled, could re-create the principal the revocation was
+// meant to stop. Any matching row now ends resolution: JIT runs only when no
+// row matches the subject.
 //
 // Harness: a real Harper with the in-process fixture (test/fixtures/inproc-app),
 // driving the SHIPPED `mcpHandler` through its `mcpRpc` op — the real
@@ -164,6 +166,87 @@ describe("flair#2503 — the /mcp resolver accepts a Credential only when its st
       expect((await adminSearch("Agent", "id", AGENT)).length).toBe(agentsBefore);
     }, 60_000);
   }
+});
+
+/** Every Agent row in this instance's store. Throws rather than answering [] on a failed read. */
+async function allAgents(): Promise<any[]> {
+  const res = await fetch(harper.opsURL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: "Basic " + btoa(`${harper.admin.username}:${harper.admin.password}`) },
+    body: JSON.stringify({ operation: "search_by_value", database: "flair", table: "Agent", search_attribute: "id", search_value: "*", get_attributes: ["*"] }),
+  });
+  const body = await res.json().catch(() => null);
+  if (!res.ok || !Array.isArray(body)) throw new Error(`Agent read → HTTP ${res.status}: ${JSON.stringify(body).slice(0, 300)}`);
+  return body;
+}
+
+describe("flair#2503 — any matching Credential row ends resolution; JIT runs only when none matches", () => {
+  // A Credential that names no principal. The current schema requires
+  // principalId, and real storage refuses a row without the attribute (pinned
+  // first). It does store an EMPTY principalId, which names no principal to
+  // either the resolver or the linker, so that is the row the resolver is
+  // exercised against here. The resolver does not rely on the schema to exclude
+  // the attribute-less shape; the unit suite covers that one.
+  test("real storage refuses a Credential with no principalId attribute (fixture control)", async () => {
+    const sub = `cs-noattr-sub-${sfx}`;
+    const res = await fetch(harper.opsURL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Basic " + btoa(`${harper.admin.username}:${harper.admin.password}`) },
+      body: JSON.stringify({ operation: "upsert", database: "flair", table: "Credential", records: [{
+        id: `cs-noattr-cred-${sfx}`, kind: "idp", label: "cs", status: "active", idpProvider: "cs-idp", idpSubject: sub,
+        createdAt: new Date().toISOString(),
+      }] }),
+    });
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain("principalId is required");
+    expect(await adminSearch("Credential", "idpSubject", sub)).toEqual([]);
+  }, 60_000);
+
+  for (const [label, status] of [["revoked", "revoked"], ["missing", undefined], ["active", "active"]] as const) {
+    test(`a principal-less ${label}-status row is refused by name; no Agent and no Credential are created`, async () => {
+      const sub = `cs-nop-sub-${label}-${sfx}`;
+      const credId = `cs-nop-cred-${label}-${sfx}`;
+      await adminUpsert("Credential", [{
+        id: credId, kind: "idp", label: "cs", idpProvider: "cs-idp", idpSubject: sub, principalId: "",
+        createdAt: new Date().toISOString(),
+        ...(status === undefined ? {} : { status }),
+      }]);
+      const before = await adminSearch("Credential", "idpSubject", sub);
+      expect(before.map((c) => c.id), "fixture control: real storage holds the row").toEqual([credId]);
+      expect(before[0].principalId, "fixture control: the stored row names no principal").toBe("");
+      expect(before[0].status ?? null, "fixture control: the stored status").toBe(status ?? null);
+      const agentsBefore = await allAgents();
+      expect(agentsBefore.length, "fixture control: the Agent read answers").toBeGreaterThan(0);
+
+      const marker = `cs-nop-marker-${label}-${sfx}`;
+      const rpc = await store(sub, marker);
+
+      expect(rpc.result, `a principal-less row must not resolve: ${JSON.stringify(rpc).slice(0, 300)}`).toBeUndefined();
+      expect(rpc.error?.code).toBe(-32001);
+      expect(rpc.error?.message).toContain(credId);
+      expect(rpc.error?.message).toContain("names no principal");
+      expect(rpc.error?.message).toContain(status === undefined ? "no status" : `status "${status}"`);
+      expect(rpc.error?.message).toMatch(/re-link/);
+
+      expect(await adminSearch("Memory", "content", marker), "the refused call wrote no memory").toEqual([]);
+      expect(await adminSearch("Credential", "idpSubject", sub), "no new Credential; the row is unchanged").toEqual(before);
+      const agentsAfter = await allAgents();
+      expect(agentsAfter.filter((a) => a.publicKey === `mcp-oauth:${sub}`), "JIT created no principal").toEqual([]);
+      expect(agentsAfter.length, "no new Agent").toBe(agentsBefore.length);
+    }, 60_000);
+  }
+
+  test("JIT still provisions when no Credential row matches the subject (positive control)", async () => {
+    const sub = `cs-jit-sub-${sfx}`;
+    expect(await adminSearch("Credential", "idpSubject", sub), "fixture control: no row matches").toEqual([]);
+    const rpc = await mcpCall(sub, { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "bootstrap", arguments: {} } });
+    expect(rpc.error, JSON.stringify(rpc)).toBeUndefined();
+    const agentId = rpc.result?.structuredContent?.agentId;
+    expect(agentId).toMatch(/^agt_mcp_/);
+    const creds = await adminSearch("Credential", "idpSubject", sub);
+    expect(creds.map((c) => [c.principalId, c.status])).toEqual([[agentId, "active"]]);
+    expect((await allAgents()).filter((a) => a.id === agentId).map((a) => a.publicKey)).toEqual([`mcp-oauth:${sub}`]);
+  }, 60_000);
 });
 
 describe("flair#2503 — the principal linker treats a non-active row as not a mapping", () => {

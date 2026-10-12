@@ -149,7 +149,7 @@ import yaml from "js-yaml";
 import { resolveHome } from "./home.js";
 import { writeConfirmed } from "./instance-identity-row.js";
 import { invalidAgentIdMessage, isValidAgentId } from "./agent-id-rule.js";
-import { isUsableCredential } from "./credential-status-rule.js";
+import { credentialMapsPrincipal, credentialPrincipalId } from "./credential-status-rule.js";
 import { agentHomeEndpoint, resolveTargetInstanceId } from "./agent-home.js";
 import { defaultReadProcessCmdline, defaultReadProcessCwd } from "./upgrade-exec-path.js";
 
@@ -1305,11 +1305,16 @@ export interface IdentityMappingResult {
   supersededCredentialIds: string[];
 }
 
-/** The linking layer's Credential-usability test is the SAME one the resolver
- *  applies (src/lib/credential-status-rule.ts, imported above): a credential is
- *  usable only when its `status` is exactly "active". The linking layer MUST use
- *  the same test — a credential the linker considers inactive but the resolver
- *  would still serve is exactly the invisible-duplicate hole #1317 is about. */
+/** The linking layer's Credential tests are the SAME ones the resolver applies
+ *  (src/lib/credential-status-rule.ts, imported above): a row maps a principal
+ *  only when its `status` is exactly "active" and it names a principal
+ *  (`credentialMapsPrincipal`), and a row that names no principal
+ *  (`credentialPrincipalId` is null) is skipped on read. The resolver refuses a
+ *  subject when none of its rows maps a principal, and resolves it through the
+ *  active, principal-bearing row this layer writes, even when a principal-less
+ *  row remains beside it. The linking layer MUST use the same tests — a
+ *  credential the linker considers inactive but the resolver would still serve
+ *  is exactly the invisible-duplicate hole #1317 is about. */
 
 /**
  * Map the operator's IdP subject to their principal via `Credential(kind:
@@ -1410,7 +1415,7 @@ export async function provisionIdpIdentityMapping(
   const findCredentialsForSubject = (): Promise<any[]> =>
     readIdpCredentialsForSubject(fetchImpl, opsUrl, authHeader, params.idpSubject);
   const subjectCreds = await findCredentialsForSubject();
-  const activeCreds = subjectCreds.filter(isUsableCredential);
+  const activeCreds = subjectCreds.filter(credentialMapsPrincipal);
   // flair#2222 — retain Agent presence and the compared principal-bearing IdP fields.
   const preflight = mappingPreflight(params.principal, params.idpSubject, foundAgents.length > 0, subjectCreds);
 
@@ -1672,7 +1677,7 @@ async function opsRecordList(
     }
     if (ids.has(row.id)) refuse("duplicate-row-id");
     ids.add(row.id);
-    if (query.table === "Credential" && !isNonEmptyString(row.principalId)) continue;
+    if (query.table === "Credential" && credentialPrincipalId(row) === null) continue;
     if (query.table === "Credential" &&
         (typeof row.idpProvider !== "string" ||
          typeof row.idpSubject !== "string" ||
@@ -1683,13 +1688,13 @@ async function opsRecordList(
     rows.push(row);
   }
   if (refuseAmbiguous && query.table === "Credential" && predicate.some(([field]) => field === "idpSubject")) {
-    const principals = [...new Set(rows.filter(isUsableCredential).map(row => row.principalId))];
+    const principals = [...new Set(rows.filter(credentialMapsPrincipal).map(row => row.principalId))];
     if (principals.length > 1) {
       throw new Error(`Identity mapping: ambiguous-prior-principals: ${principals.join(", ")} — refusing the subject read. Run flair mcp enable to heal this subject mapping.`);
     }
   }
   if (written) {
-    const active = rows.filter(isUsableCredential);
+    const active = rows.filter(credentialMapsPrincipal);
     if (active.length !== 1 || Object.entries(written).some(([field, value]) => active[0][field] !== value)) {
       const subject = predicate.find(([field]) => field === "idpSubject")?.[1];
       const seen = active.map(c => `${c.id} → ${c.principalId} (provider '${c.idpProvider}')`).join("; ") || "none";
@@ -1882,7 +1887,7 @@ export async function linkPrincipalMapping(
   await assertPrincipalExists(fetchImpl, opsUrl, authHeader, params.principal);
 
   const subjectRows = await readIdpCredentialsForSubject(fetchImpl, opsUrl, authHeader, params.idpSubject, undefined, true);
-  const active = subjectRows.filter(isUsableCredential);
+  const active = subjectRows.filter(credentialMapsPrincipal);
   const elsewhere = active.filter((c) => c?.principalId !== params.principal);
   if (elsewhere.length > 0 && !params.replace) {
     const current = [...new Set(elsewhere.map((c) => String(c?.principalId)))].join(", ");
@@ -1964,7 +1969,7 @@ export async function unlinkPrincipalMapping(
   await assertPrincipalExists(fetchImpl, opsUrl, authHeader, params.principal);
 
   const subjectRows = await readIdpCredentialsForSubject(fetchImpl, opsUrl, authHeader, params.idpSubject, undefined, true);
-  const active = subjectRows.filter(isUsableCredential);
+  const active = subjectRows.filter(credentialMapsPrincipal);
   const mine = active.filter((c) => c?.principalId === params.principal);
   if (mine.length === 0) {
     const elsewhere = [...new Set(active.map((c) => String(c?.principalId)))].join(", ");
@@ -2010,7 +2015,7 @@ export async function unlinkPrincipalMapping(
   const remaining = (await readIdpCredentialsForSubject(fetchImpl, opsUrl, authHeader, params.idpSubject)
     .catch((err: unknown) => {
       throw new Error(`${unconfirmedMessage(ids)} — ${err instanceof Error ? err.message : String(err)}`);
-    })).filter(isUsableCredential);
+    })).filter(credentialMapsPrincipal);
   if (remaining.length > 0) {
     throw new Error(`${unconfirmedMessage(remaining.map(c => c.id))} — subject '${params.idpSubject}' still has resolvable mappings.`);
   }
@@ -2042,7 +2047,7 @@ export async function listPrincipalMappings(
   await assertPrincipalExists(fetchImpl, opsUrl, authHeader, params.principal);
 
   const active = (await readIdpCredentialsForPrincipal(fetchImpl, opsUrl, authHeader, params.principal)).filter(
-    isUsableCredential,
+    credentialMapsPrincipal,
   );
   const mappings: PrincipalMappingRow[] = active.map((c) => ({
     credentialId: String(c?.id),

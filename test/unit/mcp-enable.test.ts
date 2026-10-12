@@ -654,9 +654,10 @@ describe("provisionIdpIdentityMapping", () => {
   // (src/lib/credential-status-rule.ts, the same predicate
   // resources/mcp-handler.ts resolves through and XAA's jwt-bearer grant
   // applies). The linking layer used to accept everything except "revoked", so
-  // a MISSING or unknown status counted as a live mapping: the linker would
-  // REUSE that row and re-point it to status:"active" — resurrecting a mapping
-  // the resolver would not have served.
+  // a MISSING or unknown status counted as a live mapping, and the linker would
+  // REUSE that row and re-point it to status:"active". The resolver's old
+  // predicate was the same blocklist, so it would have served such a
+  // principal-bearing row too; both now apply the allowlist.
   test("flair#2503: an ACTIVE same-provider credential is reused (positive control)", async () => {
     const { fetchImpl, creds } = mockOpsFetch({
       existingPrincipal: true,
