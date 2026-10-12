@@ -6,6 +6,8 @@ import { createHash, randomBytes } from "node:crypto";
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
 import { stampOriginatorOnCreate } from "./originator-instance.js";
 import { invalidAgentIdMessage, isValidAgentId } from "../src/lib/agent-id-rule.js";
+import { withKeyLock } from "./key-lock.js";
+import { withOwnedTransaction } from "./request-transaction.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 import { claimIdJagJti, idJagReplayDeps, ReplayStoreUnavailable, reportReplayStoreGapsAtBoot, type ReplayStoreBootStore } from "./replay-store.js";
 
@@ -155,18 +157,14 @@ export async function validateIdJag(
     }
   }
 
-  // Replay prevention (jti): a jti claim, when present, must be a nonempty
-  // string, and is then recorded once per instance, under a per-key lock,
-  // before the grant has any effect. The record is kept
-  // ID_JAG_REPLAY_RETENTION_S, so the assertion's validity is bounded first.
+  // A present jti must be a nonempty string with exp no further ahead than
+  // ID_JAG_MAX_VALIDITY_MS plus CLOCK_SKEW_MS. resolveOrCreatePrincipal claims
+  // it under the subject lock before provisioning and token issuance.
   if (payload.jti !== undefined) {
     if (typeof payload.jti !== "string" || payload.jti === "") throw new Error("jti claim must be a nonempty string");
     if (typeof payload.exp !== "number" || payload.exp * 1000 > Date.now() + ID_JAG_MAX_VALIDITY_MS + CLOCK_SKEW_MS) {
       throw new Error(`an assertion with a jti must carry an exp at most ${ID_JAG_MAX_VALIDITY_MS / 3600_000} hours ahead`);
     }
-    const claim = await claimIdJagJti(payload.jti, ID_JAG_LONGEST_ACCEPTANCE_MS);
-    if (claim === "replay") throw new Error("token replay detected");
-    if (claim !== "recorded") throw new ReplayStoreUnavailable(`flair.IdJagReplay claim: ${claim}`);
   }
 
   return { payload: payload as JWTPayload & Record<string, any>, idpConfig };
@@ -174,82 +172,138 @@ export async function validateIdJag(
 
 /**
  * Resolve or JIT-create a Principal from validated ID-JAG claims.
+ *
+ * Within one Harper process, the subject's per-key lock serializes the
+ * credential lookup and any JIT create. A lock miss refuses the grant (503).
  */
 async function resolveOrCreatePrincipal(
   payload: any,
   idpConfig: any,
+  ctx?: any,
 ): Promise<string> {
+  const store = (databases as any)?.flair?.Credential?.primaryStore;
+  const outcome = await withKeyLock(
+    store,
+    [XAA_PRINCIPAL_LOCK_NAMESPACE, idpConfig.id, String(payload.sub)],
+    () => resolveOrCreatePrincipalLocked(payload, idpConfig, ctx),
+    XAA_PRINCIPAL_LOCK_ATTEMPTS,
+    XAA_PRINCIPAL_LOCK_WAIT_MS,
+  );
+  if (outcome.kind === "done") return outcome.value;
+  throw new PrincipalProvisionBusy();
+}
+
+/** The subject's principal-provision lock namespace and wait (resources/key-lock.ts). */
+export const XAA_PRINCIPAL_LOCK_NAMESPACE = "flair-xaa-principal";
+const XAA_PRINCIPAL_LOCK_ATTEMPTS = 200;
+const XAA_PRINCIPAL_LOCK_WAIT_MS = 10;
+
+/** The named refusal of a grant that lost the principal-provision lock: refused, not retried into a second principal. */
+export class PrincipalProvisionBusy extends Error {
+  constructor() {
+    super("principal provisioning for this subject is in progress; retry");
+    this.name = "PrincipalProvisionBusy";
+  }
+}
+
+/**
+ * `resolveOrCreatePrincipal`'s check-and-write, run while holding the subject's
+ * lock: the credential lookup, and the JIT principal + credential create it
+ * falls back to. Never called outside the lock.
+ */
+async function resolveOrCreatePrincipalLocked(
+  payload: any,
+  idpConfig: any,
+  ctx?: any,
+): Promise<string> {
+  // Claim jti after taking the subject lock, before provisioning and token
+  // issuance (flair#2333). A lock miss leaves it unclaimed; a retry can succeed
+  // if the assertion remains valid and the later grant steps succeed.
+  if (payload.jti !== undefined) {
+    const claim = await claimIdJagJti(payload.jti, ID_JAG_LONGEST_ACCEPTANCE_MS);
+    if (claim === "replay") throw new Error("token replay detected");
+    if (claim !== "recorded") throw new ReplayStoreUnavailable(`flair.IdJagReplay claim: ${claim}`);
+  }
+
   const idpSubject = payload.sub;
   const email = payload.email ?? payload.preferred_username;
   const displayName = payload.name ?? email ?? idpSubject;
 
-  // Look for existing credential with this IdP subject
-  for await (const cred of (databases as any).flair.Credential.search({
-    conditions: [
-      { attribute: "kind", comparator: "equals", value: "idp" },
-      { attribute: "idpSubject", comparator: "equals", value: idpSubject },
-      { attribute: "idpProvider", comparator: "equals", value: idpConfig.id },
-    ],
-  })) {
-    // Test-only: valid names are inert unless fault injection is enabled and
-    // armed (resources/txn-pause-point.ts). Holds this touch between the read
-    // above and the write below — the interleaving a revoke or delete of this
-    // credential would commit in.
-    const pause = txnPausePoint("xaa-credential-touch");
+  // Within one Harper process, the credential lookup and any JIT create run
+  // in an owned transaction that commits before the subject lock releases.
+  return withOwnedTransaction(ctx, async (owned) => {
+    // Look for existing credential with this IdP subject
+    for await (const cred of (databases as any).flair.Credential.search({
+      conditions: [
+        { attribute: "kind", comparator: "equals", value: "idp" },
+        { attribute: "idpSubject", comparator: "equals", value: idpSubject },
+        { attribute: "idpProvider", comparator: "equals", value: idpConfig.id },
+      ],
+    }, owned)) {
+      // Test-only: valid names are inert unless fault injection is enabled and
+      // armed (resources/txn-pause-point.ts). Holds this touch between the read
+      // above and the write below — the interleaving a revoke or delete of this
+      // credential would commit in.
+      const pause = txnPausePoint("xaa-credential-touch");
+      if (pause) await pause;
+      // Update last used
+      await (databases as any).flair.Credential.put({
+        ...cred,
+        lastUsedAt: nowISO(),
+      }, owned);
+      return cred.principalId;
+    }
+
+    // No existing credential — JIT provision if enabled
+    if (!idpConfig.jitProvision) {
+      throw new Error(`no principal for IdP subject ${idpSubject} and JIT provisioning is disabled`);
+    }
+
+    // Test-only: pause after the lookup finds no credential, before JIT create.
+    const pause = txnPausePoint("xaa-principal-provision");
     if (pause) await pause;
-    // Update last used
+
+    const principalId = `usr_${idpSubject.replace(/[^a-zA-Z0-9]/g, "_").slice(0, 20)}_${randomBytes(4).toString("hex")}`;
+    // flair#2359 — the shared agent-ID rule. The id above is built to conform,
+    // but the rule is enforced on the value that is actually written, so a future
+    // change to this construction cannot store an id AgentSeed would refuse.
+    if (!isValidAgentId(principalId)) throw new Error(invalidAgentIdMessage(principalId));
+    const now = nowISO();
+
+    // Create principal (via Agent table). flair#1965 r2: a raw Agent create —
+    // stamp the local instance id (the Agent resource's post() does not run here).
+    const principalRow: any = {
+      id: principalId,
+      name: displayName,
+      displayName,
+      kind: "human",
+      type: "human",
+      status: "active",
+      publicKey: `idp:${idpConfig.id}:${idpSubject}`, // placeholder — humans don't have real Ed25519 keys
+      defaultTrustTier: idpConfig.defaultTrustTier ?? "unverified",
+      admin: false,
+      createdAt: now,
+      updatedAt: now,
+    };
+    await stampOriginatorOnCreate(principalRow);
+    await (databases as any).flair.Agent.put(principalRow, owned);
+
+    // Create IdP credential
     await (databases as any).flair.Credential.put({
-      ...cred,
-      lastUsedAt: nowISO(),
-    });
-    return cred.principalId;
-  }
+      id: `cred_idp_${randomBytes(8).toString("hex")}`,
+      principalId,
+      kind: "idp",
+      label: idpConfig.name,
+      status: "active",
+      idpProvider: idpConfig.id,
+      idpSubject,
+      idpEmail: email,
+      createdAt: now,
+      lastUsedAt: now,
+    }, owned);
 
-  // No existing credential — JIT provision if enabled
-  if (!idpConfig.jitProvision) {
-    throw new Error(`no principal for IdP subject ${idpSubject} and JIT provisioning is disabled`);
-  }
-
-  const principalId = `usr_${idpSubject.replace(/[^a-zA-Z0-9]/g, "_").slice(0, 20)}_${randomBytes(4).toString("hex")}`;
-  // flair#2359 — the shared agent-ID rule. The id above is built to conform,
-  // but the rule is enforced on the value that is actually written, so a future
-  // change to this construction cannot store an id AgentSeed would refuse.
-  if (!isValidAgentId(principalId)) throw new Error(invalidAgentIdMessage(principalId));
-  const now = nowISO();
-
-  // Create principal (via Agent table). flair#1965 r2: a raw Agent create —
-  // stamp the local instance id (the Agent resource's post() does not run here).
-  const principalRow: any = {
-    id: principalId,
-    name: displayName,
-    displayName,
-    kind: "human",
-    type: "human",
-    status: "active",
-    publicKey: `idp:${idpConfig.id}:${idpSubject}`, // placeholder — humans don't have real Ed25519 keys
-    defaultTrustTier: idpConfig.defaultTrustTier ?? "unverified",
-    admin: false,
-    createdAt: now,
-    updatedAt: now,
-  };
-  await stampOriginatorOnCreate(principalRow);
-  await (databases as any).flair.Agent.put(principalRow);
-
-  // Create IdP credential
-  await (databases as any).flair.Credential.put({
-    id: `cred_idp_${randomBytes(8).toString("hex")}`,
-    principalId,
-    kind: "idp",
-    label: idpConfig.name,
-    status: "active",
-    idpProvider: idpConfig.id,
-    idpSubject,
-    idpEmail: email,
-    createdAt: now,
-    lastUsedAt: now,
+    return principalId;
   });
-
-  return principalId;
 }
 
 /**
@@ -270,7 +324,7 @@ export function jwtBearerBaseUrl(env: NodeJS.ProcessEnv = process.env): string {
  * Handle the jwt-bearer grant type at the token endpoint.
  * Called from OAuthToken when grant_type is urn:ietf:params:oauth:grant-type:jwt-bearer.
  */
-export async function handleJwtBearerGrant(data: any): Promise<Response | object> {
+export async function handleJwtBearerGrant(data: any, ctx?: any): Promise<Response | object> {
   const assertion = data?.assertion;
   if (!assertion) {
     return new Response(JSON.stringify({
@@ -285,8 +339,14 @@ export async function handleJwtBearerGrant(data: any): Promise<Response | object
     const { payload, idpConfig } = await validateIdJag(assertion, baseUrl);
 
     // Resolve or create principal
-    const principalId = await resolveOrCreatePrincipal(payload, idpConfig);
+    const principalId = await resolveOrCreatePrincipal(payload, idpConfig, ctx);
 
+    // Test-only: pause after the subject lock releases and the owned transaction
+    // commits, before this request's transaction commits (flair#2333).
+    const released = txnPausePoint("xaa-principal-lock-released");
+    if (released) await released;
+
+    // Token writes follow the subject lock's release and can fail independently.
     // Determine scopes — intersection of ID-JAG scopes and IdP allowed scopes
     const requestedScopes = (payload.scope ?? "memory:read").split(" ");
     const allowedScopes = idpConfig.allowedScopes?.length
@@ -344,6 +404,12 @@ export async function handleJwtBearerGrant(data: any): Promise<Response | object
       return new Response(JSON.stringify({
         error: "temporarily_unavailable",
         error_description: "replay_store_unavailable",
+      }), { status: 503, headers: { "content-type": "application/json" } });
+    }
+    if (err instanceof PrincipalProvisionBusy) {
+      return new Response(JSON.stringify({
+        error: "temporarily_unavailable",
+        error_description: "principal_provision_in_progress",
       }), { status: 503, headers: { "content-type": "application/json" } });
     }
     return new Response(JSON.stringify({

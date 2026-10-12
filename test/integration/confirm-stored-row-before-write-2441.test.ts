@@ -156,6 +156,17 @@ async function withPaused<T>(point: string, trigger: () => Promise<Response>, co
   return { response, competed, released, paused };
 }
 
+/** Arm `point` without starting a trigger: for a case that runs two writers,
+ *  each held at its own point, and releases them in a chosen order. */
+function armPoint(point: string): void {
+  for (const marker of ["claimed", "paused", "go", "released"]) rmSync(join(pauseDir, `${marker}.${point}`), { force: true });
+  writeFileSync(join(pauseDir, `arm.${point}`), "");
+}
+/** Release an armed point (its holder's marker `go.<point>`). */
+function releasePoint(point: string): void {
+  writeFileSync(join(pauseDir, `go.${point}`), "");
+}
+
 beforeAll(async () => {
   pauseDir = mkdtempSync(join(tmpdir(), "flair-2441-pause-"));
   const saved = {
@@ -195,13 +206,26 @@ describe("flair#2441 — the usage-recording count bump confirms the stored row 
     insertRow({ id, agentId: owner.id, content: `usage ${id}`, contentHash: id, instanceToken: token, durability: "persistent" });
   const record = (id: string) => authSend(owner, "POST", "/RecordUsage", { memoryIds: [id] });
 
-  it("a DELETE between the read and the write leaves the row deleted", async () => {
+  // A DELETE whose transaction starts BEFORE the count bump's: the bump then
+  // reads the row before the delete commits and pauses mid-transaction. The
+  // committed-row re-check sees the committed row gone and aborts the bump, so
+  // the row stays deleted. Without that re-check the bump's newer transaction
+  // commits and re-creates the row.
+  it("a DELETE by an earlier transaction, committed while the count bump's newer transaction is paused after reading and before staging its write, leaves the row deleted", async () => {
     const id = `csr-usage-del-${Date.now()}`;
     await seed(id, randomUUID());
-    const { response, released, paused } = await withPaused("usage-count", () => record(id), () => deleteRow(id));
-    expect(paused, "the usage count bump was not paused").toBe(true);
-    expect(released).toBe("go");
-    expect(response.status, (await response.clone().text()).slice(0, 200)).toBe(200);
+    armPoint("memory-delete");
+    const delPending = authSend(owner, "DELETE", `/Memory/${id}`);
+    expect(await waitFor(join(pauseDir, "paused.memory-delete"), 15_000), "the owner delete was not paused").toBe(true);
+    armPoint("usage-count");
+    const recPending = record(id);
+    expect(await waitFor(join(pauseDir, "paused.usage-count"), 15_000), "the count bump was not paused").toBe(true);
+    releasePoint("memory-delete");
+    const del = await delPending;
+    expect(del.status, (await del.clone().text()).slice(0, 200)).toBeLessThan(300);
+    releasePoint("usage-count");
+    const rec = await recPending;
+    expect(rec.status, (await rec.clone().text()).slice(0, 200)).toBe(200);
     expect(await readRow(id), "the count bump re-created the deleted row").toBeNull();
   }, 60_000);
 
