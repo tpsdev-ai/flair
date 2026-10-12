@@ -6,8 +6,8 @@
  * including semantic search, the overlapping-edit cases and an actual embedding
  * backend failure, is test/integration/patch-refreshes-embedding-2466.test.ts.
  *
- * These non-re-embed cases cover changed `content` with no surviving supplied
- * vector, retention when unchanged/absent `content` accompanies an omitted or
+ * These non-re-embed cases cover changed `content` with `embedding` absent after
+ * redaction, retention when unchanged/absent `content` accompanies an omitted or
  * redaction-removed `embedding`, and storage of a surviving supplied vector as
  * supplied. An engine returning no vector for changed text yields null
  * embedding/embeddingModel. This file owns its harper + embeddings mock in its
@@ -269,6 +269,44 @@ describe("flair#2466 — ordinary PATCH embedding cases", () => {
     expect(stored.content).toBe("the replacement text");
     expect(stored.embedding).toEqual([0.5, 0.25, 0.125]);
     expect(embedInputs).toEqual([]);
+  });
+
+  for (const pairedNulls of [false, true]) {
+    it(`a content-changing PATCH with explicit null embedding clears it (null model: ${pairedNulls})`, async () => {
+      seed("mem-null", "the earlier text");
+      const body: Record<string, unknown> = { content: "the replacement text", embedding: null };
+      if (pairedNulls) body.embeddingModel = null;
+      await memoryFor("mem-null").patch(body);
+
+      const stored = await BaseMemory.get("mem-null");
+      expect(stored.content).toBe("the replacement text");
+      expect(stored.embedding).toBeNull();
+      expect(stored.embeddingModel).toBe(pairedNulls ? null : "old-model");
+      expect(stored.updatedAt).toBeUndefined();
+      expect(embedInputs).toEqual([]);
+    });
+  }
+
+  it("an ordinary PATCH with explicit null embedding skips the committed-row embedding check", async () => {
+    seed("mem-null-reread", "the unchanged text");
+    const get = BaseMemory.get;
+    let tableReads = 0;
+    BaseMemory.get = async (id: any) => {
+      tableReads++;
+      const stored = await get(id);
+      return tableReads === 1 ? stored : { ...stored, content: "a concurrent edit" };
+    };
+    try {
+      await memoryFor("mem-null-reread").patch({ content: "the unchanged text", embedding: null });
+      expect(tableReads).toBe(1);
+      const stored = await get("mem-null-reread");
+      expect(stored.content).toBe("the unchanged text");
+      expect(stored.embedding).toBeNull();
+      expect(stored.embeddingModel).toBe("old-model");
+      expect(embedInputs).toEqual([]);
+    } finally {
+      BaseMemory.get = get;
+    }
   });
 
   it("a trigger-only PATCH without embedding fields keeps the vector and embeds nothing", async () => {

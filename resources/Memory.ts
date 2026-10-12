@@ -1976,8 +1976,8 @@ export class Memory extends (databases as any).flair.Memory {
     const expiryError = stampEphemeralExpiry(content, existingForSkill);
     if (expiryError) return Response.json({ error: "invalid_expiry", message: expiryError }, { status: 400 });
     // flair#2466: this non-re-embed branch refreshes the embedding when the
-    // body's `content` changes the compared row's text and no non-null supplied
-    // vector survives redaction. Skill writes are refused above. A surviving
+    // body's `content` changes the compared row's text and `embedding` is absent
+    // after redaction. Skill writes are refused above. A surviving
     // supplied vector is stored as supplied, without text/vector validation.
     // Without a refresh, the stored vector survives only if the body omits
     // `embedding` (including when redaction removed it); an explicit null clears it.
@@ -1989,7 +1989,7 @@ export class Memory extends (databases as any).flair.Memory {
     // longer holds, and the embedding-stamp re-embed selects a null stamp.
     //
     // A fresh committed-row read runs only when the initial comparison selected
-    // no embedding, a stored row exists, and the vectorless body carries the
+    // no embedding, a stored row exists, and the body omits `embedding` and carries the
     // embedding-text field. If that comparison finds changed text, refresh from
     // the body's text. Other paths write without this confirmation. Harper has
     // no compare-and-set: changes after the fresh read are not seen by it.
@@ -2001,7 +2001,7 @@ export class Memory extends (databases as any).flair.Memory {
     /** The field to embed this body's text from, if writing it over `stored` needs a vector; else null. */
     const vectorFieldOver = (stored: any): MemoryEmbeddingInputField | null => {
       const field = embedTextField({ ...(stored ?? {}), ...body });
-      if (!Object.prototype.hasOwnProperty.call(body, field) || body.embedding != null) return null;
+      if (!Object.prototype.hasOwnProperty.call(body, field) || Object.prototype.hasOwnProperty.call(body, "embedding")) return null;
       if (stored == null) return redaction.embeddingDiscarded ? field : null;
       return skillEmbedText({ ...stored, ...body }) !== skillEmbedText(stored) ? field : null;
     };
@@ -2020,7 +2020,7 @@ export class Memory extends (databases as any).flair.Memory {
     // conditional committed-row read and the write.
     const beforePatchWrite = txnPausePoint("memory-patch");
     if (beforePatchWrite) await beforePatchWrite;
-    if (!readField && existingForSkill != null && body.embedding == null &&
+    if (!readField && existingForSkill != null && !Object.prototype.hasOwnProperty.call(body, "embedding") &&
       Object.prototype.hasOwnProperty.call(body, embedTextField({ ...existingForSkill, ...body }))) {
       const committed = await (databases as any).flair.Memory.get(String(existingForSkill.id), {});
       const committedField = committed ? vectorFieldOver(committed) : null;

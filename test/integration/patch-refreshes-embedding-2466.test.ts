@@ -8,11 +8,10 @@
  * edited memory still matched searches for the text it no longer held. A
  * non-re-embed PATCH refreshes when its body changes the compared row's
  * effective embedding text (embedTextField/skillEmbedText), from that text as
- * its body carries it, and only when it has no vector of its own to
- * store (none supplied, or the supplied one removed by redaction), the way
+ * its body carries it, and only when `embedding` is absent after redaction, the way
  * Memory.put() embeds a write that carries no vector. A fresh committed-row
  * read runs only when the initial comparison selected no embedding, a stored
- * row exists, and the vectorless body carries the embedding-text field. Other
+ * row exists, and the body omits `embedding` and carries the embedding-text field. Other
  * paths write without that confirmation. Skill writes are refused before this
  * branch, so every row here embeds from `content`.
  *
@@ -348,7 +347,36 @@ describe("flair#2466 — ordinary PATCH embedding cases (real Harper)", () => {
     expect(row.embedding, "the supplied vector was not stored").toEqual(SUPPLIED);
   }, 120_000);
 
-  it("(e) a trigger-only PATCH with no surviving supplied vector keeps the stored vector and its stamps", async () => {
+  it("a text-changing PATCH with explicit null embedding clears it over HTTP", async () => {
+    for (const pairedNulls of [false, true]) {
+      const id = `pre-null-${pairedNulls}`;
+      await seedRow(id, "the earlier text");
+      const body: Record<string, unknown> = { content: "the replacement text", embedding: null };
+      if (pairedNulls) body.embeddingModel = null;
+      const res = await patch(id, body);
+      expect(res.status, await res.clone().text()).toBeLessThan(300);
+      const row = await readRow(id);
+      expect(row.content).toBe("the replacement text");
+      expect(row.embedding).toBeNull();
+      expect(row.embeddingModel).toBe(pairedNulls ? null : SEED_MODEL_ID);
+    }
+  }, 120_000);
+
+  it("an overlapping content edit leaves an ordinary PATCH's explicit null embedding cleared", async () => {
+    const id = "pre-null-overlap";
+    const original = "the text echoed by the PATCH";
+    await seedRow(id, original);
+    const overlap = await overlapEditWithPatch(id, "the concurrent edit", { content: original, embedding: null });
+    expect(overlap.putPaused).toBe(true);
+    expect(overlap.patchPaused).toBe(true);
+    expect(overlap.put?.status).toBe(200);
+    expect(overlap.patched?.status).toBeLessThan(300);
+    const row = await readRow(id);
+    expect(row.content).toBe(original);
+    expect(row.embedding).toBeNull();
+  }, 180_000);
+
+  it("(e) a trigger-only PATCH omitting embedding after redaction keeps the stored vector and its stamps", async () => {
     // An ordinary row embeds from `content`; a `trigger` edit does not change
     // that text, so the PATCH computes nothing — with or without a supplied
     // vector that redaction removes from the body.
