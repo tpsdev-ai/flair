@@ -286,4 +286,45 @@ describe("flair#2422 — recordManagedStartSidecar through the real probe, again
     expect(seen).toEqual(["wait", "probe"]);
     expect(readSidecar(dataDir)).toMatchObject({ kind: "present", pid: 4242, port, startTimeMs: startTime });
   }, 15_000);
+
+  // flair#2485: the probe answers only for the port it probed. The probed port
+  // forwards the confirmation probe to a Flair-shaped answer on ANOTHER port;
+  // following that redirect would report Flair on the probed port, so the probe
+  // must see only the 3xx and call it a non-Flair answer (`foreign`).
+  test("a redirect from the probed port -> `foreign`, never the redirect target's Flair answer", async () => {
+    const target = createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "application/json", connection: "close" });
+      res.end(FLAIR_HEALTH);
+    });
+    servers.push(target);
+    await new Promise<void>((resolve, reject) => {
+      target.once("error", reject);
+      target.listen(0, "127.0.0.1", () => resolve());
+    });
+    const targetPort = (target.address() as AddressInfo).port;
+
+    const seen: Array<"wait" | "probe"> = [];
+    const probed = createServer((req, res) => {
+      const which = req.headers.authorization ? "wait" : "probe";
+      seen.push(which);
+      if (which === "probe") {
+        res.writeHead(302, { location: `http://127.0.0.1:${targetPort}/Health`, connection: "close" });
+        res.end();
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json", connection: "close" });
+      res.end(FLAIR_HEALTH);
+    });
+    servers.push(probed);
+    await new Promise<void>((resolve, reject) => {
+      probed.once("error", reject);
+      probed.listen(0, "127.0.0.1", () => resolve());
+    });
+    const port = (probed.address() as AddressInfo).port;
+    const dataDir = fixture();
+    const outcome = await recordManagedStartSidecar(dataDir, port, LABEL, { ...credentials, list: listRunning, ...pidReads });
+    expect(outcome).toEqual({ recorded: false, confirmation: "foreign", detail: detailFor("foreign") });
+    expect(seen).toEqual(["wait", "probe"]);
+    expect(readSidecar(dataDir)).toEqual({ kind: "absent" });
+  }, 15_000);
 });

@@ -5422,10 +5422,16 @@ export async function waitForPidGone(
  * The health probe (flair#1478): ok only when the response is 2xx AND the
  * body is flair's /Health shape. A decoy that answers 200 is `foreign`,
  * not healed.
+ *
+ * flair#2485: the probe answers only for the port it probed. `redirect:
+ * "manual"` stops it following a 3xx — a redirect from this port is a
+ * response that is not a Flair health answer (`foreign`), so a port that
+ * merely forwards elsewhere is never reported as ours (a followed redirect
+ * could land on a Flair instance on another port and pass the fingerprint).
  */
 async function probeHealth(port: number): Promise<HealthResult> {
   try {
-    const res = await fetch(`http://127.0.0.1:${port}/Health`, { signal: AbortSignal.timeout(2000) });
+    const res = await fetch(`http://127.0.0.1:${port}/Health`, { redirect: "manual", signal: AbortSignal.timeout(2000) });
     let body: unknown;
     try { body = await res.json(); } catch { body = null; }
     return classifyHealthProbe({ kind: "response", status: res.status, body });

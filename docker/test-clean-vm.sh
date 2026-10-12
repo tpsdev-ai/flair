@@ -119,9 +119,12 @@ const output = raw.replace(/\u001b\[[0-9;]*m/g, "");
 const lines = output.split(/\r?\n/);
 
 // Each issue doctor counts is printed with a red ✗; a counted check can also be
-// printed as a ⚠ warning (both carry a Fix/continuation block). Doctor's own
-// summary line ("✗ N issues found …") is a count, so it is read as N below and
-// not listed as a check.
+// printed as a ⚠ warning (both carry a Fix/continuation block). So the ✗ lines
+// are exactly what doctor counted only when every finding is a ✗ and their
+// number matches the summary; a ⚠ finding may itself be a counted check, and
+// doctor's output does not say which. Doctor's own summary line
+// ("✗ N issues found …") is a count, so it is read as N below and not listed as
+// a check.
 const isSummary = (s) => /^✗ \d+ issues? found\b/.test(s);
 const findings = [];
 for (let i = 0; i < lines.length; i++) {
@@ -157,10 +160,11 @@ out.push(
     : "FAIL: flair doctor exited non-zero. doctor reported issues but printed no countable summary:",
 );
 
-// The ✗ findings are the counted issues when their number matches N. When it
-// does not, a ⚠ finding also counted and doctor's output does not say which —
-// list every finding line rather than assert which one it was.
-const attributed = count !== null && count > 0 && hard.length === count;
+// The ✗ findings are exactly what doctor counted when every finding is a ✗ and
+// their number matches N. Otherwise the gate cannot tell which findings doctor
+// counted — a counted check can print as ⚠ — so list every finding line rather
+// than assert which one it was.
+const attributed = count !== null && count > 0 && hard.length === findings.length && hard.length === count;
 const shown = attributed ? hard : findings;
 if (shown.length > 0) {
   for (const f of shown) for (const line of f.lines) out.push(line);

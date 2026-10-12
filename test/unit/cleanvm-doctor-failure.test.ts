@@ -16,7 +16,7 @@
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { summarizeDoctorRun } from "../../src/commands/doctor";
@@ -127,7 +127,7 @@ describe("clean-VM gate: the doctor failure lists the failing doctor lines (#243
     expect(r.stdout).toContain("doctor reported 1 issue:");
   });
 
-  test("when the ✗ findings explain the count, an advisory ⚠ is not listed", () => {
+  test("a ⚠ finding may itself have counted, so the summary lists every finding", () => {
     const mixed = [
       "  ⚠ FLAIR_PUBLIC_URL is not set — local-only, unusable for any remote client",
       "     Fix: set FLAIR_PUBLIC_URL at a public URL, then restart",
@@ -136,8 +136,11 @@ describe("clean-VM gate: the doctor failure lists the failing doctor lines (#243
       "  ✗ 1 issue found — see fixes above",
     ].join("\n");
     const r = run(mixed);
+    // The ✗ count matches the summary, but a counted check can print as ⚠, so the
+    // gate cannot tell whether the ⚠ or the ✗ was the one counted. It lists both.
     expect(r.stdout).toContain("Ops socket permissions:");
-    expect(r.stdout).not.toContain("FLAIR_PUBLIC_URL");
+    expect(r.stdout).toContain("FLAIR_PUBLIC_URL");
+    expect(r.stdout).toContain("1 issue");
   });
 
   test("a non-zero exit with no finding line does not mention embeddings", () => {
@@ -170,5 +173,72 @@ describe("clean-VM gate: the parser is wired into the non-zero branch", () => {
 
   test("the fixed embeddings-only message is gone", () => {
     expect(GATE).not.toContain("semantic search is DEGRADED on a");
+  });
+});
+
+// flair#2489: the whole gate script, driven against a stubbed `flair`. The stub
+// answers `init` with a passing semantic line and `doctor` with a chosen log
+// and exit 1, so the gate reaches its doctor-FAIL branch. `id`/`whoami` are
+// stubbed so the gate's non-root guard is deterministic on any host, including
+// a root CI runner.
+describe("clean-VM gate: the script against a failing stubbed doctor (#2489)", () => {
+  const temps: string[] = [];
+  afterEach(() => {
+    while (temps.length) rmSync(temps.pop()!, { recursive: true, force: true });
+  });
+
+  function stubBin(dir: string): string {
+    const bin = join(dir, "bin");
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(
+      join(bin, "flair"),
+      [
+        "#!/bin/sh",
+        "case \"$1\" in",
+        "  init) printf '%s\\n' 'Semantic search operational (paraphrase recall verified, score 0.75)'; exit 0 ;;",
+        "  doctor) printf '%s' \"$FLAIR_STUB_DOCTOR\"; exit 1 ;;",
+        "esac",
+        "exit 2",
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    writeFileSync(join(bin, "id"), "#!/bin/sh\necho 1000\n", { mode: 0o755 });
+    writeFileSync(join(bin, "whoami"), "#!/bin/sh\necho gateuser\n", { mode: 0o755 });
+    return bin;
+  }
+
+  function runGate(doctorOutput: string): { status: number | null; stdout: string } {
+    const dir = mkdtempSync(join(tmpdir(), "flair-cleanvm-gate-"));
+    temps.push(dir);
+    const home = join(dir, "home");
+    mkdirSync(home, { recursive: true });
+    const bin = stubBin(dir);
+    const env: Record<string, string | undefined> = {
+      ...process.env,
+      HOME: home,
+      PATH: `${bin}:${process.env.PATH ?? ""}`,
+      FLAIR_STUB_DOCTOR: doctorOutput,
+    };
+    delete env.FLAIR_MODELS_DIR;
+    const r = spawnSync("bash", [GATE_PATH], { cwd: REPO, encoding: "utf8", timeout: 30_000, killSignal: "SIGKILL", env });
+    return { status: r.status, stdout: r.stdout ?? "" };
+  }
+
+  test("a non-embeddings doctor failure lists the counted finding and exits non-zero", () => {
+    const r = runGate(NON_EMBEDDINGS_FAIL);
+    expect(r.status).toBe(1);
+    expect(r.stdout).toContain("FAIL: flair doctor exited non-zero. doctor reported 1 issue:");
+    expect(r.stdout).toContain("no home instance");
+    // The #538 block is emitted only when an embeddings ✗ is among the findings.
+    expect(r.stdout).not.toContain("#538");
+  });
+
+  test("an embeddings DEGRADED failure names the #538 showstopper and exits non-zero", () => {
+    const r = runGate(EMBEDDINGS_FAIL);
+    expect(r.status).toBe(1);
+    expect(r.stdout).toContain("FAIL: flair doctor exited non-zero. doctor reported 1 issue:");
+    expect(r.stdout).toMatch(/Semantic search DEGRADED/);
+    expect(r.stdout).toContain("#538");
   });
 });
