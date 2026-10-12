@@ -154,7 +154,7 @@ describe("pushSecrets — plaintext never leaves this process", () => {
     const out = await pushSecrets("https://x/", "Basic y", { TEST_VAR: "val" }, PUB, { fetchImpl: impl });
     expect(out.allOk).toBe(false);
     expect(out.results[0].ok).toBe(false);
-    expect(out.results[0].detail).toMatch(/processEnv is false.*inert/);
+    expect(out.results[0].detail).toMatch(/processEnv is false.*could not be confirmed/);
     });
 
   test("verify path SUCCEEDS when read-back returns processEnv:true (positive control)", async () => {
@@ -206,7 +206,7 @@ describe("pushSecrets — plaintext never leaves this process", () => {
     const out = await pushSecrets("https://x/", "Basic y", { TEST_VAR: "val" }, PUB, { fetchImpl: impl });
     expect(out.allOk).toBe(false);
     expect(out.results[0].ok).toBe(false);
-    expect(out.results[0].detail).toMatch(/missing.*inert/);
+    expect(out.results[0].detail).toMatch(/missing.*could not be confirmed/);
     });
 
   test("a per-secret failure is reported by NAME without leaking the value", async () => {

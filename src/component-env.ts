@@ -148,7 +148,7 @@ export function envKeyNames(text: string | null | undefined): string[] {
  * scan whose first-wins rule could silently diverge from the loader.
  *
  * Scope, in two directions:
- *   - FILE parsing only. Harper's `loadEnv` does NOT override a key already set in
+ *   - FILE parsing only. The shipped `loadEnv` settings do not override a key set in
  *     the process environment, so a running instance's effective value can differ
  *     from what this file says; a caller that needs the effective value must
  *     overlay `process.env` itself (as `flair doctor`'s

@@ -3371,8 +3371,8 @@ export interface RefreshMcpFlagResult {
  * Attempts an encrypted `FLAIR_MCP_OAUTH=true` push and checks the processEnv marker.
  * After a confirmed push and PID-verified restart, checks target and public
  * discovery against the requested issuer and its MCP token endpoint.
- * A failed capability probe, failed push or unconfirmed read-back attempts a 0600
- * one-var fallback file and returns `{ ok: false }` before discovery checks; the CLI
+ * A failed probe, refused or unconfirmed push, or unconfirmed read-back attempts
+ * a 0600 one-var fallback file and returns `{ ok: false }` before discovery checks; the CLI
  * exits non-zero. An occupied path is refused without writing a file. Refresh has
  * a separate default filename; `--secrets-path` can select `mcp enable`'s path.
  * An occupied explicit path is refused before probing; an occupied default path
@@ -3387,10 +3387,7 @@ export async function refreshMcpOAuthFlag(
   const dryRun = Boolean(params.dryRun);
   let currentStep: EnableStepName = "target-shape-check";
   const push = (ok: boolean, detail: string) => steps.push({ step: currentStep, ok, detail });
-  // Set ONLY when the fallback file is really written. `secretsPath` on the
-  // result is a claim about disk state, so it is absent on every path that wrote
-  // nothing — a successful push, a later verification refusal, an error — and
-  // never merely the name of a path this call happened to compute (flair#2283).
+  // Set only after the fallback writer returns successfully.
   let stagedFallbackPath: string | undefined;
 
   const targetRefusal = targetOriginRefusal(params.instance) ?? fabricLoopbackRefusal(params.instance, params.fabric);
@@ -3440,8 +3437,8 @@ export async function refreshMcpOAuthFlag(
       push(false, message);
       return { ok: false, dryRun, steps, refused: { message }, failedStep: "secrets-provisioning" };
     }
-    // Attempt fallback creation after a failed capability probe, failed push or
-    // unconfirmed read-back.
+    // Attempt fallback creation after a failed probe, refused or unconfirmed push,
+    // or unconfirmed read-back.
     const cap = await probeSecretsCapability(
       resolveOpsUrl(params.instance),
       basicAuthHeader(params.adminUser, params.adminPass),
@@ -3466,12 +3463,12 @@ export async function refreshMcpOAuthFlag(
     if (!pushed.allOk) {
       const failedResults = pushed.results.filter((r) => !r.ok);
       const failed = failedResults.map((r) => `${r.name} (${r.detail})`).join("; ");
-      // A confirm-stage failure means set_secret answered successfully, but
-      // storage with processEnv=true was not confirmed.
-      const lead = failedResults.every((r) => r.kind === "confirm")
-        ? "FLAIR_MCP_OAUTH=true was pushed, but its storage with processEnv=true could not be confirmed"
-        : "FLAIR_MCP_OAUTH=true was not pushed";
-      const refusal = writeFallback();
+      const lead = failedResults.some((r) => r.kind === "push-unconfirmed")
+        ? "FLAIR_MCP_OAUTH=true push outcome could not be confirmed (it may have been stored)"
+        : failedResults.every((r) => r.kind === "confirm")
+          ? "FLAIR_MCP_OAUTH=true received a successful push response, but its storage with processEnv=true could not be confirmed"
+          : "FLAIR_MCP_OAUTH=true push was refused by the target";
+      const refusal = writeFallback()?.replace(/^/, `${lead}: ${failed}. `);
       if (refusal) {
         push(false, refusal);
         return { ok: false, dryRun, steps, refused: { message: refusal }, failedStep: "secrets-provisioning" };

@@ -207,7 +207,6 @@ describe("discriminateMcpOAuthDiscovery (real HTTP)", () => {
   });
 
   test("unreachable with no status when the request itself fails", async () => {
-    // Nothing listens on port 1; the request throws rather than answering.
     const result = await discriminateMcpOAuthDiscovery("http://127.0.0.1:1");
     expect(result.state).toBe("unreachable");
     expect(result.status).toBeUndefined();
@@ -283,8 +282,7 @@ describe("flair doctor runs the discriminator through the real command", () => {
     // A minimal PATH (a bare `sh`), as test/helpers/offline-doctor.ts uses: the
     // lane's service-manager tripwire is FIRST on the real PATH, and doctor's
     // install-tree section reaches `systemctl` when its own process sits in a
-    // systemd cgroup. Omitting PATH entirely is what keeps this case from
-    // tripping the lane (flair#2062).
+    // systemd cgroup. The minimal PATH excludes those service managers.
     const bin = join(home, "bin");
     mkdirSync(bin);
     symlinkSync("/bin/sh", join(bin, "sh"));

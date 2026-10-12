@@ -1,63 +1,10 @@
 /**
  * mcp-refresh-flag-2283.test.ts — flair#2283 item 2.
  *
- * `flair mcp enable --refresh-flag` is the one-shot migration for an instance
- * that still holds the old staged value (`FLAIR_MCP_OAUTH=1`) — a value the
- * `@harperfast/oauth` component deletes, leaving its MCP authorization server
- * disabled. The flag ATTEMPTS an encrypted `FLAIR_MCP_OAUTH=true` push; when the
- * target can take the secret it then checks the secret row's processEnv marker,
- * verifies a restart by PID change, and checks the target's own discovery document
- * and the PUBLIC document read at the verified issuer name that issuer with the MCP
- * token endpoint — the shared discriminator, bound to an issuer the caller knows —
- * and an update that could not be pushed or confirmed leaves a file when it can
- * create one; an occupied path is refused and no file is written — and returns
- * `{ ok: false }` (the `flair mcp enable` CLI turns that into a non-zero exit). It
- * does not run the IdP-credential intake nor apply CIMD changes.
- *
- * These drive `refreshMcpOAuthFlag` with an injected fetch. Ops calls always go to
- * a stub (a real RSA public key, so the value is sealed through the real
- * `pushSecrets` path; `disablePush` makes the capability probe fail). The discovery
- * read is served per case in one of three ways:
- *
- *   - the local HTTP `Bun.serve` below, selected by `shape` — the happy path (a
- *     `plugin-live` document) and the target-binding refusal (`plugin-absent`);
- *   - a SYNTHETIC `Response` built inside the stub — the mismatched-`--issuer` case
- *     (`otherIssuer`) and the public-document-names-a-`STRANGER` case (`discovery`);
- *   - not at all — the push-failure fallback stops at `secrets-provisioning`, and
- *     `--dry-run` issues no request.
- *
- * The REAL-Harper harness drives the SAME `refreshMcpOAuthFlag` FUNCTION — not the
- * `flair mcp enable` command, and not an end-to-end CLI run — for both branches the
- * TARGET selects: the push+marker+restart+self-verify path when the build has
- * secrets custody, and the staged-0600-file-and-`{ ok: false }` path when it does
- * not, in test/integration-heavy/mcp-refresh-real-harper-2283.test.ts. It is not the
- * "full" refresh path: it does not run IdP intake or apply CIMD changes here
- * either, and discovery reads on the push-success branch stay at the served origin.
- *
- * Refresh has a separate default filename; an explicit `--secrets-path` can select
- * `mcp enable`'s path. Fallback creation is attempted only when the update could not
- * be pushed or confirmed; an occupied path is refused without writing a file.
- *
- * flair#2283 round 9 pins `result.secretsPath`: it is returned ONLY when a fallback
- * file was actually written. A successful push and every later refusal (target
- * binding, self-verify, an ineffective restart, an unexpected error) leave no file
- * and therefore no `secretsPath`; only the fallback branches — a failed capability
- * probe, a failed push, or a push whose read-back could not confirm it — carry the
- * path they really staged.
- *
- * flair#2283 round 10 makes the fallback writer EXCLUSIVE (`wx`): an occupied explicit
- * path is refused before probing; an occupied default path is refused when the
- * fallback is needed — in both cases by name and left byte-identical, so a full IdP
- * bundle an operator staged at the default path via `mcp enable --secrets-path`
- * survives a refresh that needs the fallback. A push whose read-back could not confirm
- * `processEnv=true` — whether it read a row without the marker or the read-back threw —
- * is reported as storage that "could not be confirmed", not "was not pushed".
- *
- * flair#2283 round 11 splits the push from the read-back in `pushSecrets`: a throw
- * before a successful `set_secret` response is a failed push; a throw after it — the
- * read-back threw — is the confirm stage, so refresh reports storage that "could not
- * be confirmed" and makes no claim whether the row landed. The case below drives that
- * thrown read-back.
+ * These drive `refreshMcpOAuthFlag` with mocked fetch and a real RSA key.
+ * A refused push response and a request without a confirmed response are distinct;
+ * the latter's outcome could not be confirmed (it may have been stored).
+ * Real Harper coverage is in test/integration-heavy/mcp-refresh-real-harper-2283.test.ts.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -74,7 +21,7 @@ const { publicKey: PUB, privateKey: PRIV } = generateKeyPairSync("rsa", {
   privateKeyEncoding: { type: "pkcs8", format: "pem" },
 });
 
-/** Decrypt an enc:v1 envelope the way Harper's env-secrets decryptor does. */
+/** Decrypt the envelope produced by sealSecret. */
 function decryptEnvelope(envelope: string): string {
   const env = JSON.parse(Buffer.from(envelope.slice(ENV_ENCRYPTED_PREFIX.length), "base64url").toString("utf8"));
   const aes = privateDecrypt({ key: PRIV, padding: constants.RSA_PKCS1_OAEP_PADDING, oaepHash: "sha256" }, Buffer.from(env.k, "base64"));
@@ -85,28 +32,9 @@ function decryptEnvelope(envelope: string): string {
 
 type Shape = "plugin-live" | "plugin-absent";
 
-let server: ReturnType<typeof Bun.serve>;
 let shape: Shape = "plugin-live";
 
-beforeAll(() => {
-  server = Bun.serve({
-    port: 0,
-    fetch(req) {
-      const u = new URL(req.url);
-      if (u.pathname === "/.well-known/oauth-authorization-server") {
-        const token = shape === "plugin-live" ? `${INSTANCE}/oauth/mcp/token` : `${INSTANCE}/OAuthToken`;
-        return Response.json({ issuer: INSTANCE, token_endpoint: token });
-      }
-      return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
-    },
-  });
-});
-
-afterAll(() => {
-  server.stop(true);
-});
-
-/** An ops-API stub + a delegating fetch.
+/** An ops-API and discovery stub.
  *  - `disablePush` makes the capability probe fail.
  *  - `otherIssuer` answers the discovery path for any host that is NOT `INSTANCE`
  *    with a live MCP document advertising that other issuer — the "a live AS
@@ -114,32 +42,30 @@ afterAll(() => {
  *  - `discovery(url)` answers the discovery path first when it returns a Response.
  *  - `restartWithoutEffect` acknowledges a restart but never changes the PID, so
  *    the restart verification must fail.
- *  - `failPush` makes the capability probe succeed but the `set_secret` push fail,
+ *  - `failPush` makes the capability probe succeed but the `set_secret` response refuse,
  *    so refresh takes its fallback AFTER the push rather than at the probe.
  *  - `inertPush` makes `set_secret` answer successfully and returns a read-back
  *    row with `processEnv:false`; storage with `processEnv=true` is unconfirmed.
- *  - `throwOn` throws the named ops operation, so refresh hits its unexpected-error
- *    catch after the push.
+ *  - `throwOn` throws after recording receipt of the named ops operation.
  *
  *  The ops fake advances the Harper PID ONLY when a `restart` was actually
  *  requested: a run that never restarts (or restarts ineffectively) sees an
  *  unchanged PID, so the verification cannot pass on a no-op. */
 function opsFetch(
-  opts: { disablePush?: boolean; failPush?: boolean; inertPush?: boolean; otherIssuer?: string; throwOn?: string; discovery?: (url: URL) => Response | undefined; restartWithoutEffect?: boolean } = {},
+  opts: { disablePush?: boolean; failPush?: boolean; pushStatus?: number; inertPush?: boolean; otherIssuer?: string; throwOn?: string; discovery?: (url: URL) => Response | undefined; restartWithoutEffect?: boolean } = {},
 ) {
   const sent: any[] = [];
   let restarts = 0;
   const impl = (async (input: any, init: any) => {
     const url = new URL(typeof input === "string" ? input : input.url);
-    // The discovery read is answered by `discovery`, `otherIssuer`, or the REAL
-    // server; everything else is the ops stub.
+    // Discovery responses are synthetic.
     if (url.pathname === "/.well-known/oauth-authorization-server") {
       const custom = opts.discovery?.(url);
       if (custom) return custom;
       if (opts.otherIssuer && url.hostname !== new URL(INSTANCE).hostname) {
         return Response.json({ issuer: opts.otherIssuer, token_endpoint: `${opts.otherIssuer}/oauth/mcp/token` });
       }
-      return fetch(`http://127.0.0.1:${server.port}/.well-known/oauth-authorization-server`);
+      return Response.json({ issuer: INSTANCE, token_endpoint: `${INSTANCE}/${shape === "plugin-live" ? "oauth/mcp/token" : "OAuthToken"}` });
     }
     const body = JSON.parse(init.body);
     sent.push(body);
@@ -153,7 +79,7 @@ function opsFetch(
     if (op === "set_secret") {
       return opts.failPush
         ? Response.json({ error: "set_secret refused by fixture" }, { status: 400 })
-        : Response.json({ ok: true });
+        : Response.json({ ok: true }, { status: opts.pushStatus ?? 200 });
     }
     if (op === "search_by_value") return Response.json([{ name: body.search_value, processEnv: !opts.inertPush }]);
     if (op === "restart") {
@@ -203,13 +129,12 @@ describe("refreshMcpOAuthFlag (flair#2283 item 2)", () => {
     const setCall = sent.find((b) => b.operation === "set_secret");
     expect(Object.keys(setCall)).not.toContain("value"); // never plaintext on the wire
     expect(setCall.processEnv).toBe(true);
-    // The sealed value genuinely decrypts to "true" — the one value both readers accept.
+    // The sealed value decrypts to the requested "true".
     expect(decryptEnvelope(String(setCall.envelope))).toBe("true");
     // It restarted and self-verified.
     expect(sent.some((b) => b.operation === "restart")).toBe(true);
     expect(result.steps.find((s) => s.step === "self-verify")?.ok).toBe(true);
-    // flair#2283 round 9: a push that LANDED writes no fallback file, so the
-    // result must not name one — `secretsPath` is a claim about disk state.
+    // Successful push and marker responses do not produce a fallback path.
     expect(result.secretsPath).toBeUndefined();
   });
 
@@ -227,10 +152,7 @@ describe("refreshMcpOAuthFlag (flair#2283 item 2)", () => {
     expect(result.secretsPath).toBeUndefined();
   });
 
-  // flair#2283 blocker 2: --refresh-flag must BIND the verification to the target,
-  // as the enable path does. Reading --issuer alone let a live AS elsewhere make a
-  // broken target report ok. Here the target at INSTANCE still serves flair's own
-  // AS while a DIFFERENT live MCP AS answers at OTHER; --issuer OTHER must be refused.
+  // A matching public document must not bypass the target issuer check.
   test("a mismatched --issuer is refused, not reported ok", async () => {
     shape = "plugin-absent";
     const OTHER = "https://live-elsewhere.example.com";
@@ -265,9 +187,9 @@ describe("refreshMcpOAuthFlag (flair#2283 item 2)", () => {
   });
 
   // flair#2283 round 9: the OTHER fallback branch. The capability probe SUCCEEDS
-  // (so this is not the probe-refusal path) but the `set_secret` push fails, so the
+  // (so this is not the probe-refusal path) but the `set_secret` response refuses the push, so the
   // fallback file is written AFTER the push — and the result carries that path.
-  test("a failed push creates fallback at an unoccupied explicit path", async () => {
+  test("a refused push response creates fallback and reports the refusal", async () => {
     shape = "plugin-live";
     const { impl, sent } = opsFetch({ failPush: true });
     const stagedPath = base().secretsStagingPath;
@@ -275,13 +197,32 @@ describe("refreshMcpOAuthFlag (flair#2283 item 2)", () => {
     const result = await refreshMcpOAuthFlag(base(), { fetchImpl: impl, ...FAST });
     expect(result.ok).toBe(false);
     expect(result.failedStep).toBe("secrets-provisioning");
-    // The probe succeeded and the push was attempted — this is the push-failure
-    // fallback, not the probe-failure one.
+    // The probe succeeded and the server refused the push.
     expect(sent.some((b) => b.operation === "get_secrets_public_key")).toBe(true);
     expect(sent.some((b) => b.operation === "set_secret")).toBe(true);
     expect(result.steps.find((s) => s.step === "secrets-provisioning")?.detail).toContain(stagedPath);
     expect(readFileSync(stagedPath, "utf8")).toBe("FLAIR_MCP_OAUTH=true\n");
     expect(result.secretsPath).toBe(stagedPath);
+    const detail = result.steps.find((s) => s.step === "secrets-provisioning")?.detail ?? "";
+    expect(detail).toContain("push was refused by the target");
+    expect(detail).toContain("HTTP 400");
+    expect(detail).not.toContain("push outcome could not be confirmed");
+  });
+
+  test("a set_secret request without a confirmed response reports that it may have been stored", async () => {
+    const { impl, sent } = opsFetch({ throwOn: "set_secret" });
+    const result = await refreshMcpOAuthFlag(base(), { fetchImpl: impl, ...FAST });
+    expect(sent.some((b) => b.operation === "set_secret")).toBe(true);
+    expect(sent.some((b) => b.operation === "search_by_value")).toBe(false);
+    expect(result.ok).toBe(false);
+    expect(result.failedStep).toBe("secrets-provisioning");
+    const detail = result.steps.find((s) => s.step === "secrets-provisioning")?.detail ?? "";
+    expect(detail).toContain("push outcome could not be confirmed");
+    expect(detail).toContain("it may have been stored");
+    expect(detail).not.toContain("was not pushed");
+    expect(detail).not.toContain("push was refused");
+    expect(readFileSync(base().secretsStagingPath, "utf8")).toBe("FLAIR_MCP_OAUTH=true\n");
+    expect(result.secretsPath).toBe(base().secretsStagingPath);
   });
 
   // `set_secret` answered successfully; the returned row lacks processEnv=true.
@@ -307,7 +248,7 @@ describe("refreshMcpOAuthFlag (flair#2283 item 2)", () => {
   // A thrown read-back after a successful set_secret response is unconfirmed.
   test("a read-back that throws after a successful set_secret response is reported as unconfirmed", async () => {
     shape = "plugin-live";
-    const { impl, sent } = opsFetch({ throwOn: "search_by_value" });
+    const { impl, sent } = opsFetch({ throwOn: "search_by_value", pushStatus: 201 });
     const stagedPath = base().secretsStagingPath;
     rmSync(stagedPath, { force: true });
     const result = await refreshMcpOAuthFlag(base(), { fetchImpl: impl, ...FAST });
@@ -319,6 +260,8 @@ describe("refreshMcpOAuthFlag (flair#2283 item 2)", () => {
     const detail = result.steps.find((s) => s.step === "secrets-provisioning")?.detail ?? "";
     expect(detail).toContain("could not be confirmed");
     expect(detail).not.toContain("was not pushed");
+    expect(detail).toContain("push returned HTTP 201");
+    expect(detail).not.toContain("push returned 200");
     // A thrown read-back leaves storage unknown.
     // The fallback is still staged and named.
     expect(readFileSync(stagedPath, "utf8")).toBe("FLAIR_MCP_OAUTH=true\n");
@@ -373,8 +316,7 @@ describe("refreshMcpOAuthFlag (flair#2283 item 2)", () => {
     expect(result.secretsPath).toBeUndefined();
   });
 
-  // flair#2283 item 2: the ops fake advances the PID only on a real restart, so an
-  // acknowledged-but-ineffective restart must fail the PID check rather than pass.
+  // The ops stub advances its PID only on an effective simulated restart.
   test("an acknowledged but ineffective restart fails the PID check", async () => {
     shape = "plugin-live";
     const { impl } = opsFetch({ restartWithoutEffect: true });
@@ -382,13 +324,10 @@ describe("refreshMcpOAuthFlag (flair#2283 item 2)", () => {
     expect(result.ok).toBe(false);
     expect(result.failedStep).toBe("verify-restart");
     expect(result.steps.find((s) => s.step === "verify-restart")?.ok).not.toBe(true);
-    // The push landed, so the failure is later than the fallback: no file, no path.
+    // The restart failure does not name a fallback path.
     expect(result.secretsPath).toBeUndefined();
   });
 
-  // flair#2283 round 9: an unexpected error after a landed push (the restart's
-  // `system_information` call throws) surfaces through refresh's catch. No fallback
-  // file was written, so the result carries no secretsPath.
   test("an unexpected ops error after the push returns no secretsPath", async () => {
     shape = "plugin-live";
     const { impl } = opsFetch({ throwOn: "system_information" });
@@ -402,8 +341,8 @@ describe("refreshMcpOAuthFlag (flair#2283 item 2)", () => {
   // default staging file. They stage different bundles (enable: the full IdP
   // credentials bundle; refresh: the single FLAIR_MCP_OAUTH var) and a refresh that
   // wrote its one-var file to the enable path would erase a bundle a prior enable had
-  // staged. Here a full bundle sits at the enable path; a refresh that CANNOT push
-  // (so it definitely writes its fallback) must leave that bundle byte-identical and
+  // staged. Here a full bundle sits at the enable path; a refresh with an unavailable capability probe
+  // (and an unoccupied fallback path) must leave that bundle byte-identical and
   // land its own file elsewhere.
   test("refresh writes its own default file, never truncating a staged IdP bundle at the enable path", async () => {
     shape = "plugin-live";
@@ -488,9 +427,9 @@ describe("refreshMcpOAuthFlag (flair#2283 item 2)", () => {
         "OAUTH_GITHUB_REDIRECT_URI=https://agent-a.harperfabric.com/oauth\n";
       writeFileSync(refreshPath, idpBundle, { mode: 0o600 });
 
-      // disablePush => the capability probe fails => refresh needs its fallback,
+      // A thrown read-back leaves storage unconfirmed; refresh needs its fallback,
       // whose path IS the file above. A truncating writer would erase the bundle.
-      const { impl } = opsFetch({ disablePush: true });
+      const { impl } = opsFetch({ throwOn: "search_by_value" });
       const result = await refreshMcpOAuthFlag(
         { instance: INSTANCE, adminUser: "admin", adminPass: "pw" },
         { fetchImpl: impl, ...FAST },
@@ -500,6 +439,8 @@ describe("refreshMcpOAuthFlag (flair#2283 item 2)", () => {
       expect(result.failedStep).toBe("secrets-provisioning");
       // The refusal names the occupied path, and nothing was written.
       expect(result.refused?.message ?? "").toContain(refreshPath);
+      expect(result.refused?.message ?? "").toContain("storage with processEnv=true could not be confirmed");
+      expect(result.refused?.message ?? "").not.toContain("was not pushed");
       expect(readFileSync(refreshPath, "utf8")).toBe(idpBundle);
       expect(result.secretsPath).toBeUndefined();
     } finally {

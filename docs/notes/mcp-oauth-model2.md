@@ -174,32 +174,27 @@ registered identities.
 4. **Upgrading an instance that still holds the old staged value.** Releases
    using `FLAIR_MCP_OAUTH=1` leave the component's MCP AS disabled: it accepts only
    `true`/`false` and deletes `1`. Correct the value without re-running IdP intake
-   or changing the identity mapping — the command ATTEMPTS the push, and when the
-   update could not be pushed or confirmed it attempts a 0600 fallback file;
-   an occupied path is refused without writing, and it exits
-   non-zero:
+   or changing the identity mapping:
 
    ```bash
    flair mcp enable --instance https://your-public-origin --refresh-flag
    ```
 
    It ATTEMPTS an encrypted
-   `FLAIR_MCP_OAUTH=true` push: it probes whether the target can take a pushed
-   secret, and only then pushes the update, checks the secret row's `processEnv`
-   marker, verifies a restart by PID change, and checks discovery
-   metadata: the target's own discovery document must advertise that issuer with
+   `FLAIR_MCP_OAUTH=true` push: it probes for a usable public key, attempts the update,
+   and checks the secret row's `processEnv` marker before restart and discovery
+   checks: the target's own discovery document must advertise that issuer with
    the MCP token endpoint, and
    the public document read at that issuer must match the same normalized issuer and its token
    endpoint. When the update could not be pushed or confirmed — a failed capability
-   probe, a failed push, or
+   probe, a refused or unconfirmed push, or
    a push whose read-back could not confirm storage with `processEnv=true` — it attempts a 0600
    one-var fallback file. Refresh uses a separate default filename; an explicit
    `--secrets-path` can select `mcp enable`'s path. An occupied explicit path
    is refused before probing; an occupied default path is refused when the fallback is
    needed — in both cases by name rather than truncated (the writer opens
    exclusively). It leaves a file when it can create one; an occupied path is refused
-   and no file is written. It exits
-   non-zero.
+   and no file is written. These fallback outcomes exit non-zero.
 
 ## Sherlock's 4 requirements — how they are met
 

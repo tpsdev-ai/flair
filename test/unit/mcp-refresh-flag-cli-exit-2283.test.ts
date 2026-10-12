@@ -1,5 +1,5 @@
 /**
- * mcp-refresh-flag-cli-exit-2283.test.ts — flair#2283 item 3.
+ * mcp-refresh-flag-cli-exit-2283.test.ts — flair#2283.
  *
  * The unit file (test/unit/mcp-refresh-flag-2283.test.ts) drives the FUNCTION
  * `refreshMcpOAuthFlag`; the integration file drives it against the real Harper
@@ -63,11 +63,10 @@ function runRefresh(args: string[]): { status: number | null; stdout: string; st
   return { status: result.status, stdout: result.stdout, stderr: result.stderr };
 }
 
-describe("flair mcp enable --refresh-flag: a failed refresh exits non-zero (flair#2283 item 3)", () => {
+describe("flair mcp enable --refresh-flag: a failed refresh exits non-zero (flair#2283)", () => {
   test("human mode: the fallback step is printed, then the process exits non-zero", () => {
     const { status, stdout } = runRefresh([]);
-    // The documented fallback: the target could not take the secret, so the staged
-    // file is named and the command fails rather than reporting success.
+    // The probe could not confirm capability; the fallback file is named.
     expect(stdout).toContain("secrets-provisioning");
     expect(stdout).toContain("could not reach the ops API");
     expect(status).not.toBe(0);

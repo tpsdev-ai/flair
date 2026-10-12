@@ -49,7 +49,7 @@ export function issuerFromEnv(env: Record<string, string | undefined>): string |
 
 /**
  * The locally inferred `FLAIR_MCP_OAUTH` for an instance, decided the way Harper's
- * `loadEnv` plugin decides it: the component `.env` beside `config.yaml`
+ * shipped `loadEnv` settings decide it: the component `.env` beside `config.yaml`
  * (flair#1152 makes the on/off choice live there, not in the packed file),
  * overlaid with the process environment, which wins.
  *

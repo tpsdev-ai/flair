@@ -1184,16 +1184,9 @@ export async function verifyDeployServing(o: VerifyDeployOptions): Promise<void>
  *
  * The deploy cannot read the TARGET's environment; `mcpOAuthConfigured` and the
  * `FLAIR_PUBLIC_URL` / `FLAIR_MCP_ISSUER` candidates are read from the `.env` it
- * shipped. A target whose flag or issuer lives only in Fabric's environment panel
- * is reported, not failed.
+ * shipped.
  *
- * FAIL CLOSED on an unreadable shipped `.env`: when the staged component `.env`
- * exists but cannot be read, the deploy cannot know whether it implies MCP OAuth
- * is enabled or which issuers it names. Defaulting to "not configured / no known
- * issuers" would let discovery advertise flair's own AS and still return success —
- * the exact regression this check exists to catch. `stagedEnvReadError` carries that
- * read failure; when set, verification refuses BY NAME rather than probing an empty
- * candidate set.
+ * A staged `.env` read failure is reported by name before discovery is probed.
  */
 export async function verifyDeployedMcpDiscovery(o: {
   url: string;
@@ -1204,7 +1197,7 @@ export async function verifyDeployedMcpDiscovery(o: {
    *  `issuer` is none of these is `unrecognized`, never a failure. */
   knownIssuers?: string[];
   /** Why the staged component `.env` could not be read, when it could not. Set
-   *  by `deploy()` from the staging cleanup. Never defaults to empty. */
+   *  by `deploy()` from the staging cleanup. */
   stagedEnvReadError?: string | null;
   onProgress?: (msg: string) => void;
   fetchImpl?: typeof fetch;
@@ -1293,9 +1286,7 @@ export async function deploy(opts: DeployOptions): Promise<DeployResult> {
   // discovery check binds against.
   let mcpOAuthConfigured = false;
   let deployedKnownIssuers: string[] = [];
-  // flair#2283 round 6: an unreadable staged `.env` must not silently degrade to
-  // "not configured / no known issuers". Record the read failure so the post-deploy
-  // verification can refuse by name instead.
+  // Carry a staged `.env` read failure to discovery verification.
   let stagedEnvReadError: string | null = null;
   try {
     ({ replicationWarning, convergedAfterReplicationError } = await runHarperDeploy(
@@ -1316,10 +1307,6 @@ export async function deploy(opts: DeployOptions): Promise<DeployResult> {
         (issuer): issuer is string => typeof issuer === "string" && issuer.trim() !== "",
       );
     } catch (err: any) {
-      // A MISSING `.env` (existsSync false) is the legitimate "nothing staged"
-      // state and stays not-configured. An EXISTING but unreadable `.env` is not:
-      // we cannot tell whether it enables MCP OAuth or which issuers it names, so
-      // fail closed and let verifyDeployedMcpDiscovery refuse by name.
       mcpOAuthConfigured = false;
       deployedKnownIssuers = [];
       stagedEnvReadError = String(err?.message ?? err);
