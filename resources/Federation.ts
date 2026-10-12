@@ -483,10 +483,12 @@ export class FederationInstance extends Resource {
  * A first-time pair (no Peer row at the pre-transaction read) stages its token
  * consume and its Peer write in one owned transaction, then confirms against
  * committed state that the Peer row is still absent before that transaction
- * commits. If that confirm read finds a row for the instance (one committed
- * after the pre-transaction read, including after the transaction's token read),
- * the pair is refused (409 peer_row_appeared): the transaction aborts, so this
- * request writes no Peer row and the token stays unconsumed. Harper has no
+ * commits. If that confirm read finds a row for the instance in committed state
+ * although the pre-transaction read returned none, the pair is refused (409
+ * peer_row_appeared): the transaction aborts, so this request writes no Peer row
+ * and the token stays unconsumed. The confirm reports only a row present when it
+ * runs, not when that row was committed; it also detects a row committed after
+ * the transaction's token read, if that row is still present. Harper has no
  * compare-and-set on a table write, so a row committed after the confirm read
  * and before the commit is not seen by it.
  */
@@ -754,18 +756,20 @@ export class FederationPair extends Resource {
             const claim = await consumePairingToken(pairingToken, instanceId, owned);
             if (claim.kind !== "consumed") return claim;
             await (databases as any).flair.Peer.put(firstPairPeerRow(instanceId, publicKey, role, endpoint), owned);
-            // The pre-transaction read above saw no Peer row, and this first pair
-            // has now staged one. Confirm against COMMITTED state that the row is
-            // still absent (confirmCommittedRow, resources/write-back.ts): its read
-            // is an explicit fresh context, so it sees a pair or revoke committed
-            // for this instance at any point before it, including after this
-            // transaction's token read, which pins this transaction's own read
-            // snapshot. A row there is not the one this request staged, so the
-            // request must not answer `paired` for it: the throw aborts the owned
-            // transaction, the staged consume and Peer write are discarded, and the
-            // caller answers a named refusal with the token left unconsumed. A
-            // change committed after this confirm read and before the commit is not
-            // seen by it: Harper has no compare-and-set on a table write.
+            // The pre-transaction read above returned no Peer row, and this first
+            // pair has now staged one. Confirm against COMMITTED state that the row
+            // is still absent (confirmCommittedRow, resources/write-back.ts): its
+            // read is an explicit fresh context, so it sees the Peer row present in
+            // committed state when it runs, including one committed after this
+            // transaction's token read (which pins this transaction's own read
+            // snapshot). It reports presence, not when the row was committed, and a
+            // row deleted again before it runs is not seen. A row there is not the
+            // one this request staged, so the request must not answer `paired` for
+            // it: the throw aborts the owned transaction, the staged consume and
+            // Peer write are discarded, and the caller answers a named refusal with
+            // the token left unconsumed. A change committed after this confirm read
+            // and before the commit is not seen by it: Harper has no compare-and-set
+            // on a table write.
             await confirmCommittedRow((databases as any).flair.Peer, instanceId, (committed) => committed == null);
             return claim;
           }),
@@ -878,15 +882,16 @@ function peerRevokedRefusal(): Response {
 
 /**
  * 409 for a first-time pair whose committed-state confirm found a Peer row for
- * the instance after its pre-transaction read saw none. The owned transaction
- * aborted: this request wrote no Peer row and did not consume the pairing token.
+ * the instance although its pre-transaction read returned none. The owned
+ * transaction aborted: this request wrote no Peer row and did not consume the
+ * pairing token.
  * Signature verification recorded the request's replay nonce before pairing
  * began; that record stays.
  */
 function firstPairRowAppearedRefusal(): Response {
   return new Response(JSON.stringify({
     error: "peer_row_appeared",
-    message: "a Peer row for this instance was committed after this pairing read it as absent; this request wrote no Peer row and did not consume the pairing token",
+    message: "a Peer row for this instance is present in committed state although this pairing's earlier read found none; this request wrote no Peer row and did not consume the pairing token",
   }), { status: 409, headers: { "content-type": "application/json" } });
 }
 
