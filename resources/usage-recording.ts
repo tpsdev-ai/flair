@@ -100,9 +100,8 @@ export type CanReadMemory = (record: ScopableRecord | null | undefined) => boole
  *
  * The count bump is the shared write-back helper (write-back.ts): the row is
  * read inside a transaction this call OWNS, the bump is built from THAT read,
- * and the committed row is re-read before commit. A row deleted or purged
- * between the read and the write is not bumped (the plan skips an absent
- * row). An identity change the in-transaction read already sees throws
+ * and the committed row is re-read before commit. The plan skips an absent
+ * row. An identity change the in-transaction read already sees throws
  * WriteBackConflictError at once (no retry). Only a change to the committed
  * row found by the re-read after the bump is staged retries, from a fresh
  * read, at most WRITE_BACK_ATTEMPTS attempts in all (then
@@ -165,7 +164,7 @@ export async function recordUsageContribution(
   // confirms, inside its own transaction, that the stored row is still the one
   // this contribution was checked against (flair#2441): a row deleted or purged
   // before the in-transaction read is skipped by the plan (absent row), a
-  // same-id replace that changes identity fields is refused, and a row in a scope that no longer reads is skipped.
+  // identity mismatch seen by the check is refused; an unreadable row is skipped.
   await writeBackCommittedRow(
     (databases as any).flair.Memory,
     memoryId,

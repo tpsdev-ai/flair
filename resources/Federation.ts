@@ -961,10 +961,9 @@ export class FederationSync extends Resource {
               // CONSUMED message, telling the sender "failed" about a message the
               // recipient actually consumed — the exact inversion Relay exists to
               // kill. `consumed` is absorbing: reconcileState pins it regardless
-              // of updatedAt, against the in-transaction row's state. P1-3: reconcile
-              // the SATELLITE lifecycle fields too, not just `state`, so a
-              // consumed row keeps its own consumedAt and never carries a remote
-              // failureReason.
+              // of updatedAt, against the in-transaction row's state. For consumed
+              // state, clear failureReason and prefer the in-transaction row's
+              // consumedAt when non-null.
               if (record.table === "Message") {
                 const reconciled = reconcileState(row?.state, mergedData.state);
                 mergedData.state = reconciled;

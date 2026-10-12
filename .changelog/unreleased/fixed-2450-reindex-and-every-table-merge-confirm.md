@@ -1,14 +1,12 @@
-- **The `_reindex` re-PUT and the federation merge of every synced table confirm, inside their write, that the stored row is still the one they read.**
+- **The `_reindex` re-PUT and federation merge writes check the stored row again before commit.**
 
   `Memory.put`'s administrator `_reindex` re-PUT, and the federation sync
   merge of `Soul`, `Agent`, `Relationship` and `Message`, now re-read the
-  stored row inside the write's own transaction and write nothing when it is no
-  longer the row they read. For the `_reindex` re-PUT and the `Memory` merge the
-  stored row is confirmed against the row they read when its identity —
-  `instanceToken`, `contentHash`, `createdAt` or `agentId` — changed, or the row
-  is gone (a delete or a purge): the re-PUT answers 409 `stored_row_changed`, the
-  merge skips the record as `merge_target_changed`. `Soul`, `Agent`,
-  `Relationship` and `Message` carry no incarnation token. `Message` has a
+  stored row during the write's transaction. A missing row or identity change
+  (`instanceToken`, `contentHash`, `createdAt` or `agentId`) seen by either
+  confirmation read refuses the `_reindex` re-PUT with 409 `stored_row_changed`
+  or skips a planned `Memory` merge write as `merge_target_changed`.
+  `Soul`, `Agent`, `Relationship` and `Message` carry no incarnation token. `Message` has a
   content hash but no `agentId`; its hash excludes mutable lifecycle fields.
   These tables' planned writes compare the whole stored row against the row
   the merge read, refusing changes even when the identity fields match.
@@ -22,12 +20,12 @@
   write, so the confirmation narrows the window, it does not close it
   (resources/write-back.ts).
 
-  A `merge_target_changed` skip is not re-offered once the spoke's cursor has
-  advanced past the record's `updatedAt`. The sender's outbound cursor
-  (`peer.lastSyncAt`) is updated by `stampLocalContact`, called once after every
-  batch got a successful (2xx) response with valid JSON. The field-only update
-  advances the cursor to the pre-query timestamp only if it matches the row.
-  A later batch failure or an unmatched update leaves the old cursor, so the
-  next sync can re-offer the refused record with unchanged `updatedAt`. Once the
-  cursor passes that value, selection excludes it. A row with
-  `updatedAt > cursor` can be selected again.
+  A refused record is excluded once the spoke's cursor reaches its selection
+  timestamp. The sender's outbound cursor
+  (`peer.lastSyncAt`) is updated by `stampLocalContact`, called once after all
+  table queries and batch sends complete for a run with batches. The field-only update
+  writes the pre-query timestamp only to a matched row.
+  A later batch failure prevents this run's stamp. An unmatched update confirms
+  no advance; a deleted Peer row may need restoring before sync can find the hub.
+  Selection uses `updatedAt > cursor`, plus legacy null-`updatedAt` rows with
+  `createdAt > cursor`; a missing cursor defaults to the epoch.

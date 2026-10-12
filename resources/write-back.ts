@@ -28,15 +28,13 @@ export interface WriteBackOptions {
   matches?: (row: any) => boolean;
   matchFields?: string[];
   /**
-   * Before a planned write, require the in-transaction row to equal `expectedRow`
-   * (the row the caller read) as a WHOLE row, not only in the fields
+   * Before a planned write, require the in-transaction row to equal the selected
+   * basis (`expectedRow` when supplied) as a WHOLE row, not only in the fields
    * {@link sameStoredRow} compares. Soul, Agent and Relationship have no
    * instanceToken or contentHash; Message has contentHash but no instanceToken
    * or agentId. Message's hash excludes mutable lifecycle fields, so an
    * identity check alone misses their changes (flair#2450).
-   * The comparison spreads `row` first: a Harper row read has a different
-   * prototype from the plain `{ ...selected }` basis, so a bare
-   * isDeepStrictEqual(row, basis) could differ on prototype alone.
+   * The comparison spreads `row` to match the plain `{ ...selected }` basis.
    */
   wholeRow?: boolean;
   /** Test-only pause BEFORE this call's owned transaction opens — the

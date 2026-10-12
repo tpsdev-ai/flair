@@ -5,7 +5,7 @@
  * that the stored row is still the one they read:
  *
  *   - Memory.put's admin-only `_reindex` re-PUT (item 1);
- *   - the FederationSync merge of EVERY synced table — Soul, Agent,
+ *   - the FederationSync merge of the remaining synced tables — Soul, Agent,
  *     Relationship and Message (flair#2441 covered the Memory merge only; item 2).
  *
  * Each now confirms the COMMITTED row inside the write's transaction (item 1
@@ -15,12 +15,11 @@
  * `wholeRow` option). Soul, Agent and Relationship have no instanceToken or
  * contentHash; Message has contentHash but no instanceToken or agentId. Its hash
  * excludes mutable lifecycle fields, whose changes an identity check misses
- * (see the "pre-window" cases below). For Memory and the `_reindex` re-PUT
- * (which carry a server-stamped
- * incarnation token and a content hash) the identity check is sameStoredRow's: a
- * DELETE, a PURGE (Memory has one) or a same-id REPLACE that changed the row's
- * identity (incarnation token, content hash, creation time or owner) or removed
- * it is refused. `_reindex` answers 409 stored_row_changed; a merge is skipped by
+ * (see the "pre-window" cases below). Memory's initial check and the `_reindex`
+ * confirmations use sameStoredRow's identity fields. The helper's final
+ * confirmation compares the whole committed row with its in-transaction read.
+ * A mismatch seen by the applicable check refuses the write.
+ * `_reindex` answers 409 stored_row_changed; a merge is skipped by
  * name (merge_target_changed). Harper has no compare-and-set on a table write, so
  * a change committed AFTER the final confirm read — taken inside the same
  * transaction, before its commit — is not seen (resources/write-back.ts).
@@ -233,7 +232,7 @@ describe("flair#2450 — the _reindex re-PUT confirms the stored row (real Harpe
     expect(await readRow("Memory", id), "the re-PUT re-created the purged row").toBeNull();
   }, 60_000);
 
-  it("a same-id REPLACE with a new token is refused and not overwritten", async () => {
+  it("a same-id UPDATE with a new token is refused and not overwritten", async () => {
     const id = `csr2-reidx-rep-${Date.now()}`;
     const T2 = randomUUID();
     await seed(id, randomUUID());
@@ -281,11 +280,11 @@ interface TableCase {
   seed: (id: string, marker: string) => Record<string, unknown>;
   replace: (id: string) => Record<string, unknown>;
   /**
-   * A same-id REPLACE that KEEPS the identity fields sameStoredRow compares for
+   * A same-id UPDATE that KEEPS the identity fields sameStoredRow compares for
    * this table and changes a data field (Message changes lifecycle fields,
-   * keeping its contentHash). Only a WHOLE-ROW comparison against the row the
-   * merge read catches it. Committed at `federation-merge-pre`, after the merge's
-   * read and before the helper's in-transaction read.
+   * keeping its contentHash). The identity check alone misses it. Committed at
+   * `federation-merge-pre`, after the merge's read and before the helper's
+   * in-transaction read.
    */
   staleReplace: (id: string, stored: any) => Record<string, unknown>;
   /** A field the merge is expected to land on a control run. */
@@ -356,7 +355,7 @@ for (const c of CASES) {
       expect(released).toBe("go");
     }, 60_000);
 
-    it("a same-id REPLACE is not overwritten and the record is skipped by name", async () => {
+    it("a same-id UPDATE is not overwritten and the record is skipped by name", async () => {
       const id = `csr2-${c.table.toLowerCase()}-rep-${Date.now()}`;
       await insertRow(c.table, c.seed(id, "original"));
       const { response, released, paused } = await withPaused("federation-merge", () => push(id, `merged ${id}`), async () => {
@@ -399,7 +398,7 @@ for (const c of CASES) {
       data: { id, ...c.landed(id) },
     });
 
-    it("a same-id REPLACE between the merge read and the helper's in-transaction read is refused", async () => {
+    it("a same-id UPDATE between the merge read and the helper's in-transaction read is refused", async () => {
       const id = `csr2-${c.table.toLowerCase()}-pre-${Date.now()}`;
       await insertRow(c.table, c.seed(id, "original"));
       const stored = await readRow(c.table, id);
@@ -425,28 +424,27 @@ for (const c of CASES) {
 
 // ── item 3: is a merge_target_changed skip re-offered on the next sync? ─────
 //
-// A skip is not re-offered once the spoke's cursor advances past its updatedAt.
+// A refused record is excluded once the cursor reaches its selection timestamp.
 // The receiver (hub) records the skip
 // (SyncLog.skippedReasons, and the response body's skipped/skippedReasons); it
-// keeps NO per-record retry state, and no hub value is ever read to drive a
-// re-send. The decision belongs to the SPOKE's outbound cursor, in
+// keeps no per-record retry state. Selection uses the SPOKE's outbound cursor, in
 // src/commands/federation.ts:runFederationSyncOnce: the cursor is
-// `hub.lastSyncAt` (the spoke's local Peer row for the hub), and the push
-// selects `updatedAt > since`.
+// `hub.lastSyncAt ?? new Date(0).toISOString()` on the spoke's local hub Peer.
+// Timestamp selection is `updatedAt > since`, plus legacy null-`updatedAt` rows
+// with `createdAt > since`.
 //
-// After every batch gets a successful (2xx) response with valid JSON,
-// stampLocalContact() runs once at the end. Its field-only update advances the
-// cursor to the pre-query `queriedAt` only if it matches the Peer row. A later
-// batch failure or an unmatched update leaves the old cursor for the next poll.
+// For a run with batches, stampLocalContact() runs once after all table queries
+// and batch sends complete. Its field-only update writes the pre-query
+// `queriedAt` only to a matched Peer row. A later
+// batch failure prevents this run's stamp. An unmatched update confirms no
+// advance; a deleted Peer row may need restoring before sync can find the hub.
 //
-// `updatedAt` is a DATA value, not a structural guarantee: a merged row keeps
-// whatever updatedAt the remote sent (mergeRecord), and the receiver never
-// rewrites it on a refusal. A refused record with unchanged updatedAt can be
-// re-offered if the cursor does not advance. Once the cursor passes that value,
-// selection excludes it; a row with updatedAt > queriedAt is re-offered.
+// A remote-winning merge of an existing row retains the remote timestamp
+// (mergeRecord). Refusal does not rewrite updatedAt. A refused record remains
+// timestamp-eligible while updatedAt (or createdAt for a legacy null-updatedAt
+// row) exceeds the next cursor.
 //
-// The hub's own `lastSyncCursor` (resources/Federation.ts) is written-only: set
-// on the hub's Peer row for the spoke and read by nothing.
+// The hub's `lastSyncCursor` (resources/Federation.ts) is not used by this sender.
 //
 // SINGLE-INSTANCE CAVEAT: this file's Harper is BOTH the client's hub and the
 // receiver. FederationSync.post writes `peerUpdate.lastSyncAt = nowIso` onto the
@@ -456,10 +454,8 @@ for (const c of CASES) {
 // too. What this case DOES show, on one instance, is the observable outcome — a
 // byte-identical re-insert (same id, same updatedAt) is not re-offered on sync
 // #2 (pushed 0) and its content stays un-merged, while bumping the row's own
-// updatedAt (sync #3) IS re-offered. The spoke-side advance is pinned on its own
-// — no second instance, no pause — by the batch-path unit test in
-// test/unit/federation-liveness-ping.test.ts
-// ("flair#2450 — the spoke cursor advances after a batch, after every batch succeeds").
+// updatedAt (sync #3) IS re-offered. The spoke-side update request is checked
+// separately in the mocked wire tests in test/unit/federation-liveness-ping.test.ts.
 describe("flair#2450 item 3 — a merge_target_changed skip is not re-offered once the cursor advances past it (real Harper)", () => {
   // The hub peer row id must be this instance's id: runFederationSyncOnce signs
   // the batch as its OWN instance, and FederationSync.post authenticates it via
@@ -509,7 +505,8 @@ describe("flair#2450 item 3 — a merge_target_changed skip is not re-offered on
     keystore.setPrivateKeySeed(hubId, seed);
     const kp = nacl.sign.keyPair.fromSeed(seed);
 
-    // Cursor = now: only rows written AFTER this are federable this run.
+    // Cursor = now: selection uses updatedAt > T0, or createdAt > T0 for
+    // legacy rows with null updatedAt; it does not use the time of the write.
     const T0 = new Date().toISOString();
     await insertRow("Peer", {
       id: hubId, role: "hub", status: "paired", endpoint: harper.httpURL,
@@ -527,8 +524,8 @@ describe("flair#2450 item 3 — a merge_target_changed skip is not re-offered on
     // Sync #1: the merge is refused — the competitor DELETEs the row at the
     // in-transaction `federation-merge` pause point (after the helper's
     // in-transaction read; `federation-merge-pre` is before it). A delete rather
-    // than a same-id replace lets sync #2 re-create the row at the SAME updatedAt,
-    // so sync #2's selection turns on `updatedAt > since` alone, not on content.
+    // than a same-id update lets sync #2 re-create the row at the SAME updatedAt,
+    // so this non-null-updatedAt row's selection turns on `updatedAt > since`.
     const { result, released, paused } = await withPausedSync("federation-merge", () => syncOnce(), () => deleteRow("Soul", id));
     expect(paused, "the federation merge was not paused").toBe(true);
     expect(released).toBe("go");
@@ -557,10 +554,7 @@ describe("flair#2450 item 3 — a merge_target_changed skip is not re-offered on
     // not applied late.
     expect((await readRow("Soul", id)).value).toBe("original");
 
-    // Sync #3: the sender's OWN row changes again. A new
-    // updatedAt past the cursor makes the next poll select and merge it. (This is
-    // the re-offer that a mid-run updatedAt bump produces too: see the header
-    // note on updatedAt being a data value, not a structural guarantee.)
+    // Sync #3: updatedAt past the cursor makes this row eligible again.
     const T3 = new Date().toISOString();
     await updateRow("Soul", { id, value: "edited", updatedAt: T3 });
     const third = await syncOnce();

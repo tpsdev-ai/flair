@@ -208,20 +208,16 @@ describe("hub-side FederationSync with empty records", () => {
 });
 
 /**
- * flair#2450 — the spoke-side cursor advance after a BATCH (not the no-change
- * ping the block above covers), pinned on its own.
+ * flair#2450 — the spoke-side cursor update request after a batch.
  *
  * The item-3 real-Harper case drives a single instance that is both the
  * client's hub and the receiver, so FederationSync.post's own contact write and
  * runFederationSyncOnce's stampLocalContact both touch the SAME Peer row the
  * client re-reads as `since` — the advance cannot be attributed. These unit
- * cases isolate stampLocalContact: they mock the wire, push one Memory record,
- * and assert the field-only Peer cursor update happens exactly once, after the
- * batch POST, after every batch got a successful (2xx) response with valid JSON. Removing the post-batch
- * `await stampLocalContact()` fails the first case; letting a failed batch stamp
- * anyway fails the second.
+ * cases isolate stampLocalContact with a mocked wire: one successful batch
+ * produces one field-only Peer update request; a later failed batch produces none.
  */
-describe("flair#2450 — the spoke cursor advances after a batch, after every batch succeeds", () => {
+describe("flair#2450 — spoke cursor update requests after successful and failed batches", () => {
   const origFetch = globalThis.fetch;
   let calls: Array<{ url: string; method?: string; body?: any }> = [];
   const INSTANCE = "spoke-batch-2450";
@@ -298,10 +294,8 @@ describe("flair#2450 — the spoke cursor advances after a batch, after every ba
   });
 
   it("a LATER batch that fails does not stamp: an earlier 200 does not advance the cursor (no per-batch stamp)", async () => {
-    // 51 rows forces two batches: 50 (200) then 1 (503). The stamp is written
-    // ONCE after the whole run, so the failed second batch must leave the cursor
-    // put even though the first batch succeeded — a per-batch "after any 200"
-    // stamp would have advanced it here.
+    // The fixture produces a successful batch followed by a failed batch.
+    // Assert no cursor update request, including after the earlier success.
     installBatchMock([200, 503], 51);
     const { runFederationSyncOnce } = await import("../../src/cli");
     const result = await runFederationSyncOnce({ adminPass: "test-admin-pass", opsPort: "9925" });
