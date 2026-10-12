@@ -33,19 +33,21 @@
  *         transaction would not be.
  *     A control rotation with no competing revoke still succeeds.
  *
- *   - XAA credential touch vs revoke/delete (resources/XAA.ts). A successful
- *     jwt-bearer grant touches the matched IdP credential's `lastUsedAt`. Each
- *     case holds the touch between its read and its write (the test-only pause
- *     point `xaa-credential-touch`) while the credential is revoked (status ->
- *     "revoked") or deleted, then releases it: the credential stays revoked /
- *     stays deleted, and the case asserts the stored row. The grant still issues
- *     its tokens. (Measured: the touch's write does not overwrite the committed
- *     revoke/delete, so the stored row is what the competing write left.)
+ *   - XAA credential touch vs revoke/delete (resources/XAA.ts). A jwt-bearer
+ *     grant reads the matched IdP credential and touches its `lastUsedAt`. A
+ *     matched credential whose status is not "active" is refused by name and
+ *     nothing is written. Each contended case holds the touch between its read
+ *     and its write (the test-only pause point `xaa-credential-touch`) while the
+ *     credential is revoked (status -> "revoked"), deleted, or re-pointed at a
+ *     different principal, then releases it: the committed-row confirmation
+ *     refuses the grant and aborts the touch, so the credential keeps the
+ *     committed revoke / delete / re-point and the case asserts the stored row
+ *     and that no token was issued.
  *
  * The pause points are resources/txn-pause-point.ts, armed through
  * FLAIR_ENABLE_TEST_FAULT_INJECTION / FLAIR_TEST_PAUSE_DIR, set for this file's
  * Harper only. The control cases exercise the ordinary, uncontended path: a
- * rotation still exchanges, and a credential touch still records `lastUsedAt`.
+ * rotation still exchanges, and an active credential still records `lastUsedAt`.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
@@ -109,6 +111,15 @@ async function readTokenByHash(tokenHash: string): Promise<any> {
     search_attribute: "tokenHash", search_type: "equals", search_value: tokenHash, get_attributes: ["*"],
   });
   return Array.isArray(rows) ? (rows[0] ?? null) : null;
+}
+
+/** Every OAuthToken row issued to `principalId` (an empty array when none was). */
+async function readTokensForPrincipal(principalId: string): Promise<any[]> {
+  const rows = await ops({
+    operation: "search_by_value", database: "flair", table: "OAuthToken",
+    search_attribute: "principalId", search_type: "equals", search_value: principalId, get_attributes: ["id"],
+  });
+  return Array.isArray(rows) ? rows : [];
 }
 
 async function postJson(path: string, body: unknown): Promise<Response> {
@@ -392,7 +403,57 @@ describe("flair#2333 slice 2 — credential lifecycle writes preserve committed 
     expect(typeof row.lastUsedAt, "the control touch recorded lastUsedAt").toBe("string");
   }, 60_000);
 
-  it("a revoked credential stays revoked", async () => {
+  it("an already-revoked credential is refused by name, issues no token, and its lastUsedAt is untouched", async () => {
+    const subject = `user-already-${randomUUID()}`;
+    const principalId = `agent-2333-already-${randomUUID().slice(0, 8)}`;
+    const credentialId = `cred_idp_already_${randomUUID().slice(0, 8)}`;
+    const lastUsedAt = "2020-01-02T03:04:05.000Z";
+    await ops({
+      operation: "insert", database: "flair", table: "Credential",
+      records: [{ id: credentialId, principalId, kind: "idp", label: "already", status: "revoked", idpProvider: IDP_ID, idpSubject: subject, createdAt: new Date().toISOString(), lastUsedAt }],
+    });
+    const res = await grantJwtBearer(await jwtBearerAssertion(subject));
+    const text = await res.text();
+    expect(res.status, `grant returned ${res.status}: ${text.slice(0, 300)}`).toBe(400);
+    const body = JSON.parse(text);
+    expect(body.error).toBe("invalid_grant");
+    expect(body.error_description, "the refusal does not name the credential's non-active status").toContain('"revoked"');
+    expect(body.access_token).toBeUndefined();
+    expect(await readTokensForPrincipal(principalId), "the refused grant issued a token").toEqual([]);
+    const row = await readRow("Credential", credentialId);
+    expect(row?.status, "the stored status changed").toBe("revoked");
+    expect(row?.lastUsedAt, "the refused grant touched lastUsedAt").toBe(lastUsedAt);
+  }, 60_000);
+
+  it("a credential re-pointed at another principal while the touch is held refuses the grant", async () => {
+    const subject = `user-repl-${randomUUID()}`;
+    const principalId = `agent-2333-repl-${randomUUID().slice(0, 8)}`;
+    const otherPrincipalId = `agent-2333-other-${randomUUID().slice(0, 8)}`;
+    const credentialId = `cred_idp_repl_${randomUUID().slice(0, 8)}`;
+    await ops({
+      operation: "insert", database: "flair", table: "Credential",
+      records: [{ id: credentialId, principalId, kind: "idp", label: "repl", status: "active", idpProvider: IDP_ID, idpSubject: subject, createdAt: new Date().toISOString() }],
+    });
+    const assertion = await jwtBearerAssertion(subject);
+    const { response, competed, released } = await withPaused(
+      "xaa-credential-touch",
+      () => grantJwtBearer(assertion),
+      () => ops({ operation: "update", database: "flair", table: "Credential", records: [{ id: credentialId, principalId: otherPrincipalId }] }).then(() => 200),
+    );
+    expect(released, "the credential touch was not paused and released by this test").toBe("go");
+    expect(competed, "the competing re-point did not return 200").toBe(200);
+    const text = await response.text();
+    expect(response.status, `grant returned ${response.status}: ${text.slice(0, 300)}`).toBe(400);
+    const body = JSON.parse(text);
+    expect(body.error).toBe("invalid_grant");
+    expect(body.access_token).toBeUndefined();
+    expect(await readTokensForPrincipal(principalId), "the refused grant issued a token").toEqual([]);
+    expect(await readTokensForPrincipal(otherPrincipalId), "the refused grant issued a token").toEqual([]);
+    const row = await readRow("Credential", credentialId);
+    expect(row?.principalId, "the stored row is not the committed re-point").toBe(otherPrincipalId);
+  }, 60_000);
+
+  it("a revoke committed while the credential touch is held refuses the grant", async () => {
     const subject = `user-rev-${randomUUID()}`;
     const principalId = `agent-2333-rev-${randomUUID().slice(0, 8)}`;
     const credentialId = `cred_idp_rev_${randomUUID().slice(0, 8)}`;
@@ -409,13 +470,17 @@ describe("flair#2333 slice 2 — credential lifecycle writes preserve committed 
     expect(released, "the credential touch was not paused and released by this test").toBe("go");
     expect(competed, "the competing revoke did not return 200").toBe(200);
     const text = await response.text();
-    expect(response.status, `grant returned ${response.status}: ${text.slice(0, 300)}`).toBe(200);
+    expect(response.status, `grant returned ${response.status}: ${text.slice(0, 300)}`).toBe(400);
+    const body = JSON.parse(text);
+    expect(body.error).toBe("invalid_grant");
+    expect(body.access_token).toBeUndefined();
+    expect(await readTokensForPrincipal(principalId), "the refused grant issued a token").toEqual([]);
     const row = await readRow("Credential", credentialId);
     expect(row, "the revoked credential survived").not.toBeNull();
     expect(row.status, "the stored credential is not the committed revoke").toBe("revoked");
   }, 60_000);
 
-  it("a deleted credential stays deleted", async () => {
+  it("a delete committed while the credential touch is held refuses the grant", async () => {
     const subject = `user-del-${randomUUID()}`;
     const principalId = `agent-2333-del-${randomUUID().slice(0, 8)}`;
     const credentialId = `cred_idp_del_${randomUUID().slice(0, 8)}`;
@@ -432,7 +497,11 @@ describe("flair#2333 slice 2 — credential lifecycle writes preserve committed 
     expect(released, "the credential touch was not paused and released by this test").toBe("go");
     expect(competed, "the competing delete did not return 200").toBe(200);
     const text = await response.text();
-    expect(response.status, `grant returned ${response.status}: ${text.slice(0, 300)}`).toBe(200);
+    expect(response.status, `grant returned ${response.status}: ${text.slice(0, 300)}`).toBe(400);
+    const body = JSON.parse(text);
+    expect(body.error).toBe("invalid_grant");
+    expect(body.access_token).toBeUndefined();
+    expect(await readTokensForPrincipal(principalId), "the refused grant issued a token").toEqual([]);
     const row = await readRow("Credential", credentialId);
     expect(row, "the stored row is not the committed delete").toBeNull();
   }, 60_000);
