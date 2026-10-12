@@ -51,16 +51,7 @@ import { httpStatus } from "../helpers/http-status";
 import { childOverranDeadline, cliLeg } from "../helpers/child-deadline.js";
 
 // flair#1807: the CLI child's OWN deadline, and the per-case budget above it.
-// This is the integration lane's own invocation (`bun test
-// test/integration/*.test.ts`): the shared Harper boot is paid ONCE in
-// beforeAll, so what a case spends is one CLI child against that live Harper.
-// Measured here over three runs, a case's CLI child takes 0.14-0.31 s, so the
-// budget is the 20 s child deadline + well under a second of work + a wide
-// margin = 25 s. Before this a case had no budget at all (bun's 5 s default)
-// and the child's only bound was a manual 30 s kill that discarded the child's
-// output.
 const CHILD_DEADLINE_MS = 20_000;
-const CASE_BUDGET_MS = 25_000;
 
 const CLI = join(process.cwd(), "dist", "cli.js");
 const AGENT_ID = "flair679-e2e-agent";
@@ -95,7 +86,7 @@ function runCli(args: string[], extraEnv: Record<string, string> = {}): Promise<
       },
       // flair#1807: the child carries its OWN deadline (it replaces the manual
       // 30 s kill this used to arm); a signal kill is named, with its output.
-      timeout: CHILD_DEADLINE_MS,
+      timeout: 20_000,
     });
     let stdout = "";
     let stderr = "";
@@ -191,6 +182,7 @@ describe("flair workspace set / flair orgevent — real Harper (#679)", () => {
     const id = `${AGENT_ID}:cp679-fix`;
     const res = await fetch(`${harper.httpURL}/WorkspaceState/${id}`, {
       headers: { Authorization: adminAuthHeader() },
+      signal: AbortSignal.timeout(5_000),
     });
     expect(res.status).toBe(200);
     const ws = await res.json() as Record<string, unknown>;
@@ -201,7 +193,7 @@ describe("flair workspace set / flair orgevent — real Harper (#679)", () => {
     expect(ws.taskId).toBe("679");
     expect(ws.summary).toBe("fixing bare POST 405 for flair#679");
     expect(typeof ws.createdAt).toBe("string");
-  }, CASE_BUDGET_MS);
+  }, 30_000);
 
   test("workspace set is idempotent per (agentId, ref) — a second call overwrites the same row", async () => {
     const r = await runCli(
@@ -213,12 +205,13 @@ describe("flair workspace set / flair orgevent — real Harper (#679)", () => {
     const id = `${AGENT_ID}:cp679-fix`;
     const res = await fetch(`${harper.httpURL}/WorkspaceState/${id}`, {
       headers: { Authorization: adminAuthHeader() },
+      signal: AbortSignal.timeout(5_000),
     });
     expect(res.status).toBe(200);
     const ws = await res.json() as Record<string, unknown>;
     expect(ws.phase).toBe("review");
     expect(ws.summary).toBe("second write, same ref");
-  }, CASE_BUDGET_MS);
+  }, 30_000);
 
   // UNLIKE WorkspaceState, a bare POST /OrgEvent does NOT 405 today — measured
   // directly (this test), and confirmed by running the ORIGINAL (pre-fix)
@@ -260,6 +253,7 @@ describe("flair workspace set / flair orgevent — real Harper (#679)", () => {
     // write actually landed, not just that the CLI exited 0.
     const res = await fetch(`${harper.httpURL}/OrgEvent/${id}`, {
       headers: { Authorization: adminAuthHeader() },
+      signal: AbortSignal.timeout(5_000),
     });
     expect(res.status).toBe(200);
     const ev = await res.json() as Record<string, unknown>;
@@ -269,7 +263,7 @@ describe("flair workspace set / flair orgevent — real Harper (#679)", () => {
     expect(ev.summary).toBe("flair#679 e2e verification");
     expect(ev.targetIds).toEqual(["flint"]);
     expect(typeof ev.createdAt).toBe("string");
-  }, CASE_BUDGET_MS);
+  }, 30_000);
 
   test("orgevent generates a fresh id per call — two publishes are collision-resistant", async () => {
     const r1 = await runCli(["orgevent", "--kind", "status", "--summary", "first"], { FLAIR_AGENT_ID: AGENT_ID });
@@ -279,5 +273,5 @@ describe("flair workspace set / flair orgevent — real Harper (#679)", () => {
     const id1 = r1.stdout.match(/id:\s*(\S+)/)![1];
     const id2 = r2.stdout.match(/id:\s*(\S+)/)![1];
     expect(id1).not.toBe(id2);
-  }, CASE_BUDGET_MS);
+  }, 45_000);
 });
