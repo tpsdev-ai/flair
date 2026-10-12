@@ -36,6 +36,39 @@ export const AGENT_HOME_STAMP_FIELD = "flairStampHome";
  */
 export const AGENT_HOME_STAMP_PAUSE_POINT = "agent-home-stamp";
 
+/**
+ * The request-body control field `flair principal add`'s write-back sends to the
+ * Agent resource (flair#2473). The write-back runs when the command's create-only
+ * `insert` is SKIPPED because the row already exists: the resource then writes the
+ * record back WITHOUT the home field, in an OWNED transaction, refusing
+ * `originator_instance_immutable` when the committed row's home became foreign.
+ * The resource reads it and drops it before the write — it is a control field,
+ * not a stored column.
+ */
+export const AGENT_PRINCIPAL_WRITE_BACK_FIELD = "flairPrincipalWriteBack";
+
+/**
+ * The named pause point the write-back test arms (flair#2473), inside the
+ * write-back's OWNED transaction, between the staged update and its confirmation
+ * read. Named as a DIRECT string literal at the call site in resources/Agent.ts
+ * (flair#2382's checker resolves only literals or `spec.point`); this export is
+ * the single source the integration test arms, and it must stay equal.
+ */
+export const AGENT_PRINCIPAL_WRITE_BACK_PAUSE_POINT = "agent-principal-write-back";
+
+/**
+ * Whether a stored row's home is FOREIGN to `localId`: a non-empty
+ * `originatorInstanceId` that is not this instance's own. A home-less row (null,
+ * absent or empty) is not foreign, and neither is a row stamped with this
+ * instance's id. Used by `flair principal add`'s guarded write-back (flair#2473):
+ * a row whose home became a peer's must not be changed.
+ */
+export function isForeignAgentHome(row: Record<string, unknown> | null | undefined, localId: string | null): boolean {
+  if (!row || typeof row !== "object") return false;
+  const home = row[AGENT_HOME_FIELD];
+  return typeof home === "string" && home.length > 0 && home !== localId;
+}
+
 /** A row is home-less when `originatorInstanceId` is null, absent or empty. */
 export function isHomeLessAgentRow(row: Record<string, unknown>): boolean {
   const home = row[AGENT_HOME_FIELD];

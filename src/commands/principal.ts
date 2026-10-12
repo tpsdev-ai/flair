@@ -32,7 +32,7 @@ import {
 } from "../lib/auth-resolve.js";
 import { resolveOpsUrl } from "../lib/mcp-enable.js";
 import { writeConfirmed } from "../lib/instance-identity-row.js";
-import { agentHomeEndpoint, planAgentHomeWrite, readStoredAgentHome, resolveTargetInstanceId } from "../lib/agent-home.js";
+import { agentHomeEndpoint, planAgentHomeWrite, readStoredAgentHome, resolveTargetInstanceId, AGENT_HOME_IMMUTABLE_ERROR, AGENT_PRINCIPAL_WRITE_BACK_FIELD } from "../lib/agent-home.js";
 import { fetchErrorLabel, redactUrl } from "./federation.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
 import { invalidAgentIdMessage, isValidAgentId } from "../lib/agent-id-rule.js";
@@ -50,6 +50,7 @@ export type PrincipalCli = {
   pubKeyPath: (agentId: string, keysDir: string) => string;
   relativeTime: (iso: string | null | undefined) => string;
   resolveOpsPort: (opts: { opsPort?: string | number; port?: string | number }) => number;
+  resolveHttpPort: (opts: { port?: string | number; dataDir?: string }, mode?: "address" | "create") => number;
 };
 
 let cli: PrincipalCli;
@@ -337,6 +338,10 @@ export function register(program: Command): void {
       // silently updated; a write Harper skips is a failure named by its result,
       // not a success. A failed read is UNREADABLE, not "no home", and refused.
       const opsUrl = `http://127.0.0.1:${opsPort}/`;
+      // The instance's HTTP port, where the Agent RESOURCE lives. The write-back
+      // goes to the resource (a guarded REST PATCH), not the raw ops API, so it
+      // runs in an owned transaction (flair#2473).
+      const httpUrl = `http://127.0.0.1:${cli.resolveHttpPort(opts)}/`;
       const home = await resolveTargetInstanceId(agentHomeEndpoint(opsPort, adminUser, adminPass));
       const existingHome = await readStoredAgentHome({ opsUrl, authHeader: auth, id });
       const homePlan = planAgentHomeWrite(existingHome, home, id);
@@ -402,22 +407,27 @@ export function register(program: Command): void {
           process.exit(1);
         }
         // Write back WITHOUT the home field, so a home this command did not
-        // create is never changed.
-        const updateRes = await fetch(opsUrl, {
-          method: "POST",
+        // create is never changed. The write goes to the Agent RESOURCE (a REST
+        // PATCH, never the raw ops API): the resource runs it in its OWN owned
+        // transaction, STAGES it, then re-reads the COMMITTED row and ABORTS
+        // with `originator_instance_immutable` if that row's home became a
+        // peer's — so a row this command did not create is never changed
+        // (flair#2473). Harper has no compare-and-set, so this narrows the race
+        // rather than closing it (per-id serialization: flair#2478).
+        const writeBackRes = await fetch(`${httpUrl}Agent/${encodeURIComponent(id)}`, {
+          method: "PATCH",
           headers: { "Content-Type": "application/json", Authorization: auth },
-          body: JSON.stringify({ operation: "update", database: "flair", table: "Agent", records: [record] }),
+          body: JSON.stringify({ ...record, [AGENT_PRINCIPAL_WRITE_BACK_FIELD]: true }),
         });
-        if (!updateRes.ok) {
-          const text = await updateRes.text().catch(() => "");
-          console.error(`Error: ${updateRes.status} ${text}`);
-          process.exit(1);
-        }
-        const updateBody = await updateRes.json().catch(() => null);
-        if (!writeConfirmed(updateBody, "update_hashes", id)) {
-          console.error(
-            `Error: the write for principal '${id}' was skipped by the operations API (${JSON.stringify(updateBody)}); no row was changed. Re-run 'flair principal add ${id}'.`,
-          );
+        if (!writeBackRes.ok) {
+          const body = (await writeBackRes.json().catch(() => null)) as { error?: unknown; message?: unknown } | null;
+          if (body?.error === AGENT_HOME_IMMUTABLE_ERROR) {
+            console.error(`Error: ${typeof body.message === "string" && body.message.length > 0 ? body.message : AGENT_HOME_IMMUTABLE_ERROR}`);
+          } else {
+            console.error(
+              `Error: the write-back for principal '${id}' failed (${writeBackRes.status}${body?.message ? `: ${String(body.message)}` : ""}); no row is known to have been changed. Re-run 'flair principal add ${id}'.`,
+            );
+          }
           process.exit(1);
         }
       }

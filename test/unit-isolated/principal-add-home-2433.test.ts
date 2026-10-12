@@ -27,8 +27,8 @@ let updates: any[];
 let storedRows: Array<Record<string, unknown>>;
 /** Runs between the command's pre-read and its insert, so a test can commit a competing change in that gap. */
 let onInsert: (() => void) | undefined;
-/** When true, the mock reports the update as skipped (`update_hashes` empty, id in `skipped_hashes`). */
-let updateSkipped = false;
+/** When true, the mock resource answers the guarded write-back with `originator_instance_immutable` (409). */
+let writeBackRefused = false;
 
 beforeEach(async () => {
   tmpHome = mkdtempSync(join(tmpdir(), "flair-2433-principal-"));
@@ -37,12 +37,26 @@ beforeEach(async () => {
   updates = [];
   storedRows = [];
   onInsert = undefined;
-  updateSkipped = false;
+  writeBackRefused = false;
   server = createServer((req: IncomingMessage, res: ServerResponse) => {
     const chunks: Buffer[] = [];
     req.on("data", (c) => chunks.push(c));
     req.on("end", () => {
-      const body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+      const raw = Buffer.concat(chunks).toString("utf8") || "{}";
+      // The write-back over an existing row goes to the Agent RESOURCE (a REST
+      // PATCH to /Agent/:id), not the operations API — the resource runs it in an
+      // owned transaction and may refuse it (flair#2473).
+      if (req.method === "PATCH" && (req.url ?? "").startsWith("/Agent/")) {
+        const record = JSON.parse(raw);
+        updates.push({ records: [record] });
+        const answer = writeBackRefused
+          ? { error: "originator_instance_immutable", message: "the agent row's home is a peer's; refusing to change it" }
+          : { writtenBack: true };
+        res.writeHead(writeBackRefused ? 409 : 200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(answer));
+        return;
+      }
+      const body = JSON.parse(raw);
       let answer: unknown = { ok: true };
       if (body.operation === "sql") answer = [{ id: "inst-local-2433" }];
       else if (body.operation === "search_by_id") answer = storedRows;
@@ -58,9 +72,7 @@ beforeEach(async () => {
         }
       } else if (body.operation === "update") {
         updates.push(body);
-        answer = updateSkipped
-          ? { update_hashes: [], skipped_hashes: [body.records[0].id] }
-          : { update_hashes: [body.records[0].id], skipped_hashes: [] };
+        answer = { update_hashes: [body.records[0].id], skipped_hashes: [] };
       }
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(answer));
@@ -86,6 +98,8 @@ async function principalAdd(id: string, opsPort: number): Promise<number> {
     await program.parseAsync([
       "node", "flair", "principal", "add", id,
       "--ops-port", String(opsPort),
+      // The guarded write-back goes to the Agent RESOURCE on the HTTP port.
+      "--port", String(opsPort),
       "--admin-pass", "throwaway-admin-pass-not-a-secret",
       "--keys-dir", keysDir,
     ]);
@@ -160,10 +174,13 @@ describe("flair#2433/#2473 — principal add is create-only", () => {
     expect(updates).toHaveLength(0);
   });
 
-  test("an update the operations API skips fails by name", async () => {
+  test("a write-back the resource refuses as a foreign home fails by name", async () => {
     storedRows = [{ id: "known-id", originatorInstanceId: null }];
-    updateSkipped = true;
+    // The resource's owned-transaction confirmation sees the home became a peer's
+    // and aborts the staged write with `originator_instance_immutable`.
+    writeBackRefused = true;
     expect(await principalAdd("known-id", opsPort())).toBe(1);
     expect(updates).toHaveLength(1);
+    expect(storedRows[0].originatorInstanceId, "the row's home changed").toBeNull();
   });
 });

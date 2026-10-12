@@ -49,6 +49,9 @@ export {
   AGENT_HOME_FIELD,
   AGENT_HOME_STAMP_FIELD,
   AGENT_HOME_STAMP_PAUSE_POINT,
+  AGENT_PRINCIPAL_WRITE_BACK_FIELD,
+  AGENT_PRINCIPAL_WRITE_BACK_PAUSE_POINT,
+  isForeignAgentHome,
   isHomeLessAgentRow,
   isSyncOriginatedAgentRow,
 } from "./agent-home-fields.js";

@@ -1,13 +1,17 @@
 /**
  * agent-home-creation-paths-2474.test.ts — flair#2474.
  *
- * Every CLI Agent creation path must stamp the local instance's home, and the
- * suite must fail if any path stops doing so. This file drives the paths that
- * create the Agent row through the shared seed (`flair agent add`, `flair
- * import`) — the ones the writer-coverage test could not see, because they call
- * the seed rather than carrying the ops-API create literal themselves — against
- * an in-memory operations API and asserts the row they create carries the local
- * home. `flair init`'s two paths and the ops-literal creators
+ * Every CLI Agent creation path must stamp the local instance's home. This file
+ * drives the paths that create the Agent row through the shared seed (`flair
+ * agent add`, `flair import`) — the ones the writer-coverage test could not see,
+ * because they call the seed rather than carrying the ops-API create literal
+ * themselves — against an in-memory operations API and asserts the row they
+ * create carries the local home.
+ *
+ * NAMED GAP: `flair init`'s LOCAL path also reaches the seed (src/commands/init.ts,
+ * seedAgentWithLocalHome), but is asserted at row level only for `--remote`
+ * (init-remote-agent-home-2433.test.ts) — a row-level case for the local init
+ * path needs a real Harper boot and is not in this file. The ops-literal creators
  * (principal/mcp/mcp-enable) are covered by their own tests.
  *
  * Isolated because it drives the process-global commander `program` and stands

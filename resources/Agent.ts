@@ -5,7 +5,7 @@ import { admitPrincipalWrite, statusWriteRefusal } from "./agent-status-guard.js
 import { applyFederationBookkeeping, applyOriginatorInstanceId, dropClientFederationBookkeeping, resolveStoredRow, stampOriginatorOnCreate } from "./originator-instance.js";
 import { localInstanceId } from "./instance-identity.js";
 import { AGENT_ID_ERROR, invalidAgentIdMessage, isValidAgentId } from "../src/lib/agent-id-rule.js";
-import { AGENT_HOME_STAMP_FIELD, isHomeLessAgentRow, isSyncOriginatedAgentRow } from "../src/lib/agent-home-fields.js";
+import { AGENT_HOME_STAMP_FIELD, AGENT_PRINCIPAL_WRITE_BACK_FIELD, isForeignAgentHome, isHomeLessAgentRow, isSyncOriginatedAgentRow } from "../src/lib/agent-home-fields.js";
 import { withOwnedTransaction } from "./request-transaction.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 
@@ -42,6 +42,33 @@ function agentIdDenial(target: { present: boolean; value: unknown }): Response |
     JSON.stringify({ error: AGENT_ID_ERROR, message: invalidAgentIdMessage(target.value) }),
     { status: 400, headers: { "content-type": "application/json" } },
   );
+}
+
+/**
+ * Thrown INSIDE the guarded home stamp's owned transaction to ABORT it when the
+ * committed row is no longer eligible (it gained a home or provenance) or is
+ * gone. Aborting discards the staged write; the caller maps the reason to the
+ * response. See Agent.applyGuardedHomeStamp (flair#2472).
+ */
+class AgentHomeStampAborted extends Error {
+  constructor(readonly reason: "no-row" | "ineligible") {
+    super(`agent home stamp aborted: ${reason}`);
+    this.name = "AgentHomeStampAborted";
+  }
+}
+
+/**
+ * Thrown INSIDE the guarded principal write-back's owned transaction to ABORT it
+ * when the committed row's home became foreign between the staging and the
+ * confirmation read. Aborting discards the staged write; the caller answers
+ * `originator_instance_immutable`. See Agent.applyGuardedPrincipalWriteBack
+ * (flair#2473).
+ */
+class PrincipalWriteBackAborted extends Error {
+  constructor() {
+    super("agent principal write-back aborted: the committed home became foreign");
+    this.name = "PrincipalWriteBackAborted";
+  }
 }
 
 /**
@@ -263,7 +290,17 @@ export class Agent extends (databases as any).flair.Agent {
     // it never re-stamps a stored home or re-creates a deleted row.
     if (content != null && typeof content === "object" && content[AGENT_HOME_STAMP_FIELD] === true) {
       delete content[AGENT_HOME_STAMP_FIELD];
-      return this.applyGuardedHomeStamp(content, query);
+      return this.applyGuardedHomeStamp(content);
+    }
+
+    // flair#2473 — the guarded write-back `flair principal add` sends when its
+    // create-only insert was SKIPPED: the row exists, so the record is written
+    // back WITHOUT the home field. It runs in a FRESH OWNED transaction (see
+    // applyGuardedPrincipalWriteBack) and refuses when the row's committed home
+    // became foreign, so a row that now belongs to a peer is never changed.
+    if (content != null && typeof content === "object" && content[AGENT_PRINCIPAL_WRITE_BACK_FIELD] === true) {
+      delete content[AGENT_PRINCIPAL_WRITE_BACK_FIELD];
+      return this.applyGuardedPrincipalWriteBack(content);
     }
 
     if (content != null && typeof content === "object") {
@@ -315,17 +352,23 @@ export class Agent extends (databases as any).flair.Agent {
    *     since the caller's read is not re-created;
    *   - a row that is not home-less, or that carries federation-sync provenance,
    *     is reported `stamped: false` (a 200, NO patch, no `updatedAt` change);
-   *   - the value stamped is THIS instance's own id, never the request body's;
-   *   - between the first read and the staged write, the row is re-read in an
-   *     explicit fresh context (the COMMITTED row, not this transaction's
-   *     snapshot): a competing home or provenance that landed in the gap is
-   *     reported `stamped: false`, never overwritten.
+   *   - this instance's own id — never the request body's — is the value stamped;
+   *     when there is no canonical Instance row (none, or several) there is no id
+   *     to stamp and the write is REFUSED by name, before any PATCH;
+   *   - the update is STAGED first, then the COMMITTED row is re-read in an
+   *     explicit fresh context (never this transaction's snapshot or its staged
+   *     write). A row that gained a home or provenance, or that is gone, ABORTS
+   *     this owned transaction and discards the staged write.
+   *
+   * Harper has no compare-and-set: a home or provenance committed after that
+   * confirmation and before this transaction's commit is still not seen (the
+   * residual window; per-id serialization is tracked in flair#2478).
    *
    * The CLI reports a row `stamped` only when this resource confirms it applied
    * the stamp (`stamped: true`): a read-back that merely shows this instance's
    * home is not enough — another writer may have set it.
    */
-  private async applyGuardedHomeStamp(content: any, query?: any): Promise<Response> {
+  private async applyGuardedHomeStamp(content: any): Promise<Response> {
     const admission = admitPrincipalWrite(await resolveAgentAuth((this as any).getContext?.()));
     if (admission !== "admin" && admission !== "internal") {
       return new Response(
@@ -341,7 +384,25 @@ export class Agent extends (databases as any).flair.Agent {
       JSON.stringify({ error: "agent_home_stamp_no_row", message: "no stored agent row to stamp" }),
       { status: 404, headers: { "content-type": "application/json" } },
     );
+    const ineligible = () => new Response(
+      JSON.stringify({ id, stamped: false, reason: "ineligible" }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
     if (id === null) return noRow();
+
+    // Resolve everything that can yield FIRST (flair#2478 pattern): the value to
+    // stamp. Nothing may await between the eligibility read and the staging, or a
+    // writer could commit in that gap and be missed by the confirmation read.
+    const home = await localInstanceId();
+    // No canonical Instance row (none, or several): there is no id to stamp, so
+    // refuse by name, inside the resource and BEFORE any PATCH. Never report the
+    // row stamped.
+    if (home === null) {
+      return new Response(
+        JSON.stringify({ error: "agent_home_stamp_no_instance", message: "this instance has no single canonical Instance row to stamp as the home; the row was not written" }),
+        { status: 409, headers: { "content-type": "application/json" } },
+      );
+    }
 
     const table = (databases as any).flair?.Agent;
     const readRow = async (context: unknown): Promise<Record<string, any> | null> => {
@@ -349,39 +410,110 @@ export class Agent extends (databases as any).flair.Agent {
       const row = await table.get(id, context);
       return row && typeof row === "object" && !(row instanceof Response) ? row : null;
     };
-
-    const outcome = await withOwnedTransaction((this as any).getContext?.(), async (c: unknown) => {
-      // The row as this call OWNS it — a scope the request's snapshot does not pin.
-      const stored = await readRow(c);
-      if (stored === null) return { kind: "no-row" as const };
-      if (!isHomeLessAgentRow(stored) || isSyncOriginatedAgentRow(stored)) return { kind: "ineligible" as const };
-      // Test-only: inert unless the fault-injection env opt-in is set and armed.
-      // The name is a DIRECT string literal at the call site (flair#2382's
-      // checker scans resources/ and src/ and resolves only literals); it must
-      // stay equal to AGENT_HOME_STAMP_PAUSE_POINT, which the integration test
-      // arms (test/integration/agent-home-2433.test.ts).
-      const pause = txnPausePoint("agent-home-stamp");
-      if (pause) await pause;
-      // Confirmation read: the COMMITTED row in an explicit fresh context (never
-      // this transaction's snapshot, never the request's pinned read).
-      const confirmed = await readRow({});
-      if (confirmed === null) return { kind: "no-row" as const };
-      if (!isHomeLessAgentRow(confirmed) || isSyncOriginatedAgentRow(confirmed)) return { kind: "ineligible" as const };
-      // Field-only: the home, never the request body's other fields.
-      await super.patch({ id, originatorInstanceId: await localInstanceId(), updatedAt: new Date().toISOString() }, query);
-      return { kind: "applied" as const };
-    });
+    const eligible = (row: Record<string, any>): boolean => isHomeLessAgentRow(row) && !isSyncOriginatedAgentRow(row);
+    const stampBody = { originatorInstanceId: home, updatedAt: new Date().toISOString() };
+    let outcome: { kind: "no-row" | "ineligible" | "applied" };
+    try {
+      outcome = await withOwnedTransaction((this as any).getContext?.(), async (c: unknown) => {
+        // The row as this call OWNS it — a scope the request's snapshot does not pin.
+        const stored = await readRow(c);
+        if (stored === null) return { kind: "no-row" as const };
+        if (!eligible(stored)) return { kind: "ineligible" as const };
+        if (!table || typeof table.update !== "function") return { kind: "no-row" as const };
+        // STAGE the home-only write in this transaction's own scope.
+        await table.update(id, stampBody, c);
+        // Test-only: inert unless the fault-injection env opt-in is set and armed.
+        // The name is a DIRECT string literal at the call site (flair#2382's
+        // checker scans resources/ and src/ and resolves only literals); it must
+        // stay equal to AGENT_HOME_STAMP_PAUSE_POINT, which the integration test
+        // arms (test/integration/agent-home-2433.test.ts).
+        const pause = txnPausePoint("agent-home-stamp");
+        if (pause) await pause;
+        // CONFIRM the COMMITTED row (an explicit fresh context, never this
+        // transaction's snapshot or its staged write) is still eligible. A row
+        // that gained a home or provenance, or that is gone, ABORTS this owned
+        // transaction: the staged write is discarded and the caller is told.
+        const committed = await readRow({});
+        if (committed === null) throw new AgentHomeStampAborted("no-row");
+        if (!eligible(committed)) throw new AgentHomeStampAborted("ineligible");
+        return { kind: "applied" as const };
+      });
+    } catch (err) {
+      if (err instanceof AgentHomeStampAborted) return err.reason === "no-row" ? noRow() : ineligible();
+      throw err;
+    }
 
     invalidateAdminCache();
     if (outcome.kind === "no-row") return noRow();
-    if (outcome.kind === "ineligible") {
-      return new Response(
-        JSON.stringify({ id, stamped: false, reason: "ineligible" }),
-        { status: 200, headers: { "content-type": "application/json" } },
-      );
-    }
+    if (outcome.kind === "ineligible") return ineligible();
     return new Response(
       JSON.stringify({ id, stamped: true }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  }
+
+  /**
+   * The guarded write-back (flair#2473), the ONE write `flair principal add`
+   * sends when its create-only `insert` was SKIPPED because the row already
+   * exists. The record is written back WITHOUT the home field, so a stored home
+   * stands. It runs inside a FRESH OWNED transaction, never from the request's
+   * pinned read snapshot, and REFUSES `originator_instance_immutable` when the
+   * committed row's home is FOREIGN (a non-empty id that is not this instance's):
+   * such a row now belongs to a peer, so this command must not change it.
+   *
+   * The update is STAGED first, then the COMMITTED row is re-read in an explicit
+   * fresh context. A row whose home became foreign between the staging and that
+   * confirmation ABORTS this owned transaction and discards the staged write
+   * (`originator_instance_immutable`). Harper has no compare-and-set: a home that
+   * becomes foreign after the confirmation and before the commit is still not
+   * seen (the residual window; per-id serialization is tracked in flair#2478).
+   */
+  private async applyGuardedPrincipalWriteBack(content: any): Promise<Response> {
+    const immutable = () => new Response(
+      JSON.stringify({ error: "originator_instance_immutable", message: "originator_instance_immutable: the agent row's home is a peer's; refusing to change it" }),
+      { status: 409, headers: { "content-type": "application/json" } },
+    );
+    const target = writeTargetId(this, content);
+    const id = target.present && (typeof target.value === "string" || typeof target.value === "number")
+      ? String(target.value)
+      : null;
+    if (id === null) return immutable();
+
+    // Resolve everything that can yield FIRST (flair#2478 pattern) — this
+    // instance's own id — so nothing awaits between the eligibility read and the
+    // staging. The body carries no home field, so the stored home stands.
+    const home = await localInstanceId();
+    const table = (databases as any).flair?.Agent;
+    const body = { ...content, id };
+    let outcome: { kind: "refused" | "applied" };
+    try {
+      outcome = await withOwnedTransaction((this as any).getContext?.(), async (c: unknown) => {
+        if (!table || typeof table.get !== "function" || typeof table.update !== "function") {
+          return { kind: "refused" as const };
+        }
+        const stored = await table.get(id, c);
+        if (isForeignAgentHome(stored, home)) return { kind: "refused" as const };
+        // STAGE the write-back in this transaction's own scope.
+        await table.update(id, body, c);
+        // Test-only: inert unless the fault-injection env opt-in is set and armed.
+        const pause = txnPausePoint("agent-principal-write-back");
+        if (pause) await pause;
+        // CONFIRM the COMMITTED row's home is still not foreign. A home that
+        // became a peer's ABORTS this owned transaction, discarding the staged
+        // write.
+        const committed = await table.get(id, {});
+        if (isForeignAgentHome(committed, home)) throw new PrincipalWriteBackAborted();
+        return { kind: "applied" as const };
+      });
+    } catch (err) {
+      if (err instanceof PrincipalWriteBackAborted) return immutable();
+      throw err;
+    }
+
+    invalidateAdminCache();
+    if (outcome.kind === "refused") return immutable();
+    return new Response(
+      JSON.stringify({ id, writtenBack: true }),
       { status: 200, headers: { "content-type": "application/json" } },
     );
   }

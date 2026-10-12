@@ -16,13 +16,16 @@
  * doctor` CLI subprocess — all against this test's own ephemeral instance.
  *
  * The stamp's decision lives in the Agent resource's OWNED transaction
- * (resources/Agent.ts). The interleaving cases inject a competing commit at the
+ * (resources/Agent.ts): the resource STAGES the home-only write, then re-reads
+ * the COMMITTED row and aborts (discarding the staged write) when that row gained
+ * a home or provenance. The interleaving cases inject a competing commit at the
  * resource's in-transaction pause point (resources/txn-pause-point.ts, enabled
  * for THIS file's Harper by FLAIR_ENABLE_TEST_FAULT_INJECTION +
- * FLAIR_TEST_PAUSE_DIR) — AFTER the resource's first read and BEFORE its
- * confirmation read — so a decision made from the request's read snapshot (taken
- * before the override ran) would miss it: a competing home, a competing merge,
- * and another writer's SAME local home.
+ * FLAIR_TEST_PAUSE_DIR) — BETWEEN the staged write and the confirmation read — so
+ * a decision made from the request's read snapshot (taken before the override
+ * ran) would miss it: a competing home, a competing merge, and another writer's
+ * SAME local home. `flair principal add`'s guarded write-back runs the same way
+ * (see AGENT_PRINCIPAL_WRITE_BACK_PAUSE_POINT).
  *
  * Build prerequisite: dist/cli.js and dist/resources/*.js
  * (`bun run build && bun run build:cli`).
@@ -45,7 +48,7 @@ import {
   resolveTargetInstanceId,
   runAgentHomeStamp,
 } from "../../src/lib/agent-home.js";
-import { AGENT_HOME_STAMP_PAUSE_POINT } from "../../src/lib/agent-home-fields.js";
+import { AGENT_HOME_STAMP_FIELD, AGENT_HOME_STAMP_PAUSE_POINT, AGENT_PRINCIPAL_WRITE_BACK_PAUSE_POINT } from "../../src/lib/agent-home-fields.js";
 
 const ADMIN_PASS = "test123"; // harper-lifecycle's seeded admin pass
 const CLI = join(process.cwd(), "dist", "cli.js");
@@ -136,7 +139,7 @@ function runDoctor(): Promise<{ code: number | null; stdout: string; stderr: str
 /** Run `flair principal add <id>` as a real subprocess, with an isolated HOME. */
 function runPrincipalAdd(id: string, opsPortArg: string): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const args = ["principal", "add", id, "--ops-port", opsPortArg, "--keys-dir", join(cliHome, "keys"), "--admin-pass", ADMIN_PASS];
+    const args = ["principal", "add", id, "--ops-port", opsPortArg, "--port", new URL(harper.httpURL).port, "--keys-dir", join(cliHome, "keys"), "--admin-pass", ADMIN_PASS];
     const startedAt = Date.now();
     const child = spawn(process.execPath, [CLI, ...args], {
       env: { ...process.env, HOME: cliHome, FLAIR_TOKEN: "", NO_COLOR: "1" },
@@ -190,22 +193,23 @@ async function waitForFile(path: string, timeoutMs: number): Promise<boolean> {
 }
 
 /**
- * Arm the stamp's in-transaction pause (AFTER the resource's first read of the
- * row, BEFORE its confirmation read), run `stamp`, and once it is paused commit
- * `compete` then release it. The competing commit therefore lands where a
- * decision made from the request's read snapshot would miss it. Returns the
- * stamp's result and whether the pause actually fired.
+ * Arm the named pause point, run `work`, and once it is paused commit `compete`
+ * then release it. The competing commit therefore lands where a decision made
+ * from the request's read snapshot would miss it — for the stamp, between the
+ * STAGED home write and the confirmation read. Returns the work's result and
+ * whether the pause actually fired.
  */
-async function withPausedStamp<T, R>(
-  stamp: () => Promise<R>,
+async function withPausedPoint<T, R>(
+  point: string,
+  work: () => Promise<R>,
   compete: () => Promise<T>,
 ): Promise<{ result: R; released: string }> {
-  const p = pausePoints(AGENT_HOME_STAMP_PAUSE_POINT);
+  const p = pausePoints(point);
   for (const marker of ["claimed", "paused", "go", "released"]) {
-    rmSync(join(pauseDir, `${marker}.${AGENT_HOME_STAMP_PAUSE_POINT}`), { force: true });
+    rmSync(join(pauseDir, `${marker}.${point}`), { force: true });
   }
   writeFileSync(p.arm, "");
-  const pending = stamp();
+  const pending = work();
   const paused = await waitForFile(p.paused, 20_000);
   try {
     if (paused) await compete();
@@ -214,6 +218,13 @@ async function withPausedStamp<T, R>(
   }
   const result = await pending;
   return { result, released: paused ? readFileSync(p.released, "utf8") : "never paused" };
+}
+
+async function withPausedStamp<T, R>(
+  stamp: () => Promise<R>,
+  compete: () => Promise<T>,
+): Promise<{ result: R; released: string }> {
+  return withPausedPoint<T, R>(AGENT_HOME_STAMP_PAUSE_POINT, stamp, compete);
 }
 
 beforeAll(async () => {
@@ -254,6 +265,37 @@ afterAll(async () => {
 }, 30_000);
 
 describe("flair#2433 — the home a create stamps, on a real Harper", () => {
+  test("with no canonical Instance row the stamp refuses by name inside the resource and never stamps", async () => {
+    // This runs FIRST so the resource's localInstanceId() has not yet been
+    // resolved (a successful resolution is cached for the process lifetime).
+    // Remove every Instance row: the resource has no id to stamp, so it must
+    // refuse by name, before any PATCH, and never report `stamped`. A fresh
+    // Harper process is not needed because a null resolution is NOT cached.
+    const id = `noinstance-${sfx}`;
+    await ops({
+      operation: "insert",
+      table: "Agent",
+      records: [{ id, name: id, role: "agent", status: "active", publicKey: "pk-ni-2433", createdAt: new Date().toISOString() }],
+    });
+    const existing = await ops({ operation: "sql", sql: "SELECT id FROM flair.Instance" });
+    for (const r of Array.isArray(existing) ? existing : []) {
+      if (r?.id) await ops({ operation: "delete", table: "Instance", ids: [r.id] });
+    }
+    try {
+      const r = await send("PATCH", `/Agent/${id}`, { id, [AGENT_HOME_STAMP_FIELD]: true });
+      expect(r.status, r.raw).toBe(409);
+      expect(r.raw).toContain("agent_home_stamp_no_instance");
+      expect(r.raw, "the refused stamp still reported the row stamped").not.toContain("\"stamped\":true");
+      expect((await rowIn("Agent", id)).originatorInstanceId ?? null, "the row was stamped with no canonical instance").toBeNull();
+    } finally {
+      await ops({
+        operation: "insert",
+        table: "Instance",
+        records: [{ id: LOCAL_ID, role: "hub", publicKey: "local-pub-2433", createdAt: new Date().toISOString() }],
+      });
+    }
+  }, 30_000);
+
   test("the shared rule resolves this instance's own id from the real Instance table", async () => {
     const id = await resolveTargetInstanceId(agentHomeEndpoint(opsPort(), harper.admin.username, harper.admin.password));
     expect(id).toBe(LOCAL_ID);
@@ -445,6 +487,27 @@ describe("flair#2433 — the home a create stamps, on a real Harper", () => {
     expect((await rowIn("Agent", id)).originatorInstanceId).toBe(LOCAL_ID);
   }, 60_000);
 
+  test("provenance committed after the staged stamp, before the confirmation read, aborts it (no home written)", async () => {
+    // The resource STAGES the home-only write, then re-reads the COMMITTED row
+    // and aborts (discarding the staged write) when that row gained provenance.
+    // The competing merge lands in exactly that gap.
+    const id = `race-staged-${sfx}`;
+    await ops({
+      operation: "insert",
+      table: "Agent",
+      records: [{ id, name: id, role: "agent", status: "active", publicKey: "pk-race-staged-2433", createdAt: new Date().toISOString() }],
+    });
+    const { result, released } = await withPausedStamp(
+      () => runAgentHomeStamp({ opsUrl: harper.opsURL, httpUrl: harper.httpURL, authHeader: basic(), localInstanceId: LOCAL_ID, timeoutMs: 15_000, apply: true }),
+      () => ops({ operation: "update", table: "Agent", records: [{ id, _syncedFrom: PEER_ID, _originatorInstanceId: PEER_ID }] }),
+    );
+    expect(released, "the stamp never reached its in-transaction pause").toBe("go");
+    expect(result.stamped, "the staged stamp was committed over the merge").not.toContain(id);
+    const row = await rowIn("Agent", id);
+    expect(row.originatorInstanceId ?? null, "the staged stamp was not discarded").toBeNull();
+    expect(row._syncedFrom).toBe(PEER_ID);
+  }, 60_000);
+
   test("flair doctor reports the home-less row it can see, with the named remedy", async () => {
     // A fresh home-less row, distinct from the one stamped above.
     const id = `doctor-nohome-${sfx}`;
@@ -513,6 +576,31 @@ describe("flair#2433 — `flair principal add` over an existing row (real subpro
     expect(r.code, `${r.stdout}\n${r.stderr}`).toBe(1);
     expect(r.stderr).toContain(`could not read agent '${id}'`);
     expect(await rowIn("Agent", id), "a row was written").toBeNull();
+  }, 60_000);
+
+  test("a home that becomes a peer's between the write-back's staging and its confirmation aborts it", async () => {
+    // The row exists, so the create-only insert is skipped and the record is
+    // written back to the Agent RESOURCE in an owned transaction. The competing
+    // commit lands between the STAGED write-back and the confirmation read: the
+    // resource aborts (`originator_instance_immutable`) and discards the staged
+    // write, so neither the home nor any other field of the peer's row is changed.
+    const id = `pa-race-${sfx}`;
+    await ops({
+      operation: "insert",
+      table: "Agent",
+      records: [{ id, name: id, role: "agent", status: "active", publicKey: "pk-pa-race-2433", createdAt: new Date().toISOString() }],
+    });
+    const { result, released } = await withPausedPoint(
+      AGENT_PRINCIPAL_WRITE_BACK_PAUSE_POINT,
+      () => runPrincipalAdd(id, String(opsPort())),
+      () => ops({ operation: "update", table: "Agent", records: [{ id, originatorInstanceId: PEER_ID }] }),
+    );
+    expect(released, "the write-back never reached its in-transaction pause").toBe("go");
+    expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(1);
+    expect(result.stderr).toContain("originator_instance_immutable");
+    const row = await rowIn("Agent", id);
+    expect(row.originatorInstanceId, "the peer's home was overwritten").toBe(PEER_ID);
+    expect(row.publicKey, "the aborted write-back still changed the row").toBe("pk-pa-race-2433");
   }, 60_000);
 });
 

@@ -6,13 +6,17 @@
  * the two ports INDEPENDENTLY let `--ops-port` name one instance and `--port`
  * another, so the roster was read from the first and the stamp written to the
  * second — carrying the first instance's id. src/cli.ts's
- * `resolveAgentHomeTarget` pairs them.
+ * `resolveAgentHomeTarget` pairs them: the derived port must come from the same
+ * recorded pair as the named one, so an HTTP port that disagrees with the ops
+ * port's instance is refused, while a pair the caller names for BOTH ports is
+ * taken as given.
  *
  * Two real instances and a real `~/.flair/config.yaml` (the default install's
  * recorded pair) make the ambiguity concrete: an explicit `--ops-port` that
  * disagrees with the HTTP port's recorded pair is refused by name
- * (`ambiguous_instance_target`), while a consistent override (or one derived
- * from the config) proceeds.
+ * (`ambiguous_instance_target`), as is an HTTP port that disagrees with the pair
+ * its derived ops port came from; a consistent override (or one derived from the
+ * config) proceeds, and so does an explicit pair for another instance.
  *
  * Build prerequisite: dist/cli.js and dist/resources/*.js
  * (`bun run build && bun run build:cli`).
@@ -90,6 +94,23 @@ describe("flair#2474 — stamp-home addresses ONE instance", () => {
 
   test("omitting --ops-port derives it from the named instance's own config", async () => {
     const r = await runStampHome(["--port", httpPort(a)]);
+    expect(r.code, `${r.stdout}\n${r.stderr}`).toBe(0);
+    expect(r.stderr).toBe("");
+  }, 40_000);
+
+  test("an HTTP port that disagrees with the ops port's instance is refused by name", async () => {
+    // The config pairs A. Naming B's HTTP port with no ops override would derive
+    // the ops port from A's config — the roster read and the stamp would address
+    // different instances.
+    const r = await runStampHome(["--port", httpPort(b)]);
+    expect(r.code, `${r.stdout}\n${r.stderr}`).toBe(1);
+    expect(r.stderr).toContain("ambiguous_instance_target");
+  }, 40_000);
+
+  test("an explicit pair for another instance is accepted", async () => {
+    // Both ports named for ONE other instance: the caller verified the pair, so
+    // the config's pair for A is not a contradiction.
+    const r = await runStampHome(["--port", httpPort(b), "--ops-port", opsPort(b)]);
     expect(r.code, `${r.stdout}\n${r.stderr}`).toBe(0);
     expect(r.stderr).toBe("");
   }, 40_000);
