@@ -33,6 +33,7 @@ function stagedTable(seed: Row[]) {
   const commits: Row[] = [];
   let competing: (() => void) | undefined;
   let puts = 0;
+  const writes: { method: "put" | "update"; id: string; fields: string[] }[] = [];
   const table = {
     setCompeting(fn: (() => void) | undefined) { competing = fn; },
     async get(id: string, _ctx?: unknown): Promise<Row | null> {
@@ -53,19 +54,21 @@ function stagedTable(seed: Row[]) {
     },
     async put(row: Row, _ctx?: unknown): Promise<Row> {
       puts++;
+      writes.push({ method: "put", id: row.id, fields: Object.keys(row).sort() });
       staged = { ...row };
       competing?.();
       return row;
     },
     async update(id: string, patch: Record<string, unknown>, _ctx?: unknown): Promise<Row | null> {
       puts++;
+      writes.push({ method: "update", id, fields: Object.keys(patch).sort() });
       const current = store.get(id);
       staged = current ? { ...current, ...patch } : null;
       competing?.();
       return staged;
     },
   };
-  return { store, table, commits, puts: () => puts };
+  return { store, table, commits, writes, puts: () => puts };
 }
 
 let savedTransaction: unknown;
@@ -138,11 +141,15 @@ describe("writeBackCommittedRow — abort and retry from the committed row", () 
 
 describe("writeBackCommittedRow — an update plan writes only the fields it names", () => {
   test("an update plan lands its patch and leaves the stored row's other fields untouched", async () => {
-    const { table, store, commits } = stagedTable([{ id: "m1", content: "a", durability: "standard" }]);
+    const { table, store, commits, writes } = stagedTable([{ id: "m1", content: "a", durability: "standard" }]);
     const outcome = await writeBackCommittedRow(table, "m1", () => ({ update: { usageCount: 1 } }), opts("update-only"));
     expect(outcome).toEqual({ update: { usageCount: 1 } });
     expect(store.get("m1")).toEqual({ id: "m1", content: "a", durability: "standard", usageCount: 1 });
     expect(commits).toHaveLength(1);
+    // The plan is applied as exactly one incremental update naming its own
+    // field, never a full-row put — a put here would carry the whole row
+    // (flair#2494).
+    expect(writes).toEqual([{ method: "update", id: "m1", fields: ["usageCount"] }]);
   });
 
   test("an update plan on a table without update refuses rather than falling back to a full-row put", async () => {

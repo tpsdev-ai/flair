@@ -55,6 +55,8 @@ const STALE = { embedding: [0.1, 0.1, 0.1], embeddingModel: "ancient-model" };
 let store: Map<string, Row>;
 /** Rows committed to the store by an update (a staged update counts once its transaction commits). */
 let puts: Row[];
+/** The method and the field names of every write the migration issued (flair#2494). */
+let writeCalls: { method: "put" | "update"; id: string; fields: string[] }[];
 /** Runs after an update is staged in a transaction, before that transaction commits. */
 let afterStage: (() => void) | null = null;
 
@@ -82,12 +84,14 @@ const table = {
   async put(row: Row, ctx?: any) {
     // The migration no longer uses a full-row put; kept so an accidental
     // reintroduction would still stage/commit predictably in this fake.
+    writeCalls.push({ method: "put", id: row.id, fields: Object.keys(row).sort() });
     const staged = ctx?.transaction?.staged;
     if (!Array.isArray(staged)) return commitPatch(row.id, row);
     staged.push({ id: row.id, patch: structuredClone(row) });
     afterStage?.();
   },
   async update(id: string, patch: Row, ctx?: any) {
+    writeCalls.push({ method: "update", id, fields: Object.keys(patch).sort() });
     const staged = ctx?.transaction?.staged;
     if (!Array.isArray(staged)) return commitPatch(id, patch);
     staged.push({ id, patch: structuredClone(patch) });
@@ -117,6 +121,7 @@ function migration() {
 beforeEach(() => {
   store = new Map([[LEGACY_ID, { id: LEGACY_ID, agentId: "a", content: "legacy body", ...STALE }]]);
   puts = [];
+  writeCalls = [];
   embedded = [];
   embedImpl = async () => [0.5, 0.25, 0.125];
   afterStage = null;
@@ -130,6 +135,10 @@ describe("flair#2307 — the content-suffix re-embed validates the vector and co
     // flair#2465: an incremental update, never a full-row put — updatedAt is the
     // only other field the write touches.
     expect(Object.keys(store.get(LEGACY_ID)!).sort()).toEqual(["agentId", "content", "embedding", "embeddingModel", "id", "updatedAt"]);
+    // Exactly one update, naming only the embedding fields and updatedAt; no
+    // full-row put (flair#2494). A plan carrying the whole re-read row here
+    // would name every field and land as a put.
+    expect(writeCalls).toEqual([{ method: "update", id: LEGACY_ID, fields: ["embedding", "embeddingModel", "updatedAt"] }]);
     expect(await migration().countPending()).toBe(0);
   });
 

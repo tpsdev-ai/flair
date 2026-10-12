@@ -44,6 +44,15 @@ mock.module("../../resources/embeddings-provider.ts", () => ({
 
 const memoryRows = new Map<string, any>();
 
+// Every write the fake Memory table received, by method and the field names it
+// named (flair#2494).
+const writeCalls: { method: "put" | "update"; id: string; fields: string[] }[] = [];
+// The staged writes of the currently-open simulated transaction. A write stages
+// here (invisible to a read, as Harper's staged write is) and lands in
+// memoryRows when the owning transaction resolves, so the helper's committed
+// re-read sees the pre-write row and exactly one update is applied.
+let stagedCommits: Map<string, any> = new Map();
+
 function harperMock() {
   return {
     databases: {
@@ -57,12 +66,15 @@ function harperMock() {
         Memory: {
           get: async (id: string) => memoryRows.get(id) ?? null,
           update: async (id: string, patch: Record<string, unknown>) => {
+            writeCalls.push({ method: "update", id, fields: Object.keys(patch).sort() });
             const current = memoryRows.get(id);
-            memoryRows.set(id, { ...current, ...patch });
-            return memoryRows.get(id);
+            const merged = { ...current, ...patch };
+            stagedCommits.set(id, merged);
+            return merged;
           },
           put: async (row: any) => {
-            memoryRows.set(row.id, { ...row });
+            writeCalls.push({ method: "put", id: row.id, fields: Object.keys(row).sort() });
+            stagedCommits.set(row.id, { ...row });
             return row;
           },
         },
@@ -126,9 +138,14 @@ beforeAll(() => {
   // real Harper `transaction(ctx, cb)` does.
   (globalThis as { transaction?: unknown }).transaction = async (_ctx: unknown, cb: () => unknown) => {
     txnDepth++;
+    const saved = stagedCommits;
+    stagedCommits = new Map();
     try {
-      return await cb();
+      const out = await cb();
+      for (const [id, row] of stagedCommits) memoryRows.set(id, row);
+      return out;
     } finally {
+      stagedCommits = saved;
       txnDepth--;
     }
   };
@@ -143,6 +160,8 @@ beforeEach(() => {
   memoryRows.clear();
   embedCalls.length = 0;
   txnDepth = 0;
+  writeCalls.length = 0;
+  stagedCommits = new Map();
 });
 
 const nextLayer = () => new Response("ok", { status: 200 });
@@ -190,5 +209,14 @@ describe("flair#2484 — the embedding backfill computes its vector outside the 
     });
     expect(observed, "the transaction spy did not report an open transaction").toBe(1);
     expect(txnDepth, "the spy did not close the transaction").toBe(0);
+  });
+});
+
+describe("flair#2494 — the backfill's plan shape is pinned", () => {
+  it("stores the vector with exactly one incremental update naming only embedding, never a full-row put", async () => {
+    const id = "bfx-plan-shape";
+    memoryRows.set(id, { id, agentId: "agent-a", content: "text to embed", contentHash: id, instanceToken: "tok" });
+    await runBackfill(id);
+    expect(writeCalls).toEqual([{ method: "update", id, fields: ["embedding"] }]);
   });
 });
