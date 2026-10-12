@@ -240,6 +240,12 @@ async function resolveOrCreatePrincipalLocked(
         { attribute: "idpProvider", comparator: "equals", value: idpConfig.id },
       ],
     }, owned)) {
+      // Test-only: valid names are inert unless fault injection is enabled and
+      // armed (resources/txn-pause-point.ts). Holds this touch between the read
+      // above and the write below — the interleaving a revoke or delete of this
+      // credential would commit in.
+      const pause = txnPausePoint("xaa-credential-touch");
+      if (pause) await pause;
       // Update last used
       await (databases as any).flair.Credential.put({
         ...cred,
