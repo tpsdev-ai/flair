@@ -1,18 +1,21 @@
 /**
- * patch-refreshes-embedding-2466.test.ts — a text-changing PATCH refreshes the
- * embedding (flair#2466).
+ * patch-refreshes-embedding-2466.test.ts — a PATCH that changes the text a
+ * memory's embedding is computed from refreshes the embedding (flair#2466).
  *
  * Calls resources/Memory.ts patch() directly against a mocked harper (same
- * technique as memory-write-redaction-2407.test.ts). The real-Harper counterpart
- * is test/integration/patch-refreshes-embedding-2466.test.ts.
+ * technique as memory-write-redaction-2407.test.ts). The real-Harper counterpart,
+ * including semantic search, the overlapping-edit cases and an actual embedding
+ * backend failure, is test/integration/patch-refreshes-embedding-2466.test.ts.
  *
- * A PATCH that changes an embedding-input field (`content`, or a skill row's
- * `trigger`) and supplies no vector recomputes the vector from the patched row,
- * the way put() embeds a write with no vector. When the engine returns no vector
- * the row is stored with the embedding CLEARED (embedding/embeddingModel null) —
- * the state put() leaves a fresh row in when its embed fails — so the existing
- * re-embed path picks it up. This file owns its harper + embeddings mock in its
- * own process (test/unit-isolated/).
+ * A PATCH that changes the row's effective embedding text (`content` for every
+ * row that reaches this branch: skill rows are refused on PATCH first) and
+ * supplies no vector recomputes the vector from that text, the way put() embeds
+ * a write with no vector. A `trigger`-only PATCH of an ordinary row does not
+ * change that text and computes nothing, with or without a supplied vector that
+ * redaction removes. When the engine returns no vector the PATCH writes
+ * embedding/embeddingModel as null instead of keeping the earlier text's vector.
+ * This file owns its harper + embeddings mock in its own process
+ * (test/unit-isolated/).
  */
 import { describe, it, expect, beforeEach, mock } from "bun:test";
 import { agentStore, middlewareCapture } from "../helpers/harper-mock.js";
@@ -249,7 +252,7 @@ describe("flair#2466 — a text-changing PATCH refreshes the embedding", () => {
     expect(res).toBeDefined();
   });
 
-  it("a PATCH of a non-embedding-input field keeps the vector and embeds nothing", async () => {
+  it("a PATCH of a field no embedding is computed from (summary) keeps the vector and embeds nothing", async () => {
     seed("mem-2", "a note whose vector survives a summary edit");
     const m = memoryFor("mem-2");
     await m.patch({ summary: "an edited summary with no credential" });
@@ -269,6 +272,31 @@ describe("flair#2466 — a text-changing PATCH refreshes the embedding", () => {
     const stored = await (BaseMemory as any).get("mem-3");
     expect(stored.content).toBe("the replacement text");
     expect(stored.embedding).toEqual([0.5, 0.25, 0.125]);
+    expect(embedInputs).toEqual([]);
+  });
+
+  it("a trigger-only PATCH of an ordinary row keeps the vector and embeds nothing", async () => {
+    seed("mem-5", "an ordinary note; its trigger does not feed its vector");
+    const m = memoryFor("mem-5");
+    await m.patch({ trigger: "when the deploy job fails" });
+
+    const stored = await (BaseMemory as any).get("mem-5");
+    expect(stored.trigger).toBe("when the deploy job fails");
+    expect(stored.embedding).toEqual([0.01, 0.02, 0.03]);
+    expect(stored.embeddingModel).toBe("old-model");
+    expect(stored.updatedAt).toBeUndefined();
+    expect(embedInputs).toEqual([]);
+  });
+
+  it("a trigger-only PATCH whose supplied vector redaction removes keeps the stored vector and embeds nothing", async () => {
+    seed("mem-6", "an ordinary note; a redacted trigger does not feed its vector");
+    const m = memoryFor("mem-6");
+    await m.patch({ trigger: `when ${SLACK_TOKEN} expires`, embedding: [0.5, 0.25, 0.125], embeddingModel: "client-model" });
+
+    const stored = await (BaseMemory as any).get("mem-6");
+    expect(stored.trigger).toBe(`when ${REDACTED} expires`);
+    expect(stored.embedding).toEqual([0.01, 0.02, 0.03]);
+    expect(stored.embeddingModel).toBe("old-model");
     expect(embedInputs).toEqual([]);
   });
 

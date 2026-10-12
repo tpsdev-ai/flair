@@ -45,24 +45,31 @@ export function isSkillWrite(content: any): boolean {
 }
 
 /**
- * The text a row embeds from. Skill-tagged rows embed from `trigger` (the
- * recall signal); every other row embeds from `content`. Returns `undefined`
- * only when there is no usable text at all.
+ * Every field a Memory embedding can be computed from, across row kinds:
+ * `content` for every row, and `trigger` for a skill-tagged row only (see
+ * embedTextField). A check that sees only a write body and not the row kind
+ * (resources/memory-redaction.ts) uses this whole set; a check that has the row
+ * uses embedTextField(row), the one field THAT row embeds from.
  */
-export function skillEmbedText(content: any): string | undefined {
-  if (isSkillWrite(content) && typeof content.trigger === "string" && content.trigger.length > 0) {
-    return content.trigger;
-  }
-  return content.content;
+export const MEMORY_EMBEDDING_INPUT_FIELDS = Object.freeze(["content", "trigger"] as const);
+export type MemoryEmbeddingInputField = (typeof MEMORY_EMBEDDING_INPUT_FIELDS)[number];
+
+/**
+ * The field a row embeds from. Skill-tagged rows with a non-empty `trigger`
+ * embed from `trigger` (the recall signal); every other row — including every
+ * non-skill row, whatever its `trigger` — embeds from `content`.
+ */
+export function embedTextField(row: any): MemoryEmbeddingInputField {
+  return isSkillWrite(row) && typeof row.trigger === "string" && row.trigger.length > 0 ? "trigger" : "content";
 }
 
 /**
- * The write-body fields a stored embedding is computed from: exactly the fields
- * skillEmbedText reads — `content`, plus `trigger` for a skill-tagged row. A
- * write that changes one of these and supplies no vector must refresh the
- * vector (see Memory.put/patch; resources/memory-redaction.ts shares this set).
+ * The text a row embeds from: the value of embedTextField(row). Returns
+ * `undefined` only when there is no usable text at all.
  */
-export const MEMORY_EMBEDDING_INPUT_FIELDS = Object.freeze(["content", "trigger"] as const);
+export function skillEmbedText(content: any): string | undefined {
+  return content[embedTextField(content)];
+}
 
 /**
  * Force a skill-tagged write to durability=persistent. Rejects an explicit

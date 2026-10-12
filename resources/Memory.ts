@@ -30,7 +30,7 @@ import { isJoinableTransaction, withOwnedTransaction, withSharedWriteTransaction
 import { CommittedRowChanged, confirmCommittedRow, sameStoredRow, storedRowChangedRefusal } from "./write-back.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 import { assertValidDurability, stampEphemeralExpiry } from "./memory-durability.js";
-import { enforceSkillDurability, isSkillWrite, MEMORY_EMBEDDING_INPUT_FIELDS, rejectSkillWritePath, refuseSkillWriteSource, skillEmbedText, skillScanGate } from "./skill-write.js";
+import { embedTextField, enforceSkillDurability, isSkillWrite, rejectSkillWritePath, refuseSkillWriteSource, skillEmbedText, skillScanGate } from "./skill-write.js";
 import { buildSkillSuccessorRow, closedSkillPayloadReadable, defaultSkillHooks, resolveSkillHead, rowIsSkill, runSkillVersionWrite, skillVersionVisibility, skillPayloadUnchanged, prepareSkillBody, validateSkillSnapshots, authorizeSkillOwners, skillWriteConflict } from "./skill-version-write.js";
 import { deriveSkillSubjectId } from "./skill-subject.js";
 import {
@@ -1975,35 +1975,41 @@ export class Memory extends (databases as any).flair.Memory {
     dropClientFederationBookkeeping(content);
     const expiryError = stampEphemeralExpiry(content, existingForSkill);
     if (expiryError) return Response.json({ error: "invalid_expiry", message: expiryError }, { status: 400 });
-    if (redaction.embeddingDiscarded) {
-      // flair#2407: the body's vector was removed because redaction changed
-      // its source text; store one computed from the patched row's text
-      // instead (null when the engine returns none).
-      const embedText = skillEmbedText({ ...(existingForSkill ?? {}), ...content });
-      const vec = typeof embedText === "string" && embedText.length > 0 ? await getEmbedding(embedText, "document") : null;
-      const computed = Array.isArray(vec) && vec.length > 0;
-      content.embedding = computed ? vec : null;
-      content.embeddingModel = computed ? getModelId() : null;
-      content.updatedAt = new Date().toISOString();
-    } else if (isSemanticPatch(content, existingForSkill, MEMORY_EMBEDDING_INPUT_FIELDS) &&
-      content?.embedding == null) {
-      // flair#2466: a PATCH that changes an embedding-input field (`content`, or
-      // `trigger` on a skill row — MEMORY_EMBEDDING_INPUT_FIELDS, the fields
-      // skillEmbedText reads) and supplies no vector must not keep the vector
-      // computed from the earlier text. Compute the replacement from the patched
-      // row the way put() embeds a write that carries no vector: same engine
-      // (`getEmbedding(..., "document")`), same stamp fields (embeddingModel and
-      // updatedAt). When the engine returns no vector the row is stored with the
-      // embedding CLEARED (embedding/embeddingModel null) — the state put() leaves
-      // a fresh row in when its embed fails — so the existing re-embed path picks
-      // it up, rather than it keeping a vector for text it no longer holds.
-      const embedText = skillEmbedText({ ...(existingForSkill ?? {}), ...content });
+    // flair#2466, and flair#2407's redaction branch: a PATCH computes a vector
+    // only from the patched row's effective embedding text (embedTextField, the
+    // field skillEmbedText embeds the row from) and only when this body carries
+    // that field, so the vector is for text this same super.patch write stores.
+    // Skill rows are refused above (rejectSkillWritePath), so that field is
+    // `content` here. It computes one when:
+    //   - redaction removed the body's supplied vector (flair#2407); or
+    //   - the body supplies no vector and the text differs from the stored row's
+    //     (flair#2466), so the row does not keep the vector of its earlier text.
+    // It computes it the way put() embeds a write that carries no vector (same
+    // engine, `getEmbedding(..., "document")`; same stamps, embeddingModel and
+    // updatedAt). When the engine returns no vector, embedding and embeddingModel
+    // are written as null: the row keeps no vector for text it no longer holds,
+    // and the embedding-stamp re-embed selects a null stamp. Otherwise nothing is
+    // computed: a body with no `content` (a `trigger`-only PATCH, say) or with
+    // unchanged `content` keeps the stored vector, or stores the one it supplies.
+    const patchedRow = { ...(existingForSkill ?? {}), ...content };
+    const embedField = embedTextField(patchedRow);
+    const bodyCarriesEmbedText = content != null && typeof content === "object" &&
+      Object.prototype.hasOwnProperty.call(content, embedField);
+    const embedTextChanged = existingForSkill != null &&
+      skillEmbedText(patchedRow) !== skillEmbedText(existingForSkill);
+    if (bodyCarriesEmbedText &&
+      (redaction.embeddingDiscarded || (embedTextChanged && content?.embedding == null))) {
+      const embedText = content[embedField];
       const vec = typeof embedText === "string" && embedText.length > 0 ? await getEmbedding(embedText, "document") : null;
       const computed = Array.isArray(vec) && vec.length > 0;
       content.embedding = computed ? vec : null;
       content.embeddingModel = computed ? getModelId() : null;
       content.updatedAt = new Date().toISOString();
     }
+    // Test-only: inert unless the fault-injection env opt-in is set and armed.
+    // Holds the PATCH after its stored-row read and any embed, before its write.
+    const beforePatchWrite = txnPausePoint("memory-patch");
+    if (beforePatchWrite) await beforePatchWrite;
     const patched = await super.patch(content, query);
     // embedding-space-guard slice 1 (flair#2425): a PATCH that stores an
     // embedding stamp must consult the latch the same way post()/put() do, so a
