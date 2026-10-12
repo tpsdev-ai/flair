@@ -338,7 +338,7 @@ describe("resolveAgentFromSub", () => {
       process.env.FLAIR_MCP_JIT_PROVISION = "1"; // JIT ON: a non-active row must not fall through to it
       credentials = [{ id: `cred-${label}`, principalId: "agt_x", kind: "idp", idpSubject: "sub-x", ...(status === undefined ? {} : { status }) }];
       agents["agt_x"] = { id: "agt_x", status: "active" };
-      const err = (await resolveAgentFromSub("sub-x").then(() => null, (e) => e)) as PrincipalRefusedError | null;
+      const err = (await resolveAgentFromSub("sub-x").then(() => null, (e) => e)) as (Error & { rpcCode?: number }) | null;
       expect(err, "a non-active mapping must be refused, not resolved").toBeInstanceOf(PrincipalRefusedError);
       expect(err!.rpcCode).toBe(-32001);
       expect(err!.message).toContain(`cred-${label}`); // the actor

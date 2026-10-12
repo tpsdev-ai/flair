@@ -7,12 +7,12 @@
  * token subject through it at request time, and `provisionIdpIdentityMapping`
  * (src/lib/mcp-enable.ts) is the layer that writes and maintains it. Before
  * this module both predicates accepted every status except `"revoked"`, so a
- * row with a missing, empty or unknown status was served as a live mapping, and
- * a revoked row fell through to JIT provisioning — which re-created the
- * principal the revocation was meant to stop. The XAA jwt-bearer grant
- * (resources/XAA.ts, `resolveOrCreatePrincipalLocked`) already accepts only
- * `"active"` (flair#2501); this module is that same allowlist, so the three
- * call sites cannot drift.
+ * row with a missing, empty or unknown status was served as a live mapping; on
+ * the resolver's path a revoked row was also skipped into JIT provisioning,
+ * which re-created the principal the revocation was meant to stop. The XAA
+ * jwt-bearer grant (resources/XAA.ts, `resolveOrCreatePrincipalLocked`) already
+ * accepts only `"active"` (flair#2501); the resolver and the linker now import
+ * this same allowlist, so those two sites cannot drift.
  *
  * The rule is an ALLOWLIST: a credential is usable only when its `status` is
  * exactly `"active"`. Missing, empty, `"revoked"` and any other value are not
@@ -46,7 +46,8 @@ function credentialStatusPhrase(status: unknown): string {
  * the actor (the named credential — pass the surrounding subject too when the
  * caller has one), the state (the stored status, or that there is none) and the
  * remedy (an operator re-links the credential, which writes an active one).
- * Shared so the resolver and the linker refuse identically.
+ * The resolver builds its JSON-RPC refusal from this, so that wording has one
+ * home.
  */
 export function credentialStatusRefusal(actor: string, status: unknown): string {
   return (
