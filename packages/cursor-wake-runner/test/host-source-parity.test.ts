@@ -7,11 +7,8 @@ import { describe, expect, test } from "bun:test";
 import { HOST_SOURCE_URL_MAX, validateHostSource } from "../../../resources/host-source.ts";
 import { cursorLaunchHostSource, isAcceptableHostSourceId, isAcceptableHostSourceUrl } from "../src/index.ts";
 
-// flair#1944 — for every input, the runner keeps a hostSource value exactly
-// when the server's validateHostSource accepts it. A runner that keeps more
-// gets its receipt refused (a 400); one that keeps less drops a citation the
-// server would have stored. The server NFC-normalises BEFORE it checks, so the
-// mirror must too.
+// Compare the mirrored grammar with the server validator on these inputs.
+// Both check the NFC form.
 
 const BASE_URL = "https://cursor.example/";
 
@@ -115,7 +112,7 @@ describe("flair#1944 — the runner's host-source mirror agrees with the server'
     expect(disagreements).toEqual([]);
   }, 60_000);
 
-  test("whatever hostSource the runner builds, the server accepts it and stores its NFC form", () => {
+  test("constructed sources in the fixture cross product validate to their NFC form", () => {
     let built = 0;
     for (const [, id] of ID_CASES) {
       for (const [, url] of URL_CASES) {

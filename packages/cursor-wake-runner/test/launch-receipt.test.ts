@@ -192,7 +192,7 @@ describe("buildLaunchReceipt — content + host source, omitting what the gramma
     expect(built.omittedSource).toBe(false);
   });
 
-  test("the content never echoes the dispatch text or the prompt", () => {
+  test("content is constructed from the dispatch and Cursor agent ids", () => {
     const built = buildLaunchReceipt("evt-1", { cursorAgentId: "bc-1" });
     expect(built.receipt.content).not.toContain("a light brief");
     expect(built.receipt.content).not.toContain("example-repo");
@@ -214,7 +214,7 @@ describe("buildLaunchReceipt — content + host source, omitting what the gramma
     expect(built.omittedSource).toBe(true);
   });
 
-  test("isAcceptableHostSourceUrl mirrors the server: https, no userinfo, capped", () => {
+  test("isAcceptableHostSourceUrl accepts https and rejects http and empty userinfo", () => {
     expect(isAcceptableHostSourceUrl("https://cursor.example/x")).toBe(true);
     expect(isAcceptableHostSourceUrl("http://cursor.example/x")).toBe(false);
     expect(isAcceptableHostSourceUrl("https://@cursor.example/x")).toBe(false);
@@ -222,8 +222,8 @@ describe("buildLaunchReceipt — content + host source, omitting what the gramma
   });
 });
 
-describe("runWakeCycle — the launch receipt (flair#1944)", () => {
-  test("a created launch writes the receipt BEFORE the ack; it reads back with the stable id", async () => {
+describe("runWakeCycleCore — the launch receipt (flair#1944)", () => {
+  test("a created outcome writes to the fake store before ack, under the stable id", async () => {
     const order: string[] = [];
     const { store, records } = fakeStore(order);
     const { port, acks } = catchupWith(order, [{ events: [dispatchEvent()], hasMore: false }]);
@@ -357,7 +357,7 @@ describe("isStoredReceipt — a row is this runner's receipt only if it VERIFIES
     ).toBe(true);
   });
 
-  test("a source id the server stored NFC-normalised still matches the raw id (flair#1944 round 5)", () => {
+  test("a simulated NFC-normalised stored source id matches the raw id (flair#1944 round 5)", () => {
     // Cursor can return an id whose NFC form is what the server stores and what a
     // read-back row carries — e.g. a KELVIN-SIGN `K` (U+212A) normalises to ASCII
     // `K`. The runner builds the expected id from the raw value; comparing raw
@@ -393,7 +393,7 @@ describe("isStoredReceipt — a row is this runner's receipt only if it VERIFIES
   });
 });
 
-describe("runWakeCycle — a row at the receipt id not verified as this receipt (flair#1944 round 3)", () => {
+describe("runWakeCycleCore — a row at the receipt id not verified as this receipt (flair#1944 round 3)", () => {
   const id = launchReceiptId("evt-1");
 
   test("another agent's memory at the id: no ack, a named mismatch, row untouched", async () => {
@@ -505,8 +505,8 @@ describe("permanentReceiptRefusal — which receipt write failures are non-retry
   });
 });
 
-describe("runWakeCycle — a receipt the runner treats as a non-retryable refusal (flair#1944)", () => {
-  test("a 400 is acked, reported as receiptRefused with status + code only, and logged once", async () => {
+describe("runWakeCycleCore — a receipt the runner treats as a non-retryable refusal (flair#1944)", () => {
+  test("a simulated 400 is acked, reported as receiptRefused with status + code only, and logged once", async () => {
     const order: string[] = [];
     const { store, records } = fakeStore(order, { writeError: serverError(400, ECHOING_400) });
     const { port, acks } = catchupWith(order, [{ events: [dispatchEvent()], hasMore: false }]);
@@ -582,7 +582,7 @@ describe("runWakeCycle — a receipt the runner treats as a non-retryable refusa
   });
 });
 
-describe("runWakeCycle — a `dry-run` outcome in a live cycle is refused (flair#1944 round 7)", () => {
+describe("runWakeCycleCore — a `dry-run` outcome in a live cycle is refused (flair#1944 round 7)", () => {
   test("a dry-run launch outcome in a LIVE cycle is refused by name; nothing recorded, nothing acked", async () => {
     // The runner picks the Cursor client from `dryRun`, so a live cycle can only
     // observe a `dry-run` outcome through the test seam — defence in depth.
@@ -598,7 +598,7 @@ describe("runWakeCycle — a `dry-run` outcome in a live cycle is refused (flair
   });
 });
 
-describe("runWakeCycle — a LIVE outcome in a dry-run cycle is refused (flair#1944 round 8)", () => {
+describe("runWakeCycleCore — a LIVE outcome in a dry-run cycle is refused (flair#1944 round 8)", () => {
   test("dryRun with a write-capable client and a `created` result: refused by name BEFORE recordLaunch, no memory written", async () => {
     // The runner picks the Cursor client from `dryRun`, so a dry-run cycle can only
     // observe a live outcome through the internal core's seam — defence in depth in

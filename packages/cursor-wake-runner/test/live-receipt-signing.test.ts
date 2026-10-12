@@ -1,30 +1,7 @@
 /**
- * live-receipt-signing.test.ts — flair#1944 round 5 (slice 2 of flair#1940).
- *
- * A live receipt WRITE must be signed as the runner's own agent. Round 4 put the
- * check in `main()` at startup; round 5 enforces it WHERE THE WRITE HAPPENS, so
- * a caller that drives `runWakeCycle` directly — or a key file that disappears
- * after the CLI's existence check — cannot fall back to admin Basic credentials.
- * The production receipt store asks the client to REQUIRE the signing key, and
- * the client fails CLOSED at send time (before the request leaves the process).
- *
- * Every HTTP target here is a loopback stub this file started. The guarded cases
- * must reach it only for the idempotency READ; the receipt WRITE is refused before
- * it is sent. The event is never acked on either case.
- *
- * MUTATION (flair#1944 round 5): drop `requireSigningKey: true` from
- * receipt-store.ts's write. The Basic case then sends Basic and the unsigned case
- * sends an unsigned write; both land as "written" and ack, so the first test
- * fails. Run and restored.
- *
- * flair#1944 round 7 replaces round 6's runtime guards with construction: the
- * cycle takes ONE `FlairClient` and builds the receipt store (and the catchup
- * reader) from THAT client, so the store's signing identity IS the runner
- * identity and a store that signs as another agent is unrepresentable — there is
- * no second agent label and no store to supply. MUTATION (round 7): give
- * `runWakeCycle` back a caller-supplied `receipts` store (or an `agentId` label)
- * and this file's single-client case no longer compiles/behaves: the runner would
- * read, write and ack through a store it was handed rather than the client's.
+ * The internal core reaches the production receipt store's write-time guard.
+ * With Basic-only credentials or an unresolved key, the receipt read reaches
+ * the loopback stub; the write is refused before sending and the event is unacked.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import nacl from "tweetnacl";
@@ -118,13 +95,11 @@ afterAll(async () => {
   if (keyDir) await rm(keyDir, { recursive: true, force: true, maxRetries: 4 });
 });
 
-describe("flair#1944 round 5 — a live receipt write is refused unless it signs as the agent", () => {
-  test("runWakeCycle with a Basic-backed client: the write is refused by name, nothing acked", async () => {
+describe("the core refuses writes with Basic-only credentials or an unresolved key", () => {
+  test("runWakeCycleCore with a Basic-backed client: the write is refused by name, nothing acked", async () => {
     requests = [];
     const agentId = `agent-basic-${randomUUID()}`;
-    // Admin Basic credentials and NO signing key for this id — the state round 4
-    // refused at CLI startup. Driven through runWakeCycle directly, the STORE
-    // built from this client must still refuse the write.
+    // The core bypasses startup validation to exercise the store's write guard.
     const client = new FlairClient({
       agentId,
       url: base,
@@ -142,22 +117,22 @@ describe("flair#1944 round 5 — a live receipt write is refused unless it signs
     expect(result.items[0].receipt, "an unsigned live write must not be recorded").toBe("failed");
     expect(result.receiptFailed, "the refusal names the signing key").toContain("live receipts need the agent's signing key");
     expect(result.receiptRefused).toEqual([]);
-    expect(result.acked, "nothing is acked without a recorded receipt").toBeNull();
+    expect(result.acked, "this signing-key refusal leaves the event unacked").toBeNull();
     expect(acks).toEqual([]);
     expect(requests, "only the idempotency read reached the stub — no Basic write was sent").toEqual([
       `GET /Memory/${launchReceiptId("evt-1")}`,
     ]);
   });
 
-  test("the key file removed between the CLI's existence check and the write: the client fails closed, nothing acked", async () => {
+  test("the core with a key removed after an existence probe: the client fails closed, nothing acked", async () => {
     requests = [];
     const agent = mkAgent(`agent-gone-${randomUUID()}`);
     const keyPath = join(keyDir, `${agent.id}.key`);
     // loadPrivateKey() treats an exactly-32-byte file as a raw Ed25519 seed.
     await writeFile(keyPath, Buffer.from(agent.secretKey.slice(0, 32)));
-    // The CLI's startup existence check passes...
+    // An existence probe finds the key...
     expect(inspectKeyLookup(agent.id, keyPath).resolvedPath, "the key is present at the check").toBe(keyPath);
-    // ...then the key file disappears before the receipt write.
+    // ...then the file disappears before this client loads it.
     await rm(keyPath, { force: true });
     const client = new FlairClient({ agentId: agent.id, url: base, keyPath });
     const { port, acks } = catchupWith([{ events: [dispatchEvent(agent.id)], hasMore: false }]);
@@ -177,15 +152,15 @@ describe("flair#1944 round 5 — a live receipt write is refused unless it signs
   });
 });
 
-describe("flair#1944 round 7 — one client, one identity: a mismatched signer is unrepresentable", () => {
+describe("receipt store construction from the core's Flair client", () => {
   test("the store's agentId is the client's — there is no second label to supply", () => {
     const signer = `agent-signer-${randomUUID()}`;
     const client = new FlairClient({ agentId: signer, url: base, keyPath: join(keyDir, `absent-${randomUUID()}.key`) });
-    // The store takes the client alone: its signing identity is the client's.
+    // The store takes the client alone and copies its agentId.
     expect(createMemoryReceiptStore(client).agentId).toBe(signer);
   });
 
-  test("the cycle writes its receipt through the client it runs: the client's memory is the only store", async () => {
+  test("the core reads through its Flair client and refuses an unsigned receipt write", async () => {
     requests = [];
     const agentId = `agent-one-${randomUUID()}`;
     const client = new FlairClient({

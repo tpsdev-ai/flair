@@ -1,28 +1,14 @@
 /**
  * live-cycle-signing.test.ts — flair#1944 round 9 (slice 2 of flair#1940).
  *
- * Round 4 refused a live cycle with no signing key at CLI startup; round 5
- * enforced the requirement WHERE THE WRITE happens. Neither closed the gap
- * Codex found: a caller that drives the EXPORTED `runWakeCycle` directly with
- * admin Basic credentials could still DRAIN the feed and LAUNCH Cursor, and only
- * AFTERWARDS fail the receipt write for lack of a signing key — a real launch left
- * unrecorded, the watermark unadvanced (catchup.ts carries no signing requirement;
- * it is set only on the write, receipt-store.ts).
- *
- * Round 9 enforces the requirement at the START of a live cycle in the EXPORTED
- * runner: `runWakeCycle` refuses, by name, BEFORE it builds any part or makes any
- * request — no catchup read, no Cursor launch, no receipt write.
+ * The exported live cycle loads and validates the signing key before building
+ * its parts or sending requests.
  *
  * Every HTTP target here is a loopback stub this file started (http on 127.0.0.1,
  * so admin Basic is allowed over it). The live case must reach it ZERO times; the
  * dry-run case drains the feed once with no Cursor create, receipt write or ack.
  * A real catchup read may create an AgentReadPosition.
  *
- * MUTATION (flair#1944 round 9): remove the `assertLiveCycleSigningKey` call from
- * `runWakeCycle` (i.e. move the check back to write time, where only the store
- * requires it). The live case then drains the feed, launches Cursor, and fails
- * the write afterwards — the stub records the GET + POST — and the first test
- * fails. Run and restored.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";

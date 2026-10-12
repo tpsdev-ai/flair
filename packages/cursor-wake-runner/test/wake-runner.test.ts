@@ -136,7 +136,7 @@ describe("classifyDispatch — directed only, owner-scoped", () => {
 });
 
 describe("catchup port — owner-scope by construction", () => {
-  test("path is always the signed agent; there is no participant argument", () => {
+  test("path uses client.agentId; there is no participant argument", () => {
     expect(catchupPath(CREW)).toBe(`/OrgEventCatchup/${CREW}`);
     expect(catchupPath("a/b")).toBe("/OrgEventCatchup/a%2Fb");
     expect(catchupGetPath(CREW, "p0", 10)).toBe(`/OrgEventCatchup/${CREW}?after=p0&limit=10`);
@@ -384,7 +384,7 @@ function runCycle(
   return runWakeCycleCore(deps, { catchup: port, cursor: cursor ?? dryRunCursorClient() });
 }
 
-describe("runWakeCycle — drain, launch, ack, no double-launch", () => {
+describe("runWakeCycleCore — drain, launch outcomes and ack", () => {
   test("directed dispatch is launched, then the watermark is acked", async () => {
     const event = dispatchEvent();
     const { port, acks } = memoryCatchup([{ events: [event], nextAfter: "p1", hasMore: false }]);
@@ -401,7 +401,7 @@ describe("runWakeCycle — drain, launch, ack, no double-launch", () => {
     expect(calls[0].cursorAgentId).toBe(wakeAgentId(String(event.id)));
   });
 
-  test("redelivery of the same event reuses the Cursor agent (409) and still acks — no second create intent", async () => {
+  test("redelivery sends the same agent id and a fake already outcome remains ackable", async () => {
     const event = dispatchEvent();
     const page: CatchupPage = { events: [event], nextAfter: "p1", hasMore: false };
     const first = memoryCatchup([page]);
@@ -423,7 +423,7 @@ describe("runWakeCycle — drain, launch, ack, no double-launch", () => {
     expect(two.acked).toBe("p1");
   });
 
-  test("re-drain after ack sees an empty page and does not launch", async () => {
+  test("an empty canned page does not launch", async () => {
     const { port } = memoryCatchup([{ events: [], watermark: "p1", hasMore: false }]);
     const { client, calls } = recordingCursor(() => {
       throw new Error("should not launch");
@@ -544,9 +544,7 @@ describe("runWakeCycle — the EXPORTED function takes NO test seam (flair#1944 
   test("a stray `__test` override is IGNORED: the client's own feed is drained and a dry-run writes no receipt", async () => {
     // A fake FlairClient that serves its OWN catchup feed through `request` and
     // records any memory write. The exported `runWakeCycle` must ignore the stray
-    // override entirely: on 9c231e6a the injected empty feed drains nothing and the
-    // injected `created` cursor writes a receipt through the client's memory even
-    // in a dry-run cycle; here neither may happen.
+    // override and use its own feed and production dry-run Cursor client.
     const wrote: string[] = [];
     const client = {
       agentId: CREW,

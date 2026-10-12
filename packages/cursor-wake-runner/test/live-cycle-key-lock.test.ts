@@ -14,13 +14,6 @@
  * Authorization header, so a case can assert that NO Flair request ever carried a
  * Basic header.
  *
- * MUTATION (flair#1944 round 10): replace the start-of-cycle load with round 9's
- * existence-only check (`client.hasSigningKey()` instead of
- * `client.loadSigningKey()`). Then the client is neither locked nor primed, so
- * (a) the key file the cycle removes before its first request is gone by that
- * request and the catchup read falls back to admin Basic — the "no Basic request"
- * assertion fails (test 3), and (b) the invalid-key file is not refused at the
- * start, by name (test 4). Run and restored.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import nacl from "tweetnacl";
@@ -127,7 +120,7 @@ describe("flair#1944 round 10 — the client LOADS and VALIDATES the key, and lo
     const keyPath = join(keyDir, `${agent.id}.key`);
     // loadPrivateKey() treats an exactly-32-byte file as a raw Ed25519 seed.
     await writeFile(keyPath, Buffer.from(agent.secretKey.slice(0, 32)));
-    // Admin Basic credentials AND a key: only the LOCK decides which is used.
+    // Key resolution already prefers the key; the lock prevents fallback if none resolves.
     const client = new FlairClient({
       agentId: agent.id,
       url: base,
@@ -140,8 +133,7 @@ describe("flair#1944 round 10 — the client LOADS and VALIDATES the key, and lo
     await client.loadSigningKey();
     expect(client.signingRequired, "the load puts the client in signed-only mode").toBe(true);
 
-    // The key file disappears AFTER the load — a round-9 existence check would now
-    // fall back to admin Basic on the next request.
+    // The file disappears after loading; the cached key still signs.
     await rm(keyPath, { force: true });
     await client.request("GET", `/OrgEventCatchup/${agent.id}`);
 

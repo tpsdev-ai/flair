@@ -7,27 +7,13 @@
  * or a foreign PRIVATE row holds it and reads as absent (the server answers 404
  * to this reader); `memory.get` resolves to null ONLY on a 404 and throws on any
  * other failure, so a non-404 read failure cannot look absent and license a
- * write. A refused `write`
+ * write. An HTTP-refused `write`
  * throws the client's FlairError, whose HTTP `status` and `body` the runner
  * reads to tell a non-retryable refusal from a retryable failure (receipt.ts,
  * permanentReceiptRefusal).
  *
- * flair#1944 round 5: a live receipt `write` REQUIRES the agent's own Ed25519
- * signing key. The production store passes `requireSigningKey` so the client
- * fails closed at SEND time rather than falling back to admin Basic credentials
- * (whose username the server would stamp in place of the agent's identity). The
- * refusal is named and the caller keeps the watermark back, so the next cycle
- * retries it. Removing the key file cannot cause a Basic fallback: a key the
- * client has already loaded is CACHED and still signs (the file is not re-read),
- * and when no key resolves at send time the client refuses rather than sending
- * Basic.
- *
- * flair#1944 round 7: the store signs as EXACTLY the client's agent — it takes
- * the client and uses the client's OWN `agentId` as its signing identity. There
- * is no second agent label to supply or disagree with, so a store that signs as
- * a different agent than the runner is unrepresentable: whoever builds the
- * runner from a client gets a store bound to that same client. This signing
- * identity is what a LIVE run writes with; a dry-run run writes no receipt at all.
+ * Writes require a resolved signing key; no key means no Basic fallback.
+ * A cached key still signs after its file is removed.
  */
 
 import { MissingSigningKeyError } from "@tpsdev-ai/flair-client";
@@ -36,7 +22,7 @@ import type { CursorLaunchSource, ReceiptStore } from "./receipt.js";
 
 export function createMemoryReceiptStore(client: FlairClient): ReceiptStore {
   return {
-    // The store's signing identity IS the client's — no separate label to trust.
+    // The store uses the client's agentId.
     agentId: client.agentId,
     read: async (id) => {
       const existing = await client.memory.get(id);

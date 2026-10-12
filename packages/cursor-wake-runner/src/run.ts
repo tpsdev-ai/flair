@@ -13,8 +13,8 @@
  * Skipped events are ackable. A handoff is ackable after a successful receipt
  * write, a verified existing receipt, or a classified non-retryable refusal.
  * Launch failure, receipt failure or mismatch stops processing that event; the
- * cycle may still ack earlier successful or skipped events. Cursor 409 is treated
- * as already handed off, then the receipt is retried under the same ack rules.
+ * cycle may still ack earlier successful or skipped events. A 409 classified as
+ * an agent-id conflict is treated as already handed off under the same ack rules.
  *
  * The exported entry builds production parts. Tests can supply catchup and Cursor
  * clients to the internal core, which the package entry does not export.
@@ -37,11 +37,11 @@ export interface WakeItem {
   cursorAgentId?: string;
   url?: string;
   reason?: string;
-  /** flair#1944 — the launch receipt this handoff recorded: "written" or "unchanged" (a VERIFIED existing receipt), "refused" (a non-retryable refusal; acked without it), "failed" (transient or configuration; not acked), or "mismatched" (the id is held by a row not verified as this receipt; not acked). */
+  /** flair#1944 — the launch receipt this handoff recorded: "written" or "unchanged" (a VERIFIED existing receipt), "refused" (a non-retryable refusal; ackable without it), "failed" (transient or configuration; not acked), or "mismatched" (the id is held by a row not verified as this receipt; not acked). */
   receipt?: "written" | "unchanged" | "failed" | "refused" | "mismatched";
 }
 
-/** flair#1944 — a launch receipt the runner treats as a non-retryable refusal; the event was acked without it. */
+/** A non-retryable receipt refusal; the event is ackable without its receipt. */
 export interface WakeReceiptRefusal extends ReceiptRefusal {
   eventId: string;
 }
@@ -62,7 +62,7 @@ export interface WakeResult {
    * is not advanced past it.
    */
   receiptMismatched: string | null;
-  /** flair#1944 — receipts the runner treats as non-retryable refusals (status + error code, when present); each event was acked without its receipt. */
+  /** flair#1944 — receipts the runner treats as non-retryable refusals (status + error code, when present); each event is ackable without its receipt. */
   receiptRefused: WakeReceiptRefusal[];
   items: WakeItem[];
 }
@@ -103,7 +103,7 @@ export interface WakeCycleParts {
 /** flair#1944 round 7/8 — a construction fault: the parts a cycle was built with
  *  do not match its mode. Thrown, not swallowed into `blocked`: it is refused by
  *  name before that event is recorded or its receipt attempted. Earlier events
- *  in a live cycle may already have receipts (never a launch failure). */
+ *  in a live cycle may already have receipts. */
 class CycleConstructionError extends Error {}
 
 /** A `dry-run` launch outcome seen in a LIVE cycle (a dry-run client reached a
@@ -162,9 +162,9 @@ function mismatchReason(stored: StoredReceipt, agentId: string, receipt: LaunchR
  * that check is not verified as this receipt: it surfaces as `"mismatched"` and
  * the caller does NOT ack it. A write the runner treats as a non-retryable
  * refusal (permanentReceiptRefusal) surfaces as `"refused"` with its status and
- * error code; the caller acks past it. Any other read or write failure surfaces
+ * error code; that event is ackable. Any other read or write failure surfaces
  * as `"failed"` (the caller keeps the watermark back and the next cycle
- * retries). Never a thrown crash.
+ * retries).
  */
 async function recordLaunchReceipt(
   agentId: string,
@@ -256,8 +256,7 @@ export async function runWakeCycle(deps: WakeDeps): Promise<WakeResult> {
  * it, so a test can drive a canned feed through a fake Flair client and a fake
  * Cursor endpoint without a network. It can NEVER supply a receipt store or an
  * agent id: the store is still `createMemoryReceiptStore(deps.client)` and the
- * runner identity is still `deps.client.agentId`, so the "store labelled A writing
- * as B" combination is unrepresentable here either.
+ * runner identity is still `deps.client.agentId`.
  */
 export async function runWakeCycleCore(deps: WakeDeps, parts: WakeCycleParts): Promise<WakeResult> {
   // The runner identity and receipt store come from deps.client.
@@ -343,10 +342,9 @@ export async function runWakeCycleCore(deps: WakeDeps, parts: WakeCycleParts): P
         // an existing row VERIFIED as this runner's receipt. A transient or
         // configuration failure does not ack, so the next cycle retries the
         // receipt. A refusal the runner treats as non-retryable is reported and
-        // the event acked: the launch is real, the receipt is provenance. A row
+        // the event is ackable without its receipt. A row
         // at the id that is NOT this runner's receipt does not ack either — it is
-        // reported and left untouched. All are named outcomes, not a thrown
-        // crash.
+        // reported and left untouched.
         if (launch.outcome === "created" || launch.outcome === "already") {
           const receipt = await recordLaunchReceipt(agentId, store, dispatch, launch, deps.log);
           result.items[result.items.length - 1].receipt = receipt.status;

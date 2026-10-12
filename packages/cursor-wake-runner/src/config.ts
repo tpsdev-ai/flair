@@ -124,7 +124,7 @@ Cursor:
   CURSOR_AUTO_CREATE_PR  true to open a PR when the run completes
 
 Idempotency:
-  Each OrgEvent id maps to one Cursor agentId (bc-<sha256 uuid>). Re-POST is 409
-  and is treated as already-handed-off, then acked. Redelivery cannot start a
-  second agent.
+  Each OrgEvent id maps to one Cursor agentId (bc-<sha256 uuid>). A 409 classified
+  as an agent-id conflict is treated as already handed off; ack still depends
+  on the receipt outcome.
 `;

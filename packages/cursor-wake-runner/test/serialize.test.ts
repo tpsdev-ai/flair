@@ -9,9 +9,6 @@ import { startSerialTicks } from "../src/cli.ts";
  * runner can never overlap its own cycles. A fixed `setInterval` would start a
  * new tick on a wall-clock schedule regardless of an in-flight cycle.
  *
- * MUTATION: make `startSerialTicks` schedule on a fixed interval without
- * awaiting the tick (e.g. `setInterval(run, intervalSec * 1000)`); the delayed
- * cycle below then overlaps itself (`maxInFlight` > 1) and this case fails.
  */
 describe("startSerialTicks — a delayed cycle is never overlapped (flair#1944 round 2)", () => {
   test("a cycle slower than the interval never runs concurrently with the next", async () => {
@@ -20,8 +17,7 @@ describe("startSerialTicks — a delayed cycle is never overlapped (flair#1944 r
     let starts = 0;
     const CYCLE_MS = 30;
 
-    // 5 ms between cycles; each cycle takes 30 ms. Unserialized, ~6 ticks would
-    // be in flight at once; serialized, exactly one.
+    // The tick stays pending longer than the configured interval.
     const serial = startSerialTicks(async () => {
       starts += 1;
       inFlight += 1;

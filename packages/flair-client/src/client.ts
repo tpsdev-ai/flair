@@ -250,20 +250,9 @@ export class FlairClient {
   }
 
   /**
-   * flair#1944 round 9/10 — whether a request from this client would be SIGNED
-   * with the agent's own Ed25519 identity rather than fall back to admin Basic.
-   * This is the SYNCHRONOUS, EXISTENCE-ONLY pre-check: it mirrors `resolveKey`'s
-   * precedence without loading the key file — an in-memory key, or a key file
-   * that resolves NOW (the same `inspectKeyLookup` the CLI's startup check uses).
-   * It answers "would this client LIKELY sign", not "can it sign": a key file
-   * that exists but cannot be parsed, or that DISAPPEARS before the first
-   * request, still reports `true`. `false` only when `authMode` is "basic" (that
-   * mode never signs), regardless of a configured key path.
-   *
-   * flair#1944 round 10 — a caller that needs a GUARANTEE (a live cycle that must
-   * sign EVERY request) must call `loadSigningKey()`, which loads and VALIDATES
-   * the key into memory and locks the client to signed-only. This predicate is
-   * kept for cheap, synchronous pre-checks only.
+   * Existence-only pre-check; does not load or validate a key.
+   * Returns false in Basic mode or when no in-memory key or key file is found.
+   * Use `loadSigningKey()` to validate and cache an Ed25519 key and require signing.
    */
   hasSigningKey(): boolean {
     if (this.authMode === "basic") return false;
@@ -272,24 +261,11 @@ export class FlairClient {
   }
 
   /**
-   * flair#1944 round 10 — LOAD and VALIDATE the agent's Ed25519 signing key into
-   * this client NOW, and put the client in a mode where EVERY subsequent request
-   * MUST be signed with that loaded key (no admin Basic fallback and no unsigned
-   * request, for any path). Returns the loaded key.
-   *
-   * This is the guarantee `hasSigningKey()` cannot give: it resolves the key at
-   * THIS moment (in-memory key, else the key file), PARSES it (`createPrivateKey`
-   * — an unparsable file throws), CHECKS it is Ed25519, and CACHES it (see
-   * `resolveKey`), so the loaded key signs every later request even if the key
-   * file is then removed or replaced. A live wake cycle calls this at the START
-   * so its catchup read, receipt operations and ack all sign as the
-   * agent's own identity — a key that disappears after the check can no longer
-   * cause a Basic fallback on ANY of them.
-   *
-   * Throws a `MissingSigningKeyError` when no key resolves (missing file, or
-   * `authMode: "basic"`), and an error naming the file when one resolves but
-   * does not load as an Ed25519 key. Either way the caller is refused BEFORE it
-   * makes any request.
+   * Resolve, validate and cache an Ed25519 key, then require signed requests.
+   * Removing or replacing its file after loading does not replace the cached key.
+   * Throws MissingSigningKeyError for Basic mode, no resolved key or a load error
+   * (lookup detail and the underlying error), or a non-Ed25519 key (key type,
+   * without its file path). Returns the loaded key.
    */
   async loadSigningKey(): Promise<KeyObject> {
     if (this.authMode === "basic") {
@@ -299,8 +275,7 @@ export class FlairClient {
     try {
       key = await this.resolveKey();
     } catch (err) {
-      // The key file resolved, but could not be parsed into a private key. Fail
-      // closed with the same class as a missing key (the caller names the mode).
+      // Wrap key resolution/load errors in the signing-requirement error.
       throw new MissingSigningKeyError(
         this.agentId,
         `the key at ${describeKeyLookup(this.lastKeyLookup)} could not be loaded: ${err instanceof Error ? err.message : String(err)}`,
@@ -546,11 +521,8 @@ class MemoryApi {
     /** Optional caller-owned abort signal, forwarded to
      *  `FlairClient.request` so an in-flight write can be cancelled. */
     signal?: AbortSignal;
-    /** flair#1944 round 5 — require the agent's own Ed25519 signing key for this
-     *  write. The client resolves the key at SEND time and, when none is
-     *  available, refuses the request with a `MissingSigningKeyError` instead of
-     *  falling back to admin Basic credentials. A live receipt write sets this so
-     *  it fails closed even if the key file disappears after an earlier check. */
+    /** Require a resolved signing key for this write; refuse without Basic fallback
+     *  when none resolves. Cached keys still sign after their files are removed. */
     requireSigningKey?: boolean;
   } = {}): Promise<Memory> {
     const id = opts.id ?? `${this.client.agentId}-${crypto.randomUUID()}`;
@@ -988,13 +960,7 @@ function describeKeyLookup(state: KeyLookupState | undefined): string {
   return `checked ${state.candidates.map((c) => `${c.path} (${c.exists ? "found" : "missing"})`).join(", ")}`;
 }
 
-/**
- * flair#1944 round 5 — thrown when a request carried `requireSigningKey` and no
- * Ed25519 key could be resolved. The request is refused BEFORE it is sent: a
- * live receipt write must fail closed rather than fall back to admin Basic
- * credentials, whose username the server would stamp in place of the agent's
- * signing identity (so the written pointer could not be verified on replay).
- */
+/** A signing requirement or key-load refusal, raised before sending a request. */
 export class MissingSigningKeyError extends Error {
   constructor(
     public readonly agentId: string,

@@ -8,7 +8,7 @@ A running agent uses `flair_catchup` instead (#1612). Do not rebuild a message b
 
 ## Single-launch
 
-OrgEvent delivery is at-least-once. The runner maps each event id to one client-supplied Cursor `agentId` (`bc-<sha256 uuid>`). Re-POSTing that id returns `409 agent_id_conflict` and is treated as already handed off; ack still depends on the receipt outcome. Redelivery cannot start a second agent. A launch failure leaves that event unacked; earlier successful or skipped events
+OrgEvent delivery is at-least-once. The runner maps each event id to one client-supplied Cursor `agentId` (`bc-<sha256 uuid>`). A 409 classified as an agent-id conflict is treated as already handed off; ack still depends on the receipt outcome. A launch failure leaves that event unacked; earlier successful or skipped events
 may still be acked.
 
 If you point a Cursor Automation at "start a crew agent on the latest dispatch" *without* this runner, Cursor will mint a new agent every tick. That path is **not** safe. Schedule **this process**.
@@ -67,23 +67,23 @@ successful write, OR an existing row at that id VERIFIED as this runner's own
 receipt (same author, same deterministic content, same host-source identity); a
 row that fails that check is not verified as this runner's receipt, reported as
 `receiptMismatched` and left untouched (see **Not verified as this receipt** below), and a receipt
-the runner treats as a non-retryable refusal is acked without one (see
+the runner treats as a non-retryable refusal is ackable without one (see
 **Refused** below). The `id` is
 the Cursor agent id: on create, the id Cursor returned (the requested id when the
-response carries none); on a 409 replay, the requested id, which Cursor reported
-as already in use. The `url` is written only on create, and only as Cursor
+response has no string id); on a 409 classified as an agent-id conflict, the
+requested id. The `url` is written only on create, and only as Cursor
 returned it (an `already` result that carries a url never writes one, so a
 serialized replay that reads the existing receipt cannot rewrite the create's
 stored url — the two-runner race is disclosed, not claimed away). Neither is
 derived from the dispatch
-text. The write is private and omits `hostSourceScope`, so the server's read
+text. A new receipt defaults to private and omits `hostSourceScope`, so the read
 projection keeps the pointer author-only. An ordinary non-author cannot read this
 private row at all — it answers 404 to them — so they never see the pointer; an
 admin CAN read the row, but an admin bootstrap takes no pointer join. `withheld`
-applies only to a non-author who can read the row after its visibility changes
-(for instance it is later shared): they read the record but not the pointer, and
+applies to a non-author who can read the active row with a bound pointer after
+its visibility changes: they read the record but not the pointer, and
 see `hostSource: "withheld"`. Only a live run signed with the agent's own key
-writes the receipt. When a pointer was stored AND the memory is selected for
+writes the receipt. When an active memory with a bound pointer is selected for
 bootstrap, bootstrap prose CITES that pointer (flair#2446) to a reader who may see
 it: this memory's author
 sees the short `[via cursor/launch <id8> (unverified)]` citation — host/kind and
@@ -93,23 +93,20 @@ admin bootstrap takes no pointer join. A memory with no pointer — a receipt wh
 Cursor id the grammar refused stores none — gets no host-source citation. A `hostSource` is the
 writer's claim, not
 verified host
-authorship. A `hostSource` value the server's grammar would refuse (checked on
-its NFC form, as the server checks it; the server stores that form) is omitted
-with one line through the supplied `log` callback (the shipped CLI passes one),
-and the receipt is stored unsourced if the remaining write succeeds — a READ or
-WRITE failure can still prevent the receipt entirely.
+authorship. An invalid id omits the pointer; an invalid url omits only the url.
+Omissions are logged through the supplied callback (the shipped CLI passes one).
+Read or write failure can prevent the receipt entirely.
 
 A receipt already present under that id is left unchanged only when it VERIFIES
 as this runner's own receipt (same author, content and host-source identity), so
 a replay that reuses the agent (409) retries the receipt without rewriting the
 stored one. The ack follows a successful write or a verified existing receipt —
-except for a receipt the runner treats as a non-retryable refusal, which is acked
+except for a receipt the runner treats as a non-retryable refusal, which is ackable
 without one (see **Refused**) — and a failed write is classified:
 
 - **Refused** — the runner treats a write Flair answered with 400, 409, 413 or
-  422 as a non-retryable refusal. The event is acked anyway (the launch is
-  real; the receipt is provenance, not control) and the cycle result's
-  `receiptRefused` names the event, the HTTP status and the server's error code,
+  422 as a non-retryable refusal. The event is ackable without a receipt, and the cycle result's
+  `receiptRefused` names the event, the HTTP status and an error token,
   when present — never the content — with one line through the supplied `log`
   callback; the exit status is unaffected.
 - **Not verified as this receipt** — a row already at the receipt id not verified as
@@ -122,7 +119,7 @@ without one (see **Refused**) — and a failed write is classified:
   the row untouched, not acked.
 - **Failed** — anything else: a network error or timeout, 401, 403, 408, 429,
   a 5xx, or a failed read. The event is not acked, `receiptFailed`
-  is set, the next cycle retries the receipt, and a one-shot run (`--once`)
+  is set, the next cycle can retry the receipt, and a one-shot run (`--once`)
   exits 2 (a poller under `--interval` keeps polling).
 
 Covered by `test/integration/host-source-cursor-launch-receipt-1940.test.ts`

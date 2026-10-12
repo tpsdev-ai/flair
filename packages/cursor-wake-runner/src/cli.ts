@@ -5,7 +5,7 @@
  * Drains the configured agent's OrgEventCatchup (signed on live cycles) and launches
  * one Cursor Cloud Agent per directed coord.dispatch / a2a.message. Live cycles
  * ack skipped events and handoffs whose receipt succeeds, verifies or is refused.
- * Client-supplied agentId makes redelivery a 409, not a second launch.
+ * Reuses the client-supplied agentId on redelivery.
  */
 
 import { FlairClient, inspectKeyLookup } from "@tpsdev-ai/flair-client";
@@ -34,21 +34,8 @@ function printResult(result: WakeResult): void {
 }
 
 /**
- * flair#1944 round 4 — a LIVE receipt run needs the runner's OWN signed agent
- * identity: the Ed25519 key for `FLAIR_AGENT_ID`. Under admin Basic credentials
- * the server stamps a written pointer with the Basic username while the row's
- * `agentId` is `FLAIR_AGENT_ID`, so the receipt cannot be verified on replay
- * (the identity check compares the row's author to the runner's agent id).
- * Refuse a live cycle with no signing key BEFORE anything is read or acked;
- * Basic credentials stay allowed for `--dry-run`, which performs no Cursor
- * create, no receipt write and no ack; its catchup read may create an
- * AgentReadPosition.
- *
- * flair#1944 round 10 — this is the CLI's fast EXISTENCE pre-check; the runner
- * itself LOADS AND VALIDATES the key and LOCKS the client to signed-only at the
- * start of the exported `runWakeCycle` (see `run.js`), so an unparsable key file is
- * refused there too and no FlairClient request in a live cycle can fall back
- * to Basic. Cursor launches use Cursor API Basic authentication.
+ * Existence-only CLI pre-check; dry-run skips it. The exported live cycle
+ * loads and validates the Ed25519 key before any Flair or Cursor request.
  */
 export function assertLiveSigningKey(config: WakeConfig): void {
   if (config.dryRun) return;
@@ -79,11 +66,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
 
   const runOnce = async (): Promise<number> => {
     const result = await runWakeCycle({
-      // ONE client: on a live cycle the runner identity IS this client's signing
-      // identity, and `runWakeCycle` builds the catchup reader and the receipt
-      // store from it. The Cursor client is selected from `dryRun` + the Cursor
-      // config, not built from this client (a dry-run cycle performs no Cursor
-      // create, receipt write or ack).
+      // The catchup reader and receipt store use this Flair client.
       client: flair,
       // The runner builds its Cursor client from this for a live cycle; a
       // dry-run cycle uses the dry-run client, which never CALLS Cursor (the

@@ -1,21 +1,13 @@
 /**
  * live-credentials.test.ts — flair#1944 round 4 (slice 2 of flair#1940).
  *
- * A LIVE receipt run needs the runner's OWN signed agent identity: the Ed25519
- * key for `FLAIR_AGENT_ID`. Under admin Basic credentials the server would stamp
- * a written pointer with the Basic username while the row's `agentId` is
- * `FLAIR_AGENT_ID`, so the receipt could not be verified on replay. The shipped
- * CLI therefore REFUSES a live cycle that has no signing key BEFORE it reads the
- * feed or acks anything, naming the requirement; a dry-run (`--dry-run`)
- * with Basic credentials still works: no Cursor create, receipt write or ack;
+ * The shipped CLI refuses a live cycle without a signing key before requests.
+ * Dry-run with Basic credentials performs no Cursor create, receipt write or ack;
  * a real catchup read may create an AgentReadPosition.
  *
  * Every HTTP target here is a loopback stub this file started: the live case must
  * reach it ZERO times (the refusal happens first), the dry-run reads it once.
  *
- * MUTATION (flair#1944 round 4): allow Basic live — drop the `assertLiveSigningKey`
- * call in cli.ts. The live case then drains the feed (a GET) and the first test
- * fails. Run and restored.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";

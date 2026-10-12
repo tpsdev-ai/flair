@@ -11,26 +11,20 @@
  * url?: <url> }` claiming where the launch lives. A receipt whose Cursor id the
  * grammar refuses is stored WITHOUT a pointer if the write succeeds: it is not
  * "sourced", and it gets no host-source citation (see Scope below).
- * A receipt the runner treats as a non-retryable refusal is acked without one.
+ * A classified non-retryable refusal makes the event ackable without a receipt.
  *
- * A live receipt run requires the agent's own Ed25519 signing key (flair#1944
- * round 4): under admin Basic credentials the server would stamp the written
- * pointer with the Basic username while the row's `agentId` is
- * `FLAIR_AGENT_ID`, so the receipt could not be verified on replay. Round 9
- * enforces this at the START of the exported runner: a LIVE `runWakeCycle` whose
- * client cannot resolve an Ed25519 key is refused by name BEFORE the first read,
- * launch or write. Basic credentials are accepted only for `--dry-run`: no
- * Cursor create, receipt write or ack; the catchup read may create an
- * AgentReadPosition.
+ * The exported live cycle loads and validates an Ed25519 key before any request.
+ * Basic credentials are accepted only for dry-run: no Cursor create, receipt
+ * write or ack; the catchup read may create an AgentReadPosition.
  *
- * Scope: the write is PRIVATE and omits `hostSourceScope`, so the server's read
+ * Scope: a new receipt defaults to private and omits `hostSourceScope`, so the read
  * projection keeps the pointer AUTHOR-ONLY. An ordinary non-author cannot read
  * this private row at all — it answers 404 to them — so they never see the
  * pointer; an admin CAN read the row, but an admin/operator bootstrap takes no
  * pointer join for it. `withheld` applies only to a non-author who can read the
- * row after its visibility changes (for instance it is later shared): they read
+ * active row with a bound pointer after its visibility changes: they read
  * the record but not the pointer, and see `hostSource: "withheld"`. When a
- * pointer was stored AND the memory is selected for bootstrap, bootstrap PROSE
+ * bound pointer exists on an active memory selected for bootstrap, its prose
  * cites that pointer to a reader who may see it (flair#2446): this memory's author
  * sees the short `[via cursor/launch <id8> (unverified)]` citation (host/kind and
  * the first 8 id characters, display-only — the full url never appears there), and
@@ -40,13 +34,11 @@
  * `hostSource` is the writer's claim, not verified host authorship.
  *
  * The id is the Cursor agent id: on create, the id Cursor returned (the
- * requested id when the response carries none); on a 409 replay, the requested
- * id, which Cursor reported as already in use. The url is set only on create,
- * and only as Cursor returned it. A value the server's host-source grammar would
- * refuse is omitted — never rewritten — so the receipt is stored UNSOURCED if the
- * remaining WRITE succeeds; a READ or WRITE failure can still prevent the
- * receipt entirely. The server checks and stores each value's NFC form,
- * and so does this mirror's check. The grammar is mirrored from
+ * requested id when the response has no string id); on a 409 classified as an
+ * agent-id conflict, the requested id. The url is set only on create,
+ * and only as Cursor returned it. An invalid id omits the pointer; an invalid
+ * url omits only the url. Read or write failure can prevent the receipt entirely.
+ * The mirror checks the NFC form; the server checks and stores that form. The grammar is mirrored from
  * resources/host-source.ts (runtime package code never imports server code);
  * test/host-source-parity.test.ts runs this mirror and the server's
  * validateHostSource over the same inputs and asserts they agree.
@@ -65,10 +57,10 @@ export const RECEIPT_NAMESPACE = uuidFromSha256("flair.cursor.launch-receipt", D
  */
 const HOST_SOURCE_ID_RE = /^[A-Za-z0-9._:/@#-]{1,256}$/;
 
-/** The server's url cap (`HOST_SOURCE_URL_MAX`), in characters. */
+/** The server's url cap (`HOST_SOURCE_URL_MAX`), in UTF-16 code units. */
 const HOST_SOURCE_URL_MAX = 2048;
 
-/** Control characters and the full bidi set (`resources/host-source.ts`). */
+/** The forbidden control/bidi set (`resources/host-source.ts`). */
 const FORBIDDEN = /[\u0000-\u001F\u007F-\u009F\u200E\u200F\u202A-\u202E\u2066-\u2069]/;
 
 /** A `hostSource` the receipt claims: the Cursor launch this memory is about. */
@@ -95,7 +87,7 @@ export interface StoredReceipt {
   content: string;
   /** The stored row's joined host-source pointer, or `"withheld"` when the
    *  reader may read the record but not its pointer. Absent when the row carries
-   *  no pointer. */
+   *  no projected pointer. */
   hostSource?: CursorLaunchSource | "withheld";
 }
 
@@ -105,17 +97,11 @@ export interface StoredReceipt {
  * missing, or HIDDEN from this reader (a foreign PRIVATE row reads as a 404). A
  * `get` that returns null on 404 and THROWS on any other failure — an unknown
  * read must never license a write; `write` puts the record. A live `write` must
- * be signed as the runner's own agent: the production store sets
- * `requireSigningKey`, and the client fails closed (no Basic fallback) when no
- * Ed25519 key resolves.
+ * use a signing key: the production store sets `requireSigningKey`, and the
+ * client refuses without Basic fallback when no key resolves.
  */
 export interface ReceiptStore {
-  /**
-   * The agent this store signs receipts AS — its signing identity. The store is
-   * built from ONE client and takes that client's OWN `agentId`, so it is always
-   * signed as EXACTLY the agent whose feed the runner drained; there is no
-   * separate label to supply and a mismatched signer is unrepresentable.
-   */
+  /** The Flair client's agentId used to build this store. */
   readonly agentId: string;
   read: (id: string) => Promise<StoredReceipt | null>;
   write: (receipt: LaunchReceipt) => Promise<void>;
@@ -210,13 +196,12 @@ export function buildLaunchReceipt(
 /**
  * Whether a row already stored at a receipt id IS this runner's receipt — the
  * ONE identity check the existing-receipt path makes before it calls the row
- * "unchanged" and acks. All of these must hold:
+ * "unchanged" and makes the event ackable. All of these must hold:
  *   - the row's author is the runner's OWN agent (`stored.author === agentId`);
  *   - the row's content EQUALS the deterministic receipt content; and
  *   - the row's host-source IDENTITY (`host`/`kind`/`id`) matches the receipt's —
  *     a `"withheld"` pointer, or a different id, is not a match.
- * The url is NOT part of the identity: a create stores the url Cursor returned,
- * a replay (409) carries none, and the stored one stands.
+ * The url is not part of the identity.
  *
  * A row that fails any of these is NOT VERIFIED as this runner's receipt (a
  * collision, or another agent's shared memory). The caller must fail WITHOUT
@@ -282,7 +267,7 @@ function errorCodeFrom(body: unknown): string | null {
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) code = (parsed as Record<string, unknown>).error;
   } catch {
     // FlairError keeps at most 500 characters of the body, so a long JSON body
-    // arrives truncated; the server writes `error` first, so read it from the head.
+    // may arrive truncated; try reading a leading `error` token.
     code = /^\s*\{\s*"error"\s*:\s*"([^"\\]{1,64})"/.exec(body)?.[1];
   }
   return typeof code === "string" && ERROR_CODE_RE.test(code) ? code : null;

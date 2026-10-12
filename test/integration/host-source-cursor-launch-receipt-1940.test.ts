@@ -25,10 +25,6 @@
  * A simulated 400 refusal is covered by unit cases in
  * `packages/cursor-wake-runner/test/launch-receipt.test.ts`.
  *
- * MUTATION (flair#1944 round 3): make the existing-receipt path existence-only
- * (`read` returns a bare boolean, or ignores the row's identity). The two
- * "not this runner's receipt" cases below then return `"unchanged"` and ACK —
- * this file fails.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import nacl from "tweetnacl";
@@ -203,9 +199,7 @@ describe("flair#1944 — the Cursor wake runner records a sourced launch receipt
     // A client whose agent the server does not know — its idempotency READ (the
     // first thing the store does) is refused as unauthenticated. Under round 7
     // there is one client for the whole cycle, so the read and the write share
-    // that identity; the old "registered reader, UNREGISTERED writer" split is
-    // unrepresentable. The refusal is a configuration fault the next cycle
-    // retries; this event stays unacked and no receipt is written.
+    // that client. This receipt read failure leaves the event unacked.
     const client = await clientFor(unknown, false);
     const event = dispatchEvent(unknown.id);
     const { port, acks } = catchupWith([{ events: [event], hasMore: false }]);
