@@ -26,8 +26,9 @@
  * actual ops API is exercised. Discovery reads (only reached on the push-success
  * branch) stay at the served origin, which is also real.
  *
- * The routing fetch also RECORDS every ops exchange whose fetch COMPLETES (a router
- * that threw before its fetch resolved records nothing), so the assertions below are
+ * The routing fetch records an exchange only after its response body is read (a
+ * router that threw before its fetch resolved, or a response whose body was never
+ * read, records nothing), so the assertions below are
  * made against the request refresh ITSELF issues — its own capability probe — and
  * against Harper's own answer to it, rather than a probe this file runs separately.
  * A fetch that broke the ops route (rejecting every ops request) would leave no such
@@ -97,8 +98,8 @@ interface OpsExchange {
 
 /** Rewrite ops calls that resolve to HOSTED_OPS_PORT to the harness's real ops
  *  port; pass every other request (the served origin, i.e. discovery) through.
- *  Every ops exchange that completes is recorded, so the test can assert on the
- *  request refresh ITSELF issued and on Harper's own answer to it. */
+ *  An ops exchange is recorded only after its response body is read, so the test
+ *  can assert on the request refresh ITSELF issued and on Harper's own answer to it. */
 function routingFetch(harper: HarperInstance, record: OpsExchange[]): typeof fetch {
   const hostedOrigin = new URL(resolveOpsUrl(harper.httpURL)).origin;
   const realOpsOrigin = new URL(harper.opsURL).origin;

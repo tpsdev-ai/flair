@@ -3372,14 +3372,17 @@ export interface RefreshMcpFlagResult {
  *
  * This ATTEMPTS an encrypted `FLAIR_MCP_OAUTH=true` push, and only when the target
  * can take the secret does it check the secret row's processEnv marker and verify a
- * restart by PID change; when the target cannot, it leaves a 0600 file to apply by
- * hand and returns `{ ok: false }` — the failure signal the `flair mcp enable` CLI
+ * restart by PID change; when the target cannot, it leaves a file when it can create
+ * one; an occupied path is refused and no file is written — and returns `{ ok: false }`
+ * — the failure signal the `flair mcp enable` CLI
  * turns into a non-zero exit. That fallback RETURN happens BEFORE the two discovery
- * checks below. The fallback file is written only when the push did not land — after a
+ * checks below. The fallback file is written only when the update could not be pushed
+ * or confirmed — after a
  * failed capability probe, a failed push, or a push whose read-back could not confirm
  * the stored value — never before probing — and to this command's OWN default filename
- * (`defaultRefreshSecretsStagingPath`, never the `mcp enable` one). ANY occupied
- * fallback path, the default INCLUDED, is refused by name, not truncated (the writer
+ * (`defaultRefreshSecretsStagingPath`, never the `mcp enable` one). An occupied explicit
+ * path is refused before probing; an occupied default path is refused when the fallback
+ * is needed — in both cases by name, not truncated (the writer
  * opens exclusively), so a full IdP bundle an operator staged at that path survives
  * byte-identical
  * (flair#2283). It does

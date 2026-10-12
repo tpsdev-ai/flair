@@ -129,10 +129,11 @@ export interface PushedSecret {
   name: string;
   ok: boolean;
   detail?: string;
-  /** Which stage decided the outcome: `"push"` when `set_secret` itself failed
-   *  (or threw), `"confirm"` when it returned 200 but the read-back could not
-   *  confirm the stored row carries `processEnv=true` — the row was stored, but
-   *  its storage is unconfirmed, not "not pushed" (flair#2283). Absent when `ok`. */
+  /** Which stage decided the outcome: `"push"` when `set_secret` itself did not
+   *  answer 200 (it failed or threw) — a failed push; `"confirm"` when it answered
+   *  200 but the read-back could not confirm the stored row carries
+   *  `processEnv=true` — either it read a row WITHOUT the marker, or it threw — so
+   *  storage is unconfirmed, not "not pushed" (flair#2283). Absent when `ok`. */
   kind?: "push" | "confirm";
 }
 
@@ -151,41 +152,59 @@ export async function pushSecrets(
   const fetchImpl = deps.fetchImpl ?? fetch;
   const results: PushedSecret[] = [];
   for (const [name, value] of Object.entries(vars)) {
+    // The push's OWN request/response cycle, kept separate from the read-back
+    // below. A throw here — no response was received — is a FAILED PUSH; it is not
+    // the confirm stage, and it does not stand in for a read-back failure
+    // (flair#2283).
+    let r;
     try {
-      const r = await opsCall(
+      r = await opsCall(
         opsUrl,
         authHeader,
          { operation: "set_secret", name, envelope: sealSecret(value, publicKeyPem), processEnv: true },
         fetchImpl,
        );
-      const err = String(r.json?.error ?? "").slice(0, 140);
-      if (!r.ok) {
-        results.push({ name, ok: false, kind: "push", detail: `HTTP ${r.status}${err ? `: ${err}` : ""}` });
-        continue;
-       }
+    } catch (err: any) {
+      results.push({ name, ok: false, kind: "push", detail: String(err?.message ?? err).slice(0, 140) });
+      continue;
+     }
+    const err = String(r.json?.error ?? "").slice(0, 140);
+    if (!r.ok) {
+      results.push({ name, ok: false, kind: "push", detail: `HTTP ${r.status}${err ? `: ${err}` : ""}` });
+      continue;
+     }
 
-      // Read back one pushed row to verify processEnv actually materialised.
-      // A 200 from set_secret is not proof — core silently ignores unknown
-      // params, so the row can be accepted and still land inert.
-      const verify = await opsCall(
+    // set_secret answered 200. Everything past this point is about CONFIRMING the
+    // stored row, so any failure here is `kind: "confirm"` — storage that could
+    // not be confirmed — and NOT a failed push: the row may well be
+    // stored. Read back one pushed row to verify processEnv actually materialised;
+    // a 200 from set_secret is not proof — core silently ignores unknown params, so
+    // the row can be accepted and still land inert.
+    let verify;
+    try {
+      verify = await opsCall(
         opsUrl,
         authHeader,
           { operation: "search_by_value", database: "system", table: "hdb_secret", search_attribute: "name", search_value: name, get_attributes: ["name", "processEnv"] },
         fetchImpl,
         );
-      if (!verify.ok) {
-        results.push({ name, ok: false, kind: "confirm", detail: `push returned 200 but verify failed HTTP ${verify.status}` });
-        continue;
-        }
-      const row = Array.isArray(verify.json) ? verify.json[0] : verify.json?.[0];
-      if (!row || (row as Record<string, unknown>).processEnv !== true) {
-        results.push({ name, ok: false, kind: "confirm", detail: `push returned 200 but read-back shows processEnv is ${row?.processEnv ?? "missing"}, not true — secret is inert` });
-        continue;
-        }
-      results.push({ name, ok: true });
-     } catch (err: any) {
-      results.push({ name, ok: false, kind: "push", detail: String(err?.message ?? err).slice(0, 140) });
+    } catch (verifyErr: any) {
+      // The read-back THREW after set_secret already answered 200. Say nothing
+      // about whether the row is stored: only that its storage with processEnv=true
+      // could not be confirmed (flair#2283).
+      results.push({ name, ok: false, kind: "confirm", detail: `push returned 200 but the read-back threw (${String(verifyErr?.message ?? verifyErr).slice(0, 120)}) — whether the row carries processEnv=true could not be confirmed` });
+      continue;
      }
+    if (!verify.ok) {
+      results.push({ name, ok: false, kind: "confirm", detail: `push returned 200 but verify failed HTTP ${verify.status}` });
+      continue;
+      }
+    const row = Array.isArray(verify.json) ? verify.json[0] : verify.json?.[0];
+    if (!row || (row as Record<string, unknown>).processEnv !== true) {
+      results.push({ name, ok: false, kind: "confirm", detail: `push returned 200 but read-back shows processEnv is ${row?.processEnv ?? "missing"}, not true — secret is inert` });
+      continue;
+      }
+    results.push({ name, ok: true });
     }
   return { allOk: results.every((x) => x.ok), results };
 }

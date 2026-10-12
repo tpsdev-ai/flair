@@ -9,9 +9,10 @@
  * verifies a restart by PID change, and checks the target's own discovery document
  * and the PUBLIC document read at the verified issuer name that issuer with the MCP
  * token endpoint — the shared discriminator, bound to an issuer the caller knows —
- * and when the target cannot take the secret it leaves a 0600 file to apply by hand
- * and returns `{ ok: false }` (the `flair mcp enable` CLI turns that into a non-zero
- * exit). It does not run the IdP-credential intake nor apply CIMD changes.
+ * and an update that could not be pushed or confirmed leaves a file when it can
+ * create one; an occupied path is refused and no file is written — and returns
+ * `{ ok: false }` (the `flair mcp enable` CLI turns that into a non-zero exit). It
+ * does not run the IdP-credential intake nor apply CIMD changes.
  *
  * These drive `refreshMcpOAuthFlag` with an injected fetch. Ops calls always go to
  * a stub (a real RSA public key, so the value is sealed through the real
@@ -41,16 +42,23 @@
  * flair#2283 round 9 pins `result.secretsPath`: it is returned ONLY when a fallback
  * file was actually written. A successful push and every later refusal (target
  * binding, self-verify, an ineffective restart, an unexpected error) leave no file
- * and therefore no `secretsPath`; only the two fallback branches — a failed
- * capability probe and a failed push — carry the path they really staged.
+ * and therefore no `secretsPath`; only the fallback branches — a failed capability
+ * probe, a failed push, or a push whose read-back could not confirm it — carry the
+ * path they really staged.
  *
- * flair#2283 round 10 makes the fallback writer EXCLUSIVE (`wx`): an occupied path —
- * refresh's OWN default INCLUDED, not just an explicit `--secrets-path` — is refused
- * by name and left byte-identical, so a full IdP bundle an operator staged at the
- * default path via `mcp enable --secrets-path` survives a refresh that needs the
- * fallback. A push that stored the row but whose read-back could not confirm
- * `processEnv=true` is reported as storage that "could not be confirmed", not "was
- * not pushed".
+ * flair#2283 round 10 makes the fallback writer EXCLUSIVE (`wx`): an occupied explicit
+ * path is refused before probing; an occupied default path is refused when the
+ * fallback is needed — in both cases by name and left byte-identical, so a full IdP
+ * bundle an operator staged at the default path via `mcp enable --secrets-path`
+ * survives a refresh that needs the fallback. A push whose read-back could not confirm
+ * `processEnv=true` — whether it read a row without the marker or the read-back threw —
+ * is reported as storage that "could not be confirmed", not "was not pushed".
+ *
+ * flair#2283 round 11 splits the push from the read-back in `pushSecrets`: a throw
+ * BEFORE `set_secret` answered 200 is a failed push, while a throw AFTER it — the
+ * read-back threw — is the confirm stage, so refresh reports storage that "could not
+ * be confirmed" and makes no claim whether the row landed. The case below drives that
+ * thrown read-back.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -295,6 +303,33 @@ describe("refreshMcpOAuthFlag (flair#2283 item 2)", () => {
     expect(detail).toContain("could not be confirmed");
     expect(detail).not.toContain("was not pushed");
     // The fallback is still left on disk and named.
+    expect(readFileSync(stagedPath, "utf8")).toBe("FLAIR_MCP_OAUTH=true\n");
+    expect(result.secretsPath).toBe(stagedPath);
+  });
+
+  // flair#2283 round 11: the try around `set_secret` ALSO covered the read-back, so a
+  // `search_by_value` that THREW after a successful `set_secret` was caught by the push
+  // handler and reported kind "push" -> "was not pushed". The push may well have stored
+  // the row; only its CONFIRMATION is missing. Refresh must report storage that "could
+  // not be confirmed" and, deliberately, make NO claim either way about whether the row
+  // landed — hence this case asserts the OUTCOME wording and nothing about the row.
+  test("a read-back that throws after a successful push is reported as unconfirmed, not as not pushed", async () => {
+    shape = "plugin-live";
+    const { impl, sent } = opsFetch({ throwOn: "search_by_value" });
+    const stagedPath = base().secretsStagingPath;
+    rmSync(stagedPath, { force: true });
+    const result = await refreshMcpOAuthFlag(base(), { fetchImpl: impl, ...FAST });
+    expect(result.ok).toBe(false);
+    expect(result.failedStep).toBe("secrets-provisioning");
+    // The push itself was issued; the read-back is what threw.
+    expect(sent.some((b) => b.operation === "set_secret")).toBe(true);
+    expect(sent.some((b) => b.operation === "search_by_value")).toBe(true);
+    const detail = result.steps.find((s) => s.step === "secrets-provisioning")?.detail ?? "";
+    expect(detail).toContain("could not be confirmed");
+    expect(detail).not.toContain("was not pushed");
+    // This case deliberately asserts NOTHING about whether the row was stored: a thrown
+    // read-back leaves that unknown, and neither the code nor this file claims it.
+    // The fallback is still staged and named.
     expect(readFileSync(stagedPath, "utf8")).toBe("FLAIR_MCP_OAUTH=true\n");
     expect(result.secretsPath).toBe(stagedPath);
   });
