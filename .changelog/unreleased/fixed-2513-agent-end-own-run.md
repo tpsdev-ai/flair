@@ -1,7 +1,11 @@
-- **`agent_end` stamps a message with the id of the run that produced it and stops re-storing what earlier runs already captured (#2513).**
+- **`agent_end` keys its captures by message identity and keeps a failed write's original run (#2513).**
 
-  `agent_end` receives the whole session's message snapshot. The previous release
-  scanned the whole snapshot on each run, so later runs stored duplicates of
-  earlier messages under new memory ids, attributed to the wrong run. The capture
-  path now tracks, per session, how many snapshot messages an earlier run already
-  accounted for, and stamps the run id on the messages past that mark.
+  `agent_end` receives the whole session's message snapshot, and the previous release
+  rescanned it on every run, storing duplicates of messages an earlier run had
+  captured under the new run's id. The capture path now gives each snapshot message a
+  stable identity (its role, content and its own timestamp) and skips a message whose
+  identity it has already recorded, so a later run does not store a message an earlier
+  run already handled nor attribute it to itself. A write that fails is recorded as
+  pending with its run's id and retried under that id by a later callback. Each
+  session's identity state is bounded; `captureBounds` states the caps and what
+  eviction means.

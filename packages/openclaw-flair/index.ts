@@ -205,6 +205,49 @@ interface CaptureState {
 }
 
 /**
+ * flair#2513: the stable identity of one host message in a session snapshot.
+ * The pinned host's `agent_end` messages carry no id — `PluginHookAgentEndEvent`
+ * types `messages` as `unknown[]` and the transcript message types expose no id
+ * field — so identity is a digest over what the host does provide and that does
+ * not depend on a message's position in the snapshot: its role, its capture text
+ * and its own timestamp. A message the host rewrites (different content or
+ * timestamp) is a different identity; an unchanged message keeps its identity
+ * across snapshots and across runs.
+ */
+export function messageIdentity(msg: { role?: unknown; content?: unknown; timestamp?: unknown } | null | undefined): string | null {
+  if (!msg || typeof msg !== "object") return null;
+  const role = typeof msg.role === "string" ? msg.role : "";
+  const ts = msg.timestamp;
+  const stamp = typeof ts === "number" || typeof ts === "string" ? String(ts) : "";
+  let content: string;
+  try {
+    content = JSON.stringify(msg.content ?? null) ?? "";
+  } catch {
+    return null;
+  }
+  return hashContent(`${role}\u0000${stamp}\u0000${content}`);
+}
+
+/** flair#2513: what the plugin already did with a message identified in a session. */
+type SessionIdentityState = "captured" | "pending" | "skipped";
+interface SessionIdentityEntry {
+  state: SessionIdentityState;
+  /** For `pending`: the run whose write failed and owns the retry. */
+  runId?: string;
+}
+/**
+ * flair#2513: one session's capture-identity state. `entries` maps a message
+ * identity to what was done with it; `tail` is the settle of the last `agent_end`
+ * scan, so the next one for the session chains after it; `scans` counts scans
+ * queued or running, so `evictSessions` can keep a busy session's state.
+ */
+interface SessionCapture {
+  entries: Map<string, SessionIdentityEntry>;
+  tail: Promise<void>;
+  scans: number;
+}
+
+/**
  * Injectable clock for the run-state retirement rule (D10). Production reads
  * `Date.now`; a test substitutes a fake so the 30 s window is exercised without
  * sleeping.
@@ -247,11 +290,19 @@ export const captureBounds = {
   /** Max distinct one-time log keys remembered; the oldest are evicted. */
   logOnceCap: 10_000,
   /**
-   * flair#2513: max per-session snapshot marks remembered; the least-recently-
-   * updated are evicted. An evicted session's next `agent_end` rescans its
-   * snapshot.
+   * flair#2513: max sessions whose capture-identity state is remembered. The
+   * least-recently-updated session with no scan in flight is evicted; the map
+   * may exceed the cap until one settles. Eviction forgets the session: its next
+   * `agent_end` rescans the whole snapshot and may capture a message it had
+   * captured before.
    */
-  sessionMarkCap: 10_000,
+  sessionStateCap: 10_000,
+  /**
+   * flair#2513: max message identities remembered per session. The oldest are
+   * evicted; a message whose identity is forgotten and later re-appears in the
+   * snapshot is treated as new and may be captured again.
+   */
+  sessionMessageCap: 4_096,
   /** How often the unref'd sweep timer runs. */
   sweepIntervalMs: 30_000,
 };
@@ -267,8 +318,10 @@ export const captureInternals: {
   /** Records waiting out `tombstoneMinAgeMs`: phase `retired` or `aborted`. */
   tombstoneCount: () => number;
   logOnceCount: () => number;
-  /** flair#2513: per-session snapshot marks held (the `sessionMarkCap` budget). */
-  sessionMarkCount: () => number;
+  /** flair#2513: sessions holding capture-identity state (the `sessionStateCap` budget). */
+  sessionStateCount: () => number;
+  /** flair#2513: message identities remembered across all sessions. */
+  sessionIdentityCount: () => number;
   /** The record for a run BY IDENTITY, or undefined (round-5 tests). */
   recordOf: (agentId: string, runId: string) => RunRecord | undefined;
 } = {
@@ -277,7 +330,8 @@ export const captureInternals: {
   stateCount: () => 0,
   tombstoneCount: () => 0,
   logOnceCount: () => 0,
-  sessionMarkCount: () => 0,
+  sessionStateCount: () => 0,
+  sessionIdentityCount: () => 0,
   recordOf: () => undefined,
 };
 
@@ -728,19 +782,19 @@ export default {
     const runs = new Map<string, RunRecord>();
     const loggedOnce = new Set<string>();
     /**
-     * flair#2513 — the per-session snapshot watermark, keyed by agent + the
+     * flair#2513 — the per-session CAPTURE-IDENTITY state, keyed by agent + the
      * capture session id. `agent_end` delivers the WHOLE session's message
      * snapshot (`PluginHookAgentEndEvent.messages`), and the pinned host exposes
-     * no per-run boundary, so without this mark each run re-stores the earlier
-     * runs' capturable messages under a new memory id, attributed to the run
-     * that just ended. The mark is the number of leading snapshot messages
-     * already accounted for; the run scans from there, so an earlier message is
-     * not written again. A callback with no session id does not correlate with
-     * an earlier one, so its snapshot is scanned in full. Bounded by
-     * `sessionMarkCap`; the least-recently-updated marks are evicted, and an
-     * evicted session's next `agent_end` rescans its snapshot.
+     * no per-run boundary and no message id, so each snapshot message is given a
+     * stable identity here (see `messageIdentity`); a run skips the identities it
+     * has already recorded as captured or skipped, and retries one recorded as
+     * pending under the run that recorded it. A count watermark cannot survive a
+     * concurrent callback, compaction, or a failed write; an identity can. A
+     * callback with no session id does not correlate with an earlier one, so its
+     * snapshot is scanned in full. Bounded by `sessionStateCap` sessions /
+     * `sessionMessageCap` identities; see each bound for what eviction means.
      */
-    const sessionMarks = new Map<string, number>();
+    const sessions = new Map<string, SessionCapture>();
     /**
      * Round 13: set by `gateway_stop` BEFORE it aborts anything or clears the
      * map, and never cleared here — a later registration builds a new map and
@@ -765,7 +819,8 @@ export default {
     captureInternals.stateCount = () => countWhere((r) => r.phase === "live" || r.phase === "ended");
     captureInternals.tombstoneCount = () => countWhere((r) => r.phase === "retired" || r.phase === "aborted");
     captureInternals.logOnceCount = () => loggedOnce.size;
-    captureInternals.sessionMarkCount = () => sessionMarks.size;
+    captureInternals.sessionStateCount = () => sessions.size;
+    captureInternals.sessionIdentityCount = () => identityCount();
     captureInternals.recordOf = (agentId, runId) => runs.get(runKeyOf(agentId, runId));
 
     /** Evict the oldest entries of an insertion-ordered Set down to `cap`. */
@@ -845,33 +900,85 @@ export default {
     }
 
     /**
-     * flair#2513: the watermark key for a capture callback — agent + the
+     * flair#2513: the identity-state key for a capture callback — agent + the
      * capture session id (`sessionIdForCapture`), or null when the callback
-     * carries no session id. The key excludes `sessionKey` (a slot reused
-     * across sessions).
+     * carries no session id. The key excludes `sessionKey` (a slot reused across
+     * sessions).
      */
-    function sessionMarkKey(agentId: string, sessionId: string | null): string | null {
+    function sessionCaptureKey(agentId: string, sessionId: string | null): string | null {
       return sessionId ? `${agentId}\u0000${sessionId}` : null;
     }
 
-    /** The highest snapshot index already accounted for in this session. */
-    function sessionMarkOf(key: string): number {
-      return sessionMarks.get(key) ?? 0;
+    /**
+     * The session's identity state, created on first use and re-inserted so
+     * `evictSessions` drops the least-recently-seen session first.
+     */
+    function sessionFor(key: string): SessionCapture {
+      let session = sessions.get(key);
+      if (session) {
+        sessions.delete(key);
+      } else {
+        session = { entries: new Map(), tail: Promise.resolve(), scans: 0 };
+      }
+      sessions.set(key, session);
+      return session;
     }
 
     /**
-     * advance the session's watermark to `value`, keeping the map bounded by
-     * `sessionMarkCap`: the key is re-inserted so eviction is least-recently-
-     * updated first.
+     * Record a message's identity, keeping `entries` within `sessionMessageCap`
+     * by evicting the oldest identity. Eviction forgets a message: if it appears
+     * again in a later snapshot it is treated as new and may be captured again.
      */
-    function setSessionMark(key: string, value: number): void {
-      sessionMarks.delete(key);
-      sessionMarks.set(key, value);
-      while (sessionMarks.size > captureBounds.sessionMarkCap) {
-        const oldest = sessionMarks.keys().next().value as string | undefined;
+    function setSessionIdentity(session: SessionCapture, identity: string, entry: SessionIdentityEntry): void {
+      session.entries.delete(identity);
+      session.entries.set(identity, entry);
+      while (session.entries.size > captureBounds.sessionMessageCap) {
+        const oldest = session.entries.keys().next().value as string | undefined;
         if (oldest === undefined) break;
-        sessionMarks.delete(oldest);
+        session.entries.delete(oldest);
       }
+    }
+
+    /**
+     * Bound the session map: evict the least-recently-seen session that has no
+     * scan in flight. A session with a scan running or queued is kept (evicting it
+     * would let its next callback run concurrently with that scan), so the map can
+     * briefly exceed `sessionStateCap` by the number of busy sessions.
+     */
+    function evictSessions(): void {
+      while (sessions.size > captureBounds.sessionStateCap) {
+        let victim: string | undefined;
+        for (const [k, s] of sessions) if (s.scans === 0) { victim = k; break; }
+        if (victim === undefined) break;
+        sessions.delete(victim);
+      }
+    }
+
+    /**
+     * Run `scan` as the ONLY scan in flight for the session, chained after any
+     * scan already queued. A later `agent_end` for the same session therefore
+     * observes the identity state the earlier scan wrote instead of racing it —
+     * the race that let run 2 re-store run 1's message under run 2's id.
+     */
+    function withSessionScan<T>(key: string, scan: () => Promise<T>): Promise<T> {
+      const session = sessionFor(key);
+      session.scans += 1;
+      const run = session.tail.then(scan);
+      // Chain the next scan on the SETTLED result, so one scan's failure never
+      // breaks the queue, and release the busy count on the way.
+      session.tail = run.then(
+        () => { session.scans -= 1; },
+        () => { session.scans -= 1; },
+      );
+      evictSessions();
+      return run;
+    }
+
+    /** Every identity remembered across sessions (for the bound assertion). */
+    function identityCount(): number {
+      let total = 0;
+      for (const session of sessions.values()) total += session.entries.size;
+      return total;
     }
 
     /**
@@ -1351,34 +1458,66 @@ export default {
           // no in-flight writes) via the sweep on a later callback.
           state.phase = "ended";
           state.endedAt = captureClock.now();
-          try {
-            const client = clientFor(agentId);
-            const sessionId = sessionIdForCapture(event, ctx);
-            const markKey = sessionMarkKey(agentId, sessionId);
-            // flair#2513: `event.messages` is the WHOLE session snapshot, not
-            // this run's slice. For a session-keyed callback the messages past
-            // the session's watermark are the ones the run that just ended
-            // produced; everything before them an earlier run already captured,
-            // and re-writing it would stamp an older message with the new run's
-            // id. Scan from the mark.
-            const messages = (Array.isArray(event?.messages) ? event.messages : []) as Array<{ role?: unknown; content?: unknown }>;
-            const from = markKey ? Math.min(sessionMarkOf(markKey), messages.length) : 0;
-            let stored = 0;
-            for (let i = from; i < messages.length; i++) {
-              const msg = messages[i];
-              if (msg?.role === "user" || msg?.role === "assistant") {
-                const text = captureText(msg.content);
-                if (text && (await tryAutoCapture(client, agentId, runId, sessionId, text))) stored++;
+          const sessionId = sessionIdForCapture(event, ctx);
+          const key = sessionCaptureKey(agentId, sessionId);
+          const messages = (Array.isArray(event?.messages) ? event.messages : []) as Array<{ role?: unknown; content?: unknown; timestamp?: unknown }>;
+          const scan = async (): Promise<void> => {
+            try {
+              const client = clientFor(agentId);
+              const session = key ? sessionFor(key) : null;
+              let stored = 0;
+              for (const msg of messages) {
+                // flair#2513: `event.messages` is the WHOLE session snapshot, not
+                // this run's slice, and the host exposes no per-run boundary. A
+                // message already handled — captured, or skipped as ineligible or
+                // over the capture cap — is left alone. Only a message whose
+                // identity is new, or whose earlier write failed, is processed.
+                const identity = key ? messageIdentity(msg) : null;
+                const known = identity && session ? session.entries.get(identity) : undefined;
+                if (known && known.state !== "pending") continue;
+                const text = msg?.role === "user" || msg?.role === "assistant" ? captureText(msg?.content) : "";
+                if (!text) {
+                  // Ineligible (a role that never captures, or no text): accounted
+                  // for without a capture.
+                  if (identity && session && !known) setSessionIdentity(session, identity, { state: "skipped" });
+                  continue;
+                }
+                // A pending message belongs to the run whose write failed: retry it
+                // under THAT run's id. Only a never-seen message belongs to the run
+                // that just ended.
+                const owner = known?.state === "pending" ? known.runId ?? runId : runId;
+                let captured = false;
+                try {
+                  captured = await tryAutoCapture(client, agentId, owner, sessionId, text);
+                } catch (err: any) {
+                  // The capture failed. Keep the message's ORIGINAL run ownership
+                  // so a later callback retries it under the same id rather than
+                  // restamping it with its own.
+                  if (identity && session) setSessionIdentity(session, identity, { state: "pending", runId: owner ?? undefined });
+                  logOnce(
+                    `capture-failed:${agentId}:${owner ?? "none"}:${identity ?? "unknown"}`,
+                    `openclaw-flair: capture failed for run ${owner ?? "(none)"} (agent ${agentId}); the message is kept pending and retried under the same run id by a later callback`,
+                  );
+                  continue;
+                }
+                if (captured) stored++;
+                if (identity && session) {
+                  if (captured) setSessionIdentity(session, identity, { state: "captured" });
+                  // A seen-but-pending message that did not capture now stays
+                  // pending for a later retry; a never-seen message that did not
+                  // capture is accounted for as skipped.
+                  else if (!known) setSessionIdentity(session, identity, { state: "skipped" });
+                }
               }
-              // The message is accounted for. The mark advances past a message
-              // after its write attempt settles, so a failed write leaves the mark
-              // there and a later run retries it rather than skipping it.
-              if (markKey) setSessionMark(markKey, i + 1);
+              if (stored > 0) api.logger.info(`openclaw-flair: auto-captured ${stored} memories`);
+            } catch (err: any) {
+              refuseKey(agentId, "auto-capture", err);
             }
-            if (stored > 0) api.logger.info(`openclaw-flair: auto-captured ${stored} memories`);
-          } catch (err: any) {
-            refuseKey(agentId, "auto-capture", err);
-          }
+          };
+          // One scan in flight per session: a concurrent callback for the same
+          // session waits for this one and re-reads the identities it recorded.
+          if (key) await withSessionScan(key, scan);
+          else await scan();
         });
 
         api.on("llm_input", async (event: any, ctx: any) => {
@@ -1437,9 +1576,9 @@ export default {
           // cancel every live controller; clearing the records stops them being
           // reachable through `captureInternals` until the next registration.
           runs.clear();
-          // flair#2513: the session watermarks go with the run map — nothing is
-          // admitted after the stop, so no later callback can use them.
-          sessionMarks.clear();
+          // flair#2513: the session identity state goes with the run map — no
+          // run is admitted after the stop, so no later callback can use it.
+          sessions.clear();
         });
 
         // Item 5(c): model_call_ended with failureKind "aborted". Used only
