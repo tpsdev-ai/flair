@@ -1,4 +1,4 @@
-import { harperPortValue } from "./harper-port-value.js";
+import { proveLocalInstancePair } from "./local-instance-pair.js";
 
 export async function resolveLocalDeleteInstance(
   opts: { opsPort?: string | number; port?: string | number },
@@ -8,23 +8,10 @@ export async function resolveLocalDeleteInstance(
   const source = opts.opsPort !== undefined ? "--ops-port" : process.env.FLAIR_OPS_PORT ? "FLAIR_OPS_PORT" : "ops endpoint";
   const opsPort = resolveOpsPort(opts);
   const opsUrl = `http://127.0.0.1:${opsPort}/`;
-  const refuse = () => new Error(`${source} ${opsPort}: no matching local HTTP endpoint; refusing deletion`);
-  const response = await fetch(opsUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: authorization },
-    body: JSON.stringify({ operation: "get_configuration" }),
-    signal: AbortSignal.timeout(10_000),
-    redirect: "error",
-  }).catch(() => { throw refuse(); });
-  if (!response.ok) throw refuse();
-  const config = await response.json().catch(() => { throw refuse(); });
-  const httpPort = harperPortValue(config?.http?.port);
-  const configuredOpsPort = harperPortValue(config?.operationsApi?.network?.port);
-  const binding = String(config?.http?.port ?? "");
-  const separator = binding.lastIndexOf(":");
-  const host = separator < 0 ? "127.0.0.1" : binding.slice(0, separator);
-  if (httpPort === null || configuredOpsPort !== opsPort ||
-    !["127.0.0.1", "localhost", "0.0.0.0", "[::]", ""].includes(host)) throw refuse();
+  // The same-instance check is shared with `flair doctor` (local-instance-pair.ts).
+  const pair = await proveLocalInstancePair(opsPort, authorization);
+  if (pair.kind !== "proven") throw new Error(`${source} ${opsPort}: no matching local HTTP endpoint; refusing deletion`);
+  const httpPort = pair.httpPort;
   if (opts.port !== undefined && Number(opts.port) !== httpPort) {
     throw new Error(`--port ${opts.port} does not match ${source} ${opsPort}'s HTTP endpoint ${httpPort}; refusing deletion`);
   }

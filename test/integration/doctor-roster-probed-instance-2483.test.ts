@@ -7,14 +7,20 @@
  * Resolving the two independently let doctor probe instance A while it read the
  * roster from instance B, so it reported B's rows as A's. src/cli.ts's
  * `verifyDoctorRosterInstance` picks the ops endpoint with the pairing rule
- * `flair agent stamp-home` uses (flair#2474/#2491), then VERIFIES the pick: the
- * probed HTTP port and the candidate ops endpoint must report the same
- * `flair.Instance` identity. When they cannot be shown to be the same instance,
- * both checks report NOT RUN (counted as an issue) and nothing is read.
+ * `flair agent stamp-home` uses (flair#2474/#2491), then, before either read,
+ * asks that ops endpoint for its configuration (src/lib/local-instance-pair.ts,
+ * the check the local delete paths use): it must record that ops port and the
+ * HTTP port doctor actually probed, bound on loopback or on all interfaces.
+ * After that check passes, two different Instance ids on the two endpoints
+ * also refuse. A refusal, or a configuration check that cannot complete,
+ * reports both checks NOT RUN (counted as an issue) and reads no Agent row.
  *
- * Two real instances give the case a real config and real Instance rows: A's
- * config pairs A's two ports; `--port A` with `FLAIR_OPS_PORT=B` names B's ops
- * endpoint, and doctor must refuse rather than read B.
+ * The first block runs with NO Instance row on either instance, as on a fresh
+ * install: the default paired case must run, and every refusal there comes
+ * from the configuration check alone. The second block seeds one Instance row
+ * on each instance: the paired case still runs, and an ops endpoint whose
+ * configuration names the probed port but which reports a different Instance
+ * id is refused by the identity comparison.
  *
  * Build prerequisite: dist/cli.js and dist/resources/*.js
  * (`bun run build && bun run build:cli`).
@@ -102,15 +108,21 @@ function runDoctor(opts: { args: string[]; opsPort?: string }): Promise<{ code: 
   });
 }
 
-/** Seed rows straight through an instance's operations API. */
-async function seed(h: HarperInstance, table: string, records: Record<string, unknown>[]): Promise<void> {
+/** Run one operation against an instance's operations API. */
+async function ops(h: HarperInstance, body: Record<string, unknown>): Promise<unknown> {
   const res = await fetch(h.opsURL, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: "Basic " + btoa(`${h.admin.username}:${h.admin.password}`) },
-    body: JSON.stringify({ operation: "insert", database: "flair", table, records }),
+    body: JSON.stringify(body),
     signal: AbortSignal.timeout(15_000),
   });
-  if (!res.ok) throw new Error(`seed insert into ${table} returned ${res.status}: ${await res.text()}`);
+  if (!res.ok) throw new Error(`${String(body.operation)} returned ${res.status}: ${await res.text()}`);
+  return res.json();
+}
+
+/** Seed rows straight through an instance's operations API. */
+async function seed(h: HarperInstance, table: string, records: Record<string, unknown>[]): Promise<void> {
+  await ops(h, { operation: "insert", database: "flair", table, records });
 }
 
 const INST_A = "inst-a-2483";
@@ -139,9 +151,8 @@ beforeAll(async () => {
   home = mkdtempSync(join(tmpdir(), "flair-2483-doctor-home-"));
   // A REAL per-user config pairing A's two ports — the file `flair` itself writes.
   writeHomeConfig(`port: ${httpPort(a)}\nopsPort: ${opsPort(a)}\n`);
-  // One Instance row each, so every endpoint reports a single identity.
-  await seed(a, "Instance", [{ id: INST_A, publicKey: "seed-pub-a-2483", role: "hub", status: "active", createdAt: new Date().toISOString() }]);
-  await seed(b, "Instance", [{ id: INST_B, publicKey: "seed-pub-b-2483", role: "hub", status: "active", createdAt: new Date().toISOString() }]);
+  // NO Instance row yet: the first block runs as a fresh install does. The
+  // second block seeds one each (seedInstanceRows).
   // Rows that only ever appear if doctor reads that instance: an id outside the
   // shared agent-ID rule (the roster check) and a home-less row (the homes check).
   await seed(a, "Agent", [
@@ -160,15 +171,43 @@ afterAll(async () => {
   if (home) rmSync(home, { recursive: true, force: true });
 });
 
-describe("flair#2483 — doctor refuses the roster and home reads when the ops endpoint is not the probed instance", () => {
-  test("two named ports with no complete pair in config: both checks are NOT RUN", async () => {
+/** True when a section ran (it printed neither NOT RUN line). */
+function bothChecksRan(stdout: string): boolean {
+  return !stdout.includes("Agent IDs: NOT RUN") && !stdout.includes("Agent homes: NOT RUN");
+}
+
+let instanceRowsSeeded = false;
+/** One Instance row on each instance, for the second block. */
+async function seedInstanceRows(): Promise<void> {
+  if (instanceRowsSeeded) return;
+  await seed(a, "Instance", [{ id: INST_A, publicKey: "seed-pub-a-2483", role: "hub", status: "active", createdAt: new Date().toISOString() }]);
+  await seed(b, "Instance", [{ id: INST_B, publicKey: "seed-pub-b-2483", role: "hub", status: "active", createdAt: new Date().toISOString() }]);
+  instanceRowsSeeded = true;
+}
+
+describe("flair#2483 — no Instance row on either instance (a fresh install): the configuration check decides", () => {
+  test("the default paired config with no Instance row: both checks run and read the probed instance's rows", async () => {
+    // The shape of the clean-VM gate's doctor step: `flair doctor --port P`, the
+    // per-user config `flair init` writes, no FLAIR_OPS_PORT, no Instance row.
+    writeHomeConfig(`port: ${httpPort(a)}\nopsPort: ${opsPort(a)}\n`);
+    const r = await runDoctor({ args: ["--port", httpPort(a)] });
+    expect(bothChecksRan(r.stdout), r.stdout).toBe(true);
+    expect(r.stdout, "A's out-of-rule row was not reported").toContain(BAD_ID_ON_A);
+    expect(r.stdout, "A's home-less row was not reported").toContain(HOMELESS_ON_A);
+    expect(r.stdout, "B's roster row was reported while reading A").not.toContain(BAD_ID_ON_B);
+    expect(r.stdout, "B's home-less row was reported while reading A").not.toContain(HOMELESS_ON_B);
+  }, 90_000);
+
+  test("--port A with FLAIR_OPS_PORT=B and no complete pair in config: both checks are NOT RUN", async () => {
     // Only the ops port is configured, so the pairing rule has no complete pair
-    // to complete — it accepts the two ports the caller named. The verified
-    // identity check is what stops the read.
+    // to complete — it accepts the two ports the caller named. B's own
+    // configuration names B's HTTP port, not the probed one, so the
+    // configuration check refuses.
     writeHomeConfig(`opsPort: ${opsPort(b)}\n`);
     const r = await runDoctor({ args: ["--port", httpPort(a)], opsPort: opsPort(b) });
     expect(r.stdout, r.stdout).toContain("Agent IDs: NOT RUN");
     expect(r.stdout, r.stdout).toContain("Agent homes: NOT RUN");
+    expect(r.stdout, r.stdout).toContain(`is configured with HTTP port ${httpPort(b)}, not the probed HTTP port ${httpPort(a)}`);
     expect(r.stdout, "another instance's roster row was reported").not.toContain(BAD_ID_ON_B);
     expect(r.stdout, "another instance's home-less row was reported").not.toContain(HOMELESS_ON_B);
   }, 90_000);
@@ -182,13 +221,43 @@ describe("flair#2483 — doctor refuses the roster and home reads when the ops e
     expect(r.stdout, r.stdout).toContain("Agent homes: NOT RUN");
     expect(r.stdout).not.toContain(BAD_ID_ON_B);
     expect(r.stdout).not.toContain(HOMELESS_ON_B);
-}, 90_000);
+  }, 90_000);
 
-  test("PID-discovery drift: the decision uses the port actually probed, not the recorded one", async () => {
-    // The config records a dead HTTP port; the PID file names the process
-    // actually serving A. Doctor re-probes and finds A's HTTP port, so the
-    // decision must use THAT port — which no longer matches the recorded pair,
-    // so both checks are refused.
+  test("PID-discovery drift: the check uses the port actually probed, not the recorded one", async () => {
+    // The recorded HTTP port is dead; the PID file names the process actually
+    // serving A, so doctor probes A's HTTP port. Both ports are named and the
+    // config records no complete pair, so the pairing rule accepts them and the
+    // configuration check decides against A's port.
+    const dead = await freePort();
+    const pid = listeningPidOn(Number(httpPort(a)));
+    expect(pid, "could not find the pid listening on A's HTTP port").not.toBeNull();
+    writeHomePid(pid!);
+
+    // FLAIR_OPS_PORT names B: B's configuration names B's HTTP port, not the
+    // probed one (A's), so both checks are refused.
+    writeHomeConfig(`opsPort: ${opsPort(b)}\n`);
+    const refused = await runDoctor({ args: ["--port", String(dead)], opsPort: opsPort(b) });
+    expect(refused.stdout, refused.stdout).toContain(`responding on port ${httpPort(a)}`);
+    expect(refused.stdout, refused.stdout).toContain("Agent IDs: NOT RUN");
+    expect(refused.stdout, refused.stdout).toContain("Agent homes: NOT RUN");
+    expect(refused.stdout, refused.stdout).toContain(`not the probed HTTP port ${httpPort(a)}`);
+    expect(refused.stdout).not.toContain(BAD_ID_ON_B);
+    expect(refused.stdout).not.toContain(HOMELESS_ON_B);
+
+    // FLAIR_OPS_PORT names A: A's configuration names the probed port, so both
+    // checks run on A's rows (checked against the dead port, this would refuse).
+    writeHomeConfig(`opsPort: ${opsPort(a)}\n`);
+    const ran = await runDoctor({ args: ["--port", String(dead)], opsPort: opsPort(a) });
+    expect(bothChecksRan(ran.stdout), ran.stdout).toBe(true);
+    expect(ran.stdout, "A's out-of-rule row was not reported").toContain(BAD_ID_ON_A);
+    expect(ran.stdout, "A's home-less row was not reported").toContain(HOMELESS_ON_A);
+    expect(ran.stdout).not.toContain(BAD_ID_ON_B);
+  }, 120_000);
+
+  test("PID-discovery drift against a recorded pair: refused until --fix re-records it", async () => {
+    // The config pairs a dead HTTP port with A's ops port. Doctor re-probes and
+    // finds A's HTTP port, which conflicts with the recorded pair, so the
+    // pairing rule refuses both checks.
     const dead = await freePort();
     writeHomeConfig(`port: ${dead}\nopsPort: ${opsPort(a)}\n`);
     const pid = listeningPidOn(Number(httpPort(a)));
@@ -204,21 +273,44 @@ describe("flair#2483 — doctor refuses the roster and home reads when the ops e
     // now names the probed port and both checks run on A's rows.
     const fixedRun = await runDoctor({ args: ["--port", String(dead), "--fix"] });
     expect(fixedRun.stdout, fixedRun.stdout).toContain("Updated config to port");
-    expect(fixedRun.stdout, fixedRun.stdout).not.toContain("Agent IDs: NOT RUN");
+    expect(bothChecksRan(fixedRun.stdout), fixedRun.stdout).toBe(true);
     expect(fixedRun.stdout, "A's out-of-rule row was not reported").toContain(BAD_ID_ON_A);
     expect(fixedRun.stdout, "A's home-less row was not reported").toContain(HOMELESS_ON_A);
     expect(fixedRun.stdout).not.toContain(BAD_ID_ON_B);
     expect(fixedRun.stdout).not.toContain(HOMELESS_ON_B);
+    rmSync(join(home, ".flair", "data", "hdb.pid"), { force: true });
   }, 120_000);
+});
 
+describe("flair#2483 — one Instance row on each instance", () => {
   test("a probed HTTP port with its paired ops port: both checks run on the probed instance's rows", async () => {
+    await seedInstanceRows();
     writeHomeConfig(`port: ${httpPort(a)}\nopsPort: ${opsPort(a)}\n`);
     const r = await runDoctor({ args: ["--port", httpPort(a)], opsPort: opsPort(a) });
-    expect(r.stdout, r.stdout).toContain("Agent IDs");
+    expect(bothChecksRan(r.stdout), r.stdout).toBe(true);
     expect(r.stdout, "A's out-of-rule row was not reported").toContain(BAD_ID_ON_A);
-    expect(r.stdout, r.stdout).toContain("Agent homes");
     expect(r.stdout, "A's home-less row was not reported").toContain(HOMELESS_ON_A);
     expect(r.stdout, "B's roster row was reported while reading A").not.toContain(BAD_ID_ON_B);
     expect(r.stdout, "B's home-less row was reported while reading A").not.toContain(HOMELESS_ON_B);
+  }, 90_000);
+
+  test("an ops endpoint whose configuration names the probed port while another instance serves it: both checks are NOT RUN", async () => {
+    await seedInstanceRows();
+    // B's config FILE now records A's HTTP port (no restart, so B keeps serving
+    // its own). The configuration check reads the file and passes; the two
+    // endpoints report different Instance ids, so the identity comparison
+    // refuses.
+    await ops(b, { operation: "set_configuration", http_port: Number(httpPort(a)) });
+    try {
+      writeHomeConfig(`opsPort: ${opsPort(b)}\n`);
+      const r = await runDoctor({ args: ["--port", httpPort(a)], opsPort: opsPort(b) });
+      expect(r.stdout, r.stdout).toContain("Agent IDs: NOT RUN");
+      expect(r.stdout, r.stdout).toContain("Agent homes: NOT RUN");
+      expect(r.stdout, r.stdout).toContain("report different instance identities");
+      expect(r.stdout, "another instance's roster row was reported").not.toContain(BAD_ID_ON_B);
+      expect(r.stdout, "another instance's home-less row was reported").not.toContain(HOMELESS_ON_B);
+    } finally {
+      await ops(b, { operation: "set_configuration", http_port: Number(httpPort(b)) });
+    }
   }, 90_000);
 });

@@ -5,35 +5,52 @@
  * `resolveDoctorRosterTarget` PICKS the candidate ops endpoint with the pairing
  * rule `flair agent stamp-home` uses (flair#2474/#2491, `resolveAgentHomeTarget`):
  * the pair the addressed instance's config records binds the ops port to the
- * probed HTTP port. That rule works from config and named ports and cannot prove
- * which live instance an ops port addresses — it DELIBERATELY trusts two ports
- * the caller names — so doctor VERIFIES the candidate before either read:
- * `decideProbedPairIdentity` (below) decides whether the probed HTTP port and the
- * candidate ops endpoint report the same `flair.Instance` identity.
+ * probed HTTP port. That rule works from config and named ports and DELIBERATELY
+ * trusts two ports the caller names, so doctor checks the candidate before
+ * either read:
+ *   - `proveLocalInstancePair` (src/lib/local-instance-pair.ts, shared with the
+ *     local delete paths) asks the candidate ops endpoint for its configuration
+ *     and requires it to record that ops port and an HTTP port bound on
+ *     loopback or on all interfaces;
+ *   - `decideDoctorRosterPair` runs only when that configured HTTP port is the
+ *     probed one — no Instance row is needed, so a fresh install runs;
+ *   - `decideDoctorRosterIdentity`, applied after that, refuses only when both
+ *     endpoints report one Instance id and the two differ.
  *
  * The picking outcomes pinned here:
  *   - the probed HTTP port matches the configured pair → candidate from the
  *     pair's ops port;
  *   - it conflicts with the pair, or exactly one port is named with no complete
- *     pair to take the other from → a refusal (NOT RUN), with doctor's remedy;
- *   - two named ports with no complete pair, or two named ports matching neither
- *     side of the pair, are accepted as given — the identity check refuses those
- *     unless both endpoints report the same instance.
+ *     pair to take the other from → a refusal (NOT RUN), with doctor's remedy.
+ * Two named ports are accepted by the pairing rule as given (pinned in
+ * test/unit/agent-home-target-2474.test.ts); the configuration check is what
+ * decides them.
  *
- * The real two-instance seam, including that a refusal on either decision reports
- * BOTH checks NOT RUN and reads nothing, is
+ * `proveLocalInstancePair` is exercised against a local HTTP server on an
+ * OS-assigned loopback port that answers `get_configuration` with a fixed body.
+ * The real two-instance seam, including that a refusal reports BOTH checks NOT
+ * RUN and reads no Agent row, is
  * test/integration/doctor-roster-probed-instance-2483.test.ts.
  *
  * The file-reading cases use a NON-default data directory, so neither the
  * developer's nor the runner's `~/.flair` is read. `FLAIR_URL` and
  * `FLAIR_OPS_PORT` are cleared around each of them and restored afterwards.
  */
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DOCTOR_ROSTER_TARGET_REMEDY, resolveDoctorRosterTarget } from "../../src/cli.js";
+import {
+  DOCTOR_ROSTER_CREDENTIAL_REMEDY,
+  DOCTOR_ROSTER_TARGET_REMEDY,
+  decideDoctorRosterIdentity,
+  decideDoctorRosterPair,
+  resolveDoctorRosterTarget,
+} from "../../src/cli.js";
 import { decideProbedPairIdentity } from "../../src/lib/agent-home.js";
+import { proveLocalInstancePair } from "../../src/lib/local-instance-pair.js";
 
 const COMPLETE_PAIR = "http:\n  port: 7926\noperationsApi:\n  network:\n    port: 7925\n";
 const HTTP_ONLY = "http:\n  port: 7926\n";
@@ -104,7 +121,7 @@ describe("resolveDoctorRosterTarget — one port named with no complete pair to 
   });
 });
 
-describe("decideProbedPairIdentity — the probed HTTP port and the ops endpoint must report the same instance", () => {
+describe("decideProbedPairIdentity — the identities the probed HTTP port and the ops endpoint report", () => {
   test("two single, equal identities are the same instance", () => {
     expect(decideProbedPairIdentity({ kind: "one", id: "inst-a" }, { kind: "one", id: "inst-a" }))
       .toEqual({ kind: "same", id: "inst-a" });
@@ -122,5 +139,144 @@ describe("decideProbedPairIdentity — the probed HTTP port and the ops endpoint
     });
     expect(decideProbedPairIdentity({ kind: "one", id: "inst-a" }, { kind: "multiple", count: 2 }).kind).toBe("unestablished");
     expect(decideProbedPairIdentity({ kind: "unreadable" }, { kind: "unreadable" }).kind).toBe("unestablished");
+  });
+});
+
+// ── The configuration check (shared with the local delete paths) ────────────
+
+/** What the fixture server answers next: a status and a raw body. */
+let answer: { status: number; body: string } = { status: 200, body: "{}" };
+let lastOperation: unknown = null;
+let server: Server;
+let serverPort: number;
+
+beforeAll(async () => {
+  server = createServer((req, res) => {
+    let raw = "";
+    req.on("data", (d: Buffer) => { raw += d.toString(); });
+    req.on("end", () => {
+      try { lastOperation = JSON.parse(raw)?.operation; } catch { lastOperation = null; }
+      res.writeHead(answer.status, { "Content-Type": "application/json" });
+      res.end(answer.body);
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  serverPort = (server.address() as AddressInfo).port;
+});
+
+afterAll(async () => {
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+});
+
+/** Answer `get_configuration` with this configuration. */
+function configure(config: unknown): void {
+  answer = { status: 200, body: JSON.stringify(config) };
+}
+
+const AUTH = "Basic " + Buffer.from("admin:not-a-secret").toString("base64");
+
+describe("proveLocalInstancePair — the ops endpoint's own configuration must pair it with an HTTP port reachable on loopback", () => {
+  test("a configuration recording the asked ops port and a loopback HTTP port is proven, with that HTTP port", async () => {
+    configure({ http: { port: "127.0.0.1:7926" }, operationsApi: { network: { port: `127.0.0.1:${serverPort}` } } });
+    expect(await proveLocalInstancePair(serverPort, AUTH)).toEqual({ kind: "proven", httpPort: 7926 });
+    expect(lastOperation).toBe("get_configuration");
+  });
+
+  test("a bare HTTP port and an all-interfaces bind are accepted", async () => {
+    configure({ http: { port: 7926 }, operationsApi: { network: { port: serverPort } } });
+    expect(await proveLocalInstancePair(serverPort, AUTH)).toEqual({ kind: "proven", httpPort: 7926 });
+    configure({ http: { port: "0.0.0.0:7926" }, operationsApi: { network: { port: serverPort } } });
+    expect(await proveLocalInstancePair(serverPort, AUTH)).toEqual({ kind: "proven", httpPort: 7926 });
+  });
+
+  test("a configuration recording a different ops port is unproven", async () => {
+    configure({ http: { port: 7926 }, operationsApi: { network: { port: "127.0.0.1:7925" } } });
+    const proof = await proveLocalInstancePair(serverPort, AUTH);
+    expect(proof).toEqual({ kind: "unproven", status: null, detail: `its configuration records ops port 7925, not ${serverPort}` });
+  });
+
+  test("an HTTP port bound to a specific non-loopback host is unproven", async () => {
+    configure({ http: { port: "192.0.2.10:7926" }, operationsApi: { network: { port: serverPort } } });
+    const proof = await proveLocalInstancePair(serverPort, AUTH);
+    expect(proof.kind).toBe("unproven");
+    if (proof.kind === "unproven") expect(proof.detail).toBe("its configuration binds HTTP to 192.0.2.10, not loopback or all interfaces");
+  });
+
+  test("a configuration with no usable HTTP port is unproven", async () => {
+    configure({ http: {}, operationsApi: { network: { port: serverPort } } });
+    expect((await proveLocalInstancePair(serverPort, AUTH)).kind).toBe("unproven");
+  });
+
+  test("a refused credential is unproven and carries the status", async () => {
+    answer = { status: 401, body: JSON.stringify({ error: "Login failed" }) };
+    expect(await proveLocalInstancePair(serverPort, AUTH)).toEqual({
+      kind: "unproven",
+      status: 401,
+      detail: "the configuration request answered HTTP 401",
+    });
+  });
+
+  test("an answer that is not JSON is unproven", async () => {
+    answer = { status: 200, body: "not json" };
+    expect((await proveLocalInstancePair(serverPort, AUTH)).kind).toBe("unproven");
+  });
+
+  test("an ops port with nothing listening is unproven", async () => {
+    const closed = createServer();
+    await new Promise<void>((resolve) => closed.listen(0, "127.0.0.1", resolve));
+    const deadPort = (closed.address() as AddressInfo).port;
+    await new Promise<void>((resolve) => closed.close(() => resolve()));
+    expect(await proveLocalInstancePair(deadPort, AUTH)).toEqual({
+      kind: "unproven",
+      status: null,
+      detail: "the configuration request got no answer",
+    });
+  });
+});
+
+describe("decideDoctorRosterPair — run only when the ops endpoint's configured HTTP port is the probed port", () => {
+  test("a proven pair naming the probed HTTP port runs on that ops port", () => {
+    expect(decideDoctorRosterPair(7925, 7926, { kind: "proven", httpPort: 7926 })).toEqual({ kind: "run", opsPort: 7925 });
+  });
+
+  test("a proven pair naming another HTTP port is NOT RUN, naming both ports", () => {
+    const decision = decideDoctorRosterPair(8925, 7926, { kind: "proven", httpPort: 8926 });
+    expect(decision).toEqual({
+      kind: "not-run",
+      reason: "the ops endpoint on port 8925 is configured with HTTP port 8926, not the probed HTTP port 7926, so it is not the probed instance's",
+      remedy: DOCTOR_ROSTER_TARGET_REMEDY,
+    });
+  });
+
+  test("a check that could not complete is NOT RUN with the target remedy", () => {
+    const decision = decideDoctorRosterPair(8925, 7926, { kind: "unproven", status: null, detail: "the configuration request got no answer" });
+    expect(decision).toEqual({
+      kind: "not-run",
+      reason: "the ops endpoint on port 8925 could not be shown to belong to the probed HTTP port 7926 (the configuration request got no answer)",
+      remedy: DOCTOR_ROSTER_TARGET_REMEDY,
+    });
+  });
+
+  test("a refused credential is NOT RUN with the credential remedy", () => {
+    const decision = decideDoctorRosterPair(7925, 7926, { kind: "unproven", status: 401, detail: "the configuration request answered HTTP 401" });
+    expect(decision.kind).toBe("not-run");
+    if (decision.kind === "not-run") expect(decision.remedy).toBe(DOCTOR_ROSTER_CREDENTIAL_REMEDY);
+  });
+});
+
+describe("decideDoctorRosterIdentity — the identity comparison added after the configuration check", () => {
+  test("two different single Instance ids are NOT RUN", () => {
+    const decision = decideDoctorRosterIdentity(7925, { kind: "different", httpId: "inst-a", opsId: "inst-b" });
+    expect(decision.kind).toBe("not-run");
+    if (decision.kind === "not-run") expect(decision.remedy).toBe(DOCTOR_ROSTER_TARGET_REMEDY);
+  });
+
+  test("equal ids run", () => {
+    expect(decideDoctorRosterIdentity(7925, { kind: "same", id: "inst-a" })).toEqual({ kind: "run", opsPort: 7925 });
+  });
+
+  test("no Instance row on either side (a fresh install) leaves the configuration check's decision standing", () => {
+    const pair = decideProbedPairIdentity({ kind: "none" }, { kind: "none" });
+    expect(decideDoctorRosterIdentity(7925, pair)).toEqual({ kind: "run", opsPort: 7925 });
   });
 });

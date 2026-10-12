@@ -109,13 +109,6 @@ beforeAll(async () => {
   harper = await startHarper();
   assertOwnInstance(harper);
   cliHome = await mkdtemp(join(tmpdir(), "flair-2359-doctor-home-"));
-  // One Instance row, so `flair doctor` can verify the probed HTTP port and the
-  // ops endpoint are the same instance (flair#2483) and run the roster check.
-  await ops({
-    operation: "insert",
-    table: "Instance",
-    records: [{ id: "inst-fixture-2359", publicKey: "seed-instance-public-key", role: "hub", status: "active", createdAt: new Date().toISOString() }],
-  });
 }, 180_000);
 
 afterAll(async () => {
@@ -148,9 +141,9 @@ describe("flair doctor — the Agent IDs section (flair#2359, real CLI + real sp
     expect(issueCount(reported.stdout), "the reported invalid id did not move the summary").toBe(baseCount + 1);
 
     // 3. A roster read that fails (wrong admin credential) is a counted issue —
-    //    for the Agent-ID section AND the Agent homes section. flair#2483: with
-    //    a credential that cannot read the ops endpoint's Instance table, doctor
-    //    cannot verify the two ports are the same instance, so both checks are
+    //    for the Agent-ID section AND the Agent homes section. flair#2483: the
+    //    ops endpoint refuses the credential's configuration read, so doctor
+    //    cannot show the two ports are one instance, and both checks are
     //    reported NOT RUN rather than read.
     const unreadable = await runDoctor("wrong-admin-pass-not-a-secret");
     expect(unreadable.stdout).toContain("Agent IDs: NOT RUN");

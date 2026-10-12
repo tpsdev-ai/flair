@@ -182,12 +182,13 @@ function describeIdentityState(id: TargetInstanceIdentity): string {
 }
 
 /**
- * The same-instance decision behind doctor's roster and home reads (flair#2483):
- * the identity the probed HTTP port reports against the identity the candidate
- * ops endpoint reports. Only two SINGLE, EQUAL ids are `same`. Two different
- * single ids are `different`. Anything else — no row, several rows, or an
- * unreadable read on either side — is `unestablished`, and the caller refuses on
- * it rather than reading either endpoint.
+ * The instance-identity comparison doctor adds to its configuration check
+ * before the roster and home reads (flair#2483): the identity the probed HTTP
+ * port reports against the identity the candidate ops endpoint reports. Only
+ * two SINGLE, EQUAL ids are `same`. Two different single ids are `different`.
+ * Anything else — no row (a fresh install), several rows, or an unreadable read
+ * on either side — is `unestablished`. The caller refuses only on `different`;
+ * the configuration check (src/lib/local-instance-pair.ts) decides the rest.
  */
 export function decideProbedPairIdentity(http: TargetInstanceIdentity, ops: TargetInstanceIdentity): ProbedPairIdentity {
   if (http.kind === "one" && ops.kind === "one") {

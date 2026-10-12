@@ -2038,14 +2038,16 @@ program
       } catch (err: unknown) {
         agentListCredIssue = err instanceof Error ? err.message : String(err);
       }
-      // flair#2483: doctor VERIFIES that the ops endpoint belongs to the
-      // instance it actually probed (effectivePort — a PID-discovered port, or
-      // one --fix just re-recorded) before either read. The pairing rule only
-      // PICKS a candidate; it trusts ports the caller names and cannot prove
-      // which live instance an ops port addresses, so both endpoints must
-      // report the same instance identity. When they cannot be shown to be the
-      // same instance, both checks report NOT RUN (counted as an issue) and
-      // nothing is read.
+      // flair#2483: before either read, doctor checks that the ops endpoint
+      // belongs to the instance it actually probed (effectivePort — a
+      // PID-discovered port, or one --fix just re-recorded). The pairing rule
+      // only PICKS a candidate; it trusts ports the caller names. The candidate's
+      // own configuration must then record it as the ops port and effectivePort
+      // as its HTTP port, bound on loopback or on all interfaces (the check the
+      // local delete paths use), and two different Instance ids on the two
+      // endpoints refuse. When the pick or the configuration check refuses or
+      // cannot complete, or the ids differ, both checks report NOT RUN (counted
+      // as an issue) and no Agent row is read.
       const rosterTarget = agentListAdminPass
         ? (await verifyDoctorRosterInstance(opts, effectivePort, agentListAdminPass) as { kind: "run"; opsPort: number } | { kind: "not-run"; reason: string; remedy: string })
         : null;
