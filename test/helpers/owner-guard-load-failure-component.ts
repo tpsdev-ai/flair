@@ -114,9 +114,13 @@ function repoRoot(): string {
  */
 export function componentWithOwnerGuardLoadFailure(opts: { sourceRoot?: string } = {}): FailingComponent {
   const sourceRoot = opts.sourceRoot ?? repoRoot();
-  if (!existsSync(join(sourceRoot, LOAD_FAILURE_MODULE_REL))) {
-    // The copy still needs the built tree; fail loudly rather than spawn a
-    // component whose dist does not exist.
+  // The copy needs the built tree: fail loudly here, before creating the temp
+  // directory, rather than later with a bare ENOENT from writeFileSync.
+  const builtResources = join(sourceRoot, "dist", "resources");
+  if (!existsSync(builtResources)) {
+    throw new Error(
+      `componentWithOwnerGuardLoadFailure: ${builtResources} does not exist — build the component (bun run build) before this test.`,
+    );
   }
   const dir = mkdtempSync(join(tmpdir(), "flair-owner-guard-loadfail-"));
   for (const entry of ["config.yaml", "package.json", "dist", "schemas"]) {
