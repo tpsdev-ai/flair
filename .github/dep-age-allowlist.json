@@ -12,18 +12,5 @@
     "otherwise checked pin be age-checked. Re-read the reason before re-dating; removing the entry",
     "once the version has aged past the window is the normal outcome."
   ],
-  "entries": [
-    {
-      "package": "handlebars",
-      "version": "4.7.10",
-      "ghsa": [
-        "GHSA-8r5x-fm3f-whwj",
-        "GHSA-p8wg-vrv2-v86f",
-        "GHSA-xw65-4hp5-5hc7"
-      ],
-      "added": "2026-10-08",
-      "expires": "2026-10-14",
-      "reason": "4.7.10 is the first patched release for all three advisories (affected >=4.0.0 <=4.7.9). A root `overrides` entry pins the @langchain/classic copy — a development and peer dependency of @tpsdev-ai/n8n-nodes-flair — to it. The pin clears the 7-day bake window on 2026-10-12."
-    }
-  ]
+  "entries": []
 }
