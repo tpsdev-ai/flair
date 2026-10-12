@@ -174,8 +174,8 @@ export class FlairClient {
    * flair#1944 round 10 — set by `loadSigningKey()`. While true, EVERY request
    * this client makes MUST be signed with the loaded Ed25519 key: the client
    * never falls back to admin Basic (nor sends unsigned) for any path. A live
-   * wake cycle turns it on at the start so its catchup read, its launch path and
-   * its receipt write all sign as the agent's own identity, even if the key file
+   * wake cycle turns it on at the start so its catchup read, receipt operations
+   * and ack sign as the agent's own identity, even if the key file
    * later vanishes (the loaded key is cached).
    */
   private signingKeyRequired = false;
@@ -282,7 +282,7 @@ export class FlairClient {
    * — an unparsable file throws), CHECKS it is Ed25519, and CACHES it (see
    * `resolveKey`), so the loaded key signs every later request even if the key
    * file is then removed or replaced. A live wake cycle calls this at the START
-   * so its catchup read, its launch path and its receipt write all sign as the
+   * so its catchup read, receipt operations and ack all sign as the
    * agent's own identity — a key that disappears after the check can no longer
    * cause a Basic fallback on ANY of them.
    *

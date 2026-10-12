@@ -268,10 +268,8 @@ function recordingCursor(handler: (input: LaunchInput) => Promise<LaunchResult> 
 }
 
 /**
- * A receipt store that accepts every write. flair#1944 round 2 makes the store
- * REQUIRED for a live cycle; these cases are about drain/launch/ack, so the
- * receipt just needs to land. A fresh store per cycle, so no case inherits
- * another's ids.
+ * An accepting fake store wrapped by the test helper in a fake Flair client.
+ * Each helper call gets a fresh store for its drain/launch/ack case.
  */
 function acceptingReceiptStore(agentId = CREW): ReceiptStore {
   const written = new Map<string, { author: string; content: string; hostSource?: CursorLaunchSource }>();
@@ -296,9 +294,8 @@ const CURSOR_CONFIG: CursorLaunchConfig = { apiBase: "https://api.cursor.com", a
  * Wrap a `ReceiptStore` into a fake `FlairClient` whose `memory` delegates to
  * it, so a cycle — which now BUILDS the receipt store from the client it runs —
  * drives exactly this store. `request` is unused: the feed is a canned port
- * handed to the internal core (`runWakeCycleCore`). The client signs as the
- * store's agent, so the runner identity and the signer are the same by
- * construction (flair#1944 round 7).
+ * handed to the internal core (`runWakeCycleCore`). Its `agentId` is the
+ * store's; this fake does not sign requests.
  */
 function clientFromStore(store: ReceiptStore): FlairClient {
   return {
@@ -331,8 +328,8 @@ function clientFromStore(store: ReceiptStore): FlairClient {
 
 /**
  * A fake FlairClient that serves its own catchup feed and holds receipt rows in
- * memory, so a cycle can run with NO injected parts at all — the client is the
- * single source of the feed reader and the receipt store (flair#1944 round 7).
+ * memory. The test supplies a catchup reader derived from this client and a
+ * fake Cursor client to the internal core; the core builds the receipt store.
  */
 function singleClient(
   agentId: string,
@@ -498,19 +495,16 @@ describe("runWakeCycle — drain, launch, ack, no double-launch", () => {
 
   test("dry-run classifies and does not ack or create", async () => {
     const { port, acks } = memoryCatchup([{ events: [dispatchEvent()], hasMore: false }]);
-    // No injected Cursor client: the runner builds the dry-run client itself.
+    // The helper supplies the dry-run Cursor client to the internal core.
     const result = await runCycle(port, undefined, { dryRun: true });
     expect(result.items[0]?.action).toBe("dry-run");
     expect(result.acked).toBeNull();
     expect(acks).toEqual([]);
   });
 
-  test("the cycle builds the feed reader AND the receipt store from the ONE client (flair#1944 round 7)", async () => {
-    // No store and no agent label: the client's OWN `request` serves the feed (the
-    // catchup port is derived from it) and the receipt is written through the
-    // client's own `memory`, as the client's agent. A store that signs as another
-    // agent is unrepresentable. Only the fake Cursor endpoint is injected, through
-    // the internal core — the exported `runWakeCycle` builds production parts.
+  test("the core uses a feed reader derived from the fake client and builds its receipt store", async () => {
+    // The test supplies the derived catchup reader and fake Cursor client to
+    // the core. Receipt operations use the same fake Flair client's memory.
     const event = dispatchEvent();
     const { client, acks, records } = singleClient(CREW, [{ events: [event], hasMore: false }]);
     const { client: cursorClient } = recordingCursor(() => ({ outcome: "created", cursorAgentId: "bc-x" }));
@@ -520,7 +514,7 @@ describe("runWakeCycle — drain, launch, ack, no double-launch", () => {
     );
     expect(result.acked).toBe("p1");
     expect(acks).toEqual(["p1"]);
-    expect(records.get(launchReceiptId(String(event.id)))?.author, "the receipt is signed as the client's own agent").toBe(CREW);
+    expect(records.get(launchReceiptId(String(event.id)))?.author, "the receipt row names the fake client's agent").toBe(CREW);
   });
 
   test("pages until hasMore is false", async () => {
@@ -547,7 +541,7 @@ describe("runWakeCycle — the EXPORTED function takes NO test seam (flair#1944 
     expect("__test" in withSeam, "only a runtime leftover here, never a typed field").toBe(true);
   });
 
-  test("a stray `__test` override is IGNORED: the client's own feed is drained and a dry-run writes nothing", async () => {
+  test("a stray `__test` override is IGNORED: the client's own feed is drained and a dry-run writes no receipt", async () => {
     // A fake FlairClient that serves its OWN catchup feed through `request` and
     // records any memory write. The exported `runWakeCycle` must ignore the stray
     // override entirely: on 9c231e6a the injected empty feed drains nothing and the

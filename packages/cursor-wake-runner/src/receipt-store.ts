@@ -6,8 +6,8 @@
  * the joined pointer), or null when none is READABLE there — the id is missing,
  * or a foreign PRIVATE row holds it and reads as absent (the server answers 404
  * to this reader); `memory.get` resolves to null ONLY on a 404 and throws on any
- * other failure, so an unreadable store can never read as "no receipt" and
- * license a write (flair#2446's unverified-citation rule). A refused `write`
+ * other failure, so a non-404 read failure cannot look absent and license a
+ * write. A refused `write`
  * throws the client's FlairError, whose HTTP `status` and `body` the runner
  * reads to tell a non-retryable refusal from a retryable failure (receipt.ts,
  * permanentReceiptRefusal).

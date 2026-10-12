@@ -1,8 +1,9 @@
 /**
  * Env / argv config for the wake-runner. There is no participant or
  * foreign-feed field. With Ed25519, `FLAIR_AGENT_ID` identifies the signer
- * and its feed. Admin Basic credentials are accepted only for a read-only run
- * (`--dry-run`): a live receipt run requires the agent's own signing key.
+ * and its feed. Admin Basic credentials are accepted only for `--dry-run`:
+ * no Cursor create, receipt write or ack; the catchup read may create an
+ * AgentReadPosition. A live cycle requires the agent's own signing key.
  */
 
 const CURSOR_ENV_TYPES = ["cloud", "pool", "machine"] as const;

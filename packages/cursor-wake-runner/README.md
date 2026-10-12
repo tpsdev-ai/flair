@@ -8,7 +8,8 @@ A running agent uses `flair_catchup` instead (#1612). Do not rebuild a message b
 
 ## Single-launch
 
-OrgEvent delivery is at-least-once. The runner maps each event id to one client-supplied Cursor `agentId` (`bc-<sha256 uuid>`). Re-POSTing that id returns `409 agent_id_conflict` and is treated as already-handed-off, then acked. Redelivery cannot start a second agent. A launch failure does **not** advance the watermark.
+OrgEvent delivery is at-least-once. The runner maps each event id to one client-supplied Cursor `agentId` (`bc-<sha256 uuid>`). Re-POSTing that id returns `409 agent_id_conflict` and is treated as already handed off; ack still depends on the receipt outcome. Redelivery cannot start a second agent. A launch failure leaves that event unacked; earlier successful or skipped events
+may still be acked.
 
 If you point a Cursor Automation at "start a crew agent on the latest dispatch" *without* this runner, Cursor will mint a new agent every tick. That path is **not** safe. Schedule **this process**.
 
@@ -27,7 +28,19 @@ FLAIR_AGENT_ID=anvil CURSOR_API_KEY=… \
 FLAIR_AGENT_ID=anvil bun packages/cursor-wake-runner/src/cli.ts --once --dry-run
 ```
 
-A live run requires the Ed25519 key for `FLAIR_AGENT_ID`: the key is the signing identity and its feed is drained. Admin Basic credentials (`FLAIR_ADMIN_USER` / `FLAIR_ADMIN_PASSWORD`) with no key are accepted only for `--dry-run`, which performs no Cursor create, no receipt write and no ack (it still reads the agent's Flair feed) — a live receipt run needs the agent's signing key, because under Basic the server would stamp the written pointer with the Basic username while the row's `agentId` is `FLAIR_AGENT_ID`, so the receipt could not be verified on replay. The requirement is enforced at the START of a live cycle in the exported runner: `runWakeCycle` LOADS AND VALIDATES the agent's Ed25519 key into the client and LOCKS the client to signed-only — BEFORE any catchup read, any Cursor launch or any receipt write — so EVERY request in the cycle is signed with that loaded key, a key file that is present but unparsable or not Ed25519 is refused by name, and a caller driving the cycle directly cannot drain the feed and launch Cursor only to fail the write afterwards. It is enforced AGAIN where the write happens: the production receipt store requires the signing key, and the client fails closed — no admin Basic fallback — when no key resolves at send time. Removing the key file after the start check cannot cause a Basic fallback: the key the client loaded is cached and still signs every request (the file is not re-read); only when no key resolves at send time does the client refuse. The cycle runs on ONE signed client: `runWakeCycle` builds the catchup reader and the receipt store from that one client, so on a LIVE cycle the runner signs with the client's own Ed25519 identity and a receipt is signed as exactly the agent whose feed was drained — there is no separate agent id and no store to supply. The Cursor client, by contrast, is selected from `--dry-run` and the Cursor config, NOT built from the Flair client: a live cycle uses the real Cursor client built from the config, a dry-run cycle uses the dry-run client, which never CALLS Cursor (the cycle still reads the agent's Flair feed). The client refuses to send admin Basic credentials over plain HTTP to a non-loopback host. There is no `--participant` flag.
+A live cycle loads and validates the Ed25519 key for `FLAIR_AGENT_ID` before
+reading the feed, launching Cursor or writing a receipt. Every FlairClient
+request uses that cached key, with no admin Basic fallback. A key missing before
+loading, unparsable or not Ed25519 is refused by name; removing its file after
+loading does not stop signed requests. The receipt store also requires signing.
+The catchup reader and receipt store use the same Flair client and agent id.
+Cursor launches use Cursor API Basic authentication with `CURSOR_API_KEY`.
+
+Admin Basic credentials (`FLAIR_ADMIN_USER` / `FLAIR_ADMIN_PASSWORD`) are accepted
+only for `--dry-run`: no Cursor create, receipt write or ack. Its catchup read may
+create an `AgentReadPosition`. The runner selects the Cursor client from the mode
+and Cursor config; its dry-run client never calls Cursor. The Flair client refuses
+admin Basic over plain HTTP to a non-loopback host. There is no `--participant` flag.
 
 | Variable | Required | Notes |
 |---|---|---|
@@ -48,7 +61,8 @@ the runner ATTEMPTS one memory as its own agent: a stable id derived from the
 OrgEvent id, content naming only the dispatch id and the Cursor agent id, and a
 `sourced` receipt (a `hostSource` `{ host: "cursor", kind: "launch", id, url? }`)
 only when a pointer was STORED — an id the server's grammar refuses stores the
-receipt WITHOUT a pointer, so it is unsourced and gets no citation. The ack follows a
+receipt WITHOUT a pointer if the remaining write succeeds, so it is unsourced
+and gets no host-source citation. The ack follows a
 successful write, OR an existing row at that id VERIFIED as this runner's own
 receipt (same author, same deterministic content, same host-source identity); a
 row that fails that check is not verified as this runner's receipt, reported as
@@ -76,7 +90,7 @@ sees the short `[via cursor/launch <id8> (unverified)]` citation — host/kind a
 the first 8 id characters, display-only; the full url never appears there — and
 a reader who may read the memory but not the pointer sees `[via withheld]`; an
 admin bootstrap takes no pointer join. A memory with no pointer — a receipt whose
-Cursor id the grammar refused stores none — gets no citation. A `hostSource` is the
+Cursor id the grammar refused stores none — gets no host-source citation. A `hostSource` is the
 writer's claim, not
 verified host
 authorship. A `hostSource` value the server's grammar would refuse (checked on
@@ -119,10 +133,12 @@ reads as absent, so the runner's write is refused by the server and the event is
 not acked; and that a source id the server stores NFC-normalised is still
 verified on replay) and
 `test/integration/cursor-wake-cli-launch-receipt-1940.test.ts` (the shipped CLI
-through the real Flair client and a local Cursor fixture — drop the store and
-it fails). `test/host-source-parity.test.ts` runs the runner's copy of the
+through the real Flair client and Harper, with a local Cursor HTTP fixture). `test/host-source-parity.test.ts` runs the runner's copy of the
 grammar and the server's `validateHostSource` over the same inputs;
 `test/serialize.test.ts` pins that `--interval` never overlaps its own cycles.
+
+Skipped events are ackable without a launch or receipt. A later failure can still
+ack earlier successful or skipped events in the cycle.
 
 ## Wake trigger
 

@@ -15,10 +15,6 @@
  * launch receipt LANDED in Harper with its stable id and `hostSource`. A second
  * run drains nothing (the watermark advanced) and launches nothing.
  *
- * MUTATION (flair#1944 round 7): stop wiring the receipt path in `main` — e.g.
- * pass a bare `client` the runner cannot use (or, historically, drop the
- * `receipts:` argument). The live cycle then refuses (and would write no
- * receipt) — this file fails: no receipt is there.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import nacl from "tweetnacl";

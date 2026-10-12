@@ -1,21 +1,12 @@
 /**
  * live-cycle-key-lock.test.ts — flair#1944 round 10 (slice 2 of flair#1940).
  *
- * Round 9 refused a live cycle whose client could not resolve a signing key, but
- * the check only confirmed a key FILE EXISTED (`FlairClient.hasSigningKey()`,
- * existence-only). A live cycle could therefore still fall back to admin Basic
- * credentials: the key file could VANISH between the start check and the first
- * request (the catchup read never set `requireSigningKey`), or the file could be
- * present but UNPARSABLE. In both cases only the receipt WRITE failed closed; the
- * feed read, the launch path and any later request could go out as Basic — the
- * wrong writer identity the server would stamp.
- *
  * Round 10 fixes that at the START of a live cycle: `runWakeCycle` calls
  * `client.loadSigningKey()`, which LOADS AND VALIDATES the agent's Ed25519 key
- * into the client's memory, CACHES it, and puts the client in a mode where EVERY
- * request MUST be signed with that loaded key — no admin Basic fallback, no
- * unsigned request, for ANY path (catchup read, launch path or receipt). A key
- * file removed after the check can no longer cause a Basic fallback, and an
+ * into the client's memory, CACHES it, and puts the client in a mode where every
+ * FlairClient request MUST be signed with that loaded key — no admin Basic
+ * fallback or unsigned request on catchup, receipt operations or ack. A key file
+ * removed after the check can no longer cause a Basic fallback, and an
  * unparsable/non-Ed25519 key file is refused at the start, by name.
  *
  * Every HTTP target here is a loopback stub this file started (http on 127.0.0.1,
@@ -130,7 +121,7 @@ afterAll(async () => {
 });
 
 describe("flair#1944 round 10 — the client LOADS and VALIDATES the key, and locks to signed-only", () => {
-  test("loadSigningKey locks the client: a key file removed afterwards still signs EVERY request (never Basic)", async () => {
+  test("loadSigningKey locks the client: removing its key file still permits signed FlairClient requests", async () => {
     recorded = [];
     const agent = mkAgent(`agent-lock-${randomUUID()}`);
     const keyPath = join(keyDir, `${agent.id}.key`);
@@ -177,8 +168,8 @@ describe("flair#1944 round 10 — the client LOADS and VALIDATES the key, and lo
   });
 });
 
-describe("flair#1944 round 10 — a live cycle signs every request, from start to receipt", () => {
-  test("a live cycle loads the key at the start; a key file gone before the first request never causes a Basic request", async () => {
+describe("flair#1944 round 10 — a live cycle signs every FlairClient request", () => {
+  test("a live cycle loads the key at the start; a file removed after loading still permits signed FlairClient requests", async () => {
     recorded = [];
     const agent = mkAgent(`agent-live-lock-${randomUUID()}`);
     const keyPath = join(keyDir, `${agent.id}.key`);
@@ -209,7 +200,7 @@ describe("flair#1944 round 10 — a live cycle signs every request, from start t
 
     expect(existsSync(keyPath), "the key file was gone before the cycle's first request").toBe(false);
 
-    // The guarantee: NO request in the cycle ever fell back to admin Basic.
+    // No FlairClient request in the cycle fell back to admin Basic.
     const flair = flairRequests();
     for (const request of flair) {
       expect(
@@ -223,7 +214,7 @@ describe("flair#1944 round 10 — a live cycle signs every request, from start t
     }
     expect(
       flair.map((r) => `${r.method} ${r.url}`),
-      "every Flair request in the cycle reached the stub — read, launch, receipt, ack",
+      "every Flair request in the cycle reached the stub — catchup, receipt read/write, ack",
     ).toEqual([
       `GET /OrgEventCatchup/${agent.id}`,
       `GET /Memory/${launchReceiptId("evt-1")}`,

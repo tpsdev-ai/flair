@@ -6,8 +6,9 @@
  * a written pointer with the Basic username while the row's `agentId` is
  * `FLAIR_AGENT_ID`, so the receipt could not be verified on replay. The shipped
  * CLI therefore REFUSES a live cycle that has no signing key BEFORE it reads the
- * feed or acks anything, naming the requirement; a read-only run (`--dry-run`)
- * with Basic credentials still works.
+ * feed or acks anything, naming the requirement; a dry-run (`--dry-run`)
+ * with Basic credentials still works: no Cursor create, receipt write or ack;
+ * a real catchup read may create an AgentReadPosition.
  *
  * Every HTTP target here is a loopback stub this file started: the live case must
  * reach it ZERO times (the refusal happens first), the dry-run reads it once.
@@ -112,11 +113,11 @@ describe("flair#1944 round 4 — a live receipt run needs the agent's signing ke
     expect(requests, "the refusal happens before any request — nothing read, nothing acked").toEqual([]);
   });
 
-  test("the CLI still runs --dry-run with Basic-only credentials (read-only; no signing key required)", async () => {
+  test("the CLI still runs --dry-run with Basic-only credentials (no Cursor create, receipt write or ack)", async () => {
     requests = [];
     const code = await withEnv(basicOnlyEnv("agent-basic-dry"), () => main(["--once", "--dry-run"]));
 
-    expect(code, "the guard must not refuse a read-only run").toBe(0);
+    expect(code, "the guard must not refuse a dry-run").toBe(0);
     expect(
       requests.some((line) => line.startsWith("GET /OrgEventCatchup/")),
       "the dry-run drains the feed",

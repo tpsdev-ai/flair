@@ -6,7 +6,7 @@
   id, and — when the Cursor agent id passes the server's host-source grammar —
   `hostSource` `{ host: "cursor", kind: "launch", id, url? }` claiming where the
   launch lives. The receipt is "sourced" only when that pointer was STORED: an id
-  the grammar refuses stores no pointer (an unsourced receipt, no bootstrap
+  the grammar refuses stores no pointer (an unsourced receipt, no host-source
   citation), and a read or write failure can prevent the receipt entirely. The `id`
   is the Cursor agent id: on create, the id Cursor returned (the requested id
   when the response carries none); on a 409 replay, the requested id, which
@@ -20,14 +20,16 @@
   live run signed with the agent's own key writes the receipt, and that signing
   requirement is enforced at the START of the exported runner — `runWakeCycle`
   LOADS AND VALIDATES the agent's Ed25519 key into the client and LOCKS it to
-  signed-only, by name, before it reads the feed or launches Cursor, so EVERY
-  request in the cycle is signed with that loaded key (an unparsable or non-Ed25519
+  signed-only, by name, before it reads the feed or launches Cursor, so every
+  FlairClient request in the cycle is signed with that loaded key (an unparsable or non-Ed25519
   key file is refused there, by name) — and again WHERE THE WRITE HAPPENS: the
   production receipt store requires the key, and the client fails closed (no admin
   Basic fallback) when none resolves at send time; the loaded key is cached and
   still signs, so removing the key file cannot cause a Basic fallback. Admin Basic
   credentials are accepted only for the `--dry-run` mode, which performs no Cursor
-  create, no receipt write and no ack (it still reads the agent's Flair feed). The
+  create, no receipt write and no ack; its catchup read may create an
+  `AgentReadPosition`. Cursor launches use Cursor API Basic authentication with
+  `CURSOR_API_KEY`. The
   cycle runs
   on ONE signed client: the runner builds the catchup reader and the receipt
   store from it, so on a live cycle the receipt is signed as exactly the runner's
@@ -52,7 +54,9 @@
   non-retryable
   refusal (400, 409, 413 or 422): the event is acked without its receipt and
   reported as `receiptRefused` with the status and the error code, when present.
-  Any other failed write leaves the event unacknowledged for the next cycle and
+  Skipped events are ackable without a launch or receipt; a later failure can
+  still ack earlier successful or skipped events. Any other failed write leaves
+  that event unacknowledged for the next cycle and
   is reported as `receiptFailed`; none is a crash. A `hostSource` value the
   server's grammar would refuse (checked on its NFC form, as the server checks
   it) is omitted with one line through the supplied `log` callback — the receipt

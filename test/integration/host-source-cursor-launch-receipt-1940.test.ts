@@ -8,8 +8,8 @@
  * internal `runWakeCycleCore` (flair#1944 round 8 — the EXPORTED `runWakeCycle`
  * takes no test seam; the core it delegates to does) on ONE real Flair client —
  * the runner builds the receipt store from that client (flair#1944 round 7) —
- * with a fake Cursor endpoint and a canned catchup feed (no network). The receipt
- * reads back with its stable id, deterministic content and
+ * with a fake Cursor client and canned catchup feed. Flair requests use loopback
+ * HTTP. The receipt reads back with its stable id, deterministic content and
  * the `hostSource` the server validated and stored; a replay leaves the url-bearing
  * receipt unchanged and writes no second one; a url the server's grammar would
  * refuse (http, empty userinfo) is omitted with one log line and the receipt
@@ -20,12 +20,10 @@
  * acked; a foreign PRIVATE row at the id reads as absent, so the runner attempts
  * the write and the SERVER refuses it — a named `receiptFailed`, row untouched,
  * not acked; a source id the server stores NFC-normalised is still verified on
- * replay; a dry-run records nothing.
+ * replay; a dry-run writes no receipt and acks nothing.
  *
- * A receipt write the runner treats as a non-retryable refusal (a real 400) is
- * covered by the unit cases in `packages/cursor-wake-runner/test/launch-receipt.test.ts`:
- * the production path only ever submits a receipt whose host-source mirrors the
- * server's grammar, so a real server 400 is not reachable through it.
+ * A simulated 400 refusal is covered by unit cases in
+ * `packages/cursor-wake-runner/test/launch-receipt.test.ts`.
  *
  * MUTATION (flair#1944 round 3): make the existing-receipt path existence-only
  * (`read` returns a bare boolean, or ignores the row's identity). The two
@@ -207,7 +205,7 @@ describe("flair#1944 — the Cursor wake runner records a sourced launch receipt
     // there is one client for the whole cycle, so the read and the write share
     // that identity; the old "registered reader, UNREGISTERED writer" split is
     // unrepresentable. The refusal is a configuration fault the next cycle
-    // retries, so the watermark must stay put and nothing is written.
+    // retries; this event stays unacked and no receipt is written.
     const client = await clientFor(unknown, false);
     const event = dispatchEvent(unknown.id);
     const { port, acks } = catchupWith([{ events: [event], hasMore: false }]);

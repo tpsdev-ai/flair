@@ -2,10 +2,10 @@
 /**
  * cursor-flair-wake — the #1613 consume + wake runner.
  *
- * Drains THIS agent's OrgEventCatchup (signed FLAIR_AGENT_ID) and launches
- * one Cursor Cloud Agent per directed coord.dispatch / a2a.message. Ack
- * advances the watermark after handoff. Client-supplied agentId makes
- * redelivery a 409, not a second launch.
+ * Drains the configured agent's OrgEventCatchup (signed on live cycles) and launches
+ * one Cursor Cloud Agent per directed coord.dispatch / a2a.message. Live cycles
+ * ack skipped events and handoffs whose receipt succeeds, verifies or is refused.
+ * Client-supplied agentId makes redelivery a 409, not a second launch.
  */
 
 import { FlairClient, inspectKeyLookup } from "@tpsdev-ai/flair-client";
@@ -41,12 +41,14 @@ function printResult(result: WakeResult): void {
  * (the identity check compares the row's author to the runner's agent id).
  * Refuse a live cycle with no signing key BEFORE anything is read or acked;
  * Basic credentials stay allowed for `--dry-run`, which performs no Cursor
- * create, no receipt write and no ack (it still reads the agent's Flair feed).
+ * create, no receipt write and no ack; its catchup read may create an
+ * AgentReadPosition.
  *
  * flair#1944 round 10 — this is the CLI's fast EXISTENCE pre-check; the runner
  * itself LOADS AND VALIDATES the key and LOCKS the client to signed-only at the
  * start of the exported `runWakeCycle` (see `run.js`), so an unparsable key file is
- * refused there too and no request in a live cycle can fall back to Basic.
+ * refused there too and no FlairClient request in a live cycle can fall back
+ * to Basic. Cursor launches use Cursor API Basic authentication.
  */
 export function assertLiveSigningKey(config: WakeConfig): void {
   if (config.dryRun) return;

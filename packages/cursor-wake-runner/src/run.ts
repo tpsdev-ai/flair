@@ -1,63 +1,23 @@
 /**
- * One wake cycle: drain this agent's catchup, launch (or reuse) a Cursor
- * Cloud Agent for each directed dispatch, attempt a launch receipt, then ack
- * the watermark.
+ * Drain the client's catchup feed and launch or reuse a Cursor agent for each
+ * directed dispatch. The exported live cycle loads and validates an Ed25519 key
+ * before reading the feed, then signs every FlairClient request with that cached
+ * key. Cursor requests use Cursor API Basic authentication with CURSOR_API_KEY.
+ * The catchup reader and receipt store use the same Flair client.
  *
- * ONE signed client, ONE runner identity (flair#1944 round 7). The cycle takes a
- * single Flair client and BUILDS the catchup feed reader and the receipt store
- * from that same client; on a LIVE cycle the runner's signing identity IS the
- * client's own Ed25519 identity, so a receipt is signed as exactly the agent whose
- * feed was drained. There is no separate `agentId` label to trust and no
- * caller-supplied store, so a receipt can never be signed as a different agent
- * than the feed it drains — the "store labelled A writing as B" combination is
- * unrepresentable rather than guarded.
+ * Dry-run performs no Cursor create, receipt write or ack. Its catchup read may
+ * create an AgentReadPosition. A launch outcome inconsistent with the mode throws
+ * before recording that event or attempting its receipt; earlier events in a
+ * live cycle may already have receipts.
  *
- * flair#1944 round 9/10: that signed client is REQUIRED for a live cycle, and the
- * requirement is enforced at the START of the exported `runWakeCycle` — BEFORE the
- * first catchup read, the first Cursor launch or the receipt write — by name
- * ("live receipts need the agent's signing key"). Round 10: the check LOADS AND
- * VALIDATES the agent's Ed25519 key into the client and LOCKS it to signed-only, so
- * EVERY request in the cycle signs with that loaded key — an unparsable or
- * non-Ed25519 key file is refused here, and a key file that disappears after this
- * check cannot cause a Basic fallback on the catchup read, the launch path or the
- * receipt write. Admin Basic credentials are accepted only for the `--dry-run`
- * mode (no Cursor create, no receipt write, no ack; the cycle still reads the
- * agent's Flair feed). This closes the gap where a live `runWakeCycle` driven
- * directly with Basic-only credentials would drain the feed and LAUNCH Cursor, and
- * the receipt write would fail only afterwards for lack of a signing key.
- * The Cursor client is chosen by the runner
- * from `dryRun` AND the Cursor config — NOT built from the Flair client (a live
- * cycle -> the real client from the config; a dry-run cycle -> `dryRunCursorClient`,
- * which never CALLS Cursor).
- * A construction fault in
- * EITHER direction is refused, by name, BEFORE anything is recorded or acked:
- * a `dry-run` outcome observed in a LIVE cycle (a dry-run client reached a live
- * cycle), and symmetrically a live outcome (`created`/`already`) observed in a
- * DRY-RUN cycle — so a dry-run cycle can never write a receipt.
+ * Skipped events are ackable. A handoff is ackable after a successful receipt
+ * write, a verified existing receipt, or a classified non-retryable refusal.
+ * Launch failure, receipt failure or mismatch stops processing that event; the
+ * cycle may still ack earlier successful or skipped events. Cursor 409 is treated
+ * as already handed off, then the receipt is retried under the same ack rules.
  *
- * flair#1944 round 8: the EXPORTED `runWakeCycle` takes NO test seam. It builds
- * every part from production inputs — the catchup reader and the receipt store
- * from the runner's own client, the Cursor client from `dryRun` + the Cursor
- * config — and hands them to the internal `runWakeCycleCore`. The two seams a
- * test may drive (a canned catchup port and a Cursor client) live only on that
- * core, which the package's public entry (`src/index.ts`) does NOT export, so the
- * shipped path has no override a caller can reach; a test feeds canned events
- * through a fake Flair client and drives a fake Cursor endpoint through the core.
- *
- * Ack happens AFTER handoff and AFTER a receipt — a successful write, or an
- * existing row VERIFIED as this runner's own receipt — and only through the last
- * successful event. ONE receipt outcome is acked WITHOUT one: a receipt the
- * runner treats as a non-retryable refusal (400/409/413/422), reported as
- * `receiptRefused` (the launch is real and the receipt is provenance, not
- * control). Otherwise nothing advances the cursor — a failed launch, a receipt
- * write that failed for a transient or configuration reason, or a row already at
- * the receipt id not verified as this receipt (a foreign author, a different
- * content, or a different host-source identity), reported as `receiptMismatched`
- * — the event stays queued (at-least-once). Redelivery of an already-launched
- * event hits Cursor 409 and is treated as success, then the receipt is retried;
- * a 409 redelivery is retried and acked when its receipt write succeeds, a
- * verified receipt exists, or the receipt is a classified non-retryable refusal
- * (which is acked without one) — no second launch.
+ * The exported entry builds production parts. Tests can supply catchup and Cursor
+ * clients to the internal core, which the package entry does not export.
  */
 
 import type { FlairClient } from "@tpsdev-ai/flair-client";
@@ -108,13 +68,8 @@ export interface WakeResult {
 }
 
 export interface WakeDeps {
-  /**
-   * The runner's OWN signed Flair client. Its signing identity IS the runner
-   * identity: the catchup feed reader and the receipt store are BOTH built from
-   * THIS client, so a receipt is always signed as exactly the agent whose feed
-   * was drained. There is no separate `agentId` and no caller-supplied store to
-   * disagree with it.
-   */
+  /** The runner's Flair client. The exported live cycle requires signing;
+   *  feed and receipt operations use this client and its agentId. */
   client: FlairClient;
   /**
    * Cursor Cloud Agents launch config. The runner builds its Cursor client from
@@ -126,20 +81,19 @@ export interface WakeDeps {
   cursor: CursorLaunchConfig;
   /** One line for a receipt that omits a value the server's grammar would refuse, and one for a receipt the server refused. */
   log?: (line: string) => void;
-  /** When true, classify only — the dry-run Cursor client creates nothing, records no receipt and acks no watermark. */
+  /** When true, no Cursor create, receipt write or ack; catchup may persist its position. */
   dryRun?: boolean;
   pageLimit?: number;
 }
 
 /**
- * The interchangeable parts a wake cycle drives. fla#1944 round 8: the seams a
+ * The interchangeable parts a wake cycle drives. flair#1944 round 8: the seams a
  * TEST may substitute live HERE, on the internal `runWakeCycleCore`, never on the
  * exported `runWakeCycle` — which builds production parts only. A test feeds
  * canned events through a fake Flair client (whose `request` serves the catchup
  * feed) and drives a fake Cursor endpoint. The receipt store and the agent id are
  * NOT part of these parts: the core still builds the store from `deps.client`, so
- * the runner identity and the signer are always the client's and a mismatched
- * signer is unrepresentable through this core too.
+ * the runner identity is `deps.client.agentId`.
  */
 export interface WakeCycleParts {
   catchup: CatchupPort;
@@ -148,7 +102,8 @@ export interface WakeCycleParts {
 
 /** flair#1944 round 7/8 — a construction fault: the parts a cycle was built with
  *  do not match its mode. Thrown, not swallowed into `blocked`: it is refused by
- *  name before anything is recorded or acked (never a launch failure). */
+ *  name before that event is recorded or its receipt attempted. Earlier events
+ *  in a live cycle may already have receipts (never a launch failure). */
 class CycleConstructionError extends Error {}
 
 /** A `dry-run` launch outcome seen in a LIVE cycle (a dry-run client reached a
@@ -202,8 +157,8 @@ function mismatchReason(stored: StoredReceipt, agentId: string, receipt: LaunchR
  *
  * A row already present under the stable id is LEFT UNCHANGED only when it
  * VERIFIES as this runner's own receipt (isStoredReceipt — same author, same
- * deterministic content, same host-source identity); a replay that reuses the
- * agent (409) carries no url, and the stored receipt stands. A row that fails
+ * deterministic content, same host-source identity). An `already` result
+ * contributes no url to the receipt, and a verified stored receipt stands. A row that fails
  * that check is not verified as this receipt: it surfaces as `"mismatched"` and
  * the caller does NOT ack it. A write the runner treats as a non-retryable
  * refusal (permanentReceiptRefusal) surfaces as `"refused"` with its status and
@@ -265,29 +220,9 @@ async function recordLaunchReceipt(
   }
 }
 
-/**
- * flair#1944 round 9/10 — a LIVE cycle must SIGN its receipt as the agent's own
- * identity, so the runner refuses a live cycle whose client cannot sign BEFORE it
- * builds any part or makes any request. Without this, a live `runWakeCycle` driven
- * directly with admin Basic credentials (or a client with no resolvable Ed25519
- * key) would drain the feed and LAUNCH Cursor, and only then fail the receipt
- * write when the store asks the client to REQUIRE the key — a real launch left
- * unrecorded and the watermark unadvanced. The check lives in the EXPORTED
- * `runWakeCycle`, so a caller that drives the cycle directly gets the same
- * guarantee the CLI's own startup guard gives. A dry-run cycle performs no Cursor
- * create, no receipt write and no ack (it still reads the agent's Flair feed), so
- * admin Basic credentials stay allowed there.
- *
- * flair#1944 round 10 — the check LOADS AND VALIDATES the key, and LOCKS the
- * client to signed-only, rather than only confirming a key file EXISTS. It calls
- * `client.loadSigningKey()`, which resolves the key at this moment, parses it and
- * checks it is Ed25519, CACHES it, and makes every later request sign with it (no
- * admin Basic fallback, no unsigned request, for ANY path — the catchup read, the
- * Cursor launch path or the receipt write). A key file that is present but
- * unparsable or not Ed25519 is refused HERE, and a key file that disappears after
- * this check can no longer cause a Basic fallback: the loaded key signs every
- * request in the cycle.
- */
+/** Load and validate the live cycle's Ed25519 key before any requests.
+ *  Every subsequent FlairClient request uses the cached key, even if its file
+ *  disappears after loading. A missing or unusable key is refused by name. */
 export async function assertLiveCycleSigningKey(client: FlairClient): Promise<void> {
   try {
     await client.loadSigningKey();
@@ -302,20 +237,14 @@ export async function assertLiveCycleSigningKey(client: FlairClient): Promise<vo
 }
 
 export async function runWakeCycle(deps: WakeDeps): Promise<WakeResult> {
-  // flair#1944 round 9/10 — refuse a LIVE cycle that cannot sign, by name, BEFORE
-  // building any part or making any request: no catchup read, no Cursor launch,
-  // no receipt write. Round 10: the check LOADS AND VALIDATES the agent's Ed25519
-  // key into the client and LOCKS it to signed-only, so EVERY request in the cycle
-  // signs with that loaded key — a key that vanishes after this check cannot cause
-  // a Basic fallback on the catchup read, the launch path or the receipt write.
-  // The exported entry is the shipped path, so a caller that drives `runWakeCycle`
-  // directly gets the same guarantee the CLI's own startup check gives.
+  // Load the key and require signing for every FlairClient request before
+  // building parts or reading the feed. Cursor uses its own API authentication.
   if (!deps.dryRun) await assertLiveCycleSigningKey(deps.client);
   // flair#1944 round 8 — PRODUCTION PARTS ONLY. The exported entry builds every
   // part from the inputs it is given and nothing else: the catchup reader from
   // the runner's own client, the receipt store from that same client (inside the
   // core), and the Cursor client from `dryRun` + the Cursor config. There is no
-  // override a caller can reach; a test drives the seams through
+  // public override; a test drives the seams through
   // `runWakeCycleCore`, which `src/index.ts` does not export.
   const cursor = deps.dryRun ? dryRunCursorClient() : createCursorAgentClient(deps.cursor);
   return runWakeCycleCore(deps, { catchup: createCatchupPort(deps.client), cursor });
@@ -331,10 +260,7 @@ export async function runWakeCycle(deps: WakeDeps): Promise<WakeResult> {
  * as B" combination is unrepresentable here either.
  */
 export async function runWakeCycleCore(deps: WakeDeps, parts: WakeCycleParts): Promise<WakeResult> {
-  // flair#1944 round 7 — ONE client, ONE identity. The runner identity is the
-  // client's signing identity; the receipt store is built from that same client,
-  // so a receipt can never be signed as a different agent than the feed drained,
-  // and there is no store to supply.
+  // The runner identity and receipt store come from deps.client.
   const client = deps.client;
   const agentId = client.agentId;
   const catchup = parts.catchup;
@@ -387,8 +313,8 @@ export async function runWakeCycleCore(deps: WakeDeps, parts: WakeCycleParts): P
         });
         // flair#1944 round 7 — defence in depth: the runner picks the Cursor
         // client from `dryRun`, so a live cycle can only see `dry-run` through the
-        // internal core's seam. Refuse it, by name, BEFORE anything is recorded or
-        // acked — a live handoff must be a real launch, not a dry-run classification.
+        // internal core's seam. Refuse it before recording this event or attempting
+        // its receipt; earlier events in this cycle may already have receipts.
         if (!deps.dryRun && launch.outcome === "dry-run") {
           throw new DryRunInLiveCycleError(
             `runWakeCycle: the Cursor client reported a \`dry-run\` outcome for ${dispatch.id} in a live cycle; ` +
@@ -411,7 +337,7 @@ export async function runWakeCycleCore(deps: WakeDeps, parts: WakeCycleParts): P
         // flair#1944: after a handoff (never on dry-run), ATTEMPT one launch
         // receipt BEFORE the ack — the receipt is "sourced" only when a pointer
         // was STORED (an id the server's grammar refuses stores none, so that
-        // receipt is stored unsourced and gets no citation), and a READ or WRITE
+        // receipt is stored unsourced and gets no host-source citation), and a READ or WRITE
         // failure can prevent the receipt entirely. The ack follows a successful
         // write OR
         // an existing row VERIFIED as this runner's receipt. A transient or

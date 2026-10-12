@@ -42,7 +42,7 @@ export function catchupGetPath(agentId: string, after?: string, limit?: number):
 
 /**
  * Bind a Flair HTTP client to THIS agent's catchup feed. `agentId` is taken
- * from the signed client identity. Callers cannot redirect the path.
+ * from `client.agentId`. Callers cannot redirect the path.
  */
 export function createCatchupPort(client: FlairRequestClient): CatchupPort {
   const agentId = client.agentId;

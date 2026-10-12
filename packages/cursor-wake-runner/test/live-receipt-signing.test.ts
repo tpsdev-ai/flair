@@ -178,7 +178,7 @@ describe("flair#1944 round 5 — a live receipt write is refused unless it signs
 });
 
 describe("flair#1944 round 7 — one client, one identity: a mismatched signer is unrepresentable", () => {
-  test("the store signs as EXACTLY the client's own agent — there is no second label to supply", () => {
+  test("the store's agentId is the client's — there is no second label to supply", () => {
     const signer = `agent-signer-${randomUUID()}`;
     const client = new FlairClient({ agentId: signer, url: base, keyPath: join(keyDir, `absent-${randomUUID()}.key`) });
     // The store takes the client alone: its signing identity is the client's.

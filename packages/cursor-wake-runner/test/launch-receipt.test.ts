@@ -100,8 +100,7 @@ const CURSOR_CONFIG: CursorLaunchConfig = { apiBase: "https://api.cursor.com", a
  * so a cycle — which now BUILDS the receipt store from the client it runs —
  * drives exactly this store. `request` is never reached: the catchup feed is
  * supplied as a canned port to the internal core (`runWakeCycleCore`). The
- * client's `agentId` is the store's, so the runner identity and the signer are
- * the same by construction (flair#1944 round 7).
+ * client's `agentId` is the store's; this fake does not sign requests.
  */
 function clientFromStore(store: ReceiptStore): FlairClient {
   return {
@@ -200,7 +199,7 @@ describe("buildLaunchReceipt — content + host source, omitting what the gramma
     expect(built.receipt.hostSource).toEqual({ host: "cursor", kind: "launch", id: "bc-1" });
   });
 
-  test("a url the grammar refuses is omitted, the source still lands", () => {
+  test("a refused url is omitted from the constructed source", () => {
     for (const url of ["http://cursor.example/x", "https://@cursor.example/x", `https://cursor.example/${"a".repeat(2100)}`]) {
       const built = buildLaunchReceipt("evt-1", { cursorAgentId: "bc-1", url });
       expect(built.receipt.hostSource).toEqual({ host: "cursor", kind: "launch", id: "bc-1" });
@@ -332,8 +331,7 @@ describe("runWakeCycle — the launch receipt (flair#1944)", () => {
     const order: string[] = [];
     const { store, records } = fakeStore(order);
     const { port, acks } = catchupWith(order, [{ events: [dispatchEvent()], hasMore: false }]);
-    // No fake Cursor client: a dry-run cycle builds the dry-run client itself
-    // and never touches the network.
+    // The helper supplies the dry-run Cursor client to the internal core.
     const result = await runCycle(store, port, undefined, { dryRun: true });
     expect(result.items[0].action).toBe("dry-run");
     expect(result.items[0].receipt).toBeUndefined();

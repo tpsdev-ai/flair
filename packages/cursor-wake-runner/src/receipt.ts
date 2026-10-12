@@ -9,8 +9,8 @@
  * Cursor agent id, and — when the Cursor agent id passes the server's host-source
  * grammar — a `hostSource` `{ host: "cursor", kind: "launch", id: <cursorAgentId>,
  * url?: <url> }` claiming where the launch lives. A receipt whose Cursor id the
- * grammar refuses is stored WITHOUT a pointer: it is not "sourced", and it gets no
- * bootstrap citation (see Scope below).
+ * grammar refuses is stored WITHOUT a pointer if the write succeeds: it is not
+ * "sourced", and it gets no host-source citation (see Scope below).
  * A receipt the runner treats as a non-retryable refusal is acked without one.
  *
  * A live receipt run requires the agent's own Ed25519 signing key (flair#1944
@@ -19,8 +19,9 @@
  * `FLAIR_AGENT_ID`, so the receipt could not be verified on replay. Round 9
  * enforces this at the START of the exported runner: a LIVE `runWakeCycle` whose
  * client cannot resolve an Ed25519 key is refused by name BEFORE the first read,
- * launch or write. Basic credentials are accepted only for the read-only modes
- * (`--dry-run`), which write nothing.
+ * launch or write. Basic credentials are accepted only for `--dry-run`: no
+ * Cursor create, receipt write or ack; the catchup read may create an
+ * AgentReadPosition.
  *
  * Scope: the write is PRIVATE and omits `hostSourceScope`, so the server's read
  * projection keeps the pointer AUTHOR-ONLY. An ordinary non-author cannot read
@@ -35,7 +36,7 @@
  * the first 8 id characters, display-only — the full url never appears there), and
  * a reader who may read the memory but not the pointer sees `[via withheld]`; an
  * admin bootstrap takes no pointer join. A memory with no pointer — a receipt whose
- * Cursor id the grammar refused stores none — gets no citation at all. A
+ * Cursor id the grammar refused stores none — gets no host-source citation. A
  * `hostSource` is the writer's claim, not verified host authorship.
  *
  * The id is the Cursor agent id: on create, the id Cursor returned (the
@@ -46,7 +47,7 @@
  * remaining WRITE succeeds; a READ or WRITE failure can still prevent the
  * receipt entirely. The server checks and stores each value's NFC form,
  * and so does this mirror's check. The grammar is mirrored from
- * resources/host-source.ts (packages never import server code);
+ * resources/host-source.ts (runtime package code never imports server code);
  * test/host-source-parity.test.ts runs this mirror and the server's
  * validateHostSource over the same inputs and asserts they agree.
  */

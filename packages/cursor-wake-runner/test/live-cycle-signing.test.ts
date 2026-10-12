@@ -15,7 +15,8 @@
  *
  * Every HTTP target here is a loopback stub this file started (http on 127.0.0.1,
  * so admin Basic is allowed over it). The live case must reach it ZERO times; the
- * dry-run case drains the feed once and writes nothing.
+ * dry-run case drains the feed once with no Cursor create, receipt write or ack.
+ * A real catchup read may create an AgentReadPosition.
  *
  * MUTATION (flair#1944 round 9): remove the `assertLiveCycleSigningKey` call from
  * `runWakeCycle` (i.e. move the check back to write time, where only the store
@@ -110,7 +111,7 @@ describe("flair#1944 round 9 — a LIVE cycle refuses a Basic-only client BEFORE
     expect(requests, "the refusal is BEFORE any request — nothing read, nothing launched, nothing written").toEqual([]);
   });
 
-  test("--dry-run with Basic-only credentials still runs (read-only): the feed is drained once and nothing is written", async () => {
+  test("--dry-run with Basic-only credentials drains the feed once with no Cursor create, receipt write or ack", async () => {
     requests = [];
     const client = basicOnlyClient(`agent-dry-start-${randomUUID()}`);
 
