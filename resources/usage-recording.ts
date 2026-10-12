@@ -371,7 +371,8 @@ export async function recordCitations(
       if (err instanceof WriteBackConflictError) {
         // flair#2441: the stored row is no longer the one read (a same-id
         // replace, or a change found on every attempt); the count bump was
-        // refused and nothing was written.
+        // refused. The ledger row was already written and committed before the
+        // bump, so it stays, and the count is not bumped.
         console.error("recordCitations: not credited, stored_row_changed (no-op)", { memoryId: id, reason: "stored_row_changed", err });
       } else if (err instanceof UsageLedgerReadError) {
         // flair#2333: the ledger read that decides whether this pair already
@@ -434,7 +435,8 @@ export async function recordUsageBatch(
       if (err instanceof WriteBackConflictError) {
         // flair#2441: the stored row is no longer the one read (a same-id
         // replace, or a change found on every attempt); the count bump was
-        // refused and nothing was written.
+        // refused. The ledger row was already written and committed before the
+        // bump, so it stays, and the count is not bumped.
         console.error("RecordUsage.post: not recorded, stored_row_changed (treated as no-op)", { memoryId, reason: "stored_row_changed", err });
       } else if (err instanceof UsageLedgerReadError) {
         // flair#2333: the ledger read failed — not "no row". This contribution
