@@ -209,4 +209,18 @@ describe("flair#2229 — deletion-history bounded read and retention on a real H
     expect(dry.json?.pruned).toBe(0);
     expect(await historyIds()).toEqual(before);
   }, 150_000);
+
+  test("(a) a plain scan keeps a history row a checkpoint still needs (flair#2487)", async () => {
+    rmSync(checkpointPath(), { force: true });
+    const token = await insertMemory("keep-row", "permanent");
+    expect(runCheck().json?.status).toBe("baseline");
+    const watermark = JSON.parse(readFileSync(checkpointPath(), "utf8")).watermark as string;
+    // A still-needed row: its memory is present with a matching token, so the scan
+    // reads it again next scan and its own retention must leave it in place.
+    await insertHistory("h-keep", "keep-row", token, new Date(Date.parse(watermark) - 60_000).toISOString());
+    const r = runCheck();
+    expect(r.code, r.out).toBe(0);
+    expect(r.json?.status).toBe("healthy");
+    expect(await historyIds(), "the plain scan removed a history row it still needs").toContain("h-keep");
+  }, 150_000);
 });
