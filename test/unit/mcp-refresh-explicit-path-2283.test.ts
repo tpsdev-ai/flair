@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { refreshMcpOAuthFlag } from "../../src/lib/mcp-enable.ts";
 
-test("a dangling symlink at an explicit staging path is refused before any ops request", async () => {
+test.each([false, true])("a dangling symlink at an explicit staging path is refused before any ops request (dryRun=%s)", async (dryRun) => {
   const dir = mkdtempSync(join(tmpdir(), "flair-refresh-explicit-path-"));
   try {
     const target = join(dir, "missing.env");
@@ -20,9 +20,11 @@ test("a dangling symlink at an explicit staging path is refused before any ops r
       adminUser: "admin",
       adminPass: "fixture-password",
       secretsStagingPath: path,
+      dryRun,
     }, { fetchImpl });
 
     expect(result.ok).toBe(false);
+    expect(result.dryRun).toBe(dryRun);
     expect(result.failedStep).toBe("secrets-provisioning");
     expect(result.refused?.message).toContain(path);
     expect(result.secretsPath).toBeUndefined();

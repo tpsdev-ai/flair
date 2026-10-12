@@ -222,9 +222,7 @@ describe("verifyDeployedMcpDiscovery (real HTTP)", () => {
       ].join("\n");
       const pkgRoot = synthPkgRoot("FLAIR_MCP_OAUTH=true\n", UNREADABLE_ENV);
       const origFetch = globalThis.fetch;
-      // A plugin-live document with NO known issuers would pass if the read failure
-      // silently became "not configured" — so this case fails exactly when the fix
-      // is reverted to the empty defaults.
+      // The staged read failure must refuse even when discovery would pass.
       globalThis.fetch = routedTarget("plugin-live");
       try {
         await expect(

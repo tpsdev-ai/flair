@@ -224,8 +224,7 @@ describe("flair#2283 — a configured instance whose document advertises a PUBLI
     180_000,
   );
 
-  // The legacy value FLAIR_MCP_OAUTH=1 is the one the '@harperfast/oauth' component
-  // DELETES (its coerceConfigBoolean accepts only true/false), so a legacy instance
+  // The component treats mcp.enabled=1 as absent, so a legacy instance
   // that ACTUALLY honors "1" mounts no authorization server — and, because flair's
   // own /mcp handler reads the same variable with the WIDER 1/true/yes/on vocabulary,
   // it also stands flair's own discovery handlers down (resources/oauth-wellknown.ts).

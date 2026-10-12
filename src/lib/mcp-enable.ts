@@ -2428,8 +2428,7 @@ export async function selfVerifyMcpMetadata(
   // run the SAME function instead of re-deriving the comparison.
   const observation = await discriminateMcpOAuthDiscovery(normalizedIssuer, { ...deps, expectedIssuers: [normalizedIssuer] });
   if (observation.state === "unreachable") {
-    // A failed request read nothing, so the caller must not read it as a verdict
-    // (flair#2116). `status` is absent only when no response came back at all.
+    // `status` is absent when no response came back.
     return observation.status === undefined
       ? { ok: false, unreachable: true, detail: observation.detail }
       : { ok: false, detail: observation.detail };
@@ -3347,6 +3346,7 @@ export interface RefreshMcpFlagParams {
 
 export interface RefreshMcpFlagDeps {
   fetchImpl?: typeof fetch;
+  sealImpl?: NonNullable<Parameters<typeof pushSecrets>[4]>["sealImpl"];
   /** waitForOpsApi bounds, injectable so tests run fast. */
   waitForOpsApiTimeoutMs?: number;
   waitForOpsApiPollMs?: number;
@@ -3365,17 +3365,16 @@ export interface RefreshMcpFlagResult {
  * flair#2283 — the one-shot migration for an instance that still holds the old
  * staged value (`FLAIR_MCP_OAUTH=1`, recorded by `buildSecretsBundle` before
  * flair#1284 changed the staged value to `true`). Flair's own reader accepts
- * `1`, but the `@harperfast/oauth` component coerces only `true`/`false` and
- * deletes that value, leaving the component's MCP AS disabled.
+ * `1`, but the `@harperfast/oauth` component does not enable its MCP AS for `1`.
  *
  * Attempts an encrypted `FLAIR_MCP_OAUTH=true` push and checks the processEnv marker.
  * After a confirmed push and PID-verified restart, checks target and public
  * discovery against the requested issuer and its MCP token endpoint.
- * A failed probe, refused or unconfirmed push, or unconfirmed read-back attempts
- * a 0600 one-var fallback file and returns `{ ok: false }` before discovery checks; the CLI
- * exits non-zero. An occupied path is refused without writing a file. Refresh has
+ * A failed probe, local encryption failure, refused or unconfirmed push, or
+ * unconfirmed read-back attempts a 0600 fallback and returns `{ ok: false }`
+ * before discovery checks; the CLI exits non-zero. Refresh has
  * a separate default filename; `--secrets-path` can select `mcp enable`'s path.
- * An occupied explicit path is refused before probing; an occupied default path
+ * An occupied explicit path is refused before probing, including in dry run; an occupied default path
  * is refused when fallback is needed. The fallback writer opens exclusively.
  * Does not run IdP intake, apply CIMD changes or read or write IdP secret values.
  */
@@ -3421,12 +3420,6 @@ export async function refreshMcpOAuthFlag(
     }
   };
 
-  if (dryRun) {
-    currentStep = "secrets-provisioning";
-    push(true, `--dry-run: would push an encrypted FLAIR_MCP_OAUTH=true update to ${params.instance}, check the secret row's processEnv marker, restart and check discovery metadata; nothing was changed.`);
-    return { ok: true, dryRun: true, steps };
-  }
-
   try {
     currentStep = "secrets-provisioning";
     // An EXPLICIT staging path is the operator's own target. Refuse an occupied one
@@ -3437,8 +3430,11 @@ export async function refreshMcpOAuthFlag(
       push(false, message);
       return { ok: false, dryRun, steps, refused: { message }, failedStep: "secrets-provisioning" };
     }
-    // Attempt fallback creation after a failed probe, refused or unconfirmed push,
-    // or unconfirmed read-back.
+    if (dryRun) {
+      push(true, `--dry-run: would attempt an encrypted FLAIR_MCP_OAUTH=true update to ${params.instance}, check the secret row's processEnv marker, restart and check discovery metadata; nothing was changed.`);
+      return { ok: true, dryRun: true, steps };
+    }
+    // Attempt fallback creation when the update could not be pushed or confirmed.
     const cap = await probeSecretsCapability(
       resolveOpsUrl(params.instance),
       basicAuthHeader(params.adminUser, params.adminPass),
@@ -3458,16 +3454,18 @@ export async function refreshMcpOAuthFlag(
       basicAuthHeader(params.adminUser, params.adminPass),
       { FLAIR_MCP_OAUTH: "true" },
       cap.publicKeyPem,
-      { fetchImpl: deps.fetchImpl },
+      { fetchImpl: deps.fetchImpl, sealImpl: deps.sealImpl },
     );
     if (!pushed.allOk) {
       const failedResults = pushed.results.filter((r) => !r.ok);
       const failed = failedResults.map((r) => `${r.name} (${r.detail})`).join("; ");
-      const lead = failedResults.some((r) => r.kind === "push-unconfirmed")
-        ? "FLAIR_MCP_OAUTH=true push outcome could not be confirmed (it may have been stored)"
-        : failedResults.every((r) => r.kind === "confirm")
-          ? "FLAIR_MCP_OAUTH=true received a successful push response, but its storage with processEnv=true could not be confirmed"
-          : "FLAIR_MCP_OAUTH=true push was refused by the target";
+      const lead = failedResults.every((r) => r.kind === "local-failure")
+        ? "FLAIR_MCP_OAUTH=true local encryption failure: nothing was sent, nothing stored by this attempt"
+        : failedResults.some((r) => r.kind === "push-unconfirmed")
+          ? "FLAIR_MCP_OAUTH=true push outcome could not be confirmed (it may have been stored)"
+          : failedResults.every((r) => r.kind === "confirm")
+            ? "FLAIR_MCP_OAUTH=true received a successful push response, but its storage with processEnv=true could not be confirmed"
+            : "FLAIR_MCP_OAUTH=true push was refused by the target";
       const refusal = writeFallback()?.replace(/^/, `${lead}: ${failed}. `);
       if (refusal) {
         push(false, refusal);

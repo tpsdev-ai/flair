@@ -45,6 +45,7 @@
  * endpoint that may not exist costs a silent flag-OFF boot, which is the exact
  * failure this automation is meant to remove.
  */
+import { constants, createPublicKey, publicEncrypt } from "node:crypto";
 import { sealSecret } from "./secret-envelope.js";
 
 export interface SecretsCapability {
@@ -112,7 +113,14 @@ export async function probeSecretsCapability(
      // treated exactly like unavailable — see the failure-direction note above.
     return { available: false, reason: "the target answered the probe without a usable public key — using the staged-file flow" };
    }
-  return { available: true, reason: "target supports env-secrets; pushing over the ops API", publicKeyPem: pem };
+  try {
+    const key = createPublicKey(pem);
+    if (key.asymmetricKeyType !== "rsa") throw new Error("not an RSA key");
+    publicEncrypt({ key, padding: constants.RSA_PKCS1_OAEP_PADDING, oaepHash: "sha256" }, Buffer.alloc(32));
+  } catch {
+    return { available: false, reason: "the target answered the probe with an invalid or unusable RSA public key — using the staged-file flow" };
+  }
+  return { available: true, reason: "target provided a usable RSA public key; attempting push over the ops API", publicKeyPem: pem };
 }
 
 /** Pull the PEM out of whatever shape the operation returns, without guessing
@@ -129,9 +137,10 @@ export interface PushedSecret {
   name: string;
   ok: boolean;
   detail?: string;
-  /** "push" for a refused response; "push-unconfirmed" for a request without
-   *  a confirmed response; "confirm" for unconfirmed read-back. Absent when ok. */
-  kind?: "push" | "push-unconfirmed" | "confirm";
+  /** "local-failure" before sending; "push" for a refused response;
+   *  "push-unconfirmed" without a confirmed response; "confirm" for unconfirmed
+   *  read-back. Absent when ok. */
+  kind?: "local-failure" | "push" | "push-unconfirmed" | "confirm";
 }
 
 /**
@@ -144,18 +153,25 @@ export async function pushSecrets(
   authHeader: string,
   vars: Record<string, string>,
   publicKeyPem: string,
-  deps: { fetchImpl?: typeof fetch } = {},
+  deps: { fetchImpl?: typeof fetch; sealImpl?: typeof sealSecret } = {},
 ): Promise<{ allOk: boolean; results: PushedSecret[] }> {
   const fetchImpl = deps.fetchImpl ?? fetch;
   const results: PushedSecret[] = [];
   for (const [name, value] of Object.entries(vars)) {
+    let envelope: string;
+    try {
+      envelope = (deps.sealImpl ?? sealSecret)(value, publicKeyPem);
+    } catch {
+      results.push({ name, ok: false, kind: "local-failure", detail: "local encryption failure: nothing was sent, nothing stored by this attempt" });
+      continue;
+    }
     // Without a confirmed response, the push outcome is unknown: it may have stored.
     let r;
     try {
       r = await opsCall(
         opsUrl,
         authHeader,
-         { operation: "set_secret", name, envelope: sealSecret(value, publicKeyPem), processEnv: true },
+         { operation: "set_secret", name, envelope, processEnv: true },
         fetchImpl,
        );
     } catch (err: any) {

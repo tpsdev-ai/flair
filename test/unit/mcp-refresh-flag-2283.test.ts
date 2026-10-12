@@ -118,6 +118,24 @@ function base() {
 const FAST = { waitForOpsApiTimeoutMs: 500, waitForOpsApiPollMs: 10 };
 
 describe("refreshMcpOAuthFlag (flair#2283 item 2)", () => {
+  test("a local encryption failure stages fallback without claiming a stored push", async () => {
+    const { impl, sent } = opsFetch();
+    const result = await refreshMcpOAuthFlag(base(), {
+      fetchImpl: impl,
+      sealImpl: () => { throw new Error("fixture encryption failure"); },
+      ...FAST,
+    });
+    expect(sent.map((body) => body.operation)).toEqual(["get_secrets_public_key"]);
+    expect(result.ok).toBe(false);
+    expect(result.failedStep).toBe("secrets-provisioning");
+    const detail = result.steps.find((step) => step.step === "secrets-provisioning")?.detail ?? "";
+    expect(detail).toContain("local encryption failure: nothing was sent, nothing stored");
+    expect(detail).not.toContain("may have been stored");
+    expect(detail).not.toContain("push was refused by the target");
+    expect(result.secretsPath).toBe(base().secretsStagingPath);
+    expect(readFileSync(base().secretsStagingPath, "utf8")).toBe("FLAIR_MCP_OAUTH=true\n");
+  });
+
   test("pushes FLAIR_MCP_OAUTH=true, restarts, and the public document names the MCP token endpoint", async () => {
     shape = "plugin-live";
     const { impl, sent } = opsFetch();
@@ -177,8 +195,7 @@ describe("refreshMcpOAuthFlag (flair#2283 item 2)", () => {
     expect(result.failedStep).toBe("secrets-provisioning");
     expect(result.steps.find((s) => s.step === "secrets-provisioning")?.detail).toContain(stagedPath);
     // The fallback file is not merely NAMED in the message: it is really on disk,
-    // unreadable-by-others (0600), and carries exactly the one value the reader
-    // accepts. Naming a path that was never written would still satisfy the old
+    // mode 0600, and carries the requested flag value. Naming a path that was never written would still satisfy the old
     // assertion; this one reads the file back and checks its permission bits.
     expect(readFileSync(stagedPath, "utf8")).toBe("FLAIR_MCP_OAUTH=true\n");
     expect(statSync(stagedPath).mode & 0o777).toBe(0o600);
@@ -410,7 +427,7 @@ describe("refreshMcpOAuthFlag (flair#2283 item 2)", () => {
   // fallback, it must refuse BY NAME and write nothing, never truncating that bundle;
   // the writer opens exclusively (`wx`), so the file is byte-identical afterwards and
   // the result names the refusal instead of a path it did not write.
-  test("a pre-existing file at refresh's DEFAULT staging path is refused by name, not truncated", async () => {
+  test("an occupied default staging path is refused when fallback is needed", async () => {
     shape = "plugin-live";
     const home = mkdtempSync(join(tmpdir(), "flair-2283-refresh-home-occ-"));
     const prevHome = process.env.HOME;

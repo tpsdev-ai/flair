@@ -39,6 +39,27 @@ function opsStub(handler: (op: string, body: any) => { status?: number; json: an
 }
 
 describe("probeSecretsCapability — asks the target, never its hostname", () => {
+  test("malformed PEM text makes capability unavailable by name", async () => {
+    const { impl, sent } = opsStub(() => ({ json: { public_key: "-----BEGIN PUBLIC KEY-----\nnot-a-key\n-----END PUBLIC KEY-----" } }));
+    const cap = await probeSecretsCapability("https://x/", "Basic y", { fetchImpl: impl });
+    expect(cap.available).toBe(false);
+    expect(cap.publicKeyPem).toBeUndefined();
+    expect(cap.reason).toContain("invalid or unusable RSA public key");
+    expect(sent.map((body) => body.operation)).toEqual(["get_secrets_public_key"]);
+  });
+
+  test("a parsed key that cannot wrap the envelope AES key is unavailable", async () => {
+    const { publicKey } = generateKeyPairSync("rsa", {
+      modulusLength: 512,
+      publicKeyEncoding: { type: "spki", format: "pem" },
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    });
+    const { impl } = opsStub(() => ({ json: { public_key: publicKey } }));
+    const cap = await probeSecretsCapability("https://x/", "Basic y", { fetchImpl: impl });
+    expect(cap.available).toBe(false);
+    expect(cap.reason).toContain("invalid or unusable RSA public key");
+  });
+
   test("available when the target returns a usable public key", async () => {
     const { impl } = opsStub(() => ({ json: { public_key: PUB } }));
     const cap = await probeSecretsCapability("https://x/", "Basic y", { fetchImpl: impl });
@@ -95,6 +116,31 @@ describe("probeSecretsCapability — asks the target, never its hostname", () =>
 });
 
 describe("pushSecrets — plaintext never leaves this process", () => {
+  test("key parsing failure is local and sends no set_secret request", async () => {
+    const { impl, sent } = opsStub(() => ({ json: { ok: true } }));
+    const out = await pushSecrets("https://x/", "Basic y", { TEST_VAR: "val" }, "-----BEGIN PUBLIC KEY-----\ninvalid", { fetchImpl: impl });
+    expect(out.allOk).toBe(false);
+    expect(out.results[0].kind).toBe("local-failure");
+    expect(out.results[0].detail).toContain("nothing was sent, nothing stored");
+    expect(out.results[0].detail).not.toContain("may have been stored");
+    expect(sent).toEqual([]);
+  });
+
+  test("encryption failure is local and sends no set_secret request", async () => {
+    const { publicKey } = generateKeyPairSync("rsa", {
+      modulusLength: 512,
+      publicKeyEncoding: { type: "spki", format: "pem" },
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    });
+    const { impl, sent } = opsStub(() => ({ json: { ok: true } }));
+    const out = await pushSecrets("https://x/", "Basic y", { TEST_VAR: "val" }, publicKey, { fetchImpl: impl });
+    expect(out.allOk).toBe(false);
+    expect(out.results[0].kind).toBe("local-failure");
+    expect(out.results[0].detail).toContain("local encryption failure: nothing was sent, nothing stored");
+    expect(out.results[0].detail).not.toContain("may have been stored");
+    expect(sent).toEqual([]);
+  });
+
   test("each var is sent sealed at the processEnv tier, and decrypts to its value", async () => {
      // #1105 fix: deliver with processEnv:true so core sets the flag on the row.
      // must carry processEnv (not tier) or the row lands inert (processEnv:false).

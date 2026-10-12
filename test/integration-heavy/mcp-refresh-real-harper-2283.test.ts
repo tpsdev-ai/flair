@@ -126,7 +126,7 @@ describe("flair#2283 — refreshMcpOAuthFlag against the real Harper harness", (
     "the target's real capability decides the branch: push+marker+restart+discovery, or the staged 0600 file and { ok: false }",
     async () => {
       for (const k of MCP_ENV_KEYS) delete process.env[k];
-      // The migration's starting state: the legacy value the component deletes.
+      // The migration's starting state: the legacy value that leaves the component AS disabled.
       process.env.FLAIR_MCP_OAUTH = "1";
       process.env.FLAIR_MCP_ISSUER = "https://refresh-2283.test";
 
@@ -203,7 +203,7 @@ describe("flair#2283 — refreshMcpOAuthFlag against the real Harper harness", (
         expect(result.failedStep).toBe("secrets-provisioning");
         expect(provisionDetail).toContain("secrets custody is not initialized on this node");
         // The refusal names the staged file, and the file is really on disk at 0600
-        // carrying exactly the one value the decryptor accepts.
+        // carrying the requested flag update.
         expect(provisionDetail).toContain(stagedPath);
         expect(existsSync(stagedPath)).toBe(true);
         expect(readFileSync(stagedPath, "utf8")).toBe("FLAIR_MCP_OAUTH=true\n");
