@@ -324,10 +324,31 @@ describe("resolveAgentFromSub", () => {
     expect(agent).toEqual({ agentId: "agt_mirror", isAdmin: false });
   });
 
-  it("revoked Credential is skipped", async () => {
-    credentials = [{ principalId: "agt_x", kind: "idp", idpSubject: "sub-x", status: "revoked" }];
-    expect(await resolveAgentFromSub("sub-x")).toBeNull();
-  });
+  // ─── flair#2503 — the credential-status allowlist ───────────────────────────
+  //
+  // A Credential is usable only when its status is exactly "active"
+  // (src/lib/credential-status-rule.ts, the same predicate the linker uses and
+  // XAA's jwt-bearer grant applies). A matching row whose status is "revoked",
+  // missing, empty or any other value maps nothing: resolution is refused by
+  // name and nothing is linked or resolved. On origin/main a revoked row was
+  // SKIPPED — returning null, which let JIT re-create the mapping — and a
+  // missing/unknown status was served as a live mapping.
+  for (const [label, status] of [["revoked", "revoked"], ["missing", undefined], ["unknown", "disabled"]] as const) {
+    it(`${label} status → refused by name, nothing linked or resolved`, async () => {
+      process.env.FLAIR_MCP_JIT_PROVISION = "1"; // JIT ON: a non-active row must not fall through to it
+      credentials = [{ id: `cred-${label}`, principalId: "agt_x", kind: "idp", idpSubject: "sub-x", ...(status === undefined ? {} : { status }) }];
+      agents["agt_x"] = { id: "agt_x", status: "active" };
+      const err = (await resolveAgentFromSub("sub-x").then(() => null, (e) => e)) as PrincipalRefusedError | null;
+      expect(err, "a non-active mapping must be refused, not resolved").toBeInstanceOf(PrincipalRefusedError);
+      expect(err!.rpcCode).toBe(-32001);
+      expect(err!.message).toContain(`cred-${label}`); // the actor
+      expect(err!.message).toContain(status === undefined ? "no status" : `status "${status}"`); // the state
+      expect(err!.message).toContain(`usable only when its status is "active"`); // the rule
+      expect(err!.message).toMatch(/re-link/); // the remedy
+      expect(puts, "nothing linked (no JIT) or resolved").toHaveLength(0);
+      expect(credentials[0].status, "the mapping row is unchanged").toBe(status);
+    });
+  }
 
   it("unknown sub, JIT OFF → null (DENY, no provisioning)", async () => {
     expect(await resolveAgentFromSub("nobody")).toBeNull();

@@ -32,6 +32,7 @@ import { agentRecordIsAdmin } from "./agent-admin.js";
 import { isPrincipalDeactivated } from "./agent-auth.js";
 import { stampOriginatorOnCreate } from "./originator-instance.js";
 import { invalidAgentIdMessage, isValidAgentId } from "../src/lib/agent-id-rule.js";
+import { credentialStatusRefusal, isUsableCredential } from "../src/lib/credential-status-rule.js";
 import { resolveVersion } from "./version.js";
 
 // The MCP protocol revision we implement (initialize handshake).
@@ -201,19 +202,24 @@ function jitProvisionEnabled(): boolean {
  * principal is deactivated. If that read fails, or the credential lookup itself
  * fails, resolution is refused. An unreadable answer is never taken as
  * "allowed", and never as "no mapping": JIT provisioning runs only for a
- * subject the credential lookup answered for. Resolution writes nothing to an
- * existing credential; the handler updates its `lastUsedAt`, best effort, after
- * a tool has run (handleToolCall).
+ * subject with no Credential row at all. A row whose `status` is not "active"
+ * (missing, empty, "revoked" or any other value) maps nothing — it is refused by
+ * name (src/lib/credential-status-rule.ts, the same allowlist XAA applies,
+ * flair#2501), never skipped into JIT. Resolution writes nothing to an existing
+ * credential; the handler updates its `lastUsedAt`, best effort, after a tool
+ * has run (handleToolCall).
  *
  * Returns:
  *   - `{ agentId, isAdmin, clientId? }` when a Credential maps the sub to an
  *     existing, active Agent.
- *   - null when no Credential maps the sub AND JIT-provisioning is disabled or
- *     failed → the handler denies the tool call (sub is unresolvable).
+ *   - null when NO Credential row exists for the sub AND JIT-provisioning is
+ *     disabled or failed → the handler denies the tool call (sub is
+ *     unresolvable).
  *
  * Throws `PrincipalRefusedError` (the handler returns its JSON-RPC error) when
- * the mapped principal is deactivated or missing, or when the credential or
- * principal could not be read.
+ * a Credential row exists but its status is not "active", when the mapped
+ * principal is deactivated or missing, or when the credential or principal
+ * could not be read.
  */
 export async function resolveAgentFromSub(sub: string, clientId?: string): Promise<ResolvedAgent | null> {
   return (await resolveMapping(sub, clientId))?.agent ?? null;
@@ -233,7 +239,17 @@ async function resolveMapping(sub: string, clientId?: string): Promise<SubMappin
   if (!sub) return null;
 
   // 1. Existing IdP credential → its principalId is the Agent id.
+  //
+  // flair#2503 — a credential is usable only when its `status` is exactly
+  // "active" (src/lib/credential-status-rule.ts, the same allowlist XAA's
+  // jwt-bearer grant applies). A matching row whose status is "revoked",
+  // missing, empty or any other value maps nothing: it is REFUSED by name below,
+  // and JIT provisioning never runs for it. (Before this, a non-revoked row was
+  // served as a mapping, and a revoked row was skipped into JIT — so a revoked
+  // mapping could be re-created.) Prefer an active row when the subject somehow
+  // has several; a row with no principalId is not a mapping and is skipped.
   let mapped: any = null;
+  let refused: any = null;
   try {
     for await (const cred of (databases as any).flair.Credential.search({
       conditions: [
@@ -241,10 +257,12 @@ async function resolveMapping(sub: string, clientId?: string): Promise<SubMappin
         { attribute: "idpSubject", comparator: "equals", value: sub },
       ],
     })) {
-      if (cred?.principalId && cred.status !== "revoked") {
+      if (!cred?.principalId) continue;
+      if (isUsableCredential(cred)) {
         mapped = cred;
         break;
       }
+      if (!refused) refused = cred;
     }
   } catch {
     throw new PrincipalRefusedError(
@@ -262,7 +280,15 @@ async function resolveMapping(sub: string, clientId?: string): Promise<SubMappin
     return { agent: resolved, credential: mapped };
   }
 
-  // 2. No mapping. JIT-provision only behind the explicit trust anchor.
+  if (refused) {
+    throw new PrincipalRefusedError(
+      -32001,
+      credentialStatusRefusal(`the IdP credential for this token's subject (id '${refused.id}')`, refused.status),
+    );
+  }
+
+  // 2. No Credential row for this subject at all. JIT-provision only behind the
+  //    explicit trust anchor.
   if (!jitProvisionEnabled()) return null;
 
   try {
