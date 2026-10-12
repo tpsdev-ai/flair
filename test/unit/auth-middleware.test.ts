@@ -230,15 +230,10 @@ describe("federation pairing token lifecycle", () => {
   });
 });
 
-// Test an otherwise valid, non-revoked re-pair without a token.
+// An otherwise valid, non-revoked re-pair, with and without a supplied token,
+// is exercised end-to-end on real Harper in
+// test/integration/federation-peer-trust-2333.test.ts.
 describe("federation re-pairing", () => {
-  test("an otherwise valid, non-revoked re-pair requires no token", () => {
-    // Existing non-revoked peer, same public key, no supplied token.
-    const existingPeer = { id: "spoke_1", publicKey: "same_pubkey", status: "paired" };
-    const incomingPublicKey = "same_pubkey";
-    expect(existingPeer.publicKey === incomingPublicKey).toBe(true);
-  });
-
   test("re-pairing with mismatched key returns 409", () => {
     const existingPeer = { id: "spoke_1", publicKey: "original_pubkey" };
     const incomingPublicKey = "different_pubkey";

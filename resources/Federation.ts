@@ -479,6 +479,11 @@ export class FederationInstance extends Resource {
  * token; without one it is refused (401, a pairing token is required). On the
  * token path the owned transaction's first read is its token read, so these
  * re-read checks cover a change committed before that read, not after it.
+ *
+ * A first-time pair consumes its token and writes its row in one owned
+ * transaction, re-reading the Peer row there after the consume is staged: a row
+ * committed in between is refused (409 peer_row_appeared) with the token left
+ * unconsumed, so a first-time pair answers `paired` only for a row it stored.
  */
 export class FederationPair extends Resource {
   // Pairing is a public endpoint by design — spokes have no Harper credentials
@@ -731,14 +736,36 @@ export class FederationPair extends Resource {
       // transaction re-reads the token from committed state and commits the
       // consume and the Peer write while the lock is held.
       const ctx = (this as any).getContext?.() ?? {};
-      const refusal = await withPairingTokenClaim(pairingToken, () =>
-        withOwnedTransaction(ctx, async (owned) => {
-          const claim = await consumePairingToken(pairingToken, instanceId, owned);
-          if (claim.kind !== "consumed") return claim;
-          await (databases as any).flair.Peer.put(firstPairPeerRow(instanceId, publicKey, role, endpoint), owned);
-          return claim;
-        }),
-      );
+      // Test-only: inert unless the fault-injection env opt-in is set and armed.
+      // Pause AFTER the pre-transaction read of the Peer row and BEFORE the owned
+      // transaction, so a competing pair or revoke for this instance commits in
+      // between (flair#2512).
+      const firstPairPause = txnPausePoint("federation-pair-first-pre");
+      if (firstPairPause) await firstPairPause;
+      let refusal: Response | undefined;
+      try {
+        refusal = await withPairingTokenClaim(pairingToken, () =>
+          withOwnedTransaction(ctx, async (owned) => {
+            const claim = await consumePairingToken(pairingToken, instanceId, owned);
+            if (claim.kind !== "consumed") return claim;
+            // The pre-transaction read above saw no Peer row, and this first pair
+            // would write one. Re-read the row INSIDE this owned transaction, after
+            // the consume is staged: a pair or revoke committed in the window leaves
+            // a row where that read saw none. Writing here would overwrite that
+            // committed row (and its pinned key) and report `paired` for a row this
+            // request did not store. Throwing aborts the owned transaction, so the
+            // staged consume rolls back and the caller answers a named refusal with
+            // the token left unconsumed.
+            const current = await (databases as any).flair.Peer.get(instanceId, owned);
+            if (current) throw new FirstPairRowAppearedError();
+            await (databases as any).flair.Peer.put(firstPairPeerRow(instanceId, publicKey, role, endpoint), owned);
+            return claim;
+          }),
+        );
+      } catch (err) {
+        if (err instanceof FirstPairRowAppearedError) return firstPairRowAppearedRefusal();
+        throw err;
+      }
       if (refusal) return refusal;
 
       // Test-only: inert unless the fault-injection env opt-in is set and armed.
@@ -841,6 +868,14 @@ function peerRevokedRefusal(): Response {
   }), { status: 403, headers: { "content-type": "application/json" } });
 }
 
+/** 409 for a first-time pair whose owned-transaction re-read found a Peer row committed in the window. */
+function firstPairRowAppearedRefusal(): Response {
+  return new Response(JSON.stringify({
+    error: "peer_row_appeared",
+    message: "a Peer row for this instance was committed after this pairing read it as absent; nothing was written and the pairing token is unconsumed",
+  }), { status: 409, headers: { "content-type": "application/json" } });
+}
+
 /**
  * Tag a token-supplying re-pair's Peer.put rejection inside the owned transaction
  * callback (flair#2333), so it aborts before the caller returns peer_write_failed.
@@ -875,6 +910,19 @@ class PeerKeyChangedDuringRepairError extends Error {
   constructor() {
     super("re-pair Peer row's pinned key differs from the signed request's key on the owned transaction's re-read");
     this.name = "PeerKeyChangedDuringRepairError";
+  }
+}
+
+/**
+ * A first-time pair's owned-transaction re-read found a Peer row where the
+ * pre-transaction read saw none (flair#2512): a pair or revoke committed for this
+ * instance in between. The transaction aborts, so the staged token consume rolls
+ * back and the token is left unconsumed; the caller answers a named refusal.
+ */
+class FirstPairRowAppearedError extends Error {
+  constructor() {
+    super("first-pair Peer row appeared inside the owned transaction");
+    this.name = "FirstPairRowAppearedError";
   }
 }
 

@@ -212,19 +212,6 @@ describe("pairing token body auth", () => {
     expect(notFound).toBe(true);
   });
 
-  test("an otherwise valid, non-revoked re-pair proceeds with no token", () => {
-    // An otherwise valid, non-revoked re-pair WITH NO token proceeds
-    // (the protocol requires none). Such a re-pair WITH a token consumes it;
-    // that is exercised end-to-end in
-    // test/integration/federation-peer-trust-2333.test.ts.
-    // Body signature still required to prove key ownership.
-    const existing = { id: "spoke_1", publicKey: "same_pubkey" };
-    const incoming = { instanceId: "spoke_1", publicKey: "same_pubkey" };
-
-    expect(existing.id).toBe(incoming.instanceId);
-    expect(existing.publicKey).toBe(incoming.publicKey);
-  });
-
   test("re-pairing with mismatched key is rejected (409)", () => {
     const existing = { id: "spoke_1", publicKey: "original_key" };
     const incoming = { instanceId: "spoke_1", publicKey: "different_key" };
