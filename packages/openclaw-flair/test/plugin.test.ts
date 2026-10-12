@@ -279,6 +279,7 @@ const CAPTURE_BOUNDS_DEFAULTS = {
   logOnceCap: 10_000,
   sessionStateCap: 10_000,
   sessionMessageCap: 4_096,
+  pendingRetryMs: 30 * 60_000,
   sweepIntervalMs: 30_000,
 };
 let captureBounds: typeof CAPTURE_BOUNDS_DEFAULTS;
@@ -308,6 +309,7 @@ let captureInternals: {
   // assertion failure) instead of a TypeError.
   sessionStateCount?: () => number;
   sessionIdentityCount?: () => number;
+  sessionPendingCount?: () => number;
   recordOf: (agentId: string, runId: string) => RunRecordLike | undefined;
 };
 const CAPTURE_INTERNALS_FALLBACK = {
@@ -318,6 +320,7 @@ const CAPTURE_INTERNALS_FALLBACK = {
   logOnceCount: () => 0,
   sessionStateCount: () => 0,
   sessionIdentityCount: () => 0,
+  sessionPendingCount: () => 0,
   recordOf: () => undefined as RunRecordLike | undefined,
 };
 try {
@@ -1490,25 +1493,33 @@ describe("slice 2 — capture normalisation, ids and outcomes", () => {
   });
 });
 
-// ── flair#2513 — agent_end keys its captures by message identity ─────────────
+// ── flair#2513 — agent_end captures only what its own run added ─────────────
 //
 // `agent_end` delivers the WHOLE session's message snapshot and the host exposes
-// no per-run boundary and no message id. The plugin identifies each message it
-// has already handled — captured, or skipped as ineligible or over the capture
-// cap — and skips the identities it has seen; a message whose write failed keeps
-// its original run's id and is retried under that id. The behaviour tests below
-// cover the three ways a count watermark fails: a concurrent callback, a
-// rewritten snapshot, and a failed write.
+// no per-run boundary and no message id. The plugin gives each snapshot message
+// an identity (role, raw content, timestamp) and records per session how many
+// occurrences of each identity it has accounted for; the occurrences beyond that
+// count are new and belong to the run that ended. Scans of one session run one at
+// a time. A failed write stays pending under the run that owned it; a later scan
+// of the session whose snapshot still holds the message retries it under that
+// run (never once the run is aborted) for up to `pendingRetryMs`, and after that
+// it expires with a log line. The behaviour tests cover a concurrent
+// callback, a rewritten snapshot, a failed write (retried before and after its
+// run retires, and expired), a scan queued past the retirement window,
+// equal-field messages (counted, and the compaction ambiguity), the session cap
+// once scans settle, and a scan queued before `gateway_stop`.
 //
-// The last test drives the same sequence through the pinned host's REAL hook
-// runner (`createHookRunner`), the component that actually dispatches `agent_end`
-// to the plugin. The host's session producer (the embedded agent runner in
-// `dist/builtin-openclaw-*.mjs`) cannot be driven hermetically in this lane: it
-// needs a configured provider/model and a booted gateway session to run the model
-// loop that produces the snapshot, so the closest real component on this seam is
-// the runner, exercised here with the host's own event and context shapes.
+// The real-runner test drives synthetic events, shaped like the host's
+// `PluginHookAgentEndEvent` and agent context, through the pinned host's real
+// hook runner (`createHookRunner`), the component that dispatches `agent_end` to
+// the plugin. The host's session producer (the embedded agent runner in
+// `dist/builtin-openclaw-*.mjs`) is not driven: it needs a configured
+// provider/model and a booted gateway session to produce a snapshot.
+// The host's config reader, plugin loader and conversation-access registration
+// gate are driven, with the plugin loaded from source, by
+// `test/host-config-loader.test.ts`.
 
-describe("flair#2513 — agent_end capture is keyed by message identity, not a count", () => {
+describe("flair#2513 — agent_end capture is keyed by counted message identities, not a count", () => {
   const captureConfig = {
     plugins: { slots: { memory: "openclaw-flair" }, entries: { "openclaw-flair": { hooks: { allowConversationAccess: true } } } },
   };
@@ -1602,7 +1613,7 @@ describe("flair#2513 — agent_end capture is keyed by message identity, not a c
     expect((m2[0].body as any).hostSource.id).toBe("run-2");
   });
 
-  test("the identity state is bounded: sessions beyond sessionStateCap are forgotten", async () => {
+  test("sequential callbacks: once each scan settles the session map is within sessionStateCap, and evicted sessions take their identities with them", async () => {
     writeKey("A");
     const plugin = await loadPlugin();
     installFetchStub();
@@ -1617,7 +1628,278 @@ describe("flair#2513 — agent_end capture is keyed by message identity, not a c
     expect(captureInternals.sessionIdentityCount?.() ?? 0).toBe(1);
   });
 
-  test("real host runner: successive runs and a rewritten snapshot through the pinned OpenClaw hook runner", async () => {
+  /** A fetch stub whose FIRST Memory write fails with a 500; every other call succeeds. */
+  const failFirstWrite = () => {
+    let failFirst = true;
+    return installFetchStub((call) => {
+      if (call.method === "PUT" && /\/Memory\//.test(call.url) && failFirst) {
+        failFirst = false;
+        return { status: 500, body: { error: "write failed" } };
+      }
+      return { status: 200, body: {} };
+    });
+  };
+  const contentOf = (c: Call) => String((c.body as any).content);
+  const sourceOf = (c: Call) => (c.body as any).hostSource?.id;
+  /** A callback that captures nothing but runs the sweep (it passes `captureGate`). */
+  const runSweep = (api: MockApi) => api._handler("llm_output")({ runId: "sweep-only", assistantTexts: ["a plain note"] }, { agentId: "A" });
+
+  test("round 2 (mutation: queued run not reserved): a scan queued past the retirement window still writes its message under its own run", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const d = defer();
+    const calls = installFetchStub(undefined, { deferUntil: d.gate });
+    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
+    plugin.register(api as any);
+    const base = 5_000_000;
+    captureClock.now = () => base;
+    const ctx = { agentId: "A", sessionId: "sess-queued" };
+    const M1 = { role: "user", content: "remember this: the first run's held message", timestamp: 1 };
+    const M2 = { role: "user", content: "remember this: the queued run's own message", timestamp: 2 };
+    const handler = api._handler("agent_end");
+
+    // Run 1's write is held; run 2's scan queues behind it.
+    const p1 = handler({ runId: "run-1", success: true, messages: [M1] }, ctx);
+    await waitFor(() => puts(calls).length === 1);
+    const p2 = handler({ runId: "run-2", success: true, messages: [M1, M2] }, ctx);
+    // The 30 s retirement window passes while run 2 waits, and the sweep runs.
+    captureClock.now = () => base + 31_000;
+    await runSweep(api);
+    expect(captureInternals.recordOf("A", "run-2")?.phase).toBe("ended");
+    d.release();
+    await Promise.all([p1, p2]);
+
+    const m2 = puts(calls).filter((c) => contentOf(c).includes("queued run's own message"));
+    expect(m2.map(sourceOf)).toEqual(["run-2"]);
+    // (mutation: window starts at agent_end) Run 2's 30 s window starts when its
+    // scan settles, so its llm_output delivered next still captures.
+    await api._handler("llm_output")({ runId: "run-2", assistantTexts: ["remember this: run two's reply after its scan"] }, { agentId: "A" });
+    expect(puts(calls).filter((c) => contentOf(c).includes("reply after its scan")).map(sourceOf)).toEqual(["run-2"]);
+    expect(api._warnText()).not.toMatch(/dropped a callback for retired run run-2/);
+  });
+
+  test("round 2 (mutation: a record with a queued scan is removable): an aborted run whose scan is still queued keeps its record, so the scan writes nothing", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const d = defer();
+    const calls = installFetchStub(undefined, { deferUntil: d.gate });
+    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
+    plugin.register(api as any);
+    const base = 5_500_000;
+    captureClock.now = () => base;
+    const ctx = { agentId: "A", sessionId: "sess-aborted-queued" };
+    const M1 = { role: "user", content: "remember this: the write held while run two waits", timestamp: 1 };
+    const M2 = { role: "user", content: "remember this: the aborted run's queued message", timestamp: 2 };
+    const handler = api._handler("agent_end");
+
+    const p1 = handler({ runId: "run-1", success: true, messages: [M1] }, ctx);
+    await waitFor(() => puts(calls).length === 1);
+    const p2 = handler({ runId: "run-2", success: true, messages: [M1, M2] }, ctx);
+    // Run 2 is aborted while its scan waits, and its tombstone ages out.
+    await api._fire("model_call_ended", { runId: "run-2", failureKind: "aborted" }, { agentId: "A" });
+    captureClock.now = () => base + captureBounds.tombstoneMinAgeMs + 1;
+    await runSweep(api);
+    expect(captureInternals.recordOf("A", "run-2")?.phase).toBe("aborted");
+    d.release();
+    await Promise.all([p1, p2]);
+    expect(puts(calls).filter((c) => contentOf(c).includes("aborted run's queued message")).length).toBe(0);
+  });
+
+  test("round 2 (mutation: retry refused once its run retires): a failed write is retried under its own run after that run retired, within pendingRetryMs", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = failFirstWrite();
+    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
+    plugin.register(api as any);
+    const base = 6_000_000;
+    captureClock.now = () => base;
+    const ctx = { agentId: "A", sessionId: "sess-retry-after-retire" };
+    const M1 = { role: "user", content: "remember this: the write that failed before retirement", timestamp: 1 };
+    const M2 = { role: "user", content: "remember this: the later run's own message", timestamp: 2 };
+
+    await api._fire("agent_end", { runId: "run-1", success: true, messages: [M1] }, ctx);
+    // Run 1 retires (30 s with no write in flight, then a sweep).
+    captureClock.now = () => base + 31_000;
+    await runSweep(api);
+    expect(captureInternals.recordOf("A", "run-1")?.phase).toBe("retired");
+
+    await api._fire("agent_end", { runId: "run-2", success: true, messages: [M1, M2] }, ctx);
+    const m1 = puts(calls).filter((c) => contentOf(c).includes("failed before retirement"));
+    expect(m1.map(sourceOf)).toEqual(["run-1", "run-1"]); // the failed attempt, then the retry
+    const m2 = puts(calls).filter((c) => contentOf(c).includes("later run's own message"));
+    expect(m2.map(sourceOf)).toEqual(["run-2"]);
+    expect(captureInternals.sessionPendingCount?.() ?? 0).toBe(0);
+  });
+
+  test("round 2 (mutation: no expiry): a pending write past pendingRetryMs expires with a log line and is not written under any run", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = failFirstWrite();
+    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
+    plugin.register(api as any);
+    captureBounds.pendingRetryMs = 5 * 60_000;
+    const base = 7_000_000;
+    captureClock.now = () => base;
+    const ctx = { agentId: "A", sessionId: "sess-retry-expired" };
+    const M1 = { role: "user", content: "remember this: the write that outlived its retry window", timestamp: 1 };
+    const M2 = { role: "user", content: "remember this: the run after the window's own message", timestamp: 2 };
+
+    await api._fire("agent_end", { runId: "run-1", success: true, messages: [M1] }, ctx);
+    // The window passes with no later agent_end for the session: the sweep expires it.
+    captureClock.now = () => base + captureBounds.pendingRetryMs + 1;
+    await runSweep(api);
+    expect(api._warnText()).toMatch(/a pending capture write for run run-1 \(agent A\) expired: its retry window of 300000 ms passed; it is not written under any run/);
+    expect(captureInternals.sessionPendingCount?.() ?? 0).toBe(0);
+
+    // A later run whose snapshot still holds the message does not write it.
+    await api._fire("agent_end", { runId: "run-2", success: true, messages: [M1, M2] }, ctx);
+    const m1 = puts(calls).filter((c) => contentOf(c).includes("outlived its retry window"));
+    expect(m1.map(sourceOf)).toEqual(["run-1"]); // only the failed attempt
+    const m2 = puts(calls).filter((c) => contentOf(c).includes("run after the window's own message"));
+    expect(m2.map(sourceOf)).toEqual(["run-2"]);
+  });
+
+  test("round 2 (mutation: no expiry at retry time): a scan that starts past pendingRetryMs expires the pending write instead of retrying it", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const d = defer();
+    let writes = 0;
+    const calls: Call[] = [];
+    // The first Memory write fails, the second is held until released, the
+    // rest succeed.
+    globalThis.fetch = (async (url: string, init: any = {}) => {
+      const body = typeof init.body === "string" ? JSON.parse(init.body) : null;
+      const call: Call = { url: String(url), method: init.method ?? "GET", authorization: null, signal: init.signal ?? null, body };
+      calls.push(call);
+      let status = 200;
+      if (call.method === "PUT" && /\/Memory\//.test(call.url)) {
+        writes += 1;
+        if (writes === 1) status = 500;
+        if (writes === 2) await d.gate;
+      }
+      return new Response(JSON.stringify(status === 200 ? {} : { error: "write failed" }), { status, headers: { "content-type": "application/json" } });
+    }) as unknown as typeof fetch;
+    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
+    plugin.register(api as any);
+    captureBounds.pendingRetryMs = 5 * 60_000;
+    const base = 7_500_000;
+    captureClock.now = () => base;
+    const ctx = { agentId: "A", sessionId: "sess-retry-expired-queued" };
+    const M1 = { role: "user", content: "remember this: the failed write a queued scan finds expired", timestamp: 1 };
+    const Mh = { role: "user", content: "remember this: the held write the next scan waits behind", timestamp: 2 };
+    const M3 = { role: "user", content: "remember this: the queued run's new message", timestamp: 3 };
+    const handler = api._handler("agent_end");
+
+    await handler({ runId: "run-1", success: true, messages: [M1] }, ctx); // fails: pending
+    // A compacted snapshot without M1; its write is held.
+    const ph = handler({ runId: "run-h", success: true, messages: [Mh] }, ctx);
+    await waitFor(() => writes === 2);
+    const p3 = handler({ runId: "run-3", success: true, messages: [M1, M3] }, ctx);
+    // The retry window passes while run 3's scan waits; no sweep runs.
+    captureClock.now = () => base + captureBounds.pendingRetryMs + 1;
+    d.release();
+    await Promise.all([ph, p3]);
+
+    const m1 = puts(calls).filter((c) => contentOf(c).includes("a queued scan finds expired"));
+    expect(m1.map(sourceOf)).toEqual(["run-1"]); // only the failed attempt
+    expect(api._warnText()).toMatch(/a pending capture write for run run-1 \(agent A\) expired: its retry window of 300000 ms passed/);
+    expect(puts(calls).filter((c) => contentOf(c).includes("queued run's new message")).map(sourceOf)).toEqual(["run-3"]);
+  });
+
+  test("round 2 (mutation: an identity counts once): equal role, content and timestamp in successive runs are captured once per run, each under its own run", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = installFetchStub();
+    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
+    plugin.register(api as any);
+    const ctx = { agentId: "A", sessionId: "sess-equal-fields" };
+    const M = { role: "user", content: "remember this: the same words at the same instant", timestamp: 7 };
+
+    await api._fire("agent_end", { runId: "run-1", success: true, messages: [M] }, ctx);
+    // Run 2 adds a second message whose role, content and timestamp equal M's.
+    await api._fire("agent_end", { runId: "run-2", success: true, messages: [M, { ...M }] }, ctx);
+    // Run 3 re-delivers both and adds nothing.
+    await api._fire("agent_end", { runId: "run-3", success: true, messages: [M, { ...M }] }, ctx);
+
+    const ms = puts(calls).filter((c) => contentOf(c).includes("same words at the same instant"));
+    expect(ms.map(sourceOf)).toEqual(["run-1", "run-2"]);
+  });
+
+  test("round 2 (mutation: no diagnostic): a compaction that leaves fewer equal copies than recorded captures none of them and logs the ambiguity", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = installFetchStub();
+    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
+    plugin.register(api as any);
+    const ctx = { agentId: "A", sessionId: "sess-equal-compacted" };
+    const M = { role: "user", content: "remember this: words repeated across a compaction", timestamp: 9 };
+    const summary = { role: "compactionSummary", summary: "earlier turns", timestamp: 10 };
+
+    await api._fire("agent_end", { runId: "run-1", success: true, messages: [M] }, ctx);
+    await api._fire("agent_end", { runId: "run-2", success: true, messages: [M, { ...M }] }, ctx);
+    // A compaction removed one of the two recorded copies. Whether the copy
+    // that remains is new cannot be told, so none is captured for run 3.
+    await api._fire("agent_end", { runId: "run-3", success: true, messages: [summary, { ...M }] }, ctx);
+
+    const ms = puts(calls).filter((c) => contentOf(c).includes("repeated across a compaction"));
+    expect(ms.map(sourceOf)).toEqual(["run-1", "run-2"]);
+    expect(api._warnText()).toMatch(
+      /agent_end for run run-3 \(agent A\): the snapshot holds 1 of 2 recorded copies of a message \(as after a compaction\); no copy is captured for this run/,
+    );
+  });
+
+  test("round 2 (mutation: no eviction on settle): cap 1, two sessions busy together, one session remains once both scans settle", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const d = defer();
+    const calls = installFetchStub(undefined, { deferUntil: d.gate });
+    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
+    plugin.register(api as any);
+    captureBounds.sessionStateCap = 1;
+    const handler = api._handler("agent_end");
+    const p1 = handler(
+      { runId: "run-s1", success: true, messages: [{ role: "user", content: "remember this: session one's message", timestamp: 1 }] },
+      { agentId: "A", sessionId: "s1" },
+    );
+    const p2 = handler(
+      { runId: "run-s2", success: true, messages: [{ role: "user", content: "remember this: session two's message", timestamp: 1 }] },
+      { agentId: "A", sessionId: "s2" },
+    );
+    await waitFor(() => puts(calls).length === 2);
+    // Both sessions have a scan in flight, so neither can be evicted yet.
+    expect(captureInternals.sessionStateCount?.() ?? 0).toBe(2);
+    d.release();
+    await Promise.all([p1, p2]);
+    expect(puts(calls).length).toBe(2);
+    expect(captureInternals.sessionStateCount?.() ?? 0).toBe(1);
+  });
+
+  test("gateway_stop (mutation: queued scan not guarded): a scan queued before the stop records no session state and starts no write after it", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const d = defer();
+    const calls = installFetchStub(undefined, { deferUntil: d.gate });
+    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
+    plugin.register(api as any);
+    const ctx = { agentId: "A", sessionId: "sess-stop" };
+    const M1 = { role: "user", content: "remember this: the write held across the stop", timestamp: 1 };
+    const M2 = { role: "user", content: "remember this: the message queued before the stop", timestamp: 2 };
+    const handler = api._handler("agent_end");
+
+    const p1 = handler({ runId: "run-1", success: true, messages: [M1] }, ctx);
+    await waitFor(() => puts(calls).length === 1);
+    const p2 = handler({ runId: "run-2", success: true, messages: [M1, M2] }, ctx);
+    await api._fire("gateway_stop", {}, {});
+    expect(captureInternals.sessionStateCount?.() ?? 0).toBe(0);
+    d.release();
+    await Promise.all([p1, p2]);
+
+    expect(captureInternals.sessionStateCount?.() ?? 0).toBe(0);
+    expect(captureInternals.sessionIdentityCount?.() ?? 0).toBe(0);
+    expect(puts(calls).filter((c) => contentOf(c).includes("queued before the stop")).length).toBe(0);
+  });
+
+  test("real host runner, synthetic events: successive runs and a rewritten snapshot through the pinned OpenClaw hook runner", async () => {
     const { dist, version: hostVersion } = supportedRunnerHost();
     const entry = runnerEntry(dist);
     expect(entry).toBeDefined();
