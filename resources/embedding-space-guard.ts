@@ -38,7 +38,7 @@
  * carry no harper dependency at all.
  */
 import { EMBEDDING_ENGINE, getModelId } from "./embeddings-provider.js";
-import { txnPausePoint } from "./txn-pause-point.js";
+import { TEST_FAULT_INJECTION_ENV, txnPausePoint } from "./txn-pause-point.js";
 
 // ─── Pure core (Harper-free) ────────────────────────────────────────────────
 
@@ -138,9 +138,9 @@ let _lastScanAt = 0;
 let _scanning: Promise<void> | undefined;
 // flair#2481 — foreign-space write notes invalidate an in-flight scan's verdict.
 let _writeEpoch = 0;
-// flair#2508 — scan-start ordering. `recomputeLatch()` runs `scan()` directly,
-// bypassing the `_scanning` latch that serialises consult scans, so two scans
-// can overlap; a scan that started earlier and finishes later must not
+// flair#2508 — scan-start ordering. `recomputeLatch()` (the boot pre-warm's
+// path) runs `scan()` directly, bypassing the `_scanning` latch that serialises
+// consult scans, so two scans can overlap; a scan that started earlier and finishes later must not
 // overwrite the verdict of one that started later. Each scan takes the next
 // sequence number when it begins and publishes only when no scan that started
 // later has already published; a refused publish is named and writes nothing.
@@ -169,9 +169,9 @@ async function scan(): Promise<void> {
       if (seen.size < MAX_DIAG_STAMPS) seen.add(n);
       if (n !== current) uniform = false;
     }
-    // Test-only: inert unless the fault-injection opt-in is armed (flair#2508).
-    // The interleaving where a later-started scan reads, publishes, and only
-    // then this earlier-started scan resumes.
+    // Test-only: inert unless the fault-injection opt-in is set and this point
+    // is armed (flair#2508). It holds this scan after its read, so a scan that
+    // started later can read and publish before this one resumes.
     const paused = txnPausePoint("scan-verdict");
     if (paused) await paused;
     // A changed epoch discards this scan's verdict and makes the next consult rescan.
@@ -263,10 +263,28 @@ export function spaceGuardDiagnostics(): { current: string; found: string[] } {
 // consult computes the latch lazily — correctness never depends on this
 // pre-warm, only the first query's latency does.
 let _prewarmScheduled = false;
+// Settles when the most recently scheduled pre-warm's scan has finished,
+// whatever its outcome. Read only through `_prewarmSettledForTests()`.
+let _prewarmSettled: Promise<void> | undefined;
 export function scheduleSpaceGuardPrewarm(): void {
   if (_prewarmScheduled) return;
   _prewarmScheduled = true;
-  setImmediate(() => { void recomputeLatch().catch(() => {}); });
+  _prewarmSettled = new Promise<void>((resolve) => {
+    setImmediate(() => { void recomputeLatch().catch(() => {}).then(() => resolve()); });
+  });
+}
+
+/**
+ * Test-only barrier (flair#2508): resolves once the most recently scheduled
+ * pre-warm's scan has finished, so a test can wait for it before it injects a
+ * table getter or arms a pause point. Gated like the pause points: returns
+ * `undefined` unless the fault-injection opt-in
+ * (`FLAIR_ENABLE_TEST_FAULT_INJECTION=1`) is set, and also when no pre-warm
+ * was ever scheduled.
+ */
+export function _prewarmSettledForTests(env: NodeJS.ProcessEnv = process.env): Promise<void> | undefined {
+  if (env[TEST_FAULT_INJECTION_ENV] !== "1") return undefined;
+  return _prewarmSettled;
 }
 
 // Test-only seams — mirror embeddings-boot.ts's `_resetEmbeddingsBackendRegistrationForTests`.
@@ -282,6 +300,8 @@ export function _resetGuardForTests(): void {
   _writeEpoch = 0;
   _scanSeq = 0;
   _publishedScanSeq = 0;
+  // `_prewarmSettled` is kept: a reset cannot cancel a pre-warm that is already
+  // scheduled, so its barrier must stay awaitable.
   _prewarmScheduled = false;
 }
 

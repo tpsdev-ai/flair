@@ -1,166 +1,267 @@
 /**
  * embedding-space-scan-order-2508.test.ts — flair#2508 (real Harper).
  *
- * Same ordering scenario as the unit-isolated test, but the guard's scan reads
- * the REAL Memory store of a live Harper instance through its operations API:
- * the older scan reads a uniform corpus and parks at the verdict pause; a
- * foreign-stamp row is then inserted into that instance; a newer scan reads the
- * now-mixed corpus and publishes `false`; the older scan is released and must
- * refuse its `true` verdict by name.
+ * The guard runs INSIDE the spawned Harper worker, and its scans read the
+ * stamps through Harper's Memory table resource (`databases.flair.Memory`,
+ * queried with `search({ select: ["embeddingModel"] })` in
+ * resources/embedding-space-guard.ts scan()). Nothing in this file replaces
+ * that read or the guard's module state.
  *
- * Why the table getter is injected: the guard's latch is per-process module
- * state, so its scan runs in THIS process and cannot be reached through the
- * spawned Harper. The seam exercised here is the scan's read of the real store
- * (`SELECT embeddingModel FROM flair.Memory` through the real ops API); the
- * getter is a thin adapter, the rows are the instance's own.
+ * The overlap is the in-tree pairing: the boot pre-warm (a one-shot
+ * `recomputeLatch()`, which calls `scan()` directly) against a consult scan
+ * (`isEmbeddingSpaceUniform()`, here from a recall).
  *
- * Mutation check (fails-on-unfixed): remove the scan-order check in
- * resources/embedding-space-guard.ts scan() and the older scan overwrites the
- * newer verdict, so "final verdict false" goes red.
+ *   1. The `scan-verdict` pause point (resources/txn-pause-point.ts) is armed
+ *      before Harper starts, and its test-only opt-in is set in the
+ *      environment the spawned Harper inherits. This test sends no request of
+ *      its own until a scan has parked there.
+ *   2. The store is confirmed empty, then a current-space row and a
+ *      foreign-space row are inserted through the administrator operations API.
+ *   3. A recall consults the guard while that scan is still parked. The recall
+ *      returns, so the parked scan is not a consult scan (consults share one
+ *      in-flight scan): it is the boot pre-warm, the only other in-tree scan
+ *      starter, and the recall's scan started later. That scan publishes "not uniform", and the recall's `_warning`
+ *      names exactly the current and the foreign stamp. The current stamp can
+ *      reach that list only through a scan's read (the write-maintained latch
+ *      records foreign stamps only), so the verdict comes from the resource read.
+ *   4. The pre-warm is released by this test. Its older verdict does not
+ *      replace the newer one, a later recall still names both stamps, and the
+ *      refusal is named in Harper's log.
+ *
+ * Mutation checks (each fails on an assertion): drop the scan-order check in
+ * scan() and the pre-warm overwrites the newer verdict, so the final recall
+ * has no `_warning`; change the scan's `select` field and the consult reads no
+ * stamps, so the recall during the pause has no `_warning`; let
+ * `assertOwnInstance` accept an external instance and the "refused before any
+ * insert" case fails on its refusal message.
  */
 import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 import { TEST_FAULT_INJECTION_ENV, TEST_PAUSE_DIR_ENV } from "../../resources/txn-pause-point.ts";
+import { getModelId } from "../../resources/embeddings-provider.ts";
 
-const CURRENT = "gguf:nomic-embed-text-v1.5-Q4_K_M+searchprefix";
-const FOREIGN = "other-engine:not-the-current-space";
 const POINT = "scan-verdict";
+const AGENT = "scan-order-agent";
+// The worker's current space: the spawned Harper inherits this process's
+// environment, so its getModelId() is this one.
+const CURRENT = getModelId();
+const FOREIGN = "other-engine:not-the-current-space";
 
-let harper: HarperInstance;
-let basic: string;
-let savedFault: string | undefined;
-let savedPauseDir: string | undefined;
-let dir: string;
+function isInside(parent: string, child: string): boolean {
+  const rel = relative(parent, child);
+  return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+}
 
-const {
-  isEmbeddingSpaceUniform,
-  recomputeLatch,
-  _setGuardTableGetterForTests,
-  _setGuardModelIdForTests,
-  _resetGuardForTests,
-} = await import("../../resources/embedding-space-guard.ts");
-
-/** Refuse to talk to anything but this test's own ephemeral instance: loopback,
- *  the OS-assigned ports it was started on, never a production port. */
+/** Refuse any Harper this test did not spawn itself. Runs before the first
+ *  write: an external instance (HARPER_HTTP_URL), one without a live spawned
+ *  process, and one whose install dir is not a temporary dir this test owns are
+ *  refused, as are a non-loopback or production port and HTTP and operations
+ *  sharing a port. */
 function assertOwnInstance(h: HarperInstance): void {
+  if (h.external) {
+    throw new Error(`refusing an external Harper (${h.httpURL}): this test writes rows and runs only against an instance it spawned`);
+  }
+  const proc = h.process;
+  if (!proc || !(Number(proc.pid) > 0) || proc.exitCode !== null || proc.signalCode !== null) {
+    throw new Error(`refusing ${h.httpURL}: no live process spawned by this test`);
+  }
+  let ownedTemp = false;
+  try {
+    ownedTemp = h.ownsInstallDir && h.installDir !== "" && isInside(realpathSync(tmpdir()), realpathSync(h.installDir));
+  } catch { /* an unresolvable dir is not owned */ }
+  if (!ownedTemp) {
+    throw new Error(`refusing ${h.httpURL}: install dir ${JSON.stringify(h.installDir)} is not a temporary dir this test owns`);
+  }
   const http = new URL(h.httpURL);
   const ops = new URL(h.opsURL);
-  for (const [label, u, port] of [["http", http, Number(http.port)], ["ops", ops, Number(ops.port)]] as const) {
+  for (const u of [http, ops]) {
+    const port = Number(u.port);
     if (u.hostname !== "127.0.0.1" || !(port > 0) || port === 9925 || port === 9926) {
-      throw new Error(`refusing to run against ${label} target ${u.href}: not this test's ephemeral instance`);
+      throw new Error(`refusing ${u.href}: not a loopback, non-production port`);
     }
   }
+  if (http.port === ops.port) throw new Error(`refusing ${h.httpURL}: HTTP and operations share a port`);
 }
 
-async function adminOp(op: Record<string, unknown>): Promise<any> {
-  const res = await fetch(harper.opsURL, {
+const basicOf = (h: HarperInstance) => "Basic " + btoa(`${h.admin.username}:${h.admin.password}`);
+
+/** Every row this file writes goes through here: the own-instance check runs
+ *  before the request is built. */
+async function insertMemoryRows(h: HarperInstance, records: Record<string, unknown>[]): Promise<void> {
+  assertOwnInstance(h);
+  const res = await fetch(h.opsURL, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: basic },
-    body: JSON.stringify(op),
+    headers: { "Content-Type": "application/json", Authorization: basicOf(h) },
+    body: JSON.stringify({ operation: "insert", database: "flair", table: "Memory", records }),
   });
   const text = await res.text();
-  expect(res.status, `${op.operation} returned ${res.status}: ${text.slice(0, 200)}`).toBe(200);
-  return JSON.parse(text);
+  expect(res.status, `insert returned ${res.status}: ${text.slice(0, 200)}`).toBe(200);
 }
 
-/** The guard's scan reads `{ embeddingModel }` rows; serve them from the live
- *  instance over the real ops API. */
-function realStoreGetter() {
-  return async () => ({
-    search(_q: unknown) {
-      async function* gen() {
-        const rows = await adminOp({ operation: "sql", sql: "SELECT embeddingModel FROM flair.Memory" });
-        for (const row of Array.isArray(rows) ? rows : (rows?.results ?? [])) {
-          yield { embeddingModel: (row as any).embeddingModel ?? null };
-        }
-      }
-      return gen();
-    },
+function memoryRow(id: string, embeddingModel: string): Record<string, unknown> {
+  const now = new Date().toISOString();
+  return { id, agentId: AGENT, content: `${id} row`, visibility: "shared", embeddingModel, createdAt: now, updatedAt: now };
+}
+
+/** The ids of every Memory row, read through the operations API. */
+async function memoryRowIds(h: HarperInstance): Promise<string[]> {
+  assertOwnInstance(h);
+  const res = await fetch(h.opsURL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: basicOf(h) },
+    body: JSON.stringify({ operation: "sql", sql: "SELECT id FROM flair.Memory" }),
   });
+  const text = await res.text();
+  expect(res.status, `sql returned ${res.status}: ${text.slice(0, 200)}`).toBe(200);
+  const rows = JSON.parse(text);
+  return (Array.isArray(rows) ? rows : []).map((r: { id: string }) => r.id).sort();
 }
 
-async function waitFor(path: string, timeoutMs: number): Promise<void> {
+/** The guard's mixed-space report from a recall that consults it, or undefined
+ *  when the guard reports the store uniform. A caller-supplied
+ *  `queryEmbedding` forces the semantic leg without an embedding model. */
+async function recallWarning(h: HarperInstance): Promise<string | undefined> {
+  const res = await fetch(`${h.httpURL}/SemanticSearch`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: basicOf(h) },
+    body: JSON.stringify({ agentId: AGENT, q: "any keyword", queryEmbedding: [1, 0, 0, 0] }),
+  });
+  const text = await res.text();
+  expect(res.status, `SemanticSearch returned ${res.status}: ${text.slice(0, 300)}`).toBe(200);
+  return JSON.parse(text)._warning;
+}
+
+/** The stamps a mixed-space `_warning` names: `current` and the sorted `found` list. */
+function namedStamps(warning: string | undefined): { current: string; found: string[] } | undefined {
+  const m = /\(current: ([^;]*); found: ([^)]*)\)/.exec(String(warning ?? ""));
+  return m ? { current: m[1], found: m[2].split(", ").filter(Boolean).sort() } : undefined;
+}
+
+async function waitFor(path: string, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (existsSync(path)) return;
+    if (existsSync(path)) return true;
     await new Promise((r) => setTimeout(r, 25));
   }
-  throw new Error(`timed out after ${timeoutMs}ms waiting for ${path}`);
+  return false;
 }
 
-beforeAll(async () => {
-  harper = await startHarper();
-  assertOwnInstance(harper);
-  basic = "Basic " + btoa(`${harper.admin.username}:${harper.admin.password}`);
-  const now = new Date().toISOString();
-  await adminOp({
-    operation: "insert", database: "flair", table: "Memory", records: [
-      { id: "m-current-1", agentId: "scan-order-agent", content: "current-space row", visibility: "shared", embeddingModel: CURRENT, createdAt: now, updatedAt: now },
-    ],
-  });
-}, 180_000);
-
-afterAll(async () => {
-  if (harper) {
-    const { rm } = await import("node:fs/promises");
-    const installDir = harper.installDir;
-    await stopHarper(harper);
-    await rm(installDir, { recursive: true, force: true, maxRetries: 4 }).catch(() => {});
-  }
-}, 30_000);
-
-describe("embedding-space-guard scan ordering against a live instance (flair#2508, real Harper)", () => {
-  test("an older scan finishing after a newer one refuses its verdict by name", async () => {
-    dir = mkdtempSync(join(tmpdir(), "flair-2508-"));
-    savedFault = process.env[TEST_FAULT_INJECTION_ENV];
-    savedPauseDir = process.env[TEST_PAUSE_DIR_ENV];
-    process.env[TEST_FAULT_INJECTION_ENV] = "1";
-    process.env[TEST_PAUSE_DIR_ENV] = dir;
+/** The release marker's text once written ("go" or "timeout"); null on timeout. */
+async function releaseText(path: string, timeoutMs: number): Promise<string | null> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
     try {
-      _resetGuardForTests();
-      _setGuardModelIdForTests(() => CURRENT);
-      // Drain the module-scope pre-warm with the default getter before arming.
-      await new Promise((r) => setTimeout(r, 50));
-      _resetGuardForTests();
-      _setGuardModelIdForTests(() => CURRENT);
-      _setGuardTableGetterForTests(realStoreGetter());
+      const text = readFileSync(path, "utf8");
+      if (text) return text;
+    } catch { /* not yet */ }
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  return null;
+}
 
-      // The OLDER scan reads the uniform corpus, then parks at the verdict pause.
-      writeFileSync(join(dir, `arm.${POINT}`), "");
-      const older = recomputeLatch();
-      await waitFor(join(dir, `paused.${POINT}`), 15_000);
+async function logShows(h: HarperInstance, needle: string, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if ((h.getLog?.() ?? "").includes(needle)) return true;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return false;
+}
 
-      // A foreign-stamp row lands in the instance; a NEWER scan publishes false.
-      const now = new Date().toISOString();
-      await adminOp({
-        operation: "insert", database: "flair", table: "Memory", records: [
-          { id: "m-foreign-1", agentId: "scan-order-agent", content: "foreign-space row", visibility: "shared", embeddingModel: FOREIGN, createdAt: now, updatedAt: now },
-        ],
-      });
-      const warn = spyOn(console, "warn").mockImplementation(() => {});
-      try {
-        const newer = recomputeLatch();
-        expect(await newer).toBe(false);
-
-        // Release the OLDER scan: it must not overwrite the newer verdict.
-        writeFileSync(join(dir, `go.${POINT}`), "");
-        expect(await older).toBe(false);
-        expect(await isEmbeddingSpaceUniform()).toBe(false);
-        expect(
-          warn.mock.calls.map((call) => call.join(" ")).some((line) => line.includes("stale scan verdict refused")),
-        ).toBe(true);
-      } finally {
-        warn.mockRestore();
-      }
+describe("the own-instance check (flair#2508)", () => {
+  test("an external Harper is refused before any insert", async () => {
+    // The shape startHarper returns in external mode (HARPER_HTTP_URL set). Its
+    // ports are loopback and non-production, so the port checks would pass;
+    // only the instance checks can refuse it.
+    const external: HarperInstance = {
+      httpURL: "http://127.0.0.1:41871",
+      opsURL: "http://127.0.0.1:41870",
+      installDir: "",
+      process: null,
+      admin: { username: "admin", password: "test123" },
+      external: true,
+      ownsInstallDir: false,
+      getLog: () => "",
+    };
+    const fetchSpy = spyOn(globalThis, "fetch");
+    try {
+      await expect(insertMemoryRows(external, [memoryRow("never-written", FOREIGN)])).rejects.toThrow(/refusing an external Harper/);
+      expect(fetchSpy).not.toHaveBeenCalled();
     } finally {
-      for (const [key, saved] of [[TEST_FAULT_INJECTION_ENV, savedFault], [TEST_PAUSE_DIR_ENV, savedPauseDir]] as const) {
-        if (saved === undefined) delete process.env[key];
-        else process.env[key] = saved;
-      }
-      rmSync(dir, { recursive: true, force: true });
+      fetchSpy.mockRestore();
     }
-  }, 60_000);
+  });
+});
+
+describe("embedding-space-guard scan ordering inside a real Harper worker (flair#2508)", () => {
+  let harper: HarperInstance | undefined;
+  let pauseDir = "";
+
+  beforeAll(async () => {
+    pauseDir = mkdtempSync(join(tmpdir(), "flair-2508-pause-"));
+    // Armed before Harper starts, so the first scan to reach the verdict pause
+    // parks there; step 3 of the case shows it is the boot pre-warm.
+    writeFileSync(join(pauseDir, `arm.${POINT}`), "");
+    const saved = { [TEST_FAULT_INJECTION_ENV]: process.env[TEST_FAULT_INJECTION_ENV], [TEST_PAUSE_DIR_ENV]: process.env[TEST_PAUSE_DIR_ENV] };
+    process.env[TEST_FAULT_INJECTION_ENV] = "1";
+    process.env[TEST_PAUSE_DIR_ENV] = pauseDir;
+    try {
+      harper = await startHarper();
+    } finally {
+      // The spawned Harper has its copy; no later Harper in this process inherits it.
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+    assertOwnInstance(harper);
+  }, 180_000);
+
+  afterAll(async () => {
+    if (pauseDir) writeFileSync(join(pauseDir, `go.${POINT}`), ""); // never leave a scan parked
+    if (harper) {
+      const { rm } = await import("node:fs/promises");
+      const installDir = harper.installDir;
+      await stopHarper(harper);
+      await rm(installDir, { recursive: true, force: true, maxRetries: 4 }).catch(() => {});
+    }
+    if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
+  }, 30_000);
+
+  test("a boot pre-warm that finishes after a consult scan refuses its verdict; the verdict comes from the resource read", async () => {
+    const h = harper!;
+    const released = join(pauseDir, `released.${POINT}`);
+    // 1. Barrier: a scan has read the corpus and parked.
+    expect(await waitFor(join(pauseDir, `paused.${POINT}`), 30_000), "no scan reached the verdict pause (the boot pre-warm should have)").toBe(true);
+    expect(readFileSync(released, "utf8"), "the parked scan's pause ended before the test reached it").toBe("");
+
+    let during: string | undefined;
+    try {
+      // 2. The store holds no row yet; it becomes mixed: a current-space row,
+      //    then a foreign-space row.
+      expect(await memoryRowIds(h)).toEqual([]);
+      await insertMemoryRows(h, [memoryRow("m-current-1", CURRENT)]);
+      await insertMemoryRows(h, [memoryRow("m-foreign-1", FOREIGN)]);
+
+      // 3. The consult scan starts later, reads both stamps and publishes first;
+      //    the parked scan is still parked when the recall returns.
+      during = await recallWarning(h);
+      expect(readFileSync(released, "utf8"), "the parked scan resumed before the consult scan published").toBe("");
+    } finally {
+      writeFileSync(join(pauseDir, `go.${POINT}`), "");
+    }
+    expect(String(during), "the consult scan did not report the mixed store").toContain("mixed embedding spaces");
+    expect(namedStamps(during)).toEqual({ current: CURRENT, found: [CURRENT, FOREIGN].sort() });
+
+    // 4. The pre-warm resumes, released by this test rather than its time limit.
+    //    Its older verdict does not replace the newer one, and its refusal is named.
+    expect(await releaseText(released, 30_000), "the pre-warm's pause ended by its time limit").toBe("go");
+    const after = await recallWarning(h);
+    expect(String(after), "the older verdict overwrote the newer one").toContain("mixed embedding spaces");
+    expect(namedStamps(after)).toEqual({ current: CURRENT, found: [CURRENT, FOREIGN].sort() });
+    expect(await logShows(h, "stale scan verdict refused", 15_000), "no refusal in the Harper log").toBe(true);
+  }, 120_000);
 });
