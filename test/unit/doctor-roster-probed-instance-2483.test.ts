@@ -4,10 +4,11 @@
  *
  * `resolveDoctorRosterTarget` PICKS the candidate ops endpoint with the pairing
  * rule `flair agent stamp-home` uses (flair#2474/#2491, `resolveAgentHomeTarget`):
- * the pair the addressed instance's config records binds the ops port to the
- * probed HTTP port. That rule works from config and named ports and DELIBERATELY
- * trusts two ports the caller names, so doctor checks the candidate before
- * either read:
+ * the local configured pair (the data directory's Harper config, or the
+ * per-user config) guides which ops port pairs with the probed HTTP port. That
+ * rule works from local config and named ports and DELIBERATELY trusts two
+ * ports the caller names, so doctor then checks the candidate's own
+ * configuration separately, before either read:
  *   - `proveLocalInstancePair` (src/lib/local-instance-pair.ts, shared with the
  *     local delete paths) asks the candidate ops endpoint for its configuration
  *     and requires it to record that ops port and an HTTP port bound on
@@ -175,7 +176,7 @@ function configure(config: unknown): void {
 
 const AUTH = "Basic " + Buffer.from("admin:not-a-secret").toString("base64");
 
-describe("proveLocalInstancePair — the ops endpoint's own configuration must pair it with an HTTP port reachable on loopback", () => {
+describe("proveLocalInstancePair — the ops endpoint's own configuration must pair it with an HTTP port configured to bind on loopback or all interfaces", () => {
   test("a configuration recording the asked ops port and a loopback HTTP port is proven, with that HTTP port", async () => {
     configure({ http: { port: "127.0.0.1:7926" }, operationsApi: { network: { port: `127.0.0.1:${serverPort}` } } });
     expect(await proveLocalInstancePair(serverPort, AUTH)).toEqual({ kind: "proven", httpPort: 7926 });
