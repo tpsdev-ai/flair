@@ -5,4 +5,5 @@
   them maps it, the resolver refuses the call by name, with the credential, its
   stored state and the remedy. JIT provisioning runs only when no row matches the
   subject, so a revoked mapping stays revoked and its row is left unchanged. The
-  linker treats such a row as not a mapping. XAA's behaviour is unchanged.
+  linker treats such a row as not a mapping.
+  XAA's jwt-bearer grant refuses, by name, an active credential that names no principal, and issues no grant.

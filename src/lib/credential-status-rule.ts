@@ -17,12 +17,10 @@
  *
  * The rule is an ALLOWLIST: a credential is usable only when its `status` is
  * exactly `"active"`. Missing, empty, `"revoked"` and any other value are not
- * usable. XAA applies this status test (`isUsableCredential`). The resolver
- * and the linker apply `credentialMapsPrincipal`: the row must also name a
- * principal, a non-empty string `principalId`. The schema requires
+ * usable. All three sites apply `credentialMapsPrincipal`: the row must also
+ * name a principal, a non-empty string `principalId`. The schema requires
  * `principalId` and Harper refuses a write that omits it, but it stores an
- * empty string, and neither site relies on the schema to exclude a row
- * without one.
+ * empty string, and no site relies on the schema to exclude a row without one.
  *
  * Deliberately dependency-free (it imports nothing): the resource/CLI boundary
  * guard (test/unit/resource-src-purity-1775.test.ts) requires every src/ module
@@ -44,8 +42,8 @@ export function isUsableCredential(cred: { status?: unknown } | null | undefined
 
 /**
  * The principal `cred` names: its `principalId` when that is a non-empty
- * string, otherwise null. The resolver and the linker both decide "names no
- * principal" with this one test.
+ * string, otherwise null. The resolver, the linker and XAA all decide "names
+ * no principal" with this one test.
  */
 export function credentialPrincipalId(cred: { principalId?: unknown } | null | undefined): string | null {
   const principalId = cred?.principalId;
