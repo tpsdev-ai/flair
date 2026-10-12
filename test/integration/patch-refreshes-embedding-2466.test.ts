@@ -1,18 +1,20 @@
 /**
  * patch-refreshes-embedding-2466.test.ts — a PATCH that changes the text a
- * memory's embedding is computed from, and supplies no vector, refreshes the
- * embedding (flair#2466), real Harper.
+ * memory's embedding is computed from, and has no vector of its own to store,
+ * refreshes the embedding (flair#2466), real Harper.
  *
  * Memory.patch() merges the write body into the stored row. Before this fix a
  * PATCH that changed `content` without supplying a vector left the stored
  * vector — the one computed from the EARLIER text — in place, so a redacted or
  * edited memory still matched searches for the text it no longer held. A PATCH
- * that supplies no vector now computes one from the patched row's effective
- * embedding text (resources/skill-write.ts, embedTextField/skillEmbedText) when
- * that text changed and the body carries it, the way Memory.put() embeds a
- * write that carries no vector. Skill rows are refused on PATCH before this
- * branch, so every row here embeds from `content`; a `trigger` edit never
- * changes it.
+ * now computes a vector when its write changes the row's effective embedding
+ * text (resources/skill-write.ts, embedTextField/skillEmbedText), from that
+ * text as its body carries it, and only when it has no vector of its own to
+ * store (none supplied, or the supplied one removed by redaction), the way
+ * Memory.put() embeds a write that carries no vector. The decision is made
+ * against the row the PATCH read and again against the committed row just
+ * before its write. Skill rows are refused on PATCH before this branch, so
+ * every row here embeds from `content`; a `trigger` edit never changes it.
  *
  * Cases (one Harper with a working embedding engine):
  *   (a) a redacting PATCH of `content` with no vector stores the vector of the
@@ -28,23 +30,32 @@
  *       EDITED text, never one for the earlier content;
  *   (g) the same overlap with a `content` PATCH ends with the row's text and
  *       vector both from that PATCH — the vector it stores is for the text it
- *       stores.
- * And (h), on a second Harper whose embedding backend fails (its model file is
- * absent, so getEmbedding returns null): a text-changing PATCH of a row with a
- * stored, searchable vector clears `embedding`/`embeddingModel`, semantic search
- * no longer scores the row by the old vector, and the null stamp is selected
- * by the embedding-stamp re-embed's pending condition.
+ *       stores;
+ *   (i) a PATCH carrying the unchanged `content`, a credential in `trigger` and
+ *       a supplied vector (which redaction removes) keeps the stored vector,
+ *       `embeddingModel` and `updatedAt`;
+ *   (k) the overlap of (f) with a PATCH whose `content` equals the text it read
+ *       (plain, and as in (i)) ends with that text and its vector, never the
+ *       edit's vector next to the PATCH's text.
+ * On a second Harper whose embedding backend fails (its model file is absent,
+ * so getEmbedding returns null):
+ *   (h) a text-changing PATCH of a row with a stored, searchable vector clears
+ *       `embedding`/`embeddingModel`, semantic search no longer scores the row
+ *       by the old vector, and the null stamp is selected by the embedding-stamp
+ *       re-embed's pending condition;
+ *   (j) the PATCH of (i) keeps the valid stored vector, its stamp and
+ *       `updatedAt` (the engine is never asked).
  *
- * (f) and (g) use the test-only pauses (resources/txn-pause-point.ts, enabled by
- * FLAIR_ENABLE_TEST_FAULT_INJECTION and FLAIR_TEST_PAUSE_DIR, set in this
- * process's environment while this file starts its Harper, then restored):
+ * (f), (g) and (k) use the test-only pauses (resources/txn-pause-point.ts,
+ * enabled by FLAIR_ENABLE_TEST_FAULT_INJECTION and FLAIR_TEST_PAUSE_DIR, set in
+ * this process's environment while this file starts its Harper, then restored):
  * `memory-put` holds the editing PUT (sent as the administrator) after its first
  * read and its embed and before its write, so its transaction opens FIRST;
  * `memory-patch` holds the PATCH after its stored-row read (which sees the
- * pre-edit text) and any embed, before its write. The PUT is released and
- * commits, then the PATCH. The PATCH's transaction opened after the PUT's, so
- * Harper orders its write after the edit — the ordering flair#2465's
- * deterministic case relies on.
+ * pre-edit text) and any embed, before it confirms the committed row and
+ * writes. The PUT is released and commits, then the PATCH. The PATCH's
+ * transaction opened after the PUT's, so Harper orders its write after the
+ * edit — the ordering flair#2465's deterministic case relies on.
  *
  * Throwaway HOME + data dir, ephemeral ports. Each spawned Harper is this test's
  * own instance; see assertOwnInstance.
@@ -402,6 +413,51 @@ describe("flair#2466 — a text-changing PATCH refreshes the embedding (real Har
     expect(cosine(row.embedding, await serverEmbedding(PATCHED)), "the stored vector is not the stored text's")
       .toBeGreaterThan(0.9999);
   }, 180_000);
+
+  it("(i) a PATCH carrying the unchanged content, a credential in trigger and a vector keeps the stored vector and its stamps", async () => {
+    // Redaction removes the supplied vector (the trigger changed), but the row's
+    // embedding text — its content — does not change, so nothing is computed.
+    const id = "pre-case-i";
+    const TEXT = "an ordinary note echoed unchanged by a PATCH that edits its trigger";
+    await seedRow(id, TEXT, { updatedAt: "2026-01-01T00:00:00.000Z" });
+    const res = await patch(id, { content: TEXT, trigger: `when ${SLACK_TOKEN} expires`, embedding: SUPPLIED, embeddingModel: "client-model" });
+    expect(res.status, await res.clone().text()).toBeLessThan(300);
+
+    const row = await readRow(id);
+    expect(row.content).toBe(TEXT);
+    expect(row.trigger, "the trigger was not redacted").toBe(`when ${REDACTED} expires`);
+    expect(row.embedding, "an unchanged-text PATCH replaced the stored vector").toEqual(STALE_EMBEDDING);
+    expect(row.embeddingModel, "an unchanged-text PATCH re-stamped the model").toBe(SEED_MODEL_ID);
+    expect(row.updatedAt, "an unchanged-text PATCH re-stamped updatedAt").toBe("2026-01-01T00:00:00.000Z");
+  }, 120_000);
+
+  it("(k) an edit committed while a PATCH carrying the read-time text is held ends with the PATCH's text and its vector", async () => {
+    // The PATCH's content equals the text it read, and differs from the text
+    // the edit commits before the PATCH writes; the row must not end with the
+    // edit's vector next to the PATCH's text. Plain, and with a credential in
+    // trigger and a supplied vector that redaction removes.
+    const bodies: Array<[string, (text: string) => Record<string, unknown>]> = [
+      ["pre-case-k-plain", (text) => ({ content: text })],
+      ["pre-case-k-redacted", (text) => ({ content: text, trigger: `when ${SLACK_TOKEN} expires`, embedding: SUPPLIED, embeddingModel: "client-model" })],
+    ];
+    const READ = "the text both reads see: a field guide to tidal pools";
+    const EDITED = "the edit's text: scheduling cron jobs across time zones";
+    const readVector = await serverEmbedding(READ);
+    for (const [id, bodyFor] of bodies) {
+      await seedRow(id, READ, { embedding: readVector, embeddingModel: CURRENT_MODEL_ID });
+      const run = await overlapEditWithPatch(id, EDITED, bodyFor(READ));
+      expect(run.putPaused && run.patchPaused, `${id}: pauses reached: put=${run.putPaused} patch=${run.patchPaused}`).toBe(true);
+      expect(run.putEnded, `${id}: the PUT's pause ended by timeout, not by this test`).toBe("go");
+      expect(run.patchEnded, `${id}: the PATCH's pause ended by timeout, not by this test`).toBe("go");
+      expect(run.put?.status, await run.put?.clone().text()).toBe(200);
+      expect(run.patched?.status, await run.patched?.clone().text()).toBeLessThan(300);
+
+      const row = await readRow(id);
+      expect(row.content, `${id}: the newer PATCH's text was not stored`).toBe(READ);
+      expect(cosine(row.embedding, readVector), `${id}: the row's vector is not the stored text's`).toBeGreaterThan(0.9999);
+      expect(row.embeddingModel).toBe(CURRENT_MODEL_ID);
+    }
+  }, 180_000);
 });
 
 describe("flair#2466 — when the embedding engine returns no vector, the PATCH clears the vector (real Harper, failing backend)", () => {
@@ -454,4 +510,20 @@ describe("flair#2466 — when the embedding engine returns no vector, the PATCH 
     const pendingIds = (Array.isArray(pending) ? pending : pending?.results ?? []).map((r: any) => r.id);
     expect(pendingIds, "the null stamp is not selected by the re-embed's pending condition").toContain(id);
   }, 180_000);
+
+  it("(j) a PATCH carrying the unchanged content, a credential in trigger and a vector keeps a valid stored vector", async () => {
+    const t = failing!;
+    const id = "pre-case-j";
+    const TEXT = "a note whose text a PATCH echoes while the engine is down";
+    const STORED = Array.from({ length: DIM }, (_, i) => (i === 11 ? 1 : 0));
+    await seedRow(id, TEXT, { embedding: STORED, embeddingModel: CURRENT_MODEL_ID, updatedAt: "2026-01-01T00:00:00.000Z" }, t);
+    const res = await patch(id, { content: TEXT, trigger: `when ${SLACK_TOKEN} expires`, embedding: SUPPLIED, embeddingModel: "client-model" }, t);
+    expect(res.status, await res.clone().text()).toBeLessThan(300);
+
+    const row = await readRow(id, t);
+    expect(row.trigger, "the trigger was not redacted").toBe(`when ${REDACTED} expires`);
+    expect(row.embedding, "an unchanged-text PATCH cleared or replaced the stored vector").toEqual(STORED);
+    expect(row.embeddingModel, "an unchanged-text PATCH changed the model stamp").toBe(CURRENT_MODEL_ID);
+    expect(row.updatedAt, "an unchanged-text PATCH re-stamped updatedAt").toBe("2026-01-01T00:00:00.000Z");
+  }, 120_000);
 });

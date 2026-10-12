@@ -8,13 +8,15 @@
  * backend failure, is test/integration/patch-refreshes-embedding-2466.test.ts.
  *
  * A PATCH that changes the row's effective embedding text (`content` for every
- * row that reaches this branch: skill rows are refused on PATCH first) and
- * supplies no vector recomputes the vector from that text, the way put() embeds
- * a write with no vector. A `trigger`-only PATCH of an ordinary row does not
- * change that text and computes nothing, with or without a supplied vector that
- * redaction removes. When the engine returns no vector the PATCH writes
- * embedding/embeddingModel as null instead of keeping the earlier text's vector.
- * This file owns its harper + embeddings mock in its own process
+ * row that reaches this branch: skill rows are refused on PATCH first) and has
+ * no vector of its own to store recomputes the vector from that text, the way
+ * put() embeds a write with no vector. A PATCH that leaves that text unchanged
+ * or absent computes nothing and keeps the stored vector — a `trigger`-only
+ * PATCH, with or without a supplied vector that redaction removes, and one that
+ * echoes the unchanged `content` beside a redacted `trigger` and a supplied
+ * vector. When the engine returns no vector for a changed text the PATCH writes
+ * embedding/embeddingModel as null instead of keeping the earlier text's
+ * vector. This file owns its harper + embeddings mock in its own process
  * (test/unit-isolated/).
  */
 import { describe, it, expect, beforeEach, mock } from "bun:test";
@@ -297,6 +299,20 @@ describe("flair#2466 — a text-changing PATCH refreshes the embedding", () => {
     expect(stored.trigger).toBe(`when ${REDACTED} expires`);
     expect(stored.embedding).toEqual([0.01, 0.02, 0.03]);
     expect(stored.embeddingModel).toBe("old-model");
+    expect(embedInputs).toEqual([]);
+  });
+
+  it("a PATCH carrying the unchanged content, a credential in trigger and a vector keeps the stored vector and embeds nothing", async () => {
+    seed("mem-7", "an ordinary note echoed unchanged");
+    embedImpl = () => null; // a failing engine must not be consulted at all
+    const m = memoryFor("mem-7");
+    await m.patch({ content: "an ordinary note echoed unchanged", trigger: `when ${SLACK_TOKEN} expires`, embedding: [0.5, 0.25, 0.125], embeddingModel: "client-model" });
+
+    const stored = await (BaseMemory as any).get("mem-7");
+    expect(stored.trigger).toBe(`when ${REDACTED} expires`);
+    expect(stored.embedding).toEqual([0.01, 0.02, 0.03]);
+    expect(stored.embeddingModel).toBe("old-model");
+    expect(stored.updatedAt).toBeUndefined();
     expect(embedInputs).toEqual([]);
   });
 

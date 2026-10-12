@@ -56,9 +56,10 @@ export interface MemoryWriteRedaction {
 }
 
 /** The redacted fields an embedding can be computed from, across row kinds:
- *  `content`, and `trigger` for a skill-tagged row only (MEMORY_EMBEDDING_INPUT_FIELDS,
- *  next to embedTextField/skillEmbedText in resources/skill-write.ts). Redaction
- *  sees the write body, not the stored row's kind, so it uses the whole set. */
+ *  `trigger` for a skill-tagged row with a non-empty trigger, `content` for every
+ *  other row (MEMORY_EMBEDDING_INPUT_FIELDS, next to embedTextField/skillEmbedText
+ *  in resources/skill-write.ts). Redaction sees the write body, not the stored
+ *  row's kind, so it uses the whole set. */
 const EMBEDDING_SOURCE_FIELDS: ReadonlySet<string> = new Set(MEMORY_EMBEDDING_INPUT_FIELDS);
 
 /**

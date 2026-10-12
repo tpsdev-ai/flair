@@ -46,18 +46,20 @@ export function isSkillWrite(content: any): boolean {
 
 /**
  * Every field a Memory embedding can be computed from, across row kinds:
- * `content` for every row, and `trigger` for a skill-tagged row only (see
- * embedTextField). A check that sees only a write body and not the row kind
- * (resources/memory-redaction.ts) uses this whole set; a check that has the row
- * uses embedTextField(row), the one field THAT row embeds from.
+ * `trigger` for a skill-tagged row whose trigger is a non-empty string, and
+ * `content` for every other row — including a skill-tagged row whose trigger is
+ * empty or absent (see embedTextField). A check that sees only a write body and
+ * not the row kind (resources/memory-redaction.ts) uses this whole set; a check
+ * that has the row uses embedTextField(row), the one field THAT row embeds from.
  */
 export const MEMORY_EMBEDDING_INPUT_FIELDS = Object.freeze(["content", "trigger"] as const);
 export type MemoryEmbeddingInputField = (typeof MEMORY_EMBEDDING_INPUT_FIELDS)[number];
 
 /**
- * The field a row embeds from. Skill-tagged rows with a non-empty `trigger`
- * embed from `trigger` (the recall signal); every other row — including every
- * non-skill row, whatever its `trigger` — embeds from `content`.
+ * The field a row embeds from. A skill-tagged row with a non-empty string
+ * `trigger` embeds from `trigger` (the recall signal); every other row embeds
+ * from `content` — a non-skill row whatever its `trigger`, and a skill-tagged
+ * row whose trigger is empty or absent.
  */
 export function embedTextField(row: any): MemoryEmbeddingInputField {
   return isSkillWrite(row) && typeof row.trigger === "string" && row.trigger.length > 0 ? "trigger" : "content";
