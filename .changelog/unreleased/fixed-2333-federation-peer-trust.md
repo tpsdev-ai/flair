@@ -20,3 +20,9 @@
   supplies NO token still proceeds; it re-reads the peer row inside a fresh owned
   transaction before writing, so a row revoked or deleted before that read is
   refused (403 peer_revoked, or 401 when the row is gone) rather than overwritten.
+  Both re-pair paths also compare the re-read row's pinned public key with the
+  signed request's key: a key that differs is refused (409) and the re-pair writes
+  no peer row and consumes no token. A re-pair that supplies a valid token and
+  whose peer row was deleted before the re-read is paired as a first-time pair:
+  the row is built from the request as a first pair builds it, keeping no field
+  of the deleted row.

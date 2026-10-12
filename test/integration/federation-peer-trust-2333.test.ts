@@ -3,7 +3,8 @@
 // pause points:
 //   H1 `POST /FederationPair` pairing-token consume: one token, two pairings.
 //   H2 `POST /FederationSync` peer status: a revoke that commits during the sync.
-//   H3 `POST /FederationPair` re-pair: a peer revoked before, or during, the re-pair.
+//   H3 `POST /FederationPair` re-pair: a peer revoked before, or during, the re-pair;
+//      a pinned key changed, or a row deleted, during the re-pair.
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -89,6 +90,20 @@ async function deletePeer(id: string): Promise<{ status: number; row: any }> {
   return { status: res.status, row: await readPeer(id) };
 }
 
+/** The competing operation's own RESULT — its HTTP status AND the peer row it left. */
+async function updatePeer(id: string, fields: Record<string, unknown>): Promise<{ status: number; row: any }> {
+  const res = await fetch(harper.opsURL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: opsAuth() },
+    body: JSON.stringify({
+      operation: "update", database: "flair", table: "Peer",
+      records: [{ id, ...fields, updatedAt: now() }],
+    }),
+    signal: AbortSignal.timeout(30_000),
+  });
+  return { status: res.status, row: await readPeer(id) };
+}
+
 async function seedToken(token: string): Promise<void> {
   await ops({
     operation: "insert", database: "flair", table: "PairingToken",
@@ -118,7 +133,7 @@ function pairRequest(body: Record<string, unknown>): Promise<Response> {
   });
 }
 
-/** A pairing request carrying a Basic credential (the token's bootstrap user), under a chosen scheme spelling. */
+/** A pairing request carrying a Basic credential for `user`, under a chosen scheme spelling. */
 function pairRequestBasic(body: Record<string, unknown>, user: string, pass: string, scheme = "Basic"): Promise<Response> {
   return fetch(`${harper.httpURL}/FederationPair`, {
     method: "POST",
@@ -652,4 +667,200 @@ describe("flair#2333 — a re-pair re-reads the Peer row inside its owned transa
     expect((await readPeer(peer))?.status, "the concurrent revoke is kept").toBe("revoked");
     expect((await readToken(token))?.consumedBy, "the refused re-pair consumed no token").toBeFalsy();
   }, 60_000);
+});
+
+// ─── A re-pair rechecks the pinned key inside its owned transaction (flair#2333) ─
+//
+// The request's signature is verified against the key it SUBMITS, and the key
+// comparison first runs on the pre-transaction Peer read. Both re-pair paths
+// re-read the row inside their owned transaction before writing; that re-read
+// must compare the row's CURRENT pinned key with the submitted key too, so a key
+// changed between the two reads is refused (409, the initial key-mismatch refusal)
+// and no Peer row is written. On the token path the refusal aborts the owned
+// transaction, so the staged consume rolls back and the token stays unconsumed.
+// Mutation — drop the current-key comparison on a path — turns that path's case red.
+
+describe("flair#2333 — a re-pair rechecks the pinned key inside its owned transaction (real Harper)", () => {
+  const KEY_MISMATCH = "public key mismatch — peer already paired with different key";
+
+  it("no token: a pinned key changed during the pause is refused 409, the row is left as the change wrote it (federation-pair-repair-pre)", async () => {
+    const k = nacl.sign.keyPair();
+    const other = nacl.sign.keyPair();
+    const peer = `key-notok-${sfx}`;
+    const pub = b64url(k.publicKey);
+    await seedPeer(peer, pub);
+    const { response, competed, released, paused } = await withPaused(
+      "federation-pair-repair-pre",
+      () => pairRequest(pairBody(peer, pub, k.secretKey)),
+      () => updatePeer(peer, { publicKey: b64url(other.publicKey) }),
+    );
+    expect(paused, "the re-pair was not paused").toBe(true);
+    expect(released, "the re-pair was not released by this test").toBe("go");
+    expect(competed?.status, "the competing key change was not applied").toBe(200);
+    expect(competed?.row?.publicKey, "the competing change's own row pins the other key").toBe(b64url(other.publicKey));
+    const resBody = await response.json() as any;
+    console.log("key-change no-token re-pair body:", JSON.stringify(resBody));
+    expect(response.status, JSON.stringify(resBody)).toBe(409);
+    expect(resBody.error).toBe(KEY_MISMATCH);
+    expect(await readPeer(peer), "the full Peer row is the one the key change left").toEqual(competed?.row);
+  }, 60_000);
+
+  it("with a token: a pinned key changed during the pause is refused 409, the row is left as the change wrote it, the token unconsumed (federation-pair-repair-token-pre)", async () => {
+    const k = nacl.sign.keyPair();
+    const other = nacl.sign.keyPair();
+    const peer = `key-tok-${sfx}`;
+    const pub = b64url(k.publicKey);
+    await seedPeer(peer, pub);
+    const token = `pt-key-tok-${sfx}`;
+    await seedToken(token);
+    const tokenBefore = await readToken(token);
+    expect(tokenBefore?.consumedBy, "the pairing token starts unconsumed").toBeFalsy();
+    const { response, competed, released, paused } = await withPaused(
+      "federation-pair-repair-token-pre",
+      () => pairRequest(pairBody(peer, pub, k.secretKey, token)),
+      () => updatePeer(peer, { publicKey: b64url(other.publicKey) }),
+    );
+    expect(paused, "the re-pair was not paused before its owned transaction").toBe(true);
+    expect(released, "the re-pair was not released by this test").toBe("go");
+    expect(competed?.status, "the competing key change was not applied").toBe(200);
+    expect(competed?.row?.publicKey, "the competing change's own row pins the other key").toBe(b64url(other.publicKey));
+    const resBody = await response.json() as any;
+    console.log("key-change token re-pair body:", JSON.stringify(resBody));
+    expect(response.status, JSON.stringify(resBody)).toBe(409);
+    expect(resBody.error).toBe(KEY_MISMATCH);
+    expect(await readPeer(peer), "the full Peer row is the one the key change left").toEqual(competed?.row);
+    expect(await readToken(token), "the full PairingToken row is unchanged (unconsumed)").toEqual(tokenBefore);
+  }, 60_000);
+
+  it("CONTROL, no token: a same-key change during the pause does not refuse; the re-pair writes from the current row (federation-pair-repair-pre)", async () => {
+    const k = nacl.sign.keyPair();
+    const peer = `key-same-notok-${sfx}`;
+    const pub = b64url(k.publicKey);
+    await seedPeer(peer, pub);
+    const moved = "https://moved.example/flair";
+    const { response, competed, paused } = await withPaused(
+      "federation-pair-repair-pre",
+      () => pairRequest(pairBody(peer, pub, k.secretKey)),
+      () => updatePeer(peer, { endpoint: moved }),
+    );
+    expect(paused, "the re-pair was not paused").toBe(true);
+    expect(competed?.row?.endpoint, "the competing change was applied").toBe(moved);
+    const resBody = await response.json() as any;
+    expect(response.status, JSON.stringify(resBody)).toBe(200);
+    expect(resBody.paired).toBe(true);
+    const row = await readPeer(peer);
+    expect(row?.status).toBe("paired");
+    expect(row?.publicKey).toBe(pub);
+    expect(row?.endpoint, "the write is built from the current row").toBe(moved);
+  }, 60_000);
+
+  it("CONTROL, with a token: a same-key change during the pause does not refuse; the token is consumed (federation-pair-repair-token-pre)", async () => {
+    const k = nacl.sign.keyPair();
+    const peer = `key-same-tok-${sfx}`;
+    const pub = b64url(k.publicKey);
+    await seedPeer(peer, pub);
+    const token = `pt-key-same-${sfx}`;
+    await seedToken(token);
+    const moved = "https://moved.example/flair";
+    const { response, competed, paused } = await withPaused(
+      "federation-pair-repair-token-pre",
+      () => pairRequest(pairBody(peer, pub, k.secretKey, token)),
+      () => updatePeer(peer, { endpoint: moved }),
+    );
+    expect(paused, "the re-pair was not paused before its owned transaction").toBe(true);
+    expect(competed?.row?.endpoint, "the competing change was applied").toBe(moved);
+    const resBody = await response.json() as any;
+    expect(response.status, JSON.stringify(resBody)).toBe(200);
+    expect(resBody.paired).toBe(true);
+    const row = await readPeer(peer);
+    expect(row?.status).toBe("paired");
+    expect(row?.publicKey).toBe(pub);
+    expect(row?.endpoint, "the write is built from the current row").toBe(moved);
+    expect((await readToken(token))?.consumedBy, "the re-pair consumed the token").toBe(peer);
+  }, 60_000);
+});
+
+// ─── A token re-pair whose row was deleted pairs as a first pair (flair#2333) ───
+//
+// When the Peer row is gone by the time the token path's owned transaction
+// re-reads it, the request is no longer a re-pair: with a valid token it is paired
+// exactly as a first-time pair with that token — the row is built from the
+// verified request the way the first-pair path builds it (no field of the deleted
+// row survives) and the token's bootstrap user is dropped. Mutation — write the
+// deleted row's pre-transaction fields back — turns this case red.
+
+describe("flair#2333 — a token re-pair whose Peer row was deleted pairs as a first-time pair (real Harper)", () => {
+  /** Every non-identity, non-timestamp Peer field (schemas/federation.graphql), absent read as null. */
+  const SHAPE_FIELDS = ["role", "endpoint", "status", "relayOnly", "lastSyncAt", "lastMergeAt", "lastSyncCursor"];
+  function firstPairShape(row: any) {
+    return Object.fromEntries(SHAPE_FIELDS.map((k) => [k, row?.[k] ?? null]));
+  }
+  /** The row's fields that hold a value, Harper's own `__` attributes aside. */
+  function setFields(row: any): string[] {
+    return Object.keys(row ?? {}).filter((k) => !k.startsWith("__") && row[k] != null).sort();
+  }
+
+  it("a delete committed during the pause: the token pairs the peer with a fresh first-pair row and drops its bootstrap user (federation-pair-repair-token-pre)", async () => {
+    await ensureFlairPairInitiatorRole(harper.opsURL, harper.admin.username, harper.admin.password);
+    const k = nacl.sign.keyPair();
+    const peer = `del-tok-${sfx}`;
+    const pub = b64url(k.publicKey);
+    const stale = "2020-01-01T00:00:00.000Z";
+    // A row with fields a first pair never writes, so any survivor is visible.
+    await ops({
+      operation: "insert", database: "flair", table: "Peer",
+      records: [{
+        id: peer, publicKey: pub, role: "hub", endpoint: "https://stale.example/flair", status: "connected",
+        relayOnly: true, lastSyncAt: stale, lastMergeAt: stale, lastSyncCursor: "42",
+        pairedAt: stale, createdAt: stale, updatedAt: stale,
+      }],
+    });
+    const token = `ptdelrow-${sfx}`;
+    await seedToken(token);
+    const bootstrapUser = `pair-bootstrap-${token.slice(0, 8)}`;
+    await ops({ operation: "add_user", username: bootstrapUser, password: "del-row-pass", role: "flair_pair_initiator", active: true });
+    const startedAt = Date.now();
+
+    const { response, competed, released, paused } = await withPaused(
+      "federation-pair-repair-token-pre",
+      () => pairRequest(pairBody(peer, pub, k.secretKey, token)),
+      () => deletePeer(peer),
+    );
+    expect(paused, "the re-pair was not paused before its owned transaction").toBe(true);
+    expect(released, "the re-pair was not released by this test").toBe("go");
+    expect(competed?.status, "the competing delete was not applied").toBe(200);
+    expect(competed?.row, "the competing delete removed the row").toBeNull();
+    const resBody = await response.json() as any;
+    console.log("deleted-row token re-pair body:", JSON.stringify(resBody));
+    expect(response.status, JSON.stringify(resBody)).toBe(200);
+    expect(resBody.paired).toBe(true);
+    expect((await readToken(token))?.consumedBy, "the token records the peer it paired").toBe(peer);
+
+    // The row is the one a first pair builds from this request — nothing of the deleted row.
+    const row = await readPeer(peer);
+    expect(row?.id).toBe(peer);
+    expect(row?.publicKey).toBe(pub);
+    expect(firstPairShape(row)).toEqual({
+      role: "spoke", endpoint: null, status: "paired", relayOnly: false,
+      lastSyncAt: null, lastMergeAt: null, lastSyncCursor: null,
+    });
+    expect(row?.pairedAt).toBe(row?.createdAt);
+    expect(row?.updatedAt).toBe(row?.createdAt);
+    expect(Date.parse(row?.createdAt), "createdAt is this pairing's, not the deleted row's").toBeGreaterThanOrEqual(startedAt - 1_000);
+
+    // The same shape a plain first pair writes (control, same Harper).
+    const k2 = nacl.sign.keyPair();
+    const peer2 = `del-tok-first-${sfx}`;
+    const token2 = `pt-del-first-${sfx}`;
+    await seedToken(token2);
+    const first = await pairRequest(pairBody(peer2, b64url(k2.publicKey), k2.secretKey, token2));
+    expect(first.status, JSON.stringify(await first.clone().json())).toBe(200);
+    const firstRow = await readPeer(peer2);
+    expect(firstPairShape(row), "the row matches a plain first pair's").toEqual(firstPairShape(firstRow));
+    expect(setFields(row), "the row sets exactly the fields a plain first pair sets").toEqual(setFields(firstRow));
+
+    // The token's bootstrap user is dropped, as a first pair drops it.
+    const users = await ops({ operation: "list_users" }) as any[];
+    expect(users.map((u) => u.username), "the token's bootstrap user is dropped").not.toContain(bootstrapUser);
+  }, 90_000);
 });
