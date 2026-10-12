@@ -136,6 +136,29 @@ export async function localInstanceId(): Promise<string | null> {
 }
 
 /**
+ * This instance's canonical id from the `Instance` table AS IT IS NOW: a fresh
+ * read on every call, through the same strict reader and the same shared rule as
+ * {@link localInstanceId}, but never answered from that function's cache and
+ * never written into it (flair#2472).
+ *
+ * For a guard that must refuse when the table no longer holds exactly one
+ * Instance row. `localInstanceId()` keeps a successful id for the process
+ * lifetime, so after that row is removed, or a second row is added, it still
+ * answers the old id. This returns null when the read finds no row, several
+ * rows, or fails.
+ */
+export async function currentInstanceId(): Promise<string | null> {
+  let rows;
+  try {
+    rows = await readAllInstanceRows();
+  } catch {
+    return null;
+  }
+  const decision = decideInstanceAnswer(rows);
+  return decision.kind === "answer" ? decision.row.id : null;
+}
+
+/**
  * Test-only: force re-resolution on the next localInstanceId() call. The
  * module-level cache otherwise persists across test files that share the
  * same `bun test` process (same collision class documented in

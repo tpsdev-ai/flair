@@ -279,13 +279,16 @@ export function register(program: Command): void {
         console.error(`Error: ${invalidAgentIdMessage(id)}`);
         process.exit(1);
       }
-      // flair#2474 — the ops port and the HTTP port must address the SAME
-      // instance. `principal add` reads the stored home through the ops API and
-      // sends its guarded write-back to the Agent RESOURCE on the HTTP port;
-      // resolving the two INDEPENDENTLY would let `--ops-port` name one instance
-      // and `--port` another, so the home is read from the first and written to
-      // the second. The instance's own config pairs them; a disagreement is
-      // refused by name BEFORE any key file is written or any insert attempted.
+      // flair#2474 — pair the ops port and the HTTP port. `principal add` reads
+      // the stored home through the ops API and sends its guarded write-back to
+      // the Agent RESOURCE on the HTTP port; resolving the two INDEPENDENTLY
+      // would let `--ops-port` name one instance and `--port` another, so the
+      // home is read from the first and written to the second. A target the
+      // configured pair contradicts, or one with a single port named and no
+      // complete configured pair, is refused by name (`ambiguous_instance_target`)
+      // BEFORE any key file is written or any insert attempted. Two named ports
+      // that match neither side of the configured pair are used as given, without
+      // verification (see resolveAgentHomeTarget).
       let target: { httpPort: number; opsPort: number };
       try {
         target = resolveAgentHomeTarget(opts);
@@ -349,12 +352,13 @@ export function register(program: Command): void {
       // instance's federation id, resolved through the one shared rule, and it
       // rides on the `insert` itself — so a row created at write time carries it,
       // even one deleted since this read. That assignment is CREATE-ONLY: an
-      // insert over a row that already exists is SKIPPED by Harper, so the stored
-      // home is never replaced (other fields of an existing row may still be
-      // updated by the write-back below). A row that appeared with a home that
-      // DIFFERS from this instance's is refused with `originator_instance_immutable`,
-      // never silently updated; a write Harper skips is a failure named by its
-      // result, not a success. A failed read is UNREADABLE, not "no home", and refused.
+      // insert over a row that already exists is SKIPPED by Harper, so this insert
+      // does not replace a stored home (other fields of an existing row may still
+      // be updated by the write-back below). A row with a home that DIFFERS from
+      // this instance's is refused with `originator_instance_immutable` when this
+      // command's reads or the resource's reads see it; an insert the operations
+      // API reports neither inserted nor skipped is a failure, not a success. A
+      // failed read is UNREADABLE, not "no home", and refused.
       const opsUrl = `http://127.0.0.1:${opsPort}/`;
       // The instance's HTTP port, where the Agent RESOURCE lives. The write-back
       // goes to the resource (a guarded REST PATCH), not the raw ops API, so it
@@ -416,27 +420,29 @@ export function register(program: Command): void {
           process.exit(1);
         }
         // The row already exists — the one this read found, or one that APPEARED
-        // since. Its stored home STANDS. Re-read it now: a row that appeared with
-        // a home that differs from this instance's is refused, never silently
-        // updated; an unreadable re-read is refused too.
+        // since. Its stored home STANDS. Re-read it now: a row this re-read sees
+        // with a home that differs from this instance's is refused here, before
+        // any write-back; an unreadable re-read is refused too.
         const liveHome = await readStoredAgentHome({ opsUrl, authHeader: auth, id });
         const livePlan = planAgentHomeWrite(liveHome, home, id);
         if (livePlan.refuse) {
           console.error(`Error: ${livePlan.message}`);
           process.exit(1);
         }
-        // Write back WITHOUT the home field, so a stored home this command did
-        // not create is not changed by THIS write (other fields, such as a display
-        // name or trust tier, are). The write goes to the Agent RESOURCE (a REST
-        // PATCH, never the raw ops API): the resource runs it in a fresh owned
-        // transaction (the request's transaction is detached), writes ONLY an
-        // allow-list of fields (a home or a federation stamp in the body is never
-        // carried), STAGES it, then re-reads the COMMITTED row and ABORTS — with
-        // `originator_instance_immutable` if that row's home became a peer's, or
-        // `agent_principal_write_back_no_row` if it is gone — so a row this
-        // command did not create is not changed, and a deleted row is not
-        // re-created (flair#2473). Harper has no compare-and-set, so this narrows
-        // the race rather than closing it (per-id serialization: flair#2478).
+        // Write back WITHOUT the home field, so THIS write does not change a
+        // stored home (other fields, such as a display name or trust tier, are
+        // written). The write goes to the Agent RESOURCE (a REST PATCH, never the
+        // raw ops API): the resource runs it in a fresh owned transaction (the
+        // request's transaction is detached), writes ONLY an allow-list of fields
+        // (a home or a federation stamp in the body is never carried), STAGES it,
+        // then re-reads the COMMITTED row and ABORTS — with
+        // `originator_instance_immutable` if that read sees the row's home as a
+        // peer's, or `agent_principal_write_back_no_row` if it finds the row gone —
+        // so a row whose home the resource's reads see as a peer's is not changed,
+        // and a row they find deleted is not re-created (flair#2473). Harper has no
+        // compare-and-set, so a change committed after that confirmation read and
+        // before the commit is not seen: this narrows the race rather than closing
+        // it (per-id serialization: flair#2478).
         const writeBackRes = await fetch(`${httpUrl}Agent/${encodeURIComponent(id)}`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json", Authorization: auth },

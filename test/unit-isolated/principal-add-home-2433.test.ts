@@ -1,14 +1,17 @@
 /**
  * principal-add-home-2433.test.ts — flair#2433, flair#2473.
  *
- * `flair principal add` writes the Agent row through the operations API. The
+ * `flair principal add` creates the Agent row through the operations API. The
  * HOME ASSIGNMENT on the `insert` is CREATE-ONLY: the resolved home rides on that
  * insert itself (so a row created at write time carries it, even one deleted
  * since the read). An existing row's insert is SKIPPED, so its stored home
- * stands; the write-back that follows writes back only an allow-list of the
- * row's other fields and omits the home field, and a differing non-null stored
- * home is refused. A stored `originatorInstanceId` is not changed by this
- * command, whatever appears between the read and the write.
+ * stands; the write-back that follows (to the Agent resource, mocked here) writes
+ * back only an allow-list of the row's other fields and omits the home field.
+ * A row that appears with a differing non-null home after the read, a differing
+ * non-null stored home, and a write-back the resource refuses are each refused by
+ * name. The resource's own refusal covers what its confirmation read sees; a
+ * change committed after that read and before the write-back commits is not seen
+ * (the residual window, flair#2478).
  *
  * Isolated because it drives the process-global commander `program` and stands
  * up an HTTP server in place of the operations API.
@@ -123,7 +126,7 @@ function opsPort(): number {
   return address.port;
 }
 
-describe("flair#2433/#2473 — principal add is create-only", () => {
+describe("flair#2433/#2473 — principal add's home assignment on insert is create-only", () => {
   test("a create (no stored row) inserts the local home", async () => {
     expect(await principalAdd("fresh-id", opsPort())).toBe(0);
     expect(inserts).toHaveLength(1);
@@ -139,7 +142,7 @@ describe("flair#2433/#2473 — principal add is create-only", () => {
     // existing row Harper skips it and the stored home stands.
     expect(inserts).toHaveLength(1);
     expect(inserts[0].records[0].originatorInstanceId).toBe("inst-local-2433");
-    // The WRITE-BACK omits the home field, so the stored value is never changed.
+    // The WRITE-BACK omits the home field, so it does not change the stored value.
     expect(updates).toHaveLength(1);
     expect(updates[0].records[0].id).toBe("known-id");
     expect("originatorInstanceId" in updates[0].records[0]).toBe(false);

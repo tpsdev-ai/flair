@@ -40,8 +40,9 @@ export const AGENT_HOME_STAMP_REMEDY = `${AGENT_HOME_STAMP_COMMAND} (dry run; ad
 /**
  * The request-body control field the remedy sends to the Agent resource
  * (flair#2472): a guarded home stamp. The resource reads it, applies the stamp
- * inside its own request transaction, and drops it before the write — it is a
- * control field, not a stored column. Re-exported so callers of this module keep
+ * inside a FRESH OWNED transaction (the request's own transaction is detached for
+ * that scope), and drops it before the write — it is a control field, not a
+ * stored column. Re-exported so callers of this module keep
  * one import site; the implementations live in agent-home-fields.ts (the
  * dependency-free module the Agent resource imports directly).
  */
@@ -354,16 +355,22 @@ async function readAgentRowForStamp(args: {
  * `apply` — asks the Agent resource (a REST PATCH, `httpUrl`) to stamp each
  * stampable row, then reads it back before counting it.
  *
- * The stamp's decision is made INSIDE the resource's request transaction: the
- * resource re-reads the row at write time and stamps only when it is still
- * home-less and carries no federation-sync provenance, writing the instance's
- * OWN id. The CLI's own read is a plan/report, never the write's authority — so
- * a row that gains a home or provenance between the plan and the write is left
- * alone, and a row that is gone is refused (a stamp never creates). A stamp is
- * reported only when the read-back confirms it.
+ * The stamp's decision is made INSIDE the resource, in a FRESH OWNED transaction
+ * (the request's own transaction is detached for that scope): the resource reads
+ * the row there and stamps only when it is still home-less and carries no
+ * federation-sync provenance, writing the id the CURRENT `Instance` table names
+ * (a write with no single canonical Instance row is refused by name); it then
+ * re-reads the committed row and aborts if that read sees a home, provenance, or
+ * no row. The CLI's own read is a plan/report, never the write's authority: a
+ * row the resource's reads see gain a home or provenance is left alone, and a
+ * row they find gone is reported vanished (a stamp never creates). A change
+ * committed after the resource's confirmation read and before its commit is not
+ * seen (flair#2478). A row is counted `stamped` only when the resource reports
+ * that it applied the stamp (`stamped: true`) AND the read-back shows this
+ * instance's home with no provenance.
  *
  * `localInstanceId` is the value resolved through the one shared rule; a null
- * refuses the write (there is nothing to stamp).
+ * ends the run with no write (there is nothing to stamp).
  */
 export async function runAgentHomeStamp(args: {
   opsUrl: string;
@@ -413,8 +420,9 @@ export async function runAgentHomeStamp(args: {
       continue;
     }
     // The guarded write: the Agent resource re-checks home-lessness and
-    // provenance inside its own request transaction and stamps this instance's
-    // own id. A 404 means the row is gone (a stamp never creates).
+    // provenance inside a fresh owned transaction and stamps the id the current
+    // Instance table names. A 404 means the resource found the row gone (a stamp
+    // never creates).
     const res = await fetchImpl(`${stampUrl}${encodeURIComponent(id)}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json", Authorization: args.authHeader },
@@ -430,7 +438,7 @@ export async function runAgentHomeStamp(args: {
       throw new Error(`Failed to stamp the home on agent '${id}' (${res.status}): ${text}`);
     }
     // The resource confirms whether IT applied the stamp (`stamped: true`), and
-    // the decision is made inside its own write transaction. A read-back that
+    // the decision is made inside its fresh owned transaction. A read-back that
     // merely shows this instance's home is NOT that confirmation: another writer
     // may have set the same home, or a later merge may own the row. Count a row
     // stamped only when the resource applied it AND the read-back still shows

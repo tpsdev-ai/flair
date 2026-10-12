@@ -27,6 +27,11 @@
  * another writer's SAME local home. `flair principal add`'s guarded write-back runs the same way
  * (see AGENT_PRINCIPAL_WRITE_BACK_PAUSE_POINT).
  *
+ * The no-canonical-Instance cases change the real `Instance` table — before any
+ * id is resolved, and after a resource create and a successful stamp have
+ * resolved one — and assert the stamp is refused by name with nothing written
+ * (flair#2472).
+ *
  * Build prerequisite: dist/cli.js and dist/resources/*.js
  * (`bun run build && bun run build:cli`).
  */
@@ -290,11 +295,11 @@ afterAll(async () => {
 
 describe("flair#2433 — the home a create stamps, on a real Harper", () => {
   test("with no canonical Instance row the stamp refuses by name inside the resource and never stamps", async () => {
-    // This runs FIRST so the resource's localInstanceId() has not yet been
-    // resolved (a successful resolution is cached for the process lifetime).
     // Remove every Instance row: the resource has no id to stamp, so it must
-    // refuse by name, before any PATCH, and never report `stamped`. A fresh
-    // Harper process is not needed because a null resolution is NOT cached.
+    // refuse by name with nothing written, and never report `stamped`. This case
+    // runs before anything in this Harper resolves an id; the two cases after the
+    // remedy test below cover the same refusal after a successful stamp has
+    // resolved one (flair#2472).
     const id = `noinstance-${sfx}`;
     await ops({
       operation: "insert",
@@ -454,6 +459,77 @@ describe("flair#2433 — the home a create stamps, on a real Harper", () => {
     expect((await rowIn("Agent", syncId))._syncedFrom).toBe(PEER_ID);
   }, 60_000);
 
+  /** Make the Instance table hold exactly `ids` (one row each, same shape as beforeAll's). */
+  async function setInstanceRows(ids: string[]): Promise<void> {
+    const existing = await ops({ operation: "sql", sql: "SELECT id FROM flair.Instance" });
+    for (const r of Array.isArray(existing) ? existing : []) {
+      if (r?.id) await ops({ operation: "delete", table: "Instance", ids: [r.id] });
+    }
+    if (ids.length === 0) return;
+    await ops({
+      operation: "insert",
+      table: "Instance",
+      records: ids.map((id) => ({ id, role: "hub", publicKey: `pub-${id}`, createdAt: new Date().toISOString() })),
+    });
+  }
+
+  /**
+   * Warm the resource's process-cached instance id — a resource create (which
+   * stamps through `localInstanceId()`) and a successful guarded stamp, both
+   * landing LOCAL_ID — then change the Instance table with `change` and send the
+   * guarded stamp for a second home-less row. Returns that second response and
+   * the second row before and after it. The table is restored to exactly the
+   * LOCAL_ID row afterwards. Harper runs ONE worker here (harper-lifecycle's
+   * default), so the warmed cache is the one the second request meets.
+   */
+  async function stampAfterInstanceChange(tag: string, change: () => Promise<void>) {
+    const created = `${tag}-created-${sfx}`;
+    const warm = `${tag}-warm-${sfx}`;
+    const target = `${tag}-target-${sfx}`;
+    const create = await send("POST", "/Agent/", { id: created, name: created, role: "agent", status: "active", publicKey: `pk-${created}`, createdAt: new Date().toISOString() });
+    expect(create.status, create.raw).toBeLessThan(300);
+    expect((await rowIn("Agent", created)).originatorInstanceId, "the create did not resolve this instance's id").toBe(LOCAL_ID);
+    await ops({
+      operation: "insert",
+      table: "Agent",
+      records: [warm, target].map((id) => ({ id, name: id, role: "agent", status: "active", publicKey: `pk-${id}`, createdAt: new Date().toISOString() })),
+    });
+    const first = await send("PATCH", `/Agent/${warm}`, { id: warm, [AGENT_HOME_STAMP_FIELD]: true });
+    expect(first.status, first.raw).toBe(200);
+    expect(first.raw, "the warm-up stamp did not apply").toContain("\"stamped\":true");
+    expect((await rowIn("Agent", warm)).originatorInstanceId).toBe(LOCAL_ID);
+    try {
+      await change();
+      const before = await rowIn("Agent", target);
+      const r = await send("PATCH", `/Agent/${target}`, { id: target, [AGENT_HOME_STAMP_FIELD]: true });
+      const after = await rowIn("Agent", target);
+      return { r, before, after };
+    } finally {
+      await setInstanceRows([LOCAL_ID]);
+    }
+  }
+
+  test("after a successful stamp, removing the Instance row makes the next stamp refuse by name (the current table, not a cached id)", async () => {
+    // flair#2472 — the guard reads the CURRENT Instance table at write time. A
+    // process-cached id from the earlier successful stamp must not answer it.
+    const { r, before, after } = await stampAfterInstanceChange("inst-removed", () => setInstanceRows([]));
+    expect(r.status, r.raw).toBe(409);
+    expect(r.raw).toContain("agent_home_stamp_no_instance");
+    expect(r.raw, "the refused stamp still reported the row stamped").not.toContain("\"stamped\":true");
+    expect(after.originatorInstanceId ?? null, "the row was stamped with no Instance row").toBeNull();
+    expect(after, "the refused stamp wrote to the row").toEqual(before);
+  }, 30_000);
+
+  test("after a successful stamp, a second Instance row makes the next stamp refuse by name (the current table, not a cached id)", async () => {
+    // Several Instance rows: no single canonical id, so the same named refusal.
+    const { r, before, after } = await stampAfterInstanceChange("inst-several", () => setInstanceRows([LOCAL_ID, `inst-second-${sfx}`]));
+    expect(r.status, r.raw).toBe(409);
+    expect(r.raw).toContain("agent_home_stamp_no_instance");
+    expect(r.raw, "the refused stamp still reported the row stamped").not.toContain("\"stamped\":true");
+    expect(after.originatorInstanceId ?? null, "the row was stamped with several Instance rows").toBeNull();
+    expect(after, "the refused stamp wrote to the row").toEqual(before);
+  }, 30_000);
+
   test("a home committed after the resource's first read is not overwritten (pause inside the override)", async () => {
     // The stamp's decision is made INSIDE the Agent resource's OWNED transaction.
     // The competing commit is injected at the pause point AFTER the resource's
@@ -526,7 +602,7 @@ describe("flair#2433 — the home a create stamps, on a real Harper", () => {
       () => ops({ operation: "update", table: "Agent", records: [{ id, _syncedFrom: PEER_ID, _originatorInstanceId: PEER_ID }] }),
     );
     expect(released, "the stamp never reached its in-transaction pause").toBe("go");
-    expect(result.stamped, "the staged stamp was committed over the merge").not.toContain(id);
+    expect(result.stamped, "the staged stamp was committed over the provenance update").not.toContain(id);
     const row = await rowIn("Agent", id);
     expect(row.originatorInstanceId ?? null, "the staged stamp was not discarded").toBeNull();
     expect(row._syncedFrom).toBe(PEER_ID);
@@ -645,8 +721,10 @@ describe("flair#2473 — the guarded principal write-back cannot change a stored
   // transaction and writes back only an EXPLICIT ALLOW-LIST of fields (never a
   // home, never a federation stamp, never `publicKey`), and it is honoured only
   // for an administrator or a trusted internal call. Every one of these cases
-  // hits the REAL resource; the first two fail if the body is written unfiltered,
-  // the last two fail if a missing row is allowed to be re-created.
+  // hits the REAL resource. The administrator case fails if the write-back body
+  // is written unfiltered; the non-admin case never enters the write-back branch
+  // (it covers the ordinary PATCH path's stripping); the last two fail if a
+  // missing row is allowed to be re-created.
 
   test("a verified non-admin agent's write-back flag is stripped — its own stored home is unchanged", async () => {
     const agent = mkAgent(`wb-agent-${sfx}`);

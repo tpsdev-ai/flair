@@ -40,20 +40,23 @@ export const AGENT_HOME_STAMP_PAUSE_POINT = "agent-home-stamp";
 /**
  * The request-body control field `flair principal add`'s write-back sends to the
  * Agent resource (flair#2473). The write-back runs when the command's create-only
- * `insert` is SKIPPED because the row already exists: the resource then writes the
- * record back WITHOUT the home field, in an OWNED transaction, refusing
- * `originator_instance_immutable` when the committed row's home became foreign.
- * The resource reads it and drops it before the write — it is a control field,
- * not a stored column.
+ * `insert` is SKIPPED because the row already exists: the resource then writes
+ * back only the allow-listed fields (never the home) in a fresh owned
+ * transaction, refusing `originator_instance_immutable` when its owned read or
+ * its confirmation read sees the row's home as a peer's, and
+ * `agent_principal_write_back_no_row` when either read finds the row absent. The
+ * resource reads the field and drops it before the write — it is a control
+ * field, not a stored column.
  */
 export const AGENT_PRINCIPAL_WRITE_BACK_FIELD = "flairPrincipalWriteBack";
 
 /**
  * The named refusal the Agent resource answers for a guarded principal write-back
- * (flair#2473) whose row is ABSENT — before the staging and again at the
- * confirmation read (HTTP 404). A write-back never re-creates a row (Harper's
- * `table.update` would), so a row deleted between the caller's read and this write
- * stays deleted rather than coming back home-less.
+ * (flair#2473) whose row is ABSENT at the owned read before the staging or at the
+ * confirmation read (HTTP 404). Harper's `table.update` would re-create a missing
+ * row, so a deletion either read sees leaves the row deleted rather than bringing
+ * it back home-less. A deletion committed after the confirmation read and before
+ * the commit is not seen (the residual window, flair#2478).
  */
 export const AGENT_PRINCIPAL_WRITE_BACK_NO_ROW_ERROR = "agent_principal_write_back_no_row";
 
@@ -62,12 +65,13 @@ export const AGENT_PRINCIPAL_WRITE_BACK_NO_ROW_ERROR = "agent_principal_write_ba
  * (flair#2473). An EXPLICIT allow-list, not a deny-list: a field a future caller
  * adds to the request body is NOT carried by this path until it is named here.
  *
- * `originatorInstanceId` is deliberately ABSENT — a stored home is never accepted
- * from a request body (a create stamps it; an update keeps the stored value).
- * `publicKey` and `createdAt` are absent too: both are immutable after create
- * (key rotation and creation time have their own paths). The receiver-side
- * federation stamps (`_syncedFrom`, `_originatorInstanceId`, `_syncedAt`) are
- * absent as well — they are never client-settable.
+ * `originatorInstanceId` is deliberately ABSENT — this path never takes a home
+ * from the request body (a create stamps it; an update keeps the stored value).
+ * `publicKey` and `createdAt` are absent too: the Agent resource treats both as
+ * immutable after create (a key changes through key rotation, not this write).
+ * The receiver-side federation stamps (`_syncedFrom`, `_originatorInstanceId`,
+ * `_syncedAt`) are absent as well — the Agent resource's write paths do not take
+ * them from a request body.
  */
 export const AGENT_PRINCIPAL_WRITE_BACK_FIELDS = [
   "name",

@@ -2,30 +2,32 @@
  * agent-stamp-home-target-2474.test.ts — flair#2474, against TWO real Harpers.
  *
  * `flair agent stamp-home` talks to an ops API (the roster read and each stamp's
- * read-back) AND sends the guarded PATCH to the instance's HTTP port. Resolving
- * the two ports INDEPENDENTLY let `--ops-port` name one instance and `--port`
- * another, so the roster was read from the first and the stamp written to the
- * second — carrying the first instance's id. src/cli.ts's
- * `resolveAgentHomeTarget` pairs them: a CONFIGURED pair is CHECKED — the derived
- * port must come from the same recorded pair as the named one, so an HTTP port
- * that disagrees with the ops port's instance is refused, and an explicit
- * `--ops-port` that disagrees with that instance's record is refused too — while
- * a pair the caller names for BOTH ports is TRUSTED WITHOUT VERIFICATION (the
- * resolver takes it as given).
+ * read-back) AND sends the guarded PATCH to the instance's HTTP port;
+ * `flair principal add` reads the stored home through the ops API and sends its
+ * write-back to the HTTP port. Resolving the two ports INDEPENDENTLY let
+ * `--ops-port` name one instance and `--port` another, so the read landed on the
+ * first and the write on the second. src/cli.ts's `resolveAgentHomeTarget` pairs
+ * them against the configured pair (the ports the instance's config records):
+ *   - with a COMPLETE configured pair, a port that matches its side binds the
+ *     other to that pair, so a target where exactly one of the two ports matches
+ *     is refused by name (`ambiguous_instance_target`); a port left out is taken
+ *     from the pair;
+ *   - with NO complete configured pair, a target with only ONE port named is
+ *     refused by name, before anything is read or written;
+ *   - two named ports that match neither side of the configured pair (or with
+ *     no complete pair) are used as given, WITHOUT VERIFICATION — nothing
+ *     contacts an instance to confirm they belong together.
  *
- * Two real instances and a real `~/.flair/config.yaml` (the default install's
- * recorded pair) make the ambiguity concrete: an explicit `--ops-port` that
- * disagrees with the HTTP port's recorded pair is refused by name
- * (`ambiguous_instance_target`), as is an HTTP port that disagrees with the pair
- * its derived ops port came from; a consistent override (or one derived from the
- * config) proceeds, and so does an explicit pair for another instance.
+ * Two real instances and a real `~/.flair/config.yaml` make each case concrete:
+ * one HOME whose config pairs A's two ports (a complete pair), and one whose
+ * config records only A's HTTP port (an incomplete pair).
  *
  * Build prerequisite: dist/cli.js and dist/resources/*.js
  * (`bun run build && bun run build:cli`).
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
@@ -35,17 +37,19 @@ const CLI = join(process.cwd(), "dist", "cli.js");
 let a: HarperInstance;
 let b: HarperInstance;
 let home: string;
+/** A second isolated HOME whose `~/.flair/config.yaml` records ONLY A's HTTP port (an incomplete pair). */
+let partialHome: string;
 
 function cliHome(): string {
   return home;
 }
 
 /** Run `flair agent stamp-home` (dry run) with the given port flags against an isolated HOME. */
-function runStampHome(extra: string[]): Promise<{ code: number | null; stdout: string; stderr: string }> {
+function runStampHome(extra: string[], homeDir: string = cliHome()): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const args = ["agent", "stamp-home", "--admin-pass", a.admin.password, ...extra];
     const child = spawn(process.execPath, [CLI, ...args], {
-      env: { ...process.env, HOME: cliHome(), FLAIR_URL: "", FLAIR_OPS_PORT: "", FLAIR_TOKEN: "", NO_COLOR: "1" },
+      env: { ...process.env, HOME: homeDir, FLAIR_URL: "", FLAIR_OPS_PORT: "", FLAIR_TOKEN: "", NO_COLOR: "1" },
       timeout: 30_000,
     });
     let stdout = "";
@@ -64,11 +68,11 @@ const httpPort = (h: HarperInstance) => new URL(h.httpURL).port;
 const opsPort = (h: HarperInstance) => new URL(h.opsURL).port;
 
 /** Run `flair principal add <id>` with the given port flags against an isolated HOME. */
-function runPrincipalAdd(id: string, extra: string[]): Promise<{ code: number | null; stdout: string; stderr: string }> {
+function runPrincipalAdd(id: string, extra: string[], homeDir: string = cliHome()): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const args = ["principal", "add", id, "--admin-pass", a.admin.password, "--keys-dir", join(cliHome(), "keys"), ...extra];
+    const args = ["principal", "add", id, "--admin-pass", a.admin.password, "--keys-dir", join(homeDir, "keys"), ...extra];
     const child = spawn(process.execPath, [CLI, ...args], {
-      env: { ...process.env, HOME: cliHome(), FLAIR_URL: "", FLAIR_OPS_PORT: "", FLAIR_TOKEN: "", NO_COLOR: "1" },
+      env: { ...process.env, HOME: homeDir, FLAIR_URL: "", FLAIR_OPS_PORT: "", FLAIR_TOKEN: "", NO_COLOR: "1" },
       timeout: 30_000,
     });
     let stdout = "";
@@ -116,15 +120,21 @@ beforeAll(async () => {
     join(home, ".flair", "config.yaml"),
     `port: ${httpPort(a)}\nopsPort: ${opsPort(a)}\n`,
   );
+  // An INCOMPLETE per-user config: A's HTTP port, no ops port. No Harper config
+  // exists under this HOME, so the config records no complete pair.
+  partialHome = mkdtempSync(join(tmpdir(), "flair-2474-partial-"));
+  mkdirSync(join(partialHome, ".flair"), { recursive: true });
+  writeFileSync(join(partialHome, ".flair", "config.yaml"), `port: ${httpPort(a)}\n`);
 }, 300_000);
 
 afterAll(async () => {
   if (a) await stopHarper(a);
   if (b) await stopHarper(b);
   if (home) rmSync(home, { recursive: true, force: true });
+  if (partialHome) rmSync(partialHome, { recursive: true, force: true });
 });
 
-describe("flair#2474 — stamp-home pairs the two ports of ONE instance", () => {
+describe("flair#2474 — stamp-home checks its two ports against a complete configured pair", () => {
   test("an ops port that disagrees with the HTTP port's instance is refused by name", async () => {
     const r = await runStampHome(["--port", httpPort(a), "--ops-port", opsPort(b)]);
     expect(r.code, `${r.stdout}\n${r.stderr}`).toBe(1);
@@ -137,7 +147,7 @@ describe("flair#2474 — stamp-home pairs the two ports of ONE instance", () => 
     expect(r.stderr).toBe("");
   }, 40_000);
 
-  test("omitting --ops-port derives it from the named instance's own config", async () => {
+  test("omitting --ops-port takes it from the configured pair the named HTTP port matches", async () => {
     const r = await runStampHome(["--port", httpPort(a)]);
     expect(r.code, `${r.stdout}\n${r.stderr}`).toBe(0);
     expect(r.stderr).toBe("");
@@ -153,16 +163,15 @@ describe("flair#2474 — stamp-home pairs the two ports of ONE instance", () => 
   }, 40_000);
 
   test("an explicit pair for another instance is accepted", async () => {
-    // Both ports named for ONE other instance: the resolver trusts an explicit
-    // pair for BOTH ports without verification, so the config's pair for A is not
-    // a contradiction.
+    // Both ports named, and neither matches A's configured pair: the resolver uses
+    // them as given, WITHOUT verification (here they do belong to one instance, B).
     const r = await runStampHome(["--port", httpPort(b), "--ops-port", opsPort(b)]);
     expect(r.code, `${r.stdout}\n${r.stderr}`).toBe(0);
     expect(r.stderr).toBe("");
   }, 40_000);
 });
 
-describe("flair#2474 — principal add pairs the two ports of ONE instance", () => {
+describe("flair#2474 — principal add checks its two ports against a complete configured pair", () => {
   test("an ops port that disagrees with the HTTP port's instance is refused by name before anything is written", async () => {
     const r = await runPrincipalAdd(`pa-target-${Date.now().toString(36)}`, ["--port", httpPort(a), "--ops-port", opsPort(b)]);
     expect(r.code, `${r.stdout}\n${r.stderr}`).toBe(1);
@@ -183,4 +192,31 @@ describe("flair#2474 — principal add pairs the two ports of ONE instance", () 
     const row = await readAgentRow(a, id, ["id", "originatorInstanceId"]);
     expect(row?.originatorInstanceId ?? null).toBeNull();
   }, 120_000);
+});
+
+describe("flair#2474 — a one-sided target with no complete configured pair is refused", () => {
+  // The per-user config records only A's HTTP port. Naming B's ops port alone
+  // would read B's roster or stored home and send the write to A's HTTP port.
+  test("stamp-home: an ops port named alone is refused by name", async () => {
+    const r = await runStampHome(["--ops-port", opsPort(b)], partialHome);
+    expect(r.code, `${r.stdout}\n${r.stderr}`).toBe(1);
+    expect(r.stderr).toContain("ambiguous_instance_target");
+  }, 40_000);
+
+  test("principal add: an ops port named alone is refused by name before any key file or row is written", async () => {
+    const id = `pa-partial-${Date.now().toString(36)}`;
+    const keysDir = join(partialHome, "keys");
+    const r = await runPrincipalAdd(id, ["--ops-port", opsPort(b)], partialHome);
+    expect(r.code, `${r.stdout}\n${r.stderr}`).toBe(1);
+    expect(r.stderr).toContain("ambiguous_instance_target");
+    expect(existsSync(keysDir) ? readdirSync(keysDir) : [], "a refused target wrote a key file").toEqual([]);
+    expect(await readAgentRow(a, id, ["id"]), "a refused target wrote a row on A").toBeNull();
+    expect(await readAgentRow(b, id, ["id"]), "a refused target wrote a row on B").toBeNull();
+  }, 120_000);
+
+  test("stamp-home: both ports named for one instance proceed (used as given)", async () => {
+    const r = await runStampHome(["--port", httpPort(a), "--ops-port", opsPort(a)], partialHome);
+    expect(r.code, `${r.stdout}\n${r.stderr}`).toBe(0);
+    expect(r.stderr).toBe("");
+  }, 40_000);
 });

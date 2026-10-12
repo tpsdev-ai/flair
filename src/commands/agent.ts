@@ -822,7 +822,10 @@ export function register(program: Command): void {
     .action(async (opts) => {
       let target: { httpPort: number; opsPort: number };
       try {
-        // The ops port and the HTTP port must address the SAME instance (flair#2474).
+        // flair#2474 — pair the ops port (the roster read) with the HTTP port (the
+        // guarded PATCH). A target the configured pair contradicts, or one with a
+        // single port named and no complete configured pair, is refused by name
+        // before anything is read or written; see resolveAgentHomeTarget.
         target = resolveAgentHomeTarget(opts);
       } catch (err: any) {
         console.error(`Error: ${err.message}`);
