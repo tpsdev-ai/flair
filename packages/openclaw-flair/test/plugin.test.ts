@@ -2573,26 +2573,31 @@ describe("slice 2 round 13 — gateway_stop refuses admission until the next reg
 
 // ─── flair#2537 — memory_store replies report the STORED (redacted) content ───
 //
-// The server replaces credential-shaped text before storing a Memory and reports
-// the count on the write response without echoing the stored content; the reply
-// must preview the STORED text, never the caller's input. A redacted write's
-// stored text is re-read by id; a write the server did not redact makes no extra
-// request. The real-Harper counterpart is
-// test/integration/memory-write-redaction-2407.test.ts.
+// A redacted write's response carries `stored`, the post-redaction text that
+// write committed; the SDK builds the result from it (flair#2467). The reply
+// previews that text and never reads the row after the write: here a read
+// returns a later write's text, so a reply built from a read would show it. A
+// write the server did not redact gets the reply it always had. The real-Harper
+// counterpart is test/integration/write-reply-redaction-2537.test.ts.
 describe("flair#2537 — memory_store replies report the STORED (redacted) content", () => {
   const TOKEN = `ghp_${"a".repeat(24)}`;
   const ORIGINAL = `deploy note: use token ${TOKEN} for the CI job`;
   const STORED = "deploy note: use token [redacted] for the CI job";
+  const LATER_WRITE = "a later write to the same row";
+  const WITHHELD = "Preview: none. The server redacted 1 value(s) in this write; the stored text was not returned.";
   const memoryReads = (calls: Call[]): Call[] =>
     calls.filter((c) => c.method === "GET" && /\/Memory\//.test(c.url));
 
   async function storeWith(
-    handler: (call: Call) => { status?: number; body?: unknown },
+    write: (call: Call) => Record<string, unknown>,
     text: string,
   ): Promise<{ res: any; calls: Call[] }> {
     writeKey("A");
     const plugin = await loadPlugin();
-    const calls = installFetchStub(handler);
+    const calls = installFetchStub((call) => {
+      if (call.method === "GET") return { body: { id: call.url.split("/Memory/")[1], content: LATER_WRITE, agentId: "A" } };
+      return { body: write(call) };
+    });
     const api = createMockApi();
     plugin.register(api as any);
     const store = api._resolveTool("memory_store", { agentId: "A" })!;
@@ -2600,42 +2605,57 @@ describe("flair#2537 — memory_store replies report the STORED (redacted) conte
     return { res, calls };
   }
 
-  test("a redacted write previews the STORED text and reports the count", async () => {
-    const { res, calls } = await storeWith((call) => {
-      if (call.method === "GET") {
-        const id = call.url.split("/Memory/")[1];
-        return { body: { id, content: STORED, agentId: "A" } };
-      }
-      return { body: { id: (call.body as any)?.id, written: true, deduplicated: false, redactedValues: 1 } };
-    }, ORIGINAL);
-    const text = res.content[0].text;
-    expect(text).toContain(`Preview: ${STORED}`);
-    expect(text).not.toContain(TOKEN);
-    expect(text).toContain("Redacted 1 credential-shaped value(s) before storing.");
-    expect(res.details.redactedValues).toBe(1);
-    expect(memoryReads(calls).length).toBe(1);
-  });
-
-  test("a write the server did not redact previews the input and makes no read-back", async () => {
+  test("a redacted write previews the stored text from the write response and states the count, with no read", async () => {
     const { res, calls } = await storeWith(
-      (call) => ({ body: { id: (call.body as any)?.id, written: true, deduplicated: false } }),
-      "plain note",
+      (call) => ({ id: (call.body as any)?.id, written: true, deduplicated: false, redactedValues: 1, stored: { content: STORED } }),
+      ORIGINAL,
     );
-    expect(res.content[0].text).toContain("Preview: plain note");
-    expect(res.content[0].text).not.toContain("Redacted");
-    expect(res.details.redactedValues).toBeUndefined();
+    const id = res.details.id;
+    expect(res.content[0].text).toBe(
+      [`Memory stored (id: ${id})`, `Preview: ${STORED}`, "Redacted 1 credential-shaped value(s) before storing."].join("\n"),
+    );
+    expect(res.details.redactedValues).toBe(1);
+    expect(res.details.contentWithheld).toBeUndefined();
+    expect(res.details.errors).toEqual([]);
     expect(memoryReads(calls).length).toBe(0);
   });
 
-  test("a failed read-back omits the preview rather than show the caller's input", async () => {
-    const { res } = await storeWith((call) => {
-      if (call.method === "GET") return { status: 500, body: { error: "boom" } };
-      return { body: { id: (call.body as any)?.id, written: true, deduplicated: false, redactedValues: 1 } };
-    }, ORIGINAL);
+  test("a redacted near-duplicate names the match and previews the stored text, not the input", async () => {
+    const { res } = await storeWith(
+      (call) => ({ id: (call.body as any)?.id, written: true, deduplicated: true, matchedId: "A-older", redactedValues: 1, stored: { content: STORED } }),
+      ORIGINAL,
+    );
+    const id = res.details.id;
+    expect(res.content[0].text).toBe(
+      [`Memory stored (id: ${id}) — similar to existing memory id=A-older`, `Preview: ${STORED}`, "Redacted 1 credential-shaped value(s) before storing."].join("\n"),
+    );
+    expect(res.content[0].text).not.toContain(TOKEN);
+  });
+
+  test("a count without stored text shows no preview, states the count and sets contentWithheld", async () => {
+    const { res, calls } = await storeWith(
+      (call) => ({ id: (call.body as any)?.id, written: true, deduplicated: false, redactedValues: 1 }),
+      ORIGINAL,
+    );
     const text = res.content[0].text;
+    expect(text).toContain(WITHHELD);
     expect(text).not.toContain(TOKEN);
-    expect(text).not.toContain("Preview:");
-    expect(text).toContain("Stored text unavailable");
+    expect(text).not.toContain(LATER_WRITE);
+    expect(res.details.written).toBe(true);
+    expect(res.details.contentWithheld).toBe(true);
     expect(res.details.redactedValues).toBe(1);
+    expect(memoryReads(calls).length).toBe(0);
+  });
+
+  test("a write the server did not redact gets the reply it always had", async () => {
+    const plain = await storeWith((call) => ({ id: (call.body as any)?.id, written: true, deduplicated: false }), "plain note");
+    expect(plain.res.content[0].text).toBe(`Memory stored (id: ${plain.res.details.id})`);
+    expect(plain.res.details.redactedValues).toBeUndefined();
+    expect(memoryReads(plain.calls).length).toBe(0);
+    const dup = await storeWith(
+      (call) => ({ id: (call.body as any)?.id, written: true, deduplicated: true, matchedId: "A-older" }),
+      "plain note",
+    );
+    expect(dup.res.content[0].text).toBe(`Memory stored (id: ${dup.res.details.id}) — similar to existing memory id=A-older: plain note`);
   });
 });

@@ -1166,49 +1166,32 @@ export default {
             }
             const wasDeduplicated = (result as any).deduplicated === true;
             const matchedId = (result as any).matchedId;
-            // flair#2537 — report the STORED text, never the caller's input. The
-            // server replaces credential-shaped values before it stores a row and
-            // reports the count on the write response without echoing the stored
-            // `content`, so a redacted write's stored text is re-read by id. A
-            // write the server did not redact uses the input unchanged and makes
-            // no extra request. A failed read-back never falls back to the
-            // caller's input: the preview is omitted and the reply says so.
-            const redactedValues = typeof (result as any).redactedValues === "number" ? (result as any).redactedValues : 0;
-            let stored: string | undefined = text;
-            let storedUnreadable = false;
+            // flair#2537 — a write the server did not redact gets the reply it
+            // always had. With a redaction count, the reply previews only the
+            // result's `content`, which the SDK takes from the write response's
+            // `stored` (the post-redaction text that write committed) without a
+            // read after the write (flair#2467). A result marked
+            // `contentWithheld`, or with no `content` string, gets no preview
+            // text: the reply states the count and that the stored text was not
+            // returned, and never shows the input.
+            const redactedValues = typeof result.redactedValues === "number" && result.redactedValues > 0 ? result.redactedValues : 0;
+            const stored: string | null = result.contentWithheld !== true && typeof result.content === "string" ? result.content : null;
+            let replyText: string;
             if (redactedValues > 0) {
-              stored = undefined;
-              if (memId) {
-                try {
-                  const row = await client.memory.get(memId);
-                  if (row && typeof row.content === "string") stored = row.content;
-                  else storedUnreadable = true;
-                } catch (readErr: any) {
-                  storedUnreadable = true;
-                  errors.push(`stored-content read failed for ${memId}: ${readErr.message}`);
-                  api.logger.warn(
-                    `openclaw-flair: could not read back the stored text for ${memId} after a redacted write: ${readErr.message}`,
-                  );
-                }
-              } else {
-                storedUnreadable = true;
-              }
-            }
-            const lines = [`Memory stored (id: ${memId})`];
-            if (typeof stored === "string") {
-              lines.push(`Preview: ${stored.length > 200 ? stored.slice(0, 200) + "..." : stored}`);
-            }
-            if (redactedValues > 0) {
-              lines.push(`Redacted ${redactedValues} credential-shaped value(s) before storing.`);
-            }
-            if (storedUnreadable) {
-              lines.push(`Stored text unavailable — the write landed, but the stored row could not be read back.`);
-            }
-            if (wasDeduplicated && matchedId) {
-              lines.push(`Note: similar to existing memory (id: ${matchedId}) — both are kept.`);
+              replyText = [
+                `Memory stored (id: ${memId})${wasDeduplicated ? ` — similar to existing memory id=${matchedId}` : ""}`,
+                stored === null
+                  ? `Preview: none. The server redacted ${redactedValues} value(s) in this write; the stored text was not returned.`
+                  : `Preview: ${stored.length > 200 ? stored.slice(0, 200) + "..." : stored}`,
+                `Redacted ${redactedValues} credential-shaped value(s) before storing.`,
+              ].join("\n");
+            } else {
+              replyText = wasDeduplicated
+                ? `Memory stored (id: ${memId}) — similar to existing memory id=${matchedId}: ${result.content?.slice(0, 200)}`
+                : `Memory stored (id: ${memId})`;
             }
             return {
-              content: [{ type: "text", text: lines.join("\n") }],
+              content: [{ type: "text", text: replyText }],
               // D14: machine-readable and honest. `written` is true only after the
               // PRIMARY write succeeded; a partial success (memory written,
               // supersede-close failed) is reported as exactly that via `errors`.
@@ -1219,6 +1202,7 @@ export default {
                 errors,
                 deduplicated: wasDeduplicated,
                 ...(redactedValues > 0 ? { redactedValues } : {}),
+                ...(redactedValues > 0 && stored === null ? { contentWithheld: true } : {}),
                 ...(wasDeduplicated ? { matchedId } : {}),
               },
             };

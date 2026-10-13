@@ -330,27 +330,27 @@ describe("memory_store response shape — real extension (flair#1384)", () => {
 
 // ─── Redacted write reply (flair#2537) ────────────────────────────────────────
 //
-// The server replaces credential-shaped text before storing a Memory and reports
-// the count on the write response without echoing the stored content; the reply
-// must preview the STORED text, never the caller's input. A stand-in client
-// stands in for the SDK here (the re-read is a GET); the real-Harper counterpart
-// is test/integration/memory-write-redaction-2407.test.ts.
+// A redacted write's response carries `stored`, the post-redaction text that
+// write committed; the SDK builds the result from it (flair#2467). The reply
+// previews that text and never reads the row after the write: here a read
+// returns a later write's text, so a reply built from a read would show it.
+// Only the HTTP request is stubbed; the SDK and the extension are real. The
+// real-Harper counterpart is test/integration/write-reply-redaction-2537.test.ts.
 
 const TOKEN_REDACT = `ghp_${"a".repeat(24)}`;
 const ORIGINAL_REDACT = `deploy note: use token ${TOKEN_REDACT} for the CI job`;
 const STORED_REDACT = "deploy note: use token [redacted] for the CI job";
+const LATER_WRITE = "a later write to the same row";
 
 async function executeMemoryStoreSeq(
   write: Record<string, unknown>,
-  read: Record<string, unknown> | null | "throws",
   params: { content: string; durability?: string; tags?: string[] },
 ) {
   let readCalls = 0;
-  (FlairClient.prototype as any).request = async (method: string) => {
+  (FlairClient.prototype as any).request = async (method: string, path: string) => {
     if (method === "GET") {
       readCalls += 1;
-      if (read === "throws") throw new Error("read-back failed");
-      return read;
+      return { id: path.split("/").pop(), content: LATER_WRITE };
     }
     return write;
   };
@@ -378,43 +378,46 @@ describe("memory_store redacted reply — real extension (flair#2537)", () => {
     }
   });
 
-  test("a redacted write previews the STORED text and reports the count", async () => {
-    const { result } = await executeMemoryStoreSeq(
-      { id: "pi-2537-a", written: true, redactedValues: 1 },
-      { id: "pi-2537-a", content: STORED_REDACT, written: true },
+  test("a redacted write previews the stored text from the write response and states the count, with no read", async () => {
+    const { result, readCalls } = await executeMemoryStoreSeq(
+      { id: "pi-2537-a", written: true, redactedValues: 1, stored: { content: STORED_REDACT } },
       { content: ORIGINAL_REDACT },
     );
     const text = result.content[0].text;
     expect(text).toContain(`Preview: ${STORED_REDACT}`);
-    expect(text).not.toContain(TOKEN_REDACT);
+    expect(text).toContain(`Size: ${STORED_REDACT.length} chars`);
     expect(text).toContain("Redacted 1 credential-shaped value(s) before storing.");
+    expect(text).not.toContain(TOKEN_REDACT);
+    expect(text).not.toContain(LATER_WRITE);
     expect(result.details.redactedValues).toBe(1);
-  });
-
-  test("a write the server did not redact previews the input and makes no read-back", async () => {
-    const { result, readCalls } = await executeMemoryStoreSeq(
-      { id: "pi-2537-b", written: true },
-      "throws",
-      { content: "plain note" },
-    );
-    const text = result.content[0].text;
-    expect(text).toContain("Preview: plain note");
-    expect(text).not.toContain("Redacted");
-    expect(result.details.redactedValues).toBeUndefined();
+    expect(result.details.contentWithheld).toBeUndefined();
     expect(readCalls()).toBe(0);
   });
 
-  test("a failed read-back omits the preview rather than show the caller's input", async () => {
-    const { result } = await executeMemoryStoreSeq(
+  test("a count without stored text shows no preview, states the count and sets contentWithheld", async () => {
+    const { result, readCalls } = await executeMemoryStoreSeq(
       { id: "pi-2537-c", written: true, redactedValues: 1 },
-      null,
       { content: ORIGINAL_REDACT },
     );
     const text = result.content[0].text;
+    expect(text).toContain("Preview: none. The server redacted 1 value(s) in this write; the stored text was not returned.");
+    expect(text).not.toContain("Size:");
     expect(text).not.toContain(TOKEN_REDACT);
-    expect(text).not.toContain("Preview:");
-    expect(text).toContain("Stored text unavailable");
+    expect(result.details.contentWithheld).toBe(true);
     expect(result.details.redactedValues).toBe(1);
+    expect(readCalls()).toBe(0);
+  });
+
+  test("a write the server did not redact gets the reply it always had", async () => {
+    const { result, readCalls } = await executeMemoryStoreSeq(
+      { id: "pi-2537-b", written: true },
+      { content: "plain note" },
+    );
+    expect(result.content[0].text).toBe(
+      ["Memory stored (id: pi-2537-b)", "Preview: plain note", "Size: 10 chars", "Tags: none", "Durability: standard"].join("\n"),
+    );
+    expect(result.details).toEqual({ deduplicated: false, id: "pi-2537-b", written: true });
+    expect(readCalls()).toBe(0);
   });
 });
 
