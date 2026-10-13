@@ -97,13 +97,30 @@ async function setStatus(id: string, status: string): Promise<void> {
   }), `set ${id} status ${status}`);
 }
 
+/**
+ * The rows an admin search returns. A failed read (non-2xx, a body that is not
+ * JSON, or JSON that is not a list) throws, so "no row" holds only on a valid,
+ * empty read.
+ */
+async function adminRows(op: Record<string, any>): Promise<any[]> {
+  const res = await adminOp(op);
+  const text = await res.text();
+  if (!res.ok) throw new Error(`admin ${op.operation} ${op.table} → HTTP ${res.status}: ${text.slice(0, 300)}`);
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    throw new Error(`admin ${op.operation} ${op.table} answered a body that is not JSON: ${text.slice(0, 300)}`);
+  }
+  if (!Array.isArray(body)) throw new Error(`admin ${op.operation} ${op.table} answered a non-list: ${text.slice(0, 300)}`);
+  return body;
+}
+
 async function memoriesWithContent(content: string): Promise<any[]> {
-  const res = await adminOp({
+  return adminRows({
     operation: "search_by_value", database: "flair", table: "Memory",
     search_attribute: "content", search_value: content, get_attributes: ["id", "agentId"],
   });
-  const body = await res.json().catch(() => []);
-  return Array.isArray(body) ? body : [];
 }
 
 function ed25519Get(path: string): Promise<Response> {
@@ -334,5 +351,39 @@ describe("native MCP checks the principal's status on every tool call dispatched
     expect(res.result).toBeUndefined();
     expect(res.error?.code).toBe(-32001);
     expect(res.error?.message).toContain(`principal '${ghost.id}', which does not exist`);
+  }, 30_000);
+
+  // flair#2503 — through the real /mcp OAuth wrapper, a verified token whose
+  // subject matches only a revoked Credential is refused by name (the
+  // credential, its stored status and the remedy); no tool runs and the row is
+  // left as it was.
+  test("a token whose subject matches only a revoked credential is refused by name", async () => {
+    const r = { id: `mcpstatus-r-${sfx}`, sub: `idp-sub-r-${sfx}` };
+    const credentialId = `cred-${r.id}`;
+    const now = new Date().toISOString();
+    await expectOk(await adminOp({
+      operation: "insert", database: "flair", table: "Agent",
+      records: [{ id: r.id, name: r.id, kind: "agent", type: "agent", role: "agent", status: "active", publicKey: `mcp-oauth:${r.sub}`, createdAt: now, updatedAt: now }],
+    }), "seed principal");
+    await expectOk(await adminOp({
+      operation: "insert", database: "flair", table: "Credential",
+      records: [{ id: credentialId, principalId: r.id, kind: "idp", label: "status test", status: "revoked", idpProvider: "status-test-idp", idpSubject: r.sub, createdAt: now, lastUsedAt: now }],
+    }), "seed revoked credential");
+    const credentialRows = () => adminRows({
+      operation: "search_by_value", database: "flair", table: "Credential",
+      search_attribute: "idpSubject", search_value: r.sub, get_attributes: ["*"],
+    });
+    const before = await credentialRows();
+    expect(before.map((c) => [c.id, c.status]), "fixture control: the subject's only row is revoked").toEqual([[credentialId, "revoked"]]);
+
+    const marker = `mcpstatus R revoked ${sfx}`;
+    const res = await callTool(await mintToken(r.sub), "memory_store", { content: marker, visibility: "private" });
+    expect(res.result, JSON.stringify(res.result)?.slice(0, 200)).toBeUndefined();
+    expect(res.error?.code, JSON.stringify(res.error)).toBe(-32001);
+    expect(res.error?.message).toContain(credentialId);
+    expect(res.error?.message).toContain(`status "revoked"`);
+    expect(res.error?.message).toMatch(/re-link/);
+    expect(await memoriesWithContent(marker), "memory_store must not have written").toEqual([]);
+    expect(await credentialRows(), "the revoked row is unchanged").toEqual(before);
   }, 30_000);
 });
