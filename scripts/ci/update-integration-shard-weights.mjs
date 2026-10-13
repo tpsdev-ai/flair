@@ -29,8 +29,8 @@ export function parseJobLog(text) {
   let startTs = 0;
   for (const raw of text.split("\n")) {
     // Each line is `<timestamp> <body>`. The first line of a log may carry a
-    // UTF-8 BOM, and some log exports prefix every line with a
-    // `<job>\t<step>\t` tag; strip both before reading the timestamp.
+    // UTF-8 BOM, and a log export may prefix lines with a `<job>\t<step>\t`
+    // tag; strip both before reading the timestamp.
     const m = raw
       .replace(/^\uFEFF/, "")
       .match(/^(?:[^\t]*\t[^\t]*\t)?(\S+?Z)\s(.*)$/);
