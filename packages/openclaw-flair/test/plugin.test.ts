@@ -1501,17 +1501,19 @@ describe("slice 2 — capture normalisation, ids and outcomes", () => {
 // stringified timestamp) and records per session how many occurrences of each
 // identity it has accounted for; the occurrences beyond that count are treated
 // as new, and as messages of the run whose `agent_end` delivered the snapshot.
-// That run captures them, or, when it does not capture (success: false, retired
-// or aborted, no run id, no usable key, the run map full), they are recorded as
-// skipped. A capture whose write fails is dropped with a log line and never
-// retried. Scans of one session run one at a time, at most
-// `sessionScanQueueCap`; a callback that finds the queue full disables capture
-// for the session. The behaviour tests cover a concurrent callback, a rewritten
-// snapshot, a failed write (dropped), a scan queued past the retirement window,
-// equal-field messages (counted, and the compaction ambiguity), refused runs
-// (success: false, retired, no key, no capacity with an abort that cannot be
-// recorded), a write settling after an abort, the session and identity caps,
-// the full queue with a write settling after the disable, and `gateway_stop`.
+// For an admitted run they are considered for capture; when the run does not
+// capture (success: false, retired or aborted, no run id, no usable key, the run
+// map full), a session-keyed scan records the ones it identifies as skipped. A
+// capture whose write fails is dropped with a log line and no retry scheduled.
+// Scans of one session run one at a time, at most `sessionScanQueueCap` queued
+// or running; a callback that finds that many records nothing and disables the
+// session's `agent_end` capture (`llm_input`/`llm_output` are unaffected). The
+// behaviour tests cover a concurrent callback, a rewritten snapshot, a failed
+// write (dropped), a scan queued past the retirement window, equal-field
+// messages (counted, and the compaction ambiguity), refused runs (success:
+// false, retired, no key, no capacity with an abort that cannot be recorded), a
+// write settling after an abort, the session and identity caps, the full queue
+// with a write settling after the disable, and `gateway_stop`.
 //
 // The real-runner test drives synthetic events, shaped like the host's
 // `PluginHookAgentEndEvent` and agent context, through the pinned host's real
@@ -1584,7 +1586,7 @@ describe("flair#2513 — agent_end capture is keyed by counted message identitie
     expect(retained.every((c) => (c.body as any).hostSource.id === "run-1")).toBe(true);
   });
 
-  test("round 5 (mutation: a failed write is not recorded): a failed write is dropped with one log line and never retried, by its run or a later one", async () => {
+  test("round 5 (mutation: a failed write is not recorded): a failed write is dropped with a log line and no scheduled retry, and the next run of the session does not write it", async () => {
     writeKey("A");
     const plugin = await loadPlugin();
     const calls = failFirstWrite();
@@ -1603,7 +1605,7 @@ describe("flair#2513 — agent_end capture is keyed by counted message identitie
     expect(puts(calls).filter((c) => contentOf(c).includes("whose write failed")).map(sourceOf)).toEqual(["run-1"]);
     expect(puts(calls).filter((c) => contentOf(c).includes("next run's own message")).map(sourceOf)).toEqual(["run-2"]);
     expect(api._warnText()).toMatch(
-      /capture failed for run run-1 \(agent A\), message [0-9a-f]{16}: \S+; the capture is dropped, recorded as skipped, and not retried/,
+      /capture failed for run run-1 \(agent A\), message [0-9a-f]{16}: \S+; the capture is dropped and recorded as skipped, with no retry scheduled/,
     );
   });
 
@@ -1821,11 +1823,11 @@ describe("flair#2513 — agent_end capture is keyed by counted message identitie
     expect(puts(calls).filter((c) => contentOf(c).includes("while the key was missing")).length).toBe(0);
     expect(puts(calls).filter((c) => contentOf(c).includes("once the key was back")).map(sourceOf)).toEqual(["run-2"]);
     expect(api._warnText()).toMatch(
-      /agent_end for run run-1 \(agent A\) cannot capture now \(no usable signing key\); the new messages in its snapshot are dropped, recorded as skipped, and not retried/,
+      /agent_end for run run-1 \(agent A\) cannot capture now \(no usable signing key\); its new messages are not captured and no retry is scheduled; those this scan identifies are recorded as skipped for the session/,
     );
   });
 
-  test("round 5 (mutation: a capacity-refused run's snapshot is not recorded): a run refused for capacity, queued behind a held write and aborted with the abort overflow full, never writes, even once a slot frees", async () => {
+  test("round 5 (mutation: a capacity-refused run's snapshot is not recorded): the queued callback of a run refused for capacity and then aborted with the abort overflow full writes nothing, and the next run of the session does not write its message once a slot frees", async () => {
     writeKey("A");
     const plugin = await loadPlugin();
     const d = defer();
@@ -1858,11 +1860,11 @@ describe("flair#2513 — agent_end capture is keyed by counted message identitie
     expect(puts(calls).filter((c) => contentOf(c).includes("held run's message")).map(sourceOf)).toEqual(["run-0"]);
     expect(puts(calls).filter((c) => contentOf(c).includes("once a slot was free")).map(sourceOf)).toEqual(["run-2"]);
     expect(api._warnText()).toMatch(
-      /agent_end for run run-1 \(agent A\) cannot capture now \(the run map is full \(capacityCap\)\); the new messages in its snapshot are dropped, recorded as skipped, and not retried/,
+      /agent_end for run run-1 \(agent A\) cannot capture now \(the run map is full \(capacityCap\)\); its new messages are not captured and no retry is scheduled; those this scan identifies are recorded as skipped for the session/,
     );
   });
 
-  test("round 3 (mutation: a failed run's snapshot is not recorded): a failed run's messages are never stored, and the next run stores only its own", async () => {
+  test("round 3 (mutation: a failed run's snapshot is not recorded): a failed run's messages are not stored by it or by the next run of the session, which stores only its own", async () => {
     writeKey("A");
     const plugin = await loadPlugin();
     const calls = installFetchStub();
@@ -1878,7 +1880,7 @@ describe("flair#2513 — agent_end capture is keyed by counted message identitie
     expect(puts(calls).filter((c) => contentOf(c).includes("the run that failed")).length).toBe(0);
     expect(puts(calls).filter((c) => contentOf(c).includes("the run that succeeded")).map(sourceOf)).toEqual(["run-2"]);
     expect(api._warnText()).toMatch(
-      /agent_end for run run-1 \(agent A\) does not capture \(the host reported success: false, for an aborted run or a failed attempt\); the new messages in its snapshot are recorded as skipped/,
+      /agent_end for run run-1 \(agent A\) does not capture \(the host reported success: false, for an aborted run or a failed attempt\); the new messages this scan identifies are recorded as skipped for the session/,
     );
   });
 
@@ -1906,7 +1908,7 @@ describe("flair#2513 — agent_end capture is keyed by counted message identitie
     expect(puts(calls).filter((c) => contentOf(c).includes("the run after it")).map(sourceOf)).toEqual(["run-2"]);
   });
 
-  test("round 5 (mutation: queue full does not disable; no recheck after the await): a callback that finds the scan queue full disables the session, and a held write that then fails records nothing", async () => {
+  test("round 5 (mutation: queue full does not disable; no recheck after the await): a callback that finds the scan queue full disables the session's agent_end capture, and a held write that then fails records nothing", async () => {
     writeKey("A");
     const plugin = await loadPlugin();
     const d = defer();
@@ -1945,7 +1947,7 @@ describe("flair#2513 — agent_end capture is keyed by counted message identitie
     expect(captureInternals.sessionIdentityCount?.() ?? -1).toBe(0);
     expect(queuedWhileHeld).toBe(1);
     expect(api._warnText()).toMatch(
-      /capture is disabled for a session of agent A: agent_end for run run-2 found 1 scans queued for the session \(sessionScanQueueCap\); no later agent_end of that session captures anything while its capture state is held/,
+      /agent_end capture is disabled for a session of agent A: agent_end for run run-2 found 1 scans queued or running for the session \(sessionScanQueueCap\); no later agent_end scan of that session captures or records anything while its capture state is held/,
     );
     expect(api._warnText()).not.toMatch(/accounted to it as skipped/);
   });
