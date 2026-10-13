@@ -304,7 +304,7 @@ describe("flair#2455 — FederationRetry storage, gating and the operator query 
     expect(plain.stdout).toContain(`pending-${sfx}`);
     expect(plain.stdout).toContain(`terminal-${sfx}`);
     expect(plain.stdout).toContain("retry_exhausted");
-  }, 30_000);
+  }, 60_000); // above its sequential waits: one ops read (30 s) + one CLI spawn (20 s)
 
   test("`flair federation status` renders the retry rows when the peer read fails", async () => {
     const arm = join(pauseDir, "arm.peers-read-fail");
@@ -329,7 +329,7 @@ describe("flair#2455 — FederationRetry storage, gating and the operator query 
     } finally {
       rmSync(arm, { force: true });
     }
-  }, 30_000);
+  }, 90_000); // above its sequential waits: one admin read (30 s) + two CLI spawns (2 x 20 s)
 
   test("an inbound sync naming FederationRetry is refused as unknown_table and lands nothing", async () => {
     // A peer so POST /FederationSync accepts a batch.
@@ -376,5 +376,5 @@ describe("flair#2455 — FederationRetry storage, gating and the operator query 
     expect(plain.stdout).toContain(`pending-${sfx}`);
     expect(plain.stdout).toContain("merge_target_changed");
     expect(plain.stdout).toContain("retry_exhausted");
-  }, 30_000);
+  }, 90_000); // above its sequential waits: one ops read (30 s) + two CLI spawns (2 x 20 s)
 });
