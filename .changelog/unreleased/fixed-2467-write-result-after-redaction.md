@@ -1,9 +1,15 @@
-- **Memory write results report the STORED text after a server-side redaction: the SDK's `write`/`update` result and the MCP `memory_store`/`memory_update` replies (#2467).**
+- **Memory write results report the stored text after a server-side redaction, never the caller's input (#2467).**
 
-  The server replaces credential-shaped text before storing a Memory and reports
-  the count on the write response, without echoing the stored `content`.
-  `MemoryApi.write()` and `MemoryApi.update()` now re-read the row so the
-  result's `content` is the stored (redacted) text rather than the caller's
-  input, and the MCP write replies preview that stored text and report the
-  redacted-value count. A write the server did not redact is unchanged and makes
-  no extra request.
+  When the server replaces credential-shaped text in a Memory POST, PUT or
+  PATCH, the response now carries `stored` next to `redactedValues`: the
+  redacted `content`, `summary` and `trigger` that write committed (a PATCH
+  reports only the fields in its body; a skill update that versions to a
+  successor row reports that row's id). A write with nothing to redact answers
+  as before. `MemoryApi.write()` and `MemoryApi.update()` build a redacted
+  result from that response and make no read after the write, so a later
+  write to the row cannot change what the result reports. Against a server
+  that reports the count without `stored`, the result has no `content`,
+  `summary` or `trigger` and is marked `contentWithheld: true`. The MCP
+  `memory_store` and `memory_update` replies preview only the stored text and
+  report the count; with the content withheld they say so and show no
+  preview.

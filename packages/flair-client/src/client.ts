@@ -466,32 +466,50 @@ function mergeMetadata(existing: string | null | undefined, patch: Record<string
   return JSON.stringify({ ...parsed, ...patch });
 }
 
+/** The Memory fields the server redacts on a write (flair#2407). */
+const REDACTED_MEMORY_FIELDS = ["content", "summary", "trigger"] as const;
+
+/**
+ * flair#2467 — the result of a write()/update() whose response reports
+ * `redactedValues` above zero. The server replaced credential-shaped text in
+ * `content`, `summary` or `trigger` before storing the row, so the caller's
+ * input for those fields is not what was stored. The response carries
+ * `stored`: the redacted text fields that write committed, captured by the
+ * server from the row it staged. The result takes those fields from `stored`
+ * and the write signals (`id`, `written`, `redactedValues`, ...) from the same
+ * response, and makes no read: a later write to the row cannot change it.
+ *
+ * A response with the count and no `stored` (a server from before it) or a
+ * `stored` with no string `content` gives a result with no `content`,
+ * `summary` or `trigger` and `contentWithheld: true`. The caller's input is
+ * never returned for a redacted field. Without a count the merged result is
+ * returned unchanged.
+ */
+function writeResultAfterRedaction(response: unknown, merged: Record<string, unknown>): Record<string, unknown> {
+  const body = response && typeof response === "object" && !Array.isArray(response)
+    ? (response as Record<string, unknown>)
+    : null;
+  const redactedValues = body?.redactedValues;
+  if (typeof redactedValues !== "number" || redactedValues <= 0) return merged;
+  const result: Record<string, unknown> = { ...merged };
+  delete result.stored;
+  for (const field of REDACTED_MEMORY_FIELDS) delete result[field];
+  const stored = body?.stored;
+  const storedText = stored && typeof stored === "object" && !Array.isArray(stored)
+    ? (stored as Record<string, unknown>)
+    : null;
+  if (!storedText || typeof storedText.content !== "string") {
+    result.contentWithheld = true;
+    return result;
+  }
+  for (const field of REDACTED_MEMORY_FIELDS) {
+    if (typeof storedText[field] === "string") result[field] = storedText[field];
+  }
+  return result;
+}
+
 class MemoryApi {
   constructor(private client: FlairClient) {}
-
-  /**
-   * flair#2467 — a write response reports `redactedValues` when the server
-   * replaced credential-shaped text before storing the row; it does NOT echo
-   * the stored `content`. Re-read the row and return its STORED content, so the
-   * result's `content` is the stored text rather than the caller's input.
-   * Without a redaction count (the common case) the merged result is returned
-   * unchanged, with no extra request. A failed re-read propagates: the write
-   * already landed, and returning the caller's input as the stored text would
-   * be false.
-   */
-  private async storedWriteResult(
-    response: unknown,
-    id: string,
-    merged: Record<string, unknown>,
-  ): Promise<Record<string, unknown>> {
-    const redactedValues = (response as { redactedValues?: unknown } | null | undefined)?.redactedValues;
-    if (typeof redactedValues !== "number" || redactedValues <= 0) return merged;
-    const stored = await this.get(id);
-    if (!stored) {
-      throw new FlairError("GET", `/Memory/${encodeRecordId(id)}`, 404, `memory ${id} not found after a redacted write`);
-    }
-    return { ...merged, content: stored.content };
-  }
 
   /**
    * Write a memory. NEVER suppresses the write — the record is always
@@ -601,8 +619,9 @@ class MemoryApi {
     // written, plus any echoed fields) over the locally-constructed record —
     // the write always happens, so `record` always reflects what was sent,
     // and the server's signal fields (if any) always come through. When the
-    // response reports redaction, the stored content is re-read (flair#2467).
-    return (await this.storedWriteResult(response, id, { ...record, ...(response ?? {}) })) as unknown as Memory;
+    // response reports redaction, the text fields come from its `stored`
+    // (flair#2467, writeResultAfterRedaction).
+    return writeResultAfterRedaction(response, { ...record, ...(response ?? {}) }) as unknown as Memory;
   }
 
   /**
@@ -699,7 +718,7 @@ class MemoryApi {
       // for this write (it's an intentional version link, not an ambiguous
       // new write).
       const response = await this.client.request<Record<string, unknown>>("PUT", `/Memory/${encodeRecordId(newId)}`, record);
-      return (await this.storedWriteResult(response, newId, { ...record, ...(response ?? {}) })) as unknown as Memory;
+      return writeResultAfterRedaction(response, { ...record, ...(response ?? {}) }) as unknown as Memory;
     }
 
     const merged: Record<string, unknown> = { ...existing, content, updatedAt: new Date().toISOString() };
@@ -714,7 +733,7 @@ class MemoryApi {
     }
     applyPointerFields(merged);
     const response = await this.client.request<Record<string, unknown>>("PUT", `/Memory/${encodeRecordId(id)}`, merged);
-    return (await this.storedWriteResult(response, id, { ...merged, id, ...(response ?? {}) })) as unknown as Memory;
+    return writeResultAfterRedaction(response, { ...merged, id, ...(response ?? {}) }) as unknown as Memory;
   }
 
   /** Search memories by meaning. Optionally filter to facts valid at a specific point in time. */

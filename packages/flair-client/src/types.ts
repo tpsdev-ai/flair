@@ -86,11 +86,21 @@ export interface Memory {
   /** Always true after a successful write()/update() — the server never
    *  suppresses a write, so this is never false/absent on a real response. */
   written?: boolean;
-  /** How many credential-shaped values the server replaced before persisting
-   *  the row (flair#2407). Present only when above zero; absent means the
-   *  stored text is the caller's input unchanged. When present, write()/update()
-   *  re-read the stored row (flair#2467) so `content` is the STORED text. */
+  /** How many credential-shaped values the server replaced in `content`,
+   *  `summary` and `trigger` before persisting the row (flair#2407). Present
+   *  only when above zero; absent means the server reported no replacement.
+   *  When present on a write()/update() result, those three fields are the
+   *  STORED (redacted) text that write committed, taken from the write
+   *  response's `stored` with no read after the write (flair#2467), unless
+   *  `contentWithheld` is true. */
   redactedValues?: number;
+  /** flair#2467 — true on a write()/update() result whose response reported
+   *  `redactedValues` but did not return the stored text (a server from before
+   *  it returned `stored`). The result then has no `content`, `summary` or
+   *  `trigger`: the stored text differs from the caller's input and was not
+   *  returned, and the input is never reported in its place. Read the row to
+   *  see the stored text. Absent otherwise. */
+  contentWithheld?: boolean;
   /** True when the server's conservative dedup gate found a near-duplicate.
    *  The new content was ALWAYS written regardless — this is a signal, not a
    *  suppression flag. See `matchedId` / `matchConfidence`. */
