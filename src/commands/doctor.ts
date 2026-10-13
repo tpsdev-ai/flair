@@ -135,8 +135,8 @@ export type DoctorCli = {
 
 /**
  * The ops endpoint the four instance reads (audit-log, instance-identity, Agent
- * roster, Agent homes) may address, or the shared refusal (flair#2520): the
- * verified target `verifyDoctorRosterInstance` returns.
+ * roster, Agent homes) may address, or the refusal (flair#2520), as
+ * `verifyDoctorRosterInstance` returns it.
  */
 type DoctorProbedRead =
   | { kind: "run"; opsPort: number }
@@ -994,17 +994,22 @@ program
     }
 
     // flair#2520: the audit-log, instance-identity, Agent-roster and Agent-homes
-    // reads all address one ops endpoint, and it must be the instance doctor
-    // probed. Resolve that verified target ONCE here — the pair check flair#2483
-    // applies to the roster and home reads — and let each section read from it,
-    // or report NOT RUN with the shared pair-refused reason and remedy when it
-    // refuses. `effectivePort` is final: PID discovery (step 1) and any --fix
-    // re-record have already run. No admin credential leaves the target
-    // unresolved (`probedRead` null); each section then keeps its own
-    // no-credential state, which reads no ops endpoint.
+    // reads go through an ops endpoint, which must belong to the instance doctor
+    // probed. Verify that target here with the pair check flair#2483 applies,
+    // and let each section read from it, or report NOT RUN with the shared
+    // pair-refused reason and remedy when it refuses. `effectivePort` is final: PID discovery
+    // (step 1) and any --fix re-record have already run. The verification
+    // describes the process serving the probed port at this point, so it is
+    // shared only until a --fix step may change that process (the launchd
+    // repair, 7b, and the install-tree restart, 7c, both below). Those steps set
+    // `servingProcessMayHaveChanged`, and the Agent-roster and Agent-homes reads
+    // then verify again and use only the new answer (8b). No admin credential
+    // leaves the target unresolved (`probedRead` null); each section then keeps
+    // its own no-credential state, which reads no ops endpoint.
     let probedAdminPass: string | undefined;
     let probedCredIssue: string | null = null;
     let probedRead: DoctorProbedRead | null = null;
+    let servingProcessMayHaveChanged = false;
     if (harperResponding) {
       try {
         probedAdminPass = resolveLocalAdminPass(undefined);
@@ -1030,9 +1035,10 @@ program
       if (probedCredIssue) {
         console.log(`  ${render.icons.warn} Audit log: UNVERIFIED (could not probe — ${probedCredIssue})`);
       } else if (probedRead?.kind === "not-run") {
-        // flair#2520: the same pair-refused target the roster, home and
-        // instance-identity reads use; name why and the remedy, and count it
-        // (nothing is read).
+        // flair#2520: the pair-refused target the instance-identity section
+        // also uses (and the roster and home sections, unless a --fix step
+        // makes them verify again); name why and the remedy, and count it. This
+        // section's diagnostic read does not run.
         issues++;
         console.log(`  ${render.icons.warn} Audit log: NOT RUN — ${probedRead.reason}`);
         console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${probedRead.remedy}`);
@@ -1103,8 +1109,10 @@ program
       if (probedCredIssue) {
         console.log(`  ${render.icons.warn} Instance identity: UNVERIFIED (could not probe — ${probedCredIssue})`);
       } else if (probedRead?.kind === "not-run") {
-        // flair#2520: the same pair-refused target the roster, home and audit
-        // reads use; name why and the remedy, and count it (nothing is read).
+        // flair#2520: the pair-refused target the audit-log section also uses
+        // (and the roster and home sections, unless a --fix step makes them
+        // verify again); name why and the remedy, and count it. This section's
+        // diagnostic read does not run.
         issues++;
         console.log(`  ${render.icons.warn} Instance identity: NOT RUN — ${probedRead.reason}`);
         console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${probedRead.remedy}`);
@@ -1811,6 +1819,13 @@ program
       // Execute the repair directly; it re-derives the plan internally and
       // verifies via assessLaunchdManagement (fail-loud, never a silent pass).
       const repairResult = await repairLaunchdManagement(defaultDataDir(), effectivePort);
+      // flair#2520: only a no-op is certain to leave the instance as it was. A
+      // repair or a failure may have clean-stopped the direct process and
+      // loaded a launchd job, so the target verified before the repair no
+      // longer proves which instance serves the probed port. Refusals are
+      // decided before the instance is stopped today; counting them too keeps
+      // a later refusal path from reusing a stale answer, for one more check.
+      if (repairResult.kind !== "no-op") servingProcessMayHaveChanged = true;
       switch (repairResult.kind) {
         case "no-op":
           console.log(`  ${render.icons.ok} ${repairResult.detail}`);
@@ -1895,7 +1910,12 @@ program
               runningVersion: effectivePort === port ? instanceVersion : null,
             }) as TreeAssessment,
           repoint: (dry) => cli.repointMainServiceUnit(defaultDataDir(), effectivePort, { dryRun: dry }),
-          restart: () => cli.restartFlair(effectivePort, defaultDataDir()),
+          // flair#2520: set before the restart runs, so a restart that fails
+          // part-way still makes the later reads verify again.
+          restart: () => {
+            servingProcessMayHaveChanged = true;
+            return cli.restartFlair(effectivePort, defaultDataDir());
+          },
           rewriteFederation: (dry) => rewriteFederationSchedulerRuntime({ dryRun: dry }),
         },
       );
@@ -2070,13 +2090,20 @@ program
       console.log(`\n  ${render.wrap(render.c.bold, "Agent IDs")}`);
       let roster: Array<{ id?: unknown }> | null = null;
       let rosterReadAttempted = false;
-      // flair#2483/#2520: read from the ONE verified instance target resolved
-      // above. The roster read addresses the verified ops port, or both the
-      // roster and home checks report NOT RUN (counted as an issue) and no Agent
-      // row is read. No admin credential leaves the target null; the roster read
-      // is skipped and named below.
-      const rosterNotRun = probedRead?.kind === "not-run" ? probedRead : null;
-      const rosterOpsPort = probedRead?.kind === "run" ? probedRead.opsPort : null;
+      // flair#2483/#2520: read from the verified instance target. That is the
+      // target verified above, unless a --fix step since then may have changed
+      // the process serving the probed port (servingProcessMayHaveChanged): the
+      // target is then verified again here, right before these reads, and only
+      // the new answer is used. The roster read addresses the verified ops
+      // port, or both the roster and home checks report NOT RUN (counted as an
+      // issue) and no Agent row is read. No admin credential leaves the target
+      // null; the roster read is skipped and named below.
+      const rosterTarget: DoctorProbedRead | null =
+        servingProcessMayHaveChanged && probedAdminPass
+          ? await verifyDoctorRosterInstance(opts, effectivePort, probedAdminPass)
+          : probedRead;
+      const rosterNotRun = rosterTarget?.kind === "not-run" ? rosterTarget : null;
+      const rosterOpsPort = rosterTarget?.kind === "run" ? rosterTarget.opsPort : null;
       if (probedAdminPass && rosterOpsPort !== null) {
         rosterReadAttempted = true;
         const auth = Buffer.from(`${resolveAdminUser()}:${probedAdminPass}`).toString("base64");

@@ -1804,10 +1804,15 @@ export function decideDoctorRosterIdentity(opsPort: number, pair: ProbedPairIden
  * 3. Only then compares the instance identities both endpoints report
  *    ({@link decideDoctorRosterIdentity}): two different single ids refuse.
  *
- * Any `not-run` means the caller reports its check NOT RUN and reads nothing
- * from that endpoint. The limit: step 2 reads configured ports, which are not
- * proof of the live process, and step 3 adds a check only when both endpoints
- * have exactly one Instance row.
+ * Any `not-run` means doctor reports the sections that use this answer NOT
+ * RUN, and their diagnostic reads do not run: all four section reads, unless a
+ * `--fix` step that may have changed the serving process made the roster and
+ * home sections ask again (the answer describes the process serving the probed
+ * port when it was taken). Reaching a `not-run` may itself have read the
+ * candidate's configuration (step 2) and both endpoints' instance identities
+ * (step 3). The limit: step 2 reads configured ports, which are not proof of
+ * the live process, and step 3 adds a check only when both endpoints have
+ * exactly one Instance row.
  */
 export async function verifyDoctorRosterInstance(
   opts: { port?: string | number; opsPort?: string | number; dataDir?: string },

@@ -7,17 +7,21 @@
  * Agent-homes (flair#2433) sections through the ops API. The audit-log and
  * instance-identity sections resolved the ops endpoint independently
  * (`resolveOpsPort`), so they could read from an instance other than the one
- * probed. They now read the ONE verified target flair#2483 resolves for the
- * roster and home checks: the candidate ops endpoint whose own configuration
- * records the probed HTTP port, bound on loopback or on all interfaces. When
- * that pair check refuses, all four sections report NOT RUN (counted as an
- * issue) and read nothing; when there is no admin credential the sections keep
- * their own no-credential state.
+ * probed. They now read the verified target flair#2483 resolves for the roster
+ * and home checks: the candidate ops endpoint whose own configuration records
+ * the probed HTTP port, bound on loopback or on all interfaces. When that pair
+ * check refuses, all four sections report NOT RUN (counted as an issue) and the
+ * four diagnostic section reads do not run; when there is no admin credential
+ * the sections keep their own no-credential state. (A `--fix` step that may
+ * change the serving process makes the roster and home reads verify again:
+ * test/unit-isolated/doctor-fix-reverify-2520.test.ts.)
  *
  * The first test is the clean-install shape the from-scratch gate runs: a
- * paired config, both sections run on the probed instance. The rest prove the
- * bypass cases are refused and read nothing from the other instance, whose two
- * Instance rows are the distinguishable artifact.
+ * paired config, both sections run on the probed instance and print their
+ * success results. The rest prove the bypass cases are refused: the pair check
+ * reads the other instance's configuration to decide, and neither section's
+ * diagnostic read runs, so the other instance's two Instance rows (the
+ * distinguishable artifact) are never reported.
  *
  * Build prerequisite: dist/cli.js and dist/resources/*.js
  * (`bun run build && bun run build:cli`).
@@ -174,9 +178,22 @@ afterAll(async () => {
   if (home) rmSync(home, { recursive: true, force: true });
 });
 
-/** True when neither the audit-log nor the instance-identity section reported NOT RUN. */
-function bothSectionsRan(stdout: string): boolean {
-  return !stdout.includes("Audit log: NOT RUN") && !stdout.includes("Instance identity: NOT RUN");
+/**
+ * Both sections ran on the probed instance and printed their success results:
+ * the audit-log section verified recording, and the instance-identity section
+ * read the probed instance's Instance table (A has no rows) with its
+ * pairing-role check run. NOT RUN or UNVERIFIED in either section fails it: a
+ * missing NOT RUN alone would pass if a section never ran.
+ */
+function expectBothSectionsRan(stdout: string): void {
+  expect(stdout, "the audit-log section did not verify recording on the probed instance").toContain("Audit log: recording");
+  const identity = stdout.split("\n").filter((line) => line.includes("Instance identity:"));
+  expect(identity, `the instance-identity section did not print exactly its success line:\n${stdout}`).toHaveLength(1);
+  expect(identity[0].trimEnd(), stdout).toMatch(/Instance identity: no rows$/);
+  for (const section of ["Audit log", "Instance identity"]) {
+    expect(stdout, `${section} reported NOT RUN`).not.toContain(`${section}: NOT RUN`);
+    expect(stdout, `${section} reported UNVERIFIED`).not.toMatch(new RegExp(`${section}: .*UNVERIFIED`));
+  }
 }
 
 describe("flair#2520 — the paired instance: both sections run on the probed instance", () => {
@@ -185,14 +202,13 @@ describe("flair#2520 — the paired instance: both sections run on the probed in
     // the per-user config `flair init` writes, no FLAIR_OPS_PORT.
     writeHomeConfig(`port: ${httpPort(a)}\nopsPort: ${opsPort(a)}\n`);
     const r = await runDoctor({ args: ["--agent", AGENT_A, "--port", httpPort(a)] });
-    expect(bothSectionsRan(r.stdout), r.stdout).toBe(true);
-    expect(r.stdout, "the audit-log section did not verify recording on the probed instance").toContain("Audit log: recording");
+    expectBothSectionsRan(r.stdout);
     expect(r.stdout, "the other instance's Instance rows were reported").not.toContain(INST_B1);
     expect(r.stdout, "the other instance's Instance rows were reported").not.toContain(INST_B2);
   }, 90_000);
 });
 
-describe("flair#2520 — --port A with FLAIR_OPS_PORT=B: both sections are NOT RUN and read nothing from B", () => {
+describe("flair#2520 — --port A with FLAIR_OPS_PORT=B: both sections are NOT RUN and their diagnostic reads do not run", () => {
   test("the probed port conflicts with the configured pair: both sections report NOT RUN", async () => {
     // Only the ops port is configured, so the pairing rule has no complete pair
     // to complete — it accepts the two ports the caller named. B's own
@@ -203,7 +219,8 @@ describe("flair#2520 — --port A with FLAIR_OPS_PORT=B: both sections are NOT R
     expect(r.stdout, r.stdout).toContain("Audit log: NOT RUN");
     expect(r.stdout, r.stdout).toContain("Instance identity: NOT RUN");
     expect(r.stdout, r.stdout).toContain(`is configured with HTTP port ${httpPort(b)}, not the probed HTTP port ${httpPort(a)}`);
-    // Nothing was read from either endpoint: neither an audit verdict nor B's rows.
+    // The four diagnostic section reads did not run: no audit verdict, and
+    // neither of B's Instance rows (the pair check read only B's configuration).
     expect(r.stdout, "an audit verdict was printed for a NOT RUN check").not.toContain("Audit log: recording");
     expect(r.stdout, "an audit verdict was printed for a NOT RUN check").not.toContain("Audit log NOT RECORDING");
     expect(r.stdout, "the other instance's Instance rows were reported").not.toContain(INST_B1);
@@ -232,8 +249,7 @@ describe("flair#2520 — --port A with FLAIR_OPS_PORT=B: both sections are NOT R
     // sections run on it (against the dead port this would refuse).
     writeHomeConfig(`opsPort: ${opsPort(a)}\n`);
     const ran = await runDoctor({ args: ["--agent", AGENT_A, "--port", String(dead)], opsPort: opsPort(a) });
-    expect(bothSectionsRan(ran.stdout), ran.stdout).toBe(true);
-    expect(ran.stdout, "the audit-log section did not verify recording on the probed instance").toContain("Audit log: recording");
+    expectBothSectionsRan(ran.stdout);
     expect(ran.stdout, "the other instance's Instance rows were reported").not.toContain(INST_B1);
     expect(ran.stdout, "the other instance's Instance rows were reported").not.toContain(INST_B2);
     rmSync(join(home, ".flair", "data", "hdb.pid"), { force: true });
