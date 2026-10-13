@@ -11,6 +11,8 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { randomUUID } from "node:crypto";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import nacl from "tweetnacl";
@@ -19,6 +21,8 @@ import { redactSecrets, redactSecretsWithCount } from "../../packages/flair-mcp/
 import { computeContentHash } from "../../resources/memory-feed-lib.js";
 import { signBody, signBodyFresh } from "../../resources/federation-crypto.js";
 import { currentSeed, runSkillSeed, SEED_SKILL_ID, skillSeedRestIo } from "../../src/lib/skill-seed.js";
+import { FlairClient } from "../../packages/flair-client/src/client.js";
+import { STDIO_TOOL_HANDLERS } from "../../packages/flair-mcp/src/adapter-tools.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -400,5 +404,65 @@ describe("flair#2407 — the redactor leaves incoming federated content alone", 
     expect(body.skippedReasons).toEqual({ invalid_signature: 1 });
     expect((await readStored(goodId))?.content).toBe(content);
     expect(await readStored(forgedId)).toBeNull();
+  }, 60_000);
+});
+
+/**
+ * flair#2467 — the SDK's write/update results and the MCP write replies after
+ * a server-side redaction, through the REAL FlairClient against REAL Harper.
+ * The write response reports the count and does not echo the stored `content`,
+ * so the SDK re-reads the row; these cases pin the SDK's result and the MCP
+ * replies built from it.
+ */
+describe("flair#2467 — the SDK write result and the MCP replies after a redaction", () => {
+  let keyDir: string;
+  let client: FlairClient;
+
+  beforeAll(async () => {
+    keyDir = await mkdtemp(join(tmpdir(), "flair-2467-sdk-"));
+    const keyPath = join(keyDir, "redact-agent-a.key");
+    // loadPrivateKey() treats an exactly-32-byte file as a raw Ed25519 seed.
+    await writeFile(keyPath, Buffer.from(agent.secretKey.slice(0, 32)));
+    client = new FlairClient({ agentId: agent.id, url: harper.httpURL, keyPath });
+  });
+
+  afterAll(async () => {
+    if (keyDir) await rm(keyDir, { recursive: true, force: true });
+  });
+
+  const ctx = () => ({ flair: client, agentId: agent.id, heartbeat: () => {}, rememberTask: () => {} });
+
+  it("memory.write returns the STORED (redacted) content and the count", async () => {
+    const id = `r2467-sdk-write-${randomUUID()}`;
+    const res: any = await client.memory.write(`sdk write ${GITHUB_TOKEN} note`, { id });
+    expect(res.redactedValues).toBe(1);
+    expect(res.content).toBe(`sdk write ${REDACTED} note`);
+  }, 60_000);
+
+  it("memory.update returns the STORED (redacted) content and the count", async () => {
+    const id = `r2467-sdk-update-${randomUUID()}`;
+    await client.memory.write("seed before the redacted update", { id });
+    const res: any = await client.memory.update(id, `sdk update ${AWS_KEY} note`);
+    expect(res.redactedValues).toBe(1);
+    expect(res.content).toBe(`sdk update ${REDACTED} note`);
+  }, 60_000);
+
+  it("memory_store's reply previews the STORED text and reports the count", async () => {
+    const res: any = await STDIO_TOOL_HANDLERS.memory_store({ content: `mcp store ${GITHUB_TOKEN} note`, tags: [] }, ctx() as any);
+    const text = res.content[0].text;
+    expect(text).toContain(`Preview: mcp store ${REDACTED} note`);
+    expect(text).not.toContain(GITHUB_TOKEN);
+    expect(text).toContain("Redacted 1 credential-shaped value(s) before storing.");
+    expect(res.structuredContent.redactedValues).toBe(1);
+  }, 60_000);
+
+  it("memory_update's reply previews the STORED text and reports the count", async () => {
+    const id = `r2467-mcp-update-${randomUUID()}`;
+    await client.memory.write("seed before the mcp redacted update", { id });
+    const res: any = await STDIO_TOOL_HANDLERS.memory_update({ id, content: `mcp update ${AWS_KEY} note` }, ctx() as any);
+    const text = res.content[0].text;
+    expect(text).toContain(`Preview: mcp update ${REDACTED} note`);
+    expect(text).toContain("Redacted 1 credential-shaped value(s) before storing.");
+    expect(res.structuredContent.redactedValues).toBe(1);
   }, 60_000);
 });

@@ -87,15 +87,24 @@ const memory_store: StdioHandler = async (
     const deduplicated = (result as any).deduplicated === true;
     const matchedId = (result as any).matchedId as string | undefined;
     const effectiveVisibility = (result as any).visibility as string | undefined;
-    const preview = content.length > 120 ? content.slice(0, 120) + "..." : content;
+    const redactedValues = typeof (result as any).redactedValues === "number" ? (result as any).redactedValues : 0;
+    // flair#2467 — preview the STORED text: the server replaces credential-
+    // shaped values before storing, and MemoryApi.write() returns the stored
+    // content, so the preview shows the stored text, not the credential-shaped
+    // text the server replaced.
+    const stored = typeof result.content === "string" ? result.content : content;
+    const preview = stored.length > 120 ? stored.slice(0, 120) + "..." : stored;
     const tagStr = tags && tags.length > 0 ? tags.join(", ") : "none";
     const lines = [
       `Memory stored (id: ${result.id})`,
       `Preview: ${preview}`,
-      `Size: ${content.length} chars`,
+      `Size: ${stored.length} chars`,
       `Tags: ${tagStr}`,
       `Type: ${type ?? "session"}, Durability: ${durability ?? "standard"}, Visibility: ${effectiveVisibility ?? "(server default)"}`,
     ];
+    if (redactedValues > 0) {
+      lines.push(`Redacted ${redactedValues} credential-shaped value(s) before storing.`);
+    }
     if (deduplicated && matchedId) {
       lines.push(
         "",
@@ -105,7 +114,13 @@ const memory_store: StdioHandler = async (
     }
     return {
       content: [{ type: "text", text: lines.join("\n") }],
-      structuredContent: { deduplicated, id: result.id, written: true, ...(deduplicated ? { matchedId } : {}) },
+      structuredContent: {
+        deduplicated,
+        id: result.id,
+        written: true,
+        ...(redactedValues > 0 ? { redactedValues } : {}),
+        ...(deduplicated ? { matchedId } : {}),
+      },
     };
   } catch (err) {
     return errorResult(err, flair.url);
@@ -122,12 +137,27 @@ const memory_update: StdioHandler = async (
       preserveHistory,
       usedMemoryIds: citationIds(usedMemoryIds),
     });
-    const text = preserveHistory
-      ? `Memory updated: new version stored (id: ${result.id}), supersedes ${id}.`
-      : `Memory updated (id: ${id}).`;
+    const redactedValues = typeof (result as any).redactedValues === "number" ? (result as any).redactedValues : 0;
+    // flair#2467 — preview the STORED text (see memory_store).
+    const stored = typeof result.content === "string" ? result.content : content;
+    const preview = stored.length > 120 ? stored.slice(0, 120) + "..." : stored;
+    const lines = [
+      preserveHistory
+        ? `Memory updated: new version stored (id: ${result.id}), supersedes ${id}.`
+        : `Memory updated (id: ${id}).`,
+      `Preview: ${preview}`,
+    ];
+    if (redactedValues > 0) {
+      lines.push(`Redacted ${redactedValues} credential-shaped value(s) before storing.`);
+    }
     return {
-      content: [{ type: "text", text }],
-      structuredContent: { id: result.id, supersedes: preserveHistory ? id : undefined, written: true },
+      content: [{ type: "text", text: lines.join("\n") }],
+      structuredContent: {
+        id: result.id,
+        supersedes: preserveHistory ? id : undefined,
+        written: true,
+        ...(redactedValues > 0 ? { redactedValues } : {}),
+      },
     };
   } catch (err) {
     return errorResult(err, flair.url);

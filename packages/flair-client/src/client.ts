@@ -470,6 +470,30 @@ class MemoryApi {
   constructor(private client: FlairClient) {}
 
   /**
+   * flair#2467 — a write response reports `redactedValues` when the server
+   * replaced credential-shaped text before storing the row; it does NOT echo
+   * the stored `content`. Re-read the row and return its STORED content, so the
+   * result's `content` is the stored text rather than the caller's input.
+   * Without a redaction count (the common case) the merged result is returned
+   * unchanged, with no extra request. A failed re-read propagates: the write
+   * already landed, and returning the caller's input as the stored text would
+   * be false.
+   */
+  private async storedWriteResult(
+    response: unknown,
+    id: string,
+    merged: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const redactedValues = (response as { redactedValues?: unknown } | null | undefined)?.redactedValues;
+    if (typeof redactedValues !== "number" || redactedValues <= 0) return merged;
+    const stored = await this.get(id);
+    if (!stored) {
+      throw new FlairError("GET", `/Memory/${encodeRecordId(id)}`, 404, `memory ${id} not found after a redacted write`);
+    }
+    return { ...merged, content: stored.content };
+  }
+
+  /**
    * Write a memory. NEVER suppresses the write — the record is always
    * created. `dedup`/`dedupThreshold` are passthrough HINTS forwarded to the
    * server, which runs a conservative (cosine + lexical) near-duplicate check
@@ -576,8 +600,9 @@ class MemoryApi {
     // Merge the server response (deduplicated/matchedId/matchConfidence/
     // written, plus any echoed fields) over the locally-constructed record —
     // the write always happens, so `record` always reflects what was sent,
-    // and the server's signal fields (if any) always come through.
-    return { ...record, ...(response ?? {}) } as unknown as Memory;
+    // and the server's signal fields (if any) always come through. When the
+    // response reports redaction, the stored content is re-read (flair#2467).
+    return (await this.storedWriteResult(response, id, { ...record, ...(response ?? {}) })) as unknown as Memory;
   }
 
   /**
@@ -674,7 +699,7 @@ class MemoryApi {
       // for this write (it's an intentional version link, not an ambiguous
       // new write).
       const response = await this.client.request<Record<string, unknown>>("PUT", `/Memory/${encodeRecordId(newId)}`, record);
-      return { ...record, ...(response ?? {}) } as unknown as Memory;
+      return (await this.storedWriteResult(response, newId, { ...record, ...(response ?? {}) })) as unknown as Memory;
     }
 
     const merged: Record<string, unknown> = { ...existing, content, updatedAt: new Date().toISOString() };
@@ -689,7 +714,7 @@ class MemoryApi {
     }
     applyPointerFields(merged);
     const response = await this.client.request<Record<string, unknown>>("PUT", `/Memory/${encodeRecordId(id)}`, merged);
-    return { ...merged, id, ...(response ?? {}) } as unknown as Memory;
+    return (await this.storedWriteResult(response, id, { ...merged, id, ...(response ?? {}) })) as unknown as Memory;
   }
 
   /** Search memories by meaning. Optionally filter to facts valid at a specific point in time. */

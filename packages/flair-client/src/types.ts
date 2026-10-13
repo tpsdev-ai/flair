@@ -86,6 +86,11 @@ export interface Memory {
   /** Always true after a successful write()/update() — the server never
    *  suppresses a write, so this is never false/absent on a real response. */
   written?: boolean;
+  /** How many credential-shaped values the server replaced before persisting
+   *  the row (flair#2407). Present only when above zero; absent means the
+   *  stored text is the caller's input unchanged. When present, write()/update()
+   *  re-read the stored row (flair#2467) so `content` is the STORED text. */
+  redactedValues?: number;
   /** True when the server's conservative dedup gate found a near-duplicate.
    *  The new content was ALWAYS written regardless — this is a signal, not a
    *  suppression flag. See `matchedId` / `matchConfidence`. */
