@@ -4,12 +4,15 @@
  *
  * `memory hygiene --apply` and `agent remove` pair the operations port they
  * scanned with the HTTP port Harper's own `get_configuration` reports, once the
- * OS listener table shows one Harper process listening on both
- * (src/lib/local-delete-instance.ts, flair#2526), then send each delete
- * through the CLI's real api() transport. These tests run the real commands against a scratch
- * Harper and assert that a delete lands on the scanned instance and is written
- * to the MemoryDeletionHistory table the integrity watcher reads — and that an
- * unreadable or unpaired configuration is refused before any delete.
+ * OS listener table shows one process with a recognized Harper command line
+ * listening on both, unchanged across two reads (src/lib/local-delete-instance.ts,
+ * flair#2526). Then they delete: Memory purges through the CLI's real api()
+ * transport to the HTTP port, Soul and Agent rows through the ops API's
+ * `delete`. These tests run the real commands against a scratch Harper and
+ * assert that a delete lands on the scanned instance and is written to the
+ * MemoryDeletionHistory table the integrity watcher reads — and that an
+ * unreadable or unpaired configuration is refused before any delete or any
+ * request to the HTTP port.
  *
  * Throwaway HOME + data dir, OS-assigned ports (never 9925/9926, never ~/.flair).
  */
@@ -237,7 +240,7 @@ async function startMismatchStub(): Promise<{ port: number; configurations: numb
  * port and Harper's real HTTP port — but which is not Harper: the OS lists this
  * test process on its port and Harper's own process on the HTTP port.
  */
-async function startStaleConfigStub(): Promise<{ port: number; configurations: number; deletes: number; close: () => Promise<void> }> {
+async function startStaleConfigStub(namedHttpPort: () => number = httpPort): Promise<{ port: number; configurations: number; deletes: number; close: () => Promise<void> }> {
   const state = { configurations: 0, deletes: 0 };
   const srv = createServer((req, res) => {
     let body = "";
@@ -253,7 +256,7 @@ async function startStaleConfigStub(): Promise<{ port: number; configurations: n
       if (parsed?.operation === "get_configuration") state.configurations++;
       if (parsed?.operation === "delete") state.deletes++;
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ http: { port: `127.0.0.1:${httpPort()}` }, operationsApi: { network: { port: port } } }));
+      res.end(JSON.stringify({ http: { port: `127.0.0.1:${namedHttpPort()}` }, operationsApi: { network: { port: port } } }));
     });
   });
   await new Promise<void>((resolve, reject) => {
@@ -269,6 +272,25 @@ async function startStaleConfigStub(): Promise<{ port: number; configurations: n
     get deletes() {
       return state.deletes;
     },
+    close: () => new Promise<void>((resolve) => srv.close(() => resolve())),
+  };
+}
+
+/** A listener answering 200 to everything that records each request's headers. */
+async function startHeaderCapture(): Promise<{ port: number; requests: Array<{ url: string; headers: Record<string, unknown> }>; close: () => Promise<void> }> {
+  const requests: Array<{ url: string; headers: Record<string, unknown> }> = [];
+  const srv = createServer((req, res) => {
+    requests.push({ url: req.url ?? "", headers: { ...req.headers } });
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end("{}");
+  });
+  await new Promise<void>((resolve, reject) => {
+    srv.once("error", reject);
+    srv.listen(0, "127.0.0.1", () => resolve());
+  });
+  return {
+    port: (srv.address() as { port: number }).port,
+    requests,
     close: () => new Promise<void>((resolve) => srv.close(() => resolve())),
   };
 }
@@ -393,6 +415,8 @@ describe("flair#2225 — CLI local deletes on a real Harper", () => {
     );
     expect(closedRun.code, closedRun.out).not.toBe(0);
     expect(closedRun.out).toContain("refusing deletion");
+    // A refusal with no remedy from the pair check carries the delete path's own.
+    expect(closedRun.out).toContain("Pass --ops-port with the ops port of the instance to delete from");
     expect(await memoryExists(id)).toBe(true);
 
     // (ii) the instance's own HTTP port is not a paired operations endpoint.
@@ -412,7 +436,7 @@ describe("flair#2225 — CLI local deletes on a real Harper", () => {
         home,
       );
       expect(stubRun.code, stubRun.out).not.toBe(0);
-      expect(stubRun.out).toContain(`--ops-port ${stub.port}: no matching local HTTP endpoint`);
+      expect(stubRun.out).toContain(`--ops-port ${stub.port}: the local HTTP/ops pair could not be proven`);
       expect(stub.configurations).toBe(1);
       expect(stub.deletes).toBe(0);
       expect(await memoryExists(id)).toBe(true);
@@ -430,12 +454,34 @@ describe("flair#2225 — CLI local deletes on a real Harper", () => {
       );
       expect(staleRun.code, staleRun.out).not.toBe(0);
       expect(staleRun.out).toContain("refusing deletion");
-      expect(staleRun.out).toContain(`listening on ops port ${stale.port}, is not a Harper process`);
+      expect(staleRun.out).toContain(`listening on ops port ${stale.port}, does not have a recognized Harper command line`);
       expect(stale.configurations).toBe(1);
       expect(stale.deletes).toBe(0);
       expect(await memoryExists(id)).toBe(true);
     } finally {
       await stale.close();
+    }
+
+    // (v) the configuration names a 200-answering listener that is not the
+    // instance: both delete commands refuse before sending it anything, so no
+    // credential reaches it (flair#2526).
+    const capture = await startHeaderCapture();
+    const decoy = await startStaleConfigStub(() => capture.port);
+    try {
+      for (const args of [
+        ["memory", "hygiene", "--apply", "--pattern", "compact-id", "--ops-port", String(decoy.port)],
+        ["agent", "remove", "agent-hyg", "--force", "--keep-keys", "--ops-port", String(decoy.port)],
+      ]) {
+        const run = await runCli(args, home);
+        expect(run.code, run.out).not.toBe(0);
+        expect(run.out).toContain("refusing deletion");
+      }
+      expect(capture.requests, "a delete command sent a request to the unproven HTTP port").toEqual([]);
+      expect(decoy.deletes).toBe(0);
+      expect(await memoryExists(id)).toBe(true);
+    } finally {
+      await decoy.close();
+      await capture.close();
     }
   }, 300_000);
 });

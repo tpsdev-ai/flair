@@ -1741,8 +1741,9 @@ export function resolveDoctorRosterTarget(
  * `opsPort`, the check the local delete paths use
  * (src/lib/local-delete-instance.ts): the configuration records `opsPort` as
  * its ops port and an HTTP port bound on loopback or on all interfaces, and the
- * OS listener table shows one Harper process listening on both. This decides
- * `run` only when that configured HTTP port is `probedHttpPort`. An unproven
+ * OS listener table shows one process listening on both, with a recognized
+ * Harper command line and the same pid and start time on two reads. This
+ * decides `run` only when that configured HTTP port is `probedHttpPort`. An unproven
  * pair, or a proven one naming another HTTP port, is `not-run`, with the
  * proof's own remedy when it carries one.
  */
@@ -1799,14 +1800,18 @@ export function decideDoctorRosterIdentity(opsPort: number, pair: ProbedPairIden
  *    the check the local delete paths use) and requires it to record the
  *    candidate as its ops port and the probed port as its HTTP port, bound on
  *    loopback or on all interfaces, with the OS listener table showing one
- *    Harper process listening on both ({@link decideDoctorRosterPair}). No
+ *    process listening on both, with a recognized Harper command line and the
+ *    same pid and start time on two reads ({@link decideDoctorRosterPair}). No
  *    Instance row is needed, so a fresh install passes.
  * 3. Only then compares the instance identities both endpoints report
  *    ({@link decideDoctorRosterIdentity}): two different single ids refuse.
  *
  * Any `not-run` means the caller reports both checks as NOT RUN and reads no
- * Agent row. Step 2 sees only what this user's listener table shows: a Harper
- * run by another user, in a container, or behind a port forward is NOT RUN.
+ * Agent row; doctor takes this decision before its first credentialed request
+ * to the probed HTTP port and holds every such request on it. Step 2 sees only
+ * the listeners this CLI can see: one outside that view (another network
+ * namespace or container, or a user this CLI may not inspect), or a port
+ * reached through a forward, is NOT RUN.
  */
 export async function verifyDoctorRosterInstance(
   opts: { port?: string | number; opsPort?: string | number; dataDir?: string },

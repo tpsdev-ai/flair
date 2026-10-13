@@ -3,9 +3,9 @@
  * with an HTTP port on this host.
  *
  * Shared by the local delete paths (`memory hygiene --apply`, `agent remove`,
- * via src/lib/local-delete-instance.ts, flair#2225) and by `flair doctor`'s
- * Agent roster and home reads (src/cli.ts `verifyDoctorRosterInstance`,
- * flair#2483), so the rule is written once.
+ * via src/lib/local-delete-instance.ts, flair#2225) and by `flair doctor`
+ * (src/cli.ts `verifyDoctorRosterInstance`, flair#2483), so the rule is
+ * written once.
  *
  * What it checks:
  *   1. it asks the loopback ops endpoint on `opsPort` for Harper's
@@ -15,33 +15,41 @@
  *        localhost, 0.0.0.0, [::], or a bare port), and
  *      - records `operationsApi.network.port` equal to `opsPort`, the port asked;
  *   2. it reads the OS listener table (src/lib/listener-table.ts: `/proc` on
- *      Linux, `lsof` elsewhere) for `opsPort` and for that HTTP port, and
- *      requires exactly one process listening on each (flair#2526);
- *   3. it requires each listener's command line to be a Harper command line
- *      (`isHarperProcessCommandLine`), so a forwarder holding a port is
- *      refused;
- *   4. it requires the two listeners to be the SAME process.
+ *      Linux, `lsof` elsewhere) for `opsPort` and for that HTTP port, requires
+ *      exactly one listening process on each, and reads each one's birth
+ *      identity (pid plus start time: `/proc/<pid>/stat` on Linux, `ps -o
+ *      lstart=` elsewhere) (flair#2526);
+ *   3. it requires each listener to have a recognized Harper command line
+ *      (`isHarperProcessCommandLine`), so a forwarder holding a port is refused;
+ *   4. it requires the two listeners to be one pid;
+ *   5. it reads both listeners and their birth identities again and requires
+ *      them unchanged, so a process replaced between reads (a restart that
+ *      reused the pid) is refused.
  * Only then does it report the configured HTTP port. `flair doctor` requires it
  * to equal the HTTP port doctor probed. The delete paths compare it with
  * `--port` only when `--port` is given; otherwise they address that port.
  *
  * Nothing is sent to the HTTP port: the admin credential goes only to the ops
- * endpoint the caller named, and a caller sends it to the HTTP port only after
- * this check has proven the port. No PID file and no process id an endpoint
- * reports about itself is evidence (Harper's own `system_information` pid is
- * read from its `hdb.pid`).
+ * endpoint the caller named. Both callers send the admin credential to the
+ * HTTP port only after this check proves it; doctor holds agent-signed reads
+ * too, except on a host with no admin credential (src/commands/doctor.ts).
+ * No PID file and no process id an endpoint reports about itself is evidence
+ * (Harper's own `system_information` pid is read from its `hdb.pid`).
  *
  * Every other outcome is `unproven`, with a detail naming which condition
- * failed and, where the caller's own remedy would not fit, a `remedy`.
+ * failed and, for the listener-table conditions except two different pids, a
+ * `remedy`; callers supply their own remedy otherwise.
  *
- * Its limits: the listener table shows only what this user can see, so a Harper
- * run by another user, inside a container, or reached through a port forward
- * (docker-proxy, ssh -L) is refused, never proven. The command-line check is
- * what `ps`/`/proc` report; it does not authenticate the program.
+ * Its limits: the listener table shows only what this CLI can see, so a Harper
+ * listener outside that view (another network namespace or container, or a
+ * user this CLI may not inspect) is refused, and so is a port reached through
+ * a forward (docker-proxy, ssh -L): refused, never proven. The command-line
+ * check reads what `ps`/`/proc` report; it does not authenticate the program.
+ * The macOS start time has one-second resolution.
  */
 import { harperPortValue } from "./harper-port-value.js";
 import { isHarperProcessCommandLine } from "./daemon-liveness.js";
-import { readTcpListenerPids, LISTENER_VISIBILITY_REMEDY, type ListenerRead } from "./listener-table.js";
+import { readProcessBirth, readTcpListenerPids, LISTENER_VISIBILITY_REMEDY, type BirthRead, type ListenerRead } from "./listener-table.js";
 import { defaultReadProcessCmdline } from "./upgrade-exec-path.js";
 
 /** The host halves of an `http.port` binding that bind on loopback or on all interfaces. */
@@ -52,10 +60,12 @@ export type LocalInstancePairProof =
   | { kind: "proven"; httpPort: number }
   | { kind: "unproven"; status: number | null; detail: string; remedy?: string };
 
-/** The OS reads behind steps 2 and 3. */
+/** The OS reads behind steps 2 to 5. */
 export interface InstancePairOsReads {
   /** The processes the OS lists as LISTENING on a TCP port. */
   listeners: (port: number) => ListenerRead;
+  /** A process's birth identity (pid plus start time). */
+  birth: (pid: number) => BirthRead;
   /** A process's command line, or null when it cannot be read. */
   commandLine: (pid: number) => string | null;
 }
@@ -68,6 +78,7 @@ export interface LocalInstancePairDeps {
 
 const DEFAULT_OS_READS: InstancePairOsReads = {
   listeners: (port) => readTcpListenerPids(port),
+  birth: (pid) => readProcessBirth(pid),
   commandLine: defaultReadProcessCmdline,
 };
 
@@ -131,28 +142,75 @@ export async function proveLocalInstancePair(
     return unproven(`its configuration binds HTTP to ${host}, not loopback or all interfaces`);
   }
 
-  // 2. One process listens on each port.
-  const opsListener = soleListener(os.listeners(opsPort), "ops", opsPort);
-  if (!("pid" in opsListener)) return opsListener;
-  const httpListener = soleListener(os.listeners(httpPort), "HTTP", httpPort);
-  if (!("pid" in httpListener)) return httpListener;
+  // 2. One process listens on each port; note each one's birth identity.
+  const first = observeListeners(os, opsPort, httpPort);
+  if (!("ops" in first)) return first;
 
-  // 3. Each is a Harper process, not a forwarder holding the port.
-  const notHarper = harperListenerRefusal(os, opsListener.pid, "ops", opsPort)
-    ?? (httpListener.pid === opsListener.pid ? null : harperListenerRefusal(os, httpListener.pid, "HTTP", httpPort));
+  // 3. Each has a recognized Harper command line, not a forwarder's.
+  const notHarper = harperListenerRefusal(os, first.ops.pid, "ops", opsPort)
+    ?? (first.http.pid === first.ops.pid ? null : harperListenerRefusal(os, first.http.pid, "HTTP", httpPort));
   if (notHarper !== null) return notHarper;
 
-  // 4. They are the same process.
-  if (opsListener.pid !== httpListener.pid) {
+  // 4. They are one pid.
+  if (first.ops.pid !== first.http.pid) {
     return unproven(
-      `the process listening on ops port ${opsPort} is ${opsListener.pid} and the process listening on HTTP port ` +
-        `${httpPort} is ${httpListener.pid}, so they are not the same running instance`,
+      `the process listening on ops port ${opsPort} is ${first.ops.pid} and the process listening on HTTP port ` +
+        `${httpPort} is ${first.http.pid}, so they are not the same running instance`,
     );
+  }
+
+  // 5. Nothing changed since step 2: the same pid and birth on both ports.
+  const second = observeListeners(os, opsPort, httpPort);
+  if (!("ops" in second)) return second;
+  for (const [label, port, before, after] of [
+    ["ops", opsPort, first.ops, second.ops],
+    ["HTTP", httpPort, first.http, second.http],
+  ] as const) {
+    if (before.birth !== after.birth) {
+      return unproven(
+        `the process listening on ${label} port ${port} changed between two reads (${before.birth}, then ${after.birth}), ` +
+          `so it is not proven to be the process whose command line was checked`,
+        null,
+        RESTARTING_REMEDY,
+      );
+    }
   }
   return { kind: "proven", httpPort };
 }
 
-/** An `unproven` proof when `pid`'s command line cannot be read or is not Harper's, else null. */
+/** What to do when a listener changed under the check. */
+const RESTARTING_REMEDY = "Re-run this command once the instance is running and not restarting.";
+
+/** One listener observation: its pid and birth identity (`<pid>@<start>`). */
+interface ListenerObservation {
+  pid: number;
+  birth: string;
+}
+
+/** Read the sole listener on each port and its birth identity, or an `unproven` proof naming why not. */
+function observeListeners(
+  os: InstancePairOsReads,
+  opsPort: number,
+  httpPort: number,
+): { ops: ListenerObservation; http: ListenerObservation } | LocalInstancePairProof {
+  const ops = observeListener(os, "ops", opsPort);
+  if (!("birth" in ops)) return ops;
+  const http = observeListener(os, "HTTP", httpPort);
+  if (!("birth" in http)) return http;
+  return { ops, http };
+}
+
+function observeListener(os: InstancePairOsReads, label: "ops" | "HTTP", port: number): ListenerObservation | LocalInstancePairProof {
+  const sole = soleListener(os.listeners(port), label, port);
+  if (!("pid" in sole)) return sole;
+  const birth = os.birth(sole.pid);
+  if (birth.kind === "unavailable") {
+    return { kind: "unproven", status: null, detail: `the process listening on ${label} port ${port} has no readable birth identity: ${birth.reason}`, remedy: birth.remedy };
+  }
+  return { pid: sole.pid, birth: birth.id };
+}
+
+/** An `unproven` proof when `pid`'s command line cannot be read or is not a recognized Harper one, else null. */
 function harperListenerRefusal(os: InstancePairOsReads, pid: number, label: "ops" | "HTTP", port: number): LocalInstancePairProof | null {
   const commandLine = os.commandLine(pid);
   if (commandLine === null) {
@@ -162,7 +220,7 @@ function harperListenerRefusal(os: InstancePairOsReads, pid: number, label: "ops
   return {
     kind: "unproven",
     status: null,
-    detail: `process ${pid} (${programName(commandLine)}), listening on ${label} port ${port}, is not a Harper process, as when a port forwarder (docker-proxy, ssh -L) holds that port`,
+    detail: `process ${pid} (${programName(commandLine)}), listening on ${label} port ${port}, does not have a recognized Harper command line, as when a port forwarder (docker-proxy, ssh -L) holds that port`,
     remedy: LISTENER_VISIBILITY_REMEDY,
   };
 }
@@ -176,7 +234,7 @@ function soleListener(read: ListenerRead, label: "ops" | "HTTP", port: number): 
     return {
       kind: "unproven",
       status: null,
-      detail: `the listener table shows no process this user can see listening on ${label} port ${port}`,
+      detail: `the listener table shows no process this CLI can see listening on ${label} port ${port}`,
       remedy: label === "HTTP"
         ? `Start the instance that should serve HTTP port ${port}, or correct its configuration and restart it. ${LISTENER_VISIBILITY_REMEDY}`
         : LISTENER_VISIBILITY_REMEDY,
@@ -187,6 +245,7 @@ function soleListener(read: ListenerRead, label: "ops" | "HTTP", port: number): 
       kind: "unproven",
       status: null,
       detail: `processes ${read.pids.join(", ")} all listen on ${label} port ${port}, so the one serving it cannot be named`,
+      remedy: `Stop every listener on ${label} port ${port} but Harper's own, then re-run this command.`,
     };
   }
   return { pid: read.pids[0] };

@@ -11,10 +11,13 @@
  * runs the pair check the local delete paths use (src/lib/local-instance-pair.ts):
  * the endpoint's configuration must record that ops port and the HTTP port
  * doctor actually probed, bound on loopback or on all interfaces, and the OS
- * listener table must show one Harper process listening on both (flair#2526).
- * After that check passes, two different Instance ids on the two endpoints also
- * refuse. A refusal, or a pair check that cannot complete, reports both checks
- * NOT RUN (counted as an issue) and reads no Agent row.
+ * listener table must show one process listening on both, with a recognized
+ * Harper command line and the same pid and start time on two reads
+ * (flair#2526). After that check passes, two different Instance ids on the two
+ * endpoints also refuse. A refusal, or a pair check that cannot complete,
+ * reports both checks NOT RUN (counted as an issue) and reads no Agent row;
+ * doctor takes the same decision before its first credentialed request to the
+ * probed HTTP port and holds every such request on it.
  *
  * The first block runs with NO Instance row on either instance, as on a fresh
  * install: the default paired case must run, and every refusal there comes
@@ -25,7 +28,9 @@
  * then reports, so neither is evidence. The second block seeds one Instance
  * row on each instance: the paired case still runs, and the stale
  * configuration is refused by the pair check. The third calls the pair check
- * directly against both instances.
+ * directly against both instances. The fourth runs doctor against a listener
+ * that answers 200 but is not A, with A's ops port and FLAIR_ADMIN_PASS, and
+ * asserts that no Authorization header reaches it.
  *
  * Build prerequisite: dist/cli.js and dist/resources/*.js
  * (`bun run build && bun run build:cli`).
@@ -385,4 +390,69 @@ describe("flair#2526 — the pair check itself against two real Harpers", () => 
       }
     });
   }, 60_000);
+});
+
+/**
+ * A child process that answers HTTP 200 (`{}`) to every request on a loopback
+ * port and records each request's URL and headers — a listener that is not the
+ * instance, standing where doctor's probed HTTP port points.
+ */
+async function startHeaderCapture(): Promise<{ port: number; requests: () => Array<{ url: string; headers: Record<string, string> }>; stop: () => Promise<void> }> {
+  const script = `
+    const http = require("node:http");
+    const srv = http.createServer((req, res) => {
+      process.stdout.write(JSON.stringify({ url: req.url, headers: req.headers }) + "\\n");
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end("{}");
+    });
+    srv.listen(0, "127.0.0.1", () => process.stdout.write(JSON.stringify({ listening: srv.address().port }) + "\\n"));
+  `;
+  const child = spawn(process.execPath, ["-e", script], { stdio: ["ignore", "pipe", "inherit"] });
+  const lines: string[] = [];
+  let buffered = "";
+  const port = await new Promise<number>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("exit", (code) => reject(new Error(`header-capture child exited ${code} before listening`)));
+    child.stdout!.on("data", (chunk: Buffer) => {
+      buffered += chunk.toString();
+      let nl: number;
+      while ((nl = buffered.indexOf("\n")) >= 0) {
+        const line = buffered.slice(0, nl);
+        buffered = buffered.slice(nl + 1);
+        const parsed = JSON.parse(line);
+        if (typeof parsed.listening === "number") resolve(parsed.listening);
+        else lines.push(line);
+      }
+    });
+  });
+  child.removeAllListeners("exit");
+  return {
+    port,
+    requests: () => lines.map((l) => JSON.parse(l)),
+    stop: () => new Promise<void>((resolve) => {
+      if (child.exitCode !== null || child.signalCode !== null) return resolve();
+      child.once("exit", () => resolve());
+      child.kill("SIGTERM");
+    }),
+  };
+}
+
+describe("flair#2526 — doctor sends no credential to an unproven HTTP port", () => {
+  test("doctor probing a 200-answering listener that is not A, with A's ops port and FLAIR_ADMIN_PASS: no Authorization header reaches it", async () => {
+    const capture = await startHeaderCapture();
+    try {
+      writeHomeConfig(`opsPort: ${opsPort(a)}\n`);
+      const r = await runDoctor({ args: ["--port", String(capture.port)], opsPort: opsPort(a) });
+      const seen = capture.requests();
+      expect(seen.length, "doctor never reached the listener, so the test proves nothing").toBeGreaterThan(0);
+      const credentialed = seen.filter((q) => "authorization" in q.headers).map((q) => q.url);
+      expect(credentialed, `credentialed requests reached the unproven port:\n${r.stdout}`).toEqual([]);
+      // The credentialed sections say why they did not run.
+      expect(r.stdout, r.stdout).toContain(`Embeddings: NOT RUN — the configured HTTP/ops pair does not match`);
+      expect(r.stdout, r.stdout).toContain("Agent IDs: NOT RUN");
+      expect(r.stdout, "A's rows were read through the unproven port").not.toContain(BAD_ID_ON_A);
+    } finally {
+      await capture.stop();
+    }
+  }, 90_000);
 });

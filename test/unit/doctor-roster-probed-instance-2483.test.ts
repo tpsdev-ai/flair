@@ -13,7 +13,8 @@
  *     local delete paths) asks the candidate ops endpoint for its configuration
  *     and requires it to record that ops port and an HTTP port bound on
  *     loopback or on all interfaces, with the OS listener table showing one
- *     Harper process listening on both;
+ *     process listening on both, with a recognized Harper command line and the
+ *     same pid and start time on two reads;
  *   - `decideDoctorRosterPair` runs only when that configured HTTP port is the
  *     probed one — no Instance row is needed, so a fresh install runs;
  *   - `decideDoctorRosterIdentity`, applied after that, refuses only when both
@@ -57,7 +58,7 @@ import {
 } from "../../src/cli.js";
 import { decideProbedPairIdentity } from "../../src/lib/agent-home.js";
 import { proveLocalInstancePair, type LocalInstancePairDeps } from "../../src/lib/local-instance-pair.js";
-import { LISTENER_VISIBILITY_REMEDY, readTcpListenerPids, type ListenerRead } from "../../src/lib/listener-table.js";
+import { LISTENER_VISIBILITY_REMEDY, readProcessBirth, readTcpListenerPids, type BirthRead, type ListenerRead } from "../../src/lib/listener-table.js";
 
 const COMPLETE_PAIR = "http:\n  port: 7926\noperationsApi:\n  network:\n    port: 7925\n";
 const HTTP_ONLY = "http:\n  port: 7926\n";
@@ -158,7 +159,8 @@ describe("decideProbedPairIdentity — the identities the probed HTTP port and t
 // request it receives, headers included, so a test can assert that nothing —
 // above all no Authorization header — ever reaches it. Cases that need a
 // listener table the host cannot produce (one process on both ports, several
-// listeners, a forwarder, an unreadable table) inject it through `osReads`; the
+// listeners, a forwarder, an unreadable table, a process replaced between
+// reads) inject it through `osReads`; the
 // rest read the REAL table (`/proc` on Linux, `lsof` elsewhere).
 
 /** What the ops fixture answers `get_configuration` with next: a status and a raw body. */
@@ -261,11 +263,15 @@ const AUTH = "Basic " + Buffer.from("admin:not-a-secret").toString("base64");
 const HARPER_CMDLINE = "node\u0000/opt/flair/node_modules/@harperfast/harper/dist/bin/harper.js\u0000run\u0000.\u0000";
 const ONE_HARPER = 4242;
 
+/** A birth identity that never changes: every pid started at "t0". */
+const STABLE_BIRTH = (pid: number): BirthRead => ({ kind: "birth", id: `${pid}@t0` });
+
 /** OS reads in which these ports have these listeners and every pid runs `cmdline`. */
 function osReads(listeners: Record<number, ListenerRead>, cmdline: string | null = HARPER_CMDLINE): LocalInstancePairDeps {
   return {
     osReads: {
       listeners: (port) => listeners[port] ?? { kind: "listeners", pids: [] },
+      birth: STABLE_BIRTH,
       commandLine: () => cmdline,
     },
   };
@@ -344,7 +350,7 @@ describe("proveLocalInstancePair — the configuration must pair the ops port wi
   });
 });
 
-describe("proveLocalInstancePair — the OS listener table must show one Harper process on both ports (flair#2526)", () => {
+describe("proveLocalInstancePair — the OS listener table must show one process with a recognized Harper command line on both ports (flair#2526)", () => {
   test("a configuration naming another process's HTTP port (REAL listener table): unproven, and no request — so no credential — ever reaches that port", async () => {
     configure({ http: { port: `127.0.0.1:${capture.port}` }, operationsApi: { network: { port: serverPort } } });
     const before = capture.requests().length;
@@ -387,31 +393,43 @@ describe("proveLocalInstancePair — the OS listener table must show one Harper 
       [serverPort]: { kind: "listeners", pids: [ONE_HARPER, 5005] },
       [capture.port]: { kind: "listeners", pids: [ONE_HARPER] },
     }));
-    expect(opsShared).toEqual({ kind: "unproven", status: null, detail: `processes ${ONE_HARPER}, 5005 all listen on ops port ${serverPort}, so the one serving it cannot be named` });
+    expect(opsShared).toEqual({
+      kind: "unproven",
+      status: null,
+      detail: `processes ${ONE_HARPER}, 5005 all listen on ops port ${serverPort}, so the one serving it cannot be named`,
+      remedy: `Stop every listener on ops port ${serverPort} but Harper's own, then re-run this command.`,
+    });
     const httpShared = await proveLocalInstancePair(serverPort, AUTH, osReads({
       [serverPort]: { kind: "listeners", pids: [ONE_HARPER] },
       [capture.port]: { kind: "listeners", pids: [ONE_HARPER, 5005] },
     }));
-    expect(httpShared).toEqual({ kind: "unproven", status: null, detail: `processes ${ONE_HARPER}, 5005 all listen on HTTP port ${capture.port}, so the one serving it cannot be named` });
+    expect(httpShared.kind === "unproven" && httpShared.detail).toBe(`processes ${ONE_HARPER}, 5005 all listen on HTTP port ${capture.port}, so the one serving it cannot be named`);
+    expect(httpShared.kind === "unproven" && httpShared.remedy).toBe(`Stop every listener on HTTP port ${capture.port} but Harper's own, then re-run this command.`);
   });
 
   test("a configured HTTP port nothing listens on (REAL listener table) is unproven, with a remedy", async () => {
     const dead = await freePort();
     configure({ http: { port: `127.0.0.1:${dead}` }, operationsApi: { network: { port: serverPort } } });
-    const proof = await proveLocalInstancePair(serverPort, AUTH, { osReads: { commandLine: () => HARPER_CMDLINE, listeners: (port) => port === serverPort ? { kind: "listeners", pids: [ONE_HARPER] } : readTcpListenerPids(port) } });
+    const proof = await proveLocalInstancePair(serverPort, AUTH, {
+      osReads: {
+        commandLine: () => HARPER_CMDLINE,
+        birth: STABLE_BIRTH,
+        listeners: (port) => (port === serverPort ? { kind: "listeners", pids: [ONE_HARPER] } : readTcpListenerPids(port)),
+      },
+    });
     expect(proof.kind).toBe("unproven");
     if (proof.kind !== "unproven") return;
-    expect(proof.detail).toBe(`the listener table shows no process this user can see listening on HTTP port ${dead}`);
+    expect(proof.detail).toBe(`the listener table shows no process this CLI can see listening on HTTP port ${dead}`);
     expect(proof.remedy).toContain(`Start the instance that should serve HTTP port ${dead}`);
   });
 
-  test("an ops port the listener table does not show to this user is unproven", async () => {
+  test("an ops port the listener table does not show this CLI is unproven", async () => {
     configure({ http: { port: `127.0.0.1:${capture.port}` }, operationsApi: { network: { port: serverPort } } });
     const proof = await proveLocalInstancePair(serverPort, AUTH, osReads({ [capture.port]: { kind: "listeners", pids: [ONE_HARPER] } }));
     expect(proof).toEqual({
       kind: "unproven",
       status: null,
-      detail: `the listener table shows no process this user can see listening on ops port ${serverPort}`,
+      detail: `the listener table shows no process this CLI can see listening on ops port ${serverPort}`,
       remedy: LISTENER_VISIBILITY_REMEDY,
     });
   });
@@ -422,7 +440,7 @@ describe("proveLocalInstancePair — the OS listener table must show one Harper 
       platform: "darwin",
       runLsof: () => { throw Object.assign(new Error("spawn lsof ENOENT"), { code: "ENOENT" }); },
     });
-    const proof = await proveLocalInstancePair(serverPort, AUTH, { osReads: { listeners: noLsof, commandLine: () => HARPER_CMDLINE } });
+    const proof = await proveLocalInstancePair(serverPort, AUTH, { osReads: { listeners: noLsof, birth: STABLE_BIRTH, commandLine: () => HARPER_CMDLINE } });
     expect(proof).toEqual({
       kind: "unproven",
       status: null,
@@ -438,7 +456,7 @@ describe("proveLocalInstancePair — the OS listener table must show one Harper 
     expect(proof).toEqual({
       kind: "unproven",
       status: null,
-      detail: `process 7007 (ssh), listening on ops port ${serverPort}, is not a Harper process, as when a port forwarder (docker-proxy, ssh -L) holds that port`,
+      detail: `process 7007 (ssh), listening on ops port ${serverPort}, does not have a recognized Harper command line, as when a port forwarder (docker-proxy, ssh -L) holds that port`,
       remedy: LISTENER_VISIBILITY_REMEDY,
     });
   });
@@ -448,11 +466,12 @@ describe("proveLocalInstancePair — the OS listener table must show one Harper 
     const proof = await proveLocalInstancePair(serverPort, AUTH, {
       osReads: {
         listeners: (port) => ({ kind: "listeners", pids: [port === serverPort ? ONE_HARPER : 8008] }),
+        birth: STABLE_BIRTH,
         commandLine: (pid) => (pid === ONE_HARPER ? HARPER_CMDLINE : "/usr/bin/docker-proxy -proto tcp -host-port 9926"),
       },
     });
     expect(proof.kind === "unproven" && proof.detail).toBe(
-      `process 8008 (docker-proxy), listening on HTTP port ${capture.port}, is not a Harper process, as when a port forwarder (docker-proxy, ssh -L) holds that port`,
+      `process 8008 (docker-proxy), listening on HTTP port ${capture.port}, does not have a recognized Harper command line, as when a port forwarder (docker-proxy, ssh -L) holds that port`,
     );
   });
 
@@ -461,6 +480,76 @@ describe("proveLocalInstancePair — the OS listener table must show one Harper 
     const both = { [serverPort]: { kind: "listeners", pids: [ONE_HARPER] }, [capture.port]: { kind: "listeners", pids: [ONE_HARPER] } } as Record<number, ListenerRead>;
     const proof = await proveLocalInstancePair(serverPort, AUTH, osReads(both, null));
     expect(proof.kind === "unproven" && proof.detail).toBe(`the command line of process ${ONE_HARPER}, listening on ops port ${serverPort}, cannot be read`);
+  });
+});
+
+describe("proveLocalInstancePair — each listener is bound to its birth identity and read twice (flair#2526)", () => {
+  /** One Harper pid on both ports whose start time is `births[n]` on the n-th birth read. */
+  function replacedAfter(reads: number): { deps: LocalInstancePairDeps; birthReads: () => number } {
+    let n = 0;
+    return {
+      deps: {
+        osReads: {
+          listeners: () => ({ kind: "listeners", pids: [ONE_HARPER] }),
+          birth: (pid) => ({ kind: "birth", id: `${pid}@${n++ < reads ? "t0" : "t1"}` }),
+          commandLine: () => HARPER_CMDLINE,
+        },
+      },
+      birthReads: () => n,
+    };
+  }
+
+  test("a listener that keeps its pid and start time across both reads is proven, after four birth reads", async () => {
+    configure({ http: { port: `127.0.0.1:${capture.port}` }, operationsApi: { network: { port: serverPort } } });
+    const run = replacedAfter(Number.POSITIVE_INFINITY);
+    expect(await proveLocalInstancePair(serverPort, AUTH, run.deps)).toEqual({ kind: "proven", httpPort: capture.port });
+    expect(run.birthReads()).toBe(4);
+  });
+
+  test("the process is replaced under the same pid after the command-line check: unproven, naming both births", async () => {
+    configure({ http: { port: `127.0.0.1:${capture.port}` }, operationsApi: { network: { port: serverPort } } });
+    const proof = await proveLocalInstancePair(serverPort, AUTH, replacedAfter(2).deps);
+    expect(proof).toEqual({
+      kind: "unproven",
+      status: null,
+      detail: `the process listening on ops port ${serverPort} changed between two reads (${ONE_HARPER}@t0, then ${ONE_HARPER}@t1), so it is not proven to be the process whose command line was checked`,
+      remedy: "Re-run this command once the instance is running and not restarting.",
+    });
+  });
+
+  test("only the HTTP-side process is replaced: unproven, naming the HTTP port", async () => {
+    configure({ http: { port: `127.0.0.1:${capture.port}` }, operationsApi: { network: { port: serverPort } } });
+    const proof = await proveLocalInstancePair(serverPort, AUTH, replacedAfter(3).deps);
+    expect(proof.kind === "unproven" && proof.detail).toStartWith(`the process listening on HTTP port ${capture.port} changed between two reads`);
+  });
+
+  test("a different pid holds the port on the second read: unproven", async () => {
+    configure({ http: { port: `127.0.0.1:${capture.port}` }, operationsApi: { network: { port: serverPort } } });
+    let listenerReads = 0;
+    const proof = await proveLocalInstancePair(serverPort, AUTH, {
+      osReads: {
+        listeners: () => ({ kind: "listeners", pids: [listenerReads++ < 2 ? ONE_HARPER : 5151] }),
+        birth: STABLE_BIRTH,
+        commandLine: () => HARPER_CMDLINE,
+      },
+    });
+    expect(proof.kind === "unproven" && proof.detail).toBe(
+      `the process listening on ops port ${serverPort} changed between two reads (${ONE_HARPER}@t0, then 5151@t0), so it is not proven to be the process whose command line was checked`,
+    );
+  });
+
+  test("a listener whose start time cannot be read is unproven by name, never proven", async () => {
+    configure({ http: { port: `127.0.0.1:${capture.port}` }, operationsApi: { network: { port: serverPort } } });
+    const noPs = (pid: number) => readProcessBirth(pid, { platform: "darwin", runPs: () => { throw Object.assign(new Error("spawn ps ENOENT"), { code: "ENOENT" }); } });
+    const proof = await proveLocalInstancePair(serverPort, AUTH, {
+      osReads: { listeners: () => ({ kind: "listeners", pids: [ONE_HARPER] }), birth: noPs, commandLine: () => HARPER_CMDLINE },
+    });
+    expect(proof).toEqual({
+      kind: "unproven",
+      status: null,
+      detail: `the process listening on ops port ${serverPort} has no readable birth identity: ps is not installed or not on PATH, and this check reads a process's start time with \`ps -o lstart= -p ${ONE_HARPER}\``,
+      remedy: "Put ps on PATH (macOS ships it as /bin/ps), then re-run this command.",
+    });
   });
 });
 

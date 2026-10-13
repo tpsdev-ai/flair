@@ -204,6 +204,69 @@ function verifyDoctorRosterInstance(...args: any[]): any {
   return cli.verifyDoctorRosterInstance(...args);
 }
 
+/**
+ * Whether `url` addresses `httpPort` on this host's loopback — the port the
+ * pair check proves — so a credentialed request to it waits for that check.
+ */
+export function targetsProbedHttpPort(url: string, httpPort: number): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (!["127.0.0.1", "localhost", "[::1]", "::1"].includes(parsed.hostname)) return false;
+  const port = parsed.port === "" ? (parsed.protocol === "https:" ? 443 : 80) : Number(parsed.port);
+  return port === httpPort;
+}
+
+/**
+ * Whether doctor may send a credential to the probed HTTP port (flair#2526).
+ * `noAdminCredential` marks a check that could not run because doctor has no
+ * usable admin credential, so none can be sent.
+ */
+export type DoctorPairGate =
+  | { kind: "run"; opsPort: number }
+  | { kind: "not-run"; reason: string; remedy: string; noAdminCredential?: true };
+
+/** What doctor prints when it has no admin credential to run the pair check with. */
+export const DOCTOR_PAIR_NO_CREDENTIAL_REMEDY =
+  "Set FLAIR_ADMIN_PASS, or restore ~/.flair/admin-pass (`flair init` writes it), so doctor can read the ops "
+  + "endpoint's configuration, then re-run flair doctor.";
+
+/**
+ * The HTTP/ops pair check behind every credentialed request doctor sends to
+ * the probed HTTP port (flair#2526): `verifyDoctorRosterInstance` with the
+ * local admin credential, which goes only to the ops endpoint. Without that
+ * credential the pair cannot be checked, so the answer is `not-run`.
+ */
+export async function decideDoctorPairGate(
+  opts: { port?: string | number; opsPort?: string | number; dataDir?: string },
+  probedHttpPort: number,
+): Promise<DoctorPairGate> {
+  let adminPass: string | undefined;
+  try {
+    adminPass = resolveLocalAdminPass(undefined);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      kind: "not-run",
+      reason: `the admin credential could not be resolved (${message}), so the HTTP/ops pair check could not run`,
+      remedy: DOCTOR_PAIR_NO_CREDENTIAL_REMEDY,
+      noAdminCredential: true,
+    };
+  }
+  if (!adminPass) {
+    return {
+      kind: "not-run",
+      reason: "no admin credential to read the ops endpoint's configuration with, so the HTTP/ops pair check could not run",
+      remedy: DOCTOR_PAIR_NO_CREDENTIAL_REMEDY,
+      noAdminCredential: true,
+    };
+  }
+  return await verifyDoctorRosterInstance(opts, probedHttpPort, adminPass);
+}
+
 function resolveOpsPort(...args: any[]): any {
   return cli.resolveOpsPort(...args);
 }
@@ -711,6 +774,32 @@ program
       issues += renderEmbedGpuDoctorFinding(embedGpuFromHealth).issueDelta;
     }
 
+    // flair#2526: doctor sends a credential to the probed HTTP port only after
+    // the HTTP/ops pair check has proven that port. The check runs here, once,
+    // before the first credentialed request, with the admin credential going
+    // only to the ops endpoint; the Agent IDs and homes sections reuse its
+    // decision. Unauthenticated reads (/Health, /OAuthMetadata, OAuth
+    // discovery, an unsigned /Presence) do not wait for it. Until the pair is
+    // proven, every request that can carry the admin credential (the shared
+    // resolver behind api(), which may pick Basic, FLAIR_TOKEN or a key, and
+    // any explicit Basic header) reports NOT RUN with the reason. Requests
+    // signed with an agent key carry no admin credential: they are held too
+    // when the check ran and refused, and run as before on a host with no
+    // admin credential, where the check cannot run.
+    const pairGate: DoctorPairGate | null = harperResponding ? await decideDoctorPairGate(opts, effectivePort) : null;
+    const pairNotRun = pairGate?.kind === "not-run" ? pairGate : null;
+    const agentSignedHeld = pairNotRun !== null && pairNotRun.noAdminCredential !== true;
+    let pairRemedyShown = false;
+    /** Print `<label>: NOT RUN — <reason>`, with the remedy the first time. */
+    function reportPairNotRun(label: string, indent = "  "): void {
+      if (!pairNotRun) return;
+      console.log(`${indent}${render.icons.warn} ${label}: NOT RUN — ${pairNotRun.reason}`);
+      if (!pairRemedyShown) {
+        console.log(`${indent}   ${render.wrap(render.c.dim, "Fix:")} ${pairNotRun.remedy}`);
+        pairRemedyShown = true;
+      }
+    }
+
     // 2. Keys directory
     const keysDir = defaultKeysDir();
     if (existsSync(keysDir)) {
@@ -746,10 +835,14 @@ program
       }
 
       if (nodeKeyIds.length > 0 && harperResponding) {
-        const advisory = await readNodeSeedAdvisory({
-          nodeKeyIds, keysDir, baseUrl, port: opts.port, resolveHttpPort, resolveOpsPort,
-        });
-        if (advisory) console.log(`  ${render.icons.info} ${advisory}`);
+        if (pairNotRun) {
+          reportPairNotRun("Node key instance check");
+        } else {
+          const advisory = await readNodeSeedAdvisory({
+            nodeKeyIds, keysDir, baseUrl, port: opts.port, resolveHttpPort, resolveOpsPort,
+          });
+          if (advisory) console.log(`  ${render.icons.info} ${advisory}`);
+        }
       }
     } else {
       console.log(`  ${render.icons.error} Keys directory missing: ${render.wrap(render.c.dim, keysDir)}`);
@@ -900,13 +993,16 @@ program
         if (finding.isIssue) issues++;
       }
 
-      const mcpRedirectFinding = await readTargetMcpRedirectFinding(() =>
-        api("GET", "/HealthDetail", undefined, {
-          baseUrl,
-          keysDir: defaultKeysDir(),
-          ...(opts.agent ? { agentId: opts.agent, agentIdSource: "flag" } : {}),
-        }),
-      );
+      const mcpRedirectFinding = pairNotRun
+        ? null
+        : await readTargetMcpRedirectFinding(() =>
+          api("GET", "/HealthDetail", undefined, {
+            baseUrl,
+            keysDir: defaultKeysDir(),
+            ...(opts.agent ? { agentId: opts.agent, agentIdSource: "flag" } : {}),
+          }),
+        );
+      if (pairNotRun) reportPairNotRun("MCP OAuth redirect");
       if (mcpRedirectFinding) {
         console.log(`  ${mcpRedirectFinding.isIssue ? render.icons.error : render.icons.warn} ${mcpRedirectFinding.message}`);
         if (mcpRedirectFinding.fixHint) console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${mcpRedirectFinding.fixHint}`);
@@ -944,7 +1040,9 @@ program
     // "no issues found". This now stores a memory with a distinctive phrase and
     // searches for a PARAPHRASE (no shared keywords). If the top result isn't
     // recovered by MEANING, recall-by-meaning is broken and doctor FAILS LOUDLY.
-    if (harperResponding) {
+    if (harperResponding && agentSignedHeld) {
+      reportPairNotRun("Embeddings");
+    } else if (harperResponding) {
       const semanticStatus = await verifySemanticSearch(baseUrl, opts.agent, defaultKeysDir());
       switch (semanticStatus.state) {
         case "ok":
@@ -992,7 +1090,9 @@ program
     // So doctor writes probe rows and asserts their audit entries come back —
     // never trusts the flag. Same ok/degraded/skipped discipline as the
     // embeddings check above: skipped is rendered UNVERIFIED, never as a pass.
-    if (harperResponding) {
+    if (harperResponding && agentSignedHeld) {
+      reportPairNotRun("Audit log");
+    } else if (harperResponding) {
       // read_audit_log only exists on the ops API (its own port), which the
       // agent's Ed25519 header cannot authenticate — resolve the local admin
       // credential (env or ~/.flair/admin-pass; never prompts). A file with
@@ -1315,6 +1415,10 @@ program
         }
         console.log(`     ${render.icons.ok} FLAIR_URL ${render.wrap(render.c.dim, urlLabel)} reachable`);
 
+        if (agentSignedHeld && targetsProbedHttpPort(eff.url, effectivePort)) {
+          reportPairNotRun(`agent '${block.agentId}' registration`, "     ");
+          continue;
+        }
         const reg = await checkAgentRegistered(eff.url, block.agentId!, defaultKeysDir());
         if (reg.state === "registered") {
           console.log(`     ${render.icons.ok} agent '${block.agentId}' registered`);
@@ -1888,8 +1992,10 @@ program
     const verifiedReadAgentIds = harperResponding
       ? planAgentIterations(keyAgentIds, opts.agent || process.env.FLAIR_AGENT_ID)
       : [];
+    // flair#2526: these reads are agent-signed, held when the pair check refused.
+    const signedReadsNotRun = agentSignedHeld && verifiedReadAgentIds.length > 0;
     const agentGates: Array<{ id: string; state: AgentGateState; detail?: string }> = [];
-    for (const id of verifiedReadAgentIds) {
+    for (const id of signedReadsNotRun ? [] : verifiedReadAgentIds) {
       const reg = await checkAgentRegistered(baseUrl, id, defaultKeysDir());
       agentGates.push({ id, state: reg.state, detail: reg.detail });
       // harperResponding is necessarily true here (verifiedReadAgentIds is
@@ -2012,7 +2118,9 @@ program
 
     if (harperResponding) {
       console.log(`\n  ${render.wrap(render.c.bold, "Fleet presence")}`);
-      if (agentGates.length === 0) {
+      if (signedReadsNotRun) {
+        reportPairNotRun("Fleet presence");
+      } else if (agentGates.length === 0) {
         await fetchAndRenderFleetPresence({}, false, "  ");
       } else {
         for (const gate of agentGates) {
@@ -2044,14 +2152,14 @@ program
       // it trusts ports the caller names. The candidate's own configured pair
       // must then record it as the ops port and effectivePort as its HTTP port,
       // bound on loopback or on all interfaces, and the OS listener table must
-      // show one Harper process listening on both (flair#2526; the check the
-      // local delete paths use). Two different Instance ids on the two
-      // endpoints also refuse. When the pick or the pair check refuses or
-      // cannot complete, or the ids differ, both checks report NOT RUN (counted
-      // as an issue) and no Agent row is read.
-      const rosterTarget = agentListAdminPass
-        ? (await verifyDoctorRosterInstance(opts, effectivePort, agentListAdminPass) as { kind: "run"; opsPort: number } | { kind: "not-run"; reason: string; remedy: string })
-        : null;
+      // show one process with a recognized Harper command line listening on
+      // both, unchanged across two reads (flair#2526; the check the local
+      // delete paths use). Two different Instance ids on the two endpoints also
+      // refuse. That decision is `pairGate`, taken before doctor's first
+      // credentialed request. When the pick or the pair check refuses or cannot
+      // complete, or the ids differ, both checks report NOT RUN (counted as an
+      // issue) and no Agent row is read.
+      const rosterTarget = agentListAdminPass ? pairGate : null;
       const rosterNotRun = rosterTarget?.kind === "not-run" ? rosterTarget : null;
       const rosterOpsPort = rosterTarget?.kind === "run" ? rosterTarget.opsPort : null;
       if (agentListAdminPass && rosterOpsPort !== null) {
@@ -2149,7 +2257,9 @@ program
 
     if (harperResponding) {
       console.log(`\n  ${render.wrap(render.c.bold, "Migrations")}`);
-      if (agentGates.length === 0) {
+      if (signedReadsNotRun) {
+        reportPairNotRun("Migrations");
+      } else if (agentGates.length === 0) {
         console.log(`  ${render.icons.info} Pass --agent <id> (with a matching key in ~/.flair/keys) to see migration state — requires a verified read, same as Fleet presence above.`);
       } else {
         const passedGates = agentGates.filter((g) => describeAgentGateFinding(g.id, g.state, g.detail, { instanceReachable: harperResponding }) === null);
@@ -2194,7 +2304,9 @@ program
       const guiDomain = `gui/${process.getuid?.() ?? ""}`;
 
       let livePeerCount: number | null = null;
-      if (harperResponding) {
+      // flair#2526: a credentialed read, so only once the pair is proven; an
+      // unread count falls back to the configured peers below.
+      if (harperResponding && !pairNotRun) {
         try {
           const r = await api("GET", "/FederationPeers", undefined, { baseUrl }) as { peers?: Array<{ status?: string }> };
           const peers = Array.isArray(r?.peers) ? r.peers : [];

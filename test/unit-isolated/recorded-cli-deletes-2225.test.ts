@@ -9,10 +9,11 @@ import { setInstancePairOsReadsForTests } from "../../src/lib/local-instance-pai
  * flair#2526: the pair check reads the OS listener table, and the ops endpoint
  * here is a fetch mock with no listener behind it. These tests inject a
  * SIMULATED table: one simulated Harper process id on every port, with a
- * Harper command line. No such process exists.
+ * fixed birth identity and a Harper command line. No such process exists.
  */
 const SIMULATED_LISTENER_TABLE = {
   listeners: () => ({ kind: "listeners" as const, pids: [24_526] }),
+  birth: () => ({ kind: "birth" as const, id: "24526@simulated" }),
   commandLine: () => "node\u0000/simulated/node_modules/harper/dist/bin/harper.js\u0000run\u0000.",
 };
 process.env.FLAIR_RATE_LIMIT_ENABLED = "false";
@@ -166,7 +167,7 @@ for (const kind of ["hygiene", "remove"] as const) {
     { http: { port: "remote.invalid:19926" }, operationsApi: { network: { port: 19925 } } }]) {
     test(`${kind}: an unpaired configuration refuses before scanning or deletion: ${JSON.stringify(config)}`, async () => {
       configuration = config;
-      await expect(invoke(kind, ["--ops-port", "19925"])).rejects.toThrow("--ops-port 19925: no matching local HTTP endpoint");
+      await expect(invoke(kind, ["--ops-port", "19925"])).rejects.toThrow("--ops-port 19925: the local HTTP/ops pair could not be proven");
       expect(requests).toEqual(["POST:http://127.0.0.1:19925/"]);
       expect(otherInstance.has(row.id)).toBe(true);
       expect(deletes).toEqual([]);

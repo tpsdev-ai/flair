@@ -11,15 +11,19 @@
  *   - every other platform (macOS included): `lsof -nP -iTCP:<port>
  *     -sTCP:LISTEN -Fp`, whose `p<pid>` lines name the processes.
  *
- * Its limit: both read only what this user can see. Linux `/proc/net` lists
- * this process's network namespace, and the fds of another user's process are
- * unreadable; macOS lsof lists only processes this user may inspect. A Harper
- * in a container, behind a port forward, or run by another user is therefore
- * absent from the table, held by the forwarder (docker-proxy, ssh -L), or held
- * by a process this user cannot inspect. Callers refuse every one of those.
+ * Its limit: both read only what this CLI can see. Linux `/proc/net` lists
+ * this process's network namespace, and `/proc/<pid>/fd` of a process this
+ * user may not inspect is unreadable; macOS lsof lists only processes this
+ * user may inspect. A listener outside that view (in another network
+ * namespace or container, or owned by a user this CLI may not inspect) is
+ * absent from the table or has no owner the table can name, and a port
+ * reached through a forward is held by the forwarder (docker-proxy, ssh -L).
+ * Callers refuse every one of those. A CLI inside the same container, or
+ * allowed to inspect that user's processes, sees the listener.
  */
 import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync, readlinkSync } from "node:fs";
+import { parseProcStatStartTime } from "./daemon-liveness.js";
 
 /** What the listener table says about one TCP port. `pids` are distinct and sorted. */
 export type ListenerRead =
@@ -31,11 +35,11 @@ export function lsofListenerArgs(port: number): string[] {
   return ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-Fp"];
 }
 
-/** What to do when the table does not show the listener to this user. */
+/** What to do when the table does not show this CLI the listener, or shows a forwarder. */
 export const LISTENER_VISIBILITY_REMEDY =
-  "Run this command on the host where Harper runs, as the user that runs it. A Harper inside a container or "
-  + "reached through a port forward (docker-proxy, ssh -L) is refused, never proven: run the command inside that "
-  + "container or on that host instead.";
+  "Run this command where it can see Harper's own listener: on the host (or inside the container) where Harper "
+  + "runs, as a user allowed to inspect Harper's process. A port reached through a forward (docker-proxy, ssh -L) "
+  + "is refused, never proven.";
 
 /**
  * Parse `lsof -Fp` output into the distinct listening pids, sorted. Only `p`
@@ -84,6 +88,8 @@ export interface ListenerTableIo {
   platform: NodeJS.Platform;
   /** Run lsof with these arguments and return its stdout; throws as `execFileSync` does. */
   runLsof: (args: string[]) => string;
+  /** Run ps with these arguments and return its stdout; throws as `execFileSync` does. */
+  runPs: (args: string[]) => string;
   readFile: (path: string) => string;
   readDir: (path: string) => string[];
   readLink: (path: string) => string;
@@ -93,6 +99,14 @@ const DEFAULT_IO: ListenerTableIo = {
   platform: process.platform,
   runLsof: (args) =>
     execFileSync("lsof", args, { encoding: "utf-8", timeout: 5_000, killSignal: "SIGKILL", stdio: ["ignore", "pipe", "ignore"] }),
+  runPs: (args) =>
+    execFileSync("ps", args, {
+      encoding: "utf-8",
+      timeout: 5_000,
+      killSignal: "SIGKILL",
+      stdio: ["ignore", "pipe", "ignore"],
+      env: { ...process.env, LC_ALL: "C" },
+    }),
   readFile: (path) => readFileSync(path, "utf-8"),
   readDir: (path) => readdirSync(path),
   readLink: (path) => readlinkSync(path),
@@ -173,7 +187,7 @@ function readFromProc(port: number, io: ListenerTableIo): ListenerRead {
     try {
       fds = io.readDir(`/proc/${entry}/fd`);
     } catch {
-      continue; // another user's process, or one that exited: its sockets stay unowned below
+      continue; // a process this user may not inspect, or one that exited: its sockets stay unowned below
     }
     for (const fd of fds) {
       let target: string;
@@ -193,11 +207,83 @@ function readFromProc(port: number, io: ListenerTableIo): ListenerRead {
   if (unowned.length > 0) {
     return {
       kind: "unavailable",
-      reason: `TCP port ${port} has a listening socket (inode ${unowned.join(", ")}) whose process this user cannot inspect in /proc/<pid>/fd`,
+      reason: `TCP port ${port} has a listening socket (inode ${unowned.join(", ")}) whose owner could not be found or inspected in /proc/<pid>/fd (the process may have exited, or this user may not inspect it)`,
       remedy: LISTENER_VISIBILITY_REMEDY,
     };
   }
   const pids = new Set<number>();
   for (const set of owners.values()) for (const pid of set) pids.add(pid);
   return { kind: "listeners", pids: [...pids].sort((a, b) => a - b) };
+}
+
+/**
+ * A process's birth identity: its pid plus its start time, which differs
+ * between two processes that held the same pid one after the other.
+ *   - Linux: field 22 (starttime, clock ticks since boot) of `/proc/<pid>/stat`.
+ *   - every other platform: `ps -o lstart= -p <pid>` under `LC_ALL=C`, which
+ *     names the start to the second. Two processes that reuse one pid within
+ *     the same second are not told apart.
+ */
+export type BirthRead =
+  | { kind: "birth"; id: string }
+  | { kind: "unavailable"; reason: string; remedy: string };
+
+/** The ps command line the non-Linux birth reader runs for `pid`. */
+export function psStartArgs(pid: number): string[] {
+  return ["-o", "lstart=", "-p", String(pid)];
+}
+
+/** `ps -o lstart=` under `LC_ALL=C`: `Tue Oct 13 06:46:06 2026`, with a space-padded day. */
+const LSTART = /^[A-Z][a-z]{2} [A-Z][a-z]{2} [ 0-9][0-9] [0-9]{2}:[0-9]{2}:[0-9]{2} [0-9]{4}$/;
+
+/** Parse `ps -o lstart=` output into a start time, or null when it is not one. */
+export function parsePsLstart(output: string): string | null {
+  const line = output.trim();
+  return LSTART.test(line) ? line : null;
+}
+
+/** The birth identity of `pid` (see {@link BirthRead}). */
+export function readProcessBirth(pid: number, io: Partial<ListenerTableIo> = {}): BirthRead {
+  const full: ListenerTableIo = { ...DEFAULT_IO, ...io };
+  if (full.platform === "linux") {
+    const path = `/proc/${pid}/stat`;
+    let stat: string;
+    try {
+      stat = full.readFile(path);
+    } catch (err: any) {
+      return {
+        kind: "unavailable",
+        reason: `the start time of process ${pid} cannot be read from ${path} (${err?.code ?? err?.message}); it may have exited`,
+        remedy: "Re-run this command once the instance is running and not restarting.",
+      };
+    }
+    const ticks = parseProcStatStartTime(stat);
+    if (ticks === null) {
+      return { kind: "unavailable", reason: `${path} has no start time this check can read`, remedy: `Check ${path}; this check reads its field 22.` };
+    }
+    return { kind: "birth", id: `${pid}@${ticks}` };
+  }
+  const command = `ps ${psStartArgs(pid).join(" ")}`;
+  let output: string;
+  try {
+    output = full.runPs(psStartArgs(pid));
+  } catch (err: any) {
+    if (err?.code === "ENOENT") {
+      return {
+        kind: "unavailable",
+        reason: `ps is not installed or not on PATH, and this check reads a process's start time with \`${command}\``,
+        remedy: "Put ps on PATH (macOS ships it as /bin/ps), then re-run this command.",
+      };
+    }
+    return {
+      kind: "unavailable",
+      reason: `\`${command}\` found no start time (exit ${err?.status ?? err?.code ?? "abnormal"}); process ${pid} may have exited`,
+      remedy: "Re-run this command once the instance is running and not restarting.",
+    };
+  }
+  const started = parsePsLstart(output);
+  if (started === null) {
+    return { kind: "unavailable", reason: `\`${command}\` printed a start time this check cannot read`, remedy: `Run \`${command}\` yourself and check its output.` };
+  }
+  return { kind: "birth", id: `${pid}@${started}` };
 }

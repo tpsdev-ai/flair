@@ -18,6 +18,8 @@ import {
   LISTENER_VISIBILITY_REMEDY,
   parseLsofListenerPids,
   parseProcNetTcpListenInodes,
+  parsePsLstart,
+  readProcessBirth,
   readTcpListenerPids,
   type ListenerTableIo,
 } from "../../src/lib/listener-table.js";
@@ -149,11 +151,11 @@ describe("readTcpListenerPids — Linux reads /proc, no external tool", () => {
     }
   });
 
-  test("a LISTEN socket whose owner this user cannot inspect is refused, not reported empty", () => {
+  test("a LISTEN socket whose owner cannot be found or inspected is refused, not reported empty", () => {
     const read = readTcpListenerPids(36909, fakeProc({ tcp: TCP, tcp6: TCP6, fds: { "1": "EACCES" } }));
     expect(read).toEqual({
       kind: "unavailable",
-      reason: "TCP port 36909 has a listening socket (inode 53147756) whose process this user cannot inspect in /proc/<pid>/fd",
+      reason: "TCP port 36909 has a listening socket (inode 53147756) whose owner could not be found or inspected in /proc/<pid>/fd (the process may have exited, or this user may not inspect it)",
       remedy: LISTENER_VISIBILITY_REMEDY,
     });
   });
@@ -204,5 +206,53 @@ describe("readTcpListenerPids — every other platform runs lsof", () => {
     const read = JSON.parse(run.stdout.trim());
     expect(read.kind).toBe("unavailable");
     expect(read.reason).toStartWith("lsof is not installed or not on PATH");
+  });
+});
+
+// A real /proc/<pid>/stat line (Linux 6.12); field 22 (starttime) is 53146213.
+// The comm contains a space and a ")" to pin the last-")" split.
+const PROC_STAT = "3792276 (node (x) y) S 3792187 3792187 3792187 0 -1 4194560 113921 0 0 0 1180 222 0 0 20 0 11 0 53146213 13278784000 130764 18446744073709551615 1 1 0 0 0 0 0 4096 134234626 0 0 0 17 3 0 0 0 0 0";
+
+describe("readProcessBirth — a listener's birth identity (pid plus start time)", () => {
+  test("Linux reads field 22 of /proc/<pid>/stat", () => {
+    const read = readProcessBirth(3792276, {
+      platform: "linux",
+      readFile: (path) => { if (path !== "/proc/3792276/stat") throw new Error(path); return PROC_STAT; },
+      runPs: () => { throw new Error("the Linux reader must not run ps"); },
+    });
+    expect(read).toEqual({ kind: "birth", id: "3792276@53146213" });
+  });
+
+  test("Linux: a stat file that is gone (the process exited) is refused by name", () => {
+    const read = readProcessBirth(42, { platform: "linux", readFile: () => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); } });
+    expect(read.kind === "unavailable" && read.reason).toBe("the start time of process 42 cannot be read from /proc/42/stat (ENOENT); it may have exited");
+  });
+
+  test("elsewhere it runs `ps -o lstart= -p <pid>` and keeps the start to the second", () => {
+    let seen: string[] = [];
+    const read = readProcessBirth(51067, { platform: "darwin", runPs: (args) => { seen = args; return "Tue Oct 13 02:26:23 2026\n"; } });
+    expect(seen).toEqual(["-o", "lstart=", "-p", "51067"]);
+    expect(read).toEqual({ kind: "birth", id: "51067@Tue Oct 13 02:26:23 2026" });
+  });
+
+  test("parsePsLstart accepts the C-locale form, with a space-padded day, and nothing else", () => {
+    expect(parsePsLstart("Fri Oct  9 20:40:34 2026   \n")).toBe("Fri Oct  9 20:40:34 2026");
+    expect(parsePsLstart("")).toBeNull();
+    expect(parsePsLstart("vendredi 9 octobre 2026")).toBeNull();
+  });
+
+  test("ps missing, ps finding no process, and unreadable ps output are each refused by name", () => {
+    const missing = readProcessBirth(7, { platform: "darwin", runPs: () => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); } });
+    expect(missing.kind === "unavailable" && missing.reason).toBe("ps is not installed or not on PATH, and this check reads a process's start time with `ps -o lstart= -p 7`");
+    const gone = readProcessBirth(7, { platform: "darwin", runPs: () => { throw Object.assign(new Error("exit 1"), { status: 1 }); } });
+    expect(gone.kind === "unavailable" && gone.reason).toBe("`ps -o lstart= -p 7` found no start time (exit 1); process 7 may have exited");
+    const garbled = readProcessBirth(7, { platform: "darwin", runPs: () => "soon" });
+    expect(garbled.kind).toBe("unavailable");
+  });
+
+  test("the real reader names this test process's own birth", () => {
+    const read = readProcessBirth(process.pid);
+    expect(read.kind).toBe("birth");
+    if (read.kind === "birth") expect(read.id).toStartWith(`${process.pid}@`);
   });
 });
