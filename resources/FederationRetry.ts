@@ -182,7 +182,7 @@ export async function terminalizeRetryEntry(input: RetryTerminalInput): Promise<
   ).catch((err: any) => ({ kind: "threw", error: err }) as const);
 
   if (outcome.kind === "threw") {
-    // The owned transaction aborted: the row did not move. Fail closed.
+    // The owned transaction aborted and committed no change of its own. Fail closed.
     return { ok: false, code: "write_failed", message: outcome.error?.message ?? String(outcome.error) };
   }
   if (outcome.kind === "busy") {

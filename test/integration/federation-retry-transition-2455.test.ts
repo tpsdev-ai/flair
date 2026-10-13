@@ -12,7 +12,7 @@
 // Each refusal exercised here on a seeded row (already terminal, a missing or
 // stray bound, a malformed row, a failed write, a busy lock) is checked against
 // the WHOLE stored row: the refused call left it as it was. Nothing else writes
-// these rows during the tests.
+// a seeded row between a refusal assertion's before and after reads.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
