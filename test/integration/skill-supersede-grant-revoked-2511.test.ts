@@ -2,7 +2,7 @@
  * skill-supersede-grant-revoked-2511.test.ts — flair#2511, real Harper.
  *
  * A grant-authorized cross-agent close of a SKILL version stands on a
- * "write" MemoryGrant the authorization check reads once. The close runs in the
+ * "write" MemoryGrant the authorization check reads at authorization time. The close runs in the
  * version transaction and stages its write before that transaction commits; a
  * grant revoked and committed in that window is invisible to the authorization
  * read. Every caller of the shared skill-version writer passes the grant a

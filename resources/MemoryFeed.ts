@@ -233,7 +233,7 @@ export class FeedMemories extends Resource {
           const value = typeof successor.content === "string" ? successor.content : null;
           const visibility = skillVersionVisibility(successor);
           if (!head) return { kind: "create", predecessor: null, successor, closePatch: {}, value, visibility, grantedClose: null };
-          // flair#2511: a cross-agent close of `head` stands on the "write" grant
+          // flair#2511: a grant-authorized cross-agent close of `head` stands on the "write" grant
           // authorizeSkillOwners read above; the writer re-checks it after the
           // close is staged.
           return { kind: "update", predecessor: head, successor, closePatch: { skillSubjectId: subjectId, validTo: now, updatedAt: now }, value, visibility, grantedClose: grantedSkillClose(head, ctx, auth) };
