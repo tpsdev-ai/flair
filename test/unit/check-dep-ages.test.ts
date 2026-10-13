@@ -464,19 +464,28 @@ describe("CLI — a pin through overrides and the dated exemption", () => {
     }
   }, 30_000);
 
-  it("exits 2 on an expired exemption, before fetching", async () => {
+  it("exits 2 on an expired exemption, making no registry request", async () => {
     const root = writeOverrideFixtureRepo(join(scratch, "override-expired"), { [FIXTURE_DEP]: FIXTURE_VERSION });
     writeAllowlist(root, [exemption("2020-01-01", "2020-01-02")]);
-    const { exitCode, output } = await runGate(CLI_SCRIPT, {
-      FLAIR_CHECK_DEP_AGES_ROOT: root,
-      // A dead registry keeps a RED run off the real npm registry; the
-      // discriminating assertion is the message and the exit code.
-      FLAIR_NPM_REGISTRY: "http://127.0.0.1:1",
-    });
-    expect(output).toContain("Expired bake-time exemption");
-    expect(output).toContain(`${FIXTURE_DEP}@${FIXTURE_VERSION}`);
-    expect(output).toContain("2020-01-02");
-    expect(exitCode).toBe(2);
+    // A LIVE registry that would answer the request: the gate must refuse the
+    // expired entry BEFORE asking, so the discriminating assertion is that it
+    // made NO request. A dead registry alone cannot tell a refusal from a
+    // fetch that failed first; moving the expiry check after the fetch makes
+    // this test fail because a request is then made.
+    const registry = freshRegistry();
+    try {
+      const { exitCode, output } = await runGate(CLI_SCRIPT, {
+        FLAIR_CHECK_DEP_AGES_ROOT: root,
+        FLAIR_NPM_REGISTRY: registry.url,
+      });
+      expect(output).toContain("Expired bake-time exemption");
+      expect(output).toContain(`${FIXTURE_DEP}@${FIXTURE_VERSION}`);
+      expect(output).toContain("2020-01-02");
+      expect(registry.requests).toEqual([]);
+      expect(exitCode).toBe(2);
+    } finally {
+      registry.stop();
+    }
   }, 30_000);
 
   it("reports a non-exact override range and does not age-check it", async () => {

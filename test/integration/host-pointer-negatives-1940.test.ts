@@ -267,7 +267,7 @@ describe("flair#1940 A1-iv — host pointer negative cases (real Harper)", () =>
     expect(asAuthor.body.hostSource).toEqual(POINTER);
   }, 60_000);
 
-  it("n3: after the memory row is deleted its pointer is not returned", async () => {
+  it("n3: after the memory row is deleted a by-id read is 404 without the pointer, and the list omits the row and its pointer", async () => {
     const id = "hpneg-n3";
     const create = await reqAs(author, "POST", "/Memory", {
       id,

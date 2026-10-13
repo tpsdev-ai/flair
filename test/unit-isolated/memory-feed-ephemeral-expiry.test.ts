@@ -1,11 +1,14 @@
 import { describe, expect, test, beforeEach, afterEach, mock } from "bun:test";
 import { installFakeHarperTransaction } from "../helpers/fake-harper-txn";
 import { stampEphemeralExpiry } from "../../resources/memory-durability.ts";
+import { computeContentHash } from "../../resources/memory-feed-lib.ts";
 
 const ORIGINAL_TTL = process.env.FLAIR_EPHEMERAL_TTL_HOURS;
 
 let memoryStore: Map<string, any>;
 let txn: ReturnType<typeof installFakeHarperTransaction>;
+/** Every write the fake Memory table received, by method and the field names it named (flair#2494). */
+let writes: { method: "put" | "update"; id: string; fields: string[] }[];
 
 const databasesMock = {
   flair: {
@@ -13,8 +16,15 @@ const databasesMock = {
       get: async (id: string) => memoryStore.get(id) ?? null,
       // Harper PUT semantics: the stored row IS the record (full replacement).
       put: async (record: any) => {
+        writes.push({ method: "put", id: record.id, fields: Object.keys(record).sort() });
         if (!txn.stage(record.id, { ...record })) memoryStore.set(record.id, { ...record });
         return record;
+      },
+      update: async (id: string, patch: Record<string, any>) => {
+        writes.push({ method: "update", id, fields: Object.keys(patch).sort() });
+        const merged = { ...(memoryStore.get(id) ?? { id }), ...patch };
+        if (!txn.stage(id, merged)) memoryStore.set(id, merged);
+        return merged;
       },
       search: () => (async function* () { for (const r of memoryStore.values()) yield r; })(),
     },
@@ -49,6 +59,7 @@ function sharedRuleExpiryMs(): number {
 
 beforeEach(() => {
   memoryStore = new Map();
+  writes = [];
   txn = installFakeHarperTransaction((id, row) => memoryStore.set(id, row));
   // A distinctive TTL so a hardcoded 24h could not accidentally match.
   process.env.FLAIR_EPHEMERAL_TTL_HOURS = "6";
@@ -129,4 +140,18 @@ test("feed refuses malformed stored expiry without replacing the row", async () 
   expect((result as Response).status).toBe(400);
   expect((await (result as Response).json()).error).toBe("invalid_expiry");
   expect(memoryStore.get(stored.id)).toEqual(stored);
+});
+
+describe("the dedup expiry repair is a field-only update (flair#2494)", () => {
+  test("repairs a matching ephemeral row with exactly one incremental update naming only expiresAt, never a full-row put", async () => {
+    const content = "an ephemeral feed journal entry already stored without an expiry";
+    memoryStore.set("dup-eph", {
+      id: "dup-eph", agentId: "alice", content, contentHash: computeContentHash("alice", content),
+      durability: "ephemeral", visibility: "private", createdAt: new Date().toISOString(),
+    });
+    const result: any = await feed().post({ agentId: "alice", content, durability: "ephemeral" });
+    expect(result).not.toBeInstanceOf(Response);
+    expect(writes).toEqual([{ method: "update", id: "dup-eph", fields: ["expiresAt"] }]);
+    expect(typeof memoryStore.get("dup-eph").expiresAt).toBe("string");
+  });
 });

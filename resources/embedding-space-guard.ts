@@ -38,6 +38,7 @@
  * carry no harper dependency at all.
  */
 import { EMBEDDING_ENGINE, getModelId } from "./embeddings-provider.js";
+import { TEST_FAULT_INJECTION_ENV, txnPausePoint } from "./txn-pause-point.js";
 
 // ─── Pure core (Harper-free) ────────────────────────────────────────────────
 
@@ -137,6 +138,17 @@ let _lastScanAt = 0;
 let _scanning: Promise<void> | undefined;
 // flair#2481 — foreign-space write notes invalidate an in-flight scan's verdict.
 let _writeEpoch = 0;
+// flair#2508 — scan-start ordering. `recomputeLatch()` (the boot pre-warm's
+// path) runs `scan()` directly, bypassing the `_scanning` latch that serialises
+// consult scans, so two scans can overlap; a scan that started earlier and
+// finishes later must not overwrite the verdict of one that started later.
+// Each scan takes the next sequence number when it begins and publishes only
+// when no scan that started later has already published. When the write epoch
+// is unchanged, a refused publish is named and writes nothing; when a foreign
+// write changed the epoch, the #2481 check in scan() runs first instead,
+// discarding the scan and resetting the retry timer.
+let _scanSeq = 0;
+let _publishedScanSeq = 0;
 
 // While the latch is TRIPPED, re-verify at most this often, so a completed
 // re-embed reopens the gate without paying a scan on every degraded query.
@@ -146,6 +158,7 @@ const MAX_DIAG_STAMPS = 12;
 
 async function scan(): Promise<void> {
   const startEpoch = _writeEpoch;
+  const scanSeq = ++_scanSeq;
   const current = normalizeStamp(_modelIdGetter());
   const seen = new Set<string>();
   let uniform = true;
@@ -159,13 +172,27 @@ async function scan(): Promise<void> {
       if (seen.size < MAX_DIAG_STAMPS) seen.add(n);
       if (n !== current) uniform = false;
     }
+    // Test-only: inert unless the fault-injection opt-in is set and this point
+    // is armed (flair#2508). It holds this scan after its read, so a scan that
+    // started later can read and publish before this one resumes.
+    const paused = txnPausePoint("scan-verdict");
+    if (paused) await paused;
     // A changed epoch discards this scan's verdict and makes the next consult rescan.
     if (_writeEpoch !== startEpoch) {
       _lastScanAt = 0;
       return;
     }
+    // flair#2508 — a scan that started later already published its verdict; this
+    // stale one must not overwrite it. Refused by name; nothing is written.
+    if (scanSeq < _publishedScanSeq) {
+      console.warn(
+        `embedding-space-guard: stale scan verdict refused (scan ${scanSeq} superseded by scan ${_publishedScanSeq}); nothing written`,
+      );
+      return;
+    }
     _activeStamps = [...seen];
     _uniform = uniform;
+    _publishedScanSeq = scanSeq;
     _lastScanAt = Date.now();
   } catch {
     // No live table yet (boot race) — leave the prior verdict untouched and
@@ -239,10 +266,28 @@ export function spaceGuardDiagnostics(): { current: string; found: string[] } {
 // consult computes the latch lazily — correctness never depends on this
 // pre-warm, only the first query's latency does.
 let _prewarmScheduled = false;
+// Settles when the most recently scheduled pre-warm's scan has finished,
+// whatever its outcome. Read only through `_prewarmSettledForTests()`.
+let _prewarmSettled: Promise<void> | undefined;
 export function scheduleSpaceGuardPrewarm(): void {
   if (_prewarmScheduled) return;
   _prewarmScheduled = true;
-  setImmediate(() => { void recomputeLatch().catch(() => {}); });
+  _prewarmSettled = new Promise<void>((resolve) => {
+    setImmediate(() => { void recomputeLatch().catch(() => {}).then(() => resolve()); });
+  });
+}
+
+/**
+ * Test-only barrier (flair#2508): resolves once the most recently scheduled
+ * pre-warm's scan has finished, so a test can wait for it before it injects a
+ * table getter or arms a pause point. Gated like the pause points: returns
+ * `undefined` unless the fault-injection opt-in
+ * (`FLAIR_ENABLE_TEST_FAULT_INJECTION=1`) is set, and also when no pre-warm
+ * was ever scheduled.
+ */
+export function _prewarmSettledForTests(env: NodeJS.ProcessEnv = process.env): Promise<void> | undefined {
+  if (env[TEST_FAULT_INJECTION_ENV] !== "1") return undefined;
+  return _prewarmSettled;
 }
 
 // Test-only seams — mirror embeddings-boot.ts's `_resetEmbeddingsBackendRegistrationForTests`.
@@ -256,6 +301,10 @@ export function _resetGuardForTests(): void {
   _lastScanAt = 0;
   _scanning = undefined;
   _writeEpoch = 0;
+  _scanSeq = 0;
+  _publishedScanSeq = 0;
+  // `_prewarmSettled` is kept: a reset cannot cancel a pre-warm that is already
+  // scheduled, so its barrier must stay awaitable.
   _prewarmScheduled = false;
 }
 

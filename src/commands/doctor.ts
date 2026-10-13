@@ -125,6 +125,7 @@ export type DoctorCli = {
   repairLaunchdManagement: (...args: any[]) => any;
   repointMainServiceUnit: (...args: any[]) => any;
   resolveHttpPort: (...args: any[]) => any;
+  verifyDoctorRosterInstance: (...args: any[]) => any;
   restartFlair: (...args: any[]) => any;
   resolveOpsPort: (...args: any[]) => any;
   verifyAuditLog: (...args: any[]) => any;
@@ -197,6 +198,10 @@ function repairLaunchdManagement(...args: any[]): any {
 
 function resolveHttpPort(...args: any[]): any {
   return cli.resolveHttpPort(...args);
+}
+
+function verifyDoctorRosterInstance(...args: any[]): any {
+  return cli.verifyDoctorRosterInstance(...args);
 }
 
 function resolveOpsPort(...args: any[]): any {
@@ -2033,16 +2038,39 @@ program
       } catch (err: unknown) {
         agentListCredIssue = err instanceof Error ? err.message : String(err);
       }
-      if (agentListAdminPass) {
+      // flair#2483: before either read, doctor checks the ops endpoint against
+      // the HTTP port it actually probed (effectivePort — a PID-discovered port,
+      // or one --fix just re-recorded). The pairing rule only PICKS a candidate;
+      // it trusts ports the caller names. The candidate's own configured pair
+      // must then record it as the ops port and effectivePort as its HTTP port,
+      // bound on loopback or on all interfaces (the check the local delete paths
+      // use); configured ports are not proof of the live process. Two different
+      // Instance ids on the two endpoints also refuse. When the pick or the configuration check refuses or
+      // cannot complete, or the ids differ, both checks report NOT RUN (counted
+      // as an issue) and no Agent row is read.
+      const rosterTarget = agentListAdminPass
+        ? (await verifyDoctorRosterInstance(opts, effectivePort, agentListAdminPass) as { kind: "run"; opsPort: number } | { kind: "not-run"; reason: string; remedy: string })
+        : null;
+      const rosterNotRun = rosterTarget?.kind === "not-run" ? rosterTarget : null;
+      const rosterOpsPort = rosterTarget?.kind === "run" ? rosterTarget.opsPort : null;
+      if (agentListAdminPass && rosterOpsPort !== null) {
         rosterReadAttempted = true;
         const auth = Buffer.from(`${resolveAdminUser()}:${agentListAdminPass}`).toString("base64");
         roster = await readAgentRoster({
-          opsUrl: `http://127.0.0.1:${resolveOpsPort(opts)}/`,
+          opsUrl: `http://127.0.0.1:${rosterOpsPort}/`,
           authHeader: `Basic ${auth}`,
           timeoutMs: 5000,
         });
       }
-      if (roster === null) {
+      if (rosterNotRun) {
+        // A pair-refused check is not a clean result and not a finding about
+        // another instance: count it, and name why and the remedy. (The Agent
+        // homes no-credential skip below is different: it reads nothing and
+        // counts nothing.)
+        issues++;
+        console.log(`  ${render.icons.warn} Agent IDs: NOT RUN — ${rosterNotRun.reason}`);
+        console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${rosterNotRun.remedy}`);
+      } else if (roster === null) {
         // A check that could not run is not a clean result: it counts as an
         // issue, so the summary and exit status never report "No issues found"
         // for an Agent-ID check that did not happen.
@@ -2069,28 +2097,30 @@ program
       // home instance (`originatorInstanceId`) and name the remedy that
       // back-fills it. Read-only: nothing is rewritten here.
       console.log(`\n  ${render.wrap(render.c.bold, "Agent homes")}`);
-      const homeOpsUrl = `http://127.0.0.1:${resolveOpsPort(opts)}/`;
-      const homeEndpoint = agentHomeEndpoint(homeOpsUrl, resolveAdminUser(), agentListAdminPass);
-      const homeAuth = agentListAdminPass
-        ? `Basic ${Buffer.from(`${resolveAdminUser()}:${agentListAdminPass}`).toString("base64")}`
-        : null;
-      const homeRows = homeAuth
-        ? await readAgentHomeRows({ opsUrl: homeOpsUrl, authHeader: homeAuth, timeoutMs: 5000 })
-        : null;
-      if (!homeAuth) {
-        console.log(`  ${render.icons.info} Agent homes check skipped (no admin credential).`);
-      } else if (homeRows === null) {
+      if (rosterNotRun) {
         issues++;
-        console.log(`  ${render.icons.warn} Could not read the stored Agent roster, so the home-instance check did not run.`);
+        console.log(`  ${render.icons.warn} Agent homes: NOT RUN — ${rosterNotRun.reason}`);
+        console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${rosterNotRun.remedy}`);
+      } else if (!agentListAdminPass) {
+        console.log(`  ${render.icons.info} Agent homes check skipped (no admin credential).`);
       } else {
-        const homeIdentity = await resolveTargetInstanceIdentity(homeEndpoint);
-        const homeFinding = describeAgentHomeFinding(homeRows, homeIdentity);
-        if (!homeFinding) {
-          console.log(`  ${render.icons.ok} Every stored agent row names a home instance.`);
+        const homeOpsUrl = `http://127.0.0.1:${rosterOpsPort}/`;
+        const homeEndpoint = agentHomeEndpoint(homeOpsUrl, resolveAdminUser(), agentListAdminPass);
+        const homeAuth = `Basic ${Buffer.from(`${resolveAdminUser()}:${agentListAdminPass}`).toString("base64")}`;
+        const homeRows = await readAgentHomeRows({ opsUrl: homeOpsUrl, authHeader: homeAuth, timeoutMs: 5000 });
+        if (homeRows === null) {
+          issues++;
+          console.log(`  ${render.icons.warn} Could not read the stored Agent roster, so the home-instance check did not run.`);
         } else {
-          console.log(`  ${homeFinding.severity === "info" ? render.icons.info : render.icons.warn} ${homeFinding.message}`);
-          if (homeFinding.fixHint) console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${homeFinding.fixHint}`);
-          if (homeFinding.isIssue) issues++;
+          const homeIdentity = await resolveTargetInstanceIdentity(homeEndpoint);
+          const homeFinding = describeAgentHomeFinding(homeRows, homeIdentity);
+          if (!homeFinding) {
+            console.log(`  ${render.icons.ok} Every stored agent row names a home instance.`);
+          } else {
+            console.log(`  ${homeFinding.severity === "info" ? render.icons.info : render.icons.warn} ${homeFinding.message}`);
+            if (homeFinding.fixHint) console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${homeFinding.fixHint}`);
+            if (homeFinding.isIssue) issues++;
+          }
         }
       }
     }
