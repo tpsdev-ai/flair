@@ -503,7 +503,7 @@ ed25519 / idp) and **Integration** (legacy platform connection).
 | **WorkspaceState** | workspace.graphql | yes | Current work (`ref`, `provider`, `phase`, `entities`) |
 | **OrgEvent** | event.graphql | yes | Org-visible event (`authorId`, `kind`, `summary`, `entities`) |
 | **AgentReadPosition** | agent.graphql | no | Per-agent watermark (`agentId`, `stream`, `position`). HTTP via `/AgentReadPosition`, not raw-table REST. |
-| **AgentKeyRegistration** | agent-key-registration.graphql | yes (admin read only) | Audit log of committed `POST /AgentKeyRegister` calls (`actorId`, `operator`, `agentId`, `instanceId`, `keyFingerprint`, `createdAt`); every REST write is refused. `replicate: true` is declared explicitly to state the database default (a table replicates unless it opts out). |
+| **AgentKeyRegistration** | agent-key-registration.graphql | yes (admin read only) | Audit log of committed `POST /AgentKeyRegister` calls (`actorId`, `operator`, `agentId`, `instanceId`, `keyFingerprint`, `createdAt`). The Flair resource route refuses every write; the registration operation is its only application writer. The operations API is a separate raw-table trust root. `replicate: true` is declared explicitly to state the database default (a table replicates unless it opts out). |
 | **Message** | message.graphql | yes | Signed envelope (`from`, `to`, `threadId`, `seq`, `state`, `signature`) |
 | **OAuthClient** | oauth.graphql | yes | Registered OAuth clients |
 | **OAuthAuthCode** | oauth.graphql | no | Single-use codes + PKCE |

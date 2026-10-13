@@ -32,7 +32,7 @@ describe("flair#2266 — the canonical Ed25519 base64url key rule", () => {
   });
 
   test("rejects a non-canonical tail that decodes to 32 bytes but re-encodes differently", () => {
-    // The final base64url char of a 32-byte key encodes 4 key bits and 4 padding
+    // The final base64url char of a 32-byte key encodes 4 key bits and 2 padding
     // bits. Swapping it for a char whose padding bits are non-zero still decodes
     // to 32 bytes, but the canonical re-encoding differs — so it is refused.
     const nonCanonical = `${KEY.slice(0, 42)}f`;

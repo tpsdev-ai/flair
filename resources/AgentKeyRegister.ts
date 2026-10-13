@@ -9,8 +9,9 @@
  * agent-authentication middleware resolves the verification key from the STORED
  * row (resources/agent-auth.ts), and a pending row's stored value is the literal
  * string `pending`, which can never verify — so the Agent resource's allow* can
- * never admit this flow. This resource's gate admits a verified Flair admin and
- * its handler re-verifies everything, failing closed on absent evidence.
+ * never admit this flow. Here `allowCreate()` returns true and the handler
+ * decides: it admits only an admin and re-reads the row, failing closed on
+ * absent evidence.
  *
  * The write runs under the per-agent lock (resources/key-lock.ts, the pairing
  * composition in resources/Federation.ts) inside ONE owned transaction
@@ -20,11 +21,15 @@
  * (resources/write-back.ts) before the commit, and the stored key is read back
  * AFTER the commit. The response is returned only when the read-back is equal.
  *
- * Authorization is the gate's `tpsAgentIsAdmin` annotation (read here through
- * resolveAgentAuth) — never `request.user` / `super_user`, which Harper's
- * `authorizeLocal` forges for a credential-less loopback request. Any
- * `Flair-Enroll` Authorization is refused outright: that scheme is a later
- * slice and nothing in this build can verify it.
+ * Admin is decided by resolveAgentAuth, on two paths. TPS-Ed25519: the gate
+ * verified the signature and annotated the agent `tpsAgentIsAdmin`. Basic: the
+ * gate checked the credential (a Harper `super_user`, or the `admin` bootstrap
+ * password) and annotated it the same way; without that annotation,
+ * resolveAgentAuth admits a `super_user` `request.user` only when the request
+ * carries a credential header. So the `super_user` that Harper's
+ * `authorizeLocal` forges for a credential-less loopback request never counts.
+ * `Flair-Enroll` (a later slice) is refused by Harper's authentication before
+ * this handler runs; the handler's own refusal is a fail-closed backstop.
  */
 import { Resource, databases } from "harper";
 import { randomUUID } from "node:crypto";
@@ -66,8 +71,9 @@ function readHeader(reqLike: any, name: string): string {
   return reqLike?.headers?.get?.(name) ?? reqLike?.headers?.asObject?.[name] ?? "";
 }
 
-/** The operator username the gate resolved for the caller, if any. An audit
- *  label only — never consulted for an authorization decision. */
+/** The Harper username on the request, if any (Harper's for Basic; the user
+ *  the gate maps a TPS-Ed25519 agent to). An audit label only: this value is
+ *  never consulted for an authorization decision. */
 function operatorOf(reqLike: any): string | null {
   const username = reqLike?.user?.username;
   return typeof username === "string" && username.length > 0 ? username : null;
@@ -79,10 +85,9 @@ function asRow(value: any): Record<string, any> | null {
 }
 
 export class AgentKeyRegister extends Resource {
-  // The handler is the ONE place that decides: it answers a verified non-admin
-  // an explicit 403 and an anonymous caller an explicit 401, and it refuses a
-  // `Flair-Enroll` header outright. A permissive gate here lets each of those
-  // reach that named refusal instead of Harper's generic denial.
+  // Permissive so the handler's admin check answers a verified non-admin an
+  // explicit 403 and an anonymous caller an explicit 401, rather than Harper's
+  // generic denial.
   allowCreate(): boolean {
     return true;
   }
@@ -91,22 +96,24 @@ export class AgentKeyRegister extends Resource {
     const ctx = (this as any).getContext?.() ?? {};
     const req = (ctx as any).request ?? ctx;
 
-    // A `Flair-Enroll` Authorization is refused outright: this build has no code
-    // to verify the enrollment scheme, so it must never be silently treated as
-    // any other caller.
+    // Backstop: Harper's authentication already refuses a `Flair-Enroll`
+    // Authorization before this handler. This build cannot verify that scheme,
+    // so a configuration that lets one through is refused here, never treated
+    // as any other caller.
     if (/^Flair-Enroll(\s|$)/i.test(readHeader(req, "authorization"))) {
       return jsonRefusal(401, "authentication required", "the Flair-Enroll enrollment scheme is not enabled in this build");
     }
 
-    // A verified Flair admin only. resolveAgentAuth reads the gate's
-    // `tpsAgentIsAdmin` annotation; a credential-less loopback request lands on
-    // `anonymous` (the gate's credential-evidence rule), never on admin.
+    // An admin only: a TPS-Ed25519 or Basic caller the gate annotated
+    // `tpsAgentIsAdmin`, or a credentialed Basic `super_user`. A credential-less
+    // loopback request lands on `anonymous` (the credential-evidence rule).
     const auth = await resolveAgentAuth(ctx);
     if (auth.kind !== "agent" || !auth.isAdmin) {
       return auth.kind === "anonymous"
         ? jsonRefusal(401, "authentication required", "an admin credential is required to register a key")
         : jsonRefusal(403, "forbidden", "an admin credential is required to register a key");
     }
+    // The admin agent id (TPS-Ed25519) or the Harper username (Basic).
     const actorId = auth.agentId;
 
     // Validate the body.
@@ -192,9 +199,9 @@ export class AgentKeyRegister extends Resource {
             // row the decision was made on: a whole-row comparison, so ANY field
             // a competing writer committed in between — the key, the status, the
             // originator, an unrelated field — aborts this owned transaction and
-            // discards all three staged writes. (The admin authorization itself is
-            // decided at request time by the gate annotation and is not derived
-            // from the row, so there is no owner to re-check here.)
+            // discards all three staged writes. (Admin is decided at request
+            // time by resolveAgentAuth, not from this target row, so there is no
+            // owner to re-check here.)
             await confirmCommittedRow(table, agentId, (committed) => {
               const row = asRow(committed);
               return row !== null && isDeepStrictEqual({ ...row }, basis);
@@ -236,6 +243,15 @@ export class AgentKeyRegister extends Resource {
 
     // value.kind === "registered": read the committed key back and report the
     // result ONLY when it is equal to the key that was registered.
+
+    // Test-only: inert unless the fault-injection env opt-in is set and armed.
+    // Placed after the commit and before the read-back, so a test can commit a
+    // competing key change in between and assert the read-back refusal. A DIRECT
+    // string literal (flair#2382); it must stay equal to
+    // AGENT_KEY_REGISTER_READ_BACK_PAUSE_POINT, which the test arms.
+    const readBackPause = txnPausePoint("agent-key-register-read-back");
+    if (readBackPause) await readBackPause;
+
     let readBack: Record<string, any> | null;
     try {
       readBack = asRow(await table.get(agentId, {}));

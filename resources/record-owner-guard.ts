@@ -127,10 +127,11 @@ export const OWNER_GUARD_EXEMPT: Readonly<Record<string, string>> = Object.freez
   InstructionVersion: "application append-only; REST writes refused",
   // flair#2266: the private audit log of key registrations. Its `agentId` names
   // the row whose key was registered (the AUDIT TARGET), not the caller — the
-  // caller is the admin in `actorId`. The table is written only by
-  // resources/AgentKeyRegister.ts; resources/AgentKeyRegistration.ts admits
-  // admin reads and refuses every REST write, so no non-admin can mutate a row.
-  AgentKeyRegistration: "admin-read-only audit log; REST writes refused; written only by the registration operation",
+  // caller is the admin in `actorId`. Its only application writer is
+  // resources/AgentKeyRegister.ts; the Flair resource route
+  // (resources/AgentKeyRegistration.ts) admits admin reads and refuses every
+  // write. The Harper operations API is a separate raw-table trust root.
+  AgentKeyRegistration: "admin-read-only audit log; Flair resource-route writes refused; the registration operation is its only application writer",
 });
 
 /** The verbs that can mutate a record, and therefore need the rule applied. */

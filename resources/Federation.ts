@@ -1347,10 +1347,11 @@ export class FederationSync extends Resource {
               // row's `publicKey` while the stored value is exactly `pending` is
               // skipped WHOLE. The sync-in writes Agent through the RAW table
               // handle and a paired hub may carry a forged-originator record, so
-              // this path has no authority to complete a pending row's key; the
-              // local registration operation (resources/AgentKeyRegister.ts) is
-              // the one path that may. It carries its OWN reason so the skip log
-              // tells it apart from the status refusal above.
+              // this path has no authority to complete a pending row's key.
+              // Local writers do, such as the registration operation
+              // (resources/AgentKeyRegister.ts) or an administrator's raw write
+              // through the operations API (a trust root). It carries its OWN
+              // reason so the skip log tells it apart from the status refusal.
               if (record.table === "Agent" && inboundChangesExistingPendingKey(record, row)) {
                 return { skip: true, reason: "agent_pending_key_not_federated" };
               }

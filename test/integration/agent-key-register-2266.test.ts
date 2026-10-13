@@ -3,10 +3,12 @@
 // POST /AgentKeyRegister (resources/AgentKeyRegister.ts) registers a caller-held
 // Ed25519 public key on an Agent row whose stored `publicKey` is exactly
 // `pending`, admin only. Every case below drives this instance's own ephemeral
-// Harper booted from the built component; the concurrency and rollback cases arm
-// the operation's in-transaction pause point
-// (resources/txn-pause-point.ts, enabled for THIS file's Harper by
-// FLAIR_ENABLE_TEST_FAULT_INJECTION + FLAIR_TEST_PAUSE_DIR).
+// Harper booted from the built component. The concurrency and rollback cases arm
+// the operation's in-transaction pause point; the read-back case arms the one
+// between the commit and the read-back (resources/txn-pause-point.ts, enabled
+// for THIS file's Harper by FLAIR_ENABLE_TEST_FAULT_INJECTION +
+// FLAIR_TEST_PAUSE_DIR). The audit cases drive the AgentKeyRegistration REST
+// route itself.
 //
 // Build prerequisite: dist/resources/*.js (`bun run build`).
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
@@ -16,7 +18,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import nacl from "tweetnacl";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
-import { AGENT_KEY_REGISTER_PAUSE_POINT, keyFingerprint } from "../../src/lib/agent-key-register.js";
+import { AGENT_KEY_REGISTER_PAUSE_POINT, AGENT_KEY_REGISTER_READ_BACK_PAUSE_POINT, keyFingerprint } from "../../src/lib/agent-key-register.js";
 
 const sfx = Date.now().toString(36);
 const LOCAL_ID = `inst-local-${sfx}`;
@@ -136,6 +138,10 @@ describe("flair#2266 — admin key registration on a pending Agent row", () => {
   const enrollId = `akr-enroll-${sfx}`;
   const concId = `akr-conc-${sfx}`;
   const rollbackId = `akr-rollback-${sfx}`;
+  const readBackId = `akr-readback-${sfx}`;
+  const syncedFromId = `akr-syncedfrom-${sfx}`;
+  const syncedOriginId = `akr-syncedorigin-${sfx}`;
+  const auditTargetId = `akr-audit-${sfx}`;
 
   const edAdminKey = mkKey();
   const successKey = mkKey();
@@ -173,6 +179,12 @@ describe("flair#2266 — admin key registration on a pending Agent row", () => {
     await seedAgent({ id: enrollId, status: "active", publicKey: "pending" });
     await seedAgent({ id: concId, status: "active", publicKey: "pending" });
     await seedAgent({ id: rollbackId, status: "active", publicKey: "pending", updatedAt: "2026-01-01T00:00:00.000Z" });
+    await seedAgent({ id: readBackId, status: "active", publicKey: "pending" });
+    // Receiver-side sync provenance with NO foreign home: an absent home, and the
+    // local home. Only the sync-provenance check can refuse these.
+    await seedAgent({ id: syncedFromId, status: "active", publicKey: "pending", _syncedFrom: FOREIGN_HOME });
+    await seedAgent({ id: syncedOriginId, status: "active", publicKey: "pending", originatorInstanceId: LOCAL_ID, _originatorInstanceId: FOREIGN_HOME });
+    await seedAgent({ id: auditTargetId, status: "active", publicKey: "pending" });
   }, 240_000);
 
   afterAll(async () => {
@@ -367,7 +379,8 @@ describe("flair#2266 — admin key registration on a pending Agent row", () => {
       () => registerAsAdmin(rollbackId, keyA.pub),
       async () => {
         // A competing writer commits an unrelated field change while the
-        // registration is paused inside its transaction, after staging.
+        // registration is paused inside its transaction, after the fresh read
+        // and before the staging.
         await ops({ operation: "update", table: "Agent", records: [{ id: rollbackId, name: `${rollbackId}-renamed` }] });
       },
     );
@@ -382,4 +395,100 @@ describe("flair#2266 — admin key registration on a pending Agent row", () => {
     expect(await countRows(`SELECT id FROM flair.AgentKeyRegistration WHERE agentId = '${rollbackId}'`)).toBe(0);
     expect(await countRows(`SELECT id FROM flair.OrgEvent WHERE refId = '${rollbackId}' AND kind = 'agent_key_registered'`)).toBe(0);
   }, 60_000);
+  test("a key change committed between the commit and the read-back is refused 503 registration_unavailable, never a success", async () => {
+    const keyA = mkKey();
+    const keyB = mkKey();
+    const { result, paused } = await withPausedPoint(
+      AGENT_KEY_REGISTER_READ_BACK_PAUSE_POINT,
+      () => registerAsAdmin(readBackId, keyA.pub),
+      async () => {
+        // The registration has committed keyA. A competing raw write changes
+        // ONLY the key (updatedAt stays the registration's), so the key clause
+        // of the read-back check is the one that must refuse.
+        const committed = await rowIn("Agent", readBackId);
+        expect(committed?.publicKey, "the registration had not committed at the pause").toBe(keyA.pub);
+        await ops({ operation: "update", table: "Agent", records: [{ id: readBackId, publicKey: keyB.pub }] });
+      },
+    );
+    expect(paused, "the read-back pause point did not fire").toBe(true);
+    expect(result.status, JSON.stringify(result.body)).toBe(503);
+    expect(result.body.error).toBe("registration_unavailable");
+    expect(result.body.publicKey, "a refused read-back must not report a key").toBeUndefined();
+    expect(result.body.registrationId, "a refused read-back must not report a registration").toBeUndefined();
+    expect((await rowIn("Agent", readBackId))?.publicKey).toBe(keyB.pub);
+  }, 60_000);
+
+  for (const [label, id] of [["_syncedFrom with no home", () => syncedFromId], ["_originatorInstanceId with the local home", () => syncedOriginId]] as const) {
+    test(`a sync-provenance row (${label}) is refused agent_not_local with no Agent, audit or OrgEvent change`, async () => {
+      const agentId = id();
+      const before = await rowIn("Agent", agentId);
+      expect(before?.publicKey).toBe("pending");
+      const { status, body } = await registerAsAdmin(agentId, mkKey().pub);
+      expect(status, JSON.stringify(body)).toBe(403);
+      expect(body.error).toBe("agent_not_local");
+      expect(await rowIn("Agent", agentId)).toEqual(before);
+      expect(await countRows(`SELECT id FROM flair.AgentKeyRegistration WHERE agentId = '${agentId}'`)).toBe(0);
+      expect(await countRows(`SELECT id FROM flair.OrgEvent WHERE refId = '${agentId}'`)).toBe(0);
+    }, 30_000);
+  }
+
+  describe("the AgentKeyRegistration REST route: admin read, every write refused", () => {
+    let auditId = "";
+    let auditRow: any = null;
+
+    /** A request to the audit route as `who`: an admin agent, a non-admin agent, or the Basic admin. */
+    async function asCaller(who: "edAdmin" | "nonAdmin" | "basicAdmin", method: string, path: string, body?: unknown): Promise<{ status: number; text: string }> {
+      const authorization = who === "basicAdmin"
+        ? basic()
+        : who === "edAdmin"
+          ? edHeader(edAdminId, edAdminKey.priv, method, path)
+          : edHeader(nonAdminId, nonAdminKey.priv, method, path);
+      const res = await fetch(`${harper.httpURL}${path}`, {
+        method,
+        headers: { "Content-Type": "application/json", Authorization: authorization },
+        body: body === undefined ? undefined : JSON.stringify(body),
+        signal: AbortSignal.timeout(15_000),
+      });
+      return { status: res.status, text: await res.text() };
+    }
+
+    beforeAll(async () => {
+      const reg = await registerAsAdmin(auditTargetId, mkKey().pub);
+      expect(reg.status, JSON.stringify(reg.body)).toBe(200);
+      auditId = reg.body.registrationId;
+      auditRow = await rowIn("AgentKeyRegistration", auditId);
+      expect(auditRow).not.toBeNull();
+    }, 30_000);
+
+    test("an admin agent reads the row; a non-admin agent is refused 403", async () => {
+      const path = `/AgentKeyRegistration/${auditId}`;
+      const admin = await asCaller("edAdmin", "GET", path);
+      expect(admin.status, admin.text.slice(0, 200)).toBe(200);
+      const got = JSON.parse(admin.text);
+      expect(got.id).toBe(auditId);
+      expect(got.keyFingerprint).toBe(auditRow.keyFingerprint);
+      const nonAdmin = await asCaller("nonAdmin", "GET", path);
+      expect(nonAdmin.status, nonAdmin.text.slice(0, 200)).toBe(403);
+    }, 30_000);
+
+    for (const who of ["nonAdmin", "edAdmin", "basicAdmin"] as const) {
+      test(`${who}: POST, PUT, PATCH and DELETE are refused 403 and the audit table is unchanged`, async () => {
+        const forgedId = `akr-forged-${who}-${sfx}`;
+        const forged = { id: forgedId, actorId: who, agentId: auditTargetId, keyFingerprint: "0".repeat(64), createdAt: new Date().toISOString() };
+
+        const post = await asCaller(who, "POST", "/AgentKeyRegistration/", forged);
+        expect(post.status, `POST: ${post.text.slice(0, 200)}`).toBe(403);
+        const put = await asCaller(who, "PUT", `/AgentKeyRegistration/${auditId}`, { ...auditRow, keyFingerprint: "f".repeat(64) });
+        expect(put.status, `PUT: ${put.text.slice(0, 200)}`).toBe(403);
+        const patch = await asCaller(who, "PATCH", `/AgentKeyRegistration/${auditId}`, { keyFingerprint: "e".repeat(64) });
+        expect(patch.status, `PATCH: ${patch.text.slice(0, 200)}`).toBe(403);
+        const del = await asCaller(who, "DELETE", `/AgentKeyRegistration/${auditId}`);
+        expect(del.status, `DELETE: ${del.text.slice(0, 200)}`).toBe(403);
+
+        expect(await rowIn("AgentKeyRegistration", auditId), "the audit row changed").toEqual(auditRow);
+        expect(await rowIn("AgentKeyRegistration", forgedId), "a forged audit row landed").toBeNull();
+        expect(await countRows(`SELECT id FROM flair.AgentKeyRegistration WHERE agentId = '${auditTargetId}'`)).toBe(1);
+      }, 30_000);
+    }
+  });
 });

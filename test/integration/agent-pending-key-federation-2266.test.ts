@@ -8,12 +8,14 @@
 // refusal `agent_status_not_federated`, which the plan still emits under its own
 // name.
 //
-// The last case is the peer non-convergence consequence: a pending copy that
-// arrived from another instance carries that instance's `originatorInstanceId`,
-// so this instance refuses to register it (`agent_not_local`); the remedy is the
-// admin rotation on the originating instance.
+// The last two cases are the peer non-convergence consequence and its remedy. A
+// pending copy that arrived from another instance (A) carries A's
+// `originatorInstanceId`, so this instance (B) refuses to register it
+// (`agent_not_local`), and nothing done on A changes it. B's administrator writes
+// the key onto B's copy through B's operations API; the key then authenticates.
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
+import { randomUUID } from "node:crypto";
 import { signBodyFresh } from "../../resources/federation-crypto.js";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 
@@ -56,7 +58,26 @@ async function rawAgent(id: string): Promise<any> {
 
 const hub = nacl.sign.keyPair();
 const hubPublicKey = Buffer.from(hub.publicKey).toString("base64url");
-const aKey = Buffer.from(nacl.sign.keyPair().publicKey).toString("base64url");
+const aPair = nacl.sign.keyPair();
+const aKey = Buffer.from(aPair.publicKey).toString("base64url");
+
+function edHeader(agentId: string, key: Uint8Array, method: string, path: string): string {
+  const ts = Date.now().toString();
+  const nonce = randomUUID();
+  const sig = nacl.sign.detached(new TextEncoder().encode(`${agentId}:${ts}:${nonce}:${method}:${path}`), key);
+  return `TPS-Ed25519 ${agentId}:${ts}:${nonce}:${Buffer.from(sig).toString("base64")}`;
+}
+
+/** A signed GET of the agent's own row with A's key. */
+async function getOwnRowWithAKey(id: string): Promise<{ status: number; text: string }> {
+  const path = `/Agent/${id}`;
+  const res = await fetch(`${harper.httpURL}${path}`, {
+    method: "GET",
+    headers: { Authorization: edHeader(id, aPair.secretKey, "GET", path) },
+    signal: AbortSignal.timeout(15_000),
+  });
+  return { status: res.status, text: await res.text() };
+}
 
 async function sync(id: string, data: Record<string, unknown>): Promise<any> {
   const body = signBodyFresh(
@@ -131,7 +152,7 @@ describe("flair#2266 — an inbound federated Agent record cannot complete a pen
     expect(rec?.originatorInstanceId).toBe(HUB);
 
     // The local instance is not this row's authority, so it refuses to register
-    // it: the remedy is the admin rotation on the originating instance.
+    // it; the remedy is the operations-API write in the next case.
     const res = await fetch(`${harper.httpURL}/AgentKeyRegister`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: basicAuth() },
@@ -142,5 +163,23 @@ describe("flair#2266 — an inbound federated Agent record cannot complete a pen
     expect(res.status, text.slice(0, 200)).toBe(403);
     expect(JSON.parse(text).error).toBe("agent_not_local");
     expect((await rawAgent(PEER_COPY))?.publicKey).toBe("pending");
+  }, 30_000);
+  test("peer remedy: B's administrator writes the key onto B's copy through the operations API; read-back equals; the key authenticates", async () => {
+    // Before: B's copy is pending, so A's key does not authenticate here.
+    expect((await rawAgent(PEER_COPY))?.publicKey).toBe("pending");
+    const refused = await getOwnRowWithAKey(PEER_COPY);
+    expect(refused.status, `A's key authenticated against a pending copy: ${refused.text.slice(0, 200)}`).toBeGreaterThanOrEqual(400);
+
+    // The documented remedy: the same raw `update` `flair agent rotate-key`
+    // sends, carrying the key A registered.
+    await ops({ operation: "update", table: "Agent", records: [{ id: PEER_COPY, publicKey: aKey, updatedAt: now() }] });
+
+    const rec = await rawAgent(PEER_COPY);
+    expect(rec?.publicKey).toBe(aKey);
+    expect(rec?.originatorInstanceId, "the remedy must not move the row's home").toBe(HUB);
+
+    const ok = await getOwnRowWithAKey(PEER_COPY);
+    expect(ok.status, `the written key did not authenticate: ${ok.text.slice(0, 200)}`).toBe(200);
+    expect(JSON.parse(ok.text).id).toBe(PEER_COPY);
   }, 30_000);
 });

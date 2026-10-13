@@ -23,6 +23,14 @@ export const PENDING_PUBLIC_KEY = "pending";
  */
 export const AGENT_KEY_REGISTER_PAUSE_POINT = "agent-key-register";
 
+/**
+ * The test-only pause point after the registration's commit and before its
+ * read-back (flair#2266), so a test can commit a competing key change in
+ * between. A DIRECT string literal at the resource call site (flair#2382); this
+ * export must stay equal to it.
+ */
+export const AGENT_KEY_REGISTER_READ_BACK_PAUSE_POINT = "agent-key-register-read-back";
+
 /** 400: the request body is missing or malformed (invalid agentId / publicKey). */
 export const REGISTRATION_REQUEST_INVALID = "registration_request_invalid";
 /** 404: no Agent row with that id. */
@@ -62,9 +70,10 @@ export function isCanonicalEd25519Base64url(value: unknown): boolean {
 
 /**
  * The audit fingerprint of a registered key: the hex sha256 of its canonical
- * base64url string. The key itself is never stored or logged. Uses the ambient
- * WebCrypto (the same primitive the auth paths digest/verify with), so this
- * module imports nothing.
+ * base64url string. The audit row and the OrgEvent carry this, never the key;
+ * the key itself is stored only on the Agent row. Uses the ambient WebCrypto
+ * (the same primitive the auth paths digest/verify with), so this module
+ * imports nothing.
  */
 export async function keyFingerprint(canonicalKey: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonicalKey));
