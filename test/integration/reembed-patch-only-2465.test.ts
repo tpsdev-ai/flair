@@ -408,7 +408,7 @@ describe("flair#2465 — the re-embed confirms the committed row after staging (
   }, 120_000);
 });
 
-describe("flair#2465 part 2 — the stored vector is bound to its text (real Harper)", () => {
+describe("flair#2465 part 2 — a server-computed re-embed stores the hash of the text it embedded (real Harper)", () => {
   it("CONTROL: a re-embed records the embedded-text hash of the text it embedded", async () => {
     const id = "rpo-hash-control";
     await seedRow(id, owner.id, ORIGINAL);
@@ -493,7 +493,7 @@ describe("flair#2465 part 2 — the stored vector is bound to its text (real Har
   }, 120_000);
 });
 
-describe("flair#2465 part 2 — ordinary REST writes bind the vector the server computes (real Harper)", () => {
+describe("flair#2465 part 2 — REST writes: a server-computed hash, a body hash dropped or refused, a carried hash retained (real Harper)", () => {
   const GITHUB_TOKEN = `ghp_${"a".repeat(24)}`;
   const CREDENTIAL_TEXT = `the deploy job reads token=${GITHUB_TOKEN} from the vault`;
   const REDACTED_TEXT = "the deploy job reads token=[redacted] from the vault";

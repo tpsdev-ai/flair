@@ -1,6 +1,7 @@
 /**
- * memory-embed-hash.ts — the hash of the text a Memory row's vector was
- * computed from (flair#2465, part 2).
+ * memory-embed-hash.ts — the text hash the server stores with a vector it
+ * computes, and the expected hash a stored value is compared with (flair#2465,
+ * part 2).
  *
  * A row's embedding is only meaningful for the text it was embedded from. This
  * module defines that text's hash with the SAME function that defines a Memory
@@ -21,7 +22,9 @@
  *     A value received through federation is an unverified peer assertion.
  * Exceptions: a row with an empty owner gets no hash (null) even from a
  * server-computed embed, and a caller-supplied vector gets no newly computed
- * hash (a create stores null; an update retains the stored hash beside it).
+ * hash (a POST or PUT create stores null; an admin PATCH create drops a
+ * submitted value and can leave the field absent; an update retains the stored
+ * hash beside it).
  *
  * The embedding-stamp migration treats an embedding as current when its
  * `embeddingModel` is current-space AND the stored hash is absent or equals the
@@ -61,12 +64,15 @@ export function embeddedTextHash(row: Record<string, any> | null | undefined): s
  * no `embeddedContentHash`, or the stored hash equals the expected hash of the
  * row's current embedding text.
  *
- * A row stores no hash when it was written before this field existed, was
- * created with a caller-supplied vector, was written by a path that stores
- * none, or has an empty owner or no text. Such a row is TRUSTED here (treated
- * as current). A server-computed embed stores a hash for it only when the row
- * has a non-empty owner and text. See the migration's module doc for the cost
- * of re-queueing these rows instead.
+ * Only an actually absent hash (null or undefined) is TRUSTED here (treated as
+ * current). A row can lack one because it was written before this field
+ * existed, was created through POST or PUT with a caller-supplied vector or
+ * through an admin PATCH create, or was written by a path that stores none; a
+ * server-computed embed stores none for a row with an empty owner or no text.
+ * A row with an empty owner or no text can still hold a retained or
+ * federation-received hash: that value is compared like any other and, with no
+ * expected hash to equal, is not current. See the migration's module doc for
+ * the cost of re-queueing rows with no hash instead.
  */
 export function embeddedHashMatches(row: Record<string, any> | null | undefined): boolean {
   const recorded = row?.embeddedContentHash;
