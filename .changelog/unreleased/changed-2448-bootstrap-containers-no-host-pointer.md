@@ -1,7 +1,8 @@
 - **Bootstrap's structured containers and the admin bootstrap carry no host-source pointer (#2448).**
 
-  A `memories` or `predicted` entry omits `hostSource`; for an authenticated
-  non-admin caller the pointer renders as the `formatMemory` prose citation
-  (also in the `context` mirror when `includeContext: true`). A consumer that
-  needs a memory's host source joins the `MemoryHostSource` row by `memoryId`
-  explicitly.
+  A `memories` or `predicted` entry omits `hostSource`. A visible, bound
+  pointer appears in the bootstrap PROSE only when `includeContext` is true,
+  for an authenticated non-admin caller; the admin bootstrap prose is uncited.
+  A structured consumer that needs the pointer reads the memory back through
+  the gated Memory read — `memory_get` by id — which renders the pointer the
+  caller may see.
