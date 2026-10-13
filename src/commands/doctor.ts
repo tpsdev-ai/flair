@@ -19,7 +19,7 @@ import { buildEd25519Auth, defaultAdminPassPath, defaultKeysDir, requestTarget, 
 import { AGENT_ID_RULE } from "../lib/agent-id-rule.js";
 import { agentHomeEndpoint, readAgentHomeRows, resolveTargetInstanceIdentity } from "../lib/agent-home.js";
 import { readAgentRoster } from "../lib/agent-roster.js";
-import { describeIdpMappingWriters, idpMappingWriterLines, readCredentialAudit, readIdpMappingRows } from "../lib/idp-mapping-audit.js";
+import { describeIdpMappingWriters, idpMappingWriterReport, readCredentialAudit, readIdpMappingRows } from "../lib/idp-mapping-audit.js";
 import { flairConfigYamlCandidates, readPortFromYamlFile, resolveFlairConfigYaml } from "../lib/doctor-config-path.js";
 import { collectFederationEnv, describeFederationDriverFinding, federationPeersConfigured, loadYamlDoc } from "../lib/doctor-federation-driver.js";
 import { plistCarriesInlineAdminPassword } from "../lib/launchd-management.js";
@@ -2125,9 +2125,10 @@ program
         }
       }
 
-      // 8d. IdP mapping rows written by a non-admin agent (from the audit log).
-      // An IdP mapping (Credential kind "idp") is written only by an
-      // administrator or the server (src/lib/idp-mapping-rule.ts);
+      // 8d. IdP mapping rows and who wrote their mapping (from the audit log).
+      // Through the Credential resource, only an administrator or the server
+      // creates an IdP mapping (Credential kind "idp"), changes its kind or
+      // identity fields, or reactivates it (src/lib/idp-mapping-rule.ts);
       // src/lib/idp-mapping-audit.ts says what the audit log can and cannot
       // attribute. Read-only.
       console.log(`\n  ${render.wrap(render.c.bold, "IdP mappings")}`);
@@ -2158,15 +2159,21 @@ program
             console.log(`     ${render.wrap(render.c.dim, "Fix:")} review them with \`flair principal links <principal>\`` +
               (audit.kind === "disabled" ? "; enable logging.auditLog in the ROOT harperdb-config.yaml to attribute future writes." : "."));
           } else {
-            const lines = idpMappingWriterLines(describeIdpMappingWriters(idpRows, audit.byId));
-            if (lines.warn) {
+            // A row the log cannot attribute is a counted finding, not a clean
+            // result; each finding prints the admin commands that clear it.
+            const report = idpMappingWriterReport(describeIdpMappingWriters(idpRows, audit.byId), {
+              opsUrl: idpOpsUrl,
+              adminUser: resolveAdminUser(),
+            });
+            for (const finding of report.findings) {
               issues++;
-              console.log(`  ${render.icons.warn} ${lines.warn}`);
-              if (lines.fix) console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${lines.fix}`);
-            } else {
-              console.log(`  ${render.icons.ok} No IdP mapping rows written by a non-admin agent (from the audit log; ${idpRows.length} stored).`);
+              console.log(`  ${render.icons.warn} ${finding.warn}`);
+              const [first, ...rest] = finding.fix;
+              console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${first}`);
+              for (const line of rest) console.log(`       ${line}`);
             }
-            if (lines.info) console.log(`  ${render.icons.info} ${lines.info}`);
+            if (report.clear) console.log(`  ${render.icons.ok} ${report.clear}`);
+            console.log(`  ${render.icons.info} ${report.note}`);
           }
         }
       }

@@ -142,20 +142,45 @@ name:
 
 ### Who writes a mapping
 
-A mapping is written only by an administrator or by Flair itself:
-`flair mcp enable`, `flair principal link` and `unlink`, an administrator's
-write to the `Credential` resource, and just-in-time provisioning (below, and
-the XAA grant's). Through the `Credential` resource, a non-admin agent cannot
-create an `idp` credential, change a credential's kind to or from `idp`, or
-change an `idp` credential's principal, provider, subject or status. It may
-relabel its own `idp` credential or set its status to `revoked`. A refused
-write gets HTTP 403 with the error `idp_mapping_admin_only`.
+Through the `Credential` resource, only an administrator or Flair itself
+creates an `idp` credential, changes its kind or identity fields, or
+reactivates it. Flair writes mappings through `flair mcp enable`,
+`flair principal link` and `unlink`, and just-in-time provisioning (below, and
+the XAA grant's); an administrator can also write one through the `Credential`
+resource.
 
-`flair doctor`'s **IdP mappings** check lists the IdP mapping rows written by
-a non-admin agent, from Harper's audit log. It changes nothing. It cannot attribute a credential with no retained audit entry
-(the audit log keeps `logging.auditRetention`, 3 days by default) and says how
-many there are; a write made before the `flair-agent` Harper user existed reads
-as an administrator's.
+On POST, PUT and PATCH, a non-admin agent's write gets HTTP 403 with the error
+`idp_mapping_admin_only` when it would create an `idp` credential, change a
+credential's kind to or from `idp`, change an `idp` credential's provider or
+subject, or change its status to anything other than `revoked` (so it cannot
+reactivate one). The owner checks run first and keep their own 403: on PATCH
+and PUT the owner-field guard refuses a change to the credential's principal,
+PUT refuses a body that names another principal, and PATCH, PUT and DELETE
+refuse a write to another principal's credential. A non-admin agent may
+relabel its own `idp` credential, set its status to `revoked`, and delete it.
+
+`flair doctor`'s **IdP mappings** check reads Harper's audit log and changes
+nothing. It checks the mappings in effect: `idp` credentials whose status is
+`active` and that name a principal. It lists those whose retained history
+shows a non-admin agent creating the row as a mapping or changing a mapping
+field, and it reports a row as unattributed when its retained history does not
+show the write that created it.
+
+The log has no field that marks a creation, so the check takes an entry as
+one when it is an insert, follows a recorded delete, or is a first retained
+upsert or put by an administrator or the server whose row carries a
+`createdAt` within 60 seconds of the entry and no other `lastUsedAt`.
+`flair mcp enable`, `flair principal link`, just-in-time provisioning and an
+administrator's `Credential` write all stamp `createdAt` that way when they
+create a mapping, so a mapping they create is attributed. A row is unattributed when its creation has expired
+(entries last `logging.auditRetention`, 3 days by default), when a cluster
+base copy wrote it, or when its recorded write carries an older `createdAt`.
+
+Each kind of finding is a counted issue, and doctor prints the
+operations-API commands that clear it: revoke the mapping, or, once you have
+reviewed it, re-stamp it (an administrator's `update` of its `createdAt`,
+which the next run attributes to that write). A write made before the
+`flair-agent` Harper user existed is recorded as an administrator's.
 
 ### Just-in-time provisioning
 

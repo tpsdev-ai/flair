@@ -1,24 +1,28 @@
 /**
- * idp-mapping-rule.ts — who may write an IdP identity mapping. Shared by the
+ * idp-mapping-rule.ts — which writes to an IdP identity mapping the Credential
+ * resource reserves for an administrator or the server. Shared by the
  * Credential resource (resources/Credential.ts) and `flair doctor`
  * (src/lib/idp-mapping-audit.ts).
  *
  * An IdP identity mapping is a `Credential` row of kind "idp". The /mcp OAuth
  * resolver (resources/mcp-handler.ts) resolves a token's subject to the
- * principal named by the non-revoked idp row whose `idpSubject` is that
- * subject, and the XAA jwt-bearer grant (resources/XAA.ts) resolves to the
- * principal named by the active idp row whose `idpSubject` and `idpProvider`
- * match the assertion and its IdP configuration. Those rows are written by an administrator or by trusted
- * server code: the /mcp and XAA JIT provisioners in-process, and
- * `flair mcp enable` / `flair principal link` through the operations API.
+ * principal named by the active idp row whose `idpSubject` is that subject,
+ * and the XAA jwt-bearer grant (resources/XAA.ts) resolves to the principal
+ * named by the active idp row whose `idpSubject` and `idpProvider` match the
+ * assertion and its IdP configuration ("active" is exactly the status
+ * src/lib/credential-status-rule.ts accepts). An administrator and trusted
+ * server code write those rows: the /mcp and XAA JIT provisioners in-process,
+ * and `flair mcp enable` / `flair principal link` through the operations API.
  *
  * Through the Credential resource, a caller that is neither an administrator
  * nor trusted server code:
  *   - cannot create a kind:"idp" row;
  *   - cannot change a row's kind to or from "idp";
  *   - cannot change an idp row's principalId, idpProvider or idpSubject;
- *   - may relabel its own idp row and revoke it, and may set no other status
- *     on one.
+ *   - cannot change an idp row's status to anything but "revoked", so cannot
+ *     reactivate one;
+ *   - may relabel its own idp row, revoke it, and delete it (DELETE is the
+ *     owner check's, not this rule's).
  *
  * Dependency-free (imports nothing): resources/ imports it, and the
  * resource/CLI boundary guard (test/unit/resource-src-purity-1775.test.ts)
@@ -33,13 +37,13 @@ export const IDP_MAPPING_ADMIN_ONLY = "idp_mapping_admin_only";
 
 /** The refusal's message. It names the rule and carries nothing from the request. */
 export const IDP_MAPPING_REFUSAL_MESSAGE =
-  'forbidden: an IdP identity mapping (a Credential of kind "idp") is created and changed only by an ' +
-  "administrator or by the server; a principal may relabel or revoke its own";
+  'forbidden: only an administrator or the server creates an IdP identity mapping (a Credential of kind "idp"), ' +
+  "changes its kind or identity fields, or reactivates it; a principal may relabel, revoke or delete its own";
 
 /**
- * The fields of an idp row that decide which principal a subject resolves to,
- * besides `kind` and `status`. Every field the two resolvers read is here or
- * is `kind`/`status`.
+ * The fields of an idp row, besides `kind` and `status`, that the two
+ * resolvers use to decide which principal a subject resolves to: the subject
+ * they match on (and, for XAA, the provider), and the principal the row names.
  */
 export const IDP_MAPPING_IDENTITY_FIELDS: readonly string[] = Object.freeze(["principalId", "idpProvider", "idpSubject"]);
 
@@ -61,10 +65,10 @@ function sameValue(a: unknown, b: unknown): boolean {
 }
 
 /**
- * Would a write that turns `stored` into `next` create or change an IdP
- * identity mapping in a way this rule reserves for administrators and the
- * server? `stored` is the row before the write (null or undefined when the
- * write creates it); `next` is the row as the write would store it. Pure.
+ * Would a write that turns `stored` into `next` create an IdP identity
+ * mapping, or change one in a way this rule reserves for administrators and
+ * the server? `stored` is the row before the write (null or undefined when
+ * the write creates it); `next` is the row as the write would store it. Pure.
  */
 export function isIdpMappingChange(stored: Row, next: Row): boolean {
   // Neither side is a mapping: not this rule's business.

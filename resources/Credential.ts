@@ -23,9 +23,11 @@ function idpMappingRefusal(): Response {
  * record write: `stored` is the row before the write (null for a create) and
  * `next` the row the write would store.
  *
- *   - A non-admin writes only rows it owns, as every owner-scoped resource does.
- *   - An IdP identity mapping is created and changed only by an administrator
- *     or the server (src/lib/idp-mapping-rule.ts).
+ *   - A non-admin writes only rows it owns, as every owner-scoped resource does
+ *     (the owner refusal, checked first).
+ *   - Only an administrator or the server creates an IdP identity mapping,
+ *     changes its kind or identity fields, or reactivates it
+ *     (src/lib/idp-mapping-rule.ts; the named refusal `idp_mapping_admin_only`).
  *
  * Returns the refusal, or null to proceed.
  */
@@ -51,9 +53,10 @@ function isRecordBody(content: unknown): content is Record<string, unknown> {
  * Non-admin principals can only view their own credentials (token hashes
  * are never returned in responses).
  *
- * An IdP identity mapping (kind "idp") is created and changed only by an
- * admin or by the server (src/lib/idp-mapping-rule.ts): a non-admin agent may
- * relabel or revoke its own, on every write verb this resource serves.
+ * On POST, PUT and PATCH, only an admin or the server creates an IdP identity
+ * mapping (kind "idp"), changes its kind or identity fields, or reactivates it
+ * (src/lib/idp-mapping-rule.ts). A non-admin agent may relabel and revoke its
+ * own; DELETE of its own stays allowed under the owner check.
  */
 export class Credential extends (databases as any).flair.Credential {
   /**

@@ -237,13 +237,14 @@ describe("Credential.delete() — cross-principal guard (refactored to resolveAg
   });
 });
 
-// ─── IdP identity mappings: written only by admins and the server ──────────
+// ─── IdP identity mappings: creation, identity changes, reactivation ───────
 //
 // A non-admin agent's POST/PUT/PATCH may not create a kind:"idp" row, change a
 // row's kind to or from "idp", or change an idp row's principalId, idpProvider,
-// idpSubject, or status (beyond revoking it); put() writes only rows the caller
-// owns, as every owner-scoped resource does. _currentRecordId stands in for the
-// row Harper loads for the request, which a no-argument super.get() returns.
+// idpSubject, or status (beyond revoking it); it may relabel and revoke its own.
+// put() writes only rows the caller owns, as every owner-scoped resource does.
+// _currentRecordId stands in for the row Harper loads for the request, which a
+// no-argument super.get() returns.
 
 const IDP_SUB = "subject-from-request";
 

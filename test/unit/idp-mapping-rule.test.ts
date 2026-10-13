@@ -1,6 +1,7 @@
 /**
- * idp-mapping-rule.test.ts — the pure decision behind "an IdP identity mapping
- * is created and changed only by an administrator or the server"
+ * idp-mapping-rule.test.ts — the pure decision behind "through the Credential
+ * resource, only an administrator or the server creates an IdP identity
+ * mapping, changes its kind or identity fields, or reactivates it"
  * (src/lib/idp-mapping-rule.ts). The Credential resource applies it to a
  * non-admin agent's writes (test/unit/credential-create-auth.test.ts); the
  * real-Harper paths are test/integration/credential-idp-mapping-writes.test.ts.

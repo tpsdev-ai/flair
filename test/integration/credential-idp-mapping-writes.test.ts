@@ -2,23 +2,34 @@
 //
 // An IdP identity mapping is a `Credential` row of kind "idp": the /mcp
 // resolver (resources/mcp-handler.ts) and the XAA jwt-bearer grant
-// (resources/XAA.ts) resolve a subject to the principal that row names. Such a
-// row is written only by an administrator or by trusted server code: the /mcp
-// and XAA JIT provisioners in-process, and `flair mcp enable` / `flair
-// principal link` through the operations API. Through the Credential resource,
-// on POST, PUT and PATCH, a verified non-admin agent cannot:
+// (resources/XAA.ts) resolve a subject to the principal that row names. An
+// administrator and trusted server code write such rows: the /mcp and XAA JIT
+// provisioners in-process, and `flair mcp enable` / `flair principal link`
+// through the operations API. Through the Credential resource, on POST, PUT and
+// PATCH, a verified non-admin agent cannot:
 //
 //   - create a kind:"idp" row;
 //   - change a row's kind to or from "idp";
-//   - change idpSubject, idpProvider, principalId or status on an idp row it
-//     owns, beyond revoking it.
+//   - change idpSubject, idpProvider or principalId on an idp row it owns;
+//   - change an idp row's status to anything but "revoked", so it cannot
+//     reactivate one.
 //
-// It writes and deletes only credentials it owns.
+// It writes and deletes only credentials it owns, and may relabel, revoke and
+// delete its own idp row.
 //
-// Each refusal is a 403 naming `idp_mapping_admin_only` (or the owner refusal),
-// carries no subject from the request, and leaves the stored rows unchanged. The
-// end-to-end checks mint a /mcp token and an XAA assertion for the subject the
-// refused write named and confirm neither resolves to the writer.
+// What the refusal cases assert:
+//   - the status: 403 naming `idp_mapping_admin_only` for the IdP rule's
+//     refusals; 403 for the owner refusals, with the owner refusal's message
+//     in the principalId case (the owner-field guard, which runs before the
+//     IdP rule) and the not-owned PUT cases; any 4xx for the
+//     other-route and malformed-body cases; the DELETE-by-query case asserts
+//     only that the rows stay;
+//   - that a named refusal does not echo a subject the request carried;
+//   - that the stored row is unchanged, or that no row was stored;
+//   - /mcp resolution: a token for a subject the refused write would newly map
+//     does not resolve, and a linked row the write targeted still resolves to
+//     its owner (or, when revoked, to nobody);
+//   - XAA resolution, in the POST and idpProvider cases only.
 //
 // Still allowed: a non-admin agent creating its own webauthn, bearer-token and
 // ed25519 credentials; relabelling or revoking its own idp row; an admin agent
@@ -26,7 +37,9 @@
 // in-process XAA JIT provisioner.
 //
 // The last describe runs `flair doctor`'s IdP mapping check
-// (src/lib/idp-mapping-audit.ts) against this instance's real audit log.
+// (src/lib/idp-mapping-audit.ts) against this instance's real audit log, and
+// against that log cut where retention would cut it, then runs the re-stamp
+// command doctor prints for the unattributed rows.
 //
 // Mutation check: remove the post(), put() or patch() guard in
 // resources/Credential.ts, or its stored-owner check — the cases for that
@@ -36,6 +49,7 @@
 // in beforeAll), the production posture, whose role grants Credential full CRUD
 // — so every refusal here is flair's own rule, not Harper's table permissions.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
@@ -44,7 +58,7 @@ import { SignJWT, exportJWK, generateKeyPair, importPKCS8 } from "jose";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 import { provisionIdpIdentityMapping } from "../../src/lib/mcp-enable";
 import { ensureFlairAgentRole, ensureFlairAgentUser } from "../../src/cli";
-import { describeIdpMappingWriters, readCredentialAudit, readIdpMappingRows } from "../../src/lib/idp-mapping-audit";
+import { describeIdpMappingWriters, idpMappingRemedyCommands, readCredentialAudit, readIdpMappingRows, type CredentialAuditEntry } from "../../src/lib/idp-mapping-audit";
 
 const FORBIDDEN_PORTS = new Set([9925, 9926]);
 const MCP_ISSUER = "https://idp-mapping-writes.flair.internal";
@@ -162,6 +176,10 @@ function expectRefused(res: { status: number; text: string }, what: string, sub?
   expect(res.status, `${what} returned ${res.status}: ${res.text.slice(0, 300)}`).toBe(403);
   expect(res.text, `${what}: the refusal names the rule`).toContain(REFUSAL);
   if (sub) expect(res.text.includes(sub), `${what}: the refusal must not echo the subject`).toBe(false);
+}
+
+function expect4xx(res: { status: number; text: string }, what: string): void {
+  expect(res.status >= 400 && res.status < 500, `${what} returned ${res.status}: ${res.text.slice(0, 300)}`).toBe(true);
 }
 
 // ── /mcp: which principal does a token for `sub` resolve to? ─────────────────
@@ -343,8 +361,7 @@ describe("only an administrator or the server creates an IdP mapping", () => {
     const sub = `idpw-bulk-${sfx}`;
     const id = `idpw-bulk-${randomUUID()}`;
     const res = await signed(W, "PUT", "/Credential/", [{ id, kind: "idp", idpProvider: "mcp-oauth", idpSubject: sub }]);
-    expect(res.status, `PUT returned ${res.status}: ${res.text.slice(0, 300)}`).toBe(403);
-    expect(res.text.includes(sub)).toBe(false);
+    expectRefused(res, "multi-record PUT kind:idp", sub);
     expect(await readCredential(id)).toBeNull();
     expect(await mcpActsAs(sub)).toBeNull();
   }, 60_000);
@@ -352,9 +369,9 @@ describe("only an administrator or the server creates an IdP mapping", () => {
     const sub = `idpw-collput-${sfx}`;
     const id = `idpw-collput-${randomUUID()}`;
     const put = await signed(W, "PUT", "/Credential/", { id, kind: "idp", idpProvider: "mcp-oauth", idpSubject: sub });
-    expect(put.status, `collection PUT (object) returned ${put.status}: ${put.text.slice(0, 300)}`).toBeGreaterThanOrEqual(400);
+    expect4xx(put, "collection PUT (object)");
     const post = await signed(W, "POST", `/Credential/${id}`, { id, kind: "idp", idpProvider: "mcp-oauth", idpSubject: sub });
-    expect(post.status, `record-path POST returned ${post.status}: ${post.text.slice(0, 300)}`).toBeGreaterThanOrEqual(400);
+    expect4xx(post, "record-path POST");
     expect(await credentialsForSubject(sub)).toEqual([]);
     expect(await mcpActsAs(sub)).toBeNull();
   }, 60_000);
@@ -399,9 +416,9 @@ describe("a non-admin write that changes a credential's kind to idp is refused",
     await seedCredential({ id, principalId: W.id, kind: "bearer-token", label: "mine" });
     const sub = `idpw-kindarr-${sfx}`;
     const arr = await signed(W, "PATCH", `/Credential/${id}`, { kind: ["idp"], idpProvider: "mcp-oauth", idpSubject: sub });
-    expect(arr.status, `PATCH kind:[idp] returned ${arr.status}: ${arr.text.slice(0, 300)}`).toBeGreaterThanOrEqual(400);
+    expect4xx(arr, "PATCH kind:[idp]");
     const coll = await signed(W, "PATCH", "/Credential/", [{ id, kind: "idp", idpProvider: "mcp-oauth", idpSubject: sub }]);
-    expect(coll.status, `PATCH returned ${coll.status}: ${coll.text.slice(0, 300)}`).toBeGreaterThanOrEqual(400);
+    expect4xx(coll, "collection PATCH (array)");
     const after = await readCredential(id);
     expect(after.kind).toBe("bearer-token");
     expect(after.idpSubject ?? null).toBeNull();
@@ -428,6 +445,7 @@ describe("a non-admin write that changes an idp mapping is refused", () => {
     expectRefused(await signed(W, "PUT", `/Credential/${id}`, { ...before, idpSubject: moved }), "PUT idpSubject", moved);
     expect((await readCredential(id)).idpSubject).toBe(linked);
     expect(await mcpActsAs(moved)).toBeNull();
+    expect(await mcpActsAs(linked)).toBe(W.id);
   }, 60_000);
 
   test("a non-admin PATCH that changes idpProvider is refused (idp_mapping_admin_only)", async () => {
@@ -435,6 +453,8 @@ describe("a non-admin write that changes an idp mapping is refused", () => {
     const id = await link(W.id, linked);
     expectRefused(await signed(W, "PATCH", `/Credential/${id}`, { idpProvider: XAA_IDP_ID }), "PATCH idpProvider");
     expect((await readCredential(id)).idpProvider).toBe("idpw-test");
+    // /mcp first: the XAA grant below JIT-provisions its own mapping for this subject.
+    expect(await mcpActsAs(linked)).toBe(W.id);
     expect(await xaaGrantPrincipal(linked)).not.toBe(W.id);
   }, 60_000);
 
@@ -443,6 +463,7 @@ describe("a non-admin write that changes an idp mapping is refused", () => {
     const id = await link(W.id, linked);
     expectRefused(await signed(W, "PATCH", `/Credential/${id}`, { kind: "bearer-token" }), "PATCH kind idp→bearer-token");
     expect((await readCredential(id)).kind).toBe("idp");
+    expect(await mcpActsAs(linked)).toBe(W.id);
   }, 60_000);
 
   test("a non-admin PATCH that sets a revoked idp row active is refused (idp_mapping_admin_only)", async () => {
@@ -455,12 +476,15 @@ describe("a non-admin write that changes an idp mapping is refused", () => {
     expect(await mcpActsAs(linked)).toBeNull();
   }, 60_000);
 
-  test("a non-admin PATCH that changes principalId is refused (owner field)", async () => {
+  test("a non-admin PATCH that changes principalId is refused by the owner-field guard", async () => {
     const linked = `idpw-linked-owner-${sfx}`;
     const id = await link(W.id, linked);
     const res = await signed(W, "PATCH", `/Credential/${id}`, { principalId: V.id });
     expect(res.status, `PATCH principalId returned ${res.status}: ${res.text.slice(0, 300)}`).toBe(403);
+    // The owner-field guard runs before the IdP rule, so this is its refusal, not idp_mapping_admin_only.
+    expect(res.text).toContain("the owner of a record cannot be changed");
     expect((await readCredential(id)).principalId).toBe(W.id);
+    expect(await mcpActsAs(linked)).toBe(W.id);
   }, 60_000);
 });
 
@@ -472,6 +496,7 @@ describe("a non-admin agent writes and deletes only credentials it owns", () => 
     // The element names no principalId.
     const res = await signed(W, "PUT", "/Credential/", [{ id, kind: "idp", idpProvider: before.idpProvider, idpSubject: linked, status: "active" }]);
     expect(res.status, `PUT returned ${res.status}: ${res.text.slice(0, 300)}`).toBe(403);
+    expect(res.text).toContain("owned by another principal");
     expect((await readCredential(id)).principalId).toBe(V.id);
     expect(await mcpActsAs(linked)).toBe(V.id);
   }, 60_000);
@@ -481,6 +506,7 @@ describe("a non-admin agent writes and deletes only credentials it owns", () => 
     await seedCredential({ id, principalId: V.id, kind: "bearer-token", label: "theirs" });
     const res = await signed(W, "PUT", "/Credential/", [{ id, kind: "bearer-token", label: "mine now" }]);
     expect(res.status, `PUT returned ${res.status}: ${res.text.slice(0, 300)}`).toBe(403);
+    expect(res.text).toContain("owned by another principal");
     const after = await readCredential(id);
     expect(after.principalId).toBe(V.id);
     expect(after.label).toBe("theirs");
@@ -554,32 +580,47 @@ describe("legitimate writers are unchanged", () => {
   }, 60_000);
 });
 
-// ── flair doctor: IdP mapping rows written by a non-admin agent ──────────────
+// ── flair doctor: IdP mapping rows and who wrote them ─────────────────────────
 //
-// src/lib/idp-mapping-audit.ts reads every idp row and its Harper audit entries
-// and lists the rows whose mapping writes the audit log attributes to the
-// shared non-admin agent user. The rows to be listed are written here as the
-// `flair-agent` Harper user through the operations API (with a password this
-// test sets on its own ephemeral instance), which is the user the audit log
-// records for a non-admin agent's write. Every other writer this file
-// exercised — the ops-API linker, an admin agent over REST, the XAA JIT
-// provisioner, and a non-admin relabelling and revoking its own row — must not
-// be listed.
+// src/lib/idp-mapping-audit.ts reads every idp row and its Harper audit entries.
+// For the active rows, it lists those whose retained history shows a mapping
+// write by the shared non-admin agent user, and reports as unattributed those
+// whose history does not show their creation. The rows to be listed are written
+// here as the `flair-agent` Harper user through the operations API (with a
+// password this test sets on its own ephemeral instance), which is the user the
+// audit log records for a non-admin agent's write.
 
-describe("flair doctor: IdP mapping rows written by a non-admin agent (from the audit log)", () => {
-  test("only the rows written as the shared non-admin agent user are listed", async () => {
-    const agentPass = `idpw-${randomUUID()}`;
-    await ops({ operation: "alter_user", username: "flair-agent", password: agentPass, active: true, role: "flair_agent" });
-    const asAgent = async (op: Record<string, unknown>) => {
-      const res = await fetch(harper.opsURL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: "Basic " + btoa(`flair-agent:${agentPass}`) },
-        body: JSON.stringify(op),
-        signal: AbortSignal.timeout(20_000),
-      });
-      const text = await res.text();
-      expect(res.status, `${op.operation} as flair-agent: ${text.slice(0, 300)}`).toBe(200);
-    };
+/** The `flair-agent` Harper user, with a password set on this test's own instance. */
+async function asAgentUser(): Promise<(op: Record<string, unknown>) => Promise<void>> {
+  const agentPass = `idpw-${randomUUID()}`;
+  await ops({ operation: "alter_user", username: "flair-agent", password: agentPass, active: true, role: "flair_agent" });
+  return async (op) => {
+    const res = await fetch(harper.opsURL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Basic " + btoa(`flair-agent:${agentPass}`) },
+      body: JSON.stringify(op),
+      signal: AbortSignal.timeout(20_000),
+    });
+    const text = await res.text();
+    expect(res.status, `${op.operation} as flair-agent: ${text.slice(0, 300)}`).toBe(200);
+  };
+}
+
+const byTimestamp = (a: CredentialAuditEntry, b: CredentialAuditEntry) => Number(a.timestamp ?? 0) - Number(b.timestamp ?? 0);
+
+/** Run a remedy command doctor prints, with this instance's admin password where curl would prompt for it. */
+function runPrinted(command: string): string {
+  const user = harper.admin.username;
+  expect(command.startsWith(`curl -su ${user} `)).toBe(true);
+  expect(command).toContain(` ${harper.opsURL.replace(/\/?$/, "/")} `);
+  const res = spawnSync("bash", ["-c", command.replace(`curl -su ${user} `, `curl -su ${user}:${harper.admin.password} `)], { encoding: "utf-8", timeout: 20_000 });
+  expect(res.status, `printed command failed: ${res.stderr}`).toBe(0);
+  return res.stdout;
+}
+
+describe("flair doctor: IdP mapping rows and who wrote them (from the audit log)", () => {
+  test("lists the rows written as the shared non-admin agent user; the linker, admin REST and JIT rows are attributed", async () => {
+    const asAgent = await asAgentUser();
     const now = new Date().toISOString();
     // (1) a mapping created by the non-admin agent user.
     const created = `idpw-doctor-created-${randomUUID()}`;
@@ -587,28 +628,113 @@ describe("flair doctor: IdP mapping rows written by a non-admin agent (from the 
     // (2) an operator's mapping whose subject a write as the non-admin agent user changed.
     const repointed = await link(W.id, `idpw-doctor-b-${sfx}`);
     await asAgent({ operation: "update", database: "flair", table: "Credential", records: [{ id: repointed, idpSubject: `idpw-doctor-b2-${sfx}` }] });
-    // (3) controls written now: the linker, an admin agent, the XAA JIT, a self relabel + revoke.
+    // (3) controls written now, each attributed by its creation stamp: the
+    //     linker, an admin agent over REST, the XAA JIT, and a linked row its
+    //     owner relabelled; and an operator's insert its owner relabelled.
     const linked = await link(V.id, `idpw-doctor-c-${sfx}`);
     const adminRow = `idpw-doctor-admin-${randomUUID()}`;
     const adminPut = await signed(ADM, "PUT", `/Credential/${adminRow}`, { id: adminRow, principalId: V.id, kind: "idp", idpProvider: "mcp-oauth", idpSubject: `idpw-doctor-d-${sfx}` });
     expect([200, 204]).toContain(adminPut.status);
-    expect(await xaaGrantPrincipal(`idpw-doctor-e-${sfx}`)).not.toBeNull();
+    const jitSub = `idpw-doctor-e-${sfx}`;
+    expect(await xaaGrantPrincipal(jitSub)).not.toBeNull();
+    expect(await xaaGrantPrincipal(jitSub)).not.toBeNull(); // a second grant: the server's use stamp
+    const [jitRow] = (await credentialsForSubject(jitSub)).filter((r) => r.kind === "idp");
     const selfRow = await link(W.id, `idpw-doctor-f-${sfx}`);
     expect([200, 204]).toContain((await signed(W, "PATCH", `/Credential/${selfRow}`, { label: "mine" })).status);
-    expect([200, 204]).toContain((await signed(W, "PATCH", `/Credential/${selfRow}`, { status: "revoked" })).status);
+    const insertedRow = `idpw-doctor-inserted-${randomUUID()}`;
+    await seedCredential({ id: insertedRow, principalId: W.id, kind: "idp", idpProvider: "idpw-test", idpSubject: `idpw-doctor-i-${sfx}` });
+    expect([200, 204]).toContain((await signed(W, "PATCH", `/Credential/${insertedRow}`, { label: "mine" })).status);
+    // (4) a mapping the non-admin agent user created that an operator revoked:
+    //     it maps nobody and is not checked.
+    const revokedRow = `idpw-doctor-revoked-${randomUUID()}`;
+    await asAgent({ operation: "insert", database: "flair", table: "Credential", records: [{ id: revokedRow, principalId: W.id, kind: "idp", idpProvider: "mcp-oauth", idpSubject: `idpw-doctor-j-${sfx}`, status: "active", createdAt: now }] });
+    await ops({ operation: "update", database: "flair", table: "Credential", records: [{ id: revokedRow, status: "revoked" }] });
+    // (5) a row whose recorded write carries an older creation time, as a row
+    //     copied in from elsewhere does: its history does not show its creation.
+    const copiedRow = `idpw-doctor-copied-${randomUUID()}`;
+    await ops({ operation: "upsert", database: "flair", table: "Credential", records: [{ id: copiedRow, principalId: V.id, kind: "idp", idpProvider: "mcp-oauth", idpSubject: `idpw-doctor-k-${sfx}`, status: "active", createdAt: "2026-01-01T00:00:00.000Z" }] });
 
     const authHeader = "Basic " + btoa(`${harper.admin.username}:${harper.admin.password}`);
     const rows = await readIdpMappingRows({ opsUrl: harper.opsURL, authHeader });
     expect(rows).not.toBeNull();
     const ids = rows!.map((r) => r.id);
-    for (const id of [created, repointed, linked, adminRow, selfRow]) expect(ids).toContain(id);
+    for (const id of [created, repointed, linked, adminRow, jitRow?.id, selfRow, insertedRow, revokedRow, copiedRow]) expect(ids).toContain(id);
     const audit = await readCredentialAudit({ opsUrl: harper.opsURL, authHeader, ids });
     expect(audit.kind).toBe("ok");
     if (audit.kind !== "ok") return;
     const finding = describeIdpMappingWriters(rows!, audit.byId);
-    // Every row in this instance was written within the audit retention.
-    expect(finding.unattributed).toEqual([]);
     expect(finding.nonAdmin.map((m) => m.id).sort()).toEqual([created, repointed].sort());
     expect(finding.nonAdmin.find((m) => m.id === created)).toEqual({ id: created, principalId: W.id, idpProvider: "mcp-oauth" });
+    // Every other active row in this instance, written by the linker, an admin
+    // agent, the XAA JIT or an operator's insert, is attributed.
+    expect(finding.unattributed).toEqual([copiedRow]);
+    expect(finding.active).toBeLessThan(finding.total);
   }, 90_000);
+
+  test("expired history: an owner's relabel or update that is the first retained entry is unattributed, and the printed re-stamp attributes it", async () => {
+    // Harper's retention removes a time prefix of the audit log. A test cannot
+    // make Harper expire entries on demand, so this case reads the entries
+    // Harper returned for each row and keeps those from the owner's write
+    // onward: what retention leaves once the row's creation has expired.
+    const relabelled = `idpw-doctor-exp-patch-${randomUUID()}`;
+    const updated = `idpw-doctor-exp-put-${randomUUID()}`;
+    const subs: Record<string, string> = { [relabelled]: `idpw-doctor-g-${sfx}`, [updated]: `idpw-doctor-h-${sfx}` };
+    for (const id of [relabelled, updated]) {
+      await seedCredential({ id, principalId: W.id, kind: "idp", idpProvider: "idpw-test", idpSubject: subs[id] });
+    }
+    const relabel = await signed(W, "PATCH", `/Credential/${relabelled}`, { label: "mine" });
+    expect([200, 204], `PATCH label returned ${relabel.status}: ${relabel.text.slice(0, 300)}`).toContain(relabel.status);
+    const before = await readCredential(updated);
+    const put = await signed(W, "PUT", `/Credential/${updated}`, { ...before, label: "mine" });
+    expect([200, 201, 204], `PUT returned ${put.status}: ${put.text.slice(0, 300)}`).toContain(put.status);
+
+    const authHeader = "Basic " + btoa(`${harper.admin.username}:${harper.admin.password}`);
+    const readRows = async () => (await readIdpMappingRows({ opsUrl: harper.opsURL, authHeader }))!.filter((r) => r.id === relabelled || r.id === updated);
+    const readAudit = async () => {
+      const audit = await readCredentialAudit({ opsUrl: harper.opsURL, authHeader, ids: [relabelled, updated] });
+      expect(audit.kind).toBe("ok");
+      return audit.kind === "ok" ? audit.byId : {};
+    };
+    /** The entries from the owner's write onward, which is what retention leaves. */
+    const cut = (byId: Record<string, CredentialAuditEntry[]>) => {
+      const retained: Record<string, CredentialAuditEntry[]> = {};
+      for (const id of [relabelled, updated]) {
+        const entries = [...byId[id]].sort(byTimestamp);
+        const first = entries.findIndex((e) => e.user_name === "flair-agent");
+        expect(first, `${id}: no entry by flair-agent after the operator's insert`).toBeGreaterThan(0);
+        retained[id] = entries.slice(first);
+      }
+      return retained;
+    };
+    const rows = await readRows();
+    expect(rows.length).toBe(2);
+    const byId = await readAudit();
+
+    // The whole history shows each row's creation and no non-admin mapping write.
+    const whole = describeIdpMappingWriters(rows, byId);
+    expect(whole.nonAdmin).toEqual([]);
+    expect(whole.unattributed).toEqual([]);
+
+    const retained = cut(byId);
+    for (const id of [relabelled, updated]) {
+      // Harper returns the whole row for that entry, so it names every identity field.
+      const image = (retained[id][0].records as any[])[0];
+      expect(image).toMatchObject({ id, kind: "idp", principalId: W.id, idpProvider: "idpw-test", idpSubject: subs[id], status: "active", label: "mine" });
+    }
+    expect(retained[relabelled][0].operation).toBe("patch");
+    expect(retained[updated][0].operation).toBe("upsert");
+    const expired = describeIdpMappingWriters(rows, retained);
+    expect(expired.nonAdmin).toEqual([]);
+    expect(expired.unattributed.sort()).toEqual([relabelled, updated].sort());
+
+    // The remedy doctor prints: an administrator's re-stamp of both rows.
+    const commands = idpMappingRemedyCommands(expired.unattributed, { opsUrl: harper.opsURL.replace(/\/?$/, "/"), adminUser: harper.admin.username });
+    expect(commands).not.toBeNull();
+    expect(runPrinted(commands!.restamp)).toContain("updated 2 of 2");
+    const after = cut(await readAudit());
+    for (const id of [relabelled, updated]) expect(after[id].at(-1)).toMatchObject({ operation: "update", user_name: harper.admin.username });
+    const restamped = describeIdpMappingWriters(await readRows(), after);
+    expect(restamped.nonAdmin).toEqual([]);
+    expect(restamped.unattributed).toEqual([]);
+  }, 60_000);
 });
