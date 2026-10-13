@@ -67,7 +67,7 @@ describe("describeEmbeddingSpaceDoctorFinding (flair#2530)", () => {
 });
 
 describe("renderEmbeddingSpaceDoctorFinding (flair#2530)", () => {
-  test("only a mixed store weighs on the issue count", () => {
+  test("only a mixed store adds a guard issue", () => {
     const mixed: string[] = [];
     expect(renderEmbeddingSpaceDoctorFinding({ state: "mixed" }, (l) => mixed.push(l)).issueDelta).toBe(1);
     expect(mixed.some((l) => l.includes("Fix:"))).toBe(true);

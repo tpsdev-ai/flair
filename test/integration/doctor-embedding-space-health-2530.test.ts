@@ -6,8 +6,10 @@
  * public /Health body, including its readiness 503 (search routes not mounted:
  * the boot window, when the guard is usually still unverified). Doctor must
  * report that state from both a 200 and a 503 with Flair's /Health shape,
- * without calling the 503 healthy; must not read a verdict from a 503 without
- * those fields; and must count only a mixed store as an issue.
+ * without calling the 503 healthy (also when it carries a multi-worker
+ * refusal); must not read a verdict from a 503 without those fields. Only a
+ * mixed store adds a guard finding to the issue count; readiness has its own
+ * issue.
  *
  * The server is a plain node HTTP listener on an ephemeral loopback port that
  * answers /Health with a fixed status + body and 404s everything else. Doctor
@@ -20,7 +22,8 @@
  * the doctor action (src/commands/doctor.ts) and rebuild, and the 200 and
  * Flair-503 guard-line assertions go red (the non-Flair-503 negative assertions
  * stay green). Keep the call but drop its `issues +=` and the issue-count
- * assertion goes red.
+ * assertion goes red. Check `reaching` before `notReady` in the port check and
+ * the combined readiness + multi-worker case goes red.
  *
  * Build prerequisite: dist/cli.js (`bun run build:cli`).
  */
@@ -129,6 +132,7 @@ describe("flair doctor reports the embedding-space guard from /Health (flair#253
     const port = await serveHealth(200, flairHealthBody(true, { state: "mixed", reason: null }));
     const { stdout } = await runDoctor(port);
     expect(stdout).toContain(`Harper responding on port ${port}`);
+    expect(stdout).toContain("Fleet presence"); // a serving-instance section (absent for a not-ready 503)
     expect(stdout).toContain("the store has mixed embedding spaces");
     expect(stdout).toContain("flair reembed --stale-only");
   }, 120_000);
@@ -141,7 +145,24 @@ describe("flair doctor reports the embedding-space guard from /Health (flair#253
     expect(stdout).not.toContain(`Harper responding on port ${port}`);
   }, 120_000);
 
-  test("only a mixed store weighs on the issue count and the exit status", async () => {
+  test("a readiness 503 that also carries a multi-worker refusal is not ready, not responding", async () => {
+    const body = {
+      ...flairHealthBody(false, { state: "unverified", reason: null }),
+      multiWorker: { state: "refused", workerCount: 2, remedy: "THREADS_COUNT=1" },
+    };
+    const port = await serveHealth(503, body);
+    const { stdout } = await runDoctor(port);
+    expect(stdout).toContain("not serving search (search routes not mounted (Memory, SemanticSearch))");
+    expect(stdout).not.toContain(`Harper responding on port ${port}`);
+    // No serving-instance checks: these sections print only for a responding instance.
+    expect(stdout).not.toContain("Fleet presence");
+    expect(stdout).not.toContain("Agent IDs");
+    // The guard state and the separate worker-thread finding are both still reported.
+    expect(stdout).toContain("embedding space not yet verified");
+    expect(stdout).toContain("worker threads: fail");
+  }, 120_000);
+
+  test("only a mixed store adds a guard finding to the issue count and the exit status", async () => {
     // Same fixture, three 200 responses that differ only in the guard verdict.
     const runs: Record<string, { code: number | null; count: number }> = {};
     for (const state of ["uniform", "mixed", "scan-failed"]) {

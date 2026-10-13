@@ -35,9 +35,12 @@
  * "known uniform": only a scan that verified the store opens the gate
  * (`isEmbeddingSpaceUniform()` returns true). Every other state — pending
  * (`unverified`), a failed scan (`scan-failed`), or a foreign-write/mixed corpus
- * (`mixed`) — makes a consumer take its MIXED-space path: the recall leg drops
- * its query embedding and serves keyword-only results (none, for a request with
- * no query text) with a state-named warning, the dedup leg no-ops. A consult
+ * (`mixed`) — makes a consumer take its MIXED-space path: when a query
+ * embedding is available, the recall leg drops it and serves keyword-only
+ * results (none, for a request with no query text) with a state-named warning;
+ * the dedup leg no-ops. (A recall with no query embedding, in bm25-only mode or
+ * after a failed embedding generation, never consults the guard and has no
+ * state to name.) A consult
  * never blocks on an in-flight scan to obtain a verdict; it fails closed now,
  * and only a later SUCCESSFUL scan that finds the store uniform reopens the
  * gate. An error from the scan's table lookup or corpus read is classified into

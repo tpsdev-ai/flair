@@ -7,7 +7,7 @@
  * The guard fails closed: only `state: "uniform"` serves the embedding leg; a
  * `mixed` store, an `unverified` verdict (before the first scan completes) and a
  * `scan-failed` verdict (the last published scan threw, no foreign stamp known)
- * all make the recall leg refuse its embedding. This module is the single
+ * all make the recall leg refuse a query embedding. This module is the single
  * decision: given that field, what doctor prints and whether it weighs on the
  * exit code.
  *

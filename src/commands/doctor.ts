@@ -604,18 +604,21 @@ program
     // readFlairHealthBody) is reported as Flair answering without serving
     // search. It is an issue, never "responding", so the checks that need a
     // serving instance stay skipped; its body still carries the version and the
-    // embedding-space guard state, read in 1a below.
+    // embedding-space guard state, read in 1a below. It is checked BEFORE
+    // `reaching`: a 503 can carry a multi-worker refusal too, which makes the
+    // probe `reaching`, but search is still not served. The worker-thread
+    // finding is reported separately by the catalog check.
     let flairNotReady = false;
     const configuredProbe = await probeFlairHealth(`http://127.0.0.1:${port}/Health`);
-    if (configuredProbe.reaching) {
-      console.log(`  ${render.icons.ok} Harper responding on port ${render.wrap(render.c.bold, String(port))}`);
-      harperResponding = true;
-    } else if (configuredProbe.notReady) {
+    if (configuredProbe.notReady) {
       const why = configuredProbe.notReadyReason ? ` (${configuredProbe.notReadyReason})` : "";
       console.log(`  ${render.icons.error} Flair is answering on port ${render.wrap(render.c.bold, String(port))} but not serving search${why}`);
       console.log(`     ${render.wrap(render.c.dim, "Fix:")} wait for startup to finish; if it persists, flair restart`);
       flairNotReady = true;
       issues++;
+    } else if (configuredProbe.reaching) {
+      console.log(`  ${render.icons.ok} Harper responding on port ${render.wrap(render.c.bold, String(port))}`);
+      harperResponding = true;
     } else {
       // Port didn't respond — but if PID is alive, try to find the real port
       let discoveredPort: number | null = null;

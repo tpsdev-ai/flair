@@ -184,7 +184,10 @@ export class SemanticSearch extends Resource {
     // is a guarantee about the stored corpus; a caller-supplied
     // `queryEmbedding` carries no space provenance and is not checked.)
     // Consulted through the SAME single chokepoint the write-time dedup leg
-    // uses — O(1) on the verified-uniform happy path.
+    // uses — O(1) on the verified-uniform happy path. The consult, and so the
+    // state warning, happens only when a query embedding is available
+    // (supplied, or generated from `q`); bm25-only mode and a failed embedding
+    // generation never reach it.
     let spaceGuardVerdict: EmbeddingSpaceVerdict | null = null;
     if (qEmb) {
       const verdict = await embeddingSpaceVerdict();
