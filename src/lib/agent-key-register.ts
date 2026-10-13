@@ -3,9 +3,10 @@
  * operation (POST /AgentKeyRegister, flair#2266) and the federation rule that
  * ships with it.
  *
- * Kept out of the resource so a unit test can exercise the key-format rule, the
- * fingerprint rule and the refusal names without standing up Harper. Imports
- * NOTHING (a static resource import must reach a dependency-free compiled
+ * Kept out of the resource so the key-format rule and the fingerprint are
+ * unit-tested without Harper (test/unit/agent-key-register-2266.test.ts). The
+ * refusal names the resource answers live here too; the integration tests
+ * assert them against real Harper. Imports NOTHING (a static resource import must reach a dependency-free compiled
  * helper — test/unit/resource-src-purity-1775.test.ts); the fingerprint uses the
  * ambient WebCrypto, which the auth paths already use.
  */

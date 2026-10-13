@@ -1,9 +1,11 @@
-// agent-key-register-2266.test.ts — the pure pieces of flair#2266.
+// agent-key-register-2266.test.ts — three pure subjects of flair#2266, without
+// Harper: the canonical Ed25519 base64url key format
+// (isCanonicalEd25519Base64url), the audit fingerprint (keyFingerprint), and the
+// federation pending-key predicate (inboundChangesExistingPendingKey).
 //
-// The key-format rule, the audit fingerprint, and the federation pending-key
-// predicate, unit-tested without a Harper. The resource's request/auth/write
-// behaviour is covered against real Harper by
-// test/integration/agent-key-register-2266.test.ts and
+// No refusal name is asserted here. The handler's refusals are asserted against
+// real Harper in test/integration/agent-key-register-2266.test.ts, and the
+// federation skip names in
 // test/integration/agent-pending-key-federation-2266.test.ts.
 import { describe, expect, test } from "bun:test";
 import {

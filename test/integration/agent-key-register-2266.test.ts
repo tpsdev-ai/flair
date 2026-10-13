@@ -8,7 +8,9 @@
 // between the commit and the read-back (resources/txn-pause-point.ts, enabled
 // for THIS file's Harper by FLAIR_ENABLE_TEST_FAULT_INJECTION +
 // FLAIR_TEST_PAUSE_DIR). The audit cases drive the AgentKeyRegistration REST
-// route itself.
+// route itself. The last block boots a second Harper with
+// AUTHENTICATION_AUTHORIZELOCAL=true, proves that mode is in effect, and sends a
+// credential-less POST.
 //
 // Build prerequisite: dist/resources/*.js (`bun run build`).
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
@@ -300,7 +302,7 @@ describe("flair#2266 — admin key registration on a pending Agent row", () => {
     expect(await rowIn("Agent", nonAdminId)).toEqual(before);
   }, 30_000);
 
-  test("a credential-less loopback request is refused 401 (the authorizeLocal forgery case) with no change", async () => {
+  test("a credential-less loopback request on the harness's default Harper config is refused 401 with no change", async () => {
     const before = await rowIn("Agent", loopbackId);
     const res = await fetch(`${harper.httpURL}/AgentKeyRegister`, {
       method: "POST",
@@ -491,4 +493,64 @@ describe("flair#2266 — admin key registration on a pending Agent row", () => {
       }, 30_000);
     }
   });
+});
+
+describe("flair#2266 — a credential-less POST with Harper's authorizeLocal explicitly on", () => {
+  let lh: HarperInstance;
+  const targetId = `akr-authlocal-${sfx}`;
+  const lbasic = () => "Basic " + btoa(`${lh.admin.username}:${lh.admin.password}`);
+
+  async function lops(op: Record<string, unknown>): Promise<any> {
+    const res = await fetch(lh.opsURL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: lbasic() },
+      body: JSON.stringify({ database: "flair", ...op }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    const text = await res.text();
+    expect(res.status, `${op.operation} returned ${res.status}: ${text.slice(0, 300)}`).toBeLessThan(300);
+    return text.length ? JSON.parse(text) : null;
+  }
+  const lcount = async (sql: string): Promise<number> => {
+    const rows = await lops({ operation: "sql", sql });
+    return Array.isArray(rows) ? rows.length : 0;
+  };
+
+  beforeAll(async () => {
+    lh = await startHarper({ env: { AUTHENTICATION_AUTHORIZELOCAL: "true" } });
+    assertOwnInstance(lh);
+    await lops({ operation: "insert", table: "Agent", records: [{ id: targetId, name: targetId, role: "agent", status: "active", publicKey: "pending", createdAt: new Date().toISOString() }] });
+  }, 240_000);
+
+  afterAll(async () => {
+    if (lh) await stopHarper(lh);
+  }, 30_000);
+
+  test("the mode is in effect, and a credential-less loopback POST /AgentKeyRegister is still refused 401 with no Agent, audit or OrgEvent change", async () => {
+    // Proof the mode is in effect: a credential-less loopback operations-API
+    // `user_info` is answered as a super_user.
+    const probe = await fetch(lh.opsURL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ operation: "user_info" }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    const probeText = await probe.text();
+    expect(probe.status, `authorizeLocal is not in effect: ${probeText.slice(0, 200)}`).toBe(200);
+    expect(JSON.parse(probeText)?.role?.permission?.super_user, "the loopback request was not authorized as super_user").toBe(true);
+
+    const before = await lops({ operation: "search_by_id", table: "Agent", ids: [targetId], get_attributes: ["*"] });
+    const res = await fetch(`${lh.httpURL}/AgentKeyRegister`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ agentId: targetId, publicKey: mkKey().pub }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    const text = await res.text();
+    expect(res.status, text.slice(0, 200)).toBe(401);
+    expect(await lops({ operation: "search_by_id", table: "Agent", ids: [targetId], get_attributes: ["*"] })).toEqual(before);
+    expect(before?.[0]?.publicKey).toBe("pending");
+    expect(await lcount(`SELECT id FROM flair.AgentKeyRegistration WHERE agentId = '${targetId}'`)).toBe(0);
+    expect(await lcount(`SELECT id FROM flair.OrgEvent WHERE refId = '${targetId}'`)).toBe(0);
+  }, 30_000);
 });
