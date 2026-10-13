@@ -254,7 +254,7 @@ describe("flair#2478 — the lock guards a PATCH too", () => {
 // regardless of) the lock and the owned write — a refusal that moved after the
 // lock would let an anonymous reindex or a visibility-widening flip reach the
 // row. Both cases run through the REAL per-id lock path (Memory.primaryStore).
-describe("flair#2478 — the refusals decide before the lock, and never write", () => {
+describe("flair#2478 — a refusal decides before the lock, and the write does not land", () => {
   it("an anonymous PUT carrying _reindex is refused 401, and the row is unchanged", async () => {
     const id = `wlk-anon-reindex-${Date.now()}`;
     await seedMemory(id, "the original text");
