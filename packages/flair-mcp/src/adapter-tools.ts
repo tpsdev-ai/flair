@@ -76,16 +76,17 @@ function redactedValuesOf(result: unknown): number {
 }
 
 /**
- * flair#2467 — the text a write reply previews (cut to 120 characters by
- * previewOf), or null for no preview.
+ * flair#2467 — the text a write reply previews, or null for no preview. The
+ * reply shows the first 120 characters of it, followed by `...` when
+ * truncated (previewOf).
  *
- * With a positive redaction count, the preview comes only from the result's
- * `content`: the post-redaction content the write response returned in
- * `stored` (equal to the input when the redaction changed only another
- * field). A result marked `contentWithheld`, or with no `content` string, gets
- * null: the reply states the redacted-value count and that the stored text
- * was not returned, and never shows the input. With no count (the server reported no replacement), the
- * preview is the result's `content`, else the input.
+ * With a positive redaction count, the text is only the result's `content`:
+ * the post-redaction content the write response returned in `stored` (equal
+ * to the input when the redaction changed only another field). A result
+ * marked `contentWithheld`, or with no `content` string, gets null: the reply
+ * states the redacted-value count and that the stored text was not returned,
+ * and never shows the input. With no count (the server reported no
+ * replacement), the text is the result's `content`, else the input.
  */
 function storedTextOf(result: unknown, input: string, redactedValues: number): string | null {
   const written = result as { content?: unknown; contentWithheld?: unknown } | null;

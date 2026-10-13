@@ -501,7 +501,8 @@ describe("flair#2467 — the SDK write result and the MCP replies after a redact
   const ctx = (flair: FlairClient = client) => ({ flair, agentId: agent.id, heartbeat: () => {}, rememberTask: () => {} });
 
   /** A row written through the admin surface, so its summary and trigger hold
-   *  credential-shaped text no Memory write path would have stored. */
+   *  credential-shaped text the ordinary redacted Memory write paths would
+   *  replace. */
   async function seedUnredactedRow(id: string): Promise<void> {
     const content = "seed row before the update";
     const res = await adminOp({
