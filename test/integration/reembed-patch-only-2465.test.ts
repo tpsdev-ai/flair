@@ -400,9 +400,10 @@ describe("flair#2465 part 2 — the stored vector is bound to its text (real Har
 
   it("a text edit committed after the re-embed stages its write aborts it: the vector for the superseded text is not stored, and the row is left stale", async () => {
     const id = "rpo-hash-edit-staged";
-    // Seed with an explicit binding for the ORIGINAL text, so the row carries a
-    // matching hash before the run.
-    await seedRow(id, owner.id, ORIGINAL, { embeddedContentHash: computeContentHash(owner.id, ORIGINAL) });
+    // Seed with an explicit binding for the ORIGINAL text and an incarnation
+    // token, so the concurrent PUT carries both unchanged and only the TEXT
+    // differs — the interleaving a plain identity check cannot see.
+    await seedRow(id, owner.id, ORIGINAL, { embeddedContentHash: computeContentHash(owner.id, ORIGINAL), instanceToken: randomUUID() });
 
     const { response, released, paused } = await withPausedStaged(id, async () => {
       // Change ONLY the text, but carry the stored vector (a supplied vector is
