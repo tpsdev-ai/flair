@@ -3,19 +3,21 @@
  * instead of from a substring of its text (flair#2289, flair#2419).
  *
  * `checkCoverageGate` is a whitelist: the gate step must run exactly its
- * command, with no `if` and no `continue-on-error` on the step or its job, in a
- * job the required check reaches through `needs` within the same workflow, and
- * the required check's own job must be the canonical `if: always()` adapter.
- * `gateCases` builds the negative cases a test feeds back to the checker.
+ * command, under the default shell (no `shell:` on the step, no
+ * `defaults.run.shell` on the job or workflow), with no `if` and no
+ * `continue-on-error` on the step or its job, in a job the required check
+ * reaches through `needs` within the same workflow, and the required check's
+ * own job must be the canonical `if: always()` adapter. `gateCases` builds the
+ * negative cases a test feeds back to the checker.
  */
 
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { load as loadYaml } from "js-yaml";
 
-export type WorkflowStep = { name?: unknown; run?: unknown; if?: unknown; "continue-on-error"?: unknown };
-export type WorkflowJob = { name?: unknown; needs?: unknown; if?: unknown; "continue-on-error"?: unknown; steps?: WorkflowStep[] };
-export type WorkflowDoc = { jobs?: Record<string, WorkflowJob> };
+export type WorkflowStep = { name?: unknown; run?: unknown; if?: unknown; "continue-on-error"?: unknown; shell?: unknown };
+export type WorkflowJob = { name?: unknown; needs?: unknown; if?: unknown; "continue-on-error"?: unknown; shell?: unknown; defaults?: { run?: { shell?: unknown } }; steps?: WorkflowStep[] };
+export type WorkflowDoc = { defaults?: { run?: { shell?: unknown } }; jobs?: Record<string, WorkflowJob> };
 
 export type Gate = {
   /** The `name:` of the step that runs the gate. */
@@ -85,20 +87,26 @@ export function checkCoverageGate(docs: WorkflowDoc[], gate: Gate): void {
   if (gates.length === 0) throw new Error(`no step is named "${gate.step}"`);
   const gated = gates.filter(({ doc, id }) => required.get(doc)?.has(id));
   if (gated.length === 0) throw new Error(`"${gate.step}" runs in no job the required "${REQUIRED_UNIT_CHECK}" check depends on in the same workflow`);
-  for (const { id, job, step } of gated) {
+  for (const { doc, id, job, step } of gated) {
     if ("if" in step) throw new Error(`"${gate.step}" has if; it must be absent`);
     if ("continue-on-error" in step) throw new Error(`"${gate.step}" has continue-on-error; it must be absent`);
+    if ("shell" in step) throw new Error(`"${gate.step}" has shell; it must run under the default shell`);
     if (typeof step.run !== "string" || step.run.trim().replace(/\s+/g, " ") !== gate.command) {
       throw new Error(`"${gate.step}" must run exactly "${gate.command}"`);
     }
     if ("if" in job) throw new Error(`the job "${id}" holding "${gate.step}" has if; it must be absent`);
     if ("continue-on-error" in job) throw new Error(`the job "${id}" holding "${gate.step}" has continue-on-error; it must be absent`);
+    if ("shell" in job) throw new Error(`the job "${id}" holding "${gate.step}" has shell; it must run under the default shell`);
+    if (job.defaults?.run?.shell !== undefined) throw new Error(`the job "${id}" holding "${gate.step}" sets defaults.run.shell; it must run under the default shell`);
+    if (doc.defaults?.run?.shell !== undefined) throw new Error(`the workflow sets defaults.run.shell; the gate must run under the default shell`);
   }
   for (const doc of docs) {
     for (const [id, job] of Object.entries(doc.jobs ?? {})) {
       if (job.name !== REQUIRED_UNIT_CHECK) continue;
       const label = `the required "${REQUIRED_UNIT_CHECK}" job "${id}"`;
       if ("continue-on-error" in job) throw new Error(`${label} has continue-on-error; it must be absent`);
+      if ("shell" in job) throw new Error(`${label} has shell; it must run under the default shell`);
+      if (job.defaults?.run?.shell !== undefined) throw new Error(`${label} sets defaults.run.shell; it must run under the default shell`);
       if (!("if" in job) || normalise(String(job.if).replace(/^\s*\$\{\{(.*)\}\}\s*$/s, "$1")) !== "always()") {
         throw new Error(`${label} must have if: always()`);
       }
@@ -107,6 +115,7 @@ export function checkCoverageGate(docs: WorkflowDoc[], gate: Gate): void {
       const [step] = steps;
       if ("continue-on-error" in step) throw new Error(`${label} has a step with continue-on-error; it must be absent`);
       if ("if" in step) throw new Error(`${label} has a step with if; it must be absent`);
+      if ("shell" in step) throw new Error(`${label} has a step with shell; it must run under the default shell`);
       if (typeof step.run !== "string" || normalise(step.run) !== ADAPTER_RUN) {
         throw new Error(`${label} must run the canonical adapter script`);
       }
@@ -152,7 +161,21 @@ export function gateCases(dir: string, gate: Gate): GateCase[] {
   const jobContinueError = `the job "${GATE_JOB}" holding "${gate.step}" has continue-on-error; it must be absent`;
   const dependencyError = `"${gate.step}" runs in no job the required "${REQUIRED_UNIT_CHECK}" check depends on in the same workflow`;
   const adapter = `the required "${REQUIRED_UNIT_CHECK}" job "${ADAPTER_JOB}"`;
+  const stepShellError = `"${gate.step}" has shell; it must run under the default shell`;
+  const jobShellError = `the job "${GATE_JOB}" holding "${gate.step}" has shell; it must run under the default shell`;
+  const jobDefaultsShellError = `the job "${GATE_JOB}" holding "${gate.step}" sets defaults.run.shell; it must run under the default shell`;
+  const workflowDefaultsShellError = "the workflow sets defaults.run.shell; the gate must run under the default shell";
+  const adapterStepShellError = `${adapter} has a step with shell; it must run under the default shell`;
+  const adapterJobShellError = `${adapter} has shell; it must run under the default shell`;
+  const adapterJobDefaultsShellError = `${adapter} sets defaults.run.shell; it must run under the default shell`;
   return [
+    ["gate step shell override", mutate((_doc, _job, step) => { step.shell = "bash"; }), stepShellError],
+    ["gate job shell override", mutate((_doc, job) => { job.shell = "bash"; }), jobShellError],
+    ["gate job defaults.run.shell override", mutate((_doc, job) => { job.defaults = { run: { shell: "bash" } }; }), jobDefaultsShellError],
+    ["workflow defaults.run.shell override", mutate((doc) => { doc.defaults = { run: { shell: "bash" } }; }), workflowDefaultsShellError],
+    ["adapter step shell override", adapt((_job, step) => { step.shell = "bash"; }), adapterStepShellError],
+    ["adapter job shell override", adapt((job) => { job.shell = "bash"; }), adapterJobShellError],
+    ["adapter job defaults.run.shell override", adapt((job) => { job.defaults = { run: { shell: "bash" } }; }), adapterJobDefaultsShellError],
     ["adapter step continue-on-error", adapt((_job, step) => { step["continue-on-error"] = true; }), `${adapter} has a step with continue-on-error; it must be absent`],
     ["adapter job continue-on-error", adapt((job) => { job["continue-on-error"] = true; }), `${adapter} has continue-on-error; it must be absent`],
     ["adapter job if: false", adapt((job) => { job.if = false; }), `${adapter} must have if: always()`],
