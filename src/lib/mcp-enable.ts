@@ -1324,10 +1324,11 @@ export interface IdentityMappingResult {
  *
  * ## The uniqueness constraint (flair#1317, K&S ruling 2026-08-21)
  *
- * **At most one ACTIVE, principal-bearing `Credential(kind:"idp",
- * idpSubject:<sub>)` exists at a time, regardless of `idpProvider`.** This
- * function enforces that invariant on every write it makes (`flair mcp enable`,
- * `flair principal link`). The MCP and XAA JIT provisioners also write a
+ * **The ruling: at most one ACTIVE, principal-bearing `Credential(kind:"idp",
+ * idpSubject:<sub>)`, regardless of `idpProvider`.** This function's
+ * post-write read verifies one such row at the time of that read, on every
+ * write it makes (`flair mcp enable`, `flair principal link`); it does not
+ * hold the invariant for other writers. The MCP and XAA JIT provisioners also write a
  * mapping, when their own lookup finds no matching row, and do not run this
  * check. A principal-less row maps nothing and is skipped, so it may remain
  * active beside the mapping.

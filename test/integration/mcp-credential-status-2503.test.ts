@@ -3,8 +3,8 @@
 //
 // `resolveAgentFromSub` (resources/mcp-handler.ts) resolves a token subject
 // through `Credential(kind:"idp", idpSubject=sub)` at request time, and
-// `provisionIdpIdentityMapping` (src/lib/mcp-enable.ts) is the supported writer
-// of that mapping. Before this change both accepted every status except
+// `provisionIdpIdentityMapping` (src/lib/mcp-enable.ts) is the operator-facing
+// writer of that mapping. Before this change both accepted every status except
 // "revoked", so a principal-bearing row with no status — or any unknown value —
 // was served as a live mapping. And a revoked row was SKIPPED by the resolver,
 // so JIT provisioning, when enabled, could re-create the principal the
