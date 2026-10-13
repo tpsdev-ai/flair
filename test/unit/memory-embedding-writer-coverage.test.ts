@@ -212,6 +212,45 @@ function namedBodyTrips(source: string, name: string): boolean {
   return trips;
 }
 
+function putBranchTrips(source: string, branch: "reindex" | "ordinary"): boolean {
+  const ast = ts.createSourceFile("f.ts", source, ts.ScriptTarget.Latest, true);
+  let trips = false;
+  const visit = (node: ts.Node): void => {
+    if (ts.isMethodDeclaration(node) && node.name && ts.isIdentifier(node.name) && node.name.text === "put" && node.body) {
+      const statements = node.body.statements;
+      const index = statements.findIndex(statement => {
+        if (!ts.isIfStatement(statement)) return false;
+        const condition = statement.expression;
+        return ts.isBinaryExpression(condition) && condition.operatorToken.kind === ts.SyntaxKind.EqualsEqualsEqualsToken &&
+          ts.isPropertyAccessExpression(condition.left) && ts.isIdentifier(condition.left.expression) &&
+          condition.left.expression.text === "content" && condition.left.name.text === "_reindex" &&
+          condition.right.kind === ts.SyntaxKind.TrueKeyword && ts.isBlock(statement.thenStatement);
+      });
+      if (index < 0) return;
+      const reindex = statements[index] as ts.IfStatement;
+      const walk = (n: ts.Node): void => {
+        if (ts.isFunctionLike(n) || ts.isClassDeclaration(n) || ts.isClassExpression(n)) return;
+        if (ts.isCallExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === "noteWriteStamp") trips = true;
+        if (!trips) ts.forEachChild(n, walk);
+      };
+      if (branch === "reindex") walk(reindex.thenStatement);
+      else for (const statement of statements.slice(index + 1)) walk(statement);
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(ast);
+  return trips;
+}
+
+for (const branch of ["reindex", "ordinary"] as const) {
+  test(`Memory.put ${branch} branch calls noteWriteStamp (flair#2488)`, () => {
+    expect(putBranchTrips(readFileSync("resources/Memory.ts", "utf8"), branch),
+      `resources/Memory.ts#put ${branch} branch has no noteWriteStamp() call`,
+    ).toBe(true);
+  });
+}
+
 test("a parameter-default call does not trip the named body's latch", () => {
   for (const source of [
     "function patch(model = noteWriteStamp('foreign')) {}",
