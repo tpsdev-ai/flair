@@ -66,6 +66,22 @@ function makeHandlerMock(resource: string, method: string) {
   };
 }
 
+// flair#2537 — the server's response to a write whose body carries
+// "REDACT-ME": `redactedValues` and `stored`, the post-redaction text that
+// write committed (flair#2467). "WITHHELD" models a server that reports the
+// count without `stored`. Any other body gets the response it always had.
+const REDACTED_ROW_ID = "mock-redacted-row";
+function redactedWriteResponse(body: any): Record<string, unknown> {
+  const content = typeof body?.content === "string" ? body.content : "";
+  if (!content.includes("REDACT-ME")) return {};
+  return {
+    id: REDACTED_ROW_ID,
+    written: true,
+    redactedValues: 1,
+    ...(content.includes("WITHHELD") ? {} : { stored: { content: content.replaceAll("REDACT-ME", "[redacted]") } }),
+  };
+}
+
 // Memory has post/get/delete on the same class.
 //
 // flair#1181 — the by-id read/delete doubles are shaped like Harper's REAL
@@ -84,17 +100,23 @@ function makeHandlerMock(resource: string, method: string) {
 // A double whose instance-get returns canned data (as this one used to) is
 // easier to satisfy than the real class and cannot catch this class of bug.
 class MemoryMock extends HarperShapedBase {
-  async post(args: any) { lastCall = { resource: "Memory.post", ctx: this._ctx, args, isCollection: this.isCollection } as any; return { ok: true, resource: "Memory.post", agentId: this._ctx?.request?.tpsAgent }; }
+  async post(args: any) {
+    lastCall = { resource: "Memory.post", ctx: this._ctx, args, isCollection: this.isCollection } as any;
+    return { ok: true, resource: "Memory.post", agentId: this._ctx?.request?.tpsAgent, ...redactedWriteResponse(args) };
+  }
   // flair#1181 — the default memory_update merge now writes via the STATIC
   // `Cls.put(merged, ctx)` transactional path (the instance put on an unloaded
   // `new Cls(undefined, ctx)` throws "Invalid primary key type: undefined").
   // The instance put below is left for faithfulness but is no longer reached.
-  static async put(record: any, ctx: any) { lastCall = { resource: "Memory.put", ctx, args: record }; return { ok: true, resource: "Memory.put", agentId: ctx?.request?.tpsAgent }; }
+  static async put(record: any, ctx: any) { lastCall = { resource: "Memory.put", ctx, args: record }; return { ok: true, resource: "Memory.put", agentId: ctx?.request?.tpsAgent, ...redactedWriteResponse(record) }; }
   async put(args: any) { lastCall = { resource: "Memory.put#instance", ctx: this._ctx, args }; return { ok: true, resource: "Memory.put#instance", agentId: this._ctx?.request?.tpsAgent }; }
   static async get(target: any, ctx: any) {
     const id = typeof target === "string" ? target : target?.id;
     lastCall = { resource: "Memory.get", ctx, args: id };
     if (id === "missing-id") return null;
+    // flair#2537 — a read of the row a redacted write just wrote fails, so a
+    // reply that read after the write would surface as a JSON-RPC error.
+    if (id === REDACTED_ROW_ID) throw new Error("read after the write");
     // flair#1188 — a real by-id load returns the FULL stored row, INCLUDING the
     // raw `embedding` vector. Modeled here so memory_get's default-strip (and
     // its includeEmbedding opt-in) is exercised against a record that actually
@@ -324,9 +346,67 @@ describe("resolveAgentFromSub", () => {
     expect(agent).toEqual({ agentId: "agt_mirror", isAdmin: false });
   });
 
-  it("revoked Credential is skipped", async () => {
-    credentials = [{ principalId: "agt_x", kind: "idp", idpSubject: "sub-x", status: "revoked" }];
-    expect(await resolveAgentFromSub("sub-x")).toBeNull();
+  // ─── flair#2503 — the credential-status allowlist ───────────────────────────
+  //
+  // A Credential is usable only when its status is exactly "active"
+  // (src/lib/credential-status-rule.ts, the same predicate the linker uses and
+  // XAA's jwt-bearer grant applies). A matching row whose status is "revoked",
+  // missing, empty or any other value maps nothing. When it is the subject's
+  // only row, as here, resolution is refused by name and nothing is linked or
+  // resolved. On origin/main a revoked row was SKIPPED (returning null, so JIT,
+  // when enabled, could re-create the mapping) and a principal-bearing row with
+  // a missing/unknown status was served as a live mapping.
+  for (const [label, status] of [["revoked", "revoked"], ["missing", undefined], ["unknown", "disabled"]] as const) {
+    it(`${label} status → refused by name, nothing linked or resolved`, async () => {
+      process.env.FLAIR_MCP_JIT_PROVISION = "1"; // JIT ON: a non-active row must not fall through to it
+      credentials = [{ id: `cred-${label}`, principalId: "agt_x", kind: "idp", idpSubject: "sub-x", ...(status === undefined ? {} : { status }) }];
+      agents["agt_x"] = { id: "agt_x", status: "active" };
+      const err = (await resolveAgentFromSub("sub-x").then(() => null, (e) => e)) as (Error & { rpcCode?: number }) | null;
+      expect(err, "a non-active mapping must be refused, not resolved").toBeInstanceOf(PrincipalRefusedError);
+      expect(err!.rpcCode).toBe(-32001);
+      expect(err!.message).toContain(`cred-${label}`); // the actor
+      expect(err!.message).toContain(status === undefined ? "no status" : `status "${status}"`); // the state
+      expect(err!.message).toContain(`usable only when its status is "active"`); // the rule
+      expect(err!.message).toMatch(/re-link/); // the remedy
+      expect(puts, "nothing linked (no JIT) or resolved").toHaveLength(0);
+      expect(credentials[0].status, "the mapping row is unchanged").toBe(status);
+    });
+  }
+
+  // A matching row that names no principal maps nothing, whatever its status,
+  // and it prevents JIT fallback: JIT provisioning runs only when NO IdP
+  // Credential row matches the subject. The resolver scans for an active,
+  // principal-bearing row and refuses the call by name only if none maps; here
+  // the principal-less row is the subject's only row. The schema requires
+  // principalId; the resolver does not rely on that to exclude such a row (the
+  // integration suite exercises the empty-string form real storage accepts).
+  for (const [label, status] of [["revoked", "revoked"], ["missing", undefined], ["active", "active"]] as const) {
+    it(`principal-less row, ${label} status, JIT ON → refused by name; no Agent or Credential written`, async () => {
+      process.env.FLAIR_MCP_JIT_PROVISION = "1";
+      const row = { id: `cred-nop-${label}`, kind: "idp", idpSubject: "sub-nop", ...(status === undefined ? {} : { status }) };
+      credentials = [{ ...row }];
+      const err = (await resolveAgentFromSub("sub-nop").then(() => null, (e) => e)) as (Error & { rpcCode?: number }) | null;
+      expect(err, "a principal-less row must be refused, not resolved or provisioned").toBeInstanceOf(PrincipalRefusedError);
+      expect(err!.rpcCode).toBe(-32001);
+      expect(err!.message).toContain(row.id); // the actor
+      expect(err!.message).toContain("names no principal"); // the state
+      expect(err!.message).toContain(status === undefined ? "no status" : `status "${status}"`);
+      expect(err!.message).toMatch(/re-link/); // the remedy
+      expect(puts, "no Agent and no Credential were written (JIT did not run)").toHaveLength(0);
+      expect(agents, "no principal was created").toEqual({});
+      expect(credentials, "the row is unchanged and still the only one").toEqual([row]);
+    });
+  }
+
+  it("a principal-less row does not hide an ACTIVE principal-bearing mapping for the same subject", async () => {
+    process.env.FLAIR_MCP_JIT_PROVISION = "1";
+    credentials = [
+      { id: "cred-nop", kind: "idp", idpSubject: "sub-alice", status: "active" },
+      { id: "cred-alice", principalId: "agt_alice", kind: "idp", idpSubject: "sub-alice", status: "active" },
+    ];
+    agents["agt_alice"] = { id: "agt_alice", status: "active" };
+    expect(await resolveAgentFromSub("sub-alice")).toEqual({ agentId: "agt_alice", isAdmin: false });
+    expect(puts).toHaveLength(0);
   });
 
   it("unknown sub, JIT OFF → null (DENY, no provisioning)", async () => {
@@ -1344,5 +1424,67 @@ describe("checkToolArguments — every native tool's declared property types are
       }
     }
     expect(checked).toBeGreaterThan(40);
+  });
+});
+
+// ─── flair#2537 — write replies report the STORED (redacted) content ──────────
+//
+// A redacted write's response carries `stored`, the post-redaction text that
+// write committed. The /mcp echo takes the text from it and never reads the
+// row after the write: MemoryMock's read of the written row throws, so a read
+// would turn the reply into a JSON-RPC error. The real-Harper counterpart is
+// test/integration/write-reply-redaction-2537.test.ts.
+describe("flair#2537 — /mcp write replies report the STORED (redacted) content", () => {
+  beforeEach(() => {
+    credentials = [{ principalId: "agt_bob", kind: "idp", idpSubject: "sub-bob", status: "active" }];
+    agents["agt_bob"] = { id: "agt_bob", status: "active" };
+  });
+
+  function call(name: string, args: Record<string, unknown>) {
+    return mcpHandler(post(
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } },
+      { sub: "sub-bob" },
+    ));
+  }
+
+  it("memory_store's echo carries the stored text and the count from the write response, with no read after it", async () => {
+    const body = await parse(await call("memory_store", { content: "a note with REDACT-ME inside" }));
+    expect(body.error).toBeUndefined();
+    expect(lastCall?.resource).toBe("Memory.post");
+    const echo = body.result.structuredContent;
+    expect(echo.content).toBe("a note with [redacted] inside");
+    expect(echo.redactedValues).toBe(1);
+    expect(echo.stored).toBeUndefined();
+    expect(echo.contentWithheld).toBeUndefined();
+    expect(body.result.content[0].text).not.toContain("REDACT-ME");
+  });
+
+  it("memory_update's in-place echo carries the stored text and the count, with no read after the write", async () => {
+    const body = await parse(await call("memory_update", { id: "mem-1", content: "update with REDACT-ME inside" }));
+    expect(body.error).toBeUndefined();
+    expect(lastCall?.resource).toBe("Memory.put");
+    const echo = body.result.structuredContent;
+    expect(echo.content).toBe("update with [redacted] inside");
+    expect(echo.redactedValues).toBe(1);
+    expect(body.result.content[0].text).not.toContain("REDACT-ME");
+  });
+
+  it("a count without stored text gives a successful echo with no content and contentWithheld, never the input", async () => {
+    const body = await parse(await call("memory_store", { content: "a note with REDACT-ME and WITHHELD" }));
+    expect(body.error).toBeUndefined();
+    expect(body.result.isError).toBe(false);
+    expect(lastCall?.resource).toBe("Memory.post");
+    const echo = body.result.structuredContent;
+    expect(echo.written).toBe(true);
+    expect(echo.content).toBeUndefined();
+    expect(echo.contentWithheld).toBe(true);
+    expect(echo.redactedValues).toBe(1);
+    expect(body.result.content[0].text).not.toContain("REDACT-ME");
+  });
+
+  it("a write the server did not redact returns its response unchanged", async () => {
+    const body = await parse(await call("memory_store", { content: "a plain note" }));
+    expect(lastCall?.resource).toBe("Memory.post");
+    expect(body.result.structuredContent).toEqual({ ok: true, resource: "Memory.post", agentId: "agt_bob" });
   });
 });

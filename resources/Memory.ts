@@ -1,6 +1,6 @@
 import { databases } from "harper";
 import { randomUUID } from "node:crypto";
-import { isOperatorSeedPut, redactMemoryWrite } from "./memory-redaction.js";
+import { isOperatorSeedPut, redactMemoryWrite, storedMemoryText, type StoredMemoryText } from "./memory-redaction.js";
 import { isDeepStrictEqual } from "node:util";
 import { patchRecord, withDetachedTxn } from "./table-helpers.js";
 import { isAdmin, resolveAgentAuth, type AgentAuthVerdict } from "./agent-auth.js";
@@ -27,11 +27,11 @@ import {
 import { putPointerRow, deletePointerRowViaTable } from "./host-pointer-adapter.js";
 import { DECLARED_MEMORY_ATTRIBUTES, stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./memory-declared-attributes.js";
 import { isJoinableTransaction, withOwnedTransaction, withSharedWriteTransaction } from "./request-transaction.js";
-import { CommittedRowChanged, confirmCommittedRow, sameStoredRow, storedRowChangedRefusal } from "./write-back.js";
+import { CommittedRowChanged, GrantedCloseRevoked, confirmCommittedRow, sameStoredRow, storedRowChangedRefusal, writeGrantHeld } from "./write-back.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 import { assertValidDurability, stampEphemeralExpiry } from "./memory-durability.js";
 import { embedTextField, enforceSkillDurability, isSkillWrite, type MemoryEmbeddingInputField, rejectSkillWritePath, refuseSkillWriteSource, skillEmbedText, skillScanGate } from "./skill-write.js";
-import { buildSkillSuccessorRow, closedSkillPayloadReadable, defaultSkillHooks, resolveSkillHead, rowIsSkill, runSkillVersionWrite, skillVersionVisibility, skillPayloadUnchanged, prepareSkillBody, validateSkillSnapshots, authorizeSkillOwners, skillWriteConflict } from "./skill-version-write.js";
+import { buildSkillSuccessorRow, closedSkillPayloadReadable, defaultSkillHooks, grantedSkillClose, resolveSkillHead, rowIsSkill, runSkillVersionWrite, skillVersionVisibility, skillPayloadUnchanged, prepareSkillBody, validateSkillSnapshots, authorizeSkillOwners, skillWriteConflict } from "./skill-version-write.js";
 import { deriveSkillSubjectId } from "./skill-subject.js";
 import {
   DEDUP_COSINE_THRESHOLD_DEFAULT,
@@ -558,11 +558,15 @@ async function runDedupGate(ctx: any, content: any): Promise<DedupMatch | null> 
  * does not build its own response — a skill write, or a PATCH whose base
  * returns undefined. Returns the result unchanged when nothing was redacted or
  * when it is a Response.
+ *
+ * flair#2467: with the count it layers `stored`, the post-redaction values of
+ * the text fields the write staged (storedMemoryText of the staged row or
+ * PATCH body), when the write captured them.
  */
-function withRedactedValues(result: any, redactedValues: number, id?: any): any {
+function withRedactedValues(result: any, redactedValues: number, id?: any, stored?: StoredMemoryText | null): any {
   if (redactedValues <= 0 || result instanceof Response) return result;
   const base = result && typeof result === "object" && !Array.isArray(result) ? result : {};
-  return { id: base.id ?? id, written: true, ...base, redactedValues };
+  return { id: base.id ?? id, written: true, ...base, redactedValues, ...(stored ? { stored } : {}) };
 }
 
 /** Build the final write response: always `written: true`, always includes
@@ -587,7 +591,7 @@ function withRedactedValues(result: any, redactedValues: number, id?: any): any 
  *  an existing record that has no stored writable visibility — reporting `null`
  *  there would read as "no one but the owner",
  *  the opposite of what an absent field means to `isPrivateVisibility()`. */
-function buildWriteResponse(content: any, result: any, dedupMatch: DedupMatch | null, redactedValues: number): any {
+function buildWriteResponse(content: any, result: any, dedupMatch: DedupMatch | null, redactedValues: number, stored?: StoredMemoryText): any {
   const base = result && typeof result === "object" && !Array.isArray(result) ? result : {};
   const response: any = {
     id: content.id,
@@ -604,7 +608,14 @@ function buildWriteResponse(content: any, result: any, dedupMatch: DedupMatch | 
   }
   // flair#2407: report how many credential values the server replaced, so the
   // writer learns its text was changed. Absent when nothing was replaced.
-  if (redactedValues > 0) response.redactedValues = redactedValues;
+  // flair#2467: with it, `stored` — the post-redaction values of the text
+  // fields this write staged and committed (captured from the staged row,
+  // never read back), so a client reports them without a read a later write
+  // could change.
+  if (redactedValues > 0) {
+    response.redactedValues = redactedValues;
+    if (stored) response.stored = stored;
+  }
   return response;
 }
 
@@ -689,13 +700,6 @@ export function buildReindexRow(
 /** Aborts the close's owned transaction: the row changed after the transaction read it. */
 class CloseTargetChanged extends Error {}
 
-/**
- * Aborts the close's owned transaction: a cross-agent close authorized by a
- * "write" grant found that grant revoked on committed state before it committed
- * (flair#2333 H10). This close attempt does not retry.
- */
-class GrantedCloseRevoked extends Error {}
-
 /** Attempts of the close before it gives up on a row that keeps changing. */
 const SUPERSEDE_CLOSE_ATTEMPTS = 3;
 
@@ -763,7 +767,7 @@ async function closeSupersededRecord(ctx: any, oldId: string, patch: Record<stri
         // HERE — after the write is staged, as the last read before this transaction
         // commits — so a grant revoked and committed before this point aborts the
         // close; this close attempt does not retry.
-        if (granteeId !== undefined && !(await hasWriteGrant(granteeId, expectedOwner as string, {}))) {
+        if (granteeId !== undefined && !(await writeGrantHeld((databases as any).flair.MemoryGrant, granteeId, expectedOwner as string, {}))) {
           throw new GrantedCloseRevoked();
         }
         return closed;
@@ -810,19 +814,7 @@ async function markDerivedSourcesReflected(content: any): Promise<void> {
  *  consult MemoryGrant); it survives here for the "write" scope that gates
  *  cross-agent supersede. */
 async function hasWriteGrant(granteeId: string, ownerId: string, ctx?: unknown): Promise<boolean> {
-  try {
-    for await (const grant of (databases as any).flair.MemoryGrant.search({
-      conditions: [
-        { attribute: "granteeId", comparator: "equals", value: granteeId },
-        { attribute: "ownerId", comparator: "equals", value: ownerId },
-      ],
-    }, ctx)) {
-      if (grant.scope === "write") return true;
-    }
-  } catch {
-    /* MemoryGrant table not yet populated — no grant */
-  }
-  return false;
+  return writeGrantHeld((databases as any).flair.MemoryGrant, granteeId, ownerId, ctx);
 }
 
 /**
@@ -1029,6 +1021,9 @@ async function writeSkillCreateOrUpdate(
     inPlaceId?: string | null;
     reembedding?: boolean;
     requestedPayload?: Record<string, any>;
+    /** flair#2467: receives the post-redaction text fields of the successor
+     *  row this write staged and committed (none when it wrote no row). */
+    staged?: { text: StoredMemoryText | null };
   },
 ): Promise<any> {
   const { ctx, auth, content, storedRow, explicitPredecessor, method, pointer, inPlaceId, reembedding, requestedPayload } = args;
@@ -1087,12 +1082,12 @@ async function writeSkillCreateOrUpdate(
       const visibility = skillVersionVisibility(successor);
       if (inPlaceId || reembedInPlace) {
         return liveHead
-          ? { kind: "update", predecessor: null, successor, closePatch: {}, value, visibility }
-          : { kind: "create", predecessor: null, successor, closePatch: {}, value, visibility };
+          ? { kind: "update", predecessor: null, successor, closePatch: {}, value, visibility, grantedClose: null }
+          : { kind: "create", predecessor: null, successor, closePatch: {}, value, visibility, grantedClose: null };
       }
-      if (!liveHead) return { kind: "create", predecessor: null, successor, closePatch: {}, value, visibility };
+      if (!liveHead) return { kind: "create", predecessor: null, successor, closePatch: {}, value, visibility, grantedClose: null };
       captured.closed = liveHead;
-      return { kind: "update", predecessor: liveHead, successor, closePatch: { skillSubjectId: subjectId, validTo: now, updatedAt: now }, value, visibility };
+      return { kind: "update", predecessor: liveHead, successor, closePatch: { skillSubjectId: subjectId, validTo: now, updatedAt: now }, value, visibility, grantedClose: grantedSkillClose(liveHead, ctx, auth) };
     },
     hooks: {
       ...defaultSkillHooks,
@@ -1113,6 +1108,7 @@ async function writeSkillCreateOrUpdate(
     noteMemoryUpsert(captured.row);
     noteWriteStamp(captured.row.embeddingModel);
   }
+  if (args.staged) args.staged.text = captured.row ? storedMemoryText(captured.row) : null;
   return { id: successorId, written: captured.row !== null, visibility: skillVersionVisibility(captured.row ?? unchangedHead) };
 }
 
@@ -1159,7 +1155,10 @@ async function writeSkillDelete(args: { ctx: any; auth: AgentAuthVerdict; record
       if (!head) return skillWriteConflict("skill_head_missing");
       const liveHead = head;
       closedId = String(liveHead.id);
-      return { kind: "delete", predecessor: liveHead, closePatch: { skillSubjectId: subjectId, validTo: now, updatedAt: now }, value: null, visibility: skillVersionVisibility(liveHead) };
+      // flair#2511: a stale id resolves the live head, which can be another
+      // agent's row a "write" grant authorizes this caller to close; the writer
+      // re-checks that grant after the close is staged.
+      return { kind: "delete", predecessor: liveHead, closePatch: { skillSubjectId: subjectId, validTo: now, updatedAt: now }, value: null, visibility: skillVersionVisibility(liveHead), grantedClose: grantedSkillClose(liveHead, ctx, auth) };
     },
     hooks: { ...defaultSkillHooks, pointer: async (shared) => deletePointerRow(closedId, shared) },
   });
@@ -1785,12 +1784,13 @@ export class Memory extends (databases as any).flair.Memory {
     stripUndeclaredMemoryAttributes(content);
     if (isSkillWrite(content)) {
       const reservedId = [content?.id, (this as any).getId?.()].find((candidate) => isReservedSeedId("Memory", candidate));
+      const skillStaged: { text: StoredMemoryText | null } = { text: null };
       const skillResult = await writeSkillCreateOrUpdate({
         ctx, auth, content, storedRow: postStored, explicitPredecessor: preparedSkill.predecessor, method: "post", pointer,
-        inPlaceId: reservedId != null ? String(reservedId) : null,
+        inPlaceId: reservedId != null ? String(reservedId) : null, staged: skillStaged,
       });
       if (!(skillResult instanceof Response)) await markDerivedSourcesReflected(content);
-      return withRedactedValues(skillResult, redactedValues);
+      return withRedactedValues(skillResult, redactedValues, undefined, skillStaged.text);
     }
     // A1' item 2 (adjudication 0a): the Memory row and its pointer row share ONE
     // transaction. With a request context they join its open transaction; with
@@ -1799,7 +1799,10 @@ export class Memory extends (databases as any).flair.Memory {
     // the Memory row back too instead of leaving it pointer-less.
     // Pinned by test/unit/memory-host-source.test.ts (r20-atomic) — RED if the
     // owned-transaction branch is bypassed.
+    // flair#2467: the post-redaction text fields this write stages, for the response.
+    let postStaged: StoredMemoryText = {};
     const postResult = await withSharedWriteTransaction(ctx, async (c) => {
+      postStaged = storedMemoryText(content);
       const newId = await writeMemoryRowPost((this as any).constructor, content, c);
       if (pointer.row) {
         pointer.row.memoryId = newId;
@@ -1844,7 +1847,7 @@ export class Memory extends (databases as any).flair.Memory {
       }
     }
 
-    return buildWriteResponse(content, result, dedupMatch, redactedValues);
+    return buildWriteResponse(content, result, dedupMatch, redactedValues, postStaged);
   }
 
   // PATCH routes past put(), so agentId immutability is enforced on both verbs
@@ -2068,6 +2071,9 @@ export class Memory extends (databases as any).flair.Memory {
       const committedField = committed ? vectorFieldOver(committed) : null;
       if (committedField) await storeVectorFor(committedField);
     }
+    // flair#2467: a PATCH commits only the fields in its body; these are the
+    // post-redaction text fields among them, for the response.
+    const patchStaged = storedMemoryText(content);
     const patched = await super.patch(content, query);
     // embedding-space-guard slice 1 (flair#2425): a PATCH that stores an
     // embedding stamp must consult the latch the same way post()/put() do, so a
@@ -2075,7 +2081,7 @@ export class Memory extends (databases as any).flair.Memory {
     // model stamp the latch never recorded. A PATCH body with no embedding
     // fields is unchanged: noteWriteStamp(undefined) is a no-op.
     noteWriteStamp(content?.embeddingModel as string | null | undefined);
-    return withRedactedValues(patched, redactedValues, content?.id ?? (this as any).getId?.());
+    return withRedactedValues(patched, redactedValues, content?.id ?? (this as any).getId?.(), patchStaged);
   }
 
   async put(content: any, query?: any) {
@@ -2469,11 +2475,12 @@ export class Memory extends (databases as any).flair.Memory {
     stripUndeclaredMemoryAttributes(content);
     if (isSkillWrite(content)) {
       const reservedId = [content?.id, (this as any).getId?.()].find((candidate) => isReservedSeedId("Memory", candidate));
+      const skillStaged: { text: StoredMemoryText | null } = { text: null };
       return withRedactedValues(await writeSkillCreateOrUpdate({
         ctx, auth, content, storedRow: preExisting, explicitPredecessor: preparedSkill.predecessor, method: "put", pointer,
         reembedding, requestedPayload,
-        inPlaceId: reservedId != null ? String(reservedId) : null,
-      }), redactedValues);
+        inPlaceId: reservedId != null ? String(reservedId) : null, staged: skillStaged,
+      }), redactedValues, undefined, skillStaged.text);
     }
     // A1' item 2 (adjudication 0a): share ONE transaction with the pointer row
     // (see post()). The shared helper's owned-transaction branch is pinned by
@@ -2490,6 +2497,8 @@ export class Memory extends (databases as any).flair.Memory {
     // transaction() aborts it when its callback throws).
     const joinsRequestTxn = isJoinableTransaction(ctx);
     let putResult: any;
+    // flair#2467: the post-redaction text fields this write stages, for the response.
+    let putStaged: StoredMemoryText = {};
     try {
       putResult = await withSharedWriteTransaction(ctx, async (c) => {
         // flair#2441: this put is over the row read as `preExisting` (which
@@ -2510,6 +2519,7 @@ export class Memory extends (databases as any).flair.Memory {
           const confirmed = await (databases as any).flair.Memory.get(preExisting.id, {});
           if (!confirmed || !sameStoredRow(confirmed, preExisting)) return storedRowChangedRefusal("Memory");
         }
+        putStaged = storedMemoryText(content);
         const r: any = await (databases as any).flair.Memory.put(content, c);
         if (pointer.row) {
           pointer.row.memoryId = r?.id ?? content.id ?? "";
@@ -2558,7 +2568,7 @@ export class Memory extends (databases as any).flair.Memory {
       }
     }
 
-    return buildWriteResponse(content, result, dedupMatch, redactedValues);
+    return buildWriteResponse(content, result, dedupMatch, redactedValues, putStaged);
   }
 
   async delete(id: any) {

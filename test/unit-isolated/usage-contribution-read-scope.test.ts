@@ -35,6 +35,12 @@ const usageWrites: string[] = [];
 /** Per-id queue of rows Memory.get returns before falling back to `memory`,
  *  so a test can change a row between the core's two reads of it. */
 const memoryReadScript = new Map<string, any[]>();
+/** Ids a "competitor" changes (a replace) or removes (a delete or purge) by
+ *  committing between the count bump's in-transaction read and its write — the
+ *  interleaving the committed-row confirmation exists to catch (flair#2476).
+ *  Applied inside the fake table's update(), i.e. after the read the plan was
+ *  built from. `null` means the row is removed. */
+const competitorBeforeWrite = new Map<string, any | null>();
 
 mock.module("harper", () => ({
   server: { http: () => {}, getUser: async () => null },
@@ -53,6 +59,12 @@ mock.module("harper", () => ({
         },
         // flair#2470: the count bump is an incremental update of `usageCount`.
         update: async (id: string, patch: Record<string, unknown>) => {
+          // A competitor commits between the bump's read and its write.
+          if (competitorBeforeWrite.has(id)) {
+            const competitor = competitorBeforeWrite.get(id);
+            if (competitor === null) memory.delete(id);
+            else memory.set(id, competitor);
+          }
           const current = memory.get(id) ?? { id };
           const merged = { ...current, ...patch };
           if (txn.stage(id, merged)) return id;
@@ -104,6 +116,7 @@ beforeEach(() => {
   usageReadThrow.clear();
   usageWrites.length = 0;
   memoryReadScript.clear();
+  competitorBeforeWrite.clear();
   memory.set("own-private", { id: "own-private", agentId: REPORTER, visibility: "private", content: "own" });
   memory.set("other-shared", { id: "other-shared", agentId: OWNER, visibility: "shared", content: "shared" });
   memory.set("other-private", { id: "other-private", agentId: OWNER, visibility: "private", content: "private" });
@@ -169,5 +182,33 @@ describe("recordUsageContribution — the contributing agent's read scope", () =
     expect(usageWrites, "an aborted contribution writes no ledger row").toEqual([]);
     expect(usage.get(ledgerId), "the stored ledger row is not overwritten").toEqual(storedRow);
     expect(memory.get("own-private").usageCount, "the count is not bumped").toBeUndefined();
+  });
+
+  // flair#2476: the count bump confirms the committed row after staging the update and before committing. A
+  // competitor that commits between the bump's read and its write — a delete, a
+  // purge, or a same-id replace — must leave the competitor's state in place and
+  // never bump the count.
+  describe("the count bump confirms the committed row after staging the update and before committing (flair#2476)", () => {
+    it("a row removed (deleted or purged) between the read and the write is not re-created and the count does not land", async () => {
+      competitorBeforeWrite.set("own-private", null);
+      await contribute("own-private");
+      expect(memory.has("own-private"), "the count bump re-created the removed row").toBe(false);
+      expect(usage.has(`${REPORTER}:own-private`), "the ledger row written after the first read stays").toBe(true);
+    });
+
+    it("a same-id replace between the read and the write is refused, not overwritten, and not counted", async () => {
+      competitorBeforeWrite.set("own-private", { id: "own-private", agentId: REPORTER, visibility: "private", content: "replaced", instanceToken: "T2" });
+      // The stored row is no longer the one read: the bump is refused by name.
+      await expect(contribute("own-private")).rejects.toThrow();
+      const row = memory.get("own-private");
+      expect(row.content, "the competitor's content is overwritten").toBe("replaced");
+      expect(row.instanceToken, "the competitor's incarnation token is overwritten").toBe("T2");
+      expect(row.usageCount ?? null, "the stale bump incremented the replaced row").toBeNull();
+    });
+
+    it("CONTROL: with no competitor the count lands", async () => {
+      await contribute("own-private");
+      expect(memory.get("own-private").usageCount).toBe(1);
+    });
   });
 });

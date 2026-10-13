@@ -8,7 +8,7 @@ import { guardAuthorityFields, stripAuthorityFields } from "./authority-field-gu
 import { assertValidVisibility, assertVisibilityAllowedForDurability, PRIVATE_VISIBILITY, SHARED_VISIBILITY } from "./memory-visibility.js";
 import { assertValidDurability, stampEphemeralExpiry } from "./memory-durability.js";
 import { enforceSkillDurability, isSkillWrite, refuseSkillWriteSource, skillScanGate } from "./skill-write.js";
-import { buildSkillSuccessorRow, closedSkillPayloadReadable, defaultSkillHooks, resolveSkillHead, runSkillVersionWrite, skillVersionVisibility, prepareSkillBody, validateSkillSnapshots, authorizeSkillOwners, skillWriteConflict } from "./skill-version-write.js";
+import { buildSkillSuccessorRow, closedSkillPayloadReadable, defaultSkillHooks, grantedSkillClose, resolveSkillHead, runSkillVersionWrite, skillVersionVisibility, prepareSkillBody, validateSkillSnapshots, authorizeSkillOwners, skillWriteConflict } from "./skill-version-write.js";
 import { deriveSkillSubjectId } from "./skill-subject.js";
 import { noteMemoryUpsert, noteMemoryDelete } from "./bm25-index-service.js";
 import { extractPointerInputs } from "./memory-host-source.js";
@@ -232,8 +232,11 @@ export class FeedMemories extends Resource {
           captured.closed = head;
           const value = typeof successor.content === "string" ? successor.content : null;
           const visibility = skillVersionVisibility(successor);
-          if (!head) return { kind: "create", predecessor: null, successor, closePatch: {}, value, visibility };
-          return { kind: "update", predecessor: head, successor, closePatch: { skillSubjectId: subjectId, validTo: now, updatedAt: now }, value, visibility };
+          if (!head) return { kind: "create", predecessor: null, successor, closePatch: {}, value, visibility, grantedClose: null };
+          // flair#2511: a grant-authorized cross-agent close of `head` stands on the "write" grant
+          // authorizeSkillOwners read above; the writer re-checks it after the
+          // close is staged.
+          return { kind: "update", predecessor: head, successor, closePatch: { skillSubjectId: subjectId, validTo: now, updatedAt: now }, value, visibility, grantedClose: grantedSkillClose(head, ctx, auth) };
         },
         hooks: {
           ...defaultSkillHooks,
