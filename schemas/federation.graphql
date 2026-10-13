@@ -44,8 +44,9 @@ type Peer @table(database: "flair") @export {
 # later re-offer could clear, plus locally observed unconfirmed sends. No
 # production sender path creates rows yet (a later slice activates the sender);
 # rows an admin writes are readable now. Local bookkeeping, EXCLUDED from
-# federation policy and the receive mapping, so an inbound sync cannot target
-# it (a pushed record naming it skips as `unknown_table`). Admin-only on every
+# federation policy and the receive mapping, so no inbound sync record can write
+# it (a pushed record naming it that passes the receiver's payload-id check
+# skips as `unknown_table`). Admin-only on every
 # operation; see resources/FederationRetry.ts.
 #
 # ENFORCED: @sealed makes Harper refuse a write that names a field not declared

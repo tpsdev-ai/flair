@@ -1197,8 +1197,10 @@ export function register(program: Command): void {
       // Federation retry rows (flair#2455): the sender's retry bookkeeping per
       // peer, table and record. Rendered after the peer table, and also on the
       // two early returns below (no peers configured; a peer read that fails
-      // while the instance read succeeds). The fatal exits above (an auth
-      // failure, or both the instance and peer reads failing) render nothing.
+      // while the instance read succeeds). The fatal exits above (an instance or
+      // peer read auth failure, or both those reads failing) render nothing. A
+      // retry-row read that fails, including on auth, renders the section as
+      // unverifiable and does not by itself make the command exit non-zero.
       // No production sender path creates rows yet; admin-written rows show.
       // Once the sender is active, it re-offers pending rows; a terminal row
       // ended with a named resolution; a malformed row breaks a sender

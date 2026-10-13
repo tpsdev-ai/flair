@@ -18,9 +18,10 @@
  *
  * ISOLATION (design rev 2 K2). `FederationRetry` is deliberately absent from
  * FEDERATION_TABLE_POLICY (resources/federation-classify.ts) and therefore from
- * FederationSync's receive `tableMap` (resources/Federation.ts), so an inbound
- * sync whose record names the table skips as `unknown_table` even though
- * receive `allowCreate` is public. It is also not a sending table. Nothing in
+ * FederationSync's receive `tableMap` (resources/Federation.ts), so no inbound
+ * sync record can write the table, even though receive `allowCreate` is public
+ * (a record that passes the receiver's earlier payload-id check skips as
+ * `unknown_table`). It is also not a sending table. Nothing in
  * this slice sends a retry; the sender is activated in a later slice.
  *
  * ACCESS (design rev 2.1). Admin-only on read, create,
