@@ -6,8 +6,10 @@
  *
  *   - on create, createdAt is the server's time, whatever the body says;
  *   - on update, createdAt keeps its stored value. A body that omits it keeps
- *     the stored value; a body whose createdAt differs from the stored one is
- *     refused with `created_at_immutable` (409), and nothing is written.
+ *     the stored value; a write that reaches this check with a createdAt that
+ *     differs from the stored one is refused with `created_at_immutable` (409),
+ *     and nothing is written. Earlier checks in the resource (authentication,
+ *     ownership, attribution, entity validation) answer first.
  *
  * resources/OrgEvent.ts applies this to every write from a verified agent,
  * admin agents included, on POST, PUT (single record, collection, and each
@@ -45,7 +47,10 @@ export function createdAtImmutable(): Response {
   );
 }
 
-/** 503 when the stored event could not be read, so the write was refused. */
+/**
+ * 503 when this check's own stored-event read fails, so the write was refused.
+ * Read failures in earlier checks keep their own responses.
+ */
 export function createdAtCheckUnavailable(err: unknown): Response {
   console.error(
     "org-event-created-at: the stored event could not be read, so the write was refused",

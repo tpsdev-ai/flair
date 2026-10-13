@@ -8,7 +8,11 @@
  *   - an update whose createdAt differs from the stored one is refused with
  *     `created_at_immutable` (409) and the stored row is unchanged, for agents
  *     and admin agents alike; an update that omits createdAt keeps it;
- *   - the catch-up feed orders events by that server time;
+ *   - the catch-up feed delivers events in timestamp and ID order, so events
+ *     with one server time are delivered in ID order (checked on a second,
+ *     frozen-clock instance with IDs in reverse write order);
+ *   - a credentialed Basic admin follows the same rule, and a collection PATCH
+ *     writes nothing;
  *   - a table-level write (the path flair's in-process writers use) keeps the
  *     createdAt it supplies;
  *   - a write whose stored-event read fails is refused and writes nothing.
@@ -23,6 +27,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import nacl from "tweetnacl";
 import { HarperInstance, startHarper, stopHarper } from "../helpers/harper-lifecycle";
 import {
@@ -37,8 +42,8 @@ function mkAgent(id: string): TestAgent {
   const kp = nacl.sign.keyPair();
   return { id, publicKey: Buffer.from(kp.publicKey).toString("base64"), secretKey: kp.secretKey };
 }
-function ed25519Header(agent: TestAgent, method: string, path: string): string {
-  const ts = Date.now().toString();
+function ed25519Header(agent: TestAgent, method: string, path: string, nowMs: number = Date.now()): string {
+  const ts = String(nowMs);
   const nonce = randomUUID();
   const payload = `${agent.id}:${ts}:${nonce}:${method}:${path}`;
   const sig = nacl.sign.detached(new TextEncoder().encode(payload), agent.secretKey);
@@ -69,31 +74,39 @@ const FUTURE = "2099-01-01T00:00:00.000Z";
 const PAST = "2001-01-01T00:00:00.000Z";
 const IMMUTABLE = "created_at_immutable";
 
-async function send(who: TestAgent, method: string, path: string, body?: unknown): Promise<Response> {
-  return fetch(`${harper.httpURL}${path}`, {
+async function send(who: TestAgent, method: string, path: string, body?: unknown, h: HarperInstance = harper, nowMs?: number): Promise<Response> {
+  return fetch(`${h.httpURL}${path}`, {
     method,
-    headers: { Authorization: ed25519Header(who, method, path), "Content-Type": "application/json" },
+    headers: { Authorization: ed25519Header(who, method, path, nowMs), "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
 }
-async function adminOp(op: Record<string, any>): Promise<Response> {
-  return fetch(harper.opsURL, {
+/** A REST call with the instance's credentialed Basic admin (Harper super_user). */
+async function basicSend(method: string, path: string, body?: unknown): Promise<Response> {
+  return fetch(`${harper.httpURL}${path}`, {
+    method,
+    headers: { Authorization: "Basic " + btoa(`${harper.admin.username}:${harper.admin.password}`), "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+}
+async function adminOp(op: Record<string, any>, h: HarperInstance = harper): Promise<Response> {
+  return fetch(h.opsURL, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: "Basic " + btoa(`${harper.admin.username}:${harper.admin.password}`) },
+    headers: { "Content-Type": "application/json", Authorization: "Basic " + btoa(`${h.admin.username}:${h.admin.password}`) },
     body: JSON.stringify(op),
   });
 }
-async function seedAgent(a: TestAgent, role: "agent" | "admin"): Promise<void> {
+async function seedAgent(a: TestAgent, role: "agent" | "admin", h: HarperInstance = harper): Promise<void> {
   const res = await adminOp({
     operation: "insert", database: "flair", table: "Agent",
     records: [{ id: a.id, name: a.id, role, publicKey: a.publicKey, createdAt: new Date().toISOString() }],
-  });
+  }, h);
   expect(res.status, `seed agent ${a.id} returned ${res.status}`).toBe(200);
 }
-async function readEvent(id: string): Promise<any> {
+async function readEvent(id: string, h: HarperInstance = harper): Promise<any> {
   const res = await adminOp({
     operation: "search_by_hash", database: "flair", table: "OrgEvent", hash_values: [id], get_attributes: ["*"],
-  });
+  }, h);
   const text = await res.text();
   expect(res.status, `search_by_hash returned ${res.status}: ${text.slice(0, 200)}`).toBe(200);
   return (JSON.parse(text) as any[])[0] ?? null;
@@ -256,8 +269,8 @@ describe("an update that omits createdAt keeps the stored value", () => {
   }
 });
 
-describe("catch-up orders events by the server's time", () => {
-  it("events written with caller-supplied createdAt values are delivered in write order, each at its server time", async () => {
+describe("catch-up delivers events in timestamp and ID order", () => {
+  it("events written with caller-supplied createdAt values are delivered in timestamp and ID order, each at its server time", async () => {
     const since = new Date(Date.now() - 1000).toISOString();
     const tag = randomUUID();
     const writes = [
@@ -315,7 +328,7 @@ describe("refusals that write nothing", () => {
   it("a POST with an array body is refused and stores nothing", async () => {
     const summary = `oect-post-array-${randomUUID()}`;
     const res = await send(agent, "POST", "/OrgEvent", [{ id: summary, authorId: agent.id, kind: "status", summary, createdAt: PAST }]);
-    expect(res.status, (await res.text()).slice(0, 300)).toBeGreaterThanOrEqual(400);
+    expect(res.status, (await res.text()).slice(0, 300)).toBe(400);
     expect(await readEvent(summary)).toBeNull();
     expect(await eventsBySummary(summary)).toEqual([]);
   }, 30_000);
@@ -333,5 +346,99 @@ describe("refusals that write nothing", () => {
     expect(res.status, text.slice(0, 300)).toBe(503);
     expect(JSON.parse(text).error).toBe("created_at_check_unavailable");
     expect(await readEvent(id)).toBeNull();
+  }, 30_000);
+});
+
+describe("a credentialed Basic admin follows the same createdAt rule", () => {
+  for (const [label, createdAt] of [["future", FUTURE], ["past", PAST]] as const) {
+    for (const [verb, path, body] of [
+      ["POST", "/OrgEvent", (id: string) => ({ id, authorId: agent.id, kind: "status", summary: "basic post", createdAt })],
+      ["PUT", null, (id: string) => ({ id, authorId: agent.id, kind: "status", summary: "basic put", createdAt })],
+      ["PATCH", null, (_id: string) => ({ authorId: agent.id, kind: "status", summary: "basic patch", createdAt })],
+    ] as const) {
+      it(`a Basic-admin ${verb} create with a ${label} createdAt stores the server time`, async () => {
+        const id = `oect-basic-${verb.toLowerCase()}-${label}-${randomUUID()}`;
+        const w = await timed(() => basicSend(verb, path ?? `/OrgEvent/${id}`, body(id)));
+        expect(w.res.status, w.text.slice(0, 300)).toBeLessThan(300);
+        expectServerTime((await readEvent(id))?.createdAt, w.from, w.to);
+      }, 30_000);
+    }
+  }
+
+  for (const [verb, body] of [
+    ["PUT", (id: string, createdAt: string) => ({ id, authorId: agent.id, kind: "status", summary: "changed", createdAt })],
+    ["PATCH", (_id: string, createdAt: string) => ({ summary: "changed", createdAt })],
+  ] as const) {
+    it(`a Basic-admin ${verb} that changes createdAt is refused with ${IMMUTABLE} (409) and the row is unchanged`, async () => {
+      const id = `oect-basic-upd-${verb.toLowerCase()}-${randomUUID()}`;
+      const before = await createOwn(agent, id);
+      const res = await basicSend(verb, `/OrgEvent/${id}`, body(id, PAST));
+      expectImmutableRefusal(res.status, await res.text(), before.createdAt, PAST);
+      expect(await readEvent(id)).toEqual(before);
+    }, 30_000);
+  }
+});
+
+describe("a PATCH to the OrgEvent collection writes nothing", () => {
+  for (const [who, status] of [[agent, 404], [admin, 400]] as const) {
+    it(`a ${who === admin ? "admin" : "non-admin"} collection PATCH is refused with ${status}`, async () => {
+      const id = `oect-coll-patch-${randomUUID()}`;
+      const before = await createOwn(agent, id);
+      const res = await send(who, "PATCH", "/OrgEvent/", { summary: "changed", createdAt: PAST });
+      expect(res.status, (await res.text()).slice(0, 300)).toBe(status);
+      expect(await readEvent(id)).toEqual(before);
+    }, 30_000);
+  }
+});
+
+describe("catch-up delivers events that share one server time in ID order", () => {
+  // A second instance whose clock is frozen (test/helpers/harper-freeze-clock.cjs),
+  // so every write gets the same server time and only the ID orders them.
+  // Requests are signed at the frozen instant, which is the instance's "now".
+  let frozen: HarperInstance;
+  let frozenAt = 0;
+  const writer = mkAgent("oect-tie-writer");
+  const tieReader = mkAgent("oect-tie-reader");
+
+  beforeAll(async () => {
+    frozenAt = Date.now();
+    const clockPreload = fileURLToPath(new URL("../helpers/harper-freeze-clock.cjs", import.meta.url));
+    frozen = await startHarper({
+      env: {
+        FLAIR_TEST_FROZEN_NOW: String(frozenAt),
+        NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --require=${clockPreload}`.trim(),
+      },
+    });
+    assertOwnInstance(frozen);
+    await seedAgent(writer, "agent", frozen);
+    await seedAgent(tieReader, "agent", frozen);
+  }, 240_000);
+
+  afterAll(async () => { if (frozen) await stopHarper(frozen); });
+
+  it("events written in reverse ID order at one server time are delivered in ID order", async () => {
+    const tag = randomUUID();
+    // Written c, b, a, each with a different caller createdAt.
+    const writes = [
+      { id: `oect-tie-c-${tag}`, createdAt: FUTURE },
+      { id: `oect-tie-b-${tag}`, createdAt: PAST },
+      { id: `oect-tie-a-${tag}`, createdAt: "2050-06-01T00:00:00.000Z" },
+    ];
+    for (const w of writes) {
+      const res = await send(writer, "PUT", `/OrgEvent/${w.id}`, {
+        id: w.id, authorId: writer.id, kind: "status", summary: "tie order", targetIds: [tieReader.id], createdAt: w.createdAt,
+      }, frozen, frozenAt);
+      expect(res.status, (await res.text()).slice(0, 300)).toBeLessThan(300);
+    }
+    const serverTime = new Date(frozenAt).toISOString();
+    for (const w of writes) expect((await readEvent(w.id, frozen))?.createdAt).toBe(serverTime);
+
+    const since = new Date(frozenAt - 1000).toISOString();
+    const path = `/OrgEventCatchup/${tieReader.id}?since=${encodeURIComponent(since)}&limit=200`;
+    const res = await send(tieReader, "GET", path, undefined, frozen, frozenAt);
+    const text = await res.text();
+    expect(res.status, text.slice(0, 300)).toBe(200);
+    const mine = (JSON.parse(text).events as any[]).filter((e) => String(e.id).endsWith(tag));
+    expect(mine.map((e) => e.id)).toEqual([...writes].reverse().map((w) => w.id));
   }, 30_000);
 });
