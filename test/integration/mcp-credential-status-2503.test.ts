@@ -266,8 +266,10 @@ describe("flair#2503 — any matching IdP row prevents JIT fallback; the call is
   // or Agent is created (JIT does not run).
   test("a principal-less row beside an ACTIVE principal-bearing row: the subject resolves through the principal-bearing row", async () => {
     const sub = `cs-pair-sub-${sfx}`;
-    const nopId = `cs-pair-nop-${sfx}`;
-    const liveId = `cs-pair-live-${sfx}`;
+    // Ids chosen so the principal-less row sorts FIRST: real storage serves it
+    // before the principal-bearing row, the order the rule has to scan past.
+    const nopId = `cs-pair-a-nop-${sfx}`;
+    const liveId = `cs-pair-b-live-${sfx}`;
     const now = new Date().toISOString();
     await adminUpsert("Credential", [
       { id: nopId, kind: "idp", label: "cs", status: "active", idpProvider: "cs-idp", idpSubject: sub, principalId: "", createdAt: now },

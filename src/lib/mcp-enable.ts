@@ -1326,9 +1326,11 @@ export interface IdentityMappingResult {
  *
  * **At most one ACTIVE, principal-bearing `Credential(kind:"idp",
  * idpSubject:<sub>)` exists at a time, regardless of `idpProvider`.** This
- * function is where that invariant is enforced, because it is the only
- * supported writer of the mapping. A principal-less row maps nothing and is
- * skipped, so it may remain active beside the mapping.
+ * function enforces that invariant on every write it makes (`flair mcp enable`,
+ * `flair principal link`). The MCP and XAA JIT provisioners also write a
+ * mapping, when their own lookup finds no matching row, and do not run this
+ * check. A principal-less row maps nothing and is skipped, so it may remain
+ * active beside the mapping.
  *
  * It used to dedup on `(kind, idpProvider, idpSubject)` while the resolver read
  * `(kind, idpSubject)`. A re-link under a different provider name therefore
@@ -1341,18 +1343,20 @@ export interface IdentityMappingResult {
  * stays on the row as audit/diagnostic metadata, but it does not participate in
  * uniqueness. So:
  *
- *   - same provider, existing active credential → RE-POINT it (`credentialReused`);
+ *   - same provider, existing active, principal-bearing credential → RE-POINT
+ *     it (`credentialReused`);
  *   - any OTHER active, principal-bearing credential for the subject →
  *     SUPERSEDE it: terminal `status: "revoked"`, never a soft flag a later
  *     path could flip back
  *     (revoked rows are never reused here — a re-link after a revoke mints a
  *     fresh credential);
  *   - the re-point/insert and every revocation go out as ONE ops-API `upsert`
- *     batch, so there is no observable window with two active credentials or
- *     zero. If the batch fails, nothing is claimed and the call throws;
+ *     batch, so there is no observable window with two active,
+ *     principal-bearing credentials or zero. If the batch fails, nothing is
+ *     claimed and the call throws;
  *   - after the write the invariant is RE-READ and asserted. A store that
- *     somehow holds ≠1 active credential for the subject is a hard error, not a
- *     silent nondeterministic mapping.
+ *     somehow holds ≠1 active, principal-bearing credential for the subject is a
+ *     hard error, not a silent nondeterministic mapping.
  *
  * The principal Agent is created only if missing.
  *

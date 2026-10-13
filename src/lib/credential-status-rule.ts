@@ -6,15 +6,16 @@
  * A `Credential(kind:"idp")` is the mapping that turns an IdP subject into a
  * flair principal. `resolveAgentFromSub` (resources/mcp-handler.ts) resolves a
  * token subject through it at request time, `provisionIdpIdentityMapping`
- * (src/lib/mcp-enable.ts) is the layer that writes and maintains it, and the
- * XAA jwt-bearer grant (resources/XAA.ts, `resolveOrCreatePrincipalLocked`)
- * resolves an ID-JAG subject through it. Before this module the resolver and
- * the linker accepted every status except `"revoked"`, so a principal-bearing
- * row with a missing, empty or unknown status was served as a live mapping; on
- * the resolver's path a revoked row was also skipped, so it could re-create a
- * principal when JIT provisioning was enabled. XAA already accepted only
- * `"active"` (flair#2501). All three sites now use this module's shared rule
- * for row usability.
+ * (src/lib/mcp-enable.ts) is the operator-facing layer that writes and
+ * maintains it (the MCP and XAA JIT provisioners also create one when their
+ * lookup finds none), and the XAA jwt-bearer grant (resources/XAA.ts,
+ * `resolveOrCreatePrincipalLocked`) resolves an ID-JAG subject through it.
+ * Before this module the resolver and the linker accepted every status except
+ * `"revoked"`, so a principal-bearing row with a missing, empty or unknown
+ * status was served as a live mapping; on the resolver's path a revoked row was
+ * also skipped, so it could re-create a principal when JIT provisioning was
+ * enabled. XAA already accepted only `"active"` (flair#2501). All three sites
+ * now use this module's shared rule for row usability.
  *
  * The rule is an ALLOWLIST: a credential is usable only when its `status` is
  * exactly `"active"`. Missing, empty, `"revoked"` and any other value are not
