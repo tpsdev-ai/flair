@@ -1,0 +1,146 @@
+// agent-pending-key-federation-2266.test.ts — flair#2266, the federation half.
+//
+// A known hub with a pinned key pushes a signed batch to POST /FederationSync.
+// The merge writes the Agent table through the RAW handle with a wholesale field
+// apply, so flair#2266 adds a guard: an inbound Agent record that would CHANGE a
+// local row's `publicKey` while the stored value is exactly `pending` is skipped
+// WHOLE as `agent_pending_key_not_federated` — distinct from the existing status
+// refusal `agent_status_not_federated`, which the plan still emits under its own
+// name.
+//
+// The last case is the peer non-convergence consequence: a pending copy that
+// arrived from another instance carries that instance's `originatorInstanceId`,
+// so this instance refuses to register it (`agent_not_local`); the remedy is the
+// admin rotation on the originating instance.
+import { describe, expect, test, beforeAll, afterAll } from "bun:test";
+import nacl from "tweetnacl";
+import { signBodyFresh } from "../../resources/federation-crypto.js";
+import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+
+const sfx = Date.now().toString(36);
+const HUB = `apk-hub-${sfx}`;
+const PENDING = `apk-pending-${sfx}`;
+const STATUS_TARGET = `apk-status-${sfx}`;
+const CONTROL = `apk-control-${sfx}`;
+const PEER_COPY = `apk-peercopy-${sfx}`;
+const now = () => new Date().toISOString();
+
+let harper: HarperInstance;
+
+function assertOwnInstance(h: HarperInstance): void {
+  for (const url of [h.httpURL, h.opsURL]) {
+    const u = new URL(url);
+    expect(["127.0.0.1", "localhost"], url).toContain(u.hostname);
+    expect(["9925", "9926"], `${url} must be this test's own Harper`).not.toContain(u.port);
+  }
+}
+
+const basicAuth = () => "Basic " + btoa(`${harper.admin.username}:${harper.admin.password}`);
+
+async function ops(operation: Record<string, unknown>): Promise<any> {
+  const res = await fetch(harper.opsURL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: basicAuth() },
+    body: JSON.stringify({ database: "flair", ...operation }),
+    signal: AbortSignal.timeout(15_000),
+  });
+  const text = await res.text();
+  expect(res.status, `${operation.operation}: ${text.slice(0, 300)}`).toBeLessThan(300);
+  return text.length > 0 ? JSON.parse(text) : undefined;
+}
+
+async function rawAgent(id: string): Promise<any> {
+  const rows = await ops({ operation: "search_by_id", table: "Agent", ids: [id], get_attributes: ["*"] });
+  return Array.isArray(rows) ? rows[0] : null;
+}
+
+const hub = nacl.sign.keyPair();
+const hubPublicKey = Buffer.from(hub.publicKey).toString("base64url");
+const aKey = Buffer.from(nacl.sign.keyPair().publicKey).toString("base64url");
+
+async function sync(id: string, data: Record<string, unknown>): Promise<any> {
+  const body = signBodyFresh(
+    { instanceId: HUB, records: [{ table: "Agent", id, updatedAt: now(), originatorInstanceId: HUB, ...data }], lamportClock: Date.now() },
+    hub.secretKey,
+  );
+  const res = await fetch(`${harper.httpURL}/FederationSync`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(15_000),
+  });
+  const text = await res.text();
+  expect(res.status, `FederationSync returned ${res.status}: ${text.slice(0, 300)}`).toBeLessThan(300);
+  return JSON.parse(text);
+}
+
+describe("flair#2266 — an inbound federated Agent record cannot complete a pending row's key", () => {
+  beforeAll(async () => {
+    harper = await startHarper();
+    assertOwnInstance(harper);
+    const t = new Date(Date.now() - 60_000).toISOString();
+    for (const id of [PENDING, STATUS_TARGET, CONTROL]) {
+      await ops({
+        operation: "insert", table: "Agent",
+        records: [{ id, name: id, role: "agent", admin: false, status: "active", runtime: "local", publicKey: "pending", createdAt: t, updatedAt: t }],
+      });
+    }
+    // A pending copy that arrived from another instance: it carries that
+    // instance's home.
+    await ops({
+      operation: "insert", table: "Agent",
+      records: [{ id: PEER_COPY, name: PEER_COPY, role: "agent", admin: false, status: "active", runtime: "local", publicKey: "pending", originatorInstanceId: HUB, createdAt: t, updatedAt: t }],
+    });
+    await ops({
+      operation: "insert", table: "Peer",
+      records: [{ id: HUB, publicKey: hubPublicKey, role: "hub", status: "active", createdAt: now() }],
+    });
+  }, 180_000);
+
+  afterAll(async () => { if (harper) await stopHarper(harper); });
+
+  test("an inbound record that changes a pending row's key is skipped whole as agent_pending_key_not_federated", async () => {
+    const out = await sync(PENDING, { data: { id: PENDING, publicKey: aKey, runtime: "remote" } });
+    expect(out.skippedReasons?.agent_pending_key_not_federated, JSON.stringify(out)).toBe(1);
+    const rec = await rawAgent(PENDING);
+    expect(rec?.publicKey, "the peer completed a pending row's key").toBe("pending");
+    expect(rec?.runtime, "a second field in the refused record landed (partial merge)").toBe("local");
+  }, 30_000);
+
+  test("the status rule keeps its OWN name (the two skips are distinguishable)", async () => {
+    const out = await sync(STATUS_TARGET, { data: { id: STATUS_TARGET, status: "deactivated" } });
+    expect(out.skippedReasons?.agent_status_not_federated, JSON.stringify(out)).toBe(1);
+    expect(out.skippedReasons?.agent_pending_key_not_federated, JSON.stringify(out)).toBeUndefined();
+    const rec = await rawAgent(STATUS_TARGET);
+    expect(rec?.status).toBe("active");
+  }, 30_000);
+
+  test("CONTROL: a record that does not touch a pending key still syncs", async () => {
+    const out = await sync(CONTROL, { data: { id: CONTROL, runtime: "remote2" } });
+    expect(out.merged, JSON.stringify(out)).toBe(1);
+    const rec = await rawAgent(CONTROL);
+    expect(rec?.runtime).toBe("remote2");
+    expect(rec?.publicKey).toBe("pending");
+  }, 30_000);
+
+  test("peer non-convergence: the peer's key change is refused and this instance refuses to register the foreign copy", async () => {
+    const out = await sync(PEER_COPY, { data: { id: PEER_COPY, publicKey: aKey } });
+    expect(out.skippedReasons?.agent_pending_key_not_federated, JSON.stringify(out)).toBe(1);
+    const rec = await rawAgent(PEER_COPY);
+    expect(rec?.publicKey, "the peer's key landed on the pending copy").toBe("pending");
+    expect(rec?.originatorInstanceId).toBe(HUB);
+
+    // The local instance is not this row's authority, so it refuses to register
+    // it: the remedy is the admin rotation on the originating instance.
+    const res = await fetch(`${harper.httpURL}/AgentKeyRegister`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: basicAuth() },
+      body: JSON.stringify({ agentId: PEER_COPY, publicKey: aKey }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    const text = await res.text();
+    expect(res.status, text.slice(0, 200)).toBe(403);
+    expect(JSON.parse(text).error).toBe("agent_not_local");
+    expect((await rawAgent(PEER_COPY))?.publicKey).toBe("pending");
+  }, 30_000);
+});

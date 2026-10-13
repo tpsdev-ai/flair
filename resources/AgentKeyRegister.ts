@@ -28,6 +28,7 @@
  */
 import { Resource, databases } from "harper";
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { resolveAgentAuth } from "./agent-auth.js";
 import { withKeyLock } from "./key-lock.js";
 import { withOwnedTransaction } from "./request-transaction.js";
@@ -149,6 +150,7 @@ export class AgentKeyRegister extends Resource {
             if (isForeignAgentHome(stored, selfInstanceId) || isSyncOriginatedAgentRow(stored)) return { kind: "not-local" as const };
             if (isPrincipalDeactivated(stored)) return { kind: "inactive" as const };
             if (stored.publicKey !== PENDING_PUBLIC_KEY) return { kind: "not-pending" as const };
+            const basis = { ...stored };
 
             // Test-only: inert unless the fault-injection env opt-in is set and
             // armed. Placed after the fresh read and before the staging, inside
@@ -184,15 +186,16 @@ export class AgentKeyRegister extends Resource {
               updatedAt: now,
             }, c);
             // Confirm the COMMITTED Agent row (an explicit fresh context, never
-            // this transaction's snapshot or its staged write) still holds every
-            // fact the decision used. A competing change that committed in
-            // between aborts this owned transaction: all three staged writes are
-            // discarded.
+            // this transaction's snapshot or its staged write) is still the very
+            // row the decision was made on: a whole-row comparison, so ANY field
+            // a competing writer committed in between — the key, the status, the
+            // originator, an unrelated field — aborts this owned transaction and
+            // discards all three staged writes. (The admin authorization itself is
+            // decided at request time by the gate annotation and is not derived
+            // from the row, so there is no owner to re-check here.)
             await confirmCommittedRow(table, agentId, (committed) => {
               const row = asRow(committed);
-              return row !== null &&
-                !isForeignAgentHome(row, selfInstanceId) && !isSyncOriginatedAgentRow(row) &&
-                !isPrincipalDeactivated(row) && row.publicKey === PENDING_PUBLIC_KEY;
+              return row !== null && isDeepStrictEqual({ ...row }, basis);
             });
             return { kind: "registered" as const, registrationId, updatedAt: now };
           }),

@@ -136,6 +136,7 @@ is `GET /Name/<id>` unless noted.
 | POST | `/Agent` | Admin Basic | Create principal. Also `POST /AgentSeed` (operator/internal only — not an admin-agent key). |
 | PUT / PATCH | `/Agent/<id>` | Ed25519 | An agent updates **only its own** record. |
 | DELETE | `/Agent/<id>` | Admin Basic | Deprovision. |
+| POST | `/AgentKeyRegister` | Admin Basic / admin Ed25519 | Register a caller-held Ed25519 public key on a row whose stored `publicKey` is exactly `pending`. Refuses 409 `agent_key_not_pending` (a non-`pending` row points to key rotation), 403 `agent_not_local` / `agent_inactive`, 404 `agent_not_found`, 400 `registration_request_invalid`, 409 `registration_conflict`, 503 `registration_unavailable`. Writes an `AgentKeyRegistration` audit row and a redacted `agent_key_registered` OrgEvent carrying the key fingerprint, never the key. |
 | GET | `/Presence` | Verified reader | Roster. Requires a valid `TPS-Ed25519` agent signature or the admin credential; an anonymous request gets 401. An instance may opt in to a public roster with `PRESENCE_PUBLIC_ROSTER=true`, in which case an unverified reader gets the allowlisted roster with `currentTask`, `flairVersion`, and `harperVersion` as null. Thresholds: [Presence for API consumers](#presence-for-api-consumers). |
 | POST | `/Presence` | Ed25519 | Heartbeat. Agent writes only its own row (403 cross-agent). Stamps `flairVersion` / `harperVersion` on the row. |
 | PUT / DELETE | `/Presence/<id>` | Ed25519 | Own row only. Collection PUT is not a public bypass. |
@@ -145,7 +146,9 @@ is `GET /Name/<id>` unless noted.
 
 `Credential` (GET/POST verified; extra credentials for a principal) and
 `Integration` (legacy 0.x platform rows; verified, prefer Credential) sit on
-the same identity plane.
+the same identity plane. `AgentKeyRegistration`
+(agent-key-registration.graphql) is the admin-read-only audit log of committed
+registrations — the key fingerprint, never the key.
 
 ### Memory, search, bootstrap
 
@@ -500,6 +503,7 @@ ed25519 / idp) and **Integration** (legacy platform connection).
 | **WorkspaceState** | workspace.graphql | yes | Current work (`ref`, `provider`, `phase`, `entities`) |
 | **OrgEvent** | event.graphql | yes | Org-visible event (`authorId`, `kind`, `summary`, `entities`) |
 | **AgentReadPosition** | agent.graphql | no | Per-agent watermark (`agentId`, `stream`, `position`). HTTP via `/AgentReadPosition`, not raw-table REST. |
+| **AgentKeyRegistration** | agent-key-registration.graphql | yes (admin read only) | Audit log of committed `POST /AgentKeyRegister` calls (`actorId`, `operator`, `agentId`, `instanceId`, `keyFingerprint`, `createdAt`); every REST write is refused. `replicate: true` is declared explicitly to state the database default (a table replicates unless it opts out). |
 | **Message** | message.graphql | yes | Signed envelope (`from`, `to`, `threadId`, `seq`, `state`, `signature`) |
 | **OAuthClient** | oauth.graphql | yes | Registered OAuth clients |
 | **OAuthAuthCode** | oauth.graphql | no | Single-use codes + PKCE |

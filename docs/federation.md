@@ -277,6 +277,23 @@ Records with `updatedAt` more than 5 minutes in the future are rejected. This pr
 
 Federation uses record-level last-write-wins (LWW) with ISO timestamp comparison. When two instances modify the same record, the one with the later `updatedAt` wins. Field-level LWW is planned for a future version.
 
+### A pending agent key is never completed by federation
+
+An Agent row seeded with `publicKey: "pending"` is completed only by
+`POST /AgentKeyRegister` on the instance that seeded it. The sync-in merge writes
+the Agent table through the raw table handle, so an inbound Agent record that
+would CHANGE a stored `pending` key is skipped whole and counted as
+`agent_pending_key_not_federated` — distinct from the `agent_status_not_federated`
+refusal, which keeps its own name (see [docs/api-reference.md](api-reference.md#federation)).
+
+Peer non-convergence is the consequence. After instance A registers a key, A's
+sync-out update reaches peer B, where the skip rule leaves B's copy exactly
+`pending`. B will not complete that copy itself: it carries A's
+`originatorInstanceId`, so B records it as `agent_not_local` and refuses. The two
+instances therefore do not converge on one key for that row. The remedy is to
+register the key on the seeding instance, or to run the administrator key
+rotation on the instance whose copy must serve.
+
 ## Troubleshooting
 
 ### Listen port drift
