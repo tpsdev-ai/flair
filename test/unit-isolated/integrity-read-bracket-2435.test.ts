@@ -14,7 +14,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { bindIntegrityCli, register } from "../../src/commands/integrity";
-import { emptyCheckpoint } from "../../src/lib/memory-integrity";
+import { DELETION_HISTORY_MARGIN_MS, emptyCheckpoint } from "../../src/lib/memory-integrity";
 
 const dirs: string[] = [];
 function tmp(): string {
@@ -24,7 +24,7 @@ function tmp(): string {
 }
 afterEach(() => { for (const d of dirs.splice(0)) { try { rmSync(d, { recursive: true, force: true }); } catch { /* */ } } });
 
-interface Run { code: number | undefined; verdict: any; calls: string[] }
+interface Run { code: number | undefined; verdict: any; calls: string[]; bodies: any[] }
 
 /**
  * Run `flair integrity check` against a fake operations API. The SQL count of
@@ -45,10 +45,12 @@ async function runCheckFake(opts: {
   const calls: string[] = [];
   let output = "";
   let code: number | undefined;
+  const bodies: any[] = [];
   try {
     bindIntegrityCli({ resolveOpsPort: () => 19925, resolveAdminUser: () => "admin" });
     globalThis.fetch = (async (_url: any, init: any) => {
       const body = JSON.parse(init.body);
+      bodies.push(body);
       calls.push(`${body.operation}:${typeof body.table === "string" ? body.table : ""}`);
       if (body.operation === "describe_table") return new Response(JSON.stringify({ record_count: (opts.memoryRows ?? []).length }));
       if (body.operation === "sql") {
@@ -72,7 +74,7 @@ async function runCheckFake(opts: {
   }
   let verdict: any = null;
   try { verdict = JSON.parse(output.trim().split("\n").pop() ?? ""); } catch { /* leave null */ }
-  return { code, verdict, calls };
+  return { code, verdict, calls, bodies };
 }
 
 function checkpointWithMissingDurable(): string {
@@ -121,4 +123,27 @@ test("check: a bounded read that matches its count reads as it always did", asyn
   expect(r.code).toBe(0);
   expect(r.verdict?.status).toBe("healthy");
   expect((r.verdict?.attributedDeletes ?? []).map((d: any) => d.id)).toContain("m1");
+});
+
+// flair#2487: the bracket is only meaningful if the count and the search cover
+// the SAME range. Assert both carry the same attribute, operator and bound
+// (the checkpoint watermark minus the margin) — a shifted bound on either side
+// would make the count describe a different range than the search it brackets.
+test("check: the bounded count and the bounded search cover the same range", async () => {
+  const watermark = "2026-10-02T00:00:00.000Z";
+  const since = new Date(Date.parse(watermark) - DELETION_HISTORY_MARGIN_MS).toISOString();
+  const r = await runCheckFake({
+    checkpoint: checkpointWithMissingDurable(),
+    memoryRows: [],
+    windowCount: 1,
+    windowRows: [{ id: "h1", memoryId: "m1", memoryInstanceToken: "t1", durability: "permanent", at: "2026-09-20T00:00:00.000Z" }],
+  });
+  const count = r.bodies.find((b: any) => b.operation === "sql");
+  const search = r.bodies.find((b: any) => b.operation === "search_by_conditions");
+  expect(count, JSON.stringify(r.calls)).toBeDefined();
+  expect(search, JSON.stringify(r.calls)).toBeDefined();
+  const m = /WHERE\s+(\w+)\s*(>=|=|>|<)\s*'([^']*)'/.exec(String(count.sql));
+  expect(m, `the bounded count SQL carries no range: ${String(count.sql)}`).not.toBeNull();
+  expect([m?.[1], m?.[2], m?.[3]]).toEqual(["at", ">=", since]);
+  expect(search.conditions).toEqual([{ search_attribute: "at", search_type: "greater_than_equal", search_value: since }]);
 });

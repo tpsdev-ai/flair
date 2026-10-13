@@ -6,7 +6,8 @@
   warning that names the state (not yet verified before the first scan; a failed
   scan with its bounded reason after an error), and `explain: true` output
   carries the same warning. A store already known to be mixed stays mixed when a
-  rescan fails. A scan error is logged once per error class and the guard retries
+  rescan fails, and a failed scan follows the same scan-start order as a verdict:
+  an earlier-started scan never overrides a later scan's result. A scan error is logged once per error class and the guard retries
   on its existing schedule; only a successful scan that finds one space reopens
   the gate. `flair doctor` reports the guard state from `/Health`, including from
   a not-ready 503, which it now reports as an issue instead of as nothing

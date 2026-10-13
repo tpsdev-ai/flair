@@ -190,6 +190,63 @@ describe("embedding-space-guard — latch", () => {
     expect(spaceGuardState()).toEqual({ state: "uniform", reason: null });
   });
 
+  // flair#2508 × flair#2530 — a scan's failure obeys the same scan-start order
+  // as its verdict. Deterministic interleave: scan A's table read is held on a
+  // deferred promise while scan B (started later) runs to completion.
+  function deferredTable() {
+    let settle!: (outcome: { table?: Awaited<ReturnType<ReturnType<typeof fakeTableOver>>>; error?: Error }) => void;
+    const held = new Promise<Awaited<ReturnType<ReturnType<typeof fakeTableOver>>>>((resolve, reject) => {
+      settle = (o) => (o.error ? reject(o.error) : resolve(o.table!));
+    });
+    return { getter: () => held, settle };
+  }
+
+  it("an earlier-started scan that FAILS after a later uniform scan published leaves the store uniform, no error", async () => {
+    const warns: string[] = [];
+    const orig = console.warn;
+    console.warn = (...a: unknown[]) => { warns.push(a.map(String).join(" ")); };
+    try {
+      const a = deferredTable();
+      _setGuardTableGetterForTests(a.getter);
+      const scanA = recomputeLatch(); // scan A starts first and waits on its table read
+
+      _setGuardTableGetterForTests(fakeTableOver([CURRENT, BARE]));
+      expect(await recomputeLatch()).toBe(true); // scan B starts later and publishes uniform
+
+      a.settle({ error: new Error("late read failure") }); // scan A now fails
+      expect(await scanA).toBe(true);
+      expect(spaceGuardState()).toEqual({ state: "uniform", reason: null });
+      expect(await isEmbeddingSpaceUniform()).toBe(true);
+      expect(warns.some((w) => w.includes("stale scan failure refused"))).toBe(true);
+    } finally {
+      console.warn = orig;
+    }
+  });
+
+  it("an earlier-started UNIFORM scan finishing after a later failed scan does not reopen the gate", async () => {
+    const a = deferredTable();
+    _setGuardTableGetterForTests(a.getter);
+    const scanA = recomputeLatch(); // scan A starts first and waits on its table read
+
+    _setGuardTableGetterForTests(async () => { throw new Error("no live table"); });
+    expect(await recomputeLatch()).toBe(false); // scan B starts later and fails
+
+    a.settle({ table: await fakeTableOver([CURRENT, BARE])() }); // scan A now reads a uniform corpus
+    expect(await scanA).toBe(false);
+    expect(spaceGuardState()).toEqual({ state: "scan-failed", reason: SCAN_ERROR_TABLE_UNAVAILABLE });
+    expect(await isEmbeddingSpaceUniform()).toBe(false);
+  });
+
+  it("a scan that fails after a foreign write is discarded first (flair#2481): mixed, no error recorded", async () => {
+    const a = deferredTable();
+    _setGuardTableGetterForTests(a.getter);
+    const scanA = recomputeLatch();
+    noteWriteStamp(FOREIGN); // the epoch changes while scan A is in flight
+    a.settle({ error: new Error("late read failure") });
+    expect(await scanA).toBe(false);
+    expect(spaceGuardState()).toEqual({ state: "mixed", reason: null });
+  });
+
   it("a later successful scan clears the failed state", async () => {
     _setGuardTableGetterForTests(async () => { throw new Error("transient"); });
     expect(await recomputeLatch()).toBe(false);

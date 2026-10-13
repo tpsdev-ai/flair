@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { Glob } from "bun";
 import { readFileSync } from "node:fs";
+import ts from "typescript";
 import { rawTableWriteSites } from "../helpers/raw-table-writers";
 
 /**
@@ -187,4 +188,107 @@ test("an aliased write-back call is an enumerated writer, and an unfollowable he
   const escaping = [...head, 'import { writeBackCommittedRow } from "./write-back.js";',
     "export const helpers = { run: writeBackCommittedRow, table: (databases as any).flair.Memory };"].join("\n");
   expect(() => rawTableWriteSites(file, escaping, "Memory")).toThrow("unresolved writer-helper reference");
+});
+
+/** True when the function-like node named `name` in `source` has a
+ *  `noteWriteStamp(...)` call inside its OWN body. Unlike the file-level check
+ *  above, a call in another function of the same file does not count. */
+function namedBodyTrips(source: string, name: string): boolean {
+  const ast = ts.createSourceFile("f.ts", source, ts.ScriptTarget.Latest, true);
+  let trips = false;
+  const visit = (node: ts.Node): void => {
+    if ((ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node)) && node.name && ts.isIdentifier(node.name) && node.name.text === name) {
+      const walk = (n: ts.Node): void => {
+        if (ts.isFunctionLike(n) || ts.isClassDeclaration(n) || ts.isClassExpression(n)) return;
+        if (ts.isCallExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === "noteWriteStamp") trips = true;
+        if (!trips) ts.forEachChild(n, walk);
+      };
+      if (node.body) walk(node.body);
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(ast);
+  return trips;
+}
+
+function putBranchTrips(source: string, branch: "reindex" | "ordinary"): boolean {
+  const ast = ts.createSourceFile("f.ts", source, ts.ScriptTarget.Latest, true);
+  let trips = false;
+  const visit = (node: ts.Node): void => {
+    if (ts.isMethodDeclaration(node) && node.name && ts.isIdentifier(node.name) && node.name.text === "put" && node.body) {
+      const statements = node.body.statements;
+      const index = statements.findIndex(statement => {
+        if (!ts.isIfStatement(statement)) return false;
+        const condition = statement.expression;
+        return ts.isBinaryExpression(condition) && condition.operatorToken.kind === ts.SyntaxKind.EqualsEqualsEqualsToken &&
+          ts.isPropertyAccessExpression(condition.left) && ts.isIdentifier(condition.left.expression) &&
+          condition.left.expression.text === "content" && condition.left.name.text === "_reindex" &&
+          condition.right.kind === ts.SyntaxKind.TrueKeyword && ts.isBlock(statement.thenStatement);
+      });
+      if (index < 0) return;
+      const reindex = statements[index] as ts.IfStatement;
+      const walk = (n: ts.Node): void => {
+        if (ts.isFunctionLike(n) || ts.isClassDeclaration(n) || ts.isClassExpression(n)) return;
+        if (ts.isCallExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === "noteWriteStamp") trips = true;
+        if (!trips) ts.forEachChild(n, walk);
+      };
+      if (branch === "reindex") walk(reindex.thenStatement);
+      else for (const statement of statements.slice(index + 1)) walk(statement);
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(ast);
+  return trips;
+}
+
+for (const branch of ["reindex", "ordinary"] as const) {
+  test(`Memory.put ${branch} branch calls noteWriteStamp (flair#2488)`, () => {
+    expect(putBranchTrips(readFileSync("resources/Memory.ts", "utf8"), branch),
+      `resources/Memory.ts#put ${branch} branch has no noteWriteStamp() call`,
+    ).toBe(true);
+  });
+}
+
+test("a parameter-default call does not trip the named body's latch", () => {
+  for (const source of [
+    "function patch(model = noteWriteStamp('foreign')) {}",
+    "class Memory { patch(model = noteWriteStamp('foreign')) {} }",
+  ]) expect(namedBodyTrips(source, "patch")).toBe(false);
+});
+
+test("an uncalled nested function does not trip the named body's latch", () => {
+  for (const nested of [
+    "function unused() { noteWriteStamp('foreign'); }",
+    "function patch() { noteWriteStamp('foreign'); }",
+    "const unused = () => noteWriteStamp('foreign');",
+    "const unused = function () { noteWriteStamp('foreign'); };",
+    "const unused = { run() { noteWriteStamp('foreign'); } };",
+    "class Unused { stamp = noteWriteStamp('foreign'); }",
+  ]) expect(namedBodyTrips(`function patch() { ${nested} }`, "patch")).toBe(false);
+});
+
+// flair#2488: the file-level check above passes while ONE writer's own
+// `noteWriteStamp` call is removed, as long as any other call in the same file
+// remains — its check is file-scoped. Pin the write bodies the GATED/LATCH
+// entries actually rely on: Memory.ts's three GATED write methods (post, put,
+// patch) and the federation merge helper the Federation LATCH entry trips
+// through. Each named body must trip the latch itself.
+const TRIPPING_WRITE_BODIES: ReadonlyArray<readonly [file: string, fn: string]> = [
+  ["resources/Memory.ts", "post"],
+  ["resources/Memory.ts", "put"],
+  ["resources/Memory.ts", "patch"],
+  ["resources/Federation.ts", "noteFederationMergedMemory"],
+];
+
+test("each GATED/LATCH write body trips the latch in its own body — fails-on-unfixed (flair#2488)", () => {
+  const missing = TRIPPING_WRITE_BODIES
+    .filter(([file, fn]) => !namedBodyTrips(readFileSync(file, "utf8"), fn))
+    .map(([file, fn]) => `${file}#${fn}`);
+  expect(missing,
+    `These GATED/LATCH write bodies have no noteWriteStamp() call of their own: ${JSON.stringify(missing)}. ` +
+    `A raw write that can land a foreign embeddingModel must trip the vector-space guard's latch from its own ` +
+    `write body, or the next recall cosines a foreign vector = mixed-space garbage (embedding-space-guard slice 1).`,
+  ).toEqual([]);
 });
