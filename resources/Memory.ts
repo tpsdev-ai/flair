@@ -27,6 +27,7 @@ import {
 import { putPointerRow, deletePointerRowViaTable } from "./host-pointer-adapter.js";
 import { DECLARED_MEMORY_ATTRIBUTES, stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./memory-declared-attributes.js";
 import { isJoinableTransaction, withOwnedTransaction, withSharedWriteTransaction } from "./request-transaction.js";
+import { applyGrantedVisibility } from "./grant-visibility.js";
 import { CommittedRowChanged, GrantedCloseRevoked, confirmCommittedRow, sameStoredRow, storedRowChangedRefusal, writeGrantHeld } from "./write-back.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 import { assertValidDurability, stampEphemeralExpiry } from "./memory-durability.js";
@@ -846,6 +847,12 @@ async function hasWriteGrant(granteeId: string, ownerId: string, ctx?: unknown):
  * Later changes follow Harper's timestamp order (see the PR residual-gap note).
  * An admin or internal write has no authorization read or owner comparison.
  *
+ * A write grant does not include changing a record's visibility; visibility is
+ * set by the owner or an admin. For a grant-authorized supersede,
+ * `requestedVisibility` (the visibility the caller's body named, read before
+ * any merge, carry or default) must read the same as the target's, and the
+ * successor carries the target's visibility (resources/grant-visibility.ts).
+ *
  * flair#704: an explicit `supersedes: null` — the shape most JSON writers
  * produce for an unset optional field (`JSON.stringify({supersedes: undefined})`
  * drops the key, but plenty of writers instead do `{supersedes: x ?? null}`)
@@ -866,6 +873,7 @@ async function validateAndAuthorizeSupersedes(
   auth: AgentAuthVerdict,
   ctx: any,
   stored: Record<string, any> | null,
+  requestedVisibility: unknown,
 ): Promise<{ denial: Response | null; close: SupersedeClose | null }> {
   const refuse = (denial: Response) => ({ denial, close: null });
   if (content.supersedes === null) {
@@ -895,6 +903,19 @@ async function validateAndAuthorizeSupersedes(
   if (target.agentId !== auth.agentId) {
     if (!(await hasWriteGrant(auth.agentId, target.agentId))) {
       return refuse(FORBIDDEN("forbidden: cannot supersede a memory owned by another agent without a write grant"));
+    }
+    // A write grant does not include changing a record's visibility; visibility
+    // is set by the owner or an admin. The successor carries the predecessor's
+    // visibility, and the ephemeral private-only rule (flair#1257) is applied to
+    // that value (resources/grant-visibility.ts).
+    const visibilityDenial = applyGrantedVisibility(content, target, requestedVisibility);
+    if (visibilityDenial) return refuse(visibilityDenial);
+    const tierError = assertVisibilityAllowedForDurability(content.durability ?? stored?.durability, content.visibility);
+    if (tierError) {
+      return refuse(new Response(
+        JSON.stringify({ error: "invalid_visibility_for_durability", message: tierError }),
+        { status: 400, headers: { "content-type": "application/json" } },
+      ));
     }
     // flair#2333 (H10): the close re-checks this grant against committed state
     // before it lands, so the grantee id travels with the close plan.
@@ -1540,6 +1561,8 @@ export class Memory extends (databases as any).flair.Memory {
     // embedding input and the stored embedding are computed from `content`.
     const redactedValues = redactMemoryWrite(content).count;
     canonicalizeSupersedes(content);
+    // The visibility the caller named, before any merge or default fills it.
+    const requestedVisibility = content?.visibility;
     const preparedSkill = await prepareSkillBody(content, postStored);
     if (preparedSkill instanceof Response) return preparedSkill;
     content = preparedSkill.content;
@@ -1654,7 +1677,7 @@ export class Memory extends (databases as any).flair.Memory {
     // supersedes: optional reference to the ID of the memory this one
     // replaces. Validates shape + cross-agent-write authorization (shared
     // with put() — see validateAndAuthorizeSupersedes doc).
-    const supersede = await validateAndAuthorizeSupersedes(content, auth, ctx, postStored);
+    const supersede = await validateAndAuthorizeSupersedes(content, auth, ctx, postStored, requestedVisibility);
     if (supersede.denial) return supersede.denial;
 
     // Temporal validity: validFrom defaults to now, validTo left null for active facts.
@@ -2216,6 +2239,8 @@ export class Memory extends (databases as any).flair.Memory {
     const preExisting = resolvedExisting.row;
     canonicalizeSupersedes(content);
     const requestedPayload = { ...content };
+    // The visibility the caller named, before any merge, carry or default fills it.
+    const requestedVisibility = content?.visibility;
     const urlTargetId = (this as any).getId?.();
     if (content && typeof content === "object" && content.id == null &&
       (typeof urlTargetId === "string" || typeof urlTargetId === "number")) {
@@ -2330,7 +2355,7 @@ export class Memory extends (databases as any).flair.Memory {
     // replaces. Validates shape + cross-agent-write authorization (shared
     // with post() — see validateAndAuthorizeSupersedes doc for why PUT needs
     // this too: it's the only HTTP-reachable create path).
-    const supersede = await validateAndAuthorizeSupersedes(content, auth, ctx, preExisting);
+    const supersede = await validateAndAuthorizeSupersedes(content, auth, ctx, preExisting, requestedVisibility);
     if (supersede.denial) return supersede.denial;
     if (content.supersedes && !content.validFrom) {
       content.validFrom = content.createdAt;

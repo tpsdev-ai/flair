@@ -13,6 +13,7 @@ import { maybeThrowSkillWriteFault } from "./skill-write-fault.js";
 import { supersedesTargetUnreadable } from "./memory-id-guard.js";
 import { grantedCloseRevokedRefusal, writeGrantHeld } from "./write-back.js";
 import { txnPausePoint } from "./txn-pause-point.js";
+import { grantedSuccessorVisibilityDenial } from "./grant-visibility.js";
 
 /** Durability-keyed default visibility (mirrors Memory's write default). */
 function defaultVisibilityForDurability(durability: unknown): "private" | "shared" {
@@ -259,6 +260,9 @@ export interface SkillSuccessorPlan {
    * Required, so every plan states it. When set, the shared writer re-checks the
    * grant on committed state after it stages the close and refuses the whole
    * write — no close, no successor, no version — when the grant is gone.
+   * When set, the successor must also read with the predecessor's visibility:
+   * a write grant does not include changing a record's visibility
+   * (grant-visibility.ts).
    */
   grantedClose: GrantedClose | null;
 }
@@ -388,6 +392,10 @@ async function runSkillVersionWriteInner(args: RunSkillVersionWriteArgs): Promis
         const built = await args.plan(head, shared);
         if (built === null) return null;
         if (built instanceof Response) return built;
+        // A write grant does not include changing a record's visibility;
+        // visibility is set by the owner or an admin (grant-visibility.ts).
+        const visibilityDenial = grantedSuccessorVisibilityDenial(built);
+        if (visibilityDenial) return visibilityDenial;
         plan = built;
         const target = built.kind === "delete" ? built.predecessor : built.successor;
         owner = String(target.agentId);
