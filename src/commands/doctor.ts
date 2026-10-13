@@ -134,6 +134,27 @@ export type DoctorCli = {
   __pkgVersion: any;
 };
 
+/**
+ * The ops endpoint the four instance reads (audit-log, instance-identity, Agent
+ * roster, Agent homes) may address, or the refusal (flair#2520), as
+ * `verifyDoctorRosterInstance` returns it.
+ */
+type DoctorProbedRead =
+  | { kind: "run"; opsPort: number }
+  /** `credentialRefused`: the ops endpoint refused the admin credential, so the pair was never checked (flair#2526). */
+  | { kind: "not-run"; reason: string; remedy: string; credentialRefused?: true };
+
+/**
+ * The admin credential doctor resolved for those four reads, and the target it
+ * verified with that credential (flair#2520). `read` is null when there is no
+ * usable credential.
+ */
+type DoctorProbedTarget = {
+  adminPass: string | undefined;
+  credIssue: string | null;
+  read: DoctorProbedRead | null;
+};
+
 let cli: DoctorCli;
 
 /** Bind the cli-locals this module depends on. */
@@ -231,55 +252,45 @@ export function targetsProbedHttpPort(url: string, httpPort: number): boolean {
  *     do not. `reason` says why the pair is unproven.
  *   - `not-run`: nothing credentialed goes to the HTTP port.
  */
-export type DoctorPairGate =
+type DoctorPairGate =
   | { kind: "run"; opsPort: number }
   | { kind: "http-only"; reason: string; remedy: string }
   | { kind: "not-run"; reason: string; remedy: string };
 
 /** What doctor prints when it has no admin credential to run the pair check with. */
-export const DOCTOR_PAIR_NO_CREDENTIAL_REMEDY =
+const DOCTOR_PAIR_NO_CREDENTIAL_REMEDY =
   "Set FLAIR_ADMIN_PASS, or restore ~/.flair/admin-pass (`flair init` writes it), so doctor can read the ops "
   + "endpoint's configuration, then re-run flair doctor.";
 
 /**
- * The check behind every credentialed request doctor sends to the probed HTTP
- * port (flair#2526): the HTTP/ops pair check (`verifyDoctorRosterInstance`)
- * with the local admin credential, which goes only to the ops endpoint. When
- * that check cannot read the ops configuration for want of a usable admin
- * credential, the probed port's own listener is proven without any credential
- * instead (`http-only`); a check that ran and refused stays `not-run`.
+ * Derive the HTTP-port gate (flair#2526) from the probed target flair#2520
+ * resolves (the admin credential and `verifyDoctorRosterInstance`'s answer for
+ * it, which includes the live-process pair proof). A proven pair runs; a pair
+ * check that ran and refused holds every credentialed request. When the pair
+ * could not be checked for want of a usable admin credential, the probed
+ * port's own listener is proven without any credential instead.
  */
-export async function decideDoctorPairGate(
-  opts: { port?: string | number; opsPort?: string | number; dataDir?: string },
+function decideDoctorPairGate(
+  probed: DoctorProbedTarget,
   probedHttpPort: number,
   proveListener: (httpPort: number) => LocalInstancePairProof = proveLocalHarperListener,
-): Promise<DoctorPairGate> {
-  let unchecked: { reason: string; remedy: string };
-  let adminPass: string | undefined;
-  let credentialIssue: string | null = null;
-  try {
-    adminPass = resolveLocalAdminPass(undefined);
-  } catch (err: unknown) {
-    credentialIssue = err instanceof Error ? err.message : String(err);
+): DoctorPairGate {
+  const read = probed.read;
+  if (read?.kind === "run") return read;
+  if (read?.kind === "not-run" && read.credentialRefused !== true) {
+    return { kind: "not-run", reason: read.reason, remedy: read.remedy };
   }
-  if (credentialIssue !== null) {
-    unchecked = {
-      reason: `the admin credential could not be resolved (${credentialIssue}), so the HTTP/ops pair check could not run`,
-      remedy: DOCTOR_PAIR_NO_CREDENTIAL_REMEDY,
-    };
-  } else if (!adminPass) {
-    unchecked = {
-      reason: "no admin credential to read the ops endpoint's configuration with, so the HTTP/ops pair check could not run",
-      remedy: DOCTOR_PAIR_NO_CREDENTIAL_REMEDY,
-    };
-  } else {
-    const pair = await verifyDoctorRosterInstance(opts, probedHttpPort, adminPass) as
-      | { kind: "run"; opsPort: number }
-      | { kind: "not-run"; reason: string; remedy: string; credentialRefused?: true };
-    if (pair.kind === "run") return pair;
-    if (pair.credentialRefused !== true) return { kind: "not-run", reason: pair.reason, remedy: pair.remedy };
-    unchecked = { reason: pair.reason, remedy: pair.remedy };
-  }
+  const unchecked = read !== null
+    ? { reason: read.reason, remedy: read.remedy }
+    : probed.credIssue !== null
+      ? {
+        reason: `the admin credential could not be resolved (${probed.credIssue}), so the HTTP/ops pair check could not run`,
+        remedy: DOCTOR_PAIR_NO_CREDENTIAL_REMEDY,
+      }
+      : {
+        reason: "no admin credential to read the ops endpoint's configuration with, so the HTTP/ops pair check could not run",
+        remedy: DOCTOR_PAIR_NO_CREDENTIAL_REMEDY,
+      };
   const listener = proveListener(probedHttpPort);
   if (listener.kind === "proven") return { kind: "http-only", ...unchecked };
   return {
@@ -796,24 +807,65 @@ program
       issues += renderEmbedGpuDoctorFinding(embedGpuFromHealth).issueDelta;
     }
 
+    // flair#2520: the audit-log, instance-identity, Agent-roster and Agent-homes
+    // reads go through an ops endpoint, which must belong to the instance doctor
+    // probed. Resolve the admin credential and verify that target with it here,
+    // using the pair check flair#2483 applies (with flair#2526's live-process
+    // proof), before doctor's first credentialed request to the probed HTTP
+    // port, whose gate is derived from this answer below. Diagnostic reads that run use
+    // the verified target; pairing refusals report NOT RUN with the shared
+    // reason and remedy, and existing UNVERIFIED/skipped outcomes remain. With
+    // no usable admin credential there is no target (`read` null) and no ops
+    // endpoint is read. `effectivePort` is final: PID discovery (step 1) and any
+    // --fix re-record have already run. This answer describes the credential
+    // and the process serving the probed port at this point, so it is shared
+    // only until a --fix step may change either: the launchd repair (7b, which
+    // can also write the admin-pass file from HDB_ADMIN_PASSWORD) and the
+    // install-tree restart (7c), both below. Those steps set
+    // `servingProcessMayHaveChanged`; the credential is then resolved again
+    // and, when one is available, the target verified with it, once, right
+    // after those steps (7a), and the Agent-roster and Agent-homes checks and
+    // the later credentialed HTTP reads use only that answer.
+    async function resolveProbedTarget(): Promise<DoctorProbedTarget> {
+      let adminPass: string | undefined;
+      let credIssue: string | null = null;
+      try {
+        adminPass = resolveLocalAdminPass(undefined);
+      } catch (err: unknown) {
+        credIssue = err instanceof Error ? err.message : String(err);
+      }
+      const read: DoctorProbedRead | null = adminPass
+        ? await verifyDoctorRosterInstance(opts, effectivePort, adminPass)
+        : null;
+      return { adminPass, credIssue, read };
+    }
+    const probed: DoctorProbedTarget = harperResponding
+      ? await resolveProbedTarget()
+      : { adminPass: undefined, credIssue: null, read: null };
+    const { adminPass: probedAdminPass, credIssue: probedCredIssue, read: probedRead } = probed;
+    let servingProcessMayHaveChanged = false;
+
     // flair#2526: doctor sends a credential to the probed HTTP port only after
-    // that port is proven (decideDoctorPairGate). The decision is taken here,
-    // once, before the first credentialed request, with the admin credential
-    // going only to the ops endpoint; the Agent IDs and homes sections reuse
-    // it. Unauthenticated reads (/Health, /OAuthMetadata, OAuth discovery, an
-    // unsigned /Presence) do not wait for it.
+    // that port is proven. The gate is derived from the probed target above
+    // (decideDoctorPairGate), before the first credentialed request, with the
+    // admin credential going only to the ops endpoint. Unauthenticated reads
+    // (/Health, /OAuthMetadata, OAuth discovery, an unsigned /Presence) do not
+    // wait for it.
     //   - `run` (the HTTP/ops pair is proven): every section runs.
     //   - `http-only` (no usable admin credential to check the pair with, but
     //     the probed port's own listener is proven): requests to the HTTP port
     //     run, signed or not (flair#2270: `doctor --agent` with an unusable
     //     ambient credential still reads the redirect state); sections that
-    //     join the HTTP port with the ops endpoint report NOT RUN.
-    //   - `not-run`: every credentialed section reports NOT RUN with the reason.
-    const pairGate: DoctorPairGate | null = harperResponding ? await decideDoctorPairGate(opts, effectivePort) : null;
+    //     join the HTTP port with the ops endpoint do not.
+    //   - `not-run`: every credentialed request to the HTTP port is held and its
+    //     section reports NOT RUN with the reason.
+    // After a --fix step that may change the serving process, the gate is
+    // derived again from the re-resolved target (7a below).
+    let pairGate: DoctorPairGate | null = harperResponding ? decideDoctorPairGate(probed, effectivePort) : null;
     /** Why the HTTP/ops pair is unproven (`http-only` or `not-run`), else null. */
-    const pairNotRun = pairGate !== null && pairGate.kind !== "run" ? pairGate : null;
+    let pairNotRun = pairGate !== null && pairGate.kind !== "run" ? pairGate : null;
     /** Whether requests to the probed HTTP port are held. */
-    const httpHeld = pairGate?.kind === "not-run";
+    let httpHeld = pairGate?.kind === "not-run";
     let pairRemedyShown = false;
     /** Print `<label>: NOT RUN — <reason>`, with the remedy the first time. */
     function reportPairNotRun(label: string, indent = "  "): void {
@@ -1107,6 +1159,7 @@ program
       }
     }
 
+
     // 4b. Audit-log positive control (flair#970) — REAL write→read_audit_log
     // round-trip, only if Harper is responding. `describe_table` reporting
     // `audit: true` proves nothing: a node that joined or resynced via
@@ -1115,65 +1168,71 @@ program
     // So doctor writes probe rows and asserts their audit entries come back —
     // never trusts the flag. Same ok/degraded/skipped discipline as the
     // embeddings check above: skipped is rendered UNVERIFIED, never as a pass.
-    if (harperResponding && pairNotRun) {
-      // It writes through the HTTP port and reads the audit through the ops
-      // endpoint, so it needs the pair itself, not only the HTTP listener.
-      reportPairNotRun("Audit log");
-    } else if (harperResponding) {
+    if (harperResponding) {
       // read_audit_log only exists on the ops API (its own port), which the
       // agent's Ed25519 header cannot authenticate — resolve the local admin
       // credential (env or ~/.flair/admin-pass; never prompts). A file with
       // unsafe permissions throws — that is "could not probe", not "broken".
-      let auditAdminPass: string | undefined;
-      let auditCredIssue: string | null = null;
-      try {
-        auditAdminPass = resolveLocalAdminPass(undefined);
-      } catch (err: unknown) {
-        auditCredIssue = err instanceof Error ? err.message : String(err);
-      }
-      const auditStatus = auditCredIssue
-        ? ({ state: "skipped", reason: "no-admin-credentials", detail: auditCredIssue } as const)
-        : await verifyAuditLog(
-            baseUrl,
-            opts.agent,
-            defaultKeysDir(),
-            `http://127.0.0.1:${resolveOpsPort(opts)}`,
-            resolveAdminUser(undefined),
-            auditAdminPass,
-          );
-      switch (auditStatus.state) {
-        case "ok":
-          // Present-tense claim ONLY (see AuditVerifyResult): the probe
-          // proves the log records writes NOW — never that history is
-          // complete. Overclaiming here would rebuild the false trust
-          // anchor this check exists to kill, one layer up.
-          console.log(`  ${render.icons.ok} Audit log: recording (verified now) ${render.wrap(render.c.dim, "(verifies current recording, not history — a resynced node's audit has a hard start boundary at its copy time)")}`);
-          break;
-        case "degraded":
-          if (auditStatus.cause === "disabled") {
-            console.log(`  ${render.icons.error} Audit log DISABLED ${render.wrap(render.c.dim, `— ${auditStatus.detail}`)}`);
-            console.log(`     ${render.wrap(render.c.dim, "Fix: enable logging.auditLog in the ROOT harperdb-config.yaml (the Harper instance config, NOT flair's component config.yaml), then restart Harper.")}`);
-          } else {
-            console.log(`  ${render.icons.error} Audit log NOT RECORDING ${render.wrap(render.c.dim, `— ${auditStatus.detail}`)}`);
-            console.log(`     ${render.wrap(render.c.red, "Audit reports as enabled, but fresh writes produced no audit entries — do not treat the audit log as a record of what happened.")}`);
-            console.log(`     ${render.wrap(render.c.dim, "On a node that joined or resynced via cluster base copy, audit history has a hard start boundary at copy time (harper#2212) — \"no history\" does not mean \"nothing happened\".")}`);
-            console.log(`     ${render.wrap(render.c.dim, "Check logging.auditLog in the ROOT harperdb-config.yaml (not flair's component config.yaml), then restart Harper.")}`);
-          }
-          issues++;
-          break;
-        case "failed":
-          // Same loud discipline as the embeddings probe above (flair#1501).
-          console.log(`  ${render.icons.error} Audit log: probe rejected ${render.wrap(render.c.dim, `— ${auditStatus.detail}`)}`);
-          console.log(`     ${render.wrap(render.c.dim, "Fix: register this key on the instance (`flair agent add <id>`) or pass --agent <a registered agent id>.")}`);
-          issues++;
-          break;
-        case "skipped":
-          // An unrun check must not look like a pass — UNVERIFIED, visually
-          // distinct from ok, but not a hard issue (mirrors the embeddings
-          // skip: the operator may simply have no agent or no local admin
-          // credential on this box).
-          console.log(`  ${render.icons.warn} Audit log: UNVERIFIED (could not probe — ${auditStatus.detail})`);
-          break;
+      if (probedCredIssue) {
+        console.log(`  ${render.icons.warn} Audit log: UNVERIFIED (could not probe — ${probedCredIssue})`);
+      } else if (probedRead?.kind === "not-run") {
+        // flair#2520: the pair-refused target the instance-identity section
+        // also uses (and the roster and home sections, unless a --fix step
+        // makes them verify again); name why and the remedy, and count it. This
+        // section's diagnostic read does not run.
+        issues++;
+        console.log(`  ${render.icons.warn} Audit log: NOT RUN — ${probedRead.reason}`);
+        console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${probedRead.remedy}`);
+      } else if (httpHeld) {
+        // flair#2526: the probe writes through the HTTP port, which is not
+        // proven, so nothing credentialed goes to it.
+        reportPairNotRun("Audit log");
+      } else {
+        // A verified target, or null with no admin credential. With none,
+        // verifyAuditLog answers its no-credential/no-agent skip before it would
+        // address the ops URL, so the empty URL is never fetched.
+        const auditStatus = await verifyAuditLog(
+          baseUrl,
+          opts.agent,
+          defaultKeysDir(),
+          probedRead ? `http://127.0.0.1:${probedRead.opsPort}` : "",
+          resolveAdminUser(undefined),
+          probedAdminPass,
+        );
+        switch (auditStatus.state) {
+          case "ok":
+            // Present-tense claim ONLY (see AuditVerifyResult): the probe
+            // proves the log records writes NOW — never that history is
+            // complete. Overclaiming here would rebuild the false trust
+            // anchor this check exists to kill, one layer up.
+            console.log(`  ${render.icons.ok} Audit log: recording (verified now) ${render.wrap(render.c.dim, "(verifies current recording, not history — a resynced node's audit has a hard start boundary at its copy time)")}`);
+            break;
+          case "degraded":
+            if (auditStatus.cause === "disabled") {
+              console.log(`  ${render.icons.error} Audit log DISABLED ${render.wrap(render.c.dim, `— ${auditStatus.detail}`)}`);
+              console.log(`     ${render.wrap(render.c.dim, "Fix: enable logging.auditLog in the ROOT harperdb-config.yaml (the Harper instance config, NOT flair's component config.yaml), then restart Harper.")}`);
+            } else {
+              console.log(`  ${render.icons.error} Audit log NOT RECORDING ${render.wrap(render.c.dim, `— ${auditStatus.detail}`)}`);
+              console.log(`     ${render.wrap(render.c.red, "Audit reports as enabled, but fresh writes produced no audit entries — do not treat the audit log as a record of what happened.")}`);
+              console.log(`     ${render.wrap(render.c.dim, "On a node that joined or resynced via cluster base copy, audit history has a hard start boundary at copy time (harper#2212) — \"no history\" does not mean \"nothing happened\".")}`);
+              console.log(`     ${render.wrap(render.c.dim, "Check logging.auditLog in the ROOT harperdb-config.yaml (not flair's component config.yaml), then restart Harper.")}`);
+            }
+            issues++;
+            break;
+          case "failed":
+            // Same loud discipline as the embeddings probe above (flair#1501).
+            console.log(`  ${render.icons.error} Audit log: probe rejected ${render.wrap(render.c.dim, `— ${auditStatus.detail}`)}`);
+            console.log(`     ${render.wrap(render.c.dim, "Fix: register this key on the instance (`flair agent add <id>`) or pass --agent <a registered agent id>.")}`);
+            issues++;
+            break;
+          case "skipped":
+            // An unrun check must not look like a pass — UNVERIFIED, visually
+            // distinct from ok, but not a hard issue (mirrors the embeddings
+            // skip: the operator may simply have no agent or no local admin
+            // credential on this box).
+            console.log(`  ${render.icons.warn} Audit log: UNVERIFIED (could not probe — ${auditStatus.detail})`);
+            break;
+        }
       }
     }
 
@@ -1192,19 +1251,25 @@ program
     // unreadable leaves the pairing-role check UNVERIFIED while the row facts
     // are still reported — a green line would claim a check that did not run.
     if (harperResponding) {
-      let identityAdminPass: string | undefined;
-      let identityCredIssue: string | null = null;
-      try {
-        identityAdminPass = resolveLocalAdminPass(undefined);
-      } catch (err: unknown) {
-        identityCredIssue = err instanceof Error ? err.message : String(err);
-      }
-      if (identityCredIssue) {
-        console.log(`  ${render.icons.warn} Instance identity: UNVERIFIED (could not probe — ${identityCredIssue})`);
+      if (probedCredIssue) {
+        console.log(`  ${render.icons.warn} Instance identity: UNVERIFIED (could not probe — ${probedCredIssue})`);
+      } else if (probedRead?.kind === "not-run") {
+        // flair#2520: the pair-refused target the audit-log section also uses
+        // (and the roster and home sections, unless a --fix step makes them
+        // verify again); name why and the remedy, and count it. This section's
+        // diagnostic read does not run.
+        issues++;
+        console.log(`  ${render.icons.warn} Instance identity: NOT RUN — ${probedRead.reason}`);
+        console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${probedRead.remedy}`);
+      } else if (probedRead === null) {
+        // No admin credential: the Instance table cannot be read, and no ops
+        // endpoint is addressed. Same UNVERIFIED state as before the target was
+        // shared.
+        console.log(`  ${render.icons.warn} Instance identity: UNVERIFIED (could not read the Instance table via the ops API)`);
       } else {
         const probe = await probeInstanceIdentity({
-          opsUrl: `http://127.0.0.1:${resolveOpsPort(opts)}`,
-          credentials: { user: resolveAdminUser(undefined), pass: identityAdminPass ?? "" },
+          opsUrl: `http://127.0.0.1:${probedRead.opsPort}`,
+          credentials: { user: resolveAdminUser(undefined), pass: probedAdminPass ?? "" },
         });
         if (probe.rows === null) {
           console.log(`  ${render.icons.warn} Instance identity: UNVERIFIED (could not read the Instance table via the ops API)`);
@@ -1903,6 +1968,15 @@ program
       // Execute the repair directly; it re-derives the plan internally and
       // verifies via assessLaunchdManagement (fail-loud, never a silent pass).
       const repairResult = await repairLaunchdManagement(defaultDataDir(), effectivePort);
+      // flair#2520: only a no-op is certain to leave the instance and the admin
+      // credential as they were. A repair or a failure may have clean-stopped
+      // the direct process and loaded a launchd job, and any outcome but a
+      // no-op may come after the repair wrote the 0600 admin-pass file from
+      // HDB_ADMIN_PASSWORD (flair#1685; a later refusal leaves the file in
+      // place). So the credential and target resolved before the repair no
+      // longer hold: the Agent-roster and Agent-homes checks resolve the
+      // credential again and, when one is available, verify the target again.
+      if (repairResult.kind !== "no-op") servingProcessMayHaveChanged = true;
       switch (repairResult.kind) {
         case "no-op":
           console.log(`  ${render.icons.ok} ${repairResult.detail}`);
@@ -1987,7 +2061,13 @@ program
               runningVersion: effectivePort === port ? instanceVersion : null,
             }) as TreeAssessment,
           repoint: (dry) => cli.repointMainServiceUnit(defaultDataDir(), effectivePort, { dryRun: dry }),
-          restart: () => cli.restartFlair(effectivePort, defaultDataDir()),
+          // flair#2520: set before the restart runs, so a restart that fails
+          // part-way still makes the later checks resolve the credential again
+          // and, when one is available, verify the target again.
+          restart: () => {
+            servingProcessMayHaveChanged = true;
+            return cli.restartFlair(effectivePort, defaultDataDir());
+          },
           rewriteFederation: (dry) => rewriteFederationSchedulerRuntime({ dryRun: dry }),
         },
       );
@@ -2016,6 +2096,18 @@ program
     // never aborts the others — that's the failure isolation flair#722 asks
     // for; describeAgentGateFinding (src/doctor-client.ts) is pure decision
     // logic so it's unit-tested without a real Harper.
+    // flair#2520/#2526: a --fix step above (7b, 7c) may have changed the serving
+    // process or written the admin-pass file. Resolve the credential and the
+    // target again, once, here, and derive the HTTP-port gate from that answer
+    // for every credentialed read below; the Agent-roster and Agent-homes
+    // checks use the same answer.
+    const lateProbe: DoctorProbedTarget = servingProcessMayHaveChanged ? await resolveProbedTarget() : probed;
+    if (lateProbe !== probed) {
+      pairGate = harperResponding ? decideDoctorPairGate(lateProbe, effectivePort) : null;
+      pairNotRun = pairGate !== null && pairGate.kind !== "run" ? pairGate : null;
+      httpHeld = pairGate?.kind === "not-run";
+      pairRemedyShown = false;
+    }
     const verifiedReadAgentIds = harperResponding
       ? planAgentIterations(keyAgentIds, opts.agent || process.env.FLAIR_AGENT_ID)
       : [];
@@ -2166,32 +2258,22 @@ program
       console.log(`\n  ${render.wrap(render.c.bold, "Agent IDs")}`);
       let roster: Array<{ id?: unknown }> | null = null;
       let rosterReadAttempted = false;
-      let agentListAdminPass: string | undefined;
-      let agentListCredIssue: string | null = null;
-      try {
-        agentListAdminPass = resolveLocalAdminPass(undefined);
-      } catch (err: unknown) {
-        agentListCredIssue = err instanceof Error ? err.message : String(err);
-      }
-      // flair#2483: before either read, doctor checks the ops endpoint against
-      // the HTTP port it actually probed (effectivePort — a PID-discovered port,
-      // or one --fix just re-recorded). The pairing rule only PICKS a candidate;
-      // it trusts ports the caller names. The candidate's own configured pair
-      // must then record it as the ops port and effectivePort as its HTTP port,
-      // bound on loopback or on all interfaces, and the OS listener table must
-      // show one process with a recognized Harper command line listening on
-      // both, unchanged across two reads (flair#2526; the check the local
-      // delete paths use). Two different Instance ids on the two endpoints also
-      // refuse. That decision is `pairGate`, taken before doctor's first
-      // credentialed request. When the pick or the pair check refuses or cannot
-      // complete, or the ids differ, both checks report NOT RUN (counted as an
-      // issue) and no Agent row is read.
-      const rosterTarget = agentListAdminPass ? pairGate : null;
-      const rosterNotRun = rosterTarget !== null && rosterTarget !== undefined && rosterTarget.kind !== "run" ? rosterTarget : null;
-      const rosterOpsPort = rosterTarget?.kind === "run" ? rosterTarget.opsPort : null;
-      if (agentListAdminPass && rosterOpsPort !== null) {
+      // flair#2483/#2520: read from the verified instance target. That is the
+      // answer resolved above, unless a --fix step since then may have changed
+      // the serving process or written the admin-pass file
+      // (servingProcessMayHaveChanged): the credential is then resolved and the
+      // target verified with it again, once, right after those steps (7a,
+      // `lateProbe`), and only that answer is used. The roster read addresses the verified ops port,
+      // or both the roster and home checks report NOT RUN (counted as an issue)
+      // and no Agent row is read. No admin credential leaves the target null;
+      // the roster read is skipped and named below.
+      const rosterProbe: DoctorProbedTarget = lateProbe;
+      const rosterAdminPass = rosterProbe.adminPass;
+      const rosterNotRun = rosterProbe.read?.kind === "not-run" ? rosterProbe.read : null;
+      const rosterOpsPort = rosterProbe.read?.kind === "run" ? rosterProbe.read.opsPort : null;
+      if (rosterAdminPass && rosterOpsPort !== null) {
         rosterReadAttempted = true;
-        const auth = Buffer.from(`${resolveAdminUser()}:${agentListAdminPass}`).toString("base64");
+        const auth = Buffer.from(`${resolveAdminUser()}:${rosterAdminPass}`).toString("base64");
         roster = await readAgentRoster({
           opsUrl: `http://127.0.0.1:${rosterOpsPort}/`,
           authHeader: `Basic ${auth}`,
@@ -2212,8 +2294,8 @@ program
         // for an Agent-ID check that did not happen.
         issues++;
         console.log(
-          agentListCredIssue
-            ? `  ${render.icons.warn} Skipped: the admin credential could not be resolved (${agentListCredIssue}), so the agent-id check did not run.`
+          rosterProbe.credIssue
+            ? `  ${render.icons.warn} Skipped: the admin credential could not be resolved (${rosterProbe.credIssue}), so the agent-id check did not run.`
             : rosterReadAttempted
               ? `  ${render.icons.warn} Could not read the stored Agent roster, so the agent-id check did not run.`
               : `  ${render.icons.warn} Skipped: no admin credentials to read the stored Agent roster, so the agent-id check did not run.`,
@@ -2237,12 +2319,12 @@ program
         issues++;
         console.log(`  ${render.icons.warn} Agent homes: NOT RUN — ${rosterNotRun.reason}`);
         console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${rosterNotRun.remedy}`);
-      } else if (!agentListAdminPass) {
+      } else if (!rosterAdminPass) {
         console.log(`  ${render.icons.info} Agent homes check skipped (no admin credential).`);
       } else {
         const homeOpsUrl = `http://127.0.0.1:${rosterOpsPort}/`;
-        const homeEndpoint = agentHomeEndpoint(homeOpsUrl, resolveAdminUser(), agentListAdminPass);
-        const homeAuth = `Basic ${Buffer.from(`${resolveAdminUser()}:${agentListAdminPass}`).toString("base64")}`;
+        const homeEndpoint = agentHomeEndpoint(homeOpsUrl, resolveAdminUser(), rosterAdminPass);
+        const homeAuth = `Basic ${Buffer.from(`${resolveAdminUser()}:${rosterAdminPass}`).toString("base64")}`;
         const homeRows = await readAgentHomeRows({ opsUrl: homeOpsUrl, authHeader: homeAuth, timeoutMs: 5000 });
         if (homeRows === null) {
           issues++;

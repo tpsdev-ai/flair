@@ -3,8 +3,9 @@
  * with an HTTP port on this host.
  *
  * Shared by the local delete paths (`memory hygiene --apply`, `agent remove`,
- * via src/lib/local-delete-instance.ts, flair#2225) and by `flair doctor`
- * (src/cli.ts `verifyDoctorRosterInstance`, flair#2483), so the rule is
+ * via src/lib/local-delete-instance.ts, flair#2225) and by `flair doctor`'s
+ * instance reads and credentialed HTTP requests (src/cli.ts
+ * `verifyDoctorRosterInstance`, flair#2483/#2520/#2526), so the rule is
  * written once.
  *
  * What it checks:
