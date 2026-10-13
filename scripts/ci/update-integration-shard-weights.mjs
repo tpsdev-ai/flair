@@ -2,11 +2,10 @@
 // Regenerate scripts/ci/integration-shard-weights.json from CI job logs.
 //
 // The weights that steer integration-shards.mjs come from measured CI runs, not
-// guesses. Each input is a downloaded job log for an `Integration Tests (shard
-// N/M)` job — `gh run view <run> --log --job <job>` or the
-// `actions/jobs/<id>/logs` REST endpoint. bun prints one
-// `##[group]<file>` … `##[endgroup]` block per integration file; this reads the
-// wall time of each block.
+// guesses. Each input is a job log for an `Integration Tests (shard N/M)` job —
+// the `actions/jobs/<id>/logs` REST endpoint, or the per-job text file in the
+// run's logs archive. bun prints one `##[group]<file>` … `##[endgroup]` block
+// per integration file; this reads the wall time of each block.
 //
 // Per file the script keeps the MAX within a job (a mutation step can re-run a
 // file) and the MEDIAN across jobs, then writes the file → seconds map sorted by
@@ -28,8 +27,13 @@ export function parseJobLog(text) {
   const perFile = {};
   let cur = null;
   let startTs = 0;
-  for (const line of text.split("\n")) {
-    const m = line.match(/^(\S+?Z)\s(.*)$/);
+  for (const raw of text.split("\n")) {
+    // Each line is `<timestamp> <body>`. The first line of a log may carry a
+    // UTF-8 BOM, and some log exports prefix every line with a
+    // `<job>\t<step>\t` tag; strip both before reading the timestamp.
+    const m = raw
+      .replace(/^\uFEFF/, "")
+      .match(/^(?:[^\t]*\t[^\t]*\t)?(\S+?Z)\s(.*)$/);
     if (!m) continue;
     const body = m[2];
     const g = body.match(/^##\[group\](\S+\.test\.ts):\s*$/);
@@ -115,6 +119,14 @@ if (isEntryPoint) {
   });
   const keep = new Set(listIntegrationFiles());
   const weights = aggregate(texts, keep);
+  if (Object.keys(weights).length === 0) {
+    process.stderr.write(
+      "update-integration-shard-weights: no per-file timings found in the given " +
+        "logs (no `##[group]<file>.test.ts:` blocks); refusing to write an empty " +
+        "weights table\n",
+    );
+    process.exit(1);
+  }
   const sorted = {};
   for (const k of Object.keys(weights).sort()) sorted[k] = weights[k];
   writeFileSync(out, `${JSON.stringify(sorted, null, 2)}\n`);

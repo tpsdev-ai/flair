@@ -49,10 +49,9 @@ export const WEIGHTS_FILE = join(
 export const DEFAULT_WEIGHT = 12;
 
 /**
- * Read and validate the weights file. A missing, unparsable or malformed file
- * THROWS (the process exits non-zero) rather than silently falling back to the
- * default weight: a silent fallback would rebalance every shard off a bogus
- * table and the mistake would only surface as an imbalanced or over-cap run.
+ * Read and validate the weights file. A missing, unparsable, malformed or empty
+ * file THROWS (the process exits non-zero) rather than falling back to the
+ * default weight for every file.
  */
 export function loadWeights(path = WEIGHTS_FILE) {
   let raw;
@@ -78,6 +77,11 @@ export function loadWeights(path = WEIGHTS_FILE) {
         `shard weights file ${path}: weight for ${file} must be a finite positive number, got ${JSON.stringify(seconds)}`,
       );
     }
+  }
+  if (Object.keys(parsed).length === 0) {
+    throw new Error(
+      `shard weights file ${path} must map at least one file path to a weight`,
+    );
   }
   return parsed;
 }

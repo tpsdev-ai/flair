@@ -7,7 +7,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -22,8 +22,12 @@ import {
   verifyShards,
   weightOf,
 } from "../../scripts/ci/integration-shards.mjs";
+import { parseJobLog } from "../../scripts/ci/update-integration-shard-weights.mjs";
 
 const ALL = listIntegrationFiles();
+
+/** A real `Integration Tests (shard 1/3)` job log, trimmed to five file blocks. */
+const REAL_LOG = join(ROOT, "test", "fixtures", "integration-shard-log.txt");
 
 /** Every `*.test.ts` the shell finds, sorted — the independent list to compare against. */
 function findFiles(): string[] {
@@ -130,6 +134,68 @@ describe("integration-shards — weights", () => {
   test("a missing weights file throws", () => {
     const dir = mkdtempSync(join(tmpdir(), "shard-weights-"));
     expect(() => loadWeights(join(dir, "absent.json"))).toThrow();
+  });
+
+  test("an empty weights table throws", () => {
+    const dir = mkdtempSync(join(tmpdir(), "shard-weights-"));
+    const p = join(dir, "empty.json");
+    writeFileSync(p, "{}");
+    expect(() => loadWeights(p)).toThrow();
+  });
+});
+
+describe("integration-shards — the weight parser", () => {
+  const log = readFileSync(REAL_LOG, "utf8");
+
+  test("reads per-file wall times from a real captured job log", () => {
+    const w = parseJobLog(log);
+    expect(Object.keys(w).length).toBe(5);
+    expect(w["test/integration/patch-refreshes-embedding-2466.test.ts"]).toBeCloseTo(26.34, 1);
+    expect(w["test/integration/host-pointer-negatives-1940.test.ts"]).toBeCloseTo(12.43, 1);
+    expect(w["test/integration/local-delete-instance-2225.test.ts"]).toBeCloseTo(17.14, 1);
+    expect(w["test/integration/skill-version-completion-inproc-2139.test.ts"]).toBeCloseTo(12.67, 1);
+    expect(w["test/integration/memory-purge-unconfirmed-2290.test.ts"]).toBeCloseTo(11.92, 1);
+  });
+
+  test("ignores a leading job/step tag and a byte-order mark", () => {
+    const prefixed = log
+      .split("\n")
+      .map((l) => (l ? `job-a\tstep-a\t${l}` : l))
+      .join("\n");
+    expect(parseJobLog(prefixed)).toEqual(parseJobLog(log));
+    expect(parseJobLog(`\uFEFF${log}`)).toEqual(parseJobLog(log));
+  });
+});
+
+describe("integration-shards — the weight updater CLI", () => {
+  const run = (...args: string[]) =>
+    spawnSync("node", ["scripts/ci/update-integration-shard-weights.mjs", ...args], {
+      cwd: ROOT,
+      encoding: "utf8",
+      timeout: 20_000,
+    });
+
+  test("regenerates a weights table from the real job log", () => {
+    const out = join(mkdtempSync(join(tmpdir(), "shard-regen-")), "w.json");
+    const r = run("--out", out, "test/fixtures/integration-shard-log.txt");
+    expect(r.status).toBe(0);
+    const written = JSON.parse(readFileSync(out, "utf8"));
+    expect(Object.keys(written).length).toBe(5);
+  });
+
+  test("refuses to write when the logs carry no file timings", () => {
+    const dir = mkdtempSync(join(tmpdir(), "shard-regen-"));
+    const logPath = join(dir, "setup-only.log");
+    writeFileSync(
+      logPath,
+      "2026-10-13T00:00:00.0000000Z ##[group]Set up job\n" +
+        "2026-10-13T00:00:01.0000000Z ##[endgroup]\n",
+    );
+    const out = join(dir, "w.json");
+    const r = run("--out", out, logPath);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("no per-file timings");
+    expect(() => readFileSync(out, "utf8")).toThrow();
   });
 });
 
