@@ -14,7 +14,8 @@
  *     and requires it to record that ops port and an HTTP port bound on
  *     loopback or on all interfaces, and both endpoints to report the same
  *     running Harper process id (the ops side's id from its `system_information`,
- *     or the alive pid its PID file names when that answer carries none);
+ *     or the alive pid its PID file names when that answer carries no process
+ *     id);
  *   - `decideDoctorRosterPair` runs only when that configured HTTP port is the
  *     probed one — no Instance row is needed, so a fresh install runs;
  *   - `decideDoctorRosterIdentity`, applied after that, refuses only when both
@@ -352,7 +353,7 @@ describe("proveLocalInstancePair — the ops endpoint's configuration must pair 
   });
 });
 
-describe("proveLocalInstancePair — the ops side's process id comes from system_information, or from the instance's PID file when that carries none", () => {
+describe("proveLocalInstancePair — the ops side's process id comes from system_information, or from the instance's PID file when that carries no process id", () => {
   test("system_information carries no pid but the instance's PID file names the live process the HTTP port reports: proven", async () => {
     configure({ http: { port: `127.0.0.1:${httpPort}` }, operationsApi: { network: { port: serverPort } }, rootPath: pairRoot });
     opsPid = null;

@@ -19,8 +19,8 @@
  *      `harperdb_processes.core[0].pid` its `system_information` reports
  *      (exactly as src/lib/mcp-enable.ts's `checkTargetRunsFromConfig` and
  *      `captureBootDiscriminator` read it), or — when that answer carries no
- *      pid — the pid the instance's own `<rootPath>/hdb.pid` names when that
- *      process is alive. When both sources carry a pid, they must agree;
+ *      usable pid — the pid the instance's own `<rootPath>/hdb.pid` names when
+ *      that process is alive. When both sources carry a pid, they must agree;
  *   3. it asks the configured HTTP port for `/HealthDetail` and reads the
  *      `pid` that resource reports (`process.pid` — the process serving that
  *      port); the pair is proven ONLY when the ops process id from step 2 and
