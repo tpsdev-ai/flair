@@ -447,9 +447,9 @@ export interface FlairHealthProbe {
   observation: WorkerThreadsObservation | null;
   /** The body doctor may read Flair's fields from (see readFlairHealthBody), or null. */
   healthBody: Record<string, unknown> | null;
-  /** A shape-validated Flair readiness 503 (searchReady false): the server
-   *  answers but does not serve search. Never healthy; `reaching` stays false
-   *  unless the 503 is also a multi-worker refusal. */
+  /** A readiness 503 (searchReady false) whose body has Flair's /Health
+   *  fields: the server answers but does not serve search. Never healthy;
+   *  `reaching` stays false unless the 503 is also a multi-worker refusal. */
   notReady: boolean;
   /** The 503's bounded searchReadyReason, when it has a printable one. */
   notReadyReason: string | null;
@@ -465,10 +465,11 @@ export function interpretFlairHealth(status: number, body: unknown): { reaching:
 /**
  * flair#2530 — the /Health body doctor may read fields from (version, embedding,
  * embeddingSpace). A 2xx object body is read as before. A 503 is read only when
- * its body has the shape Health.get builds (ok:false, a version string, a
- * boolean searchReady, a capabilities array), so another service's or a
- * proxy's 503 is never read as a Flair verdict. Reading a 503 never makes the
- * instance healthy: `notReady` marks Flair's readiness refusal.
+ * its body has the fields Health.get builds (ok:false, a version string, a
+ * boolean searchReady, a capabilities array), so a 503 without them (a typical
+ * proxy or other-service error) is not read. The check is on shape only; it
+ * cannot prove the response came from Flair. Reading a 503 never makes the
+ * instance healthy: `notReady` marks a readiness refusal.
  */
 export function readFlairHealthBody(
   status: number,

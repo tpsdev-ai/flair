@@ -6,9 +6,10 @@
  * its verdict on the public /Health body as `embeddingSpace: { state, reason }`.
  * The guard fails closed: only `state: "uniform"` serves the embedding leg; a
  * `mixed` store, an `unverified` verdict (before the first scan completes) and a
- * `scan-failed` verdict (the most recent scan threw) all make the recall leg
- * serve keyword-only. This module is the single decision: given that field, what
- * doctor prints and whether it weighs on the exit code.
+ * `scan-failed` verdict (the last published scan threw, no foreign stamp known)
+ * all make the recall leg refuse its embedding. This module is the single
+ * decision: given that field, what doctor prints and whether it weighs on the
+ * exit code.
  *
  * Only `mixed` is a blocking finding — it needs the operator to reconcile the
  * corpus. `unverified` and `scan-failed` are advisories (the guard retries, so
@@ -56,7 +57,7 @@ export function describeEmbeddingSpaceDoctorFinding(field: unknown): EmbeddingSp
         icon: "error",
         message:
           "the store has mixed embedding spaces — the embedding leg is refused" +
-          // A known-mixed store stays mixed through a failed rescan; name it.
+          // A known foreign stamp outranks a scan error; name the error too.
           (rec.reason == null ? "" : `; last scan failed (${boundedScanFailureReason(rec.reason)})`),
         fixHint: "Reconcile to one space with: flair reembed --stale-only",
       };

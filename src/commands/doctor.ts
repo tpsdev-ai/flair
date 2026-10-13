@@ -600,10 +600,11 @@ program
       }
     }
 
-    // flair#2530: a shape-validated Flair readiness 503 means Flair answers but
-    // does not serve search. It is an issue, never "responding", so the checks
-    // that need a serving instance stay skipped; its body still carries the
-    // version and the embedding-space guard state, read in 1a below.
+    // flair#2530: a readiness 503 whose body has Flair's /Health fields (see
+    // readFlairHealthBody) is reported as Flair answering without serving
+    // search. It is an issue, never "responding", so the checks that need a
+    // serving instance stay skipped; its body still carries the version and the
+    // embedding-space guard state, read in 1a below.
     let flairNotReady = false;
     const configuredProbe = await probeFlairHealth(`http://127.0.0.1:${port}/Health`);
     if (configuredProbe.reaching) {
@@ -704,9 +705,9 @@ program
       try {
         const probe = await probeFlairHealth(`${baseUrl}/Health`);
         if (probe.reaching) workerThreads = probe.observation ?? undefined;
-        // A 2xx body, or a shape-validated Flair 503 body (flair#2530): the
-        // fields are the server's own either way. Reading a 503 body does not
-        // make it healthy; the port check or the worker-threads check counts it.
+        // A 2xx body, or a 503 body with Flair's /Health fields (flair#2530).
+        // Reading a 503 body does not make it healthy; the port check or the
+        // worker-threads check counts it.
         if (probe.healthBody) {
           const healthBody = probe.healthBody as { version?: unknown; embedding?: unknown; embeddingSpace?: unknown };
           runningVersion = typeof healthBody.version === "string" ? healthBody.version : null;

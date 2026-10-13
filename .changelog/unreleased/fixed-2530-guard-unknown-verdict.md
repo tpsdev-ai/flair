@@ -2,13 +2,12 @@
 
   Before the first scan completes, or after a scan error, `isEmbeddingSpaceUniform()`
   returns false rather than defaulting to true, so semantic search and the
-  write-time dedup leg take their mixed-space path: keyword-only recall with a
-  warning that names the state (not yet verified before the first scan; a failed
-  scan with its bounded reason after an error), and `explain: true` output
-  carries the same warning. A store already known to be mixed stays mixed when a
-  rescan fails, and a failed scan follows the same scan-start order as a verdict:
-  an earlier-started scan never overrides a later scan's result. A scan error is logged once per error class and the guard retries
-  on its existing schedule; only a successful scan that finds one space reopens
-  the gate. `flair doctor` reports the guard state from `/Health`, including from
-  a not-ready 503, which it now reports as an issue instead of as nothing
-  responding.
+  write-time dedup leg take their mixed-space path. A recall with query text is
+  keyword-only, and a recall with only a `queryEmbedding` returns no results;
+  both, and `explain: true`, carry a warning that names the state (not yet
+  verified, a failed scan with its bounded reason, or mixed). A store known to be
+  mixed stays mixed when a scan fails, and a scan failure follows the same
+  scan-start order as a verdict. Only a successful scan that finds one space
+  reopens the gate. `flair doctor` reports the guard state from `/Health`,
+  including from a not-ready 503 (now reported as an issue rather than as nothing
+  responding); only a mixed store counts as an issue.

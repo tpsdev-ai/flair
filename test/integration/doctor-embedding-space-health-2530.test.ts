@@ -5,18 +5,22 @@
  * Health.get puts the embedding-space guard's verdict (`embeddingSpace`) on the
  * public /Health body, including its readiness 503 (search routes not mounted:
  * the boot window, when the guard is usually still unverified). Doctor must
- * report that state from both a 200 and a shape-validated Flair 503, without
- * calling the 503 healthy, and must not read a verdict from a 503 that does not
- * have Flair's /Health shape.
+ * report that state from both a 200 and a 503 with Flair's /Health shape,
+ * without calling the 503 healthy; must not read a verdict from a 503 without
+ * those fields; and must count only a mixed store as an issue.
  *
  * The server is a plain node HTTP listener on an ephemeral loopback port that
  * answers /Health with a fixed status + body and 404s everything else. Doctor
- * runs with an isolated HOME, no admin password and a closed ops port, so it
- * reads nothing else.
+ * runs all its other checks too, under an isolated HOME with no admin password
+ * and a closed ops port; this file asserts only the guard lines, the not-ready
+ * line, and the issue counts of three 200 responses that differ only in the
+ * guard verdict.
  *
- * Mutation check: delete the `renderEmbeddingSpaceDoctorFinding(...)` call from
- * the doctor action (src/commands/doctor.ts) and rebuild; every guard-state
- * assertion below goes red.
+ * Mutation checks: delete the `renderEmbeddingSpaceDoctorFinding(...)` call from
+ * the doctor action (src/commands/doctor.ts) and rebuild, and the 200 and
+ * Flair-503 guard-line assertions go red (the non-Flair-503 negative assertions
+ * stay green). Keep the call but drop its `issues +=` and the issue-count
+ * assertion goes red.
  *
  * Build prerequisite: dist/cli.js (`bun run build:cli`).
  */
@@ -78,6 +82,14 @@ function flairHealthBody(ready: boolean, embeddingSpace: Record<string, unknown>
   };
 }
 
+/** The issue count in doctor's summary line ("N issue(s) found", or 0 for "No issues found"). */
+function issueCount(stdout: string): number {
+  if (stdout.includes("No issues found")) return 0;
+  const m = /(\d+) issues? found/.exec(stdout);
+  if (!m) throw new Error(`no doctor summary line in:\n${stdout}`);
+  return Number(m[1]);
+}
+
 function runDoctor(port: number): Promise<{ code: number | null; stdout: string }> {
   return new Promise((resolve, reject) => {
     const env: Record<string, string> = {
@@ -128,6 +140,22 @@ describe("flair doctor reports the embedding-space guard from /Health (flair#253
     expect(stdout).toContain("not serving search (search routes not mounted (Memory, SemanticSearch))");
     expect(stdout).not.toContain(`Harper responding on port ${port}`);
   }, 120_000);
+
+  test("only a mixed store weighs on the issue count and the exit status", async () => {
+    // Same fixture, three 200 responses that differ only in the guard verdict.
+    const runs: Record<string, { code: number | null; count: number }> = {};
+    for (const state of ["uniform", "mixed", "scan-failed"]) {
+      const reason = state === "scan-failed" ? "the Memory corpus scan failed" : null;
+      const port = await serveHealth(200, flairHealthBody(true, { state, reason }));
+      const { code, stdout } = await runDoctor(port);
+      runs[state] = { code, count: issueCount(stdout) };
+      // Doctor exits non-zero exactly when its summary counts an issue.
+      expect(code, `${state}: exit status vs summary`).toBe(runs[state].count > 0 ? 1 : 0);
+    }
+    expect(runs.mixed.count - runs.uniform.count, "a mixed store adds exactly one issue").toBe(1);
+    expect(runs.mixed.code).toBe(1);
+    expect(runs["scan-failed"].count, "a failed scan is an advisory, not an issue").toBe(runs.uniform.count);
+  }, 240_000);
 
   test("a 503 without Flair's /Health shape is not read as a guard verdict", async () => {
     // searchReady:false and a guard field, but no version or capabilities list.

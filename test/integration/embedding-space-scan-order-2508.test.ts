@@ -18,9 +18,10 @@
  *      itself polls /health during startup).
  *   2. The store is confirmed empty, then a current-space row and a
  *      foreign-space row are inserted through the administrator operations API.
- *   3. A recall consults the guard while that scan is still parked. No request
- *      reached the guard before the barrier, so the parked scan is the boot
- *      pre-warm, the only other in-tree scan starter. The consult does not wait
+ *   3. A recall consults the guard while that scan is still parked. No consult
+ *      scan started before the barrier (startHarper's /health polls read only
+ *      the guard's snapshot), so the parked scan is the boot pre-warm, the only
+ *      other in-tree scan starter. The consult does not wait
  *      for a scan (flair#2530 fails closed): the first recall reports the
  *      not-yet-verified state and starts a consult scan, which started later.
  *      That scan publishes "not uniform"; a later recall, still sent while the

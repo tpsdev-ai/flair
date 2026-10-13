@@ -36,14 +36,16 @@
  * (`isEmbeddingSpaceUniform()` returns true). Every other state — pending
  * (`unverified`), a failed scan (`scan-failed`), or a foreign-write/mixed corpus
  * (`mixed`) — makes a consumer take its MIXED-space path: the recall leg drops
- * its query embedding and serves keyword-only with a state-named warning, the
- * dedup leg no-ops. A consult never blocks on an in-flight scan to obtain a
- * verdict; it fails closed now, and only a later SUCCESSFUL scan that finds the
- * store uniform reopens the gate. A scan error is classified into a bounded
- * reason (never row content) and logged once per class; the consult schedule
- * retries unchanged. A failed scan does not change a known-mixed store's state:
- * once a foreign stamp is known the state stays `mixed` until a successful scan,
- * with the scan error kept in `reason`.
+ * its query embedding and serves keyword-only results (none, for a request with
+ * no query text) with a state-named warning, the dedup leg no-ops. A consult
+ * never blocks on an in-flight scan to obtain a verdict; it fails closed now,
+ * and only a later SUCCESSFUL scan that finds the store uniform reopens the
+ * gate. An error from the scan's table lookup or corpus read is classified into
+ * a bounded reason (never row content); a published failure is logged once per
+ * reason, a refused stale one each time it is refused; the consult schedule
+ * retries unchanged. A known foreign stamp outranks a scan error: the state is
+ * `mixed` whenever one is known, and `reason` keeps the last failed scan's
+ * error whether that scan failed before or after the stamp was seen.
  *
  * ─── Why the harper import is deferred ──────────────────────────────────────
  * `harper` is dynamic-imported inside the scan only (never a top-level import)
@@ -154,8 +156,10 @@ let _lastScanAt = 0;
 let _scanning: Promise<void> | undefined;
 // flair#2481 — foreign-space write notes invalidate an in-flight scan's verdict.
 let _writeEpoch = 0;
-// flair#2530 — the last scan's bounded failure reason, or null. Non-null ⇒ the
-// verdict is unknown (fail closed) until a scan reaches a verdict.
+// flair#2530 — the bounded reason of the last failed scan that published, or
+// null; cleared when a later scan publishes a verdict. It reads as
+// `scan-failed` unless a foreign stamp is known, which makes the state `mixed`
+// (see guardSnapshot).
 let _lastScanError: string | null = null;
 const _loggedScanErrorReasons = new Set<string>();
 // flair#2508 — scan-start ordering. `recomputeLatch()` (the boot pre-warm's
@@ -225,7 +229,7 @@ async function scan(): Promise<void> {
     _uniform = uniform;
     _publishedScanSeq = scanSeq;
     _lastScanAt = Date.now();
-    // A scan that reached a verdict clears any earlier failed-scan state.
+    // A published verdict clears any earlier failed-scan state.
     _lastScanError = null;
   } catch {
     // The same two checks as the verdict publish above, in the same order. A
@@ -243,11 +247,12 @@ async function scan(): Promise<void> {
       );
       return;
     }
-    // Record a bounded reason (never row content) and log the class once; the
+    // Record a bounded reason (never row content) and log each reason once; the
     // prior verdict is left untouched and the consult schedule retries. The
-    // verdict now reads as unknown ⇒ consumers fail closed (flair#2530). The
-    // failure is this scan's published outcome, so an earlier-started scan that
-    // finishes later cannot clear it.
+    // state now reads `scan-failed`, or stays `mixed` when a foreign stamp is
+    // known; either way consumers fail closed (flair#2530). The failure is this
+    // scan's published outcome, so an earlier-started scan that finishes later
+    // cannot clear it.
     noteScanFailure(phase === "table" ? SCAN_ERROR_TABLE_UNAVAILABLE : SCAN_ERROR_SCAN_FAILED);
     _publishedScanSeq = scanSeq;
   }
@@ -262,18 +267,20 @@ function runScan(): Promise<void> {
 // The latch's verdict has FOUR operator-visible states. Only `uniform` — a scan
 // that verified the corpus — opens the gate. The other three are NOT "known
 // uniform" and fail closed: `unverified` (no scan has reached a verdict yet),
-// `scan-failed` (the most recent scan attempt threw), and `mixed` (a scan or a
-// foreign write observed a non-current stamp). `mixed` outranks `scan-failed`:
-// a failed rescan cannot make a known foreign stamp less certain.
+// `scan-failed` (the last scan to publish an outcome threw, and no foreign
+// stamp is known), and `mixed` (a scan or a foreign write observed a
+// non-current stamp). `mixed` outranks `scan-failed`: a known foreign stamp
+// decides the state whether a failed scan came before or after it.
 export type EmbeddingSpaceGuardState = "uniform" | "mixed" | "unverified" | "scan-failed";
 
 export interface EmbeddingSpaceVerdict {
   /** true ONLY for a scan-verified uniform store. False ⇒ take the mixed path. */
   uniform: boolean;
   state: EmbeddingSpaceGuardState;
-  /** The last failed scan's bounded reason, cleared when a scan reaches a
-   *  verdict; null otherwise. Non-null only for `scan-failed`, and for `mixed`
-   *  when a rescan of a known-mixed store failed. Never row content. */
+  /** The last failed scan's bounded reason, cleared when a later scan
+   *  publishes a verdict; null otherwise. Present with `scan-failed`, and with
+   *  `mixed` when a scan failed before or after the foreign stamp became known.
+   *  Never row content. */
   reason: string | null;
   /** The current engine-qualified space id (a metadata string, never a vector). */
   current: string;
@@ -281,12 +288,13 @@ export interface EmbeddingSpaceVerdict {
   found: string[];
 }
 
-/** Bounded, row-content-free reasons a scan can fail with. A scan error is
- *  classified into one of these; the raw message is never surfaced or logged. */
+/** Bounded, row-content-free reasons a scan can fail with. An error from the
+ *  scan's table lookup or corpus read is classified into one of these; the raw
+ *  message is never surfaced or logged. */
 export const SCAN_ERROR_TABLE_UNAVAILABLE = "the Memory table was not available";
 export const SCAN_ERROR_SCAN_FAILED = "the Memory corpus scan failed";
 
-/** Record a scan failure: remember the bounded reason and log the class ONCE.
+/** Record a scan failure: remember the bounded reason and log each reason ONCE.
  *  The consult schedule retries unchanged; this only names the state. Never
  *  logs the raw error (which could carry row content). */
 function noteScanFailure(reason: string): void {
@@ -304,8 +312,8 @@ function noteScanFailure(reason: string): void {
 function guardSnapshot(): EmbeddingSpaceVerdict {
   const current = normalizeStamp(_modelIdGetter()) ?? _modelIdGetter();
   const found = [..._activeStamps];
-  // A known foreign stamp comes first, so a later failed scan cannot turn a
-  // mixed store into an advisory `scan-failed`; its error rides in `reason`.
+  // A known foreign stamp comes first, so no failed scan, earlier or later,
+  // turns a mixed store into an advisory `scan-failed`; the error rides in `reason`.
   if (_uniform === false) return { uniform: false, state: "mixed", reason: _lastScanError, current, found };
   if (_lastScanError !== null) {
     return { uniform: false, state: "scan-failed", reason: _lastScanError, current, found };
@@ -371,11 +379,12 @@ export function noteWriteStamp(stamp: string | null | undefined): void {
 }
 
 /**
- * Force a fresh corpus scan and return the resulting uniformity. The explicit
- * "re-embed completion clears it" primitive — used by the boot pre-warm, and
- * callable after a bulk re-embed to reopen the gate promptly rather than
- * waiting out RECHECK_MS. Fails closed: a scan that did not reach a verdict
- * (failed) returns false, exactly as a consult would.
+ * Force a fresh corpus scan, then return the current published latch
+ * decision: true only when the latch reads verified uniform with no scan error.
+ * The explicit "re-embed completion clears it" primitive — used by the boot
+ * pre-warm, and callable after a bulk re-embed to reopen the gate promptly
+ * rather than waiting out RECHECK_MS. A later-started scan may have published
+ * that decision, so it does not say whether THIS scan succeeded.
  */
 export async function recomputeLatch(): Promise<boolean> {
   _lastScanAt = 0; // bypass the throttle
@@ -396,10 +405,10 @@ export function spaceGuardDiagnostics(): { current: string; found: string[] } {
 // ─── Boot pre-warm (module side effect) ──────────────────────────────────────
 // Best-effort, single-shot, deferred to after the current synchronous load
 // phase (same setImmediate convention as migration-boot.ts). If it fires
-// before the Memory table is live, the scan silently no-ops and the first real
-// consult computes the latch lazily — correctness never depends on this
-// pre-warm (fail-closed either way); it only decides whether the first query
-// serves embeddings or falls back to keyword-only until a scan completes.
+// before the Memory table is live, the scan fails (`scan-failed`) and a later
+// consult rescans — correctness never depends on this pre-warm (fail-closed
+// either way); it only decides whether the first queries serve embeddings or
+// take the mixed-space path until a scan completes.
 let _prewarmScheduled = false;
 // Settles when the most recently scheduled pre-warm's scan has finished,
 // whatever its outcome. Read only through `_prewarmSettledForTests()`.
