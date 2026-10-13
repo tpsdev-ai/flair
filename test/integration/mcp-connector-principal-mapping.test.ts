@@ -463,8 +463,10 @@ describe("flair#1280 — connector principal mapping (distinct-by-default, forma
   // Not a #1317 regression — #1317's supersede is only worth anything if
   // "revoked" is a real denial. This pins the resolver's fail-closed property
   // directly: the revoked credential is the ONLY credential for its subject, so
-  // "not returned first" cannot mask a pass. (Green on main too, by design —
-  // it is the security floor the supersede stands on.)
+  // "not returned first" cannot mask a pass. flair#2503 tightened it: a subject
+  // whose only row is non-active is now REFUSED by name (the credential, its
+  // stored status and the remedy), not skipped and not reported as an unmapped
+  // subject, and JIT provisioning does not run for it.
   test("(f) flair#1317 fail-closed — a REVOKED credential does not resolve AT ALL, even as its subject's only credential", async () => {
     const revokedSub = `pm-idp-revoked-${sfx}`;
     const mapping = await provisionIdpIdentityMapping({
@@ -488,9 +490,12 @@ describe("flair#1280 — connector principal mapping (distinct-by-default, forma
     expect(stored?.status, "fixture control: the credential really is revoked in storage").toBe("revoked");
     expect(stored?.principalId, "the row still names a real principal — so a resolver that ignored status WOULD resolve it").toBe(AGENT_B);
 
-    // THE ASSERTION: denied outright. Not de-prioritised — unresolvable.
+    // THE ASSERTION: denied outright, by name. Not de-prioritised, not resolved,
+    // and not treated as an unprovisioned subject.
     const rpc = await mcpCall(revokedSub, "bootstrap", {});
-    expect(rpc.error?.message, `a revoked credential must not resolve: ${JSON.stringify(rpc).slice(0, 300)}`)
-      .toContain("not a provisioned flair agent");
+    expect(rpc.result, `a revoked credential must not resolve: ${JSON.stringify(rpc).slice(0, 300)}`).toBeUndefined();
+    expect(rpc.error?.message, JSON.stringify(rpc)).toContain(`usable only when its status is "active"`);
+    expect(rpc.error?.message).toContain(`status "revoked"`);
+    expect(rpc.error?.message).toMatch(/re-link/);
   }, 120_000);
 });

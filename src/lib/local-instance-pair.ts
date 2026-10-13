@@ -5,8 +5,8 @@
  *
  * Shared by the local delete paths (`memory hygiene --apply`, `agent remove`,
  * via src/lib/local-delete-instance.ts, flair#2225) and by `flair doctor`'s
- * Agent roster and home reads (src/cli.ts `verifyDoctorRosterInstance`,
- * flair#2483), so the rule is written once.
+ * instance reads (src/cli.ts `verifyDoctorRosterInstance`, flair#2483/#2520),
+ * so the rule is written once.
  *
  * What it checks: it asks the loopback ops endpoint on `opsPort` for Harper's
  * `get_configuration`, and accepts only when that configuration
