@@ -19,6 +19,7 @@ import { buildEd25519Auth, defaultAdminPassPath, defaultKeysDir, requestTarget, 
 import { AGENT_ID_RULE } from "../lib/agent-id-rule.js";
 import { agentHomeEndpoint, readAgentHomeRows, resolveTargetInstanceIdentity } from "../lib/agent-home.js";
 import { readAgentRoster } from "../lib/agent-roster.js";
+import { describeIdpMappingWriters, idpMappingWriterLines, readCredentialAudit, readIdpMappingRows } from "../lib/idp-mapping-audit.js";
 import { flairConfigYamlCandidates, readPortFromYamlFile, resolveFlairConfigYaml } from "../lib/doctor-config-path.js";
 import { collectFederationEnv, describeFederationDriverFinding, federationPeersConfigured, loadYamlDoc } from "../lib/doctor-federation-driver.js";
 import { plistCarriesInlineAdminPassword } from "../lib/launchd-management.js";
@@ -2120,6 +2121,52 @@ program
             console.log(`  ${homeFinding.severity === "info" ? render.icons.info : render.icons.warn} ${homeFinding.message}`);
             if (homeFinding.fixHint) console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${homeFinding.fixHint}`);
             if (homeFinding.isIssue) issues++;
+          }
+        }
+      }
+
+      // 8d. IdP mapping rows written by a non-admin agent (from the audit log).
+      // An IdP mapping (Credential kind "idp") is written only by an
+      // administrator or the server (src/lib/idp-mapping-rule.ts);
+      // src/lib/idp-mapping-audit.ts says what the audit log can and cannot
+      // attribute. Read-only.
+      console.log(`\n  ${render.wrap(render.c.bold, "IdP mappings")}`);
+      if (rosterNotRun) {
+        issues++;
+        console.log(`  ${render.icons.warn} IdP mappings: NOT RUN — ${rosterNotRun.reason}`);
+        console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${rosterNotRun.remedy}`);
+      } else if (!agentListAdminPass || rosterOpsPort === null) {
+        console.log(`  ${render.icons.info} IdP mapping check skipped (no admin credential).`);
+      } else {
+        const idpOpsUrl = `http://127.0.0.1:${rosterOpsPort}/`;
+        const idpAuth = `Basic ${Buffer.from(`${resolveAdminUser()}:${agentListAdminPass}`).toString("base64")}`;
+        const idpRows = await readIdpMappingRows({ opsUrl: idpOpsUrl, authHeader: idpAuth, timeoutMs: 5000 });
+        if (idpRows === null) {
+          issues++;
+          console.log(`  ${render.icons.warn} Could not read the Credential table, so the IdP mapping check did not run.`);
+        } else if (idpRows.length === 0) {
+          console.log(`  ${render.icons.ok} No IdP mapping rows are stored.`);
+        } else {
+          const audit = await readCredentialAudit({ opsUrl: idpOpsUrl, authHeader: idpAuth, ids: idpRows.map((r) => r.id), timeoutMs: 10000 });
+          if (audit.kind !== "ok") {
+            issues++;
+            console.log(
+              `  ${render.icons.warn} ${idpRows.length} IdP mapping row(s) are stored, but the audit log ` +
+                (audit.kind === "disabled" ? "is off" : "could not be read") +
+                ", so which were written by a non-admin agent cannot be told.",
+            );
+            console.log(`     ${render.wrap(render.c.dim, "Fix:")} review them with \`flair principal links <principal>\`` +
+              (audit.kind === "disabled" ? "; enable logging.auditLog in the ROOT harperdb-config.yaml to attribute future writes." : "."));
+          } else {
+            const lines = idpMappingWriterLines(describeIdpMappingWriters(idpRows, audit.byId));
+            if (lines.warn) {
+              issues++;
+              console.log(`  ${render.icons.warn} ${lines.warn}`);
+              if (lines.fix) console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${lines.fix}`);
+            } else {
+              console.log(`  ${render.icons.ok} No IdP mapping rows written by a non-admin agent (from the audit log; ${idpRows.length} stored).`);
+            }
+            if (lines.info) console.log(`  ${render.icons.info} ${lines.info}`);
           }
         }
       }

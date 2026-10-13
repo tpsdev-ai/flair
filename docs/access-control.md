@@ -140,6 +140,23 @@ name:
   credential matching the written id and principal.
   Principal-less legacy rows are skipped and may remain active.
 
+### Who writes a mapping
+
+A mapping is written only by an administrator or by Flair itself:
+`flair mcp enable`, `flair principal link` and `unlink`, an administrator's
+write to the `Credential` resource, and just-in-time provisioning (below, and
+the XAA grant's). Through the `Credential` resource, a non-admin agent cannot
+create an `idp` credential, change a credential's kind to or from `idp`, or
+change an `idp` credential's principal, provider, subject or status. It may
+relabel its own `idp` credential or set its status to `revoked`. A refused
+write gets HTTP 403 with the error `idp_mapping_admin_only`.
+
+`flair doctor`'s **IdP mappings** check lists the IdP mapping rows written by
+a non-admin agent, from Harper's audit log. It changes nothing. It cannot attribute a credential with no retained audit entry
+(the audit log keeps `logging.auditRetention`, 3 days by default) and says how
+many there are; a write made before the `flair-agent` Harper user existed reads
+as an administrator's.
+
 ### Just-in-time provisioning
 
 `FLAIR_MCP_JIT_PROVISION` is off by default; `1`, `true`, `yes` or `on` turns
