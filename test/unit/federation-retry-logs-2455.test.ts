@@ -1,9 +1,9 @@
 // flair#2455 rev 2.1 N2 — the sender never logs receiver-authored text.
 //
 // This mocks the wire and asserts that the receiver's text reaches neither the
-// returned error nor any console output, for four responses: a non-2xx batch,
-// a failed liveness ping, a 200 whose `merged`/`skipped` are not counts, and a
-// 200 whose body is not JSON.
+// returned error nor any console output, for four responses: a 403 batch of
+// one record (not retried), a 503 liveness ping, a 200 whose `merged`/`skipped`
+// are not counts, and a 200 whose body is not JSON.
 import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
 import nacl from "tweetnacl";
 
@@ -107,7 +107,7 @@ describe("flair#2455 N2 — the sender logs no receiver-authored text", () => {
     }) as any;
   }
 
-  it("a non-2xx batch reports the HTTP status only, never the receiver body", async () => {
+  it("a 403 batch of one record reports the HTTP status only, never the receiver body", async () => {
     installMock({ rows: 1, batchStatus: 403, pingStatus: 200 });
     const { runFederationSyncOnce } = await import("../../src/cli");
     const result = await runFederationSyncOnce({ adminPass: "test-admin-pass", opsPort: "9925" });
@@ -118,7 +118,7 @@ describe("flair#2455 N2 — the sender logs no receiver-authored text", () => {
     expect(logs.join("\n")).not.toContain(SECRET);
   });
 
-  it("a failed liveness ping reports the HTTP status only, never the receiver body", async () => {
+  it("a 503 liveness ping reports the HTTP status only, never the receiver body", async () => {
     installMock({ rows: 0, batchStatus: 200, pingStatus: 503 });
     const { runFederationSyncOnce } = await import("../../src/cli");
     const result = await runFederationSyncOnce({ adminPass: "test-admin-pass", opsPort: "9925" });

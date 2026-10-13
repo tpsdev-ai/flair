@@ -25,8 +25,9 @@
  *
  * ACCESS (design rev 2.1). Admin-only on read, create,
  * update AND delete — the FederationPeers/Peer pattern (resources/Peer.ts,
- * resources/Federation.ts). The rows are local bookkeeping and never agent
- * data.
+ * resources/Federation.ts). The table is meant for local retry bookkeeping
+ * (keys, counters, reasons and outcomes); the schema does not constrain what
+ * an admin writes into its string fields.
  */
 import { databases } from "harper";
 import { isDeepStrictEqual } from "node:util";
@@ -104,9 +105,10 @@ export type RetryTerminalOutcome =
  * component, unknown resolution or bound, a `retry_exhausted` without its
  * bound, a bound on any other resolution), a missing row, a malformed row
  * (retryRowProblem) and an already-terminal row are refused by name WITHOUT
- * writing. If the write or the confirming
- * re-read fails, the transaction aborts and the row stays `pending`: the
- * outcome is never reported as success on a row that did not move.
+ * writing. If the write or the confirming re-read fails, the transaction
+ * aborts, so the call commits no change of its own (the stored row keeps
+ * whatever was last committed, including by an independent admin write), and
+ * the outcome is never reported as success.
  *
  * The write carries only the schema's declared fields (RETRY_ROW_FIELDS), never
  * a spread of the stored row.
