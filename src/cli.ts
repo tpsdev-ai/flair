@@ -1703,7 +1703,8 @@ export const DOCTOR_ROSTER_CREDENTIAL_REMEDY =
 /** Whether `flair doctor` may read the Agent roster and home rows, and from which ops endpoint. */
 export type DoctorRosterTargetDecision =
   | { kind: "run"; opsPort: number }
-  | { kind: "not-run"; reason: string; remedy: string };
+  /** `credentialRefused`: the ops endpoint refused the admin credential (HTTP 401/403), so the pair was never checked. */
+  | { kind: "not-run"; reason: string; remedy: string; credentialRefused?: true };
 
 /**
  * The candidate ops endpoint for `flair doctor`'s Agent roster and home reads
@@ -1753,11 +1754,12 @@ export function decideDoctorRosterPair(
   proof: LocalInstancePairProof,
 ): DoctorRosterTargetDecision {
   if (proof.kind === "unproven") {
+    const credentialRefused = proof.status === 401 || proof.status === 403;
     return {
       kind: "not-run",
       reason: `the ops endpoint on port ${opsPort} did not prove a live HTTP/ops pair (${proof.detail}), so this check cannot be established for the probed HTTP port ${probedHttpPort}`,
-      remedy: proof.remedy
-        ?? (proof.status === 401 || proof.status === 403 ? DOCTOR_ROSTER_CREDENTIAL_REMEDY : DOCTOR_ROSTER_TARGET_REMEDY),
+      remedy: proof.remedy ?? (credentialRefused ? DOCTOR_ROSTER_CREDENTIAL_REMEDY : DOCTOR_ROSTER_TARGET_REMEDY),
+      ...(credentialRefused ? { credentialRefused: true as const } : {}),
     };
   }
   if (proof.httpPort !== probedHttpPort) {

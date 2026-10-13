@@ -30,9 +30,10 @@
  * `--port` only when `--port` is given; otherwise they address that port.
  *
  * Nothing is sent to the HTTP port: the admin credential goes only to the ops
- * endpoint the caller named. Both callers send the admin credential to the
- * HTTP port only after this check proves it; doctor holds agent-signed reads
- * too, except on a host with no admin credential (src/commands/doctor.ts).
+ * endpoint the caller named. Both callers send a credential to the HTTP port
+ * only after this check proves it, or, in doctor when no usable admin
+ * credential can run it, after {@link proveLocalHarperListener} proves that
+ * port's own listener (src/commands/doctor.ts `decideDoctorPairGate`).
  * No PID file and no process id an endpoint reports about itself is evidence
  * (Harper's own `system_information` pid is read from its `hdb.pid`).
  *
@@ -174,6 +175,35 @@ export async function proveLocalInstancePair(
         RESTARTING_REMEDY,
       );
     }
+  }
+  return { kind: "proven", httpPort };
+}
+
+/**
+ * The credential-free half of the check, for one HTTP port (flair#2526): one
+ * process listens on `httpPort`, it has a recognized Harper command line, and
+ * its pid and start time are unchanged on a second read. Nothing is sent to
+ * any port. It proves the port's listener is a Harper process, not which ops
+ * endpoint it pairs with: `flair doctor` uses it only when the full check
+ * could not read the ops configuration for want of a usable admin credential,
+ * and then only for requests to that HTTP port.
+ */
+export function proveLocalHarperListener(httpPort: number, deps: Pick<LocalInstancePairDeps, "osReads"> = {}): LocalInstancePairProof {
+  const os: InstancePairOsReads = { ...DEFAULT_OS_READS, ...osReadsForTests, ...deps.osReads };
+  const first = observeListener(os, "HTTP", httpPort);
+  if (!("birth" in first)) return first;
+  const notHarper = harperListenerRefusal(os, first.pid, "HTTP", httpPort);
+  if (notHarper !== null) return notHarper;
+  const second = observeListener(os, "HTTP", httpPort);
+  if (!("birth" in second)) return second;
+  if (first.birth !== second.birth) {
+    return {
+      kind: "unproven",
+      status: null,
+      detail: `the process listening on HTTP port ${httpPort} changed between two reads (${first.birth}, then ${second.birth}), ` +
+        `so it is not proven to be the process whose command line was checked`,
+      remedy: RESTARTING_REMEDY,
+    };
   }
   return { kind: "proven", httpPort };
 }

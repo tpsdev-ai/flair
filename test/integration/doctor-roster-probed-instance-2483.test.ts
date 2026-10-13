@@ -29,8 +29,9 @@
  * row on each instance: the paired case still runs, and the stale
  * configuration is refused by the pair check. The third calls the pair check
  * directly against both instances. The fourth runs doctor against a listener
- * that answers 200 but is not A, with A's ops port and FLAIR_ADMIN_PASS, and
- * asserts that no Authorization header reaches it.
+ * that answers 200 but is not A, with A's ops port and FLAIR_ADMIN_PASS (the
+ * real one, then a wrong one that the ops endpoint refuses), and asserts that
+ * no Authorization header reaches it.
  *
  * Build prerequisite: dist/cli.js and dist/resources/*.js
  * (`bun run build && bun run build:cli`).
@@ -94,14 +95,14 @@ function listeningPidOn(port: number): number | null {
 }
 
 /** Run `flair doctor` with an isolated HOME; returns the process's code + streams. */
-function runDoctor(opts: { args: string[]; opsPort?: string }): Promise<{ code: number | null; stdout: string; stderr: string }> {
+function runDoctor(opts: { args: string[]; opsPort?: string; adminPass?: string }): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const env: Record<string, string> = {
       ...process.env,
       HOME: home,
       FLAIR_URL: "",
       FLAIR_TOKEN: "",
-      FLAIR_ADMIN_PASS: ADMIN_PASS,
+      FLAIR_ADMIN_PASS: opts.adminPass ?? ADMIN_PASS,
       NO_COLOR: "1",
     };
     if (opts.opsPort === undefined) delete env.FLAIR_OPS_PORT;
@@ -451,6 +452,25 @@ describe("flair#2526 — doctor sends no credential to an unproven HTTP port", (
       expect(r.stdout, r.stdout).toContain(`Embeddings: NOT RUN — the configured HTTP/ops pair does not match`);
       expect(r.stdout, r.stdout).toContain("Agent IDs: NOT RUN");
       expect(r.stdout, "A's rows were read through the unproven port").not.toContain(BAD_ID_ON_A);
+    } finally {
+      await capture.stop();
+    }
+  }, 90_000);
+
+  test("with an unusable admin credential, the fallback proves the HTTP port's own listener: a listener that is not Harper still receives no Authorization header", async () => {
+    // The ops endpoint refuses the wrong password (HTTP 401), so the pair is
+    // never checked; doctor then proves the probed port's listener without a
+    // credential. A 200-answering listener that is not Harper fails that proof.
+    const capture = await startHeaderCapture();
+    try {
+      writeHomeConfig(`opsPort: ${opsPort(a)}\n`);
+      const r = await runDoctor({ args: ["--port", String(capture.port)], opsPort: opsPort(a), adminPass: `${ADMIN_PASS}-wrong` });
+      const seen = capture.requests();
+      expect(seen.length, "doctor never reached the listener, so the test proves nothing").toBeGreaterThan(0);
+      const credentialed = seen.filter((q) => "authorization" in q.headers).map((q) => q.url);
+      expect(credentialed, `credentialed requests reached the unproven port:\n${r.stdout}`).toEqual([]);
+      expect(r.stdout, r.stdout).toContain("the configuration request answered HTTP 401");
+      expect(r.stdout, r.stdout).toContain("nor is the HTTP port's own listener proven");
     } finally {
       await capture.stop();
     }

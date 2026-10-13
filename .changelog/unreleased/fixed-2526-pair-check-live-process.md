@@ -8,11 +8,12 @@
   same pid and start time when both are read again. A configuration that names
   a port another process serves is refused, whatever PID file or process id an
   endpoint reports. The check itself sends nothing to the HTTP port, and
-  `flair doctor` now runs it before any credentialed request to that port.
-  Until the pair is proven, every section whose request can carry the admin
-  credential reports NOT RUN with the reason, and so do agent-signed reads
-  when the check refused. On a host with no admin credential, where the check
-  cannot run, agent-signed reads run as before.
+  `flair doctor` now runs it before any credentialed request to that port;
+  until the pair is proven, those sections report NOT RUN with the reason.
+  When doctor has no usable admin credential to check the pair with, it
+  proves the probed port's own listener (one stable process with a Harper
+  command line) without any credential, and then runs the requests to that
+  port only.
 
   The table shows only the listeners this CLI can see. A listener in another
   network namespace or container, or owned by a user this CLI may not

@@ -16,6 +16,7 @@ import { hookSettingsPath, resolveHookAgentId } from "../hook-install.js";
 import { ALL_CLIENTS, decideCodexPinOnly, decideJsonPinOnly, detectClients, type ClientId, wireAntigravity, wireClaudeCode, wireCodex, wireCursor, wireGemini } from "../install/clients.js";
 import { checkGlobalBinOnPath, resolveNpmGlobalPrefix } from "../install/global-bin-path.js";
 import { buildEd25519Auth, defaultAdminPassPath, defaultKeysDir, requestTarget, requestUrl, resolveAdminUser, resolveKeyPath, resolveLocalAdminPass } from "../lib/auth-resolve.js";
+import { proveLocalHarperListener, type LocalInstancePairProof } from "../lib/local-instance-pair.js";
 import { AGENT_ID_RULE } from "../lib/agent-id-rule.js";
 import { agentHomeEndpoint, readAgentHomeRows, resolveTargetInstanceIdentity } from "../lib/agent-home.js";
 import { readAgentRoster } from "../lib/agent-roster.js";
@@ -222,12 +223,18 @@ export function targetsProbedHttpPort(url: string, httpPort: number): boolean {
 
 /**
  * Whether doctor may send a credential to the probed HTTP port (flair#2526).
- * `noAdminCredential` marks a check that could not run because doctor has no
- * usable admin credential, so none can be sent.
+ *   - `run`: the HTTP/ops pair is proven; every section runs.
+ *   - `http-only`: the pair could not be checked for want of a usable admin
+ *     credential (none, unresolvable, or refused by the ops endpoint), but the
+ *     probed HTTP port's own listener is proven (proveLocalHarperListener):
+ *     requests to that port run; sections that join it with the ops endpoint
+ *     do not. `reason` says why the pair is unproven.
+ *   - `not-run`: nothing credentialed goes to the HTTP port.
  */
 export type DoctorPairGate =
   | { kind: "run"; opsPort: number }
-  | { kind: "not-run"; reason: string; remedy: string; noAdminCredential?: true };
+  | { kind: "http-only"; reason: string; remedy: string }
+  | { kind: "not-run"; reason: string; remedy: string };
 
 /** What doctor prints when it has no admin credential to run the pair check with. */
 export const DOCTOR_PAIR_NO_CREDENTIAL_REMEDY =
@@ -235,36 +242,51 @@ export const DOCTOR_PAIR_NO_CREDENTIAL_REMEDY =
   + "endpoint's configuration, then re-run flair doctor.";
 
 /**
- * The HTTP/ops pair check behind every credentialed request doctor sends to
- * the probed HTTP port (flair#2526): `verifyDoctorRosterInstance` with the
- * local admin credential, which goes only to the ops endpoint. Without that
- * credential the pair cannot be checked, so the answer is `not-run`.
+ * The check behind every credentialed request doctor sends to the probed HTTP
+ * port (flair#2526): the HTTP/ops pair check (`verifyDoctorRosterInstance`)
+ * with the local admin credential, which goes only to the ops endpoint. When
+ * that check cannot read the ops configuration for want of a usable admin
+ * credential, the probed port's own listener is proven without any credential
+ * instead (`http-only`); a check that ran and refused stays `not-run`.
  */
 export async function decideDoctorPairGate(
   opts: { port?: string | number; opsPort?: string | number; dataDir?: string },
   probedHttpPort: number,
+  proveListener: (httpPort: number) => LocalInstancePairProof = proveLocalHarperListener,
 ): Promise<DoctorPairGate> {
+  let unchecked: { reason: string; remedy: string };
   let adminPass: string | undefined;
+  let credentialIssue: string | null = null;
   try {
     adminPass = resolveLocalAdminPass(undefined);
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
-    return {
-      kind: "not-run",
-      reason: `the admin credential could not be resolved (${message}), so the HTTP/ops pair check could not run`,
-      remedy: DOCTOR_PAIR_NO_CREDENTIAL_REMEDY,
-      noAdminCredential: true,
-    };
+    credentialIssue = err instanceof Error ? err.message : String(err);
   }
-  if (!adminPass) {
-    return {
-      kind: "not-run",
+  if (credentialIssue !== null) {
+    unchecked = {
+      reason: `the admin credential could not be resolved (${credentialIssue}), so the HTTP/ops pair check could not run`,
+      remedy: DOCTOR_PAIR_NO_CREDENTIAL_REMEDY,
+    };
+  } else if (!adminPass) {
+    unchecked = {
       reason: "no admin credential to read the ops endpoint's configuration with, so the HTTP/ops pair check could not run",
       remedy: DOCTOR_PAIR_NO_CREDENTIAL_REMEDY,
-      noAdminCredential: true,
     };
+  } else {
+    const pair = await verifyDoctorRosterInstance(opts, probedHttpPort, adminPass) as
+      | { kind: "run"; opsPort: number }
+      | { kind: "not-run"; reason: string; remedy: string; credentialRefused?: true };
+    if (pair.kind === "run") return pair;
+    if (pair.credentialRefused !== true) return { kind: "not-run", reason: pair.reason, remedy: pair.remedy };
+    unchecked = { reason: pair.reason, remedy: pair.remedy };
   }
-  return await verifyDoctorRosterInstance(opts, probedHttpPort, adminPass);
+  const listener = proveListener(probedHttpPort);
+  if (listener.kind === "proven") return { kind: "http-only", ...unchecked };
+  return {
+    kind: "not-run",
+    reason: `${unchecked.reason}; nor is the HTTP port's own listener proven (${listener.detail})`,
+    remedy: listener.remedy ?? unchecked.remedy,
+  };
 }
 
 function resolveOpsPort(...args: any[]): any {
@@ -775,20 +797,23 @@ program
     }
 
     // flair#2526: doctor sends a credential to the probed HTTP port only after
-    // the HTTP/ops pair check has proven that port. The check runs here, once,
-    // before the first credentialed request, with the admin credential going
-    // only to the ops endpoint; the Agent IDs and homes sections reuse its
-    // decision. Unauthenticated reads (/Health, /OAuthMetadata, OAuth
-    // discovery, an unsigned /Presence) do not wait for it. Until the pair is
-    // proven, every request that can carry the admin credential (the shared
-    // resolver behind api(), which may pick Basic, FLAIR_TOKEN or a key, and
-    // any explicit Basic header) reports NOT RUN with the reason. Requests
-    // signed with an agent key carry no admin credential: they are held too
-    // when the check ran and refused, and run as before on a host with no
-    // admin credential, where the check cannot run.
+    // that port is proven (decideDoctorPairGate). The decision is taken here,
+    // once, before the first credentialed request, with the admin credential
+    // going only to the ops endpoint; the Agent IDs and homes sections reuse
+    // it. Unauthenticated reads (/Health, /OAuthMetadata, OAuth discovery, an
+    // unsigned /Presence) do not wait for it.
+    //   - `run` (the HTTP/ops pair is proven): every section runs.
+    //   - `http-only` (no usable admin credential to check the pair with, but
+    //     the probed port's own listener is proven): requests to the HTTP port
+    //     run, signed or not (flair#2270: `doctor --agent` with an unusable
+    //     ambient credential still reads the redirect state); sections that
+    //     join the HTTP port with the ops endpoint report NOT RUN.
+    //   - `not-run`: every credentialed section reports NOT RUN with the reason.
     const pairGate: DoctorPairGate | null = harperResponding ? await decideDoctorPairGate(opts, effectivePort) : null;
-    const pairNotRun = pairGate?.kind === "not-run" ? pairGate : null;
-    const agentSignedHeld = pairNotRun !== null && pairNotRun.noAdminCredential !== true;
+    /** Why the HTTP/ops pair is unproven (`http-only` or `not-run`), else null. */
+    const pairNotRun = pairGate !== null && pairGate.kind !== "run" ? pairGate : null;
+    /** Whether requests to the probed HTTP port are held. */
+    const httpHeld = pairGate?.kind === "not-run";
     let pairRemedyShown = false;
     /** Print `<label>: NOT RUN — <reason>`, with the remedy the first time. */
     function reportPairNotRun(label: string, indent = "  "): void {
@@ -993,7 +1018,7 @@ program
         if (finding.isIssue) issues++;
       }
 
-      const mcpRedirectFinding = pairNotRun
+      const mcpRedirectFinding = httpHeld
         ? null
         : await readTargetMcpRedirectFinding(() =>
           api("GET", "/HealthDetail", undefined, {
@@ -1002,7 +1027,7 @@ program
             ...(opts.agent ? { agentId: opts.agent, agentIdSource: "flag" } : {}),
           }),
         );
-      if (pairNotRun) reportPairNotRun("MCP OAuth redirect");
+      if (httpHeld) reportPairNotRun("MCP OAuth redirect");
       if (mcpRedirectFinding) {
         console.log(`  ${mcpRedirectFinding.isIssue ? render.icons.error : render.icons.warn} ${mcpRedirectFinding.message}`);
         if (mcpRedirectFinding.fixHint) console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${mcpRedirectFinding.fixHint}`);
@@ -1040,7 +1065,7 @@ program
     // "no issues found". This now stores a memory with a distinctive phrase and
     // searches for a PARAPHRASE (no shared keywords). If the top result isn't
     // recovered by MEANING, recall-by-meaning is broken and doctor FAILS LOUDLY.
-    if (harperResponding && agentSignedHeld) {
+    if (harperResponding && httpHeld) {
       reportPairNotRun("Embeddings");
     } else if (harperResponding) {
       const semanticStatus = await verifySemanticSearch(baseUrl, opts.agent, defaultKeysDir());
@@ -1090,7 +1115,9 @@ program
     // So doctor writes probe rows and asserts their audit entries come back —
     // never trusts the flag. Same ok/degraded/skipped discipline as the
     // embeddings check above: skipped is rendered UNVERIFIED, never as a pass.
-    if (harperResponding && agentSignedHeld) {
+    if (harperResponding && pairNotRun) {
+      // It writes through the HTTP port and reads the audit through the ops
+      // endpoint, so it needs the pair itself, not only the HTTP listener.
       reportPairNotRun("Audit log");
     } else if (harperResponding) {
       // read_audit_log only exists on the ops API (its own port), which the
@@ -1415,7 +1442,7 @@ program
         }
         console.log(`     ${render.icons.ok} FLAIR_URL ${render.wrap(render.c.dim, urlLabel)} reachable`);
 
-        if (agentSignedHeld && targetsProbedHttpPort(eff.url, effectivePort)) {
+        if (httpHeld && targetsProbedHttpPort(eff.url, effectivePort)) {
           reportPairNotRun(`agent '${block.agentId}' registration`, "     ");
           continue;
         }
@@ -1993,7 +2020,7 @@ program
       ? planAgentIterations(keyAgentIds, opts.agent || process.env.FLAIR_AGENT_ID)
       : [];
     // flair#2526: these reads are agent-signed, held when the pair check refused.
-    const signedReadsNotRun = agentSignedHeld && verifiedReadAgentIds.length > 0;
+    const signedReadsNotRun = httpHeld && verifiedReadAgentIds.length > 0;
     const agentGates: Array<{ id: string; state: AgentGateState; detail?: string }> = [];
     for (const id of signedReadsNotRun ? [] : verifiedReadAgentIds) {
       const reg = await checkAgentRegistered(baseUrl, id, defaultKeysDir());
@@ -2160,7 +2187,7 @@ program
       // complete, or the ids differ, both checks report NOT RUN (counted as an
       // issue) and no Agent row is read.
       const rosterTarget = agentListAdminPass ? pairGate : null;
-      const rosterNotRun = rosterTarget?.kind === "not-run" ? rosterTarget : null;
+      const rosterNotRun = rosterTarget !== null && rosterTarget !== undefined && rosterTarget.kind !== "run" ? rosterTarget : null;
       const rosterOpsPort = rosterTarget?.kind === "run" ? rosterTarget.opsPort : null;
       if (agentListAdminPass && rosterOpsPort !== null) {
         rosterReadAttempted = true;
@@ -2306,7 +2333,7 @@ program
       let livePeerCount: number | null = null;
       // flair#2526: a credentialed read, so only once the pair is proven; an
       // unread count falls back to the configured peers below.
-      if (harperResponding && !pairNotRun) {
+      if (harperResponding && !httpHeld) {
         try {
           const r = await api("GET", "/FederationPeers", undefined, { baseUrl }) as { peers?: Array<{ status?: string }> };
           const peers = Array.isArray(r?.peers) ? r.peers : [];
