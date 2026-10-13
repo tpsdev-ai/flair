@@ -503,6 +503,14 @@ export class BootstrapMemories extends Resource {
     let eventWatermark: string | null = null;
     let eventsHasMore = false;
     let eventsRemaining = 0;
+    // flair#2448 item 3 (decision) — the STRUCTURED container deliberately
+    // carries NO host-source pointer: no `hostSource`, `hostSourceScope` or
+    // `hostSourceVisibility`. The pointer is a citation aid for the agent-facing
+    // RENDERED bootstrap (formatMemory's prose line); a structured consumer that
+    // needs a memory's host source joins the MemoryHostSource row by memoryId
+    // explicitly, the way any other reader does. The admin bootstrap's containers
+    // fall under the same rule (see hostSourceReader below). A test pins those
+    // three pointer fields absent here, so adding one is a deliberate change.
     const leanMemory = (m: any, section: string) => ({
       id: m.id,
       content: m.content,
@@ -557,6 +565,10 @@ export class BootstrapMemories extends Resource {
     // sections (OWN_SELECT) carry `agentId` and `instanceToken` only: their query
     // already excludes archived rows, and the reader is the author, so the author
     // outcome never reads `visibility`.
+    // flair#2448 item 3 (decision) — an admin bootstrap takes no join, and the
+    // structured containers are built without the pointer (see leanMemory), so
+    // neither the admin prose nor any structured container carries the host
+    // source. An admin or structured consumer joins the pointer row explicitly.
     const hostSourceReader: string | undefined =
       authenticatedAgent && !callerIsAdmin ? authenticatedAgent : undefined;
     const pointerRenders = async (rows: readonly any[]): Promise<Map<string, any>> => {
