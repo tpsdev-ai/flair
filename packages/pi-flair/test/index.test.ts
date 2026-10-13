@@ -332,10 +332,13 @@ describe("memory_store response shape — real extension (flair#1384)", () => {
 //
 // A redacted write's response carries `stored`, the post-redaction text that
 // write committed; the SDK builds the result from it (flair#2467). The reply
-// previews that text and never reads the row after the write: here a read
-// returns a later write's text, so a reply built from a read would show it.
-// Only the HTTP request is stubbed; the SDK and the extension are real. The
-// real-Harper counterpart is test/integration/write-reply-redaction-2537.test.ts.
+// previews that text and never reads the new row back. Two stubs stand in
+// here: `FlairClient.prototype.request` is replaced (a write returns the
+// canned response; a GET returns a later write's text, so a preview built
+// from a read would show it), and the extension registers on a mock Pi API.
+// The SDK's write and response mapping and the extension's tool code run
+// unchanged. The real client and server evidence is the real-Harper test,
+// test/integration/write-reply-redaction-2537.test.ts.
 
 const TOKEN_REDACT = `ghp_${"a".repeat(24)}`;
 const ORIGINAL_REDACT = `deploy note: use token ${TOKEN_REDACT} for the CI job`;

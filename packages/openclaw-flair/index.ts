@@ -1169,11 +1169,13 @@ export default {
             // flair#2537 — a write the server did not redact gets the reply it
             // always had. With a redaction count, the reply previews only the
             // result's `content`, which the SDK takes from the write response's
-            // `stored` (the post-redaction text that write committed) without a
-            // read after the write (flair#2467). A result marked
-            // `contentWithheld`, or with no `content` string, gets no preview
-            // text: the reply states the count and that the stored text was not
-            // returned, and never shows the input.
+            // `stored` (the post-redaction text that write committed), so the
+            // new row is never read back to build the preview (flair#2467). The
+            // predecessor read above, made only when `supersedes` is given,
+            // does not feed the preview. A result marked `contentWithheld`, or
+            // with no `content` string, gets no preview text: the reply states
+            // the count and that the stored text was not returned, and never
+            // shows the input.
             const redactedValues = typeof result.redactedValues === "number" && result.redactedValues > 0 ? result.redactedValues : 0;
             const stored: string | null = result.contentWithheld !== true && typeof result.content === "string" ? result.content : null;
             let replyText: string;
