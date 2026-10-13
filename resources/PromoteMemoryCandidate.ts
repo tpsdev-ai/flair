@@ -4,7 +4,7 @@ import { resolveAgentAuth } from "./agent-auth.js";
 import { Memory } from "./Memory.js";
 import { MemoryCandidate } from "./MemoryCandidate.js";
 import { stampMemoryPromotion } from "./promotion-stamp.js";
-import { withSharedWriteTransaction } from "./request-transaction.js";
+import { withComposedWriteTransaction } from "./request-transaction.js";
 import { derivePromotedTags, derivePromotedVisibility, validateHumanReviewerId, type SourceMemoryFetch } from "../src/rem/promote-policy.js";
 
 const error = (status: number, message: string) => new Response(JSON.stringify({ error: message }), {
@@ -53,8 +53,10 @@ export class PromoteMemoryCandidate extends Resource {
     const memoryId = `${candidate.agentId}-promoted-${randomUUID()}`;
     // The Memory write and its verdict stamp share one transaction (the
     // request's while it is open): a stamp failure fails this request and the
-    // Memory write rolls back with it.
-    const written = await withSharedWriteTransaction(ctx, async (shared) => {
+    // Memory write rolls back with it. Composed, so Memory.put() joins this
+    // transaction instead of committing its own (flair#2478), and the stamp's
+    // read in the same transaction is what confirms the row was written.
+    const written = await withComposedWriteTransaction(ctx, async (shared) => {
       const result = await (Memory as any).put({
         id: memoryId, agentId: candidate.agentId, content: candidate.claim, durability: "persistent",
         ...(visibility ? { visibility } : {}), tags: tags.tags,

@@ -26,7 +26,7 @@ import {
 } from "./memory-host-source.js";
 import { putPointerRow, deletePointerRowViaTable } from "./host-pointer-adapter.js";
 import { DECLARED_MEMORY_ATTRIBUTES, stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./memory-declared-attributes.js";
-import { isJoinableTransaction, withOwnedTransaction, withSharedWriteTransaction } from "./request-transaction.js";
+import { composesCallerWrite, isJoinableTransaction, withOwnedTransaction, withSharedWriteTransaction } from "./request-transaction.js";
 import { CommittedRowChanged, GrantedCloseRevoked, confirmCommittedRow, sameStoredRow, storedRowChangedRefusal, writeGrantHeld } from "./write-back.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 import {
@@ -2362,11 +2362,18 @@ export class Memory extends (databases as any).flair.Memory {
     const beforePut = txnPausePoint("memory-put-pre");
     if (beforePut) await beforePut;
     const ctx = (this as any).getContext?.();
+    // A caller that composes this put into its OWN open write transaction
+    // (withComposedWriteTransaction: manual promotion, whose verdict stamp must
+    // commit or abort with this row, flair#2354) is joined, not detached: the
+    // caller owns the commit, which lands after this lock is released, and there
+    // is no post-commit verification here (the caller's own reads in that
+    // transaction confirm the row). Every other put owns its transaction.
+    const composed = composesCallerWrite(ctx);
     let putResult: any;
     // flair#2467: the post-redaction text fields this write stages, for the response.
     let putStaged: StoredMemoryText = {};
     try {
-      putResult = await withOwnedTransaction(ctx, async (c) => {
+      putResult = await (composed ? withSharedWriteTransaction : withOwnedTransaction)(ctx, async (c) => {
         // The FIRST operation inside the owned transaction: the authoritative
         // stored read, by the URL-BOUND target id (a body id that disagrees with
         // the address, or a lookup that FAILS, is refused; a failed read is never
@@ -2710,8 +2717,14 @@ export class Memory extends (databases as any).flair.Memory {
           if (stagedPause) await stagedPause;
           // The committed row must still be the one read; the throw leaves this
           // callback, so the owned transaction aborts and the staged write is
-          // discarded, and the caller answers 409.
-          await confirmCommittedRow((databases as any).flair.Memory, preExisting.id, (committed) => sameStoredRow(committed, preExisting));
+          // discarded, and the caller answers 409. A composing caller's
+          // transaction is not aborted by the throw, so it is aborted here.
+          try {
+            await confirmCommittedRow((databases as any).flair.Memory, preExisting.id, (committed) => sameStoredRow(committed, preExisting));
+          } catch (err) {
+            if (err instanceof CommittedRowChanged && composed) abortRequestTransaction(c);
+            throw err;
+          }
         }
         // The owned transaction commits when this callback returns; the post-commit
         // verification, supersede close, citation record and response body run below.
@@ -2729,9 +2742,13 @@ export class Memory extends (databases as any).flair.Memory {
     // that landed after the commit is refused by name instead of answered with
     // success for a write that did not land. A failed verification read is an
     // UNKNOWN outcome (never "no row"): the id is marked and the caller gets 503.
-    const verified = await verifyCommittedWrite((databases as any).flair.Memory, putResult.content, putResult.fallbackId);
-    if (verified.unknown) return writeOutcomeUnknownFor(putResult.content?.id ?? putResult.fallbackId);
-    if (verified.mismatch) return storedRowChangedRefusal("Memory");
+    // A composed put has not committed yet (its caller commits), so a fresh
+    // read could not see the row; it is not verified here.
+    if (!composed) {
+      const verified = await verifyCommittedWrite((databases as any).flair.Memory, putResult.content, putResult.fallbackId);
+      if (verified.unknown) return writeOutcomeUnknownFor(putResult.content?.id ?? putResult.fallbackId);
+      if (verified.mismatch) return storedRowChangedRefusal("Memory");
+    }
     // The verification only decides whether the write is answered; the response
     // is built from the write's own result, never from the verified row. The
     // stored row carries per-row values that are not part of the write response
