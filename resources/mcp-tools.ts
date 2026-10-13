@@ -1292,7 +1292,7 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
   skill_store: {
         impl: skillStore,
     contract: {
-      summary: "Write echo { id, written:true, deduplicated } for the skill-tagged memory. No internal embedding fields; round-trips via memory_get. After a server-side redaction the echo also carries `redactedValues` and the stored `content` (with `summary`/`trigger` when written) from the write's own response; if that response returned no stored `content`, the echo omits those fields and sets `contentWithheld:true`.",
+      summary: "Write result { id, written:true, visibility } for the skill-tagged memory. No internal embedding fields; round-trips via memory_get. After a server-side redaction the echo also carries `redactedValues` and the stored `content` (with `summary`/`trigger` when written) from the write's own response; if that response returned no stored `content`, the echo omits those fields and sets `contentWithheld:true`.",
       requiredFields: ["id", "written"],
       fieldTypes: { id: "string", written: "boolean", deduplicated: "boolean" },
       forbiddenFields: INTERNAL_MEMORY_FIELDS,
@@ -1347,7 +1347,7 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
   memory_basement: {
         impl: memoryBasement,
     contract: {
-      summary: "Write echo of the archived record { id, archived:true, archivedAt, ... }. No internal embedding fields; the flip round-trips via memory_get. After a server-side redaction the echo also carries `redactedValues` and the stored `content` (with `summary`/`trigger` when the row carries them) from the write's own response; if that response returned no stored `content`, the echo omits those fields and sets `contentWithheld:true`.",
+      summary: "Write result for the archive operation; read the persisted archive state through memory_get. No internal embedding fields; the flip round-trips via memory_get. After a server-side redaction the echo also carries `redactedValues` and the stored `content` (with `summary`/`trigger` when the row carries them) from the write's own response; if that response returned no stored `content`, the echo omits those fields and sets `contentWithheld:true`.",
       requiredFields: ["id", "archived"],
       fieldTypes: { id: "string", archived: "boolean" },
       forbiddenFields: INTERNAL_MEMORY_FIELDS,
@@ -1358,7 +1358,7 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
   memory_restore: {
         impl: memoryRestore,
     contract: {
-      summary: "Write echo of the restored record { id, archived:false, ... }. No internal embedding fields; the flip round-trips via memory_get. After a server-side redaction the echo also carries `redactedValues` and the stored `content` (with `summary`/`trigger` when the row carries them) from the write's own response; if that response returned no stored `content`, the echo omits those fields and sets `contentWithheld:true`.",
+      summary: "Write result for the restore operation; read the persisted archive state through memory_get. No internal embedding fields; the flip round-trips via memory_get. After a server-side redaction the echo also carries `redactedValues` and the stored `content` (with `summary`/`trigger` when the row carries them) from the write's own response; if that response returned no stored `content`, the echo omits those fields and sets `contentWithheld:true`.",
       requiredFields: ["id", "archived"],
       fieldTypes: { id: "string", archived: "boolean" },
       forbiddenFields: INTERNAL_MEMORY_FIELDS,
