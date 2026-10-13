@@ -17,6 +17,11 @@ import { tempDir } from "../helpers/temp-dir.ts";
  * running mid-sweep leaves the directory behind for the unit lane's temp-dir
  * leak guard. `maintenance.auto=false` keeps git from spawning that command;
  * `gc.auto=0` disables the gc task behind it.
+ *
+ * git also reads the legacy `GIT_CONFIG_PARAMETERS` carrier; an inherited
+ * entry there can reappear after the indexed pairs and turn maintenance back
+ * on (flair#2486), so the same two settings are appended to that carrier as
+ * well.
  */
 function noAutomaticMaintenance(inherited: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const raw = inherited.GIT_CONFIG_COUNT;
@@ -24,7 +29,7 @@ function noAutomaticMaintenance(inherited: NodeJS.ProcessEnv = process.env): Nod
     throw new Error(`GIT_CONFIG_COUNT is not a non-negative integer: ${JSON.stringify(raw)}`);
   }
   const n = raw ? Number(raw) : 0;
-  return {
+  const env: NodeJS.ProcessEnv = {
     ...inherited,
     GIT_CONFIG_COUNT: String(n + 2),
     [`GIT_CONFIG_KEY_${n}`]: "maintenance.auto",
@@ -32,6 +37,11 @@ function noAutomaticMaintenance(inherited: NodeJS.ProcessEnv = process.env): Nod
     [`GIT_CONFIG_KEY_${n + 1}`]: "gc.auto",
     [`GIT_CONFIG_VALUE_${n + 1}`]: "0",
   };
+  const legacy = inherited.GIT_CONFIG_PARAMETERS;
+  if (legacy !== undefined && legacy !== "") {
+    env.GIT_CONFIG_PARAMETERS = `${legacy} 'maintenance.auto=false' 'gc.auto=0'`;
+  }
+  return env;
 }
 
 interface Step {
@@ -133,6 +143,31 @@ describe("adk-flair publishing", () => {
     });
     for (const bad of ["two", "-1", "1.5", " 2"]) {
       expect(() => noAutomaticMaintenance({ GIT_CONFIG_COUNT: bad })).toThrow("GIT_CONFIG_COUNT is not a non-negative integer");
+    }
+  });
+
+  test("the fixture's git reads maintenance off under an inherited config that turns it on", () => {
+    const cwd = tempDir("flair-adk-maintenance-");
+    const repo = join(cwd, "repo");
+    const home = join(cwd, "home");
+    mkdirSync(home);
+    // Each of these would turn automatic maintenance on if it reached git: a
+    // global config, an indexed GIT_CONFIG_* pair, and the legacy
+    // GIT_CONFIG_PARAMETERS.
+    writeFileSync(join(home, ".gitconfig"), "[maintenance]\n\tauto = true\n[gc]\n\tauto = 9999\n");
+    const env = noAutomaticMaintenance({
+      ...process.env,
+      HOME: home,
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "maintenance.auto", GIT_CONFIG_VALUE_0: "true",
+      GIT_CONFIG_PARAMETERS: "'maintenance.auto=true' 'gc.auto=9999'",
+    });
+    const init = spawnSync("git", ["init", "-q", repo], { env, encoding: "utf8" });
+    expect(init.status, init.stderr).toBe(0);
+    for (const [key, expected] of [["maintenance.auto", "false"], ["gc.auto", "0"]] as const) {
+      const read = spawnSync("git", ["-C", repo, "config", "--get", key], { env, encoding: "utf8" });
+      expect(read.status, `${key}: ${read.stderr}`).toBe(0);
+      expect(read.stdout.trim(), key).toBe(expected);
     }
   });
 

@@ -2,7 +2,7 @@
  * embedding-stamp-content-suffix-2307.test.ts — flair#2307 item 5, real Harper.
  *
  * The embedding-stamp migration re-embeds a stale Memory row through a
- * loopback `PUT /Memory/:id`. A legacy row whose id already ends in the
+ * loopback `PATCH /Memory/:id`. A legacy row whose id already ends in the
  * `.content` property suffix cannot be addressed that way (Harper's REST by-id
  * path reads the suffix as a selector, and the by-id write guard refuses the
  * id), so before this change the row stayed pending and /HealthDetail kept
@@ -13,7 +13,7 @@
  * A suffixed SKILL row must get the vector Memory's write paths give a skill:
  * the vector of its `trigger`, not of its `content`. Two ordinary stale rows
  * whose content is that trigger text and that content text are re-embedded by
- * the migration's loopback `PUT /Memory/:id` (Memory.put's own embed path), and
+ * the migration's loopback `PATCH /Memory/:id` (Memory's PATCH re-embed path), and
  * serve as the engine's reference vectors for the two texts.
  *
  * The provider-failure, no-text, concurrent edit and deletion paths are pinned

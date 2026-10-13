@@ -11,7 +11,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readSidecar, recordManagedStartSidecar } from "../../src/cli.ts";
+import { probeHealthBeforeDeadline, readSidecar, recordManagedStartSidecar } from "../../src/cli.ts";
 import { managedStartUnconfirmedLines } from "../../src/commands/service.ts";
 import { renderManagedStartUnconfirmed } from "../../src/lib/launchd-management.ts";
 
@@ -285,5 +285,74 @@ describe("flair#2422 — recordManagedStartSidecar through the real probe, again
     expect(outcome).toEqual({ recorded: true, pid: 4242, detail: `launchd job ${LABEL} is running as process 4242` });
     expect(seen).toEqual(["wait", "probe"]);
     expect(readSidecar(dataDir)).toMatchObject({ kind: "present", pid: 4242, port, startTimeMs: startTime });
+  }, 15_000);
+
+  /**
+   * flair#2485's redirect fixture: `target` answers every request with a
+   * Flair-shaped 200 and counts them; the probed server answers the
+   * reachability wait (Authorization present) with that same answer, and the
+   * confirmation probe with a 302 to `target`. `seen` records which arrived at
+   * the probed port, in order.
+   */
+  async function startRedirect() {
+    const targetHits: string[] = [];
+    const target = createServer((req, res) => {
+      targetHits.push(req.url ?? "");
+      res.writeHead(200, { "content-type": "application/json", connection: "close" });
+      res.end(FLAIR_HEALTH);
+    });
+    servers.push(target);
+    await new Promise<void>((resolve, reject) => {
+      target.once("error", reject);
+      target.listen(0, "127.0.0.1", () => resolve());
+    });
+    const targetPort = (target.address() as AddressInfo).port;
+
+    const seen: Array<"wait" | "probe"> = [];
+    const probed = createServer((req, res) => {
+      const which = req.headers.authorization ? "wait" : "probe";
+      seen.push(which);
+      if (which === "probe") {
+        res.writeHead(302, { location: `http://127.0.0.1:${targetPort}/Health`, connection: "close" });
+        res.end();
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json", connection: "close" });
+      res.end(FLAIR_HEALTH);
+    });
+    servers.push(probed);
+    await new Promise<void>((resolve, reject) => {
+      probed.once("error", reject);
+      probed.listen(0, "127.0.0.1", () => resolve());
+    });
+    return { port: (probed.address() as AddressInfo).port, targetPort, seen, targetHits };
+  }
+
+  // flair#2485: the probe answers only for the port it probed. The probed port
+  // forwards the confirmation probe to a Flair-shaped answer on ANOTHER port;
+  // following that redirect would report Flair on the probed port, so the probe
+  // must see only the 3xx and call it a non-Flair answer (`foreign`).
+  test("a redirect from the probed port -> `foreign`, never the redirect target's Flair answer", async () => {
+    const { port, seen, targetHits } = await startRedirect();
+    const dataDir = fixture();
+    const outcome = await recordManagedStartSidecar(dataDir, port, LABEL, { ...credentials, list: listRunning, ...pidReads });
+    expect(outcome).toEqual({ recorded: false, confirmation: "foreign", detail: detailFor("foreign") });
+    expect(seen).toEqual(["wait", "probe"]);
+    expect(targetHits).toEqual([]);
+    expect(readSidecar(dataDir)).toEqual({ kind: "absent" });
+  }, 15_000);
+
+  // flair#2485 follow-up: the adopt stop path's port-free probe applies the same
+  // rule. A followed redirect would read the target's Flair answer as `ok` on
+  // the probed port.
+  test("the stop path's deadline probe: a redirect from the probed port -> `foreign`, the target never contacted", async () => {
+    const { port, targetPort, seen, targetHits } = await startRedirect();
+    // The target alone is a Flair answer, so following the 302 would read `ok`.
+    expect(await probeHealthBeforeDeadline(targetPort, Date.now() + 5_000)).toEqual({ kind: "ok" });
+    targetHits.length = 0;
+
+    expect(await probeHealthBeforeDeadline(port, Date.now() + 5_000)).toEqual({ kind: "foreign" });
+    expect(seen).toEqual(["probe"]);
+    expect(targetHits).toEqual([]);
   }, 15_000);
 });

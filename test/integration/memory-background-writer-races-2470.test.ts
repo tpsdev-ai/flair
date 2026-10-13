@@ -102,17 +102,18 @@ async function waitFor(path: string, timeoutMs: number): Promise<boolean> {
   return false;
 }
 /**
- * A boot migration cycle that finished cleanly: phase "done", no cycle error,
- * a migrations list, and no migration failed, halted or still in progress.
+ * A boot migration cycle that finished cleanly: phase "done", no cycle error, a
+ * migrations list with at least one entry, and every entry "completed".
  * "idle" means the boot trigger never loaded (migration-boot.ts), and the
  * runner can mark a cycle "done" after a migration failed or halted
- * (runner.ts), so neither counts.
+ * (runner.ts); an empty list is the idle/no-op shape. None of those is a
+ * completed cycle, so the guard accepts only a non-empty list of completed
+ * entries (flair#2494).
  */
 export function cycleCompletedCleanly(migrations: any): boolean {
   if (migrations?.cyclePhase !== "done" || migrations?.lastCycleError) return false;
   if (!Array.isArray(migrations?.migrations)) return false;
-  const unfinished = new Set(["failed", "halted", "checking", "preflight", "snapshotting", "running", "completing"]);
-  return migrations.migrations.every((m: any) => !unfinished.has(m?.state));
+  return migrations.migrations.length > 0 && migrations.migrations.every((m: any) => m?.state === "completed");
 }
 async function waitForCycleDone(timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
@@ -273,6 +274,15 @@ describe("cycleCompletedCleanly (the first-boot guard)", () => {
   });
   it("rejects a snapshot without a migrations list", () => {
     expect(cycleCompletedCleanly({ cyclePhase: "done" })).toBe(false);
+  });
+  it("rejects a done cycle with an empty migration list (the idle/no-op shape)", () => {
+    expect(cycleCompletedCleanly({ cyclePhase: "done", migrations: [] })).toBe(false);
+  });
+  it("rejects a done cycle with an entry still idle", () => {
+    expect(cycleCompletedCleanly({ cyclePhase: "done", migrations: [{ ...ok, state: "idle" }] })).toBe(false);
+  });
+  it("rejects a done cycle whose only entry is not completed", () => {
+    expect(cycleCompletedCleanly({ cyclePhase: "done", migrations: [{ ...ok, state: "running" }] })).toBe(false);
   });
 });
 

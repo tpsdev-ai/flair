@@ -141,12 +141,19 @@ describe("flair doctor — the Agent IDs section (flair#2359, real CLI + real sp
     expect(issueCount(reported.stdout), "the reported invalid id did not move the summary").toBe(baseCount + 1);
 
     // 3. A roster read that fails (wrong admin credential) is a counted issue —
-    //    for the Agent-ID section AND the Agent homes section (both read the
-    //    same roster, so both are unrun).
+    //    for the Agent-ID section AND the Agent homes section. flair#2483: the
+    //    ops endpoint refuses the credential's configuration read, so doctor
+    //    cannot show the two ports are one instance, and both checks are
+    //    reported NOT RUN rather than read. flair#2520: the audit-log and
+    //    instance-identity sections share that pair check, so they are NOT RUN
+    //    and counted too.
     const unreadable = await runDoctor("wrong-admin-pass-not-a-secret");
-    expect(unreadable.stdout).toContain("Could not read the stored Agent roster");
+    expect(unreadable.stdout).toContain("Agent IDs: NOT RUN");
+    expect(unreadable.stdout).toContain("Agent homes: NOT RUN");
+    expect(unreadable.stdout).toContain("Audit log: NOT RUN");
+    expect(unreadable.stdout).toContain("Instance identity: NOT RUN");
     expect(unreadable.stdout).not.toContain("No stored agent id is outside");
-    expect(issueCount(unreadable.stdout), "the unrun check left the summary clean").toBe(baseCount + 2);
+    expect(issueCount(unreadable.stdout), "the unrun check left the summary clean").toBe(baseCount + 4);
 
     // 4. No admin credential at all: the Agent-ID check is a counted issue, not
     //    a pass; the Agent homes check is reported skipped and not counted.

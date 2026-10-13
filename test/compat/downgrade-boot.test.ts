@@ -438,7 +438,7 @@ describe("downgrade compat (npm baseline boot vs current-build data) [flair#637]
     if (baselineDir) await rm(baselineDir, { recursive: true, force: true });
   }, 120_000);
 
-  test("npm baseline refuses a store written by this build (engine-version message), before Harper opens it", async () => {
+  test("npm baseline start refuses a store written by this build, naming the newer Harper engine, and leaves the store's regular files unchanged", async () => {
     expect(engineVersionChanged).toBe(true);
     if (engineVersionChanged) {
       // Assert refusal and unchanged regular-file paths and contents.

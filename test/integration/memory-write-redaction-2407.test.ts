@@ -7,10 +7,13 @@
  * redaction is proven through Harper's own resource dispatch and response
  * serialization — not a stand-in table. It sends POST /Memory, PUT and PATCH
  * /Memory/<id> and POST /FeedMemories as an agent key, an admin agent key or
- * the Basic administrator, and a signed batch to POST /FederationSync.
+ * the Basic administrator, and a signed batch to POST /FederationSync. The
+ * flair#2467 blocks also drive the real FlairClient and the MCP write handlers.
  */
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { randomUUID } from "node:crypto";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import nacl from "tweetnacl";
@@ -19,6 +22,8 @@ import { redactSecrets, redactSecretsWithCount } from "../../packages/flair-mcp/
 import { computeContentHash } from "../../resources/memory-feed-lib.js";
 import { signBody, signBodyFresh } from "../../resources/federation-crypto.js";
 import { currentSeed, runSkillSeed, SEED_SKILL_ID, skillSeedRestIo } from "../../src/lib/skill-seed.js";
+import { FlairClient } from "../../packages/flair-client/src/client.js";
+import { STDIO_TOOL_HANDLERS } from "../../packages/flair-mcp/src/adapter-tools.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -400,5 +405,229 @@ describe("flair#2407 — the redactor leaves incoming federated content alone", 
     expect(body.skippedReasons).toEqual({ invalid_signature: 1 });
     expect((await readStored(goodId))?.content).toBe(content);
     expect(await readStored(forgedId)).toBeNull();
+  }, 60_000);
+});
+
+/**
+ * flair#2467 — a redacting write's response carries the post-redaction values
+ * of the text fields that write committed, and the SDK's write/update results
+ * and the MCP write replies are built from it, through the REAL FlairClient
+ * against REAL Harper.
+ *
+ * The SDK makes no read after the write: what a result reports comes from the
+ * write's own response, so a later write to the same row cannot change it.
+ */
+describe("flair#2467 — a redacting write's response carries the stored text it committed", () => {
+  it("POST, PUT and PATCH /Memory return `stored`: the redacted text fields that write committed", async () => {
+    const id = `r2467-rest-${randomUUID()}`;
+    const post = await authFetch("POST", "/Memory", {
+      id, agentId: agent.id, content: `post body ${GITHUB_TOKEN} end`, summary: `post summary ${AWS_KEY}`, visibility: "shared",
+    });
+    expect(post.status).toBe(201);
+    const postBody = await post.json();
+    expect(postBody.redactedValues).toBe(2);
+    expect(postBody.stored).toEqual({ content: `post body ${REDACTED} end`, summary: `post summary ${REDACTED}` });
+
+    const put = await authFetch("PUT", `/Memory/${id}`, {
+      id, agentId: agent.id, content: `put body ${SLACK_TOKEN} end`, summary: `put summary ${GITHUB_TOKEN}`,
+      trigger: `put trigger ${AWS_KEY}`, visibility: "shared",
+    });
+    expect(put.status).toBe(200);
+    const putBody = await put.json();
+    expect(putBody.redactedValues).toBe(3);
+    expect(putBody.stored).toEqual({
+      content: `put body ${REDACTED} end`, summary: `put summary ${REDACTED}`, trigger: `put trigger ${REDACTED}`,
+    });
+
+    // A PATCH commits only the fields in its body, so `stored` names only those.
+    const patch = await authFetch("PATCH", `/Memory/${id}`, { summary: `patch summary ${SLACK_TOKEN}` });
+    expect(patch.status).toBe(200);
+    const patchBody = await patch.json();
+    expect(patchBody.redactedValues).toBe(1);
+    expect(patchBody.stored).toEqual({ summary: `patch summary ${REDACTED}` });
+
+    const row = await readStored(id);
+    expect(row?.content).toBe(`put body ${REDACTED} end`);
+    expect(row?.summary).toBe(`patch summary ${REDACTED}`);
+    expect(row?.trigger).toBe(`put trigger ${REDACTED}`);
+  }, 60_000);
+
+  it("a write with nothing to redact returns no `stored` and no count", async () => {
+    const id = `r2467-rest-clean-${randomUUID()}`;
+    const res = await authFetch("POST", "/Memory", { id, agentId: agent.id, content: "a plain note", visibility: "shared" });
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.redactedValues).toBeUndefined();
+    expect("stored" in body).toBe(false);
+  }, 60_000);
+
+  it("a skill PUT that versions to a successor row reports the successor's id and its stored text", async () => {
+    const root = `r2467-skill-${randomUUID()}`;
+    const skill = { agentId: agent.id, tags: ["skill"], durability: "persistent", visibility: "shared" };
+    const created = await authFetch("POST", "/Memory", { ...skill, id: root, content: "skill v1 procedure", trigger: "when deploying" });
+    expect(created.status, await created.clone().text()).toBe(200);
+    const res = await authFetch("PUT", `/Memory/${root}`, {
+      ...skill, id: root, content: `skill v2 reads ${GITHUB_TOKEN}`, trigger: `when deploying with ${AWS_KEY}`,
+    });
+    const body = await res.json();
+    expect(res.status, JSON.stringify(body)).toBe(200);
+    expect(body.redactedValues).toBe(2);
+    expect(body.id).not.toBe(root);
+    expect(body.stored).toEqual({ content: `skill v2 reads ${REDACTED}`, trigger: `when deploying with ${REDACTED}` });
+    const successor = await readStored(body.id);
+    expect(successor?.supersedes).toBe(root);
+    expect(successor?.content).toBe(body.stored.content);
+    expect(successor?.trigger).toBe(body.stored.trigger);
+  }, 60_000);
+});
+
+describe("flair#2467 — the SDK write result and the MCP replies after a redaction", () => {
+  let keyDir: string;
+  let keyPath: string;
+  let client: FlairClient;
+
+  beforeAll(async () => {
+    keyDir = await mkdtemp(join(tmpdir(), "flair-2467-sdk-"));
+    keyPath = join(keyDir, "redact-agent-a.key");
+    // loadPrivateKey() treats an exactly-32-byte file as a raw Ed25519 seed.
+    await writeFile(keyPath, Buffer.from(agent.secretKey.slice(0, 32)));
+    client = new FlairClient({ agentId: agent.id, url: harper.httpURL, keyPath });
+  });
+
+  afterAll(async () => {
+    if (keyDir) await rm(keyDir, { recursive: true, force: true });
+  });
+
+  const ctx = (flair: FlairClient = client) => ({ flair, agentId: agent.id, heartbeat: () => {}, rememberTask: () => {} });
+
+  /** A row written through the admin surface, so its summary and trigger hold
+   *  credential-shaped text the ordinary redacted Memory write paths would
+   *  replace. */
+  async function seedUnredactedRow(id: string): Promise<void> {
+    const content = "seed row before the update";
+    const res = await adminOp({
+      operation: "insert", database: "flair", table: "Memory",
+      records: [{
+        id, agentId: agent.id, content, contentHash: computeContentHash(agent.id, content),
+        summary: `seed summary ${SLACK_TOKEN}`, trigger: `seed trigger ${GITHUB_TOKEN}`,
+        type: "session", durability: "standard", visibility: "shared", createdAt: new Date().toISOString(),
+      }],
+    });
+    expect(res.status).toBe(200);
+    const row = await readStored(id);
+    expect(row?.summary).toBe(`seed summary ${SLACK_TOKEN}`);
+    expect(row?.trigger).toBe(`seed trigger ${GITHUB_TOKEN}`);
+  }
+
+  it("memory.write returns the STORED (redacted) content and the count", async () => {
+    const id = `r2467-sdk-write-${randomUUID()}`;
+    const res: any = await client.memory.write(`sdk write ${GITHUB_TOKEN} note`, { id });
+    expect(res.redactedValues).toBe(1);
+    expect(res.content).toBe(`sdk write ${REDACTED} note`);
+    expect(res.contentWithheld).toBeUndefined();
+  }, 60_000);
+
+  it("a same-id memory.update of a row whose summary and trigger hold credentials returns all three redacted", async () => {
+    const id = `r2467-sdk-update-${randomUUID()}`;
+    await seedUnredactedRow(id);
+    const res: any = await client.memory.update(id, `sdk update ${AWS_KEY} note`);
+    expect(res.id).toBe(id);
+    expect(res.redactedValues).toBe(3);
+    expect(res.content).toBe(`sdk update ${REDACTED} note`);
+    expect(res.summary).toBe(`seed summary ${REDACTED}`);
+    expect(res.trigger).toBe(`seed trigger ${REDACTED}`);
+    const row = await readStored(id);
+    expect([row?.content, row?.summary, row?.trigger]).toEqual([res.content, res.summary, res.trigger]);
+  }, 60_000);
+
+  it("a redacted memory.update with preserveHistory returns the successor's id, its stored text and the count", async () => {
+    const id = `r2467-sdk-version-${randomUUID()}`;
+    await seedUnredactedRow(id);
+    const res: any = await client.memory.update(id, `sdk version ${AWS_KEY} note`, { preserveHistory: true });
+    expect(res.id).not.toBe(id);
+    expect(res.redactedValues).toBe(3);
+    expect(res.content).toBe(`sdk version ${REDACTED} note`);
+    expect(res.summary).toBe(`seed summary ${REDACTED}`);
+    expect(res.trigger).toBe(`seed trigger ${REDACTED}`);
+    const successor = await readStored(res.id);
+    expect(successor?.supersedes).toBe(id);
+    expect([successor?.content, successor?.summary, successor?.trigger]).toEqual([res.content, res.summary, res.trigger]);
+  }, 60_000);
+
+  it("memory_update with preserveHistory replies with the successor's id, its stored text and the count", async () => {
+    const id = `r2467-mcp-version-${randomUUID()}`;
+    await seedUnredactedRow(id);
+    const res: any = await STDIO_TOOL_HANDLERS.memory_update(
+      { id, content: `mcp version ${AWS_KEY} note`, preserveHistory: true }, ctx() as any,
+    );
+    const successorId = res.structuredContent.id;
+    expect(successorId).not.toBe(id);
+    expect(res.structuredContent.supersedes).toBe(id);
+    expect(res.structuredContent.redactedValues).toBe(3);
+    const text = res.content[0].text;
+    expect(text).toContain(`Memory updated: new version stored (id: ${successorId}), supersedes ${id}.`);
+    expect(text).toContain(`Preview: mcp version ${REDACTED} note`);
+    expect(text).toContain("Redacted 3 credential-shaped value(s) before storing.");
+    for (const secret of [AWS_KEY, SLACK_TOKEN, GITHUB_TOKEN]) expect(text).not.toContain(secret);
+    expect((await readStored(successorId))?.content).toBe(`mcp version ${REDACTED} note`);
+  }, 60_000);
+
+  it("memory_store's reply previews the STORED text and reports the count", async () => {
+    const res: any = await STDIO_TOOL_HANDLERS.memory_store({ content: `mcp store ${GITHUB_TOKEN} note`, tags: [] }, ctx() as any);
+    const text = res.content[0].text;
+    expect(text).toContain(`Preview: mcp store ${REDACTED} note`);
+    expect(text).not.toContain(GITHUB_TOKEN);
+    expect(text).toContain("Redacted 1 credential-shaped value(s) before storing.");
+    expect(res.structuredContent.redactedValues).toBe(1);
+  }, 60_000);
+
+  it("memory_update's reply previews the STORED text and reports the count", async () => {
+    const id = `r2467-mcp-update-${randomUUID()}`;
+    await client.memory.write("seed before the mcp redacted update", { id });
+    const res: any = await STDIO_TOOL_HANDLERS.memory_update({ id, content: `mcp update ${AWS_KEY} note` }, ctx() as any);
+    const text = res.content[0].text;
+    expect(text).toContain(`Preview: mcp update ${REDACTED} note`);
+    expect(text).toContain("Redacted 1 credential-shaped value(s) before storing.");
+    expect(res.structuredContent.redactedValues).toBe(1);
+  }, 60_000);
+
+  /** A client whose first PUT is followed, before its response reaches the
+   *  SDK, by another write to the same row with different text. */
+  function clientWithInterveningWrite(id: string, laterContent: string): { flair: FlairClient; intervened: () => number } {
+    const flair = new FlairClient({ agentId: agent.id, url: harper.httpURL, keyPath });
+    const request = flair.request.bind(flair);
+    let intervened = 0;
+    (flair as any).request = async (method: string, path: string, ...rest: any[]) => {
+      const response = await (request as any)(method, path, ...rest);
+      if (method === "PUT" && intervened === 0) {
+        intervened++;
+        const later = await authFetch("PUT", `/Memory/${id}`, { id, agentId: agent.id, content: laterContent, visibility: "shared" });
+        expect(later.status).toBe(200);
+      }
+      return response;
+    };
+    return { flair, intervened: () => intervened };
+  }
+
+  it("a write to the row after memory.write's PUT cannot change what memory.write reports", async () => {
+    const id = `r2467-race-write-${randomUUID()}`;
+    const { flair, intervened } = clientWithInterveningWrite(id, `later write ${SLACK_TOKEN} note`);
+    const res: any = await flair.memory.write(`first write ${GITHUB_TOKEN} note`, { id });
+    expect(intervened()).toBe(1);
+    expect((await readStored(id))?.content).toBe(`later write ${REDACTED} note`);
+    expect(res.id).toBe(id);
+    expect(res.redactedValues).toBe(1);
+    expect(res.content).toBe(`first write ${REDACTED} note`);
+  }, 60_000);
+
+  it("a write to the row after memory.update's PUT cannot change what memory.update reports", async () => {
+    const id = `r2467-race-update-${randomUUID()}`;
+    await client.memory.write("seed before the raced update", { id });
+    const { flair, intervened } = clientWithInterveningWrite(id, `later update ${SLACK_TOKEN} note`);
+    const res: any = await flair.memory.update(id, `first update ${AWS_KEY} note`);
+    expect(intervened()).toBe(1);
+    expect((await readStored(id))?.content).toBe(`later update ${REDACTED} note`);
+    expect(res.redactedValues).toBe(1);
+    expect(res.content).toBe(`first update ${REDACTED} note`);
   }, 60_000);
 });
