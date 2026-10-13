@@ -12,7 +12,8 @@
  *   - `proveLocalInstancePair` (src/lib/local-instance-pair.ts, shared with the
  *     local delete paths) asks the candidate ops endpoint for its configuration
  *     and requires it to record that ops port and an HTTP port bound on
- *     loopback or on all interfaces;
+ *     loopback or on all interfaces, and both endpoints to report the same
+ *     running Harper process id;
  *   - `decideDoctorRosterPair` runs only when that configured HTTP port is the
  *     probed one — no Instance row is needed, so a fresh install runs;
  *   - `decideDoctorRosterIdentity`, applied after that, refuses only when both
@@ -24,12 +25,13 @@
  *   - it conflicts with the pair, or exactly one port is named with no complete
  *     pair to take the other from → a refusal (NOT RUN), with doctor's remedy.
  * Two named ports are accepted by the pairing rule as given (pinned in
- * test/unit/agent-home-target-2474.test.ts); the configuration check is what
+ * test/unit/agent-home-target-2474.test.ts); the pair check is what
  * decides them.
  *
- * `proveLocalInstancePair` is exercised against a local HTTP server on an
- * OS-assigned loopback port that answers `get_configuration` with a fixed body.
- * The real two-instance seam, including that a refusal reports BOTH checks NOT
+ * `proveLocalInstancePair` is exercised against two local servers on
+ * OS-assigned loopback ports: an ops endpoint that answers `get_configuration`
+ * and `system_information`, and an HTTP endpoint that answers `/HealthDetail`.
+ * The real two-process seam, including that a refusal reports BOTH checks NOT
  * RUN and reads no Agent row, is
  * test/integration/doctor-roster-probed-instance-2483.test.ts.
  *
@@ -143,30 +145,68 @@ describe("decideProbedPairIdentity — the identities the probed HTTP port and t
   });
 });
 
-// ── The configuration check (shared with the local delete paths) ────────────
+// ── The pair check (shared with the local delete paths) ───────────────
+//
+// Two fixture servers stand in for one instance's two endpoints: an ops
+// endpoint that answers `get_configuration` and `system_information`, and an
+// HTTP endpoint that answers `/HealthDetail` with the `pid` it serves. The pair
+// is proven only when both report the SAME live process id.
 
-/** What the fixture server answers next: a status and a raw body. */
+/** What the ops fixture answers `get_configuration` with next: a status and a raw body. */
 let answer: { status: number; body: string } = { status: 200, body: "{}" };
-let lastOperation: unknown = null;
+/** The process id each side reports; null means the resource omits it. */
+let opsPid: number | null = 1001;
+let httpPid: number | null = 1001;
+/** The status the HTTP fixture answers `/HealthDetail` with. */
+let httpStatus = 200;
+/** Every ops operation the fixture saw, in order. */
+let operations: string[] = [];
 let server: Server;
 let serverPort: number;
+let httpServer: Server;
+let httpPort: number;
+
+function json(res: import("node:http").ServerResponse, status: number, body: unknown): void {
+  res.writeHead(status, { "Content-Type": "application/json" });
+  res.end(JSON.stringify(body));
+}
 
 beforeAll(async () => {
   server = createServer((req, res) => {
     let raw = "";
     req.on("data", (d: Buffer) => { raw += d.toString(); });
     req.on("end", () => {
-      try { lastOperation = JSON.parse(raw)?.operation; } catch { lastOperation = null; }
+      let operation: string | null = null;
+      try { operation = JSON.parse(raw)?.operation ?? null; } catch { operation = null; }
+      if (operation !== null) operations.push(operation);
+      if (operation === "system_information") {
+        return json(res, 200, opsPid === null ? {} : { harperdb_processes: { core: [{ pid: opsPid }] } });
+      }
       res.writeHead(answer.status, { "Content-Type": "application/json" });
       res.end(answer.body);
     });
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   serverPort = (server.address() as AddressInfo).port;
+
+  httpServer = createServer((_req, res) => {
+    json(res, httpStatus, httpPid === null ? {} : { pid: httpPid });
+  });
+  await new Promise<void>((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
+  httpPort = (httpServer.address() as AddressInfo).port;
 });
 
 afterAll(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
+  await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+});
+
+beforeEach(() => {
+  answer = { status: 200, body: "{}" };
+  opsPid = 1001;
+  httpPid = 1001;
+  httpStatus = 200;
+  operations = [];
 });
 
 /** Answer `get_configuration` with this configuration. */
@@ -176,22 +216,85 @@ function configure(config: unknown): void {
 
 const AUTH = "Basic " + Buffer.from("admin:not-a-secret").toString("base64");
 
-describe("proveLocalInstancePair — the ops endpoint's own configuration must pair it with an HTTP port configured to bind on loopback or all interfaces", () => {
-  test("a configuration recording the asked ops port and a loopback HTTP port is proven, with that HTTP port", async () => {
-    configure({ http: { port: "127.0.0.1:7926" }, operationsApi: { network: { port: `127.0.0.1:${serverPort}` } } });
-    expect(await proveLocalInstancePair(serverPort, AUTH)).toEqual({ kind: "proven", httpPort: 7926 });
-    expect(lastOperation).toBe("get_configuration");
+/** A free loopback port that nothing is listening on (for the dead-HTTP-port case). */
+function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = createServer();
+    srv.once("error", reject);
+    srv.listen(0, "127.0.0.1", () => {
+      const port = (srv.address() as AddressInfo).port;
+      srv.close(() => resolve(port));
+    });
+  });
+}
+
+describe("proveLocalInstancePair — the ops endpoint's configuration must pair it with a loopback HTTP port served by the same running process", () => {
+  test("a configuration recording the asked ops port and a loopback HTTP port, with both endpoints reporting one process id, is proven", async () => {
+    configure({ http: { port: `127.0.0.1:${httpPort}` }, operationsApi: { network: { port: `127.0.0.1:${serverPort}` } } });
+    expect(await proveLocalInstancePair(serverPort, AUTH)).toEqual({ kind: "proven", httpPort });
+    expect(operations).toEqual(["get_configuration", "system_information"]);
   });
 
   test("a bare HTTP port and an all-interfaces bind are accepted", async () => {
-    configure({ http: { port: 7926 }, operationsApi: { network: { port: serverPort } } });
-    expect(await proveLocalInstancePair(serverPort, AUTH)).toEqual({ kind: "proven", httpPort: 7926 });
-    configure({ http: { port: "0.0.0.0:7926" }, operationsApi: { network: { port: serverPort } } });
-    expect(await proveLocalInstancePair(serverPort, AUTH)).toEqual({ kind: "proven", httpPort: 7926 });
+    configure({ http: { port: httpPort }, operationsApi: { network: { port: serverPort } } });
+    expect(await proveLocalInstancePair(serverPort, AUTH)).toEqual({ kind: "proven", httpPort });
+    configure({ http: { port: `0.0.0.0:${httpPort}` }, operationsApi: { network: { port: serverPort } } });
+    expect(await proveLocalInstancePair(serverPort, AUTH)).toEqual({ kind: "proven", httpPort });
+  });
+
+  test("two endpoints reporting different process ids are unproven, naming both ids", async () => {
+    configure({ http: { port: `127.0.0.1:${httpPort}` }, operationsApi: { network: { port: serverPort } } });
+    opsPid = 1001;
+    httpPid = 2002;
+    expect(await proveLocalInstancePair(serverPort, AUTH)).toEqual({
+      kind: "unproven",
+      status: null,
+      detail: `the operations API reports Harper process 1001 and the HTTP endpoint on port ${httpPort} reports process 2002, so they are not the same running instance`,
+    });
+  });
+
+  test("an ops endpoint that reports no process id is unproven", async () => {
+    configure({ http: { port: `127.0.0.1:${httpPort}` }, operationsApi: { network: { port: serverPort } } });
+    opsPid = null;
+    expect(await proveLocalInstancePair(serverPort, AUTH)).toEqual({
+      kind: "unproven",
+      status: null,
+      detail: "its operations API reports no running Harper process id",
+    });
+  });
+
+  test("an HTTP endpoint that reports no process id is unproven", async () => {
+    configure({ http: { port: `127.0.0.1:${httpPort}` }, operationsApi: { network: { port: serverPort } } });
+    httpPid = null;
+    expect(await proveLocalInstancePair(serverPort, AUTH)).toEqual({
+      kind: "unproven",
+      status: null,
+      detail: `the HTTP endpoint on port ${httpPort} reports no running process id`,
+    });
+  });
+
+  test("an HTTP endpoint that answers with an error is unproven and carries the status", async () => {
+    configure({ http: { port: `127.0.0.1:${httpPort}` }, operationsApi: { network: { port: serverPort } } });
+    httpStatus = 401;
+    expect(await proveLocalInstancePair(serverPort, AUTH)).toEqual({
+      kind: "unproven",
+      status: 401,
+      detail: `the health request to the HTTP endpoint on port ${httpPort} answered HTTP 401`,
+    });
+  });
+
+  test("a configured HTTP port with nothing listening is unproven", async () => {
+    const dead = await freePort();
+    configure({ http: { port: `127.0.0.1:${dead}` }, operationsApi: { network: { port: serverPort } } });
+    expect(await proveLocalInstancePair(serverPort, AUTH)).toEqual({
+      kind: "unproven",
+      status: null,
+      detail: `the HTTP endpoint on port ${dead} got no answer to its health request`,
+    });
   });
 
   test("a configuration recording a different ops port is unproven", async () => {
-    configure({ http: { port: 7926 }, operationsApi: { network: { port: "127.0.0.1:7925" } } });
+    configure({ http: { port: `127.0.0.1:${httpPort}` }, operationsApi: { network: { port: "127.0.0.1:7925" } } });
     const proof = await proveLocalInstancePair(serverPort, AUTH);
     expect(proof).toEqual({ kind: "unproven", status: null, detail: `its configuration records ops port 7925, not ${serverPort}` });
   });
@@ -253,7 +356,7 @@ describe("decideDoctorRosterPair — run only when the ops endpoint's configured
     const decision = decideDoctorRosterPair(8925, 7926, { kind: "unproven", status: null, detail: "the configuration request got no answer" });
     expect(decision).toEqual({
       kind: "not-run",
-      reason: "the ops endpoint on port 8925 did not report a usable configured HTTP/ops pair (the configuration request got no answer), so this check cannot be established for the probed HTTP port 7926",
+      reason: "the ops endpoint on port 8925 did not prove a live HTTP/ops pair (the configuration request got no answer), so this check cannot be established for the probed HTTP port 7926",
       remedy: DOCTOR_ROSTER_TARGET_REMEDY,
     });
   });
@@ -265,7 +368,7 @@ describe("decideDoctorRosterPair — run only when the ops endpoint's configured
   });
 });
 
-describe("decideDoctorRosterIdentity — the identity comparison added after the configuration check", () => {
+describe("decideDoctorRosterIdentity — the identity comparison applied after the pair check", () => {
   test("two different single Instance ids are NOT RUN", () => {
     const decision = decideDoctorRosterIdentity(7925, { kind: "different", httpId: "inst-a", opsId: "inst-b" });
     expect(decision.kind).toBe("not-run");
@@ -276,7 +379,7 @@ describe("decideDoctorRosterIdentity — the identity comparison added after the
     expect(decideDoctorRosterIdentity(7925, { kind: "same", id: "inst-a" })).toEqual({ kind: "run", opsPort: 7925 });
   });
 
-  test("no Instance row on either side (a fresh install) leaves the configuration check's decision standing", () => {
+  test("no Instance row on either side (a fresh install) leaves the pair check's decision standing", () => {
     const pair = decideProbedPairIdentity({ kind: "none" }, { kind: "none" });
     expect(decideDoctorRosterIdentity(7925, pair)).toEqual({ kind: "run", opsPort: 7925 });
   });

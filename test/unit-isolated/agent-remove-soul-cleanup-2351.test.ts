@@ -28,6 +28,8 @@ let requested: any[];
 let soulScans: number;
 let log: ReturnType<typeof spyOn>;
 let write: ReturnType<typeof spyOn>;
+/** flair#2526: the process id both endpoints of the pair must report. */
+const LIVE_PID = 2351;
 
 beforeEach(() => {
   operations = [];
@@ -47,8 +49,14 @@ beforeEach(() => {
   write = spyOn(process.stdout, "write").mockImplementation(() => true);
 
   globalThis.fetch = (async (url: any, init: any) => {
+    // flair#2526: the pair check also reads the live process identity each
+    // endpoint holds — the ops API's `system_information` on the ops endpoint
+    // and `/HealthDetail` on the configured HTTP port. Both report one process
+    // here; neither is recorded in `requested`/`operations`.
+    if (/\/HealthDetail$/.test(String(url))) return Response.json({ pid: LIVE_PID });
     expect(String(url)).toBe("http://127.0.0.1:19925/");
     const b = JSON.parse(init.body);
+    if (b.operation === "system_information") return Response.json({ harperdb_processes: { core: [{ pid: LIVE_PID }] } });
     requested.push(b);
     operations.push(`${b.operation}:${b.table ?? ""}`);
     if (b.operation === "get_configuration") return Response.json(CONFIGURATION);

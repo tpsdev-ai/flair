@@ -8,9 +8,9 @@ export async function resolveLocalDeleteInstance(
   const source = opts.opsPort !== undefined ? "--ops-port" : process.env.FLAIR_OPS_PORT ? "FLAIR_OPS_PORT" : "ops endpoint";
   const opsPort = resolveOpsPort(opts);
   const opsUrl = `http://127.0.0.1:${opsPort}/`;
-  // The configuration check is shared with `flair doctor` (local-instance-pair.ts).
+  // The pair check is shared with `flair doctor` (local-instance-pair.ts).
   const pair = await proveLocalInstancePair(opsPort, authorization);
-  if (pair.kind !== "proven") throw new Error(`${source} ${opsPort}: no matching local HTTP endpoint; refusing deletion`);
+  if (pair.kind !== "proven") throw new Error(`${source} ${opsPort}: no matching local HTTP endpoint (${pair.detail}); refusing deletion`);
   const httpPort = pair.httpPort;
   if (opts.port !== undefined && Number(opts.port) !== httpPort) {
     throw new Error(`--port ${opts.port} does not match ${source} ${opsPort}'s HTTP endpoint ${httpPort}; refusing deletion`);

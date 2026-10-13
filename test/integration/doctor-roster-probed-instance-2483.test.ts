@@ -8,20 +8,23 @@
  * roster from instance B, so it reported B's rows as A's. src/cli.ts's
  * `verifyDoctorRosterInstance` picks the ops endpoint with the pairing rule
  * `flair agent stamp-home` uses (flair#2474/#2491), then, before either read,
- * asks that ops endpoint for its configuration (src/lib/local-instance-pair.ts,
- * the check the local delete paths use): it must record that ops port and the
- * HTTP port doctor actually probed, bound on loopback or on all interfaces.
- * After that check passes, two different Instance ids on the two endpoints
- * also refuse. A refusal, or a configuration check that cannot complete,
- * reports both checks NOT RUN (counted as an issue) and reads no Agent row.
+ * asks that ops endpoint for its configuration and the live process ids the
+ * two endpoints report (src/lib/local-instance-pair.ts, the check the local
+ * delete paths use): it must record that ops port and the HTTP port doctor
+ * actually probed, bound on loopback or on all interfaces, and the two
+ * endpoints must report the same running Harper process id. After that check
+ * passes, two different Instance ids on the two endpoints also refuse. A
+ * refusal, or a pair check that cannot complete, reports both checks NOT RUN
+ * (counted as an issue) and reads no Agent row.
  *
  * The first block runs with NO Instance row on either instance, as on a fresh
  * install: the default paired case must run, and every refusal there comes
- * from the configuration check alone, except recorded-pair PID drift, which
+ * from the pair check alone (a configured-port match no longer establishes the
+ * pair when the live processes differ), except recorded-pair PID drift, which
  * the pairing rule refuses earlier. The second block seeds one Instance row
  * on each instance: the paired case still runs, and an ops endpoint whose
- * configuration names the probed port but which reports a different Instance
- * id is refused by the identity comparison.
+ * configuration names the probed port while another process serves it is
+ * refused by the pair check.
  *
  * Build prerequisite: dist/cli.js and dist/resources/*.js
  * (`bun run build && bun run build:cli`).
@@ -281,6 +284,26 @@ describe("flair#2483 — no Instance row on either instance (a fresh install): n
     expect(fixedRun.stdout).not.toContain(HOMELESS_ON_B);
     rmSync(join(home, ".flair", "data", "hdb.pid"), { force: true });
   }, 120_000);
+
+  test("a stale configuration naming the probed HTTP port while another process serves it: both checks are NOT RUN", async () => {
+    // B's config FILE now records A's HTTP port (no restart, so B keeps serving
+    // its own). The configured ports agree with the probe, but the two endpoints
+    // are different running processes. No Instance row exists yet, so the pair
+    // check is what refuses — a port match alone no longer establishes the pair.
+    await ops(b, { operation: "set_configuration", http_port: Number(httpPort(a)) });
+    try {
+      writeHomeConfig(`opsPort: ${opsPort(b)}\n`);
+      const r = await runDoctor({ args: ["--port", httpPort(a)], opsPort: opsPort(b) });
+      expect(r.stdout, r.stdout).toContain("Agent IDs: NOT RUN");
+      expect(r.stdout, r.stdout).toContain("Agent homes: NOT RUN");
+      expect(r.stdout, r.stdout).toContain("not the same running instance");
+      expect(r.stdout, "A's out-of-rule row was read through the stale endpoint").not.toContain(BAD_ID_ON_A);
+      expect(r.stdout, "another instance's roster row was reported").not.toContain(BAD_ID_ON_B);
+      expect(r.stdout, "another instance's home-less row was reported").not.toContain(HOMELESS_ON_B);
+    } finally {
+      await ops(b, { operation: "set_configuration", http_port: Number(httpPort(b)) });
+    }
+  }, 90_000);
 });
 
 describe("flair#2483 — one Instance row on each instance", () => {
@@ -298,16 +321,15 @@ describe("flair#2483 — one Instance row on each instance", () => {
   test("an ops endpoint whose configuration names the probed port while another instance serves it: both checks are NOT RUN", async () => {
     await seedInstanceRows();
     // B's config FILE now records A's HTTP port (no restart, so B keeps serving
-    // its own). The configuration check reads the file and passes; the two
-    // endpoints report different Instance ids, so the identity comparison
-    // refuses.
+    // its own). The two endpoints report different running processes, so the
+    // pair check refuses before any Instance-id comparison.
     await ops(b, { operation: "set_configuration", http_port: Number(httpPort(a)) });
     try {
       writeHomeConfig(`opsPort: ${opsPort(b)}\n`);
       const r = await runDoctor({ args: ["--port", httpPort(a)], opsPort: opsPort(b) });
       expect(r.stdout, r.stdout).toContain("Agent IDs: NOT RUN");
       expect(r.stdout, r.stdout).toContain("Agent homes: NOT RUN");
-      expect(r.stdout, r.stdout).toContain("report different instance identities");
+      expect(r.stdout, r.stdout).toContain("not the same running instance");
       expect(r.stdout, "another instance's roster row was reported").not.toContain(BAD_ID_ON_B);
       expect(r.stdout, "another instance's home-less row was reported").not.toContain(HOMELESS_ON_B);
     } finally {

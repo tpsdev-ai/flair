@@ -231,6 +231,52 @@ async function startMismatchStub(): Promise<{ port: number; configurations: numb
   };
 }
 
+/**
+ * A stub ops endpoint whose configuration agrees with the probe — its own ops
+ * port and Harper's real HTTP port — but whose live process is not the one
+ * serving that HTTP port (it reports a different process id).
+ */
+async function startStaleConfigStub(): Promise<{ port: number; configurations: number; deletes: number; close: () => Promise<void> }> {
+  const state = { configurations: 0, deletes: 0 };
+  const srv = createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      const port = (srv.address() as { port: number }).port;
+      let parsed: any = {};
+      try {
+        parsed = JSON.parse(body);
+      } catch {
+        /* ignore */
+      }
+      if (parsed?.operation === "get_configuration") state.configurations++;
+      if (parsed?.operation === "delete") state.deletes++;
+      res.writeHead(200, { "Content-Type": "application/json" });
+      if (parsed?.operation === "system_information") {
+        // A process id that is not the one serving the HTTP port the config names.
+        res.end(JSON.stringify({ harperdb_processes: { core: [{ pid: 1 }] } }));
+        return;
+      }
+      res.end(JSON.stringify({ http: { port: `127.0.0.1:${httpPort()}` }, operationsApi: { network: { port: port } } }));
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    srv.once("error", reject);
+    srv.listen(0, "127.0.0.1", () => resolve());
+  });
+  const port = (srv.address() as { port: number }).port;
+  return {
+    port,
+    get configurations() {
+      return state.configurations;
+    },
+    get deletes() {
+      return state.deletes;
+    },
+    close: () => new Promise<void>((resolve) => srv.close(() => resolve())),
+  };
+}
+
 beforeAll(async () => {
   ensureCliBuild();
   harper = await startHarper();
@@ -370,12 +416,30 @@ describe("flair#2225 — CLI local deletes on a real Harper", () => {
         home,
       );
       expect(stubRun.code, stubRun.out).not.toBe(0);
-      expect(stubRun.out).toContain(`--ops-port ${stub.port}: no matching local HTTP endpoint; refusing deletion`);
+      expect(stubRun.out).toContain(`--ops-port ${stub.port}: no matching local HTTP endpoint`);
       expect(stub.configurations).toBe(1);
       expect(stub.deletes).toBe(0);
       expect(await memoryExists(id)).toBe(true);
     } finally {
       await stub.close();
+    }
+
+    // (iv) a configuration whose ops port matches but whose live process is not
+    // the one serving the HTTP port it names (flair#2526).
+    const stale = await startStaleConfigStub();
+    try {
+      const staleRun = await runCli(
+        ["memory", "hygiene", "--apply", "--pattern", "compact-id", "--ops-port", String(stale.port)],
+        home,
+      );
+      expect(staleRun.code, staleRun.out).not.toBe(0);
+      expect(staleRun.out).toContain("refusing deletion");
+      expect(staleRun.out).toContain("not the same running instance");
+      expect(stale.configurations).toBe(1);
+      expect(stale.deletes).toBe(0);
+      expect(await memoryExists(id)).toBe(true);
+    } finally {
+      await stale.close();
     }
   }, 300_000);
 });

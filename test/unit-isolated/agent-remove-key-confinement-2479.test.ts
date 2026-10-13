@@ -20,7 +20,11 @@ let tmpHome: string;
 let keysDir: string;
 let outsidePath: string;
 let server: Server;
+let httpServer: Server;
 let httpPort: number;
+
+/** flair#2526: the process id both endpoints of the pair must report. */
+const LIVE_PID = 2479;
 
 function json(res: ServerResponse, status: number, data: unknown) {
   res.writeHead(status, { "Content-Type": "application/json" });
@@ -50,6 +54,10 @@ beforeEach(async () => {
           operationsApi: { network: { port: opsPort } },
         });
       }
+      // flair#2526: the pair check reads the live process id from the ops API.
+      if (body.operation === "system_information") {
+        return json(res, 200, { harperdb_processes: { core: [{ pid: LIVE_PID }] } });
+      }
       if (body.operation === "search_by_value" && body.table === "Agent") {
         return json(res, 200, [{ id: String(body.search_value ?? ""), name: String(body.search_value ?? "") }]);
       }
@@ -61,11 +69,21 @@ beforeEach(async () => {
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("mock ops server has no port");
-  httpPort = address.port + 1; // an arbitrary HTTP port; only the ops port must match
+  // flair#2526: a second server stands in for the instance's HTTP endpoint,
+  // answering /HealthDetail with the same live process id the ops API reports.
+  httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
+    if (req.method === "GET" && req.url === "/HealthDetail") return json(res, 200, { pid: LIVE_PID });
+    json(res, 404, { error: "not found" });
+  });
+  await new Promise<void>((resolve) => httpServer.listen(0, "127.0.0.1", () => resolve()));
+  const httpAddress = httpServer.address();
+  if (!httpAddress || typeof httpAddress === "string") throw new Error("mock HTTP server has no port");
+  httpPort = httpAddress.port;
 });
 
 afterEach(async () => {
   await new Promise<void>((resolve, reject) => server.close((e) => (e ? reject(e) : resolve())));
+  await new Promise<void>((resolve, reject) => httpServer.close((e) => (e ? reject(e) : resolve())));
   rmSync(tmpHome, { recursive: true, force: true });
 });
 

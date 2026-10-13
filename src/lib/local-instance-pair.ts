@@ -1,28 +1,40 @@
 /**
- * local-instance-pair.ts — the ONE check of an operations API endpoint's own
- * configured HTTP/ops port pair, used to pair that endpoint with an HTTP port on
- * this host.
+ * local-instance-pair.ts — the ONE check that an operations API endpoint and an
+ * HTTP port on this host are the SAME running Harper process, used to pair an
+ * ops endpoint with an HTTP port.
  *
  * Shared by the local delete paths (`memory hygiene --apply`, `agent remove`,
  * via src/lib/local-delete-instance.ts, flair#2225) and by `flair doctor`'s
  * Agent roster and home reads (src/cli.ts `verifyDoctorRosterInstance`,
  * flair#2483), so the rule is written once.
  *
- * What it checks: it asks the loopback ops endpoint on `opsPort` for Harper's
- * `get_configuration`, and accepts only when that configuration
- *   - records a usable `http.port`,
- *   - binds that HTTP port on loopback or on all interfaces (127.0.0.1,
- *     localhost, 0.0.0.0, [::], or a bare port), and
- *   - records `operationsApi.network.port` equal to `opsPort`, the port asked.
+ * What it checks:
+ *   1. it asks the loopback ops endpoint on `opsPort` for Harper's
+ *      `get_configuration`, and accepts only when that configuration
+ *      - records a usable `http.port`,
+ *      - binds that HTTP port on loopback or on all interfaces (127.0.0.1,
+ *        localhost, 0.0.0.0, [::], or a bare port), and
+ *      - records `operationsApi.network.port` equal to `opsPort`, the port asked;
+ *   2. it asks the same ops endpoint for `system_information` and reads the
+ *      Harper core process id (`harperdb_processes.core[0].pid`, exactly as
+ *      src/lib/mcp-enable.ts's `checkTargetRunsFromConfig` and
+ *      `captureBootDiscriminator` read it);
+ *   3. it asks the configured HTTP port for `/HealthDetail` and reads the
+ *      `pid` that resource reports (`process.pid` — the process serving that
+ *      port); the pair is proven ONLY when both endpoints report the same id.
+ *      Configured ports alone no longer establish it: a configuration edited
+ *      without a restart (or otherwise stale) can name ports the live process is
+ *      not serving.
  * It then reports the configured HTTP port. `flair doctor` requires it to equal
  * the HTTP port doctor probed. The delete paths compare it with `--port` only
  * when `--port` is given; otherwise they address that configured port. A failed
- * request, a non-2xx answer, a body that is not JSON, or any of the three
- * conditions unmet is `unproven`, with a detail naming which.
+ * request, a non-2xx answer, a body that is not JSON, any of the configuration
+ * conditions above unmet, a missing process id, or a pair of ids that differ is
+ * `unproven`, with a detail naming which.
  *
- * Its limit: configured ports are not proof of the live process.
- * `get_configuration` reports the ports the instance's config file records
- * (Harper reads them from that file), not which process is listening on a port.
+ * Its limit: both endpoints are on this host, so a pair that reaches the same
+ * process through two forwarders (two hosts behind one port-forward) reports the
+ * same id and is accepted.
  */
 import { harperPortValue } from "./harper-port-value.js";
 
@@ -34,21 +46,31 @@ export type LocalInstancePairProof =
   | { kind: "proven"; httpPort: number }
   | { kind: "unproven"; status: number | null; detail: string };
 
+/** Injectable seam for tests; production callers use the global `fetch`. */
+export interface LocalInstancePairDeps {
+  fetchImpl?: typeof fetch;
+}
+
 /**
- * Ask the loopback ops endpoint on `opsPort` for its configuration and report
- * the HTTP port it records with that ops port (see the module comment).
- * `authorization` is the full `Authorization` header value. `status` is the
- * HTTP status of a non-2xx answer, else null.
+ * Ask the loopback ops endpoint on `opsPort` for its configuration and its live
+ * Harper process id, ask the configured HTTP port for the process id it serves,
+ * and report the HTTP port only when the two endpoints are one running process
+ * (see the module comment). `authorization` is the full `Authorization` header
+ * value. `status` is the HTTP status of a non-2xx answer, else null.
  */
 export async function proveLocalInstancePair(
   opsPort: number,
   authorization: string,
+  deps: LocalInstancePairDeps = {},
 ): Promise<LocalInstancePairProof> {
+  const fetchImpl = deps.fetchImpl ?? fetch;
   const unproven = (detail: string, status: number | null = null): LocalInstancePairProof =>
     ({ kind: "unproven", status, detail });
+
+  // 1. The ops endpoint's own configuration.
   let response: Response;
   try {
-    response = await fetch(`http://127.0.0.1:${opsPort}/`, {
+    response = await fetchImpl(`http://127.0.0.1:${opsPort}/`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: authorization },
       body: JSON.stringify({ operation: "get_configuration" }),
@@ -77,5 +99,85 @@ export async function proveLocalInstancePair(
   if (!LOCAL_HTTP_BIND_HOSTS.includes(host)) {
     return unproven(`its configuration binds HTTP to ${host}, not loopback or all interfaces`);
   }
+
+  // 2. The live Harper process id the ops endpoint reports.
+  const ops = await readOpsProcessId(fetchImpl, opsPort, authorization);
+  if (!("pid" in ops)) return ops;
+
+  // 3. The live process id the configured HTTP port reports.
+  const http = await readHttpProcessId(fetchImpl, httpPort, authorization);
+  if (!("pid" in http)) return http;
+
+  if (ops.pid !== http.pid) {
+    return unproven(
+      `the operations API reports Harper process ${ops.pid} and the HTTP endpoint on port ${httpPort} reports ` +
+        `process ${http.pid}, so they are not the same running instance`,
+    );
+  }
   return { kind: "proven", httpPort };
+}
+
+/** The Harper core process id the ops endpoint reports, or an `unproven` proof naming why not. */
+async function readOpsProcessId(
+  fetchImpl: typeof fetch,
+  opsPort: number,
+  authorization: string,
+): Promise<{ pid: number } | LocalInstancePairProof> {
+  let response: Response;
+  try {
+    response = await fetchImpl(`http://127.0.0.1:${opsPort}/`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: authorization },
+      body: JSON.stringify({ operation: "system_information", attributes: ["harperdb_processes"] }),
+      signal: AbortSignal.timeout(10_000),
+      redirect: "error",
+    });
+  } catch {
+    return { kind: "unproven", status: null, detail: "the operations API got no answer to its process-identity request" };
+  }
+  if (!response.ok) {
+    return { kind: "unproven", status: response.status, detail: `the process-identity request answered HTTP ${response.status}` };
+  }
+  let data: any;
+  try {
+    data = await response.json();
+  } catch {
+    return { kind: "unproven", status: null, detail: "the process-identity answer is not JSON" };
+  }
+  const pid = data?.harperdb_processes?.core?.[0]?.pid;
+  if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) {
+    return { kind: "unproven", status: null, detail: "its operations API reports no running Harper process id" };
+  }
+  return { pid };
+}
+
+/** The process id the HTTP endpoint on `httpPort` reports, or an `unproven` proof naming why not. */
+async function readHttpProcessId(
+  fetchImpl: typeof fetch,
+  httpPort: number,
+  authorization: string,
+): Promise<{ pid: number } | LocalInstancePairProof> {
+  let response: Response;
+  try {
+    response = await fetchImpl(`http://127.0.0.1:${httpPort}/HealthDetail`, {
+      headers: { Authorization: authorization },
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch {
+    return { kind: "unproven", status: null, detail: `the HTTP endpoint on port ${httpPort} got no answer to its health request` };
+  }
+  if (!response.ok) {
+    return { kind: "unproven", status: response.status, detail: `the health request to the HTTP endpoint on port ${httpPort} answered HTTP ${response.status}` };
+  }
+  let data: any;
+  try {
+    data = await response.json();
+  } catch {
+    return { kind: "unproven", status: null, detail: `the health answer from the HTTP endpoint on port ${httpPort} is not JSON` };
+  }
+  const pid = data?.pid;
+  if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) {
+    return { kind: "unproven", status: null, detail: `the HTTP endpoint on port ${httpPort} reports no running process id` };
+  }
+  return { pid };
 }

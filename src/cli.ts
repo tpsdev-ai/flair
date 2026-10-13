@@ -1736,16 +1736,15 @@ export function resolveDoctorRosterTarget(
 }
 
 /**
- * Whether the candidate ops endpoint's own configured HTTP/ops pair matches the
- * HTTP port doctor probed (flair#2483). `proof` is
+ * Whether the candidate ops endpoint is the running instance serving the HTTP
+ * port doctor probed (flair#2483). `proof` is
  * {@link proveLocalInstancePair}'s answer for `opsPort` — the same check the
  * local delete paths use (src/lib/local-delete-instance.ts): the configuration
  * records `opsPort` as its ops port and an HTTP port bound on loopback or on all
- * interfaces. This decides `run` only when that configured HTTP port is
- * `probedHttpPort`. A check that could not complete, or a configuration naming
- * another HTTP port, is `not-run`: the pair check cannot be established.
- * Configured ports are not proof of the live process, so a match establishes
- * only that the configuration agrees.
+ * interfaces, and both endpoints report the same running Harper process id. This
+ * decides `run` only when that configured HTTP port is `probedHttpPort`. A check
+ * that could not complete, a pair of ids that differ, or a configuration naming
+ * another HTTP port is `not-run`: the pair check cannot be established.
  */
 export function decideDoctorRosterPair(
   opsPort: number,
@@ -1755,7 +1754,7 @@ export function decideDoctorRosterPair(
   if (proof.kind === "unproven") {
     return {
       kind: "not-run",
-      reason: `the ops endpoint on port ${opsPort} did not report a usable configured HTTP/ops pair (${proof.detail}), so this check cannot be established for the probed HTTP port ${probedHttpPort}`,
+      reason: `the ops endpoint on port ${opsPort} did not prove a live HTTP/ops pair (${proof.detail}), so this check cannot be established for the probed HTTP port ${probedHttpPort}`,
       remedy: proof.status === 401 || proof.status === 403 ? DOCTOR_ROSTER_CREDENTIAL_REMEDY : DOCTOR_ROSTER_TARGET_REMEDY,
     };
   }
@@ -1770,14 +1769,13 @@ export function decideDoctorRosterPair(
 }
 
 /**
- * The additional instance-identity comparison behind doctor's roster and home
- * reads (flair#2483), applied only after {@link decideDoctorRosterPair} decided
- * `run`. The configuration read reports CONFIGURED ports, not which instance
- * serves the probed port. When the probed HTTP port and the ops endpoint each
- * report one `flair.Instance` id and the two differ, they are two instances:
- * `not-run`. Every other identity outcome (equal ids, no row on either side as
- * on a fresh install, several rows, or an unread table) leaves the
- * configuration check's `run` standing.
+ * The instance-identity comparison behind doctor's roster and home reads
+ * (flair#2483), applied only after {@link decideDoctorRosterPair} decided
+ * `run`. When the probed HTTP port and the ops endpoint each report one
+ * `flair.Instance` id and the two differ, they are two instances: `not-run`.
+ * Every other identity outcome (equal ids, no row on either side as on a fresh
+ * install, several rows, or an unread table) leaves the pair check's `run`
+ * standing.
  */
 export function decideDoctorRosterIdentity(opsPort: number, pair: ProbedPairIdentity): DoctorRosterTargetDecision {
   if (pair.kind === "different") {
@@ -1796,18 +1794,19 @@ export function decideDoctorRosterIdentity(opsPort: number, pair: ProbedPairIden
  *
  * 1. Picks the candidate with {@link resolveDoctorRosterTarget} against the HTTP
  *    port doctor actually probed (a PID-discovered port included).
- * 2. Asks the candidate for its configuration ({@link proveLocalInstancePair},
- *    the check the local delete paths use) and requires it to record the
- *    candidate as its ops port and the probed port as its HTTP port, bound on
- *    loopback or on all interfaces ({@link decideDoctorRosterPair}). No
- *    Instance row is needed, so a fresh install passes.
+ * 2. Asks the candidate for its configuration and the live process id both
+ *    endpoints report ({@link proveLocalInstancePair}, the check the local
+ *    delete paths use) and requires it to record the candidate as its ops port
+ *    and the probed port as its HTTP port, bound on loopback or on all
+ *    interfaces, served by the same running Harper process
+ *    ({@link decideDoctorRosterPair}). No Instance row is needed, so a fresh
+ *    install passes.
  * 3. Only then compares the instance identities both endpoints report
  *    ({@link decideDoctorRosterIdentity}): two different single ids refuse.
  *
  * Any `not-run` means the caller reports both checks as NOT RUN and reads no
- * Agent row. The limit: step 2 reads configured ports, which are not proof of
- * the live process, and step 3 adds a check only when both endpoints have
- * exactly one Instance row.
+ * Agent row. Both endpoints are on this host, so two processes reached through
+ * one port-forward report the same id and are accepted.
  */
 export async function verifyDoctorRosterInstance(
   opts: { port?: string | number; opsPort?: string | number; dataDir?: string },

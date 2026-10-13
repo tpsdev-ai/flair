@@ -23,6 +23,8 @@ let purgeResponse: ((ids: string[]) => unknown) | null;
 let log: ReturnType<typeof spyOn>;
 let write: ReturnType<typeof spyOn>;
 const row = { id: "owner-compact-/m", agentId: "owner", durability: "permanent", content: "junk" };
+/** flair#2526: the process id both endpoints of the pair must report. */
+const LIVE_PID = 4321;
 const api = async (method: string, path: string, body: any, options: any) => {
   expect(method).toBe("POST");
   expect(path).toBe("/MemoryPurge");
@@ -59,6 +61,13 @@ beforeEach(() => {
   log = spyOn(console, "log").mockImplementation(() => {});
   write = spyOn(process.stdout, "write").mockImplementation(() => true);
   globalThis.fetch = (async (url: any, init: any) => {
+    // flair#2526: the pair check also reads the live process identity each
+    // endpoint holds — the ops API's `system_information` on the ops endpoint
+    // and `/HealthDetail` on the configured HTTP port. Both report one process
+    // here. Neither is one of the ops operations these tests count, so neither
+    // is recorded in `requests`/`operations`.
+    if (/\/HealthDetail$/.test(String(url))) return Response.json({ pid: LIVE_PID });
+    if (JSON.parse(init.body).operation === "system_information") return Response.json({ harperdb_processes: { core: [{ pid: LIVE_PID }] } });
     requests.push(`POST:${url}`);
     expect(String(url)).toBe("http://127.0.0.1:19925/");
     const b = JSON.parse(init.body);
