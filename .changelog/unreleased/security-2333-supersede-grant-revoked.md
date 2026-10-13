@@ -3,4 +3,3 @@
   The close re-checks the grant on committed state inside its transaction, after
   it stages its write, and stops without closing when the revocation is visible at
   that re-check. A revocation committed after the re-check is not seen.
-  Skill-version supersedes are unchanged.

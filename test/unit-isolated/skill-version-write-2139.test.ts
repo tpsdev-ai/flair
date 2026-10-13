@@ -121,7 +121,7 @@ describe("flair#2139 S2 — skill version write: create", () => {
     const res = await runSkillVersionWrite({
       ctx: agentCtx(), subjectId: "m1", agentId: "agent-a",
       head: (shared) => resolveSkillHead("m1", null, shared),
-      plan: () => ({ kind: "create", predecessor: null, successor, closePatch: {}, value: "c1", visibility: "shared" }),
+      plan: () => ({ kind: "create", predecessor: null, successor, closePatch: {}, value: "c1", visibility: "shared", grantedClose: null }),
       hooks: { createSuccessor, closePredecessor },
     });
     expect(res.ok).toBe(true);
@@ -144,7 +144,7 @@ describe("flair#2139 S2 — skill version write: create", () => {
     await runSkillVersionWrite({
       ctx: operatorCtx(), subjectId: "m1", agentId: "agent-a",
       head: (shared) => resolveSkillHead("m1", null, shared),
-      plan: () => ({ kind: "create", predecessor: null, successor, closePatch: {}, value: "c1", visibility: "shared" }),
+      plan: () => ({ kind: "create", predecessor: null, successor, closePatch: {}, value: "c1", visibility: "shared", grantedClose: null }),
       hooks: { createSuccessor, closePredecessor },
     });
     const v = store.get("skill:m1:1")!;
@@ -164,7 +164,7 @@ describe("flair#2139 S2 — skill version write: supersede and delete", () => {
       head: (shared) => resolveSkillHead("m1", null, shared),
       plan: (head) => {
         expect(head?.id).toBe("m1");
-        return { kind: "update", predecessor: head, successor, closePatch: { validTo: "2020-01-02T00:00:00.000Z" }, value: "c2", visibility: "shared" };
+        return { kind: "update", predecessor: head, successor, closePatch: { validTo: "2020-01-02T00:00:00.000Z" }, value: "c2", visibility: "shared", grantedClose: null };
       },
       hooks: { createSuccessor, closePredecessor },
     });
@@ -182,7 +182,7 @@ describe("flair#2139 S2 — skill version write: supersede and delete", () => {
     const res = await runSkillVersionWrite({
       ctx: agentCtx(), subjectId: "m1", agentId: "agent-a",
       head: (shared) => resolveSkillHead("m1", null, shared),
-      plan: (head) => ({ kind: "delete", predecessor: head!, closePatch: { validTo: "2020-01-09T00:00:00.000Z" }, value: null, visibility: "shared" }),
+      plan: (head) => ({ kind: "delete", predecessor: head!, closePatch: { validTo: "2020-01-09T00:00:00.000Z" }, value: null, visibility: "shared", grantedClose: null }),
       hooks: { createSuccessor, closePredecessor },
     });
     expect(res.ok).toBe(true);
@@ -207,7 +207,7 @@ describe("flair#2139 S2 — skill version write atomicity", () => {
     return runSkillVersionWrite({
       ctx: agentCtx(), subjectId: "m1", agentId: "agent-a",
       head: (shared) => resolveSkillHead("m1", null, shared),
-      plan: () => ({ kind: "update", predecessor: memoryStore.get("m1") ?? null, successor, closePatch: { validTo: "2020-01-02T00:00:00.000Z" }, value: "c2", visibility: "shared" }),
+      plan: () => ({ kind: "update", predecessor: memoryStore.get("m1") ?? null, successor, closePatch: { validTo: "2020-01-02T00:00:00.000Z" }, value: "c2", visibility: "shared", grantedClose: null }),
       hooks: { createSuccessor, closePredecessor, ...overrides },
     });
   }
@@ -266,7 +266,7 @@ describe("flair#2139 S2 — skill version write atomicity", () => {
     const res = await runSkillVersionWrite({
       ctx: agentCtx(), subjectId: "m1", agentId: "agent-a",
       head: (shared) => resolveSkillHead("m1", null, shared),
-      plan: () => ({ kind: "update", predecessor: memoryStore.get("m1") ?? null, successor, closePatch: { validTo: "2020-01-02T00:00:00.000Z" }, value: "c2", visibility: "shared" }),
+      plan: () => ({ kind: "update", predecessor: memoryStore.get("m1") ?? null, successor, closePatch: { validTo: "2020-01-02T00:00:00.000Z" }, value: "c2", visibility: "shared", grantedClose: null }),
       hooks: { createSuccessor, closePredecessor },
     });
     expect(res.ok).toBe(false);
@@ -282,14 +282,14 @@ describe("flair#2139 S2 — skill version write atomicity", () => {
     await runSkillVersionWrite({
       ctx: agentCtx(), subjectId: "m1", agentId: "agent-a",
       head: (shared) => resolveSkillHead("m1", null, shared),
-      plan: (head) => ({ kind: "update", predecessor: head, successor: s2, closePatch: { validTo: "2020-01-02T00:00:00.000Z" }, value: "c2", visibility: "shared" }),
+      plan: (head) => ({ kind: "update", predecessor: head, successor: s2, closePatch: { validTo: "2020-01-02T00:00:00.000Z" }, value: "c2", visibility: "shared", grantedClose: null }),
       hooks: { createSuccessor, closePredecessor },
     });
     const s3 = { ...liveSkill("m3", "m1", "c3"), supersedes: "m2", createdAt: "2020-01-03T00:00:00.000Z" };
     await runSkillVersionWrite({
       ctx: agentCtx(), subjectId: "m1", agentId: "agent-a",
       head: (shared) => resolveSkillHead("m1", null, shared),
-      plan: (head) => ({ kind: "update", predecessor: head, successor: s3, closePatch: { validTo: "2020-01-03T00:00:00.000Z" }, value: "c3", visibility: "shared" }),
+      plan: (head) => ({ kind: "update", predecessor: head, successor: s3, closePatch: { validTo: "2020-01-03T00:00:00.000Z" }, value: "c3", visibility: "shared", grantedClose: null }),
       hooks: { createSuccessor, closePredecessor },
     });
     const v1 = store.get("skill:m1:1")!;

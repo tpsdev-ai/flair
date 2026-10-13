@@ -149,6 +149,83 @@ export async function confirmCommittedRow(
   if (!same(committed)) throw new CommittedRowChanged();
 }
 
+/** The MemoryGrant surface the committed grant re-check reads: a scoped
+ *  search that accepts a context. */
+export interface GrantReadTable {
+  search(query: any, ctx?: any): AsyncIterable<any>;
+}
+
+/**
+ * The name for a close whose authorizing "write" grant is gone at the
+ * committed-state re-check (flair#2333 H10 / flair#2511). The two closes share
+ * the re-check ({@link writeGrantHeld}) and this name, but only the
+ * skill-version close answers its caller with it. The skill-version close
+ * (skill-version-write.ts) returns {@link grantedCloseRevokedRefusal}, a 409
+ * carrying this code. The non-skill close (Memory.ts closeSupersededRecord) runs
+ * after its successor is written and throws {@link GrantedCloseRevoked}, which
+ * its caller logs: the predecessor stays open, the successor stays written, and
+ * the caller's response is a success.
+ */
+export const GRANTED_CLOSE_REVOKED = "granted_close_revoked";
+
+/** The skill-version close's named 409 for a close whose authorizing "write"
+ *  grant is gone at the committed-state re-check. Returned from inside the
+ *  version transaction, which then rolls back: nothing is written. */
+export function grantedCloseRevokedRefusal(): Response {
+  return new Response(
+    JSON.stringify({
+      error: GRANTED_CLOSE_REVOKED,
+      message: "the write grant authorizing this close was revoked; not written",
+    }),
+    { status: 409, headers: { "content-type": "application/json" } },
+  );
+}
+
+/** Aborts the non-skill close's owned transaction (Memory.ts
+ *  closeSupersededRecord): the "write" grant that authorized a cross-agent close
+ *  is gone on committed state (flair#2333 H10). The predecessor is not closed;
+ *  the caller logs this after its successor is already written. */
+export class GrantedCloseRevoked extends Error {
+  constructor() {
+    super(`${GRANTED_CLOSE_REVOKED}: the write grant authorizing the close was revoked`);
+    this.name = "GrantedCloseRevoked";
+  }
+}
+
+/**
+ * Does `table` hold a "write" grant from `ownerId` to `granteeId`? A caller that
+ * re-checks on committed state passes an explicit fresh context (`{}`) rather
+ * than its own transaction — the same discipline {@link confirmCommittedRow}
+ * applies to a row. Fail-closed: a search that rejects reads as no grant, so an
+ * unreadable grant does not close the owner's row.
+ *
+ * The committed-state grant re-check both closes run after staging a
+ * grant-authorized cross-agent close: the non-skill close (Memory.ts
+ * closeSupersededRecord, flair#2333 H10) and the shared skill-version writer
+ * (skill-version-write.ts, flair#2511), whose every caller passes the grant a
+ * cross-agent close stands on.
+ */
+export async function writeGrantHeld(
+  table: GrantReadTable,
+  granteeId: string,
+  ownerId: string,
+  ctx?: any,
+): Promise<boolean> {
+  try {
+    for await (const grant of table.search({
+      conditions: [
+        { attribute: "granteeId", comparator: "equals", value: granteeId },
+        { attribute: "ownerId", comparator: "equals", value: ownerId },
+      ],
+    }, ctx)) {
+      if (grant?.scope === "write") return true;
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
+
 /** The shared helper's own signature — so a migration can inject a plain fake
  *  in unit tests (embedding-stamp's DI style) while production uses the real,
  *  transaction-owning one. */
