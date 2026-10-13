@@ -283,8 +283,10 @@ function sameDeclaredField(stored: unknown, declared: unknown): boolean {
 /**
  * POST-COMMIT verification (flair#2478): re-read the COMMITTED row in a fresh
  * context and confirm it still carries this write's declared values. Called
- * after the owned transaction committed, still under the write lock, so the
- * response reports what is stored, not what was staged.
+ * after the owned transaction committed, still under the write lock, so a
+ * success is answered only for a write whose declared fields are what is
+ * stored. It returns a verdict, never a row: the response is built from the
+ * write's own result (see put()).
  *
  *  - `mismatch` — the row is gone or a declared field differs (a same-id write
  *    landed after the commit): the caller answers 409 stored_row_changed;
@@ -295,7 +297,7 @@ async function verifyCommittedWrite(
   table: { get(id: any, ctx?: any): Promise<any> },
   declared: any,
   fallbackId: any,
-): Promise<{ row?: any; mismatch?: boolean; unknown?: boolean }> {
+): Promise<{ mismatch?: boolean; unknown?: boolean }> {
   const id = declared?.id ?? fallbackId;
   if (id === undefined || id === null) return {};
   let row: any;
@@ -307,9 +309,9 @@ async function verifyCommittedWrite(
   if (!row) return { mismatch: true };
   for (const field of POSTCOMMIT_VERIFY_FIELDS) {
     if (!Object.prototype.hasOwnProperty.call(declared, field)) continue;
-    if (!sameDeclaredField(row[field], declared[field])) return { row, mismatch: true };
+    if (!sameDeclaredField(row[field], declared[field])) return { mismatch: true };
   }
-  return { row };
+  return {};
 }
 
 /** The 503 for a write whose post-commit verification read failed (flair#2478).
@@ -2227,7 +2229,9 @@ export class Memory extends (databases as any).flair.Memory {
     // model stamp the latch never recorded. A PATCH body with no embedding
     // fields is unchanged: noteWriteStamp(undefined) is a no-op.
     noteWriteStamp(content?.embeddingModel as string | null | undefined);
-    return withRedactedValues(verified.row ?? patched.result, redactedValues, content?.id ?? (this as any).getId?.(), patchStaged);
+    // As in put(): the verified row gates the answer; the response is the
+    // PATCH's own result, never the stored row (see put()).
+    return withRedactedValues(patched.result, redactedValues, content?.id ?? (this as any).getId?.(), patchStaged);
   }
 
   /**
@@ -2728,7 +2732,13 @@ export class Memory extends (databases as any).flair.Memory {
     const verified = await verifyCommittedWrite((databases as any).flair.Memory, putResult.content, putResult.fallbackId);
     if (verified.unknown) return writeOutcomeUnknownFor(putResult.content?.id ?? putResult.fallbackId);
     if (verified.mismatch) return storedRowChangedRefusal("Memory");
-    const result: any = verified.row ?? putResult.result;
+    // The verification only decides whether the write is answered; the response
+    // is built from the write's own result, never from the verified row. The
+    // stored row carries per-row values that are not part of the write response
+    // (`instanceToken`, `embedding`, `provenance`), and a citing write's response
+    // must not differ by anything but the writer's own inputs (flair#775: citing
+    // an unreadable memory answers byte-identically to citing a nonexistent id).
+    const result: any = putResult.result;
     // flair#1357 — read-your-write for the lexical leg (see post()).
     noteMemoryUpsert(putResult.content);
     noteWriteStamp(putResult.content?.embeddingModel as string | null | undefined); // embedding-space-guard slice 1 (see post())
