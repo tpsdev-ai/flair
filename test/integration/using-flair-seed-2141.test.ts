@@ -29,6 +29,7 @@ import {
   USING_FLAIR_SKILL_CONTENT,
   usingFlairSkillHash,
 } from "../../src/lib/using-flair-skill.js";
+import { nodeBin } from "../helpers/node-runtime.js";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array }
 const mkAgent = (id: string): TestAgent => {
@@ -67,7 +68,7 @@ const basicAuth = () => "Basic " + btoa(`${harper.admin.username}:${harper.admin
 /** Run the built CLI's `flair init` against this test's instance, HOME-isolated. */
 function runInit(extraArgs: string[] = []) {
   const res = spawnSync(
-    process.execPath,
+    nodeBin(),
     [CLI, "init", "--target", harper.httpURL, "--ops-target", harper.opsURL,
       "--admin-user", harper.admin.username, "--admin-pass", harper.admin.password, "--force", ...extraArgs],
     {

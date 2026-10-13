@@ -19,6 +19,7 @@ import { join, resolve } from "node:path";
 import { ensureCliBuild } from "../helpers/build-cli-once.js";
 import { seedAgentViaOpsApi } from "../../src/cli.js";
 import { detectPersistedAdminUser } from "../../src/lib/init-admin-pass.ts";
+import { nodeBin } from "../helpers/node-runtime.js";
 
 const REPO_ROOT = resolve(import.meta.dir, "..", "..");
 const CLI = join(REPO_ROOT, "dist", "cli.js");
@@ -81,7 +82,7 @@ interface Run {
 
 function runInit(args: string[], extraEnv: Record<string, string | undefined> = {}): Promise<Run> {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(process.execPath, [CLI, "init", ...args], {
+    const child = spawn(nodeBin(), [CLI, "init", ...args], {
       cwd: REPO_ROOT,
       env: initEnv(extraEnv),
       stdio: ["ignore", "pipe", "pipe"],
@@ -158,7 +159,7 @@ describe.skipIf(process.platform !== "linux")("fresh explicit credentials on a r
       expect(statSync(adminPassPath).mode & 0o777).toBe(0o600);
       expect(detectPersistedAdminUser(dataDir)).toBe(true);
       expect(realpathSync(join(home, ".flair", "data"))).toBe(realpathSync(dataDir));
-      const doctor = spawnSync(process.execPath, [CLI, "doctor", "--port", String(httpPort)], {
+      const doctor = spawnSync(nodeBin(), [CLI, "doctor", "--port", String(httpPort)], {
         cwd: REPO_ROOT, env: initEnv(), encoding: "utf8", timeout: 30_000,
       });
       expect(doctor.error).toBeUndefined();

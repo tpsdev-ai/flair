@@ -34,6 +34,7 @@ import {
   type SeedCurrent,
 } from "../../src/lib/skill-seed.js";
 import { USING_FLAIR_SKILL_CONTENT, usingFlairSkillHash } from "../../src/lib/using-flair-skill.js";
+import { nodeBin } from "../helpers/node-runtime.js";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array }
 const mkAgent = (id: string): TestAgent => {
@@ -138,7 +139,7 @@ function restOpts() {
 /** Run the built CLI's `flair init` against this test's instance, HOME-isolated. */
 function runInit() {
   const res = spawnSync(
-    process.execPath,
+    nodeBin(),
     [CLI, "init", "--target", harper.httpURL, "--ops-target", harper.opsURL,
       "--admin-user", harper.admin.username, "--admin-pass", harper.admin.password, "--force"],
     {
