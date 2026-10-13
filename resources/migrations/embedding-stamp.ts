@@ -136,6 +136,21 @@
  * engine is rebuilt on the upgrade boot (observed/ledgered by
  * resources/migrations/graph-heal.ts). Before enabling any FUTURE bulk
  * re-embed, ship a structural reindex trigger with it.
+ *
+ * flair#2465 part 2 — the vector/text binding. A re-embed can still store the
+ * vector for the text it read when a text edit commits after that read and
+ * before the commit (Harper has no compare-and-set; the field-only write and the
+ * committed-row confirm narrow — not close — that window). To catch the rows such
+ * an edit leaves behind, every vector write records `embeddedContentHash`
+ * (resources/memory-embed-hash.ts), and this migration re-queues a row whose
+ * recorded hash no longer matches its current embedding text. The query cannot
+ * compute the current text's hash — its conditions compare a stored value to a
+ * constant — so the mismatch leg is a LIVE SCAN: `detect`/`countPending`/`run`
+ * apply `rowEmbeddingCurrent` per row over the table, after the cheap
+ * `staleCondition()` query has had its chance (see each method). A row with no
+ * recorded hash (written before this change) is trusted and left for the next
+ * text edit; re-queueing it instead would re-embed the whole corpus once on
+ * upgrade.
  */
 import { databases } from "harper";
 import { isDeepStrictEqual } from "node:util";

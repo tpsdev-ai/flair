@@ -45,7 +45,7 @@ export function embeddedTextHash(row: Record<string, any> | null | undefined): s
  * A row with NO recorded `embeddedContentHash` is a legacy row: it carries no
  * binding, so it is TRUSTED here (treated as current) and left for the next text
  * edit, which stamps a fresh hash — see the migration's module doc for the cost
- * comparison against re-queueing every legacy row.
+ * comparison against re-queueing legacy rows.
  */
 export function embeddedHashMatches(row: Record<string, any> | null | undefined): boolean {
   const recorded = row?.embeddedContentHash;

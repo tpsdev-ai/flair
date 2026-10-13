@@ -48,10 +48,9 @@ type Memory @table(database: "flair") {
                                # recorded hash equals the hash of the row's current embedding text; the
                                # embedding-stamp migration re-queues a mismatch (a live per-row scan — a
                                # query cannot compute the current text's hash). Nullable/additive: existing
-                               # rows have no value and are TRUSTED (treated as current) until their text
-                               # next changes (clean-upgrade-path gate). NOT `contentHash`: that field is the
-                               # dedup key over `content` and is absent on ordinary writes, so it cannot
-                               # witness which text a vector represents.
+                               # rows have no value and are trusted until a later write records one
+                               # (clean-upgrade-path gate). Distinct from `contentHash`, which the feed
+                               # stamps over `content` and an ordinary Memory write does not maintain.
   tags: [String] @indexed
   durability: String @indexed
   source: String
