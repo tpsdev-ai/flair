@@ -652,6 +652,26 @@ export function parseTokenFromFile(filePath: string): {
   };
 }
 
+/**
+ * The counts of one FederationSync batch response, or null when they are not
+ * counts (flair#2455 rev 2.1 N2).
+ *
+ * The response body is receiver-authored. Its `merged` and `skipped` reach the
+ * sender's success log and the watch loop's line, so each must be an integer
+ * from 0 to the number of records in the batch it answers; anything else
+ * (text, a fraction, a negative, a count larger than the batch, a missing
+ * field) makes the whole response invalid. The caller reports that in local
+ * text, never the received value.
+ */
+export function parseSyncBatchCounts(body: unknown, batchSize: number): { merged: number; skipped: number } | null {
+  if (body === null || typeof body !== "object" || Array.isArray(body)) return null;
+  const isCount = (v: unknown): v is number =>
+    typeof v === "number" && Number.isSafeInteger(v) && v >= 0 && v <= batchSize;
+  const { merged, skipped } = body as { merged?: unknown; skipped?: unknown };
+  if (!isCount(merged) || !isCount(skipped)) return null;
+  return { merged, skipped };
+}
+
 export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number; skipped: number; error?: Error }> {
   const target = resolveTarget(opts);
   const baseUrl = target ? target.replace(/\/$/, "") : undefined;
@@ -753,7 +773,22 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
         // text and is never logged. Report the status only.
         throw new Error(`Sync batch failed: HTTP ${syncRes.status}`);
       }
-      return await syncRes.json() as { merged: number; skipped: number };
+      // A 200 is still receiver-authored: a body that is not JSON (the parser's
+      // own error quotes part of it) or whose counts are not counts is an
+      // invalid response, reported in local text only (flair#2455 N2).
+      let body: unknown;
+      try {
+        body = await syncRes.json();
+      } catch {
+        throw new Error(`Sync batch failed: invalid response (HTTP ${syncRes.status}, body is not JSON)`);
+      }
+      const counts = parseSyncBatchCounts(body, batch.length);
+      if (!counts) {
+        throw new Error(
+          `Sync batch failed: invalid response (HTTP ${syncRes.status}, merged/skipped are not counts from 0 to ${batch.length})`,
+        );
+      }
+      return counts;
     }
 
     let totalBatches = 0;
@@ -1044,9 +1079,9 @@ export function register(program: Command): void {
         peersErr = rewriteFederationStatusFetchFailed(err, baseUrl, urlSetting);
       }
 
-      // Federation retry obligations (flair#2455): the sender's pending and
-      // terminal retry rows, read through the admin-only /FederationRetries
-      // resource. null = unverifiable (the read failed), like peers.
+      // Federation retry rows (flair#2455): the sender's pending and terminal
+      // retry rows, read through the admin-only /FederationRetries resource.
+      // null = unverifiable (the read failed), like peers.
       let retries: { pending: any[]; terminal: any[] } | null = null;
       let retriesErr: any = null;
       try {
@@ -1159,6 +1194,37 @@ export function register(program: Command): void {
         console.log(render.kv("Instance", `${render.icons.warn} unverifiable — ${render.wrap(render.c.dim, String(instanceErr?.message ?? instanceErr))}`));
       }
 
+      // Federation retry rows (flair#2455): the sender's retry bookkeeping per
+      // peer, table and record. Every human-readable path from here on renders
+      // them, including the two early returns (no peers configured, peer read
+      // failed): the retry read is independent of the peer read, so the rows do
+      // not depend on the peer table. Nothing writes a retry row until the
+      // sender is activated (a later slice); from then, a pending row is one
+      // the sender will re-offer and a terminal row ended with a named
+      // resolution.
+      const renderRetrySection = (): void => {
+        if (retriesErr) {
+          console.log();
+          console.log(`${render.icons.warn} ${render.wrap(render.c.yellow, "Federation retries unverifiable — the retry read failed.")}`);
+          console.log(`  ${render.wrap(render.c.dim, String(retriesErr?.message ?? retriesErr))}`);
+          return;
+        }
+        if (!retries || (retries.pending.length === 0 && retries.terminal.length === 0)) return;
+        console.log();
+        console.log(render.wrap(render.c.bold, "Federation retries"));
+        const retryCols: render.TableColumn[] = [
+          { label: "state", key: "state" },
+          { label: "peer", key: "peerId" },
+          { label: "table", key: "table" },
+          { label: "id", key: "id" },
+          { label: "reason", key: "reason", format: (v) => String(v ?? "—") },
+          { label: "attempts", key: "attempts", format: (v) => String(v ?? "—") },
+          { label: "bound", key: "bound", format: (v) => String(v ?? "—") },
+          { label: "resolution", key: "resolution", format: (v) => String(v ?? "—") },
+        ];
+        console.log(render.table(retryCols, [...retries.pending, ...retries.terminal] as Array<Record<string, unknown>>));
+      };
+
       if (peers === null) {
         // Peer read failed but the instance rendered — say so explicitly
         // instead of aborting: "unverifiable" is a different claim from "no
@@ -1166,11 +1232,13 @@ export function register(program: Command): void {
         console.log();
         console.log(`${render.icons.warn} ${render.wrap(render.c.yellow, "Peers unverifiable — the peer read failed. This says nothing about whether peers exist or sync runs.")}`);
         console.log(`  ${render.wrap(render.c.dim, String(peersErr?.message ?? peersErr))}`);
+        renderRetrySection();
         return;
       }
 
       if (peers.length === 0) {
         console.log(`\n${render.icons.info} ${render.wrap(render.c.dim, "No peers configured. Use 'flair federation pair' to connect to a hub.")}`);
+        renderRetrySection();
         return;
       }
 
@@ -1242,28 +1310,7 @@ export function register(program: Command): void {
       ];
       console.log(render.table(cols, peers as Array<Record<string, unknown>>));
 
-      // Federation retry obligations (flair#2455): what the sender has not
-      // landed with a peer, and why. Pending rows are still being re-offered;
-      // terminal rows ended with a named resolution.
-      if (retriesErr) {
-        console.log();
-        console.log(`${render.icons.warn} ${render.wrap(render.c.yellow, "Retry obligations unverifiable — the retry read failed.")}`);
-        console.log(`  ${render.wrap(render.c.dim, String(retriesErr?.message ?? retriesErr))}`);
-      } else if (retries && (retries.pending.length > 0 || retries.terminal.length > 0)) {
-        console.log();
-        console.log(render.wrap(render.c.bold, "Federation retries"));
-        const retryCols: render.TableColumn[] = [
-          { label: "state", key: "state" },
-          { label: "peer", key: "peerId" },
-          { label: "table", key: "table" },
-          { label: "id", key: "id" },
-          { label: "reason", key: "reason", format: (v) => String(v ?? "—") },
-          { label: "attempts", key: "attempts", format: (v) => String(v ?? "—") },
-          { label: "bound", key: "bound", format: (v) => String(v ?? "—") },
-          { label: "resolution", key: "resolution", format: (v) => String(v ?? "—") },
-        ];
-        console.log(render.table(retryCols, [...retries.pending, ...retries.terminal] as Array<Record<string, unknown>>));
-      }
+      renderRetrySection();
 
       // Stale warning is gated on lastMergeAt (real progress), not lastSyncAt.
       // A peer that "syncs" every 5min but hasn't merged a record in 24h is

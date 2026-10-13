@@ -1,12 +1,18 @@
 /**
- * FederationRetry — sender-owned retry obligations for federation sync
- * (flair#2455 slice 1: storage, atomic transitions, operator query).
+ * FederationRetry — the table for the sender's federation retry bookkeeping
+ * (flair#2455 slice 1: storage, the atomic transition, the operator query).
  *
- * One row per (peerId, table, recordId) the receiver refused for a reason a
- * later re-offer could clear, plus locally observed unconfirmed sends. The row
- * holds no record content: a re-offer reads the source row fresh. See
+ * The table is shaped for one row per (peerId, table, recordId) the receiver
+ * refused for a reason a later re-offer could clear, plus locally observed
+ * unconfirmed sends. No production path writes a row in this slice: the
+ * sender creates them once it is activated (a later slice). See
  * resources/federation-retry-lib.ts for the key/state/outcome vocabulary and
  * schemas/federation.graphql for the table.
+ *
+ * NO RECORD CONTENT. The table is `@sealed` in the schema, so Harper refuses
+ * any write (REST, operations API or code) that carries a field the schema
+ * does not declare, and the transition below writes only the declared fields
+ * (RETRY_ROW_FIELDS). A re-offer will read the source row fresh.
  *
  * ISOLATION (design rev 2 K2). `FederationRetry` is deliberately absent from
  * FEDERATION_TABLE_POLICY (resources/federation-classify.ts) and therefore from
@@ -29,6 +35,7 @@ import {
   retryEntryKey,
   isRetryBound,
   isRetryResolution,
+  pickRetryRowFields,
   type RetryBound,
   type RetryResolution,
 } from "./federation-retry-lib.js";
@@ -46,19 +53,26 @@ export const RETRY_LOCK_NAMESPACE = "federation-retry";
 export const RETRY_LOCK_ATTEMPTS = 40;
 export const RETRY_LOCK_WAIT_MS = 25;
 
-export interface RetryTerminalInput {
+interface RetryTerminalBase {
   peerId: string;
   table: string;
   recordId: string;
-  resolution: RetryResolution;
-  /** Which bound fired, when `resolution` is `retry_exhausted`; null otherwise. */
-  bound?: RetryBound | null;
   completedAt?: string;
   /** The request context, if any. Its transaction is detached for the owned one. */
   ctx?: any;
   /** TEST-ONLY: awaited between the in-transaction read and the write. */
   pausePoint?: () => Promise<void> | undefined;
 }
+
+/**
+ * A terminal outcome. `bound` names which bound fired, so it is REQUIRED for
+ * `retry_exhausted` and absent (or null) for every other resolution. The
+ * transition re-checks this at run time and refuses a mismatch without writing.
+ */
+export type RetryTerminalInput = RetryTerminalBase & (
+  | { resolution: "retry_exhausted"; bound: RetryBound }
+  | { resolution: Exclude<RetryResolution, "retry_exhausted">; bound?: null }
+);
 
 export type RetryTerminalErrorCode =
   | "invalid"
@@ -79,10 +93,14 @@ export type RetryTerminalOutcome =
  * Runs under the peer's per-key lock on the table store, in a transaction this
  * call owns: the read that checks `pending` and the write that sets the
  * terminal outcome commit together or not at all. A caller bug (missing
- * component, unknown resolution/bound) and a missing or already-terminal row
- * are refused by name WITHOUT writing. If the write or the confirming re-read
- * fails, the transaction aborts and the row stays `pending` — the outcome is
- * never reported as success on a row that did not move.
+ * component, unknown resolution or bound, a `retry_exhausted` without its
+ * bound, a bound on any other resolution) and a missing or already-terminal
+ * row are refused by name WITHOUT writing. If the write or the confirming
+ * re-read fails, the transaction aborts and the row stays `pending`: the
+ * outcome is never reported as success on a row that did not move.
+ *
+ * The write carries only the schema's declared fields (RETRY_ROW_FIELDS), never
+ * a spread of the stored row.
  */
 export async function terminalizeRetryEntry(input: RetryTerminalInput): Promise<RetryTerminalOutcome> {
   let id: string;
@@ -91,11 +109,20 @@ export async function terminalizeRetryEntry(input: RetryTerminalInput): Promise<
   } catch (err: any) {
     return { ok: false, code: "invalid", message: err?.message ?? String(err) };
   }
-  if (!isRetryResolution(input.resolution)) {
-    return { ok: false, code: "invalid", message: `unknown retry resolution: ${String(input.resolution)}` };
+  // Checked at run time as well as by the type: a caller outside TypeScript (or
+  // one that casts) can still pass any pair.
+  const { resolution, bound } = input as { resolution: unknown; bound?: unknown };
+  if (!isRetryResolution(resolution)) {
+    return { ok: false, code: "invalid", message: `unknown retry resolution: ${String(resolution)}` };
   }
-  if (input.bound != null && !isRetryBound(input.bound)) {
-    return { ok: false, code: "invalid", message: `unknown retry bound: ${String(input.bound)}` };
+  if (bound != null && !isRetryBound(bound)) {
+    return { ok: false, code: "invalid", message: `unknown retry bound: ${String(bound)}` };
+  }
+  if (resolution === "retry_exhausted" && bound == null) {
+    return { ok: false, code: "invalid", message: "a retry_exhausted outcome must name the bound that fired (attempts, age or both)" };
+  }
+  if (resolution !== "retry_exhausted" && bound != null) {
+    return { ok: false, code: "invalid", message: `a ${resolution} outcome takes no bound; only retry_exhausted records one` };
   }
 
   const table = (databases as any).flair?.FederationRetry;
@@ -114,10 +141,10 @@ export async function terminalizeRetryEntry(input: RetryTerminalInput): Promise<
       }
       const now = input.completedAt ?? new Date().toISOString();
       const next = {
-        ...row,
+        ...pickRetryRowFields(row),
         state: "terminal",
-        resolution: input.resolution,
-        bound: input.bound ?? null,
+        resolution,
+        bound: bound ?? null,
         completedAt: now,
         updatedAt: now,
       };

@@ -1,10 +1,17 @@
 // flair#2455 slice 1 — the retry vocabulary: the closed SkipReason union, the
-// exhaustive retryable classification, and the FederationRetry tuple key.
+// exhaustive retryable classification, the FederationRetry tuple key and the
+// table's declared fields.
 //
-// The type-level exhaustiveness of SKIP_REASON_CLASS (a Record<SkipReason, …>)
-// is checked by tsc, not here; these cases pin the runtime view so a missing or
-// mis-classified reason is caught even in the lane that strips types.
+// A SkipReason missing from SKIP_REASON_CLASS is a tsc error (the map
+// `satisfies Record<SkipReason, …>`); that is the primary check. SKIP_REASONS
+// is derived from the map itself, so comparing the two here proves nothing
+// about a missing reason. This lane instead reads the SOURCE as an independent
+// oracle: the members of the `SkipReason` union in federation-classify.ts and
+// every literal `recordSkip("…")` reason in Federation.ts must each have a
+// class. The same approach checks RETRY_ROW_FIELDS against the schema file.
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   SKIP_REASON_CLASS,
   SKIP_REASONS,
@@ -16,17 +23,59 @@ import {
   parseRetryEntryKey,
   isRetryResolution,
   isRetryBound,
+  pickRetryRowFields,
   RETRY_RESOLUTIONS,
+  RETRY_ROW_FIELDS,
   LOCAL_RETRY_REASONS,
 } from "../../resources/federation-retry-lib.js";
 
+const ROOT = join(import.meta.dirname, "..", "..");
+const read = (rel: string) => readFileSync(join(ROOT, rel), "utf8");
+
+/** The string members of `export type SkipReason = … ;`, read from the source text. */
+function skipReasonUnionFromSource(): string[] {
+  const src = read("resources/federation-classify.ts");
+  const start = src.indexOf("export type SkipReason =");
+  expect(start, "the SkipReason union is in federation-classify.ts").toBeGreaterThanOrEqual(0);
+  const end = src.indexOf("\n;", start);
+  expect(end, "the SkipReason union ends with a line holding only `;`").toBeGreaterThan(start);
+  return [...src.slice(start, end).matchAll(/^\s*\|\s*"([a-z_]+)"/gm)].map((m) => m[1]);
+}
+
+/** The reasons FederationSync.post passes to recordSkip as string literals. */
+function literalRecordSkipReasons(): string[] {
+  const src = read("resources/Federation.ts");
+  return [...new Set([...src.matchAll(/recordSkip\("([a-z_]+)"\)/g)].map((m) => m[1]))];
+}
+
+/** The field names declared in the FederationRetry type of schemas/federation.graphql. */
+function retryFieldsFromSchema(): string[] {
+  const src = read("schemas/federation.graphql");
+  const start = src.indexOf("type FederationRetry ");
+  expect(start, "the FederationRetry type is in schemas/federation.graphql").toBeGreaterThanOrEqual(0);
+  const body = src.slice(src.indexOf("{", start) + 1, src.indexOf("}", start));
+  return [...body.matchAll(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:/gm)].map((m) => m[1]);
+}
+
 describe("flair#2455 — closed SkipReason union and retry classification", () => {
-  test("the classification map has exactly the SkipReason members", () => {
-    expect(Object.keys(SKIP_REASON_CLASS).sort()).toEqual([...SKIP_REASONS].sort());
-    expect(SKIP_REASONS.size).toBe(Object.keys(SKIP_REASON_CLASS).length);
+  test("the classification map has exactly the members of the SkipReason union, read from the source", () => {
+    const union = skipReasonUnionFromSource();
+    expect(union.length, "the oracle found the union's members").toBeGreaterThanOrEqual(18);
+    const mapKeys: string[] = Object.keys(SKIP_REASON_CLASS).sort();
+    const reasons: string[] = [...SKIP_REASONS].sort();
+    expect(mapKeys).toEqual([...union].sort());
+    expect(reasons).toEqual([...union].sort());
   });
 
-  test("the reasons the slice types are present and are their own names", () => {
+  test("every literal reason FederationSync.post records is classified", () => {
+    const emitted = literalRecordSkipReasons();
+    expect(emitted, "the oracle found the literal recordSkip sites").toContain("merge_error");
+    for (const reason of emitted) {
+      expect(Object.keys(SKIP_REASON_CLASS), `recordSkip("${reason}") has no class`).toContain(reason);
+    }
+  });
+
+  test("the five reasons the slice types are members of the union", () => {
     for (const reason of [
       "merge_error",
       "invalid_agent_id",
@@ -93,5 +142,29 @@ describe("flair#2455 — FederationRetry tuple key and outcome vocabulary", () =
     expect([...RETRY_RESOLUTIONS].length).toBe(6);
     const actual: string[] = [...LOCAL_RETRY_REASONS].sort();
     expect(actual).toEqual(["invalid_response", "retry_unknown", "transport_failure"].sort());
+  });
+});
+
+describe("flair#2455 — FederationRetry declared fields", () => {
+  test("RETRY_ROW_FIELDS is exactly the schema's declared fields, in schema order", () => {
+    const fields: string[] = [...RETRY_ROW_FIELDS];
+    expect(fields).toEqual(retryFieldsFromSchema());
+  });
+
+  test("the table is @sealed in the schema", () => {
+    const src = read("schemas/federation.graphql");
+    expect(src).toMatch(/type FederationRetry @table\([^)]*\)[^{]*@sealed[^{]*\{/);
+  });
+
+  test("pickRetryRowFields keeps declared fields with a value and drops everything else", () => {
+    const row = {
+      id: "k", peerId: "p", table: "Memory", recordId: "r", state: "pending",
+      firstRefusedAt: "t", attempts: 1, createdAt: "t", bound: null, episodeId: undefined,
+      content: "a record's content", data: { content: "x" },
+    };
+    expect(pickRetryRowFields(row)).toEqual({
+      id: "k", peerId: "p", table: "Memory", recordId: "r", state: "pending",
+      firstRefusedAt: "t", attempts: 1, createdAt: "t", bound: null,
+    });
   });
 });

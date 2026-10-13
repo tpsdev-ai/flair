@@ -1517,8 +1517,10 @@ export class FederationPeers extends Resource {
 }
 
 /**
- * GET /FederationRetries — the sender's pending and terminal federation retry
- * obligations (flair#2455), admin view.
+ * GET /FederationRetries — the rows of the sender's FederationRetry table
+ * (flair#2455), split into pending and terminal, admin view. No production path
+ * writes a row in this slice, so both lists stay empty until the sender is
+ * activated (a later slice).
  *
  * allowRead()=allowAdmin, the same gate as FederationPeers above. Read-only:
  * it never writes a row, and a read failure propagates instead of being

@@ -16,12 +16,20 @@ export type RetryState = "pending" | "terminal";
  * Why a terminal row stopped being offered, using the names the design gives
  * (rev 2 K2/S5 plus rev 2.1 N1's rename of `no_retry_required` to `merged`).
  *
- * - `merged` — a validated 200 omitted the offered key, so the receiver accepted it.
+ * - `merged` — a validated response that carries a per-key refusal list omitted
+ *   the offered key: the receiver acknowledged it. The configured hub is
+ *   trusted for that acknowledgement; it is not proof of delivery (design rev
+ *   2.1 N4).
  * - `refused_terminal` — the receiver listed the key with a non-retryable reason.
  * - `source_deleted` — the source row is gone.
  * - `source_ineligible` — the source row is no longer eligible to send (e.g. private).
  * - `peer_unavailable` — the sender's own peer listing shows the hub absent or revoked.
- * - `retry_exhausted` — an N/T bound fired with the receiver still refusing.
+ * - `retry_exhausted` — an N/T bound fired before the record was confirmed:
+ *   either the receiver still refused it, or the last send was unconfirmed (a
+ *   transport failure or an invalid response, `lastReason` says which). An
+ *   unconfirmed send means the sender stopped offering, NOT that the record is
+ *   missing: the receiver may already hold it. `bound` names the bound that
+ *   fired, and is set for this resolution only.
  */
 export type RetryResolution =
   | "merged"
@@ -40,7 +48,7 @@ export const RETRY_RESOLUTIONS: ReadonlySet<RetryResolution> = new Set<RetryReso
   "retry_exhausted",
 ]);
 
-/** Which bound ended a `retry_exhausted` obligation; null while not exhausted. */
+/** Which bound ended a `retry_exhausted` obligation; null for every other row. */
 export type RetryBound = "attempts" | "age" | "both";
 
 export const RETRY_BOUNDS: ReadonlySet<RetryBound> = new Set<RetryBound>(["attempts", "age", "both"]);
@@ -66,6 +74,44 @@ export function isRetryResolution(value: unknown): value is RetryResolution {
 
 export function isRetryBound(value: unknown): value is RetryBound {
   return typeof value === "string" && RETRY_BOUNDS.has(value as RetryBound);
+}
+
+/**
+ * Every field the `FederationRetry` schema declares (schemas/federation.graphql),
+ * in schema order. The table is `@sealed`, so Harper refuses a write carrying
+ * any other field; the transition builds its write from this list rather than
+ * spreading a stored row.
+ */
+export const RETRY_ROW_FIELDS = [
+  "id",
+  "peerId",
+  "table",
+  "recordId",
+  "state",
+  "firstRefusedAt",
+  "attempts",
+  "episodeId",
+  "recordFingerprint",
+  "lastReason",
+  "lastAttemptSyncId",
+  "lastAttemptAt",
+  "completedAt",
+  "resolution",
+  "bound",
+  "createdAt",
+  "updatedAt",
+] as const;
+
+export type RetryRowField = (typeof RETRY_ROW_FIELDS)[number];
+
+/** Copy only the declared fields of `row` that hold a value; anything else is dropped. */
+export function pickRetryRowFields(row: Record<string, unknown>): Partial<Record<RetryRowField, unknown>> {
+  const out: Partial<Record<RetryRowField, unknown>> = {};
+  for (const field of RETRY_ROW_FIELDS) {
+    const value = row[field];
+    if (value !== undefined) out[field] = value;
+  }
+  return out;
 }
 
 /**

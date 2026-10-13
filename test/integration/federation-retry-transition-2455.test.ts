@@ -3,11 +3,14 @@
 //
 // Runs against a composed copy of the built component (test/helpers/
 // federation-retry-probe-component.ts) that adds an admin-only probe whose POST
-// calls the real transition, and a test-only module that makes ONE
-// FederationRetry.put throw on demand. Nothing under resources/ ships a failure
-// switch.
+// calls the real transition (optionally pausing it after its read), and a
+// test-only module that makes ONE FederationRetry.put throw on demand. Nothing
+// under resources/ ships a pause or a failure switch.
+//
+// Every refused transition is checked against the WHOLE stored row: a refusal
+// leaves the row exactly as it was.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { retryEntryKey } from "../../resources/federation-retry-lib.js";
@@ -56,11 +59,19 @@ async function readRetryRow(key: string): Promise<any> {
   return (rows as any[])[0] ?? null;
 }
 
-async function seedPending(key: string): Promise<void> {
+async function seedPending(key: string, peerId = PEER): Promise<void> {
   await ops({
     operation: "upsert", database: "flair", table: "FederationRetry",
-    records: [{ id: key, peerId: PEER, table: "Memory", recordId: `row-${sfx}`, state: "pending", firstRefusedAt: now(), attempts: 1, createdAt: now() }],
+    records: [{ id: key, peerId, table: "Memory", recordId: `row-${sfx}`, state: "pending", firstRefusedAt: now(), attempts: 1, lastReason: "merge_error", createdAt: now() }],
   });
+}
+
+async function waitForFile(path: string, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!existsSync(path)) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${path}`);
+    await new Promise((r) => setTimeout(r, 20));
+  }
 }
 
 function probe(body: Record<string, unknown>, auth = true): Promise<Response> {
@@ -114,7 +125,44 @@ describe("flair#2455 — retry transition is atomic and fail-closed (real Harper
     const again = (await (await probe({ peerId: PEER, table: "Memory", recordId: `ok-${sfx}`, resolution: "merged" })).json()) as any;
     expect(again.ok).toBe(false);
     expect(again.code).toBe("already_terminal");
-    expect((await readRetryRow(key)).resolution).toBe("retry_exhausted");
+    expect(await readRetryRow(key)).toEqual(row);
+  });
+
+  test("a retry_exhausted outcome without its bound is refused, and the row is unchanged", async () => {
+    const key = retryEntryKey(PEER, "Memory", `nobound-${sfx}`);
+    await seedPending(key);
+    const before = await readRetryRow(key);
+    for (const bound of [undefined, null]) {
+      const out = (await (await probe({ peerId: PEER, table: "Memory", recordId: `nobound-${sfx}`, resolution: "retry_exhausted", bound })).json()) as any;
+      expect(out.ok, `bound ${String(bound)}`).toBe(false);
+      expect(out.code).toBe("invalid");
+    }
+    expect(await readRetryRow(key)).toEqual(before);
+  });
+
+  test("a bound on any resolution other than retry_exhausted is refused, and the row is unchanged", async () => {
+    const key = retryEntryKey(PEER, "Memory", `strayb-${sfx}`);
+    await seedPending(key);
+    const before = await readRetryRow(key);
+    for (const [resolution, bound] of [
+      ["merged", "attempts"],
+      ["refused_terminal", "age"],
+      ["source_deleted", "both"],
+      ["source_ineligible", "attempts"],
+      ["peer_unavailable", "age"],
+    ] as const) {
+      const out = (await (await probe({ peerId: PEER, table: "Memory", recordId: `strayb-${sfx}`, resolution, bound })).json()) as any;
+      expect(out.ok, `${resolution} + ${bound}`).toBe(false);
+      expect(out.code).toBe("invalid");
+    }
+    expect(await readRetryRow(key)).toEqual(before);
+
+    // The same resolution without a bound is accepted, and records a null bound.
+    const ok = (await (await probe({ peerId: PEER, table: "Memory", recordId: `strayb-${sfx}`, resolution: "refused_terminal" })).json()) as any;
+    expect(ok.ok).toBe(true);
+    const row = await readRetryRow(key);
+    expect(row.resolution).toBe("refused_terminal");
+    expect(row.bound ?? null).toBeNull();
   });
 
   test("a missing entry is refused by name and writes nothing", async () => {
@@ -127,6 +175,7 @@ describe("flair#2455 — retry transition is atomic and fail-closed (real Harper
   test("a bookkeeping write failure is fail-closed: the row stays pending, then recovers", async () => {
     const key = retryEntryKey(PEER, "Memory", `fail-${sfx}`);
     await seedPending(key);
+    const before = await readRetryRow(key);
 
     // Arm the one-shot write failure, then attempt the transition.
     writeFileSync(join(pauseDir, "arm.retry-write-fail"), "");
@@ -135,9 +184,7 @@ describe("flair#2455 — retry transition is atomic and fail-closed (real Harper
     expect(failed.code).toBe("write_failed");
 
     // Fail-closed: no terminal outcome was reported AND the row did not move.
-    const row = await readRetryRow(key);
-    expect(row.state).toBe("pending");
-    expect(row.resolution ?? null).toBeNull();
+    expect(await readRetryRow(key)).toEqual(before);
 
     // The failure was one-shot; a later attempt succeeds.
     const ok = (await (await probe({ peerId: PEER, table: "Memory", recordId: `fail-${sfx}`, resolution: "retry_exhausted", bound: "age" })).json()) as any;
@@ -145,15 +192,37 @@ describe("flair#2455 — retry transition is atomic and fail-closed (real Harper
     expect((await readRetryRow(key)).state).toBe("terminal");
   });
 
-  test("two concurrent transitions of one row: exactly one wins", async () => {
+  test("a transition paused after its read holds the peer's lock: a second transition of that peer is refused lock_busy and writes nothing", async () => {
     const key = retryEntryKey(PEER, "Memory", `race-${sfx}`);
     await seedPending(key);
-    const [a, b] = await Promise.all([
-      probe({ peerId: PEER, table: "Memory", recordId: `race-${sfx}`, resolution: "merged" }).then((r) => r.json()),
-      probe({ peerId: PEER, table: "Memory", recordId: `race-${sfx}`, resolution: "retry_exhausted", bound: "attempts" }).then((r) => r.json()),
-    ]);
-    const wins = [a, b].filter((o: any) => o.ok === true).length;
-    expect(wins).toBe(1);
-    expect((await readRetryRow(key)).state).toBe("terminal");
-  });
+    const before = await readRetryRow(key);
+    // A row of ANOTHER peer, to show the lock is per peer, not global.
+    const otherPeer = `${PEER}-other`;
+    const otherKey = retryEntryKey(otherPeer, "Memory", `race-${sfx}`);
+    await seedPending(otherKey, otherPeer);
+
+    const tag = `race-${sfx}`;
+    const first = probe({ peerId: PEER, table: "Memory", recordId: `race-${sfx}`, resolution: "merged", pauseTag: tag }).then((r) => r.json());
+    try {
+      // The first transition has read the pending row inside its transaction
+      // and is paused there, holding the peer's lock.
+      await waitForFile(join(pauseDir, `reached.${tag}`), 15_000);
+
+      const second = (await (await probe({ peerId: PEER, table: "Memory", recordId: `race-${sfx}`, resolution: "retry_exhausted", bound: "attempts" })).json()) as any;
+      expect(second.ok).toBe(false);
+      expect(second.code).toBe("lock_busy");
+      expect(await readRetryRow(key)).toEqual(before);
+
+      const other = (await (await probe({ peerId: otherPeer, table: "Memory", recordId: `race-${sfx}`, resolution: "merged" })).json()) as any;
+      expect(other.ok, "another peer's transition is not blocked").toBe(true);
+    } finally {
+      writeFileSync(join(pauseDir, `release.${tag}`), "");
+    }
+
+    expect(await first).toEqual({ ok: true, id: key });
+    const row = await readRetryRow(key);
+    expect(row.state).toBe("terminal");
+    expect(row.resolution).toBe("merged");
+    expect(row.bound ?? null).toBeNull();
+  }, 30_000);
 });

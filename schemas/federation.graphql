@@ -39,18 +39,21 @@ type Peer @table(database: "flair") @export {
   updatedAt: String
 }
 
-# Sender-owned retry obligations (flair#2455). One row per (peer, table, record)
-# the receiver refused for a reason a later re-offer could clear, plus locally
-# observed unconfirmed sends. Local bookkeeping: the sender writes it, and it is
-# EXCLUDED from federation policy and the receive mapping, so an inbound sync
-# cannot target it (a pushed record naming it skips as `unknown_table`).
+# Sender-owned federation retry obligations (flair#2455). The table is shaped
+# for one row per (peer, table, record) the receiver refused for a reason a
+# later re-offer could clear, plus locally observed unconfirmed sends. Nothing
+# writes a row yet: the sender creates them once it is activated in a later
+# slice. Local bookkeeping, EXCLUDED from federation policy and the receive
+# mapping, so an inbound sync cannot target it (a pushed record naming it skips
+# as `unknown_table`).
 #
 # `id` is the collision-free encoding of the (peerId, table, recordId) tuple
 # (resources/federation-retry-lib.ts retryEntryKey); the three components are
-# also stored whole for querying. No record content is stored — a re-offer reads
-# the source row fresh. Admin-only on every operation; see resources/
-# FederationRetry.ts.
-type FederationRetry @table(database: "flair") @export {
+# also stored whole for querying. @sealed: Harper refuses any write carrying a
+# field not declared below, so no record content can be stored here; a re-offer
+# will read the source row fresh. Admin-only on every operation; see
+# resources/FederationRetry.ts.
+type FederationRetry @table(database: "flair") @sealed @export {
   id: ID @primaryKey               # retryEntryKey(peerId, table, recordId)
   peerId: String! @indexed         # the peer that refused (or never answered)
   table: String!                   # the source table name
@@ -58,14 +61,14 @@ type FederationRetry @table(database: "flair") @export {
   state: String! @indexed          # "pending" | "terminal"
   firstRefusedAt: String! @indexed # age is measured from here (the T bound)
   attempts: Int! @indexed          # reserved and persisted before each send (the N bound)
-  episodeId: String                # this obligation's generation; rejects stale completions
+  episodeId: String                # RESERVED for sender activation (flair#2455 slice 3): the obligation's generation, for rejecting stale completions; nothing sets or checks it yet
   recordFingerprint: String        # content fingerprint, for exhausted-row suppression
   lastReason: String               # the closed SkipReason, or a local reason
   lastAttemptSyncId: String        # the sync that last reserved an attempt
   lastAttemptAt: String
   completedAt: String              # when the row became terminal
   resolution: String               # which terminal outcome ended it
-  bound: String                    # null | "attempts" | "age" | "both"
+  bound: String                    # "attempts" | "age" | "both" for retry_exhausted; null otherwise
   createdAt: String!
   updatedAt: String
 }
