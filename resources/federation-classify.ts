@@ -290,3 +290,36 @@ export function inboundChangesExistingPrincipalStatus(
   if (!data || typeof data !== "object") return false;
   return effectiveAgentStatus(data.status) !== effectiveAgentStatus(local.status);
 }
+
+/** The stored `publicKey` value of an Agent row seeded but not yet registered. */
+export const PENDING_PUBLIC_KEY = "pending";
+
+/**
+ * flair#2266: does this inbound Agent record CHANGE an existing local row's
+ * `publicKey` while that stored value is exactly `pending`? True only when the
+ * record is for the Agent table, a local row exists, its stored key is exactly
+ * `pending`, and the record carries a `publicKey` that differs from that stored
+ * value. A record with no `publicKey` field — or one restating `pending` — is
+ * not a change and is not refused here (the merge's last-write-wins leaves the
+ * stored value).
+ *
+ * This is the federation-side half of the pending-key rule the registration
+ * operation enforces on the local side (resources/AgentKeyRegister.ts). The
+ * sync-in merge writes Agent through the RAW table handle with a wholesale field
+ * apply, so without this guard a paired hub could deliver a key onto a local
+ * `pending` row (a hub may carry a forged-originator record — see
+ * federation-classify's originator rule). A true answer skips the whole record
+ * before the raw put, the same fail-safe shape as
+ * {@link inboundChangesExistingPrincipalStatus}, but it emits its OWN skip name
+ * so the two rules stay distinguishable.
+ */
+export function inboundChangesExistingPendingKey(
+  record: SyncRecord,
+  local: Record<string, any> | null,
+): boolean {
+  if (record.table !== "Agent" || local == null) return false;
+  if (local.publicKey !== PENDING_PUBLIC_KEY) return false;
+  const data = record.data;
+  if (!data || typeof data !== "object") return false;
+  return Object.prototype.hasOwnProperty.call(data, "publicKey") && (data as any).publicKey !== local.publicKey;
+}

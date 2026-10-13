@@ -1,0 +1,21 @@
+# AgentKeyRegistration — the private audit record for one successful key
+# registration (POST /AgentKeyRegister, resources/AgentKeyRegister.ts).
+#
+# One row per committed registration. It carries NO secret: the actor, the
+# operator, the target agent, this instance's id, the key FINGERPRINT (never the
+# key itself) and the time. Because it holds no secret it is `replicate: true` —
+# a deliberate choice, in contrast to the token-enrollment table the design
+# thread records for a later slice, which must be `replicate: false`.
+#
+# Admin-read-only through resources/AgentKeyRegistration.ts (allowRead =
+# allowAdmin); every REST write is refused, so nothing but the registration
+# operation ever writes it.
+type AgentKeyRegistration @table(database: "flair", replicate: true) {
+  id: ID @primaryKey              # server-generated registrationId
+  actorId: String! @indexed       # the verified admin agent that registered the key
+  operator: String                # the operator username the gate resolved for the caller, if any
+  agentId: String! @indexed       # the agent row whose key was registered
+  instanceId: String @indexed     # the local instance id that performed the registration
+  keyFingerprint: String!         # sha256 (hex) of the registered public key — never the key
+  createdAt: String!
+}

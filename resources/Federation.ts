@@ -38,6 +38,7 @@ import {
   reconstructRecordVerifyBody,
   checkPrincipalEntitlement,
   inboundChangesExistingPrincipalStatus,
+  inboundChangesExistingPendingKey,
   type FederationSyncTable,
 } from "./federation-classify.js";
 export {
@@ -45,6 +46,7 @@ export {
   reconstructRecordVerifyBody,
   checkPrincipalEntitlement,
   inboundChangesExistingPrincipalStatus,
+  inboundChangesExistingPendingKey,
   recordSignatureVersion,
   PRINCIPAL_OWNING_TABLES,
   FEDERATION_TABLE_POLICY,
@@ -1339,7 +1341,18 @@ export class FederationSync extends Resource {
               // also be present; neither is an admin claim), so a second field
               // in the record does not land either.
               if (record.table === "Agent" && inboundChangesExistingPrincipalStatus(record, row)) {
-                return { skip: true };
+                return { skip: true, reason: "agent_status_not_federated" };
+              }
+              // flair#2266: an inbound Agent record that would CHANGE a local
+              // row's `publicKey` while the stored value is exactly `pending` is
+              // skipped WHOLE. The sync-in writes Agent through the RAW table
+              // handle and a paired hub may carry a forged-originator record, so
+              // this path has no authority to complete a pending row's key; the
+              // local registration operation (resources/AgentKeyRegister.ts) is
+              // the one path that may. It carries its OWN reason so the skip log
+              // tells it apart from the status refusal above.
+              if (record.table === "Agent" && inboundChangesExistingPendingKey(record, row)) {
+                return { skip: true, reason: "agent_pending_key_not_federated" };
               }
               // Absorbing-state guard for the Message table (flair#1521 §12
               // P0-3). Generic newer-wins LWW would let a deadline-sweep `failed`
@@ -1383,9 +1396,11 @@ export class FederationSync extends Resource {
           }
           throw err;
         }
-        // The plan's only skip is the Agent status guard above.
+        // Each skip above carries its OWN name on the plan's `reason`; the
+        // fallback is the status rule's name for any future skip that does not.
+        // (Every skip this plan returns names a reason today.)
         if ("skip" in outcome) {
-          recordSkip("agent_status_not_federated");
+          recordSkip(outcome.reason ?? "agent_status_not_federated");
           continue;
         }
         // embedding-space-guard slice 1: a federation-merged Memory can carry a

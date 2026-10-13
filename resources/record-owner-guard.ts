@@ -125,6 +125,12 @@ export const OWNER_GUARD_EXEMPT: Readonly<Record<string, string>> = Object.freez
   MemoryHostSource: "REST writes refused; application writes stamp authorId; direct reads limited to admins and trusted internal callers",
   // Application append-only history; REST writes are refused.
   InstructionVersion: "application append-only; REST writes refused",
+  // flair#2266: the private audit log of key registrations. Its `agentId` names
+  // the row whose key was registered (the AUDIT TARGET), not the caller — the
+  // caller is the admin in `actorId`. The table is written only by
+  // resources/AgentKeyRegister.ts; resources/AgentKeyRegistration.ts admits
+  // admin reads and refuses every REST write, so no non-admin can mutate a row.
+  AgentKeyRegistration: "admin-read-only audit log; REST writes refused; written only by the registration operation",
 });
 
 /** The verbs that can mutate a record, and therefore need the rule applied. */
