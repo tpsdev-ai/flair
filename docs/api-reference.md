@@ -219,7 +219,7 @@ The remedy is `flair upgrade` (the adapter), not a server upgrade alone.
 | GET / POST / PUT | `/Relationship` | Ed25519 / Admin Basic | Owner-only for non-admin agents; administrators can read across owners. POST creates; a create that is otherwise admitted, valid and within the rate limit is 409 when its id already exists. PUT upserts. For a verified non-admin agent both stamp the owner from the caller (a body naming another agent is 403); an administrator keeps the owner it supplies. A write that passes validation gets provenance built server-side. |
 | GET / POST / PUT | `/WorkspaceState` | Ed25519 | Owner-only. POST stamps `agentId`; PUT rejects a mismatch. |
 | GET | `/WorkspaceLatest` | Ed25519 | Latest workspace row for the caller. |
-| GET / POST / PUT | `/OrgEvent` | Ed25519 | Any verified agent reads every event. Writes stamp `authorId`. |
+| GET / POST / PUT / PATCH | `/OrgEvent` | Ed25519 | Any verified agent reads every event. Writes stamp `authorId`. An OrgEvent's `createdAt` is assigned by the server on create and cannot be changed: an update that omits it keeps the stored value, and one that changes it is refused with 409 `created_at_immutable`. |
 | GET / POST | `/OrgEventCatchup` | Ed25519 | Catch-up feed for the caller. `since` is optional (defaults to the per-agent watermark). GET pages; POST acks `{ position }` (advance-on-ack). |
 | GET / POST | `/AgentReadPosition` | Ed25519 | Owner-only watermark (`stream`, default `org-event`). Foundation for light-comms catch-up. |
 | POST | `/OrgEventMaintenance` | Ed25519 / admin | Expire / sweep org events. |

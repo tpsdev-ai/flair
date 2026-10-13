@@ -36,6 +36,8 @@ import { mock, describe, it, expect, beforeEach, afterEach, setSystemTime } from
 // Capture what each resource ultimately persists.
 let workspacePut: any = null;
 let orgEventPut: any = null;
+let orgEventPatch: { id: unknown; content: any } | null = null;
+const READ_FAILS_MARKER = "read-fails";
 
 // In-memory OrgEvent store, keyed by id — backs OrgEvent.post()'s ownership read
 // (`databases.flair.OrgEvent.get`) and static put().
@@ -107,11 +109,24 @@ class BaseWorkspaceState {
 }
 class BaseOrgEvent {
   async put(content: any) { orgEventPut = content; orgEventStore.set(content.id, { ...content }); return { ok: true, ...content }; }
-  async get(id: any) { return orgEventStore.get(id) ?? null; }
+  // A no-argument get() reads the row the instance addresses (Harper's loaded row).
+  async get(id: any) { return orgEventStore.get(id ?? (this as any).getId?.()) ?? null; }
   async delete(id: any) { orgEventStore.delete(id); return { ok: true }; }
-  // OrgEvent.post() reads the stored row through the static table call
-  // (`databases.flair.OrgEvent.get(id, {})`), which Harper exposes.
-  static get(id: any) { return orgEventStore.get(id) ?? null; }
+  // PATCH merges into the row the instance addresses, creating it when absent
+  // (the table-patch-policy guard is not part of this mock).
+  async patch(content: any) {
+    const id = (this as any).getId?.();
+    orgEventPatch = { id, content: { ...content } };
+    orgEventStore.set(id, { ...(orgEventStore.get(id) ?? { id }), ...content });
+    return undefined;
+  }
+  // OrgEvent.post() and the createdAt check read the stored row through the
+  // static table call (`databases.flair.OrgEvent.get(id, {})`), which Harper
+  // exposes. An id carrying READ_FAILS_MARKER makes that read reject.
+  static get(id: any) {
+    if (typeof id === "string" && id.includes(READ_FAILS_MARKER)) return Promise.reject(new Error("injected stored-row read failure"));
+    return orgEventStore.get(id) ?? null;
+  }
   static delete(id: any) { orgEventStore.delete(id); return Promise.resolve({ ok: true }); }
 }
 
@@ -143,9 +158,10 @@ function makeWorkspace(ctxRequest: any) {
   r.getContext = () => ({ request: ctxRequest });
   return r;
 }
-function makeOrgEvent(ctxRequest: any) {
+function makeOrgEvent(ctxRequest: any, id?: string) {
   const r: any = new (OrgEvent as any)();
   r.getContext = () => ({ request: ctxRequest });
+  if (id !== undefined) r.getId = () => id;
   return r;
 }
 
@@ -155,6 +171,7 @@ const anonCtx = () => ({ tpsAnonymous: true });
 beforeEach(() => {
   workspacePut = null;
   orgEventPut = null;
+  orgEventPatch = null;
   workspaceStore = new Map();
   orgEventStore = new Map();
 });
@@ -274,6 +291,153 @@ describe("OrgEvent.post() — avoids deterministic same-millisecond collisions (
     expect(second).not.toBe(first);
     expect(orgEventStore.size).toBe(2);
     expect([...orgEventStore.values()].map((r) => r.summary).sort()).toEqual(["first", "second"]);
+  });
+});
+
+// ─── OrgEvent createdAt: assigned by the server on create; cannot be changed ──
+describe("OrgEvent — the server assigns createdAt on create, and it cannot be changed", () => {
+  const SERVER_NOW = "2026-10-13T12:00:00.000Z";
+  const STORED_AT = "2026-10-01T09:30:00.000Z";
+  const FUTURE = "2099-01-01T00:00:00.000Z";
+  const PAST = "2001-01-01T00:00:00.000Z";
+  const seed = (id: string, authorId = "agent-alpha") =>
+    orgEventStore.set(id, { id, authorId, kind: "status", summary: "stored", createdAt: STORED_AT });
+  /** put() throws its createdAt refusal; this returns whatever the call settled to. */
+  const settle = async (p: Promise<unknown>) => { try { return await p; } catch (e) { return e; } };
+  const errorOf = async (res: unknown) => JSON.parse(await (res as Response).clone().text()).error;
+
+  beforeEach(() => { setSystemTime(new Date(SERVER_NOW)); });
+  afterEach(() => { setSystemTime(); });
+
+  for (const [label, createdAt] of [["future", FUTURE], ["past", PAST]] as const) {
+    it(`POST create with a ${label} createdAt stores the server time`, async () => {
+      const res = await makeOrgEvent(agentCtx("agent-alpha")).post({ kind: "status", summary: "x", createdAt });
+      expect(res instanceof Response).toBe(false);
+      expect(orgEventPut.createdAt).toBe(SERVER_NOW);
+    });
+
+    it(`PUT create with a ${label} createdAt stores the server time`, async () => {
+      const res = await settle(makeOrgEvent(agentCtx("agent-alpha"), "new-1").put({ id: "new-1", authorId: "agent-alpha", kind: "status", summary: "x", createdAt }));
+      expect(res instanceof Response).toBe(false);
+      expect(orgEventStore.get("new-1").createdAt).toBe(SERVER_NOW);
+    });
+
+    it(`an admin PUT create with a ${label} createdAt stores the server time`, async () => {
+      const res = await settle(makeOrgEvent(agentCtx("admin-1", true), "new-2").put({ id: "new-2", authorId: "agent-beta", kind: "status", summary: "x", createdAt }));
+      expect(res instanceof Response).toBe(false);
+      expect(orgEventStore.get("new-2").createdAt).toBe(SERVER_NOW);
+    });
+
+    it(`an admin PATCH that creates a row with a ${label} createdAt stores the server time`, async () => {
+      const res = await makeOrgEvent(agentCtx("admin-1", true), "new-3").patch({ authorId: "admin-1", kind: "status", summary: "x", createdAt });
+      expect(res instanceof Response).toBe(false);
+      expect(orgEventStore.get("new-3").createdAt).toBe(SERVER_NOW);
+    });
+  }
+
+  it("POST to an existing own id without createdAt keeps the stored value", async () => {
+    seed("own-1");
+    const res = await makeOrgEvent(agentCtx("agent-alpha")).post({ id: "own-1", kind: "status", summary: "after" });
+    expect(res instanceof Response).toBe(false);
+    expect(orgEventStore.get("own-1")).toMatchObject({ summary: "after", createdAt: STORED_AT });
+  });
+
+  it("POST to an existing own id with a different createdAt is refused (409) and the row is unchanged", async () => {
+    seed("own-2");
+    const before = { ...orgEventStore.get("own-2") };
+    const res = await makeOrgEvent(agentCtx("agent-alpha")).post({ id: "own-2", kind: "status", summary: "after", createdAt: PAST });
+    expect((res as Response).status).toBe(409);
+    expect(await errorOf(res)).toBe("created_at_immutable");
+    expect(orgEventStore.get("own-2")).toEqual(before);
+    expect(orgEventPut).toBeNull();
+  });
+
+  it("PUT update without createdAt keeps the stored value", async () => {
+    seed("own-3");
+    const res = await settle(makeOrgEvent(agentCtx("agent-alpha"), "own-3").put({ id: "own-3", authorId: "agent-alpha", kind: "status", summary: "after" }));
+    expect(res instanceof Response).toBe(false);
+    expect(orgEventStore.get("own-3")).toMatchObject({ summary: "after", createdAt: STORED_AT });
+  });
+
+  for (const [who, ctx] of [["an agent", agentCtx("agent-alpha")], ["an admin", agentCtx("admin-1", true)]] as const) {
+    it(`PUT update by ${who} that changes createdAt is refused (409) and the row is unchanged`, async () => {
+      seed("own-4");
+      const before = { ...orgEventStore.get("own-4") };
+      const res = await settle(makeOrgEvent(ctx, "own-4").put({ id: "own-4", authorId: "agent-alpha", kind: "status", summary: "after", createdAt: FUTURE }));
+      expect(res).toBeInstanceOf(Response);
+      expect((res as Response).status).toBe(409);
+      expect(await errorOf(res)).toBe("created_at_immutable");
+      expect(orgEventStore.get("own-4")).toEqual(before);
+      expect(orgEventPut).toBeNull();
+    });
+
+    it(`PATCH by ${who} that changes createdAt is refused (409) and the row is unchanged`, async () => {
+      seed("own-5");
+      const before = { ...orgEventStore.get("own-5") };
+      const res = await makeOrgEvent(ctx, "own-5").patch({ summary: "after", createdAt: PAST });
+      expect((res as Response).status).toBe(409);
+      expect(await errorOf(res)).toBe("created_at_immutable");
+      expect(orgEventStore.get("own-5")).toEqual(before);
+      expect(orgEventPatch).toBeNull();
+    });
+  }
+
+  it("PATCH without createdAt keeps the stored value", async () => {
+    seed("own-6");
+    const res = await makeOrgEvent(agentCtx("agent-alpha"), "own-6").patch({ summary: "after" });
+    expect(res instanceof Response).toBe(false);
+    expect(orgEventPatch!.content).toEqual({ summary: "after" });
+    expect(orgEventStore.get("own-6")).toMatchObject({ summary: "after", createdAt: STORED_AT });
+  });
+
+  it("an admin PUT of an array body applies the rule to each element under its own id", async () => {
+    seed("arr-old", "admin-1");
+    const created = await settle(makeOrgEvent(agentCtx("admin-1", true), "path-id").put([
+      { id: "arr-new", authorId: "admin-1", kind: "status", summary: "x", createdAt: FUTURE },
+      { id: "arr-old", authorId: "admin-1", kind: "status", summary: "y" },
+    ]));
+    expect(created instanceof Response).toBe(false);
+    expect(orgEventPut.map((r: any) => r.createdAt)).toEqual([SERVER_NOW, STORED_AT]);
+
+    orgEventPut = null;
+    const before = { ...orgEventStore.get("arr-old") };
+    const refused = await settle(makeOrgEvent(agentCtx("admin-1", true), "path-id").put([
+      { id: "arr-new-2", authorId: "admin-1", kind: "status", summary: "x" },
+      { id: "arr-old", authorId: "admin-1", kind: "status", summary: "z", createdAt: PAST },
+    ]));
+    expect((refused as Response).status).toBe(409);
+    expect(orgEventPut).toBeNull();
+    expect(orgEventStore.get("arr-old")).toEqual(before);
+  });
+
+  it("a write whose stored-event read fails is refused (503) and nothing is written", async () => {
+    const id = `${READ_FAILS_MARKER}-1`;
+    const admin = agentCtx("admin-1", true);
+    const posted = await makeOrgEvent(admin).post({ id, authorId: "admin-1", kind: "status", summary: "x" });
+    const put = await settle(makeOrgEvent(admin, id).put({ id, authorId: "admin-1", kind: "status", summary: "x" }));
+    const patched = await makeOrgEvent(admin, id).patch({ summary: "x" });
+    for (const res of [posted, put, patched]) {
+      expect((res as Response).status).toBe(503);
+      expect(await errorOf(res)).toBe("created_at_check_unavailable");
+    }
+    expect(orgEventPut).toBeNull();
+    expect(orgEventPatch).toBeNull();
+  });
+
+  it("an internal call keeps the createdAt it supplies on PUT and PATCH; POST stamps the server time", async () => {
+    seed("int-1");
+    const internal = (id?: string) => {
+      const r: any = new (OrgEvent as any)();
+      r.getContext = () => undefined;
+      if (id !== undefined) r.getId = () => id;
+      return r;
+    };
+    await internal("int-2").put({ id: "int-2", authorId: "flair-migrations", kind: "migration", summary: "x", createdAt: PAST });
+    expect(orgEventStore.get("int-2").createdAt).toBe(PAST);
+    await internal("int-1").patch({ createdAt: FUTURE });
+    expect(orgEventStore.get("int-1").createdAt).toBe(FUTURE);
+    await internal().post({ authorId: "flair-migrations", kind: "migration", summary: "y", createdAt: PAST });
+    expect(orgEventPut.createdAt).toBe(SERVER_NOW);
   });
 });
 
