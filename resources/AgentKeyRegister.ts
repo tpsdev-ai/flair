@@ -39,7 +39,6 @@ import { isForeignAgentHome, isSyncOriginatedAgentRow } from "../src/lib/agent-h
 import { isValidAgentId, invalidAgentIdMessage } from "../src/lib/agent-id-rule.js";
 import { localInstanceId } from "./instance-identity.js";
 import {
-  AGENT_KEY_REGISTER_PAUSE_POINT,
   AGENT_KEY_REGISTERED_EVENT,
   AGENT_KEY_NOT_PENDING,
   AGENT_INACTIVE,
@@ -134,7 +133,7 @@ export class AgentKeyRegister extends Resource {
       return jsonRefusal(503, REGISTRATION_UNAVAILABLE, "the Agent, AgentKeyRegistration or OrgEvent store is not available on this instance");
     }
 
-    const fingerprint = keyFingerprint(registered);
+    const fingerprint = await keyFingerprint(registered);
     const operator = operatorOf(req);
 
     let outcome;
@@ -156,7 +155,10 @@ export class AgentKeyRegister extends Resource {
             // armed. Placed after the fresh read and before the staging, inside
             // this owned transaction, so the concurrency test can hold this
             // registration while a second one runs or a competing write commits.
-            const pause = txnPausePoint(AGENT_KEY_REGISTER_PAUSE_POINT);
+            // The name is a DIRECT string literal at the call site (flair#2382's
+            // checker resolves only literals or `spec.point`); it must stay equal
+            // to AGENT_KEY_REGISTER_PAUSE_POINT, which the test arms.
+            const pause = txnPausePoint("agent-key-register");
             if (pause) await pause;
 
             const registrationId = randomUUID();

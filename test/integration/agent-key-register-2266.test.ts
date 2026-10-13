@@ -202,7 +202,7 @@ describe("flair#2266 — admin key registration on a pending Agent row", () => {
     expect(audit.agentId).toBe(successId);
     expect(audit.actorId).toBe("admin");
     expect(audit.instanceId).toBe(LOCAL_ID);
-    expect(audit.keyFingerprint).toBe(keyFingerprint(successKey.pub));
+    expect(audit.keyFingerprint).toBe(await keyFingerprint(successKey.pub));
     expect(JSON.stringify(audit)).not.toContain(successKey.pub);
 
     // OrgEvent carries the fingerprint, never the key.
@@ -210,7 +210,7 @@ describe("flair#2266 — admin key registration on a pending Agent row", () => {
     expect(event).not.toBeNull();
     expect(event.kind).toBe("agent_key_registered");
     expect(event.refId).toBe(successId);
-    expect(String(event.detail)).toContain(keyFingerprint(successKey.pub));
+    expect(String(event.detail)).toContain(await keyFingerprint(successKey.pub));
     expect(JSON.stringify(event)).not.toContain(successKey.pub);
   }, 30_000);
 

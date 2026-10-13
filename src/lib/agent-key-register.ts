@@ -1,14 +1,14 @@
 /**
- * agent-key-register.ts — the pure, dependency-light helpers for the admin-only
- * key-registration operation (POST /AgentKeyRegister, flair#2266) and the
- * federation rule that ships with it.
+ * agent-key-register.ts — the pure helpers for the admin-only key-registration
+ * operation (POST /AgentKeyRegister, flair#2266) and the federation rule that
+ * ships with it.
  *
  * Kept out of the resource so a unit test can exercise the key-format rule, the
  * fingerprint rule and the refusal names without standing up Harper. Imports
- * only `node:crypto` (a builtin), so a static resource import reaches a
- * dependency-free compiled helper.
+ * NOTHING (a static resource import must reach a dependency-free compiled
+ * helper — test/unit/resource-src-purity-1775.test.ts); the fingerprint uses the
+ * ambient WebCrypto, which the auth paths already use.
  */
-import { createHash } from "node:crypto";
 
 /** The stored `publicKey` value of an Agent row seeded but not yet registered. */
 export const PENDING_PUBLIC_KEY = "pending";
@@ -61,9 +61,12 @@ export function isCanonicalEd25519Base64url(value: unknown): boolean {
 }
 
 /**
- * The audit fingerprint of a registered key: sha256 (hex) of its canonical
- * base64url string. The key itself is never stored or logged.
+ * The audit fingerprint of a registered key: the hex sha256 of its canonical
+ * base64url string. The key itself is never stored or logged. Uses the ambient
+ * WebCrypto (the same primitive the auth paths digest/verify with), so this
+ * module imports nothing.
  */
-export function keyFingerprint(canonicalKey: string): string {
-  return createHash("sha256").update(canonicalKey, "utf8").digest("hex");
+export async function keyFingerprint(canonicalKey: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonicalKey));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }

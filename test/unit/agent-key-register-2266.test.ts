@@ -43,10 +43,10 @@ describe("flair#2266 — the canonical Ed25519 base64url key rule", () => {
 });
 
 describe("flair#2266 — the audit fingerprint is of the key, never the key", () => {
-  test("is deterministic sha256 hex of the canonical key string", () => {
-    const fp = keyFingerprint(KEY);
+  test("is deterministic sha256 hex of the canonical key string", async () => {
+    const fp = await keyFingerprint(KEY);
     expect(fp).toMatch(/^[0-9a-f]{64}$/);
-    expect(keyFingerprint(KEY)).toBe(fp);
+    expect(await keyFingerprint(KEY)).toBe(fp);
     expect(fp).not.toContain(KEY);
   });
 });
