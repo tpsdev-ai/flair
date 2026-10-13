@@ -150,6 +150,7 @@ import type { Migration, RunBatchResult } from "./types.js";
 import { EMBEDDING_STAMP_ID } from "./stamp-outstanding.js";
 import { endsWithContentSelectorSuffix } from "../../src/lib/memory-id-policy.js";
 import { skillEmbedText } from "../skill-write.js";
+import { embeddedHashMatches, embeddedTextHash } from "../memory-embed-hash.js";
 
 export { EMBEDDING_STAMP_ID };
 
@@ -239,6 +240,19 @@ function isUsableEmbedding(value: unknown): value is number[] {
   return Array.isArray(value) && value.length > 0 && value.every((n) => typeof n === "number" && Number.isFinite(n));
 }
 
+/**
+ * Is this row's stored embedding current? Current means BOTH its
+ * `embeddingModel` is a current-space stamp for `currentModelId` AND its recorded
+ * `embeddedContentHash` still equals the hash of the row's current embedding text
+ * (`memory-embed-hash.ts`). A legacy row with no recorded hash is trusted (see
+ * that module). A query cannot compute the current text's hash, so a caller that
+ * needs to find a hash mismatch must scan (see each method below).
+ */
+function rowEmbeddingCurrent(row: Record<string, unknown>, currentModelId: string): boolean {
+  return isCurrentSpaceStamp(row.embeddingModel as string | null | undefined, currentModelId) &&
+    embeddedHashMatches(row);
+}
+
 /** The seams the content-suffix fallback reaches; injectable for unit tests. */
 export interface ContentSuffixRegenDeps {
   embed: (text: string) => Promise<unknown>;
@@ -299,7 +313,7 @@ async function regenContentSuffixRow(
       // full-row put. A full-row put carries this transaction's re-read row and
       // can revert a field an owner edit committed meanwhile; this write touches
       // only embedding/embeddingModel/updatedAt.
-      await table.update(id, { embedding, embeddingModel: current, updatedAt: new Date().toISOString() }, txn);
+      await table.update(id, { embedding, embeddingModel: current, updatedAt: new Date().toISOString(), embeddedContentHash: embeddedTextHash(existing) ?? null }, txn);
       // Test-only: inert unless the fault-injection env opt-in is set and armed.
       // After the write is STAGED and before the transaction commits.
       const pause = txnPausePoint("embedding-stamp-content-suffix");
@@ -391,16 +405,29 @@ export function createEmbeddingStampMigration(
 
     async detect(): Promise<boolean> {
       const table = getTable();
+      // The query leg first: a row whose stamp is not current-space (cheap,
+      // index- or live-read backed — see staleCondition()).
       for await (const _row of table.search({ conditions: staleCondition(), limit: 1 })) {
         return true;
+      }
+      // The mismatch leg: a row whose stamp IS current-space but whose recorded
+      // embedded-text hash no longer matches its current text (a text edit left
+      // the vector behind). A query cannot compute the current text's hash, so
+      // this is a live scan; it exits at the first mismatch.
+      const current = getCurrentModelId();
+      for await (const row of table.search({})) {
+        if (!rowEmbeddingCurrent(row as Record<string, unknown>, current)) return true;
       }
       return false;
     },
 
     async countPending(): Promise<number> {
       const table = getTable();
+      const current = getCurrentModelId();
       let n = 0;
-      for await (const _row of table.search({ conditions: staleCondition() })) n++;
+      for await (const row of table.search({})) {
+        if (!rowEmbeddingCurrent(row as Record<string, unknown>, current)) n++;
+      }
       return n;
     },
 
@@ -409,8 +436,9 @@ export function createEmbeddingStampMigration(
       const current = getCurrentModelId();
 
       const candidates: Record<string, unknown>[] = [];
-      for await (const row of table.search({ conditions: staleCondition(), limit: batchSize })) {
-        candidates.push(row);
+      for await (const row of table.search({})) {
+        if (!rowEmbeddingCurrent(row as Record<string, unknown>, current)) candidates.push(row);
+        if (candidates.length >= batchSize) break;
       }
 
       const touchedIds: string[] = [];
@@ -419,7 +447,7 @@ export function createEmbeddingStampMigration(
         if (!id) continue;
         const existing = await table.get(id);
         if (!existing) continue; // deleted since the search above — nothing to fix
-        if (isCurrentSpaceStamp(existing.embeddingModel as string | null | undefined, current)) continue; // already current-space (incl. bare equivalent) — idempotent skip
+        if (rowEmbeddingCurrent(existing, current)) continue; // already current (stamp and hash) — idempotent skip
 
         let ok: boolean;
         if (endsWithContentSelectorSuffix(id)) {
@@ -464,10 +492,10 @@ export function createEmbeddingStampMigration(
       let falsePositives = 0;
       for (const id of ids) {
         const existing = await table.get(id);
-        // A row that vanished since the search, OR whose live embeddingModel
-        // still doesn't match current, is a GENUINE pending row (or a
-        // concurrent delete) — never counted as a false positive.
-        if (existing && isCurrentSpaceStamp(existing.embeddingModel as string | null | undefined, current)) falsePositives++;
+        // A row that vanished since the search, OR whose live stamp and hash
+        // still don't match, is a GENUINE pending row (or a concurrent delete) —
+        // never counted as a false positive.
+        if (existing && rowEmbeddingCurrent(existing, current)) falsePositives++;
       }
 
       return { sampled: ids.length, falsePositives };

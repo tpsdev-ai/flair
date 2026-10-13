@@ -31,6 +31,7 @@ import { CommittedRowChanged, confirmCommittedRow, sameStoredRow, storedRowChang
 import { txnPausePoint } from "./txn-pause-point.js";
 import { assertValidDurability, stampEphemeralExpiry } from "./memory-durability.js";
 import { embedTextField, enforceSkillDurability, isSkillWrite, type MemoryEmbeddingInputField, rejectSkillWritePath, refuseSkillWriteSource, skillEmbedText, skillScanGate } from "./skill-write.js";
+import { embeddedTextHash } from "./memory-embed-hash.js";
 import { buildSkillSuccessorRow, closedSkillPayloadReadable, defaultSkillHooks, resolveSkillHead, rowIsSkill, runSkillVersionWrite, skillVersionVisibility, skillPayloadUnchanged, prepareSkillBody, validateSkillSnapshots, authorizeSkillOwners, skillWriteConflict } from "./skill-version-write.js";
 import { deriveSkillSubjectId } from "./skill-subject.js";
 import {
@@ -1249,7 +1250,7 @@ async function reembedStoredRow(
         // transaction by its first read, so this write can land after an edit the
         // owner committed while the vector was computed; a full-row put would
         // carry the row this transaction read and revert that edit.
-        await (databases as any).flair.Memory.update(id, { embedding, embeddingModel: model, updatedAt }, owned);
+        await (databases as any).flair.Memory.update(id, { embedding, embeddingModel: model, updatedAt, embeddedContentHash: embeddedTextHash(stored) ?? null }, owned);
         // Test-only: inert unless the fault-injection env opt-in is set and armed.
         const stagedPause = txnPausePoint("memory-reembed-staged");
         if (stagedPause) await stagedPause;
@@ -1257,11 +1258,21 @@ async function reembedStoredRow(
         // fresh context — never contextless, which joins this transaction and
         // sees its snapshot or its staged write) is still the row this transaction
         // read and re-authorized: the same identity (id, agentId, instanceToken,
-        // contentHash, createdAt). A row gone or distinguishably changed at
-        // confirmation aborts this owned transaction, discarding the staged write;
-        // the caller answers stored_row_changed (409). A change committed after
-        // this confirm and before the commit is not seen (no compare-and-set).
-        await confirmCommittedRow((databases as any).flair.Memory, id, (committed) => sameStoredRow(committed, stored));
+        // contentHash, createdAt) AND the same EMBEDDING TEXT. The text check is
+        // the binding half of part 2: an edit that changed the text but not one of
+        // the identity fields would otherwise let the staged vector — computed for
+        // the superseded text — land stamped against the new text. A row gone or
+        // changed at confirmation aborts this owned transaction, discarding the
+        // staged write; the caller answers stored_row_changed (409) and the row is
+        // left for the next re-embed (the stamp migration re-queues the mismatch).
+        await confirmCommittedRow((databases as any).flair.Memory, id, (committed) => {
+          if (!sameStoredRow(committed, stored)) return false;
+          if (embeddedTextHash(committed ?? null) !== embeddedTextHash(stored)) {
+            console.warn(`[reembed] ${id}: the embedding text changed after the vector was computed; the write is discarded`);
+            return false;
+          }
+          return true;
+        });
         return { kind: "written" as const, model, updatedAt };
       });
     } catch (err) {
@@ -1717,6 +1728,9 @@ export class Memory extends (databases as any).flair.Memory {
     // this a duplicate of something else" situation — bypass the gate for it
     // (this also gives memory_update's preserveHistory mode dedup-bypass for
     // free, without a separate flag). NEVER suppresses the write either way.
+    // flair#2465: did the caller supply a vector? A vector the server does
+    // not compute is not vouched for, so no embedded-text hash is recorded for it.
+    const embeddingSupplied = Array.isArray(content.embedding) && content.embedding.length > 0;
     let dedupMatch: DedupMatch | null = null;
     if (!content.supersedes) {
       dedupMatch = await runDedupGate(ctx, content);
@@ -1747,6 +1761,14 @@ export class Memory extends (databases as any).flair.Memory {
     // A1-iv item 3: strip every server-stamped field a client body may not set
     // (instanceToken, provenance). They are re-stamped below.
     stripServerStampedFields(content);
+    // flair#2465: bind the stored vector to the text it was computed from. The
+    // server computed this vector (a caller-supplied one is not vouched for and
+    // is left unbound), so its hash is the hash of the row's current embedding
+    // text. A PATCH/put that keeps a stored vector without recomputing it must
+    // carry the STORED hash forward instead — see put().
+    content.embeddedContentHash = !embeddingSupplied && Array.isArray(content.embedding) && content.embedding.length > 0
+      ? (embeddedTextHash(content) ?? null)
+      : null;
     // A1-iv item 1: a NEW row gets a server-stamped incarnation token.
     content.instanceToken = newInstanceToken();
     const pointer = buildPointerForWrite({ inputs: pointerInputs, memoryId: content.id ?? "", visibility: content.visibility, auth, memoryInstanceToken: content.instanceToken });
@@ -2053,6 +2075,8 @@ export class Memory extends (databases as any).flair.Memory {
       const computed = Array.isArray(vec) && vec.length > 0;
       body.embedding = computed ? vec : null;
       body.embeddingModel = computed ? getModelId() : null;
+      // flair#2465: bind the refreshed vector to the text it was computed from.
+      body.embeddedContentHash = computed ? (embeddedTextHash({ ...(existingForSkill ?? {}), ...body }) ?? null) : null;
       body.updatedAt = new Date().toISOString();
     };
     const readField = vectorFieldOver(existingForSkill);
@@ -2373,6 +2397,8 @@ export class Memory extends (databases as any).flair.Memory {
     // version-link — neither is an ambiguous "is this a duplicate of
     // something else" write, so both are dedup-bypassed automatically, no
     // separate flag needed. NEVER suppresses the write either way.
+    // flair#2465: did the caller supply a vector? See post().
+    const embeddingSupplied = Array.isArray(content.embedding) && content.embedding.length > 0;
     let dedupMatch: DedupMatch | null = null;
     if (content.supersedes) {
       delete content.dedup;
@@ -2412,6 +2438,14 @@ export class Memory extends (databases as any).flair.Memory {
     const pointerInputs = extractPointerInputs(content);
     // A1-iv item 3: strip server-stamped fields (a client may not set them).
     stripServerStampedFields(content);
+    // flair#2465: bind the stored vector to the text it was computed from (see
+    // post()). A put that kept the STORED vector without recomputing it keeps the
+    // STORED hash: an echo preserves the binding, and a caller-supplied vector
+    // over changed text keeps the old hash — which no longer matches the new
+    // text, so the row reads as stale and is re-queued rather than trusted.
+    content.embeddedContentHash = !embeddingSupplied && Array.isArray(content.embedding) && content.embedding.length > 0
+      ? (embeddedTextHash(content) ?? null)
+      : (preExisting?.embeddedContentHash ?? null);
     // A1-iv item 1: PRESERVE the existing row's incarnation token on an update,
     // else generate one (a fresh create via put).
     stampInstanceToken(content, preExisting);

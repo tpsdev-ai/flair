@@ -2,6 +2,7 @@ import { WRITE_BACK_ATTEMPTS, WriteBackConflictError, writeBackCommittedRow } fr
 import { txnPausePoint } from "./txn-pause-point.js";
 import { server, databases } from "harper";
 import { getEmbedding } from "./embeddings-provider.js";
+import { computeContentHash } from "./memory-feed-lib.js";
 import { isAdmin, isPrincipalDeactivated, FLAIR_AGENT_USERNAME, readCredentialedPrincipal, AGENT_LOOKUP_FAILED } from "./agent-auth.js";
 import { WINDOW_MS, importEd25519Key, b64ToArrayBuffer, parseTpsEd25519Header } from "./ed25519-auth.js";
 import { isKnownAgentReplay, claimAgentNonce } from "./replay-store.js";
@@ -200,9 +201,12 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
           (row: any) => {
             if (!row?.content) return { skip: true };
             if (row.embedding?.length > 100) return { skip: true };
-            // Only `embedding`: an incremental update, never a
-            // full-row put of the row read above (flair#2470).
-            return { update: { embedding } };
+            // Only `embedding` and its text binding: an incremental update,
+            // never a full-row put of the row read above (flair#2470, flair#2465).
+            // `embeddedContentHash` records the hash of the exact text embedded
+            // (`text`, above) so the stamp migration can re-queue a row whose text
+            // later changes without a re-embed.
+            return { update: { embedding, embeddedContentHash: computeContentHash(row.agentId, text) } };
           },
           {
             label: "backfillEmbedding",
