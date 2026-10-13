@@ -158,7 +158,7 @@ export function parseRetryEntryKey(id: string): { peerId: string; table: string;
  * Why a stored row breaks a sender convention, or null when it keeps them all.
  *
  * The schema does not enforce these rules: `@sealed` refuses undeclared field
- * NAMES only, and every declared field is a plain String or Int. They are
+ * NAMES only, and every declared field is a plain ID, String or Int. They are
  * the conventions the sender writes by, so the reader and the transition check
  * them and treat a row that breaks one as malformed: never pending, never
  * transitioned.

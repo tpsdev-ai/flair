@@ -198,8 +198,12 @@ describe("flair#2455 — FederationRetry storage, gating and the operator query 
     if (tmpHome) rmSync(tmpHome, { recursive: true, force: true });
   });
 
-  /** Every verb on the table and the reader, as `who`; returns each status by label. */
-  async function everyVerb(who: (method: string, path: string, body?: unknown) => Promise<Response>, newKey: string) {
+  /**
+   * The seven requests below, as `who`: GET, PUT, PATCH and DELETE on the
+   * seeded row, POST to the collection, PUT of a new row, and GET on the
+   * reader. Returns each status by label.
+   */
+  async function listedRequests(who: (method: string, path: string, body?: unknown) => Promise<Response>, newKey: string) {
     const rowPath = `/FederationRetry/${encodeURIComponent(pendingKey)}`;
     return {
       "GET row": (await who("GET", rowPath)).status,
@@ -212,10 +216,10 @@ describe("flair#2455 — FederationRetry storage, gating and the operator query 
     };
   }
 
-  test("an anonymous caller is refused on every verb, and nothing changes", async () => {
+  test("an anonymous caller is refused on GET, PUT, PATCH, DELETE and POST to the table and GET on the reader, and nothing changes", async () => {
     const before = await readRetryRow(pendingKey);
     const newKey = retryEntryKey(PEER, "Memory", `anon-${sfx}`);
-    const statuses = await everyVerb((method, path, body) =>
+    const statuses = await listedRequests((method, path, body) =>
       fetch(`${harper.httpURL}${path}`, {
         method,
         headers: { "Content-Type": "application/json" },
@@ -229,10 +233,10 @@ describe("flair#2455 — FederationRetry storage, gating and the operator query 
     expect(await readRetryRow(newKey)).toBeNull();
   });
 
-  test("an authenticated non-admin agent is refused on every verb, and nothing changes", async () => {
+  test("an authenticated non-admin agent is refused on GET, PUT, PATCH, DELETE and POST to the table and GET on the reader, and nothing changes", async () => {
     const before = await readRetryRow(pendingKey);
     const newKey = retryEntryKey(PEER, "Memory", `nonadmin-${sfx}`);
-    const statuses = await everyVerb((method, path, body) =>
+    const statuses = await listedRequests((method, path, body) =>
       fetch(`${harper.httpURL}${path}`, {
         method,
         headers: { "Content-Type": "application/json", Authorization: ed25519Header(nonAdmin, method, path) },

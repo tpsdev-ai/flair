@@ -2,7 +2,7 @@
 
   The table is shaped for one row per (peer, table, record) a receiver refuses
   for a reason a later re-offer could clear. No production sender path creates
-  rows yet; the sender starts using the table in a later release. Rows an admin
+  rows yet; sender activation is deferred to a later slice. Rows an admin
   writes are readable now. Sealed means a write naming a field the schema does
   not declare is refused. The reader lists a row that breaks the sender's
   conventions (an id that is not its tuple's key, an unknown state, reason or

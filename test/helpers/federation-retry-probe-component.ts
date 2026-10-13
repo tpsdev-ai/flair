@@ -8,8 +8,10 @@
  * - `zz-test-federation-retry-probe.js` — an admin-only resource whose POST
  *   calls the REAL retry transition (resources/FederationRetry.ts
  *   terminalizeRetryEntry) against the real FederationRetry table, and answers
- *   with its outcome. allowCreate()=allowAdmin, so only the test's admin Basic
- *   credential reaches it. A `pauseTag` in the body pauses that transition
+ *   with its outcome. allowCreate()=allowAdmin, so only an admin caller
+ *   reaches it (an admin Basic credential or an admin agent); the tests call
+ *   it with the Harper admin's Basic credential. A `pauseTag` in the body
+ *   pauses that transition
  *   after its in-transaction read: the probe writes `reached.<tag>` under
  *   FLAIR_TEST_PAUSE_DIR, then waits (at most 15 s) for `release.<tag>`.
  * - `zz-test-failing-retry-write.js` — makes ONE FederationRetry.put throw on
