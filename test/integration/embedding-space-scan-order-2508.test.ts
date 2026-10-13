@@ -13,33 +13,40 @@
  *
  *   1. The `scan-verdict` pause point (resources/txn-pause-point.ts) is armed
  *      before Harper starts, and its test-only opt-in is set in the
- *      environment the spawned Harper inherits. This test sends no request of
- *      its own until a scan has parked there.
+ *      environment the spawned Harper inherits. No fixture SQL, insert or
+ *      recall request is sent until a scan has parked there (startHarper
+ *      itself polls /health during startup).
  *   2. The store is confirmed empty, then a current-space row and a
  *      foreign-space row are inserted through the administrator operations API.
  *   3. A recall consults the guard while that scan is still parked. The recall
  *      returns, so the parked scan is not a consult scan (consults share one
  *      in-flight scan): it is the boot pre-warm, the only other in-tree scan
- *      starter, and the recall's scan started later. That scan publishes "not uniform", and the recall's `_warning`
- *      names exactly the current and the foreign stamp. The current stamp can
- *      reach that list only through a scan's read (the write-maintained latch
- *      records foreign stamps only), so the verdict comes from the resource read.
+ *      starter, and the recall's scan started later. That scan publishes "not
+ *      uniform", and the recall's `_warning` names exactly the current and the
+ *      foreign stamp. The current stamp can reach that list only through a
+ *      scan's read (the write-maintained latch records foreign stamps only),
+ *      so the verdict comes from the resource read.
  *   4. The pre-warm is released by this test. Its older verdict does not
  *      replace the newer one, a later recall still names both stamps, and the
  *      refusal is named in Harper's log.
+ *
+ * The own-instance check (test/helpers/own-harper-instance.ts) runs before
+ * every Memory row insert. A separate case runs it in a subprocess against the
+ * instance the REAL `startHarper` external branch returns.
  *
  * Mutation checks (each fails on an assertion): drop the scan-order check in
  * scan() and the pre-warm overwrites the newer verdict, so the final recall
  * has no `_warning`; change the scan's `select` field and the consult reads no
  * stamps, so the recall during the pause has no `_warning`; let
- * `assertOwnInstance` accept an external instance and the "refused before any
- * insert" case fails on its refusal message.
+ * `assertOwnInstance` accept an external instance and the external-mode case
+ * fails on its refusal message.
  */
-import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, relative } from "node:path";
+import { join } from "node:path";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { assertOwnInstance, basicAuthOf, insertMemoryRows } from "../helpers/own-harper-instance";
 import { TEST_FAULT_INJECTION_ENV, TEST_PAUSE_DIR_ENV } from "../../resources/txn-pause-point.ts";
 import { getModelId } from "../../resources/embeddings-provider.ts";
 
@@ -49,57 +56,7 @@ const AGENT = "scan-order-agent";
 // environment, so its getModelId() is this one.
 const CURRENT = getModelId();
 const FOREIGN = "other-engine:not-the-current-space";
-
-function isInside(parent: string, child: string): boolean {
-  const rel = relative(parent, child);
-  return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
-}
-
-/** Refuse any Harper this test did not spawn itself. Runs before the first
- *  write: an external instance (HARPER_HTTP_URL), one without a live spawned
- *  process, and one whose install dir is not a temporary dir this test owns are
- *  refused, as are a non-loopback or production port and HTTP and operations
- *  sharing a port. */
-function assertOwnInstance(h: HarperInstance): void {
-  if (h.external) {
-    throw new Error(`refusing an external Harper (${h.httpURL}): this test writes rows and runs only against an instance it spawned`);
-  }
-  const proc = h.process;
-  if (!proc || !(Number(proc.pid) > 0) || proc.exitCode !== null || proc.signalCode !== null) {
-    throw new Error(`refusing ${h.httpURL}: no live process spawned by this test`);
-  }
-  let ownedTemp = false;
-  try {
-    ownedTemp = h.ownsInstallDir && h.installDir !== "" && isInside(realpathSync(tmpdir()), realpathSync(h.installDir));
-  } catch { /* an unresolvable dir is not owned */ }
-  if (!ownedTemp) {
-    throw new Error(`refusing ${h.httpURL}: install dir ${JSON.stringify(h.installDir)} is not a temporary dir this test owns`);
-  }
-  const http = new URL(h.httpURL);
-  const ops = new URL(h.opsURL);
-  for (const u of [http, ops]) {
-    const port = Number(u.port);
-    if (u.hostname !== "127.0.0.1" || !(port > 0) || port === 9925 || port === 9926) {
-      throw new Error(`refusing ${u.href}: not a loopback, non-production port`);
-    }
-  }
-  if (http.port === ops.port) throw new Error(`refusing ${h.httpURL}: HTTP and operations share a port`);
-}
-
-const basicOf = (h: HarperInstance) => "Basic " + btoa(`${h.admin.username}:${h.admin.password}`);
-
-/** Every row this file writes goes through here: the own-instance check runs
- *  before the request is built. */
-async function insertMemoryRows(h: HarperInstance, records: Record<string, unknown>[]): Promise<void> {
-  assertOwnInstance(h);
-  const res = await fetch(h.opsURL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: basicOf(h) },
-    body: JSON.stringify({ operation: "insert", database: "flair", table: "Memory", records }),
-  });
-  const text = await res.text();
-  expect(res.status, `insert returned ${res.status}: ${text.slice(0, 200)}`).toBe(200);
-}
+const EXTERNAL_FIXTURE = join(import.meta.dir, "..", "fixtures", "external-harper-insert-2508.ts");
 
 function memoryRow(id: string, embeddingModel: string): Record<string, unknown> {
   const now = new Date().toISOString();
@@ -111,7 +68,7 @@ async function memoryRowIds(h: HarperInstance): Promise<string[]> {
   assertOwnInstance(h);
   const res = await fetch(h.opsURL, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: basicOf(h) },
+    headers: { "Content-Type": "application/json", Authorization: basicAuthOf(h) },
     body: JSON.stringify({ operation: "sql", sql: "SELECT id FROM flair.Memory" }),
   });
   const text = await res.text();
@@ -126,7 +83,7 @@ async function memoryRowIds(h: HarperInstance): Promise<string[]> {
 async function recallWarning(h: HarperInstance): Promise<string | undefined> {
   const res = await fetch(`${h.httpURL}/SemanticSearch`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: basicOf(h) },
+    headers: { "Content-Type": "application/json", Authorization: basicAuthOf(h) },
     body: JSON.stringify({ agentId: AGENT, q: "any keyword", queryEmbedding: [1, 0, 0, 0] }),
   });
   const text = await res.text();
@@ -171,29 +128,54 @@ async function logShows(h: HarperInstance, needle: string, timeoutMs: number): P
   return false;
 }
 
-describe("the own-instance check (flair#2508)", () => {
-  test("an external Harper is refused before any insert", async () => {
-    // The shape startHarper returns in external mode (HARPER_HTTP_URL set). Its
-    // ports are loopback and non-production, so the port checks would pass;
-    // only the instance checks can refuse it.
-    const external: HarperInstance = {
-      httpURL: "http://127.0.0.1:41871",
-      opsURL: "http://127.0.0.1:41870",
-      installDir: "",
-      process: null,
-      admin: { username: "admin", password: "test123" },
-      external: true,
-      ownsInstallDir: false,
-      getLog: () => "",
-    };
-    const fetchSpy = spyOn(globalThis, "fetch");
+describe("the own-instance check against the real external-mode helper (flair#2508)", () => {
+  test("the instance startHarper returns in external mode is refused before any Memory row insert request", async () => {
+    // A local server stands in for an external Harper. It answers only
+    // GET /health and records every request it receives.
+    const requests: { method: string; path: string }[] = [];
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(req) {
+        const path = new URL(req.url).pathname;
+        requests.push({ method: req.method, path });
+        return path === "/health" ? new Response("ok") : new Response("not found", { status: 404 });
+      },
+    });
     try {
-      await expect(insertMemoryRows(external, [memoryRow("never-written", FOREIGN)])).rejects.toThrow(/refusing an external Harper/);
-      expect(fetchSpy).not.toHaveBeenCalled();
+      const base = `http://127.0.0.1:${server.port}`;
+      // HARPER_HTTP_URL is read when harper-lifecycle.ts loads, so the REAL
+      // external branch runs in a subprocess. The operations URL points at the
+      // same server, so an insert request would be recorded too.
+      const child = Bun.spawn([process.execPath, EXTERNAL_FIXTURE], {
+        env: { ...process.env, HARPER_HTTP_URL: base, HARPER_OPS_URL: `${base}/operations` },
+        stdout: "pipe",
+        stderr: "pipe",
+        timeout: 60_000,
+      });
+      const [stdout, stderr, code] = await Promise.all([
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+        child.exited,
+      ]);
+      expect(code, `fixture exited ${code}: ${stderr.slice(-500)}`).toBe(0);
+      const line = stdout.split("\n").find((l) => l.startsWith("RESULT "));
+      expect(line, `no RESULT line in the fixture output: ${stdout.slice(-500)}`).toBeDefined();
+      const result = JSON.parse(line!.slice("RESULT ".length));
+      // The helper's external branch ran: an external instance, no spawned process.
+      expect(result.external).toBe(true);
+      expect(result.process).toBeNull();
+      // Its own health probe is a read, counted apart from everything else.
+      const healthReads = requests.filter((r) => r.method === "GET" && r.path === "/health");
+      const otherRequests = requests.filter((r) => !(r.method === "GET" && r.path === "/health"));
+      expect(healthReads.length).toBeGreaterThan(0);
+      // No insert, and no other request, reached the server.
+      expect(otherRequests).toEqual([]);
+      expect(result.refusal).toMatch(/refusing an external Harper/);
     } finally {
-      fetchSpy.mockRestore();
+      server.stop(true);
     }
-  });
+  }, 90_000);
 });
 
 describe("embedding-space-guard scan ordering inside a real Harper worker (flair#2508)", () => {
@@ -222,12 +204,7 @@ describe("embedding-space-guard scan ordering inside a real Harper worker (flair
 
   afterAll(async () => {
     if (pauseDir) writeFileSync(join(pauseDir, `go.${POINT}`), ""); // never leave a scan parked
-    if (harper) {
-      const { rm } = await import("node:fs/promises");
-      const installDir = harper.installDir;
-      await stopHarper(harper);
-      await rm(installDir, { recursive: true, force: true, maxRetries: 4 }).catch(() => {});
-    }
+    if (harper) await stopHarper(harper); // removes the install dir it owns
     if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
   }, 30_000);
 

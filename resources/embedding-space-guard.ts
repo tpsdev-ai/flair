@@ -140,10 +140,13 @@ let _scanning: Promise<void> | undefined;
 let _writeEpoch = 0;
 // flair#2508 — scan-start ordering. `recomputeLatch()` (the boot pre-warm's
 // path) runs `scan()` directly, bypassing the `_scanning` latch that serialises
-// consult scans, so two scans can overlap; a scan that started earlier and finishes later must not
-// overwrite the verdict of one that started later. Each scan takes the next
-// sequence number when it begins and publishes only when no scan that started
-// later has already published; a refused publish is named and writes nothing.
+// consult scans, so two scans can overlap; a scan that started earlier and
+// finishes later must not overwrite the verdict of one that started later.
+// Each scan takes the next sequence number when it begins and publishes only
+// when no scan that started later has already published. When the write epoch
+// is unchanged, a refused publish is named and writes nothing; when a foreign
+// write changed the epoch, the #2481 check in scan() runs first instead,
+// discarding the scan and resetting the retry timer.
 let _scanSeq = 0;
 let _publishedScanSeq = 0;
 
