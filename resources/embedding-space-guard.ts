@@ -34,8 +34,12 @@
  * ─── Unknown verdict = FAIL CLOSED (flair#2530) ──────────────────────────────
  * A scan can be pending (before the first scan completes) or fail (a boot race,
  * a transient read error). The verdict is then UNKNOWN, and "unknown" is NOT
- * "known uniform": only a scan that verified the store opens the gate
- * (`isEmbeddingSpaceUniform()` returns true). Every other state — pending
+ * "known uniform": only a scan that verified every stored `embeddingModel` stamp
+ * naming a vector space to be the current space opens the gate
+ * (`isEmbeddingSpaceUniform()` returns true). That is STAMP-METADATA
+ * uniformity: the scan skips a stored vector with no stamp, so the verdict says
+ * nothing about such a vector's space (stored-vector provenance is deferred to
+ * flair#2573). Every other state — pending
  * (`unverified`), a failed scan (`scan-failed`), or a foreign-write/mixed corpus
  * (`mixed`) — makes a consumer take its MIXED-space path: when a query
  * embedding is available outside bm25-only mode, the recall leg drops it and
@@ -45,7 +49,7 @@
  * embedding, so a supplied one is dropped unconsulted) or after a failed
  * embedding generation never consults the guard and has no state to name. A
  * consult never blocks on an in-flight scan to obtain a verdict; it fails closed now,
- * and only a later SUCCESSFUL scan that finds the store uniform reopens the
+ * and only a later SUCCESSFUL scan that finds the stamps uniform reopens the
  * gate. An error from the scan's table lookup or corpus read is classified into
  * a bounded reason (never row content); a published failure is logged once per
  * reason, a refused stale one each time it is refused; the consult schedule
@@ -280,7 +284,7 @@ function runScan(): Promise<void> {
 export type EmbeddingSpaceGuardState = "uniform" | "mixed" | "unverified" | "scan-failed";
 
 export interface EmbeddingSpaceVerdict {
-  /** true ONLY for a scan-verified uniform store. False ⇒ take the mixed path. */
+  /** true ONLY when a scan verified the stamps uniform. False ⇒ take the mixed path. */
   uniform: boolean;
   state: EmbeddingSpaceGuardState;
   /** The last failed scan's bounded reason, cleared when a later scan
@@ -331,7 +335,7 @@ function guardSnapshot(): EmbeddingSpaceVerdict {
 /** The consult decision. Fails closed and never awaits an in-flight scan: an
  *  unknown verdict must be reported NOW (the caller takes its mixed-space path)
  *  rather than block until a scan finishes. A pending or stale verdict kicks off
- *  a (re)scan; if it succeeds and finds the store uniform, later consults pass.
+ *  a (re)scan; if it succeeds and finds the stamps uniform, later consults pass.
  *  The snapshot is taken synchronously, so the state cannot drift from the
  *  decision. */
 function consultGuard(): EmbeddingSpaceVerdict {
@@ -342,13 +346,14 @@ function consultGuard(): EmbeddingSpaceVerdict {
   return guardSnapshot();
 }
 
-/** THE single chokepoint. Returns true when a scan verified the store uniform
- *  in the current embedding space (safe to cosine the query/candidate against
- *  stored vectors), false otherwise — including the UNKNOWN verdict (pending
- *  first scan, or a failed scan), which fails closed (the caller must take its
- *  mixed-space path). O(1) on the happy path: once verified-uniform, no scan; a
- *  pending or tripped verdict kicks off a (re)scan the caller does NOT wait
- *  for, so the unknown verdict is reported now, not after the scan. */
+/** THE single chokepoint. Returns true when a scan verified every stored
+ *  `embeddingModel` stamp naming a vector space to be the current space (stamp
+ *  metadata only; an unstamped stored vector is not checked, flair#2573), false
+ *  otherwise — including the UNKNOWN verdict (pending first scan, or a failed
+ *  scan), which fails closed (the caller must take its mixed-space path). O(1)
+ *  on the happy path: once verified-uniform, no scan; a pending or tripped
+ *  verdict kicks off a (re)scan the caller does NOT wait for, so the unknown
+ *  verdict is reported now, not after the scan. */
 export function isEmbeddingSpaceUniform(): Promise<boolean> {
   return Promise.resolve(consultGuard().uniform);
 }

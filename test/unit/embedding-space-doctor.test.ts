@@ -19,7 +19,7 @@ describe("describeEmbeddingSpaceDoctorFinding (flair#2530)", () => {
     expect(describeEmbeddingSpaceDoctorFinding({ state: "uniform", reason: null })).toEqual({
       isIssue: false,
       icon: "ok",
-      message: "embedding space verified uniform",
+      message: "embedding model stamps verified uniform",
     });
   });
 

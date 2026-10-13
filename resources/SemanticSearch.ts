@@ -180,16 +180,19 @@ export class SemanticSearch extends Resource {
     // query against stored vectors returns garbage: Harper zero-pads a
     // mismatched-dimension vector and returns a bogus score instead of throwing;
     // same-dims / different-space is silent garbage too. The guard fails CLOSED:
-    // only a scan-verified uniform store serves embeddings (flair#2530). Take the
+    // only a store whose stamps a scan verified uniform serves embeddings
+    // (flair#2530). Take the
     // SAME path for every non-uniform state — REFUSE the embedding leg and
     // degrade LOUDLY: drop qEmb so retrieveCandidates takes the keyword-only
     // branch (reusing the existing mode:'none' graceful-degrade contract) when
     // the request has query text, return no results when it has none, and
     // surface a structured warning that NAMES the state (mixed /
     // not-yet-verified / scan-failed) below. Never cosine a query against a
-    // stored corpus not verified to be in one space, never merely log. (This
-    // is a guarantee about the stored corpus; a caller-supplied
-    // `queryEmbedding` carries no space provenance and is not checked.)
+    // stored corpus whose `embeddingModel` stamps are not verified to be the
+    // current space, never merely log. (This is stamp-metadata uniformity
+    // only: the scan skips a stored vector with no stamp, and a caller-supplied
+    // `queryEmbedding` carries no space provenance; neither is checked.
+    // Stored-vector provenance is deferred to flair#2573.)
     // Consulted through the SAME single chokepoint the write-time dedup leg
     // uses — O(1) on the verified-uniform happy path. The consult, and so the
     // state warning, happens only when a query embedding is available

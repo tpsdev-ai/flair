@@ -13,10 +13,11 @@
  *
  * The server is a plain node HTTP listener on an ephemeral loopback port that
  * answers /Health with a fixed status + body and 404s everything else. Doctor
- * runs all its other checks too, under an isolated HOME with no admin password
- * and a closed ops port; this file asserts only the guard lines, the not-ready
- * line, and the issue counts of three 200 responses that differ only in the
- * guard verdict.
+ * also runs its other checks that apply, under an isolated HOME with no admin
+ * password and a closed ops port (on a readiness 503 it skips the
+ * serving-instance checks); this file asserts only the guard lines, the
+ * not-ready line, and the issue counts of three 200 responses that differ only
+ * in the guard verdict.
  *
  * Mutation checks: delete the `renderEmbeddingSpaceDoctorFinding(...)` call from
  * the doctor action (src/commands/doctor.ts) and rebuild, and the 200 and
@@ -72,7 +73,9 @@ async function serveHealth(status: number, body: Record<string, unknown>): Promi
   return port;
 }
 
-/** The body Health.get builds (resources/search-readiness.ts buildPublicHealthBody + the guard field). */
+/** A minimal fixture of the body Health.get builds: buildPublicHealthBody's
+ *  fields (resources/search-readiness.ts) plus the guard field. It omits the
+ *  `embedding` field Health also adds. */
 function flairHealthBody(ready: boolean, embeddingSpace: Record<string, unknown>): Record<string, unknown> {
   return {
     ok: ready,

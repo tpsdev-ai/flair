@@ -12,8 +12,15 @@
  * exit code.
  *
  * Only `mixed` is a blocking finding — it needs the operator to reconcile the
- * corpus. `unverified` and `scan-failed` are advisories (the guard retries, so
- * they usually clear without action), and `uniform` is an OK line. An absent or
+ * corpus. `unverified` and `scan-failed` are advisories, and `uniform` is an OK
+ * line. A rescan starts only on a later guard consult (a recall with a query
+ * embedding outside bm25-only mode, or a write-time dedup check; /Health does
+ * not consult): at once
+ * while no verdict is known, otherwise once RECHECK_MS has passed since the
+ * last published verdict. The state becomes `uniform` only when such a scan
+ * succeeds and finds the stamps uniform; with no consults, nothing retries.
+ * `uniform` means stamp-metadata uniformity: a stored vector with no
+ * `embeddingModel` stamp is not checked (flair#2573). An absent or
  * unrecognized field prints nothing: an older or foreign server's verdict is
  * not one to claim.
  */
@@ -50,7 +57,8 @@ export function describeEmbeddingSpaceDoctorFinding(field: unknown): EmbeddingSp
   const rec = field as { state?: unknown; reason?: unknown };
   switch (rec.state) {
     case "uniform":
-      return { isIssue: false, icon: "ok", message: "embedding space verified uniform" };
+      // Stamp metadata only; an unstamped stored vector is not checked (flair#2573).
+      return { isIssue: false, icon: "ok", message: "embedding model stamps verified uniform" };
     case "mixed":
       return {
         isIssue: true,
@@ -65,7 +73,7 @@ export function describeEmbeddingSpaceDoctorFinding(field: unknown): EmbeddingSp
       return {
         isIssue: false,
         icon: "warn",
-        message: "embedding space not yet verified — the embedding leg is refused until a scan verifies the store",
+        message: "embedding space not yet verified — the embedding leg is refused until a scan verifies the stamps",
       };
     case "scan-failed":
       return {
