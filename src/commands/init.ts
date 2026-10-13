@@ -701,9 +701,10 @@ program
       console.error(foreignOccupiedListenerDetail(listener));
       process.exit(1);
     };
-    const refuseFreePort = (listener: OccupiedHarperListener, waitedMs: number): void => {
+    const refuseFreePort = (listener: OccupiedHarperListener, waitedMs?: number): void => {
       const pid = listener.pids.length === 1 ? `, pid ${listener.pids[0]}` : "";
-      console.error(`Refusing init: port ${listener.port}${pid}: TCP readiness check failed: still free after ${waitedMs}ms (phase: waiting for the spawned instance to listen).`);
+      const waited = waitedMs === undefined ? "" : `: still free after ${waitedMs}ms (phase: waiting for the spawned instance to listen)`;
+      console.error(`Refusing init: port ${listener.port}${pid}: TCP readiness check failed${waited}.`);
       console.error("Remedy: start the instance, then rerun init.");
       process.exit(1);
     };
