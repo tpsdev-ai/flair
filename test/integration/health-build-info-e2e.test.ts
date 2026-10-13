@@ -23,7 +23,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS, HARPER_START_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const STAMP_PATH = join(REPO_ROOT, "dist", "build-info.json");
@@ -41,7 +41,7 @@ describe("/Health serves the build's own identity (flair#1076)", () => {
     ).toBe(true);
     stamp = JSON.parse(readFileSync(STAMP_PATH, "utf-8"));
     harper = await startHarper();
-  }, 120_000);
+  }, HARPER_START_BUDGET_MS);
 
   afterAll(async () => {
     if (harper) await stopHarper(harper);

@@ -559,8 +559,7 @@ const FABRIC_OPS_PORT = 9925;
 //
 // Exported (flair#2568) so the test harness's readiness budget
 // (HARPER_STARTUP_BUDGET_MS in test/helpers/harper-lifecycle.ts) can be pinned
-// equal to the budget `flair init`'s TCP readiness check polls under; the two
-// must be one number.
+// equal to the budget `flair init`'s TCP readiness check polls under.
 export const STARTUP_TIMEOUT_MS = 60_000;
 const ADOPT_STOP_TIMEOUT_MS = 60_000;
 const HEALTH_POLL_INTERVAL_MS = 500;

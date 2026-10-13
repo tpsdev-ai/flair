@@ -232,18 +232,18 @@ const MAX_SPAWN_ATTEMPTS = 3;
 
 // ─── Lifecycle budgets for before/after hooks (flair#2568) ──────────────────
 //
-// Bun applies a 5 s default to every before/after hook. That is below what a
+// Bun applies a 5 s default to before/after hooks. That is below what a
 // cold-runner Harper boot or stop costs, so a hook that starts or stops a
-// spawned Harper must pass an explicit timeout drawn from these budgets —
-// never rely on the 5 s default.
+// spawned Harper passes an explicit timeout drawn from these budgets rather
+// than relying on the 5 s default.
 //
 // HARPER_STARTUP_BUDGET_MS is the readiness budget: how long a spawned
 // Harper's HTTP/ops ports may take to answer before the boot is declared
 // failed. `waitForHealth` defaults to it and `startHarper` passes it
 // explicitly. `flair init`'s TCP readiness check (`attributeBeforeCredential`
 // in src/commands/init.ts) reads the SAME budget as `cli.STARTUP_TIMEOUT_MS`;
-// test/unit/harper-lifecycle-budgets.test.ts pins the two equal so they cannot
-// drift.
+// test/unit/harper-lifecycle-budgets.test.ts asserts the two are equal, so a
+// change to either side fails there first.
 export const HARPER_STARTUP_BUDGET_MS = 60_000;
 
 /**
@@ -1119,9 +1119,8 @@ export interface StopHarperOptions {
 }
 
 /**
- * Raised when `stopHarper` overruns its budget. Named so a slow teardown is
- * reported as a stop timeout with the pid and the phase it stalled in, never
- * as Bun's `(unnamed)` hook timeout (flair#2568).
+ * Raised when `stopHarper` overruns its budget, so a slow teardown reports as a
+ * stop timeout naming the pid and the phase it stalled in.
  */
 export class HarperStopTimeoutError extends Error {
   constructor(pid: number | undefined, phase: string, budgetMs: number) {

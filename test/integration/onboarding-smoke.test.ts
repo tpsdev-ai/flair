@@ -31,7 +31,7 @@ import { spawn } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS, HARPER_START_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { httpStatus } from "../helpers/http-status";
 import { childOverranDeadline, cliLeg } from "../helpers/child-deadline.js";
 
@@ -112,7 +112,7 @@ function runCli(args: string[], extraEnv: Record<string, string> = {}): Promise<
 beforeAll(async () => {
   harper = await startHarper();
   cliHome = await mkdtemp(join(tmpdir(), "flair-onboarding-home-"));
-}, 120_000);
+}, HARPER_START_BUDGET_MS);
 
 afterAll(async () => {
   if (harper) await stopHarper(harper);

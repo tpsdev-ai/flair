@@ -711,7 +711,7 @@ program
     // The readiness budget here is `cli.STARTUP_TIMEOUT_MS`, the SAME budget the
     // test-harness readiness poll uses (`HARPER_STARTUP_BUDGET_MS` in
     // test/helpers/harper-lifecycle.ts); test/unit/harper-lifecycle-budgets.test.ts
-    // pins the two equal so they cannot drift.
+    // asserts the two are equal.
     const attributeBeforeCredential = async (port: number, host: string): Promise<void> => {
       const startedAt = Date.now();
       const deadline = startedAt + STARTUP_TIMEOUT_MS;

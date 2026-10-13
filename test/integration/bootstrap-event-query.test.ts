@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { cp, mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS, HARPER_START_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 const root = process.cwd();
 // Keep startup/migration events outside the measured fixture window.
@@ -64,7 +64,7 @@ beforeAll(async () => {
   await symlink(root, join(appDir, "node_modules/@tpsdev-ai/flair"), "dir");
   harper = await startHarper({ cwd: appDir, harperBinDir: root });
   await insert(active);
-}, 120_000);
+}, HARPER_START_BUDGET_MS);
 
 afterAll(async () => {
   if (harper) await stopHarper(harper);

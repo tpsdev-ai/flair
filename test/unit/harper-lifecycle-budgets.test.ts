@@ -57,7 +57,7 @@ describe("flair#2568: the failure names the phase it stopped in", () => {
 
 describe("flair#2568: a stop past its budget throws the named error", () => {
   test("a process that does not exit within the stop budget raises HarperStopTimeoutError with pid and phase", async () => {
-    // A stub child that never emits `exit`: `killProcess` waits for it and the
+    // A stub child that does not emit `exit`: `killProcess` waits for it and the
     // stop budget wins the race.
     const proc = new EventEmitter() as unknown as HarperInstance["process"];
     Object.assign(proc!, { pid: 424242, exitCode: null, signalCode: null, kill: () => {} });
@@ -78,7 +78,7 @@ describe("flair#2568: a stop past its budget throws the named error", () => {
     }
     expect(err).toBeInstanceOf(HarperStopTimeoutError);
     expect((err as Error).name).toBe("HarperStopTimeoutError");
-    // The pid and the phase it stalled in are in the message — never "(unnamed)".
+    // The pid and the phase it stalled in are in the message, not "(unnamed)".
     expect((err as Error).message).toContain("pid 424242");
     expect((err as Error).message).toContain("phase: terminate");
     expect((err as Error).message).toContain("50ms");
@@ -140,7 +140,7 @@ function harperHooksMissingTimeout(): string[] {
   return offenders;
 }
 
-describe("flair#2568: every Harper lifecycle hook passes an explicit timeout", () => {
+describe("flair#2568: no Harper lifecycle hook relies on Bun's 5 s default", () => {
   test("no beforeAll/afterAll/beforeEach/afterEach that starts or stops a Harper relies on Bun's 5 s default", () => {
     expect(harperHooksMissingTimeout()).toEqual([]);
   });

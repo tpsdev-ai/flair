@@ -20,7 +20,7 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
-import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS, HARPER_START_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
 
@@ -75,7 +75,7 @@ const BACKDATED = "2020-01-05T00:00:00.000Z";
 beforeAll(async () => {
   harper = await startHarper();
   await seedAgent(harper, agent);
-}, 120_000);
+}, HARPER_START_BUDGET_MS);
 
 afterAll(async () => {
   await stopHarper(harper);

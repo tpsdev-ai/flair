@@ -2,7 +2,7 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { cp, mkdtemp, rm, symlink } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS, HARPER_START_BUDGET_MS } from "../helpers/harper-lifecycle";
 import {
   bm25LegServesTracked,
   hnswLegServesTracked,
@@ -43,7 +43,7 @@ beforeAll(async () => {
   const res = await fetch(harper.opsURL, { method: "POST", headers: { "Content-Type": "application/json", Authorization: auth() },
     body: JSON.stringify({ operation: "insert", database: "flair", table: "Memory", records }) });
   expect(res.status, await res.text()).toBe(200);
-}, 120_000);
+}, HARPER_START_BUDGET_MS);
 afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (appDir) await rm(appDir, { recursive: true, force: true });

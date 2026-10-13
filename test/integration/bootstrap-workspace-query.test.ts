@@ -3,7 +3,7 @@ import { cp, mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import nacl from "tweetnacl";
-import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS, HARPER_START_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 const root = process.cwd();
 const now = Date.now();
@@ -57,7 +57,7 @@ beforeAll(async () => {
     workspace("empty-old", "empty-reader", 10, null),
     { ...workspace("teammate-ws", "teammate", 0, ["subsystem:chosen"]), summary: "chosen collision marker" },
   ]);
-}, 120_000);
+}, HARPER_START_BUDGET_MS);
 afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (appDir) await rm(appDir, { recursive: true, force: true });

@@ -16,7 +16,7 @@
 import { beforeAll, afterAll, describe, expect, test } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
-import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS, HARPER_START_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { signBodyFresh } from "../../resources/federation-crypto.js";
 
 const agent = (id: string) => ({ id, ...nacl.sign.keyPair() });
@@ -51,7 +51,7 @@ beforeAll(async () => {
   if (process.env.HARPER_HTTP_URL) throw new Error("requires isolated Harper; unset HARPER_HTTP_URL");
   harper = await startHarper();
   await seed("Agent", [{ id: owner.id, name: owner.id, role: "agent", publicKey: Buffer.from(owner.publicKey).toString("base64"), createdAt: now }]);
-}, 120_000);
+}, HARPER_START_BUDGET_MS);
 afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
 
 describe("Memory skill-write path guards (flair#1542)", () => {
