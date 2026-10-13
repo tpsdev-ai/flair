@@ -1507,8 +1507,7 @@ describe("slice 2 — capture normalisation, ids and outcomes", () => {
 // `PluginHookAgentEndEvent` and agent context, through the pinned host's real
 // hook runner (`createHookRunner`), the component that dispatches `agent_end` to
 // the plugin. The host's session producer (the embedded agent runner in
-// `dist/builtin-openclaw-*.mjs`) is not driven: it needs a configured
-// provider/model and a booted gateway session to produce a snapshot.
+// `dist/builtin-openclaw-*.mjs`) is not driven here.
 // The host's config reader, plugin loader and conversation-access registration
 // gate are driven, with the plugin loaded from source, by
 // `test/host-config-loader.test.ts`.
