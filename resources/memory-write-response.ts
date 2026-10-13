@@ -6,7 +6,10 @@
  *   (MEMORY_EMBEDDING_FIELDS: `embedding`, `embeddingModel`).
  *   withoutEmbeddingFields() drops them from the result a Memory post/put/patch
  *   response is built on and from the result of the admin `_reindex` re-PUT;
- *   the re-embed PATCH answers `{ id, updatedAt }` (resources/Memory.ts).
+ *   the re-embed PATCH answers `{ id, updatedAt }` (resources/Memory.ts). A
+ *   write whose result is a Response answers with it only when it is a refusal;
+ *   a successful Response is replaced by the `write_response_withheld` refusal
+ *   (writeResultResponse).
  * - The POST /FeedMemories response is built from the row the feed stored or
  *   matched: feedResponseFields() keeps the FEED_RESPONSE_WRITE_FIELDS, which
  *   the server decides for that row, and otherwise only the non-null-valued
@@ -64,8 +67,38 @@ export function suppliedMemoryFields(body: unknown): ReadonlySet<string> {
   return new Set(Object.keys(body).filter((key) => body[key] !== undefined && body[key] !== null));
 }
 
-/** A copy of `result` without MEMORY_EMBEDDING_FIELDS; a non-record is returned unchanged. */
+/** The error a write answers with in place of a successful Response result (writeResultResponse). */
+export const WRITE_RESPONSE_WITHHELD = "write_response_withheld";
+
+/**
+ * A write's result when it is a Response. A refusal (a status outside 200-299)
+ * is returned as built. A successful Response is not returned: its body is not
+ * a value these write paths build, so it is replaced by a 500
+ * `write_response_withheld` refusal that says the write completed and how to
+ * see the row. On Harper the results a Memory or feed write receives are
+ * records or undefined, and the Responses it receives are the write path's own
+ * refusals; this keeps a successful write's response free of embedding fields
+ * whatever the storage layer returns, without reading or depending on the
+ * body's shape.
+ */
+export function writeResultResponse(response: Response): Response {
+  if (!response.ok) return response;
+  return Response.json({
+    error: WRITE_RESPONSE_WITHHELD,
+    message: "the write completed, but its result was a Response this server does not report; read the row to see what was stored",
+  }, { status: 500 });
+}
+
+/**
+ * A write result without MEMORY_EMBEDDING_FIELDS: a record is copied without
+ * them, an array's records likewise, and a Response goes through
+ * writeResultResponse (a refusal as built, a successful Response replaced by
+ * the `write_response_withheld` refusal). Any other value holds no fields and
+ * is returned unchanged.
+ */
 export function withoutEmbeddingFields<T>(result: T): T {
+  if (result instanceof Response) return writeResultResponse(result) as T;
+  if (Array.isArray(result)) return result.map((item) => withoutEmbeddingFields(item)) as T;
   if (!isPlainRecord(result)) return result;
   const copy: Record<string, unknown> = { ...result };
   for (const field of MEMORY_EMBEDDING_FIELDS) delete copy[field];
@@ -75,10 +108,14 @@ export function withoutEmbeddingFields<T>(result: T): T {
 /**
  * A copy of the feed row `row` holding the FEED_RESPONSE_WRITE_FIELDS and the
  * `supplied` fields (suppliedMemoryFields) it carries, each as stored, and
- * never an embedding field (a null-prototype record, protoSafeRecord). A
- * Response or a non-record is returned unchanged.
+ * never an embedding field (a null-prototype record, protoSafeRecord). An
+ * array's records are copied likewise. A Response goes through
+ * writeResultResponse. Any other value holds no fields and is returned
+ * unchanged.
  */
 export function feedResponseFields(row: unknown, supplied: ReadonlySet<string>): unknown {
+  if (row instanceof Response) return writeResultResponse(row);
+  if (Array.isArray(row)) return row.map((item) => feedResponseFields(item, supplied));
   if (!isPlainRecord(row)) return row;
   const keys = Object.keys(row).filter((key) => !EMBEDDING_FIELDS.has(key) && (WRITE_FIELDS.has(key) || supplied.has(key)));
   return protoSafeRecord(row, { keys });

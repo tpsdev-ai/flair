@@ -603,11 +603,14 @@ function isDedupMatch(row: any, match: any): boolean {
  * holds the non-null-valued fields the request supplied, each as stored, and
  * the fields the server decides for the row (feedResponseFields), and never an
  * embedding field. flair#2407: it carries the redaction count when that count
- * is above zero. A Response or a non-object result is returned unchanged.
+ * is above zero. A Response result goes through feedResponseFields too: a
+ * refusal is returned as built and a successful one is replaced by the
+ * write_response_withheld refusal. A non-object result holds no fields and is
+ * returned unchanged.
  */
 function feedWriteResponse(result: any, redactedValues: number, supplied: ReadonlySet<string>): any {
-  if (result instanceof Response || !result || typeof result !== "object") return result;
-  const response = feedResponseFields(result, supplied) as Record<string, unknown>;
+  const response = feedResponseFields(result, supplied);
+  if (response instanceof Response || !response || typeof response !== "object" || Array.isArray(response)) return response;
   return redactedValues > 0 ? { ...response, redactedValues } : response;
 }
 

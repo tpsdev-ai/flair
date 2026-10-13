@@ -200,7 +200,7 @@ const { Memory } = await import("../../resources/Memory.ts");
 const { FeedMemories } = await import("../../resources/MemoryFeed.ts");
 const { computeContentHash } = await import("../../resources/memory-feed-lib.ts");
 const { isOperatorSeedPut, redactMemoryWrite, storedMemoryText, suppliedMemoryTextFields } = await import("../../resources/memory-redaction.ts");
-const { feedResponseFields, suppliedMemoryFields, withoutEmbeddingFields } = await import("../../resources/memory-write-response.ts");
+const { WRITE_RESPONSE_WITHHELD, feedResponseFields, suppliedMemoryFields, withoutEmbeddingFields, writeResultResponse } = await import("../../resources/memory-write-response.ts");
 const { SEED_SKILL_ROW_ID } = await import("../../resources/seed-ids.ts");
 const { redactSecrets, redactSecretsWithCount } = await import("../../packages/flair-mcp/src/secret-redaction.ts");
 
@@ -498,7 +498,7 @@ describe("flair#2561 — `stored` reports only the string-valued text fields the
       summary: "s", tags: ["skill"],
     });
     expect(row.content).toBe("c");
-    const response = new Response("x");
+    const response = new Response("x", { status: 409 });
     expect(feedResponseFields(response, new Set())).toBe(response);
     expect(feedResponseFields(undefined, new Set())).toBeUndefined();
   });
@@ -519,6 +519,60 @@ describe("flair#2561 — `stored` reports only the string-valued text fields the
       expect("embedding" in res || "embeddingModel" in res).toBe(false);
     }
     expect(redacted.redactedValues).toBe(1);
+  });
+
+  it("a successful Response result is replaced by write_response_withheld; a refusal is returned as built", async () => {
+    const rowResponse = () => Response.json({ id: "r1", content: "c", embedding: [1], embeddingModel: "m" });
+    for (const replaced of [writeResultResponse(rowResponse()), withoutEmbeddingFields(rowResponse()), feedResponseFields(rowResponse(), new Set(["content"])) as Response]) {
+      expect(replaced instanceof Response).toBe(true);
+      expect(replaced.status).toBe(500);
+      const text = await replaced.text();
+      expect(JSON.parse(text).error).toBe(WRITE_RESPONSE_WITHHELD);
+      expect(text.includes("embedding")).toBe(false);
+    }
+    const refusal = Response.json({ error: "stored_row_changed" }, { status: 409 });
+    expect(writeResultResponse(refusal)).toBe(refusal);
+    expect(withoutEmbeddingFields(refusal)).toBe(refusal);
+    expect(feedResponseFields(refusal, new Set())).toBe(refusal);
+    expect(withoutEmbeddingFields<unknown>([{ id: "r1", embedding: [1], embeddingModel: "m" }, "r2"])).toEqual([{ id: "r1" }, "r2"]);
+    expect(feedResponseFields([{ id: "r1", content: "c", embedding: [1] }], new Set(["content"]))).toEqual([{ id: "r1", content: "c" }]);
+  });
+
+  it("a `_reindex` re-PUT, a PUT and a PATCH whose storage result is a successful Response answer write_response_withheld", async () => {
+    const row = {
+      id: "mem-2561-response", agentId: AGENT, content: "a note", embedding: FAKE_EMBEDDING, embeddingModel: "mock-embedding-model",
+      instanceToken: "token-2561-response", contentHash: "hash-2561-response", visibility: "shared", archived: false, createdAt: new Date().toISOString(),
+    };
+    const rowResponse = (content: any) => Response.json({ ...row, ...content, embedding: FAKE_EMBEDDING, embeddingModel: "mock-embedding-model" });
+    const staticPut = (BaseMemory as any).put;
+    const instancePatch = (BaseMemory as any).prototype.patch;
+    (BaseMemory as any).put = async (content: any) => rowResponse(content);
+    (BaseMemory as any).prototype.patch = async (content: any) => rowResponse(content);
+    try {
+      const results: Array<[string, any]> = [];
+      memoryStore.set(row.id, { ...row });
+      const reindex: any = new (Memory as any)();
+      reindex.getContext = () => ({ request: {}, __flairInternal: true });
+      reindex._targetId = row.id;
+      results.push(["_reindex", await reindex.put({ ...row, _reindex: true })]);
+      const put: any = makeMemory(agentCtx(AGENT));
+      put._targetId = row.id;
+      results.push(["PUT", await put.put({ id: row.id, agentId: AGENT, content: "a note, changed", visibility: "shared" })]);
+      memoryStore.set(row.id, { ...row });
+      const patch: any = makeMemory(agentCtx(AGENT));
+      patch._targetId = row.id;
+      results.push(["PATCH", await patch.patch({ summary: "a summary" })]);
+      for (const [label, res] of results) {
+        expect(res instanceof Response, label).toBe(true);
+        expect(res.status, label).toBe(500);
+        const text = await res.text();
+        expect(JSON.parse(text).error, label).toBe(WRITE_RESPONSE_WITHHELD);
+        expect(text.includes("embedding"), label).toBe(false);
+      }
+    } finally {
+      (BaseMemory as any).put = staticPut;
+      (BaseMemory as any).prototype.patch = instancePatch;
+    }
   });
 
   it("an internal `_reindex` re-PUT carries no embedding field when the storage result holds the row", async () => {

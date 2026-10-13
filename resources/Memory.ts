@@ -1,7 +1,7 @@
 import { databases } from "harper";
 import { randomUUID } from "node:crypto";
 import { isOperatorSeedPut, redactMemoryWrite, storedMemoryText, suppliedMemoryTextFields, type MemoryTextField, type StoredMemoryText } from "./memory-redaction.js";
-import { withoutEmbeddingFields } from "./memory-write-response.js";
+import { withoutEmbeddingFields, writeResultResponse } from "./memory-write-response.js";
 import { isDeepStrictEqual } from "node:util";
 import { patchRecord, withDetachedTxn } from "./table-helpers.js";
 import { isAdmin, resolveAgentAuth, type AgentAuthVerdict } from "./agent-auth.js";
@@ -557,7 +557,8 @@ async function runDedupGate(ctx: any, content: any): Promise<DedupMatch | null> 
 /**
  * flair#2407: layer the server-side redaction count onto a write result that
  * does not build its own response — a skill write, or a PATCH whose base
- * returns undefined. Returns a Response unchanged, and a result with nothing
+ * returns undefined. Returns a refusal Response as built and replaces a
+ * successful one (writeResultResponse), and returns a result with nothing
  * redacted unchanged apart from its embedding fields.
  *
  * flair#2467: with the count it layers `stored`, the post-redaction values of
@@ -567,7 +568,7 @@ async function runDedupGate(ctx: any, content: any): Promise<DedupMatch | null> 
  * carries no embedding field (withoutEmbeddingFields).
  */
 function withRedactedValues(result: any, redactedValues: number, id?: any, stored?: StoredMemoryText | null): any {
-  if (result instanceof Response) return result;
+  if (result instanceof Response) return writeResultResponse(result);
   if (redactedValues <= 0) return withoutEmbeddingFields(result);
   const base = result && typeof result === "object" && !Array.isArray(result) ? withoutEmbeddingFields(result) : {};
   return { id: base.id ?? id, written: true, ...base, redactedValues, ...(stored ? { stored } : {}) };
@@ -1828,7 +1829,7 @@ export class Memory extends (databases as any).flair.Memory {
       }
       return null;
     });
-    if (postResult instanceof Response) return postResult;
+    if (postResult instanceof Response) return writeResultResponse(postResult);
     const result: any = {};
     // flair#1357 — read-your-write for the lexical leg. The table change feed
     // (resources/bm25-index-service.ts) is the CORRECTNESS mechanism; this
@@ -2191,11 +2192,14 @@ export class Memory extends (databases as any).flair.Memory {
         if (err instanceof CommittedRowChanged) return storedRowChangedRefusal("Memory");
         throw err;
       }
-      if (reindexed instanceof Response) return reindexed;
+      // flair#2561: a refusal is returned as built; a successful Response is
+      // replaced by the write_response_withheld refusal (writeResultResponse).
+      if (reindexed instanceof Response) return writeResultResponse(reindexed);
       noteMemoryUpsert(content);
       noteWriteStamp(content?.embeddingModel as string | null | undefined); // embedding-space-guard slice 1 (see post())
       // flair#2561: the response carries no embedding field, whatever the
-      // storage layer's result holds.
+      // storage layer's result holds: a record or an array's records lose
+      // them, and any other value holds no fields.
       return withoutEmbeddingFields(reindexed);
     }
 
@@ -2575,7 +2579,9 @@ export class Memory extends (databases as any).flair.Memory {
       if (err instanceof CommittedRowChanged) return storedRowChangedRefusal("Memory");
       throw err;
     }
-    if (putResult instanceof Response) return putResult;
+    // flair#2561: a refusal is returned as built; a successful Response from
+    // the storage layer is replaced by the write_response_withheld refusal.
+    if (putResult instanceof Response) return writeResultResponse(putResult);
     const result: any = putResult;
     // flair#1357 — read-your-write for the lexical leg (see post()).
     noteMemoryUpsert(content);

@@ -22,11 +22,15 @@
   No Memory or feed write response carries `embedding` or `embeddingModel`.
   The re-embed PATCH (body `{"embedding": null, "embeddingModel": null}`)
   answers `{ id, updatedAt }`, and the administrator `_reindex` re-PUT answers
-  without either field. `flair reembed` counts a row as re-embedded when the
-  PATCH response names that row and the stored row then carries the current
-  model; it reads the model through the operations API when administrator
-  credentials are set, and with a signed `GET /Memory/<id>` as the agent
-  otherwise. A `flair reembed` from an earlier release reads the model from
+  without either field. A write whose storage result is a successful
+  `Response` answers with a `write_response_withheld` refusal (500) in its
+  place, which says the write completed; the write paths' own refusals are
+  named errors with no row fields. `flair reembed` counts a row as re-embedded
+  when the PATCH response names that row and the stored row then carries the
+  current model; it reads the model through the operations API when
+  administrator credentials are set, and with a signed `GET /Memory/<id>` as
+  the agent otherwise, and counts an unsuccessful or mismatched read as an
+  error. A `flair reembed` from an earlier release reads the model from
   the PATCH response, so against this server it counts each row it
   re-embedded as an error; use the `flair reembed` of this release.
 
