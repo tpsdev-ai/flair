@@ -5441,7 +5441,17 @@ async function probeHealth(port: number): Promise<HealthResult> {
   }
 }
 
-async function probeHealthBeforeDeadline(port: number, deadline: number): Promise<HealthResult> {
+/**
+ * The adopt stop path's port-free probe (stopDirectProcessForAdopt). It
+ * classifies the response with classifyHealthProbe, as probeHealth does, and
+ * returns `unreachable` after 2 s or at `deadline`, whichever comes first.
+ * Exported for tests.
+ *
+ * flair#2485: like probeHealth, it answers only for the port it probed —
+ * `redirect: "manual"` stops it following a 3xx, so a redirect from this port
+ * is a response that is not a Flair health answer (`foreign`).
+ */
+export async function probeHealthBeforeDeadline(port: number, deadline: number): Promise<HealthResult> {
   const timeoutMs = Math.min(2000, deadline - Date.now());
   if (timeoutMs <= 0) return { kind: "unreachable" };
   const controller = new AbortController();
@@ -5454,7 +5464,7 @@ async function probeHealthBeforeDeadline(port: number, deadline: number): Promis
   });
   const observe = async (): Promise<HealthResult> => {
     try {
-      const res = await fetch(`http://127.0.0.1:${port}/Health`, { signal: controller.signal });
+      const res = await fetch(`http://127.0.0.1:${port}/Health`, { redirect: "manual", signal: controller.signal });
       let body: unknown;
       try { body = await res.json(); } catch { body = null; }
       return classifyHealthProbe({ kind: "response", status: res.status, body });
