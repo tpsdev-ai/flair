@@ -1,30 +1,36 @@
 /**
- * doctor-fix-reverify-2520.test.ts — flair#2520 round 1.
+ * doctor-fix-reverify-2520.test.ts — flair#2520.
  *
- * `flair doctor` verifies one ops target (`verifyDoctorRosterInstance`) before
- * its audit-log and instance-identity reads. With `--fix` it can then repair
- * launchd management (which may clean-stop the instance and load it under
- * launchd) and restart the instance onto this CLI's install tree, both BEFORE
- * the Agent roster and home reads. A target verified before such a step proves
- * nothing about the process serving the probed port after it. Doctor therefore
- * verifies again after a process-changing fix and the roster and home reads use
- * only that answer: they read from the newly verified ops port, or report NOT
- * RUN with the new refusal.
+ * `flair doctor` resolves the admin credential and verifies one ops target
+ * (`verifyDoctorRosterInstance`) before its audit-log and instance-identity
+ * reads. With `--fix` it can then repair launchd management (which may
+ * clean-stop the instance and load it under launchd, and can write the
+ * admin-pass file from HDB_ADMIN_PASSWORD) and restart the instance onto this
+ * CLI's install tree, both BEFORE the Agent roster and home reads. A credential
+ * and target resolved before such a step prove nothing about the process
+ * serving the probed port after it. Doctor therefore resolves the credential
+ * and verifies the target again after such a fix, and the roster and home
+ * reads use only that answer: they read from the newly verified ops port with
+ * the newly resolved credential, or report NOT RUN with the new refusal.
  *
  * This drives the REAL `flair doctor --fix` action in-process through the
- * `bindCli` seam (as doctor-mcp-redirect-agent-2270 does): the launchd repair,
- * the install-tree adapters and the pair verifier are fixtures, the verifier's
- * answer changes when a fixture fix "changes the serving process", and every
- * fetch is answered locally and recorded with the phase it happened in.
+ * `bindCli` seam (as doctor-mcp-redirect-agent-2270 does). The launchd repair
+ * and the install-tree adapters are fixtures. The first describe also replaces
+ * the pair verifier, whose answer changes when a fixture fix "changes the
+ * serving process". The second keeps the real verifier and credential
+ * resolution: the repair fixture writes a real admin-pass file, and the probed
+ * instance is answered at the fetch layer, accepting only its own password.
  *
  * Isolation: HOME and the working directory are a scratch directory (set BEFORE
  * src/cli.ts is imported; node:os homedir follows HOME), deployment variables
  * are removed, PATH holds only failing stubs behind a launchctl tripwire that
- * must stay clear, the port is one nothing listens on, and process.exit is
- * captured. mock.module is process-global, hence unit-isolated.
+ * must stay clear, and process.exit is captured. Port 9 is a fixture port:
+ * every fetch is intercepted and answered in this file and recorded with the
+ * phase it happened in, so nothing on the host is addressed. mock.module is
+ * process-global, hence unit-isolated.
  */
 import { afterAll, describe, expect, mock, spyOn, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { assessTreeDivergence, withRunningVersion, type TreeAssessment } from "../../src/lib/tree-divergence.ts";
@@ -57,6 +63,11 @@ mock.module("node:os", () => {
   return { ...actual, homedir: () => process.env.HOME || actual.homedir() };
 });
 
+// Imported after HOME is set, so every path they resolve is under it.
+const { defaultAdminPassPath, resolveAdminUser } = await import("../../src/lib/auth-resolve.ts");
+const PASS_FILE = join(home, ".flair", "admin-pass");
+if (defaultAdminPassPath() !== PASS_FILE) throw new Error(`refusing to run: the admin-pass path ${defaultAdminPassPath()} is not under the scratch HOME`);
+
 afterAll(() => {
   process.chdir(savedCwd);
   for (const key of Object.keys(process.env)) if (!(key in savedEnv)) delete process.env[key];
@@ -70,20 +81,66 @@ const POST_FIX_OPS = 47202;
 const POST_FIX_REASON = "SENTINEL-2520-post-fix-refusal: the ops endpoint no longer records the probed HTTP port";
 const POST_FIX_REMEDY = "SENTINEL-2520-post-fix-remedy";
 
+/** The probed instance of the credential case: its ops port, admin password, and one Agent row. */
+const INSTANCE_OPS = 47303;
+const INSTANCE_PASS = "fixture-hdb-admin-password-2520";
+const INSTANCE_AGENT = "fixture-agent-2520";
+const INSTANCE_ID = "fixture-instance-2520";
+
 type Phase = "before-fix" | "after-fix";
 type Scenario = {
   /** Which --fix step changes the serving process, if any. */
   change: "launchd-repair" | "install-tree-restart" | "none";
-  /** What the pair verifier answers once the process changed. */
-  afterFix: { kind: "run"; opsPort: number } | { kind: "not-run"; reason: string; remedy: string };
+  /** What the fixture pair verifier answers once the process changed. */
+  afterFix?: { kind: "run"; opsPort: number } | { kind: "not-run"; reason: string; remedy: string };
+  /**
+   * The credential case: the real pair verifier runs against the probed
+   * instance answered at the fetch layer, and the launchd repair writes the
+   * admin-pass file from HDB_ADMIN_PASSWORD after proving it, as
+   * prepareLaunchdRepair does (flair#1685).
+   */
+  repairWritesPassFile?: boolean;
 };
 
 let scenario: Scenario = { change: "none", afterFix: { kind: "run", opsPort: PRE_FIX_OPS } };
 let phase: Phase = "before-fix";
 let restarted = false;
 const verifyCalls: Array<{ phase: Phase; port: unknown }> = [];
+const verifyPasses: unknown[] = [];
 const auditOpsUrls: string[] = [];
 const fetches: Array<{ phase: Phase; url: string }> = [];
+const instanceOps: Array<{ phase: Phase; operation: string; authorized: boolean }> = [];
+let writePassFile: (path: string, content: string) => void = () => {
+  throw new Error("src/cli.ts is not imported yet");
+};
+
+/**
+ * The probed instance of the credential case, answered at the fetch layer:
+ * fixture port 9 is its HTTP port and INSTANCE_OPS its ops port, whose own
+ * configuration records that pair. Its admin reads accept only INSTANCE_PASS.
+ */
+function answerAsProbedInstance(url: URL, init: RequestInit | undefined): Response {
+  const expected = `Basic ${Buffer.from(`${resolveAdminUser()}:${INSTANCE_PASS}`).toString("base64")}`;
+  const authorized = new Headers(init?.headers).get("authorization") === expected;
+  const unauthorized = () => new Response("unauthorized", { status: 401 });
+  if (Number(url.port) !== INSTANCE_OPS) {
+    if (url.pathname.startsWith("/Instance")) return authorized ? Response.json([]) : unauthorized();
+    return url.pathname === "/Health" ? Response.json({}) : Response.json([]);
+  }
+  const body = JSON.parse(typeof init?.body === "string" ? init.body : "{}");
+  instanceOps.push({ phase, operation: `${body.operation}${body.table ? `:${body.table}` : ""}`, authorized });
+  if (!authorized) return unauthorized();
+  switch (body.operation) {
+    case "get_configuration":
+      return Response.json({ http: { port: 9 }, operationsApi: { network: { port: INSTANCE_OPS } } });
+    case "sql":
+      return Response.json([{ id: INSTANCE_AGENT }]);
+    case "search_by_value":
+      return Response.json(body.table === "Agent" ? [{ id: INSTANCE_AGENT, originatorInstanceId: INSTANCE_ID }] : []);
+    default:
+      return Response.json([]);
+  }
+}
 
 const NEW_TREE = "/u/lib/node_modules/@tpsdev-ai/flair";
 const OLD_TREE = "/u/old/lib/node_modules/@tpsdev-ai/flair";
@@ -123,17 +180,28 @@ mock.module("../../src/commands/doctor.ts", () => ({
     checkAgentRegistered: async () => ({ state: "registered" }),
     verifyAuditLog: async (...args: unknown[]) => {
       auditOpsUrls.push(String(args[3]));
-      return { state: "ok" };
+      return args[5] ? { state: "ok" } : { state: "skipped", reason: "no-admin-credentials", detail: "fixture: no admin credential" };
     },
-    verifyDoctorRosterInstance: async (_opts: unknown, port: unknown) => {
-      verifyCalls.push({ phase, port });
+    verifyDoctorRosterInstance: async (...args: unknown[]) => {
+      verifyCalls.push({ phase, port: args[1] });
+      verifyPasses.push(args[2]);
+      if (scenario.repairWritesPassFile) return bindings.verifyDoctorRosterInstance(...args);
       return phase === "before-fix" ? { kind: "run", opsPort: PRE_FIX_OPS } : scenario.afterFix;
     },
     // 7b. The fixture repair adopts the instance into launchd: the process
-    // serving the probed port is a new one.
+    // serving the probed port is a new one. In the credential case it first
+    // proves the environment credential against the probed instance and
+    // writes the 0600 admin-pass file with the real writer.
     repairLaunchdManagement: async () => {
       if (scenario.change !== "launchd-repair") {
         return { kind: "no-op", reason: "already-managed", detail: "fixture: launchd already manages this instance" };
+      }
+      if (scenario.repairWritesPassFile) {
+        const candidate = process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD;
+        if (candidate !== INSTANCE_PASS) {
+          return { kind: "refused", reason: "missing-credential", detail: "fixture: the environment credential does not authenticate" };
+        }
+        writePassFile(defaultAdminPassPath(), candidate);
       }
       phase = "after-fix";
       return { kind: "repaired", detail: "fixture: adopted the instance into launchd" };
@@ -154,15 +222,17 @@ mock.module("../../src/commands/doctor.ts", () => ({
     },
   }),
 }));
-await import("../../src/cli.ts");
+writePassFile = (await import("../../src/cli.ts")).writeAdminPassFile;
 
 async function runDoctorFix(s: Scenario): Promise<{ output: string; exit: number | undefined }> {
   scenario = s;
   phase = "before-fix";
   restarted = false;
   verifyCalls.length = 0;
+  verifyPasses.length = 0;
   auditOpsUrls.length = 0;
   fetches.length = 0;
+  instanceOps.length = 0;
   // A launchctl any call would reach first; it must stay clear. tempDir sweeps
   // it after each test, so each run installs its own.
   const tripwire = installLaunchctlTripwire("flair-2520-reverify-tripwire-");
@@ -173,9 +243,10 @@ async function runDoctorFix(s: Scenario): Promise<{ output: string; exit: number
     spyOn(console, "log").mockImplementation((...args: unknown[]) => { lines.push(args.map(String).join(" ")); }),
     spyOn(console, "error").mockImplementation(() => {}),
     spyOn(console, "warn").mockImplementation(() => {}),
-    spyOn(globalThis, "fetch").mockImplementation((async (input: unknown) => {
+    spyOn(globalThis, "fetch").mockImplementation((async (input: unknown, init?: RequestInit) => {
       const url = input instanceof Request ? input.url : String(input);
       fetches.push({ phase, url });
+      if (s.repairWritesPassFile) return answerAsProbedInstance(new URL(url), init);
       return url.endsWith("/Health") ? Response.json({}) : Response.json([]);
     }) as unknown as typeof fetch),
     spyOn(process, "exit").mockImplementation(((code?: number) => {
@@ -257,5 +328,51 @@ describe("flair#2520 — doctor --fix verifies the target again after a fix that
     expect(reads.length).toBeGreaterThanOrEqual(3);
     expect(reads.every((port) => port === PRE_FIX_OPS)).toBe(true);
     expect(r.output).not.toContain(POST_FIX_REASON);
+  }, 60_000);
+});
+
+describe("flair#2520 — doctor --fix resolves the admin credential again after the launchd repair writes the pass file", () => {
+  test("no credential at start, a valid HDB_ADMIN_PASSWORD: the repair writes admin-pass, and the roster and home sections run on the probed instance with it", async () => {
+    // The probed pair, in the per-user config: fixture HTTP port 9 and the
+    // instance's ops port. No FLAIR_ADMIN_PASS and no pass file; the instance's
+    // password is only in HDB_ADMIN_PASSWORD, which the credential for these
+    // reads (resolveLocalAdminPass) does not consult.
+    mkdirSync(join(home, ".flair"), { recursive: true });
+    writeFileSync(join(home, ".flair", "config.yaml"), `port: 9\nopsPort: ${INSTANCE_OPS}\n`);
+    const flairAdminPass = process.env.FLAIR_ADMIN_PASS;
+    delete process.env.FLAIR_ADMIN_PASS;
+    process.env.HDB_ADMIN_PASSWORD = INSTANCE_PASS;
+    try {
+      expect(existsSync(PASS_FILE)).toBe(false);
+      const r = await runDoctorFix({ change: "launchd-repair", repairWritesPassFile: true });
+      expect(r.output).toContain("fixture: adopted the instance into launchd");
+      // The repair wrote the real 0600 pass file from the proven credential.
+      expect(readFileSync(PASS_FILE, "utf-8").trim()).toBe(INSTANCE_PASS);
+      expect(statSync(PASS_FILE).mode & 0o777).toBe(0o600);
+      // Before the repair there was no credential: no target was verified, and
+      // the instance-identity section kept its no-credential UNVERIFIED state.
+      expect(r.output).toContain("Instance identity: UNVERIFIED");
+      expect(instanceOps.filter((op) => op.phase === "before-fix")).toEqual([]);
+      // After it, both sections ran: doctor resolved the credential from the new
+      // file and verified the target with it (the real pair check against the
+      // probed instance), then read the roster and the home rows with it.
+      expect(r.output).not.toContain("Skipped: no admin credentials");
+      expect(r.output).not.toContain("Agent homes check skipped");
+      expect(r.output).toContain("No stored agent id is outside");
+      expect(r.output).toContain("Every stored agent row names a home instance.");
+      expect(verifyCalls).toEqual([{ phase: "after-fix", port: 9 }]);
+      expect(verifyPasses).toEqual([INSTANCE_PASS]);
+      const after = instanceOps.filter((op) => op.phase === "after-fix");
+      expect(after.map((op) => op.operation)).toContain("get_configuration");
+      expect(after.map((op) => op.operation)).toContain("sql");
+      expect(after.map((op) => op.operation)).toContain("search_by_value:Agent");
+      expect(after.every((op) => op.authorized)).toBe(true);
+    } finally {
+      if (flairAdminPass === undefined) delete process.env.FLAIR_ADMIN_PASS;
+      else process.env.FLAIR_ADMIN_PASS = flairAdminPass;
+      delete process.env.HDB_ADMIN_PASSWORD;
+      rmSync(PASS_FILE, { force: true });
+      rmSync(join(home, ".flair", "config.yaml"), { force: true });
+    }
   }, 60_000);
 });

@@ -142,6 +142,17 @@ type DoctorProbedRead =
   | { kind: "run"; opsPort: number }
   | { kind: "not-run"; reason: string; remedy: string };
 
+/**
+ * The admin credential doctor resolved for those four reads, and the target it
+ * verified with that credential (flair#2520). `read` is null when there is no
+ * usable credential.
+ */
+type DoctorProbedTarget = {
+  adminPass: string | undefined;
+  credIssue: string | null;
+  read: DoctorProbedRead | null;
+};
+
 let cli: DoctorCli;
 
 /** Bind the cli-locals this module depends on. */
@@ -995,29 +1006,38 @@ program
 
     // flair#2520: the audit-log, instance-identity, Agent-roster and Agent-homes
     // reads go through an ops endpoint, which must belong to the instance doctor
-    // probed. Verify that target here with the pair check flair#2483 applies,
-    // and let each section read from it, or report NOT RUN with the shared
-    // pair-refused reason and remedy when it refuses. `effectivePort` is final: PID discovery
-    // (step 1) and any --fix re-record have already run. The verification
-    // describes the process serving the probed port at this point, so it is
-    // shared only until a --fix step may change that process (the launchd
-    // repair, 7b, and the install-tree restart, 7c, both below). Those steps set
-    // `servingProcessMayHaveChanged`, and the Agent-roster and Agent-homes reads
-    // then verify again and use only the new answer (8b). No admin credential
-    // leaves the target unresolved (`probedRead` null); each section then keeps
-    // its own no-credential state, which reads no ops endpoint.
-    let probedAdminPass: string | undefined;
-    let probedCredIssue: string | null = null;
-    let probedRead: DoctorProbedRead | null = null;
-    let servingProcessMayHaveChanged = false;
-    if (harperResponding) {
+    // probed. Resolve the admin credential and verify that target with it here,
+    // using the pair check flair#2483 applies. Each section then reads from the
+    // verified target, or reports NOT RUN with the shared pair-refused reason
+    // and remedy when the check refuses; with no usable admin credential there
+    // is no target (`read` null), and each section keeps its own UNVERIFIED or
+    // skipped no-credential state, which reads no ops endpoint. `effectivePort`
+    // is final: PID discovery (step 1) and any --fix re-record have already run.
+    // This answer describes the credential and the process serving the probed
+    // port at this point, so it is shared only until a --fix step may change
+    // either: the launchd repair (7b, which can also write the admin-pass file
+    // from HDB_ADMIN_PASSWORD) and the install-tree restart (7c), both below.
+    // Those steps set `servingProcessMayHaveChanged`, and the Agent-roster and
+    // Agent-homes checks then resolve the credential and verify the target
+    // again, and use only that answer (8b).
+    async function resolveProbedTarget(): Promise<DoctorProbedTarget> {
+      let adminPass: string | undefined;
+      let credIssue: string | null = null;
       try {
-        probedAdminPass = resolveLocalAdminPass(undefined);
+        adminPass = resolveLocalAdminPass(undefined);
       } catch (err: unknown) {
-        probedCredIssue = err instanceof Error ? err.message : String(err);
+        credIssue = err instanceof Error ? err.message : String(err);
       }
-      probedRead = probedAdminPass ? await verifyDoctorRosterInstance(opts, effectivePort, probedAdminPass) : null;
+      const read: DoctorProbedRead | null = adminPass
+        ? await verifyDoctorRosterInstance(opts, effectivePort, adminPass)
+        : null;
+      return { adminPass, credIssue, read };
     }
+    const probed: DoctorProbedTarget = harperResponding
+      ? await resolveProbedTarget()
+      : { adminPass: undefined, credIssue: null, read: null };
+    const { adminPass: probedAdminPass, credIssue: probedCredIssue, read: probedRead } = probed;
+    let servingProcessMayHaveChanged = false;
 
     // 4b. Audit-log positive control (flair#970) — REAL write→read_audit_log
     // round-trip, only if Harper is responding. `describe_table` reporting
@@ -1819,12 +1839,14 @@ program
       // Execute the repair directly; it re-derives the plan internally and
       // verifies via assessLaunchdManagement (fail-loud, never a silent pass).
       const repairResult = await repairLaunchdManagement(defaultDataDir(), effectivePort);
-      // flair#2520: only a no-op is certain to leave the instance as it was. A
-      // repair or a failure may have clean-stopped the direct process and
-      // loaded a launchd job, so the target verified before the repair no
-      // longer proves which instance serves the probed port. Refusals are
-      // decided before the instance is stopped today; counting them too keeps
-      // a later refusal path from reusing a stale answer, for one more check.
+      // flair#2520: only a no-op is certain to leave the instance and the admin
+      // credential as they were. A repair or a failure may have clean-stopped
+      // the direct process and loaded a launchd job, and any outcome but a
+      // no-op may come after the repair wrote the 0600 admin-pass file from
+      // HDB_ADMIN_PASSWORD (flair#1685; a later refusal leaves the file in
+      // place). So the credential and target resolved before the repair no
+      // longer hold, and the Agent-roster and Agent-homes checks resolve both
+      // again.
       if (repairResult.kind !== "no-op") servingProcessMayHaveChanged = true;
       switch (repairResult.kind) {
         case "no-op":
@@ -1911,7 +1933,8 @@ program
             }) as TreeAssessment,
           repoint: (dry) => cli.repointMainServiceUnit(defaultDataDir(), effectivePort, { dryRun: dry }),
           // flair#2520: set before the restart runs, so a restart that fails
-          // part-way still makes the later reads verify again.
+          // part-way still makes the later checks resolve the credential and
+          // verify the target again.
           restart: () => {
             servingProcessMayHaveChanged = true;
             return cli.restartFlair(effectivePort, defaultDataDir());
@@ -2091,22 +2114,21 @@ program
       let roster: Array<{ id?: unknown }> | null = null;
       let rosterReadAttempted = false;
       // flair#2483/#2520: read from the verified instance target. That is the
-      // target verified above, unless a --fix step since then may have changed
-      // the process serving the probed port (servingProcessMayHaveChanged): the
-      // target is then verified again here, right before these reads, and only
-      // the new answer is used. The roster read addresses the verified ops
-      // port, or both the roster and home checks report NOT RUN (counted as an
-      // issue) and no Agent row is read. No admin credential leaves the target
-      // null; the roster read is skipped and named below.
-      const rosterTarget: DoctorProbedRead | null =
-        servingProcessMayHaveChanged && probedAdminPass
-          ? await verifyDoctorRosterInstance(opts, effectivePort, probedAdminPass)
-          : probedRead;
-      const rosterNotRun = rosterTarget?.kind === "not-run" ? rosterTarget : null;
-      const rosterOpsPort = rosterTarget?.kind === "run" ? rosterTarget.opsPort : null;
-      if (probedAdminPass && rosterOpsPort !== null) {
+      // answer resolved above, unless a --fix step since then may have changed
+      // the serving process or written the admin-pass file
+      // (servingProcessMayHaveChanged): the credential is then resolved and the
+      // target verified with it again here, right before these reads, and only
+      // that answer is used. The roster read addresses the verified ops port,
+      // or both the roster and home checks report NOT RUN (counted as an issue)
+      // and no Agent row is read. No admin credential leaves the target null;
+      // the roster read is skipped and named below.
+      const rosterProbe: DoctorProbedTarget = servingProcessMayHaveChanged ? await resolveProbedTarget() : probed;
+      const rosterAdminPass = rosterProbe.adminPass;
+      const rosterNotRun = rosterProbe.read?.kind === "not-run" ? rosterProbe.read : null;
+      const rosterOpsPort = rosterProbe.read?.kind === "run" ? rosterProbe.read.opsPort : null;
+      if (rosterAdminPass && rosterOpsPort !== null) {
         rosterReadAttempted = true;
-        const auth = Buffer.from(`${resolveAdminUser()}:${probedAdminPass}`).toString("base64");
+        const auth = Buffer.from(`${resolveAdminUser()}:${rosterAdminPass}`).toString("base64");
         roster = await readAgentRoster({
           opsUrl: `http://127.0.0.1:${rosterOpsPort}/`,
           authHeader: `Basic ${auth}`,
@@ -2127,8 +2149,8 @@ program
         // for an Agent-ID check that did not happen.
         issues++;
         console.log(
-          probedCredIssue
-            ? `  ${render.icons.warn} Skipped: the admin credential could not be resolved (${probedCredIssue}), so the agent-id check did not run.`
+          rosterProbe.credIssue
+            ? `  ${render.icons.warn} Skipped: the admin credential could not be resolved (${rosterProbe.credIssue}), so the agent-id check did not run.`
             : rosterReadAttempted
               ? `  ${render.icons.warn} Could not read the stored Agent roster, so the agent-id check did not run.`
               : `  ${render.icons.warn} Skipped: no admin credentials to read the stored Agent roster, so the agent-id check did not run.`,
@@ -2152,12 +2174,12 @@ program
         issues++;
         console.log(`  ${render.icons.warn} Agent homes: NOT RUN — ${rosterNotRun.reason}`);
         console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${rosterNotRun.remedy}`);
-      } else if (!probedAdminPass) {
+      } else if (!rosterAdminPass) {
         console.log(`  ${render.icons.info} Agent homes check skipped (no admin credential).`);
       } else {
         const homeOpsUrl = `http://127.0.0.1:${rosterOpsPort}/`;
-        const homeEndpoint = agentHomeEndpoint(homeOpsUrl, resolveAdminUser(), probedAdminPass);
-        const homeAuth = `Basic ${Buffer.from(`${resolveAdminUser()}:${probedAdminPass}`).toString("base64")}`;
+        const homeEndpoint = agentHomeEndpoint(homeOpsUrl, resolveAdminUser(), rosterAdminPass);
+        const homeAuth = `Basic ${Buffer.from(`${resolveAdminUser()}:${rosterAdminPass}`).toString("base64")}`;
         const homeRows = await readAgentHomeRows({ opsUrl: homeOpsUrl, authHeader: homeAuth, timeoutMs: 5000 });
         if (homeRows === null) {
           issues++;
