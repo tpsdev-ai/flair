@@ -318,6 +318,67 @@ describe("owner-scoped writes: each record a non-admin write touches is owner-ch
     }, 30_000);
   });
 
+  // ── A write may name only the record it addresses ──────────────────────────
+  // A PUT to a fresh or own id whose body `id` names another principal's
+  // existing record must not reach that record. The invariant, over every
+  // owner-scoped table served over REST, is that the record named only in the
+  // body is byte-for-byte unchanged — whether the resource refuses the write or
+  // writes the record it addresses and leaves the named one alone.
+  describe("a non-admin write cannot reach a record named only in the body", () => {
+    for (const s of SPECS) {
+      test(`${s.table}: a PUT to a fresh id whose body names another principal's record leaves that record unchanged`, async () => {
+        const f = await fixture(s);
+        const before = await storedRow(s.table, s.pk, f.otherId);
+        expect(before, `${s.table} fixture row was not seeded`).not.toBeNull();
+        const freshId = ownerIsKey(s) ? caller.id : s.idFor(`addr-${randomUUID().slice(0, 6)}`, caller.id);
+        // The body names the OTHER principal's existing record; the URL names a
+        // fresh/own record. The owner field is set to the caller.
+        const body: Record<string, any> = { ...s.row(f.otherId, caller.id), [s.mut]: "named-via-body" };
+        body.id = f.otherId;
+        if (!ownerIsKey(s)) body[ownerFieldOf(s)] = caller.id;
+        const res = await send(caller, "PUT", `/${s.table}/${e(freshId)}`, body);
+        const text = await res.text();
+        // A refusal is 4xx; a resource that writes the addressed record and
+        // ignores the body id answers with its create/update status. Either way
+        // the record named only in the body must not have moved.
+        expect(res.status, `${s.table} body-id PUT returned ${res.status}: ${text.slice(0, 200)}`).toBeLessThan(500);
+        expect(await storedRow(s.table, s.pk, f.otherId), `${s.table}: the record named only in the body was written`).toEqual(before);
+      }, 30_000);
+    }
+
+    test("OrgEvent: a PUT to a fresh id whose body names another agent's event is refused with the named 403", async () => {
+      const s = SPECS.find((x) => x.table === "OrgEvent")!;
+      const f = await fixture(s);
+      const before = await storedRow("OrgEvent", "id", f.otherId);
+      const freshId = s.idFor(`addr-${randomUUID().slice(0, 6)}`, caller.id);
+      const res = await send(caller, "PUT", `/OrgEvent/${e(freshId)}`, { id: f.otherId, authorId: caller.id, kind: "k", summary: "named-via-body" });
+      const text = await res.text();
+      expect(res.status, `OrgEvent body-id PUT returned ${res.status}: ${text.slice(0, 200)}`).toBe(403);
+      const parsed = JSON.parse(text);
+      expect(parsed.error).toBe("write_id_not_addressed");
+      expect(text).not.toContain(f.otherId);
+      expect(text).not.toContain(freshId);
+      expect(await storedRow("OrgEvent", "id", f.otherId), "the event named only in the body was written").toEqual(before);
+    }, 30_000);
+
+    test("the owner's own PUT to its record by id, with a matching body id, still succeeds", async () => {
+      const s = SPECS.find((x) => x.table === "Relationship")!;
+      const id = `osw-rel-addr-ok-${randomUUID().slice(0, 8)}`;
+      const res = await send(caller, "PUT", `/${s.table}/${e(id)}`, { id, agentId: caller.id, subject: "a", predicate: "b", object: "addressed" });
+      expect(res.status, `addressed PUT returned ${res.status}: ${await res.text()}`).toBeLessThan(300);
+      expect((await storedRow(s.table, "id", id))?.object).toBe("addressed");
+    }, 30_000);
+
+    test("OrgEvent: the owner's own PUT with a matching body id still succeeds", async () => {
+      const id = `osw-oe-addr-ok-${randomUUID().slice(0, 8)}`;
+      const seedRes = await send(caller, "POST", "/OrgEvent/", { id, authorId: caller.id, kind: "k", summary: "orig" });
+      expect(seedRes.status, `OrgEvent seed POST returned ${seedRes.status}: ${await seedRes.text()}`).toBeLessThan(300);
+      const res = await send(caller, "PUT", `/OrgEvent/${e(id)}`, { id, authorId: caller.id, kind: "k", summary: "updated", createdAt: NOW });
+      expect(res.status, `OrgEvent addressed PUT returned ${res.status}: ${await res.text()}`).toBeLessThan(300);
+      expect((await storedRow("OrgEvent", "id", id))?.summary).toBe("updated");
+    }, 30_000);
+  });
+
   describe("administrators are unchanged", () => {
     test("an admin agent's PUT to the collection with a list of records writes them", async () => {
       const a = `osw-rel-admin-a-${randomUUID().slice(0, 8)}`;

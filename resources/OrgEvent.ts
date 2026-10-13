@@ -15,6 +15,7 @@ import { randomUUID } from "node:crypto";
 import { databases } from "harper";
 import { resolveAgentAuth } from "./agent-auth.js";
 import { guardOwnerFieldImmutable } from "./owner-field-guard.js";
+import { guardBodyAddressesTarget } from "./owner-scoped-write-policy.js";
 import { invalidEntitiesResponse } from "./entity-vocab.js";
 import {
   makeAuthGate,
@@ -91,6 +92,10 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
   }
 
   async put(content: any) {
+    // This put() keys the table write on the body `id`, so a write must name
+    // only the record it addresses (resources/owner-scoped-write-policy.ts).
+    const __addrDenial = await guardBodyAddressesTarget(this, content, { resolveAuth: resolveAgentAuth });
+    if (__addrDenial) return __addrDenial;
     const __ownerDenial = await guardOwnerFieldImmutable(this, () => super.get(), content, "authorId");
     if (__ownerDenial) return __ownerDenial;
     const auth = await this._auth();

@@ -92,6 +92,9 @@ verified non-admin agent:
 - A PUT, PATCH or DELETE addressed to a table's collection rather than to one
   record is refused with `403 forbidden: a non-admin write to <Table> must
   address one record by its id`. Write records one at a time, by id.
+- A write may name only the record it addresses: a write whose body `id`
+  differs from the record its URL addresses is refused with
+  `403 write_id_not_addressed`.
 
 A refused request writes nothing, and the refusal carries no record content.
 Creating a record with POST to a collection is unchanged, as are writes by

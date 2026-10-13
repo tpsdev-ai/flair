@@ -11,7 +11,9 @@
  */
 import { describe, it, expect } from "bun:test";
 import {
+  addressedId,
   addressesNoSingleRecord,
+  guardBodyAddressesTarget,
   guardOwnerScopedWrites,
   isRequestEntryTarget,
   OWNER_SCOPED_WRITE_GUARD,
@@ -257,4 +259,53 @@ describe("target predicates", () => {
     expect(addressesNoSingleRecord({ id: "r1", isCollection: false })).toBe(false);
     expect(addressesNoSingleRecord({ id: "r1" })).toBe(false);
   });
+
+  it("reads the addressed id from the resource's bound record", () => {
+    expect(addressedId({ getId: () => "r1" })).toBe("r1");
+    expect(addressedId({ getId: () => 7 })).toBe(7);
+    expect(addressedId({ getId: () => undefined })).toBeNull();
+    expect(addressedId({ getId: () => { throw new Error("x"); } })).toBeNull();
+    expect(addressedId({})).toBeNull();
+    expect(addressedId(null)).toBeNull();
+  });
+});
+
+describe("guardBodyAddressesTarget — a write may name only the record it addresses", () => {
+  const self = (id: unknown, verdict: WriteCaller) => ({ getId: () => id, getContext: () => ({ verdict }) });
+  const resolveAuth = async (ctx: any): Promise<WriteCaller> => ctx?.verdict ?? { kind: "internal" };
+
+  async function body(p: Promise<Response | null>): Promise<{ status: number; body: any } | null> {
+    const r = await p;
+    return r === null ? null : { status: r.status, body: await r.json() };
+  }
+
+  it("refuses a non-admin write whose body id differs from the addressed id, echoing neither id", async () => {
+    const r = await body(guardBodyAddressesTarget(self("fresh-id", AGENT.verdict), { id: "victim-id", summary: "x" }, { resolveAuth }));
+    expect(r).toEqual({ status: 403, body: { error: "write_id_not_addressed", message: "a write may name only the record it addresses" } });
+    expect(JSON.stringify(r!.body)).not.toContain("victim-id");
+    expect(JSON.stringify(r!.body)).not.toContain("fresh-id");
+  });
+
+  it("refuses a non-string, non-number body id against a real address", async () => {
+    expect((await body(guardBodyAddressesTarget(self("r1", AGENT.verdict), { id: { nested: true } }, { resolveAuth })))?.status).toBe(403);
+  });
+
+  it("admits a body id that matches the addressed id", async () => {
+    expect(await guardBodyAddressesTarget(self("r1", AGENT.verdict), { id: "r1", v: "x" }, { resolveAuth })).toBeNull();
+  });
+
+  it("admits a write with no body id, and a body id equal by coercion", async () => {
+    expect(await guardBodyAddressesTarget(self("7", AGENT.verdict), { summary: "x" }, { resolveAuth })).toBeNull();
+    expect(await guardBodyAddressesTarget(self(7, AGENT.verdict), { id: "7" }, { resolveAuth })).toBeNull();
+  });
+
+  it("does not act when the request addresses no single record (a collection create)", async () => {
+    expect(await guardBodyAddressesTarget(self(undefined, AGENT.verdict), { id: "victim-id" }, { resolveAuth })).toBeNull();
+  });
+
+  for (const [label, verdict] of [["an administrator", ADMIN.verdict], ["a trusted internal call", INTERNAL.verdict], ["an anonymous caller", ANON.verdict]] as const) {
+    it(`leaves ${label} unchanged`, async () => {
+      expect(await guardBodyAddressesTarget(self("fresh-id", verdict), { id: "victim-id" }, { resolveAuth })).toBeNull();
+    });
+  }
 });

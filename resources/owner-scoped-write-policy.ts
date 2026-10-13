@@ -43,6 +43,19 @@
  * so it is unit-tested directly (test/unit/owner-scoped-write-policy.test.ts);
  * the dependencies it needs are passed in by resources/owner-scoped-writes.ts.
  * test/integration/owner-scoped-writes.test.ts checks the rule on a real Harper.
+ *
+ * ── A write may name only the record it addresses ────────────────────────────
+ * The guard above decides on the record the request's URL addresses. A resource
+ * whose own write path sends its body to a write keyed by the body's `id`, not
+ * by the address, would land on a different record than the one checked. So
+ * `guardBodyAddressesTarget` refuses a non-admin write whose body `id` differs
+ * from the record it addresses, with the named `write_id_not_addressed` (403)
+ * that echoes neither id and writes nothing. It is a resource-layer delegate
+ * (it needs the parsed body, which Harper's middleware has not parsed), scoped
+ * to the same entry call as the guard: an administrator, a trusted internal
+ * call and an anonymous caller are left unchanged. A create addressed to a
+ * collection names its record in the body and is unaffected (there is no
+ * addressed id to differ from).
  */
 import { collectionWriteRefusal, isForbiddenOwnerMutation, ownerMutationRefusal } from "./record-owner-guard.js";
 
@@ -130,6 +143,58 @@ export async function admitOwnerScopedWrite(
   if (isForbiddenOwnerMutation(stored as Record<string, unknown> | null | undefined, ownerField, caller.agentId)) {
     throw ownerMutationRefusal(table);
   }
+}
+
+/** The named refusal for a write whose body names a record other than the one it addresses. */
+export function writeIdNotAddressedRefusal(): Response {
+  return new Response(JSON.stringify({
+    error: "write_id_not_addressed",
+    message: "a write may name only the record it addresses",
+  }), { status: 403, headers: { "Content-Type": "application/json" } });
+}
+
+/** The id the request URL addresses, read from the resource's bound record; null when it names no single record. */
+export function addressedId(resource: unknown): string | number | null {
+  try {
+    const getId = (resource as { getId?: () => unknown } | null | undefined)?.getId;
+    const id = typeof getId === "function" ? getId.call(resource) : undefined;
+    return typeof id === "string" || typeof id === "number" ? id : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Refuse a non-admin write whose body `id` names a record other than the one
+ * the request addresses, with `write_id_not_addressed` (403). A resource whose
+ * write path keys the table write on the body `id` would otherwise land on a
+ * record other than the one the owner check read. Returns the refusal, or null
+ * when the write may proceed.
+ *
+ * Scoped to the same entry call as the guard: only a verified non-admin agent
+ * is decided here. An administrator, a trusted internal call (no resolved
+ * agent) and an anonymous caller return null and keep their current behaviour
+ * (an anonymous write is refused by the resource's own gate). A create
+ * addressed to a collection has no addressed id and is not this rule's business.
+ */
+export async function guardBodyAddressesTarget(
+  self: unknown,
+  content: unknown,
+  deps: { resolveAuth: (context: unknown) => Promise<WriteCaller> },
+): Promise<Response | null> {
+  const caller = await deps.resolveAuth((self as { getContext?: () => unknown } | null)?.getContext?.());
+  if (caller.kind !== "agent" || caller.isAdmin === true) return null;
+
+  const target = addressedId(self);
+  if (target == null) return null; // a collection create names its record in the body
+
+  const bodyId = content != null && typeof content === "object" ? (content as { id?: unknown }).id : undefined;
+  if (bodyId == null) return null;
+
+  if ((typeof bodyId !== "string" && typeof bodyId !== "number") || String(bodyId) !== String(target)) {
+    return writeIdNotAddressedRefusal();
+  }
+  return null;
 }
 
 /**
