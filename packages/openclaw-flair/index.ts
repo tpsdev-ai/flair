@@ -210,15 +210,18 @@ interface CaptureState {
  * types `messages` as `unknown[]` and the transcript message types expose no id
  * field — so identity is a digest over fields the host does provide and that do
  * not depend on a message's position in the snapshot: its role, its raw
- * `content` serialized as JSON (not the capture text), and its own timestamp,
- * hashed to a 64-bit digest. A message whose role, timestamp or JSON form the
- * host changes gets a different identity (barring a digest collision); a change
- * that leaves the JSON form equal does not. An unchanged message keeps its
- * identity across snapshots and runs. The identity is not unique: messages
- * whose role, content and timestamp are all equal share one, so the scan counts
- * occurrences per identity rather than treating it as one message. Returns null
- * for a value that is not an object, or whose content JSON cannot represent (it
- * throws, or yields no JSON text, as for a function).
+ * `content` serialized as JSON (not the capture text), and its own timestamp
+ * converted to a string, hashed to a 64-bit digest. The identity is not unique:
+ * messages whose role, JSON content and stringified timestamp are equal share
+ * one (numeric `1` and string `"1"` are equal here, and a missing timestamp
+ * equals any other non-number, non-string one), and two different messages can
+ * share one through a digest collision. The scan therefore counts occurrences
+ * per identity rather than treating it as one message. A message whose role,
+ * stringified timestamp or JSON form the host changes gets a different identity
+ * unless the digests collide; an unchanged message keeps its identity across
+ * snapshots and runs. Returns null for a value that is not an object, or whose
+ * content JSON cannot represent (it throws, or yields no JSON text, as for a
+ * function).
  */
 export function messageIdentity(msg: { role?: unknown; content?: unknown; timestamp?: unknown } | null | undefined): string | null {
   if (!msg || typeof msg !== "object") return null;
@@ -267,7 +270,7 @@ interface SessionIdentityEntry {
  * captures across `entries`; `tail` is the settle of the last `agent_end` scan,
  * so the next one for the session chains after it; `scans` counts scans queued
  * or running, so `evictSessions` keeps a busy session's state and the queue
- * stays within `sessionScanQueueCap`.
+ * holds at most `sessionScanQueueCap` scans plus one deferred scan.
  */
 interface SessionCapture {
   agentId: string;
@@ -277,11 +280,18 @@ interface SessionCapture {
   scans: number;
   /**
    * The open deferred skip: per identity, the most occurrences seen in the
-   * snapshots of runs that found the scan queue full (`sessionScanQueueCap`).
+   * snapshots of runs that found the scan queue full (`sessionScanQueueCap`),
+   * at most `sessionMessageCap` identities (past that the session is disabled).
    * It is applied by one scan queued at the tail; it closes when another scan
    * is queued after it or when it starts.
    */
   deferred: Map<string, number> | null;
+  /**
+   * Capture is off for the rest of this session's state: its ownership history
+   * is incomplete (see `disableSession`), so no later scan captures, accounts
+   * or retries anything for it.
+   */
+  disabled: boolean;
 }
 
 /**
@@ -342,7 +352,10 @@ export const captureBounds = {
    * identity would exceed it, the identity whose last recorded occurrence is
    * oldest is evicted (a retry or an expiry is not an occurrence). A forgotten
    * identity that re-appears in a later snapshot is treated as new and may be
-   * captured again, and a pending capture it held is dropped (logged).
+   * captured again, and a pending capture it held is dropped (logged). The same
+   * cap bounds the identity counts a queue-full run's snapshot adds to a deferred
+   * skip; a snapshot or deferred skip over it disables capture for the session
+   * (fail closed, logged once) instead of accounting it in part.
    */
   sessionMessageCap: 4_096,
   /**
@@ -359,7 +372,9 @@ export const captureBounds = {
    * retired run keeps for at least `tombstoneMinAgeMs`; a capture whose record is
    * gone expires early. A capture whose run was refused admission (the run map
    * full) is retried only once there is room to admit that run; until then it
-   * stays pending.
+   * stays pending, and an abort of that run that cannot be recorded expires it.
+   * Eviction or disabling of the session's state, or `sessionPendingCap`, can
+   * also end a pending capture first (logged); none of these writes it.
    */
   pendingRetryMs: 30 * 60_000,
   /**
@@ -374,7 +389,7 @@ export const captureBounds = {
    * deferred scan at the tail of the queue. Further such callbacks join that
    * deferred scan until another scan is queued behind it, so a session holds at
    * most this many scans plus one deferred scan, and a deferred scan holds a
-   * count per identity, not the snapshots.
+   * count per identity (at most `sessionMessageCap`), not the snapshots.
    */
   sessionScanQueueCap: 32,
   /** How often the unref'd sweep timer runs. */
@@ -443,7 +458,8 @@ export type RunPhase = "live" | "ended" | "aborted" | "retired";
  * queued or running (flair#2513: the window starts when the run's scan settles,
  * so a run whose scan waits behind another scan is not retired before it runs);
  * a run that never saw `agent_end` retires after `idleRunRetireMs` idle. Phase
- * `retired` or `aborted` is terminal: a callback for such a record is dropped with a
+ * `retired` or `aborted` is terminal: a callback for such a record is dropped
+ * with a
  * one-time log naming the run id, and the record leaves the map only through
  * `removable()`.
  */
@@ -898,8 +914,10 @@ export default {
      * policy, kept pending under it when it is refused for now. The others are
      * left alone, except that a capturing scan retries a pending capture under
      * the run that owns it while `pendingRetryMs` allows. Scans of one session run
-     * one at a time, at most `sessionScanQueueCap` of them. A callback with no
-     * session id correlates with no other: nothing is accounted for it, and a
+     * one at a time, at most `sessionScanQueueCap` plus one deferred scan. A
+     * session whose ownership history becomes incomplete is disabled (fails
+     * closed; see `disableSession`). A callback with no session id correlates
+     * with no other: nothing is accounted for it, and a
      * capturing scan treats its whole snapshot as new. The limits (a compaction
      * that leaves equal-field messages ambiguous, rewritten messages, eviction,
      * the caps) are stated at `scanSnapshot` and at the `captureBounds` session
@@ -1038,7 +1056,7 @@ export default {
       if (session) {
         sessions.delete(key);
       } else {
-        session = { agentId, entries: new Map(), pending: 0, tail: Promise.resolve(), scans: 0, deferred: null };
+        session = { agentId, entries: new Map(), pending: 0, tail: Promise.resolve(), scans: 0, deferred: null, disabled: false };
       }
       sessions.set(key, session);
       return session;
@@ -1055,19 +1073,30 @@ export default {
       );
     }
 
-    /** A pending capture expires instead of being retried; logged once per run, message and pending time. */
-    function logPendingExpired(agentId: string, identity: string, pending: PendingWrite, why: string): void {
-      logOnce(
-        `pending-expired:${agentId}:${pending.runId}:${identity}:${pending.since}`,
-        `openclaw-flair: a pending capture for run ${pending.runId} (agent ${agentId}) expired: ${why}; it is not written under any run`,
+    /**
+     * `count` pending captures of one run expire instead of being retried: one
+     * line per call, with the count. Each capture expires once, so the lines are
+     * bounded by the captures that were ever pending.
+     */
+    function logPendingExpired(agentId: string, runId: string, count: number, why: string): void {
+      if (count <= 0) return;
+      api.logger.warn(
+        `openclaw-flair: ${count} pending capture(s) for run ${runId} (agent ${agentId}) expired: ${why}; none is written under any run`,
       );
+    }
+
+    /** Expire the given pending captures, one aggregated line per run. */
+    function expireCaptures(agentId: string, expired: PendingWrite[], why: string): void {
+      const perRun = new Map<string, number>();
+      for (const pending of expired) perRun.set(pending.runId, (perRun.get(pending.runId) ?? 0) + 1);
+      for (const [runId, count] of perRun) logPendingExpired(agentId, runId, count, why);
     }
 
     /** A failed `agent_end` write is kept pending; logged once per run and message. */
     function logCaptureFailed(agentId: string, runId: string, identity: string): void {
       logOnce(
         `capture-failed:${agentId}:${runId}:${identity}`,
-        `openclaw-flair: capture failed for run ${runId} (agent ${agentId}); the write is kept pending: a later agent_end scan of this session that can capture retries it under run ${runId} for up to ${captureBounds.pendingRetryMs} ms (captureBounds.pendingRetryMs), after which it expires`,
+        `openclaw-flair: capture failed for run ${runId} (agent ${agentId}); the write is kept pending: a later agent_end scan of this session that can capture may retry it under run ${runId} for up to ${captureBounds.pendingRetryMs} ms (captureBounds.pendingRetryMs); an abort of the run, a snapshot with fewer copies of the message, the pending cap, or eviction or disabling of the session's state ends it sooner, and none of these writes it`,
       );
     }
 
@@ -1103,7 +1132,7 @@ export default {
     function keepPending(session: SessionCapture, identity: string, pending: PendingWrite): boolean {
       const entry = recordOccurrence(session, identity);
       if (session.pending >= captureBounds.sessionPendingCap) {
-        logPendingExpired(session.agentId, identity, pending, `the session already holds ${session.pending} pending captures (sessionPendingCap)`);
+        logPendingExpired(session.agentId, pending.runId, 1, `the session already holds ${session.pending} pending captures (sessionPendingCap)`);
         return false;
       }
       entry.pending.push(pending);
@@ -1111,13 +1140,55 @@ export default {
       return true;
     }
 
-    /** Expire every pending capture of `identity`, each with a log line. */
+    /** Expire every pending capture of `identity` (logged, counted per run). */
     function expireIdentityPending(session: SessionCapture, identity: string, why: string): void {
       const entry = session.entries.get(identity);
       if (!entry || entry.pending.length === 0) return;
-      for (const pending of entry.pending) logPendingExpired(session.agentId, identity, pending, why);
+      expireCaptures(session.agentId, entry.pending, why);
       session.pending -= entry.pending.length;
       entry.pending = [];
+    }
+
+    /**
+     * flair#2513: expire every pending capture owned by `runId` (logged, with the
+     * count). Used when an abort of that run cannot be recorded, so no retry of
+     * those captures admits the aborted run. A later callback for that run is
+     * the documented abort-overflow residual (see `abortRun`).
+     */
+    function dropRunPending(agentId: string, runId: string, why: string): void {
+      let dropped = 0;
+      for (const session of sessions.values()) {
+        if (session.agentId !== agentId || session.pending === 0) continue;
+        for (const entry of session.entries.values()) {
+          const kept = entry.pending.filter((pending) => pending.runId !== runId);
+          dropped += entry.pending.length - kept.length;
+          session.pending -= entry.pending.length - kept.length;
+          entry.pending = kept;
+        }
+      }
+      logPendingExpired(agentId, runId, dropped, why);
+    }
+
+    /**
+     * flair#2513: fail closed for one session whose ownership history is
+     * incomplete: no later scan of it captures, accounts or retries anything, and
+     * its pending captures expire. Logged once per session. Eviction forgets the
+     * flag with the rest of the session's state.
+     */
+    function disableSession(key: string, session: SessionCapture, why: string): void {
+      if (session.disabled) return;
+      session.disabled = true;
+      const expired: PendingWrite[] = [];
+      for (const entry of session.entries.values()) {
+        expired.push(...entry.pending);
+        entry.pending = [];
+      }
+      session.pending = 0;
+      expireCaptures(session.agentId, expired, "capture is disabled for its session");
+      logOnce(
+        `session-disabled:${key}`,
+        `openclaw-flair: capture is disabled for a session of agent ${session.agentId}: ${why}; no later agent_end of that session captures anything while its capture state is held`,
+      );
     }
 
     /**
@@ -1166,7 +1237,8 @@ export default {
      * queued or running. Then the run is not scanned: its snapshot's identity
      * counts join the open deferred skip at the tail of the queue (one is queued
      * if none is open), which accounts them as skipped once the scans ahead of it
-     * settle, and the run captures nothing from its snapshot (logged).
+     * settle, and the run captures nothing from its snapshot (logged). Past
+     * `sessionMessageCap` identities the session is disabled instead.
      */
     function queueSnapshot(
       key: string,
@@ -1176,26 +1248,39 @@ export default {
       scan: () => Promise<void>,
     ): Promise<void> {
       const session = sessionFor(key, agentId);
+      // A disabled session captures nothing more: there is nothing to queue.
+      if (session.disabled) return session.tail;
       if (session.scans < captureBounds.sessionScanQueueCap) return withSessionScan(session, scan);
       logOnce(
         `scan-queue-full:${agentId}:${runId ?? "none"}`,
         `openclaw-flair: agent_end for run ${runId ?? "(none)"} (agent ${agentId}) was not scanned: ${session.scans} scans are queued for its session (sessionScanQueueCap); its new messages are accounted to it as skipped and are not captured`,
       );
+      // Both maps hold at most `sessionMessageCap` identities. Past that the
+      // skipped run's messages cannot all be accounted, so the session fails
+      // closed rather than let a later run claim the ones left out.
+      const overflow = (): Promise<void> => {
+        disableSession(key, session, "a snapshot that could not be scanned holds more distinct messages than sessionMessageCap");
+        return session.tail;
+      };
       const counts = new Map<string, number>();
       for (const msg of messages) {
         const identity = messageIdentity(msg);
-        if (identity) counts.set(identity, (counts.get(identity) ?? 0) + 1);
+        if (!identity) continue;
+        counts.set(identity, (counts.get(identity) ?? 0) + 1);
+        if (counts.size > captureBounds.sessionMessageCap) return overflow();
       }
-      let deferred = session.deferred;
+      const deferred = session.deferred;
       if (deferred) {
-        for (const [identity, n] of counts) deferred.set(identity, Math.max(deferred.get(identity) ?? 0, n));
+        for (const [identity, n] of counts) {
+          deferred.set(identity, Math.max(deferred.get(identity) ?? 0, n));
+          if (deferred.size > captureBounds.sessionMessageCap) return overflow();
+        }
         return session.tail;
       }
-      deferred = counts;
-      const open = deferred;
+      const open = counts;
       const run = withSessionScan(session, async () => {
         if (session.deferred === open) session.deferred = null;
-        if (captureStopped) return;
+        if (captureStopped || session.disabled) return;
         for (const [identity, n] of open) {
           const m = session.entries.get(identity)?.seen ?? 0;
           if (n > m) recordOccurrence(session, identity, n - m);
@@ -1228,15 +1313,17 @@ export default {
     function expirePendingWrites(now: number): void {
       for (const session of sessions.values()) {
         if (session.pending === 0) continue;
-        for (const [identity, entry] of session.entries) {
+        const expired: PendingWrite[] = [];
+        for (const entry of session.entries.values()) {
           if (entry.pending.length === 0) continue;
           entry.pending = entry.pending.filter((pending) => {
             if (now - pending.since < captureBounds.pendingRetryMs) return true;
-            session.pending -= 1;
-            logPendingExpired(session.agentId, identity, pending, `its retry window of ${captureBounds.pendingRetryMs} ms passed`);
+            expired.push(pending);
             return false;
           });
         }
+        session.pending -= expired.length;
+        expireCaptures(session.agentId, expired, `its retry window of ${captureBounds.pendingRetryMs} ms passed`);
       }
     }
 
@@ -1246,9 +1333,10 @@ export default {
      * still refused admission for capacity). The capture keeps the run that owned
      * the message, and that run stays eligible for `pendingRetryMs` from when the
      * capture became pending, even once it has retired. An aborted run's capture
-     * is never retried. A run refused admission at its `agent_end` (the run map
-     * full) is admitted here if there is room, as an ended run; no other run is
-     * admitted on this path.
+     * is never retried (an abort that cannot be recorded expires the run's
+     * pending captures; see `dropRunPending`). A run refused admission at its
+     * `agent_end` (the run map full) is admitted here if there is room, as an
+     * ended run; no other run is admitted on this path.
      */
     function pendingTarget(agentId: string, pending: PendingWrite, now: number): RunRecord | { expire: string } | { wait: true } {
       if (now - pending.since >= captureBounds.pendingRetryMs) {
@@ -1441,6 +1529,9 @@ export default {
           "abort-overflow",
           `openclaw-flair: capture skipped: capture-capacity: abort-overflow — the abort overflow of ${captureBounds.abortOverflowCap} above the budget of ${captureBounds.capacityCap} is full; aborted run ${runId} (agent ${agentId}) is not recorded`,
         );
+        // flair#2513: with no tombstone to refuse it, the aborted run's pending
+        // captures would be admitted by a later retry; they expire here instead.
+        dropRunPending(agentId, runId, "its run was aborted and the abort could not be recorded (abortOverflowCap)");
         return;
       }
       const aborted = createRunRecord(agentId, runId, now);
@@ -1755,9 +1846,12 @@ export default {
         /**
          * flair#2513: how one `agent_end` snapshot is accounted. `capture` scans
          * for the admitted run that ended. A run that does not capture still
-         * accounts for its snapshot, so a later run never claims its messages:
-         * `skip` (refused by policy: the run failed, carried no run id, was
-         * already retired or aborted, or its agent is refused) records its new
+         * accounts for its snapshot, so a later scan of the same session does
+         * not claim its messages while the session's state holds them (a
+         * callback without a session id, and eviction, are the stated limits):
+         * `skip` (refused by policy: the host reported success: false, the run
+         * carried no run id, was already retired or aborted, or its agent is
+         * not served) records its new
          * occurrences as skipped; `pending` (refused for now: no usable signing
          * key, or the run map full) keeps its eligible new messages pending
          * under that run for a retry. A run that finds the scan queue full is
@@ -1780,13 +1874,14 @@ export default {
          *
          * Limits. When n < m (as after a compaction removed copies of an equal
          * message), nothing of that identity is new and its pending captures
-         * expire (logged): a genuinely new copy with the same role, content and
-         * timestamp cannot be told apart from an earlier one, so it is not
-         * captured, and a capturing scan logs a diagnostic. When a compaction
+         * expire (logged): a genuinely new copy with the same role, JSON content
+         * and stringified timestamp cannot be told apart from an earlier one, so
+         * it is not captured, and a capturing scan logs a diagnostic. When a compaction
          * removes k copies and the same run adds k equal copies, the counts
          * match: the new copies are not captured and nothing is logged. A
-         * message whose JSON form the host changes gets a new identity, is
-         * treated as new and may be captured again under the run that ended. A
+         * message whose JSON form the host changes gets a new identity (unless
+         * the digests collide), is treated as new and may be captured again
+         * under the run that ended. A
          * message with capture text and no identity (see `messageIdentity`) is
          * not captured, with a diagnostic. Without a session id nothing is
          * accounted: a capturing scan treats every message as new.
@@ -1821,6 +1916,9 @@ export default {
             }
             const run = runId ?? "(none)";
             const session = key ? sessionFor(key, agentId) : null;
+            // A disabled session (see `disableSession`) captures, accounts and
+            // retries nothing.
+            if (session?.disabled) return;
             if (!session) {
               if (mode.kind === "pending") {
                 logOnce(
@@ -1832,7 +1930,7 @@ export default {
             } else if (mode.kind === "skip") {
               logOnce(
                 `refused-skip:${agentId}:${run}`,
-                `openclaw-flair: agent_end for run ${run} (agent ${agentId}) does not capture (${mode.why}); the new messages in its snapshot are accounted to it as skipped, so no later run captures them`,
+                `openclaw-flair: agent_end for run ${run} (agent ${agentId}) does not capture (${mode.why}); the new messages in its snapshot are accounted to it as skipped, so no later agent_end of this session captures them while the session's capture state holds them`,
               );
             }
             const identities = messages.map((msg) => (session ? messageIdentity(msg) : null));
@@ -1843,7 +1941,7 @@ export default {
             let stored = 0;
             let kept = 0;
             for (let i = 0; i < messages.length; i++) {
-              if (captureStopped) break;
+              if (captureStopped || session?.disabled) break;
               const msg = messages[i];
               const text = msg?.role === "user" || msg?.role === "assistant" ? captureText(msg?.content) : "";
               if (!session) {
@@ -1884,7 +1982,7 @@ export default {
                 if (mode.kind === "capture") {
                   logOnce(
                     `ambiguous:${agentId}:${run}:${identity}`,
-                    `openclaw-flair: agent_end for run ${run} (agent ${agentId}): the snapshot holds ${n} of ${m} recorded copies of a message (as after a compaction); no copy of it is captured, for this run or as a retry, since a new copy with the same role, content and timestamp cannot be told apart from an earlier one`,
+                    `openclaw-flair: agent_end for run ${run} (agent ${agentId}): the snapshot holds ${n} of ${m} recorded copies of a message (as after a compaction); no copy of it is captured, for this run or as a retry, since a new copy with the same role, JSON content and stringified timestamp cannot be told apart from an earlier one`,
                   );
                 }
               }
@@ -1899,7 +1997,7 @@ export default {
                 session.pending -= 1;
                 const target = pendingTarget(agentId, pending, captureClock.now());
                 if ("expire" in target) {
-                  logPendingExpired(agentId, identity, pending, target.expire);
+                  logPendingExpired(agentId, pending.runId, 1, target.expire);
                   continue;
                 }
                 if ("wait" in target) {
@@ -1953,7 +2051,7 @@ export default {
             if (mode.kind === "pending" && kept > 0) {
               logOnce(
                 `refused-pending:${agentId}:${mode.runId}`,
-                `openclaw-flair: agent_end for run ${mode.runId} (agent ${agentId}) cannot capture now (${mode.why}); ${kept} eligible new message(s) are kept pending under run ${mode.runId}: a later agent_end scan of this session that can capture retries them under run ${mode.runId} for up to ${captureBounds.pendingRetryMs} ms (captureBounds.pendingRetryMs), after which they expire`,
+                `openclaw-flair: agent_end for run ${mode.runId} (agent ${agentId}) cannot capture now (${mode.why}); ${kept} eligible new message(s) are kept pending under run ${mode.runId}: a later agent_end scan of this session that can capture may retry them under run ${mode.runId} for up to ${captureBounds.pendingRetryMs} ms (captureBounds.pendingRetryMs); an abort of the run, a snapshot with fewer copies of a message, or eviction or disabling of the session's state ends that sooner, and none of these writes them`,
               );
             }
             if (stored > 0) api.logger.info(`openclaw-flair: auto-captured ${stored} memories`);
@@ -1981,13 +2079,20 @@ export default {
             const scan = () => scanSnapshot(agentId, runId, sessionId, key, messages, mode);
             return key ? queueSnapshot(key, agentId, runId, messages, scan) : scan();
           };
-          // Item 5(a): a failed run is ABORTED — no capture, and every in-flight
-          // capture for the run is cancelled and discarded. A successful
-          // agent_end never aborts. flair#2513: its snapshot is still accounted
-          // to it, as skipped.
+          // Item 5(a): `success: false` means the run did not succeed. The pinned
+          // host sends it both for an ABORTED run and for a FAILED ATTEMPT (a
+          // prompt error, a failed or blocked CLI run, an interrupted CLI turn),
+          // with only a free-form `error`; nothing in the event tells the two
+          // apart, so both take this one path, fail closed: the run is aborted
+          // here (no capture; in-flight captures cancelled and discarded; later
+          // callbacks for the run id dropped while the abort is recorded), and
+          // (flair#2513) its snapshot is accounted to it as skipped. A
+          // successful agent_end never aborts. `model_call_ended` with
+          // failureKind "aborted" is the path for an aborted model call, and
+          // `gateway_stop` aborts every run.
           if (event?.success === false) {
-            abortRun(agentId, runId, "agent_end reported the run failed");
-            await account({ kind: "skip", why: "the run failed" });
+            abortRun(agentId, runId, "agent_end reported success: false (an aborted run or a failed attempt)");
+            await account({ kind: "skip", why: "the host reported success: false, for an aborted run or a failed attempt" });
             return;
           }
           const admitted = admitRun(agentId, runId);

@@ -1499,24 +1499,27 @@ describe("slice 2 — capture normalisation, ids and outcomes", () => {
 
 // ── flair#2513 — agent_end accounts each snapshot to the run that delivered it ─
 //
-// `agent_end` delivers the WHOLE session's message snapshot and the host exposes
-// no per-run boundary and no message id. The plugin gives each snapshot message
-// an identity (role, raw content, timestamp) and records per session how many
-// occurrences of each identity it has accounted for; the occurrences beyond that
-// count are new and belong to the run whose `agent_end` delivered the snapshot.
-// That run captures them, or, when it is refused, they are accounted to it:
-// skipped when it is refused by policy (failed, retired, no run id), pending
-// under it when it is refused for now (no usable key, the run map full). Scans
-// of one session run one at a time, up to `sessionScanQueueCap`. A pending
-// capture is retried under its run (never once that run is aborted) by a later
-// capturing scan whose snapshot holds the message at least as many times as
-// recorded, for up to `pendingRetryMs`; otherwise it expires with a log line.
-// The behaviour tests cover a concurrent callback, a rewritten snapshot, a
-// failed write (retried before and after its run retires, and expired), a scan
-// queued past the retirement window, equal-field messages (counted, the
-// compaction ambiguity, and their retries expiring), refused runs (failed,
-// retired, no key, no capacity), the session, pending and scan-queue caps, and
-// `gateway_stop`.
+// Best-effort capture: `agent_end` delivers the WHOLE session's message snapshot,
+// and the host exposes no per-run boundary, no message id and no committed-message
+// event. The plugin gives each snapshot message an identity (role, raw content,
+// stringified timestamp) and records per session how many occurrences of each
+// identity it has accounted for; the occurrences beyond that count are new and
+// belong to the run whose `agent_end` delivered the snapshot. That run captures
+// them, or, when it is refused, they are accounted to it: skipped when it is
+// refused by policy (success: false, retired, no run id), pending under it when
+// it is refused for now (no usable key, the run map full). Where ownership
+// becomes ambiguous it fails closed and captures nothing. Scans of one session
+// run one at a time, up to `sessionScanQueueCap` plus one deferred scan; an
+// over-cap deferred skip disables the session. A pending capture is retried under
+// its run (never once that run is aborted) by a later capturing scan whose
+// snapshot holds the message at least as many times as recorded, for up to
+// `pendingRetryMs`; otherwise it expires with a log line. The behaviour tests
+// cover a concurrent callback, a rewritten snapshot, a failed write (retried
+// before and after its run retires, and expired), a scan queued past the
+// retirement window, equal-field messages (counted, the compaction ambiguity, and
+// their retries expiring), refused runs (success: false, retired, no key, no
+// capacity, an abort that cannot be recorded), the session, pending and
+// scan-queue caps, the deferred-skip bound, and `gateway_stop`.
 //
 // The real-runner test drives synthetic events, shaped like the host's
 // `PluginHookAgentEndEvent` and agent context, through the pinned host's real
@@ -1757,7 +1760,7 @@ describe("flair#2513 — agent_end capture is keyed by counted message identitie
     // The window passes with no later agent_end for the session: the sweep expires it.
     captureClock.now = () => base + captureBounds.pendingRetryMs + 1;
     await runSweep(api);
-    expect(api._warnText()).toMatch(/a pending capture for run run-1 \(agent A\) expired: its retry window of 300000 ms passed; it is not written under any run/);
+    expect(api._warnText()).toMatch(/1 pending capture\(s\) for run run-1 \(agent A\) expired: its retry window of 300000 ms passed; none is written under any run/);
     expect(captureInternals.sessionPendingCount?.() ?? 0).toBe(0);
 
     // A later run whose snapshot still holds the message does not write it.
@@ -1811,7 +1814,7 @@ describe("flair#2513 — agent_end capture is keyed by counted message identitie
 
     const m1 = puts(calls).filter((c) => contentOf(c).includes("a queued scan finds expired"));
     expect(m1.map(sourceOf)).toEqual(["run-1"]); // only the failed attempt
-    expect(api._warnText()).toMatch(/a pending capture for run run-1 \(agent A\) expired: its retry window of 300000 ms passed/);
+    expect(api._warnText()).toMatch(/1 pending capture\(s\) for run run-1 \(agent A\) expired: its retry window of 300000 ms passed/);
     expect(puts(calls).filter((c) => contentOf(c).includes("queued run's new message")).map(sourceOf)).toEqual(["run-3"]);
   });
 
@@ -1982,7 +1985,7 @@ describe("flair#2513 — agent_end capture is keyed by counted message identitie
     expect(puts(calls).filter((c) => contentOf(c).includes("the run that failed")).length).toBe(0);
     expect(puts(calls).filter((c) => contentOf(c).includes("the run that succeeded")).map(sourceOf)).toEqual(["run-2"]);
     expect(api._warnText()).toMatch(
-      /agent_end for run run-1 \(agent A\) does not capture \(the run failed\); the new messages in its snapshot are accounted to it as skipped/,
+      /agent_end for run run-1 \(agent A\) does not capture \(the host reported success: false, for an aborted run or a failed attempt\); the new messages in its snapshot are accounted to it as skipped/,
     );
   });
 
@@ -2027,7 +2030,7 @@ describe("flair#2513 — agent_end capture is keyed by counted message identitie
     await api._fire("agent_end", { runId: "run-2", success: true, messages: [summary, { ...M }] }, ctx);
 
     expect(puts(calls).filter((c) => contentOf(c).includes("two equal copies")).map(sourceOf)).toEqual(["run-1", "run-1"]);
-    expect(api._warnText()).toMatch(/a pending capture for run run-1 \(agent A\) expired: the snapshot holds 1 of 2 recorded copies of its message/);
+    expect(api._warnText()).toMatch(/2 pending capture\(s\) for run run-1 \(agent A\) expired: the snapshot holds 1 of 2 recorded copies of its message/);
     expect(captureInternals.sessionPendingCount?.() ?? -1).toBe(0);
   });
 
@@ -2049,7 +2052,7 @@ describe("flair#2513 — agent_end capture is keyed by counted message identitie
     expect(puts(calls).filter((c) => contentOf(c).includes("the first failed write")).map(sourceOf)).toEqual(["run-1", "run-1"]);
     expect(puts(calls).filter((c) => contentOf(c).includes("over the cap")).map(sourceOf)).toEqual(["run-1"]); // the failed attempt only
     expect(puts(calls).filter((c) => contentOf(c).includes("next run's message")).map(sourceOf)).toEqual(["run-2"]);
-    expect(api._warnText()).toMatch(/a pending capture for run run-1 \(agent A\) expired: the session already holds 1 pending captures \(sessionPendingCap\)/);
+    expect(api._warnText()).toMatch(/1 pending capture\(s\) for run run-1 \(agent A\) expired: the session already holds 1 pending captures \(sessionPendingCap\)/);
   });
 
   test("round 3 (mutation: no scan queue cap): at sessionScanQueueCap a run is not scanned, its snapshot is accounted to it as skipped, and the queue holds at most the cap plus one deferred scan", async () => {
@@ -2106,6 +2109,85 @@ describe("flair#2513 — agent_end capture is keyed by counted message identitie
     expect(messageIdentity({ role: "user", content: () => 1, timestamp: 1 })).toBeNull();
     expect(messageIdentity({ role: "user", content: Symbol("s"), timestamp: 1 })).toBeNull();
     expect(messageIdentity({ role: "user", content: "text", timestamp: 1 })).not.toBeNull();
+  });
+
+  test("round 4 (mutation: an unrecorded abort keeps its pending captures): with the abort overflow full, an aborted run's pending captures expire and a later free slot never admits it", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = installFetchStub();
+    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
+    plugin.register(api as any);
+    captureBounds.capacityCap = 1;
+    captureBounds.abortOverflowCap = 0;
+    const ctx = { agentId: "A", sessionId: "sess-abort-overflow" };
+    const M1 = { role: "user", content: "remember this: said in the run that was aborted", timestamp: 1 };
+    const M2 = { role: "user", content: "remember this: said in the run after the abort", timestamp: 2 };
+
+    // Run 1 is refused admission (the only slot is held), so its message waits pending.
+    await api._handler("llm_output")({ runId: "holder", assistantTexts: ["a plain note"] }, { agentId: "A" });
+    await api._fire("agent_end", { runId: "run-1", success: true, messages: [M1] }, ctx);
+    // Run 1 is aborted while the budget AND its abort overflow are full: no tombstone.
+    await api._fire("model_call_ended", { runId: "run-1", failureKind: "aborted" }, { agentId: "A" });
+    expect(captureInternals.recordOf("A", "run-1")).toBeUndefined();
+    // A slot frees, and a later run's snapshot still holds run 1's message.
+    captureBounds.capacityCap = 10;
+    await api._fire("agent_end", { runId: "run-2", success: true, messages: [M1, M2] }, ctx);
+
+    expect(puts(calls).filter((c) => contentOf(c).includes("the run that was aborted")).length).toBe(0);
+    expect(puts(calls).filter((c) => contentOf(c).includes("the run after the abort")).map(sourceOf)).toEqual(["run-2"]);
+    expect(api._warnText()).toMatch(/1 pending capture\(s\) for run run-1 \(agent A\) expired: its run was aborted and the abort could not be recorded/);
+  });
+
+  test("round 4 (mutation: an over-cap snapshot is accounted in part): a queue-full snapshot with more distinct messages than sessionMessageCap disables capture for its session", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const d = defer();
+    const calls = installFetchStub(undefined, { deferUntil: d.gate });
+    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
+    plugin.register(api as any);
+    captureBounds.sessionScanQueueCap = 1;
+    captureBounds.sessionMessageCap = 2;
+    const ctx = { agentId: "A", sessionId: "sess-deferred-overflow" };
+    const M = [1, 2, 3, 4].map((i) => ({ role: "user", content: `remember this: overflow message number ${i}`, timestamp: i }));
+    const handler = api._handler("agent_end");
+
+    const p1 = handler({ runId: "run-1", success: true, messages: [M[0]] }, ctx);
+    await waitFor(() => puts(calls).length === 1);
+    // The queue is full and this snapshot holds 3 distinct messages, over the cap of 2.
+    const p2 = handler({ runId: "run-2", success: true, messages: [M[0], M[1], M[2]] }, ctx);
+    d.release();
+    await Promise.all([p1, p2]);
+    await api._fire("agent_end", { runId: "run-3", success: true, messages: [M[0], M[1], M[2], M[3]] }, ctx);
+
+    // Only run 1's held write: no later run captures anything in this session.
+    expect(puts(calls).map(sourceOf)).toEqual(["run-1"]);
+    expect(api._warnText()).toMatch(/capture is disabled for a session of agent A: a snapshot that could not be scanned holds more distinct messages than sessionMessageCap/);
+  });
+
+  test("round 4 (mutation: the deferred map grows past the cap): queue-full snapshots whose merged identities exceed sessionMessageCap disable capture for their session", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const d = defer();
+    const calls = installFetchStub(undefined, { deferUntil: d.gate });
+    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
+    plugin.register(api as any);
+    captureBounds.sessionScanQueueCap = 1;
+    captureBounds.sessionMessageCap = 2;
+    const ctx = { agentId: "A", sessionId: "sess-deferred-merge" };
+    const M = [1, 2, 3, 4].map((i) => ({ role: "user", content: `remember this: merged message number ${i}`, timestamp: i }));
+    const handler = api._handler("agent_end");
+
+    const p1 = handler({ runId: "run-1", success: true, messages: [M[0]] }, ctx);
+    await waitFor(() => puts(calls).length === 1);
+    // Each snapshot fits the cap on its own; merged, the deferred skip would hold 3.
+    const p2 = handler({ runId: "run-2", success: true, messages: [M[0], M[1]] }, ctx);
+    const p3 = handler({ runId: "run-3", success: true, messages: [M[0], M[2]] }, ctx);
+    d.release();
+    await Promise.all([p1, p2, p3]);
+    await api._fire("agent_end", { runId: "run-4", success: true, messages: [M[0], M[1], M[2], M[3]] }, ctx);
+
+    expect(puts(calls).map(sourceOf)).toEqual(["run-1"]);
+    expect(api._warnText()).toMatch(/capture is disabled for a session of agent A/);
   });
 
   test("real host runner, synthetic events: successive runs and a rewritten snapshot through the pinned OpenClaw hook runner", async () => {
