@@ -1493,6 +1493,87 @@ describe("slice 2 — capture normalisation, ids and outcomes", () => {
   });
 });
 
+// ── flair#2560 — the real producer's own agent_end dispatch ─────────────────
+//
+// The session producer is the pinned host's embedded agent runner
+// (`createOpenClawAgentHarness().runAttempt`). It is NOT drivable in-process from
+// this package: a bare `runAttempt({})` enters an embedded run and dies at
+// `mkdir ''`, because an attempt must be fully prepared (resolved config, model
+// registry, session file and lock, sandbox, abort signal) and reach a live
+// provider. This drives the closest REAL seam instead: the producer's own
+// agent_end dispatch (`awaitAgentHarnessAgentEndHook`, the function
+// `runEmbeddedAttempt` calls through `runAgentEndSideEffects`), over the pinned
+// host's real hook runner.
+
+describe("flair#2560 — the real producer's own agent_end dispatch", () => {
+  const producerConfig = {
+    plugins: { slots: { memory: "openclaw-flair" }, entries: { "openclaw-flair": { hooks: { allowConversationAccess: true } } } },
+  };
+
+  /** The unique chunk in `dist` matching `re` whose source contains `needle`. */
+  function distChunk(dist: string, re: RegExp, needle: string): string {
+    const hits = readdirSync(dist).filter((n) => re.test(n) && readFileSync(join(dist, n), "utf8").includes(needle));
+    expect(hits.length).toBe(1);
+    return hits[0];
+  }
+
+  /** The name a minified pinned chunk binds to `pretty`, per its OWN export statement. */
+  function realExport(dist: string, file: string, pretty: string): string {
+    const stmt = readFileSync(join(dist, file), "utf8").match(/export\s*\{([\s\S]*?)\}\s*;?\s*$/);
+    if (!stmt) throw new Error(`no export statement in ${file}`);
+    for (const part of stmt[1].split(",")) {
+      const m = part.trim().match(/^(\S+)\s+as\s+(\S+)$/);
+      if (m && m[1] === pretty) return m[2];
+      if (part.trim() === pretty) return pretty;
+    }
+    throw new Error(`${pretty} is not exported by ${file}`);
+  }
+
+  test("a message's identity in the agent_end snapshot is stable across runs, over the producer's dispatch", async () => {
+    const { dist, version: hostVersion } = supportedRunnerHost();
+    const { createHookRunner } = await import(pathToFileURL(join(dist, distChunk(dist, /^hooks-.*\.mjs$/, "export { createHookRunner };"))).href);
+    const helpersFile = distChunk(dist, /^lifecycle-hook-helpers-.*\.mjs$/, "awaitAgentHarnessAgentEndHook");
+    const helpers: any = await import(pathToFileURL(join(dist, helpersFile)).href);
+    const dispatch = helpers[realExport(dist, helpersFile, "awaitAgentHarnessAgentEndHook")]; // the producer's agent_end dispatch
+    const { messageIdentity } = await loadModule();
+    expect(typeof dispatch).toBe("function");
+    writeKey("A");
+    const calls = installFetchStub();
+    const api = createMockApi({ hostVersion, pluginConfig: { autoCapture: true }, config: producerConfig });
+    (await loadPlugin()).register(api as any);
+    // A spy on the SAME real hook runner reads each snapshot the producer
+    // dispatches, so a message's identity can be compared across runs.
+    const snapshots: string[][] = [];
+    const typedHooks = [
+      ...[...api._hooks].flatMap(([hookName, handlers]) => handlers.map((handler) => ({ hookName, handler, pluginId: api.id }))),
+      { hookName: "agent_end", handler: (event: any) => { snapshots.push((event.messages ?? []).map(messageIdentity)); }, pluginId: "spy-2560" },
+    ];
+    const runner = createHookRunner({ typedHooks }, { catchErrors: false });
+    const ctx = { agentId: "A", sessionId: "sess-producer" };
+    // Shaped as the host's `Message` types carry them: role, content, and the
+    // millisecond `timestamp` "for transcript ordering".
+    const M1 = { role: "user", content: "remember this: the producer's first message", timestamp: 1_700_000_000_000 };
+    const M2 = { role: "assistant", content: "remember this: the producer's second message", timestamp: 1_700_000_001_000 };
+    try {
+      await dispatch({ hookRunner: runner, event: { messages: [M1], success: true }, ctx: { ...ctx, runId: "run-1" } });
+      await dispatch({ hookRunner: runner, event: { messages: [M1, M2], success: true }, ctx: { ...ctx, runId: "run-2" } });
+      // Identity of M1 is the SAME in both snapshots, and equals the plugin's.
+      expect(snapshots).toHaveLength(2);
+      expect(snapshots[0][0]).toBe(snapshots[1][0]);
+      expect(snapshots[0][0]).toBe(messageIdentity(M1));
+      // Not vacuous: the identity is sensitive to the timestamp field it keys on.
+      expect(messageIdentity({ ...M1, timestamp: (M1 as any).timestamp + 1 })).not.toBe(messageIdentity(M1));
+      // The stable identity is what keeps the re-delivered M1 from being stored twice.
+      const puts = calls.filter((c) => c.method === "PUT" && /\/Memory\//.test(c.url));
+      const sources = puts.filter((c) => String((c.body as any).content).includes("the producer's first message")).map((c) => (c.body as any).hostSource.id);
+      expect(sources).toEqual(["run-1"]);
+      expect(puts.filter((c) => String((c.body as any).content).includes("the producer's second message")).map((c) => (c.body as any).hostSource.id)).toEqual(["run-2"]);
+    } finally {
+      await runner.runGatewayStop({}, {});
+    }
+  });
+});
+
 // ── flair#2513 — agent_end: best-effort capture by occurrence counting ──────
 //
 // These tests drive `agent_end` with session-keyed snapshots and check which
@@ -2025,6 +2106,41 @@ describe("flair#2513 — agent_end capture is keyed by counted message identitie
     } finally {
       await runner.runGatewayStop({}, {});
     }
+  });
+
+  // ── flair#2560 — a session's settled-through mark survives identity eviction ──
+
+  test("flair#2560: the snapshot ordering key is the numeric millisecond timestamp the host stamps for transcript ordering", async () => {
+    const { messageTimestamp } = await loadModule();
+    expect(messageTimestamp({ timestamp: 7 })).toBe(7);
+    // A compaction summary loaded from older persisted rows may carry a string.
+    expect(messageTimestamp({ timestamp: "42" })).toBe(42);
+    for (const ts of [undefined, null, "", "now", "  ", NaN, Infinity, -Infinity, {}, [], () => 1]) {
+      expect(messageTimestamp({ timestamp: ts })).toBeNull();
+    }
+  });
+
+  test("flair#2560 (mutation: no settled-through mark): after a session's identities are evicted, a message at or below the mark is not captured again, while a genuinely new later message is", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = installFetchStub();
+    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
+    plugin.register(api as any);
+    captureBounds.sessionMessageCap = 1; // remember ONE identity: the rest are evicted
+    const ctx = { agentId: "A", sessionId: "sess-evict-mark" };
+    const M1 = { role: "user", content: "remember this: the evicted early message", timestamp: 1 };
+    const M2 = { role: "user", content: "remember this: the evicted middle message", timestamp: 2 };
+    const M3 = { role: "user", content: "remember this: a genuinely new later message", timestamp: 3 };
+
+    await api._fire("agent_end", { runId: "run-1", success: true, messages: [M1, M2] }, ctx);
+    expect(puts(calls).filter((c) => contentOf(c).includes("the evicted early message")).map(sourceOf)).toEqual(["run-1"]);
+    // Run 2 adds M3; M1's and M2's identities are evicted by the cap.
+    await api._fire("agent_end", { runId: "run-2", success: true, messages: [M1, M2, M3] }, ctx);
+    expect(puts(calls).filter((c) => contentOf(c).includes("a genuinely new later message")).map(sourceOf)).toEqual(["run-2"]);
+    // Run 3 re-delivers all three, with no identity left for M1 or M2. The
+    // session's mark (M3's timestamp) settles them: neither is captured again.
+    await api._fire("agent_end", { runId: "run-3", success: true, messages: [M1, M2, M3] }, ctx);
+    expect(puts(calls).map(sourceOf).sort()).toEqual(["run-1", "run-1", "run-2"]);
   });
 });
 

@@ -128,6 +128,13 @@ are the guarantees it keeps, each with the test that proves it in
   only): two concurrent runs of one agent share neither the session cap nor the
   dedup set`; `R10: interleaved agents, driven through the host's turn order,
   sign as themselves`.
+- **A session-keyed `agent_end` scan keeps a settled-through mark.** The greatest
+  message timestamp the session's scans have settled is remembered beyond the
+  bounded identity set, so a message at or below it whose identity has been
+  evicted is not captured again; the identity set still decides copies it holds,
+  and a message with no numeric `timestamp` relies on the identity set alone — `flair#2560 (mutation: no settled-through mark): after a session's
+  identities are evicted, a message at or below the mark is not captured again,
+  while a genuinely new later message is`.
 - **Memory is bounded.** The run map holds at most `capacityCap` records, plus at
   most `abortOverflowCap` records for aborted runs that were never admitted, and a
   new run is refused rather than evicting a live record — `(a) repeated aborts of
@@ -172,7 +179,9 @@ NFC-normalised form), plus the host's session
 id when the hook carries one. A run id outside that grammar is omitted with a
 rate-limited warning — the capture still lands. `hostSource` is the writer's claim, not
 verified host authorship. Covered by
-`test/integration/host-source-openclaw-capture-1940.test.ts`.
+`test/integration/host-source-openclaw-capture-1940.test.ts`; the session-keyed
+`agent_end` capture reads back from a real Flair component in
+`test/integration/agent-end-session-capture-2560.test.ts`.
 
 ## Auth
 

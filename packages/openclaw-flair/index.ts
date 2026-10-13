@@ -241,11 +241,37 @@ export function messageIdentity(msg: { role?: unknown; content?: unknown; timest
 }
 
 /**
+ * flair#2560: the ordering key of one `agent_end` snapshot message, or null when
+ * it carries none. The pinned host stamps conversation messages with a `timestamp`
+ * "for transcript ordering" (`UserMessage`,
+ * `AssistantMessage`, `ToolResultMessage`, and the summary/execution roles),
+ * and a snapshot is delivered in that order. A number is that stamp; a string
+ * is accepted only when it parses to a finite number (the host documents a
+ * numeric-or-string timestamp for a compaction summary loaded from older
+ * persisted rows). Anything else has no ordering key here, so the session's
+ * bounded identity set is the only guard for it (`settledThrough`).
+ */
+export function messageTimestamp(msg: SnapshotMessage | null | undefined): number | null {
+  const ts = msg?.timestamp;
+  if (typeof ts === "number") return Number.isFinite(ts) ? ts : null;
+  if (typeof ts === "string") {
+    const n = Number(ts);
+    return ts.trim() !== "" && Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+/**
  * flair#2513: one session's `agent_end` capture-identity state. `entries` maps a
  * message identity to the number of its occurrences this session's scans have
  * recorded. `tail` is the settle of the last queued scan, so the next one chains
  * after it; `scans` counts scans queued or running. `disabled` stops this
  * session's later `agent_end` scans (see `disableSession`).
+ * `settledThrough` (flair#2560) is the high-water mark of this session's
+ * snapshots: the greatest message timestamp this session's scans have settled,
+ * or null before the first. It survives `entries` eviction, so a message at or
+ * below it whose identity the session no longer records is not captured again;
+ * see `messageTimestamp`.
  */
 interface SessionCapture {
   agentId: string;
@@ -253,6 +279,7 @@ interface SessionCapture {
   tail: Promise<void>;
   scans: number;
   disabled: boolean;
+  settledThrough: number | null;
 }
 
 /**
@@ -292,10 +319,12 @@ export const captureBounds = {
    * or its next callback is admitted and captured (the failed-run re-admission
    * the round-4 review found). The abort path may therefore exceed
    * `capacityCap` by at most this many records. When even that overflow is
-   * full, the abort records nothing and logs once — the documented residual.
+   * full, the abort records nothing and logs once per retained key — the
+   * documented residual.
    */
   abortOverflowCap: 1_000,
-  /** Max distinct one-time log keys remembered; the oldest are evicted. */
+  /** Max distinct one-time log keys remembered; the oldest are evicted, so a
+   * forgotten key logs its line again. "Once" is once per retained key. */
   logOnceCap: 10_000,
   /**
    * flair#2513: max sessions whose capture-identity state is remembered. When a
@@ -310,17 +339,22 @@ export const captureBounds = {
   /**
    * flair#2513: max message identities remembered per session. When a new
    * identity would exceed it, the identity whose last recorded occurrence is
-   * oldest is evicted. A forgotten identity that re-appears in a later snapshot
-   * is treated as new and may be captured again. (A scan also builds a
-   * temporary per-identity count of its own snapshot, sized by the snapshot.)
+   * oldest is evicted. flair#2560: an evicted identity is NOT forgotten as an
+   * order: the session also keeps `settledThrough`, the greatest message
+   * timestamp its scans have settled, and a message at or below that mark whose
+   * identity has been evicted is not captured again. A forgotten identity that
+   * re-appears with a LATER timestamp than the mark is treated as new and may be
+   * captured again. (A scan also builds a temporary per-identity count of its
+   * own snapshot, sized by the snapshot.)
    */
   sessionMessageCap: 4_096,
   /**
    * flair#2513: max `agent_end` scans queued or running per session. A callback
    * that finds that many is not scanned and records nothing: `agent_end`
-   * capture is disabled for that session (fail closed, logged once; see
-   * `disableSession`), because its snapshot cannot be accounted in order
-   * without waiting in the queue.
+   * capture is disabled for that session while its capture state is held (fail
+   * closed, one line per retained log key; see `disableSession`), because its
+   * snapshot cannot be accounted in order without waiting in the queue. Eviction
+   * forgets the disable with the rest of the session's state.
    */
   sessionScanQueueCap: 32,
   /** How often the unref'd sweep timer runs. */
@@ -909,7 +943,8 @@ export default {
      * CLASS (`errorClass`, above) — a failure's KIND, not its instance. Keying by
      * agent ALONE silenced a LATER, DIFFERENT failure for the same agent: a
      * missing key at 10:00 hid an HTTP 500 on a capture write at 11:00, which is
-     * exactly the line an operator needs. Now every distinct failure logs once,
+     * exactly the line an operator needs. Now a distinct failure is logged once
+     * per retained key,
      * and repeats of it do not. The key set stays bounded by `logOnceCap`.
      */
     function refuseKey(agentId: string | undefined, site: string, err: unknown): void {
@@ -967,7 +1002,7 @@ export default {
       if (session) {
         sessions.delete(key);
       } else {
-        session = { agentId, entries: new Map(), tail: Promise.resolve(), scans: 0, disabled: false };
+        session = { agentId, entries: new Map(), tail: Promise.resolve(), scans: 0, disabled: false, settledThrough: null };
       }
       sessions.set(key, session);
       return session;
@@ -977,7 +1012,7 @@ export default {
      * Account for `count` more occurrences of `identity` in the session. `entries`
      * stays within `sessionMessageCap` by evicting the identity whose last
      * recorded occurrence is oldest; a forgotten identity that re-appears is
-     * treated as new.
+     * treated as new unless it is at or below the session's `settledThrough` mark.
      */
     function recordOccurrence(session: SessionCapture, identity: string, count = 1): void {
       const seen = session.entries.get(identity) ?? 0;
@@ -993,9 +1028,9 @@ export default {
     /**
      * flair#2513: fail closed for one session whose snapshots can no longer be
      * accounted in order: no later `agent_end` scan of it captures or records
-     * anything. `llm_input` and `llm_output` capture is not affected. Logged
-     * once per session while its log key is retained. Eviction forgets the flag
-     * with the rest of the session's state.
+     * anything. `llm_input` and `llm_output` capture is not affected. One line
+     * per retained log key, not a guarantee of exactly one. Eviction forgets the
+     * flag with the rest of the session's state.
      */
     function disableSession(key: string, session: SessionCapture, why: string): void {
       if (session.disabled) return;
@@ -1109,7 +1144,8 @@ export default {
      *   2. a key with NO record: purge what is removable, then admit ONLY when
      *      the map is below `capacityCap` — the abort overflow is never counted
      *      as room;
-     *   3. otherwise refuse (`capture-capacity: full`, logged once) and change
+     *   3. otherwise refuse (`capture-capacity: full`, one line per retained
+     *      key) and change
      *      nothing else.
      */
     function captureGate(agentId: string, runId: string | null): RunRecord | null {
@@ -1179,7 +1215,8 @@ export default {
      * `abortOverflowCap`: recording nothing there would let the run's next
      * callback be admitted and captured — exactly the failed-run re-admission
      * the round-4 review found. If even the overflow is full the record is not
-     * inserted and the line is logged once (the documented residual); it is safe
+     * inserted and the line is logged once per retained key (the documented
+     * residual); it is safe
      * because admission is refused while the budget AND its overflow are full.
      *
      * Round 13 guard: while `captureStopped` is set there is no registration to
@@ -1573,13 +1610,23 @@ export default {
          * of the n identifiable occurrences of an identity in the snapshot, the
          * trailing n - m beyond the m the session has recorded are treated as
          * new, and as the callback's run's; the first min(n, m) are left alone.
+         * flair#2560: the session also keeps a high-water mark (`settledThrough`)
+         * of the greatest message timestamp it has settled. An identity the
+         * session no longer records, whose message is at or below that mark, is
+         * already settled and is never captured again; the bounded `entries` set
+         * still decides copies whose identity it holds. A message with
+         * no timestamp has no ordering key and relies on `entries` alone.
          * In `capture` mode a new eligible occurrence is offered to
          * `tryAutoCapture`; in `skip` mode it is not. Each new occurrence is then
          * recorded, unless the scan stops first: before each message and after
          * each awaited write the scan checks the stop and the session's disabled
          * flag and, if either is set, returns without recording anything more.
          * A failed write is logged and recorded as skipped only if the scan
-         * continues past that check, and no retry is scheduled. When n < m,
+         * continues past that check. For a session-keyed scan that record also
+         * settles the message for the session (it, and the mark, stop a later
+         * scan from capturing it), so no retry follows; a session-less scan
+         * records nothing and a later callback may offer the same message again.
+         * When n < m,
          * nothing of that identity is new, and a `capture` scan logs a
          * diagnostic. In a `capture` scan, a message with capture text and no
          * identity is not captured, with a diagnostic. Without a session key
@@ -1653,6 +1700,12 @@ export default {
             for (const id of identities) if (id) total.set(id, (total.get(id) ?? 0) + 1);
             const baseline = new Map<string, number>();
             const position = new Map<string, number>();
+            // flair#2560: the mark to skip against is the one this scan STARTED
+            // with; it is advanced only over messages this scan actually settles,
+            // so an intra-snapshot reorder cannot make a later message look
+            // settled before it is processed.
+            const settledFrom = session.settledThrough;
+            let settledCandidate = session.settledThrough;
             let stored = 0;
             for (let i = 0; i < messages.length; i++) {
               if (captureStopped || session.disabled) break;
@@ -1668,6 +1721,13 @@ export default {
                 }
                 continue;
               }
+              const ts = messageTimestamp(msg);
+              // flair#2560: an identity the session no longer records, at or below
+              // the mark, is a message this session already settled: never capture
+              // it again, however its identity was evicted.
+              if (!session.entries.has(identity) && ts !== null && settledFrom !== null && ts <= settledFrom) continue;
+              // The message is settled by this scan; the mark may advance to it.
+              if (ts !== null && (settledCandidate === null || ts > settledCandidate)) settledCandidate = ts;
               if (!baseline.has(identity)) baseline.set(identity, session.entries.get(identity) ?? 0);
               const m = baseline.get(identity)!;
               const n = total.get(identity)!;
@@ -1697,7 +1757,8 @@ export default {
               // meanwhile ends the scan before anything more is recorded.
               if (captureStopped || session.disabled) break;
               if (failure !== undefined) {
-                // Dropped: recorded as skipped below, no retry scheduled. An
+                // Dropped: recorded as skipped below, so the session does not
+                // retry it while this state is held; the mark settles it too. An
                 // abort meanwhile is the reason when the run was aborted.
                 const reason = mode.record.phase === "aborted" ? "its run was aborted" : errorClass(failure);
                 logOnce(
@@ -1709,6 +1770,10 @@ export default {
               // already discarded by `tryAutoCapture`, so it records no capture.
               if (captured) stored++;
               recordOccurrence(session, identity);
+            }
+            // Advance the session's mark over the messages this scan settled.
+            if (settledCandidate !== null && (session.settledThrough === null || settledCandidate > session.settledThrough)) {
+              session.settledThrough = settledCandidate;
             }
             if (stored > 0) api.logger.info(`openclaw-flair: auto-captured ${stored} memories`);
           } catch (err: any) {
