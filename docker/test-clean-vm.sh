@@ -109,7 +109,7 @@ echo "[3/3] flair doctor --agent $AGENT_ID --port $PORT (hard semantic gate)"
 DOCTOR_OUTPUT=$(flair doctor --agent "$AGENT_ID" --port "$PORT" 2>&1) || {
   echo "$DOCTOR_OUTPUT"
   echo ""
-  # The #538 showstopper is named only when doctor prints `Semantic search DEGRADED`; every other failing line, including other embeddings failures, is listed as doctor printed it.
+  # The parser below lists doctor's finding lines, colour codes stripped. It names the #538 showstopper only when `Semantic search DEGRADED` appears anywhere inside a parsed ✗ block.
   node --input-type=module - "$DOCTOR_OUTPUT" <<'DOCTORFAIL'
 const raw = process.argv[2] ?? "";
 
@@ -118,10 +118,12 @@ const raw = process.argv[2] ?? "";
 const output = raw.replace(/\u001b\[[0-9;]*m/g, "");
 const lines = output.split(/\r?\n/);
 
-// Each issue doctor counts is printed with a red ✗; a counted check can also be
-// printed as a ⚠ warning (both carry a Fix/continuation block). Doctor's own
-// summary line ("✗ N issues found …") is a count, so it is read as N below and
-// not listed as a check.
+// Doctor prints each finding as a ✗ or a ⚠ line. Some findings have an
+// indented block under the line (a Fix: line or continuation lines) and some
+// have none. Doctor's count can include ⚠ findings as well as ✗ ones, and its
+// output does not mark which findings it counted. Doctor's own summary line
+// ("✗ N issues found …") is a count, so it is read as N below and not listed as
+// a finding.
 const isSummary = (s) => /^✗ \d+ issues? found\b/.test(s);
 const findings = [];
 for (let i = 0; i < lines.length; i++) {
@@ -157,10 +159,11 @@ out.push(
     : "FAIL: flair doctor exited non-zero. doctor reported issues but printed no countable summary:",
 );
 
-// The ✗ findings are the counted issues when their number matches N. When it
-// does not, a ⚠ finding also counted and doctor's output does not say which —
-// list every finding line rather than assert which one it was.
-const attributed = count !== null && count > 0 && hard.length === count;
+// When every finding is a ✗ and their number equals N, the gate lists the ✗
+// findings as the counted ones. Otherwise it cannot tell which findings doctor
+// counted (a counted check can print as ⚠), so it lists every finding rather
+// than pick one.
+const attributed = count !== null && count > 0 && hard.length === findings.length && hard.length === count;
 const shown = attributed ? hard : findings;
 if (shown.length > 0) {
   for (const f of shown) for (const line of f.lines) out.push(line);
