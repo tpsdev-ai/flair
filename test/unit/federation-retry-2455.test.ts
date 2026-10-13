@@ -24,6 +24,7 @@ import {
   isRetryResolution,
   isRetryBound,
   pickRetryRowFields,
+  retryRowProblem,
   RETRY_RESOLUTIONS,
   RETRY_ROW_FIELDS,
   LOCAL_RETRY_REASONS,
@@ -166,5 +167,45 @@ describe("flair#2455 — FederationRetry declared fields", () => {
       id: "k", peerId: "p", table: "Memory", recordId: "r", state: "pending",
       firstRefusedAt: "t", attempts: 1, createdAt: "t", bound: null,
     });
+  });
+});
+
+describe("flair#2455 — retryRowProblem names a row that breaks a sender convention", () => {
+  const key = retryEntryKey("peer-1", "Memory", "row-1");
+  const pending = { id: key, peerId: "peer-1", table: "Memory", recordId: "row-1", state: "pending", lastReason: "merge_error" };
+  const terminal = { ...pending, state: "terminal", resolution: "retry_exhausted", bound: "attempts" };
+
+  test("a well-formed pending or terminal row has no problem", () => {
+    expect(retryRowProblem(pending)).toBeNull();
+    expect(retryRowProblem({ ...pending, lastReason: "transport_failure" })).toBeNull();
+    expect(retryRowProblem({ ...pending, lastReason: undefined })).toBeNull();
+    expect(retryRowProblem(terminal)).toBeNull();
+    expect(retryRowProblem({ ...terminal, resolution: "merged", bound: null })).toBeNull();
+  });
+
+  test("id_mismatch: the id is not the key of the stored tuple", () => {
+    expect(retryRowProblem({ ...pending, recordId: "row-2" })).toBe("id_mismatch");
+    expect(retryRowProblem({ ...pending, peerId: "peer-2" })).toBe("id_mismatch");
+    expect(retryRowProblem({ ...pending, id: "peer-1/Memory/row-1" })).toBe("id_mismatch");
+    expect(retryRowProblem({ ...pending, recordId: "" })).toBe("id_mismatch");
+  });
+
+  test("unknown_state: a state other than pending or terminal", () => {
+    expect(retryRowProblem({ ...pending, state: "paused" })).toBe("unknown_state");
+    expect(retryRowProblem({ ...pending, state: undefined })).toBe("unknown_state");
+  });
+
+  test("unknown_reason: a lastReason that is neither a SkipReason nor a local reason", () => {
+    expect(retryRowProblem({ ...pending, lastReason: "free text" })).toBe("unknown_reason");
+  });
+
+  test("outcome_mismatch: an outcome on a pending row, or a terminal row's unknown resolution or wrong bound", () => {
+    expect(retryRowProblem({ ...pending, resolution: "merged" })).toBe("outcome_mismatch");
+    expect(retryRowProblem({ ...pending, bound: "age" })).toBe("outcome_mismatch");
+    expect(retryRowProblem({ ...terminal, resolution: "done" })).toBe("outcome_mismatch");
+    expect(retryRowProblem({ ...terminal, resolution: undefined })).toBe("outcome_mismatch");
+    expect(retryRowProblem({ ...terminal, bound: null })).toBe("outcome_mismatch");
+    expect(retryRowProblem({ ...terminal, bound: "sometimes" })).toBe("outcome_mismatch");
+    expect(retryRowProblem({ ...terminal, resolution: "merged", bound: "attempts" })).toBe("outcome_mismatch");
   });
 });

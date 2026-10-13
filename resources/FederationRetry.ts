@@ -4,15 +4,17 @@
  *
  * The table is shaped for one row per (peerId, table, recordId) the receiver
  * refused for a reason a later re-offer could clear, plus locally observed
- * unconfirmed sends. No production path writes a row in this slice: the
- * sender creates them once it is activated (a later slice). See
+ * unconfirmed sends. No production sender path creates rows yet (a later slice
+ * activates the sender); rows an admin writes are readable now. See
  * resources/federation-retry-lib.ts for the key/state/outcome vocabulary and
  * schemas/federation.graphql for the table.
  *
- * NO RECORD CONTENT. The table is `@sealed` in the schema, so Harper refuses
- * any write (REST, operations API or code) that carries a field the schema
- * does not declare, and the transition below writes only the declared fields
- * (RETRY_ROW_FIELDS). A re-offer will read the source row fresh.
+ * WHAT IS ENFORCED. The table is `@sealed`, so Harper refuses a write that
+ * names a field the schema does not declare, and the transition below writes
+ * only the declared fields (RETRY_ROW_FIELDS). That the id encodes the tuple
+ * and that state, reason and outcome hold their documented values are sender
+ * conventions the schema does not enforce; the reader and the transition check
+ * them (retryRowProblem) and treat a row that breaks one as malformed.
  *
  * ISOLATION (design rev 2 K2). `FederationRetry` is deliberately absent from
  * FEDERATION_TABLE_POLICY (resources/federation-classify.ts) and therefore from
@@ -36,6 +38,7 @@ import {
   isRetryBound,
   isRetryResolution,
   pickRetryRowFields,
+  retryRowProblem,
   type RetryBound,
   type RetryResolution,
 } from "./federation-retry-lib.js";
@@ -60,7 +63,11 @@ interface RetryTerminalBase {
   completedAt?: string;
   /** The request context, if any. Its transaction is detached for the owned one. */
   ctx?: any;
-  /** TEST-ONLY: awaited between the in-transaction read and the write. */
+  /**
+   * Optional in-process hook, awaited between the in-transaction read and the
+   * write. It is a function argument, so no request can supply it; no shipped
+   * resource passes one (the tests do, to hold the lock at a known point).
+   */
   pausePoint?: () => Promise<void> | undefined;
 }
 
@@ -78,6 +85,7 @@ export type RetryTerminalErrorCode =
   | "invalid"
   | "table_unavailable"
   | "not_found"
+  | "malformed"
   | "already_terminal"
   | "lock_busy"
   | "lock_unavailable"
@@ -94,8 +102,9 @@ export type RetryTerminalOutcome =
  * call owns: the read that checks `pending` and the write that sets the
  * terminal outcome commit together or not at all. A caller bug (missing
  * component, unknown resolution or bound, a `retry_exhausted` without its
- * bound, a bound on any other resolution) and a missing or already-terminal
- * row are refused by name WITHOUT writing. If the write or the confirming
+ * bound, a bound on any other resolution), a missing row, a malformed row
+ * (retryRowProblem) and an already-terminal row are refused by name WITHOUT
+ * writing. If the write or the confirming
  * re-read fails, the transaction aborts and the row stays `pending`: the
  * outcome is never reported as success on a row that did not move.
  *
@@ -136,6 +145,10 @@ export async function terminalizeRetryEntry(input: RetryTerminalInput): Promise<
     () => withOwnedTransaction(input.ctx, async (shared) => {
       const row = await table.get(id, shared);
       if (!row) return { ok: false, code: "not_found", message: `${id} is not a retry entry` } as RetryTerminalOutcome;
+      const problem = retryRowProblem(row);
+      if (problem) {
+        return { ok: false, code: "malformed", message: `${id} is malformed (${problem}) and is never transitioned` } as RetryTerminalOutcome;
+      }
       if (row.state !== "pending") {
         return { ok: false, code: "already_terminal", message: `${id} is already ${String(row.state)}` } as RetryTerminalOutcome;
       }

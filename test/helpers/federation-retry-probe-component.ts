@@ -19,7 +19,10 @@
  *   while a marker file `arm.peers-read-fail` exists under FLAIR_TEST_PAUSE_DIR.
  *   The test removes the file to disarm it.
  *
- * Nothing under resources/ ships a pause or a failure switch.
+ * The two failure switches exist only in this composed copy. The pause uses the
+ * transition's optional `pausePoint` callback, an in-process function argument
+ * that no request can supply and no shipped resource passes; only this probe
+ * passes it.
  */
 import { cpSync, existsSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

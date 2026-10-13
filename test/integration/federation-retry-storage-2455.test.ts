@@ -4,14 +4,17 @@
 //  - the FederationRetry table refuses GET, PUT, PATCH, DELETE and POST from an
 //    anonymous caller AND from an authenticated non-admin agent, and none of
 //    those requests changes or creates a row;
-//  - the table is sealed: a write carrying a field the schema does not declare
+//  - the table is sealed: a write naming a field the schema does not declare
 //    is refused on REST PUT/PATCH/POST and on an operations-API upsert, and the
 //    field is never persisted;
-//  - the admin-only /FederationRetries reader returns the rows;
+//  - the admin-only /FederationRetries reader returns the rows, and lists a
+//    row whose id is not its tuple's key, or whose state is unknown, under
+//    `malformed` with the problem's name, never as pending or terminal;
 //  - an inbound sync naming FederationRetry is refused (unknown_table) and
 //    lands nothing;
 //  - `flair federation status` renders the retry rows with a peer, with no
-//    peer configured, and when the peer read fails.
+//    peer configured, and when the instance read succeeds and the peer read
+//    fails.
 //
 // Runs against a composed copy of the built component (test/helpers/
 // federation-retry-probe-component.ts) whose test-only module fails GET
@@ -24,7 +27,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import nacl from "tweetnacl";
 import { signBodyFresh } from "../../resources/federation-crypto.js";
-import { retryEntryKey } from "../../resources/federation-retry-lib.js";
+import { parseRetryEntryKey, retryEntryKey } from "../../resources/federation-retry-lib.js";
 import { componentWithRetryProbe, type RetryProbeComponent } from "../helpers/federation-retry-probe-component";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 
@@ -92,12 +95,13 @@ async function readRetryRow(key: string): Promise<any> {
   return (rows as any[])[0] ?? null;
 }
 
+/** A pending row whose peerId, table and recordId are the tuple `key` encodes. */
 function retryRow(key: string, over: Record<string, unknown> = {}) {
+  const tuple = parseRetryEntryKey(key);
+  if (!tuple) throw new Error(`not a retry key: ${key}`);
   return {
     id: key,
-    peerId: PEER,
-    table: "Memory",
-    recordId: `row-${sfx}`,
+    ...tuple,
     state: "pending",
     firstRefusedAt: now(),
     attempts: 1,
@@ -151,6 +155,11 @@ async function peerCount(): Promise<number> {
 describe("flair#2455 — FederationRetry storage, gating and the operator query (real Harper)", () => {
   const pendingKey = retryEntryKey(PEER, "Memory", `pending-${sfx}`);
   const terminalKey = retryEntryKey(PEER, "Soul", `terminal-${sfx}`);
+  // Two rows that break a sender convention the schema does not enforce: an
+  // id that is not its tuple's key, and a state that is neither pending nor
+  // terminal.
+  const mismatchKey = retryEntryKey(PEER, "Memory", `mismatch-${sfx}`);
+  const badStateKey = retryEntryKey(PEER, "Memory", `badstate-${sfx}`);
 
   beforeAll(async () => {
     pauseDir = mkdtempSync(join(tmpdir(), "flair-2455-storage-pause-"));
@@ -174,8 +183,10 @@ describe("flair#2455 — FederationRetry storage, gating and the operator query 
     await ops({
       operation: "upsert", database: "flair", table: "FederationRetry",
       records: [
-        retryRow(pendingKey, { table: "Memory", recordId: `pending-${sfx}`, state: "pending", attempts: 2, lastReason: "merge_target_changed" }),
-        retryRow(terminalKey, { table: "Soul", recordId: `terminal-${sfx}`, state: "terminal", attempts: 5, lastReason: "merge_error", resolution: "retry_exhausted", bound: "attempts", completedAt: now() }),
+        retryRow(pendingKey, { attempts: 2, lastReason: "merge_target_changed" }),
+        retryRow(terminalKey, { state: "terminal", attempts: 5, lastReason: "merge_error", resolution: "retry_exhausted", bound: "attempts", completedAt: now() }),
+        retryRow(mismatchKey, { recordId: `elsewhere-${sfx}`, lastReason: "merge_error" }),
+        retryRow(badStateKey, { state: "paused", lastReason: "merge_error" }),
       ],
     });
   }, 240_000);
@@ -252,6 +263,24 @@ describe("flair#2455 — FederationRetry storage, gating and the operator query 
     expect(terminal.bound).toBe("attempts");
   });
 
+  test("the reader lists a row that breaks a sender convention under malformed, never as pending or terminal", async () => {
+    const res = await adminFetch("/FederationRetries");
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    const all = [...body.pending, ...body.terminal];
+    for (const recordId of [`elsewhere-${sfx}`, `mismatch-${sfx}`, `badstate-${sfx}`]) {
+      expect(all.some((r: any) => r.id === recordId), `${recordId} must not be pending or terminal`).toBe(false);
+    }
+    const byKey = new Map((body.malformed as any[]).map((r) => [r.key, r]));
+    expect(byKey.get(mismatchKey)?.problem, JSON.stringify(body.malformed)).toBe("id_mismatch");
+    expect(byKey.get(mismatchKey)?.id).toBe(`elsewhere-${sfx}`);
+    expect(byKey.get(badStateKey)?.problem).toBe("unknown_state");
+    expect(byKey.get(badStateKey)?.state).toBe("paused");
+    // The well-formed rows are not malformed.
+    expect(byKey.has(pendingKey)).toBe(false);
+    expect(byKey.has(terminalKey)).toBe(false);
+  });
+
   test("the table is sealed: an undeclared field is refused on REST PUT, PATCH and POST and on an operations-API upsert, and never persisted", async () => {
     const before = await readRetryRow(pendingKey);
     const rowPath = `/FederationRetry/${encodeURIComponent(pendingKey)}`;
@@ -288,7 +317,7 @@ describe("flair#2455 — FederationRetry storage, gating and the operator query 
 
     // Positive control: the same admin write with declared fields only is accepted.
     const okKey = retryEntryKey(PEER, "Memory", `sealed-ok-${sfx}`);
-    const ok = await adminFetch(`/FederationRetry/${encodeURIComponent(okKey)}`, "PUT", retryRow(okKey, { recordId: `sealed-ok-${sfx}` }));
+    const ok = await adminFetch(`/FederationRetry/${encodeURIComponent(okKey)}`, "PUT", retryRow(okKey));
     expect([200, 204], `declared-only PUT returned ${ok.status}`).toContain(ok.status);
     expect((await readRetryRow(okKey))?.state).toBe("pending");
     await ops({ operation: "delete", database: "flair", table: "FederationRetry", hash_values: [okKey] });
@@ -306,7 +335,7 @@ describe("flair#2455 — FederationRetry storage, gating and the operator query 
     expect(plain.stdout).toContain("retry_exhausted");
   }, 60_000); // above its sequential waits: one ops read (30 s) + one CLI spawn (20 s)
 
-  test("`flair federation status` renders the retry rows when the peer read fails", async () => {
+  test("`flair federation status` renders the retry rows when the instance read succeeds and the peer read fails", async () => {
     const arm = join(pauseDir, "arm.peers-read-fail");
     writeFileSync(arm, "");
     try {
@@ -368,10 +397,15 @@ describe("flair#2455 — FederationRetry storage, gating and the operator query 
     const parsed = JSON.parse(json.stdout);
     expect(parsed.retries.pending.some((r: any) => r.id === `pending-${sfx}`)).toBe(true);
     expect(parsed.retries.terminal.some((r: any) => r.id === `terminal-${sfx}`)).toBe(true);
+    expect(parsed.retries.pending.some((r: any) => r.id === `badstate-${sfx}` || r.id === `elsewhere-${sfx}`)).toBe(false);
+    expect(parsed.retries.malformed.map((r: any) => r.problem).sort()).toEqual(["id_mismatch", "unknown_state"]);
 
     const plain = await runCli(["federation", "status", "--target", harper.httpURL], { ...cliEnv(), FLAIR_OUTPUT: "human" });
     expect(plain.exitCode, `stderr: ${plain.stderr}`).toBe(0);
     expect(plain.stdout).toContain(PEER);
+    expect(plain.stdout).toContain("2 malformed retry rows");
+    expect(plain.stdout).toContain("id_mismatch");
+    expect(plain.stdout).toContain("unknown_state");
     expect(plain.stdout).toContain("Federation retries");
     expect(plain.stdout).toContain(`pending-${sfx}`);
     expect(plain.stdout).toContain("merge_target_changed");

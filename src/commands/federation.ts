@@ -1079,14 +1079,14 @@ export function register(program: Command): void {
         peersErr = rewriteFederationStatusFetchFailed(err, baseUrl, urlSetting);
       }
 
-      // Federation retry rows (flair#2455): the sender's pending and terminal
-      // retry rows, read through the admin-only /FederationRetries resource.
-      // null = unverifiable (the read failed), like peers.
-      let retries: { pending: any[]; terminal: any[] } | null = null;
+      // Federation retry rows (flair#2455): the sender's pending, terminal and
+      // malformed retry rows, read through the admin-only /FederationRetries
+      // resource. null = unverifiable (the read failed), like peers.
+      let retries: { pending: any[]; terminal: any[]; malformed: any[] } | null = null;
       let retriesErr: any = null;
       try {
         const r = await api("GET", "/FederationRetries", undefined, { baseUrl });
-        retries = { pending: r.pending ?? [], terminal: r.terminal ?? [] };
+        retries = { pending: r.pending ?? [], terminal: r.terminal ?? [], malformed: r.malformed ?? [] };
       } catch (err) {
         retriesErr = err;
       }
@@ -1195,13 +1195,14 @@ export function register(program: Command): void {
       }
 
       // Federation retry rows (flair#2455): the sender's retry bookkeeping per
-      // peer, table and record. Every human-readable path from here on renders
-      // them, including the two early returns (no peers configured, peer read
-      // failed): the retry read is independent of the peer read, so the rows do
-      // not depend on the peer table. Nothing writes a retry row until the
-      // sender is activated (a later slice); from then, a pending row is one
-      // the sender will re-offer and a terminal row ended with a named
-      // resolution.
+      // peer, table and record. Rendered after the peer table, and also on the
+      // two early returns below (no peers configured; a peer read that fails
+      // while the instance read succeeds). The fatal exits above (an auth
+      // failure, or both the instance and peer reads failing) render nothing.
+      // No production sender path creates rows yet; admin-written rows show.
+      // Once the sender is active, it re-offers pending rows; a terminal row
+      // ended with a named resolution; a malformed row breaks a sender
+      // convention and is never transitioned.
       const renderRetrySection = (): void => {
         if (retriesErr) {
           console.log();
@@ -1209,7 +1210,7 @@ export function register(program: Command): void {
           console.log(`  ${render.wrap(render.c.dim, String(retriesErr?.message ?? retriesErr))}`);
           return;
         }
-        if (!retries || (retries.pending.length === 0 && retries.terminal.length === 0)) return;
+        if (!retries || (retries.pending.length === 0 && retries.terminal.length === 0 && retries.malformed.length === 0)) return;
         console.log();
         console.log(render.wrap(render.c.bold, "Federation retries"));
         const retryCols: render.TableColumn[] = [
@@ -1222,7 +1223,19 @@ export function register(program: Command): void {
           { label: "bound", key: "bound", format: (v) => String(v ?? "—") },
           { label: "resolution", key: "resolution", format: (v) => String(v ?? "—") },
         ];
-        console.log(render.table(retryCols, [...retries.pending, ...retries.terminal] as Array<Record<string, unknown>>));
+        if (retries.pending.length > 0 || retries.terminal.length > 0) {
+          console.log(render.table(retryCols, [...retries.pending, ...retries.terminal] as Array<Record<string, unknown>>));
+        }
+        if (retries.malformed.length > 0) {
+          console.log();
+          console.log(`${render.icons.warn} ${render.wrap(render.c.yellow, `${retries.malformed.length} malformed retry row${retries.malformed.length === 1 ? "" : "s"}: not pending, never transitioned.`)}`);
+          const malformedCols: render.TableColumn[] = [
+            { label: "problem", key: "problem" },
+            { label: "key", key: "key", format: (v) => String(v ?? "—") },
+            { label: "state", key: "state", format: (v) => String(v ?? "—") },
+          ];
+          console.log(render.table(malformedCols, retries.malformed as Array<Record<string, unknown>>));
+        }
       };
 
       if (peers === null) {

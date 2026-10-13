@@ -7,7 +7,7 @@
  * DB-free. The Harper resource, the admin gates and the atomic transition live
  * in resources/FederationRetry.ts.
  */
-import type { SkipReason } from "./federation-classify.js";
+import { isSkipReason, type SkipReason } from "./federation-classify.js";
 
 /** A retry obligation's lifecycle state. `pending` is the only non-terminal state. */
 export type RetryState = "pending" | "terminal";
@@ -78,9 +78,9 @@ export function isRetryBound(value: unknown): value is RetryBound {
 
 /**
  * Every field the `FederationRetry` schema declares (schemas/federation.graphql),
- * in schema order. The table is `@sealed`, so Harper refuses a write carrying
- * any other field; the transition builds its write from this list rather than
- * spreading a stored row.
+ * in schema order. The table is `@sealed`, so Harper refuses a write that
+ * names any other field; the transition builds its write from this list rather
+ * than spreading a stored row.
  */
 export const RETRY_ROW_FIELDS = [
   "id",
@@ -152,4 +152,45 @@ export function parseRetryEntryKey(id: string): { peerId: string; table: string;
   if (typeof peerId !== "string" || typeof table !== "string" || typeof recordId !== "string") return null;
   if (peerId.length === 0 || table.length === 0 || recordId.length === 0) return null;
   return { peerId, table, recordId };
+}
+
+/**
+ * Why a stored row breaks a sender convention, or null when it keeps them all.
+ *
+ * The schema does not enforce these rules: `@sealed` refuses undeclared field
+ * NAMES only, and every declared field is a plain String or Int. They are
+ * the conventions the sender writes by, so the reader and the transition check
+ * them and treat a row that breaks one as malformed: never pending, never
+ * transitioned.
+ *
+ * - `id_mismatch` — `id` is not retryEntryKey(peerId, table, recordId).
+ * - `unknown_state` — `state` is neither `pending` nor `terminal`.
+ * - `unknown_reason` — `lastReason` is set but is neither a SkipReason nor a
+ *   local reason.
+ * - `outcome_mismatch` — a pending row carries a resolution or a bound, or a
+ *   terminal row's resolution is unknown or its bound breaks the rule that
+ *   `bound` is set exactly for `retry_exhausted`.
+ */
+export type RetryRowProblem = "id_mismatch" | "unknown_state" | "unknown_reason" | "outcome_mismatch";
+
+export function retryRowProblem(row: Record<string, unknown>): RetryRowProblem | null {
+  let expectedId: string | null = null;
+  try {
+    expectedId = retryEntryKey(row.peerId as string, row.table as string, row.recordId as string);
+  } catch {
+    expectedId = null;
+  }
+  if (expectedId === null || row.id !== expectedId) return "id_mismatch";
+  if (row.state !== "pending" && row.state !== "terminal") return "unknown_state";
+  if (row.lastReason != null && !isSkipReason(row.lastReason) && !LOCAL_RETRY_REASONS.has(row.lastReason as LocalRetryReason)) {
+    return "unknown_reason";
+  }
+  if (row.state === "pending") {
+    if (row.resolution != null || row.bound != null) return "outcome_mismatch";
+  } else {
+    if (!isRetryResolution(row.resolution)) return "outcome_mismatch";
+    const exhausted = row.resolution === "retry_exhausted";
+    if (exhausted ? !isRetryBound(row.bound) : row.bound != null) return "outcome_mismatch";
+  }
+  return null;
 }

@@ -480,7 +480,7 @@ ed25519 / idp) and **Integration** (legacy platform connection).
 | **Instance** | yes | One row per Flair instance (`id`, `publicKey`, `role` hub/spoke, `fabricEndpoint`, `status`) |
 | **PairingToken** | yes | One-time token (`expiresAt`, `consumedBy`) |
 | **Peer** | yes | Pinned peer (`publicKey`, `endpoint`, `status`, `lastSyncAt` / `lastMergeAt`, `lastSyncCursor`, `relayOnly`) |
-| **FederationRetry** | yes | Sender-owned federation retry bookkeeping, shaped for one row per (peer, table, record) refused for a reason a later re-offer could clear (`state`, `attempts`, `firstRefusedAt`, `lastReason`, `resolution`, `bound`). Nothing writes it until the sender is activated in a later release. `@sealed`: a write carrying an undeclared field is refused, so no record content is stored. Admin-only on every operation; excluded from federation policy and the receive mapping. |
+| **FederationRetry** | yes | Sender-owned federation retry bookkeeping, shaped for one row per (peer, table, record) refused for a reason a later re-offer could clear (`state`, `attempts`, `firstRefusedAt`, `lastReason`, `resolution`, `bound`). No production sender path creates rows yet; admin-written rows are readable. `@sealed`: a write naming an undeclared field is refused. Admin-only on every operation; excluded from federation policy and the receive mapping. |
 | **ReplayNonce** | no | `schemas/replay.graphql`. Anti-replay record shared by agent auth (`a:<agentId>:<nonce>`) and federation body signatures (`f:<nonce>`). Local to the instance (`replicate: false`); rows expire after 120 s |
 | **SyncLog** | no | Per-sync audit (`peerId`, `direction`, counts, `skippedReasons`, `status`) |
 

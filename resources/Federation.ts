@@ -33,6 +33,7 @@ import { CommittedRowChanged, confirmCommittedRow, writeBackCommittedRow, WriteB
 import { withKeyLock } from "./key-lock.js";
 import { withOwnedTransaction } from "./request-transaction.js";
 import { txnPausePoint } from "./txn-pause-point.js";
+import { retryRowProblem } from "./federation-retry-lib.js";
 import {
   classifyRecord,
   reconstructRecordVerifyBody,
@@ -1518,9 +1519,13 @@ export class FederationPeers extends Resource {
 
 /**
  * GET /FederationRetries — the rows of the sender's FederationRetry table
- * (flair#2455), split into pending and terminal, admin view. No production path
- * writes a row in this slice, so both lists stay empty until the sender is
- * activated (a later slice).
+ * (flair#2455), admin view, split into `pending`, `terminal` and `malformed`.
+ * No production sender path creates rows yet (a later slice activates the
+ * sender); rows an admin writes are readable now.
+ *
+ * A row that breaks a sender convention (retryRowProblem: an id that is not its
+ * tuple's key, an unknown state, reason or outcome) is listed under
+ * `malformed` with the problem's name, and never as pending or terminal.
  *
  * allowRead()=allowAdmin, the same gate as FederationPeers above. Read-only:
  * it never writes a row, and a read failure propagates instead of being
@@ -1534,7 +1539,13 @@ export class FederationRetries extends Resource {
   async get() {
     const pending: any[] = [];
     const terminal: any[] = [];
+    const malformed: any[] = [];
     for await (const r of (databases as any).flair.FederationRetry.search()) {
+      const problem = retryRowProblem(r);
+      if (problem) {
+        malformed.push({ key: r.id, peerId: r.peerId, table: r.table, id: r.recordId, state: r.state, problem });
+        continue;
+      }
       const row = {
         peerId: r.peerId,
         table: r.table,
@@ -1547,9 +1558,9 @@ export class FederationRetries extends Resource {
         firstRefusedAt: r.firstRefusedAt,
         completedAt: r.completedAt,
       };
-      (r.state === "terminal" ? terminal : pending).push(row);
+      (r.state === "pending" ? pending : terminal).push(row);
     }
-    return { pending, terminal };
+    return { pending, terminal, malformed };
   }
 }
 

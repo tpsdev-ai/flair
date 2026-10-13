@@ -3,9 +3,11 @@
 //
 // Runs against a composed copy of the built component (test/helpers/
 // federation-retry-probe-component.ts) that adds an admin-only probe whose POST
-// calls the real transition (optionally pausing it after its read), and a
-// test-only module that makes ONE FederationRetry.put throw on demand. Nothing
-// under resources/ ships a pause or a failure switch.
+// calls the real transition, and a test-only module that makes ONE
+// FederationRetry.put throw on demand; that failure switch exists only in the
+// composed copy. To pause a transition after its read, the probe passes the
+// transition's optional `pausePoint` callback: an in-process function argument
+// that no request can supply and no shipped resource passes.
 //
 // Every refused transition is checked against the WHOLE stored row: a refusal
 // leaves the row exactly as it was.
@@ -13,7 +15,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { retryEntryKey } from "../../resources/federation-retry-lib.js";
+import { parseRetryEntryKey, retryEntryKey } from "../../resources/federation-retry-lib.js";
 import { componentWithRetryProbe, type RetryProbeComponent } from "../helpers/federation-retry-probe-component";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 
@@ -59,11 +61,19 @@ async function readRetryRow(key: string): Promise<any> {
   return (rows as any[])[0] ?? null;
 }
 
-async function seedPending(key: string, peerId = PEER): Promise<void> {
-  await ops({
-    operation: "upsert", database: "flair", table: "FederationRetry",
-    records: [{ id: key, peerId, table: "Memory", recordId: `row-${sfx}`, state: "pending", firstRefusedAt: now(), attempts: 1, lastReason: "merge_error", createdAt: now() }],
-  });
+/** A pending row whose peerId, table and recordId are the tuple `key` encodes. */
+function pendingRow(key: string, over: Record<string, unknown> = {}) {
+  const tuple = parseRetryEntryKey(key);
+  if (!tuple) throw new Error(`not a retry key: ${key}`);
+  return { id: key, ...tuple, state: "pending", firstRefusedAt: now(), attempts: 1, lastReason: "merge_error", createdAt: now(), ...over };
+}
+
+async function seedRow(row: Record<string, unknown>): Promise<void> {
+  await ops({ operation: "upsert", database: "flair", table: "FederationRetry", records: [row] });
+}
+
+async function seedPending(key: string): Promise<void> {
+  await seedRow(pendingRow(key));
 }
 
 async function waitForFile(path: string, timeoutMs: number): Promise<void> {
@@ -165,6 +175,23 @@ describe("flair#2455 — retry transition is atomic and fail-closed (real Harper
     expect(row.bound ?? null).toBeNull();
   });
 
+  test("a malformed row (an id that is not its tuple's key, or an unknown state) is refused as malformed and never transitioned", async () => {
+    // The id encodes `mm-…`, but the stored recordId says otherwise.
+    const mismatchKey = retryEntryKey(PEER, "Memory", `mm-${sfx}`);
+    await seedRow(pendingRow(mismatchKey, { recordId: `elsewhere-${sfx}` }));
+    // A consistent id with a state that is neither pending nor terminal.
+    const stateKey = retryEntryKey(PEER, "Memory", `badstate-${sfx}`);
+    await seedRow(pendingRow(stateKey, { state: "paused" }));
+
+    for (const [key, recordId] of [[mismatchKey, `mm-${sfx}`], [stateKey, `badstate-${sfx}`]] as const) {
+      const before = await readRetryRow(key);
+      const out = (await (await probe({ peerId: PEER, table: "Memory", recordId, resolution: "merged" })).json()) as any;
+      expect(out.ok, recordId).toBe(false);
+      expect(out.code, recordId).toBe("malformed");
+      expect(await readRetryRow(key)).toEqual(before);
+    }
+  });
+
   test("a missing entry is refused by name and writes nothing", async () => {
     const out = (await (await probe({ peerId: PEER, table: "Memory", recordId: `absent-${sfx}`, resolution: "merged" })).json()) as any;
     expect(out.ok).toBe(false);
@@ -199,7 +226,7 @@ describe("flair#2455 — retry transition is atomic and fail-closed (real Harper
     // A row of ANOTHER peer, to show the lock is per peer, not global.
     const otherPeer = `${PEER}-other`;
     const otherKey = retryEntryKey(otherPeer, "Memory", `race-${sfx}`);
-    await seedPending(otherKey, otherPeer);
+    await seedPending(otherKey);
 
     const tag = `race-${sfx}`;
     const first = probe({ peerId: PEER, table: "Memory", recordId: `race-${sfx}`, resolution: "merged", pauseTag: tag }).then((r) => r.json());
