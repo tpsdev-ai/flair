@@ -19,6 +19,8 @@
 //
 // Mutation check (fails-on-unfixed): remove the noteWriteStamp call from
 // resources/Memory.ts patch() and the "trips the latch" assertion goes red.
+// Drop the guard warning from SemanticSearch's explain return (flair#2530) and
+// the explain assertion goes red.
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { tmpdir } from "node:os";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
@@ -72,16 +74,18 @@ async function patch(body: Record<string, unknown>): Promise<{ status: number; t
 
 /** The mixed-space degrade the guard reports, or undefined when the store is
  *  uniform in the current space. */
-async function semanticWarning(): Promise<string | undefined> {
+async function semanticWarning(extra: Record<string, unknown> = {}): Promise<string | undefined> {
   const path = "/SemanticSearch";
   const res = await fetch(`${harper.httpURL}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: basic },
-    body: JSON.stringify({ agentId: AGENT, q: "any keyword", queryEmbedding: [1, 0, 0, 0] }),
+    body: JSON.stringify({ agentId: AGENT, q: "any keyword", queryEmbedding: [1, 0, 0, 0], ...extra }),
   });
   const text = await res.text();
   expect(res.status, `SemanticSearch → ${res.status}: ${text.slice(0, 300)}`).toBe(200);
-  return JSON.parse(text)._warning;
+  const body = JSON.parse(text);
+  if (extra.explain) expect(body.explain).toBe(true);
+  return body._warning;
 }
 
 async function rowEmbeddingModel(): Promise<string | null> {
@@ -129,5 +133,7 @@ describe("a PATCH that stores an embedding stamp trips the embedding-space latch
     expect(await rowEmbeddingModel()).toBe(FOREIGN);
 
     expect(String(await semanticWarning())).toContain("mixed embedding spaces");
+    // flair#2530: `explain: true` returns its plan early and names the same state.
+    expect(String(await semanticWarning({ explain: true }))).toContain("mixed embedding spaces");
   }, 60_000);
 });

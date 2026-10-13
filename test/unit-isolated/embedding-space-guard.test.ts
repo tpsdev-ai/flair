@@ -170,6 +170,26 @@ describe("embedding-space-guard — latch", () => {
     }
   });
 
+  it("a known foreign stamp stays MIXED through a failed scan; a successful uniform rescan clears both", async () => {
+    _setGuardTableGetterForTests(fakeTableOver([BARE]));
+    expect(await recomputeLatch()).toBe(true);
+    noteWriteStamp(FOREIGN); // a foreign write: the store is now known mixed
+
+    _setGuardTableGetterForTests(async () => { throw new Error("transient"); });
+    expect(await recomputeLatch()).toBe(false); // the rescan fails
+    const v = await embeddingSpaceVerdict();
+    expect(v.uniform).toBe(false);
+    expect(v.state).toBe("mixed"); // a failed scan never downgrades a known-mixed store
+    expect(v.reason).toBe(SCAN_ERROR_TABLE_UNAVAILABLE); // the scan error is kept alongside
+    expect(v.found).toContain(normalizeStamp(FOREIGN)!);
+    expect(spaceGuardState()).toEqual({ state: "mixed", reason: SCAN_ERROR_TABLE_UNAVAILABLE });
+
+    // The foreign row is reconciled; a SUCCESSFUL rescan finds one space.
+    _setGuardTableGetterForTests(fakeTableOver([CURRENT, BARE]));
+    expect(await recomputeLatch()).toBe(true);
+    expect(spaceGuardState()).toEqual({ state: "uniform", reason: null });
+  });
+
   it("a later successful scan clears the failed state", async () => {
     _setGuardTableGetterForTests(async () => { throw new Error("transient"); });
     expect(await recomputeLatch()).toBe(false);

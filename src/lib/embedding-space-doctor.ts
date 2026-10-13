@@ -28,7 +28,7 @@ export interface EmbeddingSpaceDoctorFinding {
 }
 
 /**
- * A bounded, printable reason for a `scan-failed` verdict. The guard's own
+ * A bounded, printable reason for a failed scan. The guard's own
  * reason strings are short and content-free, but /Health is unauthenticated, so
  * bound the length and reject control characters before printing the string.
  */
@@ -54,7 +54,10 @@ export function describeEmbeddingSpaceDoctorFinding(field: unknown): EmbeddingSp
       return {
         isIssue: true,
         icon: "error",
-        message: "the store has mixed embedding spaces — the embedding leg is refused",
+        message:
+          "the store has mixed embedding spaces — the embedding leg is refused" +
+          // A known-mixed store stays mixed through a failed rescan; name it.
+          (rec.reason == null ? "" : `; last scan failed (${boundedScanFailureReason(rec.reason)})`),
         fixHint: "Reconcile to one space with: flair reembed --stale-only",
       };
     case "unverified":

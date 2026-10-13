@@ -124,9 +124,10 @@ export class Health extends Resource {
     }));
     // flair#2530 — the query-time embedding-space guard's state, for `flair
     // doctor`. Sync, no scan, no vector read. `state` is one of
-    // uniform | mixed | unverified | scan-failed (the last with a bounded
-    // reason); the guard serves a cross-space cosine in none of the
-    // non-uniform states.
+    // uniform | mixed | unverified | scan-failed; `reason` is the bounded error
+    // of a failed scan (on scan-failed, or on mixed when a rescan failed). The
+    // guard serves a cross-space cosine in none of the non-uniform states. The
+    // field is on the 503 body too; doctor reads it there.
     body.embeddingSpace = spaceGuardState();
     const multiWorker = multiWorkerHealthField(multiWorkerCondition());
     let status = readiness.status;

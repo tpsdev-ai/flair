@@ -263,6 +263,19 @@ describe("embedding-space-guard — both runtime legs (mutation test)", () => {
     expect(String(res._warning)).not.toContain("mixed embedding spaces");
   });
 
+  it("(g) explain output names the guard state when the embedding leg is refused", async () => {
+    seedRow("m1", AGENT, FINDING, CURRENT, FAKE_EMBEDDING);
+    // No scan has reached a verdict: the explained plan has no embedding leg, and says why.
+    const res: any = await makeSearch(AGENT).post({ agentId: AGENT, q: "replication", explain: true });
+    expect(res.explain).toBe(true);
+    expect(String(res._warning)).toContain("embedding space not yet verified");
+
+    expect(await recomputeLatch()).toBe(true);
+    const ok: any = await makeSearch(AGENT).post({ agentId: AGENT, q: "replication", explain: true });
+    expect(ok.explain).toBe(true);
+    expect(ok._warning).toBeUndefined();
+  });
+
   it("(f) after a scan error, the recall leg fails CLOSED with the failed-scan warning", async () => {
     seedRow("m1", AGENT, FINDING, CURRENT, FAKE_EMBEDDING);
     _setGuardTableGetterForTests(async () => { throw new Error("no live table"); });

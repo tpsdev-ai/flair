@@ -29,6 +29,24 @@ import { bestSemanticSimilarity, evaluateAbstention } from "./abstention.js";
 // so composite re-ranking has enough headroom to reorder results.
 const CANDIDATE_MULTIPLIER = 5;
 
+/** The recall leg's `_warning` for a guard-degraded search (flair#2530). The
+ *  verdict is never `uniform` here (that state is never degraded), so the three
+ *  cases are exactly the non-uniform states. Each names itself; the
+ *  mixed-stamps wording is used ONLY for a mixed store. */
+function spaceGuardWarning(v: EmbeddingSpaceVerdict): string {
+  if (v.state === "scan-failed") {
+    return `semantic search unavailable — embedding space unverified: last scan failed (${v.reason}); results are keyword-only.`;
+  }
+  if (v.state === "unverified") {
+    return `semantic search unavailable — embedding space not yet verified; results are keyword-only.`;
+  }
+  return (
+    `semantic search unavailable — the store has mixed embedding spaces ` +
+    `(current: ${v.current}; found: ${v.found.join(", ")}); results are keyword-only. ` +
+    `Reconcile to one space with: flair reembed --stale-only`
+  );
+}
+
 export class SemanticSearch extends Resource {
   // Self-authorize via the Ed25519 agent verify instead of relying on the auth
   // gate's admin super_user elevation (removed in the auth reshape). Any
@@ -256,6 +274,8 @@ export class SemanticSearch extends Resource {
         plan,
         tag,
         scoring,
+        // flair#2530: a guard-degraded plan has no embedding leg; say why.
+        ...(spaceGuardVerdict ? { _warning: spaceGuardWarning(spaceGuardVerdict) } : {}),
       };
     }
 
@@ -422,22 +442,7 @@ export class SemanticSearch extends Resource {
       response.threshold = abstention.threshold;
     }
     if (spaceGuardVerdict) {
-      // The verdict cannot be `uniform` here (that state is never degraded), so
-      // the three cases below are exactly the non-uniform states. Each names
-      // itself; the mixed-stamps wording is used ONLY for a mixed store.
-      const v = spaceGuardVerdict;
-      if (v.state === "scan-failed") {
-        response._warning =
-          `semantic search unavailable — embedding space unverified: last scan failed (${v.reason}); results are keyword-only.`;
-      } else if (v.state === "unverified") {
-        response._warning =
-          `semantic search unavailable — embedding space not yet verified; results are keyword-only.`;
-      } else {
-        response._warning =
-          `semantic search unavailable — the store has mixed embedding spaces ` +
-          `(current: ${v.current}; found: ${v.found.join(", ")}); results are keyword-only. ` +
-          `Reconcile to one space with: flair reembed --stale-only`;
-      }
+      response._warning = spaceGuardWarning(spaceGuardVerdict);
     } else if (!qEmb && q && getMode() === "none") {
       response._warning = "semantic search unavailable — results are keyword-only";
     }

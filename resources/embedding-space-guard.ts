@@ -38,9 +38,12 @@
  * (`mixed`) — makes a consumer take its MIXED-space path: the recall leg drops
  * its query embedding and serves keyword-only with a state-named warning, the
  * dedup leg no-ops. A consult never blocks on an in-flight scan to obtain a
- * verdict; it fails closed now and a later scan reopens the gate. A scan error
- * is classified into a bounded reason (never row content) and logged once per
- * class; the consult schedule retries unchanged.
+ * verdict; it fails closed now, and only a later SUCCESSFUL scan that finds the
+ * store uniform reopens the gate. A scan error is classified into a bounded
+ * reason (never row content) and logged once per class; the consult schedule
+ * retries unchanged. A failed scan does not change a known-mixed store's state:
+ * once a foreign stamp is known the state stays `mixed` until a successful scan,
+ * with the scan error kept in `reason`.
  *
  * ─── Why the harper import is deferred ──────────────────────────────────────
  * `harper` is dynamic-imported inside the scan only (never a top-level import)
@@ -214,14 +217,17 @@ function runScan(): Promise<void> {
 // that verified the corpus — opens the gate. The other three are NOT "known
 // uniform" and fail closed: `unverified` (no scan has reached a verdict yet),
 // `scan-failed` (the most recent scan attempt threw), and `mixed` (a scan or a
-// foreign write observed a non-current stamp).
+// foreign write observed a non-current stamp). `mixed` outranks `scan-failed`:
+// a failed rescan cannot make a known foreign stamp less certain.
 export type EmbeddingSpaceGuardState = "uniform" | "mixed" | "unverified" | "scan-failed";
 
 export interface EmbeddingSpaceVerdict {
   /** true ONLY for a scan-verified uniform store. False ⇒ take the mixed path. */
   uniform: boolean;
   state: EmbeddingSpaceGuardState;
-  /** A bounded reason, only for `scan-failed`; null otherwise. Never row content. */
+  /** The last failed scan's bounded reason, cleared when a scan reaches a
+   *  verdict; null otherwise. Non-null only for `scan-failed`, and for `mixed`
+   *  when a rescan of a known-mixed store failed. Never row content. */
   reason: string | null;
   /** The current engine-qualified space id (a metadata string, never a vector). */
   current: string;
@@ -252,19 +258,22 @@ function noteScanFailure(reason: string): void {
 function guardSnapshot(): EmbeddingSpaceVerdict {
   const current = normalizeStamp(_modelIdGetter()) ?? _modelIdGetter();
   const found = [..._activeStamps];
+  // A known foreign stamp comes first, so a later failed scan cannot turn a
+  // mixed store into an advisory `scan-failed`; its error rides in `reason`.
+  if (_uniform === false) return { uniform: false, state: "mixed", reason: _lastScanError, current, found };
   if (_lastScanError !== null) {
     return { uniform: false, state: "scan-failed", reason: _lastScanError, current, found };
   }
   if (_uniform === true) return { uniform: true, state: "uniform", reason: null, current, found };
-  if (_uniform === false) return { uniform: false, state: "mixed", reason: null, current, found };
   return { uniform: false, state: "unverified", reason: null, current, found };
 }
 
 /** The consult decision. Fails closed and never awaits an in-flight scan: an
  *  unknown verdict must be reported NOW (the caller takes its mixed-space path)
  *  rather than block until a scan finishes. A pending or stale verdict kicks off
- *  a (re)scan whose completion reopens the gate for later consults. The snapshot
- *  is taken synchronously, so the state cannot drift from the decision. */
+ *  a (re)scan; if it succeeds and finds the store uniform, later consults pass.
+ *  The snapshot is taken synchronously, so the state cannot drift from the
+ *  decision. */
 function consultGuard(): EmbeddingSpaceVerdict {
   if (_uniform === true && _lastScanError === null) return guardSnapshot();
   if (_uniform === undefined || Date.now() - _lastScanAt >= RECHECK_MS) {
@@ -277,9 +286,9 @@ function consultGuard(): EmbeddingSpaceVerdict {
  *  in the current embedding space (safe to cosine the query/candidate against
  *  stored vectors), false otherwise — including the UNKNOWN verdict (pending
  *  first scan, or a failed scan), which fails closed (the caller must take its
- *  mixed-space path). O(1) on the happy path: once verified-uniform, no scan, no
- *  allocation; a pending or tripped verdict kicks off a (re)scan the caller does
- *  NOT wait for, so the unknown verdict is reported now, not after the scan. */
+ *  mixed-space path). O(1) on the happy path: once verified-uniform, no scan; a
+ *  pending or tripped verdict kicks off a (re)scan the caller does NOT wait
+ *  for, so the unknown verdict is reported now, not after the scan. */
 export function isEmbeddingSpaceUniform(): Promise<boolean> {
   return Promise.resolve(consultGuard().uniform);
 }

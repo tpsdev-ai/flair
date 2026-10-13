@@ -600,9 +600,21 @@ program
       }
     }
 
-    if (await probePort(port)) {
+    // flair#2530: a shape-validated Flair readiness 503 means Flair answers but
+    // does not serve search. It is an issue, never "responding", so the checks
+    // that need a serving instance stay skipped; its body still carries the
+    // version and the embedding-space guard state, read in 1a below.
+    let flairNotReady = false;
+    const configuredProbe = await probeFlairHealth(`http://127.0.0.1:${port}/Health`);
+    if (configuredProbe.reaching) {
       console.log(`  ${render.icons.ok} Harper responding on port ${render.wrap(render.c.bold, String(port))}`);
       harperResponding = true;
+    } else if (configuredProbe.notReady) {
+      const why = configuredProbe.notReadyReason ? ` (${configuredProbe.notReadyReason})` : "";
+      console.log(`  ${render.icons.error} Flair is answering on port ${render.wrap(render.c.bold, String(port))} but not serving search${why}`);
+      console.log(`     ${render.wrap(render.c.dim, "Fix:")} wait for startup to finish; if it persists, flair restart`);
+      flairNotReady = true;
+      issues++;
     } else {
       // Port didn't respond — but if PID is alive, try to find the real port
       let discoveredPort: number | null = null;
@@ -688,17 +700,18 @@ program
     let embedGpuFromHealth: unknown;
     let embeddingSpaceFromHealth: unknown;
     let workerThreads: WorkerThreadsObservation | undefined;
-    if (harperResponding) {
+    if (harperResponding || flairNotReady) {
       try {
         const probe = await probeFlairHealth(`${baseUrl}/Health`);
-        if (probe.reaching) {
-          workerThreads = probe.observation ?? undefined;
-          if (probe.status >= 200 && probe.status < 300 && probe.body && typeof probe.body === "object") {
-            const healthBody = probe.body as { version?: unknown; embedding?: unknown; embeddingSpace?: unknown };
-            runningVersion = typeof healthBody.version === "string" ? healthBody.version : null;
-            embedGpuFromHealth = healthBody.embedding;
-            embeddingSpaceFromHealth = healthBody.embeddingSpace;
-          }
+        if (probe.reaching) workerThreads = probe.observation ?? undefined;
+        // A 2xx body, or a shape-validated Flair 503 body (flair#2530): the
+        // fields are the server's own either way. Reading a 503 body does not
+        // make it healthy; the port check or the worker-threads check counts it.
+        if (probe.healthBody) {
+          const healthBody = probe.healthBody as { version?: unknown; embedding?: unknown; embeddingSpace?: unknown };
+          runningVersion = typeof healthBody.version === "string" ? healthBody.version : null;
+          embedGpuFromHealth = healthBody.embedding;
+          embeddingSpaceFromHealth = healthBody.embeddingSpace;
         }
       } catch { /* leave runningVersion null — reported below as "unknown" */ }
 
