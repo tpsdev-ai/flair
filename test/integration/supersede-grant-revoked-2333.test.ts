@@ -3,14 +3,16 @@
  *
  * A grant-authorized, non-admin cross-agent Memory supersede stands on a "write"
  * MemoryGrant. The authorization check and the close that follows it are separate
- * reads: if the grant is revoked after the check but before the close commits, the
- * close used to land anyway and closed the owner's memory. These cases hold the
- * close inside its transaction (the "supersede-close" test pause, before the write is staged),
- * revoke the grant so the revocation is committed, release the close, and assert
- * the target row is NOT closed. The third case pauses at "supersede-close-staged"
- * instead — after the close has staged its write, so the revocation lands in the
- * window the write-back confirm covers — and asserts the same refusal. A control
- * case shows that with the grant intact the close lands.
+ * reads, so the close re-checks the grant on committed state after it stages its
+ * write. The successor and the close are staged in one transaction (flair#2564),
+ * so a revoked grant refuses the whole write with 409 granted_close_revoked: no
+ * successor, no close. These cases hold the close (the "granted-close" test
+ * pause, before the close is staged), revoke the grant so the revocation is
+ * committed, release the close, and assert the refusal and that the target row
+ * is NOT closed. The third case pauses at "granted-close-staged" instead —
+ * after the close has staged its write, so the revocation lands in the window
+ * the write-back confirm covers — and asserts the same refusal. A control case
+ * shows that with the grant intact the close lands.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
@@ -21,7 +23,7 @@ import nacl from "tweetnacl";
 import { HarperInstance, startHarper, stopHarper } from "../helpers/harper-lifecycle";
 import { getModelId } from "../../resources/embeddings-provider.ts";
 
-const POINT = "supersede-close";
+const POINT = "granted-close";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
 function mkAgent(id: string): TestAgent {
@@ -165,7 +167,7 @@ afterAll(async () => {
 });
 
 describe("flair#2333 H10 — a grant revocation committed before the grant re-check stops the close (real Harper)", () => {
-  it("a grant revocation committed during the pre-stage pause leaves the owner's memory open", async () => {
+  it("a grant revocation committed during the pre-stage pause refuses the write and leaves the owner's memory open", async () => {
     const { response, competed, released } = await withPausedClose(
       () => authSend(harper, grantee, "PUT", "/Memory/h10-revoked-successor", {
         id: "h10-revoked-successor", agentId: grantee.id, supersedes: "h10-revoked-target",
@@ -175,9 +177,10 @@ describe("flair#2333 H10 — a grant revocation committed before the grant re-ch
     );
     expect(released, "the close was not paused and released by this test").toBe("go");
     expect(competed, "the competing grant revocation failed").toBe(200);
-    expect(response.status, (await response.text()).slice(0, 300)).toBeLessThan(300);
-    const successor = await readRow(harper, "h10-revoked-successor");
-    expect(successor?.supersedes).toBe("h10-revoked-target");
+    const text = await response.text();
+    expect(response.status, text.slice(0, 300)).toBe(409);
+    expect(JSON.parse(text).error).toBe("granted_close_revoked");
+    expect(await readRow(harper, "h10-revoked-successor"), "a successor was written after the grant was revoked").toBeNull();
     const target = await readRow(harper, "h10-revoked-target");
     expect(target?.validTo ?? null, "the close landed after the authorizing grant was revoked").toBeNull();
   }, 60_000);
@@ -193,7 +196,7 @@ describe("flair#2333 H10 — a grant revocation committed before the grant re-ch
     expect(target?.validTo, "the close did not land under an intact grant").toBeTruthy();
   }, 60_000);
 
-  it("a grant revocation committed before the staged re-check leaves the owner's memory open", async () => {
+  it("a grant revocation committed before the staged re-check refuses the write and leaves the owner's memory open", async () => {
     await grantWrite(harper, owner.id, grantee.id);
     const { response, competed, released } = await withPausedClose(
       () => authSend(harper, grantee, "PUT", "/Memory/h10-staged-successor", {
@@ -201,13 +204,14 @@ describe("flair#2333 H10 — a grant revocation committed before the grant re-ch
         content: "Successor whose close is held after staging, long enough for the gate.",
       }),
       () => revokeWrite(harper, owner.id, grantee.id),
-      "supersede-close-staged",
+      "granted-close-staged",
     );
     expect(released, "the staged close was not paused and released by this test").toBe("go");
     expect(competed, "the competing grant revocation failed").toBe(200);
-    expect(response.status, (await response.text()).slice(0, 300)).toBeLessThan(300);
-    const successor = await readRow(harper, "h10-staged-successor");
-    expect(successor?.supersedes).toBe("h10-staged-target");
+    const text = await response.text();
+    expect(response.status, text.slice(0, 300)).toBe(409);
+    expect(JSON.parse(text).error).toBe("granted_close_revoked");
+    expect(await readRow(harper, "h10-staged-successor"), "a successor was written after the grant was revoked").toBeNull();
     const target = await readRow(harper, "h10-staged-target");
     expect(target?.validTo ?? null, "the close landed after the authorizing grant was revoked while its write was staged").toBeNull();
   }, 60_000);

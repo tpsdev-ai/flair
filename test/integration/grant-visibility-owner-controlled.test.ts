@@ -6,10 +6,16 @@
  * set by the owner or an admin. For the grant-authorized successor write, the
  * successor carries the predecessor's visibility when the write omits one, and
  * a write naming one that reads differently is refused with a named 403 and
- * writes nothing. (A predecessor whose visibility changes during the write is
- * covered by grant-visibility-close-contention.test.ts.) The rule governs that
- * write: an ordinary successor is the grantee's own row, and the grantee may
- * later change that row's visibility as its owner (a control below pins this).
+ * writes nothing, unless an earlier validation refuses it first (an ephemeral
+ * write naming "shared" gets the ephemeral private-only rule's 400; an
+ * ephemeral or session skill write gets the skill-durability gate's 400). An
+ * ordinary ephemeral successor that omits visibility on a shared predecessor
+ * carries "shared" and gets the same ephemeral-rule 400 (a case below). A
+ * predecessor whose visibility changes before the close's final committed-state
+ * re-read is covered by grant-visibility-close-contention.test.ts. The rule
+ * governs that write: an ordinary successor is the grantee's own row, and the
+ * grantee may later change that row's visibility as its owner (a control below
+ * pins this).
  *
  * Each grantee write path is covered in both directions (naming shared on a
  * private predecessor, and private on a shared one): PUT /Memory and POST

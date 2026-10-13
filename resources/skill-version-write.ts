@@ -344,7 +344,8 @@ export interface RunSkillVersionWriteArgs {
  * read, as for the grant) must read with the successor's visibility: a write
  * grant does not include changing a record's visibility (grant-visibility.ts).
  * A mismatch returns the named 409 predecessor_visibility_changed, and the
- * whole write rolls back the same way.
+ * whole write rolls back the same way. As with the grant, a change committed
+ * after this re-read and before the transaction commits is not seen by it.
  */
 async function afterCloseStaged(
   granted: GrantedClose | null | undefined,

@@ -2,11 +2,13 @@
  * grant-visibility-close-contention.test.ts — real Harper.
  *
  * A write grant does not include changing a record's visibility. For the
- * grant-authorized successor write, the successor is written only with the
- * visibility its predecessor has on committed state when the close commits:
- * the close compares the two after it stages its write, and a mismatch refuses
- * the whole write with the named 409 predecessor_visibility_changed — no
- * successor, no close, no version row (resources/grant-visibility.ts).
+ * grant-authorized successor write, the close stages its write and then
+ * re-reads the predecessor's committed row; if that row's visibility no longer
+ * reads the same as the successor's, the whole write is refused with the named
+ * 409 predecessor_visibility_changed — no successor, no close, no version row
+ * (resources/grant-visibility.ts). A change committed after that final re-read
+ * and before the write commits is not seen by it; Harper orders the writes by
+ * transaction timestamp.
  *
  * These cases change the predecessor's visibility while the grantee's close is
  * held by a test-only pause (resources/txn-pause-point.ts, enabled by
@@ -14,18 +16,23 @@
  * sets in the test process's environment while it starts its Harper, then
  * restores), then release the close:
  *
- *   - an ordinary successor (Memory.ts closeSupersededRecord): the owner's own
- *     signed PUT changes the predecessor's visibility, once while the close is
- *     held before it stages its write ("supersede-close", PUT /Memory) and once
- *     after ("supersede-close-staged", POST /Memory);
+ *   - an ordinary successor (Memory.ts stageGrantedClose, staged in the
+ *     successor's transaction): the owner's own signed PUT changes the
+ *     predecessor's visibility, once while the close is held before it stages
+ *     its write ("granted-close", PUT /Memory) and once after
+ *     ("granted-close-staged", POST /Memory). An owner edit that keeps the
+ *     visibility is also refused, by name, as stored_row_changed: the close is
+ *     staged at its transaction's timestamp and is not re-staged over a row
+ *     changed during the write;
  *   - a skill successor (skill-version-write.ts): a skill row's own writes take
  *     the skill-version lock the grantee's write holds, so the competing change
  *     is a raw table update, as an operator would make, while the close is held
  *     after it stages its write ("skill-close-staged"), through PUT /Memory and
  *     POST /FeedMemories.
  *
- * Control cases show that a competing change that leaves visibility as it was
- * lets the grant-authorized write land.
+ * Control cases show that a held close with no competing change lands, and
+ * that a competing change to a skill row that leaves visibility as it was lets
+ * the grant-authorized skill write land.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
@@ -203,12 +210,12 @@ afterAll(async () => {
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
 });
 
-describe("a grant-authorized ordinary successor is written only with the predecessor's committed visibility (real Harper)", () => {
+describe("a grant-authorized ordinary successor: a predecessor visibility change before the close's final re-read refuses the write (real Harper)", () => {
   it("PUT /Memory: the owner makes the shared predecessor private while the close is held before staging: 409, nothing written", async () => {
     const pred = await ownerMemory("put-pre", "shared");
     const succ = `gvc-succ-${randomUUID()}`;
     const { response, competed, released } = await withPausedClose(
-      "supersede-close",
+      "granted-close",
       () => send(grantee, "PUT", `/Memory/${succ}`, { ...memory(succ, grantee.id, "put-pre grantee successor, long enough for the gate"), supersedes: pred.id }),
       async () => (await send(owner, "PUT", `/Memory/${pred.id}`, { ...pred.body, visibility: "private" })).status,
     );
@@ -221,7 +228,7 @@ describe("a grant-authorized ordinary successor is written only with the predece
     const pred = await ownerMemory("post-staged", "private");
     const succ = `gvc-succ-${randomUUID()}`;
     const { response, competed, released } = await withPausedClose(
-      "supersede-close-staged",
+      "granted-close-staged",
       () => send(grantee, "POST", "/Memory", { ...memory(succ, grantee.id, "post-staged grantee successor, long enough for the gate"), supersedes: pred.id }),
       async () => (await send(owner, "PUT", `/Memory/${pred.id}`, { ...pred.body, visibility: "shared" })).status,
     );
@@ -230,27 +237,43 @@ describe("a grant-authorized ordinary successor is written only with the predece
     await expectRefused(response, pred.id, succ, "shared", false);
   }, 60_000);
 
-  it("control: an owner edit that keeps the visibility lets the grant-authorized successor land and close", async () => {
+  it("an owner edit that keeps the visibility refuses the write by name as stored_row_changed: nothing written, the edit kept", async () => {
     const pred = await ownerMemory("edit", "shared");
     const succ = `gvc-succ-${randomUUID()}`;
     const EDITED = "edit owner memory text AFTER the owner's edit, long enough for the gate";
     const { response, competed, released } = await withPausedClose(
-      "supersede-close",
+      "granted-close",
       () => send(grantee, "PUT", `/Memory/${succ}`, { ...memory(succ, grantee.id, "edit grantee successor, long enough for the gate"), supersedes: pred.id }),
       async () => (await send(owner, "PUT", `/Memory/${pred.id}`, { ...pred.body, content: EDITED })).status,
     );
     expect(released, "the close was not paused and released by this test").toBe("go");
     expect(competed, "the owner's edit failed").toBeLessThan(300);
-    expect(response.status, (await response.text()).slice(0, 300)).toBeLessThan(300);
-    const successor = await stored(succ);
-    expect(successor?.visibility, "successor visibility").toBe("shared");
+    const text = await response.text();
+    expect(response.status, text.slice(0, 300)).toBe(409);
+    expect(JSON.parse(text).error).toBe("stored_row_changed");
+    expect(await stored(succ), "a successor row was written").toBeNull();
     const predecessor = await stored(pred.id);
     expect(predecessor?.content, "the owner's edit is kept").toBe(EDITED);
-    expect(predecessor?.validTo, "the close did not land").toBeTruthy();
+    expect(predecessor?.validTo ?? null, "the predecessor was closed").toBeNull();
+  }, 60_000);
+
+  it("control: a held close with no competing change lands with the successor", async () => {
+    const pred = await ownerMemory("held", "private");
+    const succ = `gvc-succ-${randomUUID()}`;
+    const { response, competed, released } = await withPausedClose(
+      "granted-close-staged",
+      () => send(grantee, "PUT", `/Memory/${succ}`, { ...memory(succ, grantee.id, "held grantee successor, long enough for the gate"), supersedes: pred.id }),
+      async () => "no competing change",
+    );
+    expect(released, "the close was not paused and released by this test").toBe("go");
+    expect(competed).toBe("no competing change");
+    expect(response.status, (await response.text()).slice(0, 300)).toBeLessThan(300);
+    expect((await stored(succ))?.visibility, "successor visibility").toBe("private");
+    expect((await stored(pred.id))?.validTo, "the close did not land").toBeTruthy();
   }, 60_000);
 });
 
-describe("a grant-authorized skill successor is written only with the predecessor's committed visibility (real Harper)", () => {
+describe("a grant-authorized skill successor: a predecessor visibility change before the close's final re-read refuses the write (real Harper)", () => {
   it("PUT /Memory: the shared skill predecessor is made private while the close is staged: 409, no successor, no close, no version", async () => {
     const pred = await ownerSkill("skill-put", "shared");
     const succ = `gvc-succ-${randomUUID()}`;

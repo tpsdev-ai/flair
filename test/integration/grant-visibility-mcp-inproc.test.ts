@@ -15,16 +15,23 @@
  * memory_store write only the caller's own rows. These cases pin that the
  * owner's rows and their visibility are unchanged by a grantee's MCP calls.
  *
- * The last cases drive Memory.post() in-process through the fixture's
- * `remember` op (collectionResource + agentContext), which carries no request
+ * The next cases drive Memory.post() in-process through the fixture's
+ * `remember` op (collectionResource + agentContext), which carries no caller
  * transaction, so the write runs in a transaction withSharedWriteTransaction
- * owns. A grant-authorized successor is written only with the visibility its
- * predecessor has on committed state when the close commits: with the close
- * held by the test-only "supersede-close" pause (resources/txn-pause-point.ts,
- * enabled for this file's Harper by FLAIR_ENABLE_TEST_FAULT_INJECTION and
- * FLAIR_TEST_PAUSE_DIR), a visibility change committed to the predecessor
- * refuses the write with the named 409 and leaves no successor; with no change
- * the successor lands and the close lands.
+ * owns. For a grant-authorized successor, the close's final committed-state
+ * re-read compares the predecessor's visibility with the successor's: with
+ * the close held by the test-only "granted-close" pause
+ * (resources/txn-pause-point.ts, enabled for this file's Harper by
+ * FLAIR_ENABLE_TEST_FAULT_INJECTION and FLAIR_TEST_PAUSE_DIR), a visibility
+ * change committed to the predecessor before that re-read refuses the write
+ * with the named 409 and leaves no successor; with no change the successor
+ * lands and the close lands.
+ *
+ * The last cases write the grantee's supersede inside a transaction the
+ * caller owns (the fixture's `supersedeInCallerTransaction` op). The successor
+ * and its close are staged in that transaction, so they commit or abort with
+ * it: when the caller aborts after the write, no successor is written and the
+ * predecessor stays open.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -154,7 +161,7 @@ describe("MCP tools: a grantee's calls leave the owner's rows and their visibili
   }, 120_000);
 });
 
-const POINT = "supersede-close";
+const POINT = "granted-close";
 async function waitFor(path: string, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -210,6 +217,35 @@ describe("in-process Memory.post(): a grant-authorized successor is written only
     expect(res.ok, JSON.stringify(res).slice(0, 300)).toBe(true);
     const successors = await successorsOf(predId);
     expect(successors.map((r) => r.visibility)).toEqual(["private"]);
+    expect((await rowsFor(OWNER)).find((r) => r.id === predId)?.validTo, "the close did not land").toBeTruthy();
+  }, 120_000);
+});
+
+describe("in-process, inside a caller's transaction: a grant-authorized successor and its close commit or abort with that transaction", () => {
+  test("the caller aborts its transaction after the write: no successor, the predecessor open", async () => {
+    const pred = await fleet("remember", { agentId: OWNER, content: "gvm caller-abort predecessor", durability: "persistent", visibility: "shared" });
+    expect(pred.ok, JSON.stringify(pred).slice(0, 300)).toBe(true);
+    const predId = pred.value.id;
+    const res = await fleet("supersedeInCallerTransaction", {
+      id: `${GRANTEE}-caller-abort`, agentId: GRANTEE, content: "gvm caller-abort successor", durability: "persistent", supersedes: predId, abort: true,
+    });
+    expect(res.ok, JSON.stringify(res).slice(0, 300)).toBe(true);
+    expect(res.value, "the write did not return before the caller aborted").toEqual({ aborted: true, written: true });
+    expect(await successorsOf(predId), "a successor row was written").toEqual([]);
+    const after = (await rowsFor(OWNER)).find((r) => r.id === predId);
+    expect([after?.visibility, after?.validTo ?? null], "the predecessor was closed").toEqual(["shared", null]);
+  }, 120_000);
+
+  test("control: the caller commits its transaction: the successor lands and the close lands", async () => {
+    const pred = await fleet("remember", { agentId: OWNER, content: "gvm caller-commit predecessor", durability: "persistent", visibility: "shared" });
+    expect(pred.ok, JSON.stringify(pred).slice(0, 300)).toBe(true);
+    const predId = pred.value.id;
+    const res = await fleet("supersedeInCallerTransaction", {
+      id: `${GRANTEE}-caller-commit`, agentId: GRANTEE, content: "gvm caller-commit successor", durability: "persistent", supersedes: predId, abort: false,
+    });
+    expect(res.ok, JSON.stringify(res).slice(0, 300)).toBe(true);
+    expect(res.value).toEqual({ aborted: false, written: true });
+    expect((await successorsOf(predId)).map((r) => [r.id, r.visibility])).toEqual([[`${GRANTEE}-caller-commit`, "shared"]]);
     expect((await rowsFor(OWNER)).find((r) => r.id === predId)?.validTo, "the close did not land").toBeTruthy();
   }, 120_000);
 });

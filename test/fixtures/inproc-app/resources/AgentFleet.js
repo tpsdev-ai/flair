@@ -17,7 +17,7 @@
  * Kept as plain JS (no build step) so it loads through the `jsResource` glob
  * exactly as a hand-written application component would.
  */
-import { Resource, server } from "harper";
+import { Resource, server, transaction } from "harper";
 // The in-process call seam. Deep-imported from the installed package the same
 // way an application would — Flair ships `dist/`, and this module has no
 // dependencies of its own.
@@ -110,6 +110,33 @@ async function remember(agentId, { content, durability = "standard", visibility,
   // Optional: the id of the record this one replaces (a supersede).
   if (supersedes) body.supersedes = supersedes;
   return h.post(body);
+}
+
+/** Thrown by {@link supersedeInCallerTransaction} to abort its own transaction. */
+class CallerAbort extends Error {}
+
+/**
+ * A supersede written inside a transaction THIS caller owns (Harper's
+ * `transaction()`), the shape of an in-process caller that composes a Memory
+ * write with writes of its own: the Memory write joins the caller's
+ * transaction, and the caller's commit or abort decides it. With `abort`, the
+ * caller throws after the write returns, so its transaction aborts.
+ */
+async function supersedeInCallerTransaction(agentId, { id, content, durability = "standard", supersedes, abort }) {
+  const ctx = agentContext(agentId);
+  let written = null;
+  try {
+    await transaction(ctx, async () => {
+      const h = await collectionResource(flair("Memory"), ctx);
+      written = await h.post({ id, agentId, content, durability, supersedes });
+      if (abort && !(written instanceof Response)) throw new CallerAbort("the caller aborts its transaction after the write");
+    });
+  } catch (err) {
+    if (!(err instanceof CallerAbort)) throw err;
+    return { aborted: true, written: true };
+  }
+  if (written instanceof Response) return written;
+  return { aborted: false, written: written != null };
 }
 
 /**
@@ -357,6 +384,8 @@ export class AgentFleet extends Resource {
         return run(() => registerAgent(body));
       case "remember":
         return run(() => remember(body.agentId, body));
+      case "supersedeInCallerTransaction":
+        return run(() => supersedeInCallerTransaction(body.agentId, body));
       case "recall":
         return run(() => recall(body.agentId, body));
       case "recallById":

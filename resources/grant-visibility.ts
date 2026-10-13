@@ -13,13 +13,22 @@
  *   - a write naming a visibility that reads differently from the
  *     predecessor's (private where it is shared, or shared where it is
  *     private) is refused with {@link grantVisibilityRefusal}, a 403 that
- *     carries only its name and a fixed message;
- *   - the successor is written only with the visibility the predecessor has on
- *     committed state when the close commits: the close compares them after it
- *     stages its write, and a mismatch (the predecessor's visibility changed
- *     during the write) refuses the whole write with
- *     {@link predecessorVisibilityChangedRefusal}, a 409: no successor, no close,
- *     no version row.
+ *     carries only its name and a fixed message, unless an earlier validation
+ *     refuses it first: an ephemeral write naming "shared" gets the ephemeral
+ *     private-only rule's 400 invalid_visibility_for_durability, and an
+ *     ephemeral or session skill write gets the skill-durability gate's 400
+ *     skill_durability;
+ *   - the close stages its write and then re-reads the predecessor's committed
+ *     row; if that row's visibility no longer reads the same as the
+ *     successor's, the whole write is refused with
+ *     {@link predecessorVisibilityChangedRefusal}, a 409: no successor, no
+ *     close, no version row. A change committed after that final re-read and
+ *     before the write commits is not seen by it; Harper orders the writes by
+ *     transaction timestamp.
+ *
+ * An ordinary successor that omits visibility on a shared predecessor while
+ * naming ephemeral durability carries "shared", which the ephemeral
+ * private-only rule refuses (400 invalid_visibility_for_durability).
  *
  * The rule governs that one write. A later write follows the ordinary owner
  * rules: an ordinary (non-skill) successor is owned by the grantee, which may
@@ -37,7 +46,7 @@
  *
  * Who counts as the owner or an admin is unchanged and decided where each path
  * decides the grant: the non-skill supersede (Memory.ts
- * validateAndAuthorizeSupersedes, and closeSupersededRecord at the close)
+ * validateAndAuthorizeSupersedes, and stageGrantedClose at the close)
  * applies this to a non-admin agent writing a successor of another agent's
  * record; the skill-version writer (skill-version-write.ts) applies it to every
  * plan whose predecessor close stands on a write grant (`grantedClose`). No
@@ -48,8 +57,8 @@ import { isPrivateVisibility, PRIVATE_VISIBILITY, SHARED_VISIBILITY } from "./me
 /** The named refusal for a grant-authorized write that changes visibility. */
 export const GRANT_VISIBILITY_REFUSAL = "grant_cannot_change_visibility";
 
-/** The named refusal for a grant-authorized write whose predecessor's visibility
- *  changed on committed state before the close committed. */
+/** The named refusal for a grant-authorized write whose predecessor's committed
+ *  visibility, at the close's final re-read, no longer reads as the successor's. */
 export const PREDECESSOR_VISIBILITY_CHANGED = "predecessor_visibility_changed";
 
 /** 403: a write grant does not include changing a record's visibility. */
@@ -65,23 +74,25 @@ export function grantVisibilityRefusal(): Response {
 
 /**
  * 409: the predecessor's committed visibility no longer reads the same as the
- * successor's, so nothing was written. Retrying carries the current visibility.
+ * successor's, so nothing was written. A retry that omits visibility carries
+ * the predecessor's current visibility; a retry that names the earlier value
+ * gets the 403 {@link grantVisibilityRefusal}.
  */
 export function predecessorVisibilityChangedRefusal(): Response {
   return new Response(
     JSON.stringify({
       error: PREDECESSOR_VISIBILITY_CHANGED,
-      message: "the superseded record's visibility changed during this write; nothing was written. Retry to carry its current visibility",
+      message: "the superseded record's visibility changed during this write; nothing was written. A retry that omits visibility carries its current visibility",
     }),
     { status: 409, headers: { "content-type": "application/json" } },
   );
 }
 
 /**
- * Aborts a grant-authorized non-skill close (Memory.ts closeSupersededRecord):
- * the predecessor's committed visibility reads differently from the
- * successor's. Memory.post()/put() discard the staged successor and answer
- * {@link predecessorVisibilityChangedRefusal}.
+ * Aborts a grant-authorized non-skill close (Memory.ts stageGrantedClose): the
+ * predecessor's committed visibility reads differently from the successor's.
+ * Memory.post()/put() abort the transaction the successor and the close are
+ * staged in and answer {@link predecessorVisibilityChangedRefusal}.
  */
 export class PredecessorVisibilityChanged extends Error {
   constructor() {
