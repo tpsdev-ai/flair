@@ -13,7 +13,7 @@ import { maybeThrowSkillWriteFault } from "./skill-write-fault.js";
 import { supersedesTargetUnreadable } from "./memory-id-guard.js";
 import { grantedCloseRevokedRefusal, writeGrantHeld } from "./write-back.js";
 import { txnPausePoint } from "./txn-pause-point.js";
-import { grantedSuccessorVisibilityDenial } from "./grant-visibility.js";
+import { committedVisibilityDiffers, grantedSuccessorVisibilityDenial, predecessorVisibilityChangedRefusal } from "./grant-visibility.js";
 
 /** Durability-keyed default visibility (mirrors Memory's write default). */
 function defaultVisibilityForDurability(durability: unknown): "private" | "shared" {
@@ -260,9 +260,10 @@ export interface SkillSuccessorPlan {
    * Required, so every plan states it. When set, the shared writer re-checks the
    * grant on committed state after it stages the close and refuses the whole
    * write — no close, no successor, no version — when the grant is gone.
-   * When set, the successor must also read with the predecessor's visibility:
-   * a write grant does not include changing a record's visibility
-   * (grant-visibility.ts).
+   * When set, this grant-authorized write must also carry a successor that
+   * reads with the predecessor's visibility, both as planned and on committed
+   * state after the close is staged: a write grant does not include changing a
+   * record's visibility (grant-visibility.ts).
    */
   grantedClose: GrantedClose | null;
 }
@@ -337,14 +338,28 @@ export interface RunSkillVersionWriteArgs {
  * 409 when the grant is gone — the caller returns it, so the whole transaction
  * rolls back: no close, no successor, no version — else null. A plan with no
  * grant (same-agent, operator, internal) reads nothing.
+ *
+ * For a grant-authorized supersede, `successor` is the planned successor row.
+ * Before the grant re-check, the predecessor's COMMITTED row (an empty-context
+ * read, as for the grant) must read with the successor's visibility: a write
+ * grant does not include changing a record's visibility (grant-visibility.ts).
+ * A mismatch returns the named 409 predecessor_visibility_changed, and the
+ * whole write rolls back the same way.
  */
-async function afterCloseStaged(granted: GrantedClose | null | undefined): Promise<Response | null> {
+async function afterCloseStaged(
+  granted: GrantedClose | null | undefined,
+  supersede?: { predecessorId: string; successor: Record<string, any> },
+): Promise<Response | null> {
   // Test-only: inert unless armed — here the close write is staged, so a
-  // competing grant revocation and the committed-state re-check below can be
-  // exercised in either order (Memory's "supersede-close-staged").
+  // competing grant revocation or row change and the committed-state re-checks
+  // below can be exercised in either order (Memory's "supersede-close-staged").
   const stagedPause = txnPausePoint("skill-close-staged");
   if (stagedPause) await stagedPause;
   if (!granted) return null;
+  if (supersede) {
+    const committed = await (databases as any).flair.Memory.get(supersede.predecessorId, {});
+    if (committedVisibilityDiffers(committed, supersede.successor.visibility)) return predecessorVisibilityChangedRefusal();
+  }
   const held = await writeGrantHeld((databases as any).flair.MemoryGrant, granted.granteeId, granted.ownerId, {});
   return held ? null : grantedCloseRevokedRefusal();
 }
@@ -393,7 +408,9 @@ async function runSkillVersionWriteInner(args: RunSkillVersionWriteArgs): Promis
         if (built === null) return null;
         if (built instanceof Response) return built;
         // A write grant does not include changing a record's visibility;
-        // visibility is set by the owner or an admin (grant-visibility.ts).
+        // visibility is set by the owner or an admin (grant-visibility.ts). The
+        // plan is checked here and again on committed state once the close is
+        // staged (afterCloseStaged).
         const visibilityDenial = grantedSuccessorVisibilityDenial(built);
         if (visibilityDenial) return visibilityDenial;
         plan = built;
@@ -428,8 +445,11 @@ async function runSkillVersionWriteInner(args: RunSkillVersionWriteArgs): Promis
         if (writePlan.predecessor) {
           maybeThrowSkillWriteFault("close", owner);
           await args.hooks.closePredecessor!(writePlan.predecessor, writePlan.closePatch, shared);
-          // flair#2511: the grant re-check, after the close is staged.
-          const revoked = await afterCloseStaged(writePlan.grantedClose);
+          // flair#2511: the grant re-check, after the close is staged, with the
+          // committed-visibility check for a grant-authorized successor.
+          const revoked = await afterCloseStaged(writePlan.grantedClose, {
+            predecessorId: String(writePlan.predecessor.id), successor: writePlan.successor,
+          });
           if (revoked) return revoked;
         }
       }

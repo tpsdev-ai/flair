@@ -3,16 +3,21 @@
  *
  * A "write" MemoryGrant lets the grantee write a successor of the owner's
  * record. It does not include changing the record's visibility: visibility is
- * set by the owner or an admin. A grantee's successor carries the
- * predecessor's visibility; a grantee write that names a different one is
- * refused with a named 403 and writes nothing.
+ * set by the owner or an admin. For the grant-authorized successor write, the
+ * successor carries the predecessor's visibility when the write omits one, and
+ * a write naming one that reads differently is refused with a named 403 and
+ * writes nothing. (A predecessor whose visibility changes during the write is
+ * covered by grant-visibility-close-contention.test.ts.) The rule governs that
+ * write: an ordinary successor is the grantee's own row, and the grantee may
+ * later change that row's visibility as its owner (a control below pins this).
  *
- * Each grantee write path is covered: PUT /Memory and POST /Memory for a skill
- * successor and for an ordinary memory successor, and POST /FeedMemories for a
- * skill successor. Control cases show the owner, a Basic administrator, and a
- * grantee writing with the predecessor's visibility (or omitting it) are
- * unaffected, and that PATCH or PUT addressed at the owner's own row stays
- * refused.
+ * Each grantee write path is covered in both directions (naming shared on a
+ * private predecessor, and private on a shared one): PUT /Memory and POST
+ * /Memory for a skill successor and for an ordinary memory successor, and POST
+ * /FeedMemories for a skill successor. Control cases show the owner, a Basic
+ * administrator, and a grantee writing with the predecessor's visibility (or
+ * omitting it) are unaffected, and that PATCH or PUT addressed at the owner's
+ * own row stays refused.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
@@ -174,6 +179,13 @@ describe("a write grant does not include changing a skill's visibility", () => {
     await expectRefused(res, pred, succ, true);
   }, 60_000);
 
+  it("POST /Memory: a grantee's skill successor naming visibility private on a shared skill is refused", async () => {
+    const pred = await ownerSkill("post-skill-private", "shared");
+    const succ = `gv-succ-${randomUUID()}`;
+    const res = await send(grantee, "POST", "/Memory", skillSuccessor(succ, pred, "post-skill-private grantee version two", "private"));
+    await expectRefused(res, pred, succ, true);
+  }, 60_000);
+
   it("PUT /Memory: a grantee's skill successor naming visibility private on a shared skill is refused", async () => {
     const pred = await ownerSkill("put-skill-private", "shared");
     const succ = `gv-succ-${randomUUID()}`;
@@ -248,6 +260,20 @@ describe("a write grant does not include changing a memory's visibility", () => 
     await expectRefused(res, pred, succ, false);
   }, 60_000);
 
+  it("PUT /Memory: a grantee's successor naming visibility shared on a private memory is refused", async () => {
+    const pred = await ownerMemory("put-mem-shared", "persistent", "private");
+    const succ = `gv-succ-${randomUUID()}`;
+    const res = await send(grantee, "PUT", `/Memory/${succ}`, memorySuccessor(succ, pred, "put-mem-shared grantee text", "persistent", "shared"));
+    await expectRefused(res, pred, succ, false);
+  }, 60_000);
+
+  it("POST /Memory: a grantee's successor naming visibility private on a shared memory is refused", async () => {
+    const pred = await ownerMemory("post-mem-private", "standard", "shared");
+    const succ = `gv-succ-${randomUUID()}`;
+    const res = await send(grantee, "POST", "/Memory", memorySuccessor(succ, pred, "post-mem-private grantee text", "standard", "private"));
+    await expectRefused(res, pred, succ, false);
+  }, 60_000);
+
   it("POST /Memory: a grantee's successor naming visibility shared on a private memory is refused", async () => {
     const pred = await ownerMemory("post-mem-shared", "persistent", "private");
     const succ = `gv-succ-${randomUUID()}`;
@@ -302,6 +328,19 @@ describe("a write grant does not include changing a memory's visibility", () => 
     const res = await basicSend("PUT", `/Memory/${succ}`, { ...memory(succ, owner.id, "admin-mem admin successor", "standard", "shared"), supersedes: pred });
     expect(res.status, (await res.text()).slice(0, 300)).toBeLessThan(300);
     expect((await stored(succ))?.visibility).toBe("shared");
+  }, 60_000);
+
+  it("control: the grantee may later change its own ordinary successor's visibility as that row's owner", async () => {
+    const pred = await ownerMemory("later-owner-write", "standard", "private");
+    const succ = `gv-succ-${randomUUID()}`;
+    const res = await send(grantee, "PUT", `/Memory/${succ}`, memorySuccessor(succ, pred, "later-owner-write grantee text", "standard"));
+    expect(res.status, (await res.text()).slice(0, 300)).toBeLessThan(300);
+    const row = await stored(succ);
+    expect([row?.agentId, row?.visibility], "the successor is the grantee's row with the carried visibility").toEqual([grantee.id, "private"]);
+    const patch = await send(grantee, "PATCH", `/Memory/${succ}`, { visibility: "shared" });
+    expect(patch.status, (await patch.text()).slice(0, 300)).toBeLessThan(300);
+    expect((await stored(succ))?.visibility).toBe("shared");
+    expect((await stored(pred))?.visibility, "the owner's predecessor keeps its visibility").toBe("private");
   }, 60_000);
 
   it("control: the grantee sets visibility on its own memory without a predecessor", async () => {

@@ -6,13 +6,25 @@
  * cross-agent supersede: an ordinary memory through Memory.post()/put(), a
  * skill version through the shared skill-version writer). A write grant does
  * not include changing a record's visibility; visibility is set by the owner or
- * an admin. So, for a grant-authorized successor:
+ * an admin. So, for the grant-authorized successor write:
  *
- *   - it carries the predecessor's visibility when the write omits one;
+ *   - the successor carries the predecessor's visibility when the write omits
+ *     one;
  *   - a write naming a visibility that reads differently from the
  *     predecessor's (private where it is shared, or shared where it is
  *     private) is refused with {@link grantVisibilityRefusal}, a 403 that
- *     carries only its name and a fixed message.
+ *     carries only its name and a fixed message;
+ *   - the successor is written only with the visibility the predecessor has on
+ *     committed state when the close commits: the close compares them after it
+ *     stages its write, and a mismatch (the predecessor's visibility changed
+ *     during the write) refuses the whole write with
+ *     {@link predecessorVisibilityChangedRefusal}, a 409: no successor, no close,
+ *     no version row.
+ *
+ * The rule governs that one write. A later write follows the ordinary owner
+ * rules: an ordinary (non-skill) successor is owned by the grantee, which may
+ * later change that row's visibility as its owner; a skill successor keeps its
+ * lineage owner.
  *
  * The comparison is the read predicate's: memory-visibility.ts's
  * isPrivateVisibility decides who can read a row, so a row with no stored
@@ -25,15 +37,20 @@
  *
  * Who counts as the owner or an admin is unchanged and decided where each path
  * decides the grant: the non-skill supersede (Memory.ts
- * validateAndAuthorizeSupersedes) applies this to a non-admin agent writing a
- * successor of another agent's record; the skill-version writer
- * (skill-version-write.ts) applies it to every plan whose predecessor close
- * stands on a write grant (`grantedClose`). No Harper imports.
+ * validateAndAuthorizeSupersedes, and closeSupersededRecord at the close)
+ * applies this to a non-admin agent writing a successor of another agent's
+ * record; the skill-version writer (skill-version-write.ts) applies it to every
+ * plan whose predecessor close stands on a write grant (`grantedClose`). No
+ * Harper imports.
  */
 import { isPrivateVisibility, PRIVATE_VISIBILITY, SHARED_VISIBILITY } from "./memory-visibility.js";
 
 /** The named refusal for a grant-authorized write that changes visibility. */
 export const GRANT_VISIBILITY_REFUSAL = "grant_cannot_change_visibility";
+
+/** The named refusal for a grant-authorized write whose predecessor's visibility
+ *  changed on committed state before the close committed. */
+export const PREDECESSOR_VISIBILITY_CHANGED = "predecessor_visibility_changed";
 
 /** 403: a write grant does not include changing a record's visibility. */
 export function grantVisibilityRefusal(): Response {
@@ -46,6 +63,33 @@ export function grantVisibilityRefusal(): Response {
   );
 }
 
+/**
+ * 409: the predecessor's committed visibility no longer reads the same as the
+ * successor's, so nothing was written. Retrying carries the current visibility.
+ */
+export function predecessorVisibilityChangedRefusal(): Response {
+  return new Response(
+    JSON.stringify({
+      error: PREDECESSOR_VISIBILITY_CHANGED,
+      message: "the superseded record's visibility changed during this write; nothing was written. Retry to carry its current visibility",
+    }),
+    { status: 409, headers: { "content-type": "application/json" } },
+  );
+}
+
+/**
+ * Aborts a grant-authorized non-skill close (Memory.ts closeSupersededRecord):
+ * the predecessor's committed visibility reads differently from the
+ * successor's. Memory.post()/put() discard the staged successor and answer
+ * {@link predecessorVisibilityChangedRefusal}.
+ */
+export class PredecessorVisibilityChanged extends Error {
+  constructor() {
+    super(`${PREDECESSOR_VISIBILITY_CHANGED}: the superseded record's visibility changed during the write`);
+    this.name = "PredecessorVisibilityChanged";
+  }
+}
+
 /** The visibility a row is read with: "private" for the literal, else "shared". */
 export function readVisibility(visibility: unknown): typeof PRIVATE_VISIBILITY | typeof SHARED_VISIBILITY {
   return isPrivateVisibility(visibility as string | null | undefined) ? PRIVATE_VISIBILITY : SHARED_VISIBILITY;
@@ -54,6 +98,16 @@ export function readVisibility(visibility: unknown): typeof PRIVATE_VISIBILITY |
 /** Would `next` in place of `prior` change who can read the record? */
 export function visibilityChanges(prior: unknown, next: unknown): boolean {
   return readVisibility(prior) !== readVisibility(next);
+}
+
+/**
+ * The close's check for a grant-authorized successor: does the predecessor's
+ * committed row (read with an empty context once the close's write is staged)
+ * read with a different visibility from the successor's? A row that is gone is
+ * left to the close's own missing-row handling.
+ */
+export function committedVisibilityDiffers(committed: Record<string, any> | null | undefined, successorVisibility: unknown): boolean {
+  return !!committed && visibilityChanges(committed.visibility, successorVisibility);
 }
 
 /**

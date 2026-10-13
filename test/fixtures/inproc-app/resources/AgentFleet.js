@@ -100,13 +100,15 @@ const actingAs = (agentId, asAdmin) => (asAdmin === true ? adminContext(agentId)
  * `internal` verdict. An application never has to remember that rule — but it
  * should still resolve `agentId` before it gets here, not hope for the throw.
  */
-async function remember(agentId, { content, durability = "standard", visibility, ownerAgentId, asAdmin }) {
+async function remember(agentId, { content, durability = "standard", visibility, ownerAgentId, asAdmin, supersedes }) {
   const h = await collectionResource(flair("Memory"), actingAs(agentId, asAdmin));
   // `ownerAgentId` exists only so the test can attempt a forgery — acting as
   // one agent while claiming another owns the record. Flair 403s that; an
   // application would simply pass `agentId` and never expose the distinction.
   const body = { agentId: ownerAgentId ?? agentId, content, durability };
   if (visibility) body.visibility = visibility;
+  // Optional: the id of the record this one replaces (a supersede).
+  if (supersedes) body.supersedes = supersedes;
   return h.post(body);
 }
 
