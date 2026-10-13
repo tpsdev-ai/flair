@@ -651,9 +651,10 @@ server.http(async (request: any, nextLayer: any) => {
   // granteeId — it can only narrow mutation of another agent's stored row.
   //
   // This is the early refusal for the canonical `/<Table>/<id>` address. The
-  // same rule, decided on the record Harper resolves each write to and covering
-  // writes addressed to a table's collection, is applied to every write that
-  // reaches an owner-scoped table by resources/owner-scoped-write-policy.ts.
+  // complete rule — a non-admin addressed write owner-checked on Harper's
+  // resolved target with the body allowed to name only that record, and a
+  // collection PUT/PATCH/DELETE refused — is applied to every owner-scoped
+  // table by resources/owner-scoped-write-policy.ts.
   if (isMutation && !request.tpsAgentIsAdmin) {
     const guarded = resolveGuardedRecord(url.pathname);
     if (guarded) {

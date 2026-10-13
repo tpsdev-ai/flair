@@ -3,22 +3,29 @@
  * record it writes, however the request addresses that record.
  *
  * ── The rule ────────────────────────────────────────────────────────────────
- * For a verified non-admin agent, an HTTP write (PUT, PATCH, DELETE or POST) to
- * a table listed in resources/record-owner-guard.ts's OWNER_FIELDS:
- *   - that addresses one record is refused when that record exists and its
- *     stored owner is not the caller, with `ownerMutationRefusal` (403);
- *   - that addresses no single record (the table's collection, with or without
- *     a query) is refused on PUT, PATCH and DELETE with `collectionWriteRefusal`
+ * For a verified non-admin agent, an HTTP write to a table listed in
+ * resources/record-owner-guard.ts's OWNER_FIELDS:
+ *   - addressed to one record (POST/PUT/PATCH/DELETE to `/<Table>/<id>`) is
+ *     refused when that record exists and its stored owner is not the caller,
+ *     with `ownerMutationRefusal` (403); and, on POST/PUT/PATCH, is refused with
+ *     `writeIdNotAddressedRefusal` (403) when the body carries a scalar `id`
+ *     naming a different record than the one the URL addresses — so the body may
+ *     name only the addressed record;
+ *   - addressed to no single record (the table's collection, with or without a
+ *     query) is refused on PUT, PATCH and DELETE with `collectionWriteRefusal`
  *     (403): such a request does not name the records it would write, so their
- *     owners cannot be checked first. A collection POST is a create and is left
- *     to the resource's own post() and attribution rules.
- * The record checked is the one Harper resolved the request to — the record it
- * would write — never a re-parse of the URL, so every spelling of a record's
- * address gets the same decision. The owner is read from STORED state, never
- * from the request body. A refused request writes nothing: the decision is made
- * before Harper loads the record for the write, and one refusal fails the whole
- * request. When the stored record cannot be read, the request is refused with
- * the named `owner_check_unavailable` (resources/owner-field-guard.ts).
+ *     owners cannot be checked first. A collection POST (a create) is NOT
+ *     decided here — it stays governed by each resource's own create and
+ *     attribution rules.
+ * The record checked is the id Harper resolved the request's URL to, never a
+ * re-parse of the path, so every spelling of a record's address gets the same
+ * decision; the body-id rule then binds the write to that same record. The
+ * owner is read from STORED state, never from the request body. A refused
+ * request writes nothing, and one refusal fails the whole request. When the
+ * guard's own stored-record read for an addressed owner check fails, the
+ * request is refused with the named `owner_check_unavailable`
+ * (resources/owner-field-guard.ts); a resource's own read-failure handling on
+ * other paths (for example a Presence heartbeat) is unchanged.
  *
  * Administrators, trusted internal calls and anonymous callers are not decided
  * here (anonymous writes are refused by each resource's own gate). Server code
@@ -32,12 +39,15 @@
  * calls the class's static `getResource(target, context, options)` with that
  * resolved target and the method in `options.method`. `guardOwnerScopedWrites`
  * gives every owner-scoped table class its own static `getResource` that applies
- * the rule there and then delegates to the inherited one. Resource classes that
- * extend a table inherit it, and the table list is OWNER_FIELDS, which
- * test/unit/record-owner-guard-coverage.test.ts derives from the schema, so a
- * table that gains an owner column is enrolled without anyone naming it here.
- * resources/owner-scoped-writes.ts installs the guard at load and logs any
- * OWNER_FIELDS table it could not guard.
+ * the rule there and then delegates to the inherited one. A resource class that
+ * extends the flair table inherits it; a custom resource that extends `Resource`
+ * rather than the table (for example AgentReadPosition) is not on this path and
+ * enforces its own ownership. The table list is OWNER_FIELDS;
+ * test/unit/record-owner-guard-coverage.test.ts fails when a table declares an
+ * owner-shaped column and is neither added to that map nor exempted with a
+ * stated reason, so a new owner-scoped table has to be enrolled there — it is
+ * not picked up automatically. resources/owner-scoped-writes.ts installs the
+ * guard at load and logs any OWNER_FIELDS table it could not guard.
  *
  * This module imports only the pure helpers in resources/record-owner-guard.ts,
  * so it is unit-tested directly (test/unit/owner-scoped-write-policy.test.ts);
@@ -45,17 +55,18 @@
  * test/integration/owner-scoped-writes.test.ts checks the rule on a real Harper.
  *
  * ── A write may name only the record it addresses ────────────────────────────
- * The guard above decides on the record the request's URL addresses. A resource
- * whose own write path sends its body to a write keyed by the body's `id`, not
- * by the address, would land on a different record than the one checked. So
- * `guardBodyAddressesTarget` refuses a non-admin write whose body `id` differs
- * from the record it addresses, with the named `write_id_not_addressed` (403)
- * that echoes neither id and writes nothing. It is a resource-layer delegate
- * (it needs the parsed body, which Harper's middleware has not parsed), scoped
- * to the same entry call as the guard: an administrator, a trusted internal
- * call and an anonymous caller are left unchanged. A create addressed to a
- * collection names its record in the body and is unaffected (there is no
- * addressed id to differ from).
+ * An addressed write (POST, PUT or PATCH to `/<Table>/<id>`) is owner-checked on
+ * the record its URL addresses, and its body may name only that record: a
+ * non-admin request whose body `id` is a value that names a different record
+ * than the one the URL addresses is refused with `write_id_not_addressed` (403),
+ * which echoes neither id and writes nothing. A body with no `id`, or one that
+ * names the addressed record, proceeds. This is decided here, at the entry call,
+ * on the addressed id — so a resource whose own write path later keys the table
+ * write on the body `id` cannot land on a record other than the one checked.
+ * A non-scalar body `id` is left to each resource's own request handling.
+ * A create addressed to a collection names its record in the body and is not
+ * this rule's business (there is no addressed id to differ from); it stays
+ * governed by each resource's own create rules.
  */
 import { collectionWriteRefusal, isForbiddenOwnerMutation, ownerMutationRefusal } from "./record-owner-guard.js";
 
@@ -72,6 +83,8 @@ export interface OwnerScopedWriteDeps {
   readStored: (table: string, id: unknown) => unknown;
   /** The refusal when the stored record cannot be read (ownerCheckUnavailable). */
   unreadable: (err: unknown) => Response;
+  /** The parsed request body for this entry call (Harper's `request.data`), or a promise for it. */
+  readBody: (context: unknown) => unknown;
 }
 
 /** Marks a table class whose writes have been guarded. */
@@ -82,6 +95,9 @@ export const GUARDED_WRITE_METHODS: readonly string[] = Object.freeze(["put", "p
 
 /** Methods that write records already stored, and so are refused on a collection target. */
 const STORED_RECORD_METHODS: ReadonlySet<string> = new Set(["put", "patch", "delete"]);
+
+/** Methods that carry a record body whose `id` must name the addressed record. */
+const BODY_ID_METHODS: ReadonlySet<string> = new Set(["put", "patch", "post"]);
 
 /**
  * Whether `target` is an HTTP request's own entry target. Harper's REST layer
@@ -108,10 +124,39 @@ export function unverifiedWriteCallerRefusal(table: string): Error & { statusCod
   );
 }
 
+/** The named refusal for a write whose body names a record other than the one it addresses. */
+export function writeIdNotAddressedRefusal(): Response {
+  return new Response(JSON.stringify({
+    error: "write_id_not_addressed",
+    message: "a write may name only the record it addresses",
+  }), { status: 403, headers: { "Content-Type": "application/json" } });
+}
+
+/**
+ * Whether a parsed request `body` carries a scalar `id` that names a record
+ * other than `targetId` (the addressed record). A body with no `id`, an `id`
+ * equal to the target, or a non-scalar `id` (left to each resource's own
+ * request handling) is not a mismatch.
+ */
+export function bodyNamesDifferentRecord(targetId: unknown, body: unknown): boolean {
+  if (targetId == null) return false;
+  if (body == null || typeof body !== "object" || Array.isArray(body)) return false;
+  const bodyId = (body as { id?: unknown }).id;
+  if (bodyId == null) return false;
+  if (typeof bodyId !== "string" && typeof bodyId !== "number") return false;
+  return String(bodyId) !== String(targetId);
+}
+
 /**
  * Decide one entry write. Resolves when the write may proceed; rejects with the
  * refusal (a Response, which Harper's REST layer returns as is, or a named
  * error) when it may not.
+ *
+ * In order: resolve the caller (an unresolvable one is refused); leave an
+ * administrator, a trusted internal call and an anonymous caller to their
+ * existing handling; refuse a collection PUT/PATCH/DELETE; refuse a write whose
+ * body names a record other than the addressed one; then refuse a write to a
+ * stored record owned by another principal. Each refusal writes nothing.
  */
 export async function admitOwnerScopedWrite(
   table: string,
@@ -134,6 +179,19 @@ export async function admitOwnerScopedWrite(
     return;
   }
 
+  // Addressed write: the body may name only the addressed record. Harper has
+  // parsed the body onto the request by now; a body that cannot be read is left
+  // to Harper's own request handling.
+  if (BODY_ID_METHODS.has(method)) {
+    let body: unknown;
+    try {
+      body = await deps.readBody(context);
+    } catch {
+      body = undefined;
+    }
+    if (bodyNamesDifferentRecord(target.id, body)) throw writeIdNotAddressedRefusal();
+  }
+
   let stored: unknown;
   try {
     stored = await deps.readStored(table, target.id);
@@ -143,58 +201,6 @@ export async function admitOwnerScopedWrite(
   if (isForbiddenOwnerMutation(stored as Record<string, unknown> | null | undefined, ownerField, caller.agentId)) {
     throw ownerMutationRefusal(table);
   }
-}
-
-/** The named refusal for a write whose body names a record other than the one it addresses. */
-export function writeIdNotAddressedRefusal(): Response {
-  return new Response(JSON.stringify({
-    error: "write_id_not_addressed",
-    message: "a write may name only the record it addresses",
-  }), { status: 403, headers: { "Content-Type": "application/json" } });
-}
-
-/** The id the request URL addresses, read from the resource's bound record; null when it names no single record. */
-export function addressedId(resource: unknown): string | number | null {
-  try {
-    const getId = (resource as { getId?: () => unknown } | null | undefined)?.getId;
-    const id = typeof getId === "function" ? getId.call(resource) : undefined;
-    return typeof id === "string" || typeof id === "number" ? id : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Refuse a non-admin write whose body `id` names a record other than the one
- * the request addresses, with `write_id_not_addressed` (403). A resource whose
- * write path keys the table write on the body `id` would otherwise land on a
- * record other than the one the owner check read. Returns the refusal, or null
- * when the write may proceed.
- *
- * Scoped to the same entry call as the guard: only a verified non-admin agent
- * is decided here. An administrator, a trusted internal call (no resolved
- * agent) and an anonymous caller return null and keep their current behaviour
- * (an anonymous write is refused by the resource's own gate). A create
- * addressed to a collection has no addressed id and is not this rule's business.
- */
-export async function guardBodyAddressesTarget(
-  self: unknown,
-  content: unknown,
-  deps: { resolveAuth: (context: unknown) => Promise<WriteCaller> },
-): Promise<Response | null> {
-  const caller = await deps.resolveAuth((self as { getContext?: () => unknown } | null)?.getContext?.());
-  if (caller.kind !== "agent" || caller.isAdmin === true) return null;
-
-  const target = addressedId(self);
-  if (target == null) return null; // a collection create names its record in the body
-
-  const bodyId = content != null && typeof content === "object" ? (content as { id?: unknown }).id : undefined;
-  if (bodyId == null) return null;
-
-  if ((typeof bodyId !== "string" && typeof bodyId !== "number") || String(bodyId) !== String(target)) {
-    return writeIdNotAddressedRefusal();
-  }
-  return null;
 }
 
 /**

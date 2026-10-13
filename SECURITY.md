@@ -81,24 +81,27 @@ create names the value the record actually landed on.
 
 ### Record Ownership on Writes
 
-Every non-admin write is owner-checked for each record it writes. For a
-verified non-admin agent:
+For a verified non-admin agent:
 
-- A PUT, PATCH, DELETE or POST that would write a record owned by another
-  principal is refused with `403 forbidden: cannot modify <Table> owned by
-  another principal`. The record checked is the one the request resolves to,
-  however its address is written, and its owner is read from the stored
-  record, never from the request body.
+- An addressed write — a PUT, PATCH, DELETE or POST to `/<Table>/<id>` — is
+  owner-checked on the record the URL addresses: it is refused with
+  `403 forbidden: cannot modify <Table> owned by another principal` when that
+  record exists and belongs to another principal. The owner is read from the
+  stored record, never from the request body, and the record checked is the id
+  Harper resolves the URL to, however the address is written.
+- An addressed POST, PUT or PATCH may name only the record it addresses: a
+  request whose body `id` names a different record than its URL is refused with
+  `403 write_id_not_addressed`.
 - A PUT, PATCH or DELETE addressed to a table's collection rather than to one
   record is refused with `403 forbidden: a non-admin write to <Table> must
   address one record by its id`. Write records one at a time, by id.
-- A write may name only the record it addresses: a write whose body `id`
-  differs from the record its URL addresses is refused with
-  `403 write_id_not_addressed`.
 
-A refused request writes nothing, and the refusal carries no record content.
-Creating a record with POST to a collection is unchanged, as are writes by
-administrators and by Flair's own server code.
+Creating a record with POST to a collection stays governed by each resource's
+own create and attribution rules (for example, an OrgEvent collection POST that
+names an existing event owned by another agent is refused, and a Presence
+heartbeat creates the caller's own row). A refused request writes nothing, and
+the refusal carries no record content. Administrator writes and Flair's own
+in-process server writes are unchanged.
 
 ### Cross-Agent Access (within an org)
 

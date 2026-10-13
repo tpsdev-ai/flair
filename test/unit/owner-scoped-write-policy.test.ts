@@ -11,9 +11,8 @@
  */
 import { describe, it, expect } from "bun:test";
 import {
-  addressedId,
   addressesNoSingleRecord,
-  guardBodyAddressesTarget,
+  bodyNamesDifferentRecord,
   guardOwnerScopedWrites,
   isRequestEntryTarget,
   OWNER_SCOPED_WRITE_GUARD,
@@ -46,12 +45,15 @@ function deps(stored: Record<string, Record<string, unknown> | null> = {}, extra
     resolveAuth: async (ctx: any) => ctx?.verdict ?? { kind: "internal" },
     readStored: async (_table: string, id: unknown) => { reads.push(id); return stored[String(id)] ?? null; },
     unreadable: () => new Response(JSON.stringify({ error: "owner_check_unavailable" }), { status: 503 }),
+    readBody: (ctx: any) => ctx?.data,
     ...extra,
   };
 }
 
 /** An HTTP entry target: Harper sets checkPermission to the caller's permission set. */
 const entry = (id: unknown, isCollection = false) => ({ id, isCollection, checkPermission: {} });
+/** An entry context carrying a verdict and (optionally) a parsed request body. */
+const ctxWith = (verdict: { verdict: WriteCaller }, data?: unknown) => ({ ...verdict, data });
 
 async function outcome(p: unknown): Promise<{ ok: unknown } | { refused: any }> {
   try { return { ok: await p }; } catch (err) { return { refused: err }; }
@@ -260,52 +262,75 @@ describe("target predicates", () => {
     expect(addressesNoSingleRecord({ id: "r1" })).toBe(false);
   });
 
-  it("reads the addressed id from the resource's bound record", () => {
-    expect(addressedId({ getId: () => "r1" })).toBe("r1");
-    expect(addressedId({ getId: () => 7 })).toBe(7);
-    expect(addressedId({ getId: () => undefined })).toBeNull();
-    expect(addressedId({ getId: () => { throw new Error("x"); } })).toBeNull();
-    expect(addressedId({})).toBeNull();
-    expect(addressedId(null)).toBeNull();
+  it("sees a scalar body id that names a different record than the addressed one", () => {
+    expect(bodyNamesDifferentRecord("fresh", { id: "victim", v: 1 })).toBe(true);
+    expect(bodyNamesDifferentRecord("r1", { id: "r1" })).toBe(false);
+    expect(bodyNamesDifferentRecord(7, { id: "7" })).toBe(false);       // equal by coercion
+    expect(bodyNamesDifferentRecord("r1", { v: 1 })).toBe(false);       // no body id
+    expect(bodyNamesDifferentRecord("r1", { id: ["r1"] })).toBe(false); // non-scalar: left to the resource
+    expect(bodyNamesDifferentRecord("r1", { id: { label: "x" } })).toBe(false);
+    expect(bodyNamesDifferentRecord("r1", ["r1"])).toBe(false);         // array body
+    expect(bodyNamesDifferentRecord(null, { id: "victim" })).toBe(false); // no addressed id
   });
 });
 
-describe("guardBodyAddressesTarget — a write may name only the record it addresses", () => {
-  const self = (id: unknown, verdict: WriteCaller) => ({ getId: () => id, getContext: () => ({ verdict }) });
-  const resolveAuth = async (ctx: any): Promise<WriteCaller> => ctx?.verdict ?? { kind: "internal" };
-
-  async function body(p: Promise<Response | null>): Promise<{ status: number; body: any } | null> {
-    const r = await p;
-    return r === null ? null : { status: r.status, body: await r.json() };
-  }
-
-  it("refuses a non-admin write whose body id differs from the addressed id, echoing neither id", async () => {
-    const r = await body(guardBodyAddressesTarget(self("fresh-id", AGENT.verdict), { id: "victim-id", summary: "x" }, { resolveAuth }));
-    expect(r).toEqual({ status: 403, body: { error: "write_id_not_addressed", message: "a write may name only the record it addresses" } });
-    expect(JSON.stringify(r!.body)).not.toContain("victim-id");
-    expect(JSON.stringify(r!.body)).not.toContain("fresh-id");
-  });
-
-  it("refuses a non-string, non-number body id against a real address", async () => {
-    expect((await body(guardBodyAddressesTarget(self("r1", AGENT.verdict), { id: { nested: true } }, { resolveAuth })))?.status).toBe(403);
-  });
-
-  it("admits a body id that matches the addressed id", async () => {
-    expect(await guardBodyAddressesTarget(self("r1", AGENT.verdict), { id: "r1", v: "x" }, { resolveAuth })).toBeNull();
-  });
-
-  it("admits a write with no body id, and a body id equal by coercion", async () => {
-    expect(await guardBodyAddressesTarget(self("7", AGENT.verdict), { summary: "x" }, { resolveAuth })).toBeNull();
-    expect(await guardBodyAddressesTarget(self(7, AGENT.verdict), { id: "7" }, { resolveAuth })).toBeNull();
-  });
-
-  it("does not act when the request addresses no single record (a collection create)", async () => {
-    expect(await guardBodyAddressesTarget(self(undefined, AGENT.verdict), { id: "victim-id" }, { resolveAuth })).toBeNull();
-  });
-
-  for (const [label, verdict] of [["an administrator", ADMIN.verdict], ["a trusted internal call", INTERNAL.verdict], ["an anonymous caller", ANON.verdict]] as const) {
-    it(`leaves ${label} unchanged`, async () => {
-      expect(await guardBodyAddressesTarget(self("fresh-id", verdict), { id: "victim-id" }, { resolveAuth })).toBeNull();
+describe("a write may name only the record it addresses (through the guard)", () => {
+  for (const method of ["put", "patch", "post"]) {
+    it(`refuses a non-admin ${method} whose body names a different record, with the named 403, before any stored read or write`, async () => {
+      const { Table, calls } = makeTable();
+      const d = deps();
+      guardOwnerScopedWrites({ OrgEvent: Table }, { OrgEvent: "authorId" }, d);
+      const r = await refusalBody((Table as any).getResource(entry("fresh-id"), ctxWith(AGENT, { id: "victim-id", summary: "x" }), { method }));
+      expect(r).toEqual({ status: 403, body: { error: "write_id_not_addressed", message: "a write may name only the record it addresses" } });
+      expect(JSON.stringify(r.body)).not.toContain("victim-id");
+      expect(JSON.stringify(r.body)).not.toContain("fresh-id");
+      expect(calls, "the table was never reached").toEqual([]);
+      expect(d.reads, "no stored read happened before the body-id refusal").toEqual([]);
     });
   }
+
+  it("does not apply the body-id rule to DELETE", async () => {
+    const { Table, calls } = makeTable();
+    const d = deps({ "fresh-id": { id: "fresh-id", authorId: "caller" } });
+    guardOwnerScopedWrites({ OrgEvent: Table }, { OrgEvent: "authorId" }, d);
+    const o = await outcome((Table as any).getResource(entry("fresh-id"), ctxWith(AGENT, { id: "victim-id" }), { method: "delete" }));
+    expect("ok" in o).toBe(true);
+    expect(calls.length).toBe(1);
+  });
+
+  it("admits a write whose body id matches, or omits, the addressed id", async () => {
+    const { Table, calls } = makeTable();
+    const d = deps({ r1: { id: "r1", authorId: "caller" } });
+    guardOwnerScopedWrites({ OrgEvent: Table }, { OrgEvent: "authorId" }, d);
+    expect("ok" in await outcome((Table as any).getResource(entry("r1"), ctxWith(AGENT, { id: "r1", summary: "x" }), { method: "put" }))).toBe(true);
+    expect("ok" in await outcome((Table as any).getResource(entry("r1"), ctxWith(AGENT, { summary: "x" }), { method: "patch" }))).toBe(true);
+    expect(calls.length).toBe(2);
+  });
+
+  it("does not apply the body-id rule to a collection POST (a create names its record in the body)", async () => {
+    const { Table, calls } = makeTable();
+    const d = deps();
+    guardOwnerScopedWrites({ OrgEvent: Table }, { OrgEvent: "authorId" }, d);
+    const target = entry(null, true);
+    const o = await outcome((Table as any).getResource(target, ctxWith(AGENT, { id: "anything" }), { method: "post" }));
+    expect(o).toEqual({ ok: { resource: true, target } });
+    expect(calls.length).toBe(1);
+  });
+
+  it("leaves an admin and an internal caller's differing body id unchanged", async () => {
+    const { Table, calls } = makeTable();
+    const d = deps({ "fresh-id": { id: "fresh-id", authorId: "owner" } });
+    guardOwnerScopedWrites({ OrgEvent: Table }, { OrgEvent: "authorId" }, d);
+    expect("ok" in await outcome((Table as any).getResource(entry("fresh-id"), ctxWith(ADMIN, { id: "victim-id" }), { method: "put" }))).toBe(true);
+    expect("ok" in await outcome((Table as any).getResource(entry("fresh-id"), ctxWith(INTERNAL, { id: "victim-id" }), { method: "put" }))).toBe(true);
+    expect(calls.length).toBe(2);
+  });
+
+  it("admits the write when the body cannot be read (left to Harper's own request handling)", async () => {
+    const { Table, calls } = makeTable();
+    const d = deps({ r1: { id: "r1", authorId: "caller" } }, { readBody: async () => { throw new Error("unparsable"); } });
+    guardOwnerScopedWrites({ OrgEvent: Table }, { OrgEvent: "authorId" }, d);
+    expect("ok" in await outcome((Table as any).getResource(entry("r1"), ctxWith(AGENT, undefined), { method: "put" }))).toBe(true);
+    expect(calls.length).toBe(1);
+  });
 });

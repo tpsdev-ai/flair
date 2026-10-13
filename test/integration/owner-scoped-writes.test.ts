@@ -2,13 +2,16 @@
 // owner-checked for each record it writes, against a real Harper.
 //
 // The rule (resources/owner-scoped-write-policy.ts): for a verified non-admin
-// agent, a write that addresses one record is refused with
-// `forbidden: cannot modify <Table> owned by another principal` when that
-// record exists and is owned by someone else, and a PUT, PATCH or DELETE that
+// agent, an addressed write (POST/PUT/PATCH/DELETE to `/<Table>/<id>`) is
+// refused with `forbidden: cannot modify <Table> owned by another principal`
+// when the addressed record exists and is owned by someone else; and, on
+// POST/PUT/PATCH, is refused with `write_id_not_addressed` when the body names
+// a record other than the one the URL addresses. A PUT, PATCH or DELETE that
 // addresses the table's collection is refused with
 // `forbidden: a non-admin write to <Table> must address one record by its id`.
-// The record checked is the one Harper resolves the request to, so each address
-// form below gets the same decision. A refused request writes nothing.
+// A collection POST (create) is left to each resource's own rules. The record
+// checked is the id Harper resolves the request's URL to, so each address form
+// below gets the same decision. A refused request writes nothing.
 //
 // Every case below asserts three things: the status is 403, the body is exactly
 // the named refusal (it carries nothing from the stored row), and the stored row
@@ -319,47 +322,40 @@ describe("owner-scoped writes: each record a non-admin write touches is owner-ch
   });
 
   // ── A write may name only the record it addresses ──────────────────────────
-  // A PUT to a fresh or own id whose body `id` names another principal's
-  // existing record must not reach that record. The invariant, over every
-  // owner-scoped table served over REST, is that the record named only in the
-  // body is byte-for-byte unchanged — whether the resource refuses the write or
-  // writes the record it addresses and leaves the named one alone.
-  describe("a non-admin write cannot reach a record named only in the body", () => {
+  // A non-admin POST, PUT or PATCH to a fresh/own id whose body `id` names
+  // another principal's existing record is refused with the named 403
+  // write_id_not_addressed. Both rows are read back: the addressed (fresh/own)
+  // id has no row, and the record named only in the body is byte-for-byte
+  // unchanged. Driven over every owner-scoped table served over REST.
+  describe("a non-admin write may name only the record it addresses", () => {
     for (const s of SPECS) {
-      test(`${s.table}: a PUT to a fresh id whose body names another principal's record leaves that record unchanged`, async () => {
-        const f = await fixture(s);
-        const before = await storedRow(s.table, s.pk, f.otherId);
-        expect(before, `${s.table} fixture row was not seeded`).not.toBeNull();
-        const freshId = ownerIsKey(s) ? caller.id : s.idFor(`addr-${randomUUID().slice(0, 6)}`, caller.id);
-        // The body names the OTHER principal's existing record; the URL names a
-        // fresh/own record. The owner field is set to the caller.
-        const body: Record<string, any> = { ...s.row(f.otherId, caller.id), [s.mut]: "named-via-body" };
-        body.id = f.otherId;
-        if (!ownerIsKey(s)) body[ownerFieldOf(s)] = caller.id;
-        const res = await send(caller, "PUT", `/${s.table}/${e(freshId)}`, body);
-        const text = await res.text();
-        // A refusal is 4xx; a resource that writes the addressed record and
-        // ignores the body id answers with its create/update status. Either way
-        // the record named only in the body must not have moved.
-        expect(res.status, `${s.table} body-id PUT returned ${res.status}: ${text.slice(0, 200)}`).toBeLessThan(500);
-        expect(await storedRow(s.table, s.pk, f.otherId), `${s.table}: the record named only in the body was written`).toEqual(before);
-      }, 30_000);
+      for (const verb of ["PUT", "PATCH", "POST"] as const) {
+        test(`${s.table}: a ${verb} to a fresh id whose body names another principal's record is refused with write_id_not_addressed`, async () => {
+          const f = await fixture(s);
+          const before = await storedRow(s.table, s.pk, f.otherId);
+          expect(before, `${s.table} fixture row was not seeded`).not.toBeNull();
+          // A fresh/own id the caller may address, distinct from the victim.
+          const freshId = ownerIsKey(s) ? caller.id : s.idFor(`addr-${randomUUID().slice(0, 6)}`, caller.id);
+          const beforeFresh = await storedRow(s.table, s.pk, freshId);
+          // Body names the OTHER principal's existing record; URL names freshId.
+          const body: Record<string, any> = { ...s.row(f.otherId, caller.id), [s.mut]: "named-via-body" };
+          body.id = f.otherId;
+          if (!ownerIsKey(s)) body[ownerFieldOf(s)] = caller.id;
+          const res = await send(caller, verb, `/${s.table}/${e(freshId)}`, body);
+          const text = await res.text();
+          expect(res.status, `${s.table} ${verb} body-id returned ${res.status}: ${text.slice(0, 200)}`).toBe(403);
+          expect(JSON.parse(text).error, `${s.table} ${verb} answered with a different refusal`).toBe("write_id_not_addressed");
+          expect(text).not.toContain(String(f.otherId));
+          expect(text).not.toContain(String(freshId));
+          // Read back BOTH rows: the body-named record is untouched, and the
+          // addressed id gained no row from the refused write.
+          expect(await storedRow(s.table, s.pk, f.otherId), `${s.table}: the record named only in the body was written`).toEqual(before);
+          if (freshId !== f.otherId) {
+            expect(await storedRow(s.table, s.pk, freshId), `${s.table}: the refused ${verb} wrote the addressed id`).toEqual(beforeFresh);
+          }
+        }, 30_000);
+      }
     }
-
-    test("OrgEvent: a PUT to a fresh id whose body names another agent's event is refused with the named 403", async () => {
-      const s = SPECS.find((x) => x.table === "OrgEvent")!;
-      const f = await fixture(s);
-      const before = await storedRow("OrgEvent", "id", f.otherId);
-      const freshId = s.idFor(`addr-${randomUUID().slice(0, 6)}`, caller.id);
-      const res = await send(caller, "PUT", `/OrgEvent/${e(freshId)}`, { id: f.otherId, authorId: caller.id, kind: "k", summary: "named-via-body" });
-      const text = await res.text();
-      expect(res.status, `OrgEvent body-id PUT returned ${res.status}: ${text.slice(0, 200)}`).toBe(403);
-      const parsed = JSON.parse(text);
-      expect(parsed.error).toBe("write_id_not_addressed");
-      expect(text).not.toContain(f.otherId);
-      expect(text).not.toContain(freshId);
-      expect(await storedRow("OrgEvent", "id", f.otherId), "the event named only in the body was written").toEqual(before);
-    }, 30_000);
 
     test("the owner's own PUT to its record by id, with a matching body id, still succeeds", async () => {
       const s = SPECS.find((x) => x.table === "Relationship")!;
@@ -376,6 +372,13 @@ describe("owner-scoped writes: each record a non-admin write touches is owner-ch
       const res = await send(caller, "PUT", `/OrgEvent/${e(id)}`, { id, authorId: caller.id, kind: "k", summary: "updated", createdAt: NOW });
       expect(res.status, `OrgEvent addressed PUT returned ${res.status}: ${await res.text()}`).toBeLessThan(300);
       expect((await storedRow("OrgEvent", "id", id))?.summary).toBe("updated");
+    }, 30_000);
+
+    test("an addressed POST whose body id matches the URL still creates the record", async () => {
+      const id = `osw-mem-addrpost-${randomUUID().slice(0, 8)}`;
+      const res = await send(caller, "POST", `/Memory/${e(id)}`, { id, agentId: caller.id, content: "addressed-post", durability: "standard" });
+      expect(res.status, `addressed POST returned ${res.status}: ${await res.text()}`).toBeLessThan(300);
+      expect((await storedRow("Memory", "id", id))?.agentId).toBe(caller.id);
     }, 30_000);
   });
 
@@ -402,17 +405,21 @@ describe("owner-scoped writes: each record a non-admin write touches is owner-ch
   });
 
   // ── Coverage self-check ─────────────────────────────────────────────────────
-  // Every OWNER_FIELDS table served over REST by a resource class that extends
-  // the table must have a spec above, so a table that gains an owner column and
-  // a resource class is exercised here without anyone remembering to add it.
-  test("every owner-scoped table served over REST has a spec", () => {
+  // Every OWNER_FIELDS table whose resource class EXTENDS the flair table —
+  // i.e. whose writes flow through the wrapped static getResource — must have a
+  // spec above. This is exactly the guard's reach: a custom resource that
+  // extends `Resource` rather than the table (for example AgentReadPosition) is
+  // not on this path and enforces its own ownership, so it is deliberately out
+  // of scope here. Enrolling a new owner column still means adding it to
+  // OWNER_FIELDS (test/unit/record-owner-guard-coverage.test.ts requires that).
+  test("every owner-scoped table backed by a table-extending resource class has a spec", () => {
     const RES = join(import.meta.dir, "..", "..", "resources");
     const served = Object.keys(OWNER_FIELDS).filter((t) => {
       const file = join(RES, `${t}.ts`);
       return existsSync(file) && readFileSync(file, "utf8").includes(`extends (databases as any).flair.${t} `);
     });
     const covered = new Set(SPECS.map((s) => s.table));
-    expect(served.filter((t) => !covered.has(t)), "owner-scoped tables served over REST without a spec").toEqual([]);
+    expect(served.filter((t) => !covered.has(t)), "table-extending owner-scoped resource classes without a spec").toEqual([]);
     expect(served.length, "the served-table scan found nothing; its pattern no longer matches the resource classes").toBeGreaterThan(5);
   });
 });

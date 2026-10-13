@@ -191,11 +191,11 @@ export function isForbiddenOwnerMutation(
  * principal: 403 with a body that names only the table.
  *
  * One constructor for every place the rule is enforced — the auth middleware
- * for `/<Table>/<id>` routes, resources/owner-scoped-write-policy.ts for every
- * write that reaches an owner-scoped table, and resources/relay-ops.ts for a
- * Message POST to the collection that reuses an existing message id — so a
- * refused caller gets the same response on any route, and it carries nothing
- * from the stored row.
+ * for `/<Table>/<id>` routes, resources/owner-scoped-write-policy.ts for a
+ * non-admin addressed write (POST/PUT/PATCH/DELETE to `/<Table>/<id>`) to an
+ * owner-scoped table, and resources/relay-ops.ts for a Message POST to the
+ * collection that reuses an existing message id — so a refused caller gets the
+ * same response on any route, and it carries nothing from the stored row.
  */
 export function ownerMutationRefusal(table: string): Response {
   return new Response(JSON.stringify({
