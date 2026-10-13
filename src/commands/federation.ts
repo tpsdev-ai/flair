@@ -749,8 +749,9 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
       }
       if (!syncRes.ok) {
         if (splittable(syncRes.status)) return await split();
-        const text = await syncRes.text().catch(() => "");
-        throw new Error(`Sync batch failed: ${syncRes.status} ${text}`);
+        // flair#2455 rev 2.1 N2: the receiver's response body is receiver-authored
+        // text and is never logged. Report the status only.
+        throw new Error(`Sync batch failed: HTTP ${syncRes.status}`);
       }
       return await syncRes.json() as { merged: number; skipped: number };
     }
@@ -920,8 +921,8 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
           signal: AbortSignal.timeout(10_000),
         });
         if (!pingRes.ok) {
-          const txt = await pingRes.text().catch(() => "");
-          console.warn(`⚠️  Liveness ping to hub failed (${pingRes.status}): ${txt.slice(0, 200)}. Hub won't update spoke liveness.`);
+          // flair#2455 rev 2.1 N2: no receiver-authored body in the sender's log.
+          console.warn(`⚠️  Liveness ping to hub failed (HTTP ${pingRes.status}). Hub won't update spoke liveness.`);
         } else {
           pingOk = true;
         }
@@ -1043,6 +1044,18 @@ export function register(program: Command): void {
         peersErr = rewriteFederationStatusFetchFailed(err, baseUrl, urlSetting);
       }
 
+      // Federation retry obligations (flair#2455): the sender's pending and
+      // terminal retry rows, read through the admin-only /FederationRetries
+      // resource. null = unverifiable (the read failed), like peers.
+      let retries: { pending: any[]; terminal: any[] } | null = null;
+      let retriesErr: any = null;
+      try {
+        const r = await api("GET", "/FederationRetries", undefined, { baseUrl });
+        retries = { pending: r.pending ?? [], terminal: r.terminal ?? [] };
+      } catch (err) {
+        retriesErr = err;
+      }
+
       // Auth-shaped failures stay FATAL even when the other read succeeded:
       // both endpoints sit behind the same allowAdmin gate, so a 401/403 is a
       // property of the session's credentials, not of one endpoint — and
@@ -1105,16 +1118,18 @@ export function register(program: Command): void {
         console.log(render.asJSON({
           instance,
           peers,
+          retries,
           driver,
           driverAssessment: assessment,
           // flair#1233: name what could not be read, so a partial result is
           // distinguishable from "verified absent" (instance/peers stay null
           // when their read failed).
-          ...(instanceErr || peersErr
+          ...(instanceErr || peersErr || retriesErr
             ? {
                 unverifiable: {
                   ...(instanceErr ? { instance: String(instanceErr.message ?? instanceErr) } : {}),
                   ...(peersErr ? { peers: String(peersErr.message ?? peersErr) } : {}),
+                  ...(retriesErr ? { retries: String(retriesErr.message ?? retriesErr) } : {}),
                 },
               }
             : {}),
@@ -1226,6 +1241,29 @@ export function register(program: Command): void {
         },
       ];
       console.log(render.table(cols, peers as Array<Record<string, unknown>>));
+
+      // Federation retry obligations (flair#2455): what the sender has not
+      // landed with a peer, and why. Pending rows are still being re-offered;
+      // terminal rows ended with a named resolution.
+      if (retriesErr) {
+        console.log();
+        console.log(`${render.icons.warn} ${render.wrap(render.c.yellow, "Retry obligations unverifiable — the retry read failed.")}`);
+        console.log(`  ${render.wrap(render.c.dim, String(retriesErr?.message ?? retriesErr))}`);
+      } else if (retries && (retries.pending.length > 0 || retries.terminal.length > 0)) {
+        console.log();
+        console.log(render.wrap(render.c.bold, "Federation retries"));
+        const retryCols: render.TableColumn[] = [
+          { label: "state", key: "state" },
+          { label: "peer", key: "peerId" },
+          { label: "table", key: "table" },
+          { label: "id", key: "id" },
+          { label: "reason", key: "reason", format: (v) => String(v ?? "—") },
+          { label: "attempts", key: "attempts", format: (v) => String(v ?? "—") },
+          { label: "bound", key: "bound", format: (v) => String(v ?? "—") },
+          { label: "resolution", key: "resolution", format: (v) => String(v ?? "—") },
+        ];
+        console.log(render.table(retryCols, [...retries.pending, ...retries.terminal] as Array<Record<string, unknown>>));
+      }
 
       // Stale warning is gated on lastMergeAt (real progress), not lastSyncAt.
       // A peer that "syncs" every 5min but hasn't merged a record in 24h is

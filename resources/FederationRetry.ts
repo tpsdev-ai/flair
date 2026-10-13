@@ -1,0 +1,153 @@
+/**
+ * FederationRetry — sender-owned retry obligations for federation sync
+ * (flair#2455 slice 1: storage, atomic transitions, operator query).
+ *
+ * One row per (peerId, table, recordId) the receiver refused for a reason a
+ * later re-offer could clear, plus locally observed unconfirmed sends. The row
+ * holds no record content: a re-offer reads the source row fresh. See
+ * resources/federation-retry-lib.ts for the key/state/outcome vocabulary and
+ * schemas/federation.graphql for the table.
+ *
+ * ISOLATION (design rev 2 K2). `FederationRetry` is deliberately absent from
+ * FEDERATION_TABLE_POLICY (resources/federation-classify.ts) and therefore from
+ * FederationSync's receive `tableMap` (resources/Federation.ts), so an inbound
+ * sync whose record names the table skips as `unknown_table` even though
+ * receive `allowCreate` is public. It is also not a sending table. Nothing in
+ * this slice sends a retry; the sender is activated in a later slice.
+ *
+ * ACCESS (design rev 2.1). Admin-only on read, create,
+ * update AND delete — the FederationPeers/Peer pattern (resources/Peer.ts,
+ * resources/Federation.ts). The rows are local bookkeeping and never agent
+ * data.
+ */
+import { databases } from "harper";
+import { isDeepStrictEqual } from "node:util";
+import { allowAdmin } from "./agent-auth.js";
+import { withKeyLock } from "./key-lock.js";
+import { withOwnedTransaction } from "./request-transaction.js";
+import {
+  retryEntryKey,
+  isRetryBound,
+  isRetryResolution,
+  type RetryBound,
+  type RetryResolution,
+} from "./federation-retry-lib.js";
+
+/** Admin-only on every operation. The Peer/FederationPeers pattern. */
+export class FederationRetry extends (databases as any).flair.FederationRetry {
+  allowRead()   { return allowAdmin((this as any).getContext?.()); }
+  allowCreate() { return allowAdmin((this as any).getContext?.()); }
+  allowUpdate() { return allowAdmin((this as any).getContext?.()); }
+  allowDelete() { return allowAdmin((this as any).getContext?.()); }
+}
+
+/** Per-peer sender-ownership lock namespace (design rev 2 K2: "serialize sender ownership per peer"). */
+export const RETRY_LOCK_NAMESPACE = "federation-retry";
+export const RETRY_LOCK_ATTEMPTS = 40;
+export const RETRY_LOCK_WAIT_MS = 25;
+
+export interface RetryTerminalInput {
+  peerId: string;
+  table: string;
+  recordId: string;
+  resolution: RetryResolution;
+  /** Which bound fired, when `resolution` is `retry_exhausted`; null otherwise. */
+  bound?: RetryBound | null;
+  completedAt?: string;
+  /** The request context, if any. Its transaction is detached for the owned one. */
+  ctx?: any;
+  /** TEST-ONLY: awaited between the in-transaction read and the write. */
+  pausePoint?: () => Promise<void> | undefined;
+}
+
+export type RetryTerminalErrorCode =
+  | "invalid"
+  | "table_unavailable"
+  | "not_found"
+  | "already_terminal"
+  | "lock_busy"
+  | "lock_unavailable"
+  | "write_failed";
+
+export type RetryTerminalOutcome =
+  | { ok: true; id: string }
+  | { ok: false; code: RetryTerminalErrorCode; message: string };
+
+/**
+ * Move one retry entry `pending` → `terminal`, atomically and fail-closed.
+ *
+ * Runs under the peer's per-key lock on the table store, in a transaction this
+ * call owns: the read that checks `pending` and the write that sets the
+ * terminal outcome commit together or not at all. A caller bug (missing
+ * component, unknown resolution/bound) and a missing or already-terminal row
+ * are refused by name WITHOUT writing. If the write or the confirming re-read
+ * fails, the transaction aborts and the row stays `pending` — the outcome is
+ * never reported as success on a row that did not move.
+ */
+export async function terminalizeRetryEntry(input: RetryTerminalInput): Promise<RetryTerminalOutcome> {
+  let id: string;
+  try {
+    id = retryEntryKey(input.peerId, input.table, input.recordId);
+  } catch (err: any) {
+    return { ok: false, code: "invalid", message: err?.message ?? String(err) };
+  }
+  if (!isRetryResolution(input.resolution)) {
+    return { ok: false, code: "invalid", message: `unknown retry resolution: ${String(input.resolution)}` };
+  }
+  if (input.bound != null && !isRetryBound(input.bound)) {
+    return { ok: false, code: "invalid", message: `unknown retry bound: ${String(input.bound)}` };
+  }
+
+  const table = (databases as any).flair?.FederationRetry;
+  if (!table || typeof table.get !== "function" || typeof table.put !== "function") {
+    return { ok: false, code: "table_unavailable", message: "the FederationRetry table is unavailable" };
+  }
+
+  const outcome = await withKeyLock(
+    table.primaryStore,
+    [RETRY_LOCK_NAMESPACE, input.peerId],
+    () => withOwnedTransaction(input.ctx, async (shared) => {
+      const row = await table.get(id, shared);
+      if (!row) return { ok: false, code: "not_found", message: `${id} is not a retry entry` } as RetryTerminalOutcome;
+      if (row.state !== "pending") {
+        return { ok: false, code: "already_terminal", message: `${id} is already ${String(row.state)}` } as RetryTerminalOutcome;
+      }
+      const now = input.completedAt ?? new Date().toISOString();
+      const next = {
+        ...row,
+        state: "terminal",
+        resolution: input.resolution,
+        bound: input.bound ?? null,
+        completedAt: now,
+        updatedAt: now,
+      };
+      if (input.pausePoint) {
+        const pause = input.pausePoint();
+        if (pause) await pause;
+      }
+      await table.put(next, shared);
+      // Confirm no concurrent commit changed the row between the read above and
+      // this write: Harper has no compare-and-set, so a change committed after
+      // this re-read and before the commit is not seen (write-back.ts).
+      const committed = await table.get(id, {});
+      if (!isDeepStrictEqual(committed, row)) {
+        throw new Error(`retry transition: ${id} changed concurrently; the transition was not applied`);
+      }
+      return { ok: true, id } as RetryTerminalOutcome;
+    }),
+    RETRY_LOCK_ATTEMPTS,
+    RETRY_LOCK_WAIT_MS,
+  ).catch((err: any) => ({ kind: "threw", error: err }) as const);
+
+  if (outcome.kind === "threw") {
+    // The owned transaction aborted: the row did not move. Fail closed.
+    return { ok: false, code: "write_failed", message: outcome.error?.message ?? String(outcome.error) };
+  }
+  if (outcome.kind === "busy") {
+    return { ok: false, code: "lock_busy", message: `another transition of peer ${input.peerId}'s retries is in progress` };
+  }
+  if (outcome.kind === "unavailable") {
+    return { ok: false, code: "lock_unavailable", message: "the FederationRetry store has no per-key lock" };
+  }
+  return outcome.value as RetryTerminalOutcome;
+}

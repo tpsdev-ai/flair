@@ -39,6 +39,7 @@ import {
   checkPrincipalEntitlement,
   inboundChangesExistingPrincipalStatus,
   type FederationSyncTable,
+  type SkipReason,
 } from "./federation-classify.js";
 export {
   classifyRecord,
@@ -49,8 +50,17 @@ export {
   PRINCIPAL_OWNING_TABLES,
   FEDERATION_TABLE_POLICY,
   FEDERATION_SYNC_TABLES,
+  SKIP_REASON_CLASS,
+  SKIP_REASONS,
+  RETRYABLE_SKIP_REASONS,
+  isSkipReason,
 } from "./federation-classify.js";
-export type { SkipReason, ClassifyResult, FederationSyncTable } from "./federation-classify.js";
+export type {
+  SkipReason,
+  RetryableSkipReason,
+  ClassifyResult,
+  FederationSyncTable,
+} from "./federation-classify.js";
 
 // Federation anti-replay: FederationPair and FederationSync both verify through
 // verifyFederationRequestBody (resources/replay-store.ts), which claims each
@@ -1095,7 +1105,7 @@ export class FederationSync extends Resource {
     const skippedReasons: Record<string, number> = {};
     const mergeErrors: string[] = [];
 
-    function recordSkip(reason: string) {
+    function recordSkip(reason: SkipReason) {
       skipped++;
       skippedReasons[reason] = (skippedReasons[reason] ?? 0) + 1;
     }
@@ -1503,6 +1513,41 @@ export class FederationPeers extends Resource {
       }
     } catch {}
     return { peers };
+  }
+}
+
+/**
+ * GET /FederationRetries — the sender's pending and terminal federation retry
+ * obligations (flair#2455), admin view.
+ *
+ * allowRead()=allowAdmin, the same gate as FederationPeers above. Read-only:
+ * it never writes a row, and a read failure propagates instead of being
+ * reported as an empty set. `flair federation status` renders it.
+ */
+export class FederationRetries extends Resource {
+  async allowRead(): Promise<boolean> {
+    return allowAdmin((this as any).getContext?.());
+  }
+
+  async get() {
+    const pending: any[] = [];
+    const terminal: any[] = [];
+    for await (const r of (databases as any).flair.FederationRetry.search()) {
+      const row = {
+        peerId: r.peerId,
+        table: r.table,
+        id: r.recordId,
+        reason: r.lastReason,
+        attempts: r.attempts,
+        bound: r.bound,
+        resolution: r.resolution,
+        state: r.state,
+        firstRefusedAt: r.firstRefusedAt,
+        completedAt: r.completedAt,
+      };
+      (r.state === "terminal" ? terminal : pending).push(row);
+    }
+    return { pending, terminal };
   }
 }
 

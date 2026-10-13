@@ -39,6 +39,38 @@ type Peer @table(database: "flair") @export {
   updatedAt: String
 }
 
+# Sender-owned retry obligations (flair#2455). One row per (peer, table, record)
+# the receiver refused for a reason a later re-offer could clear, plus locally
+# observed unconfirmed sends. Local bookkeeping: the sender writes it, and it is
+# EXCLUDED from federation policy and the receive mapping, so an inbound sync
+# cannot target it (a pushed record naming it skips as `unknown_table`).
+#
+# `id` is the collision-free encoding of the (peerId, table, recordId) tuple
+# (resources/federation-retry-lib.ts retryEntryKey); the three components are
+# also stored whole for querying. No record content is stored — a re-offer reads
+# the source row fresh. Admin-only on every operation; see resources/
+# FederationRetry.ts.
+type FederationRetry @table(database: "flair") @export {
+  id: ID @primaryKey               # retryEntryKey(peerId, table, recordId)
+  peerId: String! @indexed         # the peer that refused (or never answered)
+  table: String!                   # the source table name
+  recordId: String!                # the source row id
+  state: String! @indexed          # "pending" | "terminal"
+  firstRefusedAt: String! @indexed # age is measured from here (the T bound)
+  attempts: Int! @indexed          # reserved and persisted before each send (the N bound)
+  episodeId: String                # this obligation's generation; rejects stale completions
+  recordFingerprint: String        # content fingerprint, for exhausted-row suppression
+  lastReason: String               # the closed SkipReason, or a local reason
+  lastAttemptSyncId: String        # the sync that last reserved an attempt
+  lastAttemptAt: String
+  completedAt: String              # when the row became terminal
+  resolution: String               # which terminal outcome ended it
+  bound: String                    # null | "attempts" | "age" | "both"
+  createdAt: String!
+  updatedAt: String
+}
+
+
 # Federation body-signature nonces are recorded in `ReplayNonce`
 # (schemas/replay.graphql), shared with agent auth (flair#2061).
 
@@ -49,7 +81,7 @@ type SyncLog @table(database: "flair") {
   direction: String! @indexed      # "push" | "pull"
   recordCount: Int                 # how many records merged in this batch
   skippedCount: Int                # how many records skipped (sum of skippedReasons)
-  skippedReasons: String           # JSON: { unknown_table: N, non_originator: N, future_timestamp: N, no_op_same_hash: N, merge_error: N, unknown_originator_key: N, invalid_signature: N, missing_signature: N, principal_mismatch: N }
+  skippedReasons: String           # JSON: { unknown_table: N, non_originator: N, future_timestamp: N, no_op_same_hash: N, merge_error: N, invalid_agent_id: N, skill_not_federated: N, seed_id_not_federated: N, content_suffix_id_not_federated: N, unknown_originator_key: N, invalid_signature: N, missing_signature: N, principal_mismatch: N }
   status: String @indexed          # "success" | "partial" | "failed"
   error: String                    # human-readable summary if partial/failed (includes per-record error messages, capped)
   durationMs: Int                  # how long the sync took
