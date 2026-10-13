@@ -7,3 +7,9 @@
   redacted field. A write the server did not redact returns its response
   unchanged; a write that reports the count without stored text omits those
   fields and sets `contentWithheld: true`.
+
+  The `flair-mcp` stdio `skill_store` reply follows the same rule as its
+  `memory_store`: after a redaction, its preview and `Trigger:` line come from
+  the response's stored text (never the input), its structured result carries
+  `redactedValues`, and a count with no stored text gives no preview, no
+  trigger line and `contentWithheld: true`.
