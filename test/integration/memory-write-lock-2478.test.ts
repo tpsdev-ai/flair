@@ -80,6 +80,25 @@ function patchAs(agent: TestAgent, id: string, content: string): Promise<Respons
     signal: AbortSignal.timeout(60_000),
   });
 }
+function patchBodyAs(agent: TestAgent, id: string, body: Record<string, unknown>): Promise<Response> {
+  const path = `/Memory/${encodeURIComponent(id)}`;
+  return fetch(`${harper.httpURL}${path}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json", Authorization: ed25519Header(agent, "PATCH", path) },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(60_000),
+  });
+}
+/** An UNSIGNED (anonymous) PUT over the real HTTP route. */
+function anonymousPut(id: string, body: Record<string, unknown>): Promise<Response> {
+  const path = `/Memory/${encodeURIComponent(id)}`;
+  return fetch(`${harper.httpURL}${path}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(60_000),
+  });
+}
 async function waitFor(path: string, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -228,5 +247,45 @@ describe("flair#2478 — the lock guards a PATCH too", () => {
     await assertReleased(patchPoint);
     expect(heldRes.status, `the held PATCH was not 2xx: ${await heldRes.clone().text()}`).toBeLessThan(300);
     expect((await readRow(id))?.content, "the refused PUT wrote after all").toBe("the held PATCH");
+  }, 120_000);
+});
+
+// flair#2478: the authorization and visibility refusals must decide BEFORE (or
+// regardless of) the lock and the owned write — a refusal that moved after the
+// lock would let an anonymous reindex or a visibility-widening flip reach the
+// row. Both cases run through the REAL per-id lock path (Memory.primaryStore).
+describe("flair#2478 — the refusals decide before the lock, and never write", () => {
+  it("an anonymous PUT carrying _reindex is refused 401, and the row is unchanged", async () => {
+    const id = `wlk-anon-reindex-${Date.now()}`;
+    await seedMemory(id, "the original text");
+    const before = await readRow(id);
+    expect(before?.content).toBe("the original text");
+
+    const res = await anonymousPut(id, { agentId: owner.id, content: "the original text", _reindex: true });
+    const body = await res.json() as any;
+    expect(res.status, JSON.stringify(body)).toBe(401);
+    expect(body.error).toBe("authentication required");
+
+    const after = await readRow(id);
+    expect(after?.content, "the anonymous reindex re-PUT the row").toBe("the original text");
+    expect(after?.instanceToken, "the anonymous reindex rotated the row's instance token").toBe(before.instanceToken);
+  }, 120_000);
+
+  it("a PATCH moving a shared record to ephemeral is refused by name through the lock, row unchanged", async () => {
+    const id = `wlk-vis-${Date.now()}`;
+    await seedMemory(id, "the shared text");
+    const before = await readRow(id);
+    expect(before?.visibility).toBe("shared");
+    expect(before?.durability).toBe("standard");
+
+    const res = await patchBodyAs(owner, id, { agentId: owner.id, durability: "ephemeral" });
+    const body = await res.json() as any;
+    expect(res.status, JSON.stringify(body)).toBe(400);
+    expect(body.error).toBe("invalid_visibility_for_durability");
+
+    const after = await readRow(id);
+    expect(after?.durability, "the refused PATCH wrote after all").toBe("standard");
+    expect(after?.visibility).toBe("shared");
+    expect(after?.instanceToken).toBe(before.instanceToken);
   }, 120_000);
 });

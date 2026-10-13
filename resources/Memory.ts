@@ -2050,7 +2050,12 @@ export class Memory extends (databases as any).flair.Memory {
             { status: 400, headers: { "content-type": "application/json" } },
           );
         }
-        const stored = existingForSkill;
+        // The stored row the tier guard compares against: the row this
+        // transaction's first read resolved. When the resolver found no
+        // URL-bound id to read by (an in-process harness), fall back to the
+        // resource's own bound-record read so a stored row is still consulted —
+        // a missing stored read must never let an ephemeral flip through.
+        const stored = existingForSkill ?? ((await super.get()) as any);
         const tierError = assertVisibilityAllowedForDurability(
           content.durability ?? stored?.durability,
           content.visibility ?? stored?.visibility,
@@ -2271,6 +2276,15 @@ export class Memory extends (databases as any).flair.Memory {
           headers: { "Content-Type": "application/json" },
         });
       }
+      // An UNRESOLVED caller (anonymous HTTP, or an identity that did not
+      // resolve) may not reindex: the same 401 every owner-bearing write returns
+      // (resources/owner-field-guard.ts). This guard ran before the reindex
+      // branch; the read-first restructure moved it inside the owned ordinary
+      // transaction, which the reindex branch returns before, so re-assert it
+      // here — a reindex must never run unauthenticated. Internal callers (no
+      // auth context) pass, matching every other path.
+      const reindexOwnerDenial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
+      if (reindexOwnerDenial) return reindexOwnerDenial;
       // flair#1965 r3: resolve the stored row by the URL-BOUND target id (never a
       // body id alone); a body id that disagrees with the address, or a lookup
       // that FAILS, refuses the reindex. A reindex is a re-PUT of an EXISTING
