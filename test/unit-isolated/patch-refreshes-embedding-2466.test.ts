@@ -294,11 +294,15 @@ describe("flair#2466 — ordinary PATCH embedding cases", () => {
     BaseMemory.get = async (id: any) => {
       tableReads++;
       const stored = await get(id);
-      return tableReads === 1 ? stored : { ...stored, content: "a concurrent edit" };
+      // Reads 1 and 2 belong to the patch itself: the pre-write resolve (1) and
+      // the post-commit verification read (2, flair#2478). A THIRD read would be
+      // the conditional committed-row embedding check this case skips; hand it
+      // the concurrent edit so the case stays discriminating.
+      return tableReads <= 2 ? stored : { ...stored, content: "a concurrent edit" };
     };
     try {
       await memoryFor("mem-null-reread").patch({ content: "the unchanged text", embedding: null });
-      expect(tableReads).toBe(1);
+      expect(tableReads).toBe(2);
       const stored = await get("mem-null-reread");
       expect(stored.content).toBe("the unchanged text");
       expect(stored.embedding).toBeNull();

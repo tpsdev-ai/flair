@@ -82,7 +82,7 @@ describe("the durability guard stays wired into all write paths", () => {
   // Each REST write method's own body: from its signature to its closing brace,
   // the first two-space-indented "}" line after the signature.
   function methodBody(name: string): string {
-    const start = src.indexOf(`\n  async ${name}(`);
+    const start = [`\n  async ${name}(`, `\n  private async ${name}(`].map((m) => src.indexOf(m)).find((i) => i > -1) ?? -1;
     expect(start, `Memory.${name}() not found`).toBeGreaterThan(-1);
     const end = src.indexOf("\n  }\n", start);
     expect(end, `end of Memory.${name}() not found`).toBeGreaterThan(start);
@@ -90,8 +90,9 @@ describe("the durability guard stays wired into all write paths", () => {
   }
 
   // Three separate REST entry points write a Memory: post(), patch() and put().
-  // Each needs its own guard, so each method body must call the validator once.
-  test.each(["post", "patch", "put"])("Memory.%s() calls the validator exactly once", (name) => {
+  // Each needs its own guard, so each write body (the lock wrapper's `putLocked`
+  // / `patchLocked`, flair#2478) must call the validator once.
+  test.each(["post", "patchLocked", "putLocked"])("Memory.%s() calls the validator exactly once", (name) => {
     const calls = methodBody(name).match(/assertValidDurability\(content\.durability\)/g) ?? [];
     expect(calls.length).toBe(1);
   });

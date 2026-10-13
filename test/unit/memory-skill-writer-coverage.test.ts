@@ -65,8 +65,8 @@ add("Memory", ["writer:patchRecord#1"],
   "derivedFrom/lastReflected bookkeeping patch — never writes skill content.");
 add("Memory", ["writer:(databases as any).flair.Memory.delete#1"],
   "Memory.delete(): removal, not a write.");
-add("Memory", ["alias-source:(databases as any).flair.Memory#1", "alias-source:(databases as any).flair.Memory#2", "alias-source:(databases as any).flair.Memory#3", "alias-source:(databases as any).flair.Memory#4", "alias-source:(databases as any).flair.Memory#5"],
-  "Table handles: #1 is the table handed to patchRecord (that write is classified above as writer:patchRecord#1); the others are read-only — #3 is the class heritage, and #2, #4 and #5 are committed-row re-checks (confirmCommittedRow, which takes only `get`) — #2 the re-embed's (flair#2465), #4 the _reindex re-PUT's (flair#2450) and #5 Memory.put's (flair#2441).");
+add("Memory", ["alias-source:(databases as any).flair.Memory#1", "alias-source:(databases as any).flair.Memory#2", "alias-source:(databases as any).flair.Memory#3", "alias-source:(databases as any).flair.Memory#4", "alias-source:(databases as any).flair.Memory#5", "alias-source:(databases as any).flair.Memory#6", "alias-source:(databases as any).flair.Memory#7", "alias-source:(databases as any)?.flair?.Memory#1"],
+  "Table handles: #1 is the table handed to patchRecord (that write is classified above as writer:patchRecord#1); #3 is the class heritage; the optional handle is the write-lock store read (flair#2478); the rest are read-only post-commit reads — #2 the re-embed's confirm (flair#2465), #4 the ordinary PATCH's post-commit verification (flair#2478), #5 the _reindex re-PUT's confirm (flair#2450), #6 Memory.put's confirm (flair#2441) and #7 Memory.put's post-commit verification (flair#2478). All take only `get`.");
 
 // ── Non-skill writers in other modules ──
 add("MemoryFeed", ["alias-source:(databases as any).flair.Memory#1", "writer:writeBackCommittedRow#1"],

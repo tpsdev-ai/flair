@@ -29,6 +29,13 @@ import { DECLARED_MEMORY_ATTRIBUTES, stripUndeclaredMemoryAttributes, stripServe
 import { isJoinableTransaction, withOwnedTransaction, withSharedWriteTransaction } from "./request-transaction.js";
 import { CommittedRowChanged, GrantedCloseRevoked, confirmCommittedRow, sameStoredRow, storedRowChangedRefusal, writeGrantHeld } from "./write-back.js";
 import { txnPausePoint } from "./txn-pause-point.js";
+import {
+  markMemoryWriteOutcomeUnknown,
+  memoryBusyResponse,
+  withMemoryWriteLock,
+  writeOutcomeUnknownResponse,
+  type MemoryLockOutcome,
+} from "./memory-write-lock.js";
 import { assertValidDurability, stampEphemeralExpiry } from "./memory-durability.js";
 import { embedTextField, enforceSkillDurability, isSkillWrite, type MemoryEmbeddingInputField, rejectSkillWritePath, refuseSkillWriteSource, skillEmbedText, skillScanGate } from "./skill-write.js";
 import { buildSkillSuccessorRow, closedSkillPayloadReadable, defaultSkillHooks, grantedSkillClose, resolveSkillHead, rowIsSkill, runSkillVersionWrite, skillVersionVisibility, skillPayloadUnchanged, prepareSkillBody, validateSkillSnapshots, authorizeSkillOwners, skillWriteConflict } from "./skill-version-write.js";
@@ -216,6 +223,97 @@ function abortRequestTransaction(ctx: any): void {
   // transaction cannot be aborted, the rollback is not established, so the
   // failure MUST propagate rather than being swallowed behind a 500 body.
   txn.abort();
+}
+
+/**
+ * flair#2478 slice 1 — the `Memory.primaryStore` write-lock handle. Production
+ * is a real Harper table (a `primaryStore` with `tryLock`/`unlock`); a bare
+ * test double has none, and the lock reports `unavailable` (the verb then runs
+ * unserialized — there is no in-process writer to serialize against).
+ */
+function memoryWriteLockStore(): unknown {
+  return (databases as any)?.flair?.Memory?.primaryStore;
+}
+
+/** The lock ids a Memory verb names: the URL-bound id and body id(s), dropping
+ *  non-id values so the sorted, deduplicated key set is real. */
+function putLockIds(resource: unknown, content?: unknown): string[] {
+  return writeTargetIds(resource, content)
+    .filter((id) => typeof id === "string" || typeof id === "number")
+    .map((id) => String(id));
+}
+
+/** The caller id a lock-miss refusal carries — the request's agent annotation,
+ *  else `anonymous`/`internal`. Never stored-row state (Sherlock S7). */
+function memoryLockCallerId(resource: any): string {
+  const ctx = resource?.getContext?.();
+  const request = ctx?.request ?? ctx;
+  if (typeof request?.tpsAgent === "string" && request.tpsAgent.length > 0) return request.tpsAgent;
+  if (request?.tpsAnonymous === true) return "anonymous";
+  return "internal";
+}
+
+/** Map a lock outcome to its refusal `Response`, or `null` when the verb ran. */
+function memoryLockRefusal(outcome: MemoryLockOutcome<unknown>, callerId: string): Response | null {
+  if (outcome.kind === "busy") return memoryBusyResponse(callerId);
+  if (outcome.kind === "unknown") return writeOutcomeUnknownResponse();
+  return null;
+}
+
+/**
+ * The durable fields a post-commit read must still find at the value this write
+ * declared (flair#2478). A field the write did not declare is not compared — the
+ * stored value stands for it.
+ */
+const POSTCOMMIT_VERIFY_FIELDS = ["agentId", "content", "visibility", "durability", "archived"] as const;
+
+/** Field equality for the post-commit check: objects compare structurally. */
+function sameDeclaredField(stored: unknown, declared: unknown): boolean {
+  if (stored === declared) return true;
+  if (stored == null || declared == null) return stored === declared;
+  if (typeof stored === "object" || typeof declared === "object") {
+    return JSON.stringify(stored) === JSON.stringify(declared);
+  }
+  return false;
+}
+
+/**
+ * POST-COMMIT verification (flair#2478): re-read the COMMITTED row in a fresh
+ * context and confirm it still carries this write's declared values. Called
+ * after the owned transaction committed, still under the write lock, so the
+ * response reports what is stored, not what was staged.
+ *
+ *  - `mismatch` — the row is gone or a declared field differs (a same-id write
+ *    landed after the commit): the caller answers 409 stored_row_changed;
+ *  - `unknown` — the verification READ failed: the outcome is not known, never
+ *    "no row", so the id is marked outcome-unknown and the caller answers 503.
+ */
+async function verifyCommittedWrite(
+  table: { get(id: any, ctx?: any): Promise<any> },
+  declared: any,
+  fallbackId: any,
+): Promise<{ row?: any; mismatch?: boolean; unknown?: boolean }> {
+  const id = declared?.id ?? fallbackId;
+  if (id === undefined || id === null) return {};
+  let row: any;
+  try {
+    row = await table.get(id, {});
+  } catch {
+    return { unknown: true };
+  }
+  if (!row) return { mismatch: true };
+  for (const field of POSTCOMMIT_VERIFY_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(declared, field)) continue;
+    if (!sameDeclaredField(row[field], declared[field])) return { row, mismatch: true };
+  }
+  return { row };
+}
+
+/** The 503 for a write whose post-commit verification read failed (flair#2478).
+ *  The id is marked outcome-unknown, so a later writer to it is refused too. */
+function writeOutcomeUnknownFor(id: any): Response {
+  if (typeof id === "string" || typeof id === "number") markMemoryWriteOutcomeUnknown(id);
+  return writeOutcomeUnknownResponse();
 }
 
 /**
@@ -1834,7 +1932,27 @@ export class Memory extends (databases as any).flair.Memory {
   // PATCH routes past put(), so agentId immutability is enforced on both verbs
   // via the one shared delegate. (Admin/internal — including the _reindex
   // path in put() — pass through the delegate untouched.)
+  /**
+   * flair#2478 slice 1 — a PATCH runs under the per-id memory write lock and its
+   * write owns its transaction, so the read, the decision and the COMMIT all
+   * happen before the lock releases (the protocol's rule). See
+   * resources/memory-write-lock.ts.
+   */
   async patch(content: any, query?: any) {
+    const ids = putLockIds(this, content);
+    const outcome = await withMemoryWriteLock(memoryWriteLockStore(), ids, async () => {
+      const result = await this.patchLocked(content, query);
+      // Test-only: the owned write transaction has committed; the lock is held.
+      const committed = txnPausePoint("memory-patch-committed");
+      if (committed) await committed;
+      return result;
+    });
+    if (outcome.kind === "done") return outcome.value;
+    if (outcome.kind === "unavailable") return this.patchLocked(content, query);
+    return memoryLockRefusal(outcome, memoryLockCallerId(this))!;
+  }
+
+  private async patchLocked(content: any, query?: any) {
     // flair#2296: decided on the body as sent; the guards below add fields to it.
     const reembedRequest = isReembedPatch(content);
     // flair#2141 S2: check the seed's fixed id against the operator-source
@@ -2052,17 +2170,44 @@ export class Memory extends (databases as any).flair.Memory {
       const committedField = committed ? vectorFieldOver(committed) : null;
       if (committedField) await storeVectorFor(committedField);
     }
-    const patched = await super.patch(content, query);
+    const patched = await withOwnedTransaction((this as any).getContext?.(), async () => super.patch(content, query));
+    // Post-commit verification (flair#2478): the owned transaction has committed.
+    // The committed row must still carry this PATCH's declared fields, visibility
+    // included; a same-id write that landed after the commit is refused by name,
+    // and a failed verification read is an UNKNOWN outcome (503, never "no row").
+    const verified = await verifyCommittedWrite((databases as any).flair.Memory, content, (this as any).getId?.());
+    if (verified.unknown) return writeOutcomeUnknownFor(content?.id ?? (this as any).getId?.());
+    if (verified.mismatch) return storedRowChangedRefusal("Memory");
     // embedding-space-guard slice 1 (flair#2425): a PATCH that stores an
     // embedding stamp must consult the latch the same way post()/put() do, so a
     // body-supplied foreign stamp closes the gate instead of the row carrying a
     // model stamp the latch never recorded. A PATCH body with no embedding
     // fields is unchanged: noteWriteStamp(undefined) is a no-op.
     noteWriteStamp(content?.embeddingModel as string | null | undefined);
-    return withRedactedValues(patched, redactedValues, content?.id ?? (this as any).getId?.());
+    return withRedactedValues(verified.row ?? patched, redactedValues, content?.id ?? (this as any).getId?.());
   }
 
+  /**
+   * flair#2478 slice 1 — the owner PUT runs under the per-id memory write lock
+   * and its ordinary row write owns its transaction, so the read, the decision
+   * and the COMMIT all happen before the lock releases (the protocol's rule).
+   * See resources/memory-write-lock.ts.
+   */
   async put(content: any, query?: any) {
+    const ids = putLockIds(this, content);
+    const outcome = await withMemoryWriteLock(memoryWriteLockStore(), ids, async () => {
+      const result = await this.putLocked(content, query);
+      // Test-only: the owned write transaction has committed; the lock is held.
+      const committed = txnPausePoint("memory-put-committed");
+      if (committed) await committed;
+      return result;
+    });
+    if (outcome.kind === "done") return outcome.value;
+    if (outcome.kind === "unavailable") return this.putLocked(content, query);
+    return memoryLockRefusal(outcome, memoryLockCallerId(this))!;
+  }
+
+  private async putLocked(content: any, query?: any) {
     const reembedding = content?.embedding === null && content?.embeddingModel === null;
     // flair#2141 S2: check the seed's fixed id against the operator-source
     // reservation (resources/seed-reservation.ts).
@@ -2469,13 +2614,13 @@ export class Memory extends (databases as any).flair.Memory {
     // confirmations inside.
     const beforePut = txnPausePoint("memory-put-pre");
     if (beforePut) await beforePut;
-    // A request-owned transaction is not aborted by a throw out of the callback
-    // below (the request owns its commit); an owned one is (Harper's
+    // flair#2478 slice 1: the ordinary row write OWNS its transaction (it no
+    // longer joins the request's), so it COMMITS before the write lock releases.
+    // A throw out of the callback aborts THAT owned transaction (Harper's
     // transaction() aborts it when its callback throws).
-    const joinsRequestTxn = isJoinableTransaction(ctx);
     let putResult: any;
     try {
-      putResult = await withSharedWriteTransaction(ctx, async (c) => {
+      putResult = await withOwnedTransaction(ctx, async (c) => {
         // flair#2441: this put is over the row read as `preExisting` (which
         // `stampInstanceToken` copied its incarnation token from). The write
         // confirms, inside its own transaction, that the COMMITTED row is still
@@ -2510,12 +2655,10 @@ export class Memory extends (databases as any).flair.Memory {
           // purge or a same-id replace can commit in that window.
           const stagedPause = txnPausePoint("memory-put-staged");
           if (stagedPause) await stagedPause;
-          try {
-            await confirmCommittedRow((databases as any).flair.Memory, preExisting.id, (committed) => sameStoredRow(committed, preExisting));
-          } catch (err) {
-            if (err instanceof CommittedRowChanged && joinsRequestTxn) abortRequestTransaction(c);
-            throw err;
-          }
+          // The committed row must still be the one read; the owned transaction
+          // aborts (the throw leaves its callback) so the staged write is
+          // discarded, and the caller answers 409.
+          await confirmCommittedRow((databases as any).flair.Memory, preExisting.id, (committed) => sameStoredRow(committed, preExisting));
         }
         return r;
       });
@@ -2524,7 +2667,15 @@ export class Memory extends (databases as any).flair.Memory {
       throw err;
     }
     if (putResult instanceof Response) return putResult;
-    const result: any = putResult;
+    // Post-commit verification (flair#2478): the owned transaction has committed.
+    // A fresh read must still find the row this PUT declared; a same-id write
+    // that landed after the commit is refused by name instead of answered with
+    // success for a write that did not land. A failed verification read is an
+    // UNKNOWN outcome (never "no row"): the id is marked and the caller gets 503.
+    const verified = await verifyCommittedWrite((databases as any).flair.Memory, content, preExisting?.id);
+    if (verified.unknown) return writeOutcomeUnknownFor(content?.id ?? preExisting?.id);
+    if (verified.mismatch) return storedRowChangedRefusal("Memory");
+    const result: any = verified.row ?? putResult;
     // flair#1357 — read-your-write for the lexical leg (see post()).
     noteMemoryUpsert(content);
     noteWriteStamp(content?.embeddingModel as string | null | undefined); // embedding-space-guard slice 1 (see post())
