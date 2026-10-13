@@ -133,7 +133,7 @@ mock.module("harper", () => ({ databases: databasesMock, Resource: class {}, ser
 
 const { Memory } = await import("../../resources/Memory.ts");
 const { SemanticSearch } = await import("../../resources/SemanticSearch.ts");
-const { recomputeLatch, isEmbeddingSpaceUniform, _resetGuardForTests } = await import("../../resources/embedding-space-guard.ts");
+const { recomputeLatch, isEmbeddingSpaceUniform, _setGuardTableGetterForTests, _resetGuardForTests } = await import("../../resources/embedding-space-guard.ts");
 const { _resetLocalInstanceIdCacheForTests } = await import("../../resources/instance-identity.ts");
 
 const AGENT = "agent-me";
@@ -251,5 +251,26 @@ describe("embedding-space-guard — both runtime legs (mutation test)", () => {
     const w: any = await makeMemory(AGENT).post({ agentId: AGENT, content: FINDING_REWORDED });
     expect(w.written).toBe(true);
     expect(w.deduplicated).toBe(true);
+  });
+
+  it("(e) before the first scan completes, the recall leg fails CLOSED with the not-yet-verified warning", async () => {
+    seedRow("m1", AGENT, FINDING, CURRENT, FAKE_EMBEDDING);
+    // beforeEach reset the guard: no scan has reached a verdict yet. The recall
+    // is the FIRST consult, so it must fail closed and name the unverified state.
+    const res: any = await makeSearch(AGENT).post({ agentId: AGENT, q: "replication" });
+    expect(res.results.map((r: any) => r.id)).toContain("m1"); // keyword-only STILL serves
+    expect(String(res._warning)).toContain("embedding space not yet verified");
+    expect(String(res._warning)).not.toContain("mixed embedding spaces");
+  });
+
+  it("(f) after a scan error, the recall leg fails CLOSED with the failed-scan warning", async () => {
+    seedRow("m1", AGENT, FINDING, CURRENT, FAKE_EMBEDDING);
+    _setGuardTableGetterForTests(async () => { throw new Error("no live table"); });
+    expect(await recomputeLatch()).toBe(false); // the scan error leaves an unknown verdict
+
+    const res: any = await makeSearch(AGENT).post({ agentId: AGENT, q: "replication" });
+    expect(res.results.map((r: any) => r.id)).toContain("m1");
+    expect(String(res._warning)).toContain("embedding space unverified: last scan failed");
+    expect(String(res._warning)).not.toContain("mixed embedding spaces");
   });
 });

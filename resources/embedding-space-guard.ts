@@ -29,6 +29,19 @@
  * Both runtime legs consult the SAME `isEmbeddingSpaceUniform()` — a single
  * chokepoint (like `prefixesEnabled()`), never scattered per-call-site checks.
  *
+ * ─── Unknown verdict = FAIL CLOSED (flair#2530) ──────────────────────────────
+ * A scan can be pending (before the first scan completes) or fail (a boot race,
+ * a transient read error). The verdict is then UNKNOWN, and "unknown" is NOT
+ * "known uniform": only a scan that verified the store opens the gate
+ * (`isEmbeddingSpaceUniform()` returns true). Every other state — pending
+ * (`unverified`), a failed scan (`scan-failed`), or a foreign-write/mixed corpus
+ * (`mixed`) — makes a consumer take its MIXED-space path: the recall leg drops
+ * its query embedding and serves keyword-only with a state-named warning, the
+ * dedup leg no-ops. A consult never blocks on an in-flight scan to obtain a
+ * verdict; it fails closed now and a later scan reopens the gate. A scan error
+ * is classified into a bounded reason (never row content) and logged once per
+ * class; the consult schedule retries unchanged.
+ *
  * ─── Why the harper import is deferred ──────────────────────────────────────
  * `harper` is dynamic-imported inside the scan only (never a top-level import)
  * — exactly the reason embeddings-provider.ts defers it: a static
@@ -38,6 +51,7 @@
  * carry no harper dependency at all.
  */
 import { EMBEDDING_ENGINE, getModelId } from "./embeddings-provider.js";
+import { txnPausePoint } from "./txn-pause-point.js";
 
 // ─── Pure core (Harper-free) ────────────────────────────────────────────────
 
@@ -137,6 +151,10 @@ let _lastScanAt = 0;
 let _scanning: Promise<void> | undefined;
 // flair#2481 — foreign-space write notes invalidate an in-flight scan's verdict.
 let _writeEpoch = 0;
+// flair#2530 — the last scan's bounded failure reason, or null. Non-null ⇒ the
+// verdict is unknown (fail closed) until a scan reaches a verdict.
+let _lastScanError: string | null = null;
+const _loggedScanErrorReasons = new Set<string>();
 
 // While the latch is TRIPPED, re-verify at most this often, so a completed
 // re-embed reopens the gate without paying a scan on every degraded query.
@@ -146,11 +164,20 @@ const MAX_DIAG_STAMPS = 12;
 
 async function scan(): Promise<void> {
   const startEpoch = _writeEpoch;
+  // Test-only: inert unless the fault-injection opt-in is set and this point is
+  // armed. It holds this scan before its read, so a consult that arrives while
+  // the boot pre-warm is parked observes the unknown (not-yet-verified) verdict
+  // a real boot window exposes.
+  const paused = txnPausePoint("space-guard-scan");
+  if (paused) await paused;
   const current = normalizeStamp(_modelIdGetter());
   const seen = new Set<string>();
   let uniform = true;
+  // Which half of the scan threw, for the bounded failure reason below.
+  let phase: "table" | "read" = "table";
   try {
     const table = await _tableGetter();
+    phase = "read";
     // Project ONLY the stamp — never the vector — so the boot scan is far
     // cheaper than health.ts's existing full-record corpus read.
     for await (const row of table.search({ select: ["embeddingModel"] })) {
@@ -167,9 +194,13 @@ async function scan(): Promise<void> {
     _activeStamps = [...seen];
     _uniform = uniform;
     _lastScanAt = Date.now();
+    // A scan that reached a verdict clears any earlier failed-scan state.
+    _lastScanError = null;
   } catch {
-    // No live table yet (boot race) — leave the prior verdict untouched and
-    // retry on the next consult. Never cache a verdict we couldn't compute.
+    // Record a bounded reason (never row content) and log the class once; the
+    // prior verdict is left untouched and the consult schedule retries. The
+    // verdict now reads as unknown ⇒ consumers fail closed (flair#2530).
+    noteScanFailure(phase === "table" ? SCAN_ERROR_TABLE_UNAVAILABLE : SCAN_ERROR_SCAN_FAILED);
   }
 }
 
@@ -178,20 +209,94 @@ function runScan(): Promise<void> {
   return _scanning;
 }
 
-/**
- * THE single chokepoint. Returns true when the store is uniform in the current
- * embedding space (safe to cosine the query/candidate against stored vectors),
- * false when it is not (a mixed-space corpus — the caller must NOT cosine).
- *
- * O(1) on the happy path: once known-uniform, no scan, no allocation. Only
- * (re)scans when the latch is unknown (pre-boot) or tripped-and-stale.
- */
-export async function isEmbeddingSpaceUniform(): Promise<boolean> {
-  if (_uniform === true) return true;
-  if (_uniform === undefined || Date.now() - _lastScanAt >= RECHECK_MS) {
-    await runScan();
+// ─── Verdict state (flair#2530) ──────────────────────────────────────────────
+// The latch's verdict has FOUR operator-visible states. Only `uniform` — a scan
+// that verified the corpus — opens the gate. The other three are NOT "known
+// uniform" and fail closed: `unverified` (no scan has reached a verdict yet),
+// `scan-failed` (the most recent scan attempt threw), and `mixed` (a scan or a
+// foreign write observed a non-current stamp).
+export type EmbeddingSpaceGuardState = "uniform" | "mixed" | "unverified" | "scan-failed";
+
+export interface EmbeddingSpaceVerdict {
+  /** true ONLY for a scan-verified uniform store. False ⇒ take the mixed path. */
+  uniform: boolean;
+  state: EmbeddingSpaceGuardState;
+  /** A bounded reason, only for `scan-failed`; null otherwise. Never row content. */
+  reason: string | null;
+  /** The current engine-qualified space id (a metadata string, never a vector). */
+  current: string;
+  /** The (capped) distinct active stamps seen, for the mixed-space diagnostic. */
+  found: string[];
+}
+
+/** Bounded, row-content-free reasons a scan can fail with. A scan error is
+ *  classified into one of these; the raw message is never surfaced or logged. */
+export const SCAN_ERROR_TABLE_UNAVAILABLE = "the Memory table was not available";
+export const SCAN_ERROR_SCAN_FAILED = "the Memory corpus scan failed";
+
+/** Record a scan failure: remember the bounded reason and log the class ONCE.
+ *  The consult schedule retries unchanged; this only names the state. Never
+ *  logs the raw error (which could carry row content). */
+function noteScanFailure(reason: string): void {
+  _lastScanError = reason;
+  if (_loggedScanErrorReasons.has(reason)) return;
+  _loggedScanErrorReasons.add(reason);
+  console.warn(
+    `embedding-space-guard: corpus scan failed (${reason}); ` +
+      `the store is not known to be uniform until a scan succeeds`,
+  );
+}
+
+/** Read the verdict + its state together, without scanning. Callers must not
+ *  use this to decide AND expect it to reflect a scan they just started. */
+function guardSnapshot(): EmbeddingSpaceVerdict {
+  const current = normalizeStamp(_modelIdGetter()) ?? _modelIdGetter();
+  const found = [..._activeStamps];
+  if (_lastScanError !== null) {
+    return { uniform: false, state: "scan-failed", reason: _lastScanError, current, found };
   }
-  return _uniform ?? true;
+  if (_uniform === true) return { uniform: true, state: "uniform", reason: null, current, found };
+  if (_uniform === false) return { uniform: false, state: "mixed", reason: null, current, found };
+  return { uniform: false, state: "unverified", reason: null, current, found };
+}
+
+/** The consult decision. Fails closed and never awaits an in-flight scan: an
+ *  unknown verdict must be reported NOW (the caller takes its mixed-space path)
+ *  rather than block until a scan finishes. A pending or stale verdict kicks off
+ *  a (re)scan whose completion reopens the gate for later consults. The snapshot
+ *  is taken synchronously, so the state cannot drift from the decision. */
+function consultGuard(): EmbeddingSpaceVerdict {
+  if (_uniform === true && _lastScanError === null) return guardSnapshot();
+  if (_uniform === undefined || Date.now() - _lastScanAt >= RECHECK_MS) {
+    void runScan();
+  }
+  return guardSnapshot();
+}
+
+/** THE single chokepoint. Returns true when a scan verified the store uniform
+ *  in the current embedding space (safe to cosine the query/candidate against
+ *  stored vectors), false otherwise — including the UNKNOWN verdict (pending
+ *  first scan, or a failed scan), which fails closed (the caller must take its
+ *  mixed-space path). O(1) on the happy path: once verified-uniform, no scan, no
+ *  allocation; a pending or tripped verdict kicks off a (re)scan the caller does
+ *  NOT wait for, so the unknown verdict is reported now, not after the scan. */
+export function isEmbeddingSpaceUniform(): Promise<boolean> {
+  return Promise.resolve(consultGuard().uniform);
+}
+
+/** The full verdict for a consumer that must NAME the state it degraded on
+ *  (the recall leg's `_warning`). Decision and state are captured together, so
+ *  the state cannot drift from the decision under a concurrent scan. Fails
+ *  closed exactly as `isEmbeddingSpaceUniform()` does. */
+export function embeddingSpaceVerdict(): Promise<EmbeddingSpaceVerdict> {
+  return Promise.resolve(consultGuard());
+}
+
+/** The guard state for an operator surface (`flair doctor` via /Health), without
+ *  running a scan. Never blocks, never reads a vector. */
+export function spaceGuardState(): { state: EmbeddingSpaceGuardState; reason: string | null } {
+  const v = guardSnapshot();
+  return { state: v.state, reason: v.reason };
 }
 
 /**
@@ -214,12 +319,13 @@ export function noteWriteStamp(stamp: string | null | undefined): void {
  * Force a fresh corpus scan and return the resulting uniformity. The explicit
  * "re-embed completion clears it" primitive — used by the boot pre-warm, and
  * callable after a bulk re-embed to reopen the gate promptly rather than
- * waiting out RECHECK_MS.
+ * waiting out RECHECK_MS. Fails closed: a scan that did not reach a verdict
+ * (failed) returns false, exactly as a consult would.
  */
 export async function recomputeLatch(): Promise<boolean> {
   _lastScanAt = 0; // bypass the throttle
   await scan();
-  return _uniform ?? true;
+  return _uniform === true && _lastScanError === null;
 }
 
 /**
@@ -237,7 +343,8 @@ export function spaceGuardDiagnostics(): { current: string; found: string[] } {
 // phase (same setImmediate convention as migration-boot.ts). If it fires
 // before the Memory table is live, the scan silently no-ops and the first real
 // consult computes the latch lazily — correctness never depends on this
-// pre-warm, only the first query's latency does.
+// pre-warm (fail-closed either way); it only decides whether the first query
+// serves embeddings or falls back to keyword-only until a scan completes.
 let _prewarmScheduled = false;
 export function scheduleSpaceGuardPrewarm(): void {
   if (_prewarmScheduled) return;
@@ -256,6 +363,8 @@ export function _resetGuardForTests(): void {
   _lastScanAt = 0;
   _scanning = undefined;
   _writeEpoch = 0;
+  _lastScanError = null;
+  _loggedScanErrorReasons.clear();
   _prewarmScheduled = false;
 }
 

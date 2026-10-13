@@ -1,7 +1,7 @@
 import { Resource, databases } from "harper";
 import { resolveAgentAuth, allowVerified } from "./agent-auth.js";
 import { getEmbedding, getMode } from "./embeddings-provider.js";
-import { isEmbeddingSpaceUniform, spaceGuardDiagnostics } from "./embedding-space-guard.js";
+import { embeddingSpaceVerdict, type EmbeddingSpaceVerdict } from "./embedding-space-guard.js";
 import { withDetachedTxn } from "./table-helpers.js";
 import { applyHitStats, noteSearchHits } from "./hit-tracking.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
@@ -146,22 +146,27 @@ export class SemanticSearch extends Resource {
     }
 
     // ─── Vector-space uniformity guard (embedding-space-guard slice 1) ────────
-    // If the store is NOT uniform in the current embedding space (a mixed-space
-    // corpus during a re-embed / model change), cosining the query against
-    // stored vectors returns garbage — Harper zero-pads a mismatched-dimension
-    // vector and returns a bogus score instead of throwing; same-dims /
-    // different-space is silent garbage too. REFUSE the embedding leg and
+    // If the store is NOT KNOWN uniform in the current embedding space — a
+    // mixed-space corpus during a re-embed / model change, OR an unknown verdict
+    // (before the first scan completes, or after a scan error) — cosining the
+    // query against stored vectors returns garbage: Harper zero-pads a
+    // mismatched-dimension vector and returns a bogus score instead of throwing;
+    // same-dims / different-space is silent garbage too. The guard fails CLOSED:
+    // only a scan-verified uniform store serves embeddings (flair#2530). Take the
+    // SAME path for every non-uniform state — REFUSE the embedding leg and
     // degrade to keyword-only LOUDLY: drop qEmb so retrieveCandidates takes the
     // keyword-only branch (reusing the existing mode:'none' graceful-degrade
-    // contract), and surface a structured warning naming both spaces + the
-    // `flair reembed` remedy below. Never serve mixed-space vectors, never
-    // merely log. Consulted through the SAME single chokepoint the write-time
-    // dedup leg uses (resources/embedding-space-guard.ts) — O(1) on the uniform
-    // happy path.
-    let spaceGuardDegraded = false;
-    if (qEmb && !(await isEmbeddingSpaceUniform())) {
-      qEmb = undefined;
-      spaceGuardDegraded = true;
+    // contract), and surface a structured warning that NAMES the state (mixed /
+    // not-yet-verified / scan-failed) below. Never serve a cross-space vector,
+    // never merely log. Consulted through the SAME single chokepoint the
+    // write-time dedup leg uses — O(1) on the verified-uniform happy path.
+    let spaceGuardVerdict: EmbeddingSpaceVerdict | null = null;
+    if (qEmb) {
+      const verdict = await embeddingSpaceVerdict();
+      if (!verdict.uniform) {
+        qEmb = undefined;
+        spaceGuardVerdict = verdict;
+      }
     }
 
     // ─── Temporal intent detection ────────────────────────────────────────────
@@ -416,12 +421,23 @@ export class SemanticSearch extends Resource {
       response.bestScore = abstention.bestScore;
       response.threshold = abstention.threshold;
     }
-    if (spaceGuardDegraded) {
-      const diag = spaceGuardDiagnostics();
-      response._warning =
-        `semantic search unavailable — the store has mixed embedding spaces ` +
-        `(current: ${diag.current}; found: ${diag.found.join(", ")}); results are keyword-only. ` +
-        `Reconcile to one space with: flair reembed --stale-only`;
+    if (spaceGuardVerdict) {
+      // The verdict cannot be `uniform` here (that state is never degraded), so
+      // the three cases below are exactly the non-uniform states. Each names
+      // itself; the mixed-stamps wording is used ONLY for a mixed store.
+      const v = spaceGuardVerdict;
+      if (v.state === "scan-failed") {
+        response._warning =
+          `semantic search unavailable — embedding space unverified: last scan failed (${v.reason}); results are keyword-only.`;
+      } else if (v.state === "unverified") {
+        response._warning =
+          `semantic search unavailable — embedding space not yet verified; results are keyword-only.`;
+      } else {
+        response._warning =
+          `semantic search unavailable — the store has mixed embedding spaces ` +
+          `(current: ${v.current}; found: ${v.found.join(", ")}); results are keyword-only. ` +
+          `Reconcile to one space with: flair reembed --stale-only`;
+      }
     } else if (!qEmb && q && getMode() === "none") {
       response._warning = "semantic search unavailable — results are keyword-only";
     }

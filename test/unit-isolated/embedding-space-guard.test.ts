@@ -22,9 +22,12 @@ const {
   isCurrentSpaceStamp,
   isUniformStampSet,
   isEmbeddingSpaceUniform,
+  embeddingSpaceVerdict,
+  spaceGuardState,
   noteWriteStamp,
   recomputeLatch,
   spaceGuardDiagnostics,
+  SCAN_ERROR_TABLE_UNAVAILABLE,
   _setGuardTableGetterForTests,
   _setGuardModelIdForTests,
   _resetGuardForTests,
@@ -139,13 +142,42 @@ describe("embedding-space-guard — latch", () => {
     expect(d.found).toContain(FOREIGN);
   });
 
-  it("a failed scan does not cache a verdict (fails open, retries next consult)", async () => {
-    _setGuardTableGetterForTests(async () => {
-      throw new Error("no live table (boot race)");
-    });
-    expect(await isEmbeddingSpaceUniform()).toBe(true); // unknown ⇒ safe default, not a cached false
-    // Now a real table appears — the next consult recomputes correctly.
-    _setGuardTableGetterForTests(fakeTableOver([BARE, FOREIGN]));
+  it("before the first scan completes the verdict is UNKNOWN and fails CLOSED", async () => {
+    // A table read that never resolves: no scan reaches a verdict.
+    _setGuardTableGetterForTests(() => new Promise<never>(() => {}));
+    const v = await embeddingSpaceVerdict();
+    expect(v.uniform).toBe(false); // not known uniform ⇒ the caller's mixed path
+    expect(v.state).toBe("unverified");
+    expect(spaceGuardState()).toEqual({ state: "unverified", reason: null });
+  });
+
+  it("a scan that throws leaves an unknown verdict, names it, and logs its class once", async () => {
+    const warns: string[] = [];
+    const orig = console.warn;
+    console.warn = (...a: unknown[]) => { warns.push(a.map(String).join(" ")); };
+    try {
+      _setGuardTableGetterForTests(async () => { throw new Error("no live table (boot race)"); });
+      expect(await recomputeLatch()).toBe(false); // scan A fails; fail closed, not a cached true
+      const v = await embeddingSpaceVerdict(); // a consult fires scan B, snapshots now
+      expect(v.uniform).toBe(false);
+      expect(v.state).toBe("scan-failed");
+      expect(v.reason).toBe(SCAN_ERROR_TABLE_UNAVAILABLE);
+      // scan B fails too; still only ONE log line for the error class.
+      await new Promise((r) => setTimeout(r, 25));
+      expect(warns.filter((w) => w.includes("corpus scan failed")).length).toBe(1);
+    } finally {
+      console.warn = orig;
+    }
+  });
+
+  it("a later successful scan clears the failed state", async () => {
+    _setGuardTableGetterForTests(async () => { throw new Error("transient"); });
     expect(await recomputeLatch()).toBe(false);
+    _setGuardTableGetterForTests(fakeTableOver([BARE, BARE, null]));
+    expect(await recomputeLatch()).toBe(true);
+    const v = await embeddingSpaceVerdict();
+    expect(v.uniform).toBe(true);
+    expect(v.state).toBe("uniform");
+    expect(await isEmbeddingSpaceUniform()).toBe(true);
   });
 });

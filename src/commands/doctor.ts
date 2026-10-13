@@ -24,6 +24,7 @@ import { collectFederationEnv, describeFederationDriverFinding, federationPeersC
 import { plistCarriesInlineAdminPassword } from "../lib/launchd-management.js";
 import { DOCTOR_CHECK_IDS, catalogIssueDelta, mcpRepinIcon, probeFlairHealth, renderCatalogDoctorLines, runDoctorChecks, type WorkerThreadsObservation } from "../lib/doctor-run.js";
 import { describeEmbedGpuDoctorFinding } from "../lib/embed-gpu-doctor.js";
+import { describeEmbeddingSpaceDoctorFinding } from "../lib/embedding-space-doctor.js";
 import { adminPassDesyncFinding, detectPersistedAdminUser } from "../lib/init-admin-pass.js";
 import { opsApiBindFinding } from "../lib/ops-api-bind.js";
 import {
@@ -269,6 +270,27 @@ export function renderEmbedGpuDoctorFinding(
     `  ${icon} ${finding.message}`,
     `     ${render.wrap(render.c.dim, "Fix:")} ${finding.fixHint}`,
   ];
+  for (const line of lines) write(line);
+  return { lines, issueDelta: finding.isIssue ? 1 : 0 };
+}
+
+/**
+ * flair#2530 — the single place a /Health embedding-space verdict becomes doctor
+ * output and exit-code weight, extracted like renderEmbedGpuDoctorFinding so the
+ * four states are exercised on the real counting path. Only a `mixed` store is a
+ * blocking finding; `uniform` prints an OK line and the two unverified states
+ * print advisories.
+ */
+export function renderEmbeddingSpaceDoctorFinding(
+  embeddingSpace: unknown,
+  write: (line: string) => void = (line) => console.log(line),
+): { lines: string[]; issueDelta: number } {
+  const finding = describeEmbeddingSpaceDoctorFinding(embeddingSpace);
+  if (!finding) return { lines: [], issueDelta: 0 };
+  const icon =
+    finding.icon === "ok" ? render.icons.ok : finding.icon === "warn" ? render.icons.warn : render.icons.error;
+  const lines = [`  ${icon} ${finding.message}`];
+  if (finding.fixHint) lines.push(`     ${render.wrap(render.c.dim, "Fix:")} ${finding.fixHint}`);
   for (const line of lines) write(line);
   return { lines, issueDelta: finding.isIssue ? 1 : 0 };
 }
@@ -664,6 +686,7 @@ program
     // picture here instead of a one-liner and `--fix` offers the restart.
     let runningVersion: string | null = null;
     let embedGpuFromHealth: unknown;
+    let embeddingSpaceFromHealth: unknown;
     let workerThreads: WorkerThreadsObservation | undefined;
     if (harperResponding) {
       try {
@@ -671,9 +694,10 @@ program
         if (probe.reaching) {
           workerThreads = probe.observation ?? undefined;
           if (probe.status >= 200 && probe.status < 300 && probe.body && typeof probe.body === "object") {
-            const healthBody = probe.body as { version?: unknown; embedding?: unknown };
+            const healthBody = probe.body as { version?: unknown; embedding?: unknown; embeddingSpace?: unknown };
             runningVersion = typeof healthBody.version === "string" ? healthBody.version : null;
             embedGpuFromHealth = healthBody.embedding;
+            embeddingSpaceFromHealth = healthBody.embeddingSpace;
           }
         }
       } catch { /* leave runningVersion null — reported below as "unknown" */ }
@@ -709,6 +733,10 @@ program
       // does NOT fail the run, while an explicit request or an unrecognized
       // source still fails closed. A stated CPU default is silent here.
       issues += renderEmbedGpuDoctorFinding(embedGpuFromHealth).issueDelta;
+
+      // flair#2530 — the embedding-space guard's verdict, from /Health. A `mixed`
+      // store is a blocking finding; the two unverified states are advisories.
+      issues += renderEmbeddingSpaceDoctorFinding(embeddingSpaceFromHealth).issueDelta;
     }
 
     // 2. Keys directory
