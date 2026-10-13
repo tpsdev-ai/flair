@@ -249,7 +249,7 @@ export const HARPER_STARTUP_BUDGET_MS = 60_000;
 /**
  * The budget a hook that calls `startHarper` must allow: the readiness budget
  * doubled, covering the install step and the startup-banner wait ahead of the
- * readiness poll. 120_000 is the value the existing booting hooks already use.
+ * readiness poll.
  */
 export const HARPER_START_BUDGET_MS = 2 * HARPER_STARTUP_BUDGET_MS;
 
