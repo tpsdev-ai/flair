@@ -16,7 +16,7 @@
 import { beforeAll, afterAll, describe, expect, test } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { signBodyFresh } from "../../resources/federation-crypto.js";
 
 const agent = (id: string) => ({ id, ...nacl.sign.keyPair() });
@@ -52,7 +52,7 @@ beforeAll(async () => {
   harper = await startHarper();
   await seed("Agent", [{ id: owner.id, name: owner.id, role: "agent", publicKey: Buffer.from(owner.publicKey).toString("base64"), createdAt: now }]);
 }, 120_000);
-afterAll(async () => { if (harper) await stopHarper(harper); });
+afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
 
 describe("Memory skill-write path guards (flair#1542)", () => {
   // ─── PATCH /Memory/<id> rejects a skill-tagged patch ──────────────────────

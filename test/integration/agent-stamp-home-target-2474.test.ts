@@ -30,7 +30,7 @@ import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 const CLI = join(process.cwd(), "dist", "cli.js");
 
@@ -132,7 +132,7 @@ afterAll(async () => {
   if (b) await stopHarper(b);
   if (home) rmSync(home, { recursive: true, force: true });
   if (partialHome) rmSync(partialHome, { recursive: true, force: true });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair#2474 — stamp-home checks its two ports against a complete configured pair", () => {
   test("an ops port that conflicts with the configured pair is refused by name", async () => {

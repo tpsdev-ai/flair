@@ -3,7 +3,7 @@ import { cp, mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import nacl from "tweetnacl";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 const root = process.cwd();
 const now = Date.now();
@@ -61,7 +61,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (appDir) await rm(appDir, { recursive: true, force: true });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("bootstrap workspace window", () => {
   test("preserves latest nonempty entities, ties, old-only fallback and empty history", async () => {

@@ -30,7 +30,7 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
 
@@ -135,7 +135,7 @@ describe("flair#1207 — content-selection budget must not drop the large on-tas
     }
   }, 300_000);
 
-  afterAll(async () => { if (harper) await stopHarper(harper); });
+  afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
 
   test("the large top-relevance record is INCLUDED at maxTokens where the 0.44.8 shrunk budget would drop it; every smaller record also fits", async () => {
     // Pre-flight: the sizing that makes this a real 0.44.8-vs-fixed differential.
@@ -225,7 +225,7 @@ describe("#1431 — task recall survives oversized pinned context", () => {
       agentId: reader.id, content: tasks[i].repeat(5), durability: "standard", createdAt: BACKDATED,
     });
   }, 300_000);
-  afterAll(async () => { if (instance) await stopHarper(instance); });
+  afterAll(async () => { if (instance) await stopHarper(instance); }, HARPER_STOP_BUDGET_MS);
 
   test("different tasks select different memories within the same tight budget", async () => {
     for (const includeContext of [false, true]) {

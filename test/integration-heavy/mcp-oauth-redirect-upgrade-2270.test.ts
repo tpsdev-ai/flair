@@ -6,7 +6,7 @@ import { buildEd25519Auth } from "../../src/lib/auth-resolve.ts";
 import { childOverranDeadline } from "../helpers/child-deadline.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle.js";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle.js";
 import { planRedirectMigration, readTargetMcpRedirectFinding } from "../../src/lib/mcp-oauth-env.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
@@ -55,7 +55,7 @@ afterAll(async () => {
   }
   instances = [];
   tempDirs = [];
-});
+}, HARPER_STOP_BUDGET_MS);
 
 function makeWorkDir(prefix: string): string {
   const workDir = mkdtempSync(join(tmpdir(), prefix));

@@ -25,7 +25,7 @@ import { generateKeyPairSync, createPrivateKey, sign as cryptoSign, randomUUID }
 import { mkdtemp, rm, mkdir, cp, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 const REPO_ROOT = process.cwd();
 const FIXTURE = join(REPO_ROOT, "test", "fixtures", "inproc-app");
@@ -126,7 +126,7 @@ afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (dataDir) await rm(dataDir, { recursive: true, force: true, maxRetries: 4 });
   if (appDir) await rm(appDir, { recursive: true, force: true });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("in-process embedding — Flair loaded as a sub-component of another app", () => {
   test("the app resolves Flair's RESOURCES (not just its tables) from the shared registry", async () => {

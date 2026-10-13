@@ -75,7 +75,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import yaml from "js-yaml";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle.js";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle.js";
 import { mcpOAuthEnabled } from "../../resources/mcp-oauth-flag.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
@@ -122,7 +122,7 @@ afterAll(async () => {
   for (const d of tempDirs) {
     try { rmSync(d, { recursive: true, force: true }); } catch { /* best effort */ }
   }
-});
+}, HARPER_STOP_BUDGET_MS);
 
 function makeWorkDirWithShippedConfig(prefix: string, mutate?: (shipped: string) => string): string {
   const workDir = mkdtempSync(join(tmpdir(), prefix));

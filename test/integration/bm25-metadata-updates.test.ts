@@ -2,7 +2,7 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { cp, mkdtemp, rm, symlink } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import {
   bm25LegServesTracked,
   hnswLegServesTracked,
@@ -47,7 +47,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (appDir) await rm(appDir, { recursive: true, force: true });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 async function post(endpoint: string, body: unknown): Promise<any> {
   const response = await fetch(`${harper.httpURL}/${endpoint}`, { method: "POST",

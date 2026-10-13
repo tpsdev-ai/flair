@@ -18,7 +18,7 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { ensureCliBuild } from "../helpers/build-cli-once.js";
 import { MEMORY_ATTRIBUTES } from "../../src/lib/memory-attributes.ts";
 import { getModelId } from "../../resources/embeddings-provider.ts";
@@ -246,7 +246,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (home) rmSync(home, { recursive: true, force: true });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair#2296: flair reembed", () => {
   test("the fixture covers every Memory attribute", () => {

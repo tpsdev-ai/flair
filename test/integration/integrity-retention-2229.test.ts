@@ -21,7 +21,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { ensureCliBuild } from "../helpers/build-cli-once.js";
 
 const REPO_ROOT = resolve(import.meta.dir, "..", "..");
@@ -100,7 +100,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (home) rmSync(home, { recursive: true, force: true });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair#2229 — deletion-history bounded read and retention on a real Harper", () => {
   test("the deletion-history table declares replicate: true explicitly", async () => {

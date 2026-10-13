@@ -20,7 +20,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import nacl from "tweetnacl";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { ensureCliBuild } from "../helpers/build-cli-once.js";
 
 const REPO_ROOT = resolve(import.meta.dir, "..", "..");
@@ -252,7 +252,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (harper) await stopHarper(harper);
   for (const home of homes) rmSync(home, { recursive: true, force: true });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair#2225 — CLI local deletes on a real Harper", () => {
   test("memory hygiene --apply deletes on the scanned instance and records each delete the watcher reads", async () => {

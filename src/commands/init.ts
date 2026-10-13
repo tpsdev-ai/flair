@@ -701,14 +701,19 @@ program
       console.error(foreignOccupiedListenerDetail(listener));
       process.exit(1);
     };
-    const refuseFreePort = (listener: OccupiedHarperListener): void => {
+    const refuseFreePort = (listener: OccupiedHarperListener, waitedMs: number): void => {
       const pid = listener.pids.length === 1 ? `, pid ${listener.pids[0]}` : "";
-      console.error(`Refusing init: port ${listener.port}${pid}: TCP readiness check failed.`);
+      console.error(`Refusing init: port ${listener.port}${pid}: TCP readiness check failed: still free after ${waitedMs}ms (phase: waiting for the spawned instance to listen).`);
       console.error("Remedy: start the instance, then rerun init.");
       process.exit(1);
     };
+    // The readiness budget here is `cli.STARTUP_TIMEOUT_MS`, the SAME budget the
+    // test-harness readiness poll uses (`HARPER_STARTUP_BUDGET_MS` in
+    // test/helpers/harper-lifecycle.ts); test/unit/harper-lifecycle-budgets.test.ts
+    // pins the two equal so they cannot drift.
     const attributeBeforeCredential = async (port: number, host: string): Promise<void> => {
-      const deadline = Date.now() + STARTUP_TIMEOUT_MS;
+      const startedAt = Date.now();
+      const deadline = startedAt + STARTUP_TIMEOUT_MS;
       let listener = readOccupiedListener(port);
       let state = await localPortState(port, host);
       while (ownChild && state === "free" && Date.now() < deadline) {
@@ -716,7 +721,7 @@ program
         listener = readOccupiedListener(port);
         state = await localPortState(port, host);
       }
-      if (state === "free") refuseFreePort(listener);
+      if (state === "free") refuseFreePort(listener, Date.now() - startedAt);
       if (state === "listening") listener = readOccupiedListener(port);
       if (state === "unknown") refuseUnknownListener(listener);
       refuseUnattributedListener(listener);

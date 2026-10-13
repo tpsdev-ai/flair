@@ -38,7 +38,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, copyFileSync, cpSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle.js";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle.js";
 import { refreshMcpOAuthFlag, resolveOpsUrl } from "../../src/lib/mcp-enable.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
@@ -72,7 +72,7 @@ afterAll(async () => {
   }
   instances = [];
   tempDirs = [];
-});
+}, HARPER_STOP_BUDGET_MS);
 
 function makeWorkDir(prefix: string): string {
   const workDir = mkdtempSync(join(tmpdir(), prefix));

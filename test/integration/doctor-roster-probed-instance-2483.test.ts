@@ -32,7 +32,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 const CLI = join(process.cwd(), "dist", "cli.js");
 const ADMIN_PASS = "test123"; // matches harper-lifecycle's seeded admin pass
@@ -170,7 +170,7 @@ afterAll(async () => {
   if (a) await stopHarper(a);
   if (b) await stopHarper(b);
   if (home) rmSync(home, { recursive: true, force: true });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 /** True when a section ran (it printed neither NOT RUN line). */
 function bothChecksRan(stdout: string): boolean {

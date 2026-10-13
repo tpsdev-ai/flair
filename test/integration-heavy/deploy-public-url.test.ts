@@ -29,7 +29,7 @@ import { createRequire } from "node:module";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle.js";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle.js";
 import { resolveDeployPublicUrl, stageDeployRoot } from "../../src/deploy.js";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
@@ -63,7 +63,7 @@ afterAll(async () => {
   for (const d of tmpDirs) {
     try { rmSync(d, { recursive: true, force: true }); } catch { /* best effort */ }
   }
-});
+}, HARPER_STOP_BUDGET_MS);
 
 /**
  * A package root shaped like the PUBLISHED flair package — the layout

@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 const agent = (id: string) => ({ id, ...nacl.sign.keyPair() });
 const owner = agent("authority-owner"), other = agent("authority-other");
@@ -56,7 +56,7 @@ beforeAll(async () => {
   harper = await startHarper();
   await seed("Agent", [owner, other].map(a => ({ id: a.id, name: a.id, role: "agent", publicKey: Buffer.from(a.publicKey).toString("base64"), createdAt: now })));
 }, 120_000);
-afterAll(async () => { if (harper) await stopHarper(harper); });
+afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
 
 describe("Memory authority fields over HTTP", () => {
   test("PUT and PATCH reject changed authority-field values", async () => {

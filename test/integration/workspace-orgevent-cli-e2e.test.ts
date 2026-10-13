@@ -46,7 +46,7 @@ import { spawn } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { httpStatus } from "../helpers/http-status";
 import { childOverranDeadline, cliLeg } from "../helpers/child-deadline.js";
 
@@ -136,7 +136,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (cliHome) await rm(cliHome, { recursive: true, force: true, maxRetries: 4 });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair workspace set / flair orgevent — real Harper (#679)", () => {
   // Structural sanity check FIRST, measured against the real spawned Harper

@@ -24,7 +24,7 @@
  */
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { rm } from "node:fs/promises";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { getModelId } from "../../resources/embeddings-provider.ts";
 
 const EMBEDDING_STAMP_ID = "embedding-stamp";
@@ -116,7 +116,7 @@ describe("zero-touch migrations — embedding-stamp end-to-end (real Harper, alw
   afterAll(async () => {
     if (harper) await stopHarper(harper).catch(() => {});
     await rm(installDir, { recursive: true, force: true, maxRetries: 4 }).catch(() => {});
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test("both the stale-model row and the explicit-null row get re-embedded via Memory.put()'s own regen path", async () => {
     const deadline = Date.now() + 90_000;

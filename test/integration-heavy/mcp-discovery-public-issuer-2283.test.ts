@@ -21,7 +21,7 @@ import { mkdtempSync, mkdirSync, rmSync, symlinkSync, copyFileSync, cpSync, writ
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle.js";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle.js";
 import { childOverranDeadline } from "../helpers/child-deadline.ts";
 import { discriminateMcpOAuthDiscovery, reportMcpOAuthDiscovery } from "../../src/lib/mcp-enable.ts";
 
@@ -65,7 +65,7 @@ afterAll(async () => {
   }
   instances = [];
   tempDirs = [];
-});
+}, HARPER_STOP_BUDGET_MS);
 
 function makeWorkDir(prefix: string, withCli = false): string {
   const workDir = mkdtempSync(join(tmpdir(), prefix));

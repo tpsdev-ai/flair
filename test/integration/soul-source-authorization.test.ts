@@ -2,7 +2,7 @@ import { beforeAll, afterAll, describe, expect, test } from "bun:test";
 import nacl from "tweetnacl";
 import { signBody, signBodyFresh } from "../../resources/federation-crypto";
 import { randomUUID } from "node:crypto";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 const agent = (id: string) => ({ id, ...nacl.sign.keyPair() });
 const owner = agent("soul-runtime"), other = agent("soul-admin-runtime");
@@ -30,7 +30,7 @@ beforeAll(async () => {
   harper = await startHarper();
   await seed("Agent", [owner, other].map(a => ({ id: a.id, name: a.id, role: a.id === other.id ? "admin" : "agent", publicKey: Buffer.from(a.publicKey).toString("base64"), createdAt: now })));
 }, 120_000);
-afterAll(async () => { if (harper) await stopHarper(harper); });
+afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
 
 
 const operator = async (method: string, path: string, body?: unknown, credential?: string) => fetch(harper.httpURL + path, {

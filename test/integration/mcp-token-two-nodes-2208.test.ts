@@ -38,7 +38,7 @@
 import { describe, test, expect, afterAll } from "bun:test";
 import { createHash, generateKeyPairSync, randomBytes } from "node:crypto";
 import { rmSync } from "node:fs";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle.js";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle.js";
 import {
   REPO_ROOT,
   assertOwnedInstance,
@@ -211,7 +211,7 @@ describe(
     afterAll(async () => {
       if (stopPair) await stopPair();
       for (const h of instances) { try { await stopHarper(h); } catch { /* best effort */ } }
-    });
+    }, HARPER_STOP_BUDGET_MS);
 
     test.skipIf(!support.supported)(
       "each node's freshly minted token verifies on the other after a measured wait",
@@ -262,7 +262,7 @@ describe("flair#2208 key isolation: a token verifies only where the signing key 
   afterAll(async () => {
     for (const h of instances) { try { await stopHarper(h); } catch { /* best effort */ } }
     for (const d of tempDirs) { try { rmSync(d, { recursive: true, force: true }); } catch { /* best effort */ } }
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test(
     "two nodes with different pinned keys: node-a's token is 200 on node-a and 401 on node-b",

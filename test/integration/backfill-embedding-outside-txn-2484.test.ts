@@ -23,7 +23,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import nacl from "tweetnacl";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { getModelId } from "../../resources/embeddings-provider.ts";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
@@ -196,7 +196,7 @@ afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (home) rmSync(home, { recursive: true, force: true });
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair#2484 — the embedding backfill and a concurrent text change (real Harper)", () => {
   for (const point of ["backfill-embedding-pre", "backfill-embedding"]) {
