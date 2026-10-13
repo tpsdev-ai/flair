@@ -88,12 +88,12 @@ describe("integration-shards — the partition", () => {
     expect(new Set(where).size).toBe(3);
   });
 
-  test("a file with no measured weight still lands in a shard", () => {
-    const unweighted = ALL.find((f) => !(f in SECONDS_BY_FILE));
-    expect(unweighted).toBeDefined();
-    expect(weightOf(unweighted as string)).toBe(DEFAULT_WEIGHT);
+  test("a file absent from the weights table falls back to DEFAULT_WEIGHT and still lands in a shard", () => {
+    const unmeasured = "test/integration/not-yet-measured.test.ts";
+    expect(unmeasured in SECONDS_BY_FILE).toBe(false);
+    expect(weightOf(unmeasured)).toBe(DEFAULT_WEIGHT);
     expect(DEFAULT_WEIGHT).toBeGreaterThan(0);
-    expect(assignShards(ALL, 3).flat()).toContain(unweighted as string);
+    expect(assignShards([...ALL, unmeasured], 3).flat()).toContain(unmeasured);
   });
 });
 
