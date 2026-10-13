@@ -85,7 +85,7 @@ describe("flair#2568: a stop past its budget throws the named error", () => {
   });
 });
 
-// ─── 4. A Harper hook cannot regress to Bun's 5 s default ────────────────────
+// ─── 4. No Harper hook falls back to Bun's 5 s default ──────────────────────
 
 const HOOK_NAMES = new Set(["beforeAll", "beforeEach", "afterAll", "afterEach"]);
 
