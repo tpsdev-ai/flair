@@ -328,6 +328,96 @@ describe("memory_store response shape — real extension (flair#1384)", () => {
   });
 });
 
+// ─── Redacted write reply (flair#2537) ────────────────────────────────────────
+//
+// The server replaces credential-shaped text before storing a Memory and reports
+// the count on the write response without echoing the stored content; the reply
+// must preview the STORED text, never the caller's input. A stand-in client
+// stands in for the SDK here (the re-read is a GET); the real-Harper counterpart
+// is test/integration/memory-write-redaction-2407.test.ts.
+
+const TOKEN_REDACT = `ghp_${"a".repeat(24)}`;
+const ORIGINAL_REDACT = `deploy note: use token ${TOKEN_REDACT} for the CI job`;
+const STORED_REDACT = "deploy note: use token [redacted] for the CI job";
+
+async function executeMemoryStoreSeq(
+  write: Record<string, unknown>,
+  read: Record<string, unknown> | null | "throws",
+  params: { content: string; durability?: string; tags?: string[] },
+) {
+  let readCalls = 0;
+  (FlairClient.prototype as any).request = async (method: string) => {
+    if (method === "GET") {
+      readCalls += 1;
+      if (read === "throws") throw new Error("read-back failed");
+      return read;
+    }
+    return write;
+  };
+  const pi = createMockPi();
+  registerPiFlair(pi as any);
+  const tool = pi._tools.get("memory_store");
+  if (!tool) throw new Error("memory_store was not registered");
+  return { result: await tool.execute("tool-call-1", params), readCalls: () => readCalls };
+}
+
+describe("memory_store redacted reply — real extension (flair#2537)", () => {
+  const originalRequest = FlairClient.prototype.request;
+  const originalAgentId = process.env.FLAIR_AGENT_ID;
+
+  beforeEach(() => {
+    process.env.FLAIR_AGENT_ID = "pi-test";
+  });
+
+  afterEach(() => {
+    FlairClient.prototype.request = originalRequest;
+    if (originalAgentId === undefined) {
+      delete process.env.FLAIR_AGENT_ID;
+    } else {
+      process.env.FLAIR_AGENT_ID = originalAgentId;
+    }
+  });
+
+  test("a redacted write previews the STORED text and reports the count", async () => {
+    const { result } = await executeMemoryStoreSeq(
+      { id: "pi-2537-a", written: true, redactedValues: 1 },
+      { id: "pi-2537-a", content: STORED_REDACT, written: true },
+      { content: ORIGINAL_REDACT },
+    );
+    const text = result.content[0].text;
+    expect(text).toContain(`Preview: ${STORED_REDACT}`);
+    expect(text).not.toContain(TOKEN_REDACT);
+    expect(text).toContain("Redacted 1 credential-shaped value(s) before storing.");
+    expect(result.details.redactedValues).toBe(1);
+  });
+
+  test("a write the server did not redact previews the input and makes no read-back", async () => {
+    const { result, readCalls } = await executeMemoryStoreSeq(
+      { id: "pi-2537-b", written: true },
+      "throws",
+      { content: "plain note" },
+    );
+    const text = result.content[0].text;
+    expect(text).toContain("Preview: plain note");
+    expect(text).not.toContain("Redacted");
+    expect(result.details.redactedValues).toBeUndefined();
+    expect(readCalls()).toBe(0);
+  });
+
+  test("a failed read-back omits the preview rather than show the caller's input", async () => {
+    const { result } = await executeMemoryStoreSeq(
+      { id: "pi-2537-c", written: true, redactedValues: 1 },
+      null,
+      { content: ORIGINAL_REDACT },
+    );
+    const text = result.content[0].text;
+    expect(text).not.toContain(TOKEN_REDACT);
+    expect(text).not.toContain("Preview:");
+    expect(text).toContain("Stored text unavailable");
+    expect(result.details.redactedValues).toBe(1);
+  });
+});
+
 // ─── Search Result Formatting Tests ───────────────────────────────────────────
 
 describe("Search Result Formatting", () => {

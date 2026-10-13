@@ -262,22 +262,52 @@ export default function (pi: ExtensionAPI) {
         const wasDeduplicated = (result as any).deduplicated === true;
         const matchedId = (result as any).matchedId as string | undefined;
 
-        const preview = content.length > 120 ? content.slice(0, 120) + "..." : content;
+        // flair#2537 — preview the STORED text, never the caller's input. The
+        // server replaces credential-shaped values before it stores a row and
+        // reports the count on the write response without echoing the stored
+        // `content`, so a redacted write's stored text is re-read by id. A write
+        // the server did not redact uses the input unchanged and makes no extra
+        // request. A failed read-back never falls back to the caller's input: the
+        // preview is omitted and the reply says the stored text was unreadable.
+        const redactedValues = typeof (result as any).redactedValues === "number" ? (result as any).redactedValues : 0;
+        let stored: string | undefined = content;
+        let storedUnreadable = false;
+        if (redactedValues > 0) {
+          stored = undefined;
+          try {
+            const row = typeof result.id === "string" ? await flair.memory.get(result.id) : null;
+            if (row && typeof row.content === "string") stored = row.content;
+            else storedUnreadable = true;
+          } catch {
+            storedUnreadable = true;
+          }
+        }
         const tagStr = (params.tags as string[] | undefined)?.length ? (params.tags as string[]).join(", ") : "none";
-        const lines = [
-          `Memory stored (id: ${result.id})`,
-          `Preview: ${preview}`,
-          `Size: ${content.length} chars`,
-          `Tags: ${tagStr}`,
-          `Durability: ${durability}`,
-        ];
+        const lines = [`Memory stored (id: ${result.id})`];
+        if (typeof stored === "string") {
+          lines.push(`Preview: ${stored.length > 120 ? stored.slice(0, 120) + "..." : stored}`);
+          lines.push(`Size: ${stored.length} chars`);
+        }
+        lines.push(`Tags: ${tagStr}`, `Durability: ${durability}`);
+        if (redactedValues > 0) {
+          lines.push(`Redacted ${redactedValues} credential-shaped value(s) before storing.`);
+        }
+        if (storedUnreadable) {
+          lines.push(`Stored text unavailable — the write landed, but the stored row could not be read back.`);
+        }
         if (wasDeduplicated && matchedId) {
           lines.push(`Note: similar to existing memory (id: ${matchedId}) — both are kept.`);
         }
 
         return {
           content: [{ type: "text", text: lines.join("\n") }],
-          details: { deduplicated: wasDeduplicated, id: result.id, written: true, ...(wasDeduplicated ? { matchedId } : {}) },
+          details: {
+            deduplicated: wasDeduplicated,
+            id: result.id,
+            written: true,
+            ...(redactedValues > 0 ? { redactedValues } : {}),
+            ...(wasDeduplicated ? { matchedId } : {}),
+          },
         };
       } catch (err) {
         return errorResult(err, flair.url);

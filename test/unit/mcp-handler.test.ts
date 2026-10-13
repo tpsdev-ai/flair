@@ -84,7 +84,24 @@ function makeHandlerMock(resource: string, method: string) {
 // A double whose instance-get returns canned data (as this one used to) is
 // easier to satisfy than the real class and cannot catch this class of bug.
 class MemoryMock extends HarperShapedBase {
-  async post(args: any) { lastCall = { resource: "Memory.post", ctx: this._ctx, args, isCollection: this.isCollection } as any; return { ok: true, resource: "Memory.post", agentId: this._ctx?.request?.tpsAgent }; }
+  async post(args: any) {
+    lastCall = { resource: "Memory.post", ctx: this._ctx, args, isCollection: this.isCollection } as any;
+    // flair#2537 — model the server's write echo: the response reports
+    // `redactedValues` when the write body carried a credential-shaped value to
+    // replace, and does NOT echo the stored `content`. The wrapper must re-read
+    // the row through the STATIC get; the "UNREADABLE" marker mints the id whose
+    // re-read returns null, to drive the failed-read-back branch.
+    const content = typeof args?.content === "string" ? args.content : "";
+    const id = args?.id ?? (content.includes("UNREADABLE") ? "missing-id" : "mock-written-row");
+    return {
+      ok: true,
+      resource: "Memory.post",
+      id,
+      written: true,
+      ...(content.includes("REDACT-ME") ? { redactedValues: 1 } : {}),
+      agentId: this._ctx?.request?.tpsAgent,
+    };
+  }
   // flair#1181 — the default memory_update merge now writes via the STATIC
   // `Cls.put(merged, ctx)` transactional path (the instance put on an unloaded
   // `new Cls(undefined, ctx)` throws "Invalid primary key type: undefined").
@@ -95,6 +112,11 @@ class MemoryMock extends HarperShapedBase {
     const id = typeof target === "string" ? target : target?.id;
     lastCall = { resource: "Memory.get", ctx, args: id };
     if (id === "missing-id") return null;
+    // flair#2537 — the row the redacted-write reply re-reads, with the STORED
+    // (redacted) text the server persisted.
+    if (id === "mock-written-row") {
+      return { id, agentId: ctx?.request?.tpsAgent, content: "stored text after redaction", ok: true, resource: "Memory.get" };
+    }
     // flair#1188 — a real by-id load returns the FULL stored row, INCLUDING the
     // raw `embedding` vector. Modeled here so memory_get's default-strip (and
     // its includeEmbedding opt-in) is exercised against a record that actually
@@ -1344,5 +1366,50 @@ describe("checkToolArguments — every native tool's declared property types are
       }
     }
     expect(checked).toBeGreaterThan(40);
+  });
+});
+
+// ─── flair#2537 — write replies report the STORED (redacted) content ──────────
+//
+// The server replaces credential-shaped text before storing a Memory and reports
+// the count on the write response without echoing the stored content; the /mcp
+// wrapper must re-read the row so the reply reports the text Flair stored, never
+// the caller's input. A failed read-back must not fall back to the caller's text.
+// The real-Harper counterpart is
+// test/integration/mcp-write-redaction-reply-2537.test.ts.
+describe("flair#2537 — /mcp write replies report the STORED (redacted) content", () => {
+  beforeEach(() => {
+    credentials = [{ principalId: "agt_bob", kind: "idp", idpSubject: "sub-bob", status: "active" }];
+    agents["agt_bob"] = { id: "agt_bob", status: "active" };
+  });
+
+  function storeCall(content: string) {
+    return mcpHandler(post(
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "memory_store", arguments: { content } } },
+      { sub: "sub-bob" },
+    ));
+  }
+
+  it("memory_store's reply carries the STORED text and the count after a redaction", async () => {
+    const body = await parse(await storeCall("a note with REDACT-ME inside"));
+    expect(lastCall?.resource).toBe("Memory.get"); // the wrapper re-read the row
+    expect(body.result.structuredContent.content).toBe("stored text after redaction");
+    expect(body.result.structuredContent.redactedValues).toBe(1);
+    expect(JSON.stringify(body.result.structuredContent)).not.toContain("REDACT-ME");
+  });
+
+  it("a write the server did not redact echoes no stored content and makes no re-read", async () => {
+    const body = await parse(await storeCall("a plain note"));
+    expect(lastCall?.resource).toBe("Memory.post"); // no Memory.get after it
+    expect(body.result.structuredContent.content).toBeUndefined();
+    expect(body.result.structuredContent.redactedValues).toBeUndefined();
+  });
+
+  it("a failed read-back marks the stored content unverified, never the caller's input", async () => {
+    const body = await parse(await storeCall("a note with REDACT-ME and UNREADABLE inside"));
+    expect(body.result.structuredContent.content).toBeUndefined();
+    expect(body.result.structuredContent.contentUnavailable).toBe(true);
+    expect(body.result.structuredContent.redactedValues).toBe(1);
+    expect(JSON.stringify(body.result.structuredContent)).not.toContain("REDACT-ME");
   });
 });

@@ -215,6 +215,30 @@ function stripInternalFields(value: any): any {
   return out;
 }
 
+/**
+ * flair#2537 — layer the STORED content onto a write echo after a server-side
+ * redaction. The server replaces credential-shaped text before it persists a
+ * Memory and reports the count on the write response (`redactedValues`), but
+ * does NOT echo the stored `content`. When the count is above zero the row is
+ * re-read by id so the reply reports the text Flair stored rather than the
+ * caller's input; a write the server did not redact is returned unchanged and
+ * makes no extra request. A failed re-read never falls back to the caller's
+ * input: the reply omits `content` and marks it `contentUnavailable: true`
+ * (the write itself landed — only the read-back is reported as unverified).
+ */
+async function withStoredWriteContent(Cls: any, agent: ResolvedAgent, response: any): Promise<any> {
+  const redactedValues = response && typeof response === "object" && typeof (response as any).redactedValues === "number"
+    ? (response as any).redactedValues
+    : 0;
+  const id = response && typeof response === "object" && typeof (response as any).id === "string" ? (response as any).id : undefined;
+  if (redactedValues <= 0 || id === undefined) return response;
+  const stored = await unwrap(await Cls.get(id, delegationContext(agent)));
+  if (stored && typeof stored === "object" && (stored as any).error == null && typeof (stored as any).content === "string") {
+    return { ...response, content: (stored as any).content };
+  }
+  return { ...response, contentUnavailable: true };
+}
+
 // ── Tool implementations (thin wrappers over existing handlers) ──────────────
 //
 // Each takes the resolved agent + the parsed tool arguments and returns a plain
@@ -305,7 +329,10 @@ async function memoryStore(agent: ResolvedAgent, args: any) {
   // flair#1188 — memory_store's response goes through the same buildWriteResponse
   // echo as memory_update; strip the server-regenerated embedding so no write
   // tool ever inlines the vector. No-op when the response carries none.
-  return stripInternalFields(await unwrap(await h.post(body)));
+  // flair#2537 — when the server redacted credential-shaped text, re-read the
+  // stored row and report its content (see withStoredWriteContent).
+  const response: any = stripInternalFields(await unwrap(await h.post(body)));
+  return withStoredWriteContent(Cls, agent, response);
 }
 
 /**
@@ -544,7 +571,9 @@ async function memoryUpdate(agent: ResolvedAgent, args: any) {
     // flair#1188 — the write response echoes the stored row (Memory.post
     // regenerates the embedding server-side), so strip the vector before it
     // returns over the MCP surface. No-op when the response carries none.
-    return stripInternalFields(await unwrap(await coll.post(record)));
+    // flair#2537 — report the stored content on a redacted write.
+    const response: any = stripInternalFields(await unwrap(await coll.post(record)));
+    return withStoredWriteContent(Cls, agent, response);
   }
 
   const merged: Record<string, unknown> = { ...existing, content, updatedAt: new Date().toISOString() };
@@ -563,7 +592,9 @@ async function memoryUpdate(agent: ResolvedAgent, args: any) {
   // Memory.put()'s own ownership gate — no scope change, same as the read.
   // flair#1188 — strip the embedding from the echoed write response (Memory.put
   // regenerates the vector server-side); no-op when the response carries none.
-  return stripInternalFields(await unwrap(await Cls.put(merged, delegationContext(agent))));
+  // flair#2537 — report the stored content on a redacted write.
+  const response: any = stripInternalFields(await unwrap(await Cls.put(merged, delegationContext(agent))));
+  return withStoredWriteContent(Cls, agent, response);
 }
 
 // ── flair#1472 memory_basement / memory_restore ──────────────────────────────
@@ -1237,7 +1268,7 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
   memory_store: {
         impl: memoryStore,
     contract: {
-      summary: "Write echo { id, written:true, deduplicated } — the new id + confirmation. No internal embedding fields; round-trips via memory_get.",
+      summary: "Write echo { id, written:true, deduplicated } — the new id + confirmation. No internal embedding fields; round-trips via memory_get. After a server-side redaction the echo also carries the STORED `content` and `redactedValues`; if that row cannot be read back, `content` is omitted and `contentUnavailable:true` is set.",
       requiredFields: ["id", "written"],
       fieldTypes: { id: "string", written: "boolean", deduplicated: "boolean" },
       forbiddenFields: INTERNAL_MEMORY_FIELDS,
@@ -1292,7 +1323,7 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
   memory_update: {
         impl: memoryUpdate,
     contract: {
-      summary: "Write echo { id, written:true } for the in-place overwrite (or supersede). No internal embedding fields; the change round-trips via memory_get.",
+      summary: "Write echo { id, written:true } for the in-place overwrite (or supersede). No internal embedding fields; the change round-trips via memory_get. After a server-side redaction the echo also carries the STORED `content` and `redactedValues`; if that row cannot be read back, `content` is omitted and `contentUnavailable:true` is set.",
       requiredFields: ["id", "written"],
       fieldTypes: { id: "string", written: "boolean" },
       forbiddenFields: INTERNAL_MEMORY_FIELDS,

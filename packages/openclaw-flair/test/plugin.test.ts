@@ -2570,3 +2570,72 @@ describe("slice 2 round 13 — gateway_stop refuses admission until the next reg
     expect(api._warnText()).toMatch(/the gateway is stopping/);
   });
 });
+
+// ─── flair#2537 — memory_store replies report the STORED (redacted) content ───
+//
+// The server replaces credential-shaped text before storing a Memory and reports
+// the count on the write response without echoing the stored content; the reply
+// must preview the STORED text, never the caller's input. A redacted write's
+// stored text is re-read by id; a write the server did not redact makes no extra
+// request. The real-Harper counterpart is
+// test/integration/memory-write-redaction-2407.test.ts.
+describe("flair#2537 — memory_store replies report the STORED (redacted) content", () => {
+  const TOKEN = `ghp_${"a".repeat(24)}`;
+  const ORIGINAL = `deploy note: use token ${TOKEN} for the CI job`;
+  const STORED = "deploy note: use token [redacted] for the CI job";
+  const memoryReads = (calls: Call[]): Call[] =>
+    calls.filter((c) => c.method === "GET" && /\/Memory\//.test(c.url));
+
+  async function storeWith(
+    handler: (call: Call) => { status?: number; body?: unknown },
+    text: string,
+  ): Promise<{ res: any; calls: Call[] }> {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = installFetchStub(handler);
+    const api = createMockApi();
+    plugin.register(api as any);
+    const store = api._resolveTool("memory_store", { agentId: "A" })!;
+    const res = await store.execute("1", { text });
+    return { res, calls };
+  }
+
+  test("a redacted write previews the STORED text and reports the count", async () => {
+    const { res, calls } = await storeWith((call) => {
+      if (call.method === "GET") {
+        const id = call.url.split("/Memory/")[1];
+        return { body: { id, content: STORED, agentId: "A" } };
+      }
+      return { body: { id: (call.body as any)?.id, written: true, deduplicated: false, redactedValues: 1 } };
+    }, ORIGINAL);
+    const text = res.content[0].text;
+    expect(text).toContain(`Preview: ${STORED}`);
+    expect(text).not.toContain(TOKEN);
+    expect(text).toContain("Redacted 1 credential-shaped value(s) before storing.");
+    expect(res.details.redactedValues).toBe(1);
+    expect(memoryReads(calls).length).toBe(1);
+  });
+
+  test("a write the server did not redact previews the input and makes no read-back", async () => {
+    const { res, calls } = await storeWith(
+      (call) => ({ body: { id: (call.body as any)?.id, written: true, deduplicated: false } }),
+      "plain note",
+    );
+    expect(res.content[0].text).toContain("Preview: plain note");
+    expect(res.content[0].text).not.toContain("Redacted");
+    expect(res.details.redactedValues).toBeUndefined();
+    expect(memoryReads(calls).length).toBe(0);
+  });
+
+  test("a failed read-back omits the preview rather than show the caller's input", async () => {
+    const { res } = await storeWith((call) => {
+      if (call.method === "GET") return { status: 500, body: { error: "boom" } };
+      return { body: { id: (call.body as any)?.id, written: true, deduplicated: false, redactedValues: 1 } };
+    }, ORIGINAL);
+    const text = res.content[0].text;
+    expect(text).not.toContain(TOKEN);
+    expect(text).not.toContain("Preview:");
+    expect(text).toContain("Stored text unavailable");
+    expect(res.details.redactedValues).toBe(1);
+  });
+});
