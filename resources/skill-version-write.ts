@@ -121,7 +121,7 @@ export function rowIsSkill(row: Record<string, any> | null | undefined): boolean
 
 export function skillPayloadUnchanged(base: Record<string, any>, head: Record<string, any>): boolean {
   const bookkeeping = new Set([
-    "embedding", "embeddingModel", "contentHash", "updatedAt", "instanceToken",
+    "embedding", "embeddingModel", "embeddedContentHash", "contentHash", "updatedAt", "instanceToken",
     "provenance", "skillSubjectId", "_safetyFlags", "_skillScan",
     "retrievalCount", "lastRetrieved",
   ]);
