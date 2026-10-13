@@ -23,6 +23,8 @@ import { describe, it, expect, mock } from "bun:test";
 mock.module("harper", () => ({ server: { http: () => {}, getUser: async () => null }, databases: {}, Resource: class {} }));
 
 const { createEmbeddingStampMigration, EMBEDDING_STAMP_ID } = await import("../../resources/migrations/embedding-stamp.ts");
+const { computeContentHash } = await import("../../resources/memory-feed-lib.ts");
+const hashOf = (agentId: string, content: string) => computeContentHash(agentId, content);
 
 type Row = Record<string, unknown> & { id: string };
 
@@ -365,5 +367,62 @@ describe("embedding-stamp migration — flair#807: recheckPending() safety-net h
     const recheck = await m.recheckPending!(10);
     expect(recheck.sampled).toBe(1);
     expect(recheck.falsePositives).toBe(0);
+  });
+});
+
+describe("embedding-stamp migration — flair#2465: the embedded-text hash binding", () => {
+  it("detect()/countPending() catch a row whose stamp is current but whose embeddedContentHash no longer matches its text", async () => {
+    const { table } = makeFakeMemoryTable([
+      { id: "m1", agentId: "a", content: "the current text", embeddingModel: CURRENT_MODEL, embeddedContentHash: "a-stale-hash" },
+    ]);
+    const m = createEmbeddingStampMigration(() => table, () => CURRENT_MODEL, async () => true);
+    expect(await m.detect()).toBe(true);
+    expect(await m.countPending()).toBe(1);
+  });
+
+  it("a row whose embeddedContentHash matches its current text is current (no false positive)", async () => {
+    const { table } = makeFakeMemoryTable([
+      { id: "m1", agentId: "a", content: "the current text", embeddingModel: CURRENT_MODEL, embeddedContentHash: hashOf("a", "the current text") },
+    ]);
+    const m = createEmbeddingStampMigration(() => table, () => CURRENT_MODEL, async () => true);
+    expect(await m.detect()).toBe(false);
+    expect(await m.countPending()).toBe(0);
+  });
+
+  it("a row with NO embeddedContentHash is a trusted legacy row (never re-queued for the missing binding alone)", async () => {
+    const { table } = makeFakeMemoryTable([
+      { id: "m1", agentId: "a", content: "a legacy row", embeddingModel: CURRENT_MODEL },
+    ]);
+    const m = createEmbeddingStampMigration(() => table, () => CURRENT_MODEL, async () => true);
+    expect(await m.detect()).toBe(false);
+    expect(await m.countPending()).toBe(0);
+  });
+
+  it("a skill row binds to its trigger, not its content", async () => {
+    const trigger = "when to use the skill";
+    const { table } = makeFakeMemoryTable([
+      { id: "s1", agentId: "a", content: "the procedure", trigger, tags: ["skill"], embeddingModel: CURRENT_MODEL, embeddedContentHash: hashOf("a", trigger) },
+      { id: "s2", agentId: "a", content: "the procedure", trigger, tags: ["skill"], embeddingModel: CURRENT_MODEL, embeddedContentHash: hashOf("a", "the procedure") },
+    ]);
+    const m = createEmbeddingStampMigration(() => table, () => CURRENT_MODEL, async () => true);
+    // s1 is bound to the trigger it embeds from → current; s2 is bound to the
+    // content, not the trigger → stale.
+    expect(await m.countPending()).toBe(1);
+  });
+
+  it("run() re-embeds a hash-mismatch row and the refreshed write records the matching hash", async () => {
+    const { store, table } = makeFakeMemoryTable([
+      { id: "m1", agentId: "a", content: "the current text", embeddingModel: CURRENT_MODEL, embeddedContentHash: "a-stale-hash" },
+    ]);
+    const regen = async (id: string) => {
+      const row = store.get(id)!;
+      store.set(id, { ...row, embedding: [0.3, 0.2, 0.1], embeddingModel: CURRENT_MODEL, embeddedContentHash: hashOf(String(row.agentId), String(row.content)) });
+      return true;
+    };
+    const m = createEmbeddingStampMigration(() => table, () => CURRENT_MODEL, regen);
+    const result = await m.run(10);
+    expect(result).toEqual({ processed: 1, touchedIds: ["m1"] });
+    expect(store.get("m1")!.embeddedContentHash).toBe(hashOf("a", "the current text"));
+    expect(await m.countPending()).toBe(0);
   });
 });

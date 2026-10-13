@@ -1910,6 +1910,10 @@ export class Memory extends (databases as any).flair.Memory {
     // A1-iv item 3: strip server-stamped fields on patch too (a PATCH body may
     // not set instanceToken or provenance; the stored values stand).
     stripServerStampedFields(content);
+    // flair#2465: `embeddedContentHash` is server-owned too — a PATCH merges, so
+    // dropping a body value leaves the STORED one standing; the refresh path
+    // below writes a fresh hash only when it computes a new vector.
+    delete content.embeddedContentHash;
     const denial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
     if (denial) return denial;
     // Preserve stored visibility on updates before applying write policy: a

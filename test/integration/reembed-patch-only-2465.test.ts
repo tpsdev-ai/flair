@@ -57,6 +57,7 @@ import nacl from "tweetnacl";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 import { getModelId } from "../../resources/embeddings-provider.ts";
 import { stripEnginePrefix } from "../../resources/embedding-space-guard.ts";
+import { computeContentHash } from "../../resources/memory-feed-lib.ts";
 
 const PUT_POINT = "memory-put";
 // The re-embed's pause AFTER its initial read and BEFORE it computes the vector
@@ -382,5 +383,58 @@ describe("flair#2465 — the re-embed confirms the committed row after staging (
     const text = await response.clone().text();
     expect(response.status, text.slice(0, 200)).toBe(409);
     expect(JSON.parse(text).error).toBe("stored_row_changed");
+  }, 120_000);
+});
+
+describe("flair#2465 part 2 — the stored vector is bound to its text (real Harper)", () => {
+  it("CONTROL: a re-embed records the embedded-text hash of the text it embedded", async () => {
+    const id = "rpo-hash-control";
+    await seedRow(id, owner.id, ORIGINAL);
+    const res = await reembedAs(owner, id);
+    expect(res.status, await res.clone().text()).toBeLessThan(300);
+    const row = await readRow(id);
+    expect(row.content).toBe(ORIGINAL);
+    // The binding: the recorded hash is the content hash of the row's text.
+    expect(row.embeddedContentHash).toBe(computeContentHash(owner.id, ORIGINAL));
+  }, 120_000);
+
+  it("a text edit committed after the re-embed stages its write aborts it: the vector for the superseded text is not stored, and the row is left stale", async () => {
+    const id = "rpo-hash-edit-staged";
+    // Seed with an explicit binding for the ORIGINAL text, so the row carries a
+    // matching hash before the run.
+    await seedRow(id, owner.id, ORIGINAL, { embeddedContentHash: computeContentHash(owner.id, ORIGINAL) });
+
+    const { response, released, paused } = await withPausedStaged(id, async () => {
+      // Change ONLY the text, but carry the stored vector (a supplied vector is
+      // kept by the write path), so the row now holds a vector for the
+      // SUPERSEDED text. This is the interleaving the re-embed cannot see with a
+      // plain identity check, because the incarnation token and hash fields are
+      // carried unchanged.
+      const full = await readRow(id);
+      const path = `/Memory/${encodeURIComponent(id)}`;
+      const put = await fetch(`${harper.httpURL}${path}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", Authorization: ed25519Header(owner, "PUT", path) },
+        body: JSON.stringify({ ...full, content: EDITED }),
+        signal: AbortSignal.timeout(60_000),
+      });
+      expect(put.status, await put.clone().text()).toBe(200);
+    });
+
+    expect(paused, "the re-embed was not paused after staging its write").toBe(true);
+    expect(released).toBe("go");
+    // The re-embed's staged vector (computed for ORIGINAL) must be discarded by
+    // the confirmation, which now also requires the embedding text to be unchanged.
+    const text = await response.clone().text();
+    expect(response.status, text.slice(0, 200)).toBe(409);
+    expect(JSON.parse(text).error).toBe("stored_row_changed");
+
+    const row = await readRow(id);
+    expect(row.content, "the edit did not survive").toBe(EDITED);
+    // The re-embed's stamp did not land.
+    expect(row.embeddingModel, "the re-embed's stamp landed despite the text change").toBe(SEED_MODEL_ID);
+    // The recorded binding no longer matches the current text -> the stamp
+    // migration's re-queue condition holds.
+    expect(row.embeddedContentHash).not.toBe(computeContentHash(owner.id, EDITED));
   }, 120_000);
 });
