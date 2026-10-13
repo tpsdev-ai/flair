@@ -2,7 +2,8 @@ import { WRITE_BACK_ATTEMPTS, WriteBackConflictError, writeBackCommittedRow } fr
 import { txnPausePoint } from "./txn-pause-point.js";
 import { server, databases } from "harper";
 import { getEmbedding } from "./embeddings-provider.js";
-import { computeContentHash } from "./memory-feed-lib.js";
+import { hashEmbeddedText } from "./memory-embed-hash.js";
+import { MEMORY_EMBEDDING_INPUT_FIELDS, skillEmbedText } from "./skill-write.js";
 import { isAdmin, isPrincipalDeactivated, FLAIR_AGENT_USERNAME, readCredentialedPrincipal, AGENT_LOOKUP_FAILED } from "./agent-auth.js";
 import { WINDOW_MS, importEd25519Key, b64ToArrayBuffer, parseTpsEd25519Header } from "./ed25519-auth.js";
 import { isKnownAgentReplay, claimAgentNonce } from "./replay-store.js";
@@ -181,17 +182,20 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
   try {
     const table = (databases as any).flair.Memory;
     // flair#2484: compute the vector before the owned write transaction opens.
-    // Rows without content or with an embedding longer than 100 entries skip
-    // before content comparison. For eligible rows, `matchFields` compares
-    // content before staging; the helper confirms the committed row afterward.
-    // Drift observed by either check aborts the attempt; remaining outer
-    // attempts re-read and may recompute. Changes after confirmation and before
-    // commit are not detected by these checks.
+    // The text embedded is the one Memory's own writers embed (flair#2465,
+    // `skillEmbedText`: a skill-tagged row's non-empty `trigger`, else
+    // `content`). Rows without that text or with an embedding longer than 100
+    // entries skip before the text comparison. For eligible rows, `matchFields`
+    // compares every field that selects the text (`content`, `trigger`, `tags`)
+    // before staging; the helper confirms the committed row afterward. Drift
+    // observed by either check aborts the attempt; remaining outer attempts
+    // re-read and may recompute. Changes after confirmation and before commit
+    // are not detected by these checks.
     for (let attempt = 1; attempt <= WRITE_BACK_ATTEMPTS; attempt++) {
       const record = await table.get(memoryId, {});
-      if (!record?.content) return;
+      const text = record ? skillEmbedText(record) : undefined;
+      if (typeof text !== "string" || text.length === 0) return;
       if (record.embedding?.length > 100) return;
-      const text = record.content;
       const embedding = await getEmbedding(text, "document");
       if (!embedding) return;
       try {
@@ -199,20 +203,19 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
           table,
           memoryId,
           (row: any) => {
-            if (!row?.content) return { skip: true };
+            const rowText = row ? skillEmbedText(row) : undefined;
+            if (typeof rowText !== "string" || rowText.length === 0) return { skip: true };
             if (row.embedding?.length > 100) return { skip: true };
             // Only `embedding` and its text binding: an incremental update,
             // never a full-row put of the row read above (flair#2470, flair#2465).
-            // `embeddedContentHash` records the hash of the exact text embedded
-            // (`text`, above) so the stamp migration can re-queue a row whose text
-            // later changes without a re-embed.
-            return { update: { embedding, embeddedContentHash: computeContentHash(row.agentId, text) } };
+            // The hash is of `text`, the text this vector was computed from.
+            return { update: { embedding, embeddedContentHash: hashEmbeddedText(row.agentId, text) ?? null } };
           },
           {
             label: "backfillEmbedding",
             expectedRow: record,
-            // Compare content before staging, after the plan's skip checks.
-            matchFields: ["content"],
+            // Compare the text-selecting fields before staging, after the plan's skip checks.
+            matchFields: [...MEMORY_EMBEDDING_INPUT_FIELDS, "tags"],
             pausePre: () => txnPausePoint("backfill-embedding-pre"),
             pausePoint: () => txnPausePoint("backfill-embedding"),
           },

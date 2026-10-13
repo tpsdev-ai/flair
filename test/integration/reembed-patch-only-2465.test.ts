@@ -6,10 +6,10 @@
  * Harper orders a transaction by its FIRST READ, not its write. The re-embed
  * (`Memory.patch()`'s re-embed branch, driven here by a genuine HTTP PATCH whose
  * body is `{"embedding": null, "embeddingModel": null}`) writes only
- * `embedding`, `embeddingModel` and `updatedAt`. It used to write the whole row
- * it re-read inside its transaction, so an owner edit that committed while the
- * vector was computed was reverted by the re-embed's full-row put even though
- * the edit's own PUT answered 200.
+ * `embedding`, `embeddingModel`, `updatedAt` and (part 2) `embeddedContentHash`.
+ * It used to write the whole row it re-read inside its transaction, so an owner
+ * edit that committed while the vector was computed was reverted by the
+ * re-embed's full-row put even though the edit's own PUT answered 200.
  *
  * The spawned Harper carries the test-only pause (resources/txn-pause-point.ts,
  * enabled by FLAIR_ENABLE_TEST_FAULT_INJECTION and FLAIR_TEST_PAUSE_DIR, set in
@@ -133,6 +133,24 @@ function editAs(agent: TestAgent, id: string, content: string): Promise<Response
     signal: AbortSignal.timeout(60_000),
   });
 }
+/** A re-embed PATCH over the real HTTP route, as the Basic administrator. */
+function reembedAsAdmin(id: string): Promise<Response> {
+  return fetch(`${harper.httpURL}/Memory/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json", Authorization: authHeader },
+    body: JSON.stringify({ embedding: null, embeddingModel: null }),
+    signal: AbortSignal.timeout(60_000),
+  });
+}
+/** A request over the real HTTP route, signed as `agent`. */
+function signedSend(agent: TestAgent, method: string, path: string, body: unknown): Promise<Response> {
+  return fetch(`${harper.httpURL}${path}`, {
+    method,
+    headers: { "Content-Type": "application/json", Authorization: ed25519Header(agent, method, path) },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(60_000),
+  });
+}
 /** A re-embed PATCH over the real HTTP route, signed as `agent`. */
 function reembedAs(agent: TestAgent, id: string): Promise<Response> {
   const path = `/Memory/${encodeURIComponent(id)}`;
@@ -188,10 +206,14 @@ function cosine(a: number[], b: number[]): number {
  * write staged), run `compete`, then release it. Returns the PATCH's response
  * and how the pause ended.
  */
-async function withPausedStaged(id: string, compete: () => Promise<unknown>): Promise<{ response: Response; released: string; paused: boolean }> {
+async function withPausedStaged(
+  id: string,
+  compete: () => Promise<unknown>,
+  start: () => Promise<Response> = () => reembedAs(owner, id),
+): Promise<{ response: Response; released: string; paused: boolean }> {
   for (const marker of ["claimed", "paused", "go", "released"]) rmSync(join(pauseDir, `${marker}.${REEMBED_STAGED_POINT}`), { force: true });
   writeFileSync(join(pauseDir, `arm.${REEMBED_STAGED_POINT}`), "");
-  const pending = reembedAs(owner, id);
+  const pending = start();
   const paused = await waitFor(join(pauseDir, `paused.${REEMBED_STAGED_POINT}`), 20_000);
   try {
     if (paused) await compete();
@@ -403,7 +425,12 @@ describe("flair#2465 part 2 — the stored vector is bound to its text (real Har
     // Seed with an explicit binding for the ORIGINAL text and an incarnation
     // token, so the concurrent PUT carries both unchanged and only the TEXT
     // differs — the interleaving a plain identity check cannot see.
-    await seedRow(id, owner.id, ORIGINAL, { embeddedContentHash: computeContentHash(owner.id, ORIGINAL), instanceToken: randomUUID() });
+    // The seeded vector is the server's full-length vector for ORIGINAL, so the
+    // auto-embed backfill that follows the concurrent PUT (it fills only a vector
+    // of 100 entries or fewer) leaves it alone and cannot race the read below.
+    await seedRow(id, owner.id, ORIGINAL, {
+      embedding: await serverEmbedding(ORIGINAL), embeddedContentHash: computeContentHash(owner.id, ORIGINAL), instanceToken: randomUUID(),
+    });
 
     const { response, released, paused } = await withPausedStaged(id, async () => {
       // Change ONLY the text, but carry the stored vector (a supplied vector is
@@ -438,4 +465,177 @@ describe("flair#2465 part 2 — the stored vector is bound to its text (real Har
     // migration's re-queue condition holds.
     expect(row.embeddedContentHash).not.toBe(computeContentHash(owner.id, EDITED));
   }, 120_000);
+
+  it("a row with no owner to hash with: a text edit committed after the re-embed stages its write still aborts it", async () => {
+    const id = "rpo-hash-edit-staged-ownerless";
+    // An empty agentId (the schema requires the field, not a non-empty value),
+    // so no embedded-text hash exists for either text: only an exact-text
+    // comparison tells ORIGINAL from EDITED at the confirmation.
+    await seedRow(id, "", ORIGINAL, { instanceToken: randomUUID() });
+
+    const { response, released, paused } = await withPausedStaged(
+      id,
+      // A text-only edit: every identity field (id, agentId, instanceToken,
+      // contentHash, createdAt) is unchanged.
+      () => opsCall({ operation: "update", database: "flair", table: "Memory", records: [{ id, content: EDITED }] }),
+      () => reembedAsAdmin(id),
+    );
+
+    expect(paused, "the re-embed was not paused after staging its write").toBe(true);
+    expect(released).toBe("go");
+    const text = await response.clone().text();
+    expect(response.status, text.slice(0, 200)).toBe(409);
+    expect(JSON.parse(text).error).toBe("stored_row_changed");
+    const row = await readRow(id);
+    expect(row.content, "the edit did not survive").toBe(EDITED);
+    expect(row.embeddingModel, "the re-embed's stamp landed despite the text change").toBe(SEED_MODEL_ID);
+    expect(row.embedding).toEqual(STALE_EMBEDDING);
+  }, 120_000);
+});
+
+describe("flair#2465 part 2 — ordinary REST writes bind the vector the server computes (real Harper)", () => {
+  const GITHUB_TOKEN = `ghp_${"a".repeat(24)}`;
+  const CREDENTIAL_TEXT = `the deploy job reads token=${GITHUB_TOKEN} from the vault`;
+  const REDACTED_TEXT = "the deploy job reads token=[redacted] from the vault";
+  const TRIGGER = "when a nightly backup job fails to upload its archive";
+  const PROCEDURE = "open the job log, find the failed step, and rerun that step once";
+  const FORGED = "0123456789abcdef";
+  const vectors = new Map<string, number[]>();
+  const vectorOf = async (text: string): Promise<number[]> => {
+    if (!vectors.has(text)) vectors.set(text, await serverEmbedding(text));
+    return vectors.get(text)!;
+  };
+  /** The row holds the server's vector for `text` and the binding to `text`. */
+  async function expectBoundTo(row: any, text: string, other?: string): Promise<void> {
+    expect(row, "no stored row").toBeTruthy();
+    expect(row.embeddedContentHash, "the binding is not the hash of the embedded text").toBe(computeContentHash(owner.id, text));
+    expect(Array.isArray(row.embedding) && row.embedding.length > 100, "no server-computed vector").toBe(true);
+    const own = cosine(row.embedding, await vectorOf(text));
+    expect(own, "the stored vector is not the server's vector for the embedded text").toBeGreaterThan(0.9999);
+    if (other !== undefined) expect(own).toBeGreaterThan(cosine(row.embedding, await vectorOf(other)));
+  }
+  const skillBody = (id: string, extra: Record<string, unknown> = {}) => ({
+    id, agentId: owner.id, tags: ["skill"], trigger: TRIGGER, content: PROCEDURE, embeddedContentHash: FORGED, ...extra,
+  });
+
+  it("POST /Memory: a redacted input binds the redacted text; a submitted hash is not kept", async () => {
+    const id = `rpo-rest-post-${randomUUID()}`;
+    const res = await signedSend(owner, "POST", "/Memory", { id, agentId: owner.id, content: CREDENTIAL_TEXT, embeddedContentHash: FORGED });
+    expect(res.status, await res.clone().text()).toBeLessThan(300);
+    const row = await readRow(id);
+    expect(row.content).toBe(REDACTED_TEXT);
+    await expectBoundTo(row, REDACTED_TEXT);
+  }, 120_000);
+
+  it("POST /Memory: a skill binds its trigger, not its content", async () => {
+    const id = `rpo-rest-post-skill-${randomUUID()}`;
+    const res = await signedSend(owner, "POST", "/Memory", skillBody(id));
+    expect(res.status, await res.clone().text()).toBeLessThan(300);
+    await expectBoundTo(await readRow(id), TRIGGER, PROCEDURE);
+  }, 120_000);
+
+  it("PUT /Memory/<id>: a redacted update binds the redacted text; a submitted hash is not kept", async () => {
+    const id = `rpo-rest-put-${randomUUID()}`;
+    expect((await signedSend(owner, "POST", "/Memory", { id, agentId: owner.id, content: "the row before the update" })).status).toBeLessThan(300);
+    const path = `/Memory/${encodeURIComponent(id)}`;
+    const res = await signedSend(owner, "PUT", path, { id, agentId: owner.id, content: CREDENTIAL_TEXT, embeddedContentHash: FORGED });
+    expect(res.status, await res.clone().text()).toBe(200);
+    const row = await readRow(id);
+    expect(row.content).toBe(REDACTED_TEXT);
+    await expectBoundTo(row, REDACTED_TEXT);
+  }, 120_000);
+
+  it("PUT /Memory/<id>: a skill create binds its trigger, not its content", async () => {
+    const id = `rpo-rest-put-skill-${randomUUID()}`;
+    const res = await signedSend(owner, "PUT", `/Memory/${encodeURIComponent(id)}`, skillBody(id));
+    expect(res.status, await res.clone().text()).toBeLessThan(300);
+    await expectBoundTo(await readRow(id), TRIGGER, PROCEDURE);
+  }, 120_000);
+
+  it("PATCH /Memory/<id>: a redacted text edit binds the redacted text; a submitted hash is not kept", async () => {
+    const id = `rpo-rest-patch-${randomUUID()}`;
+    expect((await signedSend(owner, "POST", "/Memory", { id, agentId: owner.id, content: "the row before the patch" })).status).toBeLessThan(300);
+    const res = await signedSend(owner, "PATCH", `/Memory/${encodeURIComponent(id)}`, { content: CREDENTIAL_TEXT, embeddedContentHash: FORGED });
+    expect(res.status, await res.clone().text()).toBe(200);
+    const row = await readRow(id);
+    expect(row.content).toBe(REDACTED_TEXT);
+    await expectBoundTo(row, REDACTED_TEXT);
+  }, 120_000);
+
+  it("PATCH /Memory/<id>: a submitted hash alone is dropped and the stored binding stands", async () => {
+    const id = `rpo-rest-patch-hash-${randomUUID()}`;
+    const original = "a note about tuning the garden irrigation timer";
+    expect((await signedSend(owner, "POST", "/Memory", { id, agentId: owner.id, content: original })).status).toBeLessThan(300);
+    const res = await signedSend(owner, "PATCH", `/Memory/${encodeURIComponent(id)}`, { subject: "irrigation", embeddedContentHash: FORGED });
+    expect(res.status, await res.clone().text()).toBeLessThan(300);
+    const row = await readRow(id);
+    expect(row.subject).toBe("irrigation");
+    await expectBoundTo(row, original);
+  }, 120_000);
+
+  it("PATCH /Memory/<id> on a skill is refused; its trigger binding stands", async () => {
+    const id = `rpo-rest-patch-skill-${randomUUID()}`;
+    expect((await signedSend(owner, "POST", "/Memory", skillBody(id))).status).toBeLessThan(300);
+    const res = await signedSend(owner, "PATCH", `/Memory/${encodeURIComponent(id)}`, { trigger: "a different trigger", embeddedContentHash: FORGED });
+    expect(res.status, await res.clone().text()).toBeGreaterThanOrEqual(400);
+    const row = await readRow(id);
+    expect(row.trigger).toBe(TRIGGER);
+    await expectBoundTo(row, TRIGGER, PROCEDURE);
+  }, 120_000);
+
+  it("POST /FeedMemories refuses a submitted embeddedContentHash and stores nothing", async () => {
+    const id = `rpo-feed-hash-${randomUUID()}`;
+    const res = await signedSend(owner, "POST", "/FeedMemories", { id, agentId: owner.id, content: "a feed note", embeddedContentHash: FORGED });
+    const text = await res.text();
+    expect(res.status, text.slice(0, 200)).toBe(400);
+    expect(JSON.parse(text).error).toBe("feed_embedding_not_writable");
+    expect(await readRow(id)).toBeFalsy();
+  }, 120_000);
+
+  it("POST /FeedMemories refuses a submitted embeddedContentHash on a skill update; the stored skill is unchanged", async () => {
+    const id = `rpo-feed-skill-hash-${randomUUID()}`;
+    expect((await signedSend(owner, "POST", "/Memory", skillBody(id))).status).toBeLessThan(300);
+    const before = await readRow(id);
+    const res = await signedSend(owner, "POST", "/FeedMemories", { ...skillBody(id), content: "a revised procedure" });
+    expect(res.status, (await res.clone().text()).slice(0, 200)).toBe(400);
+    expect((await res.json()).error).toBe("feed_embedding_not_writable");
+    const after = await readRow(id);
+    expect(after.content).toBe(PROCEDURE);
+    expect(after.validTo ?? null, "the skill was closed").toBeNull();
+    expect(after.embeddedContentHash).toBe(before.embeddedContentHash);
+  }, 120_000);
+
+  it("a feed skill successor carries the stored vector and binding only over an unchanged trigger", async () => {
+    const id = `rpo-feed-skill-${randomUUID()}`;
+    expect((await signedSend(owner, "POST", "/Memory", skillBody(id))).status).toBeLessThan(300);
+    const head = await readRow(id);
+    await expectBoundTo(head, TRIGGER, PROCEDURE);
+
+    // Same trigger, new content: the vector (computed for the trigger) is
+    // carried, and so is its binding.
+    const { embeddedContentHash: _omit, ...noHash } = skillBody(id);
+    const kept = await signedSend(owner, "POST", "/FeedMemories", { ...noHash, content: "a revised procedure that still fits the trigger" });
+    const keptBody = await kept.json();
+    expect(kept.status, JSON.stringify(keptBody).slice(0, 200)).toBe(200);
+    expect(keptBody.id).not.toBe(id);
+    const keptRow = await readRow(keptBody.id);
+    expect(keptRow.trigger).toBe(TRIGGER);
+    expect(keptRow.embedding).toEqual(head.embedding);
+    expect(keptRow.embeddedContentHash).toBe(computeContentHash(owner.id, TRIGGER));
+
+    // New trigger: the stored vector is dropped, and with it the binding.
+    const NEW_TRIGGER = "when the weekly report email bounces";
+    const moved = await signedSend(owner, "POST", "/FeedMemories", { ...noHash, id: keptBody.id, trigger: NEW_TRIGGER });
+    const movedBody = await moved.json();
+    expect(moved.status, JSON.stringify(movedBody).slice(0, 200)).toBe(200);
+    const movedRow = await readRow(movedBody.id);
+    expect(movedRow.trigger).toBe(NEW_TRIGGER);
+    expect(movedRow.embeddedContentHash, "the old trigger's binding was carried onto a new trigger").not.toBe(computeContentHash(owner.id, TRIGGER));
+    if (movedRow.embedding == null) {
+      expect(movedRow.embeddedContentHash ?? null).toBeNull();
+    } else {
+      // The stamp migration re-embedded the successor before this read.
+      await expectBoundTo(movedRow, NEW_TRIGGER);
+    }
+  }, 180_000);
 });

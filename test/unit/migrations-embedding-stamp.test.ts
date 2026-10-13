@@ -389,7 +389,7 @@ describe("embedding-stamp migration — flair#2465: the embedded-text hash bindi
     expect(await m.countPending()).toBe(0);
   });
 
-  it("a row with NO embeddedContentHash is a trusted legacy row (never re-queued for the missing binding alone)", async () => {
+  it("a row with NO embeddedContentHash counts as current (never re-queued for the missing hash alone)", async () => {
     const { table } = makeFakeMemoryTable([
       { id: "m1", agentId: "a", content: "a legacy row", embeddingModel: CURRENT_MODEL },
     ]);
@@ -410,7 +410,7 @@ describe("embedding-stamp migration — flair#2465: the embedded-text hash bindi
     expect(await m.countPending()).toBe(1);
   });
 
-  it("run() re-embeds a hash-mismatch row and the refreshed write records the matching hash", async () => {
+  it("run() selects a hash-mismatch row as a candidate (the fake regen stands in for the write)", async () => {
     const { store, table } = makeFakeMemoryTable([
       { id: "m1", agentId: "a", content: "the current text", embeddingModel: CURRENT_MODEL, embeddedContentHash: "a-stale-hash" },
     ]);

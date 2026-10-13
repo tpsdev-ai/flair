@@ -4,7 +4,8 @@
  *
  * Each CLI path (all agents, one agent) re-embeds rows seeded with a value for
  * every Memory attribute. Afterwards the stored row may differ only in
- * `embedding`, `embeddingModel` and `updatedAt`, and the new vector must match
+ * `embedding`, `embeddingModel`, `updatedAt` and (flair#2465)
+ * `embeddedContentHash`, and the new vector must match
  * the server's embedding of the row's text (`trigger` for a skill row).
  *
  * The fixtures carry the bare current-space stamp, which the boot migration

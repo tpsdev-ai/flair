@@ -70,11 +70,12 @@ export class FeedMemories extends Resource {
     if (attr.denied) return attr.denied;
 
     // The feed writes the raw table without the embedding-space latch, so a
-    // body may not supply the embedding stamp.
-    if (content?.embedding !== undefined || content?.embeddingModel !== undefined) {
+    // body may not supply the embedding stamp. flair#2465: nor its text binding,
+    // `embeddedContentHash`, which only the server records.
+    if (content?.embedding !== undefined || content?.embeddingModel !== undefined || content?.embeddedContentHash !== undefined) {
       return Response.json({
         error: "feed_embedding_not_writable",
-        message: "a feed write may not set embedding or embeddingModel; omit both fields",
+        message: "a feed write may not set embedding, embeddingModel or embeddedContentHash; omit these fields",
       }, { status: 400 });
     }
 

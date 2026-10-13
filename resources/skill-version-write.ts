@@ -159,12 +159,20 @@ export async function prepareSkillBody(content: any, stored: Record<string, any>
   if ((content.archived != null && content.archived !== false) || (content.validTo != null && content.validTo !== "")) {
     return Response.json({ error: "skill_state_requires_delete" }, { status: 400 });
   }
-  const effective = { ...(stored ?? predecessor ?? {}), ...content };
+  const source = stored ?? predecessor ?? {};
+  const effective = { ...source, ...content };
   effective.tags = content.tags ?? (rowIsSkill(stored) ? stored!.tags : predecessor?.tags);
-  if (content.embedding === undefined && skillEmbedText(effective) !== skillEmbedText(stored ?? predecessor ?? {})) {
+  const textUnchanged = skillEmbedText(effective) === skillEmbedText(source);
+  if (content.embedding === undefined && !textUnchanged) {
     effective.embedding = null;
     effective.embeddingModel = null;
   }
+  // flair#2465: the successor carries the stored `embeddedContentHash` only with
+  // the stored vector over unchanged embedding text; otherwise null. A body value
+  // is never kept. Memory.post()/put() then set their own value.
+  effective.embeddedContentHash = content.embedding === undefined && textUnchanged
+    ? (source.embeddedContentHash ?? null)
+    : null;
   if (content.id === undefined) delete effective.id;
   return { content: effective, predecessor };
 }

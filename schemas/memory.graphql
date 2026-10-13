@@ -33,23 +33,25 @@ type Memory @table(database: "flair") {
                                # write) but never DECLARED in this schema, so it was storable but not
                                # queryable — Harper's Table.search({conditions}) rejects a condition on
                                # an undeclared attribute ("X is not a defined attribute"), which the
-                               # zero-touch migration runner's bounded detect()/countPending()/run()
-                               # queries (resources/migrations/embedding-stamp.ts: `embeddingModel
-                               # not_equal <current>`) need in order to stay O(1)-bounded rather than a
-                               # full-corpus scan on every boot. Purely additive — existing rows already
+                               # zero-touch migration runner's `embeddingModel not_equal <current>` query
+                               # (resources/migrations/embedding-stamp.ts) needs. Since flair#2465 only
+                               # detect() runs that query first; countPending()/run() also scan the whole
+                               # table for a hash mismatch. Purely additive — existing rows already
                                # carry this value on disk; declaring it queryable changes nothing about
                                # what's written or how embeddings/prefixes behave (#689's gate untouched).
-  embeddedContentHash: String @indexed  # flair#2465: the content hash of the EXACT text the
-                               # stored `embedding` was computed from — `computeContentHash(agentId,
-                               # skillEmbedText(row))`, the same hash function that defines a Memory row's
-                               # `contentHash`, applied to the field that row embeds from (`trigger` for a
-                               # skill-tagged row with a non-empty trigger, else `content`). A row's
-                               # embedding is current only when `embeddingModel` is current-space AND this
-                               # recorded hash equals the hash of the row's current embedding text; the
-                               # embedding-stamp migration re-queues a mismatch (a live per-row scan — a
-                               # query cannot compute the current text's hash). Nullable/additive: existing
-                               # rows have no value and are trusted until a later write records one
-                               # (clean-upgrade-path gate). Distinct from `contentHash`, which the feed
+  embeddedContentHash: String @indexed  # flair#2465: when the server computed the stored
+                               # `embedding` on a guarded path (Memory POST/PUT/PATCH embed, re-embed
+                               # PATCH, stamp migration fallback, auto-embed backfill), the content hash
+                               # of the exact text it embedded — `computeContentHash(agentId,
+                               # skillEmbedText(row))`, the function that defines `contentHash`, applied
+                               # to the field the row embeds from (`trigger` for a skill-tagged row with a
+                               # non-empty trigger, else `content`). The stamp migration treats a row as
+                               # current when `embeddingModel` is current-space AND this value is absent
+                               # or equals the hash of the row's current embedding text; it re-queues a
+                               # mismatch (a live per-row scan). Nullable/additive: a row with no value
+                               # (e.g. written before this field, or created with a caller-supplied vector)
+                               # counts as current. A value received by federation is the peer's data, not local
+                               # proof of the vector's source. Distinct from `contentHash`, which the feed
                                # stamps over `content` and an ordinary Memory write does not maintain.
   tags: [String] @indexed
   durability: String @indexed

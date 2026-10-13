@@ -141,16 +141,17 @@
  * vector for the text it read when a text edit commits after that read and
  * before the commit (Harper has no compare-and-set; the field-only write and the
  * committed-row confirm narrow — not close — that window). To catch the rows such
- * an edit leaves behind, every vector write records `embeddedContentHash`
- * (resources/memory-embed-hash.ts), and this migration re-queues a row whose
- * recorded hash no longer matches its current embedding text. The query cannot
- * compute the current text's hash — its conditions compare a stored value to a
- * constant — so the mismatch leg is a LIVE SCAN: `detect`/`countPending`/`run`
- * apply `rowEmbeddingCurrent` per row over the table, after the cheap
- * `staleCondition()` query has had its chance (see each method). A row with no
- * recorded hash (written before this change) is trusted and left for the next
- * text edit; re-queueing it instead would re-embed the whole corpus once on
- * upgrade.
+ * an edit leaves behind, the server records `embeddedContentHash`
+ * (resources/memory-embed-hash.ts) when it computes a vector on a guarded path,
+ * and this migration re-queues a row whose recorded hash no longer matches its
+ * current embedding text. The query cannot compute the current text's hash —
+ * its conditions compare a stored value to a constant — so the mismatch leg is a
+ * LIVE SCAN. `detect` runs the cheap `staleCondition()` query first and then
+ * scans; `countPending` and `run` scan the whole table and apply
+ * `rowEmbeddingCurrent` per row. A row with no recorded hash (e.g. written
+ * before this change, or created with a vector the server did not compute)
+ * counts as current; re-queueing such rows instead would re-embed the whole corpus once
+ * on upgrade.
  */
 import { databases } from "harper";
 import { isDeepStrictEqual } from "node:util";
@@ -257,11 +258,11 @@ function isUsableEmbedding(value: unknown): value is number[] {
 
 /**
  * Is this row's stored embedding current? Current means BOTH its
- * `embeddingModel` is a current-space stamp for `currentModelId` AND its recorded
- * `embeddedContentHash` still equals the hash of the row's current embedding text
- * (`memory-embed-hash.ts`). A legacy row with no recorded hash is trusted (see
- * that module). A query cannot compute the current text's hash, so a caller that
- * needs to find a hash mismatch must scan (see each method below).
+ * `embeddingModel` is a current-space stamp for `currentModelId` AND either it
+ * records no `embeddedContentHash` or the recorded hash equals the hash of the
+ * row's current embedding text (`memory-embed-hash.ts`). A query cannot compute
+ * the current text's hash, so a caller that needs to find a hash mismatch must
+ * scan (see each method below).
  */
 function rowEmbeddingCurrent(row: Record<string, unknown>, currentModelId: string): boolean {
   return isCurrentSpaceStamp(row.embeddingModel as string | null | undefined, currentModelId) &&
@@ -291,9 +292,10 @@ const defaultContentSuffixRegenDeps: ContentSuffixRegenDeps = {
  * row with no such text is not embedded.
  *
  * Writes a usable vector in an owned transaction. It STAGES an incremental
- * `update` of only `embedding`, `embeddingModel` and `updatedAt` — the same
- * field-only write Memory's own re-embed branch uses (flair#2465), never a
- * full-row put — and the write touches no other field of the committed row.
+ * `update` of only `embedding`, `embeddingModel`, `updatedAt` and
+ * `embeddedContentHash` — the same field-only write Memory's own re-embed branch
+ * uses (flair#2465), never a full-row put — and the write touches no other field
+ * of the committed row.
  * Then it CONFIRMS the committed row (an explicit fresh context) is still the
  * row this transaction read and embedded; a row gone or distinguishably changed
  * at confirmation aborts the owned transaction and returns false.
@@ -327,7 +329,7 @@ async function regenContentSuffixRow(
       // flair#2465: an incremental update of ONLY the embedding fields, not a
       // full-row put. A full-row put carries this transaction's re-read row and
       // can revert a field an owner edit committed meanwhile; this write touches
-      // only embedding/embeddingModel/updatedAt.
+      // only embedding/embeddingModel/updatedAt and the embedded-text hash.
       await table.update(id, { embedding, embeddingModel: current, updatedAt: new Date().toISOString(), embeddedContentHash: embeddedTextHash(existing) ?? null }, txn);
       // Test-only: inert unless the fault-injection env opt-in is set and armed.
       // After the write is STAGED and before the transaction commits.
@@ -474,9 +476,8 @@ export function createEmbeddingStampMigration(
           ok = await regen(id, existing);
         }
         if (ok) touchedIds.push(id);
-        // A failed regen leaves the row untouched (still matching
-        // staleCondition — retried next batch/boot), never partially
-        // written or marked done.
+        // A failed regen leaves the row untouched (still pending — retried
+        // next batch/boot), never partially written or marked done.
       }
 
       return { processed: touchedIds.length, touchedIds };
@@ -486,7 +487,8 @@ export function createEmbeddingStampMigration(
      * flair#807 completion-gate safety net (resources/migrations/runner.ts
      * calls this ONLY when a nonzero countPending() would otherwise halt the
      * migration). Re-derives up to `limit` currently-"pending" ids via the
-     * SAME staleCondition() search countPending() uses, then re-checks each
+     * staleCondition() search (the query leg only; countPending() also scans
+     * for a hash mismatch, flair#2465), then re-checks each
      * one by a DIRECT `.get()` — a primary-key lookup, never index-assisted,
      * so it can't be fooled by the same secondary-index divergence that can
      * make the search-based count wrong. Returns counts only (never ids —
