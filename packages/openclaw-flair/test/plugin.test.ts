@@ -1937,7 +1937,7 @@ describe("flair#2513 — agent_end capture is keyed by counted message identitie
     expect(api._warnText()).toMatch(
       /agent_end capture is disabled for a session of agent A: agent_end for run run-2 found 1 scans queued or running for the session \(sessionScanQueueCap\); no later agent_end scan of that session captures or records anything while its capture state is held/,
     );
-    expect(api._warnText()).not.toMatch(/accounted to it as skipped/);
+    expect(api._warnText()).not.toMatch(/capture failed for run run-1/);
   });
 
   test("round 3 (mutation: recording not stopped): after gateway_stop, a failed run's agent_end records no session state", async () => {
