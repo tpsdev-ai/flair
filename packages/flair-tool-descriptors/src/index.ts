@@ -227,7 +227,7 @@ export const TOOL_DESCRIPTORS: readonly ToolDescriptor[] = [
         "content"
       ]
     },
-    "outputShape": "Write echo { id, written:true, deduplicated } — the new id + confirmation. No internal embedding fields; round-trips via memory_get.",
+    "outputShape": "Write echo { id, written:true, deduplicated } — the new id + confirmation. No internal embedding fields; round-trips via memory_get. After a server-side redaction the echo also carries `redactedValues` and the stored `content` (with `summary`/`trigger` when written) from the write's own response; if that response returned no stored `content`, the echo omits those fields and sets `contentWithheld:true`.",
     "stdioOmitProperties": [
       "hostSource",
       "hostSourceScope",
@@ -338,7 +338,7 @@ export const TOOL_DESCRIPTORS: readonly ToolDescriptor[] = [
         "content"
       ]
     },
-    "outputShape": "Write echo { id, written:true } for the in-place overwrite (or supersede). No internal embedding fields; the change round-trips via memory_get.",
+    "outputShape": "Write echo { id, written:true } for the in-place overwrite (or supersede). No internal embedding fields; the change round-trips via memory_get. After a server-side redaction the echo also carries `redactedValues` and the stored `content` (with `summary`/`trigger` when written) from the write's own response; if that response returned no stored `content`, the echo omits those fields and sets `contentWithheld:true`.",
     "stdioExtraProperties": {
       "usedMemoryIds": {
         "type": "array",
