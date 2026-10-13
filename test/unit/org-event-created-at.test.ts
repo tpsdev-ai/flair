@@ -1,8 +1,9 @@
 /**
- * org-event-created-at.test.ts — the pure createdAt decision behind every
- * OrgEvent write (resources/org-event-created-at.ts): an OrgEvent's createdAt
- * is assigned by the server on create and cannot be changed, and a record whose
- * id the check does not read is refused before any write.
+ * org-event-created-at.test.ts — the pure createdAt decision behind the
+ * OrgEvent createdAt check (resources/org-event-created-at.ts): with no stored
+ * row the server assigns createdAt; with one, the stored value is
+ * authoritative whatever it is (an empty string included); and the ids the
+ * check reads.
  *
  * The resource wiring (which verbs call it, for which callers, and which row
  * they read) is covered in test/unit/coordination-write-auth.test.ts and, over
@@ -44,11 +45,30 @@ describe("applyServerCreatedAt — create", () => {
     }
   }
 
-  it("assigns the server time when the stored row carries no createdAt", () => {
-    const content: Record<string, unknown> = { id: "e1", createdAt: PAST };
-    const row = { ...stored(), createdAt: undefined };
-    expect(applyServerCreatedAt(content, row, "replace", NOW)).toBeNull();
-    expect(content.createdAt).toBe(NOW.toISOString());
+});
+
+describe("applyServerCreatedAt — a stored row's createdAt is authoritative whatever its value", () => {
+  for (const [label, storedAt] of [["an empty", ""], ["an absent", undefined]] as const) {
+    for (const mode of ["replace", "merge"] as const) {
+      it(`${mode}: a body naming a createdAt for a stored row with ${label} createdAt is refused with 409`, async () => {
+        const content: Record<string, unknown> = { id: "e1", createdAt: NOW.toISOString() };
+        const res = applyServerCreatedAt(content, { ...stored(), createdAt: storedAt }, mode, NOW);
+        expect(res?.status).toBe(409);
+        expect((await refusalBody(res!)).error).toBe(CREATED_AT_IMMUTABLE_ERROR);
+      });
+    }
+
+    it(`replace: a body without createdAt keeps ${label} stored createdAt`, () => {
+      const content: Record<string, unknown> = { id: "e1", summary: "new" };
+      expect(applyServerCreatedAt(content, { ...stored(), createdAt: storedAt }, "replace", NOW)).toBeNull();
+      expect(content.createdAt).toBe(storedAt);
+    });
+  }
+
+  it("a body restating an empty stored createdAt is accepted unchanged", () => {
+    const content: Record<string, unknown> = { id: "e1", createdAt: "" };
+    expect(applyServerCreatedAt(content, { ...stored(), createdAt: "" }, "replace", NOW)).toBeNull();
+    expect(content.createdAt).toBe("");
   });
 });
 

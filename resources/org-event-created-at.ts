@@ -1,24 +1,27 @@
 /**
- * org-event-created-at.ts — an OrgEvent's createdAt is assigned by the server
- * on create and cannot be changed through the resource's write verbs.
+ * org-event-created-at.ts — the createdAt check for OrgEvent writes: the server
+ * assigns an event's createdAt on create, and a write that reaches this check
+ * cannot change a stored row's createdAt.
  *
- * The timestamp is server-owned:
+ * The check runs after the resource's earlier checks (authentication,
+ * ownership, attribution, entity validation), which answer first with their own
+ * responses, as Harper's own validation does for input it refuses before the
+ * resource runs. For each record that reaches it:
  *
- *   - the check reads the stored row under each record's id. A record that is
- *     not an object, or whose id is not a non-empty string or a non-empty
- *     array of strings, is not read: it is refused with `invalid_event_id`
- *     (400) before any write;
- *   - on create, createdAt is the server's time, whatever the body says;
- *   - on update, createdAt keeps its stored value. A body that omits it keeps
- *     the stored value; a write that reaches this check with a createdAt that
- *     differs from the stored one is refused with `created_at_immutable` (409),
- *     and nothing is written. Earlier checks in the resource (authentication,
- *     ownership, attribution, entity validation) answer first.
+ *   - a record that is not an object, or whose id is not a non-empty string or
+ *     a non-empty array of strings, is not read: it is refused with
+ *     `invalid_event_id` (400) before any write. (POST generates an id before
+ *     the check when the body's id is missing, empty, null, 0 or false.);
+ *   - otherwise the check reads the stored row under that id. With no stored
+ *     row (a create), createdAt is the server's time, whatever the body says;
+ *   - with a stored row, its createdAt is authoritative whatever its value, an
+ *     empty string included. A body that omits createdAt keeps the stored
+ *     value; a body whose createdAt differs from it is refused with
+ *     `created_at_immutable` (409), and nothing is written.
  *
- * resources/OrgEvent.ts applies this to every write from a verified agent,
- * admin agents included, on POST, PUT (single record, collection, and each
- * element of an array body) and PATCH, so a write that names an id the check
- * does not read is refused on each of them. Trusted in-process writers that supply
+ * resources/OrgEvent.ts runs this check for writes from verified agents and
+ * administrators on POST, PUT (single record, collection, and each element of
+ * an array body) and PATCH. Trusted in-process writers that supply
  * their own createdAt (the migration ledger, the graph-heal migration) write
  * through the raw `databases.flair.OrgEvent` table, not the resource's verbs,
  * and an `internal` verdict on the resource passes through unchanged.
@@ -99,8 +102,12 @@ export function isReadableEventId(id: unknown): id is string | string[] {
 
 /**
  * Assign or keep `content.createdAt` for one write, given the stored row the
- * write lands on (`stored` null/undefined = create). Mutates `content`.
- * Returns null to proceed, or the refusal to send.
+ * write lands on (`stored` null/undefined = no stored row, a create). Mutates
+ * `content`. Returns null to proceed, or the refusal to send.
+ *
+ * For a stored row, the stored createdAt is authoritative whatever its value,
+ * an empty string included: a body that names a different value is refused,
+ * and a body that omits it keeps the stored value.
  */
 export function applyServerCreatedAt(
   content: Record<string, unknown>,
@@ -108,12 +115,12 @@ export function applyServerCreatedAt(
   mode: CreatedAtWriteMode,
   now: Date = new Date(),
 ): Response | null {
-  const storedAt = stored?.createdAt;
-  if (stored == null || typeof storedAt !== "string" || storedAt === "") {
-    // A create, or a stored row with no createdAt to keep: the server assigns it.
+  if (stored == null) {
+    // No stored row: a create, so the server assigns createdAt.
     content.createdAt = now.toISOString();
     return null;
   }
+  const storedAt = stored.createdAt;
   if (Object.prototype.hasOwnProperty.call(content, "createdAt") && content.createdAt !== storedAt) {
     return createdAtImmutable();
   }

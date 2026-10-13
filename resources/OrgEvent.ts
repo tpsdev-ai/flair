@@ -4,8 +4,9 @@
  * Auth (self-enforced now that the global gate is non-rejecting):
  *   Read  — any verified agent/admin (org-scoped); anonymous denied.
  *   Write — authorId must match the authenticated agent (or admin); anonymous denied.
- *   createdAt — assigned by the server on create and cannot be changed; a
- *               record whose id the check does not read is refused
+ *   createdAt — assigned by the server on create; a write that reaches the
+ *               createdAt check cannot change a stored row's value, and a
+ *               record whose id the check does not read is refused there
  *               (resources/org-event-created-at.ts).
  *
  * The previous version read context.request.tpsAgent and treated a MISSING agent
@@ -48,12 +49,13 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
   }
 
   /**
-   * An OrgEvent's createdAt is assigned by the server on create and cannot be
-   * changed (resources/org-event-created-at.ts). Applies that rule to each
-   * record the write stores — the content itself, or each element of an array
-   * body — reading the stored row at the id the write lands on. A record that
-   * is not an object, or whose id the check does not read (isReadableEventId),
-   * is refused with `invalid_event_id` (400) before any write.
+   * The createdAt check (resources/org-event-created-at.ts), run after this
+   * verb's earlier checks. Applies to each record the write stores — the
+   * content itself, or each element of an array body — reading the stored row
+   * at the id the write lands on: server time with no stored row, the stored
+   * value (whatever it is) with one. A record that is not an object, or whose
+   * id the check does not read (isReadableEventId), is refused with
+   * `invalid_event_id` (400) before any write.
    */
   private async _assignCreatedAt(
     content: any,
@@ -120,8 +122,9 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
     );
     if (ownerDenial) return ownerDenial;
 
-    // createdAt: server time on create; the stored value on update; a record
-    // whose id the check does not read is refused.
+    // createdAt: server time with no stored row; the stored value with one; a
+    // record whose id the check does not read is refused. (The id generated
+    // above means a missing, empty, null, 0 or false id never reaches it.)
     if (auth.kind !== "internal") {
       const createdAtDenial = await this._assignCreatedAt(content, "replace", (record) => record.id);
       if (createdAtDenial) return createdAtDenial;
@@ -164,9 +167,9 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
     const entitiesError = invalidEntitiesResponse(content.entities);
     if (entitiesError) return entitiesError;
 
-    // createdAt: server time on create; the stored value on update, read under
-    // each record's own id; a record whose id the check does not read is
-    // refused. A refusal is thrown, so one refused record fails the whole
+    // createdAt: server time with no stored row; the stored value with one,
+    // read under each record's own id; a record whose id the check does not
+    // read is refused. A refusal is thrown, so one refused record fails the whole
     // request and nothing in it is written.
     if (auth.kind !== "internal") {
       const createdAtDenial = await this._assignCreatedAt(content, "replace", (record) => record.id);
