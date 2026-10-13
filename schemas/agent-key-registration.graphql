@@ -8,8 +8,8 @@
 # thread records for a later slice, which must be `replicate: false`.
 #
 # Admin-read-only through resources/AgentKeyRegistration.ts (allowRead =
-# allowAdmin); every REST write is refused, so nothing but the registration
-# operation ever writes it.
+# allowAdmin); every REST write is refused. The registration operation writes it
+# through the raw table handle.
 type AgentKeyRegistration @table(database: "flair", replicate: true) {
   id: ID @primaryKey              # server-generated registrationId
   actorId: String! @indexed       # the verified admin agent that registered the key

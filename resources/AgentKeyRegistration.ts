@@ -4,8 +4,8 @@
  *
  * One row per committed POST /AgentKeyRegister. It carries no secret (the key
  * FINGERPRINT, never the key). Reads are admin-only; every REST write is refused
- * — the only writer is resources/AgentKeyRegister.ts, through the raw table in
- * its registration transaction.
+ * — the registration operation writes it through the raw table in its
+ * registration transaction.
  */
 import { databases } from "harper";
 import { allowAdmin } from "./agent-auth.js";
