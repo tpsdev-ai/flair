@@ -1806,8 +1806,8 @@ export function decideDoctorRosterIdentity(opsPort: number, pair: ProbedPairIden
  *    ({@link decideDoctorRosterIdentity}): two different single ids refuse.
  *
  * Any `not-run` means the caller reports both checks as NOT RUN and reads no
- * Agent row. Both endpoints are on this host, so two processes reached through
- * one port-forward report the same id and are accepted.
+ * Agent row. A pair that reaches one process through two forwarders reports the
+ * same id and is accepted.
  */
 export async function verifyDoctorRosterInstance(
   opts: { port?: string | number; opsPort?: string | number; dataDir?: string },
