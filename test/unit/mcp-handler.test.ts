@@ -332,8 +332,8 @@ describe("resolveAgentFromSub", () => {
   // missing, empty or any other value maps nothing. When it is the subject's
   // only row, as here, resolution is refused by name and nothing is linked or
   // resolved. On origin/main a revoked row was SKIPPED (returning null, so JIT,
-  // when enabled, could re-create the mapping) and a missing/unknown status was
-  // served as a live mapping.
+  // when enabled, could re-create the mapping) and a principal-bearing row with
+  // a missing/unknown status was served as a live mapping.
   for (const [label, status] of [["revoked", "revoked"], ["missing", undefined], ["unknown", "disabled"]] as const) {
     it(`${label} status → refused by name, nothing linked or resolved`, async () => {
       process.env.FLAIR_MCP_JIT_PROVISION = "1"; // JIT ON: a non-active row must not fall through to it

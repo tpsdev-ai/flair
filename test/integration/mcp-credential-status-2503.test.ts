@@ -5,11 +5,11 @@
 // through `Credential(kind:"idp", idpSubject=sub)` at request time, and
 // `provisionIdpIdentityMapping` (src/lib/mcp-enable.ts) is the supported writer
 // of that mapping. Before this change both accepted every status except
-// "revoked", so a legacy row with no status — or any unknown value — was served
-// as a live mapping. And a revoked row was SKIPPED by the resolver, so JIT
-// provisioning, when enabled, could re-create the principal the revocation was
-// meant to stop. Any matching row now ends resolution: JIT runs only when no
-// row matches the subject.
+// "revoked", so a principal-bearing row with no status — or any unknown value —
+// was served as a live mapping. And a revoked row was SKIPPED by the resolver,
+// so JIT provisioning, when enabled, could re-create the principal the
+// revocation was meant to stop. Any matching row now ends resolution: JIT runs
+// only when no row matches the subject.
 //
 // Harness: a real Harper with the in-process fixture (test/fixtures/inproc-app),
 // driving the SHIPPED `mcpHandler` through its `mcpRpc` op — the real
@@ -62,14 +62,27 @@ async function mcpCall(sub: string, rpc: Record<string, unknown>): Promise<any> 
 const store = (sub: string, marker: string) =>
   mcpCall(sub, { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "memory_store", arguments: { content: marker, visibility: "private" } } });
 
+/**
+ * The rows of `table` whose `attribute` equals `value`. A read that fails — a
+ * non-2xx answer, a body that is not JSON, or JSON that is not a list — throws,
+ * so an assertion that no row exists can pass only on a valid, empty read.
+ */
 async function adminSearch(table: string, attribute: string, value: string): Promise<any[]> {
   const res = await fetch(harper.opsURL, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: "Basic " + btoa(`${harper.admin.username}:${harper.admin.password}`) },
     body: JSON.stringify({ operation: "search_by_value", database: "flair", table, search_attribute: attribute, search_value: value, get_attributes: ["*"] }),
   });
-  const body = await res.json().catch(() => []);
-  return Array.isArray(body) ? body : [];
+  const text = await res.text();
+  if (!res.ok) throw new Error(`admin search ${table}.${attribute} → HTTP ${res.status}: ${text.slice(0, 300)}`);
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    throw new Error(`admin search ${table}.${attribute} answered a body that is not JSON: ${text.slice(0, 300)}`);
+  }
+  if (!Array.isArray(body)) throw new Error(`admin search ${table}.${attribute} answered a non-list: ${text.slice(0, 300)}`);
+  return body;
 }
 
 async function adminUpsert(table: string, records: Record<string, unknown>[]): Promise<void> {

@@ -9,11 +9,12 @@
  * (src/lib/mcp-enable.ts) is the layer that writes and maintains it, and the
  * XAA jwt-bearer grant (resources/XAA.ts, `resolveOrCreatePrincipalLocked`)
  * resolves an ID-JAG subject through it. Before this module the resolver and
- * the linker accepted every status except `"revoked"`, so a row with a missing,
- * empty or unknown status was served as a live mapping; on the resolver's path
- * a revoked row was also skipped, so it could re-create a principal when JIT
- * provisioning was enabled. XAA already accepted only `"active"` (flair#2501).
- * All three sites now import this module, so they cannot drift.
+ * the linker accepted every status except `"revoked"`, so a principal-bearing
+ * row with a missing, empty or unknown status was served as a live mapping; on
+ * the resolver's path a revoked row was also skipped, so it could re-create a
+ * principal when JIT provisioning was enabled. XAA already accepted only
+ * `"active"` (flair#2501). All three sites now use this module's shared rule
+ * for row usability.
  *
  * The rule is an ALLOWLIST: a credential is usable only when its `status` is
  * exactly `"active"`. Missing, empty, `"revoked"` and any other value are not
@@ -66,10 +67,11 @@ function credentialStatusPhrase(status: unknown): string {
 /**
  * The named refusal for a Credential that maps no principal: it names the
  * actor (the named credential — pass the surrounding subject too when the
- * caller has one), the state (the stored status, or that there is none, and
- * whether the row names a principal) and the remedy (an operator re-links the
- * subject, which writes an active mapping that names its principal). The
- * resolver builds its JSON-RPC refusal from this, so that wording has one home.
+ * caller has one), the state (the stored status, or that there is none, and,
+ * when applicable, that it names no principal) and the remedy (an operator
+ * re-links the subject, which writes an active mapping that names its
+ * principal). The resolver builds its JSON-RPC refusal from this, so that
+ * wording has one home.
  */
 export function credentialRefusal(actor: string, cred: { status?: unknown; principalId?: unknown }): string {
   const state = credentialPrincipalId(cred) === null
