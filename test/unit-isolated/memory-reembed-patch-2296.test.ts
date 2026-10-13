@@ -66,7 +66,8 @@ test("the owner's request writes embedding, embeddingModel and updatedAt and lea
   const res = await resource("m1", agent("agent-a")).patch({ ...REEMBED });
   expect(res.status).toBe(200);
   const body = await res.json();
-  expect(body).toEqual({ id: "m1", embeddingModel: getModelId(), updatedAt: expect.any(String) });
+  // flair#2561: the response names the row and its updatedAt, and carries no embedding field.
+  expect(body).toEqual({ id: "m1", updatedAt: expect.any(String) });
   const after = harnessState.memoryStore.get("m1");
   expect(after).toEqual({ ...before, embedding: [0.25, 0.5, 0.75], embeddingModel: getModelId(), updatedAt: body.updatedAt });
   expect(documentEmbeds().map((c) => c.text)).toEqual(["content of m1"]);

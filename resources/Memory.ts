@@ -563,8 +563,8 @@ async function runDedupGate(ctx: any, content: any): Promise<DedupMatch | null> 
  * flair#2467: with the count it layers `stored`, the post-redaction values of
  * the text fields the write staged (storedMemoryText of the staged row or
  * PATCH body), when the write captured them. flair#2561: `stored` holds only
- * the text fields the write's request supplied, and the response carries no
- * embedding field (withoutEmbeddingFields).
+ * the string-valued text fields the write's request supplied, and the response
+ * carries no embedding field (withoutEmbeddingFields).
  */
 function withRedactedValues(result: any, redactedValues: number, id?: any, stored?: StoredMemoryText | null): any {
   if (result instanceof Response) return result;
@@ -617,7 +617,8 @@ function buildWriteResponse(content: any, result: any, dedupMatch: DedupMatch | 
   // flair#2467: with it, `stored` — the post-redaction values of the text
   // fields this write staged and committed (captured from the staged row,
   // never read back), so a client reports them without a read a later write
-  // could change. flair#2561: only the text fields the request supplied.
+  // could change. flair#2561: only the string-valued text fields the request
+  // supplied.
   if (redactedValues > 0) {
     response.redactedValues = redactedValues;
     if (stored) response.stored = stored;
@@ -1029,9 +1030,9 @@ async function writeSkillCreateOrUpdate(
     requestedPayload?: Record<string, any>;
     /** flair#2467: receives the post-redaction text fields of the successor
      *  row this write staged and committed (none when it wrote no row).
-     *  flair#2561: only the `supplied` fields, the text fields the request
-     *  supplied; the successor row also holds the fields it carries over
-     *  from its predecessor, and those are not reported. */
+     *  flair#2561: only the `supplied` fields, the string-valued text fields
+     *  the request supplied; the successor row also holds the fields it
+     *  carries over from its predecessor, and those are not reported. */
     staged?: { supplied: readonly MemoryTextField[]; text: StoredMemoryText | null };
   },
 ): Promise<any> {
@@ -1295,7 +1296,10 @@ async function reembedStoredRow(
       continue;
     }
     noteWriteStamp(outcome.model);
-    return Response.json({ id, embeddingModel: outcome.model, updatedAt: outcome.updatedAt });
+    // flair#2561: the response names the row and its new updatedAt, and
+    // carries no embedding field; `flair reembed` reads the model stamp from
+    // the stored row.
+    return Response.json({ id, updatedAt: outcome.updatedAt });
   }
   return new Response(
     JSON.stringify({ error: "reembed_row_changed", message: "the stored text changed during each re-embed attempt; retry" }),
@@ -1548,8 +1552,9 @@ export class Memory extends (databases as any).flair.Memory {
     // flair#2407: redact credential-shaped text before the dedup gate, its
     // embedding input and the stored embedding are computed from `content`.
     const redactedValues = redactMemoryWrite(content).count;
-    // flair#2561: the text fields this request supplies, read before a skill
-    // predecessor is merged into the body; `stored` reports only these.
+    // flair#2561: the string-valued text fields this request supplies, read
+    // before a skill predecessor is merged into the body; `stored` reports
+    // only these.
     const suppliedText = suppliedMemoryTextFields(content);
     canonicalizeSupersedes(content);
     const preparedSkill = await prepareSkillBody(content, postStored);
@@ -1886,7 +1891,8 @@ export class Memory extends (databases as any).flair.Memory {
     // is merged into the stored row.
     const redaction = redactMemoryWrite(content);
     const redactedValues = redaction.count;
-    // flair#2561: the text fields this request supplies; `stored` reports only these.
+    // flair#2561: the string-valued text fields this request supplies;
+    // `stored` reports only these.
     const suppliedText = suppliedMemoryTextFields(content);
     // flair#1960 r2: capture the (undeclared) authorship-claim inputs BEFORE the
     // undeclared-attribute strip removes them, so a semantic PATCH re-stamps
@@ -2188,7 +2194,9 @@ export class Memory extends (databases as any).flair.Memory {
       if (reindexed instanceof Response) return reindexed;
       noteMemoryUpsert(content);
       noteWriteStamp(content?.embeddingModel as string | null | undefined); // embedding-space-guard slice 1 (see post())
-      return reindexed;
+      // flair#2561: the response carries no embedding field, whatever the
+      // storage layer's result holds.
+      return withoutEmbeddingFields(reindexed);
     }
 
     const authorityDenial = await guardAuthorityFields(() => super.get(), content, "Memory");
@@ -2224,8 +2232,9 @@ export class Memory extends (databases as any).flair.Memory {
     const redactedValues = isOperatorSeedPut(ctx, auth, writeTargetIds(this, content))
       ? 0
       : redactMemoryWrite(content).count;
-    // flair#2561: the text fields this request supplies, read before the stored
-    // row or a skill predecessor is merged into the body; `stored` reports only these.
+    // flair#2561: the string-valued text fields this request supplies, read
+    // before the stored row or a skill predecessor is merged into the body;
+    // `stored` reports only these.
     const suppliedText = suppliedMemoryTextFields(content);
 
     const resolvedExisting = await resolveStoredRow(this, "Memory", content, () => super.get());

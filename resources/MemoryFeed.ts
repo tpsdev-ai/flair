@@ -42,9 +42,10 @@ export class FeedMemories extends Resource {
       return UNAUTH();
     }
 
-    // flair#2561: the fields this request supplies, read from the body as sent,
-    // before anything is merged into it; the response reports only these and
-    // the fields the server decides for the row (feedWriteResponse).
+    // flair#2561: the non-null-valued fields this request supplies, read from
+    // the body as sent, before anything is merged into it; the response
+    // reports only these and the fields the server decides for the row
+    // (feedWriteResponse).
     const supplied = suppliedMemoryFields(content);
 
     const seedDenial = reservedSeedFeedWriteDenial("Memory", [...writeTargetIds(this, content), content?.supersedes]);
@@ -599,10 +600,10 @@ function isDedupMatch(row: any, match: any): boolean {
 /**
  * The response to a feed write: a response-only copy of the row the feed
  * stored or matched; the stored row is not modified. flair#2561: the copy
- * holds the fields the request supplied, each as stored, and the fields the
- * server decides for the row (feedResponseFields), and never an embedding
- * field. flair#2407: it carries the redaction count when that count is above
- * zero. A Response or a non-object result is returned unchanged.
+ * holds the non-null-valued fields the request supplied, each as stored, and
+ * the fields the server decides for the row (feedResponseFields), and never an
+ * embedding field. flair#2407: it carries the redaction count when that count
+ * is above zero. A Response or a non-object result is returned unchanged.
  */
 function feedWriteResponse(result: any, redactedValues: number, supplied: ReadonlySet<string>): any {
   if (result instanceof Response || !result || typeof result !== "object") return result;

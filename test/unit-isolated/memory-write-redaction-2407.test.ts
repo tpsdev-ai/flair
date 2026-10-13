@@ -464,7 +464,7 @@ describe("flair#2407 — a deduplicated feed write reports the count in its resp
   });
 });
 
-describe("flair#2561 — `stored` and the feed response report only the text fields the request supplied", () => {
+describe("flair#2561 — `stored` reports only the string-valued text fields the request supplied, and the feed response only its non-null-valued fields", () => {
   it("suppliedMemoryTextFields names the text fields that hold a string in the request body", () => {
     expect(suppliedMemoryTextFields({ content: "c", summary: null, trigger: 42, tags: ["skill"] })).toEqual(["content"]);
     expect(suppliedMemoryTextFields({ summary: "s", trigger: "" })).toEqual(["summary", "trigger"]);
@@ -481,7 +481,7 @@ describe("flair#2561 — `stored` and the feed response report only the text fie
     expect(storedMemoryText(row, [])).toEqual({});
   });
 
-  it("suppliedMemoryFields names the request body's keys that hold a value", () => {
+  it("suppliedMemoryFields names the request body's keys that hold a non-null value", () => {
     expect([...suppliedMemoryFields({ content: "c", summary: null, trigger: undefined, tags: ["skill"], metadata: "" })]).toEqual(["content", "tags", "metadata"]);
     expect([...suppliedMemoryFields(null)]).toEqual([]);
     expect([...suppliedMemoryFields(["content"])]).toEqual([]);
@@ -519,6 +519,23 @@ describe("flair#2561 — `stored` and the feed response report only the text fie
       expect("embedding" in res || "embeddingModel" in res).toBe(false);
     }
     expect(redacted.redactedValues).toBe(1);
+  });
+
+  it("an internal `_reindex` re-PUT carries no embedding field when the storage result holds the row", async () => {
+    const row = {
+      id: "mem-2561-reindex", agentId: AGENT, content: "a note to reindex", embedding: FAKE_EMBEDDING, embeddingModel: "mock-embedding-model",
+      instanceToken: "token-2561", contentHash: "hash-2561", visibility: "shared", archived: false, createdAt: new Date().toISOString(),
+    };
+    memoryStore.set(row.id, { ...row });
+    const m: any = new (Memory as any)();
+    m.getContext = () => ({ request: {}, __flairInternal: true });
+    m._targetId = row.id;
+    const res: any = await m.put({ ...row, _reindex: true });
+    expect(res && typeof res === "object" && !(res instanceof Response)).toBe(true);
+    expect(res.id).toBe(row.id);
+    expect("embedding" in res || "embeddingModel" in res).toBe(false);
+    expect(memoryStore.get(row.id).embedding).toEqual(FAKE_EMBEDDING);
+    expect(memoryStore.get(row.id).embeddingModel).toBe("mock-embedding-model");
   });
 
   it("Memory.patch of one field over a row holding all three reports only that field", async () => {

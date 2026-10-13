@@ -1,8 +1,9 @@
 /**
- * write-stored-supplied-fields-2561.test.ts — a Memory write's `stored` and the
- * POST /FeedMemories response report only the text fields (`content`,
- * `summary`, `trigger`) the write's own request supplied, as stored
- * (flair#2561).
+ * write-stored-supplied-fields-2561.test.ts — a Memory write's `stored` reports
+ * only the string-valued text fields (`content`, `summary`, `trigger`) the
+ * write's own request supplied, as stored, and the POST /FeedMemories response
+ * only the non-null-valued fields its request supplied plus the fields the
+ * server decides for the row (flair#2561).
  *
  * Runs against a REAL Harper (test/helpers/harper-lifecycle.ts). A skill
  * successor row carries over the text fields its request omits from the row it
@@ -11,10 +12,9 @@
  * through PUT /Memory/<id>, POST /Memory and POST /FeedMemories by an agent
  * other than the skill's author that may write the author's memories (seeded
  * below), and that a write supplying every text field gets all three back,
- * redacted, and a PATCH gets back only the field it sent. The POST
- * /FeedMemories response reports only the fields the request supplied plus the
- * fields the server decides for the row, and no write response carries an
- * embedding field.
+ * redacted, and a PATCH gets back only the field it sent. No Memory or feed
+ * write response carries an embedding field: the re-embed PATCH answers
+ * `{ id, updatedAt }`, and the admin `_reindex` re-PUT answers without one.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
@@ -42,6 +42,7 @@ function ed25519Header(agent: TestAgent, method: string, path: string): string {
 let harper: HarperInstance;
 const author = mkAgent("s2561-author");
 const writer = mkAgent("s2561-writer");
+const admin = mkAgent("s2561-admin");
 const AUTHOR_CONTENT = "s2561 author skill procedure body";
 const AUTHOR_SUMMARY = "s2561 author skill summary";
 const AUTHOR_TRIGGER = "s2561 author skill trigger";
@@ -139,6 +140,11 @@ beforeAll(async () => {
     records: [author, writer].map((a) => ({ id: a.id, name: a.id, role: "agent", publicKey: a.publicKey, createdAt: new Date().toISOString() })),
   });
   expect(seed.status).toBe(200);
+  const adminSeed = await adminOp({
+    operation: "insert", database: "flair", table: "Agent",
+    records: [{ id: admin.id, name: admin.id, role: "admin", publicKey: admin.publicKey, createdAt: new Date().toISOString() }],
+  });
+  expect(adminSeed.status).toBe(200);
   const permission = await adminOp({
     operation: "insert", database: "flair", table: "MemoryGrant",
     records: [{ id: `${author.id}:${writer.id}:write`, ownerId: author.id, granteeId: writer.id, scope: "write", createdAt: new Date().toISOString() }],
@@ -151,11 +157,13 @@ afterAll(async () => {
 });
 
 describe("flair#2561 — a skill successor that omits content and trigger gets neither back", () => {
-  it("precondition: a GET of the skill by the second agent returns none of its text", async () => {
+  it("precondition: a GET of the skill by the second agent is refused with 404 and returns none of its text", async () => {
     const id = `s2561-pre-${randomUUID()}`;
     await makeAuthorSkill(id);
     const res = await send(writer, "GET", `/Memory/${id}`);
-    expectNoAuthorText(await res.text());
+    const text = await res.text();
+    expect(res.status, text.slice(0, 300)).toBe(404);
+    expectNoAuthorText(text);
   }, 60_000);
 
   it("PUT /Memory/<id>: `stored` is the redacted summary the request supplied, and nothing else", async () => {
@@ -308,7 +316,7 @@ describe("flair#2561 — a write that supplies one text field gets back only tha
   }, 60_000);
 });
 
-describe("flair#2561 — the feed response reports only the fields the request supplied; embedding fields are never returned", () => {
+describe("flair#2561 — the feed response reports only the non-null-valued fields the request supplied, and no write response carries an embedding field", () => {
   it("a feed skill successor that omits the descriptive fields gets none of them, and no embedding", async () => {
     const id = `s2561-feed-desc-${randomUUID()}`;
     await makeAuthorSkill(id);
@@ -362,5 +370,41 @@ describe("flair#2561 — the feed response reports only the fields the request s
     await call("feed successor", writer, "POST", "/FeedMemories", { agentId: writer.id, supersedes: owned, tags: ["skill"], durability: "persistent", summary: "s" });
     expect(seen.length).toBe(10);
     for (const [label, body] of seen) expectNoEmbedding(label, body);
+  }, 60_000);
+});
+
+describe("flair#2561 — the re-embed PATCH and the admin `_reindex` re-PUT answer with no embedding field", () => {
+  it("a re-embed PATCH answers { id, updatedAt }; the stored row holds the new embedding and its model", async () => {
+    const id = `s2561-reembed-${randomUUID()}`;
+    const post = await send(author, "POST", "/Memory", { id, agentId: author.id, content: "a note to re-embed", visibility: "shared" });
+    expect(post.status).toBe(201);
+    const res = await send(author, "PATCH", `/Memory/${id}`, { embedding: null, embeddingModel: null });
+    const text = await res.text();
+    expect(res.status, text.slice(0, 300)).toBe(200);
+    const body = JSON.parse(text);
+    expect(Object.keys(body).sort()).toEqual(["id", "updatedAt"]);
+    expect(body.id).toBe(id);
+    expectNoEmbedding("re-embed PATCH", body);
+    const row = await readStored(id);
+    expect(Array.isArray(row?.embedding)).toBe(true);
+    expect(typeof row?.embeddingModel).toBe("string");
+    expect(row?.updatedAt).toBe(body.updatedAt);
+  }, 60_000);
+
+  it("an admin `_reindex` re-PUT answers with no embedding field; the stored row keeps its embedding", async () => {
+    const id = `s2561-reindex-${randomUUID()}`;
+    const post = await send(author, "POST", "/Memory", { id, agentId: author.id, content: "a note to reindex", visibility: "shared" });
+    expect(post.status).toBe(201);
+    const before = await readStored(id);
+    expect(Array.isArray(before?.embedding)).toBe(true);
+    // The stored row as the MemoryReindex write-back sends it, embedding included.
+    const res = await send(admin, "PUT", `/Memory/${id}`, { ...before, _reindex: true });
+    const text = await res.text();
+    expect(res.status, text.slice(0, 300)).toBeLessThan(300);
+    const body = text ? JSON.parse(text) : {};
+    expectNoEmbedding("_reindex re-PUT", body);
+    const after = await readStored(id);
+    expect(after?.embedding).toEqual(before?.embedding);
+    expect(after?.embeddingModel).toBe(before?.embeddingModel);
   }, 60_000);
 });

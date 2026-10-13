@@ -16,10 +16,10 @@
  * put call it before the dedup gate and the stored embedding are computed.
  * When the count is above zero, a Memory post/put/patch response also carries
  * `stored`: the stored (post-redaction) values of the REDACTED_MEMORY_FIELDS
- * that write's request supplied (suppliedMemoryTextFields, storedMemoryText).
- * The feed ingest's response holds, of the row it stored or matched, only the
- * fields its request supplied and the fields the server decides for that row
- * (resources/memory-write-response.ts).
+ * that write's request supplied as strings (suppliedMemoryTextFields,
+ * storedMemoryText). The feed ingest's response holds, of the row it stored or
+ * matched, only the non-null-valued fields its request supplied and the fields
+ * the server decides for that row (resources/memory-write-response.ts).
  * put() skips the call for the shipped-skill seed write (isOperatorSeedPut): a
  * PUT of the reserved seed skill id by a verified Basic administrator
  * (src/lib/skill-seed.ts). The seed compares the stored text to its source
@@ -50,10 +50,12 @@ export type MemoryTextField = (typeof REDACTED_MEMORY_FIELDS)[number];
 export type StoredMemoryText = Partial<Record<MemoryTextField, string>>;
 
 /**
- * flair#2561: the REDACTED_MEMORY_FIELDS a write request supplies, each one
- * that holds a string in the request body. A write reads them from the body as
- * the request sent it, before a stored row or a skill predecessor is merged into
- * that body, so the list names only the text fields the request itself carried.
+ * flair#2561: the string-valued text fields a write request supplies: each of
+ * the REDACTED_MEMORY_FIELDS that holds a string in the request body. A field
+ * the body sends as null or as a non-string is not in the list. A write reads
+ * them from the body as the request sent it, before a stored row or a skill
+ * predecessor is merged into that body, so the list names only text fields the
+ * request itself carried.
  */
 export function suppliedMemoryTextFields(body: unknown): MemoryTextField[] {
   if (!body || typeof body !== "object" || Array.isArray(body)) return [];
@@ -63,10 +65,10 @@ export function suppliedMemoryTextFields(body: unknown): MemoryTextField[] {
 /**
  * flair#2467, flair#2561: the values on `row` of the `supplied` text fields,
  * copied; a supplied field that holds no string on `row` is left out. A write
- * calls it on the row it stages, after redaction, with the fields its own
- * request supplied (suppliedMemoryTextFields), so the copy holds the stored
- * (post-redaction) value of each text field that request supplied, changed or
- * not, and no other text field of the row: a field the row holds from a merged
+ * calls it on the row it stages, after redaction, with the string-valued text
+ * fields its own request supplied (suppliedMemoryTextFields), so the copy holds
+ * the stored (post-redaction) value of each of those fields, changed or not,
+ * and no other text field of the row: a field the row holds from a merged
  * stored row or a skill predecessor is not in it. When the write replaced any
  * value, its response carries the copy as `stored` next to `redactedValues`;
  * the writer never has to read the row back, so a later write cannot change
