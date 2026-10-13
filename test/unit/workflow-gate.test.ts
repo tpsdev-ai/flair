@@ -1,10 +1,11 @@
 // The workflow coverage-gate checker's own fixtures (flair#2480).
 //
 // `checkCoverageGate` refuses a gate that would not actually execute and fail
-// the required check: a step, job or workflow shell override; a gate outside
-// the job the `Unit Tests` adapter reaches through `needs`; and an `if:` or
-// `continue-on-error` on the step or its job. Each fixture below is one such
-// refusal (one workflow file per refusal); `accepted.yml` is none.
+// the required check: a step, job or workflow shell override on the gate or on
+// the `Unit Tests` adapter; a gate outside the job the adapter reaches through
+// `needs`; and an `if:` or `continue-on-error` on the step or its job. Each
+// fixture below is one such refusal (one workflow file per refusal);
+// `accepted.yml` is none.
 
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -32,6 +33,8 @@ describe("workflow coverage-gate checker — fixtures", () => {
     ["refused-shell-step.yml", `"${GATE.step}" has shell; it must run under the default shell`],
     ["refused-shell-job.yml", `the job "test-unit" holding "${GATE.step}" sets defaults.run.shell; it must run under the default shell`],
     ["refused-shell-workflow.yml", "the workflow sets defaults.run.shell; the gate must run under the default shell"],
+    ["refused-adapter-shell-step.yml", `the required "Unit Tests" job "test-unit-gate" has a step with shell; it must run under the default shell`],
+    ["refused-adapter-shell-job.yml", `the required "Unit Tests" job "test-unit-gate" sets defaults.run.shell; it must run under the default shell`],
     ["refused-unchecked-job.yml", `"${GATE.step}" runs in no job the required "Unit Tests" check depends on in the same workflow`],
     ["refused-skip-if.yml", `"${GATE.step}" has if; it must be absent`],
     ["refused-continue-on-error.yml", `"${GATE.step}" has continue-on-error; it must be absent`],
