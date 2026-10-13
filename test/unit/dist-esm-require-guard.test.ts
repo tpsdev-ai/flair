@@ -191,10 +191,16 @@ describe("check-dist-esm-require — corpus safety (a check that scans nothing m
 describe("check-dist-esm-require — CI wiring", () => {
   const job = jobBlock("dist-esm-guard");
 
-  test("a blocking job builds dist and runs the checker", () => {
+  test("a blocking job runs the checker against a built dist", () => {
     expect(job).toContain("scripts/check-dist-esm-require.mjs");
-    expect(job).toMatch(/bun run build\b/);
-    expect(job).toMatch(/bun run build:cli\b/);
+    // flair#2540 — the dist is built once per run by the `build` job and shared
+    // as an artifact, so the scanner still runs on real emitted output (not a
+    // stub) without rebuilding it in every dist consumer.
+    expect(job).toContain("name: flair-dist");
+    const builder = jobBlock("build");
+    expect(builder).toMatch(/bun run build\b/);
+    expect(builder).toMatch(/bun run build:cli\b/);
+    expect(builder).toContain("name: flair-dist");
   });
 
   test("the lane is not softened", () => {

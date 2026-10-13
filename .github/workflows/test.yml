@@ -39,6 +39,134 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # flair#2540 — classify a pull request's changed paths so a docs-only push
+  # can skip the heavy test lanes. Fail safe: a non-PR event, an empty diff, a
+  # rename/delete that reaches outside the allow-list, or any error in this job
+  # all mean "run everything". The result gates the lanes through a job-level
+  # `if:` (a skipped job still reports a check, so a required check never sits
+  # Pending — a whole-workflow `paths` filter would leave it pending forever).
+  changes:
+    name: "Changed-paths classifier"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      docs_only: ${{ steps.classify.outputs.docs_only }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          fetch-depth: 0
+      - name: Classify changed paths
+        id: classify
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          # Written exactly once, at the end — a partial write here could
+          # otherwise leave the lanes skipped on a failure (fail open).
+          docs_only=false
+          report() {
+            echo "docs_only=${docs_only}"
+            echo "docs_only=${docs_only}" >> "$GITHUB_OUTPUT"
+          }
+          if [ "${EVENT_NAME:-}" != "pull_request" ]; then
+            echo "event '${EVENT_NAME:-?}' is not a pull request — running every lane"
+            report
+            exit 0
+          fi
+          if [ -z "${BASE_REF:-}" ]; then
+            echo "no base ref — running every lane"
+            report
+            exit 0
+          fi
+          if ! git fetch --no-tags origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"; then
+            echo "could not fetch origin/${BASE_REF} — running every lane"
+            report
+            exit 0
+          fi
+          if ! changed="$(git diff --name-status "origin/${BASE_REF}...HEAD")"; then
+            echo "could not diff against origin/${BASE_REF} — running every lane"
+            report
+            exit 0
+          fi
+          printf 'Changed paths vs origin/%s:\n%s\n' "$BASE_REF" "$changed"
+          if [ -z "$changed" ]; then
+            echo "empty diff — running every lane"
+            report
+            exit 0
+          fi
+          docs_only=true
+          while IFS=$'\t' read -r status path_a path_b; do
+            [ -n "${status:-}" ] || continue
+            # A rename (R*) or delete (D) is docs-only only when every path it
+            # names is in the allow-list; any other status carries one path.
+            for p in "${path_a:-}" "${path_b:-}"; do
+              [ -n "$p" ] || continue
+              case "$p" in
+                docs/*|.changelog/*|*.md) ;;
+                *) docs_only=false ;;
+              esac
+            done
+          done <<< "$changed"
+          report
+
+  # flair#2540 — build once per run and share `dist/` (plus the workspace
+  # packages' built output) with the test lanes that need it. Gated like the
+  # other lanes: a docs-only push skips it, and it runs on every push to main,
+  # on workflow_dispatch and on release events.
+  build:
+    name: "Build (shared dist)"
+    needs: changes
+    if: ${{ always() && needs.changes.outputs.docs_only != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
+        with:
+          bun-version: "1.3.10"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+      - uses: socketdev/action@ba6de6cc0565af1f42295590380973573297e31f # v1.3.2
+        with:
+          mode: firewall-free
+      - name: Cache bun install
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.bun/install/cache
+          key: bun-cache-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            bun-cache-${{ runner.os }}-
+      - name: Cache node_modules
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            node_modules
+            packages/*/node_modules
+          key: node-modules-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            node-modules-${{ runner.os }}-
+      - run: sfw bun install --frozen-lockfile
+      - name: Build dist (resources + CLI)
+        run: bun run build && bun run build:cli
+      - name: Build workspace packages
+        run: |
+          for pkg in flair-client flair-tool-descriptors flair-mcp langgraph-flair n8n-nodes-flair openclaw-flair pi-flair flair-bench; do
+            echo "::group::build $pkg"
+            (cd "packages/$pkg" && bun run build)
+            echo "::endgroup::"
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: flair-dist
+          path: |
+            dist/
+            packages/*/dist/
+          if-no-files-found: error
+          retention-days: 7
+
   test-unit:
     # Matrixed name (#672): GitHub Actions always suffixes a
     # matrixed job's display name/check context with the matrix values (e.g.
@@ -69,7 +197,14 @@ jobs:
         # 24 = Active LTS (EOL 2028-04), 26 = Current (released 2026-05, becomes
         # Active LTS 2026-10). Node 25 was Current-only and reached EOL 2026-06-01
         # when 26 superseded it — deliberately excluded, it's already dead upstream.
-        node-version: ["22", "24", "26"]
+        #
+        # flair#2540 — a PR push exercises the primary Node (22) only; the full
+        # 22/24/26 matrix runs on a push to main, on workflow_dispatch and on
+        # release events. A Node-major regression is then caught on main before
+        # any release, rather than paying three lanes on every PR round. The
+        # required "Unit Tests" context is the aggregate gate below, so the
+        # per-leg names can change without touching branch protection.
+        node-version: ${{ github.event_name == 'pull_request' && fromJSON('["22"]') || fromJSON('["22", "24", "26"]') }}
         # flair#2311: the shared unit lane is split into shards by scripts/ci/
         # lane-shards.mjs (LANE_SHARDS); each leg below runs one shard, so a
         # leg runs part of the lane instead of all of it. lane-shards.test.ts
@@ -385,11 +520,11 @@ jobs:
 
   launchd-adopt-upgrade-darwin:
     name: "launchd adopt-then-upgrade (macOS, advisory)"
-    needs: [launchd-lane-changes]
+    needs: [changes, launchd-lane-changes]
     # Runs unconditionally on push to main and workflow_dispatch; on pull
     # requests it runs only when the changed-files gate says the lane's
     # surface moved (or the PR is a release/v* cut).
-    if: ${{ always() && (github.event_name != 'pull_request' || needs.launchd-lane-changes.outputs.run == 'true') }}
+    if: ${{ always() && needs.changes.outputs.docs_only != 'true' && (github.event_name != 'pull_request' || needs.launchd-lane-changes.outputs.run == 'true') }}
     runs-on: macos-latest
     timeout-minutes: 45
     steps:
@@ -902,6 +1037,10 @@ jobs:
     #   skips visibly regardless of runner class. All other quickstart cases run.
     name: adk-flair Python tests
     runs-on: ubuntu-latest
+    needs: changes
+    # flair#2540 — docs-only skip; the hermetic unit gate and the live boot
+    # both need code that a docs-only push cannot change.
+    if: ${{ always() && needs.changes.outputs.docs_only != 'true' }}
     # Generous headroom: the unit gate is ~1 min, but the live step below builds
     # the repo + fetches the embedding model + attempts an ephemeral Harper boot
     # whose warm-up carries a 120s floor-detection deadline before it skips.
@@ -987,33 +1126,27 @@ jobs:
     name: "Install-from-tarball smoke (node ${{ matrix.node-version }})"
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    needs: [changes, build]
+    # flair#2540 — docs-only skip, and the dist it installs is the shared
+    # artifact from the `build` job.
+    if: ${{ always() && needs.changes.outputs.docs_only != 'true' }}
     strategy:
       fail-fast: false
       matrix:
         node-version: ["22", "24", "26"]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
-      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
-        with:
-          bun-version: "1.3.10"
       # Node 22+ is required by flair's engines; ubuntu-latest ships Node 20.
       # The CLI spawns Harper via process.execPath, so we need real node (not
       # bun) on PATH for that to resolve correctly.
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: ${{ matrix.node-version }}
-      - uses: socketdev/action@ba6de6cc0565af1f42295590380973573297e31f # v1.3.2
+      # flair#2540 — the dist is built once by the `build` job and downloaded,
+      # instead of rebuilt in all three legs. Nothing here runs Bun.
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          mode: firewall-free
-      - name: Cache bun install
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: ~/.bun/install/cache
-          key: bun-cache-${{ runner.os }}-${{ hashFiles('bun.lock') }}
-          restore-keys: |
-            bun-cache-${{ runner.os }}-
-      - run: sfw bun install --frozen-lockfile
-      - run: bun run build && bun run build:cli
+          name: flair-dist
       - name: Verify dist/ modules import cleanly (dev surface)
         run: node scripts/check-imports.mjs dist
       - name: Pack
@@ -1281,9 +1414,9 @@ jobs:
     # what lets a defect persist) can only turn a matrixed check red; they
     # cannot block a merge.
     name: Install-from-tarball smoke
-    needs: pack-smoke
+    needs: [changes, pack-smoke]
     runs-on: ubuntu-latest
-    if: always()
+    if: ${{ always() && needs.changes.outputs.docs_only != 'true' }}
     steps:
       - name: Require all Node-version legs to pass
         run: |
@@ -1310,6 +1443,9 @@ jobs:
     name: MCP client wiring
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    needs: changes
+    # flair#2540 — a docs-only push cannot change CLI wiring.
+    if: ${{ always() && needs.changes.outputs.docs_only != 'true' }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
@@ -1388,6 +1524,9 @@ jobs:
     name: Install-weight budget
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    needs: changes
+    # flair#2540 — a docs-only push cannot change the installed tree.
+    if: ${{ always() && needs.changes.outputs.docs_only != 'true' }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
@@ -1467,6 +1606,9 @@ jobs:
     name: Upgrade from npm-stable
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    needs: changes
+    # flair#2540 — a docs-only push cannot change the upgrade path.
+    if: ${{ always() && needs.changes.outputs.docs_only != 'true' }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
@@ -1719,6 +1861,11 @@ jobs:
     # follow-up — flagging for reviewer call rather than silently deciding.
     name: "Type Check (node ${{ matrix.node-version }})"
     runs-on: ubuntu-latest
+    needs: changes
+    # flair#2540 — a docs-only push cannot change the type surface, so the
+    # matrix is skipped. The required "Type Check" context still reports
+    # (as skipped), so it never sits pending.
+    if: ${{ always() && needs.changes.outputs.docs_only != 'true' }}
     strategy:
       fail-fast: false
       matrix:
@@ -1753,9 +1900,9 @@ jobs:
   # Required-status-check adapter — see test-unit-gate's comment above.
   typecheck-gate:
     name: Type Check
-    needs: typecheck
+    needs: [changes, typecheck]
     runs-on: ubuntu-latest
-    if: always()
+    if: ${{ always() && needs.changes.outputs.docs_only != 'true' }}
     steps:
       - name: Require all Node-version legs to pass
         run: |
@@ -1768,6 +1915,9 @@ jobs:
   typecheck-strict:
     name: "Type Check (strict)"
     runs-on: ubuntu-latest
+    needs: changes
+    # flair#2540 — docs-only skip (see the typecheck job).
+    if: ${{ always() && needs.changes.outputs.docs_only != 'true' }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
@@ -2138,28 +2288,19 @@ jobs:
     name: "Dist ESM: require() + top-level await guard"
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    needs: [changes, build]
+    # flair#2540 — docs-only skip; scans the shared dist artifact.
+    if: ${{ always() && needs.changes.outputs.docs_only != 'true' }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
-      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
-        with:
-          bun-version: "1.3.10"
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
-      - uses: socketdev/action@ba6de6cc0565af1f42295590380973573297e31f # v1.3.2
+      # flair#2540 — scan the dist/ the `build` job built once for this run,
+      # rather than rebuilding it here. The scan is pure Node — this job needs
+      # no workspace dependencies.
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          mode: firewall-free
-      - name: Cache bun install
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: ~/.bun/install/cache
-          key: bun-cache-${{ runner.os }}-${{ hashFiles('bun.lock') }}
-          restore-keys: |
-            bun-cache-${{ runner.os }}-
-      - run: sfw bun install --frozen-lockfile
-      # Build the exact output that ships: dist/resources/** via `build`, and
-      # dist/cli.js + dist/commands/** via `build:cli`.
-      - name: Build dist
-        run: bun run build && bun run build:cli
+          name: flair-dist
       - name: Fail if any emitted ESM module uses require() with top-level await
         run: node scripts/check-dist-esm-require.mjs dist
