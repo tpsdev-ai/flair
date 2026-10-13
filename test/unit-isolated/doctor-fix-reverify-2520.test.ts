@@ -9,9 +9,10 @@
  * CLI's install tree, both BEFORE the Agent roster and home reads. A credential
  * and target resolved before such a step prove nothing about the process
  * serving the probed port after it. Doctor therefore resolves the credential
- * and verifies the target again after such a fix, and the roster and home
- * reads use only that answer: they read from the newly verified ops port with
- * the newly resolved credential, or report NOT RUN with the new refusal.
+ * again after such a fix and, when one is available, verifies the target with
+ * it; the roster and home checks use only that answer. Diagnostic reads that
+ * run use the verified target; pairing refusals report NOT RUN, and existing
+ * UNVERIFIED/skipped outcomes remain.
  *
  * This drives the REAL `flair doctor --fix` action in-process through the
  * `bindCli` seam (as doctor-mcp-redirect-agent-2270 does). The launchd repair

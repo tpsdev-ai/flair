@@ -1007,19 +1007,19 @@ program
     // flair#2520: the audit-log, instance-identity, Agent-roster and Agent-homes
     // reads go through an ops endpoint, which must belong to the instance doctor
     // probed. Resolve the admin credential and verify that target with it here,
-    // using the pair check flair#2483 applies. Each section then reads from the
-    // verified target, or reports NOT RUN with the shared pair-refused reason
-    // and remedy when the check refuses; with no usable admin credential there
-    // is no target (`read` null), and each section keeps its own UNVERIFIED or
-    // skipped no-credential state, which reads no ops endpoint. `effectivePort`
-    // is final: PID discovery (step 1) and any --fix re-record have already run.
-    // This answer describes the credential and the process serving the probed
-    // port at this point, so it is shared only until a --fix step may change
-    // either: the launchd repair (7b, which can also write the admin-pass file
-    // from HDB_ADMIN_PASSWORD) and the install-tree restart (7c), both below.
-    // Those steps set `servingProcessMayHaveChanged`, and the Agent-roster and
-    // Agent-homes checks then resolve the credential and verify the target
-    // again, and use only that answer (8b).
+    // using the pair check flair#2483 applies. Diagnostic reads that run use
+    // the verified target; pairing refusals report NOT RUN with the shared
+    // reason and remedy, and existing UNVERIFIED/skipped outcomes remain. With
+    // no usable admin credential there is no target (`read` null) and no ops
+    // endpoint is read. `effectivePort` is final: PID discovery (step 1) and any
+    // --fix re-record have already run. This answer describes the credential
+    // and the process serving the probed port at this point, so it is shared
+    // only until a --fix step may change either: the launchd repair (7b, which
+    // can also write the admin-pass file from HDB_ADMIN_PASSWORD) and the
+    // install-tree restart (7c), both below. Those steps set
+    // `servingProcessMayHaveChanged`, and the Agent-roster and Agent-homes
+    // checks then resolve the credential again and, when one is available,
+    // verify the target with it, and use only that answer (8b).
     async function resolveProbedTarget(): Promise<DoctorProbedTarget> {
       let adminPass: string | undefined;
       let credIssue: string | null = null;
@@ -1845,8 +1845,8 @@ program
       // no-op may come after the repair wrote the 0600 admin-pass file from
       // HDB_ADMIN_PASSWORD (flair#1685; a later refusal leaves the file in
       // place). So the credential and target resolved before the repair no
-      // longer hold, and the Agent-roster and Agent-homes checks resolve both
-      // again.
+      // longer hold: the Agent-roster and Agent-homes checks resolve the
+      // credential again and, when one is available, verify the target again.
       if (repairResult.kind !== "no-op") servingProcessMayHaveChanged = true;
       switch (repairResult.kind) {
         case "no-op":
@@ -1933,8 +1933,8 @@ program
             }) as TreeAssessment,
           repoint: (dry) => cli.repointMainServiceUnit(defaultDataDir(), effectivePort, { dryRun: dry }),
           // flair#2520: set before the restart runs, so a restart that fails
-          // part-way still makes the later checks resolve the credential and
-          // verify the target again.
+          // part-way still makes the later checks resolve the credential again
+          // and, when one is available, verify the target again.
           restart: () => {
             servingProcessMayHaveChanged = true;
             return cli.restartFlair(effectivePort, defaultDataDir());
