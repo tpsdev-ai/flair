@@ -25,15 +25,15 @@
  *   (d) a PATCH that SUPPLIES a vector stores that vector, unchanged;
  *   (e) a `trigger`-only PATCH of an ordinary row — plain, or carrying a vector
  *       that redaction removes — keeps the stored vector and its stamps;
- *   (f) an edit of `content` (a PUT) that commits while a `trigger`-only PATCH
- *       of the same row is held before its write ends with the vector of the
+ *   (f) an edit of `content` (a PUT) and a `trigger`-only PATCH of the same
+ *       row serialize on the write lock; the row ends with the vector of the
  *       EDITED text, never one for the earlier content;
- *   (g) the same overlap with a `content` PATCH ends with the row's text and
+ *   (g) the same pairing with a `content` PATCH ends with the row's text and
  *       vector both from that PATCH;
  *   (i) a PATCH carrying the unchanged `content`, a credential in `trigger` and
  *       a supplied vector (which redaction removes) keeps the stored vector,
  *       `embeddingModel` and `updatedAt`;
- *   (k) the overlap of (f) with a PATCH whose `content` equals the text it read
+ *   (k) the pairing of (f) with a PATCH whose `content` is the pre-edit text
  *       (plain, and as in (i)) ends with that text and its vector, never the
  *       edit's vector next to the PATCH's text.
  * On a second Harper whose embedding backend fails (its model file is absent,
@@ -47,14 +47,16 @@
  *
  * (f), (g) and (k) use the test-only pauses (resources/txn-pause-point.ts,
  * enabled by FLAIR_ENABLE_TEST_FAULT_INJECTION and FLAIR_TEST_PAUSE_DIR, set in
- * this process's environment while this file starts its Harper, then restored):
- * `memory-put` holds the editing PUT (sent as the administrator) after its first
- * read and its embed and before its write, so its transaction opens FIRST;
- * `memory-patch` holds the PATCH after its stored-row read (which sees the
- * pre-edit text) and any embed, before the conditional committed-row read and
- * the write. The PUT is released and commits, then the PATCH. The PATCH's
- * transaction opened after the PUT's, so Harper orders its write after the
- * edit — the ordering flair#2465's deterministic case relies on.
+ * this process's environment while this file starts its Harper, then restored).
+ * Both writers (the PUT and the PATCH) are owner verbs on the same id, so the
+ * per-id memory write lock (flair#2478 slice 1) serializes them — the old
+ * overlap is impossible by design. `memory-put` holds the PUT (holding the lock)
+ * after its first read and its embed and before its write; `memory-patch` holds
+ * the PATCH (holding the lock) after its stored-row read and any embed, before
+ * the conditional committed-row read and the write. The PUT is released inside
+ * the PATCH's lock budget, so the PATCH waits and then commits on the PUT's
+ * committed row — the same final ordering the pre-lock cases produced by Harper's
+ * first-read rule, now guaranteed by the lock.
  *
  * Throwaway HOME + data dir, ephemeral ports. Each spawned Harper is this test's
  * own instance; see assertOwnInstance.
@@ -236,27 +238,32 @@ function pauseEnding(point: string): string {
 }
 
 /**
- * Hold a PUT of `edited` (its transaction opens first), start `patchBody`
- * as a PATCH and hold it before its write (its stored-row read sees the pre-edit
- * text), let the PUT commit, then release the PATCH so its write is the newer
- * one. Returns both responses and how each pause ended.
+ * Two same-id owner verbs overlap: the PUT (sent as the administrator) and the
+ * PATCH. The per-id memory write lock serializes them, so this holds the PUT at
+ * its pause point (holding the lock), starts the PATCH, and releases the PUT
+ * inside the PATCH's lock budget: the PATCH waits out the hold and then commits
+ * on the PUT's committed row — no interleaving, no lost write. The PATCH is then
+ * held at its own pause point and released. Returns both responses and how each
+ * pause ended.
  */
 async function overlapEditWithPatch(id: string, edited: string, patchBody: Record<string, unknown>) {
   armPause(PUT_POINT);
   const pendingPut = putEdit(id, edited);
   const putPaused = await waitFor(join(pauseDir, `paused.${PUT_POINT}`), 30_000);
   let pendingPatch: Promise<Response> | undefined;
-  let patchPaused = false;
-  let put: Response | undefined;
-  try {
-    if (putPaused) {
-      armPause(PATCH_POINT);
-      pendingPatch = patch(id, patchBody);
-      patchPaused = await waitFor(join(pauseDir, `paused.${PATCH_POINT}`), 30_000);
-    }
-  } finally {
+  if (putPaused) {
+    armPause(PATCH_POINT);
+    pendingPatch = patch(id, patchBody);
+    // The PUT holds the lock, so the PATCH cannot reach its pause point until the
+    // PUT commits and releases it. Release the PUT inside the PATCH's budget.
+    await Bun.sleep(250);
+    expect(existsSync(join(pauseDir, `paused.${PATCH_POINT}`)), "the PATCH reached its pause while the PUT held the lock").toBe(false);
     releasePause(PUT_POINT);
-    put = await pendingPut;
+  }
+  const put = await pendingPut;
+  let patchPaused = false;
+  if (pendingPatch) {
+    patchPaused = await waitFor(join(pauseDir, `paused.${PATCH_POINT}`), 30_000);
     releasePause(PATCH_POINT);
   }
   const patched = pendingPatch ? await pendingPatch : undefined;
@@ -367,6 +374,9 @@ describe("flair#2466 — ordinary PATCH embedding cases (real Harper)", () => {
     const id = "pre-null-overlap";
     const original = "the text echoed by the PATCH";
     await seedRow(id, original);
+    // Pins the LOCK contract: the PUT holds the lock, so the PATCH waits and
+    // commits on the PUT's committed row; its body `{content: original,
+    // embedding: null}` still stores `original` and clears the vector.
     const overlap = await overlapEditWithPatch(id, "the concurrent edit", { content: original, embedding: null });
     expect(overlap.putPaused).toBe(true);
     expect(overlap.patchPaused).toBe(true);
@@ -404,6 +414,9 @@ describe("flair#2466 — ordinary PATCH embedding cases (real Harper)", () => {
     const EDITED = "the edited text: compiler register allocation by graph colouring";
     await seedRow(id, EARLIER, { embedding: await serverEmbedding(EARLIER), embeddingModel: CURRENT_MODEL_ID });
 
+    // Pins the LOCK contract: the PUT takes the lock, the trigger-only PATCH waits
+    // and commits on the PUT's committed row, so the row keeps the edited text's
+    // vector — never one for the earlier content.
     const run = await overlapEditWithPatch(id, EDITED, { trigger: "when someone asks about the harbour" });
     expect(run.putPaused && run.patchPaused, `pauses reached: put=${run.putPaused} patch=${run.patchPaused}`).toBe(true);
     expect(run.putEnded, "the PUT's pause ended by timeout, not by this test").toBe("go");
@@ -428,6 +441,9 @@ describe("flair#2466 — ordinary PATCH embedding cases (real Harper)", () => {
     const PATCHED = "the patched text: migrating a lighthouse lens to LED";
     await seedRow(id, EARLIER, { embedding: await serverEmbedding(EARLIER), embeddingModel: CURRENT_MODEL_ID });
 
+    // Pins the LOCK contract: the PUT takes the lock, the content PATCH waits and
+    // commits on the PUT's committed row, so the row ends with the PATCH's text
+    // and its vector (recomputed for that text).
     const run = await overlapEditWithPatch(id, EDITED, { content: PATCHED });
     expect(run.putPaused && run.patchPaused, `pauses reached: put=${run.putPaused} patch=${run.patchPaused}`).toBe(true);
     expect(run.putEnded, "the PUT's pause ended by timeout, not by this test").toBe("go");
@@ -459,11 +475,12 @@ describe("flair#2466 — ordinary PATCH embedding cases (real Harper)", () => {
     expect(row.updatedAt, "an unchanged-text PATCH re-stamped updatedAt").toBe("2026-01-01T00:00:00.000Z");
   }, 120_000);
 
-  it("(k) an edit committed while a PATCH carrying the read-time text is held ends with the PATCH's text and its vector", async () => {
-    // The PATCH's content equals the text it read, and differs from the text
-    // the edit commits before the PATCH writes; the row must not end with the
-    // edit's vector next to the PATCH's text. Plain, and with a credential in
-    // trigger and a supplied vector that redaction removes.
+  it("(k) an edit committed while a PATCH carrying the pre-edit text is held ends with the PATCH's text and its vector", async () => {
+    // Both writers are owner verbs, so the lock serializes them: the PUT takes the
+    // lock and the PATCH waits, then commits on the PUT's committed row. The
+    // PATCH's body carries the pre-edit text (READ); the row must end with the
+    // PATCH's text and its vector, never the edit's vector next to it. Plain, and
+    // with a credential in trigger and a supplied vector that redaction removes.
     const bodies: Array<[string, (text: string) => Record<string, unknown>]> = [
       ["pre-case-k-plain", (text) => ({ content: text })],
       ["pre-case-k-redacted", (text) => ({ content: text, trigger: `when ${SLACK_TOKEN} expires`, embedding: SUPPLIED, embeddingModel: "client-model" })],
