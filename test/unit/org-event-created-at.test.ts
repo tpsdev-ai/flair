@@ -1,7 +1,8 @@
 /**
  * org-event-created-at.test.ts — the pure createdAt decision behind every
  * OrgEvent write (resources/org-event-created-at.ts): an OrgEvent's createdAt
- * is assigned by the server on create and cannot be changed.
+ * is assigned by the server on create and cannot be changed, and a record whose
+ * id the check does not read is refused before any write.
  *
  * The resource wiring (which verbs call it, for which callers, and which row
  * they read) is covered in test/unit/coordination-write-auth.test.ts and, over
@@ -11,6 +12,8 @@ import { describe, expect, it } from "bun:test";
 import {
   applyServerCreatedAt,
   CREATED_AT_IMMUTABLE_ERROR,
+  INVALID_EVENT_ID_ERROR,
+  invalidEventId,
   isReadableEventId,
 } from "../../resources/org-event-created-at";
 
@@ -92,14 +95,25 @@ describe("applyServerCreatedAt — update", () => {
 });
 
 describe("isReadableEventId", () => {
-  it("accepts a string id and an array of strings (composite key)", () => {
+  it("accepts a non-empty string id and a non-empty array of strings (composite key)", () => {
     expect(isReadableEventId("e1")).toBe(true);
     expect(isReadableEventId(["x", "y"])).toBe(true);
+    expect(isReadableEventId(["x", ""])).toBe(true);
   });
 
-  it("rejects every other shape", () => {
+  it("declines every other shape, the empty string included", () => {
     for (const id of [undefined, null, "", 42, true, {}, { a: 1 }, [], ["x", 1]]) {
       expect(isReadableEventId(id)).toBe(false);
     }
+  });
+});
+
+describe("invalidEventId", () => {
+  it("is a named 400 that echoes nothing", async () => {
+    const res = invalidEventId();
+    expect(res.status).toBe(400);
+    const body = JSON.parse(await res.text());
+    expect(body.error).toBe(INVALID_EVENT_ID_ERROR);
+    expect(Object.keys(body).sort()).toEqual(["error", "message"]);
   });
 });

@@ -1,9 +1,13 @@
 /**
  * org-event-created-at.ts — an OrgEvent's createdAt is assigned by the server
- * on create and cannot be changed.
+ * on create and cannot be changed through the resource's write verbs.
  *
  * The timestamp is server-owned:
  *
+ *   - the check reads the stored row under each record's id. A record that is
+ *     not an object, or whose id is not a non-empty string or a non-empty
+ *     array of strings, is not read: it is refused with `invalid_event_id`
+ *     (400) before any write;
  *   - on create, createdAt is the server's time, whatever the body says;
  *   - on update, createdAt keeps its stored value. A body that omits it keeps
  *     the stored value; a write that reaches this check with a createdAt that
@@ -13,7 +17,8 @@
  *
  * resources/OrgEvent.ts applies this to every write from a verified agent,
  * admin agents included, on POST, PUT (single record, collection, and each
- * element of an array body) and PATCH. Trusted in-process writers that supply
+ * element of an array body) and PATCH, so a write that names an id the check
+ * does not read is refused on each of them. Trusted in-process writers that supply
  * their own createdAt (the migration ledger, the graph-heal migration) write
  * through the raw `databases.flair.OrgEvent` table, not the resource's verbs,
  * and an `internal` verdict on the resource passes through unchanged.
@@ -27,6 +32,7 @@
 
 export const CREATED_AT_IMMUTABLE_ERROR = "created_at_immutable";
 export const CREATED_AT_CHECK_UNAVAILABLE_ERROR = "created_at_check_unavailable";
+export const INVALID_EVENT_ID_ERROR = "invalid_event_id";
 
 /**
  * How the write applies its content: "replace" stores the content as the whole
@@ -36,12 +42,12 @@ export const CREATED_AT_CHECK_UNAVAILABLE_ERROR = "created_at_check_unavailable"
  */
 export type CreatedAtWriteMode = "replace" | "merge";
 
-/** 409 for a write that would change a stored event's createdAt. Echoes nothing. */
+/** 409 for a write that reaches the check and would change a stored event's createdAt. Echoes nothing. */
 export function createdAtImmutable(): Response {
   return new Response(
     JSON.stringify({
       error: CREATED_AT_IMMUTABLE_ERROR,
-      message: "an OrgEvent's createdAt is assigned by the server on create and cannot be changed",
+      message: "this write would change the stored event's createdAt, which the server assigns on create",
     }),
     { status: 409, headers: { "Content-Type": "application/json" } },
   );
@@ -66,9 +72,25 @@ export function createdAtCheckUnavailable(err: unknown): Response {
 }
 
 /**
- * Whether `id` is a key the stored-row read can address: a string, or an array
- * of strings (a composite key). OrgEvent's schema admits only those; anything
- * else is refused by Harper's own validation when the row is written.
+ * 400 for a record the check does not read: one that is not an object, or whose
+ * id is not a key the check reads (see isReadableEventId). Echoes nothing.
+ */
+export function invalidEventId(): Response {
+  return new Response(
+    JSON.stringify({
+      error: INVALID_EVENT_ID_ERROR,
+      message: "each OrgEvent a write stores must be an object whose id is a non-empty string or a non-empty array of strings",
+    }),
+    { status: 400, headers: { "Content-Type": "application/json" } },
+  );
+}
+
+/**
+ * Whether the check reads the stored row under `id`: a non-empty string, or a
+ * non-empty array of strings (a composite key). The check refuses every other
+ * id with `invalid_event_id` before any write. Harper accepts some of those ids
+ * as keys (the empty string is one), so the refusal is this check's own rule,
+ * not something left to Harper's validation.
  */
 export function isReadableEventId(id: unknown): id is string | string[] {
   if (typeof id === "string") return id !== "";

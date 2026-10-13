@@ -5,14 +5,19 @@
  * changed (resources/org-event-created-at.ts):
  *   - POST, PUT (single record and a collection PUT of an array) and an admin
  *     PATCH that creates a row store the server's time, whatever the body says;
- *   - an update whose createdAt differs from the stored one is refused with
- *     `created_at_immutable` (409) and the stored row is unchanged, for agents
- *     and admin agents alike; an update that omits createdAt keeps it;
+ *   - an update that reaches the check with a createdAt that differs from the
+ *     stored one is refused with `created_at_immutable` (409) and the stored
+ *     row is unchanged, for agents and admin agents alike; an update that omits
+ *     createdAt keeps it;
+ *   - a record whose id the check does not read (anything but a non-empty
+ *     string or a non-empty array of strings, the empty string included) is
+ *     refused with `invalid_event_id` (400) before any write, and a stored row
+ *     under such an id is unchanged;
  *   - the catch-up feed delivers events in timestamp and ID order, so events
  *     with one server time are delivered in ID order (checked on a second,
  *     frozen-clock instance with IDs in reverse write order);
  *   - a credentialed Basic admin follows the same rule, and a collection PATCH
- *     writes nothing;
+ *     is refused with `invalid_event_id` and writes nothing;
  *   - a table-level write (the path flair's in-process writers use) keeps the
  *     createdAt it supplies;
  *   - a write whose stored-event read fails is refused and writes nothing.
@@ -73,6 +78,7 @@ const tableReader = mkAgent("oect-table-reader");
 const FUTURE = "2099-01-01T00:00:00.000Z";
 const PAST = "2001-01-01T00:00:00.000Z";
 const IMMUTABLE = "created_at_immutable";
+const INVALID_ID = "invalid_event_id";
 
 async function send(who: TestAgent, method: string, path: string, body?: unknown, h: HarperInstance = harper, nowMs?: number): Promise<Response> {
   return fetch(`${h.httpURL}${path}`, {
@@ -141,6 +147,13 @@ function expectImmutableRefusal(status: number, text: string, ...values: string[
   expect(status, text.slice(0, 300)).toBe(409);
   expect(JSON.parse(text).error).toBe(IMMUTABLE);
   for (const v of values) expect(text).not.toContain(v);
+}
+/** The refusal for a record whose id the check does not read; echoes nothing. */
+function expectInvalidIdRefusal(status: number, text: string): void {
+  expect(status, text.slice(0, 300)).toBe(400);
+  const body = JSON.parse(text);
+  expect(body.error).toBe(INVALID_ID);
+  expect(Object.keys(body).sort()).toEqual(["error", "message"]);
 }
 /** Create an event as `who` and return its stored row. */
 async function createOwn(who: TestAgent, id: string): Promise<any> {
@@ -380,15 +393,68 @@ describe("a credentialed Basic admin follows the same createdAt rule", () => {
 });
 
 describe("a PATCH to the OrgEvent collection writes nothing", () => {
-  for (const [who, status] of [[agent, 404], [admin, 400]] as const) {
-    it(`a ${who === admin ? "admin" : "non-admin"} collection PATCH is refused with ${status}`, async () => {
+  for (const who of [agent, admin]) {
+    it(`${who === admin ? "an admin" : "a non-admin"} collection PATCH is refused with ${INVALID_ID} (400)`, async () => {
       const id = `oect-coll-patch-${randomUUID()}`;
       const before = await createOwn(agent, id);
       const res = await send(who, "PATCH", "/OrgEvent/", { summary: "changed", createdAt: PAST });
-      expect(res.status, (await res.text()).slice(0, 300)).toBe(status);
+      expectInvalidIdRefusal(res.status, await res.text());
       expect(await readEvent(id)).toEqual(before);
     }, 30_000);
   }
+});
+
+describe("a record whose id the check does not read is refused before any write", () => {
+  // The empty string is a key Harper accepts; the check does not read it, so
+  // every write naming it is refused. The row is seeded at the table.
+  const EMPTY_AT = "2026-01-01T00:00:00.000Z";
+  let emptyRow: any;
+
+  beforeAll(async () => {
+    const ins = await adminOp({
+      operation: "upsert", database: "flair", table: "OrgEvent",
+      records: [{ id: "", authorId: agent.id, kind: "status", summary: "empty-id row", createdAt: EMPTY_AT }],
+    });
+    expect(ins.status, (await ins.text()).slice(0, 300)).toBe(200);
+    emptyRow = await readEvent("");
+    expect(emptyRow?.createdAt).toBe(EMPTY_AT);
+  }, 30_000);
+
+  it("a collection PUT naming the empty id with a different createdAt is refused, and the row is unchanged", async () => {
+    const res = await send(agent, "PUT", "/OrgEvent/", [{ id: "", authorId: agent.id, kind: "status", summary: "changed", createdAt: FUTURE }]);
+    expectInvalidIdRefusal(res.status, await res.text());
+    expect(await readEvent("")).toEqual(emptyRow);
+  }, 30_000);
+
+  it("a collection PUT naming the empty id without createdAt is refused, and the row is unchanged", async () => {
+    const res = await send(agent, "PUT", "/OrgEvent/", [{ id: "", authorId: agent.id, kind: "status", summary: "changed" }]);
+    expectInvalidIdRefusal(res.status, await res.text());
+    expect(await readEvent("")).toEqual(emptyRow);
+  }, 30_000);
+
+  it("a collection PUT with the empty id among its elements stores none of them", async () => {
+    const sibling = `oect-empty-sibling-${randomUUID()}`;
+    const res = await send(agent, "PUT", "/OrgEvent/", [
+      { id: sibling, authorId: agent.id, kind: "status", summary: "new sibling" },
+      { id: "", authorId: agent.id, kind: "status", summary: "changed" },
+    ]);
+    expectInvalidIdRefusal(res.status, await res.text());
+    expect(await readEvent(sibling), "a sibling of the refused element was stored").toBeNull();
+    expect(await readEvent("")).toEqual(emptyRow);
+  }, 30_000);
+
+  it("an admin PUT of an array body naming the empty id is refused, and the row is unchanged", async () => {
+    const res = await send(admin, "PUT", `/OrgEvent/oect-array-path-${randomUUID()}`, [{ id: "", authorId: agent.id, kind: "status", summary: "changed" }]);
+    expectInvalidIdRefusal(res.status, await res.text());
+    expect(await readEvent("")).toEqual(emptyRow);
+  }, 30_000);
+
+  it("an admin POST naming an id that is not a non-empty string or array of strings is refused and stores nothing", async () => {
+    const summary = `oect-post-bad-id-${randomUUID()}`;
+    const res = await send(admin, "POST", "/OrgEvent", { id: [], authorId: admin.id, kind: "status", summary });
+    expectInvalidIdRefusal(res.status, await res.text());
+    expect(await eventsBySummary(summary)).toEqual([]);
+  }, 30_000);
 });
 
 describe("catch-up delivers events that share one server time in ID order", () => {

@@ -295,7 +295,7 @@ describe("OrgEvent.post() — avoids deterministic same-millisecond collisions (
 });
 
 // ─── OrgEvent createdAt: assigned by the server on create; cannot be changed ──
-describe("OrgEvent — the server assigns createdAt on create, and it cannot be changed", () => {
+describe("OrgEvent — the server assigns createdAt on create, it cannot be changed, and an id the check does not read is refused", () => {
   const SERVER_NOW = "2026-10-13T12:00:00.000Z";
   const STORED_AT = "2026-10-01T09:30:00.000Z";
   const FUTURE = "2099-01-01T00:00:00.000Z";
@@ -422,6 +422,38 @@ describe("OrgEvent — the server assigns createdAt on create, and it cannot be 
     }
     expect(orgEventPut).toBeNull();
     expect(orgEventPatch).toBeNull();
+  });
+
+  it("a record whose id the check does not read is refused with invalid_event_id (400) before any write", async () => {
+    orgEventStore.set("", { id: "", authorId: "agent-alpha", kind: "status", summary: "stored", createdAt: STORED_AT });
+    const before = { ...orgEventStore.get("") };
+    for (const ctx of [agentCtx("agent-alpha"), agentCtx("admin-1", true)]) {
+      const results = [
+        // PUT naming the empty id, with createdAt changed and omitted.
+        await settle(makeOrgEvent(ctx, "").put({ id: "", authorId: "agent-alpha", kind: "status", summary: "x", createdAt: PAST })),
+        await settle(makeOrgEvent(ctx, "").put({ id: "", authorId: "agent-alpha", kind: "status", summary: "x" })),
+        // An array body with one such element refuses the whole write (an
+        // array body reaches this check only for an administrator; a non-admin
+        // agent's is refused earlier by attribution).
+        ...(ctx.tpsAgentIsAdmin ? [await settle(makeOrgEvent(ctx, "arr-path").put([
+          { id: "ok-new", authorId: "agent-alpha", kind: "status", summary: "x" },
+          { id: "", authorId: "agent-alpha", kind: "status", summary: "x" },
+        ]))] : []),
+        // POST naming an id that is not a non-empty string or array of strings.
+        await makeOrgEvent(ctx).post({ id: [], authorId: "agent-alpha", kind: "status", summary: "x" }),
+        // PATCH of the empty id, and of a resource with no id.
+        await makeOrgEvent(ctx, "").patch({ summary: "x", createdAt: PAST }),
+        await makeOrgEvent(ctx).patch({ summary: "x" }),
+      ];
+      for (const res of results) {
+        expect((res as Response).status).toBe(400);
+        expect(await errorOf(res)).toBe("invalid_event_id");
+      }
+    }
+    expect(orgEventPut).toBeNull();
+    expect(orgEventPatch).toBeNull();
+    expect(orgEventStore.get("")).toEqual(before);
+    expect(orgEventStore.has("ok-new")).toBe(false);
   });
 
   it("an internal call keeps the createdAt it supplies on PUT and PATCH; POST stamps the server time", async () => {
