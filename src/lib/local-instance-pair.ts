@@ -1,7 +1,6 @@
 /**
- * local-instance-pair.ts — the ONE check that an operations API endpoint and an
- * HTTP port on this host are the SAME running Harper process, used to pair an
- * ops endpoint with an HTTP port.
+ * local-instance-pair.ts — the ONE check that pairs an operations API endpoint
+ * with an HTTP port on this host.
  *
  * Shared by the local delete paths (`memory hygiene --apply`, `agent remove`,
  * via src/lib/local-delete-instance.ts, flair#2225) and by `flair doctor`'s
@@ -10,40 +9,40 @@
  *
  * What it checks:
  *   1. it asks the loopback ops endpoint on `opsPort` for Harper's
- *      `get_configuration`, and accepts only when that configuration
+ *      `get_configuration`, and continues only when that configuration
  *      - records a usable `http.port`,
  *      - binds that HTTP port on loopback or on all interfaces (127.0.0.1,
  *        localhost, 0.0.0.0, [::], or a bare port), and
  *      - records `operationsApi.network.port` equal to `opsPort`, the port asked;
- *   2. it resolves the live Harper process id serving the ops endpoint: the
- *      `harperdb_processes.core[0].pid` its `system_information` reports
- *      (exactly as src/lib/mcp-enable.ts's `checkTargetRunsFromConfig` and
- *      `captureBootDiscriminator` read it), or — when that answer carries no
- *      usable pid — the pid the instance's own `<rootPath>/hdb.pid` names when
- *      that process is alive. When both sources carry a pid, they must agree;
- *   3. it asks the configured HTTP port for `/HealthDetail` and reads the
- *      `pid` that resource reports (`process.pid` — the process serving that
- *      port); the pair is proven ONLY when the ops process id from step 2 and
- *      that pid are equal. Configured ports alone no longer establish it: a
- *      configuration edited without a restart (or otherwise stale) can name
- *      ports the live process is not serving.
- * It then reports the configured HTTP port. `flair doctor` requires it to equal
- * the HTTP port doctor probed. The delete paths compare it with `--port` only
- * when `--port` is given; otherwise they address that configured port. A failed
- * request, a non-2xx answer, a body that is not JSON, any of the configuration
- * conditions above unmet, no process id from either source, a PID-file pid that
- * is not alive, two sources that disagree, or two endpoints that disagree is
- * `unproven`, with a detail naming which.
+ *   2. it reads the OS listener table (src/lib/listener-table.ts: `/proc` on
+ *      Linux, `lsof` elsewhere) for `opsPort` and for that HTTP port, and
+ *      requires exactly one process listening on each (flair#2526);
+ *   3. it requires each listener's command line to be a Harper command line
+ *      (`isHarperProcessCommandLine`), so a forwarder holding a port is
+ *      refused;
+ *   4. it requires the two listeners to be the SAME process.
+ * Only then does it report the configured HTTP port. `flair doctor` requires it
+ * to equal the HTTP port doctor probed. The delete paths compare it with
+ * `--port` only when `--port` is given; otherwise they address that port.
  *
- * Its limit: both endpoints are reached over loopback, so a pair that forwards
- * one remote process onto two local ports reports the same id and is accepted.
- * The PID-file fallback trusts the file the Harper process writes under its
- * configured root; a pid it names is accepted only while that process is alive.
+ * Nothing is sent to the HTTP port: the admin credential goes only to the ops
+ * endpoint the caller named, and a caller sends it to the HTTP port only after
+ * this check has proven the port. No PID file and no process id an endpoint
+ * reports about itself is evidence (Harper's own `system_information` pid is
+ * read from its `hdb.pid`).
+ *
+ * Every other outcome is `unproven`, with a detail naming which condition
+ * failed and, where the caller's own remedy would not fit, a `remedy`.
+ *
+ * Its limits: the listener table shows only what this user can see, so a Harper
+ * run by another user, inside a container, or reached through a port forward
+ * (docker-proxy, ssh -L) is refused, never proven. The command-line check is
+ * what `ps`/`/proc` report; it does not authenticate the program.
  */
-import { join } from "node:path";
 import { harperPortValue } from "./harper-port-value.js";
-import { readPidfile } from "./pidfile.js";
-import type { PidfileRead } from "./daemon-liveness.js";
+import { isHarperProcessCommandLine } from "./daemon-liveness.js";
+import { readTcpListenerPids, LISTENER_VISIBILITY_REMEDY, type ListenerRead } from "./listener-table.js";
+import { defaultReadProcessCmdline } from "./upgrade-exec-path.js";
 
 /** The host halves of an `http.port` binding that bind on loopback or on all interfaces. */
 const LOCAL_HTTP_BIND_HOSTS = ["127.0.0.1", "localhost", "0.0.0.0", "[::]", ""];
@@ -51,22 +50,43 @@ const LOCAL_HTTP_BIND_HOSTS = ["127.0.0.1", "localhost", "0.0.0.0", "[::]", ""];
 /** The outcome of {@link proveLocalInstancePair}. */
 export type LocalInstancePairProof =
   | { kind: "proven"; httpPort: number }
-  | { kind: "unproven"; status: number | null; detail: string };
+  | { kind: "unproven"; status: number | null; detail: string; remedy?: string };
 
-/** Injectable seams for tests; production callers use the global `fetch` and
- *  a signal-0 liveness probe. */
+/** The OS reads behind steps 2 and 3. */
+export interface InstancePairOsReads {
+  /** The processes the OS lists as LISTENING on a TCP port. */
+  listeners: (port: number) => ListenerRead;
+  /** A process's command line, or null when it cannot be read. */
+  commandLine: (pid: number) => string | null;
+}
+
+/** Injectable seams for tests; production callers use the global `fetch` and the OS reads. */
 export interface LocalInstancePairDeps {
   fetchImpl?: typeof fetch;
-  /** Liveness probe for a PID-file pid (default: `kill(pid, 0)`). */
-  isPidAlive?: (pid: number) => boolean;
+  osReads?: Partial<InstancePairOsReads>;
+}
+
+const DEFAULT_OS_READS: InstancePairOsReads = {
+  listeners: (port) => readTcpListenerPids(port),
+  commandLine: defaultReadProcessCmdline,
+};
+
+/**
+ * Test seam for callers that cannot pass `deps` (the CLI commands run
+ * in-process by test/unit-isolated). Production never sets it.
+ */
+let osReadsForTests: Partial<InstancePairOsReads> | null = null;
+
+export function setInstancePairOsReadsForTests(reads: Partial<InstancePairOsReads> | null): void {
+  osReadsForTests = reads;
 }
 
 /**
- * Ask the loopback ops endpoint on `opsPort` for its configuration and its live
- * Harper process id, ask the configured HTTP port for the process id it serves,
- * and report the HTTP port only when the two endpoints are one running process
- * (see the module comment). `authorization` is the full `Authorization` header
- * value. `status` is the HTTP status of a non-2xx answer, else null.
+ * Ask the loopback ops endpoint on `opsPort` for its configuration, then prove
+ * from the OS listener table that one Harper process listens on both that ops
+ * port and the configured HTTP port (see the module comment). `authorization`
+ * is the full `Authorization` header value; it is sent only to `opsPort`.
+ * `status` is the HTTP status of a non-2xx answer, else null.
  */
 export async function proveLocalInstancePair(
   opsPort: number,
@@ -74,9 +94,9 @@ export async function proveLocalInstancePair(
   deps: LocalInstancePairDeps = {},
 ): Promise<LocalInstancePairProof> {
   const fetchImpl = deps.fetchImpl ?? fetch;
-  const isPidAlive = deps.isPidAlive ?? isPidAliveByKill;
-  const unproven = (detail: string, status: number | null = null): LocalInstancePairProof =>
-    ({ kind: "unproven", status, detail });
+  const os: InstancePairOsReads = { ...DEFAULT_OS_READS, ...osReadsForTests, ...deps.osReads };
+  const unproven = (detail: string, status: number | null = null, remedy?: string): LocalInstancePairProof =>
+    remedy === undefined ? { kind: "unproven", status, detail } : { kind: "unproven", status, detail, remedy };
 
   // 1. The ops endpoint's own configuration.
   let response: Response;
@@ -111,129 +131,69 @@ export async function proveLocalInstancePair(
     return unproven(`its configuration binds HTTP to ${host}, not loopback or all interfaces`);
   }
 
-  // 2. The live Harper process id serving the ops endpoint.
-  const ops = await resolveOpsProcessId(fetchImpl, opsPort, authorization, config, isPidAlive);
-  if (!("pid" in ops)) return ops;
+  // 2. One process listens on each port.
+  const opsListener = soleListener(os.listeners(opsPort), "ops", opsPort);
+  if (!("pid" in opsListener)) return opsListener;
+  const httpListener = soleListener(os.listeners(httpPort), "HTTP", httpPort);
+  if (!("pid" in httpListener)) return httpListener;
 
-  // 3. The live process id the configured HTTP port reports.
-  const http = await readHttpProcessId(fetchImpl, httpPort, authorization);
-  if (!("pid" in http)) return http;
+  // 3. Each is a Harper process, not a forwarder holding the port.
+  const notHarper = harperListenerRefusal(os, opsListener.pid, "ops", opsPort)
+    ?? (httpListener.pid === opsListener.pid ? null : harperListenerRefusal(os, httpListener.pid, "HTTP", httpPort));
+  if (notHarper !== null) return notHarper;
 
-  if (ops.pid !== http.pid) {
+  // 4. They are the same process.
+  if (opsListener.pid !== httpListener.pid) {
     return unproven(
-      `the operations API reports Harper process ${ops.pid} and the HTTP endpoint on port ${httpPort} reports ` +
-        `process ${http.pid}, so they are not the same running instance`,
+      `the process listening on ops port ${opsPort} is ${opsListener.pid} and the process listening on HTTP port ` +
+        `${httpPort} is ${httpListener.pid}, so they are not the same running instance`,
     );
   }
   return { kind: "proven", httpPort };
 }
 
-/** Signal-0 liveness: a pid the probe may not signal is NOT reported alive. */
-function isPidAliveByKill(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
+/** An `unproven` proof when `pid`'s command line cannot be read or is not Harper's, else null. */
+function harperListenerRefusal(os: InstancePairOsReads, pid: number, label: "ops" | "HTTP", port: number): LocalInstancePairProof | null {
+  const commandLine = os.commandLine(pid);
+  if (commandLine === null) {
+    return { kind: "unproven", status: null, detail: `the command line of process ${pid}, listening on ${label} port ${port}, cannot be read`, remedy: LISTENER_VISIBILITY_REMEDY };
   }
+  if (isHarperProcessCommandLine(commandLine)) return null;
+  return {
+    kind: "unproven",
+    status: null,
+    detail: `process ${pid} (${programName(commandLine)}), listening on ${label} port ${port}, is not a Harper process, as when a port forwarder (docker-proxy, ssh -L) holds that port`,
+    remedy: LISTENER_VISIBILITY_REMEDY,
+  };
 }
 
-/**
- * The live Harper process id serving the ops endpoint: the id its
- * `system_information` reports, or, when that answer carries no usable pid, the
- * alive pid the instance's own `<rootPath>/hdb.pid` names; the two must agree
- * when both carry one. A `system_information` request that fails refuses; two
- * sources that disagree, or no pid from either, refuses.
- */
-async function resolveOpsProcessId(
-  fetchImpl: typeof fetch,
-  opsPort: number,
-  authorization: string,
-  config: any,
-  isPidAlive: (pid: number) => boolean,
-): Promise<{ pid: number } | LocalInstancePairProof> {
-  let response: Response;
-  try {
-    response = await fetchImpl(`http://127.0.0.1:${opsPort}/`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: authorization },
-      body: JSON.stringify({ operation: "system_information", attributes: ["harperdb_processes"] }),
-      signal: AbortSignal.timeout(10_000),
-      redirect: "error",
-    });
-  } catch {
-    return { kind: "unproven", status: null, detail: "the operations API got no answer to its process-identity request" };
+/** The one process listening on `port`, or an `unproven` proof naming why not. */
+function soleListener(read: ListenerRead, label: "ops" | "HTTP", port: number): { pid: number } | LocalInstancePairProof {
+  if (read.kind === "unavailable") {
+    return { kind: "unproven", status: null, detail: `the listener table for ${label} port ${port} cannot be read: ${read.reason}`, remedy: read.remedy };
   }
-  if (!response.ok) {
-    return { kind: "unproven", status: response.status, detail: `the process-identity request answered HTTP ${response.status}` };
-  }
-  let data: any;
-  try {
-    data = await response.json();
-  } catch {
-    return { kind: "unproven", status: null, detail: "the process-identity answer is not JSON" };
-  }
-  const reported = data?.harperdb_processes?.core?.[0]?.pid;
-  const systemInformationPid = isUsablePid(reported) ? reported : null;
-
-  // The PID file of the instance whose configuration this ops endpoint reports.
-  const root = typeof config?.rootPath === "string" && config.rootPath !== "" ? config.rootPath : null;
-  const pidfile: PidfileRead = root === null ? { kind: "absent" } : readPidfile(root);
-  let pidfilePid: number | null = null;
-  if (pidfile.kind === "present") {
-    pidfilePid = pidfile.pid;
-    if (!isPidAlive(pidfilePid)) {
-      return { kind: "unproven", status: null, detail: `the PID file ${join(root!, "hdb.pid")} names process ${pidfilePid}, which is not alive` };
-    }
-  }
-
-  if (systemInformationPid !== null && pidfilePid !== null && systemInformationPid !== pidfilePid) {
+  if (read.pids.length === 0) {
     return {
       kind: "unproven",
       status: null,
-      detail: `its operations API reports Harper process ${systemInformationPid} but its PID file names process ${pidfilePid}, so they disagree`,
+      detail: `the listener table shows no process this user can see listening on ${label} port ${port}`,
+      remedy: label === "HTTP"
+        ? `Start the instance that should serve HTTP port ${port}, or correct its configuration and restart it. ${LISTENER_VISIBILITY_REMEDY}`
+        : LISTENER_VISIBILITY_REMEDY,
     };
   }
-  const pid = systemInformationPid ?? pidfilePid;
-  if (pid === null) {
-    const unread = pidfile.kind === "unreadable" ? ` (${pidfile.reason})` : "";
-    return { kind: "unproven", status: null, detail: `its operations API reports no running Harper process id and its PID file names none${unread}` };
+  if (read.pids.length > 1) {
+    return {
+      kind: "unproven",
+      status: null,
+      detail: `processes ${read.pids.join(", ")} all listen on ${label} port ${port}, so the one serving it cannot be named`,
+    };
   }
-  return { pid };
+  return { pid: read.pids[0] };
 }
 
-/** A JSON value usable as a process id. */
-function isUsablePid(value: unknown): value is number {
-  return typeof value === "number" && Number.isInteger(value) && value > 0;
-}
-
-/** The process id the HTTP endpoint on `httpPort` reports, or an `unproven` proof naming why not. */
-async function readHttpProcessId(
-  fetchImpl: typeof fetch,
-  httpPort: number,
-  authorization: string,
-): Promise<{ pid: number } | LocalInstancePairProof> {
-  let response: Response;
-  try {
-    response = await fetchImpl(`http://127.0.0.1:${httpPort}/HealthDetail`, {
-      headers: { Authorization: authorization },
-      signal: AbortSignal.timeout(10_000),
-    });
-  } catch {
-    return { kind: "unproven", status: null, detail: `the HTTP endpoint on port ${httpPort} got no answer to its health request` };
-  }
-  if (!response.ok) {
-    return { kind: "unproven", status: response.status, detail: `the health request to the HTTP endpoint on port ${httpPort} answered HTTP ${response.status}` };
-  }
-  let data: any;
-  try {
-    data = await response.json();
-  } catch {
-    return { kind: "unproven", status: null, detail: `the health answer from the HTTP endpoint on port ${httpPort} is not JSON` };
-  }
-  const pid = data?.pid;
-  if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) {
-    return { kind: "unproven", status: null, detail: `the HTTP endpoint on port ${httpPort} reports no running process id` };
-  }
-  return { pid };
+/** The basename of a command line's first argument (never the arguments). */
+function programName(commandLine: string): string {
+  const first = commandLine.includes("\u0000") ? commandLine.split("\u0000")[0] : commandLine.trim().split(/\s+/)[0];
+  return first.split("/").pop() || "unknown program";
 }

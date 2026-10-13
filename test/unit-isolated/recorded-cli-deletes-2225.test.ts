@@ -3,6 +3,18 @@ import { Command } from "commander";
 import { harnessState, resetHarnessState, installMemoryHarperMock, databasesMock } from "../helpers/memory-search-harness";
 import { bindCli as bindMemory, register as registerMemory, type MemoryCli } from "../../src/commands/memory";
 import { bindCli as bindAgent, register as registerAgent, type AgentCli } from "../../src/commands/agent";
+import { setInstancePairOsReadsForTests } from "../../src/lib/local-instance-pair";
+
+/**
+ * flair#2526: the pair check reads the OS listener table, and the ops endpoint
+ * here is a fetch mock with no listener behind it. These tests inject a
+ * SIMULATED table: one simulated Harper process id on every port, with a
+ * Harper command line. No such process exists.
+ */
+const SIMULATED_LISTENER_TABLE = {
+  listeners: () => ({ kind: "listeners" as const, pids: [24_526] }),
+  commandLine: () => "node\u0000/simulated/node_modules/harper/dist/bin/harper.js\u0000run\u0000.",
+};
 process.env.FLAIR_RATE_LIMIT_ENABLED = "false";
 delete process.env.FLAIR_PUBLIC;
 installMemoryHarperMock();
@@ -23,8 +35,6 @@ let purgeResponse: ((ids: string[]) => unknown) | null;
 let log: ReturnType<typeof spyOn>;
 let write: ReturnType<typeof spyOn>;
 const row = { id: "owner-compact-/m", agentId: "owner", durability: "permanent", content: "junk" };
-/** flair#2526: the process id both endpoints of the pair must report. */
-const LIVE_PID = 4321;
 const api = async (method: string, path: string, body: any, options: any) => {
   expect(method).toBe("POST");
   expect(path).toBe("/MemoryPurge");
@@ -44,6 +54,7 @@ const api = async (method: string, path: string, body: any, options: any) => {
   return r.post({ ids });
 };
 beforeEach(() => {
+  setInstancePairOsReadsForTests(SIMULATED_LISTENER_TABLE);
   resetHarnessState();
   harnessState.memoryStore.set(row.id, { ...row });
   deletes = [];
@@ -61,13 +72,6 @@ beforeEach(() => {
   log = spyOn(console, "log").mockImplementation(() => {});
   write = spyOn(process.stdout, "write").mockImplementation(() => true);
   globalThis.fetch = (async (url: any, init: any) => {
-    // flair#2526: the pair check also reads the live process identity each
-    // endpoint holds — the ops API's `system_information` on the ops endpoint
-    // and `/HealthDetail` on the configured HTTP port. Both report one process
-    // here. Neither is one of the ops operations these tests count, so neither
-    // is recorded in `requests`/`operations`.
-    if (/\/HealthDetail$/.test(String(url))) return Response.json({ pid: LIVE_PID });
-    if (JSON.parse(init.body).operation === "system_information") return Response.json({ harperdb_processes: { core: [{ pid: LIVE_PID }] } });
     requests.push(`POST:${url}`);
     expect(String(url)).toBe("http://127.0.0.1:19925/");
     const b = JSON.parse(init.body);
@@ -98,6 +102,7 @@ beforeEach(() => {
   } satisfies AgentCli);
 });
 afterEach(() => {
+  setInstancePairOsReadsForTests(null);
   globalThis.fetch = originalFetch;
   if (originalPass === undefined) delete process.env.FLAIR_ADMIN_PASS; else process.env.FLAIR_ADMIN_PASS = originalPass;
   if (originalOpsPort === undefined) delete process.env.FLAIR_OPS_PORT; else process.env.FLAIR_OPS_PORT = originalOpsPort;

@@ -2043,9 +2043,10 @@ program
       // or one --fix just re-recorded). The pairing rule only PICKS a candidate;
       // it trusts ports the caller names. The candidate's own configured pair
       // must then record it as the ops port and effectivePort as its HTTP port,
-      // bound on loopback or on all interfaces (the check the local delete paths
-      // use); configured ports are not proof of the live process. Two different
-      // Instance ids on the two endpoints also refuse. When the pick or the configuration check refuses or
+      // bound on loopback or on all interfaces, and the OS listener table must
+      // show one Harper process listening on both (flair#2526; the check the
+      // local delete paths use). Two different Instance ids on the two
+      // endpoints also refuse. When the pick or the pair check refuses or
       // cannot complete, or the ids differ, both checks report NOT RUN (counted
       // as an issue) and no Agent row is read.
       const rosterTarget = agentListAdminPass

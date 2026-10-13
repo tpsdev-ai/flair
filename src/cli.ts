@@ -75,7 +75,6 @@ import { encodeRecordId } from "./lib/record-id-path.js";
 import { invalidAgentIdMessage, isValidAgentId } from "./lib/agent-id-rule.js";
 import { agentHomeEndpoint, decideProbedPairIdentity, readHttpInstanceIdentity, resolveTargetInstanceId, resolveTargetInstanceIdentity, stampAgentHome, type ProbedPairIdentity } from "./lib/agent-home.js";
 import { proveLocalInstancePair, type LocalInstancePairProof } from "./lib/local-instance-pair.js";
-import { readFileNoFollow, readPidfile, type NoFollowRead } from "./lib/pidfile.js";
 import {
   httpBind,
   httpCorsAccessList,
@@ -1737,16 +1736,15 @@ export function resolveDoctorRosterTarget(
 }
 
 /**
- * Whether the candidate ops endpoint is the running instance serving the HTTP
- * port doctor probed (flair#2483). `proof` is
- * {@link proveLocalInstancePair}'s answer for `opsPort` — the same check the
- * local delete paths use (src/lib/local-delete-instance.ts): the configuration
- * records `opsPort` as its ops port and an HTTP port bound on loopback or on all
- * interfaces, and the ops endpoint is served by the same running Harper process
- * as that HTTP port. This
- * decides `run` only when that configured HTTP port is `probedHttpPort`. A check
- * that could not complete, a pair of ids that differ, or a configuration naming
- * another HTTP port is `not-run`: the pair check cannot be established.
+ * Whether the candidate ops endpoint pairs with the HTTP port doctor probed
+ * (flair#2483). `proof` is {@link proveLocalInstancePair}'s answer for
+ * `opsPort`, the check the local delete paths use
+ * (src/lib/local-delete-instance.ts): the configuration records `opsPort` as
+ * its ops port and an HTTP port bound on loopback or on all interfaces, and the
+ * OS listener table shows one Harper process listening on both. This decides
+ * `run` only when that configured HTTP port is `probedHttpPort`. An unproven
+ * pair, or a proven one naming another HTTP port, is `not-run`, with the
+ * proof's own remedy when it carries one.
  */
 export function decideDoctorRosterPair(
   opsPort: number,
@@ -1757,7 +1755,8 @@ export function decideDoctorRosterPair(
     return {
       kind: "not-run",
       reason: `the ops endpoint on port ${opsPort} did not prove a live HTTP/ops pair (${proof.detail}), so this check cannot be established for the probed HTTP port ${probedHttpPort}`,
-      remedy: proof.status === 401 || proof.status === 403 ? DOCTOR_ROSTER_CREDENTIAL_REMEDY : DOCTOR_ROSTER_TARGET_REMEDY,
+      remedy: proof.remedy
+        ?? (proof.status === 401 || proof.status === 403 ? DOCTOR_ROSTER_CREDENTIAL_REMEDY : DOCTOR_ROSTER_TARGET_REMEDY),
     };
   }
   if (proof.httpPort !== probedHttpPort) {
@@ -1796,18 +1795,18 @@ export function decideDoctorRosterIdentity(opsPort: number, pair: ProbedPairIden
  *
  * 1. Picks the candidate with {@link resolveDoctorRosterTarget} against the HTTP
  *    port doctor actually probed (a PID-discovered port included).
- * 2. Asks the candidate for its configuration and the live process id serving
- *    it ({@link proveLocalInstancePair}, the check the local delete paths use)
- *    and requires it to record the candidate as its ops port and the probed
- *    port as its HTTP port, bound on loopback or on all interfaces, served by
- *    the same running Harper process ({@link decideDoctorRosterPair}). No
+ * 2. Asks the candidate for its configuration ({@link proveLocalInstancePair},
+ *    the check the local delete paths use) and requires it to record the
+ *    candidate as its ops port and the probed port as its HTTP port, bound on
+ *    loopback or on all interfaces, with the OS listener table showing one
+ *    Harper process listening on both ({@link decideDoctorRosterPair}). No
  *    Instance row is needed, so a fresh install passes.
  * 3. Only then compares the instance identities both endpoints report
  *    ({@link decideDoctorRosterIdentity}): two different single ids refuse.
  *
  * Any `not-run` means the caller reports both checks as NOT RUN and reads no
- * Agent row. A pair that reaches one process through two forwarders reports the
- * same id and is accepted.
+ * Agent row. Step 2 sees only what this user's listener table shows: a Harper
+ * run by another user, in a container, or behind a port forward is NOT RUN.
  */
 export async function verifyDoctorRosterInstance(
   opts: { port?: string | number; opsPort?: string | number; dataDir?: string },
@@ -5395,6 +5394,35 @@ registerUpgrade(program);
 // a listener pid that is not the launched instance is NOT healed
 // (flair#1478). Absence of lsof skips that bind; it does not fail it.
 
+/** A pidfile/sidecar read that refuses to follow a symlink (O_NOFOLLOW). */
+type NoFollowRead =
+  | { kind: "absent" }
+  | { kind: "unreadable"; reason: string }
+  | { kind: "present"; content: string };
+
+/**
+ * Read a file with O_NOFOLLOW so a symlink planted at the pidfile/sidecar path
+ * cannot redirect the read (flair#1454 decision 6). `readFileSync` has no such
+ * flag, so this opens the fd first and reads from it.
+ */
+function readFileNoFollow(path: string): NoFollowRead {
+  let fd: number;
+  try {
+    fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  } catch (err: any) {
+    if (err?.code === "ENOENT") return { kind: "absent" };
+    if (err?.code === "ELOOP") return { kind: "unreadable", reason: `${path} is a symbolic link` };
+    return { kind: "unreadable", reason: `cannot open ${path}: ${err?.code ?? err?.message}` };
+  }
+  try {
+    return { kind: "present", content: readFileSync(fd, "utf-8") };
+  } catch (err: any) {
+    return { kind: "unreadable", reason: `cannot read ${path}: ${err?.code ?? err?.message}` };
+  } finally {
+    try { closeSync(fd); } catch { /* already closed */ }
+  }
+}
+
 /**
  * Refuse to trust a data dir that is a symlink or world-writable (flair#1454
  * decision 6). Returns a reason, or null when the dir is safe (or absent — a
@@ -5420,6 +5448,17 @@ function checkDataDirSafe(dataDir: string): string | null {
     return `data directory ${dataDir} is world-writable — refusing to trust its pidfile`;
   }
   return null;
+}
+
+/** Read `hdb.pid` (O_NOFOLLOW) into a `PidfileRead`. */
+function readPidfile(dataDir: string): PidfileRead {
+  const r = readFileNoFollow(join(dataDir, "hdb.pid"));
+  if (r.kind !== "present") return r;
+  const n = Number(r.content.trim());
+  if (!Number.isInteger(n) || n <= 0) {
+    return { kind: "unreadable", reason: `${join(dataDir, "hdb.pid")} does not contain a valid pid` };
+  }
+  return { kind: "present", pid: n };
 }
 
 /** Read `flair-daemon.json` (O_NOFOLLOW) into a `SidecarRead`. */

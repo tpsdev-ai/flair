@@ -3,9 +3,10 @@
  * REAL ephemeral Harper (flair#2225, under #2213).
  *
  * `memory hygiene --apply` and `agent remove` pair the operations port they
- * scanned with the HTTP port Harper's own `get_configuration` reports
- * (src/lib/local-delete-instance.ts), then send each delete through the CLI's
- * real api() transport. These tests run the real commands against a scratch
+ * scanned with the HTTP port Harper's own `get_configuration` reports, once the
+ * OS listener table shows one Harper process listening on both
+ * (src/lib/local-delete-instance.ts, flair#2526), then send each delete
+ * through the CLI's real api() transport. These tests run the real commands against a scratch
  * Harper and assert that a delete lands on the scanned instance and is written
  * to the MemoryDeletionHistory table the integrity watcher reads — and that an
  * unreadable or unpaired configuration is refused before any delete.
@@ -233,8 +234,8 @@ async function startMismatchStub(): Promise<{ port: number; configurations: numb
 
 /**
  * A stub ops endpoint whose configuration agrees with the probe — its own ops
- * port and Harper's real HTTP port — but whose live process is not the one
- * serving that HTTP port (it reports a different process id).
+ * port and Harper's real HTTP port — but which is not Harper: the OS lists this
+ * test process on its port and Harper's own process on the HTTP port.
  */
 async function startStaleConfigStub(): Promise<{ port: number; configurations: number; deletes: number; close: () => Promise<void> }> {
   const state = { configurations: 0, deletes: 0 };
@@ -252,11 +253,6 @@ async function startStaleConfigStub(): Promise<{ port: number; configurations: n
       if (parsed?.operation === "get_configuration") state.configurations++;
       if (parsed?.operation === "delete") state.deletes++;
       res.writeHead(200, { "Content-Type": "application/json" });
-      if (parsed?.operation === "system_information") {
-        // A process id that is not the one serving the HTTP port the config names.
-        res.end(JSON.stringify({ harperdb_processes: { core: [{ pid: 1 }] } }));
-        return;
-      }
       res.end(JSON.stringify({ http: { port: `127.0.0.1:${httpPort()}` }, operationsApi: { network: { port: port } } }));
     });
   });
@@ -424,8 +420,8 @@ describe("flair#2225 — CLI local deletes on a real Harper", () => {
       await stub.close();
     }
 
-    // (iv) a configuration whose ops port matches but whose live process is not
-    // the one serving the HTTP port it names (flair#2526).
+    // (iv) a configuration whose ports match, served by a process that is not
+    // Harper and not the one listening on the HTTP port it names (flair#2526).
     const stale = await startStaleConfigStub();
     try {
       const staleRun = await runCli(
@@ -434,7 +430,7 @@ describe("flair#2225 — CLI local deletes on a real Harper", () => {
       );
       expect(staleRun.code, staleRun.out).not.toBe(0);
       expect(staleRun.out).toContain("refusing deletion");
-      expect(staleRun.out).toContain("not the same running instance");
+      expect(staleRun.out).toContain(`listening on ops port ${stale.port}, is not a Harper process`);
       expect(stale.configurations).toBe(1);
       expect(stale.deletes).toBe(0);
       expect(await memoryExists(id)).toBe(true);

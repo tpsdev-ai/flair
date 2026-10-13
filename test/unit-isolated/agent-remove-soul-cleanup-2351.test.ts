@@ -1,6 +1,18 @@
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { Command } from "commander";
 import { bindCli as bindAgent, register as registerAgent, type AgentCli } from "../../src/commands/agent";
+import { setInstancePairOsReadsForTests } from "../../src/lib/local-instance-pair";
+
+/**
+ * flair#2526: the pair check reads the OS listener table, and the ops endpoint
+ * here is a fetch mock with no listener behind it. These tests inject a
+ * SIMULATED table: one simulated Harper process id on every port, with a
+ * Harper command line. No such process exists.
+ */
+const SIMULATED_LISTENER_TABLE = {
+  listeners: () => ({ kind: "listeners" as const, pids: [24_526] }),
+  commandLine: () => "node\u0000/simulated/node_modules/harper/dist/bin/harper.js\u0000run\u0000.",
+};
 
 process.env.FLAIR_RATE_LIMIT_ENABLED = "false";
 
@@ -28,10 +40,9 @@ let requested: any[];
 let soulScans: number;
 let log: ReturnType<typeof spyOn>;
 let write: ReturnType<typeof spyOn>;
-/** flair#2526: the process id both endpoints of the pair must report. */
-const LIVE_PID = 2351;
 
 beforeEach(() => {
+  setInstancePairOsReadsForTests(SIMULATED_LISTENER_TABLE);
   operations = [];
   soulScan = null;
   soulConfirm = null;
@@ -49,14 +60,8 @@ beforeEach(() => {
   write = spyOn(process.stdout, "write").mockImplementation(() => true);
 
   globalThis.fetch = (async (url: any, init: any) => {
-    // flair#2526: the pair check also reads the live process identity each
-    // endpoint holds — the ops API's `system_information` on the ops endpoint
-    // and `/HealthDetail` on the configured HTTP port. Both report one process
-    // here; neither is recorded in `requested`/`operations`.
-    if (/\/HealthDetail$/.test(String(url))) return Response.json({ pid: LIVE_PID });
     expect(String(url)).toBe("http://127.0.0.1:19925/");
     const b = JSON.parse(init.body);
-    if (b.operation === "system_information") return Response.json({ harperdb_processes: { core: [{ pid: LIVE_PID }] } });
     requested.push(b);
     operations.push(`${b.operation}:${b.table ?? ""}`);
     if (b.operation === "get_configuration") return Response.json(CONFIGURATION);
@@ -115,6 +120,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  setInstancePairOsReadsForTests(null);
   globalThis.fetch = originalFetch;
   if (originalPass === undefined) delete process.env.FLAIR_ADMIN_PASS;
   else process.env.FLAIR_ADMIN_PASS = originalPass;

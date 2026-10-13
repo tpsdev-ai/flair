@@ -8,33 +8,36 @@
  * roster from instance B, so it reported B's rows as A's. src/cli.ts's
  * `verifyDoctorRosterInstance` picks the ops endpoint with the pairing rule
  * `flair agent stamp-home` uses (flair#2474/#2491), then, before either read,
- * asks that ops endpoint for its configuration and the live process id serving
- * it (src/lib/local-instance-pair.ts, the check the local delete paths use): it
- * must record that ops port and the HTTP port doctor actually probed, bound on
- * loopback or on all interfaces, and be the same running Harper process. After
- * that check passes, two different Instance ids on the two endpoints also
+ * runs the pair check the local delete paths use (src/lib/local-instance-pair.ts):
+ * the endpoint's configuration must record that ops port and the HTTP port
+ * doctor actually probed, bound on loopback or on all interfaces, and the OS
+ * listener table must show one Harper process listening on both (flair#2526).
+ * After that check passes, two different Instance ids on the two endpoints also
  * refuse. A refusal, or a pair check that cannot complete, reports both checks
  * NOT RUN (counted as an issue) and reads no Agent row.
  *
  * The first block runs with NO Instance row on either instance, as on a fresh
  * install: the default paired case must run, and every refusal there comes
- * from the pair check alone (a configured-port match no longer establishes the
- * pair when the live processes differ), except recorded-pair PID drift, which
- * the pairing rule refuses earlier. The second block seeds one Instance row
- * on each instance: the paired case still runs, and an ops endpoint whose
- * configuration names the probed port while another process serves it is
- * refused by the pair check.
+ * from the pair check alone, except recorded-pair PID drift, which the pairing
+ * rule refuses earlier. Its stale-configuration case also plants a live, wrong
+ * PID file: B's configuration names A's HTTP port and B's `hdb.pid` names A's
+ * live process, which is also the process id B's own `system_information`
+ * then reports, so neither is evidence. The second block seeds one Instance
+ * row on each instance: the paired case still runs, and the stale
+ * configuration is refused by the pair check. The third calls the pair check
+ * directly against both instances.
  *
  * Build prerequisite: dist/cli.js and dist/resources/*.js
  * (`bun run build && bun run build:cli`).
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { execFileSync, spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { proveLocalInstancePair } from "../../src/lib/local-instance-pair";
 
 const CLI = join(process.cwd(), "dist", "cli.js");
 const ADMIN_PASS = "test123"; // matches harper-lifecycle's seeded admin pass
@@ -126,6 +129,34 @@ async function ops(h: HarperInstance, body: Record<string, unknown>): Promise<un
 /** Seed rows straight through an instance's operations API. */
 async function seed(h: HarperInstance, table: string, records: Record<string, unknown>[]): Promise<void> {
   await ops(h, { operation: "insert", database: "flair", table, records });
+}
+
+/** The admin `Authorization` header for an instance. */
+const authOf = (h: HarperInstance) => "Basic " + btoa(`${h.admin.username}:${h.admin.password}`);
+
+/**
+ * Make B stale in the way flair#2526 names, run `fn`, then restore B: B's
+ * configuration FILE records A's HTTP port (no restart, so B keeps serving its
+ * own), and B's `hdb.pid` names A's live process. Returns A's pid.
+ */
+async function withStaleConfigAndWrongPidFile<T>(fn: (aPid: number) => Promise<T>): Promise<T> {
+  const aRoot = String(((await ops(a, { operation: "get_configuration" })) as any).rootPath);
+  const bRoot = String(((await ops(b, { operation: "get_configuration" })) as any).rootPath);
+  const aPid = Number(readFileSync(join(aRoot, "hdb.pid"), "utf-8").trim());
+  const bPidFile = readFileSync(join(bRoot, "hdb.pid"), "utf-8");
+  expect(Number.isInteger(aPid) && aPid > 0, "A's hdb.pid names no process").toBe(true);
+  await ops(b, { operation: "set_configuration", http_port: Number(httpPort(a)) });
+  writeFileSync(join(bRoot, "hdb.pid"), `${aPid}`);
+  try {
+    // B's own operations API now reports A's live process: Harper reads that id
+    // from its hdb.pid, so it is PID-file evidence, not the serving process.
+    const info = (await ops(b, { operation: "system_information", attributes: ["harperdb_processes"] })) as any;
+    expect(info?.harperdb_processes?.core?.[0]?.pid, "B's system_information did not follow the planted PID file").toBe(aPid);
+    return await fn(aPid);
+  } finally {
+    writeFileSync(join(bRoot, "hdb.pid"), bPidFile);
+    await ops(b, { operation: "set_configuration", http_port: Number(httpPort(b)) });
+  }
 }
 
 const INST_A = "inst-a-2483";
@@ -284,13 +315,12 @@ describe("flair#2483 — no Instance row on either instance (a fresh install): n
     rmSync(join(home, ".flair", "data", "hdb.pid"), { force: true });
   }, 120_000);
 
-  test("a stale configuration naming the probed HTTP port while another process serves it: both checks are NOT RUN", async () => {
-    // B's config FILE now records A's HTTP port (no restart, so B keeps serving
-    // its own). The configured ports agree with the probe, but the two endpoints
-    // are different running processes. No Instance row exists yet, so the pair
-    // check is what refuses — a port match alone no longer establishes the pair.
-    await ops(b, { operation: "set_configuration", http_port: Number(httpPort(a)) });
-    try {
+  test("a stale configuration naming the probed HTTP port, with a live wrong PID file, while another process serves it: both checks are NOT RUN", async () => {
+    // B's config FILE records A's HTTP port and B's hdb.pid names A's live
+    // process. The configured ports agree with the probe, but the OS lists
+    // different processes on B's ops port and A's HTTP port. No Instance row
+    // exists yet, so the pair check is what refuses.
+    await withStaleConfigAndWrongPidFile(async () => {
       writeHomeConfig(`opsPort: ${opsPort(b)}\n`);
       const r = await runDoctor({ args: ["--port", httpPort(a)], opsPort: opsPort(b) });
       expect(r.stdout, r.stdout).toContain("Agent IDs: NOT RUN");
@@ -299,9 +329,7 @@ describe("flair#2483 — no Instance row on either instance (a fresh install): n
       expect(r.stdout, "A's out-of-rule row was read through the stale endpoint").not.toContain(BAD_ID_ON_A);
       expect(r.stdout, "another instance's roster row was reported").not.toContain(BAD_ID_ON_B);
       expect(r.stdout, "another instance's home-less row was reported").not.toContain(HOMELESS_ON_B);
-    } finally {
-      await ops(b, { operation: "set_configuration", http_port: Number(httpPort(b)) });
-    }
+    });
   }, 90_000);
 });
 
@@ -320,8 +348,8 @@ describe("flair#2483 — one Instance row on each instance", () => {
   test("an ops endpoint whose configuration names the probed port while another instance serves it: both checks are NOT RUN", async () => {
     await seedInstanceRows();
     // B's config FILE now records A's HTTP port (no restart, so B keeps serving
-    // its own). The two endpoints report different running processes, so the
-    // pair check refuses before any Instance-id comparison.
+    // its own). The OS lists different processes on B's ops port and A's HTTP
+    // port, so the pair check refuses before any Instance-id comparison.
     await ops(b, { operation: "set_configuration", http_port: Number(httpPort(a)) });
     try {
       writeHomeConfig(`opsPort: ${opsPort(b)}\n`);
@@ -335,4 +363,26 @@ describe("flair#2483 — one Instance row on each instance", () => {
       await ops(b, { operation: "set_configuration", http_port: Number(httpPort(b)) });
     }
   }, 90_000);
+});
+
+describe("flair#2526 — the pair check itself against two real Harpers", () => {
+  test("a matched pair (A's ops port, A's HTTP port) is proven from the listener table", async () => {
+    expect(await proveLocalInstancePair(Number(opsPort(a)), authOf(a))).toEqual({ kind: "proven", httpPort: Number(httpPort(a)) });
+  }, 60_000);
+
+  test("B's configuration names A's HTTP port while B's PID file names A's live process: refused, naming both listeners", async () => {
+    await withStaleConfigAndWrongPidFile(async () => {
+      const bListener = listeningPidOn(Number(opsPort(b)));
+      const aListener = listeningPidOn(Number(httpPort(a)));
+      const proof = await proveLocalInstancePair(Number(opsPort(b)), authOf(b));
+      expect(proof.kind, JSON.stringify(proof)).toBe("unproven");
+      if (proof.kind !== "unproven") return;
+      expect(proof.detail).toContain("not the same running instance");
+      if (bListener !== null && aListener !== null) {
+        expect(proof.detail).toBe(
+          `the process listening on ops port ${opsPort(b)} is ${bListener} and the process listening on HTTP port ${httpPort(a)} is ${aListener}, so they are not the same running instance`,
+        );
+      }
+    });
+  }, 60_000);
 });
