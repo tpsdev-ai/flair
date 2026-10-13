@@ -75,6 +75,7 @@ import { encodeRecordId } from "./lib/record-id-path.js";
 import { invalidAgentIdMessage, isValidAgentId } from "./lib/agent-id-rule.js";
 import { agentHomeEndpoint, decideProbedPairIdentity, readHttpInstanceIdentity, resolveTargetInstanceId, resolveTargetInstanceIdentity, stampAgentHome, type ProbedPairIdentity } from "./lib/agent-home.js";
 import { proveLocalInstancePair, type LocalInstancePairProof } from "./lib/local-instance-pair.js";
+import { readFileNoFollow, readPidfile, type NoFollowRead } from "./lib/pidfile.js";
 import {
   httpBind,
   httpCorsAccessList,
@@ -1741,7 +1742,8 @@ export function resolveDoctorRosterTarget(
  * {@link proveLocalInstancePair}'s answer for `opsPort` — the same check the
  * local delete paths use (src/lib/local-delete-instance.ts): the configuration
  * records `opsPort` as its ops port and an HTTP port bound on loopback or on all
- * interfaces, and both endpoints report the same running Harper process id. This
+ * interfaces, and the ops endpoint is served by the same running Harper process
+ * as that HTTP port. This
  * decides `run` only when that configured HTTP port is `probedHttpPort`. A check
  * that could not complete, a pair of ids that differ, or a configuration naming
  * another HTTP port is `not-run`: the pair check cannot be established.
@@ -1794,13 +1796,12 @@ export function decideDoctorRosterIdentity(opsPort: number, pair: ProbedPairIden
  *
  * 1. Picks the candidate with {@link resolveDoctorRosterTarget} against the HTTP
  *    port doctor actually probed (a PID-discovered port included).
- * 2. Asks the candidate for its configuration and the live process id both
- *    endpoints report ({@link proveLocalInstancePair}, the check the local
- *    delete paths use) and requires it to record the candidate as its ops port
- *    and the probed port as its HTTP port, bound on loopback or on all
- *    interfaces, served by the same running Harper process
- *    ({@link decideDoctorRosterPair}). No Instance row is needed, so a fresh
- *    install passes.
+ * 2. Asks the candidate for its configuration and the live process id serving
+ *    it ({@link proveLocalInstancePair}, the check the local delete paths use)
+ *    and requires it to record the candidate as its ops port and the probed
+ *    port as its HTTP port, bound on loopback or on all interfaces, served by
+ *    the same running Harper process ({@link decideDoctorRosterPair}). No
+ *    Instance row is needed, so a fresh install passes.
  * 3. Only then compares the instance identities both endpoints report
  *    ({@link decideDoctorRosterIdentity}): two different single ids refuse.
  *
@@ -5394,35 +5395,6 @@ registerUpgrade(program);
 // a listener pid that is not the launched instance is NOT healed
 // (flair#1478). Absence of lsof skips that bind; it does not fail it.
 
-/** A pidfile/sidecar read that refuses to follow a symlink (O_NOFOLLOW). */
-type NoFollowRead =
-  | { kind: "absent" }
-  | { kind: "unreadable"; reason: string }
-  | { kind: "present"; content: string };
-
-/**
- * Read a file with O_NOFOLLOW so a symlink planted at the pidfile/sidecar path
- * cannot redirect the read (flair#1454 decision 6). `readFileSync` has no such
- * flag, so this opens the fd first and reads from it.
- */
-function readFileNoFollow(path: string): NoFollowRead {
-  let fd: number;
-  try {
-    fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
-  } catch (err: any) {
-    if (err?.code === "ENOENT") return { kind: "absent" };
-    if (err?.code === "ELOOP") return { kind: "unreadable", reason: `${path} is a symbolic link` };
-    return { kind: "unreadable", reason: `cannot open ${path}: ${err?.code ?? err?.message}` };
-  }
-  try {
-    return { kind: "present", content: readFileSync(fd, "utf-8") };
-  } catch (err: any) {
-    return { kind: "unreadable", reason: `cannot read ${path}: ${err?.code ?? err?.message}` };
-  } finally {
-    try { closeSync(fd); } catch { /* already closed */ }
-  }
-}
-
 /**
  * Refuse to trust a data dir that is a symlink or world-writable (flair#1454
  * decision 6). Returns a reason, or null when the dir is safe (or absent — a
@@ -5448,17 +5420,6 @@ function checkDataDirSafe(dataDir: string): string | null {
     return `data directory ${dataDir} is world-writable — refusing to trust its pidfile`;
   }
   return null;
-}
-
-/** Read `hdb.pid` (O_NOFOLLOW) into a `PidfileRead`. */
-function readPidfile(dataDir: string): PidfileRead {
-  const r = readFileNoFollow(join(dataDir, "hdb.pid"));
-  if (r.kind !== "present") return r;
-  const n = Number(r.content.trim());
-  if (!Number.isInteger(n) || n <= 0) {
-    return { kind: "unreadable", reason: `${join(dataDir, "hdb.pid")} does not contain a valid pid` };
-  }
-  return { kind: "present", pid: n };
 }
 
 /** Read `flair-daemon.json` (O_NOFOLLOW) into a `SidecarRead`. */

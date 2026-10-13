@@ -13,7 +13,8 @@
  *     local delete paths) asks the candidate ops endpoint for its configuration
  *     and requires it to record that ops port and an HTTP port bound on
  *     loopback or on all interfaces, and both endpoints to report the same
- *     running Harper process id;
+ *     running Harper process id (the ops side's id from its `system_information`,
+ *     or the alive pid its PID file names when that answer carries none);
  *   - `decideDoctorRosterPair` runs only when that configured HTTP port is the
  *     probed one — no Instance row is needed, so a fresh install runs;
  *   - `decideDoctorRosterIdentity`, applied after that, refuses only when both
@@ -31,8 +32,9 @@
  * `proveLocalInstancePair` is exercised against two local servers on
  * OS-assigned loopback ports: an ops endpoint that answers `get_configuration`
  * and `system_information`, and an HTTP endpoint that answers `/HealthDetail`.
- * The real two-process seam, including that a refusal reports BOTH checks NOT
- * RUN and reads no Agent row, is
+ * The PID-file fallback reads a REAL `<rootPath>/hdb.pid`. The real two-process
+ * seam, including that a refusal reports BOTH checks NOT RUN and reads no Agent
+ * row, is
  * test/integration/doctor-roster-probed-instance-2483.test.ts.
  *
  * The file-reading cases use a NON-default data directory, so neither the
@@ -165,6 +167,8 @@ let server: Server;
 let serverPort: number;
 let httpServer: Server;
 let httpPort: number;
+/** A real data directory holding a real `hdb.pid` for the PID-file fallback. */
+let pairRoot: string;
 
 function json(res: import("node:http").ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { "Content-Type": "application/json" });
@@ -207,11 +211,21 @@ beforeEach(() => {
   httpPid = 1001;
   httpStatus = 200;
   operations = [];
+  pairRoot = mkdtempSync(join(tmpdir(), "flair-2483-pair-root-"));
+});
+
+afterEach(() => {
+  rmSync(pairRoot, { recursive: true, force: true });
 });
 
 /** Answer `get_configuration` with this configuration. */
 function configure(config: unknown): void {
   answer = { status: 200, body: JSON.stringify(config) };
+}
+
+/** Write a REAL `<dir>/hdb.pid` naming `pid`. */
+function writeHdbPid(dir: string, pid: number): void {
+  writeFileSync(join(dir, "hdb.pid"), `${pid}\n`);
 }
 
 const AUTH = "Basic " + Buffer.from("admin:not-a-secret").toString("base64");
@@ -253,13 +267,13 @@ describe("proveLocalInstancePair — the ops endpoint's configuration must pair 
     });
   });
 
-  test("an ops endpoint that reports no process id is unproven", async () => {
+  test("an ops endpoint that reports no process id and whose PID file names none is unproven", async () => {
     configure({ http: { port: `127.0.0.1:${httpPort}` }, operationsApi: { network: { port: serverPort } } });
     opsPid = null;
     expect(await proveLocalInstancePair(serverPort, AUTH)).toEqual({
       kind: "unproven",
       status: null,
-      detail: "its operations API reports no running Harper process id",
+      detail: "its operations API reports no running Harper process id and its PID file names none",
     });
   });
 
@@ -334,6 +348,59 @@ describe("proveLocalInstancePair — the ops endpoint's configuration must pair 
       kind: "unproven",
       status: null,
       detail: "the configuration request got no answer",
+    });
+  });
+});
+
+describe("proveLocalInstancePair — the ops side's process id comes from system_information, or from the instance's PID file when that carries none", () => {
+  test("system_information carries no pid but the instance's PID file names the live process the HTTP port reports: proven", async () => {
+    configure({ http: { port: `127.0.0.1:${httpPort}` }, operationsApi: { network: { port: serverPort } }, rootPath: pairRoot });
+    opsPid = null;
+    httpPid = process.pid;
+    writeHdbPid(pairRoot, process.pid);
+    expect(await proveLocalInstancePair(serverPort, AUTH)).toEqual({ kind: "proven", httpPort });
+  });
+
+  test("system_information reports a pid and the PID file names the same process: proven", async () => {
+    configure({ http: { port: `127.0.0.1:${httpPort}` }, operationsApi: { network: { port: serverPort } }, rootPath: pairRoot });
+    opsPid = process.pid;
+    httpPid = process.pid;
+    writeHdbPid(pairRoot, process.pid);
+    expect(await proveLocalInstancePair(serverPort, AUTH)).toEqual({ kind: "proven", httpPort });
+  });
+
+  test("system_information carries no pid and the PID file names a process that is not alive: unproven", async () => {
+    configure({ http: { port: `127.0.0.1:${httpPort}` }, operationsApi: { network: { port: serverPort } }, rootPath: pairRoot });
+    opsPid = null;
+    httpPid = 4242;
+    writeHdbPid(pairRoot, 4242);
+    const proof = await proveLocalInstancePair(serverPort, AUTH, { isPidAlive: () => false });
+    expect(proof).toEqual({
+      kind: "unproven",
+      status: null,
+      detail: `the PID file ${join(pairRoot, "hdb.pid")} names process 4242, which is not alive`,
+    });
+  });
+
+  test("the ops API and the PID file name different processes: unproven", async () => {
+    configure({ http: { port: `127.0.0.1:${httpPort}` }, operationsApi: { network: { port: serverPort } }, rootPath: pairRoot });
+    opsPid = 2002;
+    httpPid = process.pid;
+    writeHdbPid(pairRoot, process.pid);
+    expect(await proveLocalInstancePair(serverPort, AUTH)).toEqual({
+      kind: "unproven",
+      status: null,
+      detail: `its operations API reports Harper process 2002 but its PID file names process ${process.pid}, so they disagree`,
+    });
+  });
+
+  test("system_information carries no pid and no PID file exists under the configured root: unproven", async () => {
+    configure({ http: { port: `127.0.0.1:${httpPort}` }, operationsApi: { network: { port: serverPort } }, rootPath: pairRoot });
+    opsPid = null;
+    expect(await proveLocalInstancePair(serverPort, AUTH)).toEqual({
+      kind: "unproven",
+      status: null,
+      detail: "its operations API reports no running Harper process id and its PID file names none",
     });
   });
 });

@@ -8,14 +8,13 @@
  * roster from instance B, so it reported B's rows as A's. src/cli.ts's
  * `verifyDoctorRosterInstance` picks the ops endpoint with the pairing rule
  * `flair agent stamp-home` uses (flair#2474/#2491), then, before either read,
- * asks that ops endpoint for its configuration and the live process ids the
- * two endpoints report (src/lib/local-instance-pair.ts, the check the local
- * delete paths use): it must record that ops port and the HTTP port doctor
- * actually probed, bound on loopback or on all interfaces, and the two
- * endpoints must report the same running Harper process id. After that check
- * passes, two different Instance ids on the two endpoints also refuse. A
- * refusal, or a pair check that cannot complete, reports both checks NOT RUN
- * (counted as an issue) and reads no Agent row.
+ * asks that ops endpoint for its configuration and the live process id serving
+ * it (src/lib/local-instance-pair.ts, the check the local delete paths use): it
+ * must record that ops port and the HTTP port doctor actually probed, bound on
+ * loopback or on all interfaces, and be the same running Harper process. After
+ * that check passes, two different Instance ids on the two endpoints also
+ * refuse. A refusal, or a pair check that cannot complete, reports both checks
+ * NOT RUN (counted as an issue) and reads no Agent row.
  *
  * The first block runs with NO Instance row on either instance, as on a fresh
  * install: the default paired case must run, and every refusal there comes
