@@ -79,6 +79,24 @@ so a write naming neither is stamped `private` and is owner-only. An explicit
 `visibility` on the write always overrides the rule, and the response to a
 create names the value the record actually landed on.
 
+### Record Ownership on Writes
+
+Every non-admin write is owner-checked for each record it writes. For a
+verified non-admin agent:
+
+- A PUT, PATCH, DELETE or POST that would write a record owned by another
+  principal is refused with `403 forbidden: cannot modify <Table> owned by
+  another principal`. The record checked is the one the request resolves to,
+  however its address is written, and its owner is read from the stored
+  record, never from the request body.
+- A PUT, PATCH or DELETE addressed to a table's collection rather than to one
+  record is refused with `403 forbidden: a non-admin write to <Table> must
+  address one record by its id`. Write records one at a time, by id.
+
+A refused request writes nothing, and the refusal carries no record content.
+Creating a record with POST to a collection is unchanged, as are writes by
+administrators and by Flair's own server code.
+
 ### Cross-Agent Access (within an org)
 
 Within an org, an agent reads every non-private memory directly — no grant

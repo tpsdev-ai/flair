@@ -649,6 +649,11 @@ server.http(async (request: any, nextLayer: any) => {
   // resource's own no-forge attribution. That keeps this incapable of breaking a
   // create, a self-write, or a legitimate cross-agent field like MemoryGrant's
   // granteeId — it can only narrow mutation of another agent's stored row.
+  //
+  // This is the early refusal for the canonical `/<Table>/<id>` address. The
+  // same rule, decided on the record Harper resolves each write to and covering
+  // writes addressed to a table's collection, is applied to every write that
+  // reaches an owner-scoped table by resources/owner-scoped-write-policy.ts.
   if (isMutation && !request.tpsAgentIsAdmin) {
     const guarded = resolveGuardedRecord(url.pathname);
     if (guarded) {

@@ -211,10 +211,13 @@ describe("flair#2199 — Memory resource writes and feed POST refuse an id endin
     expect((await after.json()).id).toBe(DEL_BASE);
   }, 30_000);
 
-  it("non-owner DELETE of a `.content` address → 400 memory_id_content_suffix and the base record is not deleted", async () => {
+  it("non-owner DELETE of a `.content` address → 403 owner refusal and the base record is not deleted", async () => {
+    // The address resolves to a record the caller does not own, so the shared
+    // owner-scoped write rule (resources/owner-scoped-write-policy.ts) refuses
+    // it before the Memory resource's own id rule runs.
     const res = await authSend(harper, reader, "DELETE", `/Memory/${DEL_OTHER_BASE}.content`);
-    expect(res.status).toBe(400);
-    expect((await res.json()).error).toBe("memory_id_content_suffix");
+    expect(res.status).toBe(403);
+    expect((await res.json()).error).toBe("forbidden: cannot modify Memory owned by another principal");
     const after = await authSend(harper, author, "GET", `/Memory/${DEL_OTHER_BASE}`);
     expect(after.status).toBe(200);
     const row = await after.json();

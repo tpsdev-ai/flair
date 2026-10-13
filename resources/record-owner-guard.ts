@@ -138,11 +138,11 @@ export function isMutatingMethod(method: string): boolean {
  * Resolve a request path to the guarded table and record id it addresses, or
  * null when the path is not a guarded single-record route.
  *
- * Matches `/<Table>/<id>` ONLY. A collection path (`/<Table>`) addresses no
- * existing record, so there is nothing to own and nothing to check — that is the
- * "creation is untouched" property, expressed as a parse rather than a special
- * case. The table segment is matched EXACTLY so `/SoulFeed/x` can never be read
- * as a `Soul` route.
+ * Matches `/<Table>/<id>` ONLY: this is the middleware's early check for a
+ * write's canonical single-record address. The complete rule — applied to the
+ * record Harper resolves each write to, and to writes addressed to a collection
+ * — is resources/owner-scoped-write-policy.ts. The table segment is matched
+ * EXACTLY so `/SoulFeed/x` can never be read as a `Soul` route.
  */
 export function resolveGuardedRecord(pathname: string): { table: string; ownerField: string; id: string } | null {
   const parts = pathname.split("/").filter(Boolean);
@@ -191,14 +191,28 @@ export function isForbiddenOwnerMutation(
  * principal: 403 with a body that names only the table.
  *
  * One constructor for every place the rule is enforced — the auth middleware
- * for `/<Table>/<id>` routes, and resources/relay-ops.ts for a Message POST to
- * the collection that reuses an existing message id — so a refused caller gets
- * the same response on either route, and it carries nothing from the stored
- * row.
+ * for `/<Table>/<id>` routes, resources/owner-scoped-write-policy.ts for every
+ * write that reaches an owner-scoped table, and resources/relay-ops.ts for a
+ * Message POST to the collection that reuses an existing message id — so a
+ * refused caller gets the same response on any route, and it carries nothing
+ * from the stored row.
  */
 export function ownerMutationRefusal(table: string): Response {
   return new Response(JSON.stringify({
     error: `forbidden: cannot modify ${table} owned by another principal`,
+  }), { status: 403, headers: { "Content-Type": "application/json" } });
+}
+
+/**
+ * The refusal for a non-admin PUT, PATCH or DELETE that addresses an
+ * owner-scoped table's collection rather than one record: 403 with a body that
+ * names only the table. Such a request does not name the records it would
+ * write, so their owners cannot be checked before the write; a non-admin caller
+ * writes one record at a time, by its id (resources/owner-scoped-write-policy.ts).
+ */
+export function collectionWriteRefusal(table: string): Response {
+  return new Response(JSON.stringify({
+    error: `forbidden: a non-admin write to ${table} must address one record by its id`,
   }), { status: 403, headers: { "Content-Type": "application/json" } });
 }
 
