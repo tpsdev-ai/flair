@@ -1421,13 +1421,35 @@ export default {
               }
             }
             const wasDeduplicated = (result as any).deduplicated === true;
+            const matchedId = (result as any).matchedId;
+            // flair#2537 — a write the server did not redact gets the reply it
+            // always had. With a redaction count, the reply previews only the
+            // result's `content`, which the SDK takes from the write response's
+            // `stored` (the post-redaction text that write committed), so the
+            // new row is never read back to build the preview (flair#2467). The
+            // predecessor read above, made only when `supersedes` is given,
+            // does not feed the preview. A result marked `contentWithheld`, or
+            // with no `content` string, gets no preview text: the reply states
+            // the count and that the stored text was not returned, and never
+            // shows the input.
+            const redactedValues = typeof result.redactedValues === "number" && result.redactedValues > 0 ? result.redactedValues : 0;
+            const stored: string | null = result.contentWithheld !== true && typeof result.content === "string" ? result.content : null;
+            let replyText: string;
+            if (redactedValues > 0) {
+              replyText = [
+                `Memory stored (id: ${memId})${wasDeduplicated ? ` — similar to existing memory id=${matchedId}` : ""}`,
+                stored === null
+                  ? `Preview: none. The server redacted ${redactedValues} value(s) in this write; the stored text was not returned.`
+                  : `Preview: ${stored.length > 200 ? stored.slice(0, 200) + "..." : stored}`,
+                `Redacted ${redactedValues} credential-shaped value(s) before storing.`,
+              ].join("\n");
+            } else {
+              replyText = wasDeduplicated
+                ? `Memory stored (id: ${memId}) — similar to existing memory id=${matchedId}: ${result.content?.slice(0, 200)}`
+                : `Memory stored (id: ${memId})`;
+            }
             return {
-              content: [{
-                type: "text",
-                text: wasDeduplicated
-                  ? `Memory stored (id: ${memId}) — similar to existing memory id=${(result as any).matchedId}: ${result.content?.slice(0, 200)}`
-                  : `Memory stored (id: ${memId})`,
-              }],
+              content: [{ type: "text", text: replyText }],
               // D14: machine-readable and honest. `written` is true only after the
               // PRIMARY write succeeded; a partial success (memory written,
               // supersede-close failed) is reported as exactly that via `errors`.
@@ -1437,7 +1459,9 @@ export default {
                 supersedeClosed,
                 errors,
                 deduplicated: wasDeduplicated,
-                ...(wasDeduplicated ? { matchedId: (result as any).matchedId } : {}),
+                ...(redactedValues > 0 ? { redactedValues } : {}),
+                ...(redactedValues > 0 && stored === null ? { contentWithheld: true } : {}),
+                ...(wasDeduplicated ? { matchedId } : {}),
               },
             };
           } catch (err: any) {

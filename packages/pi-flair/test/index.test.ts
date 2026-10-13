@@ -328,6 +328,102 @@ describe("memory_store response shape — real extension (flair#1384)", () => {
   });
 });
 
+// ─── Redacted write reply (flair#2537) ────────────────────────────────────────
+//
+// A redacted write's response carries `stored`, the post-redaction text that
+// write committed; the SDK builds the result from it (flair#2467). The reply
+// previews that text and never reads the new row back. Two stubs stand in
+// here: `FlairClient.prototype.request` is replaced (a write returns the
+// canned response; a GET returns a later write's text, so a preview built
+// from a read would show it), and the extension registers on a mock Pi API.
+// The SDK's write and response mapping and the extension's tool code run
+// unchanged. The real client and server evidence is the real-Harper test,
+// test/integration/write-reply-redaction-2537.test.ts.
+
+const TOKEN_REDACT = `ghp_${"a".repeat(24)}`;
+const ORIGINAL_REDACT = `deploy note: use token ${TOKEN_REDACT} for the CI job`;
+const STORED_REDACT = "deploy note: use token [redacted] for the CI job";
+const LATER_WRITE = "a later write to the same row";
+
+async function executeMemoryStoreSeq(
+  write: Record<string, unknown>,
+  params: { content: string; durability?: string; tags?: string[] },
+) {
+  let readCalls = 0;
+  (FlairClient.prototype as any).request = async (method: string, path: string) => {
+    if (method === "GET") {
+      readCalls += 1;
+      return { id: path.split("/").pop(), content: LATER_WRITE };
+    }
+    return write;
+  };
+  const pi = createMockPi();
+  registerPiFlair(pi as any);
+  const tool = pi._tools.get("memory_store");
+  if (!tool) throw new Error("memory_store was not registered");
+  return { result: await tool.execute("tool-call-1", params), readCalls: () => readCalls };
+}
+
+describe("memory_store redacted reply — real extension (flair#2537)", () => {
+  const originalRequest = FlairClient.prototype.request;
+  const originalAgentId = process.env.FLAIR_AGENT_ID;
+
+  beforeEach(() => {
+    process.env.FLAIR_AGENT_ID = "pi-test";
+  });
+
+  afterEach(() => {
+    FlairClient.prototype.request = originalRequest;
+    if (originalAgentId === undefined) {
+      delete process.env.FLAIR_AGENT_ID;
+    } else {
+      process.env.FLAIR_AGENT_ID = originalAgentId;
+    }
+  });
+
+  test("a redacted write previews the stored text from the write response and states the count, with no read", async () => {
+    const { result, readCalls } = await executeMemoryStoreSeq(
+      { id: "pi-2537-a", written: true, redactedValues: 1, stored: { content: STORED_REDACT } },
+      { content: ORIGINAL_REDACT },
+    );
+    const text = result.content[0].text;
+    expect(text).toContain(`Preview: ${STORED_REDACT}`);
+    expect(text).toContain(`Size: ${STORED_REDACT.length} chars`);
+    expect(text).toContain("Redacted 1 credential-shaped value(s) before storing.");
+    expect(text).not.toContain(TOKEN_REDACT);
+    expect(text).not.toContain(LATER_WRITE);
+    expect(result.details.redactedValues).toBe(1);
+    expect(result.details.contentWithheld).toBeUndefined();
+    expect(readCalls()).toBe(0);
+  });
+
+  test("a count without stored text shows no preview, states the count and sets contentWithheld", async () => {
+    const { result, readCalls } = await executeMemoryStoreSeq(
+      { id: "pi-2537-c", written: true, redactedValues: 1 },
+      { content: ORIGINAL_REDACT },
+    );
+    const text = result.content[0].text;
+    expect(text).toContain("Preview: none. The server redacted 1 value(s) in this write; the stored text was not returned.");
+    expect(text).not.toContain("Size:");
+    expect(text).not.toContain(TOKEN_REDACT);
+    expect(result.details.contentWithheld).toBe(true);
+    expect(result.details.redactedValues).toBe(1);
+    expect(readCalls()).toBe(0);
+  });
+
+  test("a write the server did not redact gets the reply it always had", async () => {
+    const { result, readCalls } = await executeMemoryStoreSeq(
+      { id: "pi-2537-b", written: true },
+      { content: "plain note" },
+    );
+    expect(result.content[0].text).toBe(
+      ["Memory stored (id: pi-2537-b)", "Preview: plain note", "Size: 10 chars", "Tags: none", "Durability: standard"].join("\n"),
+    );
+    expect(result.details).toEqual({ deduplicated: false, id: "pi-2537-b", written: true });
+    expect(readCalls()).toBe(0);
+  });
+});
+
 // ─── Search Result Formatting Tests ───────────────────────────────────────────
 
 describe("Search Result Formatting", () => {
