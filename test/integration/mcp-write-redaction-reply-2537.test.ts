@@ -12,8 +12,8 @@
 // The load-bearing assertions:
 //   1. a redacted write's reply carries the STORED (redacted) content and the
 //      count — and never the caller's token;
-//   2. a write the server did not redact is unchanged (no count, no content echo)
-//      and makes no extra request.
+//   2. a write the server did not redact is unchanged (no count, no content
+//      echo).
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { mkdtemp, rm, mkdir, cp, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";

@@ -231,7 +231,8 @@ async function withStoredWriteContent(Cls: any, agent: ResolvedAgent, response: 
     ? (response as any).redactedValues
     : 0;
   const id = response && typeof response === "object" && typeof (response as any).id === "string" ? (response as any).id : undefined;
-  if (redactedValues <= 0 || id === undefined) return response;
+  if (redactedValues <= 0) return response;
+  if (id === undefined) return { ...response, contentUnavailable: true };
   const stored = await unwrap(await Cls.get(id, delegationContext(agent)));
   if (stored && typeof stored === "object" && (stored as any).error == null && typeof (stored as any).content === "string") {
     return { ...response, content: (stored as any).content };
