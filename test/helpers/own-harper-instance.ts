@@ -20,8 +20,10 @@ function isInside(parent: string, child: string): boolean {
 /** Refuse any Harper the caller did not spawn itself. Runs before the first
  *  Memory row insert: an external instance (HARPER_HTTP_URL), one without a
  *  live spawned process, and one whose install dir is not a temporary dir the
- *  caller owns are refused, as are a non-loopback or production port and HTTP
- *  and operations sharing a port. */
+ *  caller owns are refused, as are a host other than 127.0.0.1, a missing or
+ *  invalid port, a port on a numeric denylist of two known ports (9925 and
+ *  9926), and HTTP and operations sharing a port. The denylist does not
+ *  identify every production port. */
 export function assertOwnInstance(h: HarperInstance): void {
   if (h.external) {
     throw new Error(`refusing an external Harper (${h.httpURL}): this test inserts Memory rows and runs only against an instance it spawned`);
@@ -42,7 +44,7 @@ export function assertOwnInstance(h: HarperInstance): void {
   for (const u of [http, ops]) {
     const port = Number(u.port);
     if (u.hostname !== "127.0.0.1" || !(port > 0) || port === 9925 || port === 9926) {
-      throw new Error(`refusing ${u.href}: not a loopback, non-production port`);
+      throw new Error(`refusing ${u.href}: the host is not 127.0.0.1, or the port is invalid or on the denylist (9925, 9926)`);
     }
   }
   if (http.port === ops.port) throw new Error(`refusing ${h.httpURL}: HTTP and operations share a port`);

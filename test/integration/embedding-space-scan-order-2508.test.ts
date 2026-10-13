@@ -73,8 +73,9 @@ async function memoryRowIds(h: HarperInstance): Promise<string[]> {
   });
   const text = await res.text();
   expect(res.status, `sql returned ${res.status}: ${text.slice(0, 200)}`).toBe(200);
-  const rows = JSON.parse(text);
-  return (Array.isArray(rows) ? rows : []).map((r: { id: string }) => r.id).sort();
+  const rows: unknown = JSON.parse(text);
+  if (!Array.isArray(rows)) throw new Error(`sql returned a non-array body: ${text.slice(0, 200)}`);
+  return rows.map((r: { id: string }) => r.id).sort();
 }
 
 /** The guard's mixed-space report from a recall that consults it, or undefined
@@ -139,7 +140,7 @@ describe("the own-instance check against the real external-mode helper (flair#25
       fetch(req) {
         const path = new URL(req.url).pathname;
         requests.push({ method: req.method, path });
-        return path === "/health" ? new Response("ok") : new Response("not found", { status: 404 });
+        return req.method === "GET" && path === "/health" ? new Response("ok") : new Response("not found", { status: 404 });
       },
     });
     try {
