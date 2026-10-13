@@ -16,6 +16,7 @@ import { deletePointerRowViaTable } from "./host-pointer-adapter.js";
 import { stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./memory-declared-attributes.js";
 import { buildProvenance } from "./provenance.js";
 import { redactMemoryWrite } from "./memory-redaction.js";
+import { feedResponseFields, suppliedMemoryFields } from "./memory-write-response.js";
 import { applyFederationBookkeeping, applyOriginatorInstanceId, resolveStoredRow } from "./originator-instance.js";
 import { resolveReadScope } from "./memory-read-scope.js";
 import { reservedSeedFeedWriteDenial, reservedSeedSubjectDenial, writeTargetIds } from "./seed-reservation.js";
@@ -40,6 +41,11 @@ export class FeedMemories extends Resource {
     if (auth.kind === "anonymous") {
       return UNAUTH();
     }
+
+    // flair#2561: the fields this request supplies, read from the body as sent,
+    // before anything is merged into it; the response reports only these and
+    // the fields the server decides for the row (feedWriteResponse).
+    const supplied = suppliedMemoryFields(content);
 
     const seedDenial = reservedSeedFeedWriteDenial("Memory", [...writeTargetIds(this, content), content?.supersedes]);
     if (seedDenial) return seedDenial;
@@ -250,7 +256,7 @@ export class FeedMemories extends Resource {
       const written = captured.row;
       if (captured.closed) noteMemoryDelete(String(captured.closed.id));
       if (written) noteMemoryUpsert(written);
-      return withRedactedValues(written ?? { id: successorId, written: true, durability: "persistent" }, redactedValues);
+      return feedWriteResponse(written ?? { id: successorId, written: true, durability: "persistent" }, redactedValues, supplied);
     }
 
     const now = new Date().toISOString();
@@ -259,9 +265,9 @@ export class FeedMemories extends Resource {
     const existing = await findExistingMemoryByContentHash((databases as any).flair.Memory.search(), agentId, contentHash);
     if (existing) {
       if (existing.durability === "ephemeral" && existing.expiresAt == null) {
-        return withRedactedValues(await repairDeduplicatedExpiry(ctx, existing), redactedValues);
+        return feedWriteResponse(await repairDeduplicatedExpiry(ctx, existing), redactedValues, supplied);
       }
-      return withRedactedValues(existing, redactedValues);
+      return feedWriteResponse(existing, redactedValues, supplied);
     }
 
     const record = {
@@ -372,7 +378,7 @@ export class FeedMemories extends Resource {
     const written = outcome.write;
     // flair#1357 — raw-table write: hook it explicitly (see bm25-index-service).
     noteMemoryUpsert(written);
-    return withRedactedValues(written, redactedValues);
+    return feedWriteResponse(written, redactedValues, supplied);
   }
 
   // Subscription admission: verified agents, admins and trusted internal
@@ -591,13 +597,17 @@ function isDedupMatch(row: any, match: any): boolean {
 }
 
 /**
- * flair#2407: a response-only copy of a feed result carrying the redaction
- * count. The stored row is not modified. A Response, a non-object result or a
- * zero count is returned unchanged.
+ * The response to a feed write: a response-only copy of the row the feed
+ * stored or matched; the stored row is not modified. flair#2561: the copy
+ * holds the fields the request supplied, each as stored, and the fields the
+ * server decides for the row (feedResponseFields), and never an embedding
+ * field. flair#2407: it carries the redaction count when that count is above
+ * zero. A Response or a non-object result is returned unchanged.
  */
-function withRedactedValues(result: any, redactedValues: number): any {
-  if (redactedValues <= 0 || result instanceof Response || !result || typeof result !== "object") return result;
-  return { ...result, redactedValues };
+function feedWriteResponse(result: any, redactedValues: number, supplied: ReadonlySet<string>): any {
+  if (result instanceof Response || !result || typeof result !== "object") return result;
+  const response = feedResponseFields(result, supplied) as Record<string, unknown>;
+  return redactedValues > 0 ? { ...response, redactedValues } : response;
 }
 
 /**

@@ -199,7 +199,8 @@ mock.module("harper", () => ({
 const { Memory } = await import("../../resources/Memory.ts");
 const { FeedMemories } = await import("../../resources/MemoryFeed.ts");
 const { computeContentHash } = await import("../../resources/memory-feed-lib.ts");
-const { isOperatorSeedPut, redactMemoryWrite } = await import("../../resources/memory-redaction.ts");
+const { isOperatorSeedPut, redactMemoryWrite, storedMemoryText, suppliedMemoryTextFields } = await import("../../resources/memory-redaction.ts");
+const { feedResponseFields, suppliedMemoryFields, withoutEmbeddingFields } = await import("../../resources/memory-write-response.ts");
 const { SEED_SKILL_ROW_ID } = await import("../../resources/seed-ids.ts");
 const { redactSecrets, redactSecretsWithCount } = await import("../../packages/flair-mcp/src/secret-redaction.ts");
 
@@ -454,8 +455,108 @@ describe("flair#2407 — a deduplicated feed write reports the count in its resp
 
     const { redactedValues, ...rest } = second;
     expect(redactedValues).toBe(1);
-    expect(rest).toEqual(memoryStore.get(first.id));
+    // flair#2561: the stored row less contentHash, which the request did not supply.
+    const { contentHash, ...reported } = memoryStore.get(first.id);
+    expect(typeof contentHash).toBe("string");
+    expect(rest).toEqual(reported);
     expect(memoryStore.size).toBe(1);
     expect("redactedValues" in memoryStore.get(first.id)).toBe(false);
+  });
+});
+
+describe("flair#2561 — `stored` and the feed response report only the text fields the request supplied", () => {
+  it("suppliedMemoryTextFields names the text fields that hold a string in the request body", () => {
+    expect(suppliedMemoryTextFields({ content: "c", summary: null, trigger: 42, tags: ["skill"] })).toEqual(["content"]);
+    expect(suppliedMemoryTextFields({ summary: "s", trigger: "" })).toEqual(["summary", "trigger"]);
+    expect(suppliedMemoryTextFields({ tags: ["skill"], supersedes: "x" })).toEqual([]);
+    expect(suppliedMemoryTextFields(null)).toEqual([]);
+    expect(suppliedMemoryTextFields(["content"])).toEqual([]);
+  });
+
+  it("storedMemoryText copies only the supplied fields from the row, as stored", () => {
+    const row = { content: "row content", summary: `row summary ${REDACTED}`, trigger: "row trigger", tags: ["skill"] };
+    expect(storedMemoryText(row, ["summary"])).toEqual({ summary: `row summary ${REDACTED}` });
+    expect(storedMemoryText(row, ["content", "summary", "trigger"])).toEqual({ content: "row content", summary: `row summary ${REDACTED}`, trigger: "row trigger" });
+    expect(storedMemoryText({ content: "only content" }, ["content", "trigger"])).toEqual({ content: "only content" });
+    expect(storedMemoryText(row, [])).toEqual({});
+  });
+
+  it("suppliedMemoryFields names the request body's keys that hold a value", () => {
+    expect([...suppliedMemoryFields({ content: "c", summary: null, trigger: undefined, tags: ["skill"], metadata: "" })]).toEqual(["content", "tags", "metadata"]);
+    expect([...suppliedMemoryFields(null)]).toEqual([]);
+    expect([...suppliedMemoryFields(["content"])]).toEqual([]);
+  });
+
+  it("feedResponseFields keeps the write fields and the supplied fields, never an embedding field", () => {
+    const row = {
+      id: "r1", agentId: "a", durability: "persistent", visibility: "shared", createdAt: "t0", updatedAt: "t1", supersedes: "r0",
+      content: "c", summary: "s", trigger: "t", tags: ["skill"], metadata: "{}", subject: "subj", contentHash: "h",
+      embedding: [1, 0], embeddingModel: "m", _safetyFlags: [],
+    };
+    expect(feedResponseFields(row, new Set(["summary", "tags", "embedding", "embeddingModel"]))).toEqual({
+      id: "r1", agentId: "a", durability: "persistent", visibility: "shared", createdAt: "t0", updatedAt: "t1", supersedes: "r0",
+      summary: "s", tags: ["skill"],
+    });
+    expect(row.content).toBe("c");
+    const response = new Response("x");
+    expect(feedResponseFields(response, new Set())).toBe(response);
+    expect(feedResponseFields(undefined, new Set())).toBeUndefined();
+  });
+
+  it("withoutEmbeddingFields returns a copy without embedding and embeddingModel", () => {
+    const row = { id: "r1", content: "c", embedding: [1], embeddingModel: "m" };
+    expect(withoutEmbeddingFields(row) as Record<string, unknown>).toEqual({ id: "r1", content: "c" });
+    expect(row.embedding).toEqual([1]);
+    expect(withoutEmbeddingFields(undefined)).toBeUndefined();
+  });
+
+  it("a Memory.put response carries no embedding field when the stored row has one", async () => {
+    const m = makeMemory(agentCtx(AGENT));
+    const plain: any = await m.put({ id: "mem-2561-put", agentId: AGENT, content: "a note to embed" });
+    const redacted: any = await m.put({ id: "mem-2561-put", agentId: AGENT, content: `a note with ${GITHUB_TOKEN}` });
+    expect(memoryStore.get("mem-2561-put").embedding).toEqual(FAKE_EMBEDDING);
+    for (const res of [plain, redacted]) {
+      expect("embedding" in res || "embeddingModel" in res).toBe(false);
+    }
+    expect(redacted.redactedValues).toBe(1);
+  });
+
+  it("Memory.patch of one field over a row holding all three reports only that field", async () => {
+    memoryStore.set("mem-2561", { id: "mem-2561", agentId: AGENT, content: "base content", summary: "base summary", trigger: "base trigger", archived: false, createdAt: new Date().toISOString() });
+    const m: any = makeMemory(agentCtx(AGENT));
+    m._targetId = "mem-2561";
+    const res: any = await m.patch({ trigger: `rotate ${GITHUB_TOKEN}` });
+    expect(res.redactedValues).toBe(1);
+    expect(res.stored).toEqual({ trigger: `rotate ${REDACTED}` });
+    expect(memoryStore.get("mem-2561").content).toBe("base content");
+  });
+
+  it("a deduplicated feed write gets back only the fields it supplied and the write fields of the matched row, no embedding", async () => {
+    const f: any = new (FeedMemories as any)();
+    f.getContext = () => ({ request: agentCtx(AGENT) });
+    const content = "a matched feed memory";
+    memoryStore.set("mem-2561-match", {
+      id: "mem-2561-match", agentId: AGENT, content, contentHash: computeContentHash(AGENT, content), durability: "permanent",
+      metadata: JSON.stringify({ name: "n" }), subject: "subj", embedding: FAKE_EMBEDDING, embeddingModel: "mock-embedding-model",
+      archived: false, createdAt: new Date().toISOString(),
+    });
+    const res: any = await f.post({ agentId: AGENT, content, durability: "permanent" });
+    expect(res.id).toBe("mem-2561-match");
+    for (const field of ["metadata", "subject", "embedding", "embeddingModel", "contentHash"]) expect(field in res, field).toBe(false);
+    expect(res.content).toBe(content);
+  });
+
+  it("a deduplicated feed write that supplies only content gets back no summary or trigger of the matched row", async () => {
+    const f: any = new (FeedMemories as any)();
+    f.getContext = () => ({ request: agentCtx(AGENT) });
+    const original = `feed memory ${GITHUB_TOKEN} with a summary`;
+    const first: any = await f.post({ agentId: AGENT, content: original, summary: "first summary", trigger: "first trigger", durability: "permanent" });
+    expect([first.summary, first.trigger]).toEqual(["first summary", "first trigger"]);
+    const second: any = await f.post({ agentId: AGENT, content: original, durability: "permanent" });
+    expect(second.id).toBe(first.id);
+    expect(second.redactedValues).toBe(1);
+    expect(second.content).toBe(`feed memory ${REDACTED} with a summary`);
+    expect("summary" in second || "trigger" in second).toBe(false);
+    expect(memoryStore.get(first.id).summary).toBe("first summary");
   });
 });
