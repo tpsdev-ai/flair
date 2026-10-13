@@ -94,6 +94,33 @@ async function adminUpsert(table: string, records: Record<string, unknown>[]): P
   if (!res.ok) throw new Error(`admin upsert ${table} → HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
 }
 
+/** Every Agent row in this instance's store. Throws rather than answering [] on a failed read. */
+async function allAgents(): Promise<any[]> {
+  return adminSearch("Agent", "id", "*");
+}
+
+async function adminDelete(table: string, ids: string[]): Promise<void> {
+  const res = await fetch(harper.opsURL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: "Basic " + btoa(`${harper.admin.username}:${harper.admin.password}`) },
+    body: JSON.stringify({ operation: "delete", database: "flair", table, ids }),
+  });
+  if (!res.ok) throw new Error(`admin delete ${table} → HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
+}
+
+const byId = (rows: any[]): any[] => [...rows].sort((a, b) => (String(a.id) < String(b.id) ? -1 : String(a.id) > String(b.id) ? 1 : 0));
+
+/** The full stored state a refused call must leave alone: every Credential row for `sub` and the whole Agent roster, all fields. */
+async function storeSnapshot(sub: string): Promise<{ credentials: any[]; agents: any[] }> {
+  return { credentials: byId(await adminSearch("Credential", "idpSubject", sub)), agents: byId(await allAgents()) };
+}
+
+/** Nothing was written: the subject's Credential rows and the Agent roster are deep-equal to the snapshot. */
+function expectStoreUnchanged(before: { credentials: any[]; agents: any[] }, after: { credentials: any[]; agents: any[] }): void {
+  expect(after.credentials, "the subject's Credential rows are unchanged (no row changed, removed, replaced or added)").toEqual(before.credentials);
+  expect(after.agents, "the Agent roster is unchanged (no principal changed or added)").toEqual(before.agents);
+}
+
 beforeAll(async () => {
   appDir = await mkdtemp(join(tmpdir(), "flair-inproc-credstatus-"));
   await cp(FIXTURE, appDir, { recursive: true });
@@ -154,9 +181,9 @@ describe("flair#2503 — the /mcp resolver accepts a Credential only when its st
         createdAt: new Date().toISOString(),
         ...(status === undefined ? {} : { status }),
       }]);
-      const credsBefore = (await adminSearch("Credential", "idpSubject", sub)).length;
-      expect(credsBefore, "fixture control: the mapping row is present").toBe(1);
-      const agentsBefore = (await adminSearch("Agent", "id", AGENT)).length;
+      const before = await storeSnapshot(sub);
+      expect(before.credentials.map((c) => [c.id, c.status ?? null]), "fixture control: the mapping row is present").toEqual([[credId, status ?? null]]);
+      expect(before.agents.map((a) => a.id), "fixture control: the Agent roster answers").toContain(AGENT);
 
       const marker = `cs-marker-${label}-${sfx}`;
       const rpc = await store(sub, marker);
@@ -170,28 +197,14 @@ describe("flair#2503 — the /mcp resolver accepts a Credential only when its st
       expect(rpc.error?.message).toContain(status === undefined ? "no status" : `status "${status}"`);
       expect(rpc.error?.message).toMatch(/re-link/);
 
-      // NOTHING LINKED OR RESOLVED: no tool ran, no memory row, no new mapping,
-      // and the mapping row is exactly as it was.
+      // NOTHING WRITTEN: no tool ran (no memory row), every Credential row for
+      // the subject is deep-equal to the snapshot (all fields, none added,
+      // removed or replaced), and so is the whole Agent roster (JIT did not run).
       expect(await adminSearch("Memory", "content", marker), "the refused call wrote no memory").toEqual([]);
-      const credsAfter = await adminSearch("Credential", "idpSubject", sub);
-      expect(credsAfter.length, "no new credential row was created (JIT did not run)").toBe(credsBefore);
-      expect(credsAfter.find((c) => c.id === credId)?.status ?? null, "the mapping row is unchanged").toBe(status ?? null);
-      expect((await adminSearch("Agent", "id", AGENT)).length).toBe(agentsBefore);
+      expectStoreUnchanged(before, await storeSnapshot(sub));
     }, 60_000);
   }
 });
-
-/** Every Agent row in this instance's store. Throws rather than answering [] on a failed read. */
-async function allAgents(): Promise<any[]> {
-  const res = await fetch(harper.opsURL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: "Basic " + btoa(`${harper.admin.username}:${harper.admin.password}`) },
-    body: JSON.stringify({ operation: "search_by_value", database: "flair", table: "Agent", search_attribute: "id", search_value: "*", get_attributes: ["*"] }),
-  });
-  const body = await res.json().catch(() => null);
-  if (!res.ok || !Array.isArray(body)) throw new Error(`Agent read → HTTP ${res.status}: ${JSON.stringify(body).slice(0, 300)}`);
-  return body;
-}
 
 describe("flair#2503 — any matching Credential row ends resolution; JIT runs only when none matches", () => {
   // A Credential that names no principal. The current schema requires
@@ -224,12 +237,11 @@ describe("flair#2503 — any matching Credential row ends resolution; JIT runs o
         createdAt: new Date().toISOString(),
         ...(status === undefined ? {} : { status }),
       }]);
-      const before = await adminSearch("Credential", "idpSubject", sub);
-      expect(before.map((c) => c.id), "fixture control: real storage holds the row").toEqual([credId]);
-      expect(before[0].principalId, "fixture control: the stored row names no principal").toBe("");
-      expect(before[0].status ?? null, "fixture control: the stored status").toBe(status ?? null);
-      const agentsBefore = await allAgents();
-      expect(agentsBefore.length, "fixture control: the Agent read answers").toBeGreaterThan(0);
+      const before = await storeSnapshot(sub);
+      expect(before.credentials.map((c) => c.id), "fixture control: real storage holds the row").toEqual([credId]);
+      expect(before.credentials[0].principalId, "fixture control: the stored row names no principal").toBe("");
+      expect(before.credentials[0].status ?? null, "fixture control: the stored status").toBe(status ?? null);
+      expect(before.agents.length, "fixture control: the Agent read answers").toBeGreaterThan(0);
 
       const marker = `cs-nop-marker-${label}-${sfx}`;
       const rpc = await store(sub, marker);
@@ -242,12 +254,72 @@ describe("flair#2503 — any matching Credential row ends resolution; JIT runs o
       expect(rpc.error?.message).toMatch(/re-link/);
 
       expect(await adminSearch("Memory", "content", marker), "the refused call wrote no memory").toEqual([]);
-      expect(await adminSearch("Credential", "idpSubject", sub), "no new Credential; the row is unchanged").toEqual(before);
-      const agentsAfter = await allAgents();
-      expect(agentsAfter.filter((a) => a.publicKey === `mcp-oauth:${sub}`), "JIT created no principal").toEqual([]);
-      expect(agentsAfter.length, "no new Agent").toBe(agentsBefore.length);
+      expectStoreUnchanged(before, await storeSnapshot(sub));
     }, 60_000);
   }
+
+  // The pair the rule has to order: one principal-less row and one active,
+  // principal-bearing row for the same subject. The rule's outcome: the
+  // subject resolves through the principal-bearing row, whichever row storage
+  // returns first; the principal-less row is left unchanged, and no Credential
+  // or Agent is created (JIT does not run).
+  test("a principal-less row beside an ACTIVE principal-bearing row: the subject resolves through the principal-bearing row", async () => {
+    const sub = `cs-pair-sub-${sfx}`;
+    const nopId = `cs-pair-nop-${sfx}`;
+    const liveId = `cs-pair-live-${sfx}`;
+    const now = new Date().toISOString();
+    await adminUpsert("Credential", [
+      { id: nopId, kind: "idp", label: "cs", status: "active", idpProvider: "cs-idp", idpSubject: sub, principalId: "", createdAt: now },
+      { id: liveId, kind: "idp", label: "cs", status: "active", idpProvider: "cs-idp", idpSubject: sub, principalId: AGENT, createdAt: now },
+    ]);
+    const before = await storeSnapshot(sub);
+    expect(before.credentials.map((c) => c.id).sort(), "fixture control: both rows are stored").toEqual([liveId, nopId].sort());
+    expect(before.credentials.find((c) => c.id === nopId)?.principalId, "fixture control: one row names no principal").toBe("");
+
+    const rpc = await mcpCall(sub, { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "bootstrap", arguments: {} } });
+    expect(rpc.error, JSON.stringify(rpc)).toBeUndefined();
+    expect(rpc.result?.structuredContent?.agentId, "resolved through the principal-bearing row").toBe(AGENT);
+
+    const after = await storeSnapshot(sub);
+    expect(after.credentials.map((c) => c.id), "no Credential added or removed").toEqual(before.credentials.map((c) => c.id));
+    expect(after.credentials.find((c) => c.id === nopId), "the principal-less row is unchanged").toEqual(before.credentials.find((c) => c.id === nopId));
+    expect(after.agents, "the Agent roster is unchanged (JIT did not run)").toEqual(before.agents);
+  }, 60_000);
+
+  // The no-write comparison must be able to fire: each change a refused call
+  // must not make (a row changed, a credential replaced, an Agent added) is made
+  // here directly, and expectStoreUnchanged must reject it.
+  test("the no-write comparison rejects a changed row, a replaced credential and an added Agent (check control)", async () => {
+    const sub = `cs-probe-sub-${sfx}`;
+    const credId = `cs-probe-cred-${sfx}`;
+    const seed = { id: credId, kind: "idp", label: "cs", idpProvider: "cs-idp", idpSubject: sub, principalId: AGENT, createdAt: new Date().toISOString() };
+    await adminUpsert("Credential", [seed]);
+    const fails = async (change: () => Promise<void>, undo: () => Promise<void>) => {
+      const before = await storeSnapshot(sub);
+      expectStoreUnchanged(before, await storeSnapshot(sub)); // unchanged → passes
+      await change();
+      const after = await storeSnapshot(sub);
+      await undo();
+      expect(() => expectStoreUnchanged(before, after)).toThrow();
+    };
+    // A row changed (a field other than status).
+    await fails(
+      () => adminUpsert("Credential", [{ ...seed, label: "changed" }]),
+      () => adminUpsert("Credential", [seed]),
+    );
+    // A credential replaced: the row removed and another with the same status written.
+    const replacementId = `${credId}-replacement`;
+    await fails(
+      async () => { await adminDelete("Credential", [credId]); await adminUpsert("Credential", [{ ...seed, id: replacementId }]); },
+      async () => { await adminDelete("Credential", [replacementId]); await adminUpsert("Credential", [seed]); },
+    );
+    // An Agent added.
+    const extraAgent = `cs-probe-agent-${sfx}`;
+    await fails(
+      () => adminUpsert("Agent", [{ id: extraAgent, name: extraAgent, kind: "agent", type: "agent", status: "active", publicKey: `mcp-oauth:${sub}`, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }]),
+      () => adminDelete("Agent", [extraAgent]),
+    );
+  }, 60_000);
 
   test("JIT still provisions when no Credential row matches the subject (positive control)", async () => {
     const sub = `cs-jit-sub-${sfx}`;

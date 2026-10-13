@@ -1310,11 +1310,12 @@ export interface IdentityMappingResult {
  *  only when its `status` is exactly "active" and it names a principal
  *  (`credentialMapsPrincipal`), and a row that names no principal
  *  (`credentialPrincipalId` is null) is skipped on read. The resolver refuses a
- *  subject when none of its rows maps a principal, and resolves it through the
- *  active, principal-bearing row this layer writes, even when a principal-less
- *  row remains beside it. The linking layer MUST use the same tests — a
- *  credential the linker considers inactive but the resolver would still serve
- *  is exactly the invisible-duplicate hole #1317 is about. */
+ *  subject when at least one row matches it but none maps a principal (with no
+ *  matching row at all it may JIT-provision), and resolves the subject through
+ *  the active, principal-bearing row this layer writes, even when a
+ *  principal-less row remains beside it. The linking layer MUST use the same
+ *  tests — a credential the linker considers inactive but the resolver would
+ *  still serve is exactly the invisible-duplicate hole #1317 is about. */
 
 /**
  * Map the operator's IdP subject to their principal via `Credential(kind:
