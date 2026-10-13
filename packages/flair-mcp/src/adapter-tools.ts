@@ -69,6 +69,44 @@ const memory_search: StdioHandler = async ({ query, limit }, { flair, heartbeat 
   }
 };
 
+/** The redaction count a write result reports (flair#2407), 0 when absent. */
+function redactedValuesOf(result: unknown): number {
+  const value = (result as { redactedValues?: unknown } | null)?.redactedValues;
+  return typeof value === "number" && value > 0 ? value : 0;
+}
+
+/**
+ * flair#2467 — the text a write reply previews, or null for no preview. The
+ * reply shows the first 120 characters of it, followed by `...` when
+ * truncated (previewOf).
+ *
+ * With a positive redaction count, the text is only the result's `content`:
+ * the post-redaction content the write response returned in `stored` (equal
+ * to the input when the redaction changed only another field). A result
+ * marked `contentWithheld`, or with no `content` string, gets null: the reply
+ * states the redacted-value count and that the stored text was not returned,
+ * and never shows the input. With no count (the server reported no
+ * replacement), the text is the result's `content`, else the input.
+ */
+function storedTextOf(result: unknown, input: string, redactedValues: number): string | null {
+  const written = result as { content?: unknown; contentWithheld?: unknown } | null;
+  if (redactedValues > 0) {
+    return written?.contentWithheld !== true && typeof written?.content === "string" ? written.content : null;
+  }
+  return typeof written?.content === "string" ? written.content : input;
+}
+
+/** The preview line for a counted redaction whose stored text was not
+ *  returned. It states only what the response says: how many values were
+ *  replaced in this write, not which field held them. */
+function withheldPreview(redactedValues: number): string {
+  return `Preview: none. The server redacted ${redactedValues} value(s) in this write; the stored text was not returned.`;
+}
+
+function previewOf(text: string): string {
+  return text.length > 120 ? text.slice(0, 120) + "..." : text;
+}
+
 const memory_store: StdioHandler = async (
   { content, type, durability, tags, visibility, usedMemoryIds },
   { flair, heartbeat },
@@ -87,15 +125,20 @@ const memory_store: StdioHandler = async (
     const deduplicated = (result as any).deduplicated === true;
     const matchedId = (result as any).matchedId as string | undefined;
     const effectiveVisibility = (result as any).visibility as string | undefined;
-    const preview = content.length > 120 ? content.slice(0, 120) + "..." : content;
+    const redactedValues = redactedValuesOf(result);
+    // flair#2467 — with a redaction count, the preview comes only from the
+    // stored content the write response returned (storedTextOf).
+    const stored = storedTextOf(result, content, redactedValues);
     const tagStr = tags && tags.length > 0 ? tags.join(", ") : "none";
     const lines = [
       `Memory stored (id: ${result.id})`,
-      `Preview: ${preview}`,
-      `Size: ${content.length} chars`,
+      ...(stored === null ? [withheldPreview(redactedValues)] : [`Preview: ${previewOf(stored)}`, `Size: ${stored.length} chars`]),
       `Tags: ${tagStr}`,
       `Type: ${type ?? "session"}, Durability: ${durability ?? "standard"}, Visibility: ${effectiveVisibility ?? "(server default)"}`,
     ];
+    if (redactedValues > 0) {
+      lines.push(`Redacted ${redactedValues} credential-shaped value(s) before storing.`);
+    }
     if (deduplicated && matchedId) {
       lines.push(
         "",
@@ -105,7 +148,14 @@ const memory_store: StdioHandler = async (
     }
     return {
       content: [{ type: "text", text: lines.join("\n") }],
-      structuredContent: { deduplicated, id: result.id, written: true, ...(deduplicated ? { matchedId } : {}) },
+      structuredContent: {
+        deduplicated,
+        id: result.id,
+        written: true,
+        ...(redactedValues > 0 ? { redactedValues } : {}),
+        ...(stored === null ? { contentWithheld: true } : {}),
+        ...(deduplicated ? { matchedId } : {}),
+      },
     };
   } catch (err) {
     return errorResult(err, flair.url);
@@ -122,12 +172,28 @@ const memory_update: StdioHandler = async (
       preserveHistory,
       usedMemoryIds: citationIds(usedMemoryIds),
     });
-    const text = preserveHistory
-      ? `Memory updated: new version stored (id: ${result.id}), supersedes ${id}.`
-      : `Memory updated (id: ${id}).`;
+    const redactedValues = redactedValuesOf(result);
+    // flair#2467 — with a redaction count, the preview comes only from the
+    // stored content the write response returned (storedTextOf).
+    const stored = storedTextOf(result, content, redactedValues);
+    const lines = [
+      preserveHistory
+        ? `Memory updated: new version stored (id: ${result.id}), supersedes ${id}.`
+        : `Memory updated (id: ${id}).`,
+      stored === null ? withheldPreview(redactedValues) : `Preview: ${previewOf(stored)}`,
+    ];
+    if (redactedValues > 0) {
+      lines.push(`Redacted ${redactedValues} credential-shaped value(s) before storing.`);
+    }
     return {
-      content: [{ type: "text", text }],
-      structuredContent: { id: result.id, supersedes: preserveHistory ? id : undefined, written: true },
+      content: [{ type: "text", text: lines.join("\n") }],
+      structuredContent: {
+        id: result.id,
+        supersedes: preserveHistory ? id : undefined,
+        written: true,
+        ...(redactedValues > 0 ? { redactedValues } : {}),
+        ...(stored === null ? { contentWithheld: true } : {}),
+      },
     };
   } catch (err) {
     return errorResult(err, flair.url);
