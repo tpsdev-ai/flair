@@ -638,4 +638,31 @@ describe("flair#2465 part 2 — ordinary REST writes bind the vector the server 
       await expectBoundTo(movedRow, NEW_TRIGGER);
     }
   }, 180_000);
+
+  it("a feed skill successor of a row with a hash but no vector carries no hash", async () => {
+    const id = `rpo-feed-skill-novec-${randomUUID()}`;
+    expect((await signedSend(owner, "POST", "/Memory", skillBody(id))).status).toBeLessThan(300);
+    // The POST's auto-embed backfill reads the row as soon as the response is
+    // sent (and skips it: the vector is full-length). Let that read finish, so
+    // it cannot see the cleared vector below and refill it.
+    await new Promise((r) => setTimeout(r, 1_000));
+    // Clear only the vector. The current-space `embeddingModel` stays, so the
+    // stamp migration does not select this row (or its successor) to re-embed.
+    await opsCall({ operation: "update", database: "flair", table: "Memory", records: [{ id, embedding: null }] });
+    const source = await readRow(id);
+    expect(source.embedding ?? null).toBeNull();
+    expect(source.embeddedContentHash).toBe(computeContentHash(owner.id, TRIGGER));
+
+    // Same trigger, new content, no body `embedding`: the text is unchanged, but
+    // there is no stored vector for the hash to describe.
+    const { embeddedContentHash: _omit, ...noHash } = skillBody(id);
+    const res = await signedSend(owner, "POST", "/FeedMemories", { ...noHash, content: "a revised procedure that still fits the trigger" });
+    const body = await res.json();
+    expect(res.status, JSON.stringify(body).slice(0, 200)).toBe(200);
+    expect(body.id).not.toBe(id);
+    const successor = await readRow(body.id);
+    expect(successor.trigger).toBe(TRIGGER);
+    expect(successor.embedding ?? null).toBeNull();
+    expect(successor.embeddedContentHash ?? null, "a hash was carried without a vector").toBeNull();
+  }, 120_000);
 });

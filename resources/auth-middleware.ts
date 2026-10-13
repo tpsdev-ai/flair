@@ -206,9 +206,10 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
             const rowText = row ? skillEmbedText(row) : undefined;
             if (typeof rowText !== "string" || rowText.length === 0) return { skip: true };
             if (row.embedding?.length > 100) return { skip: true };
-            // Only `embedding` and its text binding: an incremental update,
-            // never a full-row put of the row read above (flair#2470, flair#2465).
-            // The hash is of `text`, the text this vector was computed from.
+            // Only `embedding` and its text hash: an incremental update, never a
+            // full-row put of the row read above (flair#2470, flair#2465). The
+            // newly computed hash is of `text`, the text this vector was computed
+            // from (null for an empty owner).
             return { update: { embedding, embeddedContentHash: hashEmbeddedText(row.agentId, text) ?? null } };
           },
           {

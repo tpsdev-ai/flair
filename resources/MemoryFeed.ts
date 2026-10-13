@@ -70,8 +70,9 @@ export class FeedMemories extends Resource {
     if (attr.denied) return attr.denied;
 
     // The feed writes the raw table without the embedding-space latch, so a
-    // body may not supply the embedding stamp. flair#2465: nor its text binding,
-    // `embeddedContentHash`, which only the server records.
+    // body may not supply the embedding stamp. flair#2465: nor
+    // `embeddedContentHash`; a Feed skill successor may only retain the stored
+    // row's value (prepareSkillBody).
     if (content?.embedding !== undefined || content?.embeddingModel !== undefined || content?.embeddedContentHash !== undefined) {
       return Response.json({
         error: "feed_embedding_not_writable",

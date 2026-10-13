@@ -1712,8 +1712,8 @@ export class Memory extends (databases as any).flair.Memory {
     // this a duplicate of something else" situation — bypass the gate for it
     // (this also gives memory_update's preserveHistory mode dedup-bypass for
     // free, without a separate flag). NEVER suppresses the write either way.
-    // flair#2465: did the caller supply a vector? The server records an
-    // embedded-text hash only for a vector it computes.
+    // flair#2465: did the caller supply a vector? A caller-supplied vector gets
+    // no newly computed hash.
     const embeddingSupplied = Array.isArray(content.embedding) && content.embedding.length > 0;
     let dedupMatch: DedupMatch | null = null;
     if (!content.supersedes) {
@@ -1745,10 +1745,10 @@ export class Memory extends (databases as any).flair.Memory {
     // A1-iv item 3: strip every server-stamped field a client body may not set
     // (instanceToken, provenance). They are re-stamped below.
     stripServerStampedFields(content);
-    // flair#2465: a vector the server computed here is bound to the row's
-    // current embedding text. Any other vector (caller-supplied, or a skill's
-    // stored vector carried by prepareSkillBody) is left unbound (null), which
-    // the stamp migration reads as current.
+    // flair#2465: a vector the server computed here gets a newly computed
+    // hash of the text it embedded (null for an empty owner). Any other vector
+    // (caller-supplied, or a skill's stored vector carried by prepareSkillBody)
+    // gets null, which the stamp migration reads as current.
     content.embeddedContentHash = !embeddingSupplied && Array.isArray(content.embedding) && content.embedding.length > 0
       ? (embeddedTextHash(content) ?? null)
       : null;
@@ -1894,9 +1894,10 @@ export class Memory extends (databases as any).flair.Memory {
     // not set instanceToken or provenance; the stored values stand).
     stripServerStampedFields(content);
     // flair#2465: a body `embeddedContentHash` is dropped. A PATCH merges, so
-    // the STORED value stands unless the refresh path below writes the hash of
-    // the text it embeds (or null when the engine returns no vector). A PATCH
-    // that supplies its own vector also leaves the stored value standing.
+    // the STORED value is retained unless the refresh path below writes a newly
+    // computed hash of the text it embeds (null for an empty owner, or when the
+    // engine returns no vector). A PATCH that supplies its own vector retains
+    // the stored hash beside it.
     delete content.embeddedContentHash;
     const denial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
     if (denial) return denial;
@@ -2063,7 +2064,8 @@ export class Memory extends (databases as any).flair.Memory {
       const computed = Array.isArray(vec) && vec.length > 0;
       body.embedding = computed ? vec : null;
       body.embeddingModel = computed ? getModelId() : null;
-      // flair#2465: bind the refreshed vector to the text it was computed from.
+      // flair#2465: the refreshed vector gets a newly computed hash of the text
+      // it embedded (null for an empty owner).
       body.embeddedContentHash = computed ? (embeddedTextHash({ ...(existingForSkill ?? {}), ...body }) ?? null) : null;
       body.updatedAt = new Date().toISOString();
     };
@@ -2426,11 +2428,12 @@ export class Memory extends (databases as any).flair.Memory {
     const pointerInputs = extractPointerInputs(content);
     // A1-iv item 3: strip server-stamped fields (a client may not set them).
     stripServerStampedFields(content);
-    // flair#2465: a vector the server computed here is bound to the row's
-    // current embedding text (see post()). A put that carries a vector without
-    // recomputing it keeps the STORED hash, if any. A stored hash over changed
-    // text no longer matches, so the stamp migration re-queues the row; with no
-    // stored hash the row reads as current and is not re-queued.
+    // flair#2465: a vector the server computed here gets a newly computed hash
+    // (see post()). A put that carries or supplies a vector without recomputing
+    // it RETAINS the stored hash, if any: that hash records the text an earlier
+    // vector was computed from, not necessarily the vector stored now. A
+    // retained hash that differs from the current text's expected hash
+    // re-queues the row in the stamp migration; no stored hash, no re-queue.
     content.embeddedContentHash = !embeddingSupplied && Array.isArray(content.embedding) && content.embedding.length > 0
       ? (embeddedTextHash(content) ?? null)
       : (preExisting?.embeddedContentHash ?? null);

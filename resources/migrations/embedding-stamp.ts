@@ -137,21 +137,22 @@
  * resources/migrations/graph-heal.ts). Before enabling any FUTURE bulk
  * re-embed, ship a structural reindex trigger with it.
  *
- * flair#2465 part 2 — the vector/text binding. A re-embed can still store the
+ * flair#2465 part 2 — the stored text hash. A re-embed can still store the
  * vector for the text it read when a text edit commits after that read and
  * before the commit (Harper has no compare-and-set; the field-only write and the
- * committed-row confirm narrow — not close — that window). To catch the rows such
- * an edit leaves behind, the server records `embeddedContentHash`
- * (resources/memory-embed-hash.ts) when it computes a vector on a guarded path,
- * and this migration re-queues a row whose recorded hash no longer matches its
- * current embedding text. The query cannot compute the current text's hash —
- * its conditions compare a stored value to a constant — so the mismatch leg is a
- * LIVE SCAN. `detect` runs the cheap `staleCondition()` query first and then
- * scans; `countPending` and `run` scan the whole table and apply
- * `rowEmbeddingCurrent` per row. A row with no recorded hash (e.g. written
- * before this change, or created with a vector the server did not compute)
- * counts as current; re-queueing such rows instead would re-embed the whole corpus once
- * on upgrade.
+ * committed-row confirm narrow — not close — that window). To catch the rows
+ * such an edit leaves behind, the server stores a newly computed
+ * `embeddedContentHash` (resources/memory-embed-hash.ts) when it computes a
+ * vector on a guarded path for a row with a non-empty owner, and this migration
+ * re-queues a row whose stored hash differs from the expected hash of its
+ * current embedding text. No query can compute that expected hash (a condition
+ * compares a stored value to a constant), so finding a mismatch takes a LIVE
+ * SCAN: `detect` runs the `staleCondition()` query first and scans only when
+ * the query finds nothing; `countPending` and `run` scan the whole table
+ * directly, applying `rowEmbeddingCurrent` per row. A row with no stored hash
+ * (e.g. written before this change, created with a caller-supplied vector, or
+ * with an empty owner) counts as current; re-queueing such rows instead would
+ * re-embed the whole corpus once on upgrade.
  */
 import { databases } from "harper";
 import { isDeepStrictEqual } from "node:util";
@@ -259,10 +260,10 @@ function isUsableEmbedding(value: unknown): value is number[] {
 /**
  * Is this row's stored embedding current? Current means BOTH its
  * `embeddingModel` is a current-space stamp for `currentModelId` AND either it
- * records no `embeddedContentHash` or the recorded hash equals the hash of the
- * row's current embedding text (`memory-embed-hash.ts`). A query cannot compute
- * the current text's hash, so a caller that needs to find a hash mismatch must
- * scan (see each method below).
+ * stores no `embeddedContentHash` or the stored hash equals the expected hash of
+ * the row's current embedding text (`memory-embed-hash.ts`). No query can
+ * compute that expected hash, so a caller that needs to find a hash mismatch
+ * must scan (see each method below).
  */
 function rowEmbeddingCurrent(row: Record<string, unknown>, currentModelId: string): boolean {
   return isCurrentSpaceStamp(row.embeddingModel as string | null | undefined, currentModelId) &&
@@ -427,9 +428,9 @@ export function createEmbeddingStampMigration(
       for await (const _row of table.search({ conditions: staleCondition(), limit: 1 })) {
         return true;
       }
-      // The mismatch leg: a row whose stamp IS current-space but whose recorded
-      // embedded-text hash no longer matches its current text (a text edit left
-      // the vector behind). A query cannot compute the current text's hash, so
+      // The mismatch leg: a row whose stamp IS current-space but whose stored
+      // hash differs from the expected hash of its current text (a text edit
+      // left the vector behind). No query can compute that expected hash, so
       // this is a live scan; it exits at the first mismatch.
       const current = getCurrentModelId();
       for await (const row of table.search({})) {
@@ -476,8 +477,8 @@ export function createEmbeddingStampMigration(
           ok = await regen(id, existing);
         }
         if (ok) touchedIds.push(id);
-        // A failed regen leaves the row untouched (still pending — retried
-        // next batch/boot), never partially written or marked done.
+        // A failed attempt writes nothing and marks nothing done; the row is
+        // retried next batch/boot if it remains pending.
       }
 
       return { processed: touchedIds.length, touchedIds };
@@ -487,14 +488,14 @@ export function createEmbeddingStampMigration(
      * flair#807 completion-gate safety net (resources/migrations/runner.ts
      * calls this ONLY when a nonzero countPending() would otherwise halt the
      * migration). Re-derives up to `limit` currently-"pending" ids via the
-     * staleCondition() search (the query leg only; countPending() also scans
-     * for a hash mismatch, flair#2465), then re-checks each
-     * one by a DIRECT `.get()` — a primary-key lookup, never index-assisted,
-     * so it can't be fooled by the same secondary-index divergence that can
-     * make the search-based count wrong. Returns counts only (never ids —
-     * matches this codebase's structural-only-disclosure discipline, e.g.
-     * resources/migrations/ledger.ts's module doc), so the runner can log a
-     * loud, actionable WARN without ever needing to know which rows.
+     * staleCondition() query — which countPending() does not use: since
+     * flair#2465 it scans the table directly — then re-checks each one by a
+     * DIRECT `.get()` — a primary-key lookup, never index-assisted, so it
+     * can't be fooled by a secondary-index divergence in the query. Returns
+     * counts only (never ids — matches this codebase's
+     * structural-only-disclosure discipline, e.g. resources/migrations/ledger.ts's
+     * module doc), so the runner can log a loud, actionable WARN without ever
+     * needing to know which rows.
      */
     async recheckPending(limit: number): Promise<{ sampled: number; falsePositives: number }> {
       const table = getTable();
