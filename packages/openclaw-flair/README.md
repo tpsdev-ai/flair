@@ -128,13 +128,43 @@ are the guarantees it keeps, each with the test that proves it in
   only): two concurrent runs of one agent share neither the session cap nor the
   dedup set`; `R10: interleaved agents, driven through the host's turn order,
   sign as themselves`.
-- **A session-keyed `agent_end` scan keeps a settled-through mark.** The greatest
-  message timestamp the session's scans have settled is remembered beyond the
-  bounded identity set, so a message at or below it whose identity has been
-  evicted is not captured again; the identity set still decides copies it holds,
-  and a message with no numeric `timestamp` relies on the identity set alone — `flair#2560 (mutation: no settled-through mark): after a session's
-  identities are evicted, a message at or below the mark is not captured again,
-  while a genuinely new later message is`.
+- **A session-keyed `agent_end` scan treats a message as already seen only while
+  the session retains its identity, and never drops an identity its current
+  snapshot holds.** The host gives a snapshot message no host-owned id or
+  position (its only ordering field is a `Date.now()` timestamp, which can tie),
+  so no message is skipped because of its timestamp — `flair#2560 (mutation: a
+  timestamp mark): a new message is captured whether its timestamp ties with,
+  precedes or follows the session's earlier messages, and a later non-capturable
+  message hides none`. A session holds at most max(`sessionMessageCap` (4,096),
+  the distinct messages in its latest snapshot) identities: only identities that
+  have left the snapshot are evicted, so a long session does not capture its
+  earlier messages again — `flair#2560 (mutation: a live identity is evicted): a
+  snapshot over sessionMessageCap distinct messages, across several runs: each
+  run's own new message is captured and nothing older is captured again`. The
+  scan runs newest first, so a run's capture cap (`autoCaptureMaxPerSession`) is
+  spent on its own newest messages, and a message the cap leaves out stays
+  unseen until a later run captures it, under that run's id — `flair#2560
+  (mutation: oldest first; mutation: a capped message recorded as seen): a run's
+  cap is spent newest first, and the message it left out is captured by the next
+  run`. The limit is a session's first scan in this process: for a new session,
+  after its state is evicted past `sessionStateCap`, or after a gateway restart
+  (the state is held in process memory and cleared at `gateway_stop`). That scan
+  cannot tell the run's messages from earlier ones, so it captures at most the
+  run's cap of the newest eligible messages and records the rest as seen,
+  including any of the run's own beyond the cap; a message captured before lands
+  as a second row — `flair#2560 cold start (mutation: a cold scan leaves capped
+  messages unseen): a session's first scan captures at most the run's cap of the
+  newest eligible messages and records the rest as seen`. Flair's near-duplicate
+  check can flag such a write `deduplicated`, naming the row it repeats
+  (`matchedId`); it does not suppress the write, and the plugin counts flagged
+  captures and logs a line at the 1st, 2nd, 4th, … one — `flair#2560 (mutation:
+  the deduplicated flag is ignored): a capture Flair flags deduplicated is
+  counted, with a log line at the 1st, 2nd, 4th, ... one`; against a real Flair
+  component, `flair#2560 cold start (mutation: the deduplicated flag is
+  ignored): after gateway_stop and a new registration, a re-delivered message is
+  captured again; Flair stores the repeat as a second row, flags it
+  deduplicated, and the plugin counts it` in
+  `test/integration/agent-end-session-capture-2560.test.ts`.
 - **Memory is bounded.** The run map holds at most `capacityCap` records, plus at
   most `abortOverflowCap` records for aborted runs that were never admitted, and a
   new run is refused rather than evicting a live record — `(a) repeated aborts of

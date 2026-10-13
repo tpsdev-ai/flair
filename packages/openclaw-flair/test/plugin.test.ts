@@ -1493,20 +1493,24 @@ describe("slice 2 — capture normalisation, ids and outcomes", () => {
   });
 });
 
-// ── flair#2560 — the real producer's own agent_end dispatch ─────────────────
+// ── flair#2560 — the pinned host's real agent_end dispatch, synthetic snapshots ──
 //
-// The session producer is the pinned host's embedded agent runner
+// This is a DISPATCH test with synthetic snapshots, not a producer test. The
+// session producer is the pinned host's embedded agent runner
 // (`createOpenClawAgentHarness().runAttempt`). It is NOT drivable in-process from
 // this package: a bare `runAttempt({})` enters an embedded run and dies at
 // `mkdir ''`, because an attempt must be fully prepared (resolved config, model
 // registry, session file and lock, sandbox, abort signal) and reach a live
-// provider. This drives the closest REAL seam instead: the producer's own
-// agent_end dispatch (`awaitAgentHarnessAgentEndHook`, the function
-// `runEmbeddedAttempt` calls through `runAgentEndSideEffects`), over the pinned
-// host's real hook runner.
+// provider. This drives the host's real agent_end dispatch instead
+// (`awaitAgentHarnessAgentEndHook`, the function `runEmbeddedAttempt` calls
+// through `runAgentEndSideEffects`), over the pinned host's real hook runner,
+// with snapshots the TEST supplies. The dispatcher forwards the event it is
+// given, so this cannot detect a change in what the producer puts in a
+// snapshot (a message's identity across runs); driving the embedded producer
+// is a follow-up.
 
-describe("flair#2560 — the real producer's own agent_end dispatch", () => {
-  const producerConfig = {
+describe("flair#2560 — the pinned host's real agent_end dispatch, with synthetic snapshots", () => {
+  const dispatchConfig = {
     plugins: { slots: { memory: "openclaw-flair" }, entries: { "openclaw-flair": { hooks: { allowConversationAccess: true } } } },
   };
 
@@ -1529,45 +1533,46 @@ describe("flair#2560 — the real producer's own agent_end dispatch", () => {
     throw new Error(`${pretty} is not exported by ${file}`);
   }
 
-  test("a message's identity in the agent_end snapshot is stable across runs, over the producer's dispatch", async () => {
+  test("real agent_end dispatch, synthetic snapshots: a message the test re-delivers keeps its identity through the dispatcher and is stored once", async () => {
     const { dist, version: hostVersion } = supportedRunnerHost();
     const { createHookRunner } = await import(pathToFileURL(join(dist, distChunk(dist, /^hooks-.*\.mjs$/, "export { createHookRunner };"))).href);
     const helpersFile = distChunk(dist, /^lifecycle-hook-helpers-.*\.mjs$/, "awaitAgentHarnessAgentEndHook");
     const helpers: any = await import(pathToFileURL(join(dist, helpersFile)).href);
-    const dispatch = helpers[realExport(dist, helpersFile, "awaitAgentHarnessAgentEndHook")]; // the producer's agent_end dispatch
+    const dispatch = helpers[realExport(dist, helpersFile, "awaitAgentHarnessAgentEndHook")]; // the host's agent_end dispatch
     const { messageIdentity } = await loadModule();
     expect(typeof dispatch).toBe("function");
     writeKey("A");
     const calls = installFetchStub();
-    const api = createMockApi({ hostVersion, pluginConfig: { autoCapture: true }, config: producerConfig });
+    const api = createMockApi({ hostVersion, pluginConfig: { autoCapture: true }, config: dispatchConfig });
     (await loadPlugin()).register(api as any);
-    // A spy on the SAME real hook runner reads each snapshot the producer
-    // dispatches, so a message's identity can be compared across runs.
+    // A spy on the SAME real hook runner reads each snapshot the dispatcher
+    // forwards, so a message's identity can be compared across the two calls.
     const snapshots: string[][] = [];
     const typedHooks = [
       ...[...api._hooks].flatMap(([hookName, handlers]) => handlers.map((handler) => ({ hookName, handler, pluginId: api.id }))),
       { hookName: "agent_end", handler: (event: any) => { snapshots.push((event.messages ?? []).map(messageIdentity)); }, pluginId: "spy-2560" },
     ];
     const runner = createHookRunner({ typedHooks }, { catchErrors: false });
-    const ctx = { agentId: "A", sessionId: "sess-producer" };
-    // Shaped as the host's `Message` types carry them: role, content, and the
-    // millisecond `timestamp` "for transcript ordering".
-    const M1 = { role: "user", content: "remember this: the producer's first message", timestamp: 1_700_000_000_000 };
-    const M2 = { role: "assistant", content: "remember this: the producer's second message", timestamp: 1_700_000_001_000 };
+    const ctx = { agentId: "A", sessionId: "sess-dispatch" };
+    // Synthetic snapshots, shaped as the host's `Message` types: role, content,
+    // and a millisecond `timestamp`. The test supplies the SAME M1 object to
+    // both calls; the producer is not involved.
+    const M1 = { role: "user", content: "remember this: the dispatched first message", timestamp: 1_700_000_000_000 };
+    const M2 = { role: "assistant", content: "remember this: the dispatched second message", timestamp: 1_700_000_001_000 };
     try {
       await dispatch({ hookRunner: runner, event: { messages: [M1], success: true }, ctx: { ...ctx, runId: "run-1" } });
       await dispatch({ hookRunner: runner, event: { messages: [M1, M2], success: true }, ctx: { ...ctx, runId: "run-2" } });
-      // Identity of M1 is the SAME in both snapshots, and equals the plugin's.
+      // M1's identity is the same in both forwarded snapshots, and equals the plugin's.
       expect(snapshots).toHaveLength(2);
       expect(snapshots[0][0]).toBe(snapshots[1][0]);
       expect(snapshots[0][0]).toBe(messageIdentity(M1));
       // Not vacuous: the identity is sensitive to the timestamp field it keys on.
       expect(messageIdentity({ ...M1, timestamp: (M1 as any).timestamp + 1 })).not.toBe(messageIdentity(M1));
-      // The stable identity is what keeps the re-delivered M1 from being stored twice.
+      // The session retains M1's identity, so its re-delivery is not stored again.
       const puts = calls.filter((c) => c.method === "PUT" && /\/Memory\//.test(c.url));
-      const sources = puts.filter((c) => String((c.body as any).content).includes("the producer's first message")).map((c) => (c.body as any).hostSource.id);
+      const sources = puts.filter((c) => String((c.body as any).content).includes("the dispatched first message")).map((c) => (c.body as any).hostSource.id);
       expect(sources).toEqual(["run-1"]);
-      expect(puts.filter((c) => String((c.body as any).content).includes("the producer's second message")).map((c) => (c.body as any).hostSource.id)).toEqual(["run-2"]);
+      expect(puts.filter((c) => String((c.body as any).content).includes("the dispatched second message")).map((c) => (c.body as any).hostSource.id)).toEqual(["run-2"]);
     } finally {
       await runner.runGatewayStop({}, {});
     }
@@ -2065,15 +2070,21 @@ describe("flair#2513 — agent_end capture is keyed by counted message identitie
     expect(api._warnText()).toMatch(/discarded a capture for run run-1 \(agent A\) that completed after the run was aborted/);
   });
 
-  test("round 5 guard (mutation: no identity cap): a session remembers at most sessionMessageCap identities", async () => {
+  test("round 5 guard (mutation: no identity cap): a session remembers at most max(sessionMessageCap, its latest snapshot's distinct messages) identities", async () => {
     writeKey("A");
     const plugin = await loadPlugin();
     installFetchStub();
     const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
     plugin.register(api as any);
     captureBounds.sessionMessageCap = 2;
+    const ctx = { agentId: "A", sessionId: "sess-identity-cap" };
     const messages = [1, 2, 3].map((i) => ({ role: "user", content: `a plain note number ${i}`, timestamp: i }));
-    await api._fire("agent_end", { runId: "run-1", success: true, messages }, { agentId: "A", sessionId: "sess-identity-cap" });
+    await api._fire("agent_end", { runId: "run-1", success: true, messages }, ctx);
+    // flair#2560: all three are in the current snapshot, so none is evicted.
+    expect(captureInternals.sessionIdentityCount?.() ?? -1).toBe(3);
+    // A rewritten snapshot without them: the session is trimmed to the cap.
+    const rewritten = [{ role: "user", content: "a plain note after a rewrite", timestamp: 4 }];
+    await api._fire("agent_end", { runId: "run-2", success: true, messages: rewritten }, ctx);
     expect(captureInternals.sessionIdentityCount?.() ?? -1).toBe(2);
   });
 
@@ -2108,39 +2119,136 @@ describe("flair#2513 — agent_end capture is keyed by counted message identitie
     }
   });
 
-  // ── flair#2560 — a session's settled-through mark survives identity eviction ──
+  // ── flair#2560 — no host message position: the identity set is the only "already seen" signal ──
 
-  test("flair#2560: the snapshot ordering key is the numeric millisecond timestamp the host stamps for transcript ordering", async () => {
-    const { messageTimestamp } = await loadModule();
-    expect(messageTimestamp({ timestamp: 7 })).toBe(7);
-    // A compaction summary loaded from older persisted rows may carry a string.
-    expect(messageTimestamp({ timestamp: "42" })).toBe(42);
-    for (const ts of [undefined, null, "", "now", "  ", NaN, Infinity, -Infinity, {}, [], () => 1]) {
-      expect(messageTimestamp({ timestamp: ts })).toBeNull();
-    }
-  });
-
-  test("flair#2560 (mutation: no settled-through mark): after a session's identities are evicted, a message at or below the mark is not captured again, while a genuinely new later message is", async () => {
+  test("flair#2560 (mutation: a timestamp mark): a new message is captured whether its timestamp ties with, precedes or follows the session's earlier messages, and a later non-capturable message hides none", async () => {
     writeKey("A");
     const plugin = await loadPlugin();
     const calls = installFetchStub();
     const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
     plugin.register(api as any);
-    captureBounds.sessionMessageCap = 1; // remember ONE identity: the rest are evicted
-    const ctx = { agentId: "A", sessionId: "sess-evict-mark" };
-    const M1 = { role: "user", content: "remember this: the evicted early message", timestamp: 1 };
-    const M2 = { role: "user", content: "remember this: the evicted middle message", timestamp: 2 };
-    const M3 = { role: "user", content: "remember this: a genuinely new later message", timestamp: 3 };
+    const ctx = { agentId: "A", sessionId: "sess-no-mark" };
+    const U1 = { role: "user", content: "remember this: the session's first message", timestamp: 1_000 };
+    // Same millisecond as U1 (the host stamps with Date.now(), which can tie).
+    const tie = { role: "user", content: "remember this: a new message in the same millisecond", timestamp: 1_000 };
+    // Stamped before U1: the host does not sort a snapshot by timestamp.
+    const earlier = { role: "user", content: "remember this: a new message stamped earlier", timestamp: 500 };
+    // A role the scan never offers for capture, stamped after everything else.
+    const tool = { role: "toolResult", toolCallId: "call-1", toolName: "read", content: [{ type: "text", text: "the tool's output" }], isError: false, timestamp: 9_000 };
+    const next = { role: "user", content: "remember this: a new message stamped before the tool result", timestamp: 5_000 };
 
-    await api._fire("agent_end", { runId: "run-1", success: true, messages: [M1, M2] }, ctx);
-    expect(puts(calls).filter((c) => contentOf(c).includes("the evicted early message")).map(sourceOf)).toEqual(["run-1"]);
-    // Run 2 adds M3; M1's and M2's identities are evicted by the cap.
-    await api._fire("agent_end", { runId: "run-2", success: true, messages: [M1, M2, M3] }, ctx);
-    expect(puts(calls).filter((c) => contentOf(c).includes("a genuinely new later message")).map(sourceOf)).toEqual(["run-2"]);
-    // Run 3 re-delivers all three, with no identity left for M1 or M2. The
-    // session's mark (M3's timestamp) settles them: neither is captured again.
-    await api._fire("agent_end", { runId: "run-3", success: true, messages: [M1, M2, M3] }, ctx);
-    expect(puts(calls).map(sourceOf).sort()).toEqual(["run-1", "run-1", "run-2"]);
+    await api._fire("agent_end", { runId: "run-1", success: true, messages: [U1] }, ctx);
+    await api._fire("agent_end", { runId: "run-2", success: true, messages: [U1, tie, earlier] }, ctx);
+    await api._fire("agent_end", { runId: "run-3", success: true, messages: [U1, tie, earlier, tool] }, ctx);
+    await api._fire("agent_end", { runId: "run-4", success: true, messages: [U1, tie, earlier, tool, next] }, ctx);
+
+    const by = (needle: string) => puts(calls).filter((c) => contentOf(c).includes(needle)).map(sourceOf);
+    expect(by("the session's first message")).toEqual(["run-1"]);
+    expect(by("in the same millisecond")).toEqual(["run-2"]);
+    expect(by("stamped earlier")).toEqual(["run-2"]);
+    expect(by("stamped before the tool result")).toEqual(["run-4"]);
+    expect(puts(calls)).toHaveLength(4); // the tool result is never captured
+  });
+
+  test("flair#2560 (mutation: a live identity is evicted): a snapshot over sessionMessageCap distinct messages, across several runs: each run's own new message is captured and nothing older is captured again", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = installFetchStub();
+    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
+    plugin.register(api as any);
+    const ctx = { agentId: "A", sessionId: "sess-over-cap" };
+    const cap = captureBounds.sessionMessageCap; // the default, 4,096
+    const size = cap + 4;
+    // Two trigger messages at the very start (the identities an eviction
+    // would drop first), plain notes after them, and a trigger message last.
+    const base = Array.from({ length: size }, (_, i) => ({
+      role: "user",
+      content: i === 0 || i === 1 ? `remember this: early decision ${i}` : i === size - 1 ? "remember this: the first run's own message" : `a plain note number ${i}`,
+      timestamp: i,
+    }));
+    const own2 = { role: "user", content: "remember this: the second run's own message", timestamp: size };
+    const own3 = { role: "assistant", content: "remember this: the third run's own message", timestamp: size + 1 };
+
+    await api._fire("agent_end", { runId: "run-1", success: true, messages: base }, ctx);
+    await api._fire("agent_end", { runId: "run-2", success: true, messages: [...base, own2] }, ctx);
+    await api._fire("agent_end", { runId: "run-3", success: true, messages: [...base, own2, own3] }, ctx);
+
+    const by = (needle: string) => puts(calls).filter((c) => contentOf(c).includes(needle)).map(sourceOf);
+    expect(by("early decision 0")).toEqual(["run-1"]);
+    expect(by("early decision 1")).toEqual(["run-1"]);
+    expect(by("the first run's own message")).toEqual(["run-1"]);
+    expect(by("the second run's own message")).toEqual(["run-2"]);
+    expect(by("the third run's own message")).toEqual(["run-3"]);
+    expect(puts(calls)).toHaveLength(5);
+    // The bound is max(cap, the snapshot's distinct messages): all are live.
+    expect(captureInternals.sessionIdentityCount?.() ?? -1).toBe(size + 2);
+  });
+
+  test("flair#2560 (mutation: oldest first; mutation: a capped message recorded as seen): a run's cap is spent newest first, and the message it left out is captured by the next run", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = installFetchStub();
+    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
+    plugin.register(api as any);
+    const ctx = { agentId: "A", sessionId: "sess-cap-spent" };
+    const say = (text: string, timestamp: number) => ({ role: "user", content: `remember this: ${text}`, timestamp });
+    const U0 = say("the session's opening message", 0);
+    // Run 2 holds four new eligible messages; the cap (autoCaptureMaxPerSession,
+    // default 3) takes the three newest.
+    const run2 = [say("run two, message a", 1), say("run two, message b", 2), say("run two, message c", 3), say("run two, message d", 4)];
+    const e = say("run three's own message", 5);
+
+    await api._fire("agent_end", { runId: "run-1", success: true, messages: [U0] }, ctx);
+    await api._fire("agent_end", { runId: "run-2", success: true, messages: [U0, ...run2] }, ctx);
+    await api._fire("agent_end", { runId: "run-3", success: true, messages: [U0, ...run2, e] }, ctx);
+
+    const by = (needle: string) => puts(calls).filter((c) => contentOf(c).includes(needle)).map(sourceOf);
+    expect(by("opening message")).toEqual(["run-1"]);
+    expect(by("message d")).toEqual(["run-2"]);
+    expect(by("message c")).toEqual(["run-2"]);
+    expect(by("message b")).toEqual(["run-2"]);
+    // Left out by run 2's cap and not recorded as seen: run 3 captures it.
+    expect(by("message a")).toEqual(["run-3"]);
+    expect(by("run three's own message")).toEqual(["run-3"]);
+  });
+
+  test("flair#2560 cold start (mutation: a cold scan leaves capped messages unseen): a session's first scan captures at most the run's cap of the newest eligible messages and records the rest as seen", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = installFetchStub();
+    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
+    plugin.register(api as any);
+    const ctx = { agentId: "A", sessionId: "sess-cold" };
+    // A snapshot as a gateway restart leaves it: five eligible messages the
+    // plugin has no state for.
+    const old = [1, 2, 3, 4, 5].map((i) => ({ role: "user", content: `remember this: an older message ${i}`, timestamp: i }));
+    const next = { role: "user", content: "remember this: the next run's own message", timestamp: 6 };
+
+    await api._fire("agent_end", { runId: "run-1", success: true, messages: old }, ctx);
+    await api._fire("agent_end", { runId: "run-2", success: true, messages: [...old, next] }, ctx);
+
+    const by = (needle: string) => puts(calls).filter((c) => contentOf(c).includes(needle)).map(sourceOf);
+    for (const i of [5, 4, 3]) expect(by(`an older message ${i}`)).toEqual(["run-1"]);
+    // Beyond the cap in the cold scan: recorded as seen, never captured later.
+    for (const i of [2, 1]) expect(by(`an older message ${i}`)).toEqual([]);
+    expect(by("the next run's own message")).toEqual(["run-2"]);
+  });
+
+  test("flair#2560 (mutation: the deduplicated flag is ignored): a capture Flair flags deduplicated is counted, with a log line at the 1st, 2nd, 4th, ... one", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    installFetchStub((c) => (c.method === "PUT" && /\/Memory\//.test(c.url) ? { body: { written: true, deduplicated: true, matchedId: "A-earlier" } } : {}));
+    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
+    plugin.register(api as any);
+    const ctx = { agentId: "A", sessionId: "sess-repeats" };
+    const msgs = [1, 2, 3, 4].map((i) => ({ role: "user", content: `remember this: a repeated message ${i}`, timestamp: i }));
+
+    await api._fire("agent_end", { runId: "run-1", success: true, messages: msgs.slice(0, 3) }, ctx);
+    await api._fire("agent_end", { runId: "run-2", success: true, messages: msgs }, ctx);
+
+    const lines = api._warnText().split("\n").filter((l: string) => l.includes("stored a near-duplicate of an existing memory"));
+    expect(lines.map((l: string) => l.match(/; (\d+) such capture/)?.[1])).toEqual(["1", "2", "4"]);
+    expect(lines[0]).toContain("for agent A");
   });
 });
 
