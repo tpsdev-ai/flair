@@ -241,15 +241,11 @@ export function messageIdentity(msg: { role?: unknown; content?: unknown; timest
 }
 
 /**
- * flair#2513: one session's capture-identity state. `entries` maps a message
- * identity to the number of its occurrences the plugin has accounted for,
- * whatever the outcome (captured, or skipped: ineligible, no trigger, a
- * duplicate, the cap spent, its run refused, or its write failed). `tail` is the
- * settle of the last `agent_end` scan, so the next one for the session chains
- * after it; `scans` counts scans queued or running, so `evictSessions` keeps a
- * busy session's state and the queue stays within `sessionScanQueueCap`.
- * `disabled` turns this session's `agent_end` capture off for the rest of this
- * state (see `disableSession`); `llm_input` and `llm_output` are unaffected.
+ * flair#2513: one session's `agent_end` capture-identity state. `entries` maps a
+ * message identity to the number of its occurrences this session's scans have
+ * recorded. `tail` is the settle of the last queued scan, so the next one chains
+ * after it; `scans` counts scans queued or running. `disabled` stops this
+ * session's later `agent_end` scans (see `disableSession`).
  */
 interface SessionCapture {
   agentId: string;
@@ -835,25 +831,9 @@ export default {
     const runs = new Map<string, RunRecord>();
     const loggedOnce = new Set<string>();
     /**
-     * flair#2513 — the per-session CAPTURE-IDENTITY state, keyed by agent + the
-     * capture session id. `agent_end` delivers the WHOLE session's message
-     * snapshot (`PluginHookAgentEndEvent.messages`), and the pinned host exposes
-     * no per-run boundary, no message id and no committed-message event, so
-     * capture from it is best effort. Each snapshot message is given an identity
-     * (`messageIdentity`), and the session records how many occurrences of each
-     * identity it has accounted for. The occurrences beyond that count are
-     * treated as new, and as messages of the run whose `agent_end` delivered the
-     * snapshot: considered for capture when that run is admitted, and recorded
-     * as skipped when it is refused, so far as the scan identifies and reaches
-     * them. A capture whose write fails is dropped with no retry scheduled. Scans
-     * of one session run one at a time, at most `sessionScanQueueCap` queued or
-     * running; a callback that finds that many records nothing and disables the
-     * session's `agent_end` capture (fail closed). A callback with no session id
-     * correlates with no other: no identity is recorded for it, and a capturing
-     * scan treats its whole snapshot as new. The limits
-     * (a compaction that leaves equal-field messages ambiguous, rewritten
-     * messages, eviction, the caps) are stated at `scanSnapshot` and at the
-     * `captureBounds` session bounds.
+     * flair#2513: per-session `agent_end` capture-identity state, keyed by agent +
+     * capture session id (see `SessionCapture` and `scanSnapshot`), bounded by
+     * the `captureBounds` session caps.
      */
     const sessions = new Map<string, SessionCapture>();
     /**
@@ -1138,11 +1118,10 @@ export default {
     }
 
     /**
-     * `captureGate` with the reason for a refusal (flair#2513): `agent_end` needs
-     * it to word the log line for a refused run's snapshot. `"stopped"`,
-     * `"no-run-id"` and `"dropped"` (a retired or aborted run) are refusals by
-     * policy; `"capacity"` might clear later, but the run's snapshot is not
-     * captured all the same. Each refusal logs as `captureGate` documents.
+     * `captureGate` with the reason for a refusal (flair#2513), which `agent_end`
+     * uses to pick its scan mode: `"stopped"`, `"no-run-id"` and `"dropped"` (a
+     * retired or aborted run) are refusals by policy; `"capacity"` might clear
+     * later. Each refusal logs as `captureGate` documents.
      */
     function admitRun(agentId: string, runId: string | null): RunRecord | GateRefusal {
       if (captureStopped) {
@@ -1553,57 +1532,35 @@ export default {
         (sweepTimer as any).unref?.();
 
         /**
-         * flair#2513: how one `agent_end` snapshot is handled. `capture`: the
-         * new messages in the snapshot of the admitted run that ended are
-         * considered for capture. `skip`: the run does not capture; in a
-         * session-keyed scan the new messages it identifies are recorded as
-         * skipped, so a later scan of the same session does not treat them as
-         * new while the session's state holds them. A skip is a refusal by
-         * policy (the host reported `success: false`, the run carried no run id,
-         * was already retired or aborted, or its agent is not served) or, with
-         * `dropped`, a refusal that might clear later (no usable signing key,
-         * or the run map full): those messages are not captured all the same,
-         * and no retry is scheduled.
+         * flair#2513: the mode of one `agent_end` scan. `capture`: the callback's
+         * run was admitted. `skip`: the callback's `agent_end` capture is
+         * refused, by policy (`success: false`, no run id, a retired or aborted
+         * run, an agent not served) or, with `dropped`, for a reason that might
+         * clear later (no usable signing key, the run map full); `why` and
+         * `dropped` word its log line.
          */
         type ScanMode =
           | { kind: "capture"; record: RunRecord }
           | { kind: "skip"; why: string; dropped: boolean };
 
         /**
-         * flair#2513: scan one `agent_end` snapshot. `event.messages` is the
-         * WHOLE session snapshot, not this run's slice, and the host exposes no
-         * per-run boundary and no message id. Occurrences are counted per
-         * identity: of the n occurrences of an identity in this snapshot, the
-         * trailing n - m (in snapshot order) beyond the m the session has
-         * recorded are treated as new, and as this run's messages; the first
-         * min(n, m) are left alone. In a session-keyed scan each new occurrence
-         * the scan reaches is recorded whatever happens to it: captured, or
-         * skipped (ineligible, no trigger, a duplicate, the cap spent, the run
-         * refused or aborted, or its write failed). A failed write is dropped
-         * and logged (once per run and identity while that log key is
-         * retained), and no retry is scheduled; a later callback that does not
-         * correlate with this state (no session id, or after eviction) can
-         * still consider the message again. After every awaited write the
-         * session-keyed scan rechecks the stop and the session's disabled flag,
-         * and stops without recording anything more if either is set; a result
-         * that settles after its run's abort is discarded by `tryAutoCapture`
-         * and records no capture.
-         *
-         * Limits. When n < m (as after a compaction removed copies of an equal
-         * message), nothing of that identity is new: a genuinely new copy with
-         * the same role, JSON content and stringified timestamp cannot be told
-         * apart from an earlier one, so it is not captured, and a capturing
-         * scan logs a diagnostic. When a compaction removes k copies and the
-         * same run adds k equal copies, the counts match: the new copies are
-         * not captured and nothing is logged. A message whose JSON form the
-         * host changes (an earlier message rewritten) gets a new identity
-         * unless the digests collide, is treated as new, and may be captured
-         * under the run whose snapshot first holds the rewritten form. In a
-         * session-keyed capturing scan, a message with capture text and no
-         * identity (see `messageIdentity`) is not captured, with a diagnostic.
-         * Without a session id no identity is recorded, and a capturing scan
-         * considers every eligible message as new, including one with no
-         * identity.
+         * flair#2513: scan one `agent_end` snapshot (the whole session's
+         * messages). With a session key, occurrences are counted per identity:
+         * of the n identifiable occurrences of an identity in the snapshot, the
+         * trailing n - m beyond the m the session has recorded are treated as
+         * new, and as the callback's run's; the first min(n, m) are left alone.
+         * In `capture` mode a new eligible occurrence is offered to
+         * `tryAutoCapture`; in `skip` mode it is not. Each new occurrence is then
+         * recorded, unless the scan stops first: before each message and after
+         * each awaited write the scan checks the stop and the session's disabled
+         * flag and, if either is set, returns without recording anything more.
+         * A failed write is logged and recorded as skipped only if the scan
+         * continues past that check, and no retry is scheduled. When n < m,
+         * nothing of that identity is new, and a `capture` scan logs a
+         * diagnostic. In a `capture` scan, a message with capture text and no
+         * identity is not captured, with a diagnostic. Without a session key
+         * nothing is recorded and only a `capture` scan proceeds: it offers every
+         * eligible message.
          */
         const scanSnapshot = async (
           agentId: string,
@@ -1761,9 +1718,8 @@ export default {
           // apart, so both take this one path, fail closed: the run is aborted
           // here (no capture; in-flight captures cancelled and discarded; later
           // callbacks for the run id dropped while the abort is recorded), and
-          // (flair#2513) the new messages a session-keyed scan of its snapshot
-          // identifies are recorded as skipped. A successful agent_end never
-          // aborts. `model_call_ended`
+          // (flair#2513) its `agent_end` capture is skipped (`skip` mode). A
+          // successful agent_end never aborts. `model_call_ended`
           // with failureKind "aborted" is the path for an aborted model call,
           // and `gateway_stop` aborts every run.
           if (event?.success === false) {
@@ -1773,10 +1729,9 @@ export default {
           }
           const admitted = admitRun(agentId, runId);
           if (typeof admitted === "string") {
-            // flair#2513: a refused run's snapshot is scanned to record the new
-            // messages it identifies as skipped — a refusal by policy, or (the
-            // run map full) one that might clear later but is not captured all
-            // the same. Nothing is recorded once the gateway is stopping.
+            // flair#2513: a refused callback skips its `agent_end` capture
+            // (`skip` mode; see `ScanMode`). Nothing is recorded once the gateway
+            // is stopping.
             if (admitted === "stopped") return;
             if (admitted === "capacity") {
               await account({ kind: "skip", why: "the run map is full (capacityCap)", dropped: true });

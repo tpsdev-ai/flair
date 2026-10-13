@@ -1495,25 +1495,13 @@ describe("slice 2 — capture normalisation, ids and outcomes", () => {
 
 // ── flair#2513 — agent_end: best-effort capture by occurrence counting ──────
 //
-// `agent_end` delivers the WHOLE session's message snapshot, and the host
-// exposes no per-run boundary, no message id and no committed-message event.
-// The plugin gives each snapshot message an identity (role, JSON content,
-// stringified timestamp) and records per session how many occurrences of each
-// identity it has accounted for; the occurrences beyond that count are treated
-// as new, and as messages of the run whose `agent_end` delivered the snapshot.
-// For an admitted run they are considered for capture; when the run does not
-// capture (success: false, retired or aborted, no run id, no usable key, the run
-// map full), a session-keyed scan records the ones it identifies as skipped. A
-// capture whose write fails is dropped with a log line and no retry scheduled.
-// Scans of one session run one at a time, at most `sessionScanQueueCap` queued
-// or running; a callback that finds that many records nothing and disables the
-// session's `agent_end` capture (`llm_input`/`llm_output` are unaffected). The
-// behaviour tests cover a concurrent callback, a rewritten snapshot, a failed
-// write (dropped), a scan queued past the retirement window, equal-field
-// messages (counted, and the compaction ambiguity), refused runs (success:
-// false, retired, no key, no capacity with an abort that cannot be recorded), a
-// write settling after an abort, the session and identity caps, the full queue
-// with a write settling after the disable, and `gateway_stop`.
+// These tests drive `agent_end` with session-keyed snapshots and check which
+// messages are written under which run id, what the session records, and the
+// log lines: a concurrent callback, a rewritten snapshot, a failed write, a scan
+// queued past the retirement window, equal-field messages, refused callbacks
+// (success: false, retired, no key, no capacity with an abort that cannot be
+// recorded), a write settling after an abort, the session and identity caps, a
+// full scan queue with a write settling after the disable, and `gateway_stop`.
 //
 // The real-runner test drives synthetic events, shaped like the host's
 // `PluginHookAgentEndEvent` and agent context, through the pinned host's real
@@ -1806,7 +1794,7 @@ describe("flair#2513 — agent_end capture is keyed by counted message identitie
     });
   };
 
-  test("round 5 (mutation: a keyless run's snapshot is not recorded): a run with no usable key is dropped with a log line; once the key is back, a later run does not capture its messages", async () => {
+  test("round 5 (mutation: a keyless run's snapshot is not recorded): a keyless run's snapshot is skipped with a log line; once the key is back, the next run of the session does not capture its messages", async () => {
     const plugin = await loadPlugin();
     const calls = installFetchStub();
     const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
