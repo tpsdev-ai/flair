@@ -7,7 +7,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -196,6 +196,28 @@ describe("integration-shards — the weight updater CLI", () => {
     expect(r.status).toBe(1);
     expect(r.stderr).toContain("no per-file timings");
     expect(() => readFileSync(out, "utf8")).toThrow();
+  });
+
+  test("refuses a log with no file timings even next to a usable log, and writes nothing", () => {
+    const dir = mkdtempSync(join(tmpdir(), "shard-regen-"));
+    try {
+      const badLog = join(dir, "setup-only.log");
+      writeFileSync(
+        badLog,
+        "2026-10-13T00:00:00.0000000Z ##[group]Set up job\n" +
+          "2026-10-13T00:00:01.0000000Z ##[endgroup]\n",
+      );
+      const out = join(dir, "w.json");
+      const before = '{\n  "test/integration/sentinel.test.ts": 7\n}\n';
+      writeFileSync(out, before);
+      const r = run("--out", out, "test/fixtures/integration-shard-log.txt", badLog);
+      expect(r.status).toBe(1);
+      expect(r.stderr).toContain(`${badLog}: no per-file timings`);
+      expect(r.stderr).not.toContain("integration-shard-log.txt: no per-file timings");
+      expect(readFileSync(out, "utf8")).toBe(before);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

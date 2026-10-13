@@ -10,7 +10,9 @@
 // Per file the script keeps the MAX within a job (a mutation step can re-run a
 // file) and the MEDIAN across jobs, then writes the file → seconds map sorted by
 // path. A file that appears in no log is left out and falls back to
-// DEFAULT_WEIGHT in integration-shards.mjs.
+// DEFAULT_WEIGHT in integration-shards.mjs. A supplied log with no timing for a
+// current integration file is refused (exit 1, the log named, nothing written),
+// even when the other logs are usable.
 //
 // USAGE
 //   node scripts/ci/update-integration-shard-weights.mjs <job-log> [<job-log> ...]
@@ -117,16 +119,28 @@ if (isEntryPoint) {
       process.exit(1);
     }
   });
+  // Every supplied log must carry at least one current integration file's
+  // timing. Checked per log, before aggregation: a wrong or truncated log next
+  // to a good one would otherwise be dropped silently from the medians.
   const keep = new Set(listIntegrationFiles());
-  const weights = aggregate(texts, keep);
-  if (Object.keys(weights).length === 0) {
+  const unusable = paths.filter(
+    (_, i) => !Object.keys(parseJobLog(texts[i])).some((file) => keep.has(file)),
+  );
+  if (unusable.length) {
+    for (const p of unusable) {
+      process.stderr.write(
+        `update-integration-shard-weights: ${p}: no per-file timings for a ` +
+          "current integration file (no `##[group]test/integration/<file>.test.ts:` " +
+          "block)\n",
+      );
+    }
     process.stderr.write(
-      "update-integration-shard-weights: no per-file timings found in the given " +
-        "logs (no `##[group]<file>.test.ts:` blocks); refusing to write an empty " +
-        "weights table\n",
+      `update-integration-shard-weights: refusing to write ${out}; fix or drop ` +
+        `the ${unusable.length} log(s) above\n`,
     );
     process.exit(1);
   }
+  const weights = aggregate(texts, keep);
   const sorted = {};
   for (const k of Object.keys(weights).sort()) sorted[k] = weights[k];
   writeFileSync(out, `${JSON.stringify(sorted, null, 2)}\n`);
