@@ -9,10 +9,10 @@
  * exercises a different module loader (`vm.SourceTextModule`) than the shipped
  * one and can raise `ResourceLoadError` at component load.
  *
- * `nodeBin()` is the ONE runtime helper tests use for a CLI or Harper child, so
- * a child spawned through it does not take the Bun loader path. It does not
- * return a Bun binary: `NODE_BIN` is honoured only when it does not name Bun,
- * and the in-process `process.execPath` is used only when it is not Bun.
+ * `nodeBin()` is the shared runtime helper for a CLI or Harper child, so a child
+ * spawned through it does not take the Bun loader path. It does not return a Bun
+ * binary: `NODE_BIN` is honoured only when it does not name Bun, and the
+ * in-process `process.execPath` is used only when it is not Bun.
  */
 export function nodeBin(): string {
   const configured = process.env.NODE_BIN?.trim();
