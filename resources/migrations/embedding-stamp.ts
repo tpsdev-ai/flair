@@ -151,8 +151,10 @@
  * the query finds nothing; `countPending` and `run` scan the whole table
  * directly, applying `rowEmbeddingCurrent` per row. A row with no stored hash
  * (e.g. written before this change, created with a caller-supplied vector, or
- * with an empty owner) counts as current; re-queueing such rows instead would
- * re-embed the whole corpus once on upgrade.
+ * with an empty owner) counts as current. A rule that queued every missing hash
+ * would queue every legacy row at upgrade, and could leave pending a row that
+ * cannot get a hash (one with an empty owner); missing hashes are trusted
+ * instead.
  */
 import { databases } from "harper";
 import { isDeepStrictEqual } from "node:util";
@@ -429,9 +431,9 @@ export function createEmbeddingStampMigration(
         return true;
       }
       // The mismatch leg: a row whose stamp IS current-space but whose stored
-      // hash differs from the expected hash of its current text (a text edit
-      // left the vector behind). No query can compute that expected hash, so
-      // this is a live scan; it exits at the first mismatch.
+      // hash differs from the expected hash of its current text. No query can
+      // compute that expected hash, so this is a live scan; it exits at the
+      // first mismatch.
       const current = getCurrentModelId();
       for await (const row of table.search({})) {
         if (!rowEmbeddingCurrent(row as Record<string, unknown>, current)) return true;
@@ -477,8 +479,11 @@ export function createEmbeddingStampMigration(
           ok = await regen(id, existing);
         }
         if (ok) touchedIds.push(id);
-        // A failed attempt writes nothing and marks nothing done; the row is
-        // retried next batch/boot if it remains pending.
+        // A false result does not add the row to touchedIds. It does not prove
+        // nothing was written (a loopback PATCH can commit before its response
+        // fails); the next live scan decides, retrying the row only if it is
+        // still pending. Only the `.content`-suffix path's aborted local
+        // transaction is known to write nothing.
       }
 
       return { processed: touchedIds.length, touchedIds };

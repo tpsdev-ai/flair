@@ -170,8 +170,8 @@ export async function prepareSkillBody(content: any, stored: Record<string, any>
   // flair#2465: the successor keeps the stored `embeddedContentHash` only when
   // the stored row has a vector, the body omits `embedding` (so that vector is
   // carried), and the embedding text is unchanged; otherwise null. A body value
-  // is never kept. This is the Feed successor's value; Memory.post()/put()
-  // then set their own.
+  // is never kept. A Feed successor stores this value; Memory.post()/put() keep
+  // it when they store the carried vector, and otherwise set their own.
   const sourceHasVector = Array.isArray(source.embedding) && source.embedding.length > 0;
   effective.embeddedContentHash = sourceHasVector && content.embedding === undefined && textUnchanged
     ? (source.embeddedContentHash ?? null)

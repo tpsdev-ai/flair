@@ -39,23 +39,25 @@ type Memory @table(database: "flair") {
                                # scan the whole table directly. Purely additive — existing rows already
                                # carry this value on disk; declaring it queryable changes nothing about
                                # what's written or how embeddings/prefixes behave (#689's gate untouched).
-  embeddedContentHash: String @indexed  # flair#2465: a stored hash of the text a vector was
-                               # computed from — `computeContentHash(agentId, skillEmbedText(row))`, the
-                               # function that defines `contentHash`, applied to the field the row embeds
-                               # from (`trigger` for a skill-tagged row with a non-empty trigger, else
-                               # `content`). NEWLY COMPUTED when the server computes a vector on a guarded
-                               # path (Memory POST/PUT/PATCH embed, re-embed PATCH, stamp migration
-                               # fallback, auto-embed backfill) for a row with a non-empty owner; null for
-                               # an empty owner. RETAINED, not recomputed, by a PUT/PATCH that carries or
-                               # supplies a vector and by a Feed skill successor that carries the stored
-                               # vector, so it can describe an earlier vector; a create with a
-                               # caller-supplied vector stores null; a federation value is the peer's
-                               # data. The stamp migration treats a row as current when `embeddingModel`
-                               # is current-space AND this value is absent or equals the EXPECTED hash of
-                               # the row's current text; it re-queues a mismatch (a live per-row scan).
-                               # Nullable/additive: an absent value counts as current. Distinct from
-                               # `contentHash`, which the feed stamps over `content` and an ordinary Memory
-                               # write does not maintain.
+  embeddedContentHash: String @indexed  # flair#2465: a stored text hash —
+                               # `computeContentHash(agentId, skillEmbedText(row))`, the function that
+                               # defines `contentHash`, applied to the field the row embeds from
+                               # (`trigger` for a skill-tagged row with a non-empty trigger, else
+                               # `content`). NEWLY COMPUTED over the text embedded when the server
+                               # computes a vector on a guarded path (Memory POST/PUT/PATCH embed,
+                               # re-embed PATCH, stamp migration fallback, auto-embed backfill) for a row
+                               # with a non-empty owner; null for an empty owner. RETAINED, not
+                               # recomputed, by a PUT/PATCH that carries or supplies a vector and by a
+                               # skill successor that carries the stored vector: a preserved value that
+                               # may describe an earlier server-computed vector. A create with a
+                               # caller-supplied vector stores null; a value received through federation
+                               # is an unverified peer assertion. The stamp migration treats a row as
+                               # current when `embeddingModel` is current-space AND this value is absent
+                               # or equals the EXPECTED hash of the row's current text; it re-queues a
+                               # row whose value differs (a live per-row scan). Nullable/additive: an
+                               # absent value counts as current. Distinct from `contentHash`, which the
+                               # feed stamps over `content` and an ordinary Memory write does not
+                               # maintain.
   tags: [String] @indexed
   durability: String @indexed
   source: String

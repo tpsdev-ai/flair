@@ -1551,9 +1551,15 @@ export class Memory extends (databases as any).flair.Memory {
     // embedding input and the stored embedding are computed from `content`.
     const redactedValues = redactMemoryWrite(content).count;
     canonicalizeSupersedes(content);
+    // flair#2465: a body that omits `embedding` can have the stored row's vector
+    // carried in by prepareSkillBody, with the hash it retained for that vector.
+    const postOmitsEmbedding = content?.embedding === undefined;
     const preparedSkill = await prepareSkillBody(content, postStored);
     if (preparedSkill instanceof Response) return preparedSkill;
     content = preparedSkill.content;
+    const postCarriedHash = postOmitsEmbedding && Array.isArray(content?.embedding) && content.embedding.length > 0
+      ? (content.embeddedContentHash ?? null)
+      : null;
 
     // flair#744 slice A: citation-on-write — consume-and-strip, same
     // discipline as `claimedClient` below. Pull the optional
@@ -1761,12 +1767,14 @@ export class Memory extends (databases as any).flair.Memory {
     // (instanceToken, provenance). They are re-stamped below.
     stripServerStampedFields(content);
     // flair#2465: a vector the server computed here gets a newly computed
-    // hash of the text it embedded (null for an empty owner). Any other vector
-    // (caller-supplied, or a skill's stored vector carried by prepareSkillBody)
-    // gets null, which the stamp migration reads as current.
+    // hash of the text it embedded (null for an empty owner). A skill's stored
+    // vector that prepareSkillBody carried in keeps the hash prepareSkillBody
+    // retained with it (possibly null), so a successor of a row whose hash
+    // differs from its text's expected hash still differs. A caller-supplied
+    // vector gets null, which the stamp migration reads as current.
     content.embeddedContentHash = !embeddingSupplied && Array.isArray(content.embedding) && content.embedding.length > 0
       ? (embeddedTextHash(content) ?? null)
-      : null;
+      : postCarriedHash;
     // A1-iv item 1: a NEW row gets a server-stamped incarnation token.
     content.instanceToken = newInstanceToken();
     const pointer = buildPointerForWrite({ inputs: pointerInputs, memoryId: content.id ?? "", visibility: content.visibility, auth, memoryInstanceToken: content.instanceToken });
@@ -2251,9 +2259,14 @@ export class Memory extends (databases as any).flair.Memory {
       (typeof urlTargetId === "string" || typeof urlTargetId === "number")) {
       content.id = urlTargetId;
     }
+    // flair#2465: as in post(), a body that omits `embedding` can have a stored
+    // vector carried in by prepareSkillBody, with the hash it retained for it.
+    const putOmitsEmbedding = content?.embedding === undefined;
     const preparedSkill = await prepareSkillBody(content, preExisting);
     if (preparedSkill instanceof Response) return preparedSkill;
     content = preparedSkill.content;
+    const putCarriedVector = putOmitsEmbedding && Array.isArray(content?.embedding) && content.embedding.length > 0;
+    const putCarriedHash = putCarriedVector ? (content.embeddedContentHash ?? null) : null;
 
     // flair#744 slice A: citation-on-write — same consume-and-strip
     // discipline as post() above. Strip BEFORE anything else touches
@@ -2451,14 +2464,17 @@ export class Memory extends (databases as any).flair.Memory {
     // A1-iv item 3: strip server-stamped fields (a client may not set them).
     stripServerStampedFields(content);
     // flair#2465: a vector the server computed here gets a newly computed hash
-    // (see post()). A put that carries or supplies a vector without recomputing
-    // it RETAINS the stored hash, if any: that hash records the text an earlier
-    // vector was computed from, not necessarily the vector stored now. A
-    // retained hash that differs from the current text's expected hash
-    // re-queues the row in the stamp migration; no stored hash, no re-queue.
+    // (see post()). A skill vector prepareSkillBody carried in keeps the hash it
+    // retained (possibly null) — including a superseding create at a new id,
+    // which has no stored row of its own. Any other put that does not compute a
+    // vector (a caller-supplied or echoed one) retains this row's stored hash,
+    // if any. A retained hash is a preserved value that may describe an earlier
+    // server-computed vector, not necessarily the vector stored now. One that
+    // differs from the current text's expected hash re-queues the row in the
+    // stamp migration; no stored hash, no re-queue.
     content.embeddedContentHash = !embeddingSupplied && Array.isArray(content.embedding) && content.embedding.length > 0
       ? (embeddedTextHash(content) ?? null)
-      : (preExisting?.embeddedContentHash ?? null);
+      : putCarriedVector ? putCarriedHash : (preExisting?.embeddedContentHash ?? null);
     // A1-iv item 1: PRESERVE the existing row's incarnation token on an update,
     // else generate one (a fresh create via put).
     stampInstanceToken(content, preExisting);

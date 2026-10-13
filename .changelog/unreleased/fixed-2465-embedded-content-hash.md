@@ -6,8 +6,9 @@
   computed `embeddedContentHash`: the content hash of the exact text embedded
   (`trigger` for a skill-tagged row with a non-empty trigger, else `content`),
   or null for a row with an empty owner. A PUT or PATCH that does not compute a
-  vector retains the stored value, which can then describe an earlier vector;
-  a create with a caller-supplied vector stores null. The re-embed now
+  vector, and a skill successor that carries the stored vector, retain the
+  stored value, which may describe an earlier server-computed vector; a create
+  with a caller-supplied vector stores null. The re-embed now
   confirms, after staging, that the committed row still holds the exact text
   it embedded, so an edit committed before that confirmation aborts the write.
   The embedding-stamp migration re-queues a row whose stored hash differs from

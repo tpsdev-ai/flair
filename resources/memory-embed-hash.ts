@@ -14,20 +14,19 @@
  *     `embeddedContentHash` when it computes a vector on a guarded path (an
  *     ordinary Memory POST/PUT/PATCH embed, the re-embed PATCH, the stamp
  *     migration's `.content`-suffix fallback, the auto-embed backfill);
- *   - a RETAINED hash: a stored value a write keeps without computing a vector
- *     (a PUT or PATCH that carries or supplies a vector, a Feed skill successor
- *     that carries the stored vector), or a federation peer's value. It records
- *     the text an earlier vector was computed from, not necessarily the vector
- *     stored now.
+ *   - a RETAINED hash: a preserved stored value that a write keeps without
+ *     computing a vector (a PUT or PATCH that carries or supplies a vector, a
+ *     skill successor that carries the stored vector). It may describe an
+ *     earlier server-computed vector, not necessarily the vector stored now.
+ *     A value received through federation is an unverified peer assertion.
  * Exceptions: a row with an empty owner gets no hash (null) even from a
  * server-computed embed, and a caller-supplied vector gets no newly computed
  * hash (a create stores null; an update retains the stored hash beside it).
  *
  * The embedding-stamp migration treats an embedding as current when its
  * `embeddingModel` is current-space AND the stored hash is absent or equals the
- * expected hash. A stored hash that differs from the expected hash (the text
- * changed after that vector was computed) re-queues the row; an absent hash
- * does not.
+ * expected hash. A stored hash that differs from the expected hash re-queues
+ * the row; an absent hash does not.
  *
  * Deliberately a plain function: importing `memory-feed-lib.js` /
  * `skill-write.js` (both Harper-free) keeps this usable from a migration's unit

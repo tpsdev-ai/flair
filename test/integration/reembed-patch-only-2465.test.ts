@@ -639,6 +639,49 @@ describe("flair#2465 part 2 — ordinary REST writes bind the vector the server 
     }
   }, 180_000);
 
+  /** A skill whose stored hash differs from its text's expected hash: created
+   *  for TRIGGER (vector and hash for TRIGGER), then its trigger raw-edited. */
+  async function staleSkill(id: string, newTrigger: string): Promise<any> {
+    expect((await signedSend(owner, "POST", "/Memory", skillBody(id))).status).toBeLessThan(300);
+    // Let the POST's auto-embed backfill read (and skip) the row first.
+    await new Promise((r) => setTimeout(r, 1_000));
+    await opsCall({ operation: "update", database: "flair", table: "Memory", records: [{ id, trigger: newTrigger }] });
+    const row = await readRow(id);
+    expect(row.trigger).toBe(newTrigger);
+    expect(row.embeddedContentHash).toBe(computeContentHash(owner.id, TRIGGER));
+    return row;
+  }
+  /** The successor carried the predecessor's vector AND kept its hash, so it
+   *  still differs from the successor's own expected hash. */
+  async function expectCarriedWithHash(successorId: string, predecessorId: string, trigger: string): Promise<void> {
+    const successor = await readRow(successorId);
+    const predecessor = await readRow(predecessorId);
+    expect(successor.trigger).toBe(trigger);
+    expect(successor.embedding, "the predecessor's vector was not carried").toEqual(predecessor.embedding);
+    expect(successor.embeddedContentHash, "the carried vector lost its retained hash").toBe(predecessor.embeddedContentHash);
+    expect(successor.embeddedContentHash).not.toBe(computeContentHash(owner.id, trigger));
+  }
+
+  it("POST with `supersedes` over a row whose hash differs from its text: the successor keeps the carried vector's hash", async () => {
+    const id = `rpo-supersede-post-${randomUUID()}`;
+    const NEW_TRIGGER = "when the weekly report email bounces";
+    await staleSkill(id, NEW_TRIGGER);
+    const nid = `rpo-supersede-post-succ-${randomUUID()}`;
+    const res = await signedSend(owner, "POST", "/Memory", skillBody(nid, { supersedes: id, trigger: NEW_TRIGGER, content: "a revised procedure" }));
+    expect(res.status, (await res.clone().text()).slice(0, 200)).toBeLessThan(300);
+    await expectCarriedWithHash(nid, id, NEW_TRIGGER);
+  }, 120_000);
+
+  it("PUT to a new id with `supersedes` over a row whose hash differs from its text: the successor keeps the carried vector's hash", async () => {
+    const id = `rpo-supersede-put-${randomUUID()}`;
+    const NEW_TRIGGER = "when the weekly report email bounces";
+    await staleSkill(id, NEW_TRIGGER);
+    const nid = `rpo-supersede-put-succ-${randomUUID()}`;
+    const res = await signedSend(owner, "PUT", `/Memory/${encodeURIComponent(nid)}`, skillBody(nid, { supersedes: id, trigger: NEW_TRIGGER, content: "a revised procedure" }));
+    expect(res.status, (await res.clone().text()).slice(0, 200)).toBeLessThan(300);
+    await expectCarriedWithHash(nid, id, NEW_TRIGGER);
+  }, 120_000);
+
   it("a feed skill successor of a row with a hash but no vector carries no hash", async () => {
     const id = `rpo-feed-skill-novec-${randomUUID()}`;
     expect((await signedSend(owner, "POST", "/Memory", skillBody(id))).status).toBeLessThan(300);
