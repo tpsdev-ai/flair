@@ -39,12 +39,9 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # flair#2540 — classify a pull request's changed paths so a docs-only push
-  # can skip the heavy test lanes. Fail safe: a non-PR event, an empty diff, a
-  # rename/delete that reaches outside the allow-list, or any error in this job
-  # all mean "run everything". The result gates the lanes through a job-level
-  # `if:` (a skipped job still reports a check, so a required check never sits
-  # Pending — a whole-workflow `paths` filter would leave it pending forever).
+  # flair#2540 — classify changed PR paths for job-level docs-only skips.
+  # Non-PR events, empty diffs and handled errors set docs_only=false;
+  # a missing output also skips no lane through this classifier.
   changes:
     name: "Changed-paths classifier"
     runs-on: ubuntu-latest
@@ -71,28 +68,28 @@ jobs:
             echo "docs_only=${docs_only}" >> "$GITHUB_OUTPUT"
           }
           if [ "${EVENT_NAME:-}" != "pull_request" ]; then
-            echo "event '${EVENT_NAME:-?}' is not a pull request — running every lane"
+            echo "event '${EVENT_NAME:-?}' is not a pull request — docs_only=false"
             report
             exit 0
           fi
           if [ -z "${BASE_REF:-}" ]; then
-            echo "no base ref — running every lane"
+            echo "no base ref — docs_only=false"
             report
             exit 0
           fi
           if ! git fetch --no-tags origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"; then
-            echo "could not fetch origin/${BASE_REF} — running every lane"
+            echo "could not fetch origin/${BASE_REF} — docs_only=false"
             report
             exit 0
           fi
           if ! changed="$(git diff --name-status "origin/${BASE_REF}...HEAD")"; then
-            echo "could not diff against origin/${BASE_REF} — running every lane"
+            echo "could not diff against origin/${BASE_REF} — docs_only=false"
             report
             exit 0
           fi
           printf 'Changed paths vs origin/%s:\n%s\n' "$BASE_REF" "$changed"
           if [ -z "$changed" ]; then
-            echo "empty diff — running every lane"
+            echo "empty diff — docs_only=false"
             report
             exit 0
           fi
@@ -111,10 +108,7 @@ jobs:
           done <<< "$changed"
           report
 
-  # flair#2540 — build once per run and share `dist/` (plus the workspace
-  # packages' built output) with the test lanes that need it. Gated like the
-  # other lanes: a docs-only push skips it, and it runs on every push to main
-  # and on workflow_dispatch.
+  # flair#2540 — share one build with pack-smoke and dist-esm-guard.
   build:
     name: "Build (shared dist)"
     needs: changes
@@ -199,9 +193,8 @@ jobs:
         # when 26 superseded it — deliberately excluded, it's already dead upstream.
         #
         # flair#2540 — a PR push exercises the primary Node (22) only; the full
-        # 22/24/26 matrix runs on a push to main and on workflow_dispatch. A
-        # Node-major regression is then caught on main before any release,
-        # rather than paying three lanes on every PR round. The required
+        # 22/24/26 matrix runs on a push to main and on workflow_dispatch.
+        # The automatic release path checks main CI before tagging. The required
         # "Unit Tests" context is the aggregate gate below, so the per-leg
         # names can change without touching branch protection.
         node-version: ${{ github.event_name == 'pull_request' && fromJSON('["22"]') || fromJSON('["22", "24", "26"]') }}
@@ -1538,8 +1531,6 @@ jobs:
     name: Install-weight budget
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: changes
-    if: ${{ always() && needs.changes.outputs.docs_only != 'true' }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2

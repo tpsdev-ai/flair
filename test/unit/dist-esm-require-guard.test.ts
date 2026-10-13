@@ -192,11 +192,9 @@ describe("check-dist-esm-require — corpus safety (a check that scans nothing m
 describe("check-dist-esm-require — CI wiring", () => {
   const job = jobBlock("dist-esm-guard");
 
-  test("a blocking job runs the checker against a built dist", () => {
+  test("a CI job runs the checker against a built dist", () => {
     expect(job).toContain("scripts/check-dist-esm-require.mjs");
-    // flair#2540 — the dist is built once per run by the `build` job and shared
-    // as an artifact, so the scanner still runs on real emitted output (not a
-    // stub) without rebuilding it in every dist consumer.
+    // flair#2540 — pack-smoke and dist-esm-guard share the build job's artifact.
     expect(job).toContain("name: flair-dist");
     const builder = jobBlock("build");
     expect(builder).toMatch(/bun run build\b/);
@@ -214,6 +212,31 @@ describe("check-dist-esm-require — CI wiring", () => {
     expect(body).not.toContain("continue-on-error");
     expect(body).not.toMatch(/\|\|\s*true/);
     expect(body).not.toMatch(/\|\|\s*echo/);
+  });
+});
+
+describe("install-weight — docs-only workflow contract", () => {
+  type Job = { if?: string; needs?: unknown; steps: { if?: string; run?: string }[] };
+  const workflow = loadYaml(TEST_YML) as { jobs: Record<string, Job> };
+  const manifest = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as { files: string[] };
+  const job = workflow.jobs["install-weight"];
+
+  test("docs-only PRs do not skip install-weight", () => {
+    expect(manifest.files).toContain("docs/");
+    expect(manifest.files).toContain("README.md");
+    expect(job).toBeDefined();
+    expect(job.if).toBeUndefined();
+    expect(job.needs).toBeUndefined();
+    const measurement = job.steps.find((step) => step.run?.includes("scripts/check-install-weight.mjs"));
+    expect(measurement).toBeDefined();
+    expect(measurement?.if).toBeUndefined();
+  });
+
+  test.each(manifest.files)("shipped manifest entry %s cannot trigger a docs-only install-weight skip", (path) => {
+    expect(path.length).toBeGreaterThan(0);
+    expect(job.if).toBeUndefined();
+    expect(job.needs).toBeUndefined();
+    for (const step of job.steps) expect(step.if ?? "").not.toContain("docs_only");
   });
 });
 
