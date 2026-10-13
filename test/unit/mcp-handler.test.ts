@@ -351,9 +351,11 @@ describe("resolveAgentFromSub", () => {
     });
   }
 
-  // A matching row that names no principal ends resolution too, whatever its
-  // status: it maps nothing, it is refused by name, and JIT provisioning runs
-  // only when NO Credential row matches the subject. The schema requires
+  // A matching row that names no principal maps nothing, whatever its status,
+  // and it prevents JIT fallback: JIT provisioning runs only when NO IdP
+  // Credential row matches the subject. The resolver scans for an active,
+  // principal-bearing row and refuses the call by name only if none maps; here
+  // the principal-less row is the subject's only row. The schema requires
   // principalId; the resolver does not rely on that to exclude such a row (the
   // integration suite exercises the empty-string form real storage accepts).
   for (const [label, status] of [["revoked", "revoked"], ["missing", undefined], ["active", "active"]] as const) {

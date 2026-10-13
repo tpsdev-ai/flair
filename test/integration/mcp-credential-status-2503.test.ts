@@ -8,8 +8,9 @@
 // "revoked", so a principal-bearing row with no status — or any unknown value —
 // was served as a live mapping. And a revoked row was SKIPPED by the resolver,
 // so JIT provisioning, when enabled, could re-create the principal the
-// revocation was meant to stop. Any matching row now ends resolution: JIT runs
-// only when no row matches the subject.
+// revocation was meant to stop. Any matching IdP row now prevents JIT fallback:
+// the resolver scans for an active, principal-bearing row, refuses the call only
+// if none maps, and JIT runs only when no IdP row matches the subject.
 //
 // Harness: a real Harper with the in-process fixture (test/fixtures/inproc-app),
 // driving the SHIPPED `mcpHandler` through its `mcpRpc` op — the real
@@ -206,7 +207,7 @@ describe("flair#2503 — the /mcp resolver accepts a Credential only when its st
   }
 });
 
-describe("flair#2503 — any matching Credential row ends resolution; JIT runs only when none matches", () => {
+describe("flair#2503 — any matching IdP row prevents JIT fallback; the call is refused only if none maps", () => {
   // A Credential that names no principal. The current schema requires
   // principalId, and real storage refuses a row without the attribute (pinned
   // first). It does store an EMPTY principalId, which names no principal to
@@ -321,7 +322,7 @@ describe("flair#2503 — any matching Credential row ends resolution; JIT runs o
     );
   }, 60_000);
 
-  test("JIT still provisions when no Credential row matches the subject (positive control)", async () => {
+  test("JIT still provisions when no IdP Credential row matches the subject (positive control)", async () => {
     const sub = `cs-jit-sub-${sfx}`;
     expect(await adminSearch("Credential", "idpSubject", sub), "fixture control: no row matches").toEqual([]);
     const rpc = await mcpCall(sub, { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "bootstrap", arguments: {} } });

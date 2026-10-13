@@ -1324,9 +1324,11 @@ export interface IdentityMappingResult {
  *
  * ## The uniqueness constraint (flair#1317, K&S ruling 2026-08-21)
  *
- * **At most one ACTIVE `Credential(kind:"idp", idpSubject:<sub>)` exists at a
- * time, regardless of `idpProvider`.** This function is where that invariant is
- * enforced, because it is the only supported writer of the mapping.
+ * **At most one ACTIVE, principal-bearing `Credential(kind:"idp",
+ * idpSubject:<sub>)` exists at a time, regardless of `idpProvider`.** This
+ * function is where that invariant is enforced, because it is the only
+ * supported writer of the mapping. A principal-less row maps nothing and is
+ * skipped, so it may remain active beside the mapping.
  *
  * It used to dedup on `(kind, idpProvider, idpSubject)` while the resolver read
  * `(kind, idpSubject)`. A re-link under a different provider name therefore
@@ -1340,8 +1342,9 @@ export interface IdentityMappingResult {
  * uniqueness. So:
  *
  *   - same provider, existing active credential → RE-POINT it (`credentialReused`);
- *   - any OTHER active credential for the subject → SUPERSEDE it: terminal
- *     `status: "revoked"`, never a soft flag a later path could flip back
+ *   - any OTHER active, principal-bearing credential for the subject →
+ *     SUPERSEDE it: terminal `status: "revoked"`, never a soft flag a later
+ *     path could flip back
  *     (revoked rows are never reused here — a re-link after a revoke mints a
  *     fresh credential);
  *   - the re-point/insert and every revocation go out as ONE ops-API `upsert`
