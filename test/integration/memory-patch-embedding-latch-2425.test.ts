@@ -149,7 +149,9 @@ describe("a PATCH that stores an embedding stamp trips the embedding-space latch
 
     expect(String(await semanticWarning())).toContain("mixed embedding spaces");
     // flair#2530: `explain: true` returns its plan early and names the same state.
-    expect(String(await semanticWarning({ explain: true }))).toContain("mixed embedding spaces");
+    const explained = String(await semanticWarning({ explain: true }));
+    expect(explained).toContain("mixed embedding spaces");
+    expect(explained).toContain("the plan has no embedding leg");
 
     // flair#2530: a vector-only recall (no `q`) whose embedding the guard refused
     // has no signal left. It returns no results and the state warning, never the

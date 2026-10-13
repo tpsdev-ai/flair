@@ -32,11 +32,14 @@ const CANDIDATE_MULTIPLIER = 5;
 /** The recall leg's `_warning` for a guard-degraded search (flair#2530). The
  *  verdict is never `uniform` here (that state is never degraded), so the three
  *  cases are exactly the non-uniform states. Each names itself; the
- *  mixed-stamps wording is used ONLY for a mixed store. `hasText` says whether
- *  the request has query text to fall back on: with it the results are
- *  keyword-only, without it there are none. */
-function spaceGuardWarning(v: EmbeddingSpaceVerdict, hasText: boolean): string {
-  const outcome = hasText ? "results are keyword-only" : "no results (the request has no query text to fall back on)";
+ *  mixed-stamps wording is used ONLY for a mixed store. `response` says what
+ *  the caller gets back: keyword-only results (the request has query text), no
+ *  results (it has none), or an `explain` plan with no embedding leg. */
+function spaceGuardWarning(v: EmbeddingSpaceVerdict, response: "keyword" | "none" | "plan"): string {
+  const outcome =
+    response === "keyword" ? "results are keyword-only"
+    : response === "none" ? "no results (the request has no query text to fall back on)"
+    : "the plan has no embedding leg";
   if (v.state === "scan-failed") {
     return `semantic search unavailable — embedding space unverified: last scan failed (${v.reason}); ${outcome}.`;
   }
@@ -156,7 +159,11 @@ export class SemanticSearch extends Resource {
     const mode = retrievalMode();
 
     // Generate query embedding
-    let qEmb = queryEmbedding;
+    // bm25-only ranks on the lexical leg alone and never uses a query embedding
+    // (the core ignores one), so a supplied embedding is dropped here: no guard
+    // consult below, and no state warning for an embedding this mode would not
+    // use (flair#2530).
+    let qEmb = mode === "bm25-only" ? undefined : queryEmbedding;
     if (!qEmb && q && mode !== "bm25-only") {
       // Always attempt embedding generation — getEmbedding() handles init internally.
       // Don't gate on getMode() which may return "none" before init completes in worker threads.
@@ -186,8 +193,9 @@ export class SemanticSearch extends Resource {
     // Consulted through the SAME single chokepoint the write-time dedup leg
     // uses — O(1) on the verified-uniform happy path. The consult, and so the
     // state warning, happens only when a query embedding is available
-    // (supplied, or generated from `q`); bm25-only mode and a failed embedding
-    // generation never reach it.
+    // (supplied, or generated from `q`) outside bm25-only mode; bm25-only (whose
+    // supplied embedding was dropped above) and a failed embedding generation
+    // never reach it.
     let spaceGuardVerdict: EmbeddingSpaceVerdict | null = null;
     if (qEmb) {
       const verdict = await embeddingSpaceVerdict();
@@ -285,7 +293,7 @@ export class SemanticSearch extends Resource {
         tag,
         scoring,
         // flair#2530: a guard-degraded plan has no embedding leg; say why.
-        ...(spaceGuardVerdict ? { _warning: spaceGuardWarning(spaceGuardVerdict, !!q) } : {}),
+        ...(spaceGuardVerdict ? { _warning: spaceGuardWarning(spaceGuardVerdict, "plan") } : {}),
       };
     }
 
@@ -388,7 +396,7 @@ export class SemanticSearch extends Resource {
           bestScore: abstention.bestScore,
           threshold: abstention.threshold,
           results: [],
-          ...(spaceGuardVerdict ? { _warning: spaceGuardWarning(spaceGuardVerdict, !!q) } : {}),
+          ...(spaceGuardVerdict ? { _warning: spaceGuardWarning(spaceGuardVerdict, q ? "keyword" : "none") } : {}),
         };
       }
     }
@@ -456,7 +464,7 @@ export class SemanticSearch extends Resource {
       response.threshold = abstention.threshold;
     }
     if (spaceGuardVerdict) {
-      response._warning = spaceGuardWarning(spaceGuardVerdict, !!q);
+      response._warning = spaceGuardWarning(spaceGuardVerdict, q ? "keyword" : "none");
     } else if (!qEmb && q && getMode() === "none") {
       response._warning = "semantic search unavailable — results are keyword-only";
     }

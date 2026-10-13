@@ -27,9 +27,10 @@
  * the latch. Runs in its own process so `mock.module` never races another file.
  *
  * To confirm it FAILS ON UNFIXED (the mutation): make
- * resources/embedding-space-guard.ts's isEmbeddingSpaceUniform() always return
- * true (or delete either leg's guard consult) and re-run — the (a)/(b) tripped
- * assertions go red.
+ * resources/embedding-space-guard.ts's consult report uniform (both legs share
+ * it — recall through embeddingSpaceVerdict(), dedup through
+ * isEmbeddingSpaceUniform()), or delete either leg's guard consult, and re-run —
+ * the (a)/(b) tripped assertions go red.
  */
 import { describe, it, expect, beforeEach, mock } from "bun:test";
 
@@ -268,12 +269,36 @@ describe("embedding-space-guard — both runtime legs (mutation test)", () => {
     // No scan has reached a verdict: the explained plan has no embedding leg, and says why.
     const res: any = await makeSearch(AGENT).post({ agentId: AGENT, q: "replication", explain: true });
     expect(res.explain).toBe(true);
-    expect(String(res._warning)).toContain("embedding space not yet verified");
+    expect(res.results).toBeUndefined(); // a plan, not results — the warning says so
+    expect(res._warning).toBe(
+      "semantic search unavailable — embedding space not yet verified; the plan has no embedding leg.",
+    );
 
     expect(await recomputeLatch()).toBe(true);
     const ok: any = await makeSearch(AGENT).post({ agentId: AGENT, q: "replication", explain: true });
     expect(ok.explain).toBe(true);
     expect(ok._warning).toBeUndefined();
+  });
+
+  it("(h) bm25-only never uses a query embedding: a supplied one is not consulted and draws no guard warning", async () => {
+    seedRow("m1", AGENT, FINDING, CURRENT, FAKE_EMBEDDING);
+    // The verdict is non-uniform (no scan has reached one); count every scan a consult would start.
+    let scans = 0;
+    _setGuardTableGetterForTests(async () => { scans++; throw new Error("no live table"); });
+    const saved = { mode: process.env.FLAIR_RETRIEVAL_MODE, index: process.env.FLAIR_BM25_INDEX };
+    process.env.FLAIR_RETRIEVAL_MODE = "bm25-only";
+    process.env.FLAIR_BM25_INDEX = "false"; // the legacy lexical scan; no index service in this mock
+    try {
+      const res: any = await makeSearch(AGENT).post({ agentId: AGENT, q: "replication", queryEmbedding: FAKE_EMBEDDING });
+      expect(res.results.map((r: any) => r.id)).toContain("m1"); // the lexical leg serves
+      expect(res._warning).toBeUndefined();
+      expect(scans).toBe(0); // no consult, so no scan was started
+    } finally {
+      for (const [k, v] of [["FLAIR_RETRIEVAL_MODE", saved.mode], ["FLAIR_BM25_INDEX", saved.index]] as const) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
   });
 
   it("(f) after a scan error, the recall leg fails CLOSED with the failed-scan warning", async () => {

@@ -26,8 +26,10 @@
  *     completed re-embed REOPENS the gate automatically (any re-embed path —
  *     the boot migration OR a live `flair reembed`), with no cross-process
  *     signal needed.
- * Both runtime legs consult the SAME `isEmbeddingSpaceUniform()` — a single
- * chokepoint (like `prefixesEnabled()`), never scattered per-call-site checks.
+ * Both runtime legs consult the SAME verdict — the recall leg through
+ * `embeddingSpaceVerdict()`, the dedup leg through `isEmbeddingSpaceUniform()`,
+ * both over one consult — a single chokepoint (like `prefixesEnabled()`), never
+ * scattered per-call-site checks.
  *
  * ─── Unknown verdict = FAIL CLOSED (flair#2530) ──────────────────────────────
  * A scan can be pending (before the first scan completes) or fail (a boot race,
@@ -36,12 +38,13 @@
  * (`isEmbeddingSpaceUniform()` returns true). Every other state — pending
  * (`unverified`), a failed scan (`scan-failed`), or a foreign-write/mixed corpus
  * (`mixed`) — makes a consumer take its MIXED-space path: when a query
- * embedding is available, the recall leg drops it and serves keyword-only
- * results (none, for a request with no query text) with a state-named warning;
- * the dedup leg no-ops. (A recall with no query embedding, in bm25-only mode or
- * after a failed embedding generation, never consults the guard and has no
- * state to name.) A consult
- * never blocks on an in-flight scan to obtain a verdict; it fails closed now,
+ * embedding is available outside bm25-only mode, the recall leg drops it and
+ * serves keyword-only results (none, for a request with no query text; for
+ * `explain: true`, a plan with no embedding leg) with a state-named warning;
+ * the dedup leg no-ops. A recall in bm25-only mode (which never uses a query
+ * embedding, so a supplied one is dropped unconsulted) or after a failed
+ * embedding generation never consults the guard and has no state to name. A
+ * consult never blocks on an in-flight scan to obtain a verdict; it fails closed now,
  * and only a later SUCCESSFUL scan that finds the store uniform reopens the
  * gate. An error from the scan's table lookup or corpus read is classified into
  * a bounded reason (never row content); a published failure is logged once per
