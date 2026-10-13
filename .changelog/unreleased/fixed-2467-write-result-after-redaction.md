@@ -14,6 +14,7 @@
   result has no `content`, `summary` or `trigger` and is marked
   `contentWithheld: true`. With a count, the MCP `memory_store` and
   `memory_update` replies take their preview (at most 120 characters) only
-  from the stored `content` and report the count; with the content withheld
-  they say so and show no preview. With no count, the preview is the result's
+  from the stored `content` and report the count; with the stored text
+  withheld they show no preview and state the count and that the stored text
+  was not returned, without naming a field. With no count, the preview is the result's
   content or, failing that, the input, as before.

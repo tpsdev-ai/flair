@@ -83,8 +83,8 @@ function redactedValuesOf(result: unknown): number {
  * `content`: the post-redaction content the write response returned in
  * `stored` (equal to the input when the redaction changed only another
  * field). A result marked `contentWithheld`, or with no `content` string, gets
- * null: the reply says the content was redacted and not returned, and never
- * shows the input. With no count (the server reported no replacement), the
+ * null: the reply states the redacted-value count and that the stored text
+ * was not returned, and never shows the input. With no count (the server reported no replacement), the
  * preview is the result's `content`, else the input.
  */
 function storedTextOf(result: unknown, input: string, redactedValues: number): string | null {
@@ -95,7 +95,12 @@ function storedTextOf(result: unknown, input: string, redactedValues: number): s
   return typeof written?.content === "string" ? written.content : input;
 }
 
-const WITHHELD_PREVIEW = "Preview: none. The server redacted this content and did not return the stored text.";
+/** The preview line for a counted redaction whose stored text was not
+ *  returned. It states only what the response says: how many values were
+ *  replaced in this write, not which field held them. */
+function withheldPreview(redactedValues: number): string {
+  return `Preview: none. The server redacted ${redactedValues} value(s) in this write; the stored text was not returned.`;
+}
 
 function previewOf(text: string): string {
   return text.length > 120 ? text.slice(0, 120) + "..." : text;
@@ -126,7 +131,7 @@ const memory_store: StdioHandler = async (
     const tagStr = tags && tags.length > 0 ? tags.join(", ") : "none";
     const lines = [
       `Memory stored (id: ${result.id})`,
-      ...(stored === null ? [WITHHELD_PREVIEW] : [`Preview: ${previewOf(stored)}`, `Size: ${stored.length} chars`]),
+      ...(stored === null ? [withheldPreview(redactedValues)] : [`Preview: ${previewOf(stored)}`, `Size: ${stored.length} chars`]),
       `Tags: ${tagStr}`,
       `Type: ${type ?? "session"}, Durability: ${durability ?? "standard"}, Visibility: ${effectiveVisibility ?? "(server default)"}`,
     ];
@@ -174,7 +179,7 @@ const memory_update: StdioHandler = async (
       preserveHistory
         ? `Memory updated: new version stored (id: ${result.id}), supersedes ${id}.`
         : `Memory updated (id: ${id}).`,
-      stored === null ? WITHHELD_PREVIEW : `Preview: ${previewOf(stored)}`,
+      stored === null ? withheldPreview(redactedValues) : `Preview: ${previewOf(stored)}`,
     ];
     if (redactedValues > 0) {
       lines.push(`Redacted ${redactedValues} credential-shaped value(s) before storing.`);
