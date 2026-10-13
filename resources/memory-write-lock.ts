@@ -6,8 +6,8 @@
  * A writer that must make its read, decision and write on one committed basis
  * runs under ONE key of `Memory.primaryStore`'s lock: `["memory", fullStoredId]`.
  * Within one Harper process the lock is per key and shared by its threads
- * (resources/key-lock.ts). The lock is held across the owned transaction, so it
- * is released only after that transaction commits or aborts.
+ * (resources/key-lock.ts). A caller opens and settles its owned transaction
+ * inside the callback, so the key is held across the commit.
  *
  * Two refusals, both `503` because both are retryable without replaying an
  * uncertain write:
@@ -24,8 +24,8 @@
  *    restart clears it, and that restart is the fencing step. The marker is
  *    process-local (per module instance), the same scope the lock itself has.
  *
- * Acquisition is sorted and deduplicated so two writers that hold two ids in
- * common cannot deadlock. A partial acquisition is released before the wait, so
+ * Acquisition is sorted and deduplicated, so two writers that share ids take
+ * them in the same order. A partial acquisition is released before the wait, so
  * a writer never blocks on the next key while holding one. An automatic writer
  * uses {@link withMemoryWriteLockOnce}: one attempt, no wait.
  */
