@@ -409,9 +409,10 @@ describe("flair#2407 — the redactor leaves incoming federated content alone", 
 });
 
 /**
- * flair#2467 — a redacting write's response carries the text that write
- * committed, and the SDK's write/update results and the MCP write replies are
- * built from it, through the REAL FlairClient against REAL Harper.
+ * flair#2467 — a redacting write's response carries the post-redaction values
+ * of the text fields that write committed, and the SDK's write/update results
+ * and the MCP write replies are built from it, through the REAL FlairClient
+ * against REAL Harper.
  *
  * The SDK makes no read after the write: what a result reports comes from the
  * write's own response, so a later write to the same row cannot change it.

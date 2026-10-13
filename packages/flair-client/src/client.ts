@@ -472,18 +472,19 @@ const REDACTED_MEMORY_FIELDS = ["content", "summary", "trigger"] as const;
 /**
  * flair#2467 — the result of a write()/update() whose response reports
  * `redactedValues` above zero. The server replaced credential-shaped text in
- * `content`, `summary` or `trigger` before storing the row, so the caller's
- * input for those fields is not what was stored. The response carries
- * `stored`: the redacted text fields that write committed, captured by the
- * server from the row it staged. The result takes those fields from `stored`
- * and the write signals (`id`, `written`, `redactedValues`, ...) from the same
- * response, and makes no read: a later write to the row cannot change it.
+ * at least one of `content`, `summary` or `trigger` before storing the row.
+ * The response carries `stored`: the post-redaction values of those fields
+ * present in the write, captured by the server from the row it staged (a
+ * field the redaction did not change keeps the caller's value). The result
+ * takes those fields from `stored` and the write signals (`id`, `written`,
+ * `redactedValues`, ...) from the same response, and makes no read: a later
+ * write to the row cannot change it.
  *
  * A response with the count and no `stored` (a server from before it) or a
  * `stored` with no string `content` gives a result with no `content`,
  * `summary` or `trigger` and `contentWithheld: true`. The caller's input is
- * never returned for a redacted field. Without a count the merged result is
- * returned unchanged.
+ * never substituted for a field the server changed. Without a count the
+ * merged result is returned unchanged.
  */
 function writeResultAfterRedaction(response: unknown, merged: Record<string, unknown>): Record<string, unknown> {
   const body = response && typeof response === "object" && !Array.isArray(response)

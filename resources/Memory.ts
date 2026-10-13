@@ -559,9 +559,9 @@ async function runDedupGate(ctx: any, content: any): Promise<DedupMatch | null> 
  * returns undefined. Returns the result unchanged when nothing was redacted or
  * when it is a Response.
  *
- * flair#2467: with the count it layers `stored`, the redacted text fields the
- * write staged (storedMemoryText of the staged row or PATCH body), when the
- * write captured them.
+ * flair#2467: with the count it layers `stored`, the post-redaction values of
+ * the text fields the write staged (storedMemoryText of the staged row or
+ * PATCH body), when the write captured them.
  */
 function withRedactedValues(result: any, redactedValues: number, id?: any, stored?: StoredMemoryText | null): any {
   if (redactedValues <= 0 || result instanceof Response) return result;
@@ -608,9 +608,10 @@ function buildWriteResponse(content: any, result: any, dedupMatch: DedupMatch | 
   }
   // flair#2407: report how many credential values the server replaced, so the
   // writer learns its text was changed. Absent when nothing was replaced.
-  // flair#2467: with it, `stored` — the redacted text fields this write staged
-  // and committed (captured from the staged row, never read back), so a client
-  // reports the stored text without a read a later write could change.
+  // flair#2467: with it, `stored` — the post-redaction values of the text
+  // fields this write staged and committed (captured from the staged row,
+  // never read back), so a client reports them without a read a later write
+  // could change.
   if (redactedValues > 0) {
     response.redactedValues = redactedValues;
     if (stored) response.stored = stored;
@@ -1039,8 +1040,8 @@ async function writeSkillCreateOrUpdate(
     inPlaceId?: string | null;
     reembedding?: boolean;
     requestedPayload?: Record<string, any>;
-    /** flair#2467: receives the redacted text fields of the successor row this
-     *  write staged and committed (none when it wrote no row). */
+    /** flair#2467: receives the post-redaction text fields of the successor
+     *  row this write staged and committed (none when it wrote no row). */
     staged?: { text: StoredMemoryText | null };
   },
 ): Promise<any> {
@@ -1814,7 +1815,7 @@ export class Memory extends (databases as any).flair.Memory {
     // the Memory row back too instead of leaving it pointer-less.
     // Pinned by test/unit/memory-host-source.test.ts (r20-atomic) — RED if the
     // owned-transaction branch is bypassed.
-    // flair#2467: the redacted text fields this write stages, for the response.
+    // flair#2467: the post-redaction text fields this write stages, for the response.
     let postStaged: StoredMemoryText = {};
     const postResult = await withSharedWriteTransaction(ctx, async (c) => {
       postStaged = storedMemoryText(content);
@@ -2087,7 +2088,7 @@ export class Memory extends (databases as any).flair.Memory {
       if (committedField) await storeVectorFor(committedField);
     }
     // flair#2467: a PATCH commits only the fields in its body; these are the
-    // redacted text fields among them, for the response.
+    // post-redaction text fields among them, for the response.
     const patchStaged = storedMemoryText(content);
     const patched = await super.patch(content, query);
     // embedding-space-guard slice 1 (flair#2425): a PATCH that stores an
@@ -2512,7 +2513,7 @@ export class Memory extends (databases as any).flair.Memory {
     // transaction() aborts it when its callback throws).
     const joinsRequestTxn = isJoinableTransaction(ctx);
     let putResult: any;
-    // flair#2467: the redacted text fields this write stages, for the response.
+    // flair#2467: the post-redaction text fields this write stages, for the response.
     let putStaged: StoredMemoryText = {};
     try {
       putResult = await withSharedWriteTransaction(ctx, async (c) => {

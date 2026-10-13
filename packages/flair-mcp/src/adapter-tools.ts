@@ -76,14 +76,16 @@ function redactedValuesOf(result: unknown): number {
 }
 
 /**
- * flair#2467 — the text a write reply previews, or null for no preview.
+ * flair#2467 — the text a write reply previews (cut to 120 characters by
+ * previewOf), or null for no preview.
  *
- * With a redaction count, the server stored text that differs from the
- * caller's input, and only the result's `content` (the stored text the write
- * response returned) is shown. A result marked `contentWithheld`, or with no
- * `content` string, gets null: the reply says the content was redacted and not
- * returned, and never shows the input. With no count, the server reports it
- * stored the input unchanged: the result's `content`, else the input.
+ * With a positive redaction count, the preview comes only from the result's
+ * `content`: the post-redaction content the write response returned in
+ * `stored` (equal to the input when the redaction changed only another
+ * field). A result marked `contentWithheld`, or with no `content` string, gets
+ * null: the reply says the content was redacted and not returned, and never
+ * shows the input. With no count (the server reported no replacement), the
+ * preview is the result's `content`, else the input.
  */
 function storedTextOf(result: unknown, input: string, redactedValues: number): string | null {
   const written = result as { content?: unknown; contentWithheld?: unknown } | null;
@@ -118,7 +120,8 @@ const memory_store: StdioHandler = async (
     const matchedId = (result as any).matchedId as string | undefined;
     const effectiveVisibility = (result as any).visibility as string | undefined;
     const redactedValues = redactedValuesOf(result);
-    // flair#2467 — the preview comes only from the text the write stored.
+    // flair#2467 — with a redaction count, the preview comes only from the
+    // stored content the write response returned (storedTextOf).
     const stored = storedTextOf(result, content, redactedValues);
     const tagStr = tags && tags.length > 0 ? tags.join(", ") : "none";
     const lines = [
@@ -164,7 +167,8 @@ const memory_update: StdioHandler = async (
       usedMemoryIds: citationIds(usedMemoryIds),
     });
     const redactedValues = redactedValuesOf(result);
-    // flair#2467 — the preview comes only from the text the write stored.
+    // flair#2467 — with a redaction count, the preview comes only from the
+    // stored content the write response returned (storedTextOf).
     const stored = storedTextOf(result, content, redactedValues);
     const lines = [
       preserveHistory

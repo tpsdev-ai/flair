@@ -15,8 +15,9 @@
  * redactMemoryWrite() on the write body before the row is persisted; post and
  * put call it before the dedup gate and the stored embedding are computed.
  * When the count is above zero, a Memory post/put/patch response also carries
- * `stored`, the redacted fields that write committed (storedMemoryText); the
- * feed ingest's response is already the stored row.
+ * `stored`, the post-redaction values of the REDACTED_MEMORY_FIELDS present
+ * in that write (storedMemoryText); the feed ingest's response is already the
+ * stored row.
  * put() skips the call for the shipped-skill seed write (isOperatorSeedPut): a
  * PUT of the reserved seed skill id by a verified Basic administrator
  * (src/lib/skill-seed.ts). The seed compares the stored text to its source
@@ -45,8 +46,9 @@ export type StoredMemoryText = Partial<Record<(typeof REDACTED_MEMORY_FIELDS)[nu
 
 /**
  * flair#2467: the REDACTED_MEMORY_FIELDS that hold a string on `row`, copied.
- * A write calls it on the row it stages, after redaction, so the copy is the
- * text that write committed. When the write replaced any value, its response
+ * A write calls it on the row it stages, after redaction, so the copy holds
+ * the post-redaction value of each such field that write committed, changed
+ * or not. When the write replaced any value, its response
  * carries the copy as `stored` next to `redactedValues`; the writer never has
  * to read the row back, so a later write cannot change what this one reports.
  */

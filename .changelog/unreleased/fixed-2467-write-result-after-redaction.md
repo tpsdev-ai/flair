@@ -1,15 +1,19 @@
-- **Memory write results report the stored text after a server-side redaction, never the caller's input (#2467).**
+- **After a server-side redaction, Memory write results report the stored text fields, never the caller's input for a field the server changed (#2467).**
 
   When the server replaces credential-shaped text in a Memory POST, PUT or
   PATCH, the response now carries `stored` next to `redactedValues`: the
-  redacted `content`, `summary` and `trigger` that write committed (a PATCH
-  reports only the fields in its body; a skill update that versions to a
-  successor row reports that row's id). A write with nothing to redact answers
-  as before. `MemoryApi.write()` and `MemoryApi.update()` build a redacted
-  result from that response and make no read after the write, so a later
-  write to the row cannot change what the result reports. Against a server
-  that reports the count without `stored`, the result has no `content`,
-  `summary` or `trigger` and is marked `contentWithheld: true`. The MCP
-  `memory_store` and `memory_update` replies preview only the stored text and
-  report the count; with the content withheld they say so and show no
-  preview.
+  post-redaction values of the `content`, `summary` and `trigger` fields
+  present in that write, as it committed them. A field the redaction did not
+  change keeps the caller's value, so a summary-only redaction reports
+  `content` as written; a PATCH reports only the fields in its body; a skill
+  update that versions to a successor row reports that row's id. A write with
+  nothing to redact answers as before. `MemoryApi.write()` and
+  `MemoryApi.update()` take those fields from `stored` and make no read after
+  the write, so a later write to the row cannot change what the result
+  reports. Against a server that reports the count without `stored`, the
+  result has no `content`, `summary` or `trigger` and is marked
+  `contentWithheld: true`. With a count, the MCP `memory_store` and
+  `memory_update` replies take their preview (at most 120 characters) only
+  from the stored `content` and report the count; with the content withheld
+  they say so and show no preview. With no count, the preview is the result's
+  content or, failing that, the input, as before.

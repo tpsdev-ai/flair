@@ -3,12 +3,13 @@
  * server-side redaction (flair#2467).
  *
  * `memory_store` and `memory_update` build their reply from the write result.
- * When the server reports a redaction, the preview comes only from the stored
- * text the result carries, and the reply reports the count. A result with a
- * positive count and no stored text (`contentWithheld`, from a server that does
- * not return it) gets no preview: the reply says the content was redacted and
- * not returned, and never shows the caller's input. A write with no count
- * previews its text: the server reports it stored the input unchanged.
+ * When the server reports a redaction, the preview (at most 120 characters)
+ * comes only from the stored content the result carries, and the reply
+ * reports the count. A result with a positive count and no stored text
+ * (`contentWithheld`, from a server that does not return it) gets no preview:
+ * the reply says the content was redacted and not returned, and never shows
+ * the caller's input. A write with no count previews the result's content,
+ * else the input: the server reported no replacement.
  *
  * Most cases use a FlairClient stand-in; the last block runs the real SDK over
  * a stand-in fetch. The real-SDK/real-Harper counterpart is

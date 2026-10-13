@@ -4,12 +4,13 @@
  *
  * The server redacts credential-shaped text in `content`, `summary` and
  * `trigger` before storing a Memory. When it replaced any value, the write
- * response carries `redactedValues` and `stored`: the redacted text fields that
- * write committed. write()/update() build the result from that response and
- * make no read after the write. A response with a count and no `stored` (a
- * server from before `stored`) gives a result with no content, no summary and
- * no trigger, marked `contentWithheld`: the caller's input is never returned
- * for a field the server redacted.
+ * response carries `redactedValues` and `stored`: the post-redaction values of
+ * those fields present in the write, as it committed them. write()/update()
+ * build the result from that response and make no read after the write. A
+ * response with a count and no `stored` (a server from before `stored`) gives
+ * a result with no content, no summary and no trigger, marked
+ * `contentWithheld`: the caller's input is never substituted for a field the
+ * server changed.
  *
  * The fetch stand-in below keeps a small row store: a PUT stores the body with
  * the token replaced and answers `{ id, written, redactedValues, stored }`
