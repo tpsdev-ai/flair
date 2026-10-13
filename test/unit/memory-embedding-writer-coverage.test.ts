@@ -199,16 +199,36 @@ function namedBodyTrips(source: string, name: string): boolean {
   const visit = (node: ts.Node): void => {
     if ((ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node)) && node.name && ts.isIdentifier(node.name) && node.name.text === name) {
       const walk = (n: ts.Node): void => {
+        if (ts.isFunctionLike(n) || ts.isClassDeclaration(n) || ts.isClassExpression(n)) return;
         if (ts.isCallExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === "noteWriteStamp") trips = true;
         if (!trips) ts.forEachChild(n, walk);
       };
-      walk(node);
+      if (node.body) walk(node.body);
+      return;
     }
     ts.forEachChild(node, visit);
   };
   visit(ast);
   return trips;
 }
+
+test("a parameter-default call does not trip the named body's latch", () => {
+  for (const source of [
+    "function patch(model = noteWriteStamp('foreign')) {}",
+    "class Memory { patch(model = noteWriteStamp('foreign')) {} }",
+  ]) expect(namedBodyTrips(source, "patch")).toBe(false);
+});
+
+test("an uncalled nested function does not trip the named body's latch", () => {
+  for (const nested of [
+    "function unused() { noteWriteStamp('foreign'); }",
+    "function patch() { noteWriteStamp('foreign'); }",
+    "const unused = () => noteWriteStamp('foreign');",
+    "const unused = function () { noteWriteStamp('foreign'); };",
+    "const unused = { run() { noteWriteStamp('foreign'); } };",
+    "class Unused { stamp = noteWriteStamp('foreign'); }",
+  ]) expect(namedBodyTrips(`function patch() { ${nested} }`, "patch")).toBe(false);
+});
 
 // flair#2488: the file-level check above passes while ONE writer's own
 // `noteWriteStamp` call is removed, as long as any other call in the same file

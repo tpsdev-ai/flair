@@ -184,11 +184,11 @@ describe("recordUsageContribution — the contributing agent's read scope", () =
     expect(memory.get("own-private").usageCount, "the count is not bumped").toBeUndefined();
   });
 
-  // flair#2476: the count bump confirms the stored row before it writes. A
+  // flair#2476: the count bump confirms the committed row after staging the update and before committing. A
   // competitor that commits between the bump's read and its write — a delete, a
   // purge, or a same-id replace — must leave the competitor's state in place and
   // never bump the count.
-  describe("the count bump confirms the stored row before writing (flair#2476)", () => {
+  describe("the count bump confirms the committed row after staging the update and before committing (flair#2476)", () => {
     it("a row removed (deleted or purged) between the read and the write is not re-created and the count does not land", async () => {
       competitorBeforeWrite.set("own-private", null);
       await contribute("own-private");
