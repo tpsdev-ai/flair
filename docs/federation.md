@@ -292,8 +292,9 @@ Peer non-convergence is the consequence. After instance A registers a key, A's
 sync-out update reaches peer B, where the skip rule leaves B's copy exactly
 `pending`. B's `POST /AgentKeyRegister` will not complete it either: the copy
 carries A's `originatorInstanceId`, so B refuses it as `agent_not_local`. The two
-instances therefore do not converge on one key for that row, and nothing done on
-A changes B's copy. The remedy is on B: B's administrator writes the agent's
+instances therefore do not converge on one key for that row: syncing A's
+registered-key row cannot complete B's pending key, and that key needs direct
+action on B. The remedy is on B: B's administrator writes the agent's
 public key (the one registered on A) onto B's copy through B's operations API,
 an `update` of `flair.Agent` with `{id, publicKey, updatedAt}`. That is the raw
 write `flair agent rotate-key` makes, but `rotate-key` generates a new keypair,

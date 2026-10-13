@@ -11,7 +11,8 @@
 // The last two cases are the peer non-convergence consequence and its remedy. A
 // pending copy that arrived from another instance (A) carries A's
 // `originatorInstanceId`, so this instance (B) refuses to register it
-// (`agent_not_local`), and nothing done on A changes it. B's administrator writes
+// (`agent_not_local`), and syncing A's registered-key row cannot complete B's
+// pending key; that key needs direct action on B. B's administrator writes
 // the key onto B's copy through B's operations API; the key then authenticates.
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";

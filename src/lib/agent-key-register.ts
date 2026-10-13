@@ -1,13 +1,14 @@
 /**
  * agent-key-register.ts — the pure helpers for the admin-only key-registration
- * operation (POST /AgentKeyRegister, flair#2266) and the federation rule that
- * ships with it.
+ * operation (POST /AgentKeyRegister, flair#2266). The federation rule that ships
+ * with it lives in resources/federation-classify.ts.
  *
  * Kept out of the resource so the key-format rule and the fingerprint are
  * unit-tested without Harper (test/unit/agent-key-register-2266.test.ts). The
  * registration-specific refusal constants live here too; the authentication
  * refusals (`authentication required`, `forbidden`) are literals in the
- * resource. The integration tests assert both against real Harper. Imports
+ * resource. The integration tests assert the registration error names, and the
+ * authentication denials by HTTP status, against real Harper. Imports
  * NOTHING (a static resource import must reach a dependency-free compiled
  * helper — test/unit/resource-src-purity-1775.test.ts); the fingerprint uses the
  * ambient WebCrypto, which the auth paths already use.
