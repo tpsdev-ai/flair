@@ -16,18 +16,50 @@
  *
  * This module deliberately exports nothing: Harper registers exported values of
  * a resource module as routes.
+ *
+ * ─── Static imports are pure; the auth helpers load at first use ────────────
+ * Harper links a component's resource modules concurrently while it starts.
+ * This module's static imports are kept to `harper` and pure modules, so
+ * loading it adds no link of the authentication module graph to that startup
+ * phase; a static import of agent-auth.js from here stopped Harper from
+ * starting under Bun (test/integration/init-persisted-admin-harper5.test.ts).
+ * resolveAgentAuth and ownerCheckUnavailable are therefore imported on the
+ * first guarded write, by which time the component has finished loading. The
+ * guard is installed synchronously here either way. If that import fails, the
+ * write is refused: the guard turns a caller that cannot be resolved into its
+ * named refusal, and the cached import is cleared so the next write retries.
  */
 import { databases } from "harper";
-import { resolveAgentAuth } from "./agent-auth.js";
-import { ownerCheckUnavailable } from "./owner-field-guard.js";
 import { OWNER_FIELDS } from "./record-owner-guard.js";
 import { guardOwnerScopedWrites, ownerScopedWriteGuardGaps } from "./owner-scoped-write-policy.js";
 
+type AgentAuthModule = typeof import("./agent-auth.js");
+type OwnerFieldGuardModule = typeof import("./owner-field-guard.js");
+
+let agentAuthModule: Promise<AgentAuthModule> | undefined;
+let ownerFieldGuardModule: Promise<OwnerFieldGuardModule> | undefined;
+
+function agentAuth(): Promise<AgentAuthModule> {
+  agentAuthModule ??= import("./agent-auth.js").catch((err) => {
+    agentAuthModule = undefined;
+    throw err;
+  });
+  return agentAuthModule;
+}
+
+function ownerFieldGuard(): Promise<OwnerFieldGuardModule> {
+  ownerFieldGuardModule ??= import("./owner-field-guard.js").catch((err) => {
+    ownerFieldGuardModule = undefined;
+    throw err;
+  });
+  return ownerFieldGuardModule;
+}
+
 const registry = (databases as any).flair;
 const guarded = guardOwnerScopedWrites(registry, OWNER_FIELDS, {
-  resolveAuth: resolveAgentAuth,
+  resolveAuth: async (context) => (await agentAuth()).resolveAgentAuth(context),
   readStored: (table, id) => registry[table].get(id, {}),
-  unreadable: ownerCheckUnavailable,
+  unreadable: async (err) => (await ownerFieldGuard()).ownerCheckUnavailable(err),
   readBody: (context: any) => context?.data,
 });
 const gaps = ownerScopedWriteGuardGaps(registry, OWNER_FIELDS, guarded);

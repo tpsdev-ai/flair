@@ -81,8 +81,8 @@ export interface OwnerScopedWriteDeps {
   resolveAuth: (context: unknown) => Promise<WriteCaller>;
   /** Reads the stored record `id` of `table`, outside the request's transaction. */
   readStored: (table: string, id: unknown) => unknown;
-  /** The refusal when the stored record cannot be read (ownerCheckUnavailable). */
-  unreadable: (err: unknown) => Response;
+  /** The refusal when the stored record cannot be read (ownerCheckUnavailable), or a promise for it. */
+  unreadable: (err: unknown) => Response | Promise<Response>;
   /** The parsed request body for this entry call (Harper's `request.data`), or a promise for it. */
   readBody: (context: unknown) => unknown;
 }
@@ -196,7 +196,7 @@ export async function admitOwnerScopedWrite(
   try {
     stored = await deps.readStored(table, target.id);
   } catch (err) {
-    throw deps.unreadable(err);
+    throw await deps.unreadable(err);
   }
   if (isForbiddenOwnerMutation(stored as Record<string, unknown> | null | undefined, ownerField, caller.agentId)) {
     throw ownerMutationRefusal(table);
