@@ -215,7 +215,7 @@ describe("flair#2561 — a skill successor that omits content and trigger gets n
     await expectSuccessorCarriesAuthorText(String(body.id), id);
   }, 60_000);
 
-  it("POST /FeedMemories with nothing to redact: the response still holds only the text fields the request supplied", async () => {
+  it("POST /FeedMemories with nothing to redact: of the text fields, the response still holds only the one the request supplied", async () => {
     const id = `s2561-feed-clean-${randomUUID()}`;
     await makeAuthorSkill(id);
     const res = await send(writer, "POST", `/FeedMemories`, {
@@ -316,7 +316,7 @@ describe("flair#2561 — a write that supplies one text field gets back only tha
   }, 60_000);
 });
 
-describe("flair#2561 — the feed response reports only the non-null-valued fields the request supplied, and no write response carries an embedding field", () => {
+describe("flair#2561 — the feed response reports the non-null-valued fields the request supplied plus the listed server-decided fields, and no write response carries an embedding field", () => {
   it("a feed skill successor that omits the descriptive fields gets none of them, and no embedding", async () => {
     const id = `s2561-feed-desc-${randomUUID()}`;
     await makeAuthorSkill(id);

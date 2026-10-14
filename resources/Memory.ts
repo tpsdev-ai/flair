@@ -557,9 +557,10 @@ async function runDedupGate(ctx: any, content: any): Promise<DedupMatch | null> 
 /**
  * flair#2407: layer the server-side redaction count onto a write result that
  * does not build its own response — a skill write, or a PATCH whose base
- * returns undefined. Returns a refusal Response as built and replaces a
- * successful one (writeResultResponse), and returns a result with nothing
- * redacted unchanged apart from its embedding fields.
+ * returns undefined. The result goes through withoutEmbeddingFields: a refusal
+ * Response is returned as built, a successful result in a shape it does not
+ * recognise is replaced by the write_response_withheld refusal, and a result
+ * with nothing redacted is otherwise returned without its embedding fields.
  *
  * flair#2467: with the count it layers `stored`, the post-redaction values of
  * the text fields the write staged (storedMemoryText of the staged row or
@@ -568,9 +569,10 @@ async function runDedupGate(ctx: any, content: any): Promise<DedupMatch | null> 
  * carries no embedding field (withoutEmbeddingFields).
  */
 function withRedactedValues(result: any, redactedValues: number, id?: any, stored?: StoredMemoryText | null): any {
-  if (result instanceof Response) return writeResultResponse(result);
-  if (redactedValues <= 0) return withoutEmbeddingFields(result);
-  const base = result && typeof result === "object" && !Array.isArray(result) ? withoutEmbeddingFields(result) : {};
+  const reported = withoutEmbeddingFields(result);
+  if (reported instanceof Response) return reported;
+  if (redactedValues <= 0) return reported;
+  const base = reported && typeof reported === "object" && !Array.isArray(reported) ? reported : {};
   return { id: base.id ?? id, written: true, ...base, redactedValues, ...(stored ? { stored } : {}) };
 }
 
@@ -598,8 +600,11 @@ function withRedactedValues(result: any, redactedValues: number, id?: any, store
  *  the opposite of what an absent field means to `isPrivateVisibility()`. */
 function buildWriteResponse(content: any, result: any, dedupMatch: DedupMatch | null, redactedValues: number, stored?: StoredMemoryText): any {
   // flair#2561: a write response carries no embedding field, whatever the
-  // storage layer's result holds.
-  const base = result && typeof result === "object" && !Array.isArray(result) ? withoutEmbeddingFields(result) : {};
+  // storage layer's result holds: withoutEmbeddingFields reports no value or a
+  // row-shaped record without them and refuses any other shape.
+  const reported = withoutEmbeddingFields(result);
+  if (reported instanceof Response) return reported;
+  const base = reported && typeof reported === "object" && !Array.isArray(reported) ? reported : {};
   const response: any = {
     id: content.id,
     ...base,
@@ -2198,8 +2203,8 @@ export class Memory extends (databases as any).flair.Memory {
       noteMemoryUpsert(content);
       noteWriteStamp(content?.embeddingModel as string | null | undefined); // embedding-space-guard slice 1 (see post())
       // flair#2561: the response carries no embedding field, whatever the
-      // storage layer's result holds: a record or an array's records lose
-      // them, and any other value holds no fields.
+      // storage layer's result holds: withoutEmbeddingFields reports no value
+      // or a row-shaped record without them and refuses any other shape.
       return withoutEmbeddingFields(reindexed);
     }
 

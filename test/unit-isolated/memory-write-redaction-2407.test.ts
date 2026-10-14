@@ -464,7 +464,7 @@ describe("flair#2407 — a deduplicated feed write reports the count in its resp
   });
 });
 
-describe("flair#2561 — `stored` reports only the string-valued text fields the request supplied, and the feed response only its non-null-valued fields", () => {
+describe("flair#2561 — `stored` reports only the string-valued text fields the request supplied, and the feed response the non-null-valued fields it supplied plus the listed server-decided fields", () => {
   it("suppliedMemoryTextFields names the text fields that hold a string in the request body", () => {
     expect(suppliedMemoryTextFields({ content: "c", summary: null, trigger: 42, tags: ["skill"] })).toEqual(["content"]);
     expect(suppliedMemoryTextFields({ summary: "s", trigger: "" })).toEqual(["summary", "trigger"]);
@@ -534,8 +534,73 @@ describe("flair#2561 — `stored` reports only the string-valued text fields the
     expect(writeResultResponse(refusal)).toBe(refusal);
     expect(withoutEmbeddingFields(refusal)).toBe(refusal);
     expect(feedResponseFields(refusal, new Set())).toBe(refusal);
-    expect(withoutEmbeddingFields<unknown>([{ id: "r1", embedding: [1], embeddingModel: "m" }, "r2"])).toEqual([{ id: "r1" }, "r2"]);
+    expect(withoutEmbeddingFields<unknown>([{ id: "r1", embedding: [1], embeddingModel: "m" }, { id: "r2", written: true }])).toEqual([{ id: "r1" }, { id: "r2", written: true }]);
     expect(feedResponseFields([{ id: "r1", content: "c", embedding: [1] }], new Set(["content"]))).toEqual([{ id: "r1", content: "c" }]);
+    expect(withoutEmbeddingFields(undefined)).toBeUndefined();
+    expect(withoutEmbeddingFields(null)).toBeNull();
+  });
+
+  it("a successful result that is not row-shaped, such as a wrapper around a row, is replaced by write_response_withheld", async () => {
+    const wrapper = { wrapper: { id: "r1", embedding: [1], embeddingModel: "m" } };
+    for (const [label, result] of [
+      ["a wrapper", wrapper],
+      ["a row beside a wrapper", { id: "r1", wrapper: { embedding: [1] } }],
+      ["an array holding a wrapper", [{ id: "r1" }, wrapper]],
+      ["a nested array", [[{ id: "r1", embedding: [1] }]]],
+      ["a string", JSON.stringify({ embedding: [1], embeddingModel: "m" })],
+      ["a number", 1],
+    ] as Array<[string, unknown]>) {
+      const replaced = withoutEmbeddingFields<unknown>(result);
+      expect(replaced instanceof Response, label).toBe(true);
+      expect((replaced as Response).status, label).toBe(500);
+      const text = await (replaced as Response).text();
+      expect(JSON.parse(text).error, label).toBe(WRITE_RESPONSE_WITHHELD);
+      expect(text.includes("embedding"), label).toBe(false);
+    }
+    for (const [label, result] of [["a string", "r1"], ["an array holding a scalar", [{ id: "r1" }, "r2"]]] as Array<[string, unknown]>) {
+      const replaced = feedResponseFields(result, new Set());
+      expect(replaced instanceof Response && replaced.status === 500, label).toBe(true);
+    }
+    // The feed copy holds only Memory attributes: a supplied key that is not one is not echoed.
+    expect(feedResponseFields({ id: "r1", content: "c", wrapper: { embedding: [1] } }, new Set(["content", "wrapper"]))).toEqual({ id: "r1", content: "c" });
+  });
+
+  it("a PUT, a PATCH and a `_reindex` re-PUT whose storage result is a wrapper around a row answer write_response_withheld", async () => {
+    const row = {
+      id: "mem-2561-wrapper", agentId: AGENT, content: "a note", embedding: FAKE_EMBEDDING, embeddingModel: "mock-embedding-model",
+      instanceToken: "token-2561-wrapper", contentHash: "hash-2561-wrapper", visibility: "shared", archived: false, createdAt: new Date().toISOString(),
+    };
+    const wrapped = (content: any) => ({ wrapper: { ...row, ...content, embedding: FAKE_EMBEDDING, embeddingModel: "mock-embedding-model" } });
+    const staticPut = (BaseMemory as any).put;
+    const instancePatch = (BaseMemory as any).prototype.patch;
+    (BaseMemory as any).put = async (content: any) => wrapped(content);
+    (BaseMemory as any).prototype.patch = async (content: any) => wrapped(content);
+    try {
+      const results: Array<[string, any]> = [];
+      memoryStore.set(row.id, { ...row });
+      const put: any = makeMemory(agentCtx(AGENT));
+      put._targetId = row.id;
+      results.push(["PUT", await put.put({ id: row.id, agentId: AGENT, content: "a note, changed", visibility: "shared" })]);
+      memoryStore.set(row.id, { ...row });
+      const patch: any = makeMemory(agentCtx(AGENT));
+      patch._targetId = row.id;
+      results.push(["PATCH", await patch.patch({ summary: "a summary" })]);
+      memoryStore.set(row.id, { ...row });
+      const reindex: any = new (Memory as any)();
+      reindex.getContext = () => ({ request: {}, __flairInternal: true });
+      reindex._targetId = row.id;
+      results.push(["_reindex", await reindex.put({ ...row, _reindex: true })]);
+      for (const [label, res] of results) {
+        expect(res instanceof Response, label).toBe(true);
+        expect(res.status, label).toBe(500);
+        const text = await res.text();
+        expect(JSON.parse(text).error, label).toBe(WRITE_RESPONSE_WITHHELD);
+        expect(text.includes("embedding"), label).toBe(false);
+      }
+    } finally {
+      (BaseMemory as any).put = staticPut;
+      (BaseMemory as any).prototype.patch = instancePatch;
+    }
   });
 
   it("a `_reindex` re-PUT, a PUT and a PATCH whose storage result is a successful Response answer write_response_withheld", async () => {
