@@ -149,6 +149,7 @@ import yaml from "js-yaml";
 import { resolveHome } from "./home.js";
 import { writeConfirmed } from "./instance-identity-row.js";
 import { invalidAgentIdMessage, isValidAgentId } from "./agent-id-rule.js";
+import { credentialMapsPrincipal, credentialPrincipalId } from "./credential-status-rule.js";
 import { agentHomeEndpoint, resolveTargetInstanceId } from "./agent-home.js";
 import { defaultReadProcessCmdline, defaultReadProcessCwd } from "./upgrade-exec-path.js";
 
@@ -1304,14 +1305,17 @@ export interface IdentityMappingResult {
   supersededCredentialIds: string[];
 }
 
-/** The resolver's own predicate, verbatim (resources/mcp-handler.ts
- *  `resolveAgentFromSub`): a credential is resolvable unless it is explicitly
- *  revoked. The linking layer MUST use the same test — a credential the linker
- *  considers inactive but the resolver would still serve is exactly the
- *  invisible-duplicate hole #1317 is about. */
-function isResolvableCredential(cred: { status?: unknown }): boolean {
-  return cred?.status !== "revoked";
-}
+/** The linking layer's Credential tests are the SAME ones the resolver applies
+ *  (src/lib/credential-status-rule.ts, imported above): a row maps a principal
+ *  only when its `status` is exactly "active" and it names a principal
+ *  (`credentialMapsPrincipal`), and a row that names no principal
+ *  (`credentialPrincipalId` is null) is skipped on read. The resolver refuses a
+ *  subject when at least one row matches it but none maps a principal (with no
+ *  matching row at all it may JIT-provision), and resolves the subject through
+ *  the active, principal-bearing row this layer writes, even when a
+ *  principal-less row remains beside it. The linking layer MUST use the same
+ *  tests — a credential the linker considers inactive but the resolver would
+ *  still serve is exactly the invisible-duplicate hole #1317 is about. */
 
 /**
  * Map the operator's IdP subject to their principal via `Credential(kind:
@@ -1320,9 +1324,14 @@ function isResolvableCredential(cred: { status?: unknown }): boolean {
  *
  * ## The uniqueness constraint (flair#1317, K&S ruling 2026-08-21)
  *
- * **At most one ACTIVE `Credential(kind:"idp", idpSubject:<sub>)` exists at a
- * time, regardless of `idpProvider`.** This function is where that invariant is
- * enforced, because it is the only supported writer of the mapping.
+ * **The ruling: at most one ACTIVE, principal-bearing `Credential(kind:"idp",
+ * idpSubject:<sub>)`, regardless of `idpProvider`.** This function's
+ * post-write read verifies one such row at the time of that read, on every
+ * write it makes (`flair mcp enable`, `flair principal link`); it does not
+ * hold the invariant for other writers. The MCP and XAA JIT provisioners also write a
+ * mapping, when their own lookup finds no matching row, and do not run this
+ * check. A principal-less row maps nothing and is skipped, so it may remain
+ * active beside the mapping.
  *
  * It used to dedup on `(kind, idpProvider, idpSubject)` while the resolver read
  * `(kind, idpSubject)`. A re-link under a different provider name therefore
@@ -1335,17 +1344,20 @@ function isResolvableCredential(cred: { status?: unknown }): boolean {
  * stays on the row as audit/diagnostic metadata, but it does not participate in
  * uniqueness. So:
  *
- *   - same provider, existing active credential → RE-POINT it (`credentialReused`);
- *   - any OTHER active credential for the subject → SUPERSEDE it: terminal
- *     `status: "revoked"`, never a soft flag a later path could flip back
+ *   - same provider, existing active, principal-bearing credential → RE-POINT
+ *     it (`credentialReused`);
+ *   - any OTHER active, principal-bearing credential for the subject →
+ *     SUPERSEDE it: terminal `status: "revoked"`, never a soft flag a later
+ *     path could flip back
  *     (revoked rows are never reused here — a re-link after a revoke mints a
  *     fresh credential);
  *   - the re-point/insert and every revocation go out as ONE ops-API `upsert`
- *     batch, so there is no observable window with two active credentials or
- *     zero. If the batch fails, nothing is claimed and the call throws;
+ *     batch, so there is no observable window with two active,
+ *     principal-bearing credentials or zero. If the batch fails, nothing is
+ *     claimed and the call throws;
  *   - after the write the invariant is RE-READ and asserted. A store that
- *     somehow holds ≠1 active credential for the subject is a hard error, not a
- *     silent nondeterministic mapping.
+ *     somehow holds ≠1 active, principal-bearing credential for the subject is a
+ *     hard error, not a silent nondeterministic mapping.
  *
  * The principal Agent is created only if missing.
  *
@@ -1412,7 +1424,7 @@ export async function provisionIdpIdentityMapping(
   const findCredentialsForSubject = (): Promise<any[]> =>
     readIdpCredentialsForSubject(fetchImpl, opsUrl, authHeader, params.idpSubject);
   const subjectCreds = await findCredentialsForSubject();
-  const activeCreds = subjectCreds.filter(isResolvableCredential);
+  const activeCreds = subjectCreds.filter(credentialMapsPrincipal);
   // flair#2222 — retain Agent presence and the compared principal-bearing IdP fields.
   const preflight = mappingPreflight(params.principal, params.idpSubject, foundAgents.length > 0, subjectCreds);
 
@@ -1674,7 +1686,7 @@ async function opsRecordList(
     }
     if (ids.has(row.id)) refuse("duplicate-row-id");
     ids.add(row.id);
-    if (query.table === "Credential" && !isNonEmptyString(row.principalId)) continue;
+    if (query.table === "Credential" && credentialPrincipalId(row) === null) continue;
     if (query.table === "Credential" &&
         (typeof row.idpProvider !== "string" ||
          typeof row.idpSubject !== "string" ||
@@ -1685,13 +1697,13 @@ async function opsRecordList(
     rows.push(row);
   }
   if (refuseAmbiguous && query.table === "Credential" && predicate.some(([field]) => field === "idpSubject")) {
-    const principals = [...new Set(rows.filter(isResolvableCredential).map(row => row.principalId))];
+    const principals = [...new Set(rows.filter(credentialMapsPrincipal).map(row => row.principalId))];
     if (principals.length > 1) {
       throw new Error(`Identity mapping: ambiguous-prior-principals: ${principals.join(", ")} — refusing the subject read. Run flair mcp enable to heal this subject mapping.`);
     }
   }
   if (written) {
-    const active = rows.filter(isResolvableCredential);
+    const active = rows.filter(credentialMapsPrincipal);
     if (active.length !== 1 || Object.entries(written).some(([field, value]) => active[0][field] !== value)) {
       const subject = predicate.find(([field]) => field === "idpSubject")?.[1];
       const seen = active.map(c => `${c.id} → ${c.principalId} (provider '${c.idpProvider}')`).join("; ") || "none";
@@ -1884,7 +1896,7 @@ export async function linkPrincipalMapping(
   await assertPrincipalExists(fetchImpl, opsUrl, authHeader, params.principal);
 
   const subjectRows = await readIdpCredentialsForSubject(fetchImpl, opsUrl, authHeader, params.idpSubject, undefined, true);
-  const active = subjectRows.filter(isResolvableCredential);
+  const active = subjectRows.filter(credentialMapsPrincipal);
   const elsewhere = active.filter((c) => c?.principalId !== params.principal);
   if (elsewhere.length > 0 && !params.replace) {
     const current = [...new Set(elsewhere.map((c) => String(c?.principalId)))].join(", ");
@@ -1966,7 +1978,7 @@ export async function unlinkPrincipalMapping(
   await assertPrincipalExists(fetchImpl, opsUrl, authHeader, params.principal);
 
   const subjectRows = await readIdpCredentialsForSubject(fetchImpl, opsUrl, authHeader, params.idpSubject, undefined, true);
-  const active = subjectRows.filter(isResolvableCredential);
+  const active = subjectRows.filter(credentialMapsPrincipal);
   const mine = active.filter((c) => c?.principalId === params.principal);
   if (mine.length === 0) {
     const elsewhere = [...new Set(active.map((c) => String(c?.principalId)))].join(", ");
@@ -2012,7 +2024,7 @@ export async function unlinkPrincipalMapping(
   const remaining = (await readIdpCredentialsForSubject(fetchImpl, opsUrl, authHeader, params.idpSubject)
     .catch((err: unknown) => {
       throw new Error(`${unconfirmedMessage(ids)} — ${err instanceof Error ? err.message : String(err)}`);
-    })).filter(isResolvableCredential);
+    })).filter(credentialMapsPrincipal);
   if (remaining.length > 0) {
     throw new Error(`${unconfirmedMessage(remaining.map(c => c.id))} — subject '${params.idpSubject}' still has resolvable mappings.`);
   }
@@ -2044,7 +2056,7 @@ export async function listPrincipalMappings(
   await assertPrincipalExists(fetchImpl, opsUrl, authHeader, params.principal);
 
   const active = (await readIdpCredentialsForPrincipal(fetchImpl, opsUrl, authHeader, params.principal)).filter(
-    isResolvableCredential,
+    credentialMapsPrincipal,
   );
   const mappings: PrincipalMappingRow[] = active.map((c) => ({
     credentialId: String(c?.id),

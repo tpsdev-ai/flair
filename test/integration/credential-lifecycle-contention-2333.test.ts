@@ -35,10 +35,11 @@
  *
  *   - XAA credential touch vs revoke/delete (resources/XAA.ts). A jwt-bearer
  *     grant reads the matched IdP credential and touches its `lastUsedAt`. A
- *     matched credential whose status is not "active" is refused by name: no
- *     credential touch and no OAuth token is written, and the refusal names the
- *     credential's stored status (a present `jti` is claimed — and consumed —
- *     before the status check, in its own transaction). Each contended case
+ *     matched credential whose status is not "active", or that names no
+ *     principal, is refused by name: no credential touch and no OAuth token is
+ *     written, and the refusal names the credential's stored status or the
+ *     missing principal (a present `jti` is claimed — and consumed — before
+ *     that check, in its own transaction). Each contended case
  *     holds the touch between its read and its write (the test-only pause point
  *     `xaa-credential-touch`) while the credential is revoked (status ->
  *     "revoked"), deleted, or re-pointed at a different principal, then releases
@@ -426,6 +427,44 @@ describe("flair#2333 slice 2 — credential lifecycle writes preserve committed 
     const row = await readRow("Credential", credentialId);
     expect(row?.status, "the stored status changed").toBe("revoked");
     expect(row?.lastUsedAt, "the refused grant touched lastUsedAt").toBe(lastUsedAt);
+  }, 60_000);
+
+  // flair#2503 — XAA applies the rule the MCP resolver and the principal linker
+  // apply (src/lib/credential-status-rule.ts): a matched credential completes a
+  // grant only when it is active AND names a principal. Real storage refuses a
+  // Credential without principalId and stores an empty one, so the empty form is
+  // the row exercised here. The IdpConfig has JIT provisioning on.
+  it("an ACTIVE credential that names no principal is refused by name and issues no grant", async () => {
+    const subject = `user-noprincipal-${randomUUID()}`;
+    const credentialId = `cred_idp_noprincipal_${randomUUID().slice(0, 8)}`;
+    const lastUsedAt = "2020-01-02T03:04:05.000Z";
+    await ops({
+      operation: "insert", database: "flair", table: "Credential",
+      records: [{ id: credentialId, principalId: "", kind: "idp", label: "noprincipal", status: "active", idpProvider: IDP_ID, idpSubject: subject, createdAt: new Date().toISOString(), lastUsedAt }],
+    });
+    const before = await readRow("Credential", credentialId);
+    expect(before?.principalId, "fixture control: real storage holds the empty principalId").toBe("");
+    expect(before?.status, "fixture control: the stored row is active").toBe("active");
+    const allRows = async (table: string): Promise<any[]> => {
+      const rows = await ops({ operation: "search_by_value", database: "flair", table, search_attribute: "id", search_value: "*", get_attributes: ["*"] });
+      if (!Array.isArray(rows)) throw new Error(`${table} read did not answer with a list: ${JSON.stringify(rows).slice(0, 200)}`);
+      return rows;
+    };
+    const agentsBefore = (await allRows("Agent")).length;
+    const tokensBefore = (await allRows("OAuthToken")).length;
+
+    const res = await grantJwtBearer(await jwtBearerAssertion(subject));
+    const text = await res.text();
+    expect(res.status, `grant returned ${res.status}: ${text.slice(0, 300)}`).toBe(400);
+    const body = JSON.parse(text);
+    expect(body.error).toBe("invalid_grant");
+    expect(body.error_description, "the refusal names the missing principal").toContain("names no principal");
+    expect(body.access_token).toBeUndefined();
+    const tokensAfter = await allRows("OAuthToken");
+    expect(tokensAfter.filter((t) => t.idpSubject === subject), "the refused grant issued a token").toEqual([]);
+    expect(tokensAfter.length, "no token row was written").toBe(tokensBefore);
+    expect((await allRows("Agent")).length, "no principal was provisioned").toBe(agentsBefore);
+    expect(await readRow("Credential", credentialId), "the credential row is unchanged").toEqual(before);
   }, 60_000);
 
   it("a credential re-pointed at another principal while the touch is held refuses the grant", async () => {
