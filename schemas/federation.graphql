@@ -39,6 +39,43 @@ type Peer @table(database: "flair") @export {
   updatedAt: String
 }
 
+# Sender-owned federation retry bookkeeping (flair#2455). The table is shaped
+# for one row per (peer, table, record) the receiver refused for a reason a
+# later re-offer could clear, plus locally observed unconfirmed sends. No
+# production sender path creates rows yet (a later slice activates the sender);
+# rows an admin writes are readable now. Local bookkeeping, EXCLUDED from
+# federation policy and the receive mapping, so no inbound sync record can write
+# it (a pushed record naming it that passes the receiver's payload-id check
+# skips as `unknown_table`). Admin-only on every
+# operation; see resources/FederationRetry.ts.
+#
+# ENFORCED: @sealed makes Harper refuse a write that names a field not declared
+# below. CONVENTIONS, not enforced by this schema: `id` is retryEntryKey(peerId,
+# table, recordId) (resources/federation-retry-lib.ts), and the commented
+# values of state, lastReason, resolution and bound. The reader and the
+# transition check these (retryRowProblem) and treat a row that breaks one as
+# malformed.
+type FederationRetry @table(database: "flair") @sealed @export {
+  id: ID @primaryKey               # by convention retryEntryKey(peerId, table, recordId)
+  peerId: String! @indexed         # the peer that refused (or never answered)
+  table: String!                   # the source table name
+  recordId: String!                # the source row id
+  state: String! @indexed          # "pending" | "terminal"
+  firstRefusedAt: String! @indexed # age is measured from here (the T bound)
+  attempts: Int! @indexed          # reserved and persisted before each send (the N bound)
+  episodeId: String                # RESERVED for sender activation (flair#2455 slice 3): the obligation's generation, for rejecting stale completions; nothing sets or checks it yet
+  recordFingerprint: String        # content fingerprint, for exhausted-row suppression
+  lastReason: String               # the closed SkipReason, or a local reason
+  lastAttemptSyncId: String        # the sync that last reserved an attempt
+  lastAttemptAt: String
+  completedAt: String              # when the row became terminal
+  resolution: String               # which terminal outcome ended it
+  bound: String                    # "attempts" | "age" | "both" for retry_exhausted; null otherwise
+  createdAt: String!
+  updatedAt: String
+}
+
+
 # Federation body-signature nonces are recorded in `ReplayNonce`
 # (schemas/replay.graphql), shared with agent auth (flair#2061).
 
@@ -49,7 +86,7 @@ type SyncLog @table(database: "flair") {
   direction: String! @indexed      # "push" | "pull"
   recordCount: Int                 # how many records merged in this batch
   skippedCount: Int                # how many records skipped (sum of skippedReasons)
-  skippedReasons: String           # JSON: { unknown_table: N, non_originator: N, future_timestamp: N, no_op_same_hash: N, merge_error: N, unknown_originator_key: N, invalid_signature: N, missing_signature: N, principal_mismatch: N }
+  skippedReasons: String           # JSON counts by SkipReason, for example { unknown_table: N, non_originator: N, merge_error: N }; the full vocabulary is SKIP_REASON_CLASS in resources/federation-classify.ts
   status: String @indexed          # "success" | "partial" | "failed"
   error: String                    # human-readable summary if partial/failed (includes per-record error messages, capped)
   durationMs: Int                  # how long the sync took
