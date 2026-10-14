@@ -3,8 +3,7 @@
  * only the string-valued text fields (`content`, `summary`, `trigger`) the
  * write's own request supplied, as stored, and the POST /FeedMemories response
  * only the non-null Memory attributes its request supplied plus the listed
- * fields the server decides for the row and `redactedValues` when present
- * (flair#2561).
+ * response fields of the row and `redactedValues` when present (flair#2561).
  *
  * Runs against a REAL Harper (test/helpers/harper-lifecycle.ts). A skill
  * successor row carries over the text fields its request omits from the row it
@@ -129,8 +128,16 @@ async function expectSuccessorCarriesAuthorText(successorId: string, predecessor
 }
 /** No embedding field in a write response. */
 function expectNoEmbedding(label: string, body: unknown): void {
-  const keys = body && typeof body === "object" ? Object.keys(body as object) : [];
-  for (const field of EMBEDDING_FIELDS) expect(keys.includes(field), `${label} response carries ${field}`).toBe(false);
+  const found: string[] = [];
+  const walk = (value: unknown, path: string): void => {
+    if (!value || typeof value !== "object") return;
+    for (const [key, item] of Object.entries(value as object)) {
+      if (EMBEDDING_FIELDS.includes(key)) found.push(`${path}${key}`);
+      walk(item, `${path}${key}.`);
+    }
+  };
+  walk(body, "");
+  expect(found, `${label} response carries an embedding key at any depth`).toEqual([]);
 }
 
 beforeAll(async () => {
@@ -317,7 +324,7 @@ describe("flair#2561 — a write that supplies one text field gets back only tha
   }, 60_000);
 });
 
-describe("flair#2561 — the feed response reports the non-null Memory attributes the request supplied plus the listed server-decided fields and `redactedValues` when present, and no write response carries an embedding field", () => {
+describe("flair#2561 — the feed response reports the non-null Memory attributes the request supplied plus the listed response fields and `redactedValues` when present, and no write response holds an embedding key", () => {
   it("a feed skill successor that omits the descriptive fields gets none of them, and no embedding", async () => {
     const id = `s2561-feed-desc-${randomUUID()}`;
     await makeAuthorSkill(id);

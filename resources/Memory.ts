@@ -1,7 +1,7 @@
 import { databases } from "harper";
 import { randomUUID } from "node:crypto";
 import { isOperatorSeedPut, redactMemoryWrite, storedMemoryText, suppliedMemoryTextFields, type MemoryTextField, type StoredMemoryText } from "./memory-redaction.js";
-import { storageResult, withoutEmbeddingFields, writeResultResponse } from "./memory-write-response.js";
+import { checkedWriteResponse, storageResult, withoutEmbeddingFields, writeResultResponse } from "./memory-write-response.js";
 import { isDeepStrictEqual } from "node:util";
 import { patchRecord, withDetachedTxn } from "./table-helpers.js";
 import { isAdmin, resolveAgentAuth, type AgentAuthVerdict } from "./agent-auth.js";
@@ -573,7 +573,7 @@ function withRedactedValues(result: any, redactedValues: number, id?: any, store
   if (reported instanceof Response) return reported;
   if (redactedValues <= 0) return reported;
   const base = reported && typeof reported === "object" && !Array.isArray(reported) ? reported : {};
-  return { id: base.id ?? id, written: true, ...base, redactedValues, ...(stored ? { stored } : {}) };
+  return checkedWriteResponse({ id: base.id ?? id, written: true, ...base, redactedValues, ...(stored ? { stored } : {}) });
 }
 
 /** Build the final write response: always `written: true`, always includes
@@ -599,8 +599,8 @@ function withRedactedValues(result: any, redactedValues: number, id?: any, store
  *  there would read as "no one but the owner",
  *  the opposite of what an absent field means to `isPrivateVisibility()`. */
 function buildWriteResponse(content: any, result: any, dedupMatch: DedupMatch | null, redactedValues: number, stored?: StoredMemoryText): any {
-  // flair#2561: a write response carries no embedding field, whatever the
-  // storage layer's result holds: withoutEmbeddingFields reports no value or a
+  // flair#2561: a write response holds no embedding key, whatever the storage
+  // layer's result holds: withoutEmbeddingFields reports no value or a
   // row-shaped record without them and refuses any other shape.
   const reported = withoutEmbeddingFields(result);
   if (reported instanceof Response) return reported;
@@ -629,7 +629,8 @@ function buildWriteResponse(content: any, result: any, dedupMatch: DedupMatch | 
     response.redactedValues = redactedValues;
     if (stored) response.stored = stored;
   }
-  return response;
+  // flair#2561: the response returned is its checked plain-JSON copy.
+  return checkedWriteResponse(response);
 }
 
 const REINDEX_BOOKKEEPING_FIELDS = new Set<string>([
@@ -2205,9 +2206,9 @@ export class Memory extends (databases as any).flair.Memory {
       if (reindexed instanceof Response) return writeResultResponse(reindexed);
       noteMemoryUpsert(content);
       noteWriteStamp(content?.embeddingModel as string | null | undefined); // embedding-space-guard slice 1 (see post())
-      // flair#2561: the response carries no embedding field, whatever the
-      // storage layer's result holds: withoutEmbeddingFields reports no value
-      // or a row-shaped record without them and refuses any other shape.
+      // flair#2561: the response holds no embedding key, whatever the storage
+      // layer's result holds: withoutEmbeddingFields reports no value or a
+      // row-shaped record without them and refuses any other shape.
       return withoutEmbeddingFields(reindexed);
     }
 

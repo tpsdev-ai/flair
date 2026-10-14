@@ -16,7 +16,7 @@ import { deletePointerRowViaTable } from "./host-pointer-adapter.js";
 import { stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./memory-declared-attributes.js";
 import { buildProvenance } from "./provenance.js";
 import { redactMemoryWrite } from "./memory-redaction.js";
-import { feedResponseFields, suppliedMemoryFields } from "./memory-write-response.js";
+import { checkedWriteResponse, feedResponseFields, suppliedMemoryFields } from "./memory-write-response.js";
 import { applyFederationBookkeeping, applyOriginatorInstanceId, resolveStoredRow } from "./originator-instance.js";
 import { resolveReadScope } from "./memory-read-scope.js";
 import { reservedSeedFeedWriteDenial, reservedSeedSubjectDenial, writeTargetIds } from "./seed-reservation.js";
@@ -44,8 +44,8 @@ export class FeedMemories extends Resource {
 
     // flair#2561: the non-null-valued fields this request supplies, read from
     // the body as sent, before anything is merged into it; the response
-    // reports, of these, only the Memory attributes, plus the listed fields
-    // the server decides for the row (feedWriteResponse).
+    // reports, of these, only the Memory attributes, plus the listed response
+    // fields of the row (feedWriteResponse).
     const supplied = suppliedMemoryFields(content);
 
     const seedDenial = reservedSeedFeedWriteDenial("Memory", [...writeTargetIds(this, content), content?.supersedes]);
@@ -600,18 +600,19 @@ function isDedupMatch(row: any, match: any): boolean {
 /**
  * The response to a feed write: a response-only copy of the row the feed
  * stored or matched; the stored row is not modified. flair#2561: the copy
- * holds the non-null Memory attributes the request supplied, each as stored,
- * and the listed fields the server decides for the row (feedResponseFields),
- * and never an embedding field. flair#2407: it carries `redactedValues` when
- * that count is above zero. feedResponseFields returns a refusal Response as
- * built and replaces any other result it does not copy (no value, a scalar, a
- * successful Response) with the write_response_withheld refusal, which this
- * returns.
+ * (feedResponseFields) holds the listed response fields and the non-null
+ * Memory attributes the request supplied, each as stored, and no `embedding`
+ * or `embeddingModel` key at any depth. flair#2407: it carries
+ * `redactedValues` when that count is above zero (checkedWriteResponse).
+ * feedResponseFields returns a refusal Response as built and replaces any
+ * other result it does not copy (no value, a scalar, an object that is not a
+ * feed row such as a Date, a successful Response, ...) with the
+ * write_response_withheld refusal, which this returns.
  */
 function feedWriteResponse(result: any, redactedValues: number, supplied: ReadonlySet<string>): any {
   const response = feedResponseFields(result, supplied);
   if (response instanceof Response || !response || typeof response !== "object" || Array.isArray(response)) return response;
-  return redactedValues > 0 ? { ...response, redactedValues } : response;
+  return redactedValues > 0 ? checkedWriteResponse({ ...response, redactedValues }) : response;
 }
 
 /**
