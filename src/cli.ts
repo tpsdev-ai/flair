@@ -1700,20 +1700,20 @@ export const DOCTOR_ROSTER_CREDENTIAL_REMEDY =
   "Check that the admin credential doctor reads (FLAIR_ADMIN_USER, and FLAIR_ADMIN_PASS or ~/.flair/admin-pass) "
   + "is the probed instance's, and unset or correct FLAIR_OPS_PORT if it is set.";
 
-/** Whether `flair doctor` may read the Agent roster and home rows, and from which ops endpoint. */
+/** Whether `flair doctor` may read the probed instance over the ops API, and from which ops endpoint. */
 export type DoctorRosterTargetDecision =
   | { kind: "run"; opsPort: number }
   | { kind: "not-run"; reason: string; remedy: string };
 
 /**
- * The candidate ops endpoint for `flair doctor`'s Agent roster and home reads
- * (flair#2483), picked by {@link resolveAgentHomeTarget}'s pairing rule
+ * The candidate ops endpoint for `flair doctor`'s instance reads (flair#2483,
+ * #2520), picked by {@link resolveAgentHomeTarget}'s pairing rule
  * (flair#2474/#2491) against the HTTP port doctor actually probed.
  *
  * This only picks the candidate: the pairing rule works from config and named
  * ports and cannot show which instance an ops port addresses — it DELIBERATELY
  * trusts two ports the caller names. Doctor therefore checks the candidate
- * before either read ({@link verifyDoctorRosterInstance}). A refusal here (a
+ * before the reads ({@link verifyDoctorRosterInstance}). A refusal here (a
  * probed port that conflicts with the configured pair, or exactly one port
  * named with no complete pair to complete it) is likewise NOT RUN, naming the
  * reason and the remedy.
@@ -1770,8 +1770,8 @@ export function decideDoctorRosterPair(
 }
 
 /**
- * The additional instance-identity comparison behind doctor's roster and home
- * reads (flair#2483), applied only after {@link decideDoctorRosterPair} decided
+ * The additional instance-identity comparison behind doctor's instance reads
+ * (flair#2483), applied only after {@link decideDoctorRosterPair} decided
  * `run`. The configuration read reports CONFIGURED ports, not which instance
  * serves the probed port. When the probed HTTP port and the ops endpoint each
  * report one `flair.Instance` id and the two differ, they are two instances:
@@ -1791,8 +1791,8 @@ export function decideDoctorRosterIdentity(opsPort: number, pair: ProbedPairIden
 }
 
 /**
- * The ops endpoint `flair doctor` may read the Agent roster and home rows from,
- * or a refusal naming why it may not (flair#2483).
+ * The ops endpoint `flair doctor` may read the probed instance from, or a
+ * refusal naming why it may not (flair#2483).
  *
  * 1. Picks the candidate with {@link resolveDoctorRosterTarget} against the HTTP
  *    port doctor actually probed (a PID-discovered port included).
@@ -1804,8 +1804,13 @@ export function decideDoctorRosterIdentity(opsPort: number, pair: ProbedPairIden
  * 3. Only then compares the instance identities both endpoints report
  *    ({@link decideDoctorRosterIdentity}): two different single ids refuse.
  *
- * Any `not-run` means the caller reports both checks as NOT RUN and reads no
- * Agent row. The limit: step 2 reads configured ports, which are not proof of
+ * Any `not-run` means doctor reports the sections that use this answer NOT
+ * RUN, and their diagnostic reads do not run: all four section reads, unless a
+ * `--fix` step that may have changed the serving process made the roster and
+ * home sections ask again (the answer describes the process serving the probed
+ * port when it was taken). Reaching a `not-run` may itself have read the
+ * candidate's configuration (step 2) and both endpoints' instance identities
+ * (step 3). The limit: step 2 reads configured ports, which are not proof of
  * the live process, and step 3 adds a check only when both endpoints have
  * exactly one Instance row.
  */

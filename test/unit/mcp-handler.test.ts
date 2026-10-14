@@ -66,30 +66,6 @@ function makeHandlerMock(resource: string, method: string) {
   };
 }
 
-// flair#2537 — the server's response to a write whose body carries
-// "REDACT-ME": `redactedValues` and `stored`, the post-redaction text that
-// write committed (flair#2467). "WITHHELD" models a server that reports the
-// count without `stored`. Any other body gets the response it always had.
-// flair#2561: "SUMMARY-ONLY" models a `stored` that holds a summary and no
-// content; "WITH-SUMMARY" a response that also carries the body's own
-// `summary` beside a `stored` that holds only the content.
-const REDACTED_ROW_ID = "mock-redacted-row";
-function redactedWriteResponse(body: any): Record<string, unknown> {
-  const content = typeof body?.content === "string" ? body.content : "";
-  if (!content.includes("REDACT-ME")) return {};
-  const redacted = content.replaceAll("REDACT-ME", "[redacted]");
-  let stored: Record<string, unknown> | undefined = { content: redacted };
-  if (content.includes("WITHHELD")) stored = undefined;
-  else if (content.includes("SUMMARY-ONLY")) stored = { summary: "a stored summary" };
-  return {
-    id: REDACTED_ROW_ID,
-    written: true,
-    redactedValues: 1,
-    ...(content.includes("WITH-SUMMARY") ? { summary: "a summary REDACT-ME" } : {}),
-    ...(stored ? { stored } : {}),
-  };
-}
-
 // Memory has post/get/delete on the same class.
 //
 // flair#1181 — the by-id read/delete doubles are shaped like Harper's REAL
@@ -107,6 +83,39 @@ function redactedWriteResponse(body: any): Record<string, unknown> {
 //     `new Cls(undefined, ctx).get(id)` fail loudly (undefined → 404).
 // A double whose instance-get returns canned data (as this one used to) is
 // easier to satisfy than the real class and cannot catch this class of bug.
+// flair#2537, flair#2541 — the server's response to a write whose body carries
+// "REDACT-ME": `redactedValues` and `stored`, the post-redaction text that
+// write committed (flair#2467). "WITHHELD" models a server that reports the
+// count without `stored`. Any other body gets the response it always had.
+// flair#2561: "SUMMARY-ONLY" models a `stored` that holds a summary and no
+// content; "WITH-SUMMARY" a response that also carries the body's own
+// `summary` beside a `stored` that holds only the content.
+const REDACTED_ROW_ID = "mock-redacted-row";
+function redactedWriteResponse(body: any): Record<string, unknown> {
+  const content = typeof body?.content === "string" ? body.content : "";
+  if (!content.includes("REDACT-ME")) return {};
+  let stored: Record<string, string> | undefined = { content: content.replaceAll("REDACT-ME", "[redacted]") };
+  for (const field of ["summary", "trigger"] as const) {
+    const v = body?.[field];
+    if (typeof v === "string" && v.includes("REDACT-ME")) stored[field] = v.replaceAll("REDACT-ME", "[redacted]");
+  }
+  if (content.includes("WITHHELD")) stored = undefined;
+  else if (content.includes("SUMMARY-ONLY")) stored = { summary: "a stored summary" };
+  return {
+    // Always this id: Memory.get throws on it, so an echo that read the row after
+    // the write would fail (flair#2537).
+    id: REDACTED_ROW_ID,
+    written: true,
+    redactedValues: 1,
+    ...(content.includes("WITH-SUMMARY") ? { summary: "a summary REDACT-ME" } : {}),
+    ...(stored ? { stored } : {}),
+  };
+}
+
+// A row whose stored content still carries the credential-shaped text: the
+// shape a pre-flair#2407 row has, which a basement/restore re-put redacts.
+const LEGACY_ROW_ID = "mock-legacy-row";
+
 class MemoryMock extends HarperShapedBase {
   async post(args: any) {
     lastCall = { resource: "Memory.post", ctx: this._ctx, args, isCollection: this.isCollection } as any;
@@ -122,6 +131,12 @@ class MemoryMock extends HarperShapedBase {
     const id = typeof target === "string" ? target : target?.id;
     lastCall = { resource: "Memory.get", ctx, args: id };
     if (id === "missing-id") return null;
+    // flair#2541 — a row whose stored content predates the redaction. The
+    // basement/restore re-put is what redacts it, and the reply reports what
+    // THAT write stored, never this pre-write value.
+    if (id === LEGACY_ROW_ID) {
+      return { id, agentId: ctx?.request?.tpsAgent, content: "legacy with REDACT-ME", ok: true, resource: "Memory.get", embedding: [0.11, 0.22, 0.33] };
+    }
     // flair#2537 — a read of the row a redacted write just wrote fails, so a
     // reply that read after the write would surface as a JSON-RPC error.
     if (id === REDACTED_ROW_ID) throw new Error("read after the write");
@@ -1515,5 +1530,78 @@ describe("flair#2537 — /mcp write replies report the STORED (redacted) content
     const body = await parse(await call("memory_store", { content: "a plain note" }));
     expect(lastCall?.resource).toBe("Memory.post");
     expect(body.result.structuredContent).toEqual({ ok: true, resource: "Memory.post", agentId: "agt_bob" });
+  });
+});
+
+// ─── flair#2541 — skill_store / memory_basement / memory_restore write replies ─
+//
+// A redacted write's response carries `stored`, the post-redaction text that
+// write committed. Each tool's /mcp echo takes the text from it, reports the
+// count, and makes no read after the write. The real-Harper counterpart is
+// test/integration/write-reply-redaction-2541.test.ts.
+describe("flair#2541 — /mcp skill_store / memory_basement / memory_restore write echoes", () => {
+  beforeEach(() => {
+    credentials = [{ principalId: "agt_bob", kind: "idp", idpSubject: "sub-bob", status: "active" }];
+    agents["agt_bob"] = { id: "agt_bob", status: "active" };
+  });
+
+  function call(name: string, args: Record<string, unknown>) {
+    return mcpHandler(post(
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } },
+      { sub: "sub-bob" },
+    ));
+  }
+
+  it("skill_store's echo carries the stored content and trigger with the count, never the input", async () => {
+    const body = await parse(await call("skill_store", { content: "a skill with REDACT-ME", trigger: "when REDACT-ME" }));
+    expect(body.error).toBeUndefined();
+    expect(lastCall?.resource).toBe("Memory.post");
+    const echo = body.result.structuredContent;
+    expect(echo.content).toBe("a skill with [redacted]");
+    expect(echo.trigger).toBe("when [redacted]");
+    expect(echo.redactedValues).toBe(1);
+    expect(echo.stored).toBeUndefined();
+    expect(echo.contentWithheld).toBeUndefined();
+    expect(body.result.content[0].text).not.toContain("REDACT-ME");
+  });
+
+  it("memory_basement's echo carries the stored text the re-put redacted, never the row's pre-write value", async () => {
+    const body = await parse(await call("memory_basement", { id: LEGACY_ROW_ID }));
+    expect(body.error).toBeUndefined();
+    expect(lastCall?.resource).toBe("Memory.put");
+    const echo = body.result.structuredContent;
+    expect(echo.content).toBe("legacy with [redacted]");
+    expect(echo.redactedValues).toBe(1);
+    expect(echo.stored).toBeUndefined();
+    expect(body.result.content[0].text).not.toContain("REDACT-ME");
+  });
+
+  it("memory_restore's echo carries the stored text the re-put redacted, never the row's pre-write value", async () => {
+    const body = await parse(await call("memory_restore", { id: LEGACY_ROW_ID }));
+    expect(body.error).toBeUndefined();
+    expect(lastCall?.resource).toBe("Memory.put");
+    const echo = body.result.structuredContent;
+    expect(echo.content).toBe("legacy with [redacted]");
+    expect(echo.redactedValues).toBe(1);
+    expect(echo.stored).toBeUndefined();
+    expect(body.result.content[0].text).not.toContain("REDACT-ME");
+  });
+
+  it("a count without stored text omits the fields and sets contentWithheld, never the input", async () => {
+    const body = await parse(await call("skill_store", { content: "a skill with REDACT-ME and WITHHELD" }));
+    expect(body.error).toBeUndefined();
+    expect(body.result.isError).toBe(false);
+    const echo = body.result.structuredContent;
+    expect(echo.written).toBe(true);
+    expect(echo.content).toBeUndefined();
+    expect(echo.contentWithheld).toBe(true);
+    expect(echo.redactedValues).toBe(1);
+    expect(body.result.content[0].text).not.toContain("REDACT-ME");
+  });
+
+  it("a write the server did not redact returns its response unchanged", async () => {
+    const body = await parse(await call("memory_basement", { id: "mem-1" }));
+    expect(lastCall?.resource).toBe("Memory.put");
+    expect(body.result.structuredContent).toEqual({ ok: true, resource: "Memory.put", agentId: "agt_bob" });
   });
 });
