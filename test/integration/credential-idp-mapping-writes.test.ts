@@ -23,9 +23,11 @@
 //     in the principalId case (the owner-field guard, which runs before the
 //     IdP rule) and the not-owned PUT cases; any 4xx for the
 //     other-route and malformed-body cases; the DELETE-by-query case asserts
-//     only that the rows stay;
+//     no status, only that the row is unchanged;
 //   - that a named refusal does not echo a subject the request carried;
-//   - that the stored row is unchanged, or that no row was stored;
+//   - for a refused write to a stored row, that the whole stored row is the
+//     same right after the refusal as before it; for a refused create, that no
+//     row was stored;
 //   - /mcp resolution: a token for a subject the refused write would newly map
 //     does not resolve, and a linked row the write targeted still resolves to
 //     its owner (or, when revoked, to nobody);
@@ -38,8 +40,8 @@
 //
 // The last describe runs `flair doctor`'s IdP mapping check
 // (src/lib/idp-mapping-audit.ts) against this instance's real audit log, and
-// against that log cut where retention would cut it, then runs the re-stamp
-// command doctor prints for the unattributed rows.
+// against that log cut where retention would cut it, then runs the review and
+// re-stamp commands doctor prints for the unattributed rows.
 //
 // Mutation check: remove the post(), put() or patch() guard in
 // resources/Credential.ts, or its stored-owner check — the cases for that
@@ -147,6 +149,18 @@ async function credentialsForSubject(sub: string): Promise<any[]> {
     search_attribute: "idpSubject", search_type: "equals", search_value: sub, get_attributes: ["*"],
   });
   return Array.isArray(rows) ? rows : [];
+}
+
+/** The whole stored row, to compare before and after a refused write. */
+async function snapshot(id: string): Promise<Record<string, unknown>> {
+  const row = await readCredential(id);
+  expect(row, `no stored row ${id}`).not.toBeNull();
+  return row;
+}
+
+/** The stored row is exactly as it was before the refused write. */
+async function expectUnchanged(id: string, before: Record<string, unknown>): Promise<void> {
+  expect(await readCredential(id), `row ${id} changed`).toEqual(before);
 }
 
 /** Seed a credential row through the operations API (an operator's write). */
@@ -382,10 +396,9 @@ describe("a non-admin write that changes a credential's kind to idp is refused",
     const id = `idpw-own-bearer-put-${randomUUID()}`;
     await seedCredential({ id, principalId: W.id, kind: "bearer-token", label: "mine" });
     const sub = `idpw-kindput-${sfx}`;
+    const before = await snapshot(id);
     expectRefused(await signed(W, "PUT", `/Credential/${id}`, { id, kind: "idp", idpProvider: "mcp-oauth", idpSubject: sub }), "PUT kind→idp", sub);
-    const after = await readCredential(id);
-    expect(after.kind).toBe("bearer-token");
-    expect(after.idpSubject ?? null).toBeNull();
+    await expectUnchanged(id, before);
     expect(await mcpActsAs(sub)).toBeNull();
   }, 60_000);
 
@@ -393,10 +406,9 @@ describe("a non-admin write that changes a credential's kind to idp is refused",
     const id = `idpw-own-bearer-patch-${randomUUID()}`;
     await seedCredential({ id, principalId: W.id, kind: "bearer-token", label: "mine" });
     const sub = `idpw-kindpatch-${sfx}`;
+    const before = await snapshot(id);
     expectRefused(await signed(W, "PATCH", `/Credential/${id}`, { kind: "idp", idpProvider: "mcp-oauth", idpSubject: sub }), "PATCH kind→idp", sub);
-    const after = await readCredential(id);
-    expect(after.kind).toBe("bearer-token");
-    expect(after.idpSubject ?? null).toBeNull();
+    await expectUnchanged(id, before);
     expect(await mcpActsAs(sub)).toBeNull();
   }, 60_000);
   test("a non-admin PATCH that changes only the kind to idp is refused (idp_mapping_admin_only)", async () => {
@@ -406,8 +418,9 @@ describe("a non-admin write that changes a credential's kind to idp is refused",
     const [row] = await credentialsForSubject(sub);
     expect(row?.kind).toBe("bearer-token");
     expect(await mcpActsAs(sub)).toBeNull();
+    const before = await snapshot(row.id);
     expectRefused(await signed(W, "PATCH", `/Credential/${row.id}`, { kind: "idp" }), "PATCH kind-only →idp", sub);
-    expect((await readCredential(row.id)).kind).toBe("bearer-token");
+    await expectUnchanged(row.id, before);
     expect(await mcpActsAs(sub)).toBeNull();
   }, 60_000);
 
@@ -415,13 +428,12 @@ describe("a non-admin write that changes a credential's kind to idp is refused",
     const id = `idpw-own-bearer-arr-${randomUUID()}`;
     await seedCredential({ id, principalId: W.id, kind: "bearer-token", label: "mine" });
     const sub = `idpw-kindarr-${sfx}`;
+    const before = await snapshot(id);
     const arr = await signed(W, "PATCH", `/Credential/${id}`, { kind: ["idp"], idpProvider: "mcp-oauth", idpSubject: sub });
     expect4xx(arr, "PATCH kind:[idp]");
     const coll = await signed(W, "PATCH", "/Credential/", [{ id, kind: "idp", idpProvider: "mcp-oauth", idpSubject: sub }]);
     expect4xx(coll, "collection PATCH (array)");
-    const after = await readCredential(id);
-    expect(after.kind).toBe("bearer-token");
-    expect(after.idpSubject ?? null).toBeNull();
+    await expectUnchanged(id, before);
     expect(await mcpActsAs(sub)).toBeNull();
   }, 60_000);
 });
@@ -431,8 +443,9 @@ describe("a non-admin write that changes an idp mapping is refused", () => {
     const linked = `idpw-linked-subj-${sfx}`;
     const id = await link(W.id, linked);
     const moved = `idpw-moved-subj-${sfx}`;
+    const before = await snapshot(id);
     expectRefused(await signed(W, "PATCH", `/Credential/${id}`, { idpSubject: moved }), "PATCH idpSubject", moved);
-    expect((await readCredential(id)).idpSubject).toBe(linked);
+    await expectUnchanged(id, before);
     expect(await mcpActsAs(moved)).toBeNull();
     expect(await mcpActsAs(linked)).toBe(W.id); // the operator's mapping keeps working
   }, 60_000);
@@ -443,7 +456,7 @@ describe("a non-admin write that changes an idp mapping is refused", () => {
     const before = await readCredential(id);
     const moved = `idpw-moved-putsubj-${sfx}`;
     expectRefused(await signed(W, "PUT", `/Credential/${id}`, { ...before, idpSubject: moved }), "PUT idpSubject", moved);
-    expect((await readCredential(id)).idpSubject).toBe(linked);
+    await expectUnchanged(id, before);
     expect(await mcpActsAs(moved)).toBeNull();
     expect(await mcpActsAs(linked)).toBe(W.id);
   }, 60_000);
@@ -451,8 +464,9 @@ describe("a non-admin write that changes an idp mapping is refused", () => {
   test("a non-admin PATCH that changes idpProvider is refused (idp_mapping_admin_only)", async () => {
     const linked = `idpw-linked-prov-${sfx}`;
     const id = await link(W.id, linked);
+    const before = await snapshot(id);
     expectRefused(await signed(W, "PATCH", `/Credential/${id}`, { idpProvider: XAA_IDP_ID }), "PATCH idpProvider");
-    expect((await readCredential(id)).idpProvider).toBe("idpw-test");
+    await expectUnchanged(id, before);
     // /mcp first: the XAA grant below JIT-provisions its own mapping for this subject.
     expect(await mcpActsAs(linked)).toBe(W.id);
     expect(await xaaGrantPrincipal(linked)).not.toBe(W.id);
@@ -461,8 +475,9 @@ describe("a non-admin write that changes an idp mapping is refused", () => {
   test("a non-admin PATCH that changes kind away from idp is refused (idp_mapping_admin_only)", async () => {
     const linked = `idpw-linked-kind-${sfx}`;
     const id = await link(W.id, linked);
+    const before = await snapshot(id);
     expectRefused(await signed(W, "PATCH", `/Credential/${id}`, { kind: "bearer-token" }), "PATCH kind idp→bearer-token");
-    expect((await readCredential(id)).kind).toBe("idp");
+    await expectUnchanged(id, before);
     expect(await mcpActsAs(linked)).toBe(W.id);
   }, 60_000);
 
@@ -471,19 +486,21 @@ describe("a non-admin write that changes an idp mapping is refused", () => {
     const id = await link(W.id, linked);
     await ops({ operation: "update", database: "flair", table: "Credential", records: [{ id, status: "revoked", updatedAt: new Date().toISOString() }] });
     expect(await mcpActsAs(linked)).toBeNull();
+    const before = await snapshot(id);
     expectRefused(await signed(W, "PATCH", `/Credential/${id}`, { status: "active" }), "PATCH status revoked→active", linked);
-    expect((await readCredential(id)).status).toBe("revoked");
+    await expectUnchanged(id, before);
     expect(await mcpActsAs(linked)).toBeNull();
   }, 60_000);
 
   test("a non-admin PATCH that changes principalId is refused by the owner-field guard", async () => {
     const linked = `idpw-linked-owner-${sfx}`;
     const id = await link(W.id, linked);
+    const before = await snapshot(id);
     const res = await signed(W, "PATCH", `/Credential/${id}`, { principalId: V.id });
     expect(res.status, `PATCH principalId returned ${res.status}: ${res.text.slice(0, 300)}`).toBe(403);
     // The owner-field guard runs before the IdP rule, so this is its refusal, not idp_mapping_admin_only.
     expect(res.text).toContain("the owner of a record cannot be changed");
-    expect((await readCredential(id)).principalId).toBe(W.id);
+    await expectUnchanged(id, before);
     expect(await mcpActsAs(linked)).toBe(W.id);
   }, 60_000);
 });
@@ -497,34 +514,35 @@ describe("a non-admin agent writes and deletes only credentials it owns", () => 
     const res = await signed(W, "PUT", "/Credential/", [{ id, kind: "idp", idpProvider: before.idpProvider, idpSubject: linked, status: "active" }]);
     expect(res.status, `PUT returned ${res.status}: ${res.text.slice(0, 300)}`).toBe(403);
     expect(res.text).toContain("owned by another principal");
-    expect((await readCredential(id)).principalId).toBe(V.id);
+    await expectUnchanged(id, before);
     expect(await mcpActsAs(linked)).toBe(V.id);
   }, 60_000);
 
   test("a non-admin PUT to a bearer-token credential it does not own is refused", async () => {
     const id = `idpw-other-bearer-${randomUUID()}`;
     await seedCredential({ id, principalId: V.id, kind: "bearer-token", label: "theirs" });
+    const before = await snapshot(id);
     const res = await signed(W, "PUT", "/Credential/", [{ id, kind: "bearer-token", label: "mine now" }]);
     expect(res.status, `PUT returned ${res.status}: ${res.text.slice(0, 300)}`).toBe(403);
     expect(res.text).toContain("owned by another principal");
-    const after = await readCredential(id);
-    expect(after.principalId).toBe(V.id);
-    expect(after.label).toBe("theirs");
+    await expectUnchanged(id, before);
   }, 60_000);
 
   test("a non-admin DELETE of an idp credential it does not own is refused", async () => {
     const linked = `idpw-other-del-${sfx}`;
     const id = await link(V.id, linked);
+    const before = await snapshot(id);
     const res = await signed(W, "DELETE", `/Credential/${id}`);
     expect(res.status, `DELETE returned ${res.status}: ${res.text.slice(0, 300)}`).toBe(403);
-    expect(await readCredential(id)).not.toBeNull();
+    await expectUnchanged(id, before);
     expect(await mcpActsAs(linked)).toBe(V.id);
   }, 60_000);
   test("a non-admin DELETE by query leaves idp credentials it does not own in place", async () => {
     const linked = `idpw-other-qdel-${sfx}`;
     const id = await link(V.id, linked);
+    const before = await snapshot(id);
     const res = await signed(W, "DELETE", `/Credential/?idpSubject=${linked}`);
-    expect(await readCredential(id), `row after a collection DELETE (${res.status}: ${res.text.slice(0, 200)})`).not.toBeNull();
+    expect(await readCredential(id), `row after a collection DELETE (${res.status}: ${res.text.slice(0, 200)})`).toEqual(before);
     expect(await mcpActsAs(linked)).toBe(V.id);
   }, 60_000);
 });
@@ -608,12 +626,12 @@ async function asAgentUser(): Promise<(op: Record<string, unknown>) => Promise<v
 
 const byTimestamp = (a: CredentialAuditEntry, b: CredentialAuditEntry) => Number(a.timestamp ?? 0) - Number(b.timestamp ?? 0);
 
-/** Run a remedy command doctor prints, with this instance's admin password where curl would prompt for it. */
+/** Run a remedy command doctor prints, with this instance's admin password wherever curl would prompt for it. */
 function runPrinted(command: string): string {
   const user = harper.admin.username;
   expect(command.startsWith(`curl -su ${user} `)).toBe(true);
-  expect(command).toContain(` ${harper.opsURL.replace(/\/?$/, "/")} `);
-  const res = spawnSync("bash", ["-c", command.replace(`curl -su ${user} `, `curl -su ${user}:${harper.admin.password} `)], { encoding: "utf-8", timeout: 20_000 });
+  for (const step of command.split(" && ")) expect(step).toContain(` ${harper.opsURL.replace(/\/?$/, "/")} `);
+  const res = spawnSync("bash", ["-c", command.replaceAll(`curl -su ${user} `, `curl -su ${user}:${harper.admin.password} `)], { encoding: "utf-8", timeout: 20_000 });
   expect(res.status, `printed command failed: ${res.stderr}`).toBe(0);
   return res.stdout;
 }
@@ -671,7 +689,7 @@ describe("flair doctor: IdP mapping rows and who wrote them (from the audit log)
     expect(finding.active).toBeLessThan(finding.total);
   }, 90_000);
 
-  test("expired history: an owner's relabel or update that is the first retained entry is unattributed, and the printed re-stamp attributes it", async () => {
+  test("expired history: an owner's relabel or update that is the first retained entry is unattributed; the printed review returns those rows and the printed re-stamp attributes them", async () => {
     // Harper's retention removes a time prefix of the audit log. A test cannot
     // make Harper expire entries on demand, so this case reads the entries
     // Harper returned for each row and keeps those from the owner's write
@@ -727,12 +745,21 @@ describe("flair doctor: IdP mapping rows and who wrote them (from the audit log)
     expect(expired.nonAdmin).toEqual([]);
     expect(expired.unattributed.sort()).toEqual([relabelled, updated].sort());
 
-    // The remedy doctor prints: an administrator's re-stamp of both rows.
+    // The remedy doctor prints: the review returns these two rows and no
+    // other, and the re-stamp is two administrator updates of createdAt.
     const commands = idpMappingRemedyCommands(expired.unattributed, { opsUrl: harper.opsURL.replace(/\/?$/, "/"), adminUser: harper.admin.username });
     expect(commands).not.toBeNull();
-    expect(runPrinted(commands!.restamp)).toContain("updated 2 of 2");
+    const reviewed = JSON.parse(runPrinted(commands!.review));
+    expect(reviewed.map((r: any) => r.id).sort()).toEqual([relabelled, updated].sort());
+    expect(runPrinted(commands!.restamp).split("updated 2 of 2").length - 1).toBe(2);
     const after = cut(await readAudit());
-    for (const id of [relabelled, updated]) expect(after[id].at(-1)).toMatchObject({ operation: "update", user_name: harper.admin.username });
+    for (const id of [relabelled, updated]) {
+      const [prior, last] = after[id].slice(-2);
+      expect(prior).toMatchObject({ operation: "update", user_name: harper.admin.username });
+      expect((prior.records as any[])[0].createdAt).toBe("1970-01-01T00:00:00Z");
+      expect(last).toMatchObject({ operation: "update", user_name: harper.admin.username });
+      expect((last.records as any[])[0].createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
+    }
     const restamped = describeIdpMappingWriters(await readRows(), after);
     expect(restamped.nonAdmin).toEqual([]);
     expect(restamped.unattributed).toEqual([]);

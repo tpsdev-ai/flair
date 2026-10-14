@@ -29,39 +29,52 @@
  * says whether the row existed before the write (operation, user, timestamp,
  * ids and the row are all it returns). So the change an entry made is the
  * difference from the entry before it, and the first retained entry's change
- * is known only when that entry is the row's creation. An entry is taken as a
- * creation when:
- *   - it is an `insert` (Harper writes one only for a new row), or follows a
- *     recorded delete;
- *   - it is the first retained entry, an `upsert` or `put` by a user other
- *     than `flair-agent`, whose row carries a `createdAt` within
- *     CREATION_STAMP_TOLERANCE_MS of the entry and no `lastUsedAt` other than
- *     that same `createdAt` (a creation stamp, below);
- *   - it is an operations-API `update` by a user other than `flair-agent` that
- *     sets `createdAt` within the tolerance of the entry: an administrator's
- *     re-stamp, the remedy this check prints for a row it cannot attribute.
+ * is known only when that entry is the row's creation.
+ *
+ * A row's history starts over at either of two points:
+ *   - its recorded creation: an `insert` (Harper writes one only for a new
+ *     row); a write after a recorded delete; or a creation stamp, a first
+ *     retained `upsert` or `put` by a user other than `flair-agent` whose row
+ *     carries a `createdAt` within CREATION_STAMP_TOLERANCE_MS of the entry and
+ *     no `lastUsedAt` other than that same `createdAt`;
+ *   - an administrator's review re-stamp, the remedy this check prints for a
+ *     row it reports: an operations-API `update` by a user other than
+ *     `flair-agent` that, by the retained row before it, changed `createdAt` to
+ *     a whole-second UTC time within the tolerance of the entry. Without a
+ *     retained prior row a change cannot be shown, so an `update` that is the
+ *     first retained entry is not a re-stamp, and an `update` that leaves
+ *     `createdAt` as it was never is. The printed remedy writes two updates, a
+ *     fixed past time and then the current time, so the second always has a
+ *     retained prior row that shows the change. Harper rebuilds a partial
+ *     write's row from the current row, so a field the write did not set can
+ *     show a later write's value; the whole-second form tells the printed
+ *     re-stamp from the millisecond times every other writer stamps.
  *
  * A creation stamp relies on `createdAt`. Every path that can create a mapping
- * sets it: the linker (`flair mcp enable`, `flair principal link`) to the
- * time of its run, the /mcp and XAA JIT provisioners to the server's time
- * (XAA also sets `lastUsedAt` to that same value), and the Credential
- * resource's POST and PUT to the body's value or the server's time, a write
- * only an administrator may make for a mapping. A non-admin agent can change
- * `createdAt` on its own row, but that write is recorded as `flair-agent`, and
- * no entry by that user is ever taken as a creation. The server's use stamps
- * on an existing row do not read as a creation: the /mcp one is a `patch`,
- * and the XAA one keeps the stored `createdAt` and sets a new `lastUsedAt`.
- * An `update` is written only by the operations API, never by the server.
+ * sets it: the linker (`flair mcp enable`, `flair principal link`) to its
+ * host's time at the mapping write, the /mcp and XAA JIT provisioners to the
+ * server's time (XAA also sets `lastUsedAt` to that same value), and the
+ * Credential resource's POST and PUT to the body's value or the server's time,
+ * a write only an administrator may make for a mapping. A linker run on a host
+ * whose clock differs from the server's by more than the tolerance, or a POST
+ * or PUT body carrying an older `createdAt`, leaves its mapping unattributed
+ * until it is re-stamped. A non-admin agent can change `createdAt` on its own
+ * row, but that write is recorded as `flair-agent`, and no entry by that user
+ * ever starts a history over. The server's use stamps on an existing row do
+ * not read as a creation: the /mcp one is a `patch`, and the XAA one keeps the
+ * stored `createdAt` and sets a new `lastUsedAt`. An `update` is written only
+ * by the operations API, never by the server.
  *
  * Each active row is one of:
- *   - non-admin write: since the row's latest creation, an entry by
+ *   - non-admin write: since the row's history last started over, an entry by
  *     `flair-agent` whose prior row is known created the row as a mapping, or
  *     changed it in a way the rule reserves for administrators and the server;
- *   - unattributed: no such entry, and the history does not show the row's
- *     creation (no retained entry, a first retained entry that is not a
- *     creation, or an entry with no row image), so a write the log does not
- *     hold may have set the mapping;
- *   - neither: the history shows the row's creation and no such entry.
+ *   - unattributed: no such entry, and the history does not start at a
+ *     recorded creation or a review re-stamp (no retained entry, a first
+ *     retained entry that is neither, or an entry with no row image), so a
+ *     write the log does not hold may have set the mapping;
+ *   - neither: the history starts at a recorded creation or a review re-stamp,
+ *     with no such entry since.
  *
  * ── What it cannot tell ─────────────────────────────────────────────────────
  *   - Audit entries expire after `logging.auditRetention` (3 days by default),
@@ -197,8 +210,14 @@ const CREATING_OPERATION = "insert";
 /** Whole-row writes a first retained entry may be, to be taken as a creation stamp. */
 const STAMP_OPERATIONS = new Set(["upsert", "put"]);
 
-/** The operations-API operation an administrator's re-stamp is. The server never records it. */
+/** The operations-API operation an administrator's review re-stamp is. The server never records it. */
 const RESTAMP_OPERATION = "update";
+
+/** The form the printed re-stamp writes: a whole-second UTC time (`date -u +%Y-%m-%dT%H:%M:%SZ`). */
+const RESTAMP_FORMAT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
+
+/** The fixed past time the printed re-stamp writes first, so its second update shows a change. */
+export const RESTAMP_PRIOR_CREATED_AT = "1970-01-01T00:00:00Z";
 
 /**
  * How far a creation stamp's `createdAt` may be from its entry's timestamp.
@@ -214,6 +233,9 @@ function entryImage(entry: CredentialAuditEntry, id: string): Record<string, unk
   const match = records.find((r: any) => r && typeof r === "object" && (r.id === undefined || r.id === id));
   return match && typeof match === "object" ? (match as Record<string, unknown>) : null;
 }
+
+/** The prior row is not in the retained history. */
+const NOT_RETAINED = Symbol("not-retained");
 
 /** Is the row's `createdAt` within the tolerance of the entry's timestamp? */
 function createdAtMatchesEntry(entry: CredentialAuditEntry, image: Record<string, unknown>): boolean {
@@ -233,18 +255,29 @@ function isCreationStamp(entry: CredentialAuditEntry, image: Record<string, unkn
   return image.lastUsedAt == null || image.lastUsedAt === image.createdAt;
 }
 
-/** Is this entry an administrator's re-stamp of the row's `createdAt`? */
-function isAdministratorRestamp(entry: CredentialAuditEntry, image: Record<string, unknown>, agentUser: string): boolean {
-  return entry.user_name !== agentUser && entry.operation === RESTAMP_OPERATION && createdAtMatchesEntry(entry, image);
+/**
+ * Is this entry an administrator's review re-stamp? Only when the retained
+ * row before it shows that it changed `createdAt` to a whole-second UTC time
+ * within the tolerance of the entry (see the header).
+ */
+function isReviewRestamp(
+  entry: CredentialAuditEntry,
+  image: Record<string, unknown>,
+  prior: Record<string, unknown> | null | typeof NOT_RETAINED,
+  agentUser: string,
+): boolean {
+  if (entry.user_name === agentUser || entry.operation !== RESTAMP_OPERATION) return false;
+  if (prior === null || prior === NOT_RETAINED) return false;
+  const stamped = image.createdAt;
+  if (typeof stamped !== "string" || !RESTAMP_FORMAT.test(stamped) || stamped === prior.createdAt) return false;
+  return createdAtMatchesEntry(entry, image);
 }
-
-/** The prior row is not in the retained history. */
-const NOT_RETAINED = Symbol("not-retained");
 
 /**
  * What the retained audit history of `id` shows (see the header). Entries are
- * replayed in timestamp order. A creation starts the row's history over: what
- * came before it no longer decides the row as it stands. Any other write is
+ * replayed in timestamp order. A recorded creation or a review re-stamp starts
+ * the row's history over: what came before it no longer decides the row as it
+ * stands. Any other write is
  * judged against the row before it only when that row is known; a write whose
  * prior row is not retained is never judged, whoever made it, and makes the
  * row unattributed instead.
@@ -271,12 +304,12 @@ export function classifyIdpMappingHistory(
       prior = NOT_RETAINED;
       continue;
     }
-    const creation =
+    const startsOver =
       operation === CREATING_OPERATION ||
       prior === null ||
       (prior === NOT_RETAINED && isCreationStamp(entry, image, agentUser)) ||
-      isAdministratorRestamp(entry, image, agentUser);
-    if (creation) {
+      isReviewRestamp(entry, image, prior, agentUser);
+    if (startsOver) {
       creationShown = true;
       nonAdminWrite = entry.user_name === agentUser && isIdpMappingChange(null, image);
     } else if (prior === NOT_RETAINED) {
@@ -332,7 +365,7 @@ export interface IdpMappingRemedyTarget {
 /** Characters a row id, user or URL may use to be printed inside a shell command. */
 const SHELL_SAFE = /^[A-Za-z0-9_.:@\/-]+$/;
 
-/** The current UTC time, as the shell computes it when the command runs (bash, zsh, fish 3.4+). */
+/** The current UTC time in whole seconds, as the shell computes it when the command runs (bash, zsh, fish 3.4+). */
 const SHELL_NOW = `'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'`;
 
 /** One operations-API call as a curl command; `body` is JSON with no single quote. */
@@ -340,7 +373,12 @@ function opsCommand(target: IdpMappingRemedyTarget, body: string): string {
   return `curl -su ${target.adminUser} -H 'Content-Type: application/json' ${target.opsUrl} -d '${body}'`;
 }
 
-/** The review, re-stamp and revoke commands for `ids`, or null when none can be printed safely. */
+/**
+ * The review, re-stamp and revoke commands for `ids`, or null when none can be
+ * printed safely. The re-stamp is two updates joined by `&&`: createdAt to
+ * RESTAMP_PRIOR_CREATED_AT, then to the current time, so the retained row
+ * before the second shows that it changed createdAt (see the header).
+ */
 export function idpMappingRemedyCommands(
   ids: string[],
   target: IdpMappingRemedyTarget,
@@ -349,15 +387,15 @@ export function idpMappingRemedyCommands(
   const safe = ids.filter((id) => SHELL_SAFE.test(id));
   if (safe.length === 0) return null;
   const table = `"database":"flair","table":"Credential"`;
-  const review = `{"operation":"search_by_conditions",${table},"operator":"or","get_attributes":["*"],"conditions":[` +
-    safe.map((id) => `{"search_attribute":"id","search_type":"equals","search_value":"${id}"}`).join(",") + "]}";
-  const restamp = `{"operation":"update",${table},"records":[` +
-    safe.map((id) => `{"id":"${id}","createdAt":"${SHELL_NOW}"}`).join(",") + "]}";
+  const review = `{"operation":"search_by_id",${table},"get_attributes":["*"],"ids":[` +
+    safe.map((id) => `"${id}"`).join(",") + "]}";
+  const restampTo = (createdAt: string) => `{"operation":"update",${table},"records":[` +
+    safe.map((id) => `{"id":"${id}","createdAt":"${createdAt}"}`).join(",") + "]}";
   const revoke = `{"operation":"update",${table},"records":[` +
     safe.map((id) => `{"id":"${id}","status":"revoked"}`).join(",") + "]}";
   return {
     review: opsCommand(target, review),
-    restamp: opsCommand(target, restamp),
+    restamp: `${opsCommand(target, restampTo(RESTAMP_PRIOR_CREATED_AT))} && ${opsCommand(target, restampTo(SHELL_NOW))}`,
     revoke: opsCommand(target, revoke),
     omitted: ids.length - safe.length,
   };
@@ -372,17 +410,24 @@ export interface IdpMappingWriterReport {
   note: string;
 }
 
-/** The remedy lines shared by both findings: review, keep (re-stamp) and drop (revoke). */
+/**
+ * The remedy lines shared by both findings: review, keep (re-stamp) and drop
+ * (revoke). When no command can be printed safely (every id, the admin user
+ * or the URL uses other characters), the lines name the operations instead.
+ */
 function remedyLines(ids: string[], target: IdpMappingRemedyTarget, keepFirst: boolean): string[] {
   const commands = idpMappingRemedyCommands(ids, target);
   if (!commands) {
-    return ["read each row through the operations API as an administrator; re-stamp one you keep with an " +
-      "operations-API update that sets its createdAt to the current time, or revoke one you drop. Doctor changed nothing."];
+    return ["these row ids, the admin user or the operations-API URL use characters doctor does not put in a shell " +
+      "command, so no command is printed. As an administrator, read each row through the operations API; to keep one " +
+      `you reviewed, send two operations-API updates of its createdAt, first to ${RESTAMP_PRIOR_CREATED_AT} and then ` +
+      "to the current UTC time in whole seconds; to drop one, update its status to revoked. Doctor changed nothing."];
   }
-  const keep = `keep a mapping you reviewed: re-stamp it as an administrator, which the next run attributes to that write: ${commands.restamp}`;
+  const keep = "keep a mapping you reviewed: re-stamp it as an administrator with two updates of its createdAt, which " +
+    `the next run attributes to that review: ${commands.restamp}`;
   const drop = `drop a mapping: revoke it; a revoked row maps nobody and is not checked: ${commands.revoke}`;
   return [
-    `review the rows (curl prompts for the admin password; this prints each row): ${commands.review}`,
+    `review the rows (curl prompts for the admin password for each request; this prints each row): ${commands.review}`,
     ...(keepFirst ? [keep, drop] : [drop, keep]),
     "Doctor changed nothing. Edit each command to the rows you choose" +
       (commands.omitted > 0 ? `; ${commands.omitted} row id(s) with other characters are left out of the commands.` : "."),
@@ -391,12 +436,11 @@ function remedyLines(ids: string[], target: IdpMappingRemedyTarget, keepFirst: b
 
 /**
  * The finding's report lines. A row that cannot be attributed is a finding,
- * never a clear result, and each finding prints the commands that clear it.
+ * never a clear result. Each finding prints the commands that clear it for the
+ * rows whose ids can be printed in a shell command, and names the operations
+ * when none can.
  */
-export function idpMappingWriterReport(
-  finding: IdpMappingWriterFinding,
-  target: IdpMappingRemedyTarget = { opsUrl: "http://127.0.0.1:9925/", adminUser: "admin" },
-): IdpMappingWriterReport {
+export function idpMappingWriterReport(finding: IdpMappingWriterFinding, target: IdpMappingRemedyTarget): IdpMappingWriterReport {
   const findings: { warn: string; fix: string[] }[] = [];
   if (finding.nonAdmin.length > 0) {
     findings.push({
@@ -410,7 +454,8 @@ export function idpMappingWriterReport(
     const more = finding.unattributed.length - listed.length;
     findings.push({
       warn: `${finding.unattributed.length} IdP mapping row(s) cannot be attributed: their retained audit history ` +
-        "does not show the write that created them, so whether a non-admin agent wrote their mapping cannot be told: " +
+        "starts at neither a recorded creation nor an administrator's review re-stamp, so whether a non-admin agent " +
+        "wrote their mapping cannot be told: " +
         listed.join(", ") + (more > 0 ? ` and ${more} more` : ""),
       fix: remedyLines(listed, target, true),
     });
@@ -419,8 +464,9 @@ export function idpMappingWriterReport(
     findings,
     clear: findings.length > 0 ? null : finding.active === 0
       ? `No active IdP mapping rows (${finding.total} stored, none active).`
-      : `No active IdP mapping row's audit history shows a non-admin agent's mapping write, and each shows the ` +
-        `write that created the row (${finding.active} active of ${finding.total} stored).`,
+      : `No active IdP mapping row's audit history shows a non-admin agent's mapping write, and each row's history ` +
+        `starts at its recorded creation or at an administrator's review re-stamp (${finding.active} active of ` +
+        `${finding.total} stored).`,
     note: "A write made before the flair-agent Harper user existed is recorded as an administrator's.",
   };
 }

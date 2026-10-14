@@ -1376,7 +1376,8 @@ export async function provisionIdpIdentityMapping(
   const target = identityMappingOpsUrl(params);
   const opsUrl = target.url;
   const fetchImpl = deps.fetchImpl ?? fetch;
-  const now = (deps.now ?? (() => new Date().toISOString()))();
+  const clock = deps.now ?? (() => new Date().toISOString());
+  const now = clock();
   const authHeader = basicAuthHeader(params.adminUser, params.adminPass);
 
   // flair#2359 — the ONE shared agent-ID rule, before any read or write. The
@@ -1485,6 +1486,10 @@ export async function provisionIdpIdentityMapping(
   // ordering the survivor first means even a partially-applied batch can never
   // leave the subject with ZERO resolvable credentials (the fail-open denial).
   await assertMappingUnchanged(fetchImpl, opsUrl, authHeader, preflight, principalCreated);
+  // The mapping's times are read at its write, not at the start of the run:
+  // `flair doctor` takes a new mapping's createdAt, within a tolerance of the
+  // audit entry, as the record of its creation (src/lib/idp-mapping-audit.ts).
+  const writtenAt = clock();
   const upsertRes = await fetchImpl(opsUrl, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: authHeader },
@@ -1501,8 +1506,8 @@ export async function provisionIdpIdentityMapping(
           status: "active",
           idpProvider: params.idpProvider,
           idpSubject: params.idpSubject,
-          createdAt: typeof reused?.createdAt === "string" ? reused.createdAt : now,
-          lastUsedAt: now,
+          createdAt: typeof reused?.createdAt === "string" ? reused.createdAt : writtenAt,
+          lastUsedAt: writtenAt,
         },
         // Retained, not deleted: the revocation stays legible in storage and in
         // Harper's table audit log (which records the full record image of
@@ -1517,8 +1522,8 @@ export async function provisionIdpIdentityMapping(
           status: "revoked",
           idpProvider: c.idpProvider,
           idpSubject: params.idpSubject,
-          createdAt: typeof c.createdAt === "string" ? c.createdAt : now,
-          updatedAt: now,
+          createdAt: typeof c.createdAt === "string" ? c.createdAt : writtenAt,
+          updatedAt: writtenAt,
         })),
       ],
     }),

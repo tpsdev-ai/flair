@@ -14,13 +14,18 @@
  *   1. a mapping the linker (`flair mcp enable` / `flair principal link`)
  *      created and one an admin agent created over REST are the clear result
  *      and add no issue;
- *   2. a row whose history does not show its creation is reported as
- *      unattributed and counted, and running the re-stamp command doctor
- *      prints makes the next run clear;
+ *   2. a row whose history does not start at a recorded creation is reported
+ *      as unattributed and counted; the review command doctor prints returns
+ *      that row and no other, and running the printed re-stamp makes the next
+ *      run clear;
  *   3. a row the shared non-admin agent user (`flair-agent`) inserted is
  *      listed with its principal and provider, without its subject, and
  *      counted, and running the revoke command doctor prints makes the next
- *      run clear.
+ *      run clear;
+ *   4. an administrator's ordinary update (a label edit) after a non-admin
+ *      subject change leaves that change listed and counted; the printed
+ *      review returns that row alone, and the printed re-stamp after review
+ *      makes the next run clear.
  *
  * The exit status is compared with a run that holds no mapping. The sandbox
  * HOME carries a registered agent key and the data directory a local install
@@ -120,23 +125,31 @@ function idpSection(stdout: string): string {
   return next < 0 ? rest : rest.slice(0, next + "IdP mappings".length);
 }
 
-/** The one printed command in `section` whose text contains `marker`. */
+/** The command on the one printed remedy line that contains `marker`. */
 function printedCommand(section: string, marker: string): string {
-  const commands = section.split("\n").filter((l) => l.includes("curl -su ")).map((l) => l.slice(l.indexOf("curl -su ")));
-  const matching = commands.filter((c) => c.includes(marker));
-  expect(matching.length, `one printed command containing ${marker}:\n${section}`).toBe(1);
-  return matching[0];
+  const lines = section.split("\n").filter((l) => l.includes("curl -su ") && l.includes(marker));
+  expect(lines.length, `one printed command line containing ${marker}:\n${section}`).toBe(1);
+  return lines[0].slice(lines[0].indexOf("curl -su "));
 }
 
-/** Run a printed command, with this instance's admin password where curl would prompt for it. */
+/** Run a printed command, with this instance's admin password wherever curl would prompt for it. */
 function runPrinted(command: string): string {
   const user = harper.admin.username;
-  expect(command).toContain(`curl -su ${user} `);
-  expect(command).toContain(` ${harper.opsURL.replace(/\/?$/, "/")} `);
-  const res = spawnSync("bash", ["-c", command.replace(`curl -su ${user} `, `curl -su ${user}:${harper.admin.password} `)], { encoding: "utf-8", timeout: 20_000 });
+  expect(command.startsWith(`curl -su ${user} `)).toBe(true);
+  for (const step of command.split(" && ")) expect(step).toContain(` ${harper.opsURL.replace(/\/?$/, "/")} `);
+  const res = spawnSync("bash", ["-c", command.replaceAll(`curl -su ${user} `, `curl -su ${user}:${harper.admin.password} `)], { encoding: "utf-8", timeout: 20_000 });
   expect(res.status, `printed command failed: ${res.stderr}`).toBe(0);
   return res.stdout;
 }
+
+/** The ids the printed review command returns. */
+function reviewedIds(section: string): string[] {
+  const rows = JSON.parse(runPrinted(printedCommand(section, "review the rows")));
+  expect(Array.isArray(rows), JSON.stringify(rows)).toBe(true);
+  return rows.map((r: any) => String(r.id)).sort();
+}
+
+const occurrences = (text: string, part: string) => text.split(part).length - 1;
 
 async function opsAs(user: string, pass: string, op: Record<string, unknown>): Promise<any> {
   const res = await fetch(harper.opsURL, {
@@ -240,8 +253,9 @@ describe("flair doctor — the IdP mappings section (real CLI + real spawned Har
     expect(unattributedSection, "an unattributed row was reported as clear").not.toContain(CLEAR);
     expect(issueCount(unattributed.stdout), "the unattributed row did not move the summary").toBe(baseCount + 1);
     expect(unattributed.code).toBe(1);
-    // The printed re-stamp clears it.
-    expect(runPrinted(printedCommand(unattributedSection, '"createdAt":'))).toContain("updated 1 of 1");
+    // The printed review returns that row and no other; the printed re-stamp clears it.
+    expect(reviewedIds(unattributedSection)).toEqual([copied]);
+    expect(occurrences(runPrinted(printedCommand(unattributedSection, '"createdAt":')), "updated 1 of 1")).toBe(2);
     const restamped = await runDoctor();
     expect(idpSection(restamped.stdout)).toContain(CLEAR);
     expect(idpSection(restamped.stdout)).toContain("(3 active of 3 stored)");
@@ -265,6 +279,7 @@ describe("flair doctor — the IdP mappings section (real CLI + real spawned Har
     expect(listedSection).not.toContain(CLEAR);
     expect(issueCount(listed.stdout), "the non-admin mapping did not move the summary").toBe(baseCount + 1);
     expect(listed.code).toBe(1);
+    expect(reviewedIds(listedSection)).toEqual([written]);
     // The printed revoke clears it: a revoked row maps nobody and is not checked.
     expect(runPrinted(printedCommand(listedSection, '"status":"revoked"'))).toContain("updated 1 of 1");
     const revoked = await runDoctor();
@@ -272,5 +287,34 @@ describe("flair doctor — the IdP mappings section (real CLI + real spawned Har
     expect(idpSection(revoked.stdout)).toContain("(3 active of 4 stored)");
     expect(issueCount(revoked.stdout), "the revoked row still moved the summary").toBe(baseCount);
     expect(revoked.code).toBe(base.code);
-  }, 180_000);
+
+    // 4. An administrator creates a mapping, a write as the non-admin agent
+    //    user changes its subject, and an administrator then edits its label.
+    //    The label edit is an ordinary update: it leaves createdAt as it was, so
+    //    it does not start the row's history over, and the subject change
+    //    stays listed. The row is created with a whole-second createdAt, the
+    //    form a review re-stamp writes, so only the unchanged createdAt tells
+    //    the label edit from a re-stamp.
+    const edited = `cred-idp-cli-edited-${sfx}`;
+    const wholeSecondNow = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+    await asAdmin({ operation: "insert", table: "Credential", records: [{ id: edited, principalId: PRINCIPALS[2], kind: "idp", idpProvider: "mcp-oauth", idpSubject: `sub-edited-${sfx}`, status: "active", createdAt: wholeSecondNow }] });
+    await opsAs("flair-agent", agentPass, { operation: "update", table: "Credential", records: [{ id: edited, idpSubject: `sub-edited-moved-${sfx}` }] });
+    await asAdmin({ operation: "update", table: "Credential", records: [{ id: edited, label: "reviewed label" }] });
+    const editedRun = await runDoctor();
+    const editedSection = idpSection(editedRun.stdout);
+    expect(editedSection).toContain(
+      `1 IdP mapping row(s) written by a non-admin agent (from the audit log): ${edited} (principal '${PRINCIPALS[2]}', provider 'mcp-oauth')`,
+    );
+    expect(editedSection).not.toContain(CLEAR);
+    expect(issueCount(editedRun.stdout), "the label edit cleared the non-admin subject change").toBe(baseCount + 1);
+    expect(editedRun.code).toBe(1);
+    // After review, the printed re-stamp (two updates of createdAt) starts the row's history over.
+    expect(reviewedIds(editedSection)).toEqual([edited]);
+    expect(occurrences(runPrinted(printedCommand(editedSection, '"createdAt":')), "updated 1 of 1")).toBe(2);
+    const reviewed = await runDoctor();
+    expect(idpSection(reviewed.stdout)).toContain(CLEAR);
+    expect(idpSection(reviewed.stdout)).toContain("(4 active of 5 stored)");
+    expect(issueCount(reviewed.stdout), "the re-stamped row still moved the summary").toBe(baseCount);
+    expect(reviewed.code).toBe(base.code);
+  }, 240_000);
 });

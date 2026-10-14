@@ -2233,7 +2233,9 @@ program
               (audit.kind === "disabled" ? "; enable logging.auditLog in the ROOT harperdb-config.yaml to attribute future writes." : "."));
           } else {
             // A row the log cannot attribute is a counted finding, not a clean
-            // result; each finding prints the admin commands that clear it.
+            // result. A finding prints the admin commands that clear it for the
+            // rows whose ids can go in a shell command, and names the
+            // operations when none can.
             const report = idpMappingWriterReport(describeIdpMappingWriters(idpRows, audit.byId), {
               opsUrl: idpOpsUrl,
               adminUser: resolveAdminUser(),

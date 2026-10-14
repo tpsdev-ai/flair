@@ -19,6 +19,7 @@ import {
   idpMappingRemedyCommands,
   idpMappingWriterReport,
   NON_ADMIN_AGENT_HARPER_USER,
+  RESTAMP_PRIOR_CREATED_AT,
   readCredentialAudit,
   readIdpMappingRows,
   type CredentialAuditEntry,
@@ -146,22 +147,65 @@ describe("classifyIdpMappingHistory — a creation stamp: a first retained upser
   });
 });
 
-describe("classifyIdpMappingHistory — an administrator's re-stamp (operations-API update of createdAt)", () => {
-  const restamp = (ts: number, extra: Record<string, unknown> = {}) => entry("update", "admin", ts, idp("c1", { createdAt: iso(ts), ...extra }));
+describe("classifyIdpMappingHistory — an administrator's review re-stamp (operations-API update that changes createdAt)", () => {
+  /** A whole-second UTC time, the form the printed re-stamp writes. */
+  const seconds = (ms: number) => new Date(Math.floor(ms / 1000) * 1000).toISOString().replace(".000Z", "Z");
+  const update = (user: string, ts: number, extra: Record<string, unknown>) => entry("update", user, ts, idp("c1", extra));
 
-  it("starts the row's history over after an unknown first entry or a non-admin write", () => {
-    expect(classifyIdpMappingHistory("c1", [entry("patch", AGENT, T0, idp("c1", { label: "x" })), restamp(T0 + 100)])).toBe("no-non-admin-write");
+  it("does not let an ordinary admin update clear a non-admin change, however recent createdAt is", () => {
+    // Admin creates; a non-admin changes the subject; an admin edits the label.
+    const created = iso(T0);
     expect(classifyIdpMappingHistory("c1", [
-      entry("insert", "admin", T0, idp("c1")),
-      entry("patch", AGENT, T0 + 1, idp("c1", { idpSubject: "mallory" })),
-      restamp(T0 + 100, { idpSubject: "mallory" }),
+      entry("insert", "admin", T0, idp("c1", { createdAt: created })),
+      entry("patch", AGENT, T0 + 1_000, idp("c1", { createdAt: created, idpSubject: "mallory" })),
+      update("admin", T0 + 2_000, { createdAt: created, idpSubject: "mallory", label: "reviewed" }),
+    ])).toBe("non-admin-write");
+  });
+
+  it("does not let an update that leaves a whole-second createdAt as it was clear a non-admin change", () => {
+    const at = T0 + 100_000;
+    expect(classifyIdpMappingHistory("c1", [
+      entry("insert", "admin", at, idp("c1", { createdAt: seconds(at) })),
+      entry("patch", AGENT, at + 1_000, idp("c1", { createdAt: seconds(at), idpSubject: "mallory" })),
+      update("admin", at + 2_000, { createdAt: seconds(at), idpSubject: "mallory", label: "reviewed" }),
+    ])).toBe("non-admin-write");
+  });
+
+  it("starts the history over when the retained row before it shows createdAt changed to the entry's time", () => {
+    const at = T0 + 100_000;
+    expect(classifyIdpMappingHistory("c1", [
+      entry("insert", "admin", T0, idp("c1", { createdAt: iso(T0) })),
+      entry("patch", AGENT, T0 + 1, idp("c1", { createdAt: iso(T0), idpSubject: "mallory" })),
+      update("admin", at, { createdAt: seconds(at), idpSubject: "mallory" }),
     ])).toBe("no-non-admin-write");
   });
 
-  it("is not a re-stamp when made by the non-admin agent user, or with a createdAt outside the tolerance", () => {
-    const first = entry("patch", AGENT, T0, idp("c1", { label: "x" }));
-    expect(classifyIdpMappingHistory("c1", [first, entry("update", AGENT, T0 + 100, idp("c1", { createdAt: iso(T0 + 100) }))])).toBe("unattributed");
-    expect(classifyIdpMappingHistory("c1", [first, entry("update", "admin", T0 + 100, idp("c1", { createdAt: iso(T0 - CREATION_STAMP_TOLERANCE_MS) }))])).toBe("unattributed");
+  it("is not a re-stamp without a retained row before it: the first retained update leaves the row unattributed", () => {
+    const at = T0 + 100_000;
+    expect(classifyIdpMappingHistory("c1", [update("admin", at, { createdAt: seconds(at) })])).toBe("unattributed");
+  });
+
+  it("the printed two-step re-stamp attributes a row whose history is gone or starts with an unknown write", () => {
+    const at = T0 + 100_000;
+    const twoStep = [update("admin", at, { createdAt: RESTAMP_PRIOR_CREATED_AT }), update("admin", at + 500, { createdAt: seconds(at + 500) })];
+    expect(classifyIdpMappingHistory("c1", twoStep)).toBe("no-non-admin-write");
+    expect(classifyIdpMappingHistory("c1", [entry("patch", AGENT, T0, idp("c1", { label: "x" })), ...twoStep])).toBe("no-non-admin-write");
+  });
+
+  it("is not a re-stamp in a millisecond form, the form every other writer stamps", () => {
+    const at = T0 + 100_000;
+    expect(classifyIdpMappingHistory("c1", [
+      entry("insert", "admin", T0, idp("c1", { createdAt: iso(T0) })),
+      entry("patch", AGENT, T0 + 1, idp("c1", { createdAt: iso(T0), idpSubject: "mallory" })),
+      update("admin", at, { createdAt: iso(at), idpSubject: "mallory" }),
+    ])).toBe("non-admin-write");
+  });
+
+  it("is not a re-stamp when made by the non-admin agent user, or to a time outside the tolerance", () => {
+    const at = T0 + 100_000;
+    const first = entry("patch", AGENT, T0, idp("c1", { label: "x", createdAt: iso(T0) }));
+    expect(classifyIdpMappingHistory("c1", [first, update(AGENT, at, { createdAt: seconds(at) })])).toBe("unattributed");
+    expect(classifyIdpMappingHistory("c1", [first, update("admin", at, { createdAt: seconds(at - CREATION_STAMP_TOLERANCE_MS - 1_000) })])).toBe("unattributed");
   });
 });
 
@@ -253,16 +297,27 @@ describe("describeIdpMappingWriters / idpMappingWriterReport", () => {
 
   it("prints commands whose bodies are the operations-API calls that re-stamp, revoke and read the rows", () => {
     const commands = idpMappingRemedyCommands(["c1", "c2"], TARGET)!;
+    const PREFIX = "curl -su admin -H 'Content-Type: application/json' http://127.0.0.1:9925/ -d '";
     const body = (command: string) => {
-      const m = command.match(/ -d '(.*)'$/s);
-      expect(m, command).not.toBeNull();
+      expect(command.startsWith(PREFIX), command).toBe(true);
+      expect(command.endsWith("'"), command).toBe(true);
       // The shell substitutes the current time where the body leaves the single quotes.
-      return JSON.parse(m![1].replaceAll(`'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'`, "2026-10-01T00:00:00Z"));
+      return JSON.parse(command.slice(PREFIX.length, -1).replaceAll(`'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'`, "2026-10-01T00:00:00Z"));
     };
-    for (const c of [commands.review, commands.restamp, commands.revoke]) expect(c.startsWith("curl -su admin -H 'Content-Type: application/json' http://127.0.0.1:9925/ -d '")).toBe(true);
-    expect(body(commands.restamp)).toEqual({ operation: "update", database: "flair", table: "Credential", records: [{ id: "c1", createdAt: "2026-10-01T00:00:00Z" }, { id: "c2", createdAt: "2026-10-01T00:00:00Z" }] });
+    const steps = commands.restamp.split(" && ");
+    expect(steps.length).toBe(2);
+    expect(body(steps[0])).toEqual({ operation: "update", database: "flair", table: "Credential", records: [{ id: "c1", createdAt: RESTAMP_PRIOR_CREATED_AT }, { id: "c2", createdAt: RESTAMP_PRIOR_CREATED_AT }] });
+    expect(body(steps[1])).toEqual({ operation: "update", database: "flair", table: "Credential", records: [{ id: "c1", createdAt: "2026-10-01T00:00:00Z" }, { id: "c2", createdAt: "2026-10-01T00:00:00Z" }] });
     expect(body(commands.revoke)).toEqual({ operation: "update", database: "flair", table: "Credential", records: [{ id: "c1", status: "revoked" }, { id: "c2", status: "revoked" }] });
-    expect(body(commands.review).conditions.map((c: any) => c.search_value)).toEqual(["c1", "c2"]);
+    expect(body(commands.review)).toEqual({ operation: "search_by_id", database: "flair", table: "Credential", get_attributes: ["*"], ids: ["c1", "c2"] });
+  });
+
+  it("names the operations instead of printing commands when no id can be printed", () => {
+    const report = idpMappingWriterReport(describeIdpMappingWriters([idp("x y")], {}), TARGET);
+    const fix = report.findings[0].fix.join("\n");
+    expect(fix).not.toContain("curl");
+    expect(fix).toContain("no command is printed");
+    expect(fix).toContain(RESTAMP_PRIOR_CREATED_AT);
   });
 
   it("leaves an id with other characters out of the commands, and prints no command for an unsafe user", () => {
@@ -287,7 +342,7 @@ describe("describeIdpMappingWriters / idpMappingWriterReport", () => {
     expect(line.warn).not.toContain("c10");
   });
 
-  it("is clear only when every active row's history shows its creation and no non-admin mapping write", () => {
+  it("is clear only when every active row's history starts at a recorded creation or a review re-stamp, with no non-admin mapping write since", () => {
     const report = idpMappingWriterReport(describeIdpMappingWriters([idp("c1"), idp("c2", { status: "revoked" })], { c1: [entry("insert", "admin", T0, idp("c1"))] }), TARGET);
     expect(report.findings).toEqual([]);
     expect(report.clear).toContain("(1 active of 2 stored)");
