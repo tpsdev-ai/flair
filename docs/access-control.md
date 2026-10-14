@@ -151,11 +151,14 @@ resource.
 
 On POST, PUT and PATCH, the checks that run first decide before this rule:
 authentication, the owner checks, and the request checks (the rate limit and
-kind validation on POST and PUT, the single-record body on PATCH). The owner
-checks keep their own 403: on PATCH and PUT the owner-field guard refuses a
-change to the credential's principal, PUT refuses a body that names another
-principal, and PATCH, PUT and DELETE refuse a write to another principal's
-credential. A non-admin agent's write that passes those checks gets HTTP 403
+kind validation on POST and PUT, the single-record body on PATCH). For a
+non-admin agent, the owner checks keep their own 403: on PATCH and PUT the
+owner-field guard refuses a change to the credential's principal, PUT refuses
+a body that names another principal, and PATCH, PUT and DELETE refuse a write
+to another principal's credential. On POST, a non-admin agent's credential is
+stamped with its own principal; a `principalId` in the body is not used. An
+administrator may write another principal's credential. A non-admin agent's
+write that passes those checks gets HTTP 403
 with the error `idp_mapping_admin_only` when it would create an `idp`
 credential, change a credential's kind to or from `idp`, change an `idp`
 credential's provider or subject, or change its status to anything other than

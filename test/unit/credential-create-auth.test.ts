@@ -242,7 +242,8 @@ describe("Credential.delete() — cross-principal guard (refactored to resolveAg
 // A non-admin agent's POST/PUT/PATCH may not create a kind:"idp" row, change a
 // row's kind to or from "idp", or change an idp row's principalId, idpProvider,
 // idpSubject, or status (beyond revoking it); it may relabel and revoke its own.
-// put() writes only rows the caller owns, as every owner-scoped resource does.
+// For a non-admin caller, put() writes only rows it owns, as every
+// owner-scoped resource does.
 // _currentRecordId stands in for the row Harper loads for the request, which a
 // no-argument super.get() returns.
 

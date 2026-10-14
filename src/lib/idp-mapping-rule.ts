@@ -62,7 +62,8 @@ export function namesIdpKind(kind: unknown): boolean {
 /**
  * Is the field exactly as it was? A null and an absent value differ here, so
  * a write that sets an absent field to null, or removes a null one, changes
- * it. (An array kind is compared by reference, so any write of one differs.)
+ * it. (An array kind is compared by reference: an array the write supplies
+ * differs from the stored one even when it holds the same items.)
  */
 function sameValue(a: unknown, b: unknown): boolean {
   return a === b;
