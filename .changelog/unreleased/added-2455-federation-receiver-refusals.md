@@ -1,4 +1,4 @@
-- **The federation receiver names every offered record it refused and aborts an overrunning merge.**
+- **The federation receiver names every offered key it refused and aborts an overrunning merge.**
 
   A `POST /FederationSync` batch response now carries `refused`: one entry per
   offered key the receiver refused, each with a reason from the closed

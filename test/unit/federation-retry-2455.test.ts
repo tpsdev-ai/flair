@@ -46,7 +46,7 @@ function skipReasonUnionFromSource(): string[] {
 /** The reasons FederationSync.post passes to recordSkip as string literals. */
 function literalRecordSkipReasons(): string[] {
   const src = read("resources/Federation.ts");
-  return [...new Set([...src.matchAll(/recordSkip\("([a-z_]+)"\)/g)].map((m) => m[1]))];
+  return [...new Set([...src.matchAll(/recordSkip\("([a-z_]+)",\s*record\s*\)/g)].map((m) => m[1]))];
 }
 
 /** The field names declared in the FederationRetry type of schemas/federation.graphql. */

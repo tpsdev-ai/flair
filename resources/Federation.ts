@@ -1065,7 +1065,7 @@ async function consumePairingToken(
  * aborted for real, so it never late-commits. A healthy merge is ~1.7 s per 50
  * records; 5 s bounds a stalled or hung write without cutting a normal one.
  */
-export const RECORD_MERGE_DEADLINE_MS = 5_000;
+const RECORD_MERGE_DEADLINE_MS = 5_000;
 
 /**
  * POST /FederationSync — push sync records from a peer.

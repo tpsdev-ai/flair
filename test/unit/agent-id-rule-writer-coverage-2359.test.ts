@@ -97,7 +97,7 @@ test("each resource Agent write path runs the guard before it writes", () => {
   expect(seed.indexOf(".flair.Agent.put(")).toBeGreaterThan(seed.indexOf("isValidAgentId(agentId)"));
 
   const federation = readFileSync("resources/Federation.ts", "utf8");
-  const skip = federation.indexOf("recordSkip(AGENT_ID_ERROR)");
+  const skip = federation.indexOf("recordSkip(AGENT_ID_ERROR, record)");
   expect(skip).toBeGreaterThan(-1);
   // flair#2450: every synced table's merge, Agent included, is the write-back helper.
   expect(federation.indexOf("await writeBackCommittedRow(", skip)).toBeGreaterThan(skip);

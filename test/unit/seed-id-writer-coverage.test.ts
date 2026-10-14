@@ -155,9 +155,9 @@ function denialReturnEnd(body: string, call: string, denialField?: string): numb
   return match ? match.index + match[0].length : -1;
 }
 
-/** The end of `recordSkip("<reason>");` immediately followed by `continue;`; -1 otherwise. */
+/** The end of `recordSkip("<reason>", record);` immediately followed by `continue;`; -1 otherwise. */
 function skipContinueEnd(src: string, reason: string): number {
-  const match = new RegExp(`recordSkip\\("${reason}"\\);\\s*continue;`).exec(src);
+  const match = new RegExp(`recordSkip\\("${reason}",\\s*record\\);\\s*continue;`).exec(src);
   return match ? match.index + match[0].length : -1;
 }
 
@@ -241,7 +241,7 @@ test("the listed entry paths run the .content-suffix id decision on the ids it w
   // The federation merge: the predicate runs on the id of the row it writes
   // (`mergedData`), the skip stops the record, and the put of that row follows.
   const federation = readFileSync("resources/Federation.ts", "utf8");
-  const guard = /if \(record\.table === "Memory" && endsWithContentSelectorSuffix\(mergedData\.id\)\) \{\s*recordSkip\("content_suffix_id_not_federated"\);\s*continue;/.exec(federation);
+  const guard = /if \(record\.table === "Memory" && endsWithContentSelectorSuffix\(mergedData\.id\)\) \{\s*recordSkip\("content_suffix_id_not_federated",\s*record\);\s*continue;/.exec(federation);
   expect(guard, "the federation merge does not test endsWithContentSelectorSuffix(mergedData.id) before skipping, or the skip does not stop the record").not.toBeNull();
   const skip = skipContinueEnd(federation, "content_suffix_id_not_federated");
   expect(skip).toBe(guard!.index + guard![0].length);
