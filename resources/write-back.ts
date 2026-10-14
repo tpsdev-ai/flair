@@ -51,6 +51,15 @@ export interface WriteBackOptions {
    *  the interleaving where this write's transaction opens first. Named at
    *  the call site, like `pausePre`. */
   pausePoint?: WriteBackPause;
+  /**
+   * A bounded per-call deadline (flair#2455 slice 2). When it expires, the
+   * owned transaction is aborted FOR REAL (its context carries an AbortSignal)
+   * and the call rejects with {@link WriteBackDeadlineError}. Aborting makes
+   * Harper drop the staged write and refuse a later one, so a continuation
+   * that resumes after the deadline cannot commit — a timer that merely
+   * stopped awaiting the callback would leave it free to commit late.
+   */
+  deadlineMs?: number;
 }
 
 /** The fields of `expectedRow` (or of the helper's own first read) it compares
@@ -107,6 +116,18 @@ export class WriteBackConflictError extends Error {
   constructor(label: string, id: string, attempts: number) {
     super(`${label}: row ${id} changed; write not applied (${attempts} attempts)`);
     this.name = "WriteBackConflictError";
+    this.id = id;
+  }
+}
+
+/** The named error a write-back throws when its `deadlineMs` expires: the owned
+ *  transaction is aborted for real, so nothing is written and a continuation
+ *  that resumes later is refused (flair#2455 slice 2). */
+export class WriteBackDeadlineError extends Error {
+  readonly id: string;
+  constructor(label: string, id: string) {
+    super(`${label}: row ${id} exceeded its write deadline; transaction aborted, not written`);
+    this.name = "WriteBackDeadlineError";
     this.id = id;
   }
 }
@@ -270,27 +291,65 @@ export async function writeBackCommittedRow(
     const pre = opts.pausePre();
     if (pre) await pre;
   }
-  for (let attempt = 1; ; attempt++) {
-    try {
-      return await withOwnedTransaction(opts.ctx, async (c) => {
-        const row = await table.get(id, c);
-        if (opts.matches && !opts.matches(row)) return { skip: true };
-        const decision = await plan(row);
-        if ("skip" in decision) return decision;
-        if (!sameTarget(row)) throw new WriteBackConflictError(opts.label, id, attempt);
-        // Test-only: inert unless the fault-injection opt-in is armed.
-        if (opts.pausePoint) {
-          const pause = opts.pausePoint();
-          if (pause) await pause;
-        }
-        if ("update" in decision) await applyFieldUpdate(table, id, decision.update, c);
-        else await table.put(decision.write, c);
-        await confirmCommittedRow(table, id, (committed) => isDeepStrictEqual(committed, row));
-        return decision;
-      });
-    } catch (err) {
-      if (!(err instanceof CommittedRowChanged)) throw err;
-      if (attempt >= attempts) throw new WriteBackConflictError(opts.label, id, attempts);
+
+  // A deadline makes the owned transaction cancellable: its context carries an
+  // AbortSignal, and expiring the deadline aborts it (below). The default path
+  // is unchanged — `ctx` is the caller's context and no signal is added.
+  let deadlineController: AbortController | undefined;
+  let ctx = opts.ctx;
+  if (opts.deadlineMs != null) {
+    deadlineController = new AbortController();
+    const upstream: AbortSignal | undefined = opts.ctx?.signal;
+    ctx = {
+      ...(opts.ctx ?? {}),
+      signal: upstream ? AbortSignal.any([upstream, deadlineController.signal]) : deadlineController.signal,
+    };
+  }
+
+  const run = async (): Promise<WriteBackPlan> => {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await withOwnedTransaction(ctx, async (c) => {
+          const row = await table.get(id, c);
+          if (opts.matches && !opts.matches(row)) return { skip: true };
+          const decision = await plan(row);
+          if ("skip" in decision) return decision;
+          if (!sameTarget(row)) throw new WriteBackConflictError(opts.label, id, attempt);
+          // Test-only: inert unless the fault-injection opt-in is armed.
+          if (opts.pausePoint) {
+            const pause = opts.pausePoint();
+            if (pause) await pause;
+          }
+          if ("update" in decision) await applyFieldUpdate(table, id, decision.update, c);
+          else await table.put(decision.write, c);
+          await confirmCommittedRow(table, id, (committed) => isDeepStrictEqual(committed, row));
+          return decision;
+        });
+      } catch (err) {
+        if (!(err instanceof CommittedRowChanged)) throw err;
+        if (attempt >= attempts) throw new WriteBackConflictError(opts.label, id, attempts);
+      }
     }
+  };
+
+  const work = run();
+  if (opts.deadlineMs == null) return await work;
+  const controller = deadlineController as AbortController;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      // Abort the owned transaction for real, THEN report the refusal: a
+      // continuation that resumes after this cannot stage a write
+      // (admitRequestWrite refuses an aborted signal) or commit a staged one.
+      controller.abort();
+      reject(new WriteBackDeadlineError(opts.label, id));
+    }, opts.deadlineMs);
+  });
+  try {
+    // `work` keeps its own handler through the race, so a later rejection from
+    // the aborted continuation is observed, never unhandled.
+    return await Promise.race([work, deadline]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
 }

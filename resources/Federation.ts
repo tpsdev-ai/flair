@@ -1060,6 +1060,14 @@ async function consumePairingToken(
 }
 
 /**
+ * The receiver's per-record merge deadline (flair#2455 slice 2). A record whose
+ * merge overruns it is reported refused (merge_error) and its transaction is
+ * aborted for real, so it never late-commits. A healthy merge is ~1.7 s per 50
+ * records; 5 s bounds a stalled or hung write without cutting a normal one.
+ */
+export const RECORD_MERGE_DEADLINE_MS = 5_000;
+
+/**
  * POST /FederationSync — push sync records from a peer.
  * In 1.0, this is a simple HTTP push (not WebSocket).
  * The calling peer sends a batch of SyncRecords; we merge them.
@@ -1104,11 +1112,23 @@ export class FederationSync extends Resource {
     let merged = 0;
     let skipped = 0;
     const skippedReasons: Record<string, number> = {};
+    // flair#2455 slice 2 / rev 2.1 N1: the complete per-key refusal list. Every
+    // offered key the receiver refused, retryable or not, named by its closed
+    // SkipReason. `table` and `id` are the offered key's, `reason` is the
+    // matched enum member — no receiver-authored text. The sender acts on this
+    // in a later slice; old senders ignore the added field.
+    const refused: Array<{ table: string; id: string; reason: SkipReason }> = [];
     const mergeErrors: string[] = [];
 
-    function recordSkip(reason: SkipReason) {
+    function recordSkip(reason: SkipReason, record: SyncRecord) {
       skipped++;
       skippedReasons[reason] = (skippedReasons[reason] ?? 0) + 1;
+      // Only an offered key the receiver can name is listed: `refused` stays a
+      // subset of the batch the sender sent, and a malformed batch entry cannot
+      // crash the refusal bookkeeping.
+      if (typeof record?.table === "string" && typeof record?.id === "string") {
+        refused.push({ table: record.table, id: record.id, reason });
+      }
     }
 
     // Table name → Harper database table mapping.
@@ -1141,7 +1161,7 @@ export class FederationSync extends Resource {
     for (const record of records as SyncRecord[]) {
       try {
         if (payloadIdMismatch(record)) {
-          recordSkip("id_mismatch");
+          recordSkip("id_mismatch", record);
           continue;
         }
         const table = (record.table in tableMap)
@@ -1158,7 +1178,7 @@ export class FederationSync extends Resource {
         );
 
         if (decision.action === "skip") {
-          recordSkip(decision.reason);
+          recordSkip(decision.reason, record);
           continue;
         }
 
@@ -1187,7 +1207,7 @@ export class FederationSync extends Resource {
             : (await (databases as any).flair.Peer.get(originator))?.publicKey;
 
           if (!originatorPublicKey) {
-            recordSkip("unknown_originator_key");
+            recordSkip("unknown_originator_key", record);
             continue;
           }
 
@@ -1204,14 +1224,14 @@ export class FederationSync extends Resource {
             originatorPublicKey,
           );
           if (!signatureValid) {
-            recordSkip("invalid_signature");
+            recordSkip("invalid_signature", record);
             continue;
           }
         } else if (requireRecordSignatures()) {
           // require-mode: unsigned records are no longer trusted on
           // batch-level auth alone. Default mode (verify-if-present) falls
           // through here and merges — see requireRecordSignatures() above.
-          recordSkip("missing_signature");
+          recordSkip("missing_signature", record);
           continue;
         }
 
@@ -1225,7 +1245,7 @@ export class FederationSync extends Resource {
           enforceV1Principal: requireRecordPrincipal(),
         });
         if (principalSkip) {
-          recordSkip(principalSkip);
+          recordSkip(principalSkip, record);
           continue;
         }
 
@@ -1237,7 +1257,7 @@ export class FederationSync extends Resource {
           // Malformed or out-of-bound ephemeral expiry skips the record before merging.
           const expiryError = stampEphemeralExpiry(incoming, local, { incoming: true });
           if (expiryError) {
-            recordSkip("invalid_expiry");
+            recordSkip("invalid_expiry", record);
             continue;
           }
         }
@@ -1247,7 +1267,7 @@ export class FederationSync extends Resource {
         // rule as a locally-created one. This raw merge is the receiver's write
         // path, so a peer pushing a malformed id must not land a row here.
         if (record.table === "Agent" && !isValidAgentId(record.id)) {
-          recordSkip(AGENT_ID_ERROR);
+          recordSkip(AGENT_ID_ERROR, record);
           continue;
         }
 
@@ -1267,14 +1287,14 @@ export class FederationSync extends Resource {
         // would land an unscanned, possibly non-persistent skill — bypassing the
         // gate. Skip it: skills are written locally via skill_store, never synced.
         if (record.table === "Memory" && isSkillWrite(mergedData)) {
-          recordSkip("skill_not_federated");
+          recordSkip("skill_not_federated", record);
           continue;
         }
 
         // flair#2141 S2: the merge skips a row on the seed's fixed id
         // (resources/seed-reservation.ts), whatever its tags.
         if (isReservedSeedId(record.table, record.id)) {
-          recordSkip("seed_id_not_federated");
+          recordSkip("seed_id_not_federated", record);
           continue;
         }
 
@@ -1284,7 +1304,7 @@ export class FederationSync extends Resource {
         // seed reservation does just above. A legacy row with such an id that
         // already exists on the sending peer is therefore not federated.
         if (record.table === "Memory" && endsWithContentSelectorSuffix(mergedData.id)) {
-          recordSkip("content_suffix_id_not_federated");
+          recordSkip("content_suffix_id_not_federated", record);
           continue;
         }
 
@@ -1381,6 +1401,11 @@ export class FederationSync extends Resource {
               // identity fields do not move on one either (flair#2450 — see
               // above).
               wholeRow: true,
+              // flair#2455 slice 2: a per-record deadline whose expiry aborts
+              // THIS record's transaction for real (no late commit after the
+              // receiver reports the key refused). A record that overruns is
+              // reported refused (merge_error) and never lands.
+              deadlineMs: RECORD_MERGE_DEADLINE_MS,
               pausePre: () => txnPausePoint("federation-merge-pre"),
               pausePoint: () => txnPausePoint("federation-merge"),
             },
@@ -1389,14 +1414,14 @@ export class FederationSync extends Resource {
           // The target disappeared or failed the applicable identity or whole-row
           // comparison. The transaction aborts; one attempt, no retry.
           if (err instanceof WriteBackConflictError) {
-            recordSkip("merge_target_changed");
+            recordSkip("merge_target_changed", record);
             continue;
           }
           throw err;
         }
         // The plan's only skip is the Agent status guard above.
         if ("skip" in outcome) {
-          recordSkip("agent_status_not_federated");
+          recordSkip("agent_status_not_federated", record);
           continue;
         }
         // embedding-space-guard slice 1: a federation-merged Memory can carry a
@@ -1407,7 +1432,7 @@ export class FederationSync extends Resource {
         merged++;
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        recordSkip("merge_error");
+        recordSkip("merge_error", record);
         // Cap the captured-error list so a hostile/buggy peer can't blow up
         // the SyncLog row, but ALWAYS log to console so operators don't lose
         // the per-record signal — the silent-swallow is the bug we're fixing.
@@ -1477,6 +1502,7 @@ export class FederationSync extends Resource {
       merged,
       skipped,
       skippedReasons,
+      refused,
       total: records.length,
       durationMs: Date.now() - startTime,
     };
