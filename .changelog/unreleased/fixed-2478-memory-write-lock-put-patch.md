@@ -1,15 +1,34 @@
 - **The ordinary `PUT`/`PATCH` of a memory now takes the row's write lock and reads, decides and writes it in ONE transaction of its own (#2478).**
 
   Both verbs take the per-id memory write lock and run their ordinary write in an
-  owned transaction whose FIRST operation is the authoritative stored read, so a
-  concurrent owner write to the same id cannot interleave: a writer that cannot
-  take the lock within its budget answers 503 `memory_busy`. Harper orders a
+  owned transaction whose FIRST operation is the authoritative stored read, and
+  that transaction commits before the lock releases, so two such owner `PUT`/`PATCH`
+  writes to the same id cannot interleave. A same-id owner writer waits for the lock
+  within its budget, then opens its transaction and reads the row as stored at
+  that moment (a manual promotion's write, or an admin `_reindex` re-PUT, that
+  joins an already-open request transaction reads that transaction's earlier
+  snapshot instead); if the lock stays held for the whole budget it answers 503
+  `memory_busy`, and if the store has no lock the write is refused 503
+  `memory_lock_unavailable` instead of running unserialized. Harper orders a
   transaction by its first read, so the read, the decision and the commit share
-  one transaction — a background field-only write started later therefore folds
-  around this older full update instead of being overwritten. After the commit, a
-  fresh read confirms the committed row still carries the fields the write
-  declared: a row replaced after the commit answers 409 `stored_row_changed`, and
-  a verification read that fails answers 503 `write_outcome_unknown`. A manual
-  promotion's memory write still joins the promotion's own transaction, so its
-  approval stamp commits or rolls back with the row. The lock is per process, so
-  it serializes writers within one instance only.
+  one transaction — a background
+  field-only write started later therefore folds around this older full update
+  instead of being overwritten. After the commit, a fresh read by the write's id
+  confirms the committed row still carries the incarnation token this write left
+  and, among the fields the write declared, the same `agentId`, `content`,
+  `visibility` and `durability`. A row deleted and re-created with a different
+  token (even with the same values), or one where a later write changed one of
+  those four, answers 409 `stored_row_changed`; a later write that changed only
+  other fields (not the token) is not refused. A re-embed `PATCH` is checked the
+  same way after its own commit, and a `PATCH` or re-embed of a row written
+  before incarnation tokens gives it one in the same write. A verification read
+  that fails answers 503 `write_outcome_unknown`: later `PUT`, `PATCH` and
+  `DELETE` requests for that id are refused until the instance restarts (the
+  other memory writers do not check this yet), and the row should be read before
+  that write is sent again. A `PUT` that names no id is refused 400
+  `memory_id_required`. A manual promotion's memory write joins the
+  promotion's own transaction, so its approval stamp commits or rolls back with
+  the row; that commit lands after the lock releases, as does the admin
+  `_reindex` re-PUT's when the request carries an open transaction it joins. The
+  lock is per process, and it serializes only owner `PUT`/`PATCH` writes that
+  commit under it, within one instance.

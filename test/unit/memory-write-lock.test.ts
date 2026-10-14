@@ -1,14 +1,16 @@
 // flair#2478 slice 1 — resources/memory-write-lock.ts, the per-memory-id write
 // serialization protocol: sorted/deduplicated acquisition, release-before-wait
 // on a partial failure, the bounded busy budget, the per-id unknown-outcome
-// marker, and the two 503 refusals.
+// marker, and the three 503 refusals.
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   MEMORY_BUSY_ERROR,
+  MEMORY_LOCK_UNAVAILABLE_ERROR,
   WRITE_OUTCOME_UNKNOWN_ERROR,
   markMemoryWriteOutcomeUnknown,
   memoryBusyResponse,
   memoryLockKey,
+  memoryLockUnavailableResponse,
   memoryWriteOutcomeUnknown,
   resetMemoryWriteOutcomeUnknownForTest,
   withMemoryWriteLock,
@@ -113,10 +115,13 @@ describe("withMemoryWriteLock (flair#2478 slice 1)", () => {
     store.tryLock(memoryLockKey("b")); // b is held by a third party for the whole test.
     const bStart = Date.now();
     const pending = withMemoryWriteLock(store, ["a", "b"], async () => "b");
-    // While the first writer waits on "b", key "a" must be free for a second writer.
+    // While the first writer waits on "b", key "a" must be free for a second
+    // writer. A ONE-SHOT attempt (no wait), so a first writer that held "a"
+    // through its wait would make it busy instead of letting it run later.
     await sleep(150);
+    expect(store.held.has(JSON.stringify(memoryLockKey("a"))), "the waiting writer holds \"a\"").toBe(false);
     let aRan = false;
-    const aRun = await withMemoryWriteLock(store, ["a"], async () => { aRan = true; return "a"; });
+    const aRun = await withMemoryWriteLockOnce(store, ["a"], async () => { aRan = true; return "a"; });
     expect(aRun.kind).toBe("done");
     expect(aRan).toBe(true);
     // The first writer never got "b" within its budget: busy, callback not run.
@@ -127,7 +132,7 @@ describe("withMemoryWriteLock (flair#2478 slice 1)", () => {
     expect(store.held.size).toBe(0);
   }, 15_000);
 
-  test("a lock held past the whole budget is busy and the callback does not run (caller waits the full 200 x 10 ms)", async () => {
+  test("a lock held past the whole budget is busy and the callback does not run (200 attempts, with a 10 ms wait between attempts)", async () => {
     const store = fakeStore();
     store.tryLock(memoryLockKey("a"));
     let ran = false;
@@ -183,19 +188,30 @@ describe("withMemoryWriteLock (flair#2478 slice 1)", () => {
   }, 10_000);
 });
 
-describe("the two 503 refusals (flair#2478 slice 1)", () => {
-  test("memory_busy is 503 and carries the caller id only — byte-identical for an absent and an existing target (S7)", async () => {
-    const absent = memoryBusyResponse("agent-a");
-    const existing = memoryBusyResponse("agent-a");
-    const parsed = memoryBusyResponse("agent-a");
-    expect(absent.status).toBe(503);
-    expect(await parsed.json()).toEqual({ error: MEMORY_BUSY_ERROR, caller: "agent-a" });
-    expect(await absent.text()).toBe(await existing.text());
+describe("the three 503 refusals (flair#2478 slice 1)", () => {
+  // The helper takes the caller id and nothing about the target row. That the
+  // RESOURCE answers the same bytes for an existing and an absent target is
+  // asserted through real Harper in test/integration/memory-write-lock-2478.test.ts.
+  test("memory_busy is 503 and its body is the error and the caller id only", async () => {
+    const res = memoryBusyResponse("agent-a");
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: MEMORY_BUSY_ERROR, caller: "agent-a" });
   });
 
-  test("write_outcome_unknown is 503 and named", async () => {
+  test("write_outcome_unknown is 503, named, and tells the caller to read the row before writing again", async () => {
     const res = writeOutcomeUnknownResponse();
     expect(res.status).toBe(503);
-    expect((await res.json()).error).toBe(WRITE_OUTCOME_UNKNOWN_ERROR);
+    const body = await res.json();
+    expect(body.error).toBe(WRITE_OUTCOME_UNKNOWN_ERROR);
+    expect(body.message).toContain("Read the row before writing again");
+    expect(body.message).toContain("PUT, PATCH and DELETE requests for this id are refused until the instance restarts");
+  });
+
+  test("memory_lock_unavailable is 503, named, and says nothing was written", async () => {
+    const res = memoryLockUnavailableResponse();
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.error).toBe(MEMORY_LOCK_UNAVAILABLE_ERROR);
+    expect(body.message).toContain("nothing was written");
   });
 });

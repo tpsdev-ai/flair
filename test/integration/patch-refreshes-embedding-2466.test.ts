@@ -475,7 +475,7 @@ describe("flair#2466 — ordinary PATCH embedding cases (real Harper)", () => {
     expect(row.updatedAt, "an unchanged-text PATCH re-stamped updatedAt").toBe("2026-01-01T00:00:00.000Z");
   }, 120_000);
 
-  it("(k) an edit committed while a PATCH carrying the pre-edit text is held ends with the PATCH's text and its vector", async () => {
+  it("(k) a PATCH carrying the pre-edit text that waits for a held PUT edit, then commits after it, ends with the PATCH's text and its vector", async () => {
     // Both writers are owner verbs, so the lock serializes them: the PUT takes the
     // lock and the PATCH waits, then commits on the PUT's committed row. The
     // PATCH's body carries the pre-edit text (READ); the row must end with the

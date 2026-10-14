@@ -4,6 +4,7 @@
  * mock for Memory.ts.
  */
 import { describe, expect, test, beforeEach, mock } from "bun:test";
+import { memoryLockDouble } from "../helpers/memory-lock-double";
 
 process.env.FLAIR_RATE_LIMIT_ENABLED = "false";
 delete (process.env as any).FLAIR_PUBLIC;
@@ -20,6 +21,9 @@ let memoryStore: Map<string, any>;
 let staged: Map<string, any> | null = null;
 
 class BaseMemory {
+  /** flair#2478: Memory PUT/PATCH refuse a store with no per-id lock; this
+   *  double injects one (test/helpers/memory-lock-double.ts). */
+  static primaryStore = memoryLockDouble();
   async get(target?: any) {
     const id = typeof target === "string" ? target : target?.id ?? (this as any).id;
     return memoryStore.get(id) ?? null;
@@ -69,6 +73,9 @@ const { Memory } = await import("../../resources/Memory.ts");
 function makeMemory(id: string) {
   const r: any = new (Memory as any)();
   r.id = id;
+  // The URL-bound id, as a Harper resource exposes it (flair#2478: the
+  // post-commit verification reads the row by this id).
+  r.getId = () => id;
   r.getContext = () => ({ request: { tpsAgent: "alice", tpsAgentIsAdmin: false } });
   return r;
 }

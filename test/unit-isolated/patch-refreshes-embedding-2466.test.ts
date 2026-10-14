@@ -16,6 +16,7 @@
 import { describe, it, expect, beforeEach, mock } from "bun:test";
 import { agentStore, middlewareCapture } from "../helpers/harper-mock.js";
 import { createFakeReplayNonceTable } from "../helpers/fake-replay-store.ts";
+import { memoryLockDouble } from "../helpers/memory-lock-double";
 
 process.env.FLAIR_RATE_LIMIT_ENABLED = "false";
 delete (process.env as any).FLAIR_PUBLIC;
@@ -64,6 +65,9 @@ function memorySearchGen(query: any) {
 }
 
 class BaseMemory {
+  /** flair#2478: Memory PUT/PATCH refuse a store with no per-id lock; this
+   *  double injects one (test/helpers/memory-lock-double.ts). */
+  static primaryStore = memoryLockDouble();
   async post(content: any) {
     const id = content.id ?? `mock-${++idCounter}`;
     content.id = id;

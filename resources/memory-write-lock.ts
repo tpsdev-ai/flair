@@ -1,48 +1,81 @@
 /**
  * memory-write-lock.ts — the per-memory-id write serialization protocol
- * (flair#2478 slice 1). Slice 1 lands the protocol inert, with unit and
- * real-Harper tests, before the owner verbs convert to it.
+ * (flair#2478 slice 1). The ordinary owner PUT and PATCH (resources/Memory.ts)
+ * run under it; the other Memory writers convert in part 2.
  *
  * A writer that must make its read, decision and write on one committed basis
  * runs under ONE key of `Memory.primaryStore`'s lock: `["memory", fullStoredId]`.
  * Within one Harper process the lock is per key and shared by its threads
  * (resources/key-lock.ts). A caller opens and settles its owned transaction
- * inside the callback, so the key is held across the commit.
+ * inside the callback, so the key is held across the commit. Two PUT paths can
+ * join a transaction they do not own, which then commits after the put returns
+ * and so after the key is released: a put composed into its caller's
+ * transaction (manual promotion, via withComposedWriteTransaction in
+ * resources/request-transaction.ts), and the admin `_reindex` re-PUT when the
+ * request carries an open transaction, which it joins as it did before the lock
+ * (with none open, it owns its transaction and commits before the release).
  *
- * Two refusals, both `503` because both are retryable without replaying an
- * uncertain write:
+ * A same-id writer that finds the key held waits and retries within its budget
+ * ({@link MEMORY_LOCK_ATTEMPTS} attempts with a {@link MEMORY_LOCK_WAIT_MS} ms
+ * wait between them — the bound resources/usage-recording.ts and
+ * resources/instruction-version-record.ts use). If the holder releases inside
+ * the budget, the writer takes the key. A writer that then opens a new owned
+ * transaction (the ordinary PUT and PATCH) reads the row as stored at that
+ * moment: the holder's committed row when the holder owned its transaction (a
+ * composed or `_reindex` holder that joined another transaction may release
+ * before that transaction commits). A composed or `_reindex` writer that joins
+ * an already-open request transaction reads from that transaction's snapshot
+ * instead, which can predate the acquisition. Otherwise it is refused:
  *
- *  - `memory_busy` — the lock could not be acquired within the caller's budget
- *    ({@link MEMORY_LOCK_ATTEMPTS} × {@link MEMORY_LOCK_WAIT_MS}, the same
- *    `200 × 10 ms` bound resources/usage-recording.ts and
- *    resources/instruction-version-record.ts use). The body carries the caller
- *    id and nothing else: it is byte-identical whether the target id exists or
- *    not, so a lock miss never reveals stored-row state (Sherlock S7).
+ *  - `503 memory_busy` — the key stayed held for the whole budget. Nothing was
+ *    written, so the request can be sent again unchanged. The body carries the
+ *    caller id and nothing else: it is byte-identical whether the target id
+ *    exists or not, so a lock miss never reveals stored-row state (Sherlock S7).
+ *
+ * Two more refusals, also `503`:
+ *
+ *  - `memory_lock_unavailable` — `Memory.primaryStore` has no lock. The write
+ *    is refused, never run unserialized, and nothing was written. There is no
+ *    production fallback; a unit-test double supplies a lock on its mock table.
  *  - `write_outcome_unknown` — the id's last owned write settled with an
- *    unresolved outcome (a commit that may or may not have landed).
- *    {@link markMemoryWriteOutcomeUnknown} records the marker; only a process
- *    restart clears it, and that restart is the fencing step. The marker is
- *    process-local (per module instance), the same scope the lock itself has.
+ *    unresolved outcome: its commit may have landed while its verification read
+ *    failed. Do not replay that write blindly: read the row first, and treat a
+ *    row that already holds it as written. {@link markMemoryWriteOutcomeUnknown}
+ *    records the marker; until a process restart clears it (the fencing step),
+ *    later PUT, PATCH and DELETE requests for that id are refused. The other
+ *    Memory writers (POST, and the background and nested writers part 2
+ *    converts) do not check it.
+ *
+ * The marker is module state, so it is per Harper worker thread. That covers
+ * the whole instance only in the supported single-worker mode: flair refuses to
+ * serve on more than one worker thread (resources/multi-worker-guard.ts,
+ * flair#2059; every route but `/Health` and `/health` answers 503
+ * `multi_worker_unsupported`).
+ * Under the explicit `FLAIR_MULTI_WORKER_UNSAFE=1` opt-in, a marker set on one
+ * worker is not seen by another.
  *
  * Acquisition is sorted and deduplicated, so two writers that share ids take
  * them in the same order. A partial acquisition is released before the wait, so
- * a writer never blocks on the next key while holding one. An automatic writer
- * uses {@link withMemoryWriteLockOnce}: one attempt, no wait.
+ * a writer never blocks on the next key while holding one.
  */
 
 import type { KeyLockStore } from "./key-lock.js";
 
 /** The `Memory.primaryStore` key namespace (flair#2478). */
 export const MEMORY_LOCK_NAMESPACE = "memory";
-/** The owner-verb busy budget: {@link MEMORY_LOCK_ATTEMPTS} × {@link MEMORY_LOCK_WAIT_MS}. */
+/** The owner-verb busy budget: {@link MEMORY_LOCK_ATTEMPTS} attempts, {@link MEMORY_LOCK_WAIT_MS} ms apart. */
 export const MEMORY_LOCK_ATTEMPTS = 200;
 export const MEMORY_LOCK_WAIT_MS = 10;
 /** The lock-miss error code. */
 export const MEMORY_BUSY_ERROR = "memory_busy";
 /** The unresolved-outcome error code. */
 export const WRITE_OUTCOME_UNKNOWN_ERROR = "write_outcome_unknown";
+/** The no-lock error code: the store has no per-id lock, so the write is refused. */
+export const MEMORY_LOCK_UNAVAILABLE_ERROR = "memory_lock_unavailable";
 
-/** Process-local per-id unknown-outcome markers (Kern pin 2 / Flint decision). */
+/** Per-id unknown-outcome markers (Kern pin 2 / Flint decision). Module state:
+ *  one set per worker thread, which is the whole instance in the supported
+ *  single-worker mode (see the header). */
 const outcomeUnknown = new Set<string>();
 
 /** The `["memory", fullStoredId]` lock key for one stored id. */
@@ -124,8 +157,9 @@ export async function withMemoryWriteLock<T>(
   return acquire(lockStore(store), normalizeIds(ids), MEMORY_LOCK_ATTEMPTS, MEMORY_LOCK_WAIT_MS, fn);
 }
 
-/** One attempt, no wait — the automatic-writer shape. A held lock or a marker
- *  answers `busy`/`unknown` and the writer reports skipped. */
+/** One attempt, no wait. No writer calls it yet: it is the shape part 2's
+ *  automatic writers take (flair#2478). A held lock or a marker answers
+ *  `busy`/`unknown`. */
 export async function withMemoryWriteLockOnce<T>(
   store: unknown,
   ids: readonly (string | number)[],
@@ -158,14 +192,13 @@ async function acquire<T>(
     if (gotAll) {
       try {
         lock.resetReadTxn?.();
-        // A marker set by another thread between the check above and this
-        // acquisition must still refuse the write.
-        const held = normalized.ids.find((id) => memoryWriteOutcomeUnknown(id));
-        if (held !== undefined) return { kind: "unknown", id: held };
+        // The marker was checked at the top of this attempt; nothing between
+        // that check and here yields, so it cannot have changed.
         return { kind: "done", value: await fn(scope) };
       } finally {
-        // Release only after `fn`'s owned transaction settled: the lock spans
-        // the commit.
+        // Release only after `fn` returns. A callback that owns its transaction
+        // has settled it by then, so the lock spans that commit; a transaction
+        // the callback only joined commits later, after this release.
         releaseAll(lock, acquired);
       }
     }
@@ -187,7 +220,21 @@ export function memoryBusyResponse(callerId: string): Response {
 /** The unresolved-outcome refusal: `503 write_outcome_unknown`. */
 export function writeOutcomeUnknownResponse(): Response {
   return new Response(
-    JSON.stringify({ error: WRITE_OUTCOME_UNKNOWN_ERROR, message: "the last write to this id settled with an unknown outcome; retry after the process restarts" }),
+    JSON.stringify({
+      error: WRITE_OUTCOME_UNKNOWN_ERROR,
+      message: "the last write to this id may or may not have landed. Read the row before writing again: if it already holds that write, do not resend it. PUT, PATCH and DELETE requests for this id are refused until the instance restarts.",
+    }),
+    { status: 503, headers: { "content-type": "application/json" } },
+  );
+}
+
+/** The no-lock refusal: `503 memory_lock_unavailable`. Nothing was written. */
+export function memoryLockUnavailableResponse(): Response {
+  return new Response(
+    JSON.stringify({
+      error: MEMORY_LOCK_UNAVAILABLE_ERROR,
+      message: "this instance's Memory store has no per-id write lock, so the write was refused; nothing was written",
+    }),
     { status: 503, headers: { "content-type": "application/json" } },
   );
 }

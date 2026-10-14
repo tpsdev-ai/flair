@@ -93,7 +93,10 @@ const CASES: WriteCase[] = [
   { module: "Credential", cls: "Credential", verb: "put", body: { kind: "bearer-token", status: "active" }, ctx: AGENT, failFrom: 1, via: "owner-guard" },
   { module: "Integration", cls: "Integration", verb: "patch", body: { platform: "slack", username: "u" }, ctx: AGENT, failFrom: 1, via: "owner-guard" },
   { module: "Integration", cls: "Integration", verb: "put", body: { platform: "slack", username: "u" }, ctx: AGENT, failFrom: 1, via: "owner-guard" },
-  { module: "Memory", cls: "Memory", verb: "put", body: { content: "hi" }, ctx: AGENT, failFrom: 1, via: "owner-guard" },
+  // A Memory PUT names its id (flair#2478: an idless PUT is refused 400 before
+  // any read). Read 1 is the stored-row resolver's read by that id (no row);
+  // read 2, the owner guard's, is the one that fails.
+  { module: "Memory", cls: "Memory", verb: "put", body: { id: "mem-owner-guard", content: "hi" }, ctx: AGENT, failFrom: 2, via: "owner-guard" },
   { module: "Memory", cls: "Memory", verb: "patch", body: { content: "hi" }, ctx: AGENT, failFrom: 2, via: "owner-guard" },
   { module: "MemoryCandidate", cls: "MemoryCandidate", verb: "patch", body: { status: "promoted" }, ctx: AGENT, failFrom: 1, via: "owner-guard" },
   { module: "MemoryCandidate", cls: "MemoryCandidate", verb: "put", body: { status: "pending" }, ctx: AGENT, failFrom: 1, via: "owner-guard" },

@@ -13,6 +13,7 @@
 import { describe, it, expect, beforeEach, mock } from "bun:test";
 import { agentStore, middlewareCapture } from "../helpers/harper-mock.js";
 import { createFakeReplayNonceTable } from "../helpers/fake-replay-store.ts";
+import { memoryLockDouble } from "../helpers/memory-lock-double";
 
 process.env.FLAIR_RATE_LIMIT_ENABLED = "false";
 delete (process.env as any).FLAIR_PUBLIC;
@@ -60,6 +61,9 @@ function memorySearchGen(query: any) {
 }
 
 class BaseMemory {
+  /** flair#2478: Memory PUT/PATCH refuse a store with no per-id lock; this
+   *  double injects one (test/helpers/memory-lock-double.ts). */
+  static primaryStore = memoryLockDouble();
   async post(content: any) {
     const id = content.id ?? `mock-${++idCounter}`;
     content.id = id;
@@ -251,7 +255,8 @@ describe("flair#2407 — Memory write paths redact credential-shaped text", () =
   it("Memory.put (create) stores the redacted content and reports the count", async () => {
     const m = makeMemory(agentCtx(AGENT));
     const original = `aws credentials for the backup job are ${AWS_KEY} rotate weekly`;
-    const res: any = await m.put({ agentId: AGENT, content: original });
+    // A PUT names its id (flair#2478: an idless PUT is refused 400 memory_id_required).
+    const res: any = await m.put({ id: "mem-put-create-redacted", agentId: AGENT, content: original });
 
     const stored = await (BaseMemory as any).get(res.id);
     expect(stored.content).toBe(`aws credentials for the backup job are ${REDACTED} rotate weekly`);
@@ -398,7 +403,7 @@ describe("flair#2407 — a supplied embedding is replaced when redaction changes
 
   it("Memory.put discards the supplied vector and stores the one computed from the redacted text", async () => {
     const m = makeMemory(agentCtx(AGENT));
-    const res: any = await m.put({ agentId: AGENT, content: `ship it with ${AWS_KEY} today`, embedding: SUPPLIED, embeddingModel: "client-model" });
+    const res: any = await m.put({ id: "mem-put-supplied-vector", agentId: AGENT, content: `ship it with ${AWS_KEY} today`, embedding: SUPPLIED, embeddingModel: "client-model" });
 
     const stored = await (BaseMemory as any).get(res.id);
     expect(stored.embedding).toEqual(FAKE_EMBEDDING);

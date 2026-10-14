@@ -5,6 +5,7 @@ import { beforeEach, expect, test } from "bun:test";
 import {
   databasesMock, harnessState, installMemoryHarperMock, resetHarnessState,
 } from "../helpers/memory-search-harness";
+import { nonSerializingLockDouble } from "../helpers/memory-lock-double";
 
 const versions = new Map<string, any>();
 const locks = new Set<string>();
@@ -24,6 +25,12 @@ const locks = new Set<string>();
   },
 };
 const { Memory, _resetLocalInstanceIdCacheForTests } = await installMemoryHarperMock();
+// flair#2478: the concurrent same-id seed PUT cases below exercise the
+// skill-version write's own stale-target refusal (skill_target_changed), which
+// sits beneath the per-id Memory write lock. Reaching it takes two same-id PUTs
+// at once, so this file swaps in a lock that does not serialize. The skill
+// branch under the real lock is reviewed in part 2 of flair#2478.
+(databasesMock.flair.Memory as any).primaryStore = nonSerializingLockDouble();
 const { FeedMemories } = await import("../../resources/MemoryFeed.ts");
 const { resolveSkillManifest, resolvableSkillRows, SKILL_ROW_SELECT } = await import("../../resources/skill-manifest.ts");
 const table = databasesMock.flair.Memory;

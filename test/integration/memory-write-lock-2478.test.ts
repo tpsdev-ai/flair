@@ -4,19 +4,33 @@
  *
  * The converted verbs acquire the lock BEFORE their first stored read, and
  * their row write owns its transaction, so the read, the decision and the
- * COMMIT all happen before the lock releases. Two writers on one id therefore
- * cannot interleave:
+ * COMMIT all happen before the lock releases. (A put composed into its caller's
+ * own transaction — manual promotion — commits after the lock releases; that
+ * path is covered by promotion-stamp-failure-2354 and memory-authority-fields.)
+ * Two owner PUT/PATCH writers on one id that own their transactions therefore
+ * cannot interleave (writers that take no lock, part 2, are not covered). A second writer
+ * waits for the lock within its budget (200 attempts, 10 ms apart):
  *
- *   - a second writer that cannot take the lock within its 200 x 10 ms budget
- *     answers 503 memory_busy (the caller id only), and does not write;
- *   - a second writer that takes the lock after the first released it reads the
- *     first's COMMITTED row and commits its own write — no lost write and no
- *     spurious 409.
+ *   - if the first releases inside the budget, the second takes the lock, reads
+ *     the first's COMMITTED row (an owner PUT/PATCH owns its transaction, so it
+ *     committed before it released) and commits its own write — no lost write
+ *     and no spurious 409;
+ *   - otherwise it answers 503 memory_busy (the caller id only, byte-identical
+ *     for an existing and an absent target), and does not write.
+ *
+ * After its commit, a write re-reads the row and answers 409 stored_row_changed
+ * when the row carries a different incarnation token, even with the same values (a
+ * legacy row without a token is given one by its PATCH, so this holds for it
+ * too, and a re-embed PATCH is checked the same way). A PUT
+ * that names no id is refused 400 memory_id_required before it locks or writes.
  *
  * DETERMINISTIC ORDERING via the `memory-put-committed` / `memory-patch-committed`
  * pause points (resources/txn-pause-point.ts, enabled by
  * FLAIR_ENABLE_TEST_FAULT_INJECTION / FLAIR_TEST_PAUSE_DIR): each holds a writer
  * AFTER its owned transaction committed and while the write lock is still held.
+ * `memory-put-pre` holds a PUT under the lock before its first read;
+ * `memory-put-verify` / `memory-patch-verify` hold a write after its commit and
+ * before its verification read.
  *
  * Throwaway HOME + data dir, ephemeral ports.
  */
@@ -250,11 +264,12 @@ describe("flair#2478 — the lock guards a PATCH too", () => {
   }, 120_000);
 });
 
-// flair#2478: the authorization and visibility refusals must decide BEFORE (or
-// regardless of) the lock and the owned write — a refusal that moved after the
-// lock would let an anonymous reindex or a visibility-widening flip reach the
-// row. Both cases run through the REAL per-id lock path (Memory.primaryStore).
-describe("flair#2478 — a refusal decides before the lock, and the write does not land", () => {
+// flair#2478: the authorization and visibility refusals decide before the row
+// is written. Both decide under the lock, after acquisition; a refusal that
+// moved after the write would let an anonymous reindex or a visibility-widening
+// flip reach the row. Both cases run through the REAL per-id lock path
+// (Memory.primaryStore).
+describe("flair#2478 — a refusal decides before the write, and the write does not land", () => {
   it("an anonymous PUT carrying _reindex is refused 401, and the row is unchanged", async () => {
     const id = `wlk-anon-reindex-${Date.now()}`;
     await seedMemory(id, "the original text");
@@ -287,5 +302,172 @@ describe("flair#2478 — a refusal decides before the lock, and the write does n
     expect(after?.durability, "the refused PATCH wrote after all").toBe("standard");
     expect(after?.visibility).toBe("shared");
     expect(after?.instanceToken).toBe(before.instanceToken);
+  }, 120_000);
+});
+
+/** A signed owner PUT to an explicit path with an explicit body (the idless-PUT case sends neither an id). */
+function putPathAs(agent: TestAgent, path: string, body: Record<string, unknown>): Promise<Response> {
+  return fetch(`${harper.httpURL}${path}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", Authorization: ed25519Header(agent, "PUT", path) },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(60_000),
+  });
+}
+/** Replace the committed row with a NEW incarnation carrying the same values (ops API, outside the lock).
+ *  `token: false` re-creates it the way a legacy writer would, with no instanceToken at all. */
+async function replaceWithSameValues(id: string, opts: { token: boolean } = { token: true }): Promise<{ before: any; after: any }> {
+  const before = await readRow(id);
+  expect(before, "no committed row to replace").toBeTruthy();
+  await opsCall({ operation: "delete", database: "flair", table: "Memory", ids: [id] });
+  const copy: Record<string, unknown> = { ...before };
+  if (opts.token) copy.instanceToken = randomUUID();
+  else delete copy.instanceToken;
+  for (const key of ["__createdtime__", "__updatedtime__"]) delete copy[key];
+  await opsCall({ operation: "insert", database: "flair", table: "Memory", records: [copy] });
+  const after = await readRow(id);
+  for (const field of ["agentId", "content", "visibility", "durability", "embedding"]) expect(after?.[field]).toEqual(before[field]);
+  expect(after?.instanceToken ?? null).not.toBe(before.instanceToken ?? null);
+  return { before, after };
+}
+/** A legacy row: written before incarnation tokens, so it carries no instanceToken. */
+async function seedLegacyMemory(id: string, content: string): Promise<void> {
+  await opsCall({
+    operation: "insert", database: "flair", table: "Memory",
+    records: [{
+      id, agentId: owner.id, content, durability: "standard", visibility: "shared",
+      embedding: [0.1, 0.2, 0.3], usageCount: 0, createdAt: new Date().toISOString(),
+    }],
+  });
+  expect((await readRow(id))?.instanceToken ?? null, "the legacy row already has a token").toBeNull();
+}
+
+describe("flair#2478 — a lock miss reveals nothing about the target row", () => {
+  it("the memory_busy refusal for an existing target and for an absent target is byte-identical", async () => {
+    const PRE = "memory-put-pre";
+    const refusalFor = async (id: string): Promise<string> => {
+      arm(PRE);
+      const held = editAs(owner, id, "the held PUT");
+      expect(await waitFor(join(pauseDir, `paused.${PRE}`), 30_000), "the first PUT never reached its pre-read pause").toBe(true);
+      const refused = await editAs(owner, id, "the refused PUT");
+      const text = await refused.text();
+      const bytes = JSON.stringify({ status: refused.status, type: refused.headers.get("content-type"), body: text });
+      release(PRE);
+      const heldRes = await held;
+      await assertReleased(PRE);
+      expect(heldRes.status, `the held PUT was not 2xx: ${await heldRes.clone().text()}`).toBeLessThan(300);
+      expect(refused.status, text).toBe(503);
+      return bytes;
+    };
+    const existing = `wlk-miss-existing-${Date.now()}`;
+    await seedMemory(existing, "the original text");
+    const absent = `wlk-miss-absent-${Date.now()}`;
+    expect(await readRow(absent), "the absent target exists").toBeNull();
+
+    const existingBytes = await refusalFor(existing);
+    const absentBytes = await refusalFor(absent);
+    expect(JSON.parse(JSON.parse(existingBytes).body)).toEqual({ error: "memory_busy", caller: owner.id });
+    expect(absentBytes).toBe(existingBytes);
+  }, 120_000);
+});
+
+describe("flair#2478 — post-commit verification checks the row's incarnation", () => {
+  it("a PUT whose committed row is replaced by a new incarnation with the SAME values answers 409 stored_row_changed", async () => {
+    const id = `wlk-ident-put-${Date.now()}`;
+    await seedMemory(id, "the original text");
+    const verifyPoint = "memory-put-verify";
+    arm(verifyPoint);
+    const held = editAs(owner, id, "the verified PUT");
+    expect(await waitFor(join(pauseDir, `paused.${verifyPoint}`), 30_000), "the PUT never reached its pre-verification pause").toBe(true);
+    const { after } = await replaceWithSameValues(id);
+    release(verifyPoint);
+    const res = await held;
+    await assertReleased(verifyPoint);
+    const body = await res.json() as any;
+    expect(res.status, JSON.stringify(body)).toBe(409);
+    expect(body.error).toBe("stored_row_changed");
+    expect(JSON.stringify(body), "the refusal carries the row's incarnation token").not.toContain(after.instanceToken);
+    expect((await readRow(id))?.instanceToken).toBe(after.instanceToken);
+  }, 120_000);
+
+  it("a PATCH whose committed row is replaced by a new incarnation with the SAME values answers 409 stored_row_changed", async () => {
+    const id = `wlk-ident-patch-${Date.now()}`;
+    await seedMemory(id, "the original text");
+    const verifyPoint = "memory-patch-verify";
+    arm(verifyPoint);
+    const held = patchAs(owner, id, "the verified PATCH");
+    expect(await waitFor(join(pauseDir, `paused.${verifyPoint}`), 30_000), "the PATCH never reached its pre-verification pause").toBe(true);
+    const { after } = await replaceWithSameValues(id);
+    release(verifyPoint);
+    const res = await held;
+    await assertReleased(verifyPoint);
+    const body = await res.json() as any;
+    expect(res.status, JSON.stringify(body)).toBe(409);
+    expect(body.error).toBe("stored_row_changed");
+    expect((await readRow(id))?.instanceToken).toBe(after.instanceToken);
+  }, 120_000);
+});
+
+describe("flair#2478 — post-commit verification on a re-embed PATCH and a legacy row", () => {
+  it("a re-embed PATCH whose committed row is replaced by a new incarnation with the SAME values answers 409 stored_row_changed", async () => {
+    const id = `wlk-ident-reembed-${Date.now()}`;
+    await seedMemory(id, "the text this re-embed computes its vector from");
+    const verifyPoint = "memory-patch-verify";
+    arm(verifyPoint);
+    const held = patchBodyAs(owner, id, { embedding: null, embeddingModel: null });
+    expect(await waitFor(join(pauseDir, `paused.${verifyPoint}`), 60_000), "the re-embed PATCH never reached its pre-verification pause").toBe(true);
+    const { before, after } = await replaceWithSameValues(id);
+    expect(Array.isArray(before.embedding) && before.embedding.length > 3, "the re-embed did not commit its vector before the pause").toBe(true);
+    release(verifyPoint);
+    const res = await held;
+    await assertReleased(verifyPoint);
+    const body = await res.json() as any;
+    expect(res.status, JSON.stringify(body)).toBe(409);
+    expect(body.error).toBe("stored_row_changed");
+    expect((await readRow(id))?.instanceToken).toBe(after.instanceToken);
+  }, 180_000);
+
+  it("a PATCH gives a legacy row that has no instanceToken one, in the same write", async () => {
+    const id = `wlk-legacy-token-${Date.now()}`;
+    await seedLegacyMemory(id, "the legacy text");
+    const res = await patchAs(owner, id, "the legacy row, patched");
+    expect(res.status, await res.clone().text()).toBeLessThan(300);
+    const row = await readRow(id);
+    expect(row?.content).toBe("the legacy row, patched");
+    expect(typeof row?.instanceToken === "string" && row.instanceToken.length > 0, "the PATCH left the legacy row without a token").toBe(true);
+  }, 120_000);
+
+  it("a legacy row's PATCH whose committed row is deleted and re-created WITHOUT a token, with the same values, answers 409 stored_row_changed", async () => {
+    const id = `wlk-legacy-replace-${Date.now()}`;
+    await seedLegacyMemory(id, "the legacy text");
+    const verifyPoint = "memory-patch-verify";
+    arm(verifyPoint);
+    const held = patchAs(owner, id, "the legacy row, patched");
+    expect(await waitFor(join(pauseDir, `paused.${verifyPoint}`), 30_000), "the PATCH never reached its pre-verification pause").toBe(true);
+    const { after } = await replaceWithSameValues(id, { token: false });
+    expect(after?.instanceToken ?? null).toBeNull();
+    release(verifyPoint);
+    const res = await held;
+    await assertReleased(verifyPoint);
+    const body = await res.json() as any;
+    expect(res.status, JSON.stringify(body)).toBe(409);
+    expect(body.error).toBe("stored_row_changed");
+  }, 120_000);
+});
+
+describe("flair#2478 — a PUT must name its id", () => {
+  it("a PUT with no id in the URL or the body is refused 400 memory_id_required, and writes nothing", async () => {
+    const marker = `wlk-idless-${randomUUID()}`;
+    for (const path of ["/Memory/", "/Memory"]) {
+      const res = await putPathAs(owner, path, { agentId: owner.id, content: marker, durability: "standard" });
+      const body = await res.json() as any;
+      expect(res.status, `${path}: ${JSON.stringify(body)}`).toBe(400);
+      expect(body.error, path).toBe("memory_id_required");
+    }
+    const rows = await opsCall({
+      operation: "search_by_value", database: "flair", table: "Memory",
+      search_attribute: "agentId", search_value: owner.id, get_attributes: ["id", "content"],
+    });
+    expect((rows as any[]).filter((row) => row.content === marker)).toEqual([]);
   }, 120_000);
 });

@@ -91,8 +91,10 @@ const COMPOSED_WRITE = Symbol("flair.composedMemoryWrite");
  * instead of owning one (flair#2478 slice 1, part 1). The caller owns the
  * commit: its own writes in `fn` commit or abort with the Memory row. Manual
  * promotion uses it, so its Memory write and verdict stamp stay one
- * transaction (flair#2354). The per-id write lock still serializes the put's
- * read and decision, but this transaction commits after that lock is released.
+ * transaction (flair#2354). The per-id write lock orders the put's read and
+ * decision against other owner PUT/PATCH writers of that id, but this
+ * transaction commits after the lock is released, so its commit is not
+ * serialized with theirs; writers that take no lock are not serialized at all.
  */
 export async function withComposedWriteTransaction<T>(ctx: any, fn: (shared: any) => Promise<T>): Promise<T> {
   return withSharedWriteTransaction(ctx, async (shared) => {
