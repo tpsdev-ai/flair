@@ -39,80 +39,9 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # flair#2540 — classify changed PR paths for job-level docs-only skips.
-  # Non-PR events, empty diffs and handled errors set docs_only=false;
-  # a missing output also skips no lane through this classifier.
-  changes:
-    name: "Changed-paths classifier"
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    outputs:
-      docs_only: ${{ steps.classify.outputs.docs_only }}
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
-        with:
-          fetch-depth: 0
-      - name: Classify changed paths
-        id: classify
-        shell: bash
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          BASE_REF: ${{ github.base_ref }}
-        run: |
-          set -euo pipefail
-          # Written exactly once, at the end — a partial write here could
-          # otherwise leave the lanes skipped on a failure (fail open).
-          docs_only=false
-          report() {
-            echo "docs_only=${docs_only}"
-            echo "docs_only=${docs_only}" >> "$GITHUB_OUTPUT"
-          }
-          if [ "${EVENT_NAME:-}" != "pull_request" ]; then
-            echo "event '${EVENT_NAME:-?}' is not a pull request — docs_only=false"
-            report
-            exit 0
-          fi
-          if [ -z "${BASE_REF:-}" ]; then
-            echo "no base ref — docs_only=false"
-            report
-            exit 0
-          fi
-          if ! git fetch --no-tags origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"; then
-            echo "could not fetch origin/${BASE_REF} — docs_only=false"
-            report
-            exit 0
-          fi
-          if ! changed="$(git diff --name-status "origin/${BASE_REF}...HEAD")"; then
-            echo "could not diff against origin/${BASE_REF} — docs_only=false"
-            report
-            exit 0
-          fi
-          printf 'Changed paths vs origin/%s:\n%s\n' "$BASE_REF" "$changed"
-          if [ -z "$changed" ]; then
-            echo "empty diff — docs_only=false"
-            report
-            exit 0
-          fi
-          docs_only=true
-          while IFS=$'\t' read -r status path_a path_b; do
-            [ -n "${status:-}" ] || continue
-            # A rename (R*) or delete (D) is docs-only only when every path it
-            # names is in the allow-list; any other status carries one path.
-            for p in "${path_a:-}" "${path_b:-}"; do
-              [ -n "$p" ] || continue
-              case "$p" in
-                docs/*|.changelog/*|*.md) ;;
-                *) docs_only=false ;;
-              esac
-            done
-          done <<< "$changed"
-          report
-
   # flair#2540 — share one build with pack-smoke and dist-esm-guard.
   build:
     name: "Build (shared dist)"
-    needs: changes
-    if: ${{ always() && needs.changes.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -513,11 +442,11 @@ jobs:
 
   launchd-adopt-upgrade-darwin:
     name: "launchd adopt-then-upgrade (macOS, advisory)"
-    needs: [changes, launchd-lane-changes]
+    needs: [launchd-lane-changes]
     # Runs unconditionally on push to main and workflow_dispatch; on pull
     # requests it runs only when the changed-files gate says the lane's
     # surface moved (or the PR is a release/v* cut).
-    if: ${{ always() && needs.changes.outputs.docs_only != 'true' && (github.event_name != 'pull_request' || needs.launchd-lane-changes.outputs.run == 'true') }}
+    if: ${{ always() && (github.event_name != 'pull_request' || needs.launchd-lane-changes.outputs.run == 'true') }}
     runs-on: macos-latest
     timeout-minutes: 45
     steps:
@@ -1033,10 +962,6 @@ jobs:
     #   skips visibly regardless of runner class. All other quickstart cases run.
     name: adk-flair Python tests
     runs-on: ubuntu-latest
-    needs: changes
-    # flair#2540 — docs-only skip; the hermetic unit gate and the live boot
-    # both need code that a docs-only push cannot change.
-    if: ${{ always() && needs.changes.outputs.docs_only != 'true' }}
     # Generous headroom: the unit gate is ~1 min, but the live step below builds
     # the repo + fetches the embedding model + attempts an ephemeral Harper boot
     # whose warm-up carries a 120s floor-detection deadline before it skips.
@@ -1122,14 +1047,15 @@ jobs:
     name: "Install-from-tarball smoke (node ${{ matrix.node-version }})"
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: [changes, build]
-    # flair#2540 — docs-only skip, and the dist it installs is the shared
-    # artifact from the `build` job.
-    if: ${{ always() && needs.changes.outputs.docs_only != 'true' }}
+    needs: build
     strategy:
       fail-fast: false
       matrix:
-        node-version: ["22", "24", "26"]
+        # flair#2554 — a PR push exercises the primary Node (22) only; the full
+        # 22/24/26 matrix runs on a push to main and on a release (`release/v*`)
+        # PR. The required "Install-from-tarball smoke" context is re-emitted by
+        # pack-smoke-gate, so per-leg names can change without touching it.
+        node-version: ${{ github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release/v') && fromJSON('["22"]') || fromJSON('["22", "24", "26"]') }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
@@ -1424,9 +1350,9 @@ jobs:
     # what lets a defect persist) can only turn a matrixed check red; they
     # cannot block a merge.
     name: Install-from-tarball smoke
-    needs: [changes, pack-smoke]
+    needs: pack-smoke
     runs-on: ubuntu-latest
-    if: ${{ always() && needs.changes.outputs.docs_only != 'true' }}
+    if: always()
     steps:
       - name: Require all Node-version legs to pass
         run: |
@@ -1453,9 +1379,6 @@ jobs:
     name: MCP client wiring
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    needs: changes
-    # flair#2540 — a docs-only push cannot change CLI wiring.
-    if: ${{ always() && needs.changes.outputs.docs_only != 'true' }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
@@ -1613,9 +1536,6 @@ jobs:
     name: Upgrade from npm-stable
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: changes
-    # flair#2540 — a docs-only push cannot change the upgrade path.
-    if: ${{ always() && needs.changes.outputs.docs_only != 'true' }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
@@ -1868,15 +1788,14 @@ jobs:
     # follow-up — flagging for reviewer call rather than silently deciding.
     name: "Type Check (node ${{ matrix.node-version }})"
     runs-on: ubuntu-latest
-    needs: changes
-    # flair#2540 — a docs-only push cannot change the type surface, so the
-    # matrix is skipped. The required "Type Check" context still reports
-    # (as skipped), so it never sits pending.
-    if: ${{ always() && needs.changes.outputs.docs_only != 'true' }}
     strategy:
       fail-fast: false
       matrix:
-        node-version: ["22", "24", "26"]
+        # flair#2554 — a PR push exercises the primary Node (22) only; the full
+        # 22/24/26 matrix runs on a push to main and on a release (`release/v*`)
+        # PR. The required "Type Check" context is re-emitted by typecheck-gate,
+        # so per-leg names can change without touching it.
+        node-version: ${{ github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release/v') && fromJSON('["22"]') || fromJSON('["22", "24", "26"]') }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
@@ -1907,9 +1826,9 @@ jobs:
   # Required-status-check adapter — see test-unit-gate's comment above.
   typecheck-gate:
     name: Type Check
-    needs: [changes, typecheck]
+    needs: typecheck
     runs-on: ubuntu-latest
-    if: ${{ always() && needs.changes.outputs.docs_only != 'true' }}
+    if: always()
     steps:
       - name: Require all Node-version legs to pass
         run: |
@@ -1922,9 +1841,6 @@ jobs:
   typecheck-strict:
     name: "Type Check (strict)"
     runs-on: ubuntu-latest
-    needs: changes
-    # flair#2540 — docs-only skip (see the typecheck job).
-    if: ${{ always() && needs.changes.outputs.docs_only != 'true' }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
@@ -2295,9 +2211,7 @@ jobs:
     name: "Dist ESM: require() + top-level await guard"
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    needs: [changes, build]
-    # flair#2540 — docs-only skip; scans the shared dist artifact.
-    if: ${{ always() && needs.changes.outputs.docs_only != 'true' }}
+    needs: build
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
