@@ -83,8 +83,8 @@ export function opsStoredModelReader(opsPort: string | number, opsAuth: string):
 
 /**
  * A StoredModelReader that reads the row with a signed `GET /Memory/<id>` as
- * the agent that owns it, the same key that signs the re-embed PATCH (the
- * single-agent path without administrator credentials).
+ * the agent whose key signs the re-embed PATCH (the single-agent path without
+ * administrator credentials).
  */
 export function agentStoredModelReader(baseUrl: string, agentId: string, keyPath: string): StoredModelReader {
   return async (id) => {

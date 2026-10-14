@@ -7,18 +7,19 @@
  *   withoutEmbeddingFields() drops them from the result a Memory post/put/patch
  *   response is built on and from the result of the admin `_reindex` re-PUT;
  *   the re-embed PATCH answers `{ id, updatedAt }` (resources/Memory.ts). It
- *   reports a successful result only in a shape it recognises: no value, a
- *   row-shaped record (isRowShaped) or an array of them. Any other successful
- *   result, a successful Response included, is replaced by the
- *   `write_response_withheld` refusal (withheldWriteResult); a refusal Response
- *   is returned as built (writeResultResponse).
+ *   reports a result only in a shape it recognises: no value, a row-shaped
+ *   record (isRowShaped) or an array of them. Any other result, a successful
+ *   Response included, is replaced by the `write_response_withheld` refusal
+ *   (withheldWriteResult); a refusal Response the write path built is returned
+ *   as built (writeResultResponse), and a Response from the storage layer is
+ *   replaced where it is received (storageResult).
  * - The POST /FeedMemories response is built from the row the feed stored or
  *   matched: feedResponseFields() keeps the FEED_RESPONSE_WRITE_FIELDS, which
- *   the server decides for that row, and otherwise only the non-null-valued
- *   fields the request supplied (suppliedMemoryFields) that are Memory
- *   attributes, each as stored. A field the row holds that the request did not
- *   send with a non-null value (text, metadata, subject, tags, ...) is not in
- *   the response.
+ *   the server decides for that row, and otherwise only the non-null Memory
+ *   attributes the request supplied (suppliedMemoryFields), each as stored;
+ *   feedWriteResponse adds `redactedValues` when it is above zero. A field the
+ *   row holds that the request did not send with a non-null value (text,
+ *   metadata, subject, tags, ...) is not in the response.
  *
  * Pure data and functions: importing this module never loads Harper.
  */
@@ -71,13 +72,13 @@ export function suppliedMemoryFields(body: unknown): ReadonlySet<string> {
   return new Set(Object.keys(body).filter((key) => body[key] !== undefined && body[key] !== null));
 }
 
-/** The error a write answers with in place of a successful result it does not report (withheldWriteResult). */
+/** The error a write answers with in place of a result it does not report (withheldWriteResult). */
 export const WRITE_RESPONSE_WITHHELD = "write_response_withheld";
 
 /**
  * The 500 `write_response_withheld` refusal a write answers with in place of a
- * successful result whose shape it does not report. It says the write
- * completed and how to see the row.
+ * result it does not report. It says the write completed and how to see the
+ * row.
  */
 export function withheldWriteResult(): Response {
   return Response.json({
@@ -87,11 +88,23 @@ export function withheldWriteResult(): Response {
 }
 
 /**
- * A write's result when it is a Response. A refusal (a status outside 200-299)
- * is returned as built: the write paths build their refusals as named errors
- * with no row fields. A successful Response is not returned: it is replaced by
- * the `write_response_withheld` refusal (withheldWriteResult) without its body
- * being read.
+ * A value a write received from the storage layer (a table put or patch). A
+ * Response, whatever its status, is replaced by the `write_response_withheld`
+ * refusal without its body being read; any other value is returned for the
+ * write's exit to check (withoutEmbeddingFields). So every Response a write's
+ * exit receives is a refusal the write path built or this refusal.
+ */
+export function storageResult<T>(value: T): T | Response {
+  return value instanceof Response ? withheldWriteResult() : value;
+}
+
+/**
+ * A write's result when it is a Response. Storage-layer Responses are replaced
+ * where they are received (storageResult), so a Response that reaches a
+ * write's exit is a refusal the write path built, a named error with no row
+ * fields, or the `write_response_withheld` refusal. A refusal (a status
+ * outside 200-299) is returned as built. A successful Response is replaced by
+ * the `write_response_withheld` refusal without its body being read.
  */
 export function writeResultResponse(response: Response): Response {
   if (!response.ok) return response;
@@ -103,15 +116,43 @@ const WRITE_RESULT_FIELDS = Object.freeze(["written"] as const);
 
 const ROW_FIELDS: ReadonlySet<string> = new Set<string>([...MEMORY_ATTRIBUTES, ...WRITE_RESULT_FIELDS]);
 
+/** A plain object: an object whose prototype is Object.prototype or null (not an array, a Date, a Map, ...). */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
 /**
- * A row-shaped record: a plain record whose every key is a Memory attribute
- * (MEMORY_ATTRIBUTES) or `written`. A Memory row holds `embedding` and
- * `embeddingModel` only as top-level attributes, so removing those two keys
- * removes them from a row-shaped record. A record with any other key, such as
- * a wrapper around a row, is not row-shaped.
+ * Whether `value` holds a key named `embedding` or `embeddingModel` at any
+ * depth: in a nested object, or in an object inside an array. A typed array (a
+ * vector) holds values and no keys. A value that contains itself (a cycle) is
+ * treated as holding one, so the caller refuses it.
+ */
+function holdsEmbeddingKey(value: unknown, ancestors: Set<object> = new Set()): boolean {
+  if (!value || typeof value !== "object" || ArrayBuffer.isView(value)) return false;
+  if (ancestors.has(value)) return true;
+  ancestors.add(value);
+  const found = Array.isArray(value)
+    ? value.some((item) => holdsEmbeddingKey(item, ancestors))
+    : Object.entries(value).some(([key, item]) => EMBEDDING_FIELDS.has(key) || holdsEmbeddingKey(item, ancestors));
+  ancestors.delete(value);
+  return found;
+}
+
+/**
+ * A row-shaped record: a plain object (isPlainObject) whose every key is a
+ * Memory attribute (MEMORY_ATTRIBUTES) or `written`, and whose values hold no
+ * `embedding` or `embeddingModel` key at any depth. A Memory row holds those
+ * two fields only as top-level attributes, so removing those two keys from a
+ * row-shaped record leaves neither anywhere in it. A record with any other key,
+ * such as a wrapper around a row, or with either name nested in a value, is
+ * not row-shaped.
  */
 export function isRowShaped(value: unknown): value is Record<string, unknown> {
-  return isPlainRecord(value) && Object.keys(value).every((key) => ROW_FIELDS.has(key));
+  if (!isPlainObject(value)) return false;
+  return Object.entries(value).every(([key, item]) =>
+    ROW_FIELDS.has(key) && (EMBEDDING_FIELDS.has(key) || !holdsEmbeddingKey(item)));
 }
 
 /**
@@ -121,10 +162,10 @@ export function isRowShaped(value: unknown): value is Record<string, unknown> {
  * returned as built (writeResultResponse). Any other result, a successful
  * Response, a record that is not row-shaped, an array holding anything else,
  * or a scalar, is replaced by the `write_response_withheld` refusal
- * (withheldWriteResult). The result a write reports therefore carries no
- * embedding field whatever the storage layer returns. On Harper the results
- * these writes receive are no value or row-shaped records the write paths
- * build, so no successful write is refused.
+ * (withheldWriteResult). The result a write reports therefore holds no key
+ * named `embedding` or `embeddingModel` whatever the storage layer returns. On
+ * Harper the results these writes receive are no value or row-shaped records
+ * the write paths build, so no successful write is refused.
  */
 export function withoutEmbeddingFields<T>(result: T): T {
   if (result === undefined || result === null) return result;
@@ -140,24 +181,26 @@ export function withoutEmbeddingFields<T>(result: T): T {
 }
 
 /**
- * A copy of the feed row `row` holding the FEED_RESPONSE_WRITE_FIELDS and the
- * `supplied` fields (suppliedMemoryFields) that are Memory attributes and that
- * it carries, each as stored, and never an embedding field (a null-prototype
- * record, protoSafeRecord): the copy is row-shaped whatever other keys `row`
- * holds. An array's records are copied likewise. No value is returned
- * unchanged, a refusal Response as built (writeResultResponse), and any other
- * result, a successful Response, a scalar or an array holding a non-record,
- * is replaced by the `write_response_withheld` refusal (withheldWriteResult).
+ * A copy of the feed row `row` (a null-prototype record, protoSafeRecord)
+ * holding the FEED_RESPONSE_WRITE_FIELDS it carries and the `supplied` fields
+ * (suppliedMemoryFields) that are Memory attributes and that it carries, each
+ * as stored, and never an embedding field. An array's records are copied
+ * likewise. A refusal Response is returned as built (writeResultResponse).
+ * Any other result, no value, a successful Response, a scalar, an array
+ * holding a non-record, or a copy with `embedding` or `embeddingModel` nested
+ * in a value, is replaced by the `write_response_withheld` refusal
+ * (withheldWriteResult).
  */
 export function feedResponseFields(row: unknown, supplied: ReadonlySet<string>): unknown {
-  if (row === undefined || row === null) return row;
   if (row instanceof Response) return writeResultResponse(row);
   if (Array.isArray(row)) {
     if (!row.every((item) => isPlainRecord(item))) return withheldWriteResult();
-    return row.map((item) => feedResponseFields(item, supplied));
+    const copies = row.map((item) => feedResponseFields(item, supplied));
+    return copies.some((copy) => copy instanceof Response) ? withheldWriteResult() : copies;
   }
   if (!isPlainRecord(row)) return withheldWriteResult();
   const keys = Object.keys(row).filter((key) =>
     !EMBEDDING_FIELDS.has(key) && (WRITE_FIELDS.has(key) || (supplied.has(key) && ROW_FIELDS.has(key))));
-  return protoSafeRecord(row, { keys });
+  const copy = protoSafeRecord(row, { keys });
+  return holdsEmbeddingKey(copy) ? withheldWriteResult() : copy;
 }

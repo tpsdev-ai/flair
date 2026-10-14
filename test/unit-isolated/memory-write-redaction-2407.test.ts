@@ -200,7 +200,7 @@ const { Memory } = await import("../../resources/Memory.ts");
 const { FeedMemories } = await import("../../resources/MemoryFeed.ts");
 const { computeContentHash } = await import("../../resources/memory-feed-lib.ts");
 const { isOperatorSeedPut, redactMemoryWrite, storedMemoryText, suppliedMemoryTextFields } = await import("../../resources/memory-redaction.ts");
-const { WRITE_RESPONSE_WITHHELD, feedResponseFields, suppliedMemoryFields, withoutEmbeddingFields, writeResultResponse } = await import("../../resources/memory-write-response.ts");
+const { WRITE_RESPONSE_WITHHELD, feedResponseFields, isRowShaped, storageResult, suppliedMemoryFields, withoutEmbeddingFields, writeResultResponse } = await import("../../resources/memory-write-response.ts");
 const { SEED_SKILL_ROW_ID } = await import("../../resources/seed-ids.ts");
 const { redactSecrets, redactSecretsWithCount } = await import("../../packages/flair-mcp/src/secret-redaction.ts");
 
@@ -464,7 +464,7 @@ describe("flair#2407 — a deduplicated feed write reports the count in its resp
   });
 });
 
-describe("flair#2561 — `stored` reports only the string-valued text fields the request supplied, and the feed response the non-null-valued fields it supplied plus the listed server-decided fields", () => {
+describe("flair#2561 — `stored` reports only the string-valued text fields the request supplied, and the feed response the non-null Memory attributes it supplied plus the listed server-decided fields and `redactedValues` when present", () => {
   it("suppliedMemoryTextFields names the text fields that hold a string in the request body", () => {
     expect(suppliedMemoryTextFields({ content: "c", summary: null, trigger: 42, tags: ["skill"] })).toEqual(["content"]);
     expect(suppliedMemoryTextFields({ summary: "s", trigger: "" })).toEqual(["summary", "trigger"]);
@@ -487,7 +487,7 @@ describe("flair#2561 — `stored` reports only the string-valued text fields the
     expect([...suppliedMemoryFields(["content"])]).toEqual([]);
   });
 
-  it("feedResponseFields keeps the write fields and the supplied fields, never an embedding field", () => {
+  it("feedResponseFields keeps the write fields and the supplied Memory attributes, never an embedding field", () => {
     const row = {
       id: "r1", agentId: "a", durability: "persistent", visibility: "shared", createdAt: "t0", updatedAt: "t1", supersedes: "r0",
       content: "c", summary: "s", trigger: "t", tags: ["skill"], metadata: "{}", subject: "subj", contentHash: "h",
@@ -500,7 +500,6 @@ describe("flair#2561 — `stored` reports only the string-valued text fields the
     expect(row.content).toBe("c");
     const response = new Response("x", { status: 409 });
     expect(feedResponseFields(response, new Set())).toBe(response);
-    expect(feedResponseFields(undefined, new Set())).toBeUndefined();
   });
 
   it("withoutEmbeddingFields returns a copy without embedding and embeddingModel", () => {
@@ -561,20 +560,47 @@ describe("flair#2561 — `stored` reports only the string-valued text fields the
       const replaced = feedResponseFields(result, new Set());
       expect(replaced instanceof Response && replaced.status === 500, label).toBe(true);
     }
-    // The feed copy holds only Memory attributes: a supplied key that is not one is not echoed.
-    expect(feedResponseFields({ id: "r1", content: "c", wrapper: { embedding: [1] } }, new Set(["content", "wrapper"]))).toEqual({ id: "r1", content: "c" });
+    // The feed copy holds only the listed server-decided fields and the supplied Memory attributes.
+    expect(feedResponseFields({ id: "r1", written: true, content: "c", wrapper: { embedding: [1] } }, new Set(["content", "wrapper"]))).toEqual({ id: "r1", written: true, content: "c" });
   });
 
-  it("a PUT, a PATCH and a `_reindex` re-PUT whose storage result is a wrapper around a row answer write_response_withheld", async () => {
-    const row = {
-      id: "mem-2561-wrapper", agentId: AGENT, content: "a note", embedding: FAKE_EMBEDDING, embeddingModel: "mock-embedding-model",
-      instanceToken: "token-2561-wrapper", contentHash: "hash-2561-wrapper", visibility: "shared", archived: false, createdAt: new Date().toISOString(),
+  it("a nested embedding key, a non-plain object, a cycle or an absent feed result is not reported", async () => {
+    const expectWithheld = async (label: string, replaced: unknown) => {
+      expect(replaced instanceof Response, label).toBe(true);
+      expect((replaced as Response).status, label).toBe(500);
+      expect(JSON.parse(await (replaced as Response).text()).error, label).toBe(WRITE_RESPONSE_WITHHELD);
     };
-    const wrapped = (content: any) => ({ wrapper: { ...row, ...content, embedding: FAKE_EMBEDDING, embeddingModel: "mock-embedding-model" } });
+    const cyclic: Record<string, unknown> = { id: "r1" };
+    cyclic.meta = { parent: cyclic };
+    for (const [label, result] of [
+      ["an embedding key under a Memory attribute", { id: "r1", metadata: { embedding: [1] } }],
+      ["an embeddingModel key in an array value", { id: "r1", entities: [{ embeddingModel: "m" }] }],
+      ["an array element with a nested embedding key", [{ id: "r1" }, { id: "r2", meta: { embedding: [1] } }]],
+      ["a Date", new Date()],
+      ["a cycle", cyclic],
+    ] as Array<[string, unknown]>) {
+      await expectWithheld(label, withoutEmbeddingFields<unknown>(result));
+    }
+    expect(isRowShaped(new Date())).toBe(false);
+    const tags = ["a"];
+    expect(withoutEmbeddingFields<unknown>({ id: "r1", tags, derivedFrom: tags, embedding: [1] })).toEqual({ id: "r1", tags: ["a"], derivedFrom: ["a"] });
+    await expectWithheld("a refusal Response from the storage layer", storageResult(Response.json({ error: "x", row: { embedding: [1] } }, { status: 409 })));
+    expect(storageResult(undefined)).toBeUndefined();
+    await expectWithheld("an absent feed result", feedResponseFields(undefined, new Set()));
+    await expectWithheld("a null feed result", feedResponseFields(null, new Set()));
+    await expectWithheld("a supplied feed attribute with a nested embedding key", feedResponseFields({ id: "r1", meta: { embedding: [1] } }, new Set(["meta"])));
+  });
+
+  /** Runs a PUT, a PATCH and a `_reindex` re-PUT whose storage stand-in returns `result(content)`, and returns their answers. */
+  async function threeExitsWith(result: (content: any) => unknown): Promise<Array<[string, any]>> {
+    const row = {
+      id: "mem-2561-exits", agentId: AGENT, content: "a note", embedding: FAKE_EMBEDDING, embeddingModel: "mock-embedding-model",
+      instanceToken: "token-2561-exits", contentHash: "hash-2561-exits", visibility: "shared", archived: false, createdAt: new Date().toISOString(),
+    };
     const staticPut = (BaseMemory as any).put;
     const instancePatch = (BaseMemory as any).prototype.patch;
-    (BaseMemory as any).put = async (content: any) => wrapped(content);
-    (BaseMemory as any).prototype.patch = async (content: any) => wrapped(content);
+    (BaseMemory as any).put = async (content: any) => result(content);
+    (BaseMemory as any).prototype.patch = async (content: any) => result(content);
     try {
       const results: Array<[string, any]> = [];
       memoryStore.set(row.id, { ...row });
@@ -590,17 +616,33 @@ describe("flair#2561 — `stored` reports only the string-valued text fields the
       reindex.getContext = () => ({ request: {}, __flairInternal: true });
       reindex._targetId = row.id;
       results.push(["_reindex", await reindex.put({ ...row, _reindex: true })]);
-      for (const [label, res] of results) {
-        expect(res instanceof Response, label).toBe(true);
-        expect(res.status, label).toBe(500);
-        const text = await res.text();
-        expect(JSON.parse(text).error, label).toBe(WRITE_RESPONSE_WITHHELD);
-        expect(text.includes("embedding"), label).toBe(false);
-      }
+      return results;
     } finally {
       (BaseMemory as any).put = staticPut;
       (BaseMemory as any).prototype.patch = instancePatch;
     }
+  }
+
+  async function expectAllWithheld(results: Array<[string, any]>): Promise<void> {
+    for (const [label, res] of results) {
+      expect(res instanceof Response, label).toBe(true);
+      expect(res.status, label).toBe(500);
+      const text = await res.text();
+      expect(JSON.parse(text).error, label).toBe(WRITE_RESPONSE_WITHHELD);
+      expect(text.includes("embedding"), label).toBe(false);
+    }
+  }
+
+  it("a PUT, a PATCH and a `_reindex` re-PUT whose storage result is a wrapper around a row answer write_response_withheld", async () => {
+    await expectAllWithheld(await threeExitsWith((content) => ({ wrapper: { ...content, embedding: FAKE_EMBEDDING, embeddingModel: "mock-embedding-model" } })));
+  });
+
+  it("a PUT, a PATCH and a `_reindex` re-PUT whose storage result holds an embedding key under a Memory attribute answer write_response_withheld", async () => {
+    await expectAllWithheld(await threeExitsWith((content) => ({ id: content.id ?? "mem-2561-exits", metadata: { embedding: FAKE_EMBEDDING, embeddingModel: "mock-embedding-model" } })));
+  });
+
+  it("a PUT, a PATCH and a `_reindex` re-PUT whose storage result is a refusal Response with an embedding field answer write_response_withheld", async () => {
+    await expectAllWithheld(await threeExitsWith(() => Response.json({ error: "conflict", row: { embedding: FAKE_EMBEDDING, embeddingModel: "mock-embedding-model" } }, { status: 409 })));
   });
 
   it("a `_reindex` re-PUT, a PUT and a PATCH whose storage result is a successful Response answer write_response_withheld", async () => {
@@ -667,7 +709,7 @@ describe("flair#2561 — `stored` reports only the string-valued text fields the
     expect(memoryStore.get("mem-2561").content).toBe("base content");
   });
 
-  it("a deduplicated feed write gets back only the fields it supplied and the write fields of the matched row, no embedding", async () => {
+  it("a deduplicated feed write gets back only the Memory attributes it supplied and the write fields of the matched row, no embedding", async () => {
     const f: any = new (FeedMemories as any)();
     f.getContext = () => ({ request: agentCtx(AGENT) });
     const content = "a matched feed memory";

@@ -2,8 +2,9 @@
  * write-stored-supplied-fields-2561.test.ts — a Memory write's `stored` reports
  * only the string-valued text fields (`content`, `summary`, `trigger`) the
  * write's own request supplied, as stored, and the POST /FeedMemories response
- * only the non-null-valued fields its request supplied plus the fields the
- * server decides for the row (flair#2561).
+ * only the non-null Memory attributes its request supplied plus the listed
+ * fields the server decides for the row and `redactedValues` when present
+ * (flair#2561).
  *
  * Runs against a REAL Harper (test/helpers/harper-lifecycle.ts). A skill
  * successor row carries over the text fields its request omits from the row it
@@ -316,7 +317,7 @@ describe("flair#2561 — a write that supplies one text field gets back only tha
   }, 60_000);
 });
 
-describe("flair#2561 — the feed response reports the non-null-valued fields the request supplied plus the listed server-decided fields, and no write response carries an embedding field", () => {
+describe("flair#2561 — the feed response reports the non-null Memory attributes the request supplied plus the listed server-decided fields and `redactedValues` when present, and no write response carries an embedding field", () => {
   it("a feed skill successor that omits the descriptive fields gets none of them, and no embedding", async () => {
     const id = `s2561-feed-desc-${randomUUID()}`;
     await makeAuthorSkill(id);

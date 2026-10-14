@@ -1,7 +1,7 @@
 import { databases } from "harper";
 import { randomUUID } from "node:crypto";
 import { isOperatorSeedPut, redactMemoryWrite, storedMemoryText, suppliedMemoryTextFields, type MemoryTextField, type StoredMemoryText } from "./memory-redaction.js";
-import { withoutEmbeddingFields, writeResultResponse } from "./memory-write-response.js";
+import { storageResult, withoutEmbeddingFields, writeResultResponse } from "./memory-write-response.js";
 import { isDeepStrictEqual } from "node:util";
 import { patchRecord, withDetachedTxn } from "./table-helpers.js";
 import { isAdmin, resolveAgentAuth, type AgentAuthVerdict } from "./agent-auth.js";
@@ -2100,7 +2100,8 @@ export class Memory extends (databases as any).flair.Memory {
     // flair#2467: a PATCH commits only the fields in its body; these are the
     // post-redaction text fields among them, for the response.
     const patchStaged = storedMemoryText(content, suppliedText);
-    const patched = await super.patch(content, query);
+    // flair#2561: a Response from the storage layer is not reported (storageResult).
+    const patched = storageResult(await super.patch(content, query));
     // embedding-space-guard slice 1 (flair#2425): a PATCH that stores an
     // embedding stamp must consult the latch the same way post()/put() do, so a
     // body-supplied foreign stamp closes the gate instead of the row carrying a
@@ -2191,14 +2192,16 @@ export class Memory extends (databases as any).flair.Memory {
             if (err instanceof CommittedRowChanged && reindexJoinsRequestTxn) abortRequestTransaction(c);
             throw err;
           }
-          return r;
+          // flair#2561: a Response from the storage layer is not reported (storageResult).
+          return storageResult(r);
         });
       } catch (err) {
         if (err instanceof CommittedRowChanged) return storedRowChangedRefusal("Memory");
         throw err;
       }
-      // flair#2561: a refusal is returned as built; a successful Response is
-      // replaced by the write_response_withheld refusal (writeResultResponse).
+      // flair#2561: a refusal this path built is returned as built; a
+      // successful Response is replaced by the write_response_withheld
+      // refusal (writeResultResponse).
       if (reindexed instanceof Response) return writeResultResponse(reindexed);
       noteMemoryUpsert(content);
       noteWriteStamp(content?.embeddingModel as string | null | undefined); // embedding-space-guard slice 1 (see post())
@@ -2578,14 +2581,16 @@ export class Memory extends (databases as any).flair.Memory {
             throw err;
           }
         }
-        return r;
+        // flair#2561: a Response from the storage layer is not reported (storageResult).
+        return storageResult(r);
       });
     } catch (err) {
       if (err instanceof CommittedRowChanged) return storedRowChangedRefusal("Memory");
       throw err;
     }
-    // flair#2561: a refusal is returned as built; a successful Response from
-    // the storage layer is replaced by the write_response_withheld refusal.
+    // flair#2561: a refusal this path built is returned as built; a
+    // successful Response is replaced by the write_response_withheld refusal
+    // (a storage-layer Response was replaced in the transaction, storageResult).
     if (putResult instanceof Response) return writeResultResponse(putResult);
     const result: any = putResult;
     // flair#1357 — read-your-write for the lexical leg (see post()).

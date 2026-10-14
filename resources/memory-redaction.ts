@@ -18,8 +18,9 @@
  * `stored`: the stored (post-redaction) values of the REDACTED_MEMORY_FIELDS
  * that write's request supplied as strings (suppliedMemoryTextFields,
  * storedMemoryText). The feed ingest's response holds, of the row it stored or
- * matched, only the non-null-valued fields its request supplied and the fields
- * the server decides for that row (resources/memory-write-response.ts).
+ * matched, only the non-null Memory attributes its request supplied and the
+ * listed fields the server decides for that row, plus `redactedValues` when
+ * present (resources/memory-write-response.ts).
  * put() skips the call for the shipped-skill seed write (isOperatorSeedPut): a
  * PUT of the reserved seed skill id by a verified Basic administrator
  * (src/lib/skill-seed.ts). The seed compares the stored text to its source

@@ -1,4 +1,4 @@
-- **A Memory write's `stored` holds only request-supplied text fields; `POST /FeedMemories` returns request-supplied plus the listed server-decided fields; write responses carry no embedding field (#2561).**
+- **Memory `stored` holds only request-supplied text fields; `POST /FeedMemories` returns non-null request-supplied Memory attributes plus listed server-decided fields; no write response carries embedding fields (#2561).**
 
   `stored`, which a Memory POST, PUT or PATCH returns next to `redactedValues`
   (#2467), holds the string-valued text fields (`content`, `summary`,
@@ -10,9 +10,8 @@
   before.
 
   The `POST /FeedMemories` response, built from the row the feed stored or
-  matched, holds the non-null-valued fields the request supplied that are
-  Memory attributes, each as stored, plus the fields the server decides for
-  that row: `id`, `agentId`,
+  matched, holds the non-null Memory attributes the request supplied, each as
+  stored, plus the fields the server decides for that row: `id`, `agentId`,
   `durability`, `visibility`, `createdAt`, `updatedAt`, `expiresAt`,
   `archived`, `supersedes`, `skillSubjectId`, `instanceToken`,
   `originatorInstanceId` and `provenance` (plus `written` and `redactedValues`
@@ -24,15 +23,19 @@
   The re-embed PATCH (body `{"embedding": null, "embeddingModel": null}`)
   answers `{ id, updatedAt }`, and the administrator `_reindex` re-PUT answers
   without either field. A Memory POST, PUT or PATCH and a `_reindex` re-PUT
-  report a successful storage result only when it has no value or is a
-  row-shaped record (Memory attributes and `written` only) or an array of
-  them; any other successful result, such as a wrapper around a row, a scalar
-  or a successful `Response`, is answered with a `write_response_withheld`
-  refusal (500) that says the write completed. The feed response is a copy of
-  the row holding only Memory attributes, and a feed result that is not a
-  record or an array of records, such as a successful `Response`, is answered
-  with the same refusal. The write paths' own refusals are named errors with
-  no row fields. `flair reembed` counts a row as re-embedded
+  report a result only when it has no value or is a row-shaped record (a plain
+  object with only Memory attributes and `written`, and no `embedding` or
+  `embeddingModel` key nested in a value) or an array of them. Any other
+  result, such as a wrapper around a row, a nested embedding key, a scalar or
+  a successful `Response`, is answered with a `write_response_withheld`
+  refusal (500) that says the write completed. A `Response` from the storage
+  layer, whatever its status, gets the same refusal, so the refusals these
+  writes return as built are their own named errors, which hold no row
+  fields. The feed response is a copy of the row holding only the listed
+  server-decided fields and the non-null Memory attributes the request
+  supplied, plus `redactedValues` when present; a feed result that is absent,
+  is not a record or an array of records, or whose copy holds a nested
+  embedding key gets the same refusal. `flair reembed` counts a row as re-embedded
   when the PATCH response names that row and the stored row then carries the
   current model; it reads the model through the operations API when
   administrator credentials are set, and with a signed `GET /Memory/<id>` as
