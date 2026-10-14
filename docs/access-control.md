@@ -162,46 +162,6 @@ credential's provider or subject, or change its status to anything other than
 `revoked` (so it cannot reactivate one). A non-admin agent may relabel its own
 `idp` credential, set its status to `revoked`, and delete it.
 
-`flair doctor`'s **IdP mappings** check reads Harper's audit log and changes
-nothing. It checks the mappings in effect: `idp` credentials whose status is
-`active` and that name a principal. It lists those whose retained history,
-since it last started over, shows a non-admin agent creating the row as a
-mapping or changing a mapping field. It reports a row as unattributed when its
-retained history starts at neither a recorded creation nor an administrator's
-review re-stamp.
-
-A row's history starts over at either point:
-
-- **A recorded creation.** The log has no field that marks one, so the check
-  takes an insert, a write after a recorded delete, or a first retained upsert
-  or put by an administrator or the server whose row carries a `createdAt`
-  within 60 seconds of the entry and no other `lastUsedAt`. Just-in-time
-  provisioning, and an administrator's `Credential` write without a
-  `createdAt` in its body, stamp the server's time. `flair mcp enable` and
-  `flair principal link` stamp their host's time at the mapping write, so a
-  mapping they create is attributed when that host's clock is within 60
-  seconds of the server's.
-- **An administrator's review re-stamp.** This is an operations-API `update`
-  that, by the retained row before it, changed `createdAt` to the current UTC
-  time in whole seconds. An update that leaves `createdAt` as it was, such as a
-  label edit, never starts a history over, and neither does an update that is
-  the first retained entry.
-
-A row is unattributed when its creation has expired (entries last
-`logging.auditRetention`, 3 days by default), when a cluster base copy wrote
-it, or when its recorded write carries a `createdAt` more than 60 seconds from
-the entry. It stays unattributed until it is re-stamped or revoked.
-
-Each kind of finding is a counted issue. For the rows whose ids contain only
-letters, digits and `_ . : @ / -` (with an admin user name and an
-operations-API URL that do too), doctor prints the operations-API commands
-that clear it. One reads the rows, one revokes them, and one re-stamps them
-after your review with two updates of `createdAt`: a fixed past time, then the
-current time. The next run attributes a re-stamped row to that review. When no
-row id can be printed in a command, doctor names these operations instead. A
-write made before the `flair-agent` Harper user existed is recorded as an
-administrator's.
-
 ### Just-in-time provisioning
 
 `FLAIR_MCP_JIT_PROVISION` is off by default; `1`, `true`, `yes` or `on` turns

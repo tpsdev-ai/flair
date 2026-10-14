@@ -1,8 +1,7 @@
 /**
  * idp-mapping-rule.ts — which writes to an IdP identity mapping the Credential
- * resource reserves for an administrator or the server. Shared by the
- * Credential resource (resources/Credential.ts) and `flair doctor`
- * (src/lib/idp-mapping-audit.ts).
+ * resource (resources/Credential.ts) reserves for an administrator or the
+ * server.
  *
  * An IdP identity mapping is a `Credential` row of kind "idp". The /mcp OAuth
  * resolver (resources/mcp-handler.ts) resolves a token's subject to the

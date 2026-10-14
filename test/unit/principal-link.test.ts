@@ -11,7 +11,6 @@
 import { describe, test, expect } from "bun:test";
 import { Command } from "commander";
 import { agentInsertSchemaError } from "../helpers/agent-insert-schema.ts";
-import { classifyIdpMappingHistory, CREATION_STAMP_TOLERANCE_MS } from "../../src/lib/idp-mapping-audit.ts";
 import { register } from "../../src/commands/principal.ts";
 import {
   linkPrincipalMapping,
@@ -1058,11 +1057,10 @@ describe("flair#2222 — the pre-write re-validation bound", () => {
 });
 
 // The linker stamps a new mapping's createdAt and lastUsedAt at the mapping
-// write, not at the start of its run: `flair doctor` takes a createdAt within
-// CREATION_STAMP_TOLERANCE_MS of the audit entry as the record of the mapping's
-// creation (src/lib/idp-mapping-audit.ts).
+// write, not at the start of its run, so createdAt is the time the mapping was
+// written however long the run's earlier reads took.
 describe("the linker stamps a new mapping at its write", () => {
-  test("a run whose reads take longer than doctor's tolerance stamps the write's time, which doctor attributes", async () => {
+  test("a run whose reads take ten minutes each stamps the write's time", async () => {
     const st = mappingStub({ expectedUrl: HOSTED_OPS, principals: ["alice"] });
     let clockMs = Date.parse("2026-10-02T00:00:00.000Z");
     const clock = () => new Date(clockMs).toISOString();
@@ -1080,15 +1078,9 @@ describe("the linker stamps a new mapping at its write", () => {
       { fetchImpl, now: clock },
     );
     expect(writeAt).not.toBeNull();
-    expect(writeAt! - Date.parse(startedAt)).toBeGreaterThan(CREATION_STAMP_TOLERANCE_MS);
+    expect(writeAt!).toBeGreaterThan(Date.parse(startedAt));
     const [mapping] = st.writes().find((w) => w.body.table === "Credential" && w.body.operation === "upsert")!.body.records;
     expect(mapping.createdAt).toBe(new Date(writeAt!).toISOString());
     expect(mapping.lastUsedAt).toBe(mapping.createdAt);
-    // An audit entry a few milliseconds after the write: doctor takes it as the creation.
-    const recorded = { operation: "upsert", user_name: "admin", timestamp: writeAt! + 6, records: [mapping] };
-    expect(classifyIdpMappingHistory(mapping.id, [recorded])).toBe("no-non-admin-write");
-    // Stamped at the start of the run instead, the same entry is not one.
-    const early = { ...recorded, records: [{ ...mapping, createdAt: startedAt, lastUsedAt: startedAt }] };
-    expect(classifyIdpMappingHistory(mapping.id, [early])).toBe("unattributed");
   });
 });

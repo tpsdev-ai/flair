@@ -38,20 +38,15 @@
 // creating and editing idp rows over REST; the operations-API linker; and the
 // in-process XAA JIT provisioner.
 //
-// The last describe runs `flair doctor`'s IdP mapping check
-// (src/lib/idp-mapping-audit.ts) against this instance's real audit log, and
-// against that log cut where retention would cut it, then runs the review and
-// re-stamp commands doctor prints for the unattributed rows.
-//
 // Mutation check: remove the post(), put() or patch() guard in
 // resources/Credential.ts, or its stored-owner check — the cases for that
 // path go red.
 //
 // Agents resolve to the least-privilege `flair-agent` Harper user (provisioned
 // in beforeAll), the production posture, whose role grants Credential full CRUD
-// — so every refusal here is flair's own rule, not Harper's table permissions.
+// — so a 403 here, named or an owner refusal, is flair's own rule, not Harper's
+// table permissions. The other-route and malformed-body cases accept any 4xx.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { spawnSync } from "node:child_process";
 import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
@@ -60,7 +55,6 @@ import { SignJWT, exportJWK, generateKeyPair, importPKCS8 } from "jose";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 import { provisionIdpIdentityMapping } from "../../src/lib/mcp-enable";
 import { ensureFlairAgentRole, ensureFlairAgentUser } from "../../src/cli";
-import { describeIdpMappingWriters, idpMappingRemedyCommands, readCredentialAudit, readIdpMappingRows, type CredentialAuditEntry } from "../../src/lib/idp-mapping-audit";
 
 const FORBIDDEN_PORTS = new Set([9925, 9926]);
 const MCP_ISSUER = "https://idp-mapping-writes.flair.internal";
@@ -431,6 +425,7 @@ describe("a non-admin write that changes a credential's kind to idp is refused",
     const before = await snapshot(id);
     const arr = await signed(W, "PATCH", `/Credential/${id}`, { kind: ["idp"], idpProvider: "mcp-oauth", idpSubject: sub });
     expect4xx(arr, "PATCH kind:[idp]");
+    await expectUnchanged(id, before);
     const coll = await signed(W, "PATCH", "/Credential/", [{ id, kind: "idp", idpProvider: "mcp-oauth", idpSubject: sub }]);
     expect4xx(coll, "collection PATCH (array)");
     await expectUnchanged(id, before);
@@ -595,173 +590,5 @@ describe("legitimate writers are unchanged", () => {
     const first = await xaaGrantPrincipal(xaaSub);
     expect(first).not.toBeNull();
     expect(await xaaGrantPrincipal(xaaSub)).toBe(first); // the JIT row resolves on the next grant
-  }, 60_000);
-});
-
-// ── flair doctor: IdP mapping rows and who wrote them ─────────────────────────
-//
-// src/lib/idp-mapping-audit.ts reads every idp row and its Harper audit entries.
-// For the active rows, it lists those whose retained history shows a mapping
-// write by the shared non-admin agent user, and reports as unattributed those
-// whose history does not show their creation. The rows to be listed are written
-// here as the `flair-agent` Harper user through the operations API (with a
-// password this test sets on its own ephemeral instance), which is the user the
-// audit log records for a non-admin agent's write.
-
-/** The `flair-agent` Harper user, with a password set on this test's own instance. */
-async function asAgentUser(): Promise<(op: Record<string, unknown>) => Promise<void>> {
-  const agentPass = `idpw-${randomUUID()}`;
-  await ops({ operation: "alter_user", username: "flair-agent", password: agentPass, active: true, role: "flair_agent" });
-  return async (op) => {
-    const res = await fetch(harper.opsURL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: "Basic " + btoa(`flair-agent:${agentPass}`) },
-      body: JSON.stringify(op),
-      signal: AbortSignal.timeout(20_000),
-    });
-    const text = await res.text();
-    expect(res.status, `${op.operation} as flair-agent: ${text.slice(0, 300)}`).toBe(200);
-  };
-}
-
-const byTimestamp = (a: CredentialAuditEntry, b: CredentialAuditEntry) => Number(a.timestamp ?? 0) - Number(b.timestamp ?? 0);
-
-/** Run a remedy command doctor prints, with this instance's admin password wherever curl would prompt for it. */
-function runPrinted(command: string): string {
-  const user = harper.admin.username;
-  expect(command.startsWith(`curl -su ${user} `)).toBe(true);
-  for (const step of command.split(" && ")) expect(step).toContain(` ${harper.opsURL.replace(/\/?$/, "/")} `);
-  const res = spawnSync("bash", ["-c", command.replaceAll(`curl -su ${user} `, `curl -su ${user}:${harper.admin.password} `)], { encoding: "utf-8", timeout: 20_000 });
-  expect(res.status, `printed command failed: ${res.stderr}`).toBe(0);
-  return res.stdout;
-}
-
-describe("flair doctor: IdP mapping rows and who wrote them (from the audit log)", () => {
-  test("lists the rows written as the shared non-admin agent user; the linker, admin REST and JIT rows are attributed", async () => {
-    const asAgent = await asAgentUser();
-    const now = new Date().toISOString();
-    // (1) a mapping created by the non-admin agent user.
-    const created = `idpw-doctor-created-${randomUUID()}`;
-    await asAgent({ operation: "insert", database: "flair", table: "Credential", records: [{ id: created, principalId: W.id, kind: "idp", idpProvider: "mcp-oauth", idpSubject: `idpw-doctor-a-${sfx}`, status: "active", createdAt: now }] });
-    // (2) an operator's mapping whose subject a write as the non-admin agent user changed.
-    const repointed = await link(W.id, `idpw-doctor-b-${sfx}`);
-    await asAgent({ operation: "update", database: "flair", table: "Credential", records: [{ id: repointed, idpSubject: `idpw-doctor-b2-${sfx}` }] });
-    // (3) controls written now, each attributed by its creation stamp: the
-    //     linker, an admin agent over REST, the XAA JIT, and a linked row its
-    //     owner relabelled; and an operator's insert its owner relabelled.
-    const linked = await link(V.id, `idpw-doctor-c-${sfx}`);
-    const adminRow = `idpw-doctor-admin-${randomUUID()}`;
-    const adminPut = await signed(ADM, "PUT", `/Credential/${adminRow}`, { id: adminRow, principalId: V.id, kind: "idp", idpProvider: "mcp-oauth", idpSubject: `idpw-doctor-d-${sfx}` });
-    expect([200, 204]).toContain(adminPut.status);
-    const jitSub = `idpw-doctor-e-${sfx}`;
-    expect(await xaaGrantPrincipal(jitSub)).not.toBeNull();
-    expect(await xaaGrantPrincipal(jitSub)).not.toBeNull(); // a second grant: the server's use stamp
-    const [jitRow] = (await credentialsForSubject(jitSub)).filter((r) => r.kind === "idp");
-    const selfRow = await link(W.id, `idpw-doctor-f-${sfx}`);
-    expect([200, 204]).toContain((await signed(W, "PATCH", `/Credential/${selfRow}`, { label: "mine" })).status);
-    const insertedRow = `idpw-doctor-inserted-${randomUUID()}`;
-    await seedCredential({ id: insertedRow, principalId: W.id, kind: "idp", idpProvider: "idpw-test", idpSubject: `idpw-doctor-i-${sfx}` });
-    expect([200, 204]).toContain((await signed(W, "PATCH", `/Credential/${insertedRow}`, { label: "mine" })).status);
-    // (4) a mapping the non-admin agent user created that an operator revoked:
-    //     it maps nobody and is not checked.
-    const revokedRow = `idpw-doctor-revoked-${randomUUID()}`;
-    await asAgent({ operation: "insert", database: "flair", table: "Credential", records: [{ id: revokedRow, principalId: W.id, kind: "idp", idpProvider: "mcp-oauth", idpSubject: `idpw-doctor-j-${sfx}`, status: "active", createdAt: now }] });
-    await ops({ operation: "update", database: "flair", table: "Credential", records: [{ id: revokedRow, status: "revoked" }] });
-    // (5) a row whose recorded write carries an older creation time, as a row
-    //     copied in from elsewhere does: its history does not show its creation.
-    const copiedRow = `idpw-doctor-copied-${randomUUID()}`;
-    await ops({ operation: "upsert", database: "flair", table: "Credential", records: [{ id: copiedRow, principalId: V.id, kind: "idp", idpProvider: "mcp-oauth", idpSubject: `idpw-doctor-k-${sfx}`, status: "active", createdAt: "2026-01-01T00:00:00.000Z" }] });
-
-    const authHeader = "Basic " + btoa(`${harper.admin.username}:${harper.admin.password}`);
-    const rows = await readIdpMappingRows({ opsUrl: harper.opsURL, authHeader });
-    expect(rows).not.toBeNull();
-    const ids = rows!.map((r) => r.id);
-    for (const id of [created, repointed, linked, adminRow, jitRow?.id, selfRow, insertedRow, revokedRow, copiedRow]) expect(ids).toContain(id);
-    const audit = await readCredentialAudit({ opsUrl: harper.opsURL, authHeader, ids });
-    expect(audit.kind).toBe("ok");
-    if (audit.kind !== "ok") return;
-    const finding = describeIdpMappingWriters(rows!, audit.byId);
-    expect(finding.nonAdmin.map((m) => m.id).sort()).toEqual([created, repointed].sort());
-    expect(finding.nonAdmin.find((m) => m.id === created)).toEqual({ id: created, principalId: W.id, idpProvider: "mcp-oauth" });
-    // Every other active row in this instance, written by the linker, an admin
-    // agent, the XAA JIT or an operator's insert, is attributed.
-    expect(finding.unattributed).toEqual([copiedRow]);
-    expect(finding.active).toBeLessThan(finding.total);
-  }, 90_000);
-
-  test("expired history: an owner's relabel or update that is the first retained entry is unattributed; the printed review returns those rows and the printed re-stamp attributes them", async () => {
-    // Harper's retention removes a time prefix of the audit log. A test cannot
-    // make Harper expire entries on demand, so this case reads the entries
-    // Harper returned for each row and keeps those from the owner's write
-    // onward: what retention leaves once the row's creation has expired.
-    const relabelled = `idpw-doctor-exp-patch-${randomUUID()}`;
-    const updated = `idpw-doctor-exp-put-${randomUUID()}`;
-    const subs: Record<string, string> = { [relabelled]: `idpw-doctor-g-${sfx}`, [updated]: `idpw-doctor-h-${sfx}` };
-    for (const id of [relabelled, updated]) {
-      await seedCredential({ id, principalId: W.id, kind: "idp", idpProvider: "idpw-test", idpSubject: subs[id] });
-    }
-    const relabel = await signed(W, "PATCH", `/Credential/${relabelled}`, { label: "mine" });
-    expect([200, 204], `PATCH label returned ${relabel.status}: ${relabel.text.slice(0, 300)}`).toContain(relabel.status);
-    const before = await readCredential(updated);
-    const put = await signed(W, "PUT", `/Credential/${updated}`, { ...before, label: "mine" });
-    expect([200, 201, 204], `PUT returned ${put.status}: ${put.text.slice(0, 300)}`).toContain(put.status);
-
-    const authHeader = "Basic " + btoa(`${harper.admin.username}:${harper.admin.password}`);
-    const readRows = async () => (await readIdpMappingRows({ opsUrl: harper.opsURL, authHeader }))!.filter((r) => r.id === relabelled || r.id === updated);
-    const readAudit = async () => {
-      const audit = await readCredentialAudit({ opsUrl: harper.opsURL, authHeader, ids: [relabelled, updated] });
-      expect(audit.kind).toBe("ok");
-      return audit.kind === "ok" ? audit.byId : {};
-    };
-    /** The entries from the owner's write onward, which is what retention leaves. */
-    const cut = (byId: Record<string, CredentialAuditEntry[]>) => {
-      const retained: Record<string, CredentialAuditEntry[]> = {};
-      for (const id of [relabelled, updated]) {
-        const entries = [...byId[id]].sort(byTimestamp);
-        const first = entries.findIndex((e) => e.user_name === "flair-agent");
-        expect(first, `${id}: no entry by flair-agent after the operator's insert`).toBeGreaterThan(0);
-        retained[id] = entries.slice(first);
-      }
-      return retained;
-    };
-    const rows = await readRows();
-    expect(rows.length).toBe(2);
-    const byId = await readAudit();
-
-    // The whole history shows each row's creation and no non-admin mapping write.
-    const whole = describeIdpMappingWriters(rows, byId);
-    expect(whole.nonAdmin).toEqual([]);
-    expect(whole.unattributed).toEqual([]);
-
-    const retained = cut(byId);
-    for (const id of [relabelled, updated]) {
-      // Harper returns the whole row for that entry, so it names every identity field.
-      const image = (retained[id][0].records as any[])[0];
-      expect(image).toMatchObject({ id, kind: "idp", principalId: W.id, idpProvider: "idpw-test", idpSubject: subs[id], status: "active", label: "mine" });
-    }
-    expect(retained[relabelled][0].operation).toBe("patch");
-    expect(retained[updated][0].operation).toBe("upsert");
-    const expired = describeIdpMappingWriters(rows, retained);
-    expect(expired.nonAdmin).toEqual([]);
-    expect(expired.unattributed.sort()).toEqual([relabelled, updated].sort());
-
-    // The remedy doctor prints: the review returns these two rows and no
-    // other, and the re-stamp is two administrator updates of createdAt.
-    const commands = idpMappingRemedyCommands(expired.unattributed, { opsUrl: harper.opsURL.replace(/\/?$/, "/"), adminUser: harper.admin.username });
-    expect(commands).not.toBeNull();
-    const reviewed = JSON.parse(runPrinted(commands!.review));
-    expect(reviewed.map((r: any) => r.id).sort()).toEqual([relabelled, updated].sort());
-    expect(runPrinted(commands!.restamp).split("updated 2 of 2").length - 1).toBe(2);
-    const after = cut(await readAudit());
-    for (const id of [relabelled, updated]) {
-      const [prior, last] = after[id].slice(-2);
-      expect(prior).toMatchObject({ operation: "update", user_name: harper.admin.username });
-      expect((prior.records as any[])[0].createdAt).toBe("1970-01-01T00:00:00Z");
-      expect(last).toMatchObject({ operation: "update", user_name: harper.admin.username });
-      expect((last.records as any[])[0].createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
-    }
-    const restamped = describeIdpMappingWriters(await readRows(), after);
-    expect(restamped.nonAdmin).toEqual([]);
-    expect(restamped.unattributed).toEqual([]);
   }, 60_000);
 });

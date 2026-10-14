@@ -19,7 +19,6 @@ import { buildEd25519Auth, defaultAdminPassPath, defaultKeysDir, requestTarget, 
 import { AGENT_ID_RULE } from "../lib/agent-id-rule.js";
 import { agentHomeEndpoint, readAgentHomeRows, resolveTargetInstanceIdentity } from "../lib/agent-home.js";
 import { readAgentRoster } from "../lib/agent-roster.js";
-import { describeIdpMappingWriters, idpMappingWriterReport, readCredentialAudit, readIdpMappingRows } from "../lib/idp-mapping-audit.js";
 import { flairConfigYamlCandidates, readPortFromYamlFile, resolveFlairConfigYaml } from "../lib/doctor-config-path.js";
 import { collectFederationEnv, describeFederationDriverFinding, federationPeersConfigured, loadYamlDoc } from "../lib/doctor-federation-driver.js";
 import { plistCarriesInlineAdminPassword } from "../lib/launchd-management.js";
@@ -2194,61 +2193,6 @@ program
             console.log(`  ${homeFinding.severity === "info" ? render.icons.info : render.icons.warn} ${homeFinding.message}`);
             if (homeFinding.fixHint) console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${homeFinding.fixHint}`);
             if (homeFinding.isIssue) issues++;
-          }
-        }
-      }
-
-      // 8d. IdP mapping rows and who wrote their mapping (from the audit log).
-      // Through the Credential resource, only an administrator or the server
-      // creates an IdP mapping (Credential kind "idp"), changes its kind or
-      // identity fields, or reactivates it (src/lib/idp-mapping-rule.ts);
-      // src/lib/idp-mapping-audit.ts says what the audit log can and cannot
-      // attribute. Read-only.
-      console.log(`\n  ${render.wrap(render.c.bold, "IdP mappings")}`);
-      if (rosterNotRun) {
-        issues++;
-        console.log(`  ${render.icons.warn} IdP mappings: NOT RUN — ${rosterNotRun.reason}`);
-        console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${rosterNotRun.remedy}`);
-      } else if (!rosterAdminPass || rosterOpsPort === null) {
-        console.log(`  ${render.icons.info} IdP mapping check skipped (no admin credential).`);
-      } else {
-        const idpOpsUrl = `http://127.0.0.1:${rosterOpsPort}/`;
-        const idpAuth = `Basic ${Buffer.from(`${resolveAdminUser()}:${rosterAdminPass}`).toString("base64")}`;
-        const idpRows = await readIdpMappingRows({ opsUrl: idpOpsUrl, authHeader: idpAuth, timeoutMs: 5000 });
-        if (idpRows === null) {
-          issues++;
-          console.log(`  ${render.icons.warn} Could not read the Credential table, so the IdP mapping check did not run.`);
-        } else if (idpRows.length === 0) {
-          console.log(`  ${render.icons.ok} No IdP mapping rows are stored.`);
-        } else {
-          const audit = await readCredentialAudit({ opsUrl: idpOpsUrl, authHeader: idpAuth, ids: idpRows.map((r) => r.id), timeoutMs: 10000 });
-          if (audit.kind !== "ok") {
-            issues++;
-            console.log(
-              `  ${render.icons.warn} ${idpRows.length} IdP mapping row(s) are stored, but the audit log ` +
-                (audit.kind === "disabled" ? "is off" : "could not be read") +
-                ", so which were written by a non-admin agent cannot be told.",
-            );
-            console.log(`     ${render.wrap(render.c.dim, "Fix:")} review them with \`flair principal links <principal>\`` +
-              (audit.kind === "disabled" ? "; enable logging.auditLog in the ROOT harperdb-config.yaml to attribute future writes." : "."));
-          } else {
-            // A row the log cannot attribute is a counted finding, not a clean
-            // result. A finding prints the admin commands that clear it for the
-            // rows whose ids can go in a shell command, and names the
-            // operations when none can.
-            const report = idpMappingWriterReport(describeIdpMappingWriters(idpRows, audit.byId), {
-              opsUrl: idpOpsUrl,
-              adminUser: resolveAdminUser(),
-            });
-            for (const finding of report.findings) {
-              issues++;
-              console.log(`  ${render.icons.warn} ${finding.warn}`);
-              const [first, ...rest] = finding.fix;
-              console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${first}`);
-              for (const line of rest) console.log(`       ${line}`);
-            }
-            if (report.clear) console.log(`  ${render.icons.ok} ${report.clear}`);
-            console.log(`  ${render.icons.info} ${report.note}`);
           }
         }
       }

@@ -15,24 +15,3 @@
   `flair mcp enable`, `flair principal link`, and the /mcp and XAA
   just-in-time provisioners write mappings as before; the linker now stamps a
   new mapping's `createdAt` at the mapping write.
-
-  `flair doctor` has a new read-only **IdP mappings** check, from Harper's
-  audit log, over the active mappings. It lists the rows whose retained
-  history, since it last started over, shows a non-admin agent creating the
-  row as a mapping or changing a mapping field. It reports as unattributed the
-  rows whose retained history starts at neither a recorded creation nor an
-  administrator's review re-stamp. A mapping the just-in-time provisioners or
-  an administrator's Credential write create is attributed by its `createdAt`
-  (the server's time, within 60 seconds of its audit entry); one the linker
-  creates is attributed when the linker host's clock is within 60 seconds of
-  the server's. An administrator's update that leaves `createdAt` as it was,
-  such as a label edit, does not start a history over. Each finding is a
-  counted issue. For rows whose ids can go in a shell command, doctor prints
-  the operations-API commands that clear it: revoke the mapping, or re-stamp
-  one you reviewed and keep. Otherwise it names those operations. A write made
-  before the `flair-agent` Harper user existed is recorded as an
-  administrator's. The check changes nothing.
-
-  > **Heads-up:** after upgrading, run `flair doctor`. Review any mapping it
-  > lists or cannot attribute, then revoke it or re-stamp it as doctor
-  > describes.

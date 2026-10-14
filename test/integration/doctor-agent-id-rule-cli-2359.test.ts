@@ -15,8 +15,7 @@
  *      reported, and the finding moves the summary count;
  *   2. an Agent-ID check that could NOT run — no admin credential, a failed
  *      roster read, or an admin-pass file the credential resolver refuses — is
- *      a counted issue, not a clean result. Under a failed read the Agent homes
- *      and IdP mappings checks are counted NOT RUN too.
+ *      a counted issue, not a clean result.
  *
  * Build prerequisite: dist/cli.js and dist/resources/*.js must exist
  * (`bun run build && bun run build:cli`).
@@ -123,7 +122,6 @@ describe("flair doctor — the Agent IDs section (flair#2359, real CLI + real sp
     const base = await runDoctor(ADMIN_PASS);
     expect(base.stderr, base.stderr).toBe("");
     expect(base.stdout).toContain("No stored agent id is outside");
-    expect(base.stdout).toContain("No IdP mapping rows are stored");
     const baseCount = issueCount(base.stdout);
 
     // 2. A stored id whose createdAt sorts BELOW "1970-01-01" — the old
@@ -143,29 +141,25 @@ describe("flair doctor — the Agent IDs section (flair#2359, real CLI + real sp
     expect(issueCount(reported.stdout), "the reported invalid id did not move the summary").toBe(baseCount + 1);
 
     // 3. A roster read that fails (wrong admin credential) is a counted issue —
-    //    for the Agent-ID, Agent homes and IdP mappings sections. flair#2483:
-    //    the ops endpoint refuses the credential's configuration read, so doctor
-    //    cannot show the two ports are one instance, and those checks are
+    //    for the Agent-ID section AND the Agent homes section. flair#2483: the
+    //    ops endpoint refuses the credential's configuration read, so doctor
+    //    cannot show the two ports are one instance, and both checks are
     //    reported NOT RUN rather than read. flair#2520: the audit-log and
     //    instance-identity sections share that pair check, so they are NOT RUN
     //    and counted too.
     const unreadable = await runDoctor("wrong-admin-pass-not-a-secret");
     expect(unreadable.stdout).toContain("Agent IDs: NOT RUN");
     expect(unreadable.stdout).toContain("Agent homes: NOT RUN");
-    expect(unreadable.stdout).toContain("IdP mappings: NOT RUN");
     expect(unreadable.stdout).toContain("Audit log: NOT RUN");
     expect(unreadable.stdout).toContain("Instance identity: NOT RUN");
     expect(unreadable.stdout).not.toContain("No stored agent id is outside");
-    expect(unreadable.stdout).not.toContain("No IdP mapping rows are stored");
-    expect(issueCount(unreadable.stdout), "the unrun checks left the summary clean").toBe(baseCount + 5);
+    expect(issueCount(unreadable.stdout), "the unrun check left the summary clean").toBe(baseCount + 4);
 
     // 4. No admin credential at all: the Agent-ID check is a counted issue, not
-    //    a pass; the Agent homes and IdP mappings checks are reported skipped and
-    //    not counted.
+    //    a pass; the Agent homes check is reported skipped and not counted.
     const noCred = await runDoctor("");
     expect(noCred.stdout).toContain("no admin credentials");
     expect(noCred.stdout).toContain("Agent homes check skipped (no admin credential)");
-    expect(noCred.stdout).toContain("IdP mapping check skipped (no admin credential)");
     expect(issueCount(noCred.stdout), "the skipped check left the summary clean").toBe(baseCount + 1);
   }, 120_000);
 
