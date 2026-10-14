@@ -247,3 +247,49 @@ describe("flair#1940 slice 2b — bootstrap prose cites the host source (real Ha
     expect(line).not.toContain("openclaw/run"); // assertion: the host object is never rendered
   }, 180_000);
 });
+
+describe("flair#2448 — the structured bootstrap containers omit the host-source pointer (real Harper)", () => {
+  // Seed a sourced memory and its bound pointer, then read it back through the
+  // real bootstrap. The caller may see this pointer (author + scopeAtWrite null
+  // is author-only, so the AUTHOR is the reader who sees it).
+  const seedSourced = async (key: string): Promise<{ id: string; content: string }> => {
+    const id = `hs2b-struct-${key}-${sfx}`;
+    const content = `zqhs2bstruct${key}${sfx} structured recall`;
+    const tok = randomUUID();
+    const now = new Date().toISOString();
+    await seedInsert("Memory", {
+      id, agentId: AUTHOR, content, durability: "standard",
+      visibility: "shared", archived: false, instanceToken: tok, createdAt: now,
+    });
+    await seedInsert("MemoryHostSource", {
+      memoryId: id, hostSource: JSON.stringify(POINTER), scopeAtWrite: null,
+      authorId: AUTHOR, memoryInstanceToken: tok, receivedAt: now,
+    });
+    return { id, content };
+  };
+
+  test("as the owner: the container entry omits the pointer, the prose cites it", async () => {
+    const { id, content } = await seedSourced("owner");
+    const body = await tool(AUTHOR, "bootstrap", { includeContext: true, maxTokens: 8000 });
+    const struct = ((body?.memories as any[]) ?? []).find((m) => m.id === id);
+    expect(struct, "the sourced memory is in the returned container").toBeDefined(); // assertion: recalled
+    expect(struct).not.toHaveProperty("hostSource"); // assertion: no pointer on the returned entry
+    expect(struct).not.toHaveProperty("hostSourceScope");
+    expect(struct).not.toHaveProperty("hostSourceVisibility");
+    const line = lineFor(String(body?.context ?? ""), content);
+    expect(line, "the owner's prose cites the pointer it may see").toContain(`[via ${POINTER.host}/${POINTER.kind} ${ID8}`); // assertion: the visible pointer renders in the prose
+  }, 180_000);
+
+  test("as an admin: the container entry omits the pointer and the prose is uncited", async () => {
+    const { id, content } = await seedSourced("admin");
+    const body = await tool(AUTHOR, "bootstrap", { includeContext: true, maxTokens: 8000 }, true);
+    const struct = ((body?.memories as any[]) ?? []).find((m) => m.id === id);
+    expect(struct, "the sourced memory is in the admin's returned container").toBeDefined(); // assertion: recalled
+    expect(struct).not.toHaveProperty("hostSource"); // assertion: no pointer on the admin's returned entry
+    expect(struct).not.toHaveProperty("hostSourceScope");
+    expect(struct).not.toHaveProperty("hostSourceVisibility");
+    const line = lineFor(String(body?.context ?? ""), content);
+    expect(line, "the sourced item is recalled for the admin").not.toBe(""); // assertion: recalled
+    expect(line).not.toContain("[via"); // assertion: the admin prose takes no join
+  }, 180_000);
+});
