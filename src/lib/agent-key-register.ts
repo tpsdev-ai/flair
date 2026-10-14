@@ -50,7 +50,7 @@ export const REGISTRATION_CONFLICT = "registration_conflict";
 /** 503: the registration store is unavailable, or committed state could not be confirmed. */
 export const REGISTRATION_UNAVAILABLE = "registration_unavailable";
 
-/** The OrgEvent kind a committed registration writes (fingerprint only, never the key). */
+/** The OrgEvent kind a committed registration writes (its detail carries the fingerprint, not the key). */
 export const AGENT_KEY_REGISTERED_EVENT = "agent_key_registered";
 
 /** A canonical, unpadded, base64url-encoded 32-byte Ed25519 public key. */
@@ -74,8 +74,9 @@ export function isCanonicalEd25519Base64url(value: unknown): boolean {
 
 /**
  * The audit fingerprint of a registered key: the hex sha256 of its canonical
- * base64url string. The audit row and the OrgEvent carry this, never the key;
- * the key itself is stored only on the Agent row. Uses the ambient WebCrypto
+ * base64url string. The audit row's key field and the OrgEvent's detail carry
+ * this in place of the key; their identifier fields carry the agent id. The key
+ * itself is stored on the Agent row. Uses the ambient WebCrypto
  * (the same primitive the auth paths digest/verify with), so this module
  * imports nothing.
  */

@@ -1363,6 +1363,9 @@ export class FederationSync extends Resource {
               // (resources/AgentKeyRegister.ts) or an administrator's raw write
               // through the operations API (a trust root). It carries its OWN
               // reason so the skip log tells it apart from the status refusal.
+              // It runs AFTER the status guard above, so a record that changes
+              // both the status and a pending key is refused with the status
+              // reason.
               if (record.table === "Agent" && inboundChangesExistingPendingKey(record, row)) {
                 return { skip: true, reason: "agent_pending_key_not_federated" };
               }

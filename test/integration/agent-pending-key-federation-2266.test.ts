@@ -4,9 +4,9 @@
 // The merge writes the Agent table through the RAW handle with a wholesale field
 // apply, so flair#2266 adds a guard: an inbound Agent record that would CHANGE a
 // local row's `publicKey` while the stored value is exactly `pending` is skipped
-// WHOLE as `agent_pending_key_not_federated` — distinct from the existing status
-// refusal `agent_status_not_federated`, which the plan still emits under its own
-// name.
+// WHOLE, as `agent_pending_key_not_federated` when the status guard has not
+// already refused it. The status refusal `agent_status_not_federated` runs first
+// and keeps its own name; the mixed case pins that precedence.
 //
 // The last two cases are the peer non-convergence consequence and its remedy. A
 // pending copy that arrived from another instance (A) carries A's
@@ -24,6 +24,7 @@ const sfx = Date.now().toString(36);
 const HUB = `apk-hub-${sfx}`;
 const PENDING = `apk-pending-${sfx}`;
 const STATUS_TARGET = `apk-status-${sfx}`;
+const MIXED = `apk-mixed-${sfx}`;
 const CONTROL = `apk-control-${sfx}`;
 const PEER_COPY = `apk-peercopy-${sfx}`;
 const now = () => new Date().toISOString();
@@ -101,7 +102,7 @@ describe("flair#2266 — an inbound federated Agent record cannot complete a pen
     harper = await startHarper();
     assertOwnInstance(harper);
     const t = new Date(Date.now() - 60_000).toISOString();
-    for (const id of [PENDING, STATUS_TARGET, CONTROL]) {
+    for (const id of [PENDING, STATUS_TARGET, CONTROL, MIXED]) {
       await ops({
         operation: "insert", table: "Agent",
         records: [{ id, name: id, role: "agent", admin: false, status: "active", runtime: "local", publicKey: "pending", createdAt: t, updatedAt: t }],
@@ -127,6 +128,15 @@ describe("flair#2266 — an inbound federated Agent record cannot complete a pen
     const rec = await rawAgent(PENDING);
     expect(rec?.publicKey, "the peer completed a pending row's key").toBe("pending");
     expect(rec?.runtime, "a second field in the refused record landed (partial merge)").toBe("local");
+  }, 30_000);
+
+  test("precedence: a record that changes BOTH the status and a pending key is refused by the status rule first, as agent_status_not_federated", async () => {
+    const out = await sync(MIXED, { data: { id: MIXED, status: "deactivated", publicKey: aKey } });
+    expect(out.skippedReasons?.agent_status_not_federated, JSON.stringify(out)).toBe(1);
+    expect(out.skippedReasons?.agent_pending_key_not_federated, JSON.stringify(out)).toBeUndefined();
+    const rec = await rawAgent(MIXED);
+    expect(rec?.status).toBe("active");
+    expect(rec?.publicKey).toBe("pending");
   }, 30_000);
 
   test("the status rule keeps its OWN name (the two skips are distinguishable)", async () => {

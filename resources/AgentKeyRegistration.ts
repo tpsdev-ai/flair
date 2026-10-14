@@ -2,8 +2,9 @@
  * AgentKeyRegistration.ts — the Flair resource route for the key-registration
  * audit log (flair#2266).
  *
- * One row per committed POST /AgentKeyRegister. It carries no secret (the key
- * FINGERPRINT, never the key). On this route reads are admin-only and create,
+ * One row per committed POST /AgentKeyRegister. It carries no secret: its key
+ * field is the FINGERPRINT, not the key, and `agentId` is the target agent's
+ * id. On this route reads are admin-only and create,
  * update and delete are refused. The registration operation is the table's only
  * application writer, through the raw table in its registration transaction.
  * The Harper operations API is a separate raw-table trust root, not governed

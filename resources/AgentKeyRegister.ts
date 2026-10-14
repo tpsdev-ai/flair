@@ -17,7 +17,7 @@
  * composition in resources/Federation.ts) inside ONE owned transaction
  * (resources/request-transaction.ts): a fresh read, the exactly-`pending` /
  * local / non-deactivated checks, then the key, the private audit row and the
- * redacted OrgEvent are staged together, the COMMITTED Agent row is confirmed
+ * OrgEvent (the key's fingerprint in place of the key) are staged together, the COMMITTED Agent row is confirmed
  * (resources/write-back.ts) before the commit, and the stored key is read back
  * AFTER the commit. The response is returned only when the read-back is equal.
  *
@@ -173,7 +173,7 @@ export class AgentKeyRegister extends Resource {
             // Stage the key and updatedAt (incremental update: unrelated fields
             // and the stored originator stand).
             await table.update(agentId, { publicKey: registered, updatedAt: now }, c);
-            // Stage the private audit row and the redacted OrgEvent in the SAME
+            // Stage the private audit row and the OrgEvent in the SAME
             // transaction: all three commit together or none does.
             await audit.put({
               id: registrationId,

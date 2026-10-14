@@ -144,6 +144,10 @@ describe("flair#2266 — admin key registration on a pending Agent row", () => {
   const syncedFromId = `akr-syncedfrom-${sfx}`;
   const syncedOriginId = `akr-syncedorigin-${sfx}`;
   const auditTargetId = `akr-audit-${sfx}`;
+  // An agent id is any string matching the agent-id rule, so a canonical key
+  // can also be an agent's id.
+  const keyAsIdKey = mkKey();
+  const keyAsId = keyAsIdKey.pub;
 
   const edAdminKey = mkKey();
   const successKey = mkKey();
@@ -187,6 +191,7 @@ describe("flair#2266 — admin key registration on a pending Agent row", () => {
     await seedAgent({ id: syncedFromId, status: "active", publicKey: "pending", _syncedFrom: FOREIGN_HOME });
     await seedAgent({ id: syncedOriginId, status: "active", publicKey: "pending", originatorInstanceId: LOCAL_ID, _originatorInstanceId: FOREIGN_HOME });
     await seedAgent({ id: auditTargetId, status: "active", publicKey: "pending" });
+    await seedAgent({ id: keyAsId, status: "active", publicKey: "pending" });
   }, 240_000);
 
   afterAll(async () => {
@@ -194,7 +199,7 @@ describe("flair#2266 — admin key registration on a pending Agent row", () => {
     if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
   }, 30_000);
 
-  test("an admin registers a caller-held key on a legacy pending row; read-back equals; audit + OrgEvent carry the fingerprint only", async () => {
+  test("an admin registers a caller-held key on a legacy pending row; read-back equals; the audit and OrgEvent key fields carry the fingerprint, the identifier fields the agent id", async () => {
     const before = await rowIn("Agent", successId);
     expect(before?.publicKey).toBe("pending");
 
@@ -210,7 +215,8 @@ describe("flair#2266 — admin key registration on a pending Agent row", () => {
     expect(after?.publicKey).toBe(body.publicKey);
     expect(after?.updatedAt).toBe(body.updatedAt);
 
-    // Audit row: fingerprint only, never the key.
+    // Audit row: the key field is the fingerprint; the identifier fields are ids.
+    // This agent's id is not the key, so no field holds the key string.
     const audit = await rowIn("AgentKeyRegistration", body.registrationId);
     expect(audit).not.toBeNull();
     expect(audit.agentId).toBe(successId);
@@ -219,13 +225,28 @@ describe("flair#2266 — admin key registration on a pending Agent row", () => {
     expect(audit.keyFingerprint).toBe(await keyFingerprint(successKey.pub));
     expect(JSON.stringify(audit)).not.toContain(successKey.pub);
 
-    // OrgEvent carries the fingerprint, never the key.
+    // OrgEvent: the detail carries the fingerprint; refId is the agent id.
     const event = await rowIn("OrgEvent", `admin-${body.updatedAt}-${body.registrationId}`);
     expect(event).not.toBeNull();
     expect(event.kind).toBe("agent_key_registered");
     expect(event.refId).toBe(successId);
     expect(String(event.detail)).toContain(await keyFingerprint(successKey.pub));
     expect(JSON.stringify(event)).not.toContain(successKey.pub);
+  }, 30_000);
+
+  test("an agent whose id equals its key: the key fields carry the fingerprint, the identifier fields carry the id (which is the key string)", async () => {
+    const { status, body } = await registerAsAdmin(keyAsId, keyAsIdKey.pub);
+    expect(status, JSON.stringify(body)).toBe(200);
+    const fp = await keyFingerprint(keyAsIdKey.pub);
+
+    const audit = await rowIn("AgentKeyRegistration", body.registrationId);
+    expect(audit.keyFingerprint).toBe(fp);
+    expect(audit.agentId).toBe(keyAsId);
+
+    const event = await rowIn("OrgEvent", `admin-${body.updatedAt}-${body.registrationId}`);
+    expect(event.detail).toBe(`key fingerprint ${fp}`);
+    expect(event.refId).toBe(keyAsId);
+    expect(event.summary).toBe(`registered a public key for ${keyAsId}`);
   }, 30_000);
 
   test("the registered key now authenticates the agent against this Harper", async () => {
