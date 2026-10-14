@@ -503,6 +503,17 @@ export class BootstrapMemories extends Resource {
     let eventWatermark: string | null = null;
     let eventsHasMore = false;
     let eventsRemaining = 0;
+    // flair#2448 item 3 (decision) — the STRUCTURED container deliberately
+    // carries NO host-source pointer: no `hostSource`, `hostSourceScope` or
+    // `hostSourceVisibility`. The pointer is a citation aid for the agent-facing
+    // RENDERED bootstrap (formatMemory's prose line); a non-admin structured
+    // consumer that needs the pointer reads the memory back through the gated
+    // Memory read (memory_get by id), which renders the pointer that caller may
+    // see. An admin Memory read takes no pointer join (Memory.ts), so it does not
+    // render the pointer either. The admin
+    // bootstrap's containers fall under the same rule (see hostSourceReader
+    // below). A test pins those three pointer fields absent here, so adding one
+    // is a deliberate change.
     const leanMemory = (m: any, section: string) => ({
       id: m.id,
       content: m.content,
@@ -557,6 +568,12 @@ export class BootstrapMemories extends Resource {
     // sections (OWN_SELECT) carry `agentId` and `instanceToken` only: their query
     // already excludes archived rows, and the reader is the author, so the author
     // outcome never reads `visibility`.
+    // flair#2448 item 3 (decision) — an admin bootstrap takes no join, and the
+    // structured containers are built without the pointer (see leanMemory), so
+    // neither the admin prose nor any structured container carries the host
+    // source. A non-admin structured consumer that needs the pointer reads the
+    // memory back through the gated Memory read (memory_get by id); an admin
+    // Memory read takes no pointer join, so it does not render the pointer.
     const hostSourceReader: string | undefined =
       authenticatedAgent && !callerIsAdmin ? authenticatedAgent : undefined;
     const pointerRenders = async (rows: readonly any[]): Promise<Map<string, any>> => {
