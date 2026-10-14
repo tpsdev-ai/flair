@@ -9,10 +9,10 @@
  * flair#2526). Then they delete: Memory purges through the CLI's real api()
  * transport to the HTTP port, Soul and Agent rows through the ops API's
  * `delete`. These tests run the real commands against a scratch Harper and
- * assert that a delete lands on the scanned instance and is written to the
- * MemoryDeletionHistory table the integrity watcher reads — and that an
- * unreadable or unpaired configuration is refused before any delete or any
- * request to the HTTP port.
+ * assert that deletes land on the scanned instance, that each deleted Memory
+ * row is recorded in the MemoryDeletionHistory table the integrity watcher
+ * reads, and that an unreadable or unpaired configuration is refused before
+ * any delete or any request to the HTTP port.
  *
  * Throwaway HOME + data dir, OS-assigned ports (never 9925/9926, never ~/.flair).
  */

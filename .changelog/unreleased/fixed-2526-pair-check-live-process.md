@@ -8,16 +8,19 @@
   same pid and start time when both are read again. A configuration that names
   a port another process serves is refused, whatever PID file or process id an
   endpoint reports. The check itself sends nothing to the HTTP port, and
-  `flair doctor` now runs it before any credentialed request to that port;
-  until the pair is proven, those sections report NOT RUN with the reason.
-  When doctor has no usable admin credential to check the pair with, it
-  proves the probed port's own listener (one stable process with a Harper
-  command line) without any credential, and then runs the requests to that
-  port only.
+  `flair doctor` now runs it before any credentialed request to that port and
+  holds those requests until the pair is proven, reporting NOT RUN with the
+  reason. One exception: when doctor has no usable admin credential to check
+  the pair with, and the probed port's own listener is one stable process
+  whose command line matches a Harper pattern, doctor sends that port
+  requests with no Authorization header or an Ed25519 signature. No Basic or
+  Bearer header goes out in that mode, from any source. A reused pid is refused when the recorded start time
+  differs; on macOS the start time has one-second resolution.
 
   The table shows only the listeners this CLI can see. A listener in another
   network namespace or container, or owned by a user this CLI may not
-  inspect, is refused, and so is a port reached through a forward
-  (docker-proxy, `ssh -L`): refused, never proven. Each refusal names the
+  inspect, is refused, and so is a port held by a forwarder whose command
+  line does not match Harper's (such as docker-proxy or `ssh -L`). The
+  command-line check does not authenticate the program. Each refusal names the
   reason and a remedy — not run for `flair doctor`, a refusal for the delete
   paths.

@@ -162,7 +162,21 @@ export function bindCli(fns: DoctorCli): void {
   cli = fns;
 }
 
+/**
+ * flair#2526: true while doctor's HTTP-port gate is `http-only` (the probed
+ * port's listener is proven but the HTTP/ops pair is not). Every `api()` call
+ * doctor makes then runs with the shared resolver's `signedOnly` transport:
+ * no Authorization header or an Ed25519 signature; never a Basic or Bearer
+ * header, from any source. Set by the doctor action each time it decides the
+ * gate.
+ */
+let signedOnlyTransport = false;
+
 function api(...args: any[]): any {
+  if (signedOnlyTransport) {
+    const options = args[3] && typeof args[3] === "object" ? args[3] : {};
+    args[3] = { ...options, signedOnly: true };
+  }
   return cli.api(...args);
 }
 
@@ -227,30 +241,41 @@ function verifyDoctorRosterInstance(...args: any[]): any {
 }
 
 /**
- * Whether `url` addresses `httpPort` on this host's loopback — the port the
- * pair check proves — so a credentialed request to it waits for that check.
+ * Whether `url` uses `httpPort`, the port the pair check proves, on ANY host,
+ * so a credentialed request to it waits for that check. The host is not
+ * compared: alternate host spellings and the wildcard address (`0.0.0.0`,
+ * `localhost.`, an IPv4-mapped address) can reach the probed listener under
+ * names no list can enumerate, so the gate conservatively holds any URL on
+ * the probed port, whatever its host, without claiming that every spelling
+ * reaches the listener. An unparseable URL is held too.
  */
 export function targetsProbedHttpPort(url: string, httpPort: number): boolean {
   let parsed: URL;
   try {
     parsed = new URL(url);
   } catch {
-    return false;
+    return true;
   }
-  if (!["127.0.0.1", "localhost", "[::1]", "::1"].includes(parsed.hostname)) return false;
   const port = parsed.port === "" ? (parsed.protocol === "https:" ? 443 : 80) : Number(parsed.port);
   return port === httpPort;
 }
 
 /**
  * Whether doctor may send a credential to the probed HTTP port (flair#2526).
- *   - `run`: the HTTP/ops pair is proven; every section runs.
+ *   - `run`: the HTTP/ops pair is proven; the gate permits every section
+ *     (each section's own prerequisites still apply).
  *   - `http-only`: the pair could not be checked for want of a usable admin
  *     credential (none, unresolvable, or refused by the ops endpoint), but the
- *     probed HTTP port's own listener is proven (proveLocalHarperListener):
- *     requests to that port run; sections that join it with the ops endpoint
- *     do not. `reason` says why the pair is unproven.
- *   - `not-run`: nothing credentialed goes to the HTTP port.
+ *     probed HTTP port's own listener passes proveLocalHarperListener (a
+ *     recognized Harper command line, stable across two reads; not an
+ *     authentication of the program): requests to that port are permitted
+ *     with no Authorization header or an Ed25519 signature, never a Basic or
+ *     Bearer header
+ *     (`signedOnlyTransport`); sections that join it with the ops endpoint
+ *     are not. `reason` says why the pair is unproven.
+ *   - `not-run`: the later credentialed requests to the HTTP port are held. (A
+ *     `not-run` from an Instance-id mismatch comes after the pair proof passed
+ *     and the Basic `/Instance/` identity read went to the probed port.)
  */
 type DoctorPairGate =
   | { kind: "run"; opsPort: number }
@@ -529,6 +554,7 @@ program
   .option("--fix", "Automatically fix issues where possible")
   .option("--dry-run", "Show what --fix would do without making changes")
   .action(async (opts) => {
+    signedOnlyTransport = false; // flair#2526: decided per run, below
     const port = resolveHttpPort(opts);
     const autoFix = opts.fix ?? false;
     const dryRun = opts.dryRun ?? false;
@@ -811,12 +837,14 @@ program
     // reads go through an ops endpoint, which must belong to the instance doctor
     // probed. Resolve the admin credential and verify that target with it here,
     // using the pair check flair#2483 applies (with flair#2526's live-process
-    // proof), before doctor's first credentialed request to the probed HTTP
-    // port, whose gate is derived from this answer below. Diagnostic reads that run use
+    // proof). The order is: pair proof, then (only when the pair is proven)
+    // the Basic `/Instance/` identity read on the probed HTTP port, then the
+    // gate below for the later diagnostic requests. Diagnostic reads that run use
     // the verified target; pairing refusals report NOT RUN with the shared
     // reason and remedy, and existing UNVERIFIED/skipped outcomes remain. With
-    // no usable admin credential there is no target (`read` null) and no ops
-    // endpoint is read. `effectivePort` is final: PID discovery (step 1) and any
+    // no resolvable admin password there is no target (`read` null) and no ops
+    // endpoint is read. A resolved password that the ops endpoint rejects
+    // (HTTP 401/403) has been sent there, and the answer is `not-run`. `effectivePort` is final: PID discovery (step 1) and any
     // --fix re-record have already run. This answer describes the credential
     // and the process serving the probed port at this point, so it is shared
     // only until a --fix step may change either: the launchd repair (7b, which
@@ -846,17 +874,23 @@ program
     let servingProcessMayHaveChanged = false;
 
     // flair#2526: doctor sends a credential to the probed HTTP port only after
-    // that port is proven. The gate is derived from the probed target above
-    // (decideDoctorPairGate), before the first credentialed request, with the
-    // admin credential going only to the ops endpoint. Unauthenticated reads
+    // that port is proven. The pair proof above runs before any credentialed
+    // HTTP request (its own Basic `/Instance/` identity read follows only a
+    // proven pair). The gate is derived from that answer (decideDoctorPairGate)
+    // for the later diagnostic requests. Unauthenticated reads
     // (/Health, /OAuthMetadata, OAuth discovery, an unsigned /Presence) do not
     // wait for it.
-    //   - `run` (the HTTP/ops pair is proven): every section runs.
+    //   - `run` (the HTTP/ops pair is proven): the gate permits every section;
+    //     each section's own prerequisites still apply.
     //   - `http-only` (no usable admin credential to check the pair with, but
-    //     the probed port's own listener is proven): requests to the HTTP port
-    //     run, signed or not (flair#2270: `doctor --agent` with an unusable
-    //     ambient credential still reads the redirect state); sections that
-    //     join the HTTP port with the ops endpoint do not.
+    //     the probed port's listener passes the listener-only check): requests
+    //     to the HTTP port are permitted with no Authorization header or an
+    //     Ed25519 signature; never Basic or Bearer. Every
+    //     api() call runs signedOnly, so no Basic or Bearer header goes out from
+    //     any source (FLAIR_TOKEN, FLAIR_ADMIN_PASS, HDB_ADMIN_PASSWORD, the
+    //     admin-pass file). flair#2270: `doctor --agent` with an unusable
+    //     ambient credential still reads the redirect state. Sections that join
+    //     the HTTP port with the ops endpoint are not permitted.
     //   - `not-run`: every credentialed request to the HTTP port is held and its
     //     section reports NOT RUN with the reason.
     // After a --fix step that may change the serving process, the gate is
@@ -866,6 +900,7 @@ program
     let pairNotRun = pairGate !== null && pairGate.kind !== "run" ? pairGate : null;
     /** Whether requests to the probed HTTP port are held. */
     let httpHeld = pairGate?.kind === "not-run";
+    signedOnlyTransport = pairGate?.kind === "http-only";
     let pairRemedyShown = false;
     /** Print `<label>: NOT RUN — <reason>`, with the remedy the first time. */
     function reportPairNotRun(label: string, indent = "  "): void {
@@ -2106,6 +2141,7 @@ program
       pairGate = harperResponding ? decideDoctorPairGate(lateProbe, effectivePort) : null;
       pairNotRun = pairGate !== null && pairGate.kind !== "run" ? pairGate : null;
       httpHeld = pairGate?.kind === "not-run";
+      signedOnlyTransport = pairGate?.kind === "http-only";
       pairRemedyShown = false;
     }
     const verifiedReadAgentIds = harperResponding
@@ -2413,8 +2449,9 @@ program
       const guiDomain = `gui/${process.getuid?.() ?? ""}`;
 
       let livePeerCount: number | null = null;
-      // flair#2526: a credentialed read, so only once the pair is proven; an
-      // unread count falls back to the configured peers below.
+      // flair#2526: a credentialed read, held while the gate is `not-run`; in
+      // `http-only` it runs signed-only (no Basic or Bearer header). An unread
+      // count falls back to the configured peers below.
       if (harperResponding && !httpHeld) {
         try {
           const r = await api("GET", "/FederationPeers", undefined, { baseUrl }) as { peers?: Array<{ status?: string }> };

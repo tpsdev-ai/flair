@@ -18,7 +18,8 @@
  * namespace or container, or owned by a user this CLI may not inspect) is
  * absent from the table or has no owner the table can name, and a port
  * reached through a forward is held by the forwarder (docker-proxy, ssh -L).
- * Callers refuse every one of those. A CLI inside the same container, or
+ * Callers refuse a listener they cannot see, and a forwarder whose observed
+ * command line does not match Harper's. A CLI inside the same container, or
  * allowed to inspect that user's processes, sees the listener.
  */
 import { execFileSync } from "node:child_process";
@@ -38,8 +39,8 @@ export function lsofListenerArgs(port: number): string[] {
 /** What to do when the table does not show this CLI the listener, or shows a forwarder. */
 export const LISTENER_VISIBILITY_REMEDY =
   "Run this command where it can see Harper's own listener: on the host (or inside the container) where Harper "
-  + "runs, as a user allowed to inspect Harper's process. A port reached through a forward (docker-proxy, ssh -L) "
-  + "is refused, never proven.";
+  + "runs, as a user allowed to inspect Harper's process. A port held by a forwarder whose command line does not "
+  + "match Harper's (such as docker-proxy or ssh -L) is refused.";
 
 /**
  * Parse `lsof -Fp` output into the distinct listening pids, sorted. Only `p`
@@ -217,12 +218,13 @@ function readFromProc(port: number, io: ListenerTableIo): ListenerRead {
 }
 
 /**
- * A process's birth identity: its pid plus its start time, which differs
- * between two processes that held the same pid one after the other.
+ * A process's birth identity: its pid plus its recorded start time. Two
+ * processes that held the same pid one after the other are told apart when
+ * their recorded start times differ.
  *   - Linux: field 22 (starttime, clock ticks since boot) of `/proc/<pid>/stat`.
  *   - every other platform: `ps -o lstart= -p <pid>` under `LC_ALL=C`, which
- *     names the start to the second. Two processes that reuse one pid within
- *     the same second are not told apart.
+ *     records the start to the second, so two processes that reuse one pid
+ *     within the same second are not told apart.
  */
 export type BirthRead =
   | { kind: "birth"; id: string }

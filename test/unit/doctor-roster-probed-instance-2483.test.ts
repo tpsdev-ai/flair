@@ -294,7 +294,7 @@ function freePort(): Promise<number> {
 }
 
 describe("proveLocalInstancePair — the configuration must pair the ops port with a loopback HTTP port", () => {
-  test("a configuration recording the asked ops port and a loopback HTTP port, with one Harper process listening on both, is proven", async () => {
+  test("a configuration recording the asked ops port and a loopback HTTP port, with one process with a recognized Harper command line listening on both, is proven", async () => {
     configure({ http: { port: `127.0.0.1:${capture.port}` }, operationsApi: { network: { port: `127.0.0.1:${serverPort}` } } });
     expect(await proveLocalInstancePair(serverPort, AUTH, oneHarperOnBoth())).toEqual({ kind: "proven", httpPort: capture.port });
     // Only the configuration is asked for; no process id an endpoint reports is evidence.

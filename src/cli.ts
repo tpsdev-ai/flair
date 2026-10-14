@@ -1812,13 +1812,16 @@ export function decideDoctorRosterIdentity(opsPort: number, pair: ProbedPairIden
  * RUN, and their diagnostic reads do not run: all four section reads, unless a
  * `--fix` step that may have changed the serving process made the roster and
  * home sections ask again (the answer describes the process serving the probed
- * port when it was taken). Doctor also derives from it, before its first
- * credentialed request to the probed HTTP port, whether that request may be
- * sent (flair#2526). Reaching a `not-run` may itself have read the candidate's
- * configuration (step 2) and both endpoints' instance identities (step 3).
+ * port when it was taken). Doctor also derives from it whether its later
+ * diagnostic requests to the probed HTTP port may be sent (flair#2526); the
+ * pair proof (step 2) precedes any credentialed HTTP request, and step 3's
+ * Basic identity read on the HTTP port follows only a proven pair. Reaching a
+ * `not-run` may itself have read the candidate's configuration (step 2) and
+ * both endpoints' instance identities (step 3).
  * Step 2 sees only the listeners this CLI can see: one outside that view
  * (another network namespace or container, or a user this CLI may not
- * inspect), or a port reached through a forward, is NOT RUN; step 3 adds a
+ * inspect), or a port held by a forwarder whose command line does not match
+ * Harper's, is NOT RUN; step 3 adds a
  * check only when both endpoints have exactly one Instance row.
  */
 export async function verifyDoctorRosterInstance(
@@ -2874,7 +2877,7 @@ function b64url(bytes: Uint8Array): string {
  * / disabling authorizeLocal there) is tracked separately in flair#654 and is
  * out of scope for this HTTP/REST auth path.
  */
-async function api(method: string, path: string, body?: any, options?: { baseUrl?: string; keysDir?: string; agentId?: string | null; agentIdSource?: SigningIdentitySource; explicitAdminPass?: string; adminUser?: string }): Promise<any> {
+async function api(method: string, path: string, body?: any, options?: { baseUrl?: string; keysDir?: string; agentId?: string | null; agentIdSource?: SigningIdentitySource; explicitAdminPass?: string; adminUser?: string; signedOnly?: boolean }): Promise<any> {
   // Resolve port via the canonical path (flair#1129): options.baseUrl > FLAIR_URL > resolveHttpPort.
   // api() callers mean the default install, so resolveHttpPort({}) with no --data-dir is correct.
   const hasExplicitBase = !!(options?.baseUrl || process.env.FLAIR_URL);
@@ -2905,6 +2908,7 @@ async function api(method: string, path: string, body?: any, options?: { baseUrl
     explicitAdminPass: options?.explicitAdminPass,
     adminUser: options?.adminUser,
     agentIdSource: options?.agentIdSource,
+    signedOnly: options?.signedOnly,
   };
 
   try {

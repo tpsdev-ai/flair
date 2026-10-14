@@ -345,10 +345,11 @@ describe("flair#2520 — doctor --fix resolves the admin credential again after 
     delete process.env.FLAIR_ADMIN_PASS;
     process.env.HDB_ADMIN_PASSWORD = INSTANCE_PASS;
     // flair#2526: the real pair check also proves from the OS listener table
-    // that one Harper process listens on both ports. The probed instance here
-    // exists only at the fetch layer, so its listener table is simulated the
-    // same way: one simulated Harper process on fixture port 9 and its ops port,
-    // with a fixed start time. No such process exists.
+    // that one process with a Harper command line listens on both ports. The
+    // probed instance here exists only at the fetch layer, so its listener
+    // table is simulated the same way: one simulated process with a Harper
+    // command line on fixture port 9 and its ops port, with a fixed start
+    // time. No such process exists.
     setInstancePairOsReadsForTests({
       listeners: (port) => ({ kind: "listeners", pids: port === 9 || port === INSTANCE_OPS ? [25_200] : [] }),
       birth: (pid) => ({ kind: "birth", id: `${pid}@simulated` }),

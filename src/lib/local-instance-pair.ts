@@ -21,20 +21,27 @@
  *      identity (pid plus start time: `/proc/<pid>/stat` on Linux, `ps -o
  *      lstart=` elsewhere) (flair#2526);
  *   3. it requires each listener to have a recognized Harper command line
- *      (`isHarperProcessCommandLine`), so a forwarder holding a port is refused;
+ *      (`isHarperProcessCommandLine`), so a forwarder whose observed command
+ *      line does not match Harper's (such as docker-proxy or ssh -L) is refused;
  *   4. it requires the two listeners to be one pid;
  *   5. it reads both listeners and their birth identities again and requires
- *      them unchanged, so a process replaced between reads (a restart that
- *      reused the pid) is refused.
+ *      them unchanged, so a process replaced between reads under a reused pid
+ *      is refused when its start time differs. On macOS the start time has
+ *      one-second resolution, so a replacement started within the same second
+ *      is not told apart (a finer birth identity is a follow-up).
  * Only then does it report the configured HTTP port. `flair doctor` requires it
  * to equal the HTTP port doctor probed. The delete paths compare it with
  * `--port` only when `--port` is given; otherwise they address that port.
  *
  * Nothing is sent to the HTTP port: the admin credential goes only to the ops
  * endpoint the caller named. Both callers send a credential to the HTTP port
- * only after this check proves it, or, in doctor when no usable admin
- * credential can run it, after {@link proveLocalHarperListener} proves that
- * port's own listener (src/commands/doctor.ts `decideDoctorPairGate`).
+ * only after this check proves the pair. Doctor has one exception: when no
+ * usable admin credential can run this check, and
+ * {@link proveLocalHarperListener} passes for that port's own listener, it
+ * sends that port requests with no Authorization header or an Ed25519
+ * signature, never a Basic or Bearer header
+ * (src/commands/doctor.ts `decideDoctorPairGate`, the shared resolver's
+ * `signedOnly` transport).
  * No PID file and no process id an endpoint reports about itself is evidence
  * (Harper's own `system_information` pid is read from its `hdb.pid`).
  *
@@ -44,10 +51,12 @@
  *
  * Its limits: the listener table shows only what this CLI can see, so a Harper
  * listener outside that view (another network namespace or container, or a
- * user this CLI may not inspect) is refused, and so is a port reached through
- * a forward (docker-proxy, ssh -L): refused, never proven. The command-line
- * check reads what `ps`/`/proc` report; it does not authenticate the program.
- * The macOS start time has one-second resolution.
+ * user this CLI may not inspect) is refused, and so is a port held by a
+ * forwarder whose observed command line does not match Harper's, such as
+ * docker-proxy or ssh -L. The command-line check reads what `ps`/`/proc`
+ * report; it does not authenticate the program, so a forwarder started with a
+ * Harper-shaped command line is not told apart. The macOS start time is
+ * recorded to the second.
  */
 import { harperPortValue } from "./harper-port-value.js";
 import { isHarperProcessCommandLine } from "./daemon-liveness.js";
@@ -96,8 +105,9 @@ export function setInstancePairOsReadsForTests(reads: Partial<InstancePairOsRead
 
 /**
  * Ask the loopback ops endpoint on `opsPort` for its configuration, then prove
- * from the OS listener table that one Harper process listens on both that ops
- * port and the configured HTTP port (see the module comment). `authorization`
+ * from the OS listener table that one process with a recognized Harper command
+ * line listens on both that ops port and the configured HTTP port (see the
+ * module comment). `authorization`
  * is the full `Authorization` header value; it is sent only to `opsPort`.
  * `status` is the HTTP status of a non-2xx answer, else null.
  */
@@ -182,12 +192,14 @@ export async function proveLocalInstancePair(
 
 /**
  * The credential-free half of the check, for one HTTP port (flair#2526): one
- * process listens on `httpPort`, it has a recognized Harper command line, and
- * its pid and start time are unchanged on a second read. Nothing is sent to
- * any port. It proves the port's listener is a Harper process, not which ops
- * endpoint it pairs with: `flair doctor` uses it only when the full check
- * could not read the ops configuration for want of a usable admin credential,
- * and then only for requests to that HTTP port.
+ * process listens on `httpPort`, its command line matches a recognized Harper
+ * pattern, and its pid and start time are unchanged on a second read (to the
+ * second on macOS). Nothing is sent to any port. The command-line match does
+ * not authenticate the program, and the check says nothing about which ops
+ * endpoint the listener pairs with: `flair doctor` uses it only when the full
+ * check could not read the ops configuration for want of a usable admin
+ * credential, and then sends that HTTP port requests with no Authorization
+ * header or an Ed25519 signature; never Basic or Bearer.
  */
 export function proveLocalHarperListener(httpPort: number, deps: Pick<LocalInstancePairDeps, "osReads"> = {}): LocalInstancePairProof {
   const os: InstancePairOsReads = { ...DEFAULT_OS_READS, ...osReadsForTests, ...deps.osReads };
