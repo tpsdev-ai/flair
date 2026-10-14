@@ -1497,11 +1497,11 @@ describe("slice 2 — capture normalisation, ids and outcomes", () => {
 //
 // This is a DISPATCH test with synthetic snapshots, not a producer test. The
 // session producer is the pinned host's embedded agent runner
-// (`createOpenClawAgentHarness().runAttempt`). It is NOT drivable in-process from
-// this package: a bare `runAttempt({})` enters an embedded run and dies at
-// `mkdir ''`, because an attempt must be fully prepared (resolved config, model
-// registry, session file and lock, sandbox, abort signal) and reach a live
-// provider. This drives the host's real agent_end dispatch instead
+// (`createOpenClawAgentHarness().runAttempt`). It is not driven by this PR: a
+// bare `runAttempt({})` enters an embedded run and dies at `mkdir ''`, and an
+// attempt must be fully prepared (resolved config, model registry, session file
+// and lock, sandbox, abort signal) and reach a provider, which this PR does not
+// set up. This drives the host's real agent_end dispatch instead
 // (`awaitAgentHarnessAgentEndHook`, the function `runEmbeddedAttempt` calls
 // through `runAgentEndSideEffects`), over the pinned host's real hook runner,
 // with snapshots the TEST supplies. The dispatcher forwards the event it is
@@ -1533,7 +1533,7 @@ describe("flair#2560 — the pinned host's real agent_end dispatch, with synthet
     throw new Error(`${pretty} is not exported by ${file}`);
   }
 
-  test("real agent_end dispatch, synthetic snapshots: a message the test re-delivers keeps its identity through the dispatcher and is stored once", async () => {
+  test("real agent_end dispatch, synthetic snapshots: a message the test re-delivers keeps its identity through the dispatcher and issues one Memory write request", async () => {
     const { dist, version: hostVersion } = supportedRunnerHost();
     const { createHookRunner } = await import(pathToFileURL(join(dist, distChunk(dist, /^hooks-.*\.mjs$/, "export { createHookRunner };"))).href);
     const helpersFile = distChunk(dist, /^lifecycle-hook-helpers-.*\.mjs$/, "awaitAgentHarnessAgentEndHook");
@@ -1568,7 +1568,8 @@ describe("flair#2560 — the pinned host's real agent_end dispatch, with synthet
       expect(snapshots[0][0]).toBe(messageIdentity(M1));
       // Not vacuous: the identity is sensitive to the timestamp field it keys on.
       expect(messageIdentity({ ...M1, timestamp: (M1 as any).timestamp + 1 })).not.toBe(messageIdentity(M1));
-      // The session retains M1's identity, so its re-delivery is not stored again.
+      // The session retains M1's identity, so its re-delivery issues no second
+      // Memory write request (this stubs fetch; the real-Harper test reads rows).
       const puts = calls.filter((c) => c.method === "PUT" && /\/Memory\//.test(c.url));
       const sources = puts.filter((c) => String((c.body as any).content).includes("the dispatched first message")).map((c) => (c.body as any).hostSource.id);
       expect(sources).toEqual(["run-1"]);
@@ -2150,7 +2151,7 @@ describe("flair#2513 — agent_end capture is keyed by counted message identitie
     expect(puts(calls)).toHaveLength(4); // the tool result is never captured
   });
 
-  test("flair#2560 (mutation: a live identity is evicted): a snapshot over sessionMessageCap distinct messages, across several runs: each run's own new message is captured and nothing older is captured again", async () => {
+  test("flair#2560 (mutation: a live identity is evicted): a snapshot over sessionMessageCap distinct messages, across several runs: the message each run appends is captured and nothing earlier is captured again", async () => {
     writeKey("A");
     const plugin = await loadPlugin();
     const calls = installFetchStub();
@@ -2184,7 +2185,7 @@ describe("flair#2513 — agent_end capture is keyed by counted message identitie
     expect(captureInternals.sessionIdentityCount?.() ?? -1).toBe(size + 2);
   });
 
-  test("flair#2560 (mutation: oldest first; mutation: a capped message recorded as seen): a run's cap is spent newest first, and the message it left out is captured by the next run", async () => {
+  test("flair#2560 (mutation: oldest first; mutation: a capped message recorded as seen): a run's cap is spent from the last snapshot position, and the message it left out is captured by the next capture scan", async () => {
     writeKey("A");
     const plugin = await loadPlugin();
     const calls = installFetchStub();
@@ -2194,7 +2195,7 @@ describe("flair#2513 — agent_end capture is keyed by counted message identitie
     const say = (text: string, timestamp: number) => ({ role: "user", content: `remember this: ${text}`, timestamp });
     const U0 = say("the session's opening message", 0);
     // Run 2 holds four new eligible messages; the cap (autoCaptureMaxPerSession,
-    // default 3) takes the three newest.
+    // default 3) takes the three at the last positions of the snapshot.
     const run2 = [say("run two, message a", 1), say("run two, message b", 2), say("run two, message c", 3), say("run two, message d", 4)];
     const e = say("run three's own message", 5);
 
@@ -2212,7 +2213,7 @@ describe("flair#2513 — agent_end capture is keyed by counted message identitie
     expect(by("run three's own message")).toEqual(["run-3"]);
   });
 
-  test("flair#2560 cold start (mutation: a cold scan leaves capped messages unseen): a session's first scan captures at most the run's cap of the newest eligible messages and records the rest as seen", async () => {
+  test("flair#2560 cold start (mutation: a cold scan leaves capped messages unseen): a session's first scan captures at most the run's cap, from the last eligible position, and records the rest as seen", async () => {
     writeKey("A");
     const plugin = await loadPlugin();
     const calls = installFetchStub();
@@ -2229,7 +2230,8 @@ describe("flair#2513 — agent_end capture is keyed by counted message identitie
 
     const by = (needle: string) => puts(calls).filter((c) => contentOf(c).includes(needle)).map(sourceOf);
     for (const i of [5, 4, 3]) expect(by(`an older message ${i}`)).toEqual(["run-1"]);
-    // Beyond the cap in the cold scan: recorded as seen, never captured later.
+    // Beyond the cap in the cold scan: recorded as seen, so a later scan of
+    // this retained session state does not offer them again.
     for (const i of [2, 1]) expect(by(`an older message ${i}`)).toEqual([]);
     expect(by("the next run's own message")).toEqual(["run-2"]);
   });
@@ -2249,6 +2251,146 @@ describe("flair#2513 — agent_end capture is keyed by counted message identitie
     const lines = api._warnText().split("\n").filter((l: string) => l.includes("stored a near-duplicate of an existing memory"));
     expect(lines.map((l: string) => l.match(/; (\d+) such capture/)?.[1])).toEqual(["1", "2", "4"]);
     expect(lines[0]).toContain("for agent A");
+  });
+
+  test("flair#2560 (mutation: a refused scan settles a deferred message): a message an earlier run's cap left out stays unseen through a refused run, and the next capture scan captures it", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const calls = installFetchStub();
+    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
+    plugin.register(api as any);
+    const ctx = { agentId: "A", sessionId: "sess-deferred" };
+    const say = (text: string, timestamp: number) => ({ role: "user", content: `remember this: ${text}`, timestamp });
+    const U0 = say("the opening message", 0);
+    const run2 = [say("run two's deferred message a", 1), say("run two's kept message b", 2), say("run two's kept message c", 3), say("run two's kept message d", 4)];
+    const failed = say("the failed run's message", 5);
+    const next = say("the next run's message", 6);
+
+    await api._fire("agent_end", { runId: "run-1", success: true, messages: [U0] }, ctx);
+    // Run 2's cap leaves message a unseen.
+    await api._fire("agent_end", { runId: "run-2", success: true, messages: [U0, ...run2] }, ctx);
+    // Run 3 is refused (success: false): it records its new messages as
+    // skipped, but not the deferred one.
+    await api._fire("agent_end", { runId: "run-3", success: false, messages: [U0, ...run2, failed] }, ctx);
+    await api._fire("agent_end", { runId: "run-4", success: true, messages: [U0, ...run2, failed, next] }, ctx);
+
+    const by = (needle: string) => puts(calls).filter((c) => contentOf(c).includes(needle)).map(sourceOf);
+    expect(by("deferred message a")).toEqual(["run-4"]);
+    expect(by("the failed run's message")).toEqual([]);
+    expect(by("the next run's message")).toEqual(["run-4"]);
+    for (const k of ["kept message b", "kept message c", "kept message d"]) expect(by(k)).toEqual(["run-2"]);
+  });
+
+  test("flair#2560 (mutation: a run refused meanwhile settles a deferred message): when a run is aborted before a deferred message's write starts, the message stays unseen, and the next capture scan captures it", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const before = installFetchStub();
+    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
+    plugin.register(api as any);
+    const ctx = { agentId: "A", sessionId: "sess-deferred-abort" };
+    const say = (text: string, timestamp: number) => ({ role: "user", content: `remember this: ${text}`, timestamp });
+    const U0 = say("the opening message", 0);
+    const run2 = [say("run two's deferred message a", 1), say("run two's kept message b", 2), say("run two's kept message c", 3), say("run two's kept message d", 4)];
+    const e = say("the aborted run's message e", 5);
+    const f = say("the next run's message f", 6);
+
+    await api._fire("agent_end", { runId: "run-1", success: true, messages: [U0] }, ctx);
+    await api._fire("agent_end", { runId: "run-2", success: true, messages: [U0, ...run2] }, ctx);
+    // Run 3's first write (e, the last position) is held; the run is aborted
+    // meanwhile, so its scan reaches message a after the run is refused.
+    const d = defer();
+    const after = installFetchStub(undefined, { deferUntil: d.gate });
+    const p3 = api._handler("agent_end")({ runId: "run-3", success: true, messages: [U0, ...run2, e] }, ctx);
+    await waitFor(() => puts(after).length === 1);
+    await api._fire("model_call_ended", { runId: "run-3", failureKind: "aborted" }, { agentId: "A" });
+    d.release();
+    await p3;
+    await api._fire("agent_end", { runId: "run-4", success: true, messages: [U0, ...run2, e, f] }, ctx);
+
+    const all = [...puts(before), ...puts(after)];
+    const by = (needle: string) => all.filter((c) => contentOf(c).includes(needle)).map(sourceOf);
+    expect(by("deferred message a")).toEqual(["run-4"]);
+    expect(by("the next run's message f")).toEqual(["run-4"]);
+  });
+
+  test("flair#2560 (mutation: a discarded write leaves the message deferred): when a run is aborted while a deferred message's own write is in flight, the message is recorded as skipped and not captured again", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    const before = installFetchStub();
+    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
+    plugin.register(api as any);
+    const ctx = { agentId: "A", sessionId: "sess-deferred-in-flight" };
+    const say = (text: string, timestamp: number) => ({ role: "user", content: `remember this: ${text}`, timestamp });
+    const U0 = say("the opening message", 0);
+    const run2 = [say("run two's deferred message a", 1), say("run two's kept message b", 2), say("run two's kept message c", 3), say("run two's kept message d", 4)];
+    const f = say("the next run's message f", 6);
+
+    await api._fire("agent_end", { runId: "run-1", success: true, messages: [U0] }, ctx);
+    await api._fire("agent_end", { runId: "run-2", success: true, messages: [U0, ...run2] }, ctx);
+    // Run 3 adds nothing new, so its only write is message a's, and it is held;
+    // the run is aborted while that write is in flight.
+    const d = defer();
+    const after = installFetchStub(undefined, { deferUntil: d.gate });
+    const p3 = api._handler("agent_end")({ runId: "run-3", success: true, messages: [U0, ...run2] }, ctx);
+    await waitFor(() => puts(after).length === 1);
+    expect(contentOf(puts(after)[0])).toContain("deferred message a");
+    await api._fire("model_call_ended", { runId: "run-3", failureKind: "aborted" }, { agentId: "A" });
+    d.release(); // the stub ignores the signal, so the write resolves after the abort
+    await p3;
+    await api._fire("agent_end", { runId: "run-4", success: true, messages: [U0, ...run2, f] }, ctx);
+
+    const all = [...puts(before), ...puts(after)];
+    const by = (needle: string) => all.filter((c) => contentOf(c).includes(needle)).map(sourceOf);
+    // The in-flight write reached the stub; its result was discarded, and the
+    // message was recorded as skipped, so run 4 does not write it again.
+    expect(by("deferred message a")).toEqual(["run-3"]);
+    expect(by("the next run's message f")).toEqual(["run-4"]);
+    expect(api._warnText()).toMatch(/discarded a capture for run run-3 \(agent A\) that completed after the run was aborted/);
+  });
+
+  test("flair#2560 (mutation: deferred is never pruned): entries stay within max(sessionMessageCap, D) and deferred holds only latest-snapshot identities", async () => {
+    writeKey("A");
+    const plugin = await loadPlugin();
+    installFetchStub();
+    const api = createMockApi({ pluginConfig: { autoCapture: true }, config: captureConfig });
+    plugin.register(api as any);
+    captureBounds.sessionMessageCap = 2;
+    const ctx = { agentId: "A", sessionId: "sess-two-sets" };
+    const U0 = { role: "user", content: "a plain opening note", timestamp: 0 };
+    const eligible = [1, 2, 3, 4, 5, 6].map((i) => ({ role: "user", content: `remember this: eligible message number ${i}`, timestamp: i }));
+
+    await api._fire("agent_end", { runId: "run-1", success: true, messages: [U0] }, ctx);
+    // D = 7. The run's cap (3) takes the last three positions; the other three
+    // eligible messages are deferred.
+    await api._fire("agent_end", { runId: "run-2", success: true, messages: [U0, ...eligible] }, ctx);
+    const entries = captureInternals.sessionIdentityCount?.() ?? -1;
+    const deferred = captureInternals.sessionDeferredCount?.() ?? -1;
+    expect(entries).toBe(4); // U0 and the three captured, all in the snapshot
+    expect(deferred).toBe(3);
+    expect(entries).toBeLessThanOrEqual(Math.max(2, 7));
+    expect(deferred).toBeLessThanOrEqual(7);
+    expect(entries + deferred).toBe(7); // in this fixture the two sets are disjoint and cover the snapshot
+    // A rewritten snapshot without them: deferred is pruned, entries trimmed to the cap.
+    await api._fire("agent_end", { runId: "run-3", success: true, messages: [{ role: "user", content: "a plain note after a rewrite", timestamp: 9 }] }, ctx);
+    expect(captureInternals.sessionDeferredCount?.() ?? -1).toBe(0);
+    expect(captureInternals.sessionIdentityCount?.() ?? -1).toBe(2);
+  });
+
+  test("flair#2560 (mutation: untyped timestamp): a numeric and a string timestamp give different identities", async () => {
+    const { messageIdentity } = await loadModule();
+    const msg = { role: "user", content: "remember this: one message" };
+    expect(messageIdentity({ ...msg, timestamp: 1 })).not.toBe(messageIdentity({ ...msg, timestamp: "1" }));
+    expect(messageIdentity({ ...msg, timestamp: 1 })).toBe(messageIdentity({ ...msg, timestamp: 1 }));
+  });
+
+  test("flair#2560 (mutation: a 32-bit power-of-two check): the repeat log points are exactly the powers of two, for any count", async () => {
+    const { isRepeatLogPoint } = await loadModule();
+    let points = 0;
+    for (let n = 1n; n <= 1024n; n++) if (isRepeatLogPoint(n)) points++;
+    expect(points).toBe(11); // floor(log2 1024) + 1
+    expect(isRepeatLogPoint(0n)).toBe(false);
+    // Past 32 bits: 2^32 and 2^53 are points; 2^32 + 1 and 2^32 + 2 are not.
+    expect([2n ** 32n, 2n ** 32n + 1n, 2n ** 32n + 2n, 2n ** 53n, 2n ** 53n + 1n].map(isRepeatLogPoint)).toEqual([true, false, false, true, false]);
   });
 });
 

@@ -128,42 +128,74 @@ are the guarantees it keeps, each with the test that proves it in
   only): two concurrent runs of one agent share neither the session cap nor the
   dedup set`; `R10: interleaved agents, driven through the host's turn order,
   sign as themselves`.
-- **A session-keyed `agent_end` scan treats a message as already seen only while
-  the session retains its identity, and never drops an identity its current
-  snapshot holds.** The host gives a snapshot message no host-owned id or
-  position (its only ordering field is a `Date.now()` timestamp, which can tie),
-  so no message is skipped because of its timestamp — `flair#2560 (mutation: a
-  timestamp mark): a new message is captured whether its timestamp ties with,
-  precedes or follows the session's earlier messages, and a later non-capturable
-  message hides none`. A session holds at most max(`sessionMessageCap` (4,096),
-  the distinct messages in its latest snapshot) identities: only identities that
-  have left the snapshot are evicted, so a long session does not capture its
-  earlier messages again — `flair#2560 (mutation: a live identity is evicted): a
-  snapshot over sessionMessageCap distinct messages, across several runs: each
-  run's own new message is captured and nothing older is captured again`. The
-  scan runs newest first, so a run's capture cap (`autoCaptureMaxPerSession`) is
-  spent on its own newest messages, and a message the cap leaves out stays
-  unseen until a later run captures it, under that run's id — `flair#2560
-  (mutation: oldest first; mutation: a capped message recorded as seen): a run's
-  cap is spent newest first, and the message it left out is captured by the next
-  run`. The limit is a session's first scan in this process: for a new session,
-  after its state is evicted past `sessionStateCap`, or after a gateway restart
-  (the state is held in process memory and cleared at `gateway_stop`). That scan
-  cannot tell the run's messages from earlier ones, so it captures at most the
-  run's cap of the newest eligible messages and records the rest as seen,
-  including any of the run's own beyond the cap; a message captured before lands
-  as a second row — `flair#2560 cold start (mutation: a cold scan leaves capped
-  messages unseen): a session's first scan captures at most the run's cap of the
-  newest eligible messages and records the rest as seen`. Flair's near-duplicate
-  check can flag such a write `deduplicated`, naming the row it repeats
-  (`matchedId`); it does not suppress the write, and the plugin counts flagged
-  captures and logs a line at the 1st, 2nd, 4th, … one — `flair#2560 (mutation:
-  the deduplicated flag is ignored): a capture Flair flags deduplicated is
-  counted, with a log line at the 1st, 2nd, 4th, ... one`; against a real Flair
-  component, `flair#2560 cold start (mutation: the deduplicated flag is
-  ignored): after gateway_stop and a new registration, a re-delivered message is
-  captured again; Flair stores the repeat as a second row, flags it
-  deduplicated, and the plugin counts it` in
+- **While the plugin holds a session's state, a session-keyed `agent_end` scan
+  treats a message as already seen only if the session records its identity, and
+  the identity cap does not drop a recorded identity the current snapshot
+  holds.** The host gives a snapshot message no host-owned id or position (its
+  only ordering field is a `Date.now()` timestamp, which can tie), so no message
+  is skipped because of its timestamp — `flair#2560 (mutation: a timestamp
+  mark): a new message is captured whether its timestamp ties with, precedes or
+  follows the session's earlier messages, and a later non-capturable message
+  hides none`. The identity hashes the role, the JSON content and the timestamp
+  with its type, so messages whose encoded fields differ have different
+  identities, barring digest collisions — `flair#2560 (mutation: untyped
+  timestamp): a numeric and a string timestamp give different identities`. While
+  the state is held, a session's recorded identities number at most
+  max(`sessionMessageCap` (4,096), D), where D is the number of distinct
+  identities in its latest snapshot; deferred identities (below) are a separate
+  set, holding only identities of the latest snapshot, so at most D. The cap
+  evicts only identities that have left the snapshot, so a recorded message that
+  stays in the snapshot is not offered again, however long the session; one that
+  left the snapshot can be evicted and, if it reappears, captured again —
+  `flair#2560 (mutation: a live identity is evicted): a snapshot over
+  sessionMessageCap distinct messages, across several runs: the message each run
+  appends is captured and nothing earlier is captured again`; `flair#2560
+  (mutation: deferred is never pruned): entries stay within
+  max(sessionMessageCap, D) and deferred holds only latest-snapshot identities`.
+  The scan walks the supplied snapshot from its last position, so a run's
+  capture cap (`autoCaptureMaxPerSession`) is spent on the last eligible
+  positions; that is position, not proof of which run added a message. In a warm
+  session a message the cap leaves out stays unseen (deferred) and remains
+  eligible for a later capture scan, subject to that scan's gates and cap, and
+  if a later scan captures it, the row carries that later run's id. Only a
+  `skip`-mode scan (a refused run), or a run refused before that message's write
+  starts, leaves it unseen. Other outcomes settle it: same-run excerpt dedup or
+  a failure before the write settles it without a new write, and a write that
+  starts and then fails, or whose run is aborted while it is in flight, records
+  it as skipped, because an aborted write may still have reached Flair —
+  `flair#2560 (mutation: oldest first; mutation: a capped message recorded as
+  seen): a run's cap is spent from the last snapshot position, and the message
+  it left out is captured by the next capture scan`; `flair#2560 (mutation: a
+  refused scan settles a deferred message): a message an earlier run's cap left
+  out stays unseen through a refused run, and the next capture scan captures
+  it`; `flair#2560 (mutation: a run refused meanwhile settles a deferred
+  message): when a run is aborted before a deferred message's write starts, the
+  message stays unseen, and the next capture scan captures it`; `flair#2560
+  (mutation: a discarded write leaves the message deferred): when a run is
+  aborted while a deferred message's own write is in flight, the message is
+  recorded as skipped and not captured again`. The limit is a session's first
+  scan in this process: for a new session, after its state is evicted past
+  `sessionStateCap`, or after a gateway restart (the state is held in process
+  memory and cleared at `gateway_stop`). That scan cannot tell which messages a
+  run added, so it offers the last eligible positions up to the run's cap and
+  records the rest of the identifiable messages as seen, including any the run
+  added beyond the cap. A message captured before can be captured again, if it
+  passes the trigger rule, the run's dedup and cap, and its write succeeds; it
+  then lands as a second row, under the current run's id — `flair#2560 cold
+  start (mutation: a cold scan leaves capped messages unseen): a session's first
+  scan captures at most the run's cap, from the last eligible position, and
+  records the rest as seen`. Flair's near-duplicate check can flag such a write
+  `deduplicated`, naming a near-matching row (`matchedId`); it does not suppress
+  the write. The plugin counts flagged auto-captures since it registered and
+  logs a line at the 1st, 2nd, 4th, … one: no line for n = 0 flagged captures,
+  and floor(log2 n) + 1 lines for n ≥ 1 — `flair#2560 (mutation: the
+  deduplicated flag is ignored): a capture Flair flags deduplicated is counted,
+  with a log line at the 1st, 2nd, 4th, ... one`; `flair#2560 (mutation: a
+  32-bit power-of-two check): the repeat log points are exactly the powers of
+  two, for any count`; against a real Flair component, `flair#2560 cold start
+  (mutation: the deduplicated flag is ignored): after gateway_stop and a new
+  registration, a re-delivered message is captured again; Flair stores the
+  repeat as a second row, flags it deduplicated, and the plugin counts it` in
   `test/integration/agent-end-session-capture-2560.test.ts`.
 - **Memory is bounded.** The run map holds at most `capacityCap` records, plus at
   most `abortOverflowCap` records for aborted runs that were never admitted, and a

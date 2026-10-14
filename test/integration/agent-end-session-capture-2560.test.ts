@@ -13,8 +13,9 @@
  * The third test pins the stated cold-start limit (flair#2560): the session's
  * identity set is the only record that a message was seen and lives in process
  * memory, so after a gateway restart a re-delivered message is captured again.
- * The real Flair component stores that repeat as a second row and flags its
- * write response `deduplicated`, and the plugin counts it.
+ * The real Flair component stores that repeat as a second row and, in this
+ * fixture, flags its write response `deduplicated` with a near-matching row;
+ * the plugin counts it.
  *
  * The host is a minimal stand-in for the OpenClaw plugin API: it exposes the
  * hooks and tools the plugin registers and nothing else, and reports a host
@@ -193,8 +194,8 @@ describe("flair#2560 — a session-keyed agent_end capture reads back from real 
       const c = reader();
       const sessionId = `sess-${randomUUID()}`;
       const marker = `openclaw-agent-end-repeat-${randomUUID()}`;
-      // Two unrelated texts, so the server's near-duplicate check cannot match
-      // one against the other.
+      // Two unrelated texts. In this fixture the server's near-duplicate check
+      // did not match one against the other (the first two writes assert it).
       const M1 = { role: "user", content: `remember this: the deploy window for ${marker} is Tuesday morning`, timestamp: 3 };
       const M2 = { role: "user", content: `remember this: we decided ${marker} keeps seven days of cache history`, timestamp: 4 };
 
@@ -215,8 +216,9 @@ describe("flair#2560 — a session-keyed agent_end capture reads back from real 
         expect(new Set(mine.map((m) => m.id)).size).toBe(2);
       }
       // assertion: the server's near-duplicate check flags each repeat's write
-      // response with the row it repeats, and does not suppress the write.
-      // The scan runs newest first, so each run writes M2, then M1.
+      // response with a near-matching row (in this fixture, the row it repeats)
+      // and does not suppress the write. The scan walks the snapshot from its
+      // last position, so each run writes M2, then M1.
       expect(writes).toHaveLength(4);
       expect(writes.slice(0, 2).map((w) => w.deduplicated)).toEqual([false, false]);
       expect(writes.slice(2).map((w) => [w.written, w.deduplicated, w.matchedId])).toEqual([

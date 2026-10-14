@@ -1,19 +1,29 @@
-- **`openclaw-flair` never forgets a message a session's `agent_end` snapshot still holds, and spends a run's capture cap on its newest messages (#2560).**
+- **`openclaw-flair` stops re-capturing earlier messages a session's snapshot still holds, while it keeps that session's state, and spends a run's cap from the end (#2560).**
 
-  A session-keyed `agent_end` scan never evicts an identity its current snapshot
-  holds, so a session keeps at most max(4,096 (`sessionMessageCap`), the number
-  of distinct messages in its latest snapshot) identities and a long session
-  does not capture its earlier messages again. The scan runs newest first, so
-  the run's cap (`autoCaptureMaxPerSession`) is spent on the run's own newest
-  messages; a message the cap leaves out stays unseen until a later run captures
-  it, under that run's id. The plugin infers nothing from message timestamps:
-  the host gives a snapshot message no host-owned id or position. The remaining
-  limit is a session's first scan in the process (a new session, session state
-  evicted past `sessionStateCap`, or a gateway restart): it captures at most the
-  run's cap of the newest eligible messages and records the rest as seen, so a
-  message captured before can land as a second row. Flair's near-duplicate check
-  can flag that write `deduplicated` and does not suppress it; the plugin logs a
-  counted line at the 1st, 2nd, 4th, … flagged capture. The overflow wording is
-  qualified by the state the plugin retains: a queue-overflow disable lasts
-  while the session's state is held, and "logged once" means one line per
-  retained log key (log keys are a separate set, bounded by `logOnceCap`).
+  While the plugin holds a session's state, a session-keyed `agent_end` scan's
+  identity cap never evicts a recorded identity the current snapshot holds, so
+  recorded identities number at most max(4,096 (`sessionMessageCap`), D), D
+  being the distinct identities in the latest snapshot, and a recorded message
+  that stays in the snapshot is not offered again. Deferred identities (below)
+  are a separate set, holding only identities of the latest snapshot, so at most
+  D. The scan walks the snapshot from its last position, so the run's cap
+  (`autoCaptureMaxPerSession`) is spent on the last eligible positions. In a
+  warm session a message the cap leaves out stays eligible for a later capture
+  scan, subject to that scan's gates and cap; only a refused scan, or a run
+  refused before that message's write starts, leaves it unseen, while same-run
+  excerpt dedup, a failure before the write, a failed write, or a write whose
+  run is aborted while it is in flight settles it. Message identity now encodes
+  the timestamp's type, and the plugin infers nothing from timestamps: the host
+  gives a snapshot message no host-owned id or position. The remaining limit is
+  a session's first scan in the process (a new session, session state evicted
+  past `sessionStateCap`, or a gateway restart): it offers the last eligible
+  positions up to the run's cap and records the rest of the identifiable
+  messages as seen, so a message captured before can be captured again, if it
+  passes the capture rules and its write succeeds, as a second row under the
+  current run's id. Flair's near-duplicate check can flag that write
+  `deduplicated` and does not suppress it; the plugin logs a counted line at the
+  1st, 2nd, 4th, … flagged capture: none for n = 0, and floor(log2 n) + 1 lines
+  for n ≥ 1. The overflow wording is qualified by the state the plugin retains:
+  a queue-overflow disable lasts while the session's state is held, and "logged
+  once" means one line per retained log key (log keys are a separate set,
+  bounded by `logOnceCap`).
