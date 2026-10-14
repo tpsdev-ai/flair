@@ -30,6 +30,8 @@ export const TPS_GET_ROUTE_STATUS: Record<string, number | readonly number[]> = 
   FederationInstance: 403,
   FederationPair: 404,
   FederationPeers: 403,
+  FederationRetries: 403,
+  FederationRetry: 403,
   FederationSync: 404,
   FeedMemories: 404,
   FeedSouls: 404,
