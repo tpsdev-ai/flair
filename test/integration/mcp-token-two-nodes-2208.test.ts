@@ -38,7 +38,7 @@
 import { describe, test, expect, afterAll } from "bun:test";
 import { createHash, generateKeyPairSync, randomBytes } from "node:crypto";
 import { rmSync } from "node:fs";
-import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle.js";
+import { startHarper, stopHarpers, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle.js";
 import {
   REPO_ROOT,
   assertOwnedInstance,
@@ -209,8 +209,11 @@ describe(
     let stopPair: (() => Promise<void>) | undefined;
 
     afterAll(async () => {
+      // flair#2568: `instances` holds the pair's own two nodes, which
+      // `stopPair` stops concurrently (and removes their work dirs); stopping
+      // them again afterwards would add a second stop deadline to this hook.
       if (stopPair) await stopPair();
-      for (const h of instances) { try { await stopHarper(h); } catch { /* best effort */ } }
+      else await stopHarpers(instances).catch(() => { /* best effort */ });
     }, HARPER_STOP_BUDGET_MS);
 
     test.skipIf(!support.supported)(
@@ -260,7 +263,8 @@ describe("flair#2208 key isolation: a token verifies only where the signing key 
   const tempDirs: string[] = [];
 
   afterAll(async () => {
-    for (const h of instances) { try { await stopHarper(h); } catch { /* best effort */ } }
+    // flair#2568: concurrent, so the set settles within one stop deadline.
+    await stopHarpers(instances).catch(() => { /* best effort */ });
     for (const d of tempDirs) { try { rmSync(d, { recursive: true, force: true }); } catch { /* best effort */ } }
   }, HARPER_STOP_BUDGET_MS);
 

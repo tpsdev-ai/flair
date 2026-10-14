@@ -23,7 +23,7 @@ import { mkdtemp, rm, mkdir, cp, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import nacl from "tweetnacl";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { provisionIdpIdentityMapping } from "../../src/lib/mcp-enable.ts";
 
 const REPO_ROOT = process.cwd();
@@ -151,7 +151,7 @@ afterAll(async () => {
   if (dataDir) await rm(dataDir, { recursive: true, force: true, maxRetries: 4 });
   if (appDir) await rm(appDir, { recursive: true, force: true });
   if (keyDir) await rm(keyDir, { recursive: true, force: true });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair#2541 — the built-in /mcp write echo reports the stored text (shipped mcpHandler)", () => {
   test("skill_store: the echo carries the stored content and trigger with the count, never the input", async () => {

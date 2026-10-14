@@ -30,7 +30,7 @@ import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarpers, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 const CLI = join(process.cwd(), "dist", "cli.js");
 
@@ -128,10 +128,14 @@ beforeAll(async () => {
 }, 300_000);
 
 afterAll(async () => {
-  if (a) await stopHarper(a);
-  if (b) await stopHarper(b);
-  if (home) rmSync(home, { recursive: true, force: true });
-  if (partialHome) rmSync(partialHome, { recursive: true, force: true });
+  // flair#2568: stop both instances concurrently so neither stop's deadline
+  // waits on the other, and remove the temp homes even when a stop fails.
+  try {
+    await stopHarpers([a, b]);
+  } finally {
+    if (home) rmSync(home, { recursive: true, force: true });
+    if (partialHome) rmSync(partialHome, { recursive: true, force: true });
+  }
 }, HARPER_STOP_BUDGET_MS);
 
 describe("flair#2474 — stamp-home checks its two ports against a complete configured pair", () => {

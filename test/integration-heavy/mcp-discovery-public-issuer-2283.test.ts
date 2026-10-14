@@ -21,7 +21,7 @@ import { mkdtempSync, mkdirSync, rmSync, symlinkSync, copyFileSync, cpSync, writ
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle.js";
+import { startHarper, stopHarpers, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle.js";
 import { childOverranDeadline } from "../helpers/child-deadline.ts";
 import { discriminateMcpOAuthDiscovery, reportMcpOAuthDiscovery } from "../../src/lib/mcp-enable.ts";
 
@@ -57,9 +57,9 @@ function clearMcpEnv(): void {
   for (const k of MCP_ENV_KEYS) delete process.env[k];
 }
 afterAll(async () => {
-  for (const h of instances) {
-    try { await stopHarper(h); } catch { /* best effort */ }
-  }
+  // flair#2568: every instance this file started, stopped concurrently (one
+  // stop deadline for the set, not one per instance); best effort, as before.
+  await stopHarpers(instances).catch(() => { /* best effort */ });
   for (const d of tempDirs) {
     try { rmSync(d, { recursive: true, force: true }); } catch { /* best effort */ }
   }

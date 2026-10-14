@@ -75,7 +75,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import yaml from "js-yaml";
-import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle.js";
+import { startHarper, stopHarper, stopHarpers, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle.js";
 import { mcpOAuthEnabled } from "../../resources/mcp-oauth-flag.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
@@ -116,9 +116,9 @@ function clearMcpEnv(): void {
 }
 
 afterAll(async () => {
-  for (const h of instances) {
-    try { await stopHarper(h); } catch { /* best effort */ }
-  }
+  // flair#2568: every instance this file started, stopped concurrently (one
+  // stop deadline for the set, not one per instance); best effort, as before.
+  await stopHarpers(instances).catch(() => { /* best effort */ });
   for (const d of tempDirs) {
     try { rmSync(d, { recursive: true, force: true }); } catch { /* best effort */ }
   }
