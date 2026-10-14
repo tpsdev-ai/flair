@@ -65,6 +65,12 @@ export type SkipReason =
   // administrator authority for that principal, so the whole record is skipped
   // rather than merged without `status`.
   | "agent_status_not_federated"
+  // ─── flair#2266 (an inbound Agent record that would set a locally pending key) ──
+  // Emitted by FederationSync.post's merge plan: an inbound Agent record that
+  // would CHANGE the publicKey of a local row whose stored value is exactly
+  // "pending" is skipped whole. Only that instance's administrator completes a
+  // pending key, so a later re-offer cannot clear it.
+  | "agent_pending_key_not_federated"
   // Emitted by FederationSync.post before the row is read: the payload's id is
   // missing or is not the envelope's id, so the record is not applied.
   | "id_mismatch"
@@ -112,6 +118,7 @@ export const SKIP_REASON_CLASS = {
   principal_mismatch: "non_retryable",
   pointer_not_federated: "non_retryable",
   agent_status_not_federated: "non_retryable",
+  agent_pending_key_not_federated: "non_retryable",
   id_mismatch: "non_retryable",
   invalid_expiry: "non_retryable",
   merge_target_changed: "retryable",

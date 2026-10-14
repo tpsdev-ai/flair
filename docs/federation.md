@@ -288,9 +288,9 @@ CHANGE a stored `pending` key is skipped whole and counted as
 `agent_pending_key_not_federated` — distinct from the `agent_status_not_federated`
 refusal, which keeps its own name (see [docs/api-reference.md](api-reference.md#federation)).
 
-Peer non-convergence is the consequence. After instance A registers a key, A's
-sync-out update reaches peer B, where the skip rule leaves B's copy exactly
-`pending`. B's `POST /AgentKeyRegister` will not complete it either: the copy
+Peer non-convergence is the consequence. Registration writes only A's local
+tables; when A's registered-key row later reaches peer B through a sync, the
+skip rule leaves B's copy exactly `pending`. B's `POST /AgentKeyRegister` will not complete it either: the copy
 carries A's `originatorInstanceId`, so B refuses it as `agent_not_local`. The two
 instances therefore do not converge on one key for that row: syncing A's
 registered-key row cannot complete B's pending key, and that key needs direct
