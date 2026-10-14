@@ -1,6 +1,8 @@
 /**
- * owner-scoped-write-policy.test.ts — the guard that owner-checks every record a
- * non-admin write touches (resources/owner-scoped-write-policy.ts).
+ * owner-scoped-write-policy.test.ts — the owner-scoped write guard
+ * (resources/owner-scoped-write-policy.ts): a non-admin agent's addressed
+ * writes and collection PUT/PATCH/DELETE; collection POST is left to each
+ * resource.
  *
  * The integration test (test/integration/owner-scoped-writes.test.ts) checks the
  * rule on every owner-scoped table of a real Harper. These cases pin what a real
@@ -307,7 +309,7 @@ describe("a write may name only the record it addresses (through the guard)", ()
     expect(calls.length).toBe(2);
   });
 
-  it("does not apply the body-id rule to a collection POST (a create names its record in the body)", async () => {
+  it("does not apply the body-id rule to a POST to a collection (it has no addressed id)", async () => {
     const { Table, calls } = makeTable();
     const d = deps();
     guardOwnerScopedWrites({ OrgEvent: Table }, { OrgEvent: "authorId" }, d);

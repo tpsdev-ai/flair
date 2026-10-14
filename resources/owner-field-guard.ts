@@ -49,30 +49,13 @@
  * refusal for a read this guard does not backstop.
  */
 import { resolveAgentAuth } from "./agent-auth.js";
-import { isForbiddenOwnerFieldChange } from "./record-owner-guard.js";
+import { isForbiddenOwnerFieldChange, ownerCheckUnavailable } from "./record-owner-guard.js";
 
-/** The named refusal when a non-admin agent's guard thunk fails. */
-export const OWNER_CHECK_UNAVAILABLE_ERROR = "owner_check_unavailable";
-
-/**
- * Refuse a non-admin agent's write when the guard's `getExisting` thunk fails.
- * A numeric 4xx `statusCode` maps to 400; anything else maps to 503.
- */
-export function ownerCheckUnavailable(err: unknown): Response {
-  console.error(
-    "owner-field-guard: the stored record could not be read, so the write was refused",
-    { err },
-  );
-  const code = (err as { statusCode?: unknown } | null | undefined)?.statusCode;
-  const status = typeof code === "number" && code >= 400 && code < 500 ? 400 : 503;
-  return new Response(
-    JSON.stringify({
-      error: OWNER_CHECK_UNAVAILABLE_ERROR,
-      message: "the stored record could not be read; the write was refused",
-    }),
-    { status, headers: { "content-type": "application/json" } },
-  );
-}
+// The named refusal and its constant live in record-owner-guard.ts, which has
+// no authentication-module dependency, so the owner-scoped write guard can use
+// them without importing this module;
+// re-exported here for this module's existing importers.
+export { OWNER_CHECK_UNAVAILABLE_ERROR, ownerCheckUnavailable } from "./record-owner-guard.js";
 
 /**
  * Enforce owner-field immutability for one write.

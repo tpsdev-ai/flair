@@ -650,11 +650,14 @@ server.http(async (request: any, nextLayer: any) => {
   // create, a self-write, or a legitimate cross-agent field like MemoryGrant's
   // granteeId — it can only narrow mutation of another agent's stored row.
   //
-  // This is the early refusal for the canonical `/<Table>/<id>` address. The
-  // complete rule — a non-admin addressed write owner-checked on Harper's
-  // resolved target with the body allowed to name only that record, and a
-  // collection PUT/PATCH/DELETE refused — is applied to every owner-scoped
-  // table by resources/owner-scoped-write-policy.ts.
+  // This is an early refusal, made only for the address form whose decoded id
+  // is exactly the id Harper resolves (record-owner-guard.ts's
+  // resolveGuardedRecord: `/<Table>/<id>`, no trailing slash, no `.` in the
+  // id); every other form is left to the guard below. The complete rule — a non-admin addressed write owner-checked on Harper's
+  // resolved target with a scalar body `id` required to name that record, and
+  // a collection PUT/PATCH/DELETE refused — is applied by
+  // resources/owner-scoped-write-policy.ts to the resource classes that extend
+  // the owner-scoped tables resources/owner-scoped-writes.ts guards.
   if (isMutation && !request.tpsAgentIsAdmin) {
     const guarded = resolveGuardedRecord(url.pathname);
     if (guarded) {

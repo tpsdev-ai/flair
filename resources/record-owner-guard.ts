@@ -136,17 +136,22 @@ export function isMutatingMethod(method: string): boolean {
 
 /**
  * Resolve a request path to the guarded table and record id it addresses, or
- * null when the path is not a guarded single-record route.
+ * null when the path is not one this early check decides.
  *
- * Matches `/<Table>/<id>` ONLY: this is the middleware's early check for a
- * write's canonical single-record address. The complete rule — applied to the
- * record Harper resolves each write to, and to writes addressed to a collection
- * — is resources/owner-scoped-write-policy.ts. The table segment is matched
- * EXACTLY so `/SoulFeed/x` can never be read as a `Soul` route.
+ * This is the middleware's early check, and it decides only the address form
+ * whose decoded id is exactly the id Harper resolves: two path segments
+ * (`/<Table>/<id>`), no trailing slash, and an id with no `.` (Harper may read
+ * a `.` suffix as a content type or attribute and address a different id).
+ * Every other form — a dotted id, extra segments, a trailing slash, a
+ * collection — returns null and is decided by the owner-scoped write guard
+ * (resources/owner-scoped-write-policy.ts) on the id Harper itself resolves.
+ * The table segment is matched EXACTLY so `/SoulFeed/x` can never be read as a
+ * `Soul` route.
  */
 export function resolveGuardedRecord(pathname: string): { table: string; ownerField: string; id: string } | null {
+  if (pathname.endsWith("/")) return null;
   const parts = pathname.split("/").filter(Boolean);
-  if (parts.length < 2) return null;
+  if (parts.length !== 2) return null;
   const table = parts[0];
   const ownerField = OWNER_FIELDS[table];
   if (!ownerField) return null;
@@ -156,7 +161,7 @@ export function resolveGuardedRecord(pathname: string): { table: string; ownerFi
   } catch {
     return null; // malformed percent-encoding addresses no record we can resolve
   }
-  if (!id) return null;
+  if (!id || id.includes(".")) return null;
   return { table, ownerField, id };
 }
 
@@ -206,14 +211,43 @@ export function ownerMutationRefusal(table: string): Response {
 /**
  * The refusal for a non-admin PUT, PATCH or DELETE that addresses an
  * owner-scoped table's collection rather than one record: 403 with a body that
- * names only the table. Such a request does not name the records it would
- * write, so their owners cannot be checked before the write; a non-admin caller
- * writes one record at a time, by its id (resources/owner-scoped-write-policy.ts).
+ * names only the table. Such a request does not resolve to one addressed row,
+ * so the guard cannot owner-check the rows it would write before the write; a
+ * non-admin caller writes one record at a time, by its id
+ * (resources/owner-scoped-write-policy.ts).
  */
 export function collectionWriteRefusal(table: string): Response {
   return new Response(JSON.stringify({
     error: `forbidden: a non-admin write to ${table} must address one record by its id`,
   }), { status: 403, headers: { "Content-Type": "application/json" } });
+}
+
+/** The named refusal when a non-admin agent's stored-record read for an owner check fails. */
+export const OWNER_CHECK_UNAVAILABLE_ERROR = "owner_check_unavailable";
+
+/**
+ * Refuse a non-admin agent's write when the stored record its owner check
+ * needs cannot be read (resources/owner-field-guard.ts's guard thunk, and the
+ * owner-scoped write guard's stored-record read). A numeric 4xx `statusCode`
+ * maps to 400; anything else maps to 503. It logs the failure and has no
+ * authentication-module dependency, so the owner-scoped write guard can use it
+ * without importing that module graph; re-exported by
+ * resources/owner-field-guard.ts.
+ */
+export function ownerCheckUnavailable(err: unknown): Response {
+  console.error(
+    "owner-field-guard: the stored record could not be read, so the write was refused",
+    { err },
+  );
+  const code = (err as { statusCode?: unknown } | null | undefined)?.statusCode;
+  const status = typeof code === "number" && code >= 400 && code < 500 ? 400 : 503;
+  return new Response(
+    JSON.stringify({
+      error: OWNER_CHECK_UNAVAILABLE_ERROR,
+      message: "the stored record could not be read; the write was refused",
+    }),
+    { status, headers: { "content-type": "application/json" } },
+  );
 }
 
 /**

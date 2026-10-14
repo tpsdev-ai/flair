@@ -235,6 +235,14 @@ describe("resolveGuardedRecord", () => {
       .toEqual({ table: "Soul", ownerField: "agentId", id: "alice:mission" });
   });
 
+  it("leaves address forms whose id Harper may resolve differently to the owner-scoped write guard", () => {
+    expect(resolveGuardedRecord("/Relationship/r.json")).toBeNull();   // a `.` suffix Harper may strip
+    expect(resolveGuardedRecord("/Relationship/r%2Ejson")).toBeNull(); // the same, percent-encoded
+    expect(resolveGuardedRecord("/Relationship/a/b")).toBeNull();      // extra segments
+    expect(resolveGuardedRecord("/Relationship/r/")).toBeNull();       // trailing slash
+    expect(resolveGuardedRecord("/Relationship/r")).toEqual({ table: "Relationship", ownerField: "agentId", id: "r" });
+  });
+
   it("returns null for unguarded tables and malformed paths", () => {
     expect(resolveGuardedRecord("/NotATable/x")).toBeNull();
     expect(resolveGuardedRecord("/")).toBeNull();

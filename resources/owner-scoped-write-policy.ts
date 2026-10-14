@@ -1,31 +1,37 @@
 /**
- * Every non-admin write to an owner-scoped table is owner-checked for each
- * record it writes, however the request addresses that record.
+ * The owner-scoped write guard: for a verified non-admin agent's HTTP request
+ * to a resource class that extends an owner-scoped table, an addressed write
+ * is owner-checked on the record its URL addresses and a scalar body `id` must
+ * name that record, and a collection PUT, PATCH or DELETE is refused. A POST
+ * to a collection is not decided here; it is delegated to the resource's own
+ * POST handling.
  *
  * ── The rule ────────────────────────────────────────────────────────────────
  * For a verified non-admin agent, an HTTP write to a table listed in
- * resources/record-owner-guard.ts's OWNER_FIELDS:
+ * resources/record-owner-guard.ts's OWNER_FIELDS, through a resource class that
+ * extends that table:
  *   - addressed to one record (POST/PUT/PATCH/DELETE to `/<Table>/<id>`) is
- *     refused when that record exists and its stored owner is not the caller,
- *     with `ownerMutationRefusal` (403); and, on POST/PUT/PATCH, is refused with
+ *     refused with `ownerMutationRefusal` (403) when that record exists and its
+ *     stored owner is not the caller; and, on POST/PUT/PATCH, is refused with
  *     `writeIdNotAddressedRefusal` (403) when the body carries a scalar `id`
- *     naming a different record than the one the URL addresses — so the body may
- *     name only the addressed record;
+ *     (a string or number) naming a different record than the one the URL
+ *     addresses;
  *   - addressed to no single record (the table's collection, with or without a
  *     query) is refused on PUT, PATCH and DELETE with `collectionWriteRefusal`
- *     (403): such a request does not name the records it would write, so their
- *     owners cannot be checked first. A collection POST (a create) is NOT
- *     decided here — it stays governed by each resource's own create and
- *     attribution rules.
+ *     (403): such a request does not resolve to one addressed row, so the
+ *     guard cannot owner-check the rows it would write before the write. A
+ *     POST to a collection is NOT decided here: it is delegated to the
+ *     resource's own POST handling (its create and attribution rules;
+ *     OrgEvent's post() can also update a caller-owned record its body names).
  * The record checked is the id Harper resolved the request's URL to, never a
  * re-parse of the path, so every spelling of a record's address gets the same
- * decision; the body-id rule then binds the write to that same record. The
- * owner is read from STORED state, never from the request body. A refused
- * request writes nothing, and one refusal fails the whole request. When the
- * guard's own stored-record read for an addressed owner check fails, the
- * request is refused with the named `owner_check_unavailable`
- * (resources/owner-field-guard.ts); a resource's own read-failure handling on
- * other paths (for example a Presence heartbeat) is unchanged.
+ * decision. The owner is read from STORED state, never from the request body.
+ * A refused write leaves its target row unchanged (authentication has already
+ * recorded the request's replay nonce), and one refusal fails the whole
+ * request. When the guard's own stored-record read for an addressed owner check
+ * fails, the request is refused with the named `owner_check_unavailable`; a
+ * resource's own read-failure handling on other paths (for example a Presence
+ * heartbeat) is unchanged.
  *
  * Administrators, trusted internal calls and anonymous callers are not decided
  * here (anonymous writes are refused by each resource's own gate). Server code
@@ -37,36 +43,37 @@
  * Harper serves a table write through the class's static put/patch/delete/post,
  * which resolves the request target to the record id it will write and then
  * calls the class's static `getResource(target, context, options)` with that
- * resolved target and the method in `options.method`. `guardOwnerScopedWrites`
- * gives every owner-scoped table class its own static `getResource` that applies
- * the rule there and then delegates to the inherited one. A resource class that
- * extends the flair table inherits it; a custom resource that extends `Resource`
- * rather than the table (for example AgentReadPosition) is not on this path and
- * enforces its own ownership. The table list is OWNER_FIELDS;
- * test/unit/record-owner-guard-coverage.test.ts fails when a table declares an
- * owner-shaped column and is neither added to that map nor exempted with a
- * stated reason, so a new owner-scoped table has to be enrolled there — it is
- * not picked up automatically. resources/owner-scoped-writes.ts installs the
- * guard at load and logs any OWNER_FIELDS table it could not guard.
+ * resolved target, the method in `options.method`, and the request as context.
+ * `guardOwnerScopedWrites` gives every owner-scoped table class its own static
+ * `getResource` that applies the rule there and then delegates to the inherited
+ * one. A resource class that extends the flair table inherits it; a custom
+ * resource that extends `Resource` rather than the table (for example
+ * AgentReadPosition) is not on this path and enforces its own rule. The table
+ * list is OWNER_FIELDS; test/unit/record-owner-guard-coverage.test.ts fails
+ * when a table declares an owner-shaped column and is neither added to that map
+ * nor exempted with a stated reason, so a new owner-scoped table has to be
+ * enrolled there. resources/owner-scoped-writes.ts installs the guard at load
+ * and logs any OWNER_FIELDS table it could not guard.
  *
- * This module imports only the pure helpers in resources/record-owner-guard.ts,
- * so it is unit-tested directly (test/unit/owner-scoped-write-policy.test.ts);
+ * This module imports only helpers from resources/record-owner-guard.ts, which
+ * has no Harper or authentication-module dependency, so it is unit-tested
+ * directly (test/unit/owner-scoped-write-policy.test.ts);
  * the dependencies it needs are passed in by resources/owner-scoped-writes.ts.
  * test/integration/owner-scoped-writes.test.ts checks the rule on a real Harper.
  *
- * ── A write may name only the record it addresses ────────────────────────────
- * An addressed write (POST, PUT or PATCH to `/<Table>/<id>`) is owner-checked on
- * the record its URL addresses, and its body may name only that record: a
- * non-admin request whose body `id` is a value that names a different record
- * than the one the URL addresses is refused with `write_id_not_addressed` (403),
- * which echoes neither id and writes nothing. A body with no `id`, or one that
- * names the addressed record, proceeds. This is decided here, at the entry call,
- * on the addressed id — so a resource whose own write path later keys the table
- * write on the body `id` cannot land on a record other than the one checked.
- * A non-scalar body `id` is left to each resource's own request handling.
- * A create addressed to a collection names its record in the body and is not
- * this rule's business (there is no addressed id to differ from); it stays
- * governed by each resource's own create rules.
+ * ── A supplied body id must name the addressed record ────────────────────────
+ * An addressed POST, PUT or PATCH is owner-checked on the record its URL
+ * addresses, and a scalar body `id` must name that same record: a non-admin
+ * request whose scalar body `id` names a different record is refused with
+ * `write_id_not_addressed` (403), which echoes neither id. A body with no `id`,
+ * or with the addressed id, proceeds; a non-scalar body `id` is left to each
+ * resource's own request handling. A resource whose write path keys its table
+ * write on the body `id` therefore receives the addressed id, no id, or a
+ * non-scalar id that the guard leaves to it; where it fills in a missing id for
+ * an addressed write it uses the addressed one (Memory's and OrgEvent's
+ * post()), and OrgEvent's post() also uses the addressed id when the body id
+ * equals it as text. A POST to a collection has no addressed id, so this
+ * rule does not apply to it.
  */
 import { collectionWriteRefusal, isForbiddenOwnerMutation, ownerMutationRefusal } from "./record-owner-guard.js";
 
@@ -81,8 +88,8 @@ export interface OwnerScopedWriteDeps {
   resolveAuth: (context: unknown) => Promise<WriteCaller>;
   /** Reads the stored record `id` of `table`, outside the request's transaction. */
   readStored: (table: string, id: unknown) => unknown;
-  /** The refusal when the stored record cannot be read (ownerCheckUnavailable), or a promise for it. */
-  unreadable: (err: unknown) => Response | Promise<Response>;
+  /** The refusal when the stored record cannot be read (ownerCheckUnavailable). */
+  unreadable: (err: unknown) => Response;
   /** The parsed request body for this entry call (Harper's `request.data`), or a promise for it. */
   readBody: (context: unknown) => unknown;
 }
@@ -93,7 +100,7 @@ export const OWNER_SCOPED_WRITE_GUARD: unique symbol = Symbol.for("flair.ownerSc
 /** The Harper resource methods an HTTP request reaches to write a record. */
 export const GUARDED_WRITE_METHODS: readonly string[] = Object.freeze(["put", "patch", "delete", "post"]);
 
-/** Methods that write records already stored, and so are refused on a collection target. */
+/** Methods refused on a collection target, where the request does not resolve to one addressed row. */
 const STORED_RECORD_METHODS: ReadonlySet<string> = new Set(["put", "patch", "delete"]);
 
 /** Methods that carry a record body whose `id` must name the addressed record. */
@@ -124,7 +131,7 @@ export function unverifiedWriteCallerRefusal(table: string): Error & { statusCod
   );
 }
 
-/** The named refusal for a write whose body names a record other than the one it addresses. */
+/** The named refusal for an addressed write whose scalar body `id` names a record other than the one it addresses. */
 export function writeIdNotAddressedRefusal(): Response {
   return new Response(JSON.stringify({
     error: "write_id_not_addressed",
@@ -154,9 +161,10 @@ export function bodyNamesDifferentRecord(targetId: unknown, body: unknown): bool
  *
  * In order: resolve the caller (an unresolvable one is refused); leave an
  * administrator, a trusted internal call and an anonymous caller to their
- * existing handling; refuse a collection PUT/PATCH/DELETE; refuse a write whose
- * body names a record other than the addressed one; then refuse a write to a
- * stored record owned by another principal. Each refusal writes nothing.
+ * existing handling; refuse a collection PUT/PATCH/DELETE; refuse an addressed
+ * POST/PUT/PATCH whose scalar body `id` names a record other than the
+ * addressed one; then refuse a write to a stored record owned by another
+ * principal. Each refusal leaves the target row unchanged.
  */
 export async function admitOwnerScopedWrite(
   table: string,
@@ -179,9 +187,9 @@ export async function admitOwnerScopedWrite(
     return;
   }
 
-  // Addressed write: the body may name only the addressed record. Harper has
-  // parsed the body onto the request by now; a body that cannot be read is left
-  // to Harper's own request handling.
+  // Addressed write: a scalar body `id` must name the addressed record. Harper
+  // has parsed the body onto the request by now; a body that cannot be read is
+  // left to Harper's own request handling.
   if (BODY_ID_METHODS.has(method)) {
     let body: unknown;
     try {
@@ -196,7 +204,7 @@ export async function admitOwnerScopedWrite(
   try {
     stored = await deps.readStored(table, target.id);
   } catch (err) {
-    throw await deps.unreadable(err);
+    throw deps.unreadable(err);
   }
   if (isForbiddenOwnerMutation(stored as Record<string, unknown> | null | undefined, ownerField, caller.agentId)) {
     throw ownerMutationRefusal(table);

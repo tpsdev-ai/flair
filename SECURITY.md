@@ -81,7 +81,10 @@ create names the value the record actually landed on.
 
 ### Record Ownership on Writes
 
-For a verified non-admin agent:
+For a verified non-admin agent's HTTP write to an owner-scoped table served by
+a resource that extends that table (Memory, Relationship, Soul, Credential,
+Integration, Asset, MemoryCandidate, MemoryGrant, MemoryUsage, Message,
+OrgEvent, WorkspaceState, Presence):
 
 - An addressed write — a PUT, PATCH, DELETE or POST to `/<Table>/<id>` — is
   owner-checked on the record the URL addresses: it is refused with
@@ -89,19 +92,24 @@ For a verified non-admin agent:
   record exists and belongs to another principal. The owner is read from the
   stored record, never from the request body, and the record checked is the id
   Harper resolves the URL to, however the address is written.
-- An addressed POST, PUT or PATCH may name only the record it addresses: a
-  request whose body `id` names a different record than its URL is refused with
-  `403 write_id_not_addressed`.
+- An addressed POST, PUT or PATCH whose body carries a scalar `id` (a string or
+  number) naming a different record than its URL is refused with
+  `403 write_id_not_addressed`. A body with no `id`, or with the addressed id,
+  proceeds; an OrgEvent or Memory POST addressed to a record with no body `id`
+  writes the addressed record.
 - A PUT, PATCH or DELETE addressed to a table's collection rather than to one
   record is refused with `403 forbidden: a non-admin write to <Table> must
   address one record by its id`. Write records one at a time, by id.
 
-Creating a record with POST to a collection stays governed by each resource's
-own create and attribution rules (for example, an OrgEvent collection POST that
-names an existing event owned by another agent is refused, and a Presence
-heartbeat creates the caller's own row). A refused request writes nothing, and
-the refusal carries no record content. Administrator writes and Flair's own
-in-process server writes are unchanged.
+A refused write leaves its target row unchanged, and the refusal carries no
+record content. A POST to a collection is delegated to each resource's own
+POST handling — its create and attribution rules (for example, an OrgEvent
+collection POST that names an existing event owned by another agent is
+refused, one that names the caller's own existing event updates it, and a
+Presence heartbeat writes the caller's own row). Routes served
+by a custom resource rather than a table-backed one, such as
+`/AgentReadPosition`, apply their own ownership rule and response.
+Administrator writes and Flair's own in-process server writes are unchanged.
 
 ### Cross-Agent Access (within an org)
 
