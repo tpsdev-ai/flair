@@ -262,22 +262,43 @@ export default function (pi: ExtensionAPI) {
         const wasDeduplicated = (result as any).deduplicated === true;
         const matchedId = (result as any).matchedId as string | undefined;
 
-        const preview = content.length > 120 ? content.slice(0, 120) + "..." : content;
+        // flair#2537 — with a redaction count, the preview is only the result's
+        // `content`, which the SDK takes from the write response's `stored`
+        // (the post-redaction text that write committed) without a read after
+        // the write (flair#2467). A result marked `contentWithheld`, or with no
+        // `content` string, gets no preview text or size: the reply states the
+        // count and that the stored text was not returned, and never shows the
+        // input. With no count the preview is the input, as before.
+        const redactedValues = typeof result.redactedValues === "number" && result.redactedValues > 0 ? result.redactedValues : 0;
+        const stored: string | null = redactedValues > 0
+          ? (result.contentWithheld !== true && typeof result.content === "string" ? result.content : null)
+          : content;
         const tagStr = (params.tags as string[] | undefined)?.length ? (params.tags as string[]).join(", ") : "none";
         const lines = [
           `Memory stored (id: ${result.id})`,
-          `Preview: ${preview}`,
-          `Size: ${content.length} chars`,
+          ...(stored === null
+            ? [`Preview: none. The server redacted ${redactedValues} value(s) in this write; the stored text was not returned.`]
+            : [`Preview: ${stored.length > 120 ? stored.slice(0, 120) + "..." : stored}`, `Size: ${stored.length} chars`]),
           `Tags: ${tagStr}`,
           `Durability: ${durability}`,
         ];
+        if (redactedValues > 0) {
+          lines.push(`Redacted ${redactedValues} credential-shaped value(s) before storing.`);
+        }
         if (wasDeduplicated && matchedId) {
           lines.push(`Note: similar to existing memory (id: ${matchedId}) — both are kept.`);
         }
 
         return {
           content: [{ type: "text", text: lines.join("\n") }],
-          details: { deduplicated: wasDeduplicated, id: result.id, written: true, ...(wasDeduplicated ? { matchedId } : {}) },
+          details: {
+            deduplicated: wasDeduplicated,
+            id: result.id,
+            written: true,
+            ...(redactedValues > 0 ? { redactedValues } : {}),
+            ...(stored === null ? { contentWithheld: true } : {}),
+            ...(wasDeduplicated ? { matchedId } : {}),
+          },
         };
       } catch (err) {
         return errorResult(err, flair.url);

@@ -6,6 +6,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
 import { stampOriginatorOnCreate } from "./originator-instance.js";
 import { invalidAgentIdMessage, isValidAgentId } from "../src/lib/agent-id-rule.js";
+import { credentialMapsPrincipal, credentialPrincipalId, isUsableCredential } from "../src/lib/credential-status-rule.js";
 import { withKeyLock } from "./key-lock.js";
 import { withOwnedTransaction } from "./request-transaction.js";
 import { CommittedRowChanged, confirmCommittedRow, sameStoredRow } from "./write-back.js";
@@ -241,15 +242,20 @@ async function resolveOrCreatePrincipalLocked(
         { attribute: "idpProvider", comparator: "equals", value: idpConfig.id },
       ],
     }, owned)) {
-      // A matched credential whose status is not "active" completes no grant.
+      // A matched credential completes a grant only when its status is
+      // "active" AND it names a principal (a non-empty string principalId): the
+      // rule the MCP resolver and the principal linker apply
+      // (src/lib/credential-status-rule.ts, `credentialMapsPrincipal`).
       // `status` is a nullable String on schemas/agent.graphql whose documented
       // values are "active" and "revoked" (a comment, not an enforced enum); the
-      // revoke path writes "revoked". Refuse it by name: no credential touch and
-      // no OAuth token is written, so its lastUsedAt is left untouched. A present
-      // `jti` is claimed — and consumed — before this status check, in its own
+      // revoke path writes "revoked". Refuse it by name, naming the stored
+      // status, or that the credential names no principal: no credential touch
+      // and no OAuth token is written, so its lastUsedAt is left untouched. A
+      // present `jti` is claimed — and consumed — before this check, in its own
       // transaction (the claim above, before the owned transaction).
-      if (cred.status !== "active") {
-        throw new Error(`IdP credential for this subject has status "${cred.status}"; the jwt-bearer grant is refused`);
+      if (!credentialMapsPrincipal(cred)) {
+        const state = isUsableCredential(cred) ? "names no principal" : `has status "${cred.status}"`;
+        throw new Error(`IdP credential for this subject ${state}; the jwt-bearer grant is refused`);
       }
       // Test-only: valid names are inert unless fault injection is enabled and
       // armed (resources/txn-pause-point.ts). Holds this touch between the read
@@ -275,7 +281,7 @@ async function resolveOrCreatePrincipalLocked(
         await confirmCommittedRow(
           (databases as any).flair.Credential,
           cred.id,
-          (committed) => committed != null && committed.status === "active" &&
+          (committed) => committed != null && credentialMapsPrincipal(committed) &&
             sameStoredRow(committed, cred) &&
             committed.principalId === cred.principalId &&
             committed.kind === cred.kind &&
@@ -290,7 +296,7 @@ async function resolveOrCreatePrincipalLocked(
         }
         throw err;
       }
-      return cred.principalId;
+      return credentialPrincipalId(cred)!;
     }
 
     // No existing credential — JIT provision if enabled

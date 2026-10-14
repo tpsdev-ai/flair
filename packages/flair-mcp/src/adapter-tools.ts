@@ -69,6 +69,74 @@ const memory_search: StdioHandler = async ({ query, limit }, { flair, heartbeat 
   }
 };
 
+/** The redaction count a write result reports (flair#2407), 0 when absent. */
+function redactedValuesOf(result: unknown): number {
+  const value = (result as { redactedValues?: unknown } | null)?.redactedValues;
+  return typeof value === "number" && value > 0 ? value : 0;
+}
+
+/**
+ * flair#2467 — the text a write reply previews, or null for no preview. The
+ * reply shows the first 120 characters of it, followed by `...` when
+ * truncated (previewOf).
+ *
+ * With a positive redaction count, the text is only the result's `content`:
+ * the post-redaction content the write response returned in `stored` (equal
+ * to the input when the redaction changed only another field). A result
+ * marked `contentWithheld`, or with no `content` string, gets null: the reply
+ * states the redacted-value count and that the stored text was not returned,
+ * and never shows the input. With no count (the server reported no
+ * replacement), the text is the result's `content`, else the input.
+ *
+ * flair#2541 — `field` "trigger" applies the same rule to a skill's trigger:
+ * with a count, only the result's stored `trigger` (null when the result is
+ * withheld or carries none), never the input.
+ */
+function storedTextOf(
+  result: unknown,
+  input: string,
+  redactedValues: number,
+  field: "content" | "trigger" = "content",
+): string | null {
+  const written = result as { content?: unknown; trigger?: unknown; contentWithheld?: unknown } | null;
+  const value = written?.[field];
+  if (redactedValues > 0) {
+    return written?.contentWithheld !== true && typeof written?.content === "string" && typeof value === "string"
+      ? value
+      : null;
+  }
+  return typeof value === "string" ? value : input;
+}
+
+/**
+ * flair#2541 — skill_store writes with a raw PUT /Memory (flair.request), so
+ * its result is the server's response, where a redacted write's stored text
+ * sits in `stored` rather than at the top level of a flair.memory.write
+ * result. This returns that text in the shape storedTextOf reads, as
+ * flair-client does for memory_store: `stored.content` and `stored.trigger`,
+ * or `contentWithheld: true` when `stored` carries no `content` string. With
+ * no redaction count it returns null, so the reply previews the input as
+ * before.
+ */
+function storedWriteOf(response: unknown, redactedValues: number): Record<string, unknown> | null {
+  if (redactedValues <= 0) return null;
+  const stored = (response as { stored?: unknown } | null)?.stored;
+  const text = stored && typeof stored === "object" && !Array.isArray(stored) ? (stored as Record<string, unknown>) : null;
+  if (typeof text?.content !== "string") return { contentWithheld: true };
+  return { content: text.content, ...(typeof text.trigger === "string" ? { trigger: text.trigger } : {}) };
+}
+
+/** The preview line for a counted redaction whose stored text was not
+ *  returned. It states only what the response says: how many values were
+ *  replaced in this write, not which field held them. */
+function withheldPreview(redactedValues: number): string {
+  return `Preview: none. The server redacted ${redactedValues} value(s) in this write; the stored text was not returned.`;
+}
+
+function previewOf(text: string): string {
+  return text.length > 120 ? text.slice(0, 120) + "..." : text;
+}
+
 const memory_store: StdioHandler = async (
   { content, type, durability, tags, visibility, usedMemoryIds },
   { flair, heartbeat },
@@ -87,15 +155,20 @@ const memory_store: StdioHandler = async (
     const deduplicated = (result as any).deduplicated === true;
     const matchedId = (result as any).matchedId as string | undefined;
     const effectiveVisibility = (result as any).visibility as string | undefined;
-    const preview = content.length > 120 ? content.slice(0, 120) + "..." : content;
+    const redactedValues = redactedValuesOf(result);
+    // flair#2467 — with a redaction count, the preview comes only from the
+    // stored content the write response returned (storedTextOf).
+    const stored = storedTextOf(result, content, redactedValues);
     const tagStr = tags && tags.length > 0 ? tags.join(", ") : "none";
     const lines = [
       `Memory stored (id: ${result.id})`,
-      `Preview: ${preview}`,
-      `Size: ${content.length} chars`,
+      ...(stored === null ? [withheldPreview(redactedValues)] : [`Preview: ${previewOf(stored)}`, `Size: ${stored.length} chars`]),
       `Tags: ${tagStr}`,
       `Type: ${type ?? "session"}, Durability: ${durability ?? "standard"}, Visibility: ${effectiveVisibility ?? "(server default)"}`,
     ];
+    if (redactedValues > 0) {
+      lines.push(`Redacted ${redactedValues} credential-shaped value(s) before storing.`);
+    }
     if (deduplicated && matchedId) {
       lines.push(
         "",
@@ -105,7 +178,14 @@ const memory_store: StdioHandler = async (
     }
     return {
       content: [{ type: "text", text: lines.join("\n") }],
-      structuredContent: { deduplicated, id: result.id, written: true, ...(deduplicated ? { matchedId } : {}) },
+      structuredContent: {
+        deduplicated,
+        id: result.id,
+        written: true,
+        ...(redactedValues > 0 ? { redactedValues } : {}),
+        ...(stored === null ? { contentWithheld: true } : {}),
+        ...(deduplicated ? { matchedId } : {}),
+      },
     };
   } catch (err) {
     return errorResult(err, flair.url);
@@ -122,12 +202,28 @@ const memory_update: StdioHandler = async (
       preserveHistory,
       usedMemoryIds: citationIds(usedMemoryIds),
     });
-    const text = preserveHistory
-      ? `Memory updated: new version stored (id: ${result.id}), supersedes ${id}.`
-      : `Memory updated (id: ${id}).`;
+    const redactedValues = redactedValuesOf(result);
+    // flair#2467 — with a redaction count, the preview comes only from the
+    // stored content the write response returned (storedTextOf).
+    const stored = storedTextOf(result, content, redactedValues);
+    const lines = [
+      preserveHistory
+        ? `Memory updated: new version stored (id: ${result.id}), supersedes ${id}.`
+        : `Memory updated (id: ${id}).`,
+      stored === null ? withheldPreview(redactedValues) : `Preview: ${previewOf(stored)}`,
+    ];
+    if (redactedValues > 0) {
+      lines.push(`Redacted ${redactedValues} credential-shaped value(s) before storing.`);
+    }
     return {
-      content: [{ type: "text", text }],
-      structuredContent: { id: result.id, supersedes: preserveHistory ? id : undefined, written: true },
+      content: [{ type: "text", text: lines.join("\n") }],
+      structuredContent: {
+        id: result.id,
+        supersedes: preserveHistory ? id : undefined,
+        written: true,
+        ...(redactedValues > 0 ? { redactedValues } : {}),
+        ...(stored === null ? { contentWithheld: true } : {}),
+      },
     };
   } catch (err) {
     return errorResult(err, flair.url);
@@ -313,16 +409,29 @@ const skill_store: StdioHandler = async (
     });
     const result = await flair.request<Record<string, unknown>>("PUT", `/Memory/${encodeRecordId(id)}`, body);
     const writtenId = typeof result?.id === "string" && result.id.length > 0 ? result.id : id;
-    const preview = content.length > 120 ? content.slice(0, 120) + "..." : content;
+    const redactedValues = redactedValuesOf(result);
+    // flair#2541 — with a redaction count, the preview and the trigger line
+    // come only from the stored text the write response returned
+    // (storedWriteOf, storedTextOf), never the input; the name is metadata,
+    // which the server does not redact.
+    const written = storedWriteOf(result, redactedValues);
+    const stored = storedTextOf(written, content, redactedValues);
+    const storedTrigger = storedTextOf(written, trigger ?? "", redactedValues, "trigger");
     const lines = [
       `Skill stored (id: ${writtenId})`,
-      `Preview: ${preview}`,
+      stored === null ? withheldPreview(redactedValues) : `Preview: ${previewOf(stored)}`,
       name ? `Name: ${name}` : undefined,
-      trigger ? `Trigger: ${trigger}` : undefined,
+      storedTrigger ? `Trigger: ${storedTrigger}` : undefined,
+      redactedValues > 0 ? `Redacted ${redactedValues} credential-shaped value(s) before storing.` : undefined,
     ].filter((line): line is string => line != null);
     return {
       content: [{ type: "text", text: lines.join("\n") }],
-      structuredContent: { id: writtenId, written: true },
+      structuredContent: {
+        id: writtenId,
+        written: true,
+        ...(redactedValues > 0 ? { redactedValues } : {}),
+        ...(stored === null ? { contentWithheld: true } : {}),
+      },
     };
   } catch (err) {
     return errorResult(err, flair.url);
