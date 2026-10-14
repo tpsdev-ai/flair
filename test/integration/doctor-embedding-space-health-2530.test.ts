@@ -7,9 +7,9 @@
  * the boot window, when the guard is usually still unverified). Doctor must
  * report that state from both a 200 and a 503 with Flair's /Health shape,
  * without calling the 503 healthy (also when it carries a multi-worker
- * refusal); must not read a verdict from a 503 without those fields. Only a
- * mixed store adds a guard finding to the issue count; readiness has its own
- * issue.
+ * refusal); must not read a verdict from a 503 without those fields. Only the
+ * `mixed` state increments doctor's issue count among the guard states;
+ * readiness has its own issue.
  *
  * The server is a plain node HTTP listener on an ephemeral loopback port that
  * answers /Health with a fixed status + body and 404s everything else. Doctor
@@ -131,12 +131,12 @@ describe("flair doctor reports the embedding-space guard from /Health (flair#253
     if (home) rmSync(home, { recursive: true, force: true });
   });
 
-  test("200: the guard state is reported, and a mixed store is a blocking finding", async () => {
+  test("200: the guard state is reported, and the mixed state is a blocking finding", async () => {
     const port = await serveHealth(200, flairHealthBody(true, { state: "mixed", reason: null }));
     const { stdout } = await runDoctor(port);
     expect(stdout).toContain(`Harper responding on port ${port}`);
     expect(stdout).toContain("Fleet presence"); // a serving-instance section (absent for a not-ready 503)
-    expect(stdout).toContain("the store has mixed embedding spaces");
+    expect(stdout).toContain("a non-current embedding model stamp was observed");
     expect(stdout).toContain("flair reembed --stale-only");
   }, 120_000);
 
@@ -165,7 +165,7 @@ describe("flair doctor reports the embedding-space guard from /Health (flair#253
     expect(stdout).toContain("worker threads: fail");
   }, 120_000);
 
-  test("only a mixed store adds a guard finding to the issue count and the exit status", async () => {
+  test("only the mixed state increments the issue count; the exit status follows the summary", async () => {
     // Same fixture, three 200 responses that differ only in the guard verdict.
     const runs: Record<string, { code: number | null; count: number }> = {};
     for (const state of ["uniform", "mixed", "scan-failed"]) {
@@ -176,7 +176,7 @@ describe("flair doctor reports the embedding-space guard from /Health (flair#253
       // Doctor exits non-zero exactly when its summary counts an issue.
       expect(code, `${state}: exit status vs summary`).toBe(runs[state].count > 0 ? 1 : 0);
     }
-    expect(runs.mixed.count - runs.uniform.count, "a mixed store adds exactly one issue").toBe(1);
+    expect(runs.mixed.count - runs.uniform.count, "the mixed state adds exactly one issue").toBe(1);
     expect(runs.mixed.code).toBe(1);
     expect(runs["scan-failed"].count, "a failed scan is an advisory, not an issue").toBe(runs.uniform.count);
   }, 240_000);
@@ -185,7 +185,7 @@ describe("flair doctor reports the embedding-space guard from /Health (flair#253
     // searchReady:false and a guard field, but no version or capabilities list.
     const port = await serveHealth(503, { ok: false, searchReady: false, embeddingSpace: { state: "mixed", reason: null } });
     const { stdout } = await runDoctor(port);
-    expect(stdout).not.toContain("mixed embedding spaces");
+    expect(stdout).not.toContain("non-current embedding model stamp was observed");
     expect(stdout).not.toContain("not serving search");
   }, 120_000);
 });

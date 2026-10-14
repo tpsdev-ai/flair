@@ -179,7 +179,7 @@ describe("embedding-space-guard — latch", () => {
     expect(await recomputeLatch()).toBe(false); // the rescan fails
     const v = await embeddingSpaceVerdict();
     expect(v.uniform).toBe(false);
-    expect(v.state).toBe("mixed"); // a failed scan never downgrades a known-mixed store
+    expect(v.state).toBe("mixed"); // a failed scan never downgrades the mixed state
     expect(v.reason).toBe(SCAN_ERROR_TABLE_UNAVAILABLE); // the scan error is kept alongside
     expect(v.found).toContain(normalizeStamp(FOREIGN)!);
     expect(spaceGuardState()).toEqual({ state: "mixed", reason: SCAN_ERROR_TABLE_UNAVAILABLE });

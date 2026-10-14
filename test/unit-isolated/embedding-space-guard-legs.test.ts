@@ -212,7 +212,7 @@ describe("embedding-space-guard — both runtime legs (mutation test)", () => {
     // matches, and the warning names both spaces + the remedy.
     const semantic: any = await makeSearch(AGENT).post({ agentId: AGENT, q: "zqxnokeywordhere" });
     expect(semantic.results).toEqual([]);
-    expect(String(semantic._warning)).toContain("mixed embedding spaces");
+    expect(String(semantic._warning)).toContain("non-current embedding model stamp was observed");
     expect(String(semantic._warning)).toContain("flair reembed");
     expect(String(semantic._warning)).toContain(FOREIGN);
 
@@ -261,7 +261,7 @@ describe("embedding-space-guard — both runtime legs (mutation test)", () => {
     const res: any = await makeSearch(AGENT).post({ agentId: AGENT, q: "replication" });
     expect(res.results.map((r: any) => r.id)).toContain("m1"); // keyword-only STILL serves
     expect(String(res._warning)).toContain("embedding space not yet verified");
-    expect(String(res._warning)).not.toContain("mixed embedding spaces");
+    expect(String(res._warning)).not.toContain("non-current embedding model stamp was observed");
   });
 
   it("(g) explain output names the guard state when the embedding leg is refused", async () => {
@@ -282,7 +282,7 @@ describe("embedding-space-guard — both runtime legs (mutation test)", () => {
 
   it("(h) bm25-only never uses a query embedding: a supplied one is not consulted and draws no guard warning", async () => {
     seedRow("m1", AGENT, FINDING, CURRENT, FAKE_EMBEDDING);
-    // The verdict is non-uniform (no scan has reached one); count every scan a consult would start.
+    // The verdict is unverified (no scan has reached one); count every scan a consult would start.
     let scans = 0;
     _setGuardTableGetterForTests(async () => { scans++; throw new Error("no live table"); });
     const saved = { mode: process.env.FLAIR_RETRIEVAL_MODE, index: process.env.FLAIR_BM25_INDEX };
@@ -309,6 +309,6 @@ describe("embedding-space-guard — both runtime legs (mutation test)", () => {
     const res: any = await makeSearch(AGENT).post({ agentId: AGENT, q: "replication" });
     expect(res.results.map((r: any) => r.id)).toContain("m1");
     expect(String(res._warning)).toContain("embedding space unverified: last scan failed");
-    expect(String(res._warning)).not.toContain("mixed embedding spaces");
+    expect(String(res._warning)).not.toContain("non-current embedding model stamp was observed");
   });
 });

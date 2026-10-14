@@ -95,12 +95,12 @@ async function recallWarning(h: HarperInstance): Promise<string | undefined> {
   return JSON.parse(text)._warning;
 }
 
-/** Recall until the guard reports a mixed store (the consult scan published),
+/** Recall until the guard reports the mixed state (the consult scan published),
  *  or the deadline passes; returns the last `_warning`. */
 async function recallUntilMixed(h: HarperInstance, timeoutMs: number): Promise<string | undefined> {
   const deadline = Date.now() + timeoutMs;
   let warning = await recallWarning(h);
-  while (!String(warning).includes("mixed embedding spaces") && Date.now() < deadline) {
+  while (!String(warning).includes("non-current embedding model stamp was observed") && Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 50));
     warning = await recallWarning(h);
   }
@@ -249,14 +249,14 @@ describe("embedding-space-guard scan ordering inside a real Harper worker (flair
     } finally {
       writeFileSync(join(pauseDir, `go.${POINT}`), "");
     }
-    expect(String(during), "the consult scan did not report the mixed store").toContain("mixed embedding spaces");
+    expect(String(during), "the consult scan did not report the mixed state").toContain("non-current embedding model stamp was observed");
     expect(namedStamps(during)).toEqual({ current: CURRENT, found: [CURRENT, FOREIGN].sort() });
 
     // 4. The pre-warm resumes, released by this test rather than its time limit.
     //    Its older verdict does not replace the newer one, and its refusal is named.
     expect(await releaseText(released, 30_000), "the pre-warm's pause ended by its time limit").toBe("go");
     const after = await recallWarning(h);
-    expect(String(after), "the older verdict overwrote the newer one").toContain("mixed embedding spaces");
+    expect(String(after), "the older verdict overwrote the newer one").toContain("non-current embedding model stamp was observed");
     expect(namedStamps(after)).toEqual({ current: CURRENT, found: [CURRENT, FOREIGN].sort() });
     expect(await logShows(h, "stale scan verdict refused", 15_000), "no refusal in the Harper log").toBe(true);
   }, 120_000);

@@ -277,8 +277,8 @@ export function renderEmbedGpuDoctorFinding(
 /**
  * flair#2530 — the single place a /Health embedding-space verdict becomes doctor
  * output and exit-code weight, extracted like renderEmbedGpuDoctorFinding so the
- * four states are exercised on the real counting path. Only a `mixed` store is a
- * blocking finding; `uniform` prints an OK line and the two unverified states
+ * four states are exercised on the real counting path. Only the `mixed` state is
+ * a blocking finding; `uniform` prints an OK line and the two unverified states
  * print advisories.
  */
 export function renderEmbeddingSpaceDoctorFinding(
@@ -751,8 +751,8 @@ program
       // source still fails closed. A stated CPU default is silent here.
       issues += renderEmbedGpuDoctorFinding(embedGpuFromHealth).issueDelta;
 
-      // flair#2530 — the embedding-space guard's verdict, from /Health. A `mixed`
-      // store is a blocking finding; the two unverified states are advisories.
+      // flair#2530 — the embedding-space guard's verdict, from /Health. The
+      // `mixed` state is a blocking finding; the two unverified states are advisories.
       issues += renderEmbeddingSpaceDoctorFinding(embeddingSpaceFromHealth).issueDelta;
     }
 

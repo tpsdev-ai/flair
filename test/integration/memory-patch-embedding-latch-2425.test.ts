@@ -147,10 +147,10 @@ describe("a PATCH that stores an embedding stamp trips the embedding-space latch
     expect(stamped.status, stamped.text).toBeLessThan(300);
     expect(await rowEmbeddingModel()).toBe(FOREIGN);
 
-    expect(String(await semanticWarning())).toContain("mixed embedding spaces");
+    expect(String(await semanticWarning())).toContain("non-current embedding model stamp was observed");
     // flair#2530: `explain: true` returns its plan early and names the same state.
     const explained = String(await semanticWarning({ explain: true }));
-    expect(explained).toContain("mixed embedding spaces");
+    expect(explained).toContain("non-current embedding model stamp was observed");
     expect(explained).toContain("the plan has no embedding leg");
 
     // flair#2530: a vector-only recall (no `q`) whose embedding the guard refused
@@ -160,7 +160,7 @@ describe("a PATCH that stores an embedding stamp trips the embedding-space latch
     expect(listing.ids).toContain(ROW);
     const vectorOnly = await recall({ queryEmbedding: [1, 0, 0, 0] });
     expect(vectorOnly.ids).toEqual([]);
-    expect(String(vectorOnly.warning)).toContain("mixed embedding spaces");
+    expect(String(vectorOnly.warning)).toContain("non-current embedding model stamp was observed");
     expect(String(vectorOnly.warning)).toContain("no results");
     expect(String(vectorOnly.warning)).not.toContain("keyword-only");
   }, 60_000);

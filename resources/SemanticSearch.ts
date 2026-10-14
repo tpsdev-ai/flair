@@ -32,7 +32,7 @@ const CANDIDATE_MULTIPLIER = 5;
 /** The recall leg's `_warning` for a guard-degraded search (flair#2530). The
  *  verdict is never `uniform` here (that state is never degraded), so the three
  *  cases are exactly the non-uniform states. Each names itself; the
- *  mixed-stamps wording is used ONLY for a mixed store. `response` says what
+ *  non-current-stamp wording is used ONLY for the `mixed` state. `response` says what
  *  the caller gets back: keyword-only results (the request has query text), no
  *  results (it has none), or an `explain` plan with no embedding leg. */
 function spaceGuardWarning(v: EmbeddingSpaceVerdict, response: "keyword" | "none" | "plan"): string {
@@ -47,7 +47,7 @@ function spaceGuardWarning(v: EmbeddingSpaceVerdict, response: "keyword" | "none
     return `semantic search unavailable — embedding space not yet verified; ${outcome}.`;
   }
   return (
-    `semantic search unavailable — the store has mixed embedding spaces ` +
+    `semantic search unavailable — a non-current embedding model stamp was observed ` +
     `(current: ${v.current}; found: ${v.found.join(", ")}); ${outcome}. ` +
     `Reconcile to one space with: flair reembed --stale-only`
   );
@@ -174,12 +174,13 @@ export class SemanticSearch extends Resource {
     }
 
     // ─── Vector-space uniformity guard (embedding-space-guard slice 1) ────────
-    // If the store is NOT KNOWN uniform in the current embedding space — a
-    // mixed-space corpus during a re-embed / model change, OR an unknown verdict
-    // (before the first scan completes, or after a scan error) — cosining the
-    // query against stored vectors returns garbage: Harper zero-pads a
-    // mismatched-dimension vector and returns a bogus score instead of throwing;
-    // same-dims / different-space is silent garbage too. The guard fails CLOSED:
+    // If the store's model stamps are NOT KNOWN uniform in the current embedding
+    // space — a non-current stamp observed during a re-embed / model change, OR an unknown
+    // verdict (before the first scan completes, or after a scan error) —
+    // cosining the query against stored vectors could cross spaces or produce
+    // an invalid score: Harper zero-pads a mismatched-dimension vector and
+    // returns a bogus score instead of throwing, and a same-dims vector from
+    // another space scores meaninglessly. The guard fails CLOSED:
     // only a store whose stamps a scan verified uniform serves embeddings
     // (flair#2530). Take the
     // SAME path for every non-uniform state — REFUSE the embedding leg and

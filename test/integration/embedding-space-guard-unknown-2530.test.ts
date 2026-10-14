@@ -103,7 +103,7 @@ describe("embedding-space-guard unknown verdict inside a real Harper worker (fla
       expect(res.status, `SemanticSearch returned ${res.status}: ${text.slice(0, 300)}`).toBe(200);
       const warning = JSON.parse(text)._warning;
       expect(String(warning)).toContain("embedding space not yet verified");
-      expect(String(warning)).not.toContain("mixed embedding spaces");
+      expect(String(warning)).not.toContain("non-current embedding model stamp was observed");
     } finally {
       writeFileSync(join(pauseDir, `go.${POINT}`), "");
     }

@@ -33,7 +33,7 @@ describe("describeEmbeddingSpaceDoctorFinding (flair#2530)", () => {
   test("mixed after a failed rescan: still blocking, and names the scan error", () => {
     const f = describeEmbeddingSpaceDoctorFinding({ state: "mixed", reason: "the Memory corpus scan failed" });
     expect(f?.isIssue).toBe(true);
-    expect(String(f?.message)).toContain("mixed embedding spaces");
+    expect(String(f?.message)).toContain("non-current embedding model stamp was observed");
     expect(String(f?.message)).toContain("last scan failed (the Memory corpus scan failed)");
   });
 
@@ -67,7 +67,7 @@ describe("describeEmbeddingSpaceDoctorFinding (flair#2530)", () => {
 });
 
 describe("renderEmbeddingSpaceDoctorFinding (flair#2530)", () => {
-  test("only a mixed store adds a guard issue", () => {
+  test("only the mixed state adds a guard issue", () => {
     const mixed: string[] = [];
     expect(renderEmbeddingSpaceDoctorFinding({ state: "mixed" }, (l) => mixed.push(l)).issueDelta).toBe(1);
     expect(mixed.some((l) => l.includes("Fix:"))).toBe(true);

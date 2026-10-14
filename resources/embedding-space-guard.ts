@@ -34,15 +34,17 @@
  * ─── Unknown verdict = FAIL CLOSED (flair#2530) ──────────────────────────────
  * A scan can be pending (before the first scan completes) or fail (a boot race,
  * a transient read error). The verdict is then UNKNOWN, and "unknown" is NOT
- * "known uniform": only a scan that verified every stored `embeddingModel` stamp
- * naming a vector space to be the current space opens the gate
+ * "known uniform": only a scan that verified every space-bearing
+ * `embeddingModel` stamp to be the current space opens the gate
  * (`isEmbeddingSpaceUniform()` returns true). That is STAMP-METADATA
- * uniformity: the scan skips a stored vector with no stamp, so the verdict says
- * nothing about such a vector's space (stored-vector provenance is deferred to
- * flair#2573). Every other state — pending
- * (`unverified`), a failed scan (`scan-failed`), or a foreign-write/mixed corpus
- * (`mixed`) — makes a consumer take its MIXED-space path: when a query
- * embedding is available outside bm25-only mode, the recall leg drops it and
+ * uniformity: the scan ignores a missing stamp and the hash-fallback marker
+ * `hash-512d`, so the verdict says nothing about the space of a stored vector
+ * without a space-bearing stamp, including a hash-fallback vector
+ * (stored-vector provenance is deferred to flair#2573). Every other state — pending
+ * (`unverified`), a failed scan (`scan-failed`), or a non-current stamp observed
+ * by a scan or a foreign write (`mixed`) — makes a consumer take its
+ * MIXED-space path: when a query embedding is available outside bm25-only
+ * mode, the recall leg drops it and
  * serves keyword-only results (none, for a request with no query text; for
  * `explain: true`, a plan with no embedding leg) with a state-named warning;
  * the dedup leg no-ops. A recall in bm25-only mode (which never uses a query
@@ -275,7 +277,7 @@ function runScan(): Promise<void> {
 
 // ─── Verdict state (flair#2530) ──────────────────────────────────────────────
 // The latch's verdict has FOUR operator-visible states. Only `uniform` — a scan
-// that verified the corpus — opens the gate. The other three are NOT "known
+// that verified the corpus's model stamps — opens the gate. The other three are NOT "known
 // uniform" and fail closed: `unverified` (no scan has reached a verdict yet),
 // `scan-failed` (the last scan to publish an outcome threw, and no foreign
 // stamp is known), and `mixed` (a scan or a foreign write observed a
@@ -294,7 +296,9 @@ export interface EmbeddingSpaceVerdict {
   reason: string | null;
   /** The current engine-qualified space id (a metadata string, never a vector). */
   current: string;
-  /** The (capped) distinct active stamps seen, for the mixed-space diagnostic. */
+  /** The (capped) distinct stamps observed by the last published scan and by
+   *  later foreign writes, for the diagnostic. An observation can be stale (a
+   *  foreign row since deleted) until a successful rescan. */
   found: string[];
 }
 
@@ -323,7 +327,7 @@ function guardSnapshot(): EmbeddingSpaceVerdict {
   const current = normalizeStamp(_modelIdGetter()) ?? _modelIdGetter();
   const found = [..._activeStamps];
   // A known foreign stamp comes first, so no failed scan, earlier or later,
-  // turns a mixed store into an advisory `scan-failed`; the error rides in `reason`.
+  // turns the `mixed` state into an advisory `scan-failed`; the error rides in `reason`.
   if (_uniform === false) return { uniform: false, state: "mixed", reason: _lastScanError, current, found };
   if (_lastScanError !== null) {
     return { uniform: false, state: "scan-failed", reason: _lastScanError, current, found };
@@ -346,9 +350,9 @@ function consultGuard(): EmbeddingSpaceVerdict {
   return guardSnapshot();
 }
 
-/** THE single chokepoint. Returns true when a scan verified every stored
- *  `embeddingModel` stamp naming a vector space to be the current space (stamp
- *  metadata only; an unstamped stored vector is not checked, flair#2573), false
+/** THE single chokepoint. Returns true when a scan verified every
+ *  space-bearing `embeddingModel` stamp to be the current space (stamp metadata
+ *  only; a stored vector without such a stamp is not checked, flair#2573), false
  *  otherwise — including the UNKNOWN verdict (pending first scan, or a failed
  *  scan), which fails closed (the caller must take its mixed-space path). O(1)
  *  on the happy path: once verified-uniform, no scan; a pending or tripped

@@ -5,22 +5,23 @@
  * resources/embedding-space-guard.ts runs inside the Harper worker and reports
  * its verdict on the public /Health body as `embeddingSpace: { state, reason }`.
  * The guard fails closed: only `state: "uniform"` serves the embedding leg; a
- * `mixed` store, an `unverified` verdict (before the first scan completes) and a
+ * `mixed` state, an `unverified` verdict (before the first scan completes) and a
  * `scan-failed` verdict (the last published scan threw, no foreign stamp known)
  * all make the recall leg refuse a query embedding. This module is the single
  * decision: given that field, what doctor prints and whether it weighs on the
  * exit code.
  *
- * Only `mixed` is a blocking finding — it needs the operator to reconcile the
- * corpus. `unverified` and `scan-failed` are advisories, and `uniform` is an OK
- * line. A rescan starts only on a later guard consult (a recall with a query
- * embedding outside bm25-only mode, or a write-time dedup check; /Health does
- * not consult): at once
- * while no verdict is known, otherwise once RECHECK_MS has passed since the
- * last published verdict. The state becomes `uniform` only when such a scan
+ * Only `mixed` is a blocking finding: a non-current model stamp was observed,
+ * possibly stale until a successful rescan, which warrants investigation
+ * (`flair reembed --stale-only` reconciles a real one). `unverified` and
+ * `scan-failed` are advisories, and `uniform` is an OK line. A rescan starts
+ * only on a later guard consult (a recall with a query embedding outside
+ * bm25-only mode, or a write-time dedup check; /Health does not consult): at
+ * once while no verdict is known, otherwise once RECHECK_MS has passed since
+ * the last published verdict. The state becomes `uniform` only when such a scan
  * succeeds and finds the stamps uniform; with no consults, nothing retries.
- * `uniform` means stamp-metadata uniformity: a stored vector with no
- * `embeddingModel` stamp is not checked (flair#2573). An absent or
+ * `uniform` means stamp-metadata uniformity: a stored vector without a
+ * space-bearing `embeddingModel` stamp is not checked (flair#2573). An absent or
  * unrecognized field prints nothing: an older or foreign server's verdict is
  * not one to claim.
  */
@@ -64,7 +65,7 @@ export function describeEmbeddingSpaceDoctorFinding(field: unknown): EmbeddingSp
         isIssue: true,
         icon: "error",
         message:
-          "the store has mixed embedding spaces — the embedding leg is refused" +
+          "a non-current embedding model stamp was observed — the embedding leg is refused" +
           // A known foreign stamp outranks a scan error; name the error too.
           (rec.reason == null ? "" : `; last scan failed (${boundedScanFailureReason(rec.reason)})`),
         fixHint: "Reconcile to one space with: flair reembed --stale-only",
