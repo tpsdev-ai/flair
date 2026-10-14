@@ -13,9 +13,10 @@
  *     but a non-empty string or a non-empty array of strings, the empty string
  *     included) is refused with `invalid_event_id` (400) before any write, and
  *     a stored row under such an id is unchanged; a composite id is read;
- *   - for malformed ids and bodies, the response each caller gets is pinned,
- *     including those answered before the check (POST's generated id,
- *     attribution, the ownership lookup, Harper's own validation);
+ *   - for malformed ids and bodies, the status each caller gets is pinned, with
+ *     a refusal's `error` or `code` field, including input answered before the
+ *     check (POST's generated id, attribution, the ownership lookup, Harper's
+ *     own validation);
  *   - the catch-up feed delivers events in timestamp and ID order, so events
  *     with one server time are delivered in ID order (checked on a second,
  *     frozen-clock instance with IDs in reverse write order);
@@ -600,10 +601,16 @@ describe("a composite (array of strings) id follows the same createdAt rule", ()
 
 describe("what each malformed id or body gets", () => {
   // The createdAt check answers only for input that reaches it. POST generates
-  // an id first when the body's id is missing, empty, null, 0 or false; other
-  // input can be answered earlier by attribution, the ownership lookup, or
-  // Harper's own validation. Each case pins the response the caller gets and
-  // that nothing is stored.
+  // an id first when the body's id is missing, empty, null, 0 or false; some
+  // other input is answered earlier by attribution, the ownership lookup, or
+  // Harper's own validation. A refused case asserts the status plus its `error`
+  // field (flair refusals) or `code` field (Harper's problem details); a
+  // generated-id POST case asserts a 2xx and exactly one row with a generated
+  // id; the non-admin collection-PUT case whose element is an array asserts
+  // 200 and `[{}]`. Storage is checked for the id cases (a refused one stores
+  // no row with its summary), single-record PUT bodies (no row at the path)
+  // and PATCH (the row is unchanged); the POST-body and collection-element
+  // cases check only the response.
   type Expect = { status: number; error?: string; code?: string };
   const INVALID: Expect = { status: 400, error: INVALID_ID };
   const OWNER_CHANGE: Expect = { status: 403, error: "forbidden: the owner of a record cannot be changed" };

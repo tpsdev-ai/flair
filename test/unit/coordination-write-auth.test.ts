@@ -294,8 +294,9 @@ describe("OrgEvent.post() — avoids deterministic same-millisecond collisions (
   });
 });
 
-// ─── OrgEvent createdAt: assigned by the server on create; cannot be changed ──
-describe("OrgEvent — the server assigns createdAt on create, it cannot be changed, and an id the check does not read is refused", () => {
+// ─── OrgEvent createdAt: assigned by the server on create; a write that ──────
+// reaches the createdAt check cannot change it (an internal call is not checked)
+describe("OrgEvent — the server assigns createdAt on create, a write that reaches the createdAt check cannot change it, and an id the check does not read is refused", () => {
   const SERVER_NOW = "2026-10-13T12:00:00.000Z";
   const STORED_AT = "2026-10-01T09:30:00.000Z";
   const FUTURE = "2099-01-01T00:00:00.000Z";
