@@ -187,7 +187,14 @@ function stripAmbientFlair(env: NodeJS.ProcessEnv): Record<string, string> {
   return out;
 }
 
-function doctorEnv(tmpHome: string, opts: { adminPassEnv?: boolean } = {}): Record<string, string> {
+/**
+ * The env credential doctor runs with: both variables (the default), none, or
+ * HDB_ADMIN_PASSWORD only — which the repair can prove and write to the pass
+ * file (#1685), but which doctor's own instance reads do not consult (#2520).
+ */
+type AdminPassEnv = boolean | "hdb-only";
+
+function doctorEnv(tmpHome: string, opts: { adminPassEnv?: AdminPassEnv } = {}): Record<string, string> {
   const env: Record<string, string> = {
     ...stripAmbientFlair(process.env),
     HOME: tmpHome,
@@ -197,7 +204,7 @@ function doctorEnv(tmpHome: string, opts: { adminPassEnv?: boolean } = {}): Reco
   // the refusal case needs it absent, so the file cannot be created.
   if (opts.adminPassEnv !== false) {
     env.HDB_ADMIN_PASSWORD = ADMIN_PASS;
-    env.FLAIR_ADMIN_PASS = ADMIN_PASS;
+    if (opts.adminPassEnv !== "hdb-only") env.FLAIR_ADMIN_PASS = ADMIN_PASS;
   }
   env.HDB_ADMIN_USERNAME = ADMIN_USER;
   return env;
@@ -206,7 +213,7 @@ function doctorEnv(tmpHome: string, opts: { adminPassEnv?: boolean } = {}): Reco
 async function runDoctorFix(
   tmpHome: string,
   port: number,
-  opts: { adminPassEnv?: boolean } = {},
+  opts: { adminPassEnv?: AdminPassEnv } = {},
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   requireCliBuild();
   const proc = spawn(nodeBin(), [CLI_JS, "doctor", "--fix", "--port", String(port)], {
@@ -594,8 +601,11 @@ async function populateDataDir(sb: Sandbox): Promise<void> {
   }
 }
 
-async function doctorFixToManaged(sb: Sandbox): Promise<{ stdout: string; stderr: string }> {
-  const result = await runDoctorFix(sb.tmpHome, sb.httpPort);
+async function doctorFixToManaged(
+  sb: Sandbox,
+  opts: { adminPassEnv?: AdminPassEnv } = {},
+): Promise<{ stdout: string; stderr: string }> {
+  const result = await runDoctorFix(sb.tmpHome, sb.httpPort, opts);
   await waitForHttp(sb.httpURL, 60_000);
   const after = assessManaged(sb.dataDir, sb.httpPort, sb.launchAgentsDir);
   if (after.state !== "managed") {
@@ -606,6 +616,26 @@ async function doctorFixToManaged(sb: Sandbox): Promise<{ stdout: string; stderr
     );
   }
   return result;
+}
+
+/**
+ * flair#2520: after a `doctor --fix` that repaired launchd management, the
+ * Agent-roster and Agent-home checks resolved the admin credential and verified
+ * the target again, then read the repaired instance: both report their result
+ * for the sandbox (no Agent rows), not NOT RUN, a skip, or an unreadable roster.
+ */
+function assertPostRepairInstanceReads(stdout: string): void {
+  expect(stdout, "the Agent-roster check did not read the repaired instance").toContain("No stored agent id is outside");
+  expect(stdout, "the Agent-home check did not read the repaired instance").toContain("Every stored agent row names a home instance.");
+  for (const notRead of [
+    "Agent IDs: NOT RUN",
+    "Agent homes: NOT RUN",
+    "so the agent-id check did not run",
+    "Agent homes check skipped",
+    "Could not read the stored Agent roster",
+  ]) {
+    expect(stdout, `after the repair: ${notRead}`).not.toContain(notRead);
+  }
 }
 
 async function newSandbox(): Promise<Sandbox> {
@@ -1041,6 +1071,7 @@ test.skipIf(skipFixtureCase)(
 
     const result = await doctorFixToManaged(sb);
     const managed = assertManaged(sb);
+    assertPostRepairInstanceReads(result.stdout);
     expect(isAlive(detachedPid), `adopt must clean-stop the direct-spawned pid ${detachedPid}`).toBe(false);
     expect(managed.pid, "adopt must bounce the live instance exactly once (new launchd PID)").not.toBe(detachedPid);
     expect(isAlive(managed.pid)).toBe(true);
@@ -1087,15 +1118,19 @@ test.skipIf(skipFixtureCase)(
     expect(detachedPid).not.toBe(managedPid);
     const passFile = join(sb.tmpHome, ".flair", "admin-pass");
     // The #1685 gap: the direct-spawned instance is live, but the pass file the
-    // adopted plist's launcher needs does not exist. FLAIR_ADMIN_PASS is set to
-    // the instance's real password, so adoption must PROVE it against the live
-    // instance, write the file 0600, and only then write the plist.
+    // adopted plist's launcher needs does not exist. HDB_ADMIN_PASSWORD (only)
+    // is set to the instance's real password, so adoption must PROVE it against
+    // the live instance, write the file 0600, and only then write the plist.
+    // flair#2520: with no FLAIR_ADMIN_PASS, doctor starts with no credential for
+    // its own instance reads; the Agent-roster and Agent-home checks must pick
+    // up the file the repair wrote and read the repaired instance.
     rmSync(passFile, { force: true });
     expect(existsSync(passFile)).toBe(false);
     clearLaunchdLogs(sb.dataDir);
 
-    const result = await doctorFixToManaged(sb);
+    const result = await doctorFixToManaged(sb, { adminPassEnv: "hdb-only" });
     const managed = assertManaged(sb);
+    assertPostRepairInstanceReads(result.stdout);
     expect(existsSync(passFile), "doctor --fix must create the admin-pass file").toBe(true);
     expect(statSync(passFile).mode & 0o777, "the created pass file must be 0600").toBe(0o600);
     expect(readFileSync(passFile, "utf-8").replace(/\s+$/, "")).toBe(ADMIN_PASS);
