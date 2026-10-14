@@ -59,8 +59,13 @@ export function namesIdpKind(kind: unknown): boolean {
   return kind === IDP_KIND || (Array.isArray(kind) && kind.includes(IDP_KIND));
 }
 
+/**
+ * Is the field exactly as it was? A null and an absent value differ here, so
+ * a write that sets an absent field to null, or removes a null one, changes
+ * it. (An array kind is compared by reference, so any write of one differs.)
+ */
 function sameValue(a: unknown, b: unknown): boolean {
-  return (a ?? null) === (b ?? null);
+  return a === b;
 }
 
 /**

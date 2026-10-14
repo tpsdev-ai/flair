@@ -13,5 +13,5 @@
   agent may still relabel, revoke and delete its own idp credential, and create
   its own `webauthn`, `bearer-token` and `ed25519` credentials. Administrators,
   `flair mcp enable`, `flair principal link`, and the /mcp and XAA
-  just-in-time provisioners write mappings as before; the linker now stamps a
-  new mapping's `createdAt` at the mapping write.
+  just-in-time provisioners write mappings as before; the linker now reads a
+  new mapping's `createdAt` immediately before sending the mapping upsert.

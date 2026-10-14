@@ -1056,11 +1056,11 @@ describe("flair#2222 — the pre-write re-validation bound", () => {
   });
 });
 
-// The linker stamps a new mapping's createdAt and lastUsedAt at the mapping
-// write, not at the start of its run, so createdAt is the time the mapping was
-// written however long the run's earlier reads took.
-describe("the linker stamps a new mapping at its write", () => {
-  test("a run whose reads take ten minutes each stamps the write's time", async () => {
+// The linker reads a new mapping's createdAt and lastUsedAt from its clock
+// immediately before sending the mapping upsert, not at the start of its run,
+// however long the run's earlier reads took.
+describe("the linker stamps a new mapping immediately before sending its upsert", () => {
+  test("a run whose reads take ten minutes each stamps the clock as the upsert is sent", async () => {
     const st = mappingStub({ expectedUrl: HOSTED_OPS, principals: ["alice"] });
     let clockMs = Date.parse("2026-10-02T00:00:00.000Z");
     const clock = () => new Date(clockMs).toISOString();
@@ -1069,7 +1069,7 @@ describe("the linker stamps a new mapping at its write", () => {
     // Each operations-API call before the mapping write takes ten minutes on this clock.
     const fetchImpl = (async (url: any, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body));
-      if (body.table === "Credential" && body.operation === "upsert") writeAt = clockMs;
+      if (body.table === "Credential" && body.operation === "upsert") writeAt = clockMs; // the clock as the upsert is sent
       else clockMs += 10 * 60_000;
       return st.fetchImpl(url, init);
     }) as typeof fetch;

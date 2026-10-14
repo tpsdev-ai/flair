@@ -82,9 +82,19 @@ describe("isIdpMappingChange", () => {
   it("allows a write that leaves the mapping as it is", () => {
     expect(isIdpMappingChange(idpRow, { ...idpRow })).toBe(false);
     expect(isIdpMappingChange(idpRow, { ...idpRow, label: "desktop", updatedAt: "2026-10-13T00:00:00Z" })).toBe(false);
-    // An absent and a null value are the same stored state.
-    const noProvider = { ...idpRow, idpProvider: undefined };
-    expect(isIdpMappingChange(noProvider, { ...noProvider, idpProvider: null })).toBe(false);
+    const nullProvider = { ...idpRow, idpProvider: null };
+    expect(isIdpMappingChange(nullProvider, { ...nullProvider, label: "desktop" })).toBe(false);
+  });
+
+  it("takes null and absent as different values: setting or removing a null field is a change", () => {
+    const { idpProvider: _p, ...noProvider } = idpRow;
+    const nullProvider = { ...idpRow, idpProvider: null };
+    expect(isIdpMappingChange(noProvider, { ...noProvider, idpProvider: null })).toBe(true);
+    expect(isIdpMappingChange(nullProvider, noProvider)).toBe(true);
+    const { status: _s, ...noStatus } = idpRow;
+    expect(isIdpMappingChange(noStatus, { ...noStatus, status: null })).toBe(true);
+    const { idpSubject: _u, ...noSubject } = idpRow;
+    expect(isIdpMappingChange({ ...idpRow, idpSubject: null }, noSubject)).toBe(true);
   });
 });
 

@@ -37,7 +37,7 @@ function nonAdminWriteRefusal(stored: any, next: any, callerId: string): Respons
   return null;
 }
 
-/** A write body the resource treats as one record: a plain object. */
+/** A write body the resource treats as one record: a non-null object that is not an array. */
 function isRecordBody(content: unknown): content is Record<string, unknown> {
   return content != null && typeof content === "object" && !Array.isArray(content);
 }

@@ -467,6 +467,26 @@ describe("a non-admin write that changes an idp mapping is refused", () => {
     expect(await xaaGrantPrincipal(linked)).not.toBe(W.id);
   }, 60_000);
 
+  test("a non-admin write that removes a null idpProvider, or sets an absent one to null, is refused (idp_mapping_admin_only)", async () => {
+    // A null and an absent value are different stored values to the rule.
+    const nullRow = `idpw-null-provider-${randomUUID()}`;
+    const nullSub = `idpw-null-provider-${sfx}`;
+    await seedCredential({ id: nullRow, principalId: W.id, kind: "idp", idpProvider: null, idpSubject: nullSub });
+    const nullBefore = await snapshot(nullRow);
+    expect(nullBefore.idpProvider).toBeNull();
+    const { idpProvider: _dropped, ...withoutProvider } = nullBefore;
+    expectRefused(await signed(W, "PUT", `/Credential/${nullRow}`, withoutProvider), "PUT without the null idpProvider", nullSub);
+    await expectUnchanged(nullRow, nullBefore);
+
+    const absentRow = `idpw-absent-provider-${randomUUID()}`;
+    const absentSub = `idpw-absent-provider-${sfx}`;
+    await seedCredential({ id: absentRow, principalId: W.id, kind: "idp", idpSubject: absentSub });
+    const absentBefore = await snapshot(absentRow);
+    expect("idpProvider" in absentBefore && absentBefore.idpProvider !== undefined).toBe(false);
+    expectRefused(await signed(W, "PATCH", `/Credential/${absentRow}`, { idpProvider: null }), "PATCH idpProvider absent→null", absentSub);
+    await expectUnchanged(absentRow, absentBefore);
+  }, 60_000);
+
   test("a non-admin PATCH that changes kind away from idp is refused (idp_mapping_admin_only)", async () => {
     const linked = `idpw-linked-kind-${sfx}`;
     const id = await link(W.id, linked);

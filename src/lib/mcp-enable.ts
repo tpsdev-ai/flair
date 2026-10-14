@@ -1486,8 +1486,8 @@ export async function provisionIdpIdentityMapping(
   // ordering the survivor first means even a partially-applied batch can never
   // leave the subject with ZERO resolvable credentials (the fail-open denial).
   await assertMappingUnchanged(fetchImpl, opsUrl, authHeader, preflight, principalCreated);
-  // The mapping's times are read at its write, not at the start of the run,
-  // so a new mapping's createdAt is the time it was written.
+  // The mapping's times are read immediately before sending the mapping
+  // upsert, not at the start of the run.
   const writtenAt = clock();
   const upsertRes = await fetchImpl(opsUrl, {
     method: "POST",
