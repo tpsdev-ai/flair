@@ -19,8 +19,8 @@
 //   node scripts/ci/update-integration-shard-weights.mjs --out <path> <job-log> ...
 //   With no log paths, reads one log path per line from stdin.
 
-import { readFileSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { listIntegrationFiles, WEIGHTS_FILE } from "./integration-shards.mjs";
 
@@ -143,7 +143,17 @@ if (isEntryPoint) {
   const weights = aggregate(texts, keep);
   const sorted = {};
   for (const k of Object.keys(weights).sort()) sorted[k] = weights[k];
-  writeFileSync(out, `${JSON.stringify(sorted, null, 2)}\n`);
+  // Replace the weights file atomically: an interrupted run must never leave a truncated JSON
+  // file that integration-shards.mjs then fails to load. The temporary file sits in out's own
+  // directory so the rename stays on one filesystem.
+  const tmp = join(dirname(out), `.${basename(out)}.${process.pid}.tmp`);
+  try {
+    writeFileSync(tmp, `${JSON.stringify(sorted, null, 2)}\n`);
+    renameSync(tmp, out);
+  } catch (err) {
+    rmSync(tmp, { force: true });
+    throw err;
+  }
   const files = Object.keys(sorted).length;
   const sum = Object.values(sorted).reduce((a, b) => a + b, 0);
   process.stdout.write(
