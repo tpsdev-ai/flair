@@ -1733,8 +1733,8 @@ export class Memory extends (databases as any).flair.Memory {
     // this a duplicate of something else" situation — bypass the gate for it
     // (this also gives memory_update's preserveHistory mode dedup-bypass for
     // free, without a separate flag). NEVER suppresses the write either way.
-    // flair#2465: did the caller supply a vector? A caller-supplied vector gets
-    // no newly computed hash.
+    // flair#2465: did the caller supply a vector that survived redaction? A
+    // vector accepted from the caller gets no newly computed hash.
     const embeddingSupplied = Array.isArray(content.embedding) && content.embedding.length > 0;
     let dedupMatch: DedupMatch | null = null;
     if (!content.supersedes) {
@@ -1770,8 +1770,9 @@ export class Memory extends (databases as any).flair.Memory {
     // hash of the text it embedded (null for an empty owner). A skill's stored
     // vector that prepareSkillBody carried in keeps the hash prepareSkillBody
     // retained with it (possibly null), so a successor of a row whose hash
-    // differs from its text's expected hash still differs. A caller-supplied
-    // vector gets null, which the stamp migration reads as current.
+    // differs from its text's expected hash still differs. A vector accepted
+    // and stored from the caller gets null; the stamp migration then skips only
+    // the hash comparison for the row.
     content.embeddedContentHash = !embeddingSupplied && Array.isArray(content.embedding) && content.embedding.length > 0
       ? (embeddedTextHash(content) ?? null)
       : postCarriedHash;
@@ -2467,11 +2468,12 @@ export class Memory extends (databases as any).flair.Memory {
     // (see post()). A skill vector prepareSkillBody carried in keeps the hash it
     // retained (possibly null) — including a superseding create at a new id,
     // which has no stored row of its own. Any other put that does not compute a
-    // vector (a caller-supplied or echoed one) retains this row's stored hash,
-    // if any. A retained hash is a preserved value that may describe an earlier
-    // server-computed vector, not necessarily the vector stored now. One that
-    // differs from the current text's expected hash re-queues the row in the
-    // stamp migration; no stored hash, no re-queue.
+    // vector (one accepted from the caller, an echoed one, or a failed embed)
+    // retains this row's stored hash, if any. A retained hash is a preserved
+    // value that may describe an earlier server-computed vector, not
+    // necessarily the vector stored now. One that differs from the current
+    // text's expected hash re-queues the row in the stamp migration; with no
+    // stored hash the comparison is skipped.
     content.embeddedContentHash = !embeddingSupplied && Array.isArray(content.embedding) && content.embedding.length > 0
       ? (embeddedTextHash(content) ?? null)
       : putCarriedVector ? putCarriedHash : (preExisting?.embeddedContentHash ?? null);

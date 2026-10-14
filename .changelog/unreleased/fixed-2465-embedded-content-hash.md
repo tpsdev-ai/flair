@@ -8,11 +8,16 @@
   or null for a row with an empty owner. A PUT or PATCH that does not compute a
   vector, and a skill successor that carries the stored vector, retain the
   stored value, which may describe an earlier server-computed vector. A POST or
-  PUT create with a caller-supplied vector stores null; an admin PATCH create
-  drops a submitted value and can leave the field absent. The re-embed now
-  confirms, after staging, that the committed row still holds the exact text
-  it embedded, so an edit committed before that confirmation aborts the write.
-  The embedding-stamp migration re-queues a row whose stored hash differs from
-  the expected hash of its current text; a row with no stored hash counts as
-  current. `POST /FeedMemories` refuses a body `embeddedContentHash` (400
-  `feed_embedding_not_writable`).
+  PUT create that stores a vector accepted from the caller stores null; when
+  redaction changes the text, the supplied vector is discarded and the redacted
+  text is embedded afresh, with a new hash when that yields a vector. An admin PATCH create drops a submitted
+  value and can leave the field absent. The re-embed now confirms, after
+  staging, that the committed row still has the identity and the exact text it
+  embedded, so an edit to either that commits before the confirmation aborts
+  the write. The embedding-stamp migration re-queues a row whose stored hash
+  differs from the expected hash of its current text. An absent hash skips only
+  that comparison, as a matching one passes it; either way the row also needs
+  a current-space model. Its pending count is now a live scan, so it no longer
+  opts into the runner's completion-gate recheck, which could otherwise pass
+  the gate with a row pending only on its stored hash. `POST /FeedMemories`
+  refuses a body `embeddedContentHash` (400 `feed_embedding_not_writable`).

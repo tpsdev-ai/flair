@@ -16,15 +16,18 @@
  *     ordinary Memory POST/PUT/PATCH embed, the re-embed PATCH, the stamp
  *     migration's `.content`-suffix fallback, the auto-embed backfill);
  *   - a RETAINED hash: a preserved stored value that a write keeps without
- *     computing a vector (a PUT or PATCH that carries or supplies a vector, a
- *     skill successor that carries the stored vector). It may describe an
+ *     computing a vector (a PUT or PATCH that carries a vector or stores one
+ *     accepted from the caller, a skill successor that carries the stored
+ *     vector). It may describe an
  *     earlier server-computed vector, not necessarily the vector stored now.
  *     A value received through federation is an unverified peer assertion.
  * Exceptions: a row with an empty owner gets no hash (null) even from a
- * server-computed embed, and a caller-supplied vector gets no newly computed
- * hash (a POST or PUT create stores null; an admin PATCH create drops a
- * submitted value and can leave the field absent; an update retains the stored
- * hash beside it).
+ * server-computed embed, and a vector accepted and stored from the caller gets
+ * no newly computed hash (a POST or PUT create stores null; an admin PATCH
+ * create drops a submitted value and can leave the field absent; an update
+ * retains the stored hash beside it). When redaction changes the text, the
+ * supplied vector is discarded instead, and the write embeds the redacted text
+ * and stores a newly computed hash when the engine returns a vector.
  *
  * The embedding-stamp migration treats an embedding as current when its
  * `embeddingModel` is current-space AND the stored hash is absent or equals the
@@ -64,19 +67,21 @@ export function embeddedTextHash(row: Record<string, any> | null | undefined): s
  * no `embeddedContentHash`, or the stored hash equals the expected hash of the
  * row's current embedding text.
  *
- * Only an actually absent hash (null or undefined) is TRUSTED here (treated as
- * current). A row can lack one because it was written before this field
- * existed, was created through POST or PUT with a caller-supplied vector or
- * through an admin PATCH create, or was written by a path that stores none; a
- * server-computed embed stores none for a row with an empty owner or no text.
- * A row with an empty owner or no text can still hold a retained or
- * federation-received hash: that value is compared like any other and, with no
- * expected hash to equal, is not current. See the migration's module doc for
- * the cost of re-queueing rows with no hash instead.
+ * Only an actually absent hash (null or undefined) bypasses the comparison
+ * here; a matching hash passes it. Either way the caller still requires a
+ * current-space model. A row can lack a hash because it was written before
+ * this field existed, was created through POST or PUT with a vector accepted
+ * from the caller or through an admin PATCH create, or was written by a path
+ * that stores none; a server-computed embed stores none for a row with an
+ * empty owner or no text. A row with an empty owner or no text can still hold
+ * a retained or federation-received hash: that value is compared like any
+ * other and, with no expected hash to equal, fails the comparison. See the
+ * migration's module doc for the cost of re-queueing rows with no hash
+ * instead.
  */
 export function embeddedHashMatches(row: Record<string, any> | null | undefined): boolean {
   const recorded = row?.embeddedContentHash;
-  if (recorded === undefined || recorded === null) return true; // no stored hash — trusted
+  if (recorded === undefined || recorded === null) return true; // no stored hash — comparison bypassed
   const expected = embeddedTextHash(row);
   return typeof expected === "string" && recorded === expected;
 }

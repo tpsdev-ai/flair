@@ -21,6 +21,7 @@ const { listMigrationProgress, _resetProgressForTests, getCycleStatus } = await 
 const { getMigrationStatusSnapshot } = await import("../../resources/migrations/status.ts");
 const { _resetInProcessLockForTests } = await import("../../resources/migrations/lock.ts");
 const { hashSourceFields } = await import("../../resources/migrations/source-fields.ts");
+const { createEmbeddingStampMigration } = await import("../../resources/migrations/embedding-stamp.ts");
 
 import type { Migration, RunBatchResult } from "../../resources/migrations/types.ts";
 
@@ -862,6 +863,50 @@ describe("runMigrationCycle — flair#807 completion-gate safety net (migration.
     expect(result.ran).toBe(true);
     const detail = JSON.parse((ledgerEvents[0] as any).detail);
     expect(detail.outcome).toBe("halted");
+  });
+
+  it("flair#2465: the real embedding-stamp migration halts on a row pending only on its stored hash, although the stale-stamp query returns an unrelated row that reads current", async () => {
+    const CURRENT = "test-model-current";
+    const rows = new Map<string, Row>([
+      // The query's false positive: the stale-stamp condition search returns it,
+      // but a live read shows a current stamp and no stored hash.
+      ["q1", { id: "q1", agentId: "a1", content: "a current row", embedding: [0.1], embeddingModel: CURRENT }],
+      // Pending only on its stored hash: a current-space stamp, but a hash that
+      // differs from the expected hash of its text.
+      ["h1", { id: "h1", agentId: "a1", content: "the current text", embedding: [0.2], embeddingModel: CURRENT, embeddedContentHash: "a-stale-hash" }],
+    ]);
+    const table = {
+      async get(id: string) { return rows.has(id) ? { ...rows.get(id)! } : null; },
+      async put(row: Row) { rows.set(row.id, { ...row }); return row; },
+      async update(id: string, patch: Record<string, unknown>) { rows.set(id, { ...rows.get(id)!, ...patch }); return true; },
+      search(query: any): AsyncIterable<Row> {
+        // A condition query returns only q1 (what a stale index would claim); an
+        // unconditioned search is a live scan of every row.
+        const hasConditions = Array.isArray(query?.conditions) && query.conditions.length > 0;
+        const limit = typeof query?.limit === "number" ? query.limit : Infinity;
+        const out = (hasConditions ? [rows.get("q1")!] : Array.from(rows.values())).slice(0, limit);
+        async function* gen() { for (const r of out) yield { ...r }; }
+        return gen();
+      },
+    };
+    // A regen that never lands, so h1 is still pending at the completion gate.
+    const migration = createEmbeddingStampMigration(() => table, () => CURRENT, async () => false);
+    const registry = buildRegistryWith(migration);
+
+    const ledgerEvents: unknown[] = [];
+    const result = await runMigrationCycle({
+      registry,
+      getTable: () => table,
+      dataDir,
+      runningVersion: "0.1.0",
+      sleep: fastSleep,
+      ledgerDeps: { orgEventTable: { put: async (c: unknown) => { ledgerEvents.push(c); return c; } } },
+    });
+
+    expect(result.ran).toBe(true);
+    const detail = JSON.parse((ledgerEvents[0] as any).detail);
+    expect(detail.outcome, "the gate passed with a hash-only row still pending").toBe("halted");
+    expect(detail.error).toContain("rowsRemaining=1");
   });
 });
 

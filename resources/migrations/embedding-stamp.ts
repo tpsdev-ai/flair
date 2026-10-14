@@ -107,12 +107,13 @@
  * negated comparator — no analogous bypass exists or is needed; its
  * behavior was already verified against real Harper per the doc above).
  *
- * `recheckPending()` below is a SEPARATE, generic defense-in-depth layer
- * (wired into resources/migrations/runner.ts's completion gate) — even a
- * migration whose countPending() query is airtight can be defeated by some
- * OTHER, not-yet-understood counting artifact; this lets the runner PROVE
- * (via `.get()`, a primary-key lookup — always live, never index-assisted)
- * that a nonzero countPending() result is real before halting on it.
+ * NO `recheckPending()` (the runner's flair#807 completion-gate safety net,
+ * resources/migrations/runner.ts) since flair#2465. `countPending()` now scans
+ * every row's live value instead of querying an index, so there is no index
+ * artifact for that net to excuse. A recheck that re-derived its candidates
+ * from the `staleCondition()` query could also sample rows other than the ones
+ * the scan counted (a row pending only on its stored hash is invisible to that
+ * query) and pass the gate with that row still pending.
  *
  * ROOT-CAUSE GUARD — recall graph correctness (recall-hnsw-graph-heal).
  * This migration RE-EMBEDS rows in BULK via `PATCH /Memory/:id` — it replaces
@@ -150,11 +151,12 @@
  * SCAN: `detect` runs the `staleCondition()` query first and scans only when
  * the query finds nothing; `countPending` and `run` scan the whole table
  * directly, applying `rowEmbeddingCurrent` per row. A row with no stored hash
- * (e.g. written before this change, created with a caller-supplied vector, or
- * with an empty owner) counts as current. A rule that queued every missing hash
+ * (e.g. written before this change, created with a vector accepted from the
+ * caller, or with an empty owner) bypasses only the hash comparison: it is
+ * current when its model is current-space. A rule that queued every missing hash
  * would queue every legacy row at upgrade, and could leave pending a row that
- * cannot get a hash (one with an empty owner); missing hashes are trusted
- * instead.
+ * cannot get a hash (one with an empty owner); a missing hash skips the
+ * comparison instead.
  */
 import { databases } from "harper";
 import { isDeepStrictEqual } from "node:util";
@@ -487,41 +489,6 @@ export function createEmbeddingStampMigration(
       }
 
       return { processed: touchedIds.length, touchedIds };
-    },
-
-    /**
-     * flair#807 completion-gate safety net (resources/migrations/runner.ts
-     * calls this ONLY when a nonzero countPending() would otherwise halt the
-     * migration). Re-derives up to `limit` currently-"pending" ids via the
-     * staleCondition() query — which countPending() does not use: since
-     * flair#2465 it scans the table directly — then re-checks each one by a
-     * DIRECT `.get()` — a primary-key lookup, never index-assisted, so it
-     * can't be fooled by a secondary-index divergence in the query. Returns
-     * counts only (never ids — matches this codebase's
-     * structural-only-disclosure discipline, e.g. resources/migrations/ledger.ts's
-     * module doc), so the runner can log a loud, actionable WARN without ever
-     * needing to know which rows.
-     */
-    async recheckPending(limit: number): Promise<{ sampled: number; falsePositives: number }> {
-      const table = getTable();
-      const current = getCurrentModelId();
-
-      const ids: string[] = [];
-      for await (const row of table.search({ conditions: staleCondition(), limit })) {
-        const id = String((row as { id?: unknown }).id ?? "");
-        if (id) ids.push(id);
-      }
-
-      let falsePositives = 0;
-      for (const id of ids) {
-        const existing = await table.get(id);
-        // A row that vanished since the search, OR whose live stamp and hash
-        // still don't match, is a GENUINE pending row (or a concurrent delete) —
-        // never counted as a false positive.
-        if (existing && rowEmbeddingCurrent(existing, current)) falsePositives++;
-      }
-
-      return { sampled: ids.length, falsePositives };
     },
   };
 }
