@@ -102,6 +102,10 @@ async function countRows(sql: string): Promise<number> {
   return Array.isArray(rows) ? rows.length : 0;
 }
 
+async function registrationEventCount(agentId: string): Promise<number> {
+  return countRows(`SELECT id FROM flair.OrgEvent WHERE kind = 'agent_key_registered' AND refId = '${agentId}'`);
+}
+
 /** POST /AgentKeyRegister as the admin operator (Basic). Returns status + body. */
 async function registerAsAdmin(agentId: string, publicKey: string): Promise<{ status: number; body: any }> {
   const res = await fetch(`${harper.httpURL}/AgentKeyRegister`, {
@@ -239,6 +243,8 @@ describe("flair#2266 — admin key registration on a pending Agent row", () => {
     expect(body.publicKey).toBe(successKey.pub);
     expect(typeof body.updatedAt).toBe("string");
     expect(typeof body.registrationId).toBe("string");
+
+    expect(await registrationEventCount(successId)).toBe(1);
 
     // Read-back equals the response.
     const after = await rowIn("Agent", successId);
@@ -401,13 +407,13 @@ describe("flair#2266 — admin key registration on a pending Agent row", () => {
     expect(typeof tokens?.operation_token, JSON.stringify(tokens).slice(0, 200)).toBe("string");
     const before = await rowIn("Agent", bearerTargetId);
     const auditsBefore = await ops({ operation: "sql", sql: "SELECT * FROM flair.AgentKeyRegistration ORDER BY id" });
-    const eventsBefore = await countRows("SELECT id FROM flair.OrgEvent WHERE type = 'agent_key_registered'");
+    const eventsBefore = await registrationEventCount(bearerTargetId);
     const { status, text } = await registerWithBearer(tokens.operation_token, bearerTargetId, mkKey().pub);
     expect(status, text.slice(0, 200)).toBe(401);
     expect(JSON.parse(text).error).toBe("authentication required");
     expect(await rowIn("Agent", bearerTargetId)).toEqual(before);
     expect(await ops({ operation: "sql", sql: "SELECT * FROM flair.AgentKeyRegistration ORDER BY id" })).toEqual(auditsBefore);
-    expect(await countRows("SELECT id FROM flair.OrgEvent WHERE type = 'agent_key_registered'")).toBe(eventsBefore);
+    expect(await registrationEventCount(bearerTargetId)).toBe(eventsBefore);
   }, 30_000);
 
   test("an unverifiable Bearer token is refused 401; the Agent row is unchanged", async () => {

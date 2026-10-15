@@ -87,12 +87,8 @@ export class AgentKeyRegister extends Resource {
     const ctx = (this as any).getContext?.() ?? {};
     const req = (ctx as any).request ?? ctx;
 
-    // Backstop: Harper's authentication already refuses a `Flair-Enroll`
-    // Authorization before this handler. This build cannot verify that scheme,
-    // so a configuration that lets one through is refused here, never treated
-    // as any other caller.
-    if (/^Flair-Enroll(\s|$)/i.test(readHeader(req, "authorization"))) {
-      return jsonRefusal(401, "authentication required", "the Flair-Enroll enrollment scheme is not enabled in this build");
+    if (!/^(Basic|TPS-Ed25519)(\s|$)/i.test(readHeader(req, "authorization"))) {
+      return jsonRefusal(401, "authentication required", "an admin credential is required to register a key");
     }
 
     const auth = await resolveAgentAuth(ctx);
