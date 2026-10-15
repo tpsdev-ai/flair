@@ -380,10 +380,15 @@ async function findConservativeDedupMatch(
 ): Promise<DedupMatch | null> {
   if (!agentId || !embedding || embedding.length === 0) return null;
   // ── Vector-space uniformity guard (embedding-space-guard slice 1) ──────────
-  // When the corpus is not uniform in the current embedding space, the cosine
-  // compare below would cross vector spaces (Harper zero-pads / returns a
-  // garbage score). No-op the dedup cosine leg — treat as no-match — through
-  // the SAME single chokepoint the recall leg (SemanticSearch) consults.
+  // When the stored model stamps are NOT KNOWN uniform in the current embedding
+  // space, the cosine compare below could cross vector spaces or produce an
+  // invalid score (Harper zero-pads a mismatched-dimension vector). No-op the
+  // dedup cosine leg — treat as no-match — through
+  // the SAME single chokepoint the recall leg (SemanticSearch) consults. The
+  // guard fails CLOSED (flair#2530): it returns false for an UNKNOWN verdict too
+  // (before the first scan completes, or after a scan error), so this leg no-ops
+  // in exactly those states — the same no-match behavior as the `mixed` state. This
+  // leg surfaces no warning (a skipped comparison is invisible by design).
   // ADVISORY ONLY: the write always proceeds (runDedupGate already computed and
   // stamped a fresh CURRENT-space embedding); this only skips a comparison that
   // can't be trusted while spaces are mixed. Never suppresses a write.

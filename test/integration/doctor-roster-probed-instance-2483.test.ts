@@ -8,31 +8,50 @@
  * roster from instance B, so it reported B's rows as A's. src/cli.ts's
  * `verifyDoctorRosterInstance` picks the ops endpoint with the pairing rule
  * `flair agent stamp-home` uses (flair#2474/#2491), then, before either read,
- * asks that ops endpoint for its configuration (src/lib/local-instance-pair.ts,
- * the check the local delete paths use): it must record that ops port and the
- * HTTP port doctor actually probed, bound on loopback or on all interfaces.
- * After that check passes, two different Instance ids on the two endpoints
- * also refuse. A refusal, or a configuration check that cannot complete,
- * reports both checks NOT RUN (counted as an issue) and reads no Agent row.
+ * runs the pair check the local delete paths use (src/lib/local-instance-pair.ts):
+ * the endpoint's configuration must record that ops port and the HTTP port
+ * doctor actually probed, bound on loopback or on all interfaces, and the OS
+ * listener table must show one process listening on both, with a recognized
+ * Harper command line and the same pid and start time on two reads
+ * (flair#2526). After that check passes, two different Instance ids on the two
+ * endpoints also refuse. A refused pair check reports both checks NOT RUN
+ * (counted as an issue) and reads no Agent row; a pair check that cannot start
+ * for want of an admin credential reports them skipped and reads no Agent row.
+ * The pair proof runs before any credentialed HTTP request; the Basic
+ * identity read on the probed HTTP port follows only a proven pair; doctor
+ * then holds its later diagnostic requests to that port until the pair is
+ * proven, with one exception: with no usable admin credential to check the
+ * pair, a listener that passes the listener-only check gets requests with no
+ * Authorization header or an Ed25519 signature, never a Basic or Bearer
+ * header. The "listener-only fallback" block tests that exception, and the
+ * last block a configured client URL on the probed port.
  *
  * The first block runs with NO Instance row on either instance, as on a fresh
  * install: the default paired case must run, and every refusal there comes
- * from the configuration check alone, except recorded-pair PID drift, which
- * the pairing rule refuses earlier. The second block seeds one Instance row
- * on each instance: the paired case still runs, and an ops endpoint whose
- * configuration names the probed port but which reports a different Instance
- * id is refused by the identity comparison.
+ * from the pair check alone, except recorded-pair PID drift, which the pairing
+ * rule refuses earlier. Its stale-configuration case also plants a live, wrong
+ * PID file: B's configuration names A's HTTP port and B's `hdb.pid` names A's
+ * live process, which is also the process id B's own `system_information`
+ * then reports, so neither is evidence. The second block seeds one Instance
+ * row on each instance: the paired case still runs, and the stale
+ * configuration is refused by the pair check. The third calls the pair check
+ * directly against both instances. The fourth runs doctor against a listener
+ * that answers 200 but is not A, with A's ops port and FLAIR_ADMIN_PASS (the
+ * real one, then a wrong one that the ops endpoint refuses), and asserts that
+ * no Authorization header reaches it.
  *
  * Build prerequisite: dist/cli.js and dist/resources/*.js
  * (`bun run build && bun run build:cli`).
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { execFileSync, spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { proveLocalInstancePair } from "../../src/lib/local-instance-pair";
 
 const CLI = join(process.cwd(), "dist", "cli.js");
 const ADMIN_PASS = "test123"; // matches harper-lifecycle's seeded admin pass
@@ -84,19 +103,31 @@ function listeningPidOn(port: number): number | null {
 }
 
 /** Run `flair doctor` with an isolated HOME; returns the process's code + streams. */
-function runDoctor(opts: { args: string[]; opsPort?: string }): Promise<{ code: number | null; stdout: string; stderr: string }> {
+function runDoctor(opts: {
+  args: string[];
+  opsPort?: string;
+  adminPass?: string;
+  /** Extra environment; an `undefined` value removes the variable. */
+  env?: Record<string, string | undefined>;
+  /** A `bun --preload` module for the doctor process. */
+  preload?: string;
+}): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const env: Record<string, string> = {
+    const env: Record<string, string | undefined> = {
       ...process.env,
       HOME: home,
       FLAIR_URL: "",
       FLAIR_TOKEN: "",
-      FLAIR_ADMIN_PASS: ADMIN_PASS,
+      FLAIR_ADMIN_PASS: opts.adminPass ?? ADMIN_PASS,
+      HDB_ADMIN_PASSWORD: undefined,
       NO_COLOR: "1",
+      ...opts.env,
     };
     if (opts.opsPort === undefined) delete env.FLAIR_OPS_PORT;
     else env.FLAIR_OPS_PORT = opts.opsPort;
-    const child = spawn(process.execPath, [CLI, "doctor", ...opts.args], { env, timeout: 60_000 });
+    for (const [key, value] of Object.entries(env)) if (value === undefined) delete env[key];
+    const args = [...(opts.preload ? ["--preload", opts.preload] : []), CLI, "doctor", ...opts.args];
+    const child = spawn(process.execPath, args, { env: env as Record<string, string>, timeout: 60_000 });
     let stdout = "";
     let stderr = "";
     child.stdout?.on("data", (d: Buffer) => { stdout += d.toString(); });
@@ -124,6 +155,34 @@ async function ops(h: HarperInstance, body: Record<string, unknown>): Promise<un
 /** Seed rows straight through an instance's operations API. */
 async function seed(h: HarperInstance, table: string, records: Record<string, unknown>[]): Promise<void> {
   await ops(h, { operation: "insert", database: "flair", table, records });
+}
+
+/** The admin `Authorization` header for an instance. */
+const authOf = (h: HarperInstance) => "Basic " + btoa(`${h.admin.username}:${h.admin.password}`);
+
+/**
+ * Make B stale in the way flair#2526 names, run `fn`, then restore B: B's
+ * configuration FILE records A's HTTP port (no restart, so B keeps serving its
+ * own), and B's `hdb.pid` names A's live process. Returns A's pid.
+ */
+async function withStaleConfigAndWrongPidFile<T>(fn: (aPid: number) => Promise<T>): Promise<T> {
+  const aRoot = String(((await ops(a, { operation: "get_configuration" })) as any).rootPath);
+  const bRoot = String(((await ops(b, { operation: "get_configuration" })) as any).rootPath);
+  const aPid = Number(readFileSync(join(aRoot, "hdb.pid"), "utf-8").trim());
+  const bPidFile = readFileSync(join(bRoot, "hdb.pid"), "utf-8");
+  expect(Number.isInteger(aPid) && aPid > 0, "A's hdb.pid names no process").toBe(true);
+  await ops(b, { operation: "set_configuration", http_port: Number(httpPort(a)) });
+  writeFileSync(join(bRoot, "hdb.pid"), `${aPid}`);
+  try {
+    // B's own operations API now reports A's live process: Harper reads that id
+    // from its hdb.pid, so it is PID-file evidence, not the serving process.
+    const info = (await ops(b, { operation: "system_information", attributes: ["harperdb_processes"] })) as any;
+    expect(info?.harperdb_processes?.core?.[0]?.pid, "B's system_information did not follow the planted PID file").toBe(aPid);
+    return await fn(aPid);
+  } finally {
+    writeFileSync(join(bRoot, "hdb.pid"), bPidFile);
+    await ops(b, { operation: "set_configuration", http_port: Number(httpPort(b)) });
+  }
 }
 
 const INST_A = "inst-a-2483";
@@ -281,6 +340,23 @@ describe("flair#2483 — no Instance row on either instance (a fresh install): n
     expect(fixedRun.stdout).not.toContain(HOMELESS_ON_B);
     rmSync(join(home, ".flair", "data", "hdb.pid"), { force: true });
   }, 120_000);
+
+  test("a stale configuration naming the probed HTTP port, with a live wrong PID file, while another process serves it: both checks are NOT RUN", async () => {
+    // B's config FILE records A's HTTP port and B's hdb.pid names A's live
+    // process. The configured ports agree with the probe, but the OS lists
+    // different processes on B's ops port and A's HTTP port. No Instance row
+    // exists yet, so the pair check is what refuses.
+    await withStaleConfigAndWrongPidFile(async () => {
+      writeHomeConfig(`opsPort: ${opsPort(b)}\n`);
+      const r = await runDoctor({ args: ["--port", httpPort(a)], opsPort: opsPort(b) });
+      expect(r.stdout, r.stdout).toContain("Agent IDs: NOT RUN");
+      expect(r.stdout, r.stdout).toContain("Agent homes: NOT RUN");
+      expect(r.stdout, r.stdout).toContain("not the same running instance");
+      expect(r.stdout, "A's out-of-rule row was read through the stale endpoint").not.toContain(BAD_ID_ON_A);
+      expect(r.stdout, "another instance's roster row was reported").not.toContain(BAD_ID_ON_B);
+      expect(r.stdout, "another instance's home-less row was reported").not.toContain(HOMELESS_ON_B);
+    });
+  }, 90_000);
 });
 
 describe("flair#2483 — one Instance row on each instance", () => {
@@ -298,20 +374,260 @@ describe("flair#2483 — one Instance row on each instance", () => {
   test("an ops endpoint whose configuration names the probed port while another instance serves it: both checks are NOT RUN", async () => {
     await seedInstanceRows();
     // B's config FILE now records A's HTTP port (no restart, so B keeps serving
-    // its own). The configuration check reads the file and passes; the two
-    // endpoints report different Instance ids, so the identity comparison
-    // refuses.
+    // its own). The OS lists different processes on B's ops port and A's HTTP
+    // port, so the pair check refuses before any Instance-id comparison.
     await ops(b, { operation: "set_configuration", http_port: Number(httpPort(a)) });
     try {
       writeHomeConfig(`opsPort: ${opsPort(b)}\n`);
       const r = await runDoctor({ args: ["--port", httpPort(a)], opsPort: opsPort(b) });
       expect(r.stdout, r.stdout).toContain("Agent IDs: NOT RUN");
       expect(r.stdout, r.stdout).toContain("Agent homes: NOT RUN");
-      expect(r.stdout, r.stdout).toContain("report different instance identities");
+      expect(r.stdout, r.stdout).toContain("not the same running instance");
       expect(r.stdout, "another instance's roster row was reported").not.toContain(BAD_ID_ON_B);
       expect(r.stdout, "another instance's home-less row was reported").not.toContain(HOMELESS_ON_B);
     } finally {
       await ops(b, { operation: "set_configuration", http_port: Number(httpPort(b)) });
+    }
+  }, 90_000);
+});
+
+describe("flair#2526 — the pair check itself against two real Harpers", () => {
+  test("a matched pair (A's ops port, A's HTTP port) is proven from the listener table", async () => {
+    expect(await proveLocalInstancePair(Number(opsPort(a)), authOf(a))).toEqual({ kind: "proven", httpPort: Number(httpPort(a)) });
+  }, 60_000);
+
+  test("B's configuration names A's HTTP port while B's PID file names A's live process: refused, naming both listeners", async () => {
+    await withStaleConfigAndWrongPidFile(async () => {
+      const bListener = listeningPidOn(Number(opsPort(b)));
+      const aListener = listeningPidOn(Number(httpPort(a)));
+      const proof = await proveLocalInstancePair(Number(opsPort(b)), authOf(b));
+      expect(proof.kind, JSON.stringify(proof)).toBe("unproven");
+      if (proof.kind !== "unproven") return;
+      expect(proof.detail).toContain("not the same running instance");
+      if (bListener !== null && aListener !== null) {
+        expect(proof.detail).toBe(
+          `the process listening on ops port ${opsPort(b)} is ${bListener} and the process listening on HTTP port ${httpPort(a)} is ${aListener}, so they are not the same running instance`,
+        );
+      }
+    });
+  }, 60_000);
+});
+
+/**
+ * A child process that answers HTTP 200 (`{}`) to every request on a loopback
+ * port and records each request's URL and headers — a listener that is not the
+ * instance, standing where doctor's probed HTTP port points.
+ */
+async function startHeaderCapture(opts: { harperShaped?: boolean } = {}): Promise<{ port: number; requests: () => Array<{ url: string; headers: Record<string, string> }>; stop: () => Promise<void> }> {
+  const script = `
+    const http = require("node:http");
+    const srv = http.createServer((req, res) => {
+      process.stdout.write(JSON.stringify({ url: req.url, headers: req.headers }) + "\\n");
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end("{}");
+    });
+    srv.listen(0, "127.0.0.1", () => process.stdout.write(JSON.stringify({ listening: srv.address().port }) + "\\n"));
+  `;
+  // A Harper-shaped listener runs the same server from a file at a Harper
+  // entry path, so its command line matches isHarperProcessCommandLine and it
+  // passes doctor's listener-only proof. It is not Harper.
+  let entry: string | null = null;
+  let dir: string | null = null;
+  if (opts.harperShaped) {
+    dir = mkdtempSync(join(tmpdir(), "flair-2526-harper-shaped-"));
+    mkdirSync(join(dir, "node_modules", "harper", "dist", "bin"), { recursive: true });
+    entry = join(dir, "node_modules", "harper", "dist", "bin", "harper.js");
+    writeFileSync(entry, script);
+  }
+  const child = spawn(process.execPath, entry ? [entry] : ["-e", script], { stdio: ["ignore", "pipe", "inherit"] });
+  const lines: string[] = [];
+  let buffered = "";
+  const port = await new Promise<number>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("exit", (code) => reject(new Error(`header-capture child exited ${code} before listening`)));
+    child.stdout!.on("data", (chunk: Buffer) => {
+      buffered += chunk.toString();
+      let nl: number;
+      while ((nl = buffered.indexOf("\n")) >= 0) {
+        const line = buffered.slice(0, nl);
+        buffered = buffered.slice(nl + 1);
+        const parsed = JSON.parse(line);
+        if (typeof parsed.listening === "number") resolve(parsed.listening);
+        else lines.push(line);
+      }
+    });
+  });
+  child.removeAllListeners("exit");
+  return {
+    port,
+    requests: () => lines.map((l) => JSON.parse(l)),
+    stop: () => new Promise<void>((resolve) => {
+      const done = () => {
+        if (dir) rmSync(dir, { recursive: true, force: true });
+        resolve();
+      };
+      if (child.exitCode !== null || child.signalCode !== null) return done();
+      child.once("exit", done);
+      child.kill("SIGTERM");
+    }),
+  };
+}
+
+describe("flair#2526 — doctor sends no credential to an unproven HTTP port", () => {
+  test("doctor probing a 200-answering listener that is not A, with A's ops port and FLAIR_ADMIN_PASS: no Authorization header reaches it", async () => {
+    const capture = await startHeaderCapture();
+    try {
+      writeHomeConfig(`opsPort: ${opsPort(a)}\n`);
+      const r = await runDoctor({ args: ["--port", String(capture.port)], opsPort: opsPort(a) });
+      const seen = capture.requests();
+      expect(seen.length, "doctor never reached the listener, so the test proves nothing").toBeGreaterThan(0);
+      const credentialed = seen.filter((q) => "authorization" in q.headers).map((q) => q.url);
+      expect(credentialed, `credentialed requests reached the unproven port:\n${r.stdout}`).toEqual([]);
+      // The credentialed sections say why they did not run.
+      expect(r.stdout, r.stdout).toContain(`Embeddings: NOT RUN — the configured HTTP/ops pair does not match`);
+      expect(r.stdout, r.stdout).toContain("Agent IDs: NOT RUN");
+      expect(r.stdout, "A's rows were read through the unproven port").not.toContain(BAD_ID_ON_A);
+    } finally {
+      await capture.stop();
+    }
+  }, 90_000);
+
+  test("with an unusable admin credential, the fallback proves the HTTP port's own listener: a listener that is not Harper still receives no Authorization header", async () => {
+    // The ops endpoint refuses the wrong password (HTTP 401), so the pair is
+    // never checked; doctor then proves the probed port's listener without a
+    // credential. A 200-answering listener that is not Harper fails that proof.
+    const capture = await startHeaderCapture();
+    try {
+      writeHomeConfig(`opsPort: ${opsPort(a)}\n`);
+      const r = await runDoctor({ args: ["--port", String(capture.port)], opsPort: opsPort(a), adminPass: `${ADMIN_PASS}-wrong` });
+      const seen = capture.requests();
+      expect(seen.length, "doctor never reached the listener, so the test proves nothing").toBeGreaterThan(0);
+      const credentialed = seen.filter((q) => "authorization" in q.headers).map((q) => q.url);
+      expect(credentialed, `credentialed requests reached the unproven port:\n${r.stdout}`).toEqual([]);
+      expect(r.stdout, r.stdout).toContain("the configuration request answered HTTP 401");
+      expect(r.stdout, r.stdout).toContain("nor is the HTTP port's own listener proven");
+    } finally {
+      await capture.stop();
+    }
+  }, 90_000);
+});
+
+/** A `bun --preload` module that records every fetch the doctor process makes: its URL and only the Authorization scheme. */
+function fetchRecorder(): { preload: string; log: string; calls: () => Array<{ url: string; scheme: string | null }>; cleanup: () => void } {
+  const dir = mkdtempSync(join(tmpdir(), "flair-2526-fetch-log-"));
+  const log = join(dir, "fetches.jsonl");
+  const preload = join(dir, "record-fetch.cjs");
+  writeFileSync(log, "");
+  writeFileSync(preload, `
+    const fs = require("node:fs");
+    const original = globalThis.fetch;
+    globalThis.fetch = async (input, init) => {
+      try {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        let auth = null;
+        const h = init && init.headers;
+        if (h) auth = typeof h.get === "function" ? h.get("authorization") : (h.Authorization ?? h.authorization ?? null);
+        else if (input && typeof input === "object" && input.headers && typeof input.headers.get === "function") auth = input.headers.get("authorization");
+        fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ url, scheme: auth ? String(auth).split(" ")[0] : null }) + "\\n");
+      } catch {}
+      return original(input, init);
+    };
+  `);
+  return {
+    preload,
+    log,
+    calls: () => readFileSync(log, "utf-8").split("\n").filter(Boolean).map((l) => JSON.parse(l)),
+    cleanup: () => rmSync(dir, { recursive: true, force: true }),
+  };
+}
+
+describe("flair#2526 — the listener-only fallback sends no Basic and no Bearer credential", () => {
+  for (const [name, env] of [
+    ["HDB_ADMIN_PASSWORD", { HDB_ADMIN_PASSWORD: "hdb-admin-pass-not-a-secret" }],
+    ["FLAIR_TOKEN", { FLAIR_TOKEN: "bearer-token-not-a-secret" }],
+  ] as const) {
+    test(`no admin credential, ${name} set, a Harper-shaped listener on the probed port: no Authorization header reaches it`, async () => {
+      // No FLAIR_ADMIN_PASS and no ~/.flair/admin-pass: the pair cannot be
+      // checked, the listener passes the listener-only proof (its command line
+      // has Harper's shape), and doctor runs its HTTP reads signed-only.
+      const capture = await startHeaderCapture({ harperShaped: true });
+      try {
+        writeHomeConfig(`port: ${capture.port}\n`);
+        const r = await runDoctor({ args: ["--port", String(capture.port)], adminPass: "", env: { ...env, FLAIR_ADMIN_PASS: undefined } });
+        const seen = capture.requests();
+        expect(seen.length, "doctor never reached the listener, so the test proves nothing").toBeGreaterThan(0);
+        // No admin credential, and the listener-only proof passed, so the
+        // redirect read ran rather than being held.
+        expect(r.stdout, r.stdout).toContain("Skipped: no admin credentials to read the stored Agent roster");
+        expect(r.stdout, r.stdout).not.toContain("MCP OAuth redirect: NOT RUN");
+        const credentialed = seen.filter((q) => "authorization" in q.headers).map((q) => `${q.url} ${q.headers.authorization.split(" ")[0]}`);
+        expect(credentialed, `credentialed requests reached the unpaired listener:\n${r.stdout}`).toEqual([]);
+      } finally {
+        await capture.stop();
+      }
+    }, 90_000);
+  }
+
+  test("A's ops endpoint refuses a password that B accepts; doctor probing B's HTTP port with A's ops port sends nothing credentialed to B", async () => {
+    // A's admin password is changed for this test, so the shared test password
+    // is refused by A's ops endpoint (HTTP 401) and still accepted by B.
+    const changed = `${ADMIN_PASS}-a-only`;
+    await ops(a, { operation: "alter_user", username: a.admin.username, password: changed, active: true });
+    const original = a.admin.password;
+    a.admin.password = changed;
+    const recorder = fetchRecorder();
+    try {
+      writeHomeConfig(`opsPort: ${opsPort(a)}\n`);
+      const r = await runDoctor({ args: ["--port", httpPort(b)], opsPort: opsPort(a), preload: recorder.preload });
+      expect(r.stdout, r.stdout).toContain("the configuration request answered HTTP 401");
+      const toB = recorder.calls().filter((c) => new URL(c.url).port === httpPort(b));
+      expect(toB.length, "doctor never reached B, so the test proves nothing").toBeGreaterThan(0);
+      const shared = toB.filter((c) => c.scheme === "Basic" || c.scheme === "Bearer").map((c) => `${new URL(c.url).pathname} ${c.scheme}`);
+      expect(shared, `a Basic or Bearer credential reached B's HTTP port:\n${r.stdout}`).toEqual([]);
+      expect(r.stdout, "B's rows were read through an unpaired ops endpoint").not.toContain(BAD_ID_ON_B);
+    } finally {
+      await ops(a, { operation: "alter_user", username: a.admin.username, password: original, active: true });
+      a.admin.password = original;
+      recorder.cleanup();
+    }
+  }, 90_000);
+});
+
+describe("flair#2526 — a configured client URL on the probed port is held whatever its host", () => {
+  test("a refused pair, and ~/.claude.json naming the probed port with the wildcard host 0.0.0.0: the client registration read is NOT RUN and no Authorization header reaches the listener", async () => {
+    // A REAL client config file and a REAL agent key in the test HOME. The
+    // listener on the probed port is not Harper and the pair check refuses
+    // (A's configuration names A's HTTP port), so every credentialed request
+    // to that port is held, including the signed registration read a client
+    // block makes, whatever host its FLAIR_URL names.
+    const capture = await startHeaderCapture();
+    const agentId = "client-2526";
+    const keyFile = join(home, ".flair", "keys", `${agentId}.key`);
+    const claudeJson = join(home, ".claude.json");
+    mkdirSync(join(home, ".flair", "keys"), { recursive: true });
+    writeFileSync(keyFile, randomBytes(32), { mode: 0o600 });
+    writeFileSync(claudeJson, JSON.stringify({
+      mcpServers: {
+        flair: {
+          command: "npx",
+          args: ["-y", "@tpsdev-ai/flair-mcp"],
+          env: { FLAIR_URL: `http://0.0.0.0:${capture.port}`, FLAIR_AGENT_ID: agentId },
+        },
+      },
+    }, null, 2));
+    try {
+      writeHomeConfig(`opsPort: ${opsPort(a)}\n`);
+      const r = await runDoctor({ args: ["--port", String(capture.port)], opsPort: opsPort(a) });
+      expect(r.stdout, "doctor did not read the client config file").toContain("MCP server configured");
+      const credentialed = capture.requests()
+        .filter((q) => "authorization" in q.headers)
+        .map((q) => `${q.url} ${q.headers.authorization.split(" ")[0]}`);
+      expect(credentialed, `credentialed requests reached the unproven port:\n${r.stdout}`).toEqual([]);
+      expect(r.stdout, r.stdout).toContain(`agent '${agentId}' registration: NOT RUN`);
+    } finally {
+      rmSync(claudeJson, { force: true });
+      rmSync(keyFile, { force: true });
+      await capture.stop();
     }
   }, 90_000);
 });
