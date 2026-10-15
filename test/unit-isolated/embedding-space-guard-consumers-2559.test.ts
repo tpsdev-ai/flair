@@ -25,13 +25,11 @@
  * bootstrap warning disappears and the dedup counts come back non-null.
  */
 import { describe, it, expect, beforeEach, mock } from "bun:test";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { tempDir } from "../helpers/temp-dir";
 
 // HOME before the dedup-cluster module (imported by MemoryDedupStats) computes
 // REM_DEDUP_STATS_PATH from homedir() — the sweep writes its stat file there.
-process.env.HOME = mkdtempSync(join(tmpdir(), "flair-2559-home-"));
+process.env.HOME = tempDir("flair-2559-home-"); // removed by the shared helper when the file finishes
 process.env.FLAIR_RATE_LIMIT_ENABLED = "false";
 process.env.FLAIR_HYBRID_RETRIEVAL = "false"; // legacy HNSW-only path — no BM25 index service to stand up
 delete (process.env as any).FLAIR_PUBLIC;
