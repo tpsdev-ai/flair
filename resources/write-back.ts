@@ -51,15 +51,10 @@ export interface WriteBackOptions {
    *  the interleaving where this write's transaction opens first. Named at
    *  the call site, like `pausePre`. */
   pausePoint?: WriteBackPause;
-  /**
-   * A bounded per-call deadline (flair#2455 slice 2). When it expires, the
-   * owned transaction is aborted FOR REAL (its context carries an AbortSignal)
-   * and the call rejects with {@link WriteBackDeadlineError}. Aborting makes
-   * Harper drop the staged write and refuse a later one, so a continuation
-   * that resumes after the deadline cannot commit — a timer that merely
-   * stopped awaiting the callback would leave it free to commit late.
-   */
+  /** Deadline for work before commit submission; submitted commits are awaited. */
   deadlineMs?: number;
+  /** Test-only pause after commit submission. */
+  pauseSubmitted?: WriteBackPause;
 }
 
 /** The fields of `expectedRow` (or of the helper's own first read) it compares
@@ -120,15 +115,21 @@ export class WriteBackConflictError extends Error {
   }
 }
 
-/** The named error a write-back throws when its `deadlineMs` expires: the owned
- *  transaction is aborted for real, so nothing is written and a continuation
- *  that resumes later is refused (flair#2455 slice 2). */
+/** The owned callback exceeded its deadline before commit submission. */
 export class WriteBackDeadlineError extends Error {
   readonly id: string;
   constructor(label: string, id: string) {
-    super(`${label}: row ${id} exceeded its write deadline; transaction aborted, not written`);
+    super(`${label}: row ${id} exceeded its write deadline before commit submission`);
     this.name = "WriteBackDeadlineError";
     this.id = id;
+  }
+}
+
+/** Commit submission failed or its outcome could not be confirmed. */
+export class WriteBackIndeterminateError extends Error {
+  constructor(label: string, id: string, cause: unknown) {
+    super(`${label}: row ${id} commit outcome unknown`, { cause });
+    this.name = "WriteBackIndeterminateError";
   }
 }
 
@@ -292,27 +293,23 @@ export async function writeBackCommittedRow(
     if (pre) await pre;
   }
 
-  // A deadline makes the owned transaction cancellable: its context carries an
-  // AbortSignal, and expiring the deadline aborts it (below). The default path
-  // is unchanged — `ctx` is the caller's context and no signal is added.
-  let deadlineController: AbortController | undefined;
-  let ctx = opts.ctx;
-  if (opts.deadlineMs != null) {
-    deadlineController = new AbortController();
-    const upstream: AbortSignal | undefined = opts.ctx?.signal;
-    ctx = {
-      ...(opts.ctx ?? {}),
-      signal: upstream ? AbortSignal.any([upstream, deadlineController.signal]) : deadlineController.signal,
-    };
-  }
+  let deadlineExpired = false;
+  let commitSubmitted = false;
+  const checkDeadline = () => {
+    if (deadlineExpired) throw new WriteBackDeadlineError(opts.label, id);
+  };
+  const ctx = opts.ctx;
 
   const run = async (): Promise<WriteBackPlan> => {
     for (let attempt = 1; ; attempt++) {
       try {
         return await withOwnedTransaction(ctx, async (c) => {
+          checkDeadline();
           const row = await table.get(id, c);
+          checkDeadline();
           if (opts.matches && !opts.matches(row)) return { skip: true };
           const decision = await plan(row);
+          checkDeadline();
           if ("skip" in decision) return decision;
           if (!sameTarget(row)) throw new WriteBackConflictError(opts.label, id, attempt);
           // Test-only: inert unless the fault-injection opt-in is armed.
@@ -320,35 +317,35 @@ export async function writeBackCommittedRow(
             const pause = opts.pausePoint();
             if (pause) await pause;
           }
+          checkDeadline();
           if ("update" in decision) await applyFieldUpdate(table, id, decision.update, c);
           else await table.put(decision.write, c);
           await confirmCommittedRow(table, id, (committed) => isDeepStrictEqual(committed, row));
+          checkDeadline();
+          if (opts.deadlineMs != null) {
+            // Commit-submission boundary: Harper does not abort a submitted
+            // native commit. From here, await the outcome; never report refusal.
+            commitSubmitted = true;
+            const committed = c.transaction.commit();
+            await Promise.all([committed, Promise.resolve().then(opts.pauseSubmitted)]);
+          }
           return decision;
         });
       } catch (err) {
+        if (commitSubmitted) throw new WriteBackIndeterminateError(opts.label, id, err);
         if (!(err instanceof CommittedRowChanged)) throw err;
         if (attempt >= attempts) throw new WriteBackConflictError(opts.label, id, attempts);
       }
     }
   };
 
-  const work = run();
-  if (opts.deadlineMs == null) return await work;
-  const controller = deadlineController as AbortController;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const deadline = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      // Abort the owned transaction for real, THEN report the refusal: a
-      // continuation that resumes after this cannot stage a write
-      // (admitRequestWrite refuses an aborted signal) or commit a staged one.
-      controller.abort();
-      reject(new WriteBackDeadlineError(opts.label, id));
-    }, opts.deadlineMs);
-  });
+  const timer = opts.deadlineMs == null ? undefined : setTimeout(() => {
+    if (!commitSubmitted) deadlineExpired = true;
+  }, opts.deadlineMs);
   try {
-    // `work` keeps its own handler through the race, so a later rejection from
-    // the aborted continuation is observed, never unhandled.
-    return await Promise.race([work, deadline]);
+    // A pre-submission deadline throws inside the owned callback, so Harper's
+    // rollback completes before this call rejects.
+    return await run();
   } finally {
     if (timer !== undefined) clearTimeout(timer);
   }

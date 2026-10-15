@@ -29,7 +29,7 @@ import { stripInboundMemoryRow, stripServerStampedFields } from "./memory-declar
 import { noteWriteStamp } from "./embedding-space-guard.js";
 import { initFederationCleanup } from "./federation-cleanup.js";
 import { verifyFederationRequestBody } from "./replay-store.js";
-import { CommittedRowChanged, confirmCommittedRow, writeBackCommittedRow, WriteBackConflictError } from "./write-back.js";
+import { CommittedRowChanged, confirmCommittedRow, writeBackCommittedRow, WriteBackConflictError, WriteBackIndeterminateError } from "./write-back.js";
 import { withKeyLock } from "./key-lock.js";
 import { withOwnedTransaction } from "./request-transaction.js";
 import { txnPausePoint } from "./txn-pause-point.js";
@@ -1059,12 +1059,7 @@ async function consumePairingToken(
   return { kind: "consumed" };
 }
 
-/**
- * The receiver's per-record merge deadline (flair#2455 slice 2). A record whose
- * merge overruns it is reported refused (merge_error) and its transaction is
- * aborted for real, so it never late-commits. A healthy merge is ~1.7 s per 50
- * records; 5 s bounds a stalled or hung write without cutting a normal one.
- */
+/** Deadline for each record's write-back before commit submission. */
 const RECORD_MERGE_DEADLINE_MS = 5_000;
 
 /**
@@ -1108,27 +1103,35 @@ export class FederationSync extends Resource {
     const verifyResult = await verifyFederationRequestBody(data, peer.publicKey);
     if (!verifyResult.ok) return federationVerifyRefusal(verifyResult.reason);
 
+    const offeredKeys = new Set<string>();
+    for (const record of records) {
+      if (typeof record?.table !== "string" || typeof record?.id !== "string" ||
+        record?.data?.id !== record.id) {
+        return new Response(JSON.stringify({ error: "invalid_sync_batch_key" }), {
+          status: 400, headers: { "content-type": "application/json" },
+        });
+      }
+      const key = JSON.stringify([record.table, record.id]);
+      if (offeredKeys.has(key)) {
+        return new Response(JSON.stringify({ error: "duplicate_sync_batch_key" }), {
+          status: 400, headers: { "content-type": "application/json" },
+        });
+      }
+      offeredKeys.add(key);
+    }
+
     const startTime = Date.now();
     let merged = 0;
     let skipped = 0;
     const skippedReasons: Record<string, number> = {};
-    // flair#2455 slice 2 / rev 2.1 N1: the complete per-key refusal list. Every
-    // offered key the receiver refused, retryable or not, named by its closed
-    // SkipReason. `table` and `id` are the offered key's, `reason` is the
-    // matched enum member — no receiver-authored text. The sender acts on this
-    // in a later slice; old senders ignore the added field.
+    // Refusals name validated, unique offered keys with a closed reason.
     const refused: Array<{ table: string; id: string; reason: SkipReason }> = [];
     const mergeErrors: string[] = [];
 
     function recordSkip(reason: SkipReason, record: SyncRecord) {
       skipped++;
       skippedReasons[reason] = (skippedReasons[reason] ?? 0) + 1;
-      // Only an offered key the receiver can name is listed: `refused` stays a
-      // subset of the batch the sender sent, and a malformed batch entry cannot
-      // crash the refusal bookkeeping.
-      if (typeof record?.table === "string" && typeof record?.id === "string") {
-        refused.push({ table: record.table, id: record.id, reason });
-      }
+      refused.push({ table: record.table, id: record.id, reason });
     }
 
     // Table name → Harper database table mapping.
@@ -1401,13 +1404,10 @@ export class FederationSync extends Resource {
               // identity fields do not move on one either (flair#2450 — see
               // above).
               wholeRow: true,
-              // flair#2455 slice 2: a per-record deadline whose expiry aborts
-              // THIS record's transaction for real (no late commit after the
-              // receiver reports the key refused). A record that overruns is
-              // reported refused (merge_error) and never lands.
               deadlineMs: RECORD_MERGE_DEADLINE_MS,
               pausePre: () => txnPausePoint("federation-merge-pre"),
               pausePoint: () => txnPausePoint("federation-merge"),
+              pauseSubmitted: () => txnPausePoint("federation-merge-submitted"),
             },
           );
         } catch (err) {
@@ -1431,6 +1431,11 @@ export class FederationSync extends Resource {
         noteFederationMergedMemory(record.table, mergedData);
         merged++;
       } catch (err) {
+        if (err instanceof WriteBackIndeterminateError) {
+          return new Response(JSON.stringify({ error: "sync_merge_outcome_unknown" }), {
+            status: 503, headers: { "content-type": "application/json" },
+          });
+        }
         const msg = err instanceof Error ? err.message : String(err);
         recordSkip("merge_error", record);
         // Cap the captured-error list so a hostile/buggy peer can't blow up

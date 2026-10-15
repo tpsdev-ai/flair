@@ -1,26 +1,7 @@
-/**
- * federation-receiver-2455.test.ts — flair#2455 slice 2, real Harper.
- *
- * Two receiver behaviours, both over the REAL FederationSync push route:
- *
- *  - a complete per-key refusal list: the batch response names EVERY offered
- *    key the receiver refused, with a closed SkipReason, so nothing is dropped
- *    without a name;
- *  - a per-record deadline with real transaction cancellation: a record whose
- *    merge is paused past its five-second deadline is reported refused AND the
- *    record's transaction is aborted for real, so it does NOT land afterwards
- *    even once the pause releases. The proof uses the in-transaction
- *    `federation-merge` pause (resources/txn-pause-point.ts), armed by this
- *    test while it starts its own ephemeral Harper.
- *
- * The no-late-commit case fails if the deadline stops the wait but does not
- * abort the transaction: the resumed continuation then commits the record late.
- *
- * Throwaway HOME + data dir, ephemeral ports, swept in afterAll.
- */
+/** Real-Harper coverage for validated unique keys and both sides of commit submission. */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import nacl from "tweetnacl";
@@ -141,8 +122,8 @@ afterAll(async () => {
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
 });
 
-describe("flair#2455 slice 2 — receiver completeness and the per-record deadline (real Harper)", () => {
-  it("a merge paused past the deadline is reported refused and never late-commits", async () => {
+describe("flair#2455 slice 2 — validated batch keys and the commit-submission deadline (real Harper)", () => {
+  it("a pre-submission timeout is refused after rollback", async () => {
     const id = `frc-deadline-${Date.now()}`;
     for (const marker of ["claimed", "paused", "go", "released"]) rmSync(join(pauseDir, `${marker}.${PAUSE}`), { force: true });
     writeFileSync(join(pauseDir, `arm.${PAUSE}`), "");
@@ -151,24 +132,66 @@ describe("flair#2455 slice 2 — receiver completeness and the per-record deadli
     const paused = await waitFor(join(pauseDir, `paused.${PAUSE}`), 20_000);
     expect(paused, "the merge never reached its in-transaction pause").toBe(true);
 
-    // The request returns on its own at the deadline — it does not wait out the
-    // pause (which the test still holds).
+    await new Promise((r) => setTimeout(r, 5_500));
+    writeFileSync(join(pauseDir, `go.${PAUSE}`), "");
     const res = await pending;
     const body = await res.json() as any;
     expect(res.status, JSON.stringify(body)).toBe(200);
     expect(body.merged, JSON.stringify(body)).toBe(0);
     expect(body.refused, JSON.stringify(body)).toEqual([{ table: "Memory", id, reason: "merge_error" }]);
-    // Already absent while the write is still paused on the receiver.
-    expect(await readRow("Memory", id), "the refused merge landed before its pause released").toBeNull();
-
-    // Release the pause: the continuation resumes. With the transaction aborted
-    // for real it is refused; without that it would commit here.
-    writeFileSync(join(pauseDir, `go.${PAUSE}`), "");
-    expect(await waitFor(join(pauseDir, `released.${PAUSE}`), 20_000), "the paused merge never released").toBe(true);
+    expect(await waitFor(join(pauseDir, `released.${PAUSE}`), 20_000)).toBe(true);
     for (let i = 0; i < 15; i++) {
       expect(await readRow("Memory", id), `the merge late-committed after being reported refused (poll ${i})`).toBeNull();
       await new Promise((r) => setTimeout(r, 200));
     }
+  }, 60_000);
+
+  it("a submitted commit held past the deadline reports merged and lands", async () => {
+    const id = `frc-submitted-${Date.now()}`;
+    const point = "federation-merge-submitted";
+    for (const marker of ["claimed", "paused", "go", "released"]) rmSync(join(pauseDir, `${marker}.${point}`), { force: true });
+    writeFileSync(join(pauseDir, `arm.${point}`), "");
+    let responded = false;
+    const pending = federatedPush([memoryRecord(id)]).then((res) => {
+      responded = true;
+      return res;
+    });
+    try {
+      expect(await waitFor(join(pauseDir, `paused.${point}`), 20_000)).toBe(true);
+      await new Promise((r) => setTimeout(r, 5_500));
+      expect(responded, "the receiver answered while the submitted outcome was held").toBe(false);
+    } finally {
+      writeFileSync(join(pauseDir, `go.${point}`), "");
+    }
+    const res = await pending;
+    const body = await res.json() as any;
+    expect(res.status, JSON.stringify(body)).toBe(200);
+    expect(body.merged).toBe(1);
+    expect(body.skipped).toBe(0);
+    expect(body.refused).toEqual([]);
+    const row = await readRow("Memory", id);
+    expect(row?.content).toBe(`body ${id}`);
+    expect(row?.agentId).toBe(owner.id);
+  }, 60_000);
+
+  it("a numeric key refuses the whole batch before any merge", async () => {
+    const id = `frc-invalid-${Date.now()}`;
+    const res = await federatedPush([
+      memoryRecord(id),
+      { table: "Presence", id: 42, data: { id: 42 }, updatedAt: new Date().toISOString() },
+    ]);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "invalid_sync_batch_key" });
+    expect(await readRow("Memory", id)).toBeNull();
+  }, 60_000);
+
+  it("a duplicate key refuses the whole batch before any merge", async () => {
+    const id = `frc-duplicate-${Date.now()}`;
+    const record = memoryRecord(id);
+    const res = await federatedPush([record, record]);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "duplicate_sync_batch_key" });
+    expect(await readRow("Memory", id)).toBeNull();
   }, 60_000);
 
   it("CONTROL: an un-paused merge lands and reports no refusal", async () => {
@@ -179,7 +202,7 @@ describe("flair#2455 slice 2 — receiver completeness and the per-record deadli
     expect(await readRow("Memory", id)).not.toBeNull();
   }, 60_000);
 
-  it("names every offered key it refused, exactly once, with a closed reason", async () => {
+  it("names refused validated unique keys with a closed reason", async () => {
     const ts = Date.now();
     const mergedId = `frc-merged-${ts}`;
     const futureId = `frc-future-${ts}`;
@@ -202,7 +225,7 @@ describe("flair#2455 slice 2 — receiver completeness and the per-record deadli
     ];
     const body = await (await federatedPush(records)).json() as any;
 
-    // Every offered key is accounted for exactly once: merged, or refused once.
+    // These validated unique keys are merged or refused.
     expect(body.total, JSON.stringify(body)).toBe(records.length);
     expect(body.merged, JSON.stringify(body)).toBe(1);
     expect(body.merged + body.refused.length, JSON.stringify(body)).toBe(body.total);
@@ -223,7 +246,7 @@ describe("flair#2455 slice 2 — receiver completeness and the per-record deadli
     for (const entry of body.refused) counts[entry.reason] = (counts[entry.reason] ?? 0) + 1;
     expect(counts).toEqual(body.skippedReasons);
 
-    // An old sender reads only merged/skipped and ignores the added field.
+    // The shipped sender parser ignores the added field.
     expect(parseSyncBatchCounts(body, records.length)).toEqual({ merged: body.merged, skipped: body.skipped });
 
     // And the refusals are real: only the mergeable record landed.

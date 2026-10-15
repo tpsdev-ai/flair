@@ -40,6 +40,7 @@ const NEW = "2026-09-02T00:00:00.000Z";
 let peerStore: Map<string, any>;
 let syncLogStore: Map<string, any>;
 let stores: Record<string, Map<string, any>>;
+let loseCommitAck = false;
 
 function emptyGen() {
   async function* gen() {}
@@ -67,6 +68,7 @@ function table(name: string) {
 
 const harperTxn = installFakeHarperTransaction((id: string, payload: { table: string; row: any }) => {
   stores[payload.table].set(id, JSON.parse(JSON.stringify(payload.row)));
+  if (loseCommitAck) throw new Error("commit acknowledgement lost");
 });
 
 mock.module("harper", () => ({
@@ -170,6 +172,7 @@ const ROWS: Record<string, { data: (origin: string) => Record<string, any>; fiel
 };
 
 beforeEach(() => {
+  loseCommitAck = false;
   peerStore = new Map();
   syncLogStore = new Map();
   stores = { Memory: new Map(), Soul: new Map(), Agent: new Map(), Relationship: new Map(), Message: new Map() };
@@ -233,4 +236,16 @@ describe("FederationSync ephemeral expiry", () => {
       else process.env.FLAIR_EPHEMERAL_TTL_HOURS = prior;
     }
   });
+});
+
+it("a lost commit acknowledgement returns unknown without refusing the committed row", async () => {
+  const { secretKey, publicKey } = keypair();
+  peerStore.set(PEER_ID, { id: PEER_ID, publicKey, createdAt: OLD, role: "hub", status: "connected" });
+  const data = ROWS.Memory.data(ORIGIN);
+  const record = pushedRecord("Memory", data.id, data, NEW, secretKey);
+  loseCommitAck = true;
+  const response = await postSync({ instanceId: PEER_ID, records: [record], lamportClock: 1 }, secretKey);
+  expect(response.status).toBe(503);
+  expect(await response.json()).toEqual({ error: "sync_merge_outcome_unknown" });
+  expect(stores.Memory.get(data.id)?.content).toBe(data.content);
 });
