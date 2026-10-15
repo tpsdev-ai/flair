@@ -43,12 +43,14 @@ function runtimeKind(command: string, options: Options): "bun" | "node" | "unkno
   } catch { return "unknown"; }
 }
 
-function entryKind(arg: string, options: Options): "harper" | "cli" | undefined {
+type EntryKind = "harper.js" | "dist/cli.js" | "dist/cli-shim.cjs";
+
+function entryKind(arg: string, options: Options): EntryKind | undefined {
   const entry = resolve(cwdPath(options.cwd), arg);
   const canonical = canonicalPath(entry);
   for (const path of [entry, canonical].map(value => value.replaceAll(sep, "/"))) {
-    if (basename(path) === "harper.js") return "harper";
-    if (/\/dist\/(cli\.js|cli-shim\.cjs)$/.test(path)) return "cli";
+    if (basename(path) === "harper.js") return "harper.js";
+    if (/\/dist\/(cli\.js|cli-shim\.cjs)$/.test(path)) return basename(path) === "cli.js" ? "dist/cli.js" : "dist/cli-shim.cjs";
   }
 }
 
@@ -92,34 +94,37 @@ function scriptIndex(args: string[], options: Options): number {
   return -1;
 }
 
-function startsHarper(args: string[], options: Options): boolean {
+function startsHarper(args: string[], options: Options): EntryKind | undefined {
   options = { ...options };
   const index = scriptIndex(args, options);
-  if (index < 0 || !args[index]) return false;
+  if (index < 0 || !args[index]) return undefined;
   const kind = entryKind(args[index], options);
-  if (kind === "harper") return true;
-  if (kind !== "cli") return false;
+  if (kind === "harper.js") return kind;
+  if (!kind) return undefined;
   const cli = args.slice(index + 1);
   if (cli[0] === "--") cli.shift();
   const command = cli[0];
-  if (cli.includes("--help") || cli.includes("-h")) return false;
+  if (cli.includes("--help") || cli.includes("-h")) return undefined;
   const hasValue = (flag: string): boolean => cli.some((arg, i) =>
     arg.startsWith(`${flag}=`) ? arg.length > flag.length + 1 : arg === flag && !!cli[i + 1] && !cli[i + 1].startsWith("-"));
-  if (command === "init") return !cli.includes("--skip-start") && !hasValue("--target");
-  if (command === "upgrade") return !cli.includes("--check") && !hasValue("--target");
-  if (command === "doctor") return cli.includes("--fix") && !cli.includes("--dry-run");
-  if (command === "snapshot") return ["create", "restore"].includes(cli[1]);
-  return ["start", "restart"].includes(command);
+  if (command === "init") return !cli.includes("--skip-start") && !hasValue("--target") ? kind : undefined;
+  if (command === "upgrade") return !cli.includes("--check") && !hasValue("--target") ? kind : undefined;
+  if (command === "doctor") return cli.includes("--fix") && !cli.includes("--dry-run") ? kind : undefined;
+  if (command === "snapshot") return ["create", "restore"].includes(cli[1]) ? kind : undefined;
+  return ["start", "restart"].includes(command) ? kind : undefined;
 }
 
-function shellWords(source: string): string[] {
+function shellWords(source: string): string[] | undefined {
   const words: string[] = [];
   let word = "";
   let quote = "";
   let started = false;
   for (let i = 0; i < source.length; i++) {
     const char = source[i];
-    if (char === "\\" && quote !== "'") { word += source[++i] ?? ""; started = true; }
+    if (char === "\\" && quote !== "'") {
+      if (++i === source.length) return;
+      word += source[i]; started = true;
+    }
     else if (quote) {
       if (char === quote) quote = "";
       else word += char;
@@ -131,14 +136,16 @@ function shellWords(source: string): string[] {
       started = false;
     } else { word += char; started = true; }
   }
+  if (quote) return;
   if (started) words.push(word);
   return words;
 }
 
-// Guard Bun launches: direct, env-wrapped, or a shell string beginning with bun after assignments.
-// Shell strings: shell: true, sh -c, and bash -c.
+// Guard direct launches; env COMMAND; env -S STRING / -SSTRING;
+// env --split-string STRING / --split-string=STRING; and shell: true, sh -c,
+// bash -c strings beginning with a runtime after assignments.
 function invocation(command: string, args: string[], options: Options) {
-  let words = [command, ...args];
+  let words: string[] | undefined = [command, ...args];
   if (options.shell) words = shellWords(words.join(" "));
   else if (["sh", "bash"].includes(basename(command)) && args.includes("-c")) {
     words = shellWords(args[args.indexOf("-c") + 1] ?? "");
@@ -150,6 +157,11 @@ function invocation(command: string, args: string[], options: Options) {
     probeOptions.env[match[1]] = match[2];
     return true;
   };
+  const failure = (reason: string) => ({
+    command: options.shell ? typeof options.shell === "string" ? options.shell : "sh" : command,
+    args: [], options: probeOptions, failure: reason,
+  });
+  if (!words) return failure("unclassifiable shell string");
   while (words.length && assignment(words[0])) words.shift();
   if (basename(words[0] ?? "") === "env") {
     words.shift();
@@ -160,26 +172,40 @@ function invocation(command: string, args: string[], options: Options) {
       if (assignment(word)) { words.shift(); continue; }
       if (!acceptsOptions || !word.startsWith("-")) break;
       words.shift();
-      if (["-i", "--ignore-environment", "-"].includes(word)) probeOptions.env = {};
-      if (["-u", "--unset"].includes(word)) delete probeOptions.env[words.shift() ?? ""];
-      if (word.startsWith("--unset=")) delete probeOptions.env[word.slice(8)];
-      if (["-C", "--chdir"].includes(word)) probeOptions.cwd = resolve(cwdPath(probeOptions.cwd), words.shift() ?? ".");
-      if (word.startsWith("--chdir=")) probeOptions.cwd = resolve(cwdPath(probeOptions.cwd), word.slice(8));
+      if (word === "-S" || word === "--split-string" || word.startsWith("--split-string=") || word.startsWith("-S")) {
+        const source = word.startsWith("--split-string=") ? word.slice(15)
+          : word.startsWith("-S") && word !== "-S" ? word.slice(2) : words.shift();
+        if (source === undefined) return failure("missing env split string");
+        const split = shellWords(source);
+        if (!split?.length) return failure("unclassifiable env split string");
+        words.unshift(...split);
+      } else if (["-i", "--ignore-environment", "-"].includes(word)) probeOptions.env = {};
+      else if (["-u", "--unset", "-C", "--chdir"].includes(word)) {
+        const value = words.shift();
+        if (value === undefined) return failure("missing env option operand");
+        if (word === "-u" || word === "--unset") delete probeOptions.env[value];
+        else probeOptions.cwd = resolve(cwdPath(probeOptions.cwd), value);
+      } else if (word.startsWith("--unset=")) delete probeOptions.env[word.slice(8)];
+      else if (word.startsWith("--chdir=")) probeOptions.cwd = resolve(cwdPath(probeOptions.cwd), word.slice(8));
+      else return failure("unsupported env option");
     }
+    if (!words[0]) return failure("missing env executable");
+    if (["env", "sh", "bash"].includes(basename(words[0]))) return failure("unsupported nested env wrapper");
+    if (!resolvedExecutable(words[0], probeOptions)) return failure("unresolved env executable");
   }
-  return { command: words[0], args: words.slice(1), options: probeOptions };
+  return { command: words[0], args: words.slice(1), options: probeOptions, failure: undefined };
 }
 
 export class BunHarperSpawnError extends Error {
-  constructor(api: string, command: string, args: string[]) {
-    super(`${api} refused Bun launching a covered CLI/Harper entry: ${JSON.stringify([command, ...args])}`);
+  constructor(api: string, executable: string, entry: EntryKind) {
+    super(`${api} refused ${basename(executable)} launching ${entry} under Bun`);
     this.name = "BunHarperSpawnError";
   }
 }
 
 export class TestRuntimeIdentityError extends Error {
-  constructor(api: string, command: string) {
-    super(`${api} cannot verify runtime identity for CLI/Harper child ${JSON.stringify(command)}`);
+  constructor(api: string, executable: string, reason: string) {
+    super(`${api} refused ${basename(executable)}: ${reason}`);
     this.name = "TestRuntimeIdentityError";
   }
 }
@@ -187,10 +213,14 @@ export class TestRuntimeIdentityError extends Error {
 function check(api: string, command: unknown, args: unknown, options: Options = {}): void {
   if (typeof command !== "string" || !Array.isArray(args)) return;
   const launch = invocation(command, args, options);
-  if (!launch.command || !startsHarper(launch.args, launch.options)) return;
+  if (launch.failure) throw new TestRuntimeIdentityError(api, launch.command!, launch.failure);
+  if (!launch.command) return;
+  const entry = startsHarper(launch.args, launch.options);
+  if (!entry) return;
   const runtime = runtimeKind(launch.command, launch.options);
   if (runtime === "node" || runtime === "missing") return;
-  const error = runtime === "bun" ? new BunHarperSpawnError(api, command, args) : new TestRuntimeIdentityError(api, command);
+  const error = runtime === "bun" ? new BunHarperSpawnError(api, launch.command, entry)
+    : new TestRuntimeIdentityError(api, launch.command, `unverified runtime launching ${entry}`);
   const reason = !Object.hasOwn(process.env, ALLOW) && options.env && Object.hasOwn(options.env, ALLOW)
     ? options.env[ALLOW]?.trim() : undefined;
   if (reason) {

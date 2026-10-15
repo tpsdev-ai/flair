@@ -28,6 +28,7 @@ function refused(call: () => unknown, api = "child_process.spawnSync", name = "B
   expect(error.name).toBe(name);
   expect(error.message).toContain(api);
   expect(error.stack).toContain("cli-runtime-node-guard-2570.test.ts:");
+  return error;
 }
 
 function allowed(cli: string, args: string[]) {
@@ -108,13 +109,89 @@ describe("Bun Harper spawn preload with argument-printing scripts standing in fo
     const run = (runtime: string, args: string[]) => spawnSync(runtime, args, { timeout: 5_000 });
     refused(() => run(process.execPath, [cli, "init"]));
   }, 20_000);
-  test("direct and env-wrapped Bun invocations of an argument-printing script standing in for the CLI entry are refused", () => {
+  test("direct bun and env bun invocations of an argument-printing CLI fixture are refused", () => {
     const { cli } = fixture();
     refused(() => spawnSync("bun", [cli, "init"], { timeout: 5_000 }));
     for (const prefix of [[], ["-i"], ["-u", "UNUSED"], ["--unset=UNUSED"], ["-C", dirname(cli)], ["--"]]) {
       refused(() => spawnSync("/usr/bin/env", [...prefix, `PATH=${process.env.PATH}`, "UNUSED=value", "bun", cli, "init"], { timeout: 5_000 }));
     }
   }, 20_000);
+  for (const form of ["-S", "-SSTRING", "--split-string", "--split-string="]) {
+    test(`env ${form} refuses Bun running an argument-printing CLI fixture`, () => {
+      const { cli } = fixture();
+      const source = `bun '${cli}' init`;
+      const args = form === "-SSTRING" ? [`-S${source}`]
+        : form.endsWith("=") ? [form + source] : [form, source];
+      refused(() => spawnSync("/usr/bin/env", args, { timeout: 5_000 }));
+    }, 20_000);
+  }
+  test("unclassifiable env forms fail closed with a named reason", () => {
+    const { cli } = fixture();
+    for (const [args, reason] of [
+      [["-P", "/unclassified", "bun", cli, "init"], "unsupported env option"],
+      [["-S"], "missing env split string"],
+      [["-S", "'unterminated"], "unclassifiable env split string"],
+      [["-S", ""], "unclassifiable env split string"],
+      [["-u"], "missing env option operand"],
+      [["UNUSED=value"], "missing env executable"],
+      [["flair-missing-runtime-2571", cli, "init"], "unresolved env executable"],
+      [["env", "bun", cli, "init"], "unsupported nested env wrapper"],
+    ] as const) {
+      const error = refused(() => spawnSync("/usr/bin/env", [...args], { timeout: 5_000 }),
+        "child_process.spawnSync", "TestRuntimeIdentityError");
+      expect(error.message).toContain(reason);
+    }
+  }, 20_000);
+  test("real env -S runs Node and an explicitly overridden Bun CLI fixture", () => {
+    const { cli } = fixture();
+    const log = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      for (const runtime of [Bun.which("node")!, process.execPath]) {
+        const result = spawnSync("/usr/bin/env", ["-S", `'${runtime}' '${cli}' init`], {
+          encoding: "utf8", timeout: 5_000,
+          env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise real env split string" },
+        });
+        expect(result.status).toBe(0);
+        expect(JSON.parse(result.stdout)).toEqual(["init"]);
+      }
+      expect(log).toHaveBeenCalled();
+    } finally { log.mockRestore(); }
+  }, 20_000);
+  test("spawn errors, stacks and warnings omit secret arguments in direct, env and shell forms", () => {
+    const { root, cli } = fixture();
+    const marker = "SECRET_ARGUMENT_2571";
+    const unknown = join(root, "runtime");
+    writeFileSync(unknown, `#!/bin/sh\nif [ "$1" = "-p" ]; then exit 1; fi\nexec '${process.execPath}' "$@"\n`, { mode: 0o755 });
+    const log = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      for (const runtime of [process.execPath, unknown]) {
+        const shell = `'${runtime}' '${cli}' init --admin-pass '${marker}'`;
+        const cases = [
+          { command: runtime, args: [cli, "init", "--admin-pass", marker] },
+          { command: "/usr/bin/env", args: [runtime, cli, "init", "--admin-pass", marker] },
+          { command: "/usr/bin/env", args: ["-S", shell] },
+          { command: shell, args: [], shell: true },
+          { command: "/bin/sh", args: ["-c", shell] },
+        ];
+        for (const form of cases) {
+          const options = { shell: form.shell, timeout: 5_000, encoding: "utf8" as const };
+          const error = refused(() => spawnSync(form.command, form.args, options),
+            "child_process.spawnSync", runtime === unknown ? "TestRuntimeIdentityError" : "BunHarperSpawnError");
+          expect(error.message).toContain("launching dist/cli.js");
+          expect(error.message).not.toContain(marker);
+          expect(error.stack).not.toContain(marker);
+          expect(error.message).not.toContain(root);
+          const result = spawnSync(form.command, form.args, { ...options,
+            env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise redacted warning" },
+          });
+          expect(result.status).toBe(0);
+          expect(JSON.parse(result.stdout)).toEqual(["init", "--admin-pass", marker]);
+        }
+      }
+      expect(log).toHaveBeenCalled();
+      expect(log.mock.calls.flat().join("\n")).not.toContain(marker);
+    } finally { log.mockRestore(); }
+  }, 40_000);
   test("shell strings beginning with bun refuse an argument-printing script standing in for the CLI entry", () => {
     const { cli } = fixture();
     for (const prefix of ["", "UNUSED=value "]) {
