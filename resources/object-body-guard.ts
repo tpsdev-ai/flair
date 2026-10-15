@@ -1,19 +1,9 @@
 /**
- * object-body-guard.ts — the shared shape check for a table's write body: a
- * write body must be a JSON object, and only the collection form of PUT may be
- * an array of them.
+ * object-body-guard.ts — the shared write-body shape check.
  *
- * A resource's post()/put()/patch() run their other checks against fields of
- * `content` (`content.id`, `content.authorId`, …). A body that is not an object
- * (an array, a string, a number, a boolean, null) has no such fields, so the
- * read, or a later property write, throws — the request answers 500 with an
- * unhandled TypeError instead of a named 4xx, before any other check can run.
- * This guard answers first, so that body-shape mistake is a named 400.
- *
- * The rule: `content` must be a non-null, non-array object. `allowArrayObjects`
- * additionally admits an array whose elements are all such objects — a
- * collection PUT body, which Harper dispatches to the resource one element at a
- * time. Anything else is refused with `body_must_be_object` (400).
+ * `content` must be a non-null, non-array object. Arrays of records are admitted
+ * when `allowArrayObjects` is enabled. Anything else reaching this guard is
+ * refused with `body_must_be_object` (400).
  */
 
 export const BODY_MUST_BE_OBJECT_ERROR = "body_must_be_object";
@@ -35,13 +25,10 @@ export function bodyMustBeObject(): Response {
 }
 
 /**
- * Refuse a write body that is not a JSON object.
+ * Refuse a write body that is neither an object nor an allowed array of records.
  *
  * @param content the parsed request body
- * @param opts    `allowArrayObjects: true` on a verb whose collection form takes
- *                an array of records (PUT); the array is admitted only when
- *                every element is an object, so an array of primitives is still
- *                refused
+ * @param opts    `allowArrayObjects: true` admits arrays of records
  * @returns the 400 `Response` to send, or null to proceed
  */
 export function guardObjectBody(content: unknown, opts: { allowArrayObjects?: boolean } = {}): Response | null {

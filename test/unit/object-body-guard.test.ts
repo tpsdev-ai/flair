@@ -1,8 +1,7 @@
 /**
  * object-body-guard.test.ts — the shared write-body shape check
- * (resources/object-body-guard.ts): a body that is not a JSON object answers
- * the named 400 `body_must_be_object`, and only a collection write (an array of
- * records) may be an array.
+ * (resources/object-body-guard.ts). Arrays of records are admitted when
+ * `allowArrayObjects` is enabled.
  */
 import { describe, expect, test } from "bun:test";
 import { BODY_MUST_BE_OBJECT_ERROR, bodyMustBeObject, guardObjectBody } from "../../resources/object-body-guard";
@@ -27,7 +26,7 @@ describe("guardObjectBody — a body that is not a JSON object is refused with t
     ["null", null],
     ["undefined", undefined],
     ["an array of primitives", ["abc", 1]],
-    ["an array of objects without the collection form", [{ id: "e1" }]],
+    ["an array of objects without allowArrayObjects", [{ id: "e1" }]],
   ] as const) {
     test(`${label} is refused with ${BODY_MUST_BE_OBJECT_ERROR}`, async () => {
       const res = guardObjectBody(value);
@@ -43,12 +42,12 @@ describe("guardObjectBody — a body that is not a JSON object is refused with t
   }
 });
 
-describe("guardObjectBody — an array is admitted only as the collection form of PUT", () => {
+describe("guardObjectBody — arrays of records are admitted when allowArrayObjects is enabled", () => {
   test("an array of objects is admitted with allowArrayObjects", () => {
     expect(guardObjectBody([{ id: "a" }, { id: "b" }], { allowArrayObjects: true })).toBeNull();
   });
 
-  test("an empty array is admitted with allowArrayObjects (writes nothing)", () => {
+  test("an empty array is admitted with allowArrayObjects", () => {
     expect(guardObjectBody([], { allowArrayObjects: true })).toBeNull();
   });
 

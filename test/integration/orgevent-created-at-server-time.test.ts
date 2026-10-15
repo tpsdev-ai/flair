@@ -13,9 +13,10 @@
  *     but a non-empty string or a non-empty array of strings, the empty string
  *     included) is refused with `invalid_event_id` (400) before any write, and
  *     a stored row under such an id is unchanged; a composite id is read;
- *   - a body that is not a JSON object (a string, a number, a boolean, null, or
- *     an array of those) is refused with `body_must_be_object` (400) before any
- *     other check, on POST, PUT and PATCH (resources/object-body-guard.ts);
+ *   - malformed bodies reaching the POST, PUT and PATCH resource methods are
+ *     refused with `body_must_be_object` (400), except admitted arrays of records,
+ *     before the resource method's authentication, attribution, ownership and
+ *     createdAt checks. Harper's collection validation can refuse input earlier;
  *   - for malformed ids and bodies, the status each caller gets is pinned, with
  *     a refusal's `error` or `code` field, including input answered before the
  *     check (the object-body guard, POST's generated id, attribution, the
@@ -611,12 +612,11 @@ describe("what each malformed id or body gets", () => {
   // Harper's own validation. A refused case asserts the status plus its `error`
   // field (flair refusals) or `code` field (Harper's problem details); a
   // generated-id POST case asserts a 2xx and exactly one row with a generated
-  // id. A body that is not a JSON object is answered by the object-body guard
-  // (resources/object-body-guard.ts) before any other check, with
+  // id. Malformed POST and addressed PUT/PATCH bodies assert
   // `body_must_be_object` (400). Storage is checked for the id cases (a refused
-  // one stores no row with its summary), single-record PUT bodies (no row at the
-  // path) and PATCH (the row is unchanged); the POST-body and collection-element
-  // cases check only the response.
+  // one stores no row with its summary), addressed PUT bodies (no row at the
+  // path) and PATCH (the row is unchanged). POST-body and collection-element
+  // cases check only the response, including Harper's earlier collection refusals.
   type Expect = { status: number; error?: string; code?: string };
   const INVALID: Expect = { status: 400, error: INVALID_ID };
   const OWNER_CHANGE: Expect = { status: 403, error: "forbidden: the owner of a record cannot be changed" };
@@ -685,9 +685,7 @@ describe("what each malformed id or body gets", () => {
   }
 
   const BODIES: Array<[string, string]> = [["a string", '"abc"'], ["a number", "42"], ["null", "null"], ["true", "true"], ["an array of primitives", '["abc",1]']];
-  // [agent, admin] per verb. Every one of these shapes is answered by the
-  // object-body guard with the named 400, before attribution, ownership or the
-  // createdAt check.
+  // [agent, admin] for POST and addressed PUT/PATCH.
   const BODY_WANT: Record<string, Record<string, [Expect, Expect]>> = {
     POST: {
       "a string": [BODY_OBJECT, BODY_OBJECT], "a number": [BODY_OBJECT, BODY_OBJECT], null: [BODY_OBJECT, BODY_OBJECT],
