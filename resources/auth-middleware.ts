@@ -653,8 +653,8 @@ server.http(async (request: any, nextLayer: any) => {
   // This is an early refusal, made only for the address form whose decoded id
   // is exactly the id Harper resolves (record-owner-guard.ts's
   // resolveGuardedRecord: `/<Table>/<id>`, no trailing slash, no `.` in the
-  // id). Other addressed forms of a table-backed route are owner-checked by the
-  // owner-scoped write guard on Harper's resolved id; collection
+  // id). This owner check precedes the guard's body-id check. On other addressed
+  // forms, the guard checks body ids on POST/PUT/PATCH before stored ownership; collection
   // PUT/PATCH/DELETE are refused by that guard; collection POST follows the
   // resource's own rules. The guard (resources/owner-scoped-write-policy.ts)
   // applies to the resource classes that extend the owner-scoped tables

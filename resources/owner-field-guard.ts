@@ -32,13 +32,12 @@
  *
  * For addressed single-record HTTP PUT/PATCH, Harper loads the row through
  * `Table.getResource` → `resource._loadRecord` before the resource method runs;
- * a no-argument `super.get()` then returns the cached row. Before that load, a
- * non-admin agent's write is decided by the owner-scoped write guard
- * (resources/owner-scoped-write-policy.ts), which reads the stored row itself
- * and refuses with this module's `owner_check_unavailable` when it cannot. The
+ * a no-argument `super.get()` then returns the cached row. If reached before
+ * that load, the non-admin write guard checks body ids before stored ownership.
+ * Its stored-row read failure returns `owner_check_unavailable`. The
  * real-Harper test injects an initial load failure: a non-admin agent gets that
  * named refusal, and an administrator gets Harper's own 500. It does not cover
- * collection paths; OrgEvent.post does not call this guard.
+ * collection paths.
  *
  * This guard returns `owner_check_unavailable` only when a non-admin agent's
  * `getExisting` thunk throws or rejects. Admin/internal callers return before

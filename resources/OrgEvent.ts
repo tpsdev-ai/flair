@@ -60,8 +60,7 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
     // The id this POST writes. For a POST addressed to one record
     // (`/OrgEvent/<id>`): the addressed id when the body has no `id` or an `id`
     // equal to the address as text (`0` for `/OrgEvent/0`), otherwise the
-    // body's `id` (for a non-admin, a differing scalar body id was already
-    // refused by the owner-scoped write guard). For a POST to the collection:
+    // body's `id`. For a POST to the collection:
     // the body's `id` when it supplies one. In either case an id is generated
     // when the result is absent or the empty string. The raw put() below is an
     // upsert: an existing event at that id is updated, subject to the
@@ -107,12 +106,6 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
   }
 
   async put(content: any) {
-    // put() and post() write the body's `id` through a raw table put(). For an
-    // addressed write, the shared owner-scoped write guard
-    // (resources/owner-scoped-write-policy.ts) refuses a non-admin request
-    // whose scalar body `id` names a record other than the addressed one, and
-    // post() gives a body with no `id` the addressed id; a collection POST
-    // follows post()'s id selection and owner-field rule.
     const __ownerDenial = await guardOwnerFieldImmutable(this, () => super.get(), content, "authorId");
     if (__ownerDenial) return __ownerDenial;
     const auth = await this._auth();

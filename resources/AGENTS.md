@@ -18,7 +18,7 @@ whether it is loaded. Check the loader configuration when extracting code.
 
 Preserve these boundaries:
 
-- A non-admin addressed write (POST/PUT/PATCH/DELETE to `/<Table>/<id>`) through a resource class that extends an owner-scoped table is owner-checked on the record Harper resolves the URL to, and a scalar body `id` must name that record (`owner-scoped-write-policy.ts`); a non-admin collection PUT/PATCH/DELETE is refused; a POST to a collection is delegated to each resource's own POST handling, and a custom resource that extends `Resource` (for example AgentReadPosition) applies its own rule. A resource that fills in a missing `id` for an addressed write uses the addressed id.
+- For non-admin addressed writes, middleware can return the owner refusal before the table guard runs. The table guard checks a scalar body `id` on POST/PUT/PATCH before stored ownership, using Harper's resolved record id (`owner-scoped-write-policy.ts`); collection PUT/PATCH/DELETE is refused, and collection POST follows the resource's rules. A custom resource that extends `Resource` applies its own rule. Memory and OrgEvent bind an addressed POST's missing `id` to the addressed id.
 - Resolve identity from the resource context. Keep authenticated HTTP and deliberate internal calls distinct.
 - Compose caller filters inside the authoritative read scope; preserve the row re-check after retrieval.
 - Audit each exposed mutation verb. A `put()` guard does not automatically cover `patch()` or `post()`.

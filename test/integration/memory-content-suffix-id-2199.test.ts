@@ -144,10 +144,8 @@ describe("flair#2199 — an encoded `/` before a declared suffix is refused, nev
 describe("flair#2199 — Memory resource writes and feed POST refuse an id ending in `.content`", () => {
   // Harper strips a trailing `.content` property selector from the URL, so a
   // body whose own id keeps that suffix names a different record than the URL
-  // addresses; the shared owner-scoped write guard refuses that first with
-  // write_id_not_addressed. Where the URL carries the suffix but the body id is
-  // the plain addressed id (or there is no addressed id), the Memory resource's
-  // own rule answers memory_id_content_suffix. Either way the write is refused.
+  // addresses; the guard returns write_id_not_addressed before checking ownership.
+  // A matching body id reaches the stored-owner check before Memory's id rule.
   const cases: Array<{ name: string; method: string; path: string; body: unknown; status: number; error: string }> = [
     { name: "collection POST /Memory", method: "POST", path: "/Memory", body: { id: "mcs-post.content", agentId: author.id, content: "x" }, status: 400, error: "memory_id_content_suffix" },
     { name: "POST to a `.content` address", method: "POST", path: "/Memory/mcs-post.content", body: { id: "mcs-post", agentId: author.id, content: "x" }, status: 400, error: "memory_id_content_suffix" },

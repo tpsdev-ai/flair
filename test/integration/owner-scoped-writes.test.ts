@@ -2,17 +2,9 @@
 // Harper: a verified non-admin agent's addressed writes and collection
 // PUT/PATCH/DELETE to owner-scoped tables served by table-extending resources.
 //
-// The rule (resources/owner-scoped-write-policy.ts): for a verified non-admin
-// agent, an addressed write (POST/PUT/PATCH/DELETE to `/<Table>/<id>`) is
-// refused with `forbidden: cannot modify <Table> owned by another principal`
-// when the addressed record exists and is owned by someone else; and, on
-// POST/PUT/PATCH, is refused with `write_id_not_addressed` when a scalar body
-// `id` names a record other than the one the URL addresses. A PUT, PATCH or
-// DELETE that addresses the table's collection is refused with
-// `forbidden: a non-admin write to <Table> must address one record by its id`.
-// A POST to a collection is delegated to each resource's own POST handling. The record
-// checked is the id Harper resolves the request's URL to, so each address form
-// below gets the same decision.
+// Middleware can return the owner refusal first on a plain addressed URL.
+// If reached, the guard checks scalar body ids before stored ownership.
+// Collection PUT/PATCH/DELETE is refused; collection POST follows the resource.
 //
 // Each refusal case asserts three things: the status is 403, the body is
 // exactly the named refusal (it carries nothing from the stored row), and the
@@ -133,7 +125,7 @@ const SPECS: TableSpec[] = [
     row: (id, o) => ({ id, authorId: o, kind: "k", summary: "orig", createdAt: NOW }) },
   { table: "WorkspaceState", pk: "id", mut: "ref", ownerPatchable: true, idFor: (n) => `osw-ws-${n}`,
     row: (id, o) => ({ id, agentId: o, ref: "orig", provider: "git", timestamp: NOW, createdAt: NOW }) },
-  // Presence's owner field IS its primary key, so every case uses a fresh owning principal id.
+  // Presence uses fresh ids for other rows and reuses caller.id for the caller's row.
   { table: "Presence", pk: "agentId", mut: "activity", ownerPatchable: true, idFor: (n) => `osw-presence-${n}`,
     row: (id) => ({ agentId: id, lastHeartbeatAt: Date.now(), activity: "orig" }) },
 ];
@@ -280,6 +272,26 @@ describe("owner-scoped writes: non-admin addressed writes and collection PUT/PAT
     });
   }
 
+  for (const suffix of ["", ".json"]) {
+    test(`Relationship: overlapping checks at a ${suffix ? "suffixed" : "plain"} address return the first refusal and preserve both rows`, async () => {
+      const s = SPECS.find((spec) => spec.table === "Relationship")!;
+      const f = await fixture(s);
+      const addressedBefore = await storedRow(s.table, s.pk, f.otherId);
+      const bodyBefore = await storedRow(s.table, s.pk, f.mineId);
+      expect(addressedBefore).not.toBeNull();
+      expect(bodyBefore).not.toBeNull();
+      const res = await send(caller, "PATCH", `/Relationship/${e(f.otherId)}${suffix}`, {
+        id: f.mineId, object: "changed",
+      });
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual(suffix
+        ? { error: "write_id_not_addressed", message: "a write may name only the record it addresses" }
+        : RECORD_REFUSAL(s.table));
+      expect(await storedRow(s.table, s.pk, f.otherId)).toEqual(addressedBefore);
+      expect(await storedRow(s.table, s.pk, f.mineId)).toEqual(bodyBefore);
+    }, 30_000);
+  }
+
   // ── POSITIVE CONTROLS ─────────────────────────────────────────────────────
   describe("the caller's own records stay writable", () => {
     test("a PATCH to the caller's record by an id with a format suffix writes that record, even when a row literally named with the suffix belongs to someone else", async () => {
@@ -359,7 +371,7 @@ describe("owner-scoped writes: non-admin addressed writes and collection PUT/PAT
           const f = await fixture(s);
           const before = await storedRow(s.table, s.pk, f.otherId);
           expect(before, `${s.table} fixture row was not seeded`).not.toBeNull();
-          // A fresh/own id the caller may address, distinct from the victim.
+          // A fresh/own id the caller may address, distinct from the other principal's row.
           const freshId = ownerIsKey(s) ? caller.id : s.idFor(`addr-${randomUUID().slice(0, 6)}`, caller.id);
           const beforeFresh = await storedRow(s.table, s.pk, freshId);
           // Body names the OTHER principal's existing record; URL names freshId.

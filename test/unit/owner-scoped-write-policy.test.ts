@@ -4,12 +4,8 @@
  * writes and collection PUT/PATCH/DELETE; collection POST is left to each
  * resource.
  *
- * The integration test (test/integration/owner-scoped-writes.test.ts) checks the
- * rule on every owner-scoped table of a real Harper. These cases pin what a real
- * Harper does not exercise on demand: a caller that cannot be resolved, a stored
- * record that cannot be read, a stored record with no owner value, calls from
- * server code (which must reach the table unchanged and synchronously),
- * inheritance by a resource class, and idempotent installation.
+ * Real-Harper coverage: owner-scoped-writes.test.ts checks the REST matrix;
+ * owner-guard-2468-real-harper-load.test.ts injects stored-row read failures.
  */
 import { describe, it, expect } from "bun:test";
 import {
@@ -52,7 +48,7 @@ function deps(stored: Record<string, Record<string, unknown> | null> = {}, extra
   };
 }
 
-/** An HTTP entry target: Harper sets checkPermission to the caller's permission set. */
+/** A target carrying a permission marker. */
 const entry = (id: unknown, isCollection = false) => ({ id, isCollection, checkPermission: {} });
 /** An entry context carrying a verdict and (optionally) a parsed request body. */
 const ctxWith = (verdict: { verdict: WriteCaller }, data?: unknown) => ({ ...verdict, data });
@@ -158,7 +154,7 @@ describe("guardOwnerScopedWrites", () => {
     });
   }
 
-  it("passes server-code calls (no entry target) and reads straight through, synchronously", () => {
+  it("delegates writes without a permission marker and reads synchronously", () => {
     const { Table, calls } = makeTable();
     const d = deps({ r1: { id: "r1", agentId: "owner" } });
     guardOwnerScopedWrites({ Relationship: Table }, { Relationship: "agentId" }, d);
@@ -247,7 +243,7 @@ describe("ownerScopedWriteGuardGaps", () => {
 });
 
 describe("target predicates", () => {
-  it("recognizes an HTTP entry target by its permission set", () => {
+  it("recognizes a non-null, non-false permission marker", () => {
     expect(isRequestEntryTarget({ checkPermission: {} })).toBe(true);
     expect(isRequestEntryTarget({ checkPermission: { super_user: false } })).toBe(true);
     expect(isRequestEntryTarget({ checkPermission: false })).toBe(false);

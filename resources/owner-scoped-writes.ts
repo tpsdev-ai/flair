@@ -3,8 +3,8 @@
  * on every table class named in resources/record-owner-guard.ts's OWNER_FIELDS
  * when the component loads. For a non-admin HTTP request to a resource class
  * that extends one of those tables: an addressed write (POST/PUT/PATCH/DELETE
- * to `/<Table>/<id>`) is owner-checked on the record its URL addresses, and a
- * scalar body `id` on an addressed POST/PUT/PATCH must name that record; a
+ * to `/<Table>/<id>`) checks a scalar body `id` on POST/PUT/PATCH before the
+ * stored owner, if reached; middleware can return the owner refusal first. A
  * collection PUT/PATCH/DELETE is refused. A POST to a collection is delegated
  * to each resource's own POST handling. An incomplete installation (a missing or empty
  * registry, or an owner-scoped table that could not be guarded) is logged as an
@@ -28,7 +28,7 @@
  * phase; a static import of agent-auth.js from here stopped Harper from
  * starting under Bun (test/integration/init-persisted-admin-harper5.test.ts).
  *
- * agent-auth.js is imported once, when the first guarded HTTP write needs its
+ * agent-auth.js is imported once, when the first guarded write needs its
  * caller resolved, by which time the component has finished loading. The guard
  * itself is installed synchronously here either way. If that import fails, the
  * guard refuses the write as a caller that could not be verified (its named

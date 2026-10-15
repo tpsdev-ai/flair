@@ -86,17 +86,14 @@ a resource that extends that table (Memory, Relationship, Soul, Credential,
 Integration, Asset, MemoryCandidate, MemoryGrant, MemoryUsage, Message,
 OrgEvent, WorkspaceState, Presence):
 
-- An addressed write — a PUT, PATCH, DELETE or POST to `/<Table>/<id>` — is
-  owner-checked on the record the URL addresses: it is refused with
-  `403 forbidden: cannot modify <Table> owned by another principal` when that
-  record exists and belongs to another principal. The owner is read from the
-  stored record, never from the request body, and the record checked is the id
-  Harper resolves the URL to, however the address is written.
-- An addressed POST, PUT or PATCH whose body carries a scalar `id` (a string or
-  number) naming a different record than its URL is refused with
-  `403 write_id_not_addressed`. An absent or matching body `id` passes the
-  body-id check, subject to the remaining checks. OrgEvent and Memory bind an
-  addressed POST's missing body `id` to the addressed id.
+- The middleware can return
+  `403 forbidden: cannot modify <Table> owned by another principal` before the
+  table guard runs on `/<Table>/<id>` with no trailing slash or decoded `.`.
+- If reached, the guard checks a differing scalar body `id` on POST/PUT/PATCH
+  first (`403 write_id_not_addressed`), then stored ownership (the same owner
+  refusal), using Harper's resolved record id. An absent or matching body `id`
+  passes the body-id check. OrgEvent and Memory bind an addressed POST's
+  missing body `id` to the addressed id.
 - A PUT, PATCH or DELETE addressed to a table's collection rather than to one
   record is refused with `403 forbidden: a non-admin write to <Table> must
   address one record by its id`.

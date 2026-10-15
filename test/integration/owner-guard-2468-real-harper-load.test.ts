@@ -193,8 +193,6 @@ describe("flair#2468 — initial row-load failures on addressed single-record Ha
         // RECORD what the client sees.
         console.log(`[2468] ${c.table}.${verb} (owner, unreadable row) -> ${res.status} ${text.slice(0, 240)}`);
 
-        // A non-admin agent's write: the owner-scoped write guard reads the
-        // stored row first and refuses with its named error when it cannot.
         expect(res.status, `${c.table}.${verb} returned ${res.status}: ${text.slice(0, 240)}`).toBe(503);
         expect(parsed.error, `${c.table}.${verb} must answer with the named refusal`).toBe("owner_check_unavailable");
         expect(await readRow(c.table, c.id), `${c.table}.${verb} must leave the full row unchanged`).toEqual(prior);
