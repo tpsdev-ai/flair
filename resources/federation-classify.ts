@@ -66,11 +66,8 @@ export type SkipReason =
   // rather than merged without `status`.
   | "agent_status_not_federated"
   // ─── flair#2266 (an inbound Agent record that would set a locally pending key) ──
-  // Emitted by FederationSync.post's merge plan when the status guard above has
-  // not already refused the record: an inbound Agent record that would CHANGE
-  // the publicKey of a local row whose stored value is exactly "pending" is
-  // skipped whole. Only that instance's administrator completes a pending key,
-  // so a later re-offer cannot clear it.
+  // A record that reaches the merge plan and changes a stored pending key,
+  // unless the status guard refused it first. Earlier validation keeps its reason.
   | "agent_pending_key_not_federated"
   // Emitted by FederationSync.post before the row is read: the payload's id is
   // missing or is not the envelope's id, so the record is not applied.

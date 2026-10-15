@@ -49,7 +49,6 @@ describe("flair#2266 — the audit fingerprint is a sha256 of the key string, no
   test("is deterministic sha256 hex of the canonical key string", async () => {
     const fp = await keyFingerprint(KEY);
     expect(fp).toMatch(/^[0-9a-f]{64}$/);
-    // An independent oracle: node:crypto's sha256 of the same key string.
     expect(fp).toBe(createHash("sha256").update(KEY, "utf8").digest("hex"));
     expect(await keyFingerprint(KEY)).toBe(fp);
     expect(fp).not.toContain(KEY);

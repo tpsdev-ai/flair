@@ -21,16 +21,8 @@
  * (resources/write-back.ts) before the commit, and the stored key is read back
  * AFTER the commit. The response is returned only when the read-back is equal.
  *
- * Admin is decided by resolveAgentAuth. TPS-Ed25519: the gate verified the
- * signature and annotated the agent `tpsAgentIsAdmin`. A Harper credential
- * (Basic, or a Bearer operation token Harper issued): the gate annotates it the
- * same way when Harper verified it to a `super_user` (or it is the `admin`
- * bootstrap password); without that annotation, resolveAgentAuth admits a
- * `super_user` `request.user` only when the request carries a credential
- * header. So the `super_user` that Harper's
- * `authorizeLocal` forges for a credential-less loopback request never counts.
- * `Flair-Enroll` (a later slice) is refused by Harper's authentication before
- * this handler runs; the handler's own refusal is a fail-closed backstop.
+ * resolveAgentAuth admits admin Basic credentials, Harper admin Bearer
+ * operation tokens and verified TPS-Ed25519 admin signatures.
  */
 import { Resource, databases } from "harper";
 import { randomUUID } from "node:crypto";

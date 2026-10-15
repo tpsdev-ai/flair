@@ -1,12 +1,9 @@
 // agent-pending-key-federation-2266.test.ts — flair#2266, the federation half.
 //
 // A known hub with a pinned key pushes a signed batch to POST /FederationSync.
-// The merge writes the Agent table through the RAW handle with a wholesale field
-// apply, so flair#2266 adds a guard: an inbound Agent record that would CHANGE a
-// local row's `publicKey` while the stored value is exactly `pending` is skipped
-// WHOLE, as `agent_pending_key_not_federated` when the status guard has not
-// already refused it. The status refusal `agent_status_not_federated` runs first
-// and keeps its own name; the mixed case pins that precedence.
+// A record that reaches the merge plan and changes a stored pending key is
+// skipped as `agent_pending_key_not_federated` unless the status guard refused
+// it first. Earlier validation keeps its own reason.
 //
 // The last two cases are the peer non-convergence consequence and its remedy. A
 // pending copy that arrived from another instance (A) carries A's
@@ -122,7 +119,7 @@ describe("flair#2266 — an inbound federated Agent record cannot complete a pen
 
   afterAll(async () => { if (harper) await stopHarper(harper); });
 
-  test("an inbound record that changes a pending row's key is skipped whole as agent_pending_key_not_federated", async () => {
+  test("merge-plan pending-key refusal", async () => {
     const out = await sync(PENDING, { data: { id: PENDING, publicKey: aKey, runtime: "remote" } });
     expect(out.skippedReasons?.agent_pending_key_not_federated, JSON.stringify(out)).toBe(1);
     const rec = await rawAgent(PENDING);
@@ -130,7 +127,7 @@ describe("flair#2266 — an inbound federated Agent record cannot complete a pen
     expect(rec?.runtime, "a second field in the refused record landed (partial merge)").toBe("local");
   }, 30_000);
 
-  test("precedence: a record that changes BOTH the status and a pending key is refused by the status rule first, as agent_status_not_federated", async () => {
+  test("merge-plan precedence for a mixed status-and-key record", async () => {
     const out = await sync(MIXED, { data: { id: MIXED, status: "deactivated", publicKey: aKey } });
     expect(out.skippedReasons?.agent_status_not_federated, JSON.stringify(out)).toBe(1);
     expect(out.skippedReasons?.agent_pending_key_not_federated, JSON.stringify(out)).toBeUndefined();
@@ -139,7 +136,7 @@ describe("flair#2266 — an inbound federated Agent record cannot complete a pen
     expect(rec?.publicKey).toBe("pending");
   }, 30_000);
 
-  test("the status rule keeps its OWN name (the two skips are distinguishable)", async () => {
+  test("merge-plan status refusal", async () => {
     const out = await sync(STATUS_TARGET, { data: { id: STATUS_TARGET, status: "deactivated" } });
     expect(out.skippedReasons?.agent_status_not_federated, JSON.stringify(out)).toBe(1);
     expect(out.skippedReasons?.agent_pending_key_not_federated, JSON.stringify(out)).toBeUndefined();
@@ -147,7 +144,7 @@ describe("flair#2266 — an inbound federated Agent record cannot complete a pen
     expect(rec?.status).toBe("active");
   }, 30_000);
 
-  test("CONTROL: a record that does not touch a pending key still syncs", async () => {
+  test("merge-plan control without a key change", async () => {
     const out = await sync(CONTROL, { data: { id: CONTROL, runtime: "remote2" } });
     expect(out.merged, JSON.stringify(out)).toBe(1);
     const rec = await rawAgent(CONTROL);

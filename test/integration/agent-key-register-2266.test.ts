@@ -387,7 +387,7 @@ describe("flair#2266 — admin key registration on a pending Agent row", () => {
     expect((await rowIn("AgentKeyRegistration", body.registrationId))?.actorId).toBe(harper.admin.username);
   }, 30_000);
 
-  test("an unverifiable Bearer token is refused 401 with no change", async () => {
+  test("an unverifiable Bearer token is refused 401; the Agent row is unchanged", async () => {
     const before = await rowIn("Agent", badBearerId);
     const res = await fetch(`${harper.httpURL}/AgentKeyRegister`, {
       method: "POST",
