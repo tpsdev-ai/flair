@@ -891,8 +891,9 @@ program
     //     admin-pass file). flair#2270: `doctor --agent` with an unusable
     //     ambient credential still reads the redirect state. Sections that join
     //     the HTTP port with the ops endpoint are not permitted.
-    //   - `not-run`: every credentialed request to the HTTP port is held and its
-    //     section reports NOT RUN with the reason.
+    //   - `not-run`: later credentialed HTTP requests are held. Fully held
+    //     diagnostic sections report NOT RUN; Scheduled drivers skips the live
+    //     `/FederationPeers` read and continues using configured peers.
     // After a --fix step that may change the serving process, the gate is
     // derived again from the re-resolved target (7a below).
     let pairGate: DoctorPairGate | null = harperResponding ? decideDoctorPairGate(probed, effectivePort) : null;
