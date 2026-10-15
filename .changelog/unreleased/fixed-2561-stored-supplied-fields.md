@@ -18,7 +18,10 @@
   plain objects. `stored` is built from its named text fields. A missing or
   wrong-typed required `id` returns `write_response_withheld` (500).
   Storage-layer Responses of any status return the same refusal.
-  The re-embed PATCH answers `{ id, updatedAt }`.
+  The re-embed PATCH answers `{ id, updatedAt }`. Any other Memory PATCH
+  answers 204 with no body when the server replaced no value, and
+  `{ id, written, redactedValues, stored }` when it did; the admin `_reindex`
+  re-PUT answers 204 with no body.
 
   `flair reembed` counts a row as re-embedded
   when the PATCH response names that row and the stored row then carries the

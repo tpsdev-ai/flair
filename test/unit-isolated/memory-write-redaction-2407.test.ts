@@ -570,12 +570,18 @@ describe("flair#2561 — `stored` reports only the string-valued text fields the
 
   for (const [shape, makeResult] of resultShapes) {
     for (const redacted of [false, true]) {
-      it(`${shape}: Memory exits return exactly their named fields, redaction=${redacted}`, async () => {
+      it(`${shape}: Memory exits return exactly their named fields, and a PATCH or _reindex that replaced no value returns no body, redaction=${redacted}`, async () => {
         for (const [exit, result] of await memoryExits(makeResult, redacted)) {
           const redaction = redacted && exit !== "_reindex"
             ? { redactedValues: 1, stored: exit === "PATCH" ? { summary: "rotate [redacted]" } : { content: "rotate [redacted]" } }
             : {};
-          const expected = exit === "PATCH" || exit === "_reindex"
+          const rowExit = exit === "PATCH" || exit === "_reindex";
+          if (rowExit && !("redactedValues" in redaction)) {
+            // No body (HTTP 204): nothing of the storage result is returned.
+            expect(result, exit).toBeUndefined();
+            continue;
+          }
+          const expected = rowExit
             ? { id: "mem-2561-exits", written: true, ...redaction }
             : { id: "mem-2561-exits", written: true, deduplicated: false, visibility: "shared", ...redaction };
           expect(result, exit).toEqual(expected);

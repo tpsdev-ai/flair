@@ -606,8 +606,16 @@ function skillWriteResponse(result: any, redactedValues: number, stored?: Stored
   return redaction instanceof Response ? redaction : Object.assign(built, redaction);
 }
 
+/**
+ * The answer of a PATCH and of the admin `_reindex` re-PUT. A Response from
+ * storage is refused (writeResultResponse). A write that replaced no value
+ * answers with no body (HTTP 204), the answer Harper gives for a PATCH; a write
+ * that replaced a value answers `{ id, written, redactedValues, stored }`, built
+ * from those named fields. Any other storage result is never read into the answer.
+ */
 function rowWriteResponse(result: any, id: unknown, redactedValues: number, stored?: StoredMemoryText | null): any {
   if (result instanceof Response) return writeResultResponse(result);
+  if (redactedValues <= 0) return undefined;
   return buildFromAllowlist({ id, written: true, ...redactionValues(redactedValues, stored) }, ROW_WRITE_RESPONSE_RULES);
 }
 
