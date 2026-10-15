@@ -49,6 +49,8 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { tmpdir } from "node:os";
 import nacl from "tweetnacl";
 import { SignJWT, exportJWK, generateKeyPair, importPKCS8 } from "jose";
@@ -76,6 +78,8 @@ const W = mkAgent(`idpw-writer-${sfx}`);
 const V = mkAgent(`idpw-other-${sfx}`);
 const ADM = mkAgent(`idpw-admin-${sfx}`);
 
+const WRITE_POINT = "credential-row-write";
+let pauseDir: string;
 let harper: HarperInstance;
 let mcpPrivateKeyPem: string;
 let xaaSigningKey: any;
@@ -266,8 +270,11 @@ beforeAll(async () => {
   mcpPrivateKeyPem = privateKey;
 
   // startHarper copies process.env into the spawned Harper; restore it at once.
-  const envKeys = ["FLAIR_MCP_OAUTH", "FLAIR_MCP_ISSUER", "FLAIR_MCP_JIT_PROVISION", "OAUTH_GITHUB_CLIENT_ID", "OAUTH_GITHUB_CLIENT_SECRET", "OAUTH_GITHUB_REDIRECT_URI"] as const;
+  pauseDir = mkdtempSync(join(tmpdir(), "flair-idpw-pause-"));
+  const envKeys = ["FLAIR_ENABLE_TEST_FAULT_INJECTION", "FLAIR_TEST_PAUSE_DIR", "FLAIR_MCP_OAUTH", "FLAIR_MCP_ISSUER", "FLAIR_MCP_JIT_PROVISION", "OAUTH_GITHUB_CLIENT_ID", "OAUTH_GITHUB_CLIENT_SECRET", "OAUTH_GITHUB_REDIRECT_URI"] as const;
   const prior = envKeys.map((key) => [key, process.env[key]] as const);
+  process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION = "1";
+  process.env.FLAIR_TEST_PAUSE_DIR = pauseDir;
   process.env.FLAIR_MCP_OAUTH = "true";
   process.env.FLAIR_MCP_ISSUER = MCP_ISSUER;
   process.env.OAUTH_GITHUB_CLIENT_ID = "idp-mapping-writes-client";
@@ -334,6 +341,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (jwksServer) jwksServer.close();
+  if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
 }, 60_000);
 
 describe("only an administrator or the server creates an IdP mapping", () => {
@@ -611,4 +619,132 @@ describe("legitimate writers are unchanged", () => {
     expect(first).not.toBeNull();
     expect(await xaaGrantPrincipal(xaaSub)).toBe(first); // the JIT row resolves on the next grant
   }, 60_000);
+});
+
+async function withPausedCredentialWrite(write: () => ReturnType<typeof signed>, change: () => Promise<void>, point = WRITE_POINT) {
+  for (const marker of ["arm", "claimed", "paused", "go", "released"]) {
+    rmSync(join(pauseDir, `${marker}.${point}`), { force: true });
+  }
+  writeFileSync(join(pauseDir, `arm.${point}`), "");
+  const pending = write();
+  try {
+    const deadline = Date.now() + 15_000;
+    while (!existsSync(join(pauseDir, `paused.${point}`)) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    expect(existsSync(join(pauseDir, `paused.${point}`)), "owner write reached the pause").toBe(true);
+    await change();
+  } finally {
+    writeFileSync(join(pauseDir, `go.${point}`), "");
+    await pending;
+  }
+  const response = await pending;
+  expect(readFileSync(join(pauseDir, `released.${point}`), "utf8")).toBe("go");
+  return response;
+}
+
+describe("owner Credential writes confirm mapping fields", () => {
+  for (const method of ["PATCH", "PUT"] as const) {
+    for (const field of ["status", "kind", "idpProvider", "idpSubject", "principalId"] as const) {
+      test(`${method} returns stored_row_changed for a ${field} difference at confirmation`, async () => {
+        const id = `idpw-confirm-${randomUUID()}`;
+        const sub = `${id}-subject`;
+        const initial = {
+          id, principalId: W.id, kind: "idp", status: "active", idpProvider: "mcp-oauth",
+          idpSubject: sub, label: "mapping", createdAt: new Date().toISOString(),
+        };
+        await seedCredential(initial);
+        expect(await mcpActsAs(sub)).toBe(W.id);
+        const values = {
+          status: "revoked", kind: "bearer-token", idpProvider: "updated-provider",
+          idpSubject: `${sub}-updated`, principalId: V.id,
+        };
+        let committed: Record<string, unknown> | undefined;
+        const result = await withPausedCredentialWrite(
+          () => signed(W, method, `/Credential/${id}`, method === "PUT" ? { ...initial, label: "owner label" } : { label: "owner label" }),
+          async () => {
+            await ops({ operation: "update", database: "flair", table: "Credential", records: [{ ...initial, [field]: values[field] }] });
+            committed = await snapshot(id);
+            expect(committed[field]).toBe(values[field]);
+          },
+        );
+        expect(result.status, result.text).toBe(409);
+        expect(JSON.parse(result.text).error).toBe("stored_row_changed");
+        expect(await readCredential(id)).toEqual(committed);
+        if (field === "status" || field === "kind" || field === "idpSubject") {
+          expect(await mcpActsAs(sub)).toBeNull();
+        } else {
+          expect(await mcpActsAs(sub)).toBe(field === "principalId" ? V.id : W.id);
+        }
+      }, 60_000);
+    }
+
+    test(`${method} relabels the owner's mapping when the committed fields match`, async () => {
+      const id = `idpw-confirm-control-${randomUUID()}`;
+      const initial = {
+        id, principalId: W.id, kind: "idp", status: "active", idpProvider: "mcp-oauth",
+        idpSubject: `${id}-subject`, label: "mapping", createdAt: new Date().toISOString(),
+      };
+      await seedCredential(initial);
+      const result = await withPausedCredentialWrite(
+        () => signed(W, method, `/Credential/${id}`, method === "PUT" ? { ...initial, label: "owner label" } : { label: "owner label" }),
+        async () => {},
+      );
+      expect([200, 204], result.text).toContain(result.status);
+      expect((await readCredential(id)).label).toBe("owner label");
+      expect(await mcpActsAs(initial.idpSubject)).toBe(W.id);
+    }, 60_000);
+  }
+});
+
+
+describe("Credential transaction boundaries", () => {
+  test("an owner array PUT commits no owner updates when a mapping confirmation differs", async () => {
+    const rows = [0, 1].map((index) => ({
+      id: `idpw-batch-${index}-${randomUUID()}`, principalId: W.id, kind: "idp", status: "active",
+      idpProvider: "mcp-oauth", idpSubject: `idpw-batch-${randomUUID()}`, label: "mapping",
+      createdAt: new Date().toISOString(),
+    }));
+    for (const row of rows) await seedCredential(row);
+    const sibling = await snapshot(rows[0].id);
+    let changed: Record<string, unknown> | undefined;
+    const result = await withPausedCredentialWrite(
+      () => signed(W, "PUT", "/Credential/", rows.map((row) => ({ ...row, label: "owner label" }))),
+      async () => {
+        await ops({ operation: "update", database: "flair", table: "Credential", records: [{ ...rows[1], status: "revoked" }] });
+        changed = await snapshot(rows[1].id);
+        expect(changed.status).toBe("revoked");
+      },
+      "credential-batch-row-write",
+    );
+    expect(result.status, result.text).toBe(409);
+    expect(JSON.parse(result.text).error).toBe("stored_row_changed");
+    expect(await readCredential(rows[0].id)).toEqual(sibling);
+    expect(await readCredential(rows[1].id)).toEqual(changed);
+    expect(await mcpActsAs(rows[1].idpSubject)).toBeNull();
+  }, 60_000);
+
+  for (const method of ["PUT", "PATCH"] as const) {
+    test(`${method} completes when an administrator changes the row after confirmation`, async () => {
+      const initial = {
+        id: `idpw-confirmed-${randomUUID()}`, principalId: W.id, kind: "idp", status: "active",
+        idpProvider: "mcp-oauth", idpSubject: `idpw-confirmed-${randomUUID()}`, label: "mapping",
+        createdAt: new Date().toISOString(),
+      };
+      await seedCredential(initial);
+      const result = await withPausedCredentialWrite(
+        () => signed(W, method, `/Credential/${initial.id}`, method === "PUT" ? { ...initial, label: "owner label" } : { label: "owner label" }),
+        async () => {
+          await ops({ operation: "update", database: "flair", table: "Credential", records: [{ id: initial.id, principalId: initial.principalId, kind: initial.kind, createdAt: initial.createdAt, status: "revoked" }] });
+          expect((await readCredential(initial.id)).status).toBe("revoked");
+        },
+        "credential-row-write-confirmed",
+      );
+      expect([200, 204], result.text).toContain(result.status);
+      const stored = await readCredential(initial.id);
+      expect(stored.label).toBe("owner label");
+      expect(stored.status).toBe("revoked");
+      expect(await mcpActsAs(initial.idpSubject)).toBeNull();
+    }, 60_000);
+  }
 });

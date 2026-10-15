@@ -3,6 +3,19 @@ import { Command } from "commander";
 import { harnessState, resetHarnessState, installMemoryHarperMock, databasesMock } from "../helpers/memory-search-harness";
 import { bindCli as bindMemory, register as registerMemory, type MemoryCli } from "../../src/commands/memory";
 import { bindCli as bindAgent, register as registerAgent, type AgentCli } from "../../src/commands/agent";
+import { setInstancePairOsReadsForTests } from "../../src/lib/local-instance-pair";
+
+/**
+ * flair#2526: the pair check reads the OS listener table, and the ops endpoint
+ * here is a fetch mock with no listener behind it. These tests inject a
+ * SIMULATED table: one simulated Harper process id on every port, with a
+ * fixed birth identity and a Harper command line. No such process exists.
+ */
+const SIMULATED_LISTENER_TABLE = {
+  listeners: () => ({ kind: "listeners" as const, pids: [24_526] }),
+  birth: () => ({ kind: "birth" as const, id: "24526@simulated" }),
+  commandLine: () => "node\u0000/simulated/node_modules/harper/dist/bin/harper.js\u0000run\u0000.",
+};
 process.env.FLAIR_RATE_LIMIT_ENABLED = "false";
 delete process.env.FLAIR_PUBLIC;
 installMemoryHarperMock();
@@ -42,6 +55,7 @@ const api = async (method: string, path: string, body: any, options: any) => {
   return r.post({ ids });
 };
 beforeEach(() => {
+  setInstancePairOsReadsForTests(SIMULATED_LISTENER_TABLE);
   resetHarnessState();
   harnessState.memoryStore.set(row.id, { ...row });
   deletes = [];
@@ -89,6 +103,7 @@ beforeEach(() => {
   } satisfies AgentCli);
 });
 afterEach(() => {
+  setInstancePairOsReadsForTests(null);
   globalThis.fetch = originalFetch;
   if (originalPass === undefined) delete process.env.FLAIR_ADMIN_PASS; else process.env.FLAIR_ADMIN_PASS = originalPass;
   if (originalOpsPort === undefined) delete process.env.FLAIR_OPS_PORT; else process.env.FLAIR_OPS_PORT = originalOpsPort;
@@ -152,7 +167,7 @@ for (const kind of ["hygiene", "remove"] as const) {
     { http: { port: "remote.invalid:19926" }, operationsApi: { network: { port: 19925 } } }]) {
     test(`${kind}: an unpaired configuration refuses before scanning or deletion: ${JSON.stringify(config)}`, async () => {
       configuration = config;
-      await expect(invoke(kind, ["--ops-port", "19925"])).rejects.toThrow("--ops-port 19925: no matching local HTTP endpoint");
+      await expect(invoke(kind, ["--ops-port", "19925"])).rejects.toThrow("--ops-port 19925: the local HTTP/ops pair could not be proven");
       expect(requests).toEqual(["POST:http://127.0.0.1:19925/"]);
       expect(otherInstance.has(row.id)).toBe(true);
       expect(deletes).toEqual([]);
