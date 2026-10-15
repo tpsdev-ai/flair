@@ -17,7 +17,7 @@
  * composition in resources/Federation.ts) inside ONE owned transaction
  * (resources/request-transaction.ts): a fresh read, the exactly-`pending` /
  * local / non-deactivated checks, then the key, the private audit row and the
- * OrgEvent (the key's fingerprint in place of the key) are staged together, the COMMITTED Agent row is confirmed
+ * OrgEvent (`detail`: fingerprint; `refId` and `summary`: target id) are staged together, the COMMITTED Agent row is confirmed
  * (resources/write-back.ts) before the commit, and the stored key is read back
  * AFTER the commit. The response is returned only when the read-back is equal.
  *
