@@ -1,7 +1,7 @@
 // agent-pending-key-federation-2266.test.ts — flair#2266, the federation half.
 //
 // A known hub with a pinned key pushes a signed batch to POST /FederationSync.
-// A record that reaches the merge plan and changes a stored pending key is
+// A record reaching the merge plan with publicKey different from stored pending is
 // skipped as `agent_pending_key_not_federated` unless the status guard refused
 // it first. Earlier validation keeps its own reason.
 //

@@ -1354,15 +1354,8 @@ export class FederationSync extends Resource {
               if (record.table === "Agent" && inboundChangesExistingPrincipalStatus(record, row)) {
                 return { skip: true, reason: "agent_status_not_federated" };
               }
-              // flair#2266: an inbound Agent record that would CHANGE a local
-              // row's `publicKey` while the stored value is exactly `pending` is
-              // skipped WHOLE. The sync-in writes Agent through the RAW table
-              // handle and a paired hub may carry a forged-originator record, so
-              // this path has no authority to complete a pending row's key.
-              // Local writers do, such as the registration operation
-              // (resources/AgentKeyRegister.ts) or an administrator's raw write
-              // through the operations API (a trust root). It carries its OWN
-              // reason so the skip log tells it apart from the status refusal.
+              // flair#2266: skip an inbound Agent record carrying a publicKey
+              // different from stored `pending`, regardless of timestamps.
               if (record.table === "Agent" && inboundChangesExistingPendingKey(record, row)) {
                 return { skip: true, reason: "agent_pending_key_not_federated" };
               }

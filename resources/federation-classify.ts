@@ -65,8 +65,8 @@ export type SkipReason =
   // administrator authority for that principal, so the whole record is skipped
   // rather than merged without `status`.
   | "agent_status_not_federated"
-  // ─── flair#2266 (an inbound Agent record that would set a locally pending key) ──
-  // A record that reaches the merge plan and changes a stored pending key,
+  // ─── flair#2266 (pending-key guard) ──
+  // A record reaching the merge plan with publicKey different from stored `pending`,
   // unless the status guard refused it first. Earlier validation keeps its reason.
   | "agent_pending_key_not_federated"
   // Emitted by FederationSync.post before the row is read: the payload's id is
@@ -370,23 +370,8 @@ export function inboundChangesExistingPrincipalStatus(
 export const PENDING_PUBLIC_KEY = "pending";
 
 /**
- * flair#2266: does this inbound Agent record CHANGE an existing local row's
- * `publicKey` while that stored value is exactly `pending`? True only when the
- * record is for the Agent table, a local row exists, its stored key is exactly
- * `pending`, and the record carries a `publicKey` that differs from that stored
- * value. A record with no `publicKey` field — or one restating `pending` — is
- * not a change and is not refused here (the merge's last-write-wins leaves the
- * stored value).
- *
- * This is the federation-side half of the pending-key rule the registration
- * operation enforces on the local side (resources/AgentKeyRegister.ts). The
- * sync-in merge writes Agent through the RAW table handle with a wholesale field
- * apply, so without this guard a paired hub could deliver a key onto a local
- * `pending` row (a hub may carry a forged-originator record — see
- * federation-classify's originator rule). A true answer skips the whole record
- * before the raw put, the same fail-safe shape as
- * {@link inboundChangesExistingPrincipalStatus}, but it emits its OWN skip name
- * so the two rules stay distinguishable.
+ * flair#2266: true for an inbound Agent record carrying a `publicKey` different
+ * from an existing local row's stored `pending`, regardless of timestamps.
  */
 export function inboundChangesExistingPendingKey(
   record: SyncRecord,

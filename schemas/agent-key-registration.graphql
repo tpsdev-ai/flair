@@ -1,4 +1,4 @@
-# AgentKeyRegistration — the private audit record for one successful key
+# AgentKeyRegistration — the private audit record for one committed key
 # registration (POST /AgentKeyRegister, resources/AgentKeyRegister.ts).
 #
 # One row per committed registration. It carries NO secret: the actor, the

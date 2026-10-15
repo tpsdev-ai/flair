@@ -59,7 +59,7 @@ describe("flair#2266 — the federation pending-key predicate", () => {
   const pendingRow = { id: "a", publicKey: PENDING_PUBLIC_KEY, status: "active" };
   const record = (data: unknown, table = "Agent") => ({ table, id: "a", updatedAt: "2026-01-01T00:00:00.000Z", data }) as any;
 
-  test("true only when a local pending row's key would change", () => {
+  test("true for an incoming publicKey different from stored pending", () => {
     expect(inboundChangesExistingPendingKey(record({ id: "a", publicKey: KEY }), pendingRow)).toBe(true);
   });
 
