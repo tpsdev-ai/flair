@@ -143,7 +143,11 @@ is `GET /Name/<id>` unless noted.
 | POST / PUT / PATCH / DELETE | `/Soul` | **Operator / internal** | Not Ed25519. Learned Memory text cannot be copied in as Soul. See [docs/auth.md](auth.md#soul-authorship). |
 | POST | `/FeedSouls` | Ed25519 | Soul change feed (verified). |
 
-`Credential` (GET/POST verified; extra credentials for a principal) and
+`Credential` (GET/POST verified; extra credentials for a principal; through
+this resource only an administrator or the server creates a `kind: "idp"`
+credential, changes its kind or identity fields, or reactivates it, and its
+owner may relabel, revoke or delete it, see
+[Who writes a mapping](access-control.md#who-writes-a-mapping)) and
 `Integration` (legacy 0.x platform rows; verified, prefer Credential) sit on
 the same identity plane.
 
