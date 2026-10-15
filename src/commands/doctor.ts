@@ -16,6 +16,7 @@ import { hookSettingsPath, resolveHookAgentId } from "../hook-install.js";
 import { ALL_CLIENTS, decideCodexPinOnly, decideJsonPinOnly, detectClients, type ClientId, wireAntigravity, wireClaudeCode, wireCodex, wireCursor, wireGemini } from "../install/clients.js";
 import { checkGlobalBinOnPath, resolveNpmGlobalPrefix } from "../install/global-bin-path.js";
 import { buildEd25519Auth, defaultAdminPassPath, defaultKeysDir, requestTarget, requestUrl, resolveAdminUser, resolveKeyPath, resolveLocalAdminPass } from "../lib/auth-resolve.js";
+import { proveLocalHarperListener, type LocalInstancePairProof } from "../lib/local-instance-pair.js";
 import { AGENT_ID_RULE } from "../lib/agent-id-rule.js";
 import { agentHomeEndpoint, readAgentHomeRows, resolveTargetInstanceIdentity } from "../lib/agent-home.js";
 import { readAgentRoster } from "../lib/agent-roster.js";
@@ -24,6 +25,7 @@ import { collectFederationEnv, describeFederationDriverFinding, federationPeersC
 import { plistCarriesInlineAdminPassword } from "../lib/launchd-management.js";
 import { DOCTOR_CHECK_IDS, catalogIssueDelta, mcpRepinIcon, probeFlairHealth, renderCatalogDoctorLines, runDoctorChecks, type WorkerThreadsObservation } from "../lib/doctor-run.js";
 import { describeEmbedGpuDoctorFinding } from "../lib/embed-gpu-doctor.js";
+import { describeEmbeddingSpaceDoctorFinding } from "../lib/embedding-space-doctor.js";
 import { adminPassDesyncFinding, detectPersistedAdminUser } from "../lib/init-admin-pass.js";
 import { opsApiBindFinding } from "../lib/ops-api-bind.js";
 import {
@@ -140,7 +142,8 @@ export type DoctorCli = {
  */
 type DoctorProbedRead =
   | { kind: "run"; opsPort: number }
-  | { kind: "not-run"; reason: string; remedy: string };
+  /** `credentialRefused`: the ops endpoint refused the admin credential, so the pair was never checked (flair#2526). */
+  | { kind: "not-run"; reason: string; remedy: string; credentialRefused?: true };
 
 /**
  * The admin credential doctor resolved for those four reads, and the target it
@@ -160,7 +163,21 @@ export function bindCli(fns: DoctorCli): void {
   cli = fns;
 }
 
+/**
+ * flair#2526: true while doctor's HTTP-port gate is `http-only` (the probed
+ * port's listener is proven but the HTTP/ops pair is not). Every `api()` call
+ * doctor makes then runs with the shared resolver's `signedOnly` transport:
+ * no Authorization header or an Ed25519 signature; never a Basic or Bearer
+ * header, from any source. Set by the doctor action each time it decides the
+ * gate.
+ */
+let signedOnlyTransport = false;
+
 function api(...args: any[]): any {
+  if (signedOnlyTransport) {
+    const options = args[3] && typeof args[3] === "object" ? args[3] : {};
+    args[3] = { ...options, signedOnly: true };
+  }
   return cli.api(...args);
 }
 
@@ -222,6 +239,91 @@ function resolveHttpPort(...args: any[]): any {
 
 function verifyDoctorRosterInstance(...args: any[]): any {
   return cli.verifyDoctorRosterInstance(...args);
+}
+
+/**
+ * Whether `url` uses `httpPort`, the port the pair check proves, on ANY host,
+ * so a credentialed request to it waits for that check. The host is not
+ * compared: alternate host spellings and the wildcard address (`0.0.0.0`,
+ * `localhost.`, an IPv4-mapped address) can reach the probed listener under
+ * names no list can enumerate, so the gate conservatively holds any URL on
+ * the probed port, whatever its host, without claiming that every spelling
+ * reaches the listener. An unparseable URL is held too.
+ */
+export function targetsProbedHttpPort(url: string, httpPort: number): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return true;
+  }
+  const port = parsed.port === "" ? (parsed.protocol === "https:" ? 443 : 80) : Number(parsed.port);
+  return port === httpPort;
+}
+
+/**
+ * Whether doctor may send a credential to the probed HTTP port (flair#2526).
+ *   - `run`: the HTTP/ops pair is proven; the gate permits every section
+ *     (each section's own prerequisites still apply).
+ *   - `http-only`: the pair could not be checked for want of a usable admin
+ *     credential (none, unresolvable, or refused by the ops endpoint), but the
+ *     probed HTTP port's own listener passes proveLocalHarperListener (a
+ *     recognized Harper command line, stable across two reads; not an
+ *     authentication of the program): requests to that port are permitted
+ *     with no Authorization header or an Ed25519 signature, never a Basic or
+ *     Bearer header
+ *     (`signedOnlyTransport`); sections that join it with the ops endpoint
+ *     are not. `reason` says why the pair is unproven.
+ *   - `not-run`: the later credentialed requests to the HTTP port are held. (A
+ *     `not-run` from an Instance-id mismatch comes after the pair proof passed
+ *     and the Basic `/Instance/` identity read went to the probed port.)
+ */
+type DoctorPairGate =
+  | { kind: "run"; opsPort: number }
+  | { kind: "http-only"; reason: string; remedy: string }
+  | { kind: "not-run"; reason: string; remedy: string };
+
+/** What doctor prints when it has no admin credential to run the pair check with. */
+const DOCTOR_PAIR_NO_CREDENTIAL_REMEDY =
+  "Set FLAIR_ADMIN_PASS, or restore ~/.flair/admin-pass (`flair init` writes it), so doctor can read the ops "
+  + "endpoint's configuration, then re-run flair doctor.";
+
+/**
+ * Derive the HTTP-port gate (flair#2526) from the probed target flair#2520
+ * resolves (the admin credential and `verifyDoctorRosterInstance`'s answer for
+ * it, which includes the live-process pair proof). A proven pair runs; a pair
+ * check that ran and refused holds every credentialed request. When the pair
+ * could not be checked for want of a usable admin credential, the probed
+ * port's own listener is proven without any credential instead.
+ */
+function decideDoctorPairGate(
+  probed: DoctorProbedTarget,
+  probedHttpPort: number,
+  proveListener: (httpPort: number) => LocalInstancePairProof = proveLocalHarperListener,
+): DoctorPairGate {
+  const read = probed.read;
+  if (read?.kind === "run") return read;
+  if (read?.kind === "not-run" && read.credentialRefused !== true) {
+    return { kind: "not-run", reason: read.reason, remedy: read.remedy };
+  }
+  const unchecked = read !== null
+    ? { reason: read.reason, remedy: read.remedy }
+    : probed.credIssue !== null
+      ? {
+        reason: `the admin credential could not be resolved (${probed.credIssue}), so the HTTP/ops pair check could not run`,
+        remedy: DOCTOR_PAIR_NO_CREDENTIAL_REMEDY,
+      }
+      : {
+        reason: "no admin credential to read the ops endpoint's configuration with, so the HTTP/ops pair check could not run",
+        remedy: DOCTOR_PAIR_NO_CREDENTIAL_REMEDY,
+      };
+  const listener = proveListener(probedHttpPort);
+  if (listener.kind === "proven") return { kind: "http-only", ...unchecked };
+  return {
+    kind: "not-run",
+    reason: `${unchecked.reason}; nor is the HTTP port's own listener proven (${listener.detail})`,
+    remedy: listener.remedy ?? unchecked.remedy,
+  };
 }
 
 function resolveOpsPort(...args: any[]): any {
@@ -289,6 +391,27 @@ export function renderEmbedGpuDoctorFinding(
     `  ${icon} ${finding.message}`,
     `     ${render.wrap(render.c.dim, "Fix:")} ${finding.fixHint}`,
   ];
+  for (const line of lines) write(line);
+  return { lines, issueDelta: finding.isIssue ? 1 : 0 };
+}
+
+/**
+ * flair#2530 — the single place a /Health embedding-space verdict becomes doctor
+ * output and exit-code weight, extracted like renderEmbedGpuDoctorFinding so the
+ * four states are exercised on the real counting path. Only the `mixed` state is
+ * a blocking finding; `uniform` prints an OK line and the two unverified states
+ * print advisories.
+ */
+export function renderEmbeddingSpaceDoctorFinding(
+  embeddingSpace: unknown,
+  write: (line: string) => void = (line) => console.log(line),
+): { lines: string[]; issueDelta: number } {
+  const finding = describeEmbeddingSpaceDoctorFinding(embeddingSpace);
+  if (!finding) return { lines: [], issueDelta: 0 };
+  const icon =
+    finding.icon === "ok" ? render.icons.ok : finding.icon === "warn" ? render.icons.warn : render.icons.error;
+  const lines = [`  ${icon} ${finding.message}`];
+  if (finding.fixHint) lines.push(`     ${render.wrap(render.c.dim, "Fix:")} ${finding.fixHint}`);
   for (const line of lines) write(line);
   return { lines, issueDelta: finding.isIssue ? 1 : 0 };
 }
@@ -453,6 +576,7 @@ program
   .option("--fix", "Automatically fix issues where possible")
   .option("--dry-run", "Show what --fix would do without making changes")
   .action(async (opts) => {
+    signedOnlyTransport = false; // flair#2526: decided per run, below
     const port = resolveHttpPort(opts);
     const autoFix = opts.fix ?? false;
     const dryRun = opts.dryRun ?? false;
@@ -598,7 +722,23 @@ program
       }
     }
 
-    if (await probePort(port)) {
+    // flair#2530: a readiness 503 whose body has Flair's /Health fields (see
+    // readFlairHealthBody) is reported as Flair answering without serving
+    // search. It is an issue, never "responding", so the checks that need a
+    // serving instance stay skipped; its body still carries the version and the
+    // embedding-space guard state, read in 1a below. It is checked BEFORE
+    // `reaching`: a 503 can carry a multi-worker refusal too, which makes the
+    // probe `reaching`, but search is still not served. The worker-thread
+    // finding is reported separately by the catalog check.
+    let flairNotReady = false;
+    const configuredProbe = await probeFlairHealth(`http://127.0.0.1:${port}/Health`);
+    if (configuredProbe.notReady) {
+      const why = configuredProbe.notReadyReason ? ` (${configuredProbe.notReadyReason})` : "";
+      console.log(`  ${render.icons.error} Flair is answering on port ${render.wrap(render.c.bold, String(port))} but not serving search${why}`);
+      console.log(`     ${render.wrap(render.c.dim, "Fix:")} wait for startup to finish; if it persists, flair restart`);
+      flairNotReady = true;
+      issues++;
+    } else if (configuredProbe.reaching) {
       console.log(`  ${render.icons.ok} Harper responding on port ${render.wrap(render.c.bold, String(port))}`);
       harperResponding = true;
     } else {
@@ -684,17 +824,20 @@ program
     // picture here instead of a one-liner and `--fix` offers the restart.
     let runningVersion: string | null = null;
     let embedGpuFromHealth: unknown;
+    let embeddingSpaceFromHealth: unknown;
     let workerThreads: WorkerThreadsObservation | undefined;
-    if (harperResponding) {
+    if (harperResponding || flairNotReady) {
       try {
         const probe = await probeFlairHealth(`${baseUrl}/Health`);
-        if (probe.reaching) {
-          workerThreads = probe.observation ?? undefined;
-          if (probe.status >= 200 && probe.status < 300 && probe.body && typeof probe.body === "object") {
-            const healthBody = probe.body as { version?: unknown; embedding?: unknown };
-            runningVersion = typeof healthBody.version === "string" ? healthBody.version : null;
-            embedGpuFromHealth = healthBody.embedding;
-          }
+        if (probe.reaching) workerThreads = probe.observation ?? undefined;
+        // A 2xx body, or a 503 body with Flair's /Health fields (flair#2530).
+        // Reading a 503 body does not make it healthy; the port check or the
+        // worker-threads check counts it.
+        if (probe.healthBody) {
+          const healthBody = probe.healthBody as { version?: unknown; embedding?: unknown; embeddingSpace?: unknown };
+          runningVersion = typeof healthBody.version === "string" ? healthBody.version : null;
+          embedGpuFromHealth = healthBody.embedding;
+          embeddingSpaceFromHealth = healthBody.embeddingSpace;
         }
       } catch { /* leave runningVersion null — reported below as "unknown" */ }
 
@@ -729,6 +872,90 @@ program
       // does NOT fail the run, while an explicit request or an unrecognized
       // source still fails closed. A stated CPU default is silent here.
       issues += renderEmbedGpuDoctorFinding(embedGpuFromHealth).issueDelta;
+
+      // flair#2530 — the embedding-space guard's verdict, from /Health. The
+      // `mixed` state is a blocking finding; the two unverified states are advisories.
+      issues += renderEmbeddingSpaceDoctorFinding(embeddingSpaceFromHealth).issueDelta;
+    }
+
+    // flair#2520: the audit-log, instance-identity, Agent-roster and Agent-homes
+    // reads go through an ops endpoint, which must belong to the instance doctor
+    // probed. Resolve the admin credential and verify that target with it here,
+    // using the pair check flair#2483 applies (with flair#2526's live-process
+    // proof). The order is: pair proof, then (only when the pair is proven)
+    // the Basic `/Instance/` identity read on the probed HTTP port, then the
+    // gate below for the later diagnostic requests. Diagnostic reads that run use
+    // the verified target; pairing refusals report NOT RUN with the shared
+    // reason and remedy, and existing UNVERIFIED/skipped outcomes remain. With
+    // no resolvable admin password there is no target (`read` null) and no ops
+    // endpoint is read. A resolved password that the ops endpoint rejects
+    // (HTTP 401/403) has been sent there, and the answer is `not-run`. `effectivePort` is final: PID discovery (step 1) and any
+    // --fix re-record have already run. This answer describes the credential
+    // and the process serving the probed port at this point, so it is shared
+    // only until a --fix step may change either: the launchd repair (7b, which
+    // can also write the admin-pass file from HDB_ADMIN_PASSWORD) and the
+    // install-tree restart (7c), both below. Those steps set
+    // `servingProcessMayHaveChanged`; the credential is then resolved again
+    // and, when one is available, the target verified with it, once, right
+    // after those steps (7a), and the Agent-roster and Agent-homes checks and
+    // the later credentialed HTTP reads use only that answer.
+    async function resolveProbedTarget(): Promise<DoctorProbedTarget> {
+      let adminPass: string | undefined;
+      let credIssue: string | null = null;
+      try {
+        adminPass = resolveLocalAdminPass(undefined);
+      } catch (err: unknown) {
+        credIssue = err instanceof Error ? err.message : String(err);
+      }
+      const read: DoctorProbedRead | null = adminPass
+        ? await verifyDoctorRosterInstance(opts, effectivePort, adminPass)
+        : null;
+      return { adminPass, credIssue, read };
+    }
+    const probed: DoctorProbedTarget = harperResponding
+      ? await resolveProbedTarget()
+      : { adminPass: undefined, credIssue: null, read: null };
+    const { adminPass: probedAdminPass, credIssue: probedCredIssue, read: probedRead } = probed;
+    let servingProcessMayHaveChanged = false;
+
+    // flair#2526: doctor sends a credential to the probed HTTP port only after
+    // that port is proven. The pair proof above runs before any credentialed
+    // HTTP request (its own Basic `/Instance/` identity read follows only a
+    // proven pair). The gate is derived from that answer (decideDoctorPairGate)
+    // for the later diagnostic requests. Unauthenticated reads
+    // (/Health, /OAuthMetadata, OAuth discovery, an unsigned /Presence) do not
+    // wait for it.
+    //   - `run` (the HTTP/ops pair is proven): the gate permits every section;
+    //     each section's own prerequisites still apply.
+    //   - `http-only` (no usable admin credential to check the pair with, but
+    //     the probed port's listener passes the listener-only check): requests
+    //     to the HTTP port are permitted with no Authorization header or an
+    //     Ed25519 signature; never Basic or Bearer. Every
+    //     api() call runs signedOnly, so no Basic or Bearer header goes out from
+    //     any source (FLAIR_TOKEN, FLAIR_ADMIN_PASS, HDB_ADMIN_PASSWORD, the
+    //     admin-pass file). flair#2270: `doctor --agent` with an unusable
+    //     ambient credential still reads the redirect state. Sections that join
+    //     the HTTP port with the ops endpoint are not permitted.
+    //   - `not-run`: later credentialed HTTP requests are held. Fully held
+    //     diagnostic sections report NOT RUN; Scheduled drivers skips the live
+    //     `/FederationPeers` read and continues using configured peers.
+    // After a --fix step that may change the serving process, the gate is
+    // derived again from the re-resolved target (7a below).
+    let pairGate: DoctorPairGate | null = harperResponding ? decideDoctorPairGate(probed, effectivePort) : null;
+    /** Why the HTTP/ops pair is unproven (`http-only` or `not-run`), else null. */
+    let pairNotRun = pairGate !== null && pairGate.kind !== "run" ? pairGate : null;
+    /** Whether requests to the probed HTTP port are held. */
+    let httpHeld = pairGate?.kind === "not-run";
+    signedOnlyTransport = pairGate?.kind === "http-only";
+    let pairRemedyShown = false;
+    /** Print `<label>: NOT RUN — <reason>`, with the remedy the first time. */
+    function reportPairNotRun(label: string, indent = "  "): void {
+      if (!pairNotRun) return;
+      console.log(`${indent}${render.icons.warn} ${label}: NOT RUN — ${pairNotRun.reason}`);
+      if (!pairRemedyShown) {
+        console.log(`${indent}   ${render.wrap(render.c.dim, "Fix:")} ${pairNotRun.remedy}`);
+        pairRemedyShown = true;
+      }
     }
 
     // 2. Keys directory
@@ -766,10 +993,14 @@ program
       }
 
       if (nodeKeyIds.length > 0 && harperResponding) {
-        const advisory = await readNodeSeedAdvisory({
-          nodeKeyIds, keysDir, baseUrl, port: opts.port, resolveHttpPort, resolveOpsPort,
-        });
-        if (advisory) console.log(`  ${render.icons.info} ${advisory}`);
+        if (pairNotRun) {
+          reportPairNotRun("Node key instance check");
+        } else {
+          const advisory = await readNodeSeedAdvisory({
+            nodeKeyIds, keysDir, baseUrl, port: opts.port, resolveHttpPort, resolveOpsPort,
+          });
+          if (advisory) console.log(`  ${render.icons.info} ${advisory}`);
+        }
       }
     } else {
       console.log(`  ${render.icons.error} Keys directory missing: ${render.wrap(render.c.dim, keysDir)}`);
@@ -920,13 +1151,16 @@ program
         if (finding.isIssue) issues++;
       }
 
-      const mcpRedirectFinding = await readTargetMcpRedirectFinding(() =>
-        api("GET", "/HealthDetail", undefined, {
-          baseUrl,
-          keysDir: defaultKeysDir(),
-          ...(opts.agent ? { agentId: opts.agent, agentIdSource: "flag" } : {}),
-        }),
-      );
+      const mcpRedirectFinding = httpHeld
+        ? null
+        : await readTargetMcpRedirectFinding(() =>
+          api("GET", "/HealthDetail", undefined, {
+            baseUrl,
+            keysDir: defaultKeysDir(),
+            ...(opts.agent ? { agentId: opts.agent, agentIdSource: "flag" } : {}),
+          }),
+        );
+      if (httpHeld) reportPairNotRun("MCP OAuth redirect");
       if (mcpRedirectFinding) {
         console.log(`  ${mcpRedirectFinding.isIssue ? render.icons.error : render.icons.warn} ${mcpRedirectFinding.message}`);
         if (mcpRedirectFinding.fixHint) console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${mcpRedirectFinding.fixHint}`);
@@ -964,7 +1198,9 @@ program
     // "no issues found". This now stores a memory with a distinctive phrase and
     // searches for a PARAPHRASE (no shared keywords). If the top result isn't
     // recovered by MEANING, recall-by-meaning is broken and doctor FAILS LOUDLY.
-    if (harperResponding) {
+    if (harperResponding && httpHeld) {
+      reportPairNotRun("Embeddings");
+    } else if (harperResponding) {
       const semanticStatus = await verifySemanticSearch(baseUrl, opts.agent, defaultKeysDir());
       switch (semanticStatus.state) {
         case "ok":
@@ -1004,40 +1240,6 @@ program
       }
     }
 
-    // flair#2520: the audit-log, instance-identity, Agent-roster and Agent-homes
-    // reads go through an ops endpoint, which must belong to the instance doctor
-    // probed. Resolve the admin credential and verify that target with it here,
-    // using the pair check flair#2483 applies. Diagnostic reads that run use
-    // the verified target; pairing refusals report NOT RUN with the shared
-    // reason and remedy, and existing UNVERIFIED/skipped outcomes remain. With
-    // no usable admin credential there is no target (`read` null) and no ops
-    // endpoint is read. `effectivePort` is final: PID discovery (step 1) and any
-    // --fix re-record have already run. This answer describes the credential
-    // and the process serving the probed port at this point, so it is shared
-    // only until a --fix step may change either: the launchd repair (7b, which
-    // can also write the admin-pass file from HDB_ADMIN_PASSWORD) and the
-    // install-tree restart (7c), both below. Those steps set
-    // `servingProcessMayHaveChanged`, and the Agent-roster and Agent-homes
-    // checks then resolve the credential again and, when one is available,
-    // verify the target with it, and use only that answer (8b).
-    async function resolveProbedTarget(): Promise<DoctorProbedTarget> {
-      let adminPass: string | undefined;
-      let credIssue: string | null = null;
-      try {
-        adminPass = resolveLocalAdminPass(undefined);
-      } catch (err: unknown) {
-        credIssue = err instanceof Error ? err.message : String(err);
-      }
-      const read: DoctorProbedRead | null = adminPass
-        ? await verifyDoctorRosterInstance(opts, effectivePort, adminPass)
-        : null;
-      return { adminPass, credIssue, read };
-    }
-    const probed: DoctorProbedTarget = harperResponding
-      ? await resolveProbedTarget()
-      : { adminPass: undefined, credIssue: null, read: null };
-    const { adminPass: probedAdminPass, credIssue: probedCredIssue, read: probedRead } = probed;
-    let servingProcessMayHaveChanged = false;
 
     // 4b. Audit-log positive control (flair#970) — REAL write→read_audit_log
     // round-trip, only if Harper is responding. `describe_table` reporting
@@ -1062,6 +1264,10 @@ program
         issues++;
         console.log(`  ${render.icons.warn} Audit log: NOT RUN — ${probedRead.reason}`);
         console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${probedRead.remedy}`);
+      } else if (httpHeld) {
+        // flair#2526: the probe writes through the HTTP port, which is not
+        // proven, so nothing credentialed goes to it.
+        reportPairNotRun("Audit log");
       } else {
         // A verified target, or null with no admin credential. With none,
         // verifyAuditLog answers its no-credential/no-agent skip before it would
@@ -1382,6 +1588,10 @@ program
         }
         console.log(`     ${render.icons.ok} FLAIR_URL ${render.wrap(render.c.dim, urlLabel)} reachable`);
 
+        if (httpHeld && targetsProbedHttpPort(eff.url, effectivePort)) {
+          reportPairNotRun(`agent '${block.agentId}' registration`, "     ");
+          continue;
+        }
         const reg = await checkAgentRegistered(eff.url, block.agentId!, defaultKeysDir());
         if (reg.state === "registered") {
           console.log(`     ${render.icons.ok} agent '${block.agentId}' registered`);
@@ -1967,11 +2177,26 @@ program
     // never aborts the others — that's the failure isolation flair#722 asks
     // for; describeAgentGateFinding (src/doctor-client.ts) is pure decision
     // logic so it's unit-tested without a real Harper.
+    // flair#2520/#2526: a --fix step above (7b, 7c) may have changed the serving
+    // process or written the admin-pass file. Resolve the credential and the
+    // target again, once, here, and derive the HTTP-port gate from that answer
+    // for every credentialed read below; the Agent-roster and Agent-homes
+    // checks use the same answer.
+    const lateProbe: DoctorProbedTarget = servingProcessMayHaveChanged ? await resolveProbedTarget() : probed;
+    if (lateProbe !== probed) {
+      pairGate = harperResponding ? decideDoctorPairGate(lateProbe, effectivePort) : null;
+      pairNotRun = pairGate !== null && pairGate.kind !== "run" ? pairGate : null;
+      httpHeld = pairGate?.kind === "not-run";
+      signedOnlyTransport = pairGate?.kind === "http-only";
+      pairRemedyShown = false;
+    }
     const verifiedReadAgentIds = harperResponding
       ? planAgentIterations(keyAgentIds, opts.agent || process.env.FLAIR_AGENT_ID)
       : [];
+    // flair#2526: these reads are agent-signed, held when the pair check refused.
+    const signedReadsNotRun = httpHeld && verifiedReadAgentIds.length > 0;
     const agentGates: Array<{ id: string; state: AgentGateState; detail?: string }> = [];
-    for (const id of verifiedReadAgentIds) {
+    for (const id of signedReadsNotRun ? [] : verifiedReadAgentIds) {
       const reg = await checkAgentRegistered(baseUrl, id, defaultKeysDir());
       agentGates.push({ id, state: reg.state, detail: reg.detail });
       // harperResponding is necessarily true here (verifiedReadAgentIds is
@@ -2094,7 +2319,9 @@ program
 
     if (harperResponding) {
       console.log(`\n  ${render.wrap(render.c.bold, "Fleet presence")}`);
-      if (agentGates.length === 0) {
+      if (signedReadsNotRun) {
+        reportPairNotRun("Fleet presence");
+      } else if (agentGates.length === 0) {
         await fetchAndRenderFleetPresence({}, false, "  ");
       } else {
         for (const gate of agentGates) {
@@ -2117,12 +2344,12 @@ program
       // answer resolved above, unless a --fix step since then may have changed
       // the serving process or written the admin-pass file
       // (servingProcessMayHaveChanged): the credential is then resolved and the
-      // target verified with it again here, right before these reads, and only
-      // that answer is used. The roster read addresses the verified ops port,
+      // target verified with it again, once, right after those steps (7a,
+      // `lateProbe`), and only that answer is used. The roster read addresses the verified ops port,
       // or both the roster and home checks report NOT RUN (counted as an issue)
       // and no Agent row is read. No admin credential leaves the target null;
       // the roster read is skipped and named below.
-      const rosterProbe: DoctorProbedTarget = servingProcessMayHaveChanged ? await resolveProbedTarget() : probed;
+      const rosterProbe: DoctorProbedTarget = lateProbe;
       const rosterAdminPass = rosterProbe.adminPass;
       const rosterNotRun = rosterProbe.read?.kind === "not-run" ? rosterProbe.read : null;
       const rosterOpsPort = rosterProbe.read?.kind === "run" ? rosterProbe.read.opsPort : null;
@@ -2221,7 +2448,9 @@ program
 
     if (harperResponding) {
       console.log(`\n  ${render.wrap(render.c.bold, "Migrations")}`);
-      if (agentGates.length === 0) {
+      if (signedReadsNotRun) {
+        reportPairNotRun("Migrations");
+      } else if (agentGates.length === 0) {
         console.log(`  ${render.icons.info} Pass --agent <id> (with a matching key in ~/.flair/keys) to see migration state — requires a verified read, same as Fleet presence above.`);
       } else {
         const passedGates = agentGates.filter((g) => describeAgentGateFinding(g.id, g.state, g.detail, { instanceReachable: harperResponding }) === null);
@@ -2266,7 +2495,10 @@ program
       const guiDomain = `gui/${process.getuid?.() ?? ""}`;
 
       let livePeerCount: number | null = null;
-      if (harperResponding) {
+      // flair#2526: a credentialed read, held while the gate is `not-run`; in
+      // `http-only` it runs signed-only (no Basic or Bearer header). An unread
+      // count falls back to the configured peers below.
+      if (harperResponding && !httpHeld) {
         try {
           const r = await api("GET", "/FederationPeers", undefined, { baseUrl }) as { peers?: Array<{ status?: string }> };
           const peers = Array.isArray(r?.peers) ? r.peers : [];
