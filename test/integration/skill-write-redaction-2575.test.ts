@@ -4,7 +4,9 @@
 // a write; flair#2575 extends the SAME redactor to a skill's fields: each
 // `tags` entry and the `name`/`description` keys of the `metadata` JSON blob.
 // The write response's `stored` names those redacted fields like the Memory
-// fields, and the /mcp and stdio replies echo the STORED value.
+// fields. After a counted redaction, /mcp echoes the stored skill fields;
+// stdio renders the stored name, with no description or tags. On a clean
+// write, stdio uses the input name.
 //
 // This file drives each surface against a REAL Harper (the inproc-app fixture,
 // Flair loaded as a sub-component — test/helpers/harper-lifecycle.ts):
@@ -15,9 +17,9 @@
 //   - stdio: the shipped `STDIO_TOOL_HANDLERS.skill_store` over the real client.
 //
 // Coverage per surface: REST and /mcp assert every redacted skill field on the
-// stored row and in the reply/echo; the stdio reply renders only the stored
-// `Name:` line, so it asserts that line and every field on the stored row. A
-// clean value is unchanged. The stored row is read afterwards through the
+// stored row and in the reply/echo; stdio asserts the `Name:` line after a
+// counted redaction and every field on the stored row. Clean field values
+// are unchanged. The stored row is read afterwards through the
 // operations API to prove the reported value is what Harper holds.
 //
 // It also drives the built-in /mcp `memory_basement` / `memory_restore` against
@@ -237,8 +239,8 @@ describe("flair#2575 — /mcp skill_store echoes the stored skill fields", () =>
   }, 120_000);
 });
 
-describe("flair#2575 — stdio skill_store echoes the stored name", () => {
-  test("the reply's Name: line shows the stored name, never the input", async () => {
+describe("flair#2575 — stdio skill_store uses the stored name after a counted redaction", () => {
+  test("after a counted redaction, the reply's Name: line shows the stored name", async () => {
     const res: any = await STDIO_TOOL_HANDLERS.skill_store(
       {
         content: "the procedure",

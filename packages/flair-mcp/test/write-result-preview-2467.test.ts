@@ -209,7 +209,7 @@ describe("flair#2541 — skill_store previews the STORED text and trigger and re
     expect(res.structuredContent).toEqual({ id: "skill-1", written: true, redactedValues: 2 });
   });
 
-  test("flair#2575 — the name line comes from the stored name, never the caller's input", async () => {
+  test("flair#2575 — after a counted redaction, the name line comes from the stored name", async () => {
     const res = await STDIO_TOOL_HANDLERS.skill_store(
       { content: ORIGINAL, trigger: TRIGGER, name: `deploy ${TOKEN}` },
       skillCtx({ id: "skill-1", written: true, redactedValues: 2, stored: { content: STORED, trigger: STORED_TRIGGER, name: "deploy [redacted]" } }),

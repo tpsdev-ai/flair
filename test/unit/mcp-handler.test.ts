@@ -1583,7 +1583,7 @@ describe("flair#2541 — /mcp skill_store / memory_basement / memory_restore wri
 // ─── flair#2575 — the archive tools' contract matches the reply they return ──
 //
 // `memory_basement` / `memory_restore` answer with the Memory write result
-// (`id`, `written`), never with the `archived` flag. Their contract must declare
+// (`id`, `written`). Their contract must declare
 // exactly those required fields, and the shipped reply must carry them. The
 // real-Harper counterpart is test/integration/skill-write-redaction-2575.test.ts.
 describe("flair#2575 — the archive tools' contract matches their write reply", () => {
