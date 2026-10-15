@@ -7,9 +7,11 @@
   visibility that reads differently from the predecessor's is refused with 403
   `grant_cannot_change_visibility` and writes nothing, unless an earlier
   validation refuses it first: an ephemeral write naming `shared` gets the
-  ephemeral private-only rule's 400 `invalid_visibility_for_durability`, and an
-  ephemeral or session skill write gets the skill-durability gate's 400
-  `skill_durability`. An ordinary ephemeral successor that omits visibility on
+  ephemeral private-only rule's 400 `invalid_visibility_for_durability`; an
+  ephemeral skill write gets the skill-durability gate's 400
+  `skill_durability`; and a `session` skill write gets 400 `invalid_durability`
+  on Memory POST and PUT (durability validation runs first) and 400
+  `skill_durability` on FeedMemories. An ordinary ephemeral successor that omits visibility on
   a shared predecessor carries `shared`, which the ephemeral rule refuses with
   the same 400. The close stages its write and then re-reads the predecessor's
   committed row; if that row's visibility no longer reads the same as the

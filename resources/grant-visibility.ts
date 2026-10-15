@@ -15,9 +15,11 @@
  *     private) is refused with {@link grantVisibilityRefusal}, a 403 that
  *     carries only its name and a fixed message, unless an earlier validation
  *     refuses it first: an ephemeral write naming "shared" gets the ephemeral
- *     private-only rule's 400 invalid_visibility_for_durability, and an
- *     ephemeral or session skill write gets the skill-durability gate's 400
- *     skill_durability;
+ *     private-only rule's 400 invalid_visibility_for_durability; an ephemeral
+ *     skill write gets the skill-durability gate's 400 skill_durability; and a
+ *     "session" skill write gets 400 invalid_durability on Memory POST and PUT
+ *     (durability validation runs first) and 400 skill_durability on
+ *     FeedMemories;
  *   - the close stages its write and then re-reads the predecessor's committed
  *     row; if that row's visibility no longer reads the same as the
  *     successor's, the whole write is refused with
