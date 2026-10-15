@@ -14,6 +14,7 @@ import {
 } from "../../src/lib/scratch-owner.js";
 import { isStartTimeMatch } from "../../src/lib/daemon-liveness.js";
 import { readProcessStartTimeMs } from "../../src/lib/process-start-time.js";
+import { assertFlairDistFresh } from "./dist-freshness.js";
 
 // flair#1450: test-harness Harper only. NODE_OPTIONS --require of this file
 // makes the child exit on EPIPE / reparent rather than loop into a multi-GB
@@ -843,6 +844,11 @@ export async function startHarper(opts: StartHarperOptions = {}): Promise<Harper
   }
 
   // ── Local mode: spawn Harper from node_modules ────────────────────────────
+  // flair#2583: the component Harper loads below is the COMPILED resources
+  // bundle (config.yaml's jsResource glob), so a resource edit without a
+  // rebuild would boot the previous build. Fail fast, naming the stale input
+  // and the command to run, before any install or spawn.
+  assertFlairDistFresh(cwd);
   const ownsInstallDir = !opts.installDir;
   // Boot sweep first: leftovers from SIGKILL / cancelled CI are not small,
   // and a handler cannot cover those exits (flair#1032).
