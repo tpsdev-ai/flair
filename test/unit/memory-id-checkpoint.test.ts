@@ -99,12 +99,12 @@ describe("flair#2218 — paged admin read", () => {
     expect(out.map((r) => r.id)).toEqual(["a", "b", "c"]);
     expect(calls[0]).toMatchObject({ operation: "search_by_conditions", table: "Memory", limit: 2, offset: 0 });
     expect(calls[1]).toMatchObject({ offset: 2 });
-  });
+  }, 5_000);
 
   test("a row count the pages do not add up to is a read failure, not a short list", async () => {
     const { opsPost } = pager([[{ id: "a", durability: "standard" }]]);
     await expect(readMemoryRowsPaged(opsPost, { pageSize: 1, expected: 5 })).rejects.toThrow(/did not see every row/);
-  });
+  }, 5_000);
 
   test("a duplicate id across pages is a read failure", async () => {
     const { opsPost } = pager([
@@ -112,18 +112,18 @@ describe("flair#2218 — paged admin read", () => {
       [{ id: "a", durability: "standard" }],
     ]);
     await expect(readMemoryRowsPaged(opsPost, { pageSize: 1 })).rejects.toThrow(/duplicate id/);
-  });
+  }, 5_000);
 
   test("a body that is not a row array is a read failure", async () => {
     const opsPost = async () => ({ nope: true });
     await expect(readMemoryRowsPaged(opsPost, { pageSize: 1 })).rejects.toThrow(/neither a row array/);
-  });
+  }, 5_000);
 
   test("the page walk has a hard upper bound", async () => {
     const opsPost = async (body: Record<string, unknown>) =>
       Array.from({ length: Number(body.limit) }, (_, i) => ({ id: `p${body.offset}-${i}`, durability: "standard" }));
     await expect(readMemoryRowsPaged(opsPost, { pageSize: 1, maxPages: MAX_MEMORY_PAGES })).rejects.toThrow(/exceeded/);
-  });
+  }, 5_000);
 });
 
 describe("flair#2218 — verify refuses a different instance", () => {
