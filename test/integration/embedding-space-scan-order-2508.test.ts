@@ -18,14 +18,17 @@
  *      itself polls /health during startup).
  *   2. The store is confirmed empty, then a current-space row and a
  *      foreign-space row are inserted through the administrator operations API.
- *   3. A recall consults the guard while that scan is still parked. The recall
- *      returns, so the parked scan is not a consult scan (consults share one
- *      in-flight scan): it is the boot pre-warm, the only other in-tree scan
- *      starter, and the recall's scan started later. That scan publishes "not
- *      uniform", and the recall's `_warning` names exactly the current and the
- *      foreign stamp. The current stamp can reach that list only through a
- *      scan's read (the write-maintained latch records foreign stamps only),
- *      so the verdict comes from the resource read.
+ *   3. A recall consults the guard while that scan is still parked. No consult
+ *      scan started before the barrier (startHarper's /health polls read only
+ *      the guard's snapshot), so the parked scan is the boot pre-warm, the only
+ *      other in-tree scan starter. The consult does not wait
+ *      for a scan (flair#2530 fails closed): the first recall reports the
+ *      not-yet-verified state and starts a consult scan, which started later.
+ *      That scan publishes "not uniform"; a later recall, still sent while the
+ *      pre-warm is parked, reports it, and its `_warning` names exactly the
+ *      current and the foreign stamp. The current stamp can reach that list
+ *      only through a scan's read (the write-maintained latch records foreign
+ *      stamps only), so the verdict comes from the resource read.
  *   4. The pre-warm is released by this test. Its older verdict does not
  *      replace the newer one, a later recall still names both stamps, and the
  *      refusal is named in Harper's log.
@@ -90,6 +93,18 @@ async function recallWarning(h: HarperInstance): Promise<string | undefined> {
   const text = await res.text();
   expect(res.status, `SemanticSearch returned ${res.status}: ${text.slice(0, 300)}`).toBe(200);
   return JSON.parse(text)._warning;
+}
+
+/** Recall until the guard reports the mixed state (the consult scan published),
+ *  or the deadline passes; returns the last `_warning`. */
+async function recallUntilMixed(h: HarperInstance, timeoutMs: number): Promise<string | undefined> {
+  const deadline = Date.now() + timeoutMs;
+  let warning = await recallWarning(h);
+  while (!String(warning).includes("non-current embedding model stamp was observed") && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 50));
+    warning = await recallWarning(h);
+  }
+  return warning;
 }
 
 /** The stamps a mixed-space `_warning` names: `current` and the sorted `found` list. */
@@ -224,21 +239,24 @@ describe("embedding-space-guard scan ordering inside a real Harper worker (flair
       await insertMemoryRows(h, [memoryRow("m-current-1", CURRENT)]);
       await insertMemoryRows(h, [memoryRow("m-foreign-1", FOREIGN)]);
 
-      // 3. The consult scan starts later, reads both stamps and publishes first;
-      //    the parked scan is still parked when the recall returns.
-      during = await recallWarning(h);
+      // 3. The first recall fails closed without waiting and starts the consult
+      //    scan; that scan reads both stamps and publishes first, and a later
+      //    recall reports it while the parked scan is still parked.
+      const first = await recallWarning(h);
+      expect(String(first), "the first consult did not fail closed").toContain("embedding space not yet verified");
+      during = await recallUntilMixed(h, 15_000);
       expect(readFileSync(released, "utf8"), "the parked scan resumed before the consult scan published").toBe("");
     } finally {
       writeFileSync(join(pauseDir, `go.${POINT}`), "");
     }
-    expect(String(during), "the consult scan did not report the mixed store").toContain("mixed embedding spaces");
+    expect(String(during), "the consult scan did not report the mixed state").toContain("non-current embedding model stamp was observed");
     expect(namedStamps(during)).toEqual({ current: CURRENT, found: [CURRENT, FOREIGN].sort() });
 
     // 4. The pre-warm resumes, released by this test rather than its time limit.
     //    Its older verdict does not replace the newer one, and its refusal is named.
     expect(await releaseText(released, 30_000), "the pre-warm's pause ended by its time limit").toBe("go");
     const after = await recallWarning(h);
-    expect(String(after), "the older verdict overwrote the newer one").toContain("mixed embedding spaces");
+    expect(String(after), "the older verdict overwrote the newer one").toContain("non-current embedding model stamp was observed");
     expect(namedStamps(after)).toEqual({ current: CURRENT, found: [CURRENT, FOREIGN].sort() });
     expect(await logShows(h, "stale scan verdict refused", 15_000), "no refusal in the Harper log").toBe(true);
   }, 120_000);

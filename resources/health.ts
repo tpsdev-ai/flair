@@ -13,7 +13,7 @@ import { REM_DEDUP_STATS_PATH } from "./dedup-cluster.js";
 import { hybridEnabled, retrievalMode } from "./bm25.js";
 import { bm25IndexEnabled, bm25IndexInRetrievalPath, bm25IndexStatus } from "./bm25-index-service.js";
 import { bm25DisabledWarning } from "./bm25-status.js";
-import { normalizeStamp } from "./embedding-space-guard.js";
+import { normalizeStamp, spaceGuardState } from "./embedding-space-guard.js";
 import { getModelId } from "./embeddings-provider.js";
 import { describeStampOutstanding, EMBEDDING_STAMP_ID } from "./migrations/stamp-outstanding.js";
 import { buildPublicHealthBody, resolveSearchReadiness, type ResourceRegistry, type SearchReadiness } from "./search-readiness.js";
@@ -122,6 +122,16 @@ export class Health extends Resource {
       version: build?.version ?? resolveVersion(),
       buildCommit: build?.commit ?? null,
     }));
+    // flair#2530 — the query-time embedding-space guard's state, for `flair
+    // doctor`. Sync, no scan, no vector read. `state` is one of
+    // uniform | mixed | unverified | scan-failed; `reason` is the bounded error
+    // of the last failed scan (on scan-failed, or on mixed when a scan failed
+    // before or after the foreign stamp was seen). In the non-uniform states the
+    // guarded paths, SemanticSearch and the write-time dedup leg, cosine nothing
+    // against the stored corpus; MemoryBootstrap and MemoryDedupStats call
+    // retrieval directly without this guard (#2559). The field is on the 503
+    // body too; doctor reads it there.
+    body.embeddingSpace = spaceGuardState();
     const multiWorker = multiWorkerHealthField(multiWorkerCondition());
     let status = readiness.status;
     if (multiWorker) {

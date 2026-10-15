@@ -15,6 +15,19 @@ import { createServer, type IncomingMessage, type ServerResponse, type Server } 
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { program } from "../../src/cli.js";
+import { setInstancePairOsReadsForTests } from "../../src/lib/local-instance-pair.js";
+
+/**
+ * flair#2526: the pair check reads the OS listener table, and the ops endpoint
+ * here is a fetch mock with no listener behind it. These tests inject a
+ * SIMULATED table: one simulated Harper process id on every port, with a
+ * fixed birth identity and a Harper command line. No such process exists.
+ */
+const SIMULATED_LISTENER_TABLE = {
+  listeners: () => ({ kind: "listeners" as const, pids: [24_526] }),
+  birth: () => ({ kind: "birth" as const, id: "24526@simulated" }),
+  commandLine: () => "node\u0000/simulated/node_modules/harper/dist/bin/harper.js\u0000run\u0000.",
+};
 
 let tmpHome: string;
 let keysDir: string;
@@ -28,6 +41,7 @@ function json(res: ServerResponse, status: number, data: unknown) {
 }
 
 beforeEach(async () => {
+  setInstancePairOsReadsForTests(SIMULATED_LISTENER_TABLE);
   tmpHome = mkdtempSync(join(tmpdir(), "flair-2479-remove-"));
   keysDir = join(tmpHome, "keys");
   mkdirSync(keysDir, { recursive: true });
@@ -65,6 +79,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  setInstancePairOsReadsForTests(null);
   await new Promise<void>((resolve, reject) => server.close((e) => (e ? reject(e) : resolve())));
   rmSync(tmpHome, { recursive: true, force: true });
 });
