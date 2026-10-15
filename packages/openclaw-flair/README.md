@@ -158,15 +158,16 @@ are the guarantees it keeps, each with the test that proves it in
   positions; that is position, not proof of which run added a message. In a warm
   session a message the cap leaves out stays unseen (deferred) and remains
   eligible for a later capture scan unless settled, subject to its gates and cap, and
-  if a later scan captures it, the row carries that later run's id. Another cap
-  can leave it unseen. A refused scan settles its occurrences, including
-  identical copies: their origin is ambiguous. Preserving deferred messages
+  if a later scan captures it, the row carries that later run's id only when it
+  passes the `hostSource` grammar; otherwise it lands without that field, with
+  a rate-limited warning. Another cap can leave it unseen. A refused scan settles
+  its occurrences, including identical copies: their origin is ambiguous. Preserving deferred messages
   while excluding refused-run copies fully needs a stable host-owned message
   identity; that is a follow-up.
-  Same-run excerpt dedup or a failure before the write settles it without a new
-  write, and a write that starts and then fails, or whose run is aborted while
-  it is in flight, records
-  it as skipped, because an aborted write may still have reached Flair —
+  Same-run excerpt dedup settles it without a new write. A failure before the
+  write, a write that starts and then fails, or a write whose run is aborted
+  while it is in flight records it as skipped if the scan continues past its
+  stop and disable check, because an aborted write may still have reached Flair —
   `flair#2560 (mutation: oldest first; mutation: a capped message recorded as
   seen): a run's cap is spent from the last snapshot position, and the message
   it left out is captured by the next capture scan`; `flair#2560: a refused
@@ -182,9 +183,10 @@ are the guarantees it keeps, each with the test that proves it in
   records the rest of the identifiable messages as seen, including any the run
   added beyond the cap. A message captured before can be captured again, if it
   passes the trigger rule, the run's dedup and cap, and its write succeeds; it
-  then lands as a second row, under the current run's id — `flair#2560 cold
-  start (mutation: a cold scan leaves capped messages unseen): a session's first
-  scan captures at most the run's cap, from the last eligible position, and
+  then lands as a second row. The row carries the current run's id only when
+  it passes the `hostSource` grammar; otherwise it lands without that field,
+  with a rate-limited warning — `flair#2560 cold start (mutation: a cold scan
+  leaves capped messages unseen): a session's first scan captures at most the run's cap, from the last eligible position, and
   records the rest as seen`. Flair's near-duplicate check can flag such a write
   `deduplicated`, naming a near-matching row (`matchedId`); it does not suppress
   the write. The plugin counts flagged auto-captures since it registered and

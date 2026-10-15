@@ -275,11 +275,12 @@ export function isRepeatLogPoint(n: bigint): boolean {
  * cap was spent. Another cap can leave it unseen. A refused scan settles its
  * occurrences: an identical copy cannot be distinguished from the deferred one.
  * Same-run excerpt dedup settles it without a new write, and so does a failure
- * before the write (recorded as skipped if the scan continues). A write that
- * starts and then fails, or whose run is aborted while it is in flight,
- * records it as skipped: an aborted write may still reach Flair, so it is not
- * retried. `deferred` holds only identities of the last snapshot accounted for;
- * disabled callbacks do not update it.
+ * before the write (recorded as skipped if the scan continues past its stop
+ * and disable check). A write that starts and then fails, or whose run is
+ * aborted while it is in flight, records it as skipped if the scan continues
+ * past its stop and disable check: an aborted write may still reach Flair,
+ * so it is not retried. `deferred` holds only identities of the last snapshot
+ * accounted for; disabled callbacks do not update it.
  */
 interface SessionCapture {
   agentId: string;
@@ -1729,11 +1730,13 @@ export default {
          * anything more. The exception: in a warm session an occurrence the
          * run's cap left out (`capped`) stays unseen and is held in `deferred`,
          * eligible for a later capture scan unless settled, subject to its gates and
-         * cap (a later capture carries that later run's id). Another cap can
-         * leave it unseen. Refusal settles its occurrences, since identical
-         * copies cannot be distinguished. Same-run excerpt dedup, a failure
-         * before the write, a write that fails, or a write
-         * discarded by an abort settles it (see `SessionCapture`). In the
+         * cap. A later capture carries that later run's id only when it passes
+         * the `hostSource` grammar; otherwise it lands without that field, with
+         * a rate-limited warning. Another cap can leave it unseen. Refusal
+         * settles its occurrences, since identical copies cannot be distinguished.
+         * Same-run excerpt dedup settles it. A failure before the write, a write
+         * that fails, or a write discarded by an abort settles it if the scan
+         * continues past its stop and disable check (see `SessionCapture`). In the
          * session's first scan in
          * this process a capped occurrence is recorded as seen (see
          * `SessionCapture.warm`).
