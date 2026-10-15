@@ -1,4 +1,4 @@
-- **New admin-only `POST /AgentKeyRegister` registers a caller-held Ed25519 key.**
+- **New admin-only `POST /AgentKeyRegister` registers an agent key.**
 
   Accepted credentials: Basic admin or an Ed25519 agent with the admin annotation.
   A Harper Bearer token is refused. Under Flair's per-agent registration lock,

@@ -1,7 +1,7 @@
 /**
  * AgentKeyRegister.ts — POST /AgentKeyRegister (flair#2266).
  *
- * Register a caller-held Ed25519 public key. Admin only.
+ * Register an agent key. Admin only.
  *
  * A standalone CUSTOM Resource, not a verb on the Agent resource: the ordinary
  * agent-authentication middleware resolves the verification key from the STORED
@@ -108,13 +108,11 @@ export class AgentKeyRegister extends Resource {
       return jsonRefusal(400, REGISTRATION_REQUEST_INVALID, invalidAgentIdMessage(agentId));
     }
     if (!isCanonicalEd25519Base64url(publicKey)) {
-      return jsonRefusal(400, REGISTRATION_REQUEST_INVALID, "publicKey must be a canonical unpadded base64url-encoded 32-byte Ed25519 key");
+      return jsonRefusal(400, REGISTRATION_REQUEST_INVALID, "publicKey must be a canonical base64url encoding of 32 bytes");
     }
     const registered: string = publicKey;
 
-    // Resolve this instance's own id BEFORE the critical section, so nothing
-    // awaits between the fresh read and the staging where a writer could commit
-    // unseen by the confirmation read.
+    // Resolve the instance ID before the transaction.
     const selfInstanceId = await localInstanceId();
 
     const table = (databases as any).flair?.Agent;
@@ -178,14 +176,8 @@ export class AgentKeyRegister extends Resource {
               createdAt: now,
               updatedAt: now,
             }, c);
-            // Confirm the COMMITTED Agent row (an explicit fresh context, never
-            // this transaction's snapshot or its staged write) is still the very
-            // row the decision was made on: a whole-row comparison, so ANY field
-            // a competing writer committed before this read — the key, the status, the
-            // originator, an unrelated field — aborts this owned transaction and
-            // discards all three staged writes. (Admin is decided at request
-            // time by resolveAgentAuth, not from this target row, so there is no
-            // owner to re-check here.)
+            // Reject a row difference that persists and is visible at the confirmation read.
+            // A write that restores the original values is not detected.
             await confirmCommittedRow(table, agentId, (committed) => {
               const row = asRow(committed);
               return row !== null && isDeepStrictEqual({ ...row }, basis);

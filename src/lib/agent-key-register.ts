@@ -53,14 +53,12 @@ export const REGISTRATION_UNAVAILABLE = "registration_unavailable";
 /** The OrgEvent kind a committed registration writes (its detail carries the fingerprint, not the key). */
 export const AGENT_KEY_REGISTERED_EVENT = "agent_key_registered";
 
-/** A canonical, unpadded, base64url-encoded 32-byte Ed25519 public key. */
 const CANONICAL_B64URL_43 = /^[A-Za-z0-9_-]{43}$/;
 
 /**
- * True iff `value` is a canonical, unpadded base64url encoding of a 32-byte
- * Ed25519 public key. The length check alone is not enough: the round trip
- * proves the encoding is canonical (43 base64url characters encode 32 bytes and
- * two leftover bits, so a non-canonical tail would re-encode differently).
+ * True iff `value` is a canonical base64url encoding of 32 bytes.
+ * This does not establish a valid Ed25519 point or possession of the private key.
+ * A key that is not a valid point never verifies a signature.
  */
 export function isCanonicalEd25519Base64url(value: unknown): boolean {
   if (typeof value !== "string" || !CANONICAL_B64URL_43.test(value)) return false;

@@ -1,5 +1,5 @@
 // agent-key-register-2266.test.ts — three pure subjects of flair#2266, without
-// Harper: the canonical Ed25519 base64url key format
+// Harper: a canonical base64url encoding of 32 bytes
 // (isCanonicalEd25519Base64url), the audit fingerprint (keyFingerprint), and the
 // federation pending-key predicate (inboundChangesExistingPendingKey).
 //
@@ -18,8 +18,8 @@ import { inboundChangesExistingPendingKey } from "../../resources/federation-cla
 
 const KEY = Buffer.from(new Uint8Array(32).fill(7)).toString("base64url");
 
-describe("flair#2266 — the canonical Ed25519 base64url key rule", () => {
-  test("accepts a canonical unpadded base64url 32-byte key", () => {
+describe("flair#2266 — a canonical base64url encoding of 32 bytes", () => {
+  test("accepts a canonical base64url encoding of 32 bytes", () => {
     expect(KEY.length).toBe(43);
     expect(isCanonicalEd25519Base64url(KEY)).toBe(true);
   });

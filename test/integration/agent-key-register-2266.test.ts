@@ -1,7 +1,7 @@
 // agent-key-register-2266.test.ts — flair#2266, against a REAL Harper.
 //
-// POST /AgentKeyRegister (resources/AgentKeyRegister.ts) registers a caller-held
-// Ed25519 public key, admin only. The route checks a fresh row is `pending` and
+// POST /AgentKeyRegister (resources/AgentKeyRegister.ts) registers an agent key,
+// admin only. The route checks a fresh row is `pending` and
 // confirms it before commit. Every case below drives this instance's own ephemeral
 // Harper booted from the built component. The concurrency and rollback cases arm
 // the operation's in-transaction pause point; the read-back case arms the one
@@ -464,7 +464,7 @@ describe("flair#2266 — admin key registration on a pending Agent row", () => {
     expect(events).toBe(1);
   }, 60_000);
 
-  test("a competing committed change before the commit aborts the whole registration: rollback, no audit, no OrgEvent", async () => {
+  test("a row difference visible at confirmation aborts registration: no audit or OrgEvent", async () => {
     const keyA = mkKey();
     const before = await rowIn("Agent", rollbackId);
     const { result, paused } = await withPausedPoint(
