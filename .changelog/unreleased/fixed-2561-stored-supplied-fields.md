@@ -13,9 +13,9 @@
   request-supplied fields with non-null request values. Array-valued fields
   are omitted.
 
-  No embedding field whatever storage returns: Memory POST, PUT, PATCH,
-  `_reindex` and feed responses are built from named, typed fields in fresh
-  plain objects. `stored` is built from its named text fields. A missing or
+  No embedding field whatever storage returns: successful Memory POST, PUT,
+  PATCH, `_reindex` and feed replies with a body use `buildFromAllowlist`.
+  `stored` is built from its named text fields. A missing or
   wrong-typed required `id` returns `write_response_withheld` (500).
   Storage-layer Responses of any status return the same refusal.
   The re-embed PATCH answers `{ id, updatedAt }`. Any other Memory PATCH

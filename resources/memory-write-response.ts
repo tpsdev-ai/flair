@@ -1,4 +1,4 @@
-/** Write responses read named fields by type; no embedding field whatever storage returns. */
+/** Successful write replies with a body read named fields by type; no embedding field whatever storage returns. */
 
 export const MEMORY_EMBEDDING_FIELDS = Object.freeze(["embedding", "embeddingModel"] as const);
 
