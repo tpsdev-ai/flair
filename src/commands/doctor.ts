@@ -25,6 +25,7 @@ import { collectFederationEnv, describeFederationDriverFinding, federationPeersC
 import { plistCarriesInlineAdminPassword } from "../lib/launchd-management.js";
 import { DOCTOR_CHECK_IDS, catalogIssueDelta, mcpRepinIcon, probeFlairHealth, renderCatalogDoctorLines, runDoctorChecks, type WorkerThreadsObservation } from "../lib/doctor-run.js";
 import { describeEmbedGpuDoctorFinding } from "../lib/embed-gpu-doctor.js";
+import { describeEmbeddingSpaceDoctorFinding } from "../lib/embedding-space-doctor.js";
 import { adminPassDesyncFinding, detectPersistedAdminUser } from "../lib/init-admin-pass.js";
 import { opsApiBindFinding } from "../lib/ops-api-bind.js";
 import {
@@ -394,6 +395,27 @@ export function renderEmbedGpuDoctorFinding(
   return { lines, issueDelta: finding.isIssue ? 1 : 0 };
 }
 
+/**
+ * flair#2530 — the single place a /Health embedding-space verdict becomes doctor
+ * output and exit-code weight, extracted like renderEmbedGpuDoctorFinding so the
+ * four states are exercised on the real counting path. Only the `mixed` state is
+ * a blocking finding; `uniform` prints an OK line and the two unverified states
+ * print advisories.
+ */
+export function renderEmbeddingSpaceDoctorFinding(
+  embeddingSpace: unknown,
+  write: (line: string) => void = (line) => console.log(line),
+): { lines: string[]; issueDelta: number } {
+  const finding = describeEmbeddingSpaceDoctorFinding(embeddingSpace);
+  if (!finding) return { lines: [], issueDelta: 0 };
+  const icon =
+    finding.icon === "ok" ? render.icons.ok : finding.icon === "warn" ? render.icons.warn : render.icons.error;
+  const lines = [`  ${icon} ${finding.message}`];
+  if (finding.fixHint) lines.push(`     ${render.wrap(render.c.dim, "Fix:")} ${finding.fixHint}`);
+  for (const line of lines) write(line);
+  return { lines, issueDelta: finding.isIssue ? 1 : 0 };
+}
+
 export interface InstallTreeDoctorDeps {
   /** This CLI's tree vs the tree proven to serve the instance. */
   assess: () => TreeAssessment;
@@ -700,7 +722,23 @@ program
       }
     }
 
-    if (await probePort(port)) {
+    // flair#2530: a readiness 503 whose body has Flair's /Health fields (see
+    // readFlairHealthBody) is reported as Flair answering without serving
+    // search. It is an issue, never "responding", so the checks that need a
+    // serving instance stay skipped; its body still carries the version and the
+    // embedding-space guard state, read in 1a below. It is checked BEFORE
+    // `reaching`: a 503 can carry a multi-worker refusal too, which makes the
+    // probe `reaching`, but search is still not served. The worker-thread
+    // finding is reported separately by the catalog check.
+    let flairNotReady = false;
+    const configuredProbe = await probeFlairHealth(`http://127.0.0.1:${port}/Health`);
+    if (configuredProbe.notReady) {
+      const why = configuredProbe.notReadyReason ? ` (${configuredProbe.notReadyReason})` : "";
+      console.log(`  ${render.icons.error} Flair is answering on port ${render.wrap(render.c.bold, String(port))} but not serving search${why}`);
+      console.log(`     ${render.wrap(render.c.dim, "Fix:")} wait for startup to finish; if it persists, flair restart`);
+      flairNotReady = true;
+      issues++;
+    } else if (configuredProbe.reaching) {
       console.log(`  ${render.icons.ok} Harper responding on port ${render.wrap(render.c.bold, String(port))}`);
       harperResponding = true;
     } else {
@@ -786,17 +824,20 @@ program
     // picture here instead of a one-liner and `--fix` offers the restart.
     let runningVersion: string | null = null;
     let embedGpuFromHealth: unknown;
+    let embeddingSpaceFromHealth: unknown;
     let workerThreads: WorkerThreadsObservation | undefined;
-    if (harperResponding) {
+    if (harperResponding || flairNotReady) {
       try {
         const probe = await probeFlairHealth(`${baseUrl}/Health`);
-        if (probe.reaching) {
-          workerThreads = probe.observation ?? undefined;
-          if (probe.status >= 200 && probe.status < 300 && probe.body && typeof probe.body === "object") {
-            const healthBody = probe.body as { version?: unknown; embedding?: unknown };
-            runningVersion = typeof healthBody.version === "string" ? healthBody.version : null;
-            embedGpuFromHealth = healthBody.embedding;
-          }
+        if (probe.reaching) workerThreads = probe.observation ?? undefined;
+        // A 2xx body, or a 503 body with Flair's /Health fields (flair#2530).
+        // Reading a 503 body does not make it healthy; the port check or the
+        // worker-threads check counts it.
+        if (probe.healthBody) {
+          const healthBody = probe.healthBody as { version?: unknown; embedding?: unknown; embeddingSpace?: unknown };
+          runningVersion = typeof healthBody.version === "string" ? healthBody.version : null;
+          embedGpuFromHealth = healthBody.embedding;
+          embeddingSpaceFromHealth = healthBody.embeddingSpace;
         }
       } catch { /* leave runningVersion null — reported below as "unknown" */ }
 
@@ -831,6 +872,10 @@ program
       // does NOT fail the run, while an explicit request or an unrecognized
       // source still fails closed. A stated CPU default is silent here.
       issues += renderEmbedGpuDoctorFinding(embedGpuFromHealth).issueDelta;
+
+      // flair#2530 — the embedding-space guard's verdict, from /Health. The
+      // `mixed` state is a blocking finding; the two unverified states are advisories.
+      issues += renderEmbeddingSpaceDoctorFinding(embeddingSpaceFromHealth).issueDelta;
     }
 
     // flair#2520: the audit-log, instance-identity, Agent-roster and Agent-homes
