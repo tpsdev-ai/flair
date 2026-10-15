@@ -85,10 +85,11 @@ const CLASSIFICATIONS: Array<{ file: string; via: WriterVia; needle: string; kin
   { file: "resources/promotion-stamp.ts", via: "write-back", needle: 'label: "promotion-stamp"', kind: "trusted-stamp" },
   { file: "resources/promotion-stamp.ts", via: "alias-source", needle: "put(row, stagedContext)", kind: "trusted-stamp" },
   { file: "resources/Memory.ts", via: "direct-put", needle: "put(closed, c)", kind: "echo" },
-  // The re-embed's field-only update: the vector, its model and updatedAt, plus
-  // a fresh instanceToken for a legacy row that has none (flair#2478) — no
-  // authority field.
-  { file: "resources/Memory.ts", via: "direct-update", needle: "update(id, reembedFields, owned)", kind: "echo" },
+  // The re-embed's field-only update: the vector, its model and updatedAt, the
+  // hash of the text it embedded (flair#2465), plus a fresh instanceToken for a
+  // legacy row that has none (flair#2478) — no authority field. The needle names
+  // both the token spread and the hash call.
+  { file: "resources/Memory.ts", via: "direct-update", needle: "update(id, { ...legacyToken, embedding, embeddingModel: model, updatedAt, embeddedContentHash: hashEmbeddedText(stored.agentId, textToEmbed) ?? null }, owned)", kind: "echo" },
   { file: "resources/Memory.ts", via: "direct-put", needle: "flair.Memory.put(content, c)", kind: "trusted-stamp" },
   { file: "resources/Memory.ts", via: "direct-put", needle: "flair.Memory.put(reindexRow, c)", kind: "admin-restate" },
   { file: "resources/Memory.ts", via: "patchRecord", needle: "reflectPatch", kind: "single-field" },

@@ -23,6 +23,8 @@ import { describe, it, expect, mock } from "bun:test";
 mock.module("harper", () => ({ server: { http: () => {}, getUser: async () => null }, databases: {}, Resource: class {} }));
 
 const { createEmbeddingStampMigration, EMBEDDING_STAMP_ID } = await import("../../resources/migrations/embedding-stamp.ts");
+const { computeContentHash } = await import("../../resources/memory-feed-lib.ts");
+const hashOf = (agentId: string, content: string) => computeContentHash(agentId, content);
 
 type Row = Record<string, unknown> & { id: string };
 
@@ -294,76 +296,67 @@ describe("embedding-stamp migration — flair#807: staleCondition() comparator s
   });
 });
 
-describe("embedding-stamp migration — flair#807: recheckPending() safety-net hook", () => {
-  /**
-   * A fake table whose search() and get() paths are DECOUPLED — search()
-   * reports whatever `searchIds` says is "pending" regardless of the
-   * store's real content, while get() always reads the store's true,
-   * current value. This mirrors the production divergence this safety net
-   * exists for: countPending()'s search-based query (index-assisted, can be
-   * stale) vs. a direct per-id record read (always live) disagreeing about
-   * the SAME row.
-   */
-  function makeDivergentTable(store: Map<string, Row>, searchIds: string[]) {
-    return {
-      async get(id: string) {
-        return store.has(id) ? { ...store.get(id)! } : null;
-      },
-      search(query: any): AsyncIterable<Row> {
-        const limit = typeof query?.limit === "number" ? query.limit : Infinity;
-        const ids = searchIds.slice(0, limit);
-        async function* gen() {
-          for (const id of ids) yield { ...(store.get(id) ?? { id }) } as Row;
-        }
-        return gen();
-      },
+describe("embedding-stamp migration — flair#2465: no recheckPending() opt-in", () => {
+  it("does not implement recheckPending(): countPending() is a live scan, so the runner's safety net has no index artifact to excuse", () => {
+    const { table } = makeFakeMemoryTable([]);
+    const m = createEmbeddingStampMigration(() => table, () => CURRENT_MODEL, async () => true);
+    expect(m.recheckPending).toBeUndefined();
+  });
+});
+
+describe("embedding-stamp migration — flair#2465: the embedded-text hash binding", () => {
+  it("detect()/countPending() catch a row whose stamp is current but whose embeddedContentHash no longer matches its text", async () => {
+    const { table } = makeFakeMemoryTable([
+      { id: "m1", agentId: "a", content: "the current text", embeddingModel: CURRENT_MODEL, embeddedContentHash: "a-stale-hash" },
+    ]);
+    const m = createEmbeddingStampMigration(() => table, () => CURRENT_MODEL, async () => true);
+    expect(await m.detect()).toBe(true);
+    expect(await m.countPending()).toBe(1);
+  });
+
+  it("a row whose embeddedContentHash matches its current text is current (no false positive)", async () => {
+    const { table } = makeFakeMemoryTable([
+      { id: "m1", agentId: "a", content: "the current text", embeddingModel: CURRENT_MODEL, embeddedContentHash: hashOf("a", "the current text") },
+    ]);
+    const m = createEmbeddingStampMigration(() => table, () => CURRENT_MODEL, async () => true);
+    expect(await m.detect()).toBe(false);
+    expect(await m.countPending()).toBe(0);
+  });
+
+  it("a row with NO embeddedContentHash counts as current (never re-queued for the missing hash alone)", async () => {
+    const { table } = makeFakeMemoryTable([
+      { id: "m1", agentId: "a", content: "a legacy row", embeddingModel: CURRENT_MODEL },
+    ]);
+    const m = createEmbeddingStampMigration(() => table, () => CURRENT_MODEL, async () => true);
+    expect(await m.detect()).toBe(false);
+    expect(await m.countPending()).toBe(0);
+  });
+
+  it("a skill row binds to its trigger, not its content", async () => {
+    const trigger = "when to use the skill";
+    const { table } = makeFakeMemoryTable([
+      { id: "s1", agentId: "a", content: "the procedure", trigger, tags: ["skill"], embeddingModel: CURRENT_MODEL, embeddedContentHash: hashOf("a", trigger) },
+      { id: "s2", agentId: "a", content: "the procedure", trigger, tags: ["skill"], embeddingModel: CURRENT_MODEL, embeddedContentHash: hashOf("a", "the procedure") },
+    ]);
+    const m = createEmbeddingStampMigration(() => table, () => CURRENT_MODEL, async () => true);
+    // s1 is bound to the trigger it embeds from → current; s2 is bound to the
+    // content, not the trigger → stale.
+    expect(await m.countPending()).toBe(1);
+  });
+
+  it("run() selects a hash-mismatch row as a candidate (the fake regen stands in for the write)", async () => {
+    const { store, table } = makeFakeMemoryTable([
+      { id: "m1", agentId: "a", content: "the current text", embeddingModel: CURRENT_MODEL, embeddedContentHash: "a-stale-hash" },
+    ]);
+    const regen = async (id: string) => {
+      const row = store.get(id)!;
+      store.set(id, { ...row, embedding: [0.3, 0.2, 0.1], embeddingModel: CURRENT_MODEL, embeddedContentHash: hashOf(String(row.agentId), String(row.content)) });
+      return true;
     };
-  }
-
-  it("flags a row as a false positive when the search claims it pending but a direct get() shows it already current", async () => {
-    const store = new Map<string, Row>([
-      ["m1", { id: "m1", content: "a", embeddingModel: CURRENT_MODEL }], // TRUE state: already current
-    ]);
-    const table = makeDivergentTable(store, ["m1"]); // search() WRONGLY claims m1 is pending
-    const m = createEmbeddingStampMigration(() => table, () => CURRENT_MODEL, async () => true);
-
-    const recheck = await m.recheckPending!(10);
-    expect(recheck.sampled).toBe(1);
-    expect(recheck.falsePositives).toBe(1);
-  });
-
-  it("does NOT flag a genuinely stale row as a false positive (direct get() agrees it's still pending)", async () => {
-    const store = new Map<string, Row>([
-      ["m1", { id: "m1", content: "a", embeddingModel: "genuinely-old" }], // TRUE state: still stale
-    ]);
-    const table = makeDivergentTable(store, ["m1"]);
-    const m = createEmbeddingStampMigration(() => table, () => CURRENT_MODEL, async () => true);
-
-    const recheck = await m.recheckPending!(10);
-    expect(recheck.sampled).toBe(1);
-    expect(recheck.falsePositives).toBe(0);
-  });
-
-  it("a mix of real-stale and false-positive rows reports both counts correctly", async () => {
-    const store = new Map<string, Row>([
-      ["m1", { id: "m1", content: "a", embeddingModel: CURRENT_MODEL }], // false positive
-      ["m2", { id: "m2", content: "b", embeddingModel: "genuinely-old" }], // real
-    ]);
-    const table = makeDivergentTable(store, ["m1", "m2"]);
-    const m = createEmbeddingStampMigration(() => table, () => CURRENT_MODEL, async () => true);
-
-    const recheck = await m.recheckPending!(10);
-    expect(recheck.sampled).toBe(2);
-    expect(recheck.falsePositives).toBe(1);
-  });
-
-  it("a row deleted between search and the direct get() is never counted as a false positive", async () => {
-    const store = new Map<string, Row>(); // empty — "m1" was deleted
-    const table = makeDivergentTable(store, ["m1"]);
-    const m = createEmbeddingStampMigration(() => table, () => CURRENT_MODEL, async () => true);
-
-    const recheck = await m.recheckPending!(10);
-    expect(recheck.sampled).toBe(1);
-    expect(recheck.falsePositives).toBe(0);
+    const m = createEmbeddingStampMigration(() => table, () => CURRENT_MODEL, regen);
+    const result = await m.run(10);
+    expect(result).toEqual({ processed: 1, touchedIds: ["m1"] });
+    expect(store.get("m1")!.embeddedContentHash).toBe(hashOf("a", "the current text"));
+    expect(await m.countPending()).toBe(0);
   });
 });

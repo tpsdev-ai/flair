@@ -213,10 +213,11 @@ describe("flair#2484 — the embedding backfill computes its vector outside the 
 });
 
 describe("flair#2494 — the backfill's plan shape is pinned", () => {
-  it("stores the vector with exactly one incremental update naming only embedding, never a full-row put", async () => {
+  it("stores the vector with exactly one incremental update naming only the embedding fields, never a full-row put", async () => {
     const id = "bfx-plan-shape";
     memoryRows.set(id, { id, agentId: "agent-a", content: "text to embed", contentHash: id, instanceToken: "tok" });
     await runBackfill(id);
-    expect(writeCalls).toEqual([{ method: "update", id, fields: ["embedding"] }]);
+    // flair#2465: the write also records the hash of the text it embedded.
+    expect(writeCalls).toEqual([{ method: "update", id, fields: ["embeddedContentHash", "embedding"] }]);
   });
 });
