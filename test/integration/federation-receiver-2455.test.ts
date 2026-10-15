@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import nacl from "tweetnacl";
@@ -91,6 +91,26 @@ async function waitFor(path: string, timeoutMs: number): Promise<boolean> {
   return false;
 }
 
+/**
+ * How the pause at `point` ended. txnPausePoint creates `released.<point>`
+ * empty when it pauses and writes "go" (or "timeout") into it when the pause
+ * ends, so "" means the record is still held at the pause.
+ */
+function pauseState(point: string): string | null {
+  const path = join(pauseDir, `released.${point}`);
+  return existsSync(path) ? readFileSync(path, "utf8") : null;
+}
+
+async function waitForRelease(point: string, timeoutMs: number): Promise<string | null> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const state = pauseState(point);
+    if (state) return state;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  return pauseState(point);
+}
+
 beforeAll(async () => {
   pauseDir = mkdtempSync(join(tmpdir(), "flair-2455-receiver-pause-"));
   const saved = {
@@ -140,7 +160,7 @@ describe("flair#2455 slice 2 — validated batch keys and indeterminate outcomes
         const res = await pending;
         const body = await res.json() as any;
         expect(res.status, JSON.stringify(body)).toBe(200);
-        expect(existsSync(join(pauseDir, `released.${point}`))).toBe(false);
+        expect(pauseState(point), "the record was no longer paused when the response arrived").toBe("");
         expect(body.merged).toBe(1);
         expect(body.refused).toEqual([{ table: "Memory", id: futureId, reason: "future_timestamp" }]);
         expect(body.refused.some((entry: any) => entry.id === id)).toBe(false);
@@ -151,7 +171,7 @@ describe("flair#2455 slice 2 — validated batch keys and indeterminate outcomes
       } finally {
         writeFileSync(join(pauseDir, `go.${point}`), "");
       }
-      expect(await waitFor(join(pauseDir, `released.${point}`), 20_000)).toBe(true);
+      expect(await waitForRelease(point, 20_000)).toBe("go");
       let row: any;
       for (let i = 0; i < 100; i++) {
         row = await readRow("Memory", id);

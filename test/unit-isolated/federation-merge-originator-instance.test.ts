@@ -302,14 +302,20 @@ for (const stage of ["initial read", "commit outcome"]) {
   }, 15_000);
 }
 
-it("a changed committed row after staging is indeterminate", async () => {
+it("a committed row that changes after staging refuses the key as merge_target_changed and keeps the other write", async () => {
   const { secretKey, publicKey } = keypair();
   peerStore.set(PEER_ID, { id: PEER_ID, publicKey, createdAt: OLD, role: "hub", status: "connected" });
   const data = ROWS.Memory.data(ORIGIN);
   changeAfterStage = true;
   const response = await postSync({ instanceId: PEER_ID, records: [pushedRecord("Memory", data.id, data, NEW, secretKey)] }, secretKey);
-  expect(response.refused).toEqual([]);
-  expect(response.indeterminate).toEqual([{ table: "Memory", id: data.id }]);
+  expect(response.merged).toBe(0);
+  expect(response.refused).toEqual([{ table: "Memory", id: data.id, reason: "merge_target_changed" }]);
+  expect(response.indeterminate).toEqual([]);
+  expect(response.skippedReasons).toEqual({ merge_target_changed: 1 });
+  expect(response.merged + response.refused.length + response.indeterminate.length).toBe(response.total);
+  // The staged merge was discarded with its aborted transaction: the row the
+  // other writer committed stays.
+  expect(stores.Memory.get(data.id)?.content).toBe("concurrent");
 });
 
 it("a committed Memory remains merged when its post-commit note throws", async () => {

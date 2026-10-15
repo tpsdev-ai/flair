@@ -1399,7 +1399,13 @@ export class FederationSync extends Resource {
             },
           );
         } catch (err) {
-          if (err instanceof WriteBackConflictError && !err.writeAttempted) {
+          // A merge refusal returned by the write path itself: the helper
+          // names a changed row with WriteBackConflictError only after its
+          // owned transaction aborted, whether the change was seen at the
+          // in-transaction comparison or at the committed-row confirmation
+          // after staging. Nothing was written, so the key is refused, not
+          // indeterminate.
+          if (err instanceof WriteBackConflictError) {
             return { reason: "merge_target_changed" };
           }
           throw err;
