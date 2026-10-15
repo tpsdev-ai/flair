@@ -20,7 +20,6 @@ import {
   unknownVerify,
   verifyCheckpoint,
   writeCheckpointFile,
-  CHECKPOINT_MODE,
   MAX_MEMORY_PAGES,
   type MemoryCheckpoint,
 } from "../../src/memory-id-checkpoint.ts";
@@ -159,7 +158,7 @@ describe("flair#2218 — checkpoint file", () => {
         expect(read.checkpoint.byDurability).toEqual({ permanent: 1, persistent: 0, standard: 0, ephemeral: 1 });
         expect(read.checkpoint.host).toBe("node-a.example.invalid");
       }
-      expect(statSync(path).mode & 0o777).toBe(CHECKPOINT_MODE);
+      expect(statSync(path).mode & 0o777).toBe(0o600);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
