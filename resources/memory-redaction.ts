@@ -7,11 +7,9 @@
  * to `redactSecretsWithCount`; this module calls `redactSecretsWithCount`
  * directly, so the server keeps no second pattern list.
  *
- * REDACTED_MEMORY_FIELDS names the three Memory text fields redacted on a
- * write: `content`, `summary` and `trigger`. On a skill-tagged write the
- * redaction also covers the skill fields (flair#2575): each `tags` entry, and
- * the `name` and `description` keys of the `metadata` JSON blob
- * (REDACTED_SKILL_FIELDS). Other fields (id, agentId, ...) are not redacted.
+ * Memory text fields are redacted on write. Skill writes refuse metadata with
+ * duplicate top-level keys; otherwise name/description and string tags are
+ * redacted (flair#2575).
  *
  * Memory post/put/patch and the feed ingest (resources/MemoryFeed.ts) call
  * redactMemoryWrite() on the write body before the row is persisted; post and
@@ -47,9 +45,7 @@ import { skillWriteSource } from "./skill-write-policy.js";
 /** The Memory text fields redacted on a write. */
 export const REDACTED_MEMORY_FIELDS = Object.freeze(["content", "summary", "trigger"] as const);
 
-/** The skill fields redacted on a skill-tagged write: the `name` and
- *  `description` keys of the `metadata` JSON blob. Each `tags` entry is redacted
- *  too (see redactSkillFields). */
+/** Metadata fields selected after duplicate-key validation. */
 export const REDACTED_SKILL_FIELDS = Object.freeze(["name", "description"] as const);
 
 /** The redacted skill fields of one skill-tagged row, as a write's response
@@ -157,17 +153,9 @@ export function redactMemoryWrite(content: unknown): MemoryWriteRedaction {
 }
 
 /**
- * Redact the skill fields of an EFFECTIVE skill row IN PLACE (flair#2575):
- * every string entry of `tags`, and the `name`/`description` keys of the
- * `metadata` JSON blob (REDACTED_SKILL_FIELDS), through the SAME redactor as the
- * Memory text fields. Returns the number of values replaced.
- *
- * A write calls it AFTER prepareSkillBody resolved the effective skill tag
- * (resources/skill-version-write.ts): a PUT that omits `tags` on a stored
- * skill, a superseding POST and the feed ingest all inherit the tag from the
- * row they replace, so deciding from the request body alone would miss them.
- * A non-skill row is a no-op. A skill field is never an embedding source, so
- * this does not affect the embedding decision.
+ * Redact name/description and string tags after prepareSkillBody has refused
+ * metadata with duplicate top-level keys and resolved the effective skill tag.
+ * Returns the number of values replaced.
  */
 export function redactSkillWrite(row: unknown): number {
   if (!row || typeof row !== "object" || Array.isArray(row)) return 0;
@@ -175,12 +163,7 @@ export function redactSkillWrite(row: unknown): number {
   return isSkillWrite(record) ? redactSkillFields(record) : 0;
 }
 
-/**
- * Redact the skill fields of a skill-tagged row IN PLACE (flair#2575): every
- * string entry of `tags`, and the `name`/`description` keys of the `metadata`
- * JSON blob (REDACTED_SKILL_FIELDS), through the SAME redactor as the Memory
- * text fields. Returns the number of values replaced.
- */
+/** Redact validated skill fields in place. */
 function redactSkillFields(row: Record<string, unknown>): number {
   let count = 0;
   if (Array.isArray(row.tags)) {
@@ -196,12 +179,7 @@ function redactSkillFields(row: Record<string, unknown>): number {
   return count;
 }
 
-/**
- * Redact the REDACTED_SKILL_FIELDS of the `metadata` blob on `row` IN PLACE
- * (flair#2575). `metadata` is stored as a JSON string (or, from a raw body, an
- * object); the keys are re-serialized only when a value changed, so a metadata
- * blob with no redactable text is left byte-for-byte. Returns the count.
- */
+/** Serialize validated metadata only when name or description changes. */
 function redactSkillMetadata(row: Record<string, unknown>): number {
   const original = row.metadata;
   const asString = typeof original === "string";

@@ -383,7 +383,7 @@ describe("flair#2407 — the count covers only values the redactor changed", () 
   });
 });
 
-describe("flair#2575 — a skill write redacts its name, description and tags", () => {
+describe("flair#2575 — skill fields with distinct top-level metadata keys", () => {
   it("redactSkillWrite redacts the metadata name/description and every tags entry", () => {
     const body: any = {
       tags: ["skill", `release-${GITHUB_TOKEN}`, "ops"],
@@ -496,4 +496,43 @@ describe("flair#2407 — a deduplicated feed write reports the count in its resp
     expect(memoryStore.size).toBe(1);
     expect("redactedValues" in memoryStore.get(first.id)).toBe(false);
   });
+});
+
+
+describe("skill metadata validation before redaction", () => {
+  for (const path of ["POST", "PUT", "feed", "superseding POST"]) {
+    it(`${path} refuses duplicate metadata without changing the supplied text or stored rows`, async () => {
+      const root = { id: "metadata-root", agentId: AGENT, content: "procedure", trigger: "when deploying", tags: ["skill"], createdAt: new Date().toISOString() };
+      memoryStore.set(root.id, root);
+      const body: any = {
+        agentId: AGENT, content: `procedure ${GITHUB_TOKEN}`, summary: `summary ${AWS_KEY}`,
+        metadata: `{"name":"${GITHUB_TOKEN}","name":"deploy"}`,
+      };
+      if (path === "POST") body.tags = ["skill"];
+      else if (path === "superseding POST") body.supersedes = root.id;
+      else body.id = root.id;
+      const original = structuredClone(body);
+      const m: any = makeMemory(agentCtx(AGENT));
+      const f: any = new (FeedMemories as any)();
+      f.getContext = () => ({ request: agentCtx(AGENT) });
+      if (path === "PUT") m._targetId = root.id;
+      const result = path === "feed" ? await f.post(body) : path === "PUT" ? await m.put(body) : await m.post(body);
+      expect(result).toBeInstanceOf(Response);
+      expect(result.status).toBe(400);
+      expect(await result.json()).toEqual({ error: "skill_metadata_duplicate_key" });
+      for (const field of ["content", "summary", "metadata"]) expect(body[field]).toBe(original[field]);
+      expect([...memoryStore.values()]).toEqual([root]);
+      expect(embedInputs).toEqual([]);
+    });
+  }
+});
+
+
+it("a skill reindex requires distinct supplied or retained top-level metadata keys", async () => {
+  const { buildReindexRow } = await import("../../resources/Memory.ts");
+  const root = { id: "metadata-reindex", agentId: AGENT, content: "procedure", tags: ["skill"], createdAt: new Date().toISOString() };
+  const metadata = `{"name":"${GITHUB_TOKEN}","name":"deploy"}`;
+  for (const [body, stored] of [[{ ...root, metadata }, root], [root, { ...root, metadata }]]) {
+    expect(buildReindexRow({ ...body, _reindex: true }, stored)).toMatchObject({ status: 400, error: "skill_metadata_duplicate_key" });
+  }
 });

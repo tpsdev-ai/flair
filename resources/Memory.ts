@@ -30,7 +30,7 @@ import { isJoinableTransaction, withOwnedTransaction, withSharedWriteTransaction
 import { CommittedRowChanged, GrantedCloseRevoked, confirmCommittedRow, sameStoredRow, storedRowChangedRefusal, writeGrantHeld } from "./write-back.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 import { assertValidDurability, stampEphemeralExpiry } from "./memory-durability.js";
-import { embedTextField, enforceSkillDurability, isSkillWrite, type MemoryEmbeddingInputField, rejectSkillWritePath, refuseSkillWriteSource, skillEmbedText, skillScanGate } from "./skill-write.js";
+import { embedTextField, enforceSkillDurability, isSkillWrite, type MemoryEmbeddingInputField, rejectSkillWritePath, refuseSkillWriteSource, skillEmbedText, skillScanGate, skillMetadataHasDuplicateKey } from "./skill-write.js";
 import { buildSkillSuccessorRow, closedSkillPayloadReadable, defaultSkillHooks, grantedSkillClose, resolveSkillHead, rowIsSkill, runSkillVersionWrite, skillVersionVisibility, skillPayloadUnchanged, prepareSkillBody, validateSkillSnapshots, authorizeSkillOwners, skillWriteConflict } from "./skill-version-write.js";
 import { deriveSkillSubjectId } from "./skill-subject.js";
 import {
@@ -644,7 +644,7 @@ function reindexDrift(content: any, existing: Record<string, any>): string | nul
 export function buildReindexRow(
   content: any,
   existing: Record<string, any> | null | undefined,
-): { row: Record<string, any> } | { status: 404 | 409; error: string; message: string } {
+): { row: Record<string, any> } | { status: 400 | 404 | 409; error: string; message: string } {
   delete content._reindex;
   // A1' item 1: the reindex branch keeps declared and named retained
   // attributes. Pinned by test/unit/memory-host-source.test.ts
@@ -659,6 +659,10 @@ export function buildReindexRow(
   // refused — it is never re-created/re-stamped.
   if (!existing) {
     return { status: 404, error: "reindex_row_not_found", message: "the _reindex re-PUT requires an existing stored row" };
+  }
+  const effective = { ...existing, ...content };
+  if (rowIsSkill(effective) && skillMetadataHasDuplicateKey(effective.metadata)) {
+    return { status: 400, error: "skill_metadata_duplicate_key", message: "skill metadata requires distinct top-level keys" };
   }
   const drift = reindexDrift(reindexBody, existing);
   if (drift) {
@@ -1536,15 +1540,12 @@ export class Memory extends (databases as any).flair.Memory {
       content.id = postUrlTargetId;
     }
     const postStored = content.id ? await (databases as any).flair.Memory.get(content.id) : null;
-    // flair#2407: redact credential-shaped text before the dedup gate, its
-    // embedding input and the stored embedding are computed from `content`.
-    let redactedValues = redactMemoryWrite(content).count;
     canonicalizeSupersedes(content);
     const preparedSkill = await prepareSkillBody(content, postStored);
     if (preparedSkill instanceof Response) return preparedSkill;
     content = preparedSkill.content;
-    // flair#2575: the effective row now carries the inherited skill tag, so
-    // redact the skill fields of the row this write persists.
+    let redactedValues = redactMemoryWrite(content).count;
+    // Duplicate top-level metadata keys are refused; otherwise redact name/description and tags.
     redactedValues += redactSkillWrite(content);
 
     // flair#744 slice A: citation-on-write — consume-and-strip, same
@@ -2207,13 +2208,6 @@ export class Memory extends (databases as any).flair.Memory {
       if (attr.denied) return attr.denied;
     }
 
-    // flair#2407: redact credential-shaped text before the dedup gate / the
-    // embedding, and before the row is persisted, except for the shipped-skill
-    // seed's Basic PUT of its reserved id (resources/memory-redaction.ts).
-    let redactedValues = isOperatorSeedPut(ctx, auth, writeTargetIds(this, content))
-      ? 0
-      : redactMemoryWrite(content).count;
-
     const resolvedExisting = await resolveStoredRow(this, "Memory", content, () => super.get());
     if (resolvedExisting.denial) return resolvedExisting.denial;
     const preExisting = resolvedExisting.row;
@@ -2227,8 +2221,10 @@ export class Memory extends (databases as any).flair.Memory {
     const preparedSkill = await prepareSkillBody(content, preExisting);
     if (preparedSkill instanceof Response) return preparedSkill;
     content = preparedSkill.content;
-    // flair#2575: the effective row now carries the inherited skill tag, so
-    // redact the skill fields of the row this write persists.
+    const operatorSeed = isOperatorSeedPut(ctx, auth, writeTargetIds(this, content));
+    let redactedValues = operatorSeed ? 0 : redactMemoryWrite(content).count;
+    if (!operatorSeed) redactMemoryWrite(requestedPayload);
+    // Duplicate top-level metadata keys are refused; otherwise redact name/description and tags.
     redactedValues += redactSkillWrite(content);
 
     // flair#744 slice A: citation-on-write — same consume-and-strip

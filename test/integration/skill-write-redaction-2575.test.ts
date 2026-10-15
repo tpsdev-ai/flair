@@ -1,8 +1,5 @@
-// ─── flair#2575 — server-side redaction covers a skill's name/description/tags ─
-//
-// flair#2407 redacts the Memory text fields (`content`, `summary`, `trigger`) on
-// a write; flair#2575 extends the SAME redactor to a skill's fields: each
-// `tags` entry and the `name`/`description` keys of the `metadata` JSON blob.
+// Skill POST, PUT without `_reindex`, and feed writes refuse metadata with
+// duplicate top-level keys; otherwise name/description and string tags are redacted.
 // The write response's `stored` names those redacted fields like the Memory
 // fields. After a counted redaction, /mcp echoes the stored skill fields;
 // stdio renders the stored name, with no description or tags. On a clean
@@ -160,7 +157,7 @@ afterAll(async () => {
   if (keyDir) await rm(keyDir, { recursive: true, force: true });
 }, 60_000);
 
-describe("flair#2575 — REST: a skill write redacts name, description and each tag entry", () => {
+describe("flair#2575 — REST: skill fields with distinct top-level metadata keys", () => {
   test("POST /Memory stores the redacted skill fields and reports them in `stored`", async () => {
     const name = `deploy ${GITHUB_TOKEN}`;
     const description = `runs the nightly ${AWS_KEY}`;
@@ -274,7 +271,7 @@ describe("flair#2575 — stdio skill_store uses the stored name after a counted 
   }, 120_000);
 });
 
-describe("flair#2575 — a write that INHERITS the skill tag redacts the skill fields", () => {
+describe("flair#2575 — inherited skill tags with distinct top-level metadata keys", () => {
   test("a PUT that omits `tags` on a stored skill redacts the supplied metadata name/description", async () => {
     const created: any = await client.request("POST", "/Memory", {
       agentId: AGENT,
@@ -370,3 +367,101 @@ describe("flair#2575 — the archive tools' contracts hold on their real Harper 
     expect(row.archived).toBe(false);
   }, 120_000);
 });
+
+
+const metadataWritePaths = ["POST", "PUT create", "feed create", "PUT inherited", "superseding POST", "feed inherited"] as const;
+type MetadataWritePath = (typeof metadataWritePaths)[number];
+
+async function metadataWrite(path: MetadataWritePath, metadata: string, summary: string) {
+  const id = `metadata-${crypto.randomUUID()}`;
+  let root: any;
+  if (path === "PUT inherited" || path === "superseding POST" || path === "feed inherited") {
+    root = await client.request("POST", "/Memory", {
+      agentId: AGENT, content: `root ${id}`, trigger: "when deploying", tags: ["skill"],
+      metadata: JSON.stringify({ name: "deploy" }),
+    });
+  }
+  const before = root ? await storedRow(root.id) : undefined;
+  const body: Record<string, unknown> = {
+    id, agentId: AGENT, content: `procedure ${id}`, trigger: "when deploying", metadata, summary,
+  };
+  if (!root) body.tags = ["skill"];
+  else if (path === "superseding POST") body.supersedes = root.id;
+  else body.id = root.id;
+  const method = path.startsWith("PUT") ? "PUT" : "POST";
+  const endpoint = path.startsWith("feed") ? "/FeedMemories" : method === "PUT" ? `/Memory/${body.id}` : "/Memory";
+  const response = await fetch(`${harper.httpURL}${endpoint}`, {
+    method, headers: { "Content-Type": "application/json", Authorization: adminAuth() },
+    body: JSON.stringify(body),
+  });
+  return { response, id: body.id as string, root, before };
+}
+
+async function agentMemoryRows(): Promise<any[]> {
+  const response = await fetch(harper.opsURL, {
+    method: "POST", headers: { "Content-Type": "application/json", Authorization: adminAuth() },
+    body: JSON.stringify({ operation: "search_by_value", database: "flair", table: "Memory", search_attribute: "agentId", search_value: AGENT, get_attributes: ["*"] }),
+  });
+  expect(response.status).toBe(200);
+  return (await response.json() as any[]).sort((a, b) => a.id.localeCompare(b.id));
+}
+
+describe("skill writes require distinct top-level metadata keys", () => {
+  for (const path of metadataWritePaths) {
+    for (const key of ["name", "description", "source", "na\\u006de"]) {
+      test(`${path} refuses duplicate ${key} keys with no supplied metadata in its reply or rows`, async () => {
+        const firstKey = key === "na\\u006de" ? "name" : key;
+        const metadata = `{"${firstKey}":"${GITHUB_TOKEN}","${key}":"deploy"}`;
+        const { response, id, root, before } = await metadataWrite(path, metadata, `summary ${AWS_KEY}`);
+        expect(response.status).toBe(400);
+        const reply = await response.text();
+        expect(JSON.parse(reply)).toEqual({ error: "skill_metadata_duplicate_key" });
+        expect(reply).not.toContain(GITHUB_TOKEN);
+        expect(reply).not.toContain(AWS_KEY);
+        if (root && path !== "superseding POST") expect(await storedRow(id)).toEqual(before);
+        else expect(await storedRow(id)).toBeUndefined();
+        if (root) expect(await storedRow(root.id)).toEqual(before);
+        const rows = await agentMemoryRows();
+        expect(JSON.stringify(rows)).not.toContain(GITHUB_TOKEN);
+        expect(JSON.stringify(rows)).not.toContain(AWS_KEY);
+        if (root) expect(rows.filter((row) => row.supersedes === root.id)).toEqual([]);
+      }, 120_000);
+    }
+
+    test(`${path} redacts metadata and summary in a valid write's raw row and reply`, async () => {
+      const metadata = JSON.stringify({ name: `deploy ${GITHUB_TOKEN}`, description: `nightly ${AWS_KEY}` });
+      const { response } = await metadataWrite(path, metadata, `summary ${SLACK_TOKEN}`);
+      expect(response.ok).toBe(true);
+      const reply = await response.text();
+      const out = JSON.parse(reply);
+      expect(out.redactedValues).toBe(3);
+      const row = await storedRow(out.id);
+      expect(typeof row.metadata).toBe("string");
+      expect(metadataOf(row)).toEqual({ name: `deploy ${REDACTED}`, description: `nightly ${REDACTED}` });
+      expect(row.summary).toBe(`summary ${REDACTED}`);
+      for (const credential of [GITHUB_TOKEN, AWS_KEY, SLACK_TOKEN]) {
+        expect(row.metadata).not.toContain(credential);
+        expect(JSON.stringify(row)).not.toContain(credential);
+        expect(reply).not.toContain(credential);
+      }
+    }, 120_000);
+  }
+});
+
+
+test("a skill reindex refuses duplicate top-level metadata keys before row comparison", async () => {
+  const created: any = await client.request("POST", "/Memory", {
+    agentId: AGENT, content: `reindex ${crypto.randomUUID()}`, trigger: "when deploying", tags: ["skill"],
+    metadata: JSON.stringify({ name: "deploy" }),
+  });
+  const before = await storedRow(created.id);
+  const response = await fetch(`${harper.httpURL}/Memory/${created.id}`, {
+    method: "PUT", headers: { "Content-Type": "application/json", Authorization: adminAuth() },
+    body: JSON.stringify({ id: created.id, _reindex: true, metadata: `{"name":"${GITHUB_TOKEN}","name":"deploy"}` }),
+  });
+  expect(response.status).toBe(400);
+  const reply = await response.text();
+  expect(JSON.parse(reply).error).toBe("skill_metadata_duplicate_key");
+  expect(reply).not.toContain(GITHUB_TOKEN);
+  expect(await storedRow(created.id)).toEqual(before);
+}, 120_000);

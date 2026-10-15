@@ -106,15 +106,11 @@ export class FeedMemories extends Resource {
       }
     }
 
-    // flair#2407: this raw-table ingest is a Memory write too; redact
-    // credential-shaped text before the skill body is prepared, before the
-    // content hash is computed from it and before the row is stored.
-    let redactedValues = redactMemoryWrite(content).count;
     const preparedSkill = await prepareSkillBody(content, existingRecord);
     if (preparedSkill instanceof Response) return preparedSkill;
     content = preparedSkill.content;
-    // flair#2575: the effective row now carries the inherited skill tag, so
-    // redact the skill fields of the row this ingest persists.
+    let redactedValues = redactMemoryWrite(content).count;
+    // Duplicate top-level metadata keys are refused; otherwise redact name/description and tags.
     redactedValues += redactSkillWrite(content);
     const agentId = content.agentId;
     const body = String(content?.content ?? "");
