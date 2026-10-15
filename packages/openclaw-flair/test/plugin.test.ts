@@ -1502,10 +1502,11 @@ describe("slice 2 — capture normalisation, ids and outcomes", () => {
 // bare `runAttempt({})` enters an embedded run and dies at `mkdir ''`, and an
 // attempt must be fully prepared (resolved config, model registry, session file
 // and lock, sandbox, abort signal) and reach a provider, which this PR does not
-// set up. This drives the host's real agent_end dispatch instead
-// (`awaitAgentHarnessAgentEndHook`, the function `runEmbeddedAttempt` calls
-// through `runAgentEndSideEffects`), over the pinned host's real hook runner,
-// with snapshots the TEST supplies. The dispatcher forwards the event it is
+// set up. This drives the host's real agent_end dispatch instead: the test
+// calls the awaited wrapper, `awaitAgentHarnessAgentEndHook`. The embedded path
+// calls `runAgentHarnessAgentEndHook` through `runAgentEndSideEffects`; both
+// wrappers use the shared inner dispatcher. It runs over the pinned host's real
+// hook runner, with snapshots the TEST supplies. The dispatcher forwards the event it is
 // given, so this cannot detect a change in what the producer puts in a
 // snapshot (a message's identity across runs); driving the embedded producer
 // is a follow-up.
