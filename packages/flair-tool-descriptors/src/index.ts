@@ -268,7 +268,7 @@ export const TOOL_DESCRIPTORS: readonly ToolDescriptor[] = [
         "content"
       ]
     },
-    "outputShape": "Write result { id, written:true, visibility } for the skill-tagged memory. No internal embedding fields; round-trips via memory_get. After a server-side redaction the echo also carries `redactedValues` and the stored `content` (with `summary`/`trigger` when written) from the write's own response; if that response returned no stored `content`, the echo omits those fields and sets `contentWithheld:true`."
+    "outputShape": "Write result { id, written:true, visibility } for the skill-tagged memory. No internal embedding fields; round-trips via memory_get. After a server-side redaction the echo also carries `redactedValues` and the stored text from the write's own response: `content` (with `summary`/`trigger` when written, and `name`/`description`/`tags` for the skill); if that response returned no stored `content`, the echo omits those fields and sets `contentWithheld:true`."
   },
   {
     "name": "skill_search",

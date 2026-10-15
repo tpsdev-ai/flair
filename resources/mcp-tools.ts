@@ -221,6 +221,10 @@ function stripInternalFields(value: any): any {
  *  through its lazy handler loaders. */
 const STORED_TEXT_FIELDS = ["content", "summary", "trigger"] as const;
 
+/** The skill fields a redacted skill write's `stored` also reports (flair#2575):
+ *  REDACTED_SKILL_FIELDS plus the whole `tags` array. */
+const STORED_SKILL_FIELDS = ["name", "description", "tags"] as const;
+
 /**
  * flair#2537, flair#2541 — the /mcp write echo after a server-side redaction. A Memory
  * write whose text the server redacted answers with `redactedValues` and, since
@@ -230,7 +234,9 @@ const STORED_TEXT_FIELDS = ["content", "summary", "trigger"] as const;
  * write, so a later write to the row cannot change what this one reports. With
  * the count and no string `stored.content`, the echo has no `content`,
  * `summary` or `trigger` and sets `contentWithheld: true`; the caller's input
- * is never put in their place. A response with no count, an error result
+ * is never put in their place. flair#2575: a skill-tagged write's `stored` also
+ * carries the redacted `name`, `description` and `tags`, and the echo reports
+ * them from `stored` the same way. A response with no count, an error result
  * included, is returned as it came.
  */
 function redactedWriteEcho(response: any): any {
@@ -246,6 +252,16 @@ function redactedWriteEcho(response: any): any {
   }
   for (const field of STORED_TEXT_FIELDS) {
     if (typeof stored[field] === "string") echo[field] = stored[field];
+  }
+  // flair#2575 — a skill write's `stored` also carries the redacted skill fields
+  // (its `metadata` `name`/`description` and the whole `tags` array); the echo
+  // reports them from `stored` just as it does the Memory text fields.
+  for (const field of STORED_SKILL_FIELDS) {
+    if (field === "tags") {
+      if (Array.isArray(stored.tags)) echo.tags = stored.tags;
+    } else if (typeof stored[field] === "string") {
+      echo[field] = stored[field];
+    }
   }
   return echo;
 }
@@ -1295,7 +1311,7 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
   skill_store: {
         impl: skillStore,
     contract: {
-      summary: "Write result { id, written:true, visibility } for the skill-tagged memory. No internal embedding fields; round-trips via memory_get. After a server-side redaction the echo also carries `redactedValues` and the stored `content` (with `summary`/`trigger` when written) from the write's own response; if that response returned no stored `content`, the echo omits those fields and sets `contentWithheld:true`.",
+      summary: "Write result { id, written:true, visibility } for the skill-tagged memory. No internal embedding fields; round-trips via memory_get. After a server-side redaction the echo also carries `redactedValues` and the stored text from the write's own response: `content` (with `summary`/`trigger` when written, and `name`/`description`/`tags` for the skill); if that response returned no stored `content`, the echo omits those fields and sets `contentWithheld:true`.",
       requiredFields: ["id", "written"],
       fieldTypes: { id: "string", written: "boolean", deduplicated: "boolean" },
       forbiddenFields: INTERNAL_MEMORY_FIELDS,
@@ -1351,8 +1367,8 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
         impl: memoryBasement,
     contract: {
       summary: "Write result for the archive operation; read the persisted archive state through memory_get. No internal embedding fields; the flip round-trips via memory_get. After a server-side redaction the echo also carries `redactedValues` and the stored `content` (with `summary`/`trigger` when the row carries them) from the write's own response; if that response returned no stored `content`, the echo omits those fields and sets `contentWithheld:true`.",
-      requiredFields: ["id", "archived"],
-      fieldTypes: { id: "string", archived: "boolean" },
+      requiredFields: ["id", "written"],
+      fieldTypes: { id: "string", written: "boolean" },
       forbiddenFields: INTERNAL_MEMORY_FIELDS,
       invariants: { fullyResolved: true },
       errorShape: { trigger: "basementing a non-existent, unreadable, or unauthorized id", fields: ["error", "status"] },
@@ -1362,8 +1378,8 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
         impl: memoryRestore,
     contract: {
       summary: "Write result for the restore operation; read the persisted archive state through memory_get. No internal embedding fields; the flip round-trips via memory_get. After a server-side redaction the echo also carries `redactedValues` and the stored `content` (with `summary`/`trigger` when the row carries them) from the write's own response; if that response returned no stored `content`, the echo omits those fields and sets `contentWithheld:true`.",
-      requiredFields: ["id", "archived"],
-      fieldTypes: { id: "string", archived: "boolean" },
+      requiredFields: ["id", "written"],
+      fieldTypes: { id: "string", written: "boolean" },
       forbiddenFields: INTERNAL_MEMORY_FIELDS,
       invariants: { fullyResolved: true },
       errorShape: { trigger: "restoring a non-existent, unreadable, or unauthorized id", fields: ["error", "status"] },

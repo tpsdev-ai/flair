@@ -7,9 +7,11 @@
  * to `redactSecretsWithCount`; this module calls `redactSecretsWithCount`
  * directly, so the server keeps no second pattern list.
  *
- * REDACTED_MEMORY_FIELDS names the three fields redacted on a write: `content`,
- * `summary` and `trigger`. Other fields (id, agentId, tags, metadata, ...) are
- * not redacted.
+ * REDACTED_MEMORY_FIELDS names the three Memory text fields redacted on a
+ * write: `content`, `summary` and `trigger`. On a skill-tagged write the
+ * redaction also covers the skill fields (flair#2575): each `tags` entry, and
+ * the `name` and `description` keys of the `metadata` JSON blob
+ * (REDACTED_SKILL_FIELDS). Other fields (id, agentId, ...) are not redacted.
  *
  * Memory post/put/patch and the feed ingest (resources/MemoryFeed.ts) call
  * redactMemoryWrite() on the write body before the row is persisted; post and
@@ -35,29 +37,57 @@
 import { redactSecretsWithCount } from "../packages/flair-mcp/src/secret-redaction.js";
 import type { AgentAuthVerdict } from "./agent-auth.js";
 import { isReservedSeedId } from "./seed-reservation.js";
-import { MEMORY_EMBEDDING_INPUT_FIELDS } from "./skill-write.js";
+import { isSkillWrite, MEMORY_EMBEDDING_INPUT_FIELDS } from "./skill-write.js";
+import { parseSkillMetadata } from "./skill-provenance.js";
 import { skillWriteSource } from "./skill-write-policy.js";
 
-/** The Memory fields redacted on a write. */
+/** The Memory text fields redacted on a write. */
 export const REDACTED_MEMORY_FIELDS = Object.freeze(["content", "summary", "trigger"] as const);
 
-/** The REDACTED_MEMORY_FIELDS of one row, as a write's response reports them. */
-export type StoredMemoryText = Partial<Record<(typeof REDACTED_MEMORY_FIELDS)[number], string>>;
+/** The skill fields redacted on a skill-tagged write: the `name` and
+ *  `description` keys of the `metadata` JSON blob. Each `tags` entry is redacted
+ *  too (see redactSkillFields). */
+export const REDACTED_SKILL_FIELDS = Object.freeze(["name", "description"] as const);
+
+/** The redacted skill fields of one skill-tagged row, as a write's response
+ *  reports them: the `metadata` keys plus the whole `tags` array. */
+export interface StoredSkillText {
+  name?: string;
+  description?: string;
+  tags?: string[];
+}
+
+/** The redacted fields of one row, as a write's response reports them: the
+ *  REDACTED_MEMORY_FIELDS that hold a string, plus the skill fields when the row
+ *  is skill-tagged (StoredSkillText). */
+export type StoredMemoryText =
+  & Partial<Record<(typeof REDACTED_MEMORY_FIELDS)[number], string>>
+  & StoredSkillText;
 
 /**
- * flair#2467: the REDACTED_MEMORY_FIELDS that hold a string on `row`, copied.
- * A write calls it on the row it stages, after redaction, so the copy holds
- * the post-redaction value of each such field that write committed, changed
- * or not. When the write replaced any value, its response
- * carries the copy as `stored` next to `redactedValues`; the writer never has
- * to read the row back, so a later write cannot change what this one reports.
+ * flair#2467: the redacted fields that hold a value on `row`, copied. A write
+ * calls it on the row it stages, after redaction, so the copy holds the
+ * post-redaction value of each such field that write committed, changed or not.
+ * flair#2575: for a skill-tagged row that is also the redacted skill fields — the
+ * `metadata` `name`/`description` (parsed out) and the entire `tags` array.
+ * When the write replaced any value, its response carries the copy as `stored`
+ * next to `redactedValues`; the writer never has to read the row back, so a
+ * later write cannot change what this one reports.
  */
 export function storedMemoryText(row: unknown): StoredMemoryText {
   const stored: StoredMemoryText = {};
   if (!row || typeof row !== "object" || Array.isArray(row)) return stored;
+  const record = row as Record<string, unknown>;
   for (const field of REDACTED_MEMORY_FIELDS) {
-    const value = (row as Record<string, unknown>)[field];
+    const value = record[field];
     if (typeof value === "string") stored[field] = value;
+  }
+  if (isSkillWrite(record)) {
+    const meta = parseSkillMetadata(record.metadata);
+    for (const field of REDACTED_SKILL_FIELDS) {
+      if (typeof meta[field] === "string") stored[field] = meta[field] as string;
+    }
+    if (Array.isArray(record.tags)) stored.tags = record.tags.filter((tag): tag is string => typeof tag === "string");
   }
   return stored;
 }
@@ -110,10 +140,60 @@ export function redactMemoryWrite(content: unknown): MemoryWriteRedaction {
       if (EMBEDDING_SOURCE_FIELDS.has(field)) embedSourceChanged = true;
     }
   }
+  if (isSkillWrite(row)) count += redactSkillFields(row);
   if (count === 0) return none;
   const supplied = row.embedding != null || row.embeddingModel != null;
   if (!supplied || !embedSourceChanged) return { count, embeddingDiscarded: false };
   delete row.embedding;
   delete row.embeddingModel;
   return { count, embeddingDiscarded: true };
+}
+
+/**
+ * Redact the skill fields of a skill-tagged write body IN PLACE (flair#2575):
+ * every string entry of `tags`, and the `name`/`description` keys of the
+ * `metadata` JSON blob (REDACTED_SKILL_FIELDS), through the SAME redactor as the
+ * Memory text fields. Returns the number of values replaced. A skill field is
+ * never an embedding source, so this does not affect the embedding decision.
+ */
+function redactSkillFields(row: Record<string, unknown>): number {
+  let count = 0;
+  if (Array.isArray(row.tags)) {
+    row.tags = row.tags.map((entry) => {
+      if (typeof entry !== "string") return entry;
+      const redacted = redactSecretsWithCount(entry);
+      if (redacted.text === entry) return entry;
+      count += redacted.count;
+      return redacted.text;
+    });
+  }
+  count += redactSkillMetadata(row);
+  return count;
+}
+
+/**
+ * Redact the REDACTED_SKILL_FIELDS of the `metadata` blob on `row` IN PLACE
+ * (flair#2575). `metadata` is stored as a JSON string (or, from a raw body, an
+ * object); the keys are re-serialized only when a value changed, so a metadata
+ * blob with no redactable text is left byte-for-byte. Returns the count.
+ */
+function redactSkillMetadata(row: Record<string, unknown>): number {
+  const original = row.metadata;
+  const asString = typeof original === "string";
+  const asObject = original !== null && typeof original === "object" && !Array.isArray(original);
+  if (!asString && !asObject) return 0;
+  const parsed = parseSkillMetadata(original);
+  let count = 0;
+  for (const field of REDACTED_SKILL_FIELDS) {
+    const value = parsed[field];
+    if (typeof value !== "string") continue;
+    const redacted = redactSecretsWithCount(value);
+    if (redacted.text !== value) {
+      parsed[field] = redacted.text;
+      count += redacted.count;
+    }
+  }
+  if (count === 0) return 0;
+  row.metadata = asString ? JSON.stringify(parsed) : parsed;
+  return count;
 }

@@ -20,6 +20,7 @@
  */
 
 import { mock, describe, it, expect, beforeEach, afterEach, afterAll } from "bun:test";
+import { conform } from "../helpers/mcp-conformance";
 
 // ─── Capture state for the mocked handlers ───────────────────────────────────
 let lastCall: { resource: string; ctx: any; args: any } | null = null;
@@ -1577,4 +1578,56 @@ describe("flair#2541 — /mcp skill_store / memory_basement / memory_restore wri
     expect(lastCall?.resource).toBe("Memory.put");
     expect(body.result.structuredContent).toEqual({ ok: true, resource: "Memory.put", agentId: "agt_bob" });
   });
+});
+
+// ─── flair#2575 — the archive tools' contract matches the reply they return ──
+//
+// `memory_basement` / `memory_restore` answer with the Memory write result
+// (`id`, `written`), never with the `archived` flag. Their contract must declare
+// exactly those required fields, and the shipped reply must carry them. The
+// real-Harper counterpart is test/integration/skill-write-redaction-2575.test.ts.
+describe("flair#2575 — the archive tools' contract matches their write reply", () => {
+  beforeEach(() => {
+    credentials = [{ principalId: "agt_bob", kind: "idp", idpSubject: "sub-bob", status: "active" }];
+    agents["agt_bob"] = { id: "agt_bob", status: "active" };
+  });
+
+  // A Memory double whose put answers with the real server's reply shape.
+  class ArchiveReplyMemory extends HarperShapedBase {
+    static async put(record: any, ctx: any) {
+      lastCall = { resource: "Memory.put", ctx, args: record };
+      return { id: record?.id, written: true };
+    }
+    static async get(target: any, ctx: any) {
+      const id = typeof target === "string" ? target : target?.id;
+      return { id, agentId: ctx?.request?.tpsAgent, content: "a plain note", tags: [], archived: false };
+    }
+  }
+
+  function call(name: string, args: Record<string, unknown>) {
+    return mcpHandler(post(
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } },
+      { sub: "sub-bob" },
+    ));
+  }
+
+  for (const name of ["memory_basement", "memory_restore"] as const) {
+    it(`${name}: requiredFields are id/written and the reply carries them`, async () => {
+      const { TOOLS } = await import("../../resources/mcp-tools.ts");
+      const restore = __setHandlers({ Memory: ArchiveReplyMemory as any });
+      try {
+        const contract = TOOLS[name].contract;
+        expect(contract.requiredFields).toEqual(["id", "written"]);
+        expect(contract.fieldTypes).toEqual({ id: "string", written: "boolean" });
+        const body = await parse(await call(name, { id: "mem-1" }));
+        expect(body.error).toBeUndefined();
+        const echo = body.result.structuredContent;
+        conform(name, echo, contract as any);
+        expect(echo.id).toBe("mem-1");
+        expect(echo.written).toBe(true);
+      } finally {
+        restore();
+      }
+    });
+  }
 });
