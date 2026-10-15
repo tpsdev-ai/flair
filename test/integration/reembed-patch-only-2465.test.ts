@@ -420,7 +420,7 @@ describe("flair#2465 part 2 — a server-computed re-embed stores the hash of th
     expect(row.embeddedContentHash).toBe(computeContentHash(owner.id, ORIGINAL));
   }, 120_000);
 
-  it("a text edit committed after the re-embed stages its write aborts it: the vector for the superseded text is not stored, and the row is left stale", async () => {
+  it("a text edit committed after the re-embed stages its write aborts the staged re-embed; the vector and hash the concurrent PUT carried stay on the row, stale", async () => {
     const id = "rpo-hash-edit-staged";
     // Seed with an explicit binding for the ORIGINAL text and an incarnation
     // token, so the concurrent PUT carries both unchanged and only the TEXT
