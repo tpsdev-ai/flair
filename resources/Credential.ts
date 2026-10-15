@@ -1,13 +1,46 @@
 import { databases } from "harper";
 import { resolveAgentAuth, allowVerified } from "./agent-auth.js";
-import { guardOwnerFieldImmutable } from "./owner-field-guard.js";
+import { guardOwnerFieldImmutable, ownerCheckUnavailable } from "./owner-field-guard.js";
 import { deleteOwnedRow } from "./owner-delete-recheck.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
 import { makeReadScope, makeScopedSearch, stampAttribution, UNAUTH } from "./record-type-kit.js";
+import { isForbiddenOwnerMutation, ownerMutationRefusal } from "./record-owner-guard.js";
+import { IDP_MAPPING_ADMIN_ONLY, IDP_MAPPING_REFUSAL_MESSAGE, isIdpMappingChange } from "../src/lib/idp-mapping-rule.js";
 
 const credentialReadScope = makeReadScope("owner-only", "principalId");
 const credentialScopedSearch = makeScopedSearch(credentialReadScope);
+
+/** 403 for a write src/lib/idp-mapping-rule.ts reserves for administrators and the server. */
+function idpMappingRefusal(): Response {
+  return new Response(JSON.stringify({ error: IDP_MAPPING_ADMIN_ONLY, message: IDP_MAPPING_REFUSAL_MESSAGE }), {
+    status: 403, headers: { "content-type": "application/json" },
+  });
+}
+
+/**
+ * The resource-layer write rules for a verified non-admin agent, applied to one
+ * record write: `stored` is the row before the write (null for a create) and
+ * `next` the row the write would store.
+ *
+ *   - A non-admin writes only rows it owns, as every owner-scoped resource does
+ *     (the owner refusal, checked first).
+ *   - Only an administrator or the server creates an IdP identity mapping,
+ *     changes its kind or identity fields, or reactivates it
+ *     (src/lib/idp-mapping-rule.ts; the named refusal `idp_mapping_admin_only`).
+ *
+ * Returns the refusal, or null to proceed.
+ */
+function nonAdminWriteRefusal(stored: any, next: any, callerId: string): Response | null {
+  if (stored && isForbiddenOwnerMutation(stored, "principalId", callerId)) return ownerMutationRefusal("Credential");
+  if (isIdpMappingChange(stored, next)) return idpMappingRefusal();
+  return null;
+}
+
+/** A write body the resource treats as one record: a non-null object that is not an array. */
+function isRecordBody(content: unknown): content is Record<string, unknown> {
+  return content != null && typeof content === "object" && !Array.isArray(content);
+}
 
 /**
  * Credential resource — authentication surfaces for Principals.
@@ -19,6 +52,11 @@ const credentialScopedSearch = makeScopedSearch(credentialReadScope);
  * Only admin principals can create/revoke credentials for other principals.
  * Non-admin principals can only view their own credentials (token hashes
  * are never returned in responses).
+ *
+ * On POST, PUT and PATCH, only an admin or the server creates an IdP identity
+ * mapping (kind "idp"), changes its kind or identity fields, or reactivates it
+ * (src/lib/idp-mapping-rule.ts). A non-admin agent may relabel and revoke its
+ * own; DELETE of its own stays allowed under the owner check.
  */
 export class Credential extends (databases as any).flair.Credential {
   /**
@@ -71,6 +109,13 @@ export class Credential extends (databases as any).flair.Credential {
       return new Response(JSON.stringify({ error: `kind must be one of: ${validKinds.join(", ")}` }), {
         status: 400, headers: { "content-type": "application/json" },
       });
+    }
+
+    // A POST creates (Harper refuses an existing id with 409), so there is no
+    // stored row: a non-admin may not create an IdP identity mapping.
+    if (auth.kind === "agent" && !auth.isAdmin) {
+      const denial = nonAdminWriteRefusal(null, content, auth.agentId);
+      if (denial) return denial;
     }
 
     const now = new Date().toISOString();
@@ -132,9 +177,28 @@ export class Credential extends (databases as any).flair.Credential {
   // verbs via the one shared delegate. principalId owns a credential; a non-admin
   // may rotate a token on its OWN credential but never re-point it at another
   // principal. (Self-update stays legitimate — update:true is retained.)
+  //
+  // A non-admin's PATCH is also held to nonAdminWriteRefusal against the row as
+  // the patch would leave it (stored merged with the body).
   async patch(content: any, query?: any) {
     const denial = await guardOwnerFieldImmutable(this, () => super.get(), content, "principalId");
     if (denial) return denial;
+    const auth = await resolveAgentAuth((this as any).getContext?.());
+    if (auth.kind === "agent" && !auth.isAdmin) {
+      if (!isRecordBody(content)) {
+        return new Response(JSON.stringify({ error: "a Credential PATCH body must be one record object" }), {
+          status: 400, headers: { "content-type": "application/json" },
+        });
+      }
+      let stored: any;
+      try {
+        stored = (await super.get()) ?? null;
+      } catch (err) {
+        return ownerCheckUnavailable(err);
+      }
+      const refusal = nonAdminWriteRefusal(stored, { ...(stored ?? {}), ...content }, auth.agentId);
+      if (refusal) return refusal;
+    }
     return super.patch(content, query);
   }
 
@@ -172,6 +236,20 @@ export class Credential extends (databases as any).flair.Credential {
     content.status = content.status || "active";
     content.createdAt = content.createdAt || now;
     content.updatedAt = now;
+
+    // A PUT replaces the row with `content`. These refusals are thrown: Harper
+    // answers a thrown Response as the response and abandons the write's
+    // transaction.
+    if (auth.kind === "agent" && !auth.isAdmin) {
+      let stored: any;
+      try {
+        stored = (await super.get()) ?? null;
+      } catch (err) {
+        throw ownerCheckUnavailable(err);
+      }
+      const refusal = nonAdminWriteRefusal(stored, content, auth.agentId);
+      if (refusal) throw refusal;
+    }
 
     return super.put(content);
   }
