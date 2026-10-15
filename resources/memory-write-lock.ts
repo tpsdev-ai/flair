@@ -42,10 +42,8 @@
  *    failed. Do not replay that write blindly: read the row first, and treat a
  *    row that already holds it as written. {@link markMemoryWriteOutcomeUnknown}
  *    records the marker; until a process restart clears it (the fencing step),
- *    later PUT, PATCH and DELETE requests for that id are refused, including
- *    a DELETE addressed to a stale skill id whose live head is that id. The other
- *    Memory writers (POST, and the background and nested writers part 2
- *    converts) do not check it.
+ *    PUT/PATCH check the addressed id; DELETE also checks the resolved skill
+ *    head. POST and background/nested writers do not check the marker.
  *
  * The marker is module state, so it is per Harper worker thread. That covers
  * the whole instance only in the supported single-worker mode: flair refuses to
@@ -223,7 +221,7 @@ export function writeOutcomeUnknownResponse(): Response {
   return new Response(
     JSON.stringify({
       error: WRITE_OUTCOME_UNKNOWN_ERROR,
-      message: "the last write to this id may or may not have landed. Read the row before writing again: if it already holds that write, do not resend it. PUT, PATCH and DELETE requests for this id are refused until the instance restarts.",
+      message: "the write outcome is unknown. Read the affected row before writing again.",
     }),
     { status: 503, headers: { "content-type": "application/json" } },
   );

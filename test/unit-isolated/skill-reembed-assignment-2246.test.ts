@@ -481,3 +481,27 @@ test("closing an unenrolled successor enrolls its retained row for stale-id dele
   expect((await deleted.json()).id).toBe(next.id);
   expect(harnessState.memoryStore.get(next.id)?.validTo).toBeString();
 });
+
+
+test("a stale-id DELETE refuses an outcome-unknown live head without changing rows or versions", async () => {
+  const { markMemoryWriteOutcomeUnknown, resetMemoryWriteOutcomeUnknownForTest } = await import("../../resources/memory-write-lock.ts");
+  const old = { ...skill("fence-old"), skillSubjectId: "fence-subject", validTo: "closed" };
+  const head = { ...skill("fence-head"), skillSubjectId: "fence-subject" };
+  harnessState.memoryStore.set(old.id, old);
+  harnessState.memoryStore.set(head.id, head);
+  const caller = () => writer(old.id, { request: { tpsAgent: "owner", tpsAgentIsAdmin: false, headers: new Headers() } });
+  markMemoryWriteOutcomeUnknown(head.id);
+  try {
+    const result = await caller().delete(old.id);
+    expect(result.status).toBe(503);
+    expect((await result.json()).error).toBe("write_outcome_unknown");
+    expect([...harnessState.memoryStore.values()]).toEqual([old, head]);
+    expect(versions.size).toBe(0);
+  } finally {
+    resetMemoryWriteOutcomeUnknownForTest(head.id);
+  }
+  const result = await caller().delete(old.id);
+  expect(result.status).toBe(200);
+  expect(harnessState.memoryStore.get(head.id)?.validTo).toBeString();
+  expect(versions.size).toBe(1);
+});

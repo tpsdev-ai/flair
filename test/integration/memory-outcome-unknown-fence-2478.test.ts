@@ -1,24 +1,3 @@
-/**
- * memory-outcome-unknown-fence-2478.test.ts — the outcome-unknown fence
- * (flair#2478 slice 1, part 1), real Harper.
- *
- * When a PUT or PATCH commits and its post-commit verification read then fails,
- * the outcome is unknown: the write answers 503 write_outcome_unknown and the id
- * is marked, so later PUT, PATCH and DELETE requests for it are refused until
- * the instance restarts. A DELETE can address a STALE skill id and close a
- * different row, the skill's live head; the head's marker must fence that close
- * too, not only the addressed id's.
- *
- * Runs against a composed copy of the built component that adds a test-only
- * module (test/helpers/host-pointer-failing-component.ts,
- * FAILING_MEMORY_READ_MODULE_SRC): one `Memory.get` of an id fails when the test
- * arms `arm.memory-get-fail.<id>`. The test arms it while the write is held at
- * its `memory-patch-verify` pause (after the commit, before the verification
- * read), so the read it fails is that verification read. Everything else is
- * production.
- *
- * Throwaway HOME + data dir, ephemeral ports.
- */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -90,8 +69,6 @@ async function releaseAndConfirm(point: string): Promise<void> {
 }
 const isClosed = (row: any) => typeof row?.validTo === "string" && row.validTo.length > 0;
 
-/** A skill created and then updated through the version writer: the created id
- *  is closed (stale) and the update's successor is the live head. */
 async function staleSkillLineage(): Promise<{ staleId: string; headId: string }> {
   const staleId = `fence-skill-${randomUUID()}`;
   const body = (content: string) => ({
@@ -108,8 +85,6 @@ async function staleSkillLineage(): Promise<{ staleId: string; headId: string }>
   return { staleId, headId };
 }
 
-/** Mark `id` outcome-unknown the way production does: a re-embed PATCH commits,
- *  then its post-commit verification read fails. */
 async function markOutcomeUnknown(id: string): Promise<void> {
   const point = "memory-patch-verify";
   arm(point);
@@ -167,12 +142,14 @@ describe("flair#2478 — the outcome-unknown fence (real Harper)", () => {
   it("a DELETE addressed to a stale skill id is refused when the live head it would close is outcome-unknown, and the head stays open", async () => {
     const { staleId, headId } = await staleSkillLineage();
     await markOutcomeUnknown(headId);
+    const before = await readRow(headId);
 
     const res = await signed("DELETE", `/Memory/${staleId}`);
     const body = await res.json() as any;
     expect(res.status, JSON.stringify(body)).toBe(503);
     expect(body.error).toBe("write_outcome_unknown");
     const head = await readRow(headId);
+    expect(head).toEqual(before);
     expect(head, "the live head is gone").not.toBeNull();
     expect(isClosed(head), "the stale-id DELETE closed the outcome-unknown live head").toBe(false);
   }, 180_000);

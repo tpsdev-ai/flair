@@ -217,16 +217,8 @@ export function componentWithFailingRepairPeerWrite(opts: { sourceRoot?: string 
   return composeComponent({ [FAILING_REPAIR_PEER_WRITE_MODULE_REL]: FAILING_REPAIR_PEER_WRITE_MODULE_SRC }, opts.sourceRoot ?? repoRoot());
 }
 
-/** Where a composed copy writes the failing Memory-read module: a top-level
- *  built resource file, loaded with the rest of `dist/resources`. */
 export const FAILING_MEMORY_READ_MODULE_REL = join("dist", "resources", "zz-test-failing-memory-read.js");
 
-/** A test-only module for a composed copy (see
- *  `componentWithFailingMemoryRead`): one `Memory.get` of an id is failed ON
- *  DEMAND, when the test arms a marker file named `arm.memory-get-fail.<id>`
- *  under FLAIR_TEST_PAUSE_DIR. The arm file is CONSUMED (one-shot). Armed while a
- *  write is held at its `memory-put-verify` / `memory-patch-verify` pause, the
- *  read it fails is that write's post-commit verification read (flair#2478). */
 export const FAILING_MEMORY_READ_MODULE_SRC = `import { existsSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { databases } from "harper";
@@ -245,8 +237,6 @@ Memory.get = function (id, ...rest) {
 };
 `;
 
-/** A composed copy that keeps every built resource and adds the failing
- *  Memory-read module (FAILING_MEMORY_READ_MODULE_SRC). */
 export function componentWithFailingMemoryRead(opts: { sourceRoot?: string } = {}): FailingComponent {
   return composeComponent({ [FAILING_MEMORY_READ_MODULE_REL]: FAILING_MEMORY_READ_MODULE_SRC }, opts.sourceRoot ?? repoRoot());
 }

@@ -203,8 +203,7 @@ describe("the three 503 refusals (flair#2478 slice 1)", () => {
     expect(res.status).toBe(503);
     const body = await res.json();
     expect(body.error).toBe(WRITE_OUTCOME_UNKNOWN_ERROR);
-    expect(body.message).toContain("Read the row before writing again");
-    expect(body.message).toContain("PUT, PATCH and DELETE requests for this id are refused until the instance restarts");
+    expect(body.message).toContain("Read the affected row before writing again");
   });
 
   test("memory_lock_unavailable is 503, named, and says nothing was written", async () => {
