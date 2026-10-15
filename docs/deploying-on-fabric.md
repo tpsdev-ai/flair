@@ -349,23 +349,22 @@ flair memory verify --target https://<cluster>.<org>.harperfabric.com \
 ```
 
 The checkpoint command reads Memory ids and durability tiers through the admin operations
-API (paged, never through recall) and writes them to `~/.flair/memory-id-checkpoint.json`
+API (primary-key pages, never through recall) and writes them to `~/.flair/memory-id-checkpoint.json`
 (mode `0600`); it reads no Memory content. `--checkpoint <path>` picks another file.
 
 The verify command re-reads the same node and compares:
 
-- **verified** (exit 0) — every checkpointed id is still present; new ids are fine;
+- **verified** (exit 0) — checkpointed ids present and no tier-count drop; new ids are fine;
 - **integrity failure** (exit 2) — a checkpointed id is gone, or a durability tier count
   dropped; the report names the count of missing ids and up to ten ids;
 - **unknown** (exit 3) — the instance, a page, or the whole table could not be read.
   Unknown is not reported as verified.
 
-A checkpoint taken from one node address is refused against a different one.
+A different origin (scheme, host or port) is refused.
 
 `flair deploy` also takes `--memory-checkpoint <path>`: after the deploy it runs the same
-verify and adds a `Data convergence:` line to the report. Without the flag the report
-says the data was not checked — component convergence alone is not reported as data
-convergence.
+verify and adds a `Memory id/tier check:` line to the report. Without the flag it says
+`not checked`.
 
 ---
 

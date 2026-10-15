@@ -94,6 +94,7 @@ beforeEach(() => {
     addSharedCredentialOptions: (cmd: Command) => cmd, addSharedIdentityOption: (cmd: Command) => cmd,
     resolveSigningAgentId: () => ({ agentId: null, source: "none" }), applyAdminPassFile: () => {},
     parseEntitiesOptionOrExit: () => [], ENTITIES_OPTION_DESCRIPTION: "entities",
+    resolveEffectiveOpsUrl: () => { throw new Error("unused"); },
     resolveFabricCredentials: () => ({ fabricUser: undefined, fabricPassword: undefined, warnings: [] }),
   } satisfies MemoryCli);
   bindAgent({ api, resolveOpsPort, resolveHttpPort,

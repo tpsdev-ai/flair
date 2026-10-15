@@ -1,15 +1,6 @@
-/**
- * memory-id-checkpoint.test.ts — flair#2218 unit lane.
- *
- * The comparison and the checkpoint file. The real-Harper end-to-end case
- * (a row deleted between checkpoint and verify → integrity failure; an
- * unreachable instance → unknown; nothing deleted → verified) lives in
- * test/integration/memory-id-checkpoint.test.ts.
- *
- * Fixtures use neutral names (agent-a, node-a) — never a real fleet host.
- */
+/** Memory checkpoint comparison, paging and file tests. */
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -35,7 +26,7 @@ function checkpointOf(spec: [string, string][], node = NODE_A): MemoryCheckpoint
 }
 
 describe("flair#2218 — Memory id checkpoint comparison", () => {
-  test("every checkpointed id still present → verified (new ids are fine)", () => {
+  test("ids present without a tier-count drop → verified (new ids are fine)", () => {
     const cp = checkpointOf([["mem-1", "permanent"], ["mem-2", "standard"]]);
     const result = compareCheckpoint(cp, rows(["mem-1", "permanent"], ["mem-2", "standard"], ["mem-3", "standard"]));
     expect(result.outcome).toBe("verified");
@@ -81,29 +72,47 @@ describe("flair#2218 — Memory id checkpoint comparison", () => {
 });
 
 describe("flair#2218 — paged admin read", () => {
-  function pager(pages: { id: string; durability: string }[][]) {
+  function pager(pages: { id: string; durability: string }[][], after?: number) {
     const calls: any[] = [];
+    let page = 0;
+    const count = pages.flat().length;
     const opsPost = async (body: Record<string, unknown>) => {
       calls.push(body);
-      return pages[Number(body.offset) / Number(body.limit)] ?? [];
+      if (body.operation === "describe_table") return { record_count: page === 0 ? count : after ?? count };
+      return pages[page++] ?? [];
     };
     return { opsPost, calls };
   }
 
-  test("walks pages with limit/offset until a short page", async () => {
+  test("walks primary-key pages and projects only id and durability", async () => {
     const { opsPost, calls } = pager([
-      [{ id: "a", durability: "standard" }, { id: "b", durability: "standard" }],
+      [{ id: "a", durability: "standard" }, { id: "b'quoted", durability: "standard" }],
       [{ id: "c", durability: "permanent" }],
     ]);
     const out = await readMemoryRowsPaged(opsPost, { pageSize: 2 });
-    expect(out.map((r) => r.id)).toEqual(["a", "b", "c"]);
-    expect(calls[0]).toMatchObject({ operation: "search_by_conditions", table: "Memory", limit: 2, offset: 0 });
-    expect(calls[1]).toMatchObject({ offset: 2 });
+    expect(out.map((r) => r.id)).toEqual(["a", "b'quoted", "c"]);
+    expect(calls).toEqual([
+      { operation: "describe_table", database: "flair", table: "Memory", exact_count: true },
+      { operation: "sql", sql: "SELECT id, durability FROM flair.Memory ORDER BY id LIMIT 2" },
+      { operation: "sql", sql: "SELECT id, durability FROM flair.Memory WHERE id > 'b''quoted' ORDER BY id LIMIT 2" },
+      { operation: "describe_table", database: "flair", table: "Memory", exact_count: true },
+    ]);
   }, 5_000);
 
-  test("a row count the pages do not add up to is a read failure, not a short list", async () => {
+  test("a row-count mismatch refuses the checkpoint", async () => {
     const { opsPost } = pager([[{ id: "a", durability: "standard" }]]);
-    await expect(readMemoryRowsPaged(opsPost, { pageSize: 1, expected: 5 })).rejects.toThrow(/did not see every row/);
+    await expect(readMemoryRowsPaged(opsPost, { pageSize: 1, expected: 5 })).rejects.toThrow("writes during checkpoint");
+  }, 5_000);
+
+  test("a backslash cursor is refused before it can alter the SQL predicate", async () => {
+    const { opsPost, calls } = pager([[{ id: "x\\' OR 1=1 --", durability: "standard" }]]);
+    await expect(readMemoryRowsPaged(opsPost, { pageSize: 1 })).rejects.toThrow("unsupported backslash");
+    expect(calls.filter((body) => body.operation === "sql")).toHaveLength(1);
+  }, 5_000);
+
+  test("a changed exact count after the final page refuses the checkpoint", async () => {
+    const { opsPost } = pager([[{ id: "a", durability: "standard" }]], 2);
+    await expect(readMemoryRowsPaged(opsPost)).rejects.toThrow("writes during checkpoint");
   }, 5_000);
 
   test("a duplicate id across pages is a read failure", async () => {
@@ -115,29 +124,58 @@ describe("flair#2218 — paged admin read", () => {
   }, 5_000);
 
   test("a body that is not a row array is a read failure", async () => {
-    const opsPost = async () => ({ nope: true });
+    const opsPost = async (body: Record<string, unknown>) => body.operation === "describe_table" ? { record_count: 1 } : { nope: true };
     await expect(readMemoryRowsPaged(opsPost, { pageSize: 1 })).rejects.toThrow(/neither a row array/);
   }, 5_000);
 
   test("the page walk has a hard upper bound", async () => {
+    let counter = 0;
     const opsPost = async (body: Record<string, unknown>) =>
-      Array.from({ length: Number(body.limit) }, (_, i) => ({ id: `p${body.offset}-${i}`, durability: "standard" }));
-    await expect(readMemoryRowsPaged(opsPost, { pageSize: 1, maxPages: MAX_MEMORY_PAGES })).rejects.toThrow(/exceeded/);
+      body.operation === "describe_table" ? { record_count: 100 } : [{ id: String(counter++).padStart(4, "0"), durability: "standard" }];
+    await expect(readMemoryRowsPaged(opsPost, { pageSize: 1, maxPages: MAX_MEMORY_PAGES })).rejects.toThrow(/page cap/);
   }, 5_000);
 });
 
-describe("flair#2218 — verify refuses a different instance", () => {
-  test("a checkpoint from another node is unknown, never verified", async () => {
-    const cp = checkpointOf([["mem-1", "standard"]], "https://node-a.example.invalid");
+describe("flair#2218 — origin comparison", () => {
+  test.each(["https://node-b.example.invalid", "http://node-a.example.invalid", "https://node-a.example.invalid:8443"])("refuses a different origin: %s", async (target) => {
+    let called = false;
     const result = await verifyCheckpoint({
-      checkpoint: cp,
-      target: "https://node-b.example.invalid",
-      opsPost: async () => {
-        throw new Error("must not be called");
-      },
+      checkpoint: checkpointOf([["mem-1", "standard"]]), target,
+      opsPost: async () => { called = true; throw new Error("must not be called"); },
     });
     expect(result.outcome).toBe("unknown");
-    expect(result.reason).toMatch(/node-a.*node-b/);
+    expect(called).toBe(false);
+  });
+
+  test("normalizes scheme, hostname and default port", async () => {
+    const result = await verifyCheckpoint({
+      checkpoint: checkpointOf([], "https://NODE-A.example.invalid:443/"),
+      target: NODE_A,
+      opsPost: async (body) => body.operation === "describe_table" ? { record_count: 0 } : [],
+    });
+    expect(result.outcome).toBe("verified");
+  });
+
+  test("the origin guard compares the resolved ops target", async () => {
+    let called = false;
+    const result = await verifyCheckpoint({
+      checkpoint: checkpointOf([]), target: NODE_A, opsTarget: "http://node-a.example.invalid",
+      opsPost: async () => { called = true; return []; },
+    });
+    expect(result.outcome).toBe("unknown");
+    expect(called).toBe(false);
+  });
+
+  test("a served URL and its matching ops origin can differ", async () => {
+    const result = await verifyCheckpoint({
+      checkpoint: checkpointOf([]), target: "https://served.example.invalid", opsTarget: NODE_A,
+      opsPost: async (body) => body.operation === "describe_table" ? { record_count: 0 } : [],
+    });
+    expect(result.outcome).toBe("verified");
+  });
+
+  test("rejects a non-HTTP origin", () => {
+    expect(() => checkpointOf([], "file:///some/path")).toThrow();
   });
 });
 
@@ -171,6 +209,28 @@ describe("flair#2218 — checkpoint file", () => {
       writeFileSync(path, JSON.stringify({ version: 1, node: NODE_A }));
       const read = readCheckpointFile(path);
       expect(read.kind).toBe("unreadable");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a dangling symlink is unreadable", () => {
+    const dir = mkdtempSync(join(tmpdir(), "flair-2218-unit-"));
+    try {
+      const path = join(dir, "dangling.json");
+      symlinkSync(join(dir, "absent"), path);
+      expect(readCheckpointFile(path).kind).toBe("unreadable");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("malformed JSON returns a static error without source bytes", () => {
+    const dir = mkdtempSync(join(tmpdir(), "flair-2218-unit-"));
+    try {
+      const path = join(dir, "malformed.json");
+      writeFileSync(path, '{"secret":"SECRET_MARKER", broken');
+      expect(readCheckpointFile(path)).toEqual({ kind: "unreadable", reason: "checkpoint is not valid JSON or has an invalid origin" });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

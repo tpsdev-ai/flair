@@ -20,6 +20,7 @@ test.each(cases)("memory search --json prints render.asJSON(rows) once: $name", 
     resolveSigningAgentId: (opts) => ({ agentId: opts.agent ?? null, source: "flag" }),
     applyAdminPassFile: () => {}, addSharedCredentialOptions: (c) => c, addSharedIdentityOption: (c) => c,
     resolveOpsPort: () => 0, resolveHttpPort: () => 0, parseEntitiesOptionOrExit: (s) => s.split(","), ENTITIES_OPTION_DESCRIPTION: "Entities",
+    resolveEffectiveOpsUrl: () => { throw new Error("unused"); },
     resolveFabricCredentials: () => ({ fabricUser: undefined, fabricPassword: undefined, warnings: [] }),
   });
   const program = new Command().exitOverride();

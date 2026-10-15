@@ -13,6 +13,7 @@ import { readCheckpointFile, verifyCheckpoint } from "../memory-id-checkpoint.js
 
 export type DeployCli = {
   fleetSweepCallerExitMessage: (...args: any[]) => any;
+  resolveEffectiveOpsUrl: (opts: { target?: string; opsTarget?: string }) => string | undefined;
   resolveFabricCredentials: (...args: any[]) => any;
   shouldRunFleetVerify: (...args: any[]) => any;
 };
@@ -82,7 +83,8 @@ program
   .option("--no-verify", "Skip post-deploy served-API verification (default: verify — on by design, so the CLI can't report success on an empty/broken deploy)")
   .option("--verify-timeout <ms>", "Milliseconds to wait for the served API to settle after harper's post-deploy restart before verifying (default: 300000)")
   .option("--verify-resource <name>", "Resource to verify is serving after deploy (repeatable; default: derived from the deployed package's dist/resources)", (val: string, prev: string[]) => [...prev, val], [] as string[])
-  .option("--memory-checkpoint <path>", "After deploy, verify this instance's Memory ids against a `flair memory checkpoint` file and add a data-convergence line to the report")
+  .option("--ops-target <url>", "Operations API URL override for the Memory checkpoint report (env: FLAIR_OPS_TARGET)")
+  .option("--memory-checkpoint <path>", "After deploy, verify this instance's Memory ids against a `flair memory checkpoint` file and add a Memory id/tier check line to the report")
   .option("--deploy-retries <n>", "Retry the full harper deploy this many times, ONLY when peer replication is positively observed not to converge (default: 0 — retrying re-runs harper's component install and can escalate a transient replication warning into a hard ENOTEMPTY install failure; see flair#878)", "0")
   .option("--ignore-replication-errors", "If peer replication still hasn't converged, treat it as a non-fatal warning and succeed with an origin-only deploy (the peer catches up via federation sync or a later deploy)")
   .option("--no-convergence-check", "Skip the post-replication-error convergence poll and fail on harper's error verbatim (default: poll — Harper replicates asynchronously, so its error is a snapshot, not a verdict; flair#878)")
@@ -164,29 +166,24 @@ program
       console.log(`\n  URL:     ${result.url}`);
       console.log(`  Project: ${result.project}`);
 
-      // ── Data convergence (flair#2218) ─────────────────────────────────────
-      // Component convergence says nothing about the DATA: a tree can converge
-      // byte-for-byte while a durable Memory row is gone. With --memory-checkpoint
-      // the report gains a data line from the same guard the operator runs by
-      // hand; without one it says so, rather than leaving "verified" to be read
-      // from component convergence alone.
       if (opts.memoryCheckpoint) {
         const read = readCheckpointFile(opts.memoryCheckpoint);
         if (read.kind === "ok") {
           const data = await verifyCheckpoint({
             checkpoint: read.checkpoint,
             target: result.url,
+            opsTarget: cli.resolveEffectiveOpsUrl({ target: result.url, opsTarget: opts.opsTarget }),
             user: deployOpts.fabricUser,
             password: deployOpts.fabricPassword,
           });
           const color = data.outcome === "verified" ? green : data.outcome === "integrity-failure" ? red : yellow;
-          console.log(`  ${color(`Data convergence: ${data.detail}`)}`);
+          console.log(`  ${color(`Memory id/tier check: ${data.detail}`)}`);
         } else {
           const why = read.kind === "absent" ? `no checkpoint at ${opts.memoryCheckpoint}` : `checkpoint unreadable: ${read.reason}`;
-          console.log(`  ${yellow(`Data convergence: unknown — ${why}`)}`);
+          console.log(`  ${yellow(`Memory id/tier check: unknown — ${why}`)}`);
         }
       } else {
-        console.log(dim("  Data convergence: not checked (component convergence is not data convergence; pass --memory-checkpoint <path> to guard Memory ids across this deploy)"));
+        console.log(dim("  Memory id/tier check: not checked (pass --memory-checkpoint <path>)"));
       }
 
       // ── Post-deploy fleet sweep (flair#636) ─────────────────────────────

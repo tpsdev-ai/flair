@@ -2,7 +2,7 @@
 # Byte-identical gate for src/cli.ts modularization. Do not edit by hand.
 # Refresh: UPDATE_CLI_SURFACE_SNAPSHOT=1 bun test test/unit-isolated/cli-surface-snapshot.test.ts
 # helpWidth=80 (pinned; TTY columns must not affect this file)
-# commands=142 options=644
+# commands=142 options=647
 #
 # TREE is registration order: every command/subcommand + declared options/args.
 # HELP is each command's outputHelp() (--help, including addHelpText).
@@ -1820,8 +1820,11 @@ flair deploy
       description: Resource to verify is serving after deploy (repeatable; default: derived from the deployed package's dist/resources)
       attr: verifyResource
       default: []
+    --ops-target <url>
+      description: Operations API URL override for the Memory checkpoint report (env: FLAIR_OPS_TARGET)
+      attr: opsTarget
     --memory-checkpoint <path>
-      description: After deploy, verify this instance's Memory ids against a `flair memory checkpoint` file and add a data-convergence line to the report
+      description: After deploy, verify this instance's Memory ids against a `flair memory checkpoint` file and add a Memory id/tier check line to the report
       attr: memoryCheckpoint
     --deploy-retries <n>
       description: Retry the full harper deploy this many times, ONLY when peer replication is positively observed not to converge (default: 0 — retrying re-runs harper's component install and can escalate a transient replication warning into a hard ENOTEMPTY install failure; see flair#878)
@@ -2171,12 +2174,15 @@ flair memory checkpoint
   usage: [options]
   options:
     --target <url>
-      description: Instance base URL — the node's own origin, where its admin operations API is served
+      description: Instance served URL; operations API address is derived unless --ops-target is set
       attr: target
       mandatory: true
     --checkpoint <path>
       description: Checkpoint file path (default: ~/.flair/memory-id-checkpoint.json)
       attr: checkpoint
+    --ops-target <url>
+      description: Operations API URL override (env: FLAIR_OPS_TARGET)
+      attr: opsTarget
     --fabric-user <user>
       description: Admin username (env: FABRIC_USER; inline leaks to ps/shell history)
       attr: fabricUser
@@ -2198,6 +2204,9 @@ flair memory verify
     --checkpoint <path>
       description: Checkpoint file path (default: ~/.flair/memory-id-checkpoint.json)
       attr: checkpoint
+    --ops-target <url>
+      description: Operations API URL override (env: FLAIR_OPS_TARGET)
+      attr: opsTarget
     --fabric-user <user>
       description: Admin username (env: FABRIC_USER; inline leaks to ps/shell history)
       attr: fabricUser
@@ -4926,9 +4935,11 @@ Options:
   --verify-resource <name>       Resource to verify is serving after deploy
                                  (repeatable; default: derived from the deployed
                                  package's dist/resources) (default: [])
+  --ops-target <url>             Operations API URL override for the Memory
+                                 checkpoint report (env: FLAIR_OPS_TARGET)
   --memory-checkpoint <path>     After deploy, verify this instance's Memory ids
                                  against a `flair memory checkpoint` file and
-                                 add a data-convergence line to the report
+                                 add a Memory id/tier check line to the report
   --deploy-retries <n>           Retry the full harper deploy this many times,
                                  ONLY when peer replication is positively
                                  observed not to converge (default: 0 — retrying
@@ -5356,10 +5367,12 @@ Write this instance's Memory ids and per-tier counts to an operator-held
 checkpoint (mode 0600) before a planned cluster operation
 
 Options:
-  --target <url>                 Instance base URL — the node's own origin,
-                                 where its admin operations API is served
+  --target <url>                 Instance served URL; operations API address is
+                                 derived unless --ops-target is set
   --checkpoint <path>            Checkpoint file path (default:
                                  ~/.flair/memory-id-checkpoint.json)
+  --ops-target <url>             Operations API URL override (env:
+                                 FLAIR_OPS_TARGET)
   --fabric-user <user>           Admin username (env: FABRIC_USER; inline leaks
                                  to ps/shell history)
   --fabric-password <pass>       Admin password (prefer FABRIC_PASSWORD env or
@@ -5381,6 +5394,8 @@ Options:
                                  checkpoint was taken from
   --checkpoint <path>            Checkpoint file path (default:
                                  ~/.flair/memory-id-checkpoint.json)
+  --ops-target <url>             Operations API URL override (env:
+                                 FLAIR_OPS_TARGET)
   --fabric-user <user>           Admin username (env: FABRIC_USER; inline leaks
                                  to ps/shell history)
   --fabric-password <pass>       Admin password (prefer FABRIC_PASSWORD env or
@@ -5392,7 +5407,7 @@ Global Options:
   -v, --version                  output the version number
 
 Exit codes:
-  0  verified — every checkpointed Memory id is still present; new ids are fine
+  0  verified — checkpointed ids present and no tier-count drop; new ids are fine
   2  integrity failure — a checkpointed Memory id is missing, or a durability tier count dropped
   3  unknown — the instance, a page, or the whole table could not be read; never reported as verified
 

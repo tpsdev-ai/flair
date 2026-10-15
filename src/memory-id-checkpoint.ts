@@ -1,33 +1,5 @@
-/**
- * memory-id-checkpoint.ts — flair#2218 (slice 3 of #1244).
- *
- * A deploy guard. `src/replication-convergence.ts` compares COMPONENT state
- * (files, sizes, mtimes) and `flair fleet verify` compares version/health — neither
- * says anything about the DATA. A component tree can converge byte-for-byte while
- * a durable Memory row is gone.
- *
- * The guard is two operator commands around a planned cluster operation:
- *
- *   - checkpoint: read every Memory row's id and durability tier through the
- *     admin operations API (paged, never through recall) and write them to an
- *     operator-held file (mode 0600);
- *   - verify: read the same instance again and compare. A checkpointed id that is
- *     gone, or a durability-tier count that dropped, is an INTEGRITY FAILURE.
- *     Every checkpointed id still present is VERIFIED (new ids are fine). A read
- *     that cannot see the instance, a page, or the whole table is UNKNOWN — never
- *     verified.
- *
- * No Memory CONTENT is ever read, written to the checkpoint, or printed: the
- * admin read selects `id` and `durability` only, and the failure sample names ids.
- * The checkpoint covers every row in the Memory table (all four durability
- * tiers), so any Memory row that disappears between checkpoint and verify is
- * caught, not only a permanent/persistent one.
- *
- * The instance is addressed by its own origin (the way replication-convergence.ts
- * addresses a node), recorded in the checkpoint as `node`; verify refuses to
- * compare against a checkpoint taken from a different node address.
- */
-import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+/** Memory id and tier-count checks around a planned cluster operation. */
+import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, lstatSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { ALL_TIERS, normalizeTier, tallyByDurability, type MemoryRowLite, type Tier } from "./lib/memory-integrity.js";
@@ -37,9 +9,9 @@ export const CHECKPOINT_VERSION = 1;
 export const CHECKPOINT_MODE = 0o600;
 export const CHECKPOINT_FILENAME = "memory-id-checkpoint.json";
 
-/** How many rows one operations-API page asks for (Harper's own page ceiling is 10_000). */
+/** Rows requested per operations-API page. */
 export const MEMORY_PAGE_SIZE = 10_000;
-/** A hard page cap: 100 pages × 10_000 rows. Independent of any model output. */
+/** A full final page at this cap is refused. */
 export const MAX_MEMORY_PAGES = 100;
 /** Per-request timeout for the admin read. Every operation is bounded. */
 export const OPS_READ_TIMEOUT_MS = 30_000;
@@ -48,13 +20,13 @@ export const MISSING_SAMPLE_LIMIT = 10;
 
 export interface MemoryCheckpoint {
   version: typeof CHECKPOINT_VERSION;
-  /** The instance's own origin (scheme://host[:port]) the checkpoint was read from. */
+  /** Operations API origin (scheme://host[:port]) read for this checkpoint. */
   node: string;
-  /** The node's hostname, the way replication-convergence.ts addresses a node. */
+  /** The node's host and port. */
   host: string;
   /** ISO timestamp of the read. */
   at: string;
-  /** Every Memory id present, sorted. IDs only — never content. */
+  /** Sorted ids from the checkpoint read. */
   ids: string[];
   /** Row count per durability tier at the checkpoint. */
   byDurability: Record<Tier, number>;
@@ -70,12 +42,7 @@ export function checkpointPath(home: string): string {
 /** POST one operations-API body at an instance origin, with Basic auth. */
 export type OpsPost = (body: Record<string, unknown>) => Promise<unknown>;
 
-/**
- * Build an admin operations-API caller for an instance addressed by its own
- * origin — the same addressing replication-convergence.ts uses (a node's own
- * hostname, the deploy's admin Basic auth). The credential is never logged and
- * an error body is never folded into a thrown message.
- */
+/** Build a Basic-auth operations caller; omit response bodies from errors. */
 export function buildOpsPost(
   target: string,
   user?: string,
@@ -105,36 +72,27 @@ function asRows(body: unknown): any[] | null {
   return Array.isArray(results) ? results : null;
 }
 
-/**
- * Read every Memory id + durability via the admin operations API, one page at a
- * time (search_by_conditions with limit/offset — Harper's own page ceiling is
- * 10_000). Never through recall. A page that is not a row array, a duplicate id
- * across pages, or running past the hard page cap is a read failure (throw) —
- * the caller reports UNKNOWN.
- *
- * `expected` is the table's own exact row count; a mismatch means this read did
- * not see every row (a drifting table, or a condition that hid one), which is
- * also a read failure rather than a short list that looks complete.
- */
+/** Read id and durability in primary-key order. */
 export async function readMemoryRowsPaged(
   opsPost: OpsPost,
   opts: { pageSize?: number; maxPages?: number; expected?: number } = {},
 ): Promise<MemoryRowLite[]> {
   const pageSize = opts.pageSize ?? MEMORY_PAGE_SIZE;
   const maxPages = opts.maxPages ?? MAX_MEMORY_PAGES;
+  if (!Number.isSafeInteger(pageSize) || pageSize < 1 || !Number.isSafeInteger(maxPages) || maxPages < 1) {
+    throw new Error("invalid Memory paging bounds");
+  }
+  const expected = opts.expected ?? await readMemoryRowCount(opsPost);
   const rows: MemoryRowLite[] = [];
+  let lastId: string | undefined;
   const seen = new Set<string>();
 
   for (let page = 0; page < maxPages; page++) {
+    if (lastId?.includes("\\")) throw new Error("Memory cursor contains an unsupported backslash");
+    const where = lastId === undefined ? "" : ` WHERE id > '${lastId.replace(/'/g, "''")}'`;
     const body = await opsPost({
-      operation: "search_by_conditions",
-      database: "flair",
-      table: "Memory",
-      operator: "and",
-      conditions: [{ search_attribute: "createdAt", search_type: "greater_than", search_value: "1970-01-01" }],
-      get_attributes: ["id", "durability"],
-      limit: pageSize,
-      offset: page * pageSize,
+      operation: "sql",
+      sql: `SELECT id, durability FROM flair.Memory${where} ORDER BY id LIMIT ${pageSize}`,
     });
     const batch = asRows(body);
     if (batch === null) throw new Error("Memory search returned a body that is neither a row array nor { results: [...] }");
@@ -144,18 +102,18 @@ export async function readMemoryRowsPaged(
       }
       if (seen.has(r.id)) throw new Error(`Memory search returned duplicate id ${r.id} across pages`);
       seen.add(r.id);
+      lastId = r.id;
       rows.push({ id: r.id, durability: typeof r.durability === "string" ? r.durability : "standard" });
     }
     if (batch.length < pageSize) break;
     if (page === maxPages - 1) {
-      throw new Error(`Memory read exceeded ${maxPages} pages; refusing to treat a truncated read as the whole table`);
+      throw new Error(`Memory read reached the ${maxPages}-page cap`);
     }
   }
 
-  if (opts.expected !== undefined && rows.length !== opts.expected) {
-    throw new Error(
-      `Memory read saw ${rows.length} row(s) but the table reports ${opts.expected} — the read did not see every row`,
-    );
+  const after = await readMemoryRowCount(opsPost);
+  if (after !== expected || rows.length !== expected) {
+    throw new Error("writes during checkpoint");
   }
   return rows;
 }
@@ -172,17 +130,18 @@ export async function readMemoryRowCount(opsPost: OpsPost): Promise<number> {
 
 // ─── Build / compare ────────────────────────────────────────────────────────
 
-/** Reduce a row set to a checkpoint (sorted ids, tier counts, node identity, time). */
+/** Reduce a row set to a checkpoint (sorted ids, tier counts, origin, time). */
 export function buildCheckpoint(input: {
   node: string;
   at: string;
   rows: readonly MemoryRowLite[];
 }): MemoryCheckpoint {
-  const host = hostOf(input.node);
+  const node = normalizeOrigin(input.node);
+  const host = new URL(node).host;
   const ids = input.rows.map((r) => r.id).slice().sort();
   return {
     version: CHECKPOINT_VERSION,
-    node: input.node,
+    node,
     host,
     at: input.at,
     ids,
@@ -190,12 +149,12 @@ export function buildCheckpoint(input: {
   };
 }
 
-function hostOf(url: string): string {
-  try {
-    return new URL(url).host;
-  } catch {
-    return url;
+export function normalizeOrigin(value: string): string {
+  const url = new URL(value);
+  if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) {
+    throw new Error("node must be an HTTP(S) origin without credentials");
   }
+  return url.origin;
 }
 
 export type VerifyOutcome = "verified" | "integrity-failure" | "unknown";
@@ -231,7 +190,7 @@ export function unknownVerify(reason: string): VerifyResult {
  *
  *  - a checkpointed id that is gone  → integrity failure;
  *  - a durability-tier count that dropped → integrity failure;
- *  - every checkpointed id still present (new ids are fine) → verified.
+ *  - ids present with no tier-count drop → verified (new ids are fine).
  */
 export function compareCheckpoint(checkpoint: MemoryCheckpoint, rows: readonly MemoryRowLite[]): VerifyResult {
   const present = new Set(rows.map((r) => r.id));
@@ -268,7 +227,7 @@ export function compareCheckpoint(checkpoint: MemoryCheckpoint, rows: readonly M
     totalRows: rows.length,
     missing: [],
     tierDrops: [],
-    detail: `verified — all ${checkpoint.ids.length} checkpointed Memory id(s) present across ${ALL_TIERS.map((t) => `${t} ${counts[t]}`).join(", ")}`,
+    detail: `verified — all ${checkpoint.ids.length} checkpointed Memory id(s) present; no tier-count drop; counts: ${ALL_TIERS.map((t) => `${t} ${counts[t]}`).join(", ")}`,
   };
 }
 
@@ -288,7 +247,7 @@ export type CheckpointRead =
  */
 export function readCheckpointFile(path: string): CheckpointRead {
   try {
-    statSync(path);
+    lstatSync(path);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return { kind: "absent" };
     return { kind: "unreadable", reason: err instanceof Error ? err.message : String(err) };
@@ -311,9 +270,13 @@ export function readCheckpointFile(path: string): CheckpointRead {
     ) {
       return { kind: "unreadable", reason: "checkpoint is not a version-1 memory id checkpoint" };
     }
-    return { kind: "ok", checkpoint: parsed };
-  } catch (err) {
-    return { kind: "unreadable", reason: `checkpoint is not valid JSON: ${err instanceof Error ? err.message : String(err)}` };
+    const node = normalizeOrigin(parsed.node);
+    if (new URL(node).host !== parsed.host) {
+      return { kind: "unreadable", reason: "checkpoint host does not match its origin" };
+    }
+    return { kind: "ok", checkpoint: { ...parsed, node } };
+  } catch {
+    return { kind: "unreadable", reason: "checkpoint is not valid JSON or has an invalid origin" };
   }
 }
 
@@ -339,6 +302,8 @@ export function writeCheckpointFile(path: string, checkpoint: MemoryCheckpoint):
 export interface VerifyOptions {
   checkpoint: MemoryCheckpoint;
   target: string;
+  opsTarget?: string;
+  pageSize?: number;
   user?: string;
   password?: string;
   opsPost?: OpsPost;
@@ -349,23 +314,22 @@ export interface VerifyOptions {
  * failure (unreachable instance, a page, or a short read) is UNKNOWN.
  */
 export async function verifyCheckpoint(opts: VerifyOptions): Promise<VerifyResult> {
-  const targetHost = hostOf(opts.target);
-  if (targetHost !== opts.checkpoint.host) {
-    return unknownVerify(
-      `checkpoint was taken from node ${opts.checkpoint.host} but this target is ${targetHost} — refusing to compare across instances`,
-    );
-  }
   try {
-    const opsPost = opts.opsPost ?? buildOpsPost(opts.target, opts.user, opts.password);
+    const target = normalizeOrigin(opts.opsTarget ?? opts.target);
+    const node = normalizeOrigin(opts.checkpoint.node);
+    if (target !== node) {
+      return unknownVerify(`checkpoint was taken from node ${node} but this target is ${target} — refusing to compare across origins`);
+    }
+    const opsPost = opts.opsPost ?? buildOpsPost(target, opts.user, opts.password);
     const expected = await readMemoryRowCount(opsPost);
-    const rows = await readMemoryRowsPaged(opsPost, { expected });
+    const rows = await readMemoryRowsPaged(opsPost, { expected, pageSize: opts.pageSize });
     return compareCheckpoint(opts.checkpoint, rows);
   } catch (err) {
     return unknownVerify(err instanceof Error ? err.message : String(err));
   }
 }
 
-/** Human-readable verify report. IDs only — never content. */
+/** Render the comparison report. */
 export function renderVerifyHuman(result: VerifyResult, checkpointPathShown: string): string {
   const lines: string[] = [];
   lines.push(`Memory id checkpoint verify: ${result.outcome.toUpperCase()}`);
@@ -382,7 +346,7 @@ export function renderVerifyHuman(result: VerifyResult, checkpointPathShown: str
     }
     for (const d of result.tierDrops) lines.push(`  ❌ ${d.tier} tier dropped by ${d.dropped}`);
   } else {
-    lines.push(`  ✓ every checkpointed Memory id present`);
+    lines.push(`  ✓ every checkpointed Memory id present; no tier-count drop`);
   }
   return lines.join("\n");
 }
