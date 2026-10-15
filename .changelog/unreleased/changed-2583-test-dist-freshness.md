@@ -1,1 +1,1 @@
-- `startHarper` checks local resource output membership, readability and mtimes for roots with the Flair package name and resources entry; reported issues refuse local startup with `bun run build` (#2583).
+- `startHarper` checks local resource output membership, readability and mtimes for Flair source trees; reported issues refuse local startup (#2583).

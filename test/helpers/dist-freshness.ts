@@ -53,20 +53,19 @@ export function resourcesInputs(root: string): string[] {
 }
 
 export function isFlairSourceRoot(root: string): boolean {
-  let text: string;
-  try {
-    text = readFileSync(join(root, "package.json"), "utf-8");
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-      try {
-        lstatSync(join(root, "package.json"));
-      } catch (statError) {
-        if ((statError as NodeJS.ErrnoException).code === "ENOENT") return false;
-        throw statError;
-      }
+  // Treat a Flair root as source if any root marker exists, even when another
+  // watched input is missing.
+  const hasSourceMarker = ["resources", "tsconfig.json", "scripts", "packages"].some((marker) => {
+    try {
+      lstatSync(join(root, marker));
+      return true;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw err;
     }
-    throw err;
-  }
+  });
+  if (!hasSourceMarker) return false;
+  const text = readFileSync(join(root, "package.json"), "utf-8");
   const pkg = JSON.parse(text);
   return pkg.name === "@tpsdev-ai/flair" && pkg.main === "./dist/resources/in-process-api.js";
 }
@@ -131,7 +130,7 @@ export function assertFlairDistFresh(root: string): void {
     if (!isFlairSourceRoot(root)) return;
     issues = distFreshnessIssues(root);
   } catch (err) {
-    issues = [{ message: `package identity could not be read: ${(err as Error).message}`, remedy: "bun run build" }];
+    throw new Error(`[harper-lifecycle] refusing to start Harper: ${root} package identity could not be read: ${(err as Error).message}`);
   }
   if (issues.length === 0) return;
   const remedies = [...new Set(issues.map((i) => i.remedy))];

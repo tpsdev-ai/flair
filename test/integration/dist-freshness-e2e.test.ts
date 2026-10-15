@@ -58,3 +58,27 @@ test("startHarper boots a resources-only copied build with a null commit", async
     }
   }
 }, 300_000);
+
+test("startHarper boots a compiled-only Flair component copy", async () => {
+  const source = resolve(import.meta.dirname, "../..");
+  const root = mkdtempSync(join(tmpdir(), "flair-compiled-build-"));
+  let harper: HarperInstance | undefined;
+  try {
+    for (const path of ["config.yaml", "package.json", "dist", "schemas"]) {
+      cpSync(join(source, path), join(root, path), { recursive: true });
+    }
+    symlinkSync(join(source, "node_modules"), join(root, "node_modules"), "dir");
+    for (const marker of ["resources", "tsconfig.json", "scripts", "packages"]) {
+      expect(existsSync(join(root, marker))).toBe(false);
+    }
+    harper = await startHarper({ cwd: root, harperBinDir: source });
+    expect(harper.external).toBe(false);
+    expect((await fetch(`${harper.httpURL}/Health`)).ok).toBe(true);
+  } finally {
+    try {
+      if (harper) await stopHarper(harper);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+}, 300_000);

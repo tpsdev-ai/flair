@@ -152,6 +152,40 @@ describe("dist freshness (flair#2583)", () => {
     expect(() => assertFlairDistFresh(root)).not.toThrow();
   });
 
+  it("a compiled-only Flair component is skipped", () => {
+    const { root } = makeTree();
+    for (const entry of ["resources", "tsconfig.json", "scripts", "packages", "src", "tsconfig.cli.json", "bun.lock"]) {
+      rmSync(join(root, entry), { recursive: true, force: true });
+    }
+    expect(isFlairSourceRoot(root)).toBe(false);
+    expect(() => assertFlairDistFresh(root)).not.toThrow();
+  });
+
+  for (const marker of ["resources", "tsconfig.json", "scripts", "packages"]) {
+    it(`a source tree with only the ${marker} root marker is refused`, () => {
+      const { root } = makeTree();
+      for (const entry of ["resources", "tsconfig.json", "scripts", "packages"]) {
+        if (entry !== marker) rmSync(join(root, entry), { recursive: true, force: true });
+      }
+      expect(isFlairSourceRoot(root)).toBe(true);
+      expect(() => assertFlairDistFresh(root)).toThrow("Rebuild first: `bun run build`");
+    });
+  }
+
+  it("a source tree with a missing package manifest is refused", () => {
+    const { root } = makeTree();
+    rmSync(join(root, "package.json"));
+    expect(() => assertFlairDistFresh(root)).toThrow("package identity could not be read");
+  });
+
+  it("an unreadable package identity is refused without a rebuild instruction", () => {
+    const { root } = makeTree();
+    rmSync(join(root, "package.json"));
+    symlinkSync(join(root, "absent"), join(root, "package.json"));
+    expect(() => assertFlairDistFresh(root)).toThrow("package identity could not be read");
+    expect(() => assertFlairDistFresh(root)).not.toThrow("Rebuild first");
+  });
+
   for (const input of ["packages/flair-tool-descriptors/src/index.ts", "scripts/vendor-tool-descriptors.mjs", "resources/foo.ts"]) {
     it(`startup refuses a newer ${input}`, async () => {
       const { root } = makeTree();
@@ -160,7 +194,7 @@ describe("dist freshness (flair#2583)", () => {
     });
   }
 
-  for (const deleted of ["resources/foo.ts", "dist/resources/foo.js", "tsconfig.json", "bun.lock", "dist/build-info.json"]) {
+  for (const deleted of ["resources/foo.ts", "dist/resources/foo.js", "tsconfig.json", "bun.lock", "scripts/vendor-tool-descriptors.mjs", "scripts/write-build-info.mjs", "packages/flair-tool-descriptors/src/index.ts", "dist/build-info.json"]) {
     it(`startup refuses after deleting ${deleted}`, async () => {
       const { root } = makeTree();
       rmSync(join(root, deleted));
