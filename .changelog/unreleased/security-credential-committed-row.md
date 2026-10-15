@@ -1,0 +1,1 @@
+- **Owner IdP mapping updates confirm committed authorization fields.** A non-admin owner's PUT or PATCH checks the committed status, kind, provider, subject and principal inside the write transaction. A change to those fields returns `stored_row_changed` (409) without writing; an administrator's committed revocation or identity change is retained.

@@ -1,12 +1,14 @@
 import { databases } from "harper";
+import { isDeepStrictEqual } from "node:util";
 import { resolveAgentAuth, allowVerified } from "./agent-auth.js";
 import { guardOwnerFieldImmutable, ownerCheckUnavailable } from "./owner-field-guard.js";
 import { deleteOwnedRow } from "./owner-delete-recheck.js";
 import { txnPausePoint } from "./txn-pause-point.js";
+import { withOwnedTransaction } from "./request-transaction.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
 import { makeReadScope, makeScopedSearch, stampAttribution, UNAUTH } from "./record-type-kit.js";
 import { isForbiddenOwnerMutation, ownerMutationRefusal } from "./record-owner-guard.js";
-import { IDP_MAPPING_ADMIN_ONLY, IDP_MAPPING_REFUSAL_MESSAGE, isIdpMappingChange } from "../src/lib/idp-mapping-rule.js";
+import { IDP_MAPPING_ADMIN_ONLY, IDP_MAPPING_IDENTITY_FIELDS, IDP_MAPPING_REFUSAL_MESSAGE, isIdpMappingChange } from "../src/lib/idp-mapping-rule.js";
 
 const credentialReadScope = makeReadScope("owner-only", "principalId");
 const credentialScopedSearch = makeScopedSearch(credentialReadScope);
@@ -59,6 +61,30 @@ function isRecordBody(content: unknown): content is Record<string, unknown> {
  * own; DELETE of its own stays allowed under the owner check.
  */
 export class Credential extends (databases as any).flair.Credential {
+  private async writeAgainstStoredRow(stored: any, content: any, write: () => Promise<any>) {
+    const ctx = (this as any).getContext?.();
+    return withOwnedTransaction(ctx, async () => {
+      const pause = txnPausePoint("credential-row-write");
+      if (pause) await pause;
+      const id = (this as any).getId?.() ?? stored?.id ?? content.id;
+      if (id != null) {
+        let committed: any;
+        try {
+          committed = (await (databases as any).flair.Credential.get(id, {})) ?? null;
+        } catch (err) {
+          throw ownerCheckUnavailable(err);
+        }
+        const fields = ["status", "kind", ...IDP_MAPPING_IDENTITY_FIELDS];
+        if (!!committed !== !!stored || fields.some((field) => !isDeepStrictEqual(committed?.[field], stored?.[field]))) {
+          throw new Response(JSON.stringify({ error: "stored_row_changed", message: "the stored record changed; retry the write" }), {
+            status: 409, headers: { "content-type": "application/json" },
+          });
+        }
+      }
+      return await write();
+    });
+  }
+
   /**
    * Self-authorize (mirrors Soul.ts/Relationship.ts/WorkspaceState.ts). Harper
    * routes some request shapes (e.g. collection-describe `GET /Credential`)
@@ -198,6 +224,7 @@ export class Credential extends (databases as any).flair.Credential {
       }
       const refusal = nonAdminWriteRefusal(stored, { ...(stored ?? {}), ...content }, auth.agentId);
       if (refusal) return refusal;
+      return this.writeAgainstStoredRow(stored, content, () => super.patch(content, query));
     }
     return super.patch(content, query);
   }
@@ -249,6 +276,7 @@ export class Credential extends (databases as any).flair.Credential {
       }
       const refusal = nonAdminWriteRefusal(stored, content, auth.agentId);
       if (refusal) throw refusal;
+      return this.writeAgainstStoredRow(stored, content, () => super.put(content));
     }
 
     return super.put(content);

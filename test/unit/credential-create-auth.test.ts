@@ -189,6 +189,7 @@ describe("Credential.put() — cross-principal guard (refactored to resolveAgent
   });
 
   it("a non-admin can update their own credential", async () => {
+    _currentRecordId = "cred-1";
     credentialStore.set("cred-1", { id: "cred-1", principalId: "agent-1", kind: "bearer-token", status: "active" });
     const cred = makeCredential(agentCtx("agent-1"));
     const res: any = await cred.put({ id: "cred-1", principalId: "agent-1", kind: "bearer-token", status: "revoked" });
