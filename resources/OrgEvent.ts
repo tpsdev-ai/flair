@@ -4,6 +4,10 @@
  * Auth (self-enforced now that the global gate is non-rejecting):
  *   Read  — any verified agent/admin (org-scoped); anonymous denied.
  *   Write — authorId must match the authenticated agent (or admin); anonymous denied.
+ *   createdAt — assigned by the server on create; a write that reaches the
+ *               createdAt check cannot change a stored row's value, and a
+ *               record whose id the check does not read is refused there
+ *               (resources/org-event-created-at.ts).
  *
  * The previous version read context.request.tpsAgent and treated a MISSING agent
  * as trusted (`if (agentId && …)` / `if (!agentId) super.delete`), so anonymous
@@ -16,6 +20,13 @@ import { databases } from "harper";
 import { resolveAgentAuth } from "./agent-auth.js";
 import { guardOwnerFieldImmutable } from "./owner-field-guard.js";
 import { invalidEntitiesResponse } from "./entity-vocab.js";
+import {
+  applyServerCreatedAt,
+  createdAtCheckUnavailable,
+  invalidEventId,
+  isReadableEventId,
+  type CreatedAtWriteMode,
+} from "./org-event-created-at.js";
 import {
   makeAuthGate,
   resolveAuthGate,
@@ -35,6 +46,37 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
 
   private _auth() {
     return resolveAgentAuth((this as any).getContext?.());
+  }
+
+  /**
+   * The createdAt check (resources/org-event-created-at.ts), run after this
+   * verb's earlier checks. Applies to each record the write stores — the
+   * content itself, or each element of an array body — reading the stored row
+   * at the id the write lands on: server time with no stored row, the stored
+   * value (whatever it is) with one. A record that is not an object, or whose
+   * id the check does not read (isReadableEventId), is refused with
+   * `invalid_event_id` (400) before any write.
+   */
+  private async _assignCreatedAt(
+    content: any,
+    mode: CreatedAtWriteMode,
+    idOf: (record: any) => unknown,
+  ): Promise<Response | null> {
+    const records = Array.isArray(content) ? content : [content];
+    for (const record of records) {
+      if (record == null || typeof record !== "object" || Array.isArray(record)) return invalidEventId();
+      const id = idOf(record);
+      if (!isReadableEventId(id)) return invalidEventId();
+      let stored: Record<string, unknown> | null;
+      try {
+        stored = ((await (databases as any).flair.OrgEvent.get(id, {})) ?? null) as Record<string, unknown> | null;
+      } catch (err) {
+        return createdAtCheckUnavailable(err);
+      }
+      const denial = applyServerCreatedAt(record, stored, mode);
+      if (denial) return denial;
+    }
+    return null;
   }
 
   async post(content: any) {
@@ -59,7 +101,9 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
 
     // flair#2333 (H9): avoids deterministic same-millisecond collisions (random UUID).
     if (!content.id) content.id = `${content.authorId}-${new Date().toISOString()}-${randomUUID()}`;
-    content.createdAt = new Date().toISOString();
+    // A trusted in-process call keeps its existing stamp; every verified agent's
+    // createdAt is assigned below, once the write passes its other checks.
+    if (auth.kind === "internal") content.createdAt = new Date().toISOString();
 
     // attention-plane vocabulary gate (flair#675): `entities`, if present,
     // must be well-formed vocabulary strings — see resources/entity-vocab.ts.
@@ -78,6 +122,14 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
     );
     if (ownerDenial) return ownerDenial;
 
+    // createdAt: server time with no stored row; the stored value with one; a
+    // record whose id the check does not read is refused. (The id generated
+    // above means a missing, empty, null, 0 or false id never reaches it.)
+    if (auth.kind !== "internal") {
+      const createdAtDenial = await this._assignCreatedAt(content, "replace", (record) => record.id);
+      if (createdAtDenial) return createdAtDenial;
+    }
+
     // Harper 5: table resources use put() for create/upsert (post() removed).
     return (databases as any).flair.OrgEvent.put(content);
   }
@@ -87,6 +139,15 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
   async patch(content: any, query?: any) {
     const denial = await guardOwnerFieldImmutable(this, () => super.get(), content, "authorId");
     if (denial) return denial;
+    // createdAt: PATCH writes the row its URL names, so the stored value is read
+    // there; a URL with no id the check reads (the collection) is refused. An
+    // omitted createdAt is left out of the merge and keeps that value.
+    const auth = await this._auth();
+    if (auth.kind !== "internal") {
+      const pathId = (this as any).getId?.();
+      const createdAtDenial = await this._assignCreatedAt(content, "merge", () => pathId);
+      if (createdAtDenial) return createdAtDenial;
+    }
     return super.patch(content, query);
   }
 
@@ -105,6 +166,15 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
     // attention-plane vocabulary gate (flair#675) — same as post() above.
     const entitiesError = invalidEntitiesResponse(content.entities);
     if (entitiesError) return entitiesError;
+
+    // createdAt: server time with no stored row; the stored value with one,
+    // read under each record's own id; a record whose id the check does not
+    // read is refused. A refusal is thrown, so one refused record fails the whole
+    // request and nothing in it is written.
+    if (auth.kind !== "internal") {
+      const createdAtDenial = await this._assignCreatedAt(content, "replace", (record) => record.id);
+      if (createdAtDenial) throw createdAtDenial;
+    }
 
     return (databases as any).flair.OrgEvent.put(content);
   }
