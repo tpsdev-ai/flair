@@ -75,8 +75,8 @@ function stubHarper(root: string): string {
 }
 
 /** Start a background process this file owns (killed in afterEach). Returns its pid. */
-function startBackground(argv: string[], stdin: "ignore" | "pipe" = "ignore"): number {
-  const proc = Bun.spawn(argv, { stdin, stdout: "ignore", stderr: "ignore" });
+function startBackground(argv: string[], stdin: "ignore" | "pipe" = "ignore", env?: Record<string, string | undefined>): number {
+  const proc = Bun.spawn(argv, { stdin, stdout: "ignore", stderr: "ignore", env });
   pids.push(proc.pid);
   return proc.pid;
 }
@@ -96,7 +96,10 @@ function startHarperEntry(root: string, runtime = "node"): number {
   mkdirSync(dir, { recursive: true });
   const script = join(dir, "harper.js");
   writeFileSync(script, "setTimeout(() => {}, 120_000);\n");
-  return startBackground([runtime, script, "run", "."]);
+  return startBackground([runtime, script, "run", "."], "ignore", {
+    ...process.env,
+    FLAIR_TEST_ALLOW_BUN_HARPER: "PID-identity fixture runs a timer stub named harper.js",
+  });
 }
 
 /**

@@ -5,7 +5,8 @@
  * network calls to Harper Fabric.
  */
 
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, spyOn } from "bun:test";
+import * as childProcess from "node:child_process";
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -14,7 +15,7 @@ import {
   buildTargetUrl,
   resolvePackageRoot,
   validatePackageLayout,
-  deploy,
+  deploy as deployProduction,
   REQUIRED_PACKAGE_FILES,
   buildHarperDeployArgs,
   DEFAULT_DEPLOYMENT_TIMEOUT_MS,
@@ -31,6 +32,25 @@ import {
 } from "../../src/deploy.js";
 import { FABRIC_NPM_INSTALL_COMMAND } from "../../src/fabric-npm-install.js";
 import type { ConvergenceDeps } from "../../src/replication-convergence.js";
+
+const stubHarperPaths = new Set<string>();
+
+async function deploy(opts: Parameters<typeof deployProduction>[0]) {
+  const original = childProcess.spawn;
+  const intercept = spyOn(childProcess, "spawn").mockImplementation(((...args: unknown[]) => {
+    const entry = Array.isArray(args[1]) ? args[1][0] : undefined;
+    if (typeof entry === "string" && stubHarperPaths.has(entry)) {
+      const options = (args[2] ?? {}) as childProcess.SpawnOptions;
+      args[2] = { ...options, env: {
+        ...options.env,
+        FLAIR_TEST_ALLOW_BUN_HARPER: "deploy fixture runs a scripted harper.js stub",
+      } };
+    }
+    return Reflect.apply(original, childProcess, args);
+  }) as typeof childProcess.spawn);
+  try { return await deployProduction(opts); }
+  finally { intercept.mockRestore(); }
+}
 
 // ─── flair#878 helpers: a fake cluster for the convergence poll ─────────────
 //
@@ -453,6 +473,7 @@ describe("flair deploy: deploy() gating — --no-verify and --dry-run both skip 
     const binDir = join(packageRoot, "node_modules", harperPkg, "dist", "bin");
     mkdirSync(binDir, { recursive: true });
     writeFileSync(join(binDir, "harper.js"), "process.exit(0);\n");
+    stubHarperPaths.add(join(binDir, "harper.js"));
   }
 
   // flair#870 regression guard: resolveHarperBin() must still find a Harper
@@ -657,6 +678,7 @@ if (behavior === 'success') {
 }
 `;
     writeFileSync(join(binDir, "harper.js"), script);
+    stubHarperPaths.add(join(binDir, "harper.js"));
     return counterPath;
   }
 
