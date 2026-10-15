@@ -287,7 +287,6 @@ function memoryIdRequiredResponse(): Response {
  */
 const POSTCOMMIT_VERIFY_FIELDS = ["agentId", "content", "visibility", "durability"] as const;
 
-/** Field equality for the post-commit check: objects compare structurally. */
 function sameDeclaredField(stored: unknown, declared: unknown): boolean {
   if (stored === declared) return true;
   if (stored == null || declared == null) return stored === declared;
