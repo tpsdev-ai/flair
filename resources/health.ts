@@ -127,9 +127,9 @@ export class Health extends Resource {
     // uniform | mixed | unverified | scan-failed; `reason` is the bounded error
     // of the last failed scan (on scan-failed, or on mixed when a scan failed
     // before or after the foreign stamp was seen). In the non-uniform states the
-    // guarded paths, SemanticSearch and the write-time dedup leg, cosine nothing
-    // against the stored corpus; MemoryBootstrap and MemoryDedupStats call
-    // retrieval directly without this guard (#2559). The field is on the 503
+    // guarded paths — SemanticSearch, MemoryBootstrap's task-relevant selection,
+    // the write-time dedup leg and the /MemoryDedupStats sweep — cosine nothing
+    // against the stored corpus (flair#2559). The field is on the 503
     // body too; doctor reads it there.
     body.embeddingSpace = spaceGuardState();
     const multiWorker = multiWorkerHealthField(multiWorkerCondition());

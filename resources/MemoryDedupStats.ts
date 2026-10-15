@@ -59,6 +59,7 @@ import { setImmediate as yieldToRequests } from "node:timers/promises";
 import { dirname } from "node:path";
 import { allowAdmin } from "./agent-auth.js";
 import { retrieveCandidates } from "./semantic-retrieval-core.js";
+import { embeddingSpaceVerdict, type EmbeddingSpaceGuardState } from "./embedding-space-guard.js";
 import { DEDUP_COSINE_THRESHOLD_DEFAULT } from "./dedup.js";
 import {
   countDedupClusters,
@@ -75,6 +76,23 @@ export interface MemoryDedupStatsResult {
   largestClusterSize: number;
   totalMemoriesInClusters: number;
   computedAt: string;
+}
+
+/**
+ * The response a GUARD-DEGRADED sweep returns in place of a stat (flair#2559).
+ * The sweep cosines each memory's own stored embedding against its neighbours;
+ * when the store's model stamps are not known uniform in the current embedding
+ * space, those edges could be computed across spaces. So the sweep runs no ANN
+ * query at all: the three counts are null (no vector-derived count, never a
+ * number computed across spaces) and `embeddingSpace` names the guard state
+ * that was refused, the same state names the other guarded consumers use.
+ */
+export interface MemoryDedupStatsUnavailable {
+  clusterCount: null;
+  largestClusterSize: null;
+  totalMemoriesInClusters: null;
+  computedAt: string;
+  embeddingSpace: { state: EmbeddingSpaceGuardState; reason: string | null };
 }
 
 function persistStat(stat: MemoryDedupStatsResult, pathOverride?: string): void {
@@ -188,6 +206,23 @@ export class MemoryDedupStats extends Resource {
   async post(_data: any) {
     const ctx = (this as any).getContext?.();
     try {
+      // ─── Vector-space uniformity guard (flair#2559) ──────────────────────
+      // Consult the SAME chokepoint SemanticSearch and the write-time dedup leg
+      // use. The sweep's ANN edges are only trustworthy for a store known
+      // uniform in the current space; on any non-uniform verdict (mixed, or an
+      // unknown verdict: not yet verified / scan-failed) it fails CLOSED and
+      // returns no vector-derived counts, naming the state in the response —
+      // never numbers computed across spaces. Nothing is persisted in that case.
+      const verdict = await embeddingSpaceVerdict();
+      if (!verdict.uniform) {
+        return {
+          clusterCount: null,
+          largestClusterSize: null,
+          totalMemoriesInClusters: null,
+          computedAt: new Date().toISOString(),
+          embeddingSpace: { state: verdict.state, reason: verdict.reason },
+        };
+      }
       return await computeAndPersist(ctx);
     } catch (err: any) {
       return new Response(

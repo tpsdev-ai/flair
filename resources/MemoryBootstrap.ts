@@ -22,6 +22,7 @@ import {
 // semantic-retrieval-core.ts's module doc for the full boundary).
 import { retrieveCandidates, DEFAULT_SELECT } from "./semantic-retrieval-core.js";
 import { retrievalMode } from "./bm25.js";
+import { embeddingSpaceVerdict, spaceGuardWarning, type EmbeddingSpaceVerdict } from "./embedding-space-guard.js";
 import { buildTrustBlock } from "./trust-block.js";
 import { projectRowsThroughPointers } from "./memory-host-source.js";
 import { formatHostSourceCitation } from "./host-source-citation.js";
@@ -874,6 +875,11 @@ export class BootstrapMemories extends Resource {
       : 0;
     tokenBudget -= taskReserve;
     let taskRetrievalHint: string | undefined;
+    // flair#2559 — the guard verdict when the task-relevant selection's
+    // embedding leg was refused (a non-uniform store). Declared here so the
+    // response tail can surface the state-named warning; set inside the
+    // task-relevant block below.
+    let spaceGuardVerdict: EmbeddingSpaceVerdict | null = null;
 
     // --- 2. Permanent memories ---
     // Own-scoped pushdown: `agentId==self` + `durability==permanent`, both
@@ -1129,8 +1135,26 @@ export class BootstrapMemories extends Resource {
         } catch {}
       }
 
-      if (mode !== "bm25-only" && !queryEmbedding) taskRetrievalHint = "Task retrieval skipped: query embedding unavailable.";
-      if (mode === "bm25-only" || queryEmbedding) {
+      // ─── Vector-space uniformity guard (flair#2559) ────────────────────
+      // Consult the SAME chokepoint SemanticSearch uses (embeddingSpaceVerdict()):
+      // when the store's model stamps are not KNOWN uniform in the current
+      // embedding space — a non-current stamp observed, or an unknown verdict
+      // (before the first scan, or after a scan error) — cosining the task
+      // embedding against stored vectors could cross spaces. Fails CLOSED: the
+      // embedding leg is refused and the selection degrades to its non-vector
+      // (lexical) path, with the SAME state-named warning SemanticSearch emits.
+      // Consulted only when a query embedding is available (outside bm25-only,
+      // which ignores any query embedding).
+      if (queryEmbedding) {
+        const verdict = await embeddingSpaceVerdict();
+        if (!verdict.uniform) {
+          queryEmbedding = null;
+          spaceGuardVerdict = verdict;
+        }
+      }
+
+      if (mode !== "bm25-only" && !queryEmbedding && !spaceGuardVerdict) taskRetrievalHint = "Task retrieval skipped: query embedding unavailable.";
+      if (mode === "bm25-only" || queryEmbedding || spaceGuardVerdict) {
         // flair#1207 — exclude own memories ALREADY placed via the authoritative
         // set (permanent + recent + predicted actually admitted). The old set was
         // built positionally (recent.filter by index) AND omitted `predicted`, so
@@ -1851,6 +1875,10 @@ export class BootstrapMemories extends Resource {
       // never absent, so "empty" is distinguishable from "unsupported").
       agentId,
       ...(taskRetrievalHint ? { taskRetrievalHint } : {}),
+      // flair#2559 — the task-relevant selection refused its embedding leg for a
+      // non-uniform store; the warning names the guard state (same wording as
+      // SemanticSearch's `_warning`).
+      ...(spaceGuardVerdict ? { _warning: spaceGuardWarning(spaceGuardVerdict, "keyword") } : {}),
       directoryHint: directoryHint(),
       scope: scopeInfo,
       soul: soulMap,
