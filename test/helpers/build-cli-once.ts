@@ -81,7 +81,6 @@ function newestMtimeMs(path: string): number {
   return st.mtimeMs;
 }
 
-/** A tsconfig and every file it `extends`, transitively (none today). */
 function tsconfigInputs(root: string, path: string, seen = new Set<string>()): string[] {
   const out: string[] = [];
   if (seen.has(path) || !existsSync(path)) return out;
@@ -102,8 +101,6 @@ function tsconfigInputs(root: string, path: string, seen = new Set<string>()): s
   return out;
 }
 
-/** Every build INPUT whose change must make dist/cli.js stale. Exported so a
- *  fixture pins the set — a stale-dist escape here is silent. */
 export function buildCliInputs(root = ROOT): string[] {
   return [
     join(root, "src"),
@@ -114,7 +111,6 @@ export function buildCliInputs(root = ROOT): string[] {
   ];
 }
 
-/** dist/cli.js exists and is at least as new as the newest build input. */
 export function cliIsFresh(root = ROOT): boolean {
   try {
     const cliPath = join(root, "dist", "cli.js");
@@ -129,7 +125,7 @@ export function cliIsFresh(root = ROOT): boolean {
 export function assertCliBuildFresh(root = ROOT): void {
   if (cliIsFresh(root)) return;
   const cli = join(root, "dist", "cli.js");
-  throw new Error(`[build-cli-once] refusing to spawn CLI: ${cli} is missing or stale. Rebuild first: \`bun run build:cli\`.`);
+  throw new Error(`[build-cli-once] refusing to spawn CLI: ${cli} freshness could not be verified. Rebuild first: \`bun run build:cli\`.`);
 }
 
 export function spawnCli(args: string[], options: SpawnOptionsWithoutStdio & { timeout: number }, root = ROOT) {

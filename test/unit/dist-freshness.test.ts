@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, it } from "bun:test";
 import { once } from "node:events";
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { assertFlairDistFresh, distFreshnessIssues, isFlairSourceRoot } from "../helpers/dist-freshness.js";
@@ -13,7 +13,6 @@ afterAll(() => {
   for (const dir of roots) rmSync(dir, { recursive: true, force: true, maxRetries: 2 });
 });
 
-/** A second, in epoch milliseconds, offset from a fixed base. */
 const BASE_MS = Date.parse("2026-01-01T00:00:00.000Z");
 const OLD = BASE_MS;
 const NEW = BASE_MS + 60_000;
@@ -23,7 +22,6 @@ function write(path: string, contents = "x\n"): void {
   writeFileSync(path, contents);
 }
 
-/** Stamp every file under `dir` with `mtimeMs`. */
 function stamp(dir: string, mtimeMs: number): void {
   const at = new Date(mtimeMs);
   let isDir = false;
@@ -34,33 +32,32 @@ function stamp(dir: string, mtimeMs: number): void {
   }
   if (isDir) {
     for (const name of readdirSync(dir)) stamp(join(dir, name), mtimeMs);
-  } else {
-    utimesSync(dir, at, at);
   }
+  utimesSync(dir, at, at);
 }
 
 interface Fixture {
   root: string;
 }
 
-/**
- * Build a fresh Flair-shaped tree: every input mtime is OLD and every built
- * output mtime is NEW (fresh, like CI after a build).
- */
 function makeTree(): Fixture {
   const root = mkdtempSync(join(tmpdir(), "flair-2583-fixture-"));
   roots.push(root);
   write(join(root, "resources", "foo.ts"));
-  write(join(root, "tsconfig.json"), '{ "include": ["resources/**/*.ts"] }\n');
-  write(join(root, "package.json"), '{ "name": "flair-fixture", "version": "1.0.0" }\n');
+  write(join(root, "resources", "peer.ts"));
+  write(join(root, "tsconfig.json"), '{ "compilerOptions": { "outDir": "dist", "rootDir": "." }, "include": ["resources/**/*.ts"] }\n');
+  write(join(root, "package.json"), '{ "name": "@tpsdev-ai/flair", "version": "1.0.0", "main": "./dist/resources/in-process-api.js" }\n');
   write(join(root, "bun.lock"));
   write(join(root, "scripts", "write-build-info.mjs"));
+  write(join(root, "scripts", "vendor-tool-descriptors.mjs"));
+  write(join(root, "packages", "flair-tool-descriptors", "src", "index.ts"));
   write(join(root, "src", "cli.ts"));
   write(join(root, "tsconfig.cli.json"), '{ "include": ["src/cli.ts"] }\n');
   write(join(root, "dist", "resources", "foo.js"));
+  write(join(root, "dist", "resources", "peer.js"));
   write(join(root, "dist", "build-info.json"), "{}\n");
   write(join(root, "dist", "cli.js"), 'require("node:fs").writeFileSync(process.argv[2], "ran");\n');
-  for (const input of ["resources", "tsconfig.json", "package.json", "bun.lock", "scripts", "src", "tsconfig.cli.json"]) {
+  for (const input of ["resources", "tsconfig.json", "package.json", "bun.lock", "scripts", "packages", "src", "tsconfig.cli.json"]) {
     stamp(join(root, input), OLD);
   }
   for (const output of ["dist/resources", "dist/build-info.json", "dist/cli.js"]) {
@@ -84,14 +81,14 @@ describe("dist freshness (flair#2583)", () => {
     expect(issues[0].message).toContain("resources/foo.ts");
     expect(issues[0].message).toContain("newer than the oldest built resource");
     expect(issues[0].remedy).toBe("bun run build");
-    expect(() => assertFlairDistFresh(root)).toThrow(/dist\/ was not built from the current sources/);
+    expect(() => assertFlairDistFresh(root)).toThrow(/dist\/ freshness could not be verified/);
   });
 
   it("a missing dist/resources is reported", () => {
     const { root } = makeTree();
     rmSync(join(root, "dist", "resources"), { recursive: true, force: true });
     const issues = distFreshnessIssues(root);
-    expect(issues.some((i) => i.message.includes("dist/resources contains no built resources"))).toBe(true);
+    expect(issues.some((i) => i.message.includes("dist/resources"))).toBe(true);
   });
 
   it("fresh resources do not require dist/cli.js or fresh CLI sources", () => {
@@ -140,12 +137,83 @@ describe("dist freshness (flair#2583)", () => {
     expect(existsSync(marker)).toBe(false);
   }, 5000);
 
-  it("a tree without tsconfig.json is not the Flair source tree and is skipped", () => {
+  it("a non-Flair component with resources and tsconfig is skipped", () => {
     const { root } = makeTree();
-    rmSync(join(root, "tsconfig.json"));
+    write(join(root, "package.json"), '{ "name": "other-component", "main": "./dist/resources/in-process-api.js" }');
     rmSync(join(root, "dist"), { recursive: true, force: true });
     expect(isFlairSourceRoot(root)).toBe(false);
     expect(() => assertFlairDistFresh(root)).not.toThrow();
+  });
+
+  it("the Flair name without the resources entry is skipped", () => {
+    const { root } = makeTree();
+    write(join(root, "package.json"), '{ "name": "@tpsdev-ai/flair", "version": "1.0.0", "main": "./other.js" }');
+    expect(isFlairSourceRoot(root)).toBe(false);
+    expect(() => assertFlairDistFresh(root)).not.toThrow();
+  });
+
+  for (const input of ["packages/flair-tool-descriptors/src/index.ts", "scripts/vendor-tool-descriptors.mjs", "resources/foo.ts"]) {
+    it(`startup refuses a newer ${input}`, async () => {
+      const { root } = makeTree();
+      stamp(join(root, input), NEW + 60_000);
+      await expect(startHarper({ cwd: root, harperBinDir: root })).rejects.toThrow(input);
+    });
+  }
+
+  for (const deleted of ["resources/foo.ts", "dist/resources/foo.js", "tsconfig.json", "bun.lock", "dist/build-info.json"]) {
+    it(`startup refuses after deleting ${deleted}`, async () => {
+      const { root } = makeTree();
+      rmSync(join(root, deleted));
+      if (deleted === "resources/foo.ts") {
+        expect(distFreshnessIssues(root).some((i) => i.message === "dist/resources/foo.js has no source in the resources build configuration")).toBe(true);
+      } else if (deleted === "dist/resources/foo.js") {
+        expect(distFreshnessIssues(root).some((i) => i.message === "dist/resources/foo.js is missing")).toBe(true);
+      }
+      await expect(startHarper({ cwd: root, harperBinDir: root })).rejects.toThrow(/freshness could not be verified/);
+    });
+  }
+
+  for (const unreadable of ["resources/foo.ts", "dist/resources/foo.js", "tsconfig.json", "package.json", "dist/build-info.json"]) {
+    it(`startup refuses a dangling path at ${unreadable}`, async () => {
+      const { root } = makeTree();
+      rmSync(join(root, unreadable));
+      symlinkSync(join(root, "absent"), join(root, unreadable));
+      await expect(startHarper({ cwd: root, harperBinDir: root })).rejects.toThrow(/could not be read/);
+    });
+  }
+
+  for (const unreadable of ["tsconfig.json", "package.json", "bun.lock", "scripts/write-build-info.mjs", "scripts/vendor-tool-descriptors.mjs", "packages/flair-tool-descriptors/src/index.ts", "dist/build-info.json"]) {
+    it(`startup refuses a directory read as ${unreadable}`, async () => {
+      const { root } = makeTree();
+      rmSync(join(root, unreadable));
+      mkdirSync(join(root, unreadable));
+      await expect(startHarper({ cwd: root, harperBinDir: root })).rejects.toThrow(/could not be read/);
+    });
+  }
+
+  it("a source directory newer than the oldest resource output is reported", () => {
+    const { root } = makeTree();
+    const at = new Date(NEW + 60_000);
+    utimesSync(join(root, "resources"), at, at);
+    expect(() => assertFlairDistFresh(root)).toThrow("resources");
+  });
+
+  it("a build directory newer than the build-info stamp is reported", () => {
+    const { root } = makeTree();
+    const at = new Date(NEW + 60_000);
+    utimesSync(join(root, "dist/resources"), at, at);
+    expect(() => assertFlairDistFresh(root)).toThrow("dist/resources");
+  });
+
+  it("deleting a source and its output still reports the changed directory", () => {
+    const { root } = makeTree();
+    write(join(root, "resources/other.ts"));
+    write(join(root, "dist/resources/other.js"));
+    stamp(join(root, "resources"), OLD);
+    stamp(join(root, "dist/resources"), NEW);
+    rmSync(join(root, "resources/foo.ts"));
+    rmSync(join(root, "dist/resources/foo.js"));
+    expect(() => assertFlairDistFresh(root)).toThrow("newer than");
   });
 
   it("startHarper refuses a stale tree before spawning and leaks no scratch dir", async () => {

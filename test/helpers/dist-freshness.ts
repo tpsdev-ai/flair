@@ -1,147 +1,142 @@
-/**
- * Refuse stale resource builds before Harper loads the component (flair#2583).
- */
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { join, relative, resolve } from "node:path";
+import { lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { join, relative, sep } from "node:path";
+import ts from "typescript";
 
 interface FileMtime {
   path: string;
   mtimeMs: number;
+  directory: boolean;
 }
 
-/**
- * The newest file under `path` (recursively). A directory's OWN mtime is
- * ignored: it changes on add/remove, not on an edit to a file. A missing path
- * is reported as mtime 0.
- */
-function newestEntry(path: string): FileMtime {
-  let st;
-  try {
-    st = statSync(path);
-  } catch {
-    return { path, mtimeMs: 0 };
+function entriesUnder(path: string): FileMtime[] {
+  const st = statSync(path);
+  const entry = { path, mtimeMs: st.mtimeMs, directory: st.isDirectory() };
+  if (entry.directory) {
+    return [entry, ...readdirSync(path).flatMap((name) => entriesUnder(join(path, name)))];
   }
-  if (st.isDirectory()) {
-    let newest: FileMtime = { path, mtimeMs: 0 };
-    for (const name of readdirSync(path)) {
-      const e = newestEntry(join(path, name));
-      if (e.mtimeMs > newest.mtimeMs) newest = e;
-    }
-    return newest;
-  }
-  return { path, mtimeMs: st.mtimeMs };
+  readFileSync(path);
+  return [entry];
 }
 
-/** Every file under `path` (recursively), with its mtime. */
-function filesUnder(path: string, out: FileMtime[] = []): FileMtime[] {
-  let st;
-  try {
-    st = statSync(path);
-  } catch {
-    return out;
+function resourceBuild(root: string): { inputs: string[]; config: ts.ParsedCommandLine } {
+  const configs = new Set<string>();
+  const config = ts.getParsedCommandLineOfConfigFile(join(root, "tsconfig.json"), {}, {
+    ...ts.sys,
+    getCurrentDirectory: () => root,
+    readFile: (path) => {
+      configs.add(path);
+      return readFileSync(path, "utf-8");
+    },
+    onUnRecoverableConfigFileDiagnostic: (diagnostic) => {
+      throw new Error(ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n"));
+    },
+  });
+  if (!config || config.errors.length) {
+    throw new Error(config?.errors.map((d) => ts.flattenDiagnosticMessageText(d.messageText, "\n")).join("\n") || "could not parse tsconfig.json");
   }
-  if (st.isDirectory()) {
-    for (const name of readdirSync(path)) filesUnder(join(path, name), out);
-  } else {
-    out.push({ path, mtimeMs: st.mtimeMs });
-  }
-  return out;
+  return {
+    config,
+    inputs: [
+      join(root, "resources"),
+      ...configs,
+      join(root, "package.json"),
+      join(root, "bun.lock"),
+      join(root, "scripts", "write-build-info.mjs"),
+      join(root, "scripts", "vendor-tool-descriptors.mjs"),
+      join(root, "packages", "flair-tool-descriptors", "src", "index.ts"),
+    ],
+  };
 }
 
-/** A tsconfig and every file it `extends`, transitively. */
-function tsconfigInputs(root: string, path: string, seen = new Set<string>()): string[] {
-  const out: string[] = [];
-  if (seen.has(path) || !existsSync(path)) return out;
-  seen.add(path);
-  out.push(path);
-  try {
-    // tsconfig.json is JSONC; `extends` here is a bare string with no comments
-    // on its line, so a targeted match is enough and avoids a JSON5 dep.
-    const text = readFileSync(path, "utf-8");
-    const m = text.match(/"extends"\s*:\s*"([^"]+)"/);
-    if (m) {
-      const base = m[1].startsWith(".") ? resolve(path, "..", m[1]) : resolve(root, "node_modules", m[1]);
-      out.push(...tsconfigInputs(root, base, seen));
-    }
-  } catch {
-    /* unreadable — the file's own mtime still counts via the caller */
-  }
-  return out;
-}
-
-/** Every input whose change must make dist/resources stale. */
 export function resourcesInputs(root: string): string[] {
-  return [
-    join(root, "resources"),
-    ...tsconfigInputs(root, join(root, "tsconfig.json")),
-    join(root, "package.json"),
-    join(root, "bun.lock"),
-    join(root, "scripts", "write-build-info.mjs"),
-  ];
+  return resourceBuild(root).inputs;
 }
 
-/** True when `root` is the Flair source tree the resources build reads. */
 export function isFlairSourceRoot(root: string): boolean {
-  return existsSync(join(root, "resources")) && existsSync(join(root, "tsconfig.json"));
+  let text: string;
+  try {
+    text = readFileSync(join(root, "package.json"), "utf-8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      try {
+        lstatSync(join(root, "package.json"));
+      } catch (statError) {
+        if ((statError as NodeJS.ErrnoException).code === "ENOENT") return false;
+        throw statError;
+      }
+    }
+    throw err;
+  }
+  const pkg = JSON.parse(text);
+  return pkg.name === "@tpsdev-ai/flair" && pkg.main === "./dist/resources/in-process-api.js";
 }
 
 export interface DistIssue {
-  /** What is stale or missing, named. */
   message: string;
-  /** The exact command that rebuilds it. */
   remedy: string;
 }
 
-/**
- * Reasons `root`'s dist/resources is stale or missing, each naming the
- * input (or output) and the command that fixes it. Empty means fresh.
- */
 export function distFreshnessIssues(root: string): DistIssue[] {
   const issues: DistIssue[] = [];
+  const report = (message: string) => issues.push({ message, remedy: "bun run build" });
   try {
+    const stamp = join(root, "dist", "build-info.json");
+    readFileSync(stamp);
+    const stampMtime = statSync(stamp).mtimeMs;
+    const { inputs, config } = resourceBuild(root);
+    const sourceEntries = entriesUnder(join(root, "resources"));
+    const expected = new Set<string>();
+    for (const source of config.fileNames) {
+      if (/\.d\.[cm]?ts$/.test(source)) continue;
+      for (const output of ts.getOutputFileNames(config, source, !ts.sys.useCaseSensitiveFileNames)) {
+        if (output.startsWith(join(root, "dist", "resources") + sep)) expected.add(output);
+      }
+    }
     const builtResources = join(root, "dist", "resources");
-    const built = filesUnder(builtResources);
-    if (built.length === 0) {
-      issues.push({ message: `${relative(root, builtResources)} contains no built resources`, remedy: "bun run build" });
-    } else {
-      let oldest = built[0];
-      for (const f of built) if (f.mtimeMs < oldest.mtimeMs) oldest = f;
-      for (const input of resourcesInputs(root)) {
-        const e = newestEntry(input);
-        if (e.mtimeMs > oldest.mtimeMs) {
-          issues.push({
-            message: `${relative(root, e.path)} (${new Date(e.mtimeMs).toISOString()}) is newer than the oldest built resource ${relative(root, oldest.path)} (${new Date(oldest.mtimeMs).toISOString()})`,
-            remedy: "bun run build",
-          });
+    const builtEntries = entriesUnder(builtResources);
+    const built = builtEntries.filter((entry) => !entry.directory);
+    const actual = new Set(built.map((entry) => entry.path));
+    for (const output of expected) {
+      if (!actual.has(output)) report(`${relative(root, output)} is missing`);
+    }
+    for (const output of actual) {
+      if (!expected.has(output)) report(`${relative(root, output)} has no source in the resources build configuration`);
+    }
+    if (!built.length) report(`${relative(root, builtResources)} contains no built resources`);
+    else {
+      const oldest = built.reduce((a, b) => a.mtimeMs < b.mtimeMs ? a : b);
+      const watched = [...sourceEntries, ...inputs.filter((p) => p !== join(root, "resources")).map((path) => {
+        const st = statSync(path);
+        readFileSync(path);
+        return { path, mtimeMs: st.mtimeMs };
+      })];
+      for (const entry of watched) {
+        if (entry.mtimeMs > oldest.mtimeMs) {
+          report(`${relative(root, entry.path)} (${new Date(entry.mtimeMs).toISOString()}) is newer than the oldest built resource ${relative(root, oldest.path)} (${new Date(oldest.mtimeMs).toISOString()})`);
         }
       }
     }
-    const stamp = join(root, "dist", "build-info.json");
-    if (!existsSync(stamp)) {
-      issues.push({ message: `${relative(root, stamp)} is missing`, remedy: "bun run build" });
+    for (const entry of builtEntries.filter((e) => e.directory)) {
+      if (entry.mtimeMs > stampMtime) report(`${relative(root, entry.path)} directory is newer than dist/build-info.json`);
     }
   } catch (err) {
-    // A tree that could not be read is NOT a fresh tree: fail closed.
-    issues.push({
-      message: `the build tree could not be read: ${(err as Error).message}`,
-      remedy: "bun run build",
-    });
+    report(`the build tree could not be read: ${(err as Error).message}`);
   }
   return issues;
 }
 
-/**
- * Throw a named error if `root` is the Flair source tree and its dist/ was not
- * built from the current sources. Call before a component is loaded. No-op for
- * any root that is not the Flair source tree.
- */
 export function assertFlairDistFresh(root: string): void {
-  if (!isFlairSourceRoot(root)) return;
-  const issues = distFreshnessIssues(root);
+  let issues: DistIssue[];
+  try {
+    if (!isFlairSourceRoot(root)) return;
+    issues = distFreshnessIssues(root);
+  } catch (err) {
+    issues = [{ message: `package identity could not be read: ${(err as Error).message}`, remedy: "bun run build" }];
+  }
   if (issues.length === 0) return;
   const remedies = [...new Set(issues.map((i) => i.remedy))];
   throw new Error(
-    `[harper-lifecycle] refusing to start Harper: ${root} dist/ was not built from the current sources.\n` +
+    `[harper-lifecycle] refusing to start Harper: ${root} dist/ freshness could not be verified.\n` +
       issues.map((i) => `  - ${i.message}`).join("\n") +
       `\nRebuild first: ${remedies.map((r) => `\`${r}\``).join(" then ")}.`,
   );

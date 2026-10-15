@@ -844,10 +844,6 @@ export async function startHarper(opts: StartHarperOptions = {}): Promise<Harper
   }
 
   // ── Local mode: spawn Harper from node_modules ────────────────────────────
-  // flair#2583: the component Harper loads below is the COMPILED resources
-  // bundle (config.yaml's jsResource glob), so a resource edit without a
-  // rebuild would boot the previous build. Fail fast, naming the stale input
-  // and the command to run, before any install or spawn.
   assertFlairDistFresh(cwd);
   const ownsInstallDir = !opts.installDir;
   // Boot sweep first: leftovers from SIGKILL / cancelled CI are not small,
