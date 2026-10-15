@@ -57,15 +57,9 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
     // completeness only.
     stampAttribution(auth, content, RECORD_TYPES.OrgEvent.ownerField, RECORD_TYPES.OrgEvent.attribution.post, "forbidden: unreachable for stamp-default");
 
-    // The id this POST writes. For a POST addressed to one record
-    // (`/OrgEvent/<id>`): the addressed id when the body has no `id` or an `id`
-    // equal to the address as text (`0` for `/OrgEvent/0`), otherwise the
-    // body's `id`. For a POST to the collection:
-    // the body's `id` when it supplies one. In either case an id is generated
-    // when the result is absent or the empty string. The raw put() below is an
-    // upsert: an existing event at that id is updated, subject to the
-    // owner-field rule that follows. This id selection also applies to
-    // administrators and in-process calls.
+    // An addressed POST binds a missing body id, or one equal as text, to getId().
+    // At /OrgEvent/, an absent or empty body id generates an id.
+    // At /OrgEvent/<prefix>/, a missing body id takes the target id (<prefix>/).
     const addressedId = (this as any).getId?.();
     if (content && typeof content === "object" &&
       (typeof addressedId === "string" || typeof addressedId === "number") &&

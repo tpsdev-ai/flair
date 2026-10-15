@@ -305,7 +305,7 @@ describe("a write may name only the record it addresses (through the guard)", ()
     expect(calls.length).toBe(2);
   });
 
-  it("does not apply the body-id rule to a POST to a collection (it has no addressed id)", async () => {
+  it("does not apply the body-id rule to a POST to a collection", async () => {
     const { Table, calls } = makeTable();
     const d = deps();
     guardOwnerScopedWrites({ OrgEvent: Table }, { OrgEvent: "authorId" }, d);

@@ -28,10 +28,10 @@
  * the asynchronous guard path, including permission-marked internal calls.
  *
  * ── The seam ────────────────────────────────────────────────────────────────
- * Harper serves a table write through the class's static put/patch/delete/post,
- * which resolves the request target to the record id it will write and then
- * calls the class's static `getResource(target, context, options)` with that
- * resolved target, the method in `options.method`, and the request as context.
+ * For an addressed REST call, Harper supplies the target resolved to a record
+ * id and the request as context to static `getResource(target, context, options)`.
+ * A collection target addresses no single record and carries `isCollection: true`.
+ * Internal or MQTT calls supply a context, not an HTTP request.
  * `guardOwnerScopedWrites` gives every owner-scoped table class its own static
  * `getResource` that applies the rule there and then delegates to the inherited
  * one. A resource class that extends the flair table inherits it; a custom
@@ -65,7 +65,7 @@ export interface OwnerScopedWriteDeps {
   readStored: (table: string, id: unknown) => unknown;
   /** The refusal when the stored record cannot be read (ownerCheckUnavailable). */
   unreadable: (err: unknown) => Response;
-  /** The parsed request body for this entry call (Harper's `request.data`), or a promise for it. */
+  /** Reads body data from the entry call's context. */
   readBody: (context: unknown) => unknown;
 }
 
@@ -159,9 +159,7 @@ export async function admitOwnerScopedWrite(
     return;
   }
 
-  // Addressed write: a scalar body `id` must name the addressed record. Harper
-  // has parsed the body onto the request by now; a body that cannot be read is
-  // left to Harper's own request handling.
+  // Addressed write: a scalar body `id` must name the addressed record.
   if (BODY_ID_METHODS.has(method)) {
     let body: unknown;
     try {

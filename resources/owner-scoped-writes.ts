@@ -12,9 +12,8 @@
  *
  * The stored record is read with its own empty context, so the read runs in a
  * fresh transaction as a trusted internal read of committed state, the same
- * read resources/auth-middleware.ts's single-record owner check makes. The body
- * is `request.data`, the body Harper itself writes from, read from the entry
- * call's context.
+ * read resources/auth-middleware.ts's single-record owner check makes.
+ * `readBody` reads `data` from the entry call's context.
  *
  * This module deliberately exports nothing: Harper registers exported values of
  * a resource module as routes.

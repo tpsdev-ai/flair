@@ -438,14 +438,24 @@ describe("owner-scoped writes: non-admin addressed writes and collection PUT/PAT
       expect((await rowsWhere("OrgEvent", "kind", kind)).map((r) => r.id), "the request wrote an id other than the addressed one").toEqual(["0"]);
     }, 30_000);
 
-    test("OrgEvent: a collection POST with no body id still writes a generated id", async () => {
+    test("OrgEvent: a root collection POST with no body id writes a generated id", async () => {
       const kind = `osw-kind-${randomUUID().slice(0, 8)}`;
       const res = await send(caller, "POST", "/OrgEvent/", { kind, summary: "collection-no-id" });
       expect(res.status, `collection OrgEvent POST returned ${res.status}: ${await res.text()}`).toBeLessThan(300);
       const rows = await rowsWhere("OrgEvent", "kind", kind);
       expect(rows.length).toBe(1);
       expect(rows[0].authorId).toBe(caller.id);
-      expect(String(rows[0].id).startsWith(`${caller.id}-`), "a collection POST with no body id writes a generated id").toBe(true);
+      expect(String(rows[0].id).startsWith(`${caller.id}-`), "a root collection POST with no body id writes a generated id").toBe(true);
+    }, 30_000);
+
+    test("OrgEvent: a prefixed collection POST with no body id writes the target id", async () => {
+      const prefix = `osw-prefix-${randomUUID().slice(0, 8)}`;
+      const kind = `osw-kind-${randomUUID().slice(0, 8)}`;
+      const res = await send(caller, "POST", `/OrgEvent/${prefix}/`, { kind, summary: "prefixed-collection" });
+      expect(res.status, `prefixed collection POST returned ${res.status}: ${await res.text()}`).toBeLessThan(300);
+      const rows = await rowsWhere("OrgEvent", "kind", kind);
+      expect(rows.map((row) => row.id)).toEqual([`${prefix}/`]);
+      expect(rows[0].authorId).toBe(caller.id);
     }, 30_000);
 
     test("Memory: an addressed POST with no body id writes the addressed record and no other", async () => {
