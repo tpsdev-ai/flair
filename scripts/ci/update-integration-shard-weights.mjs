@@ -4,10 +4,10 @@
 // The weights that steer integration-shards.mjs come from measured CI runs, not
 // guesses. Each input is a job log for an `Integration Tests (shard N/M)` job —
 // the `actions/jobs/<id>/logs` REST endpoint, or the per-job text file in the
-// run's logs archive. In a normal single-repeat run bun prints one
-// `##[group]<file>` … `##[endgroup]` block per integration file; with
-// `integration_repeats` a job can hold repeated blocks for the same file. This
-// reads the wall time of each block.
+// run's logs archive. Each main-suite `bun test` invocation prints one
+// `##[group]<file>` … `##[endgroup]` block per file it runs. The mutation step
+// adds another block in shard 1; dispatch repeats can add more.
+// This reads the wall time of each block.
 //
 // Per file the script keeps the MAX within a job (a mutation step can re-run a
 // file) and the MEDIAN across jobs, then writes the file → seconds map sorted by
