@@ -94,22 +94,23 @@ OrgEvent, WorkspaceState, Presence):
   Harper resolves the URL to, however the address is written.
 - An addressed POST, PUT or PATCH whose body carries a scalar `id` (a string or
   number) naming a different record than its URL is refused with
-  `403 write_id_not_addressed`. A body with no `id`, or with the addressed id,
-  proceeds; an OrgEvent or Memory POST addressed to a record with no body `id`
-  writes the addressed record.
+  `403 write_id_not_addressed`. An absent or matching body `id` passes the
+  body-id check, subject to the remaining checks. OrgEvent and Memory bind an
+  addressed POST's missing body `id` to the addressed id.
 - A PUT, PATCH or DELETE addressed to a table's collection rather than to one
   record is refused with `403 forbidden: a non-admin write to <Table> must
-  address one record by its id`. Write records one at a time, by id.
+  address one record by its id`.
 
-A refused write leaves its target row unchanged, and the refusal carries no
-record content. A POST to a collection is delegated to each resource's own
+A refusal by this guard leaves its target row unchanged and carries no record
+content. A POST to a collection is delegated to each resource's own
 POST handling — its create and attribution rules (for example, an OrgEvent
 collection POST that names an existing event owned by another agent is
 refused, one that names the caller's own existing event updates it, and a
 Presence heartbeat writes the caller's own row). Routes served
 by a custom resource rather than a table-backed one, such as
 `/AgentReadPosition`, apply their own ownership rule and response.
-Administrator writes and Flair's own in-process server writes are unchanged.
+The guard exempts administrator and in-process calls. OrgEvent POST id
+selection also applies to administrator and in-process calls.
 
 ### Cross-Agent Access (within an org)
 

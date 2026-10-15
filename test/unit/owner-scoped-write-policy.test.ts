@@ -98,7 +98,7 @@ describe("guardOwnerScopedWrites", () => {
     expect(calls).toEqual([]);
   });
 
-  it("lets a non-admin collection POST through to the resource (a create)", async () => {
+  it("delegates a non-admin collection POST to the resource", async () => {
     const { Table, calls } = makeTable();
     const d = deps();
     guardOwnerScopedWrites({ Presence: Table }, { Presence: "agentId" }, d);
@@ -300,7 +300,7 @@ describe("a write may name only the record it addresses (through the guard)", ()
     expect(calls.length).toBe(1);
   });
 
-  it("admits a write whose body id matches, or omits, the addressed id", async () => {
+  it("admits a caller-owned record with a matching or absent body id", async () => {
     const { Table, calls } = makeTable();
     const d = deps({ r1: { id: "r1", authorId: "caller" } });
     guardOwnerScopedWrites({ OrgEvent: Table }, { OrgEvent: "authorId" }, d);
@@ -328,7 +328,7 @@ describe("a write may name only the record it addresses (through the guard)", ()
     expect(calls.length).toBe(2);
   });
 
-  it("admits the write when the body cannot be read (left to Harper's own request handling)", async () => {
+  it("admits a caller-owned record when the body cannot be read", async () => {
     const { Table, calls } = makeTable();
     const d = deps({ r1: { id: "r1", authorId: "caller" } }, { readBody: async () => { throw new Error("unparsable"); } });
     guardOwnerScopedWrites({ OrgEvent: Table }, { OrgEvent: "authorId" }, d);

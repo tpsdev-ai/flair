@@ -17,10 +17,8 @@
 // Each refusal case asserts three things: the status is 403, the body is
 // exactly the named refusal (it carries nothing from the stored row), and the
 // target row read afterwards deeply equals its earlier read (stored rows
-// compared as parsed objects). The positive controls
-// further down assert that the owner's own writes, collection creates,
-// addressed creates and administrator writes are unaffected, because a guard
-// that broke everyone's writes would pass every refusal case just as happily.
+// compared as parsed objects). Positive controls cover owner writes,
+// collection and addressed creates, and administrator requests.
 //
 // Agents resolve to the least-privilege `flair-agent` user here, as they do in
 // production (ensureFlairAgentRole/ensureFlairAgentUser), so the cases exercise
@@ -462,7 +460,7 @@ describe("owner-scoped writes: non-admin addressed writes and collection PUT/PAT
     }, 30_000);
   });
 
-  describe("administrators are unchanged", () => {
+  describe("administrator collection PUT and suffixed PATCH", () => {
     test("an admin agent's PUT to the collection with a list of records writes them", async () => {
       const a = `osw-rel-admin-a-${randomUUID().slice(0, 8)}`;
       const b = `osw-rel-admin-b-${randomUUID().slice(0, 8)}`;

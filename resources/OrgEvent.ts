@@ -65,8 +65,8 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
     // the body's `id` when it supplies one. In either case an id is generated
     // when the result is absent or the empty string. The raw put() below is an
     // upsert: an existing event at that id is updated, subject to the
-    // owner-field rule that follows. This id selection applies to every
-    // caller, administrators and in-process calls included.
+    // owner-field rule that follows. This id selection also applies to
+    // administrators and in-process calls.
     const addressedId = (this as any).getId?.();
     if (content && typeof content === "object" &&
       (typeof addressedId === "string" || typeof addressedId === "number") &&
@@ -112,7 +112,7 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
     // (resources/owner-scoped-write-policy.ts) refuses a non-admin request
     // whose scalar body `id` names a record other than the addressed one, and
     // post() gives a body with no `id` the addressed id; a collection POST
-    // writes a generated id under post()'s own owner-field rule.
+    // follows post()'s id selection and owner-field rule.
     const __ownerDenial = await guardOwnerFieldImmutable(this, () => super.get(), content, "authorId");
     if (__ownerDenial) return __ownerDenial;
     const auth = await this._auth();

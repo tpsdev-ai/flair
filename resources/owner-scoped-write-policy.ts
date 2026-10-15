@@ -28,16 +28,13 @@
  * decision. The owner is read from STORED state, never from the request body.
  * A write refused by this guard leaves its target row unchanged
  * (authentication has already recorded the request's replay nonce), and one
- * such refusal fails the whole request. When the guard's own stored-record read for an addressed owner check
- * fails, the request is refused with the named `owner_check_unavailable`; a
- * resource's own read-failure handling on other paths (for example a Presence
- * heartbeat) is unchanged.
+ * such refusal fails the whole request. When the guard's own stored-record
+ * read for an addressed owner check fails, the request is refused with
+ * `owner_check_unavailable`.
  *
  * This guard exempts administrators, trusted internal calls and anonymous
- * callers (anonymous writes are refused by each resource's own gate), and it
- * does not act on server code that writes these tables in-process: it acts
- * only on the entry call of an HTTP request, the one call whose target Harper marks with the
- * request's permission set (`checkPermission`) before authorizing it.
+ * callers. It acts only on the HTTP entry call whose target Harper marks with
+ * the request's permission set (`checkPermission`), not on in-process writes.
  *
  * ── The seam ────────────────────────────────────────────────────────────────
  * Harper serves a table write through the class's static put/patch/delete/post,
@@ -65,11 +62,11 @@
  * An addressed POST, PUT or PATCH is owner-checked on the record its URL
  * addresses, and a scalar body `id` must name that same record: a non-admin
  * request whose scalar body `id` names a different record is refused with
- * `write_id_not_addressed` (403), which echoes neither id. A body with no `id`,
- * or with the addressed id, passes this body-id check and is still subject to
- * the stored-owner check and the resource's own rules; a non-scalar body `id`
- * is left to each resource's own request handling. A resource whose write path keys its table
- * write on the body `id` therefore receives the addressed id, no id, or a
+ * `write_id_not_addressed` (403), which echoes neither id. An absent or matching
+ * body `id` passes the body-id check, subject to the remaining checks. A
+ * non-scalar body `id` is left to each resource's own request handling. A
+ * resource whose write path keys its table write on the body `id` therefore
+ * receives the addressed id, no id, or a
  * non-scalar id that the guard leaves to it; where it fills in a missing id for
  * an addressed write it uses the addressed one (Memory's and OrgEvent's
  * post()), and OrgEvent's post() also uses the addressed id when the body id

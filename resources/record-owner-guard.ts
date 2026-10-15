@@ -213,10 +213,7 @@ export function ownerMutationRefusal(table: string): Response {
 /**
  * The refusal for a non-admin PUT, PATCH or DELETE that addresses an
  * owner-scoped table's collection rather than one record: 403 with a body that
- * names only the table. Such a request does not resolve to one addressed row,
- * so the guard cannot owner-check the rows it would write before the write; a
- * non-admin PUT, PATCH or DELETE addresses one record at a time, by its id
- * (resources/owner-scoped-write-policy.ts).
+ * names only the table (resources/owner-scoped-write-policy.ts).
  */
 export function collectionWriteRefusal(table: string): Response {
   return new Response(JSON.stringify({

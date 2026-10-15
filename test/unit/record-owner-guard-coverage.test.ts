@@ -235,7 +235,7 @@ describe("resolveGuardedRecord", () => {
       .toEqual({ table: "Soul", ownerField: "agentId", id: "alice:mission" });
   });
 
-  it("leaves address forms whose id Harper may resolve differently to the owner-scoped write guard", () => {
+  it("returns null for dotted ids, extra segments and trailing slashes", () => {
     expect(resolveGuardedRecord("/Relationship/r.json")).toBeNull();   // a `.` suffix Harper may strip
     expect(resolveGuardedRecord("/Relationship/r%2Ejson")).toBeNull(); // the same, percent-encoded
     expect(resolveGuardedRecord("/Relationship/a/b")).toBeNull();      // extra segments
