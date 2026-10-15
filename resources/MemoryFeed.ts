@@ -16,7 +16,7 @@ import { deletePointerRowViaTable } from "./host-pointer-adapter.js";
 import { stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./memory-declared-attributes.js";
 import { buildProvenance } from "./provenance.js";
 import { redactMemoryWrite } from "./memory-redaction.js";
-import { checkedWriteResponse, feedResponseFields, suppliedMemoryFields } from "./memory-write-response.js";
+import { REDACTION_RULES, buildFromAllowlist, feedResponseFields, suppliedMemoryFields } from "./memory-write-response.js";
 import { applyFederationBookkeeping, applyOriginatorInstanceId, resolveStoredRow } from "./originator-instance.js";
 import { resolveReadScope } from "./memory-read-scope.js";
 import { reservedSeedFeedWriteDenial, reservedSeedSubjectDenial, writeTargetIds } from "./seed-reservation.js";
@@ -598,21 +598,20 @@ function isDedupMatch(row: any, match: any): boolean {
 }
 
 /**
- * The response to a feed write: a response-only copy of the row the feed
- * stored or matched; the stored row is not modified. flair#2561: the copy
- * (feedResponseFields) holds the listed response fields and the non-null
- * Memory attributes the request supplied, each as stored, and no `embedding`
- * or `embeddingModel` key at any depth. flair#2407: it carries
- * `redactedValues` when that count is above zero (checkedWriteResponse).
- * feedResponseFields returns a refusal Response as built and replaces any
- * other result it does not copy (no value, a scalar, an object that is not a
- * feed row such as a Date, a successful Response, ...) with the
- * write_response_withheld refusal, which this returns.
+ * The response to a feed write, built by allowlist; the stored row is not
+ * modified. flair#2561: feedResponseFields builds it from the row the feed
+ * stored or matched: the listed response fields and the non-null Memory
+ * attributes the request supplied, each read by name and copied when it has
+ * its schema type. flair#2407: it carries `redactedValues` when that count is
+ * above zero. A refusal Response is returned as built; a successful Response,
+ * or a result with no string `id`, is answered with the
+ * write_response_withheld refusal.
  */
 function feedWriteResponse(result: any, redactedValues: number, supplied: ReadonlySet<string>): any {
   const response = feedResponseFields(result, supplied);
-  if (response instanceof Response || !response || typeof response !== "object" || Array.isArray(response)) return response;
-  return redactedValues > 0 ? checkedWriteResponse({ ...response, redactedValues }) : response;
+  if (response instanceof Response || redactedValues <= 0) return response;
+  const redaction = buildFromAllowlist({ redactedValues }, REDACTION_RULES);
+  return redaction instanceof Response ? redaction : Object.assign(response, redaction);
 }
 
 /**
