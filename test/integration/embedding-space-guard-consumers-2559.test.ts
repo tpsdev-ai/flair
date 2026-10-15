@@ -14,8 +14,8 @@
  *
  * The unknown verdict is held the way embedding-space-guard-unknown-2530 holds
  * it: the boot pre-warm's first scan parks at the test-only `space-guard-scan`
- * pause point, armed before Harper starts. Releasing it converges the (uniform)
- * store and reopens the gate; a signed PATCH that stores a foreign
+ * pause point, armed before Harper starts. Releasing it publishes a uniform
+ * verdict and reopens the gate; an admin-authenticated PATCH that stores a foreign
  * `embeddingModel` stamp then trips the latch immediately (the #2425 path), for
  * the mixed verdict. No production port is used: all traffic is loopback to the
  * ephemeral instance this file started.
@@ -92,7 +92,7 @@ async function dedupStats(h: HarperInstance): Promise<any> {
   return JSON.parse(text);
 }
 
-/** A signed PATCH that stores a foreign embedding stamp — the write-maintained
+/** An admin-authenticated PATCH that stores a foreign embedding stamp — the write-maintained
  *  latch path (#2425). */
 async function patchForeignStamp(h: HarperInstance): Promise<void> {
   const res = await fetch(`${h.httpURL}/Memory/${ROW}`, {
@@ -153,7 +153,7 @@ describe("MemoryDedupStats consults the guard against a real Harper (flair#2559)
     expect(unknown.embeddingSpace?.state).toBe("unverified");
     expect(unknown.embeddingSpace?.reason).toBeNull();
 
-    // Release the scan: the (uniform) store reopens the gate.
+    // Release the scan to publish a uniform verdict.
     writeFileSync(join(pauseDir, `go.${POINT}`), "");
     expect(await waitForGuardState(h!, "uniform", 60_000)).toBe("uniform");
 
@@ -232,7 +232,7 @@ gate("MemoryBootstrap's task-relevant selection consults the guard against a rea
     if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
   }, 60_000);
 
-  test("unknown warning while the first scan is held, then no warning uniform, then the mixed warning", async () => {
+  test("unknown warning, verified-uniform response, then mixed warning with lexical task results", async () => {
     expect(await waitFor(join(pauseDir, `paused.${POINT}`), 30_000), "no scan reached the boot pause").toBe(true);
 
     const unknown = await bootstrap();
@@ -245,14 +245,18 @@ gate("MemoryBootstrap's task-relevant selection consults the guard against a rea
     const uniform = await bootstrap();
     expect(uniform._warning).toBeUndefined();
 
+    const old = new Date(Date.now() - 90 * 24 * 3600_000).toISOString();
     await adminOp(h!, {
       operation: "insert", database: "flair", table: "Memory", records: [
-        { id: ROW, agentId: AGENT, content: "seeded row", durability: "standard", visibility: "shared", createdAt: new Date().toISOString() },
+        { id: ROW, agentId: AGENT, content: "federation replication direction", durability: "persistent", visibility: "shared", archived: false, createdAt: old, updatedAt: old },
       ],
     });
     await patchForeignStamp(h!);
     const mixed = await bootstrap();
     expect(String(mixed._warning)).toContain("non-current embedding model stamp was observed");
     expect(String(mixed._warning)).toContain("results are keyword-only");
+    expect(mixed.memories).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: ROW, section: "relevant" }),
+    ]));
   }, 180_000);
 });

@@ -1,7 +1,7 @@
 /**
  * embedding-space-guard-consumers-2559.test.ts — flair#2559.
  *
- * The two remaining consumers of stored vectors now consult the query-time
+ * The remaining runtime vector-comparison consumers now consult the query-time
  * embedding-space guard (resources/embedding-space-guard.ts) with the same
  * policy SemanticSearch and the write-time dedup leg use:
  *   (a) MemoryBootstrap's task-relevant selection REFUSES its task embedding on
@@ -10,34 +10,34 @@
  *   (b) MemoryDedupStats returns NO vector-derived counts (never numbers
  *       computed across spaces) and names the guard state in the response.
  *
- * Each consumer is driven over a controlled corpus against the SHIPPED code, in
- * its own process, for a uniform verdict (unchanged behaviour), a mixed verdict
- * and an unknown verdict. This mirrors embedding-space-guard-legs.test.ts:
- * a real-Harper spawn cannot HOLD a two-space corpus deterministically (the
- * stamp migration converges it on the next boot), so the shipped consumers are
- * exercised here against an in-memory harper, and the real-Harper unknown
- * verdict and foreign-stamp latch are covered by the integration tests
- * (embedding-space-guard-unknown-2530, embedding-space-guard-consumers-2559).
+ * Both consumers run in this file's process against an in-memory Harper for
+ * uniform, mixed and unknown verdicts. Boot stamp migration converges a seeded
+ * mixed corpus; the integration tests apply a foreign stamp after boot.
  *
  * Mutation check: delete either consumer's guard consult (the
  * embeddingSpaceVerdict() block in resources/MemoryBootstrap.ts /
  * resources/MemoryDedupStats.ts) and the mixed/unknown assertions go red: the
  * bootstrap warning disappears and the dedup counts come back non-null.
  */
-import { describe, it, expect, beforeEach, mock } from "bun:test";
-import { tempDir } from "../helpers/temp-dir";
+import { describe, it, expect, beforeEach, afterAll, mock } from "bun:test";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { createSandboxHome } from "../helpers/sandbox-home";
 
-// HOME before the dedup-cluster module (imported by MemoryDedupStats) computes
-// REM_DEDUP_STATS_PATH from homedir() — the sweep writes its stat file there.
-process.env.HOME = tempDir("flair-2559-home-"); // removed by the shared helper when the file finishes
+const statsHome = createSandboxHome("flair-2559-home-");
+afterAll(statsHome.cleanup);
+const statsPath = join(statsHome.dir, ".flair", "rem-dedup-stats.json");
+const dedupCluster = await import("../../resources/dedup-cluster.ts");
+mock.module("../../resources/dedup-cluster.ts", () => ({
+  ...dedupCluster,
+  REM_DEDUP_STATS_PATH: statsPath,
+}));
 process.env.FLAIR_RATE_LIMIT_ENABLED = "false";
 process.env.FLAIR_HYBRID_RETRIEVAL = "false"; // legacy HNSW-only path — no BM25 index service to stand up
 delete (process.env as any).FLAIR_PUBLIC;
 
 const CURRENT = "gguf:nomic-embed-text-v1.5-Q4_K_M+searchprefix";
 const FOREIGN = "gemma-embed:768"; // a genuinely different vector space
-// Constant embedding ⇒ raw cosine is ALWAYS 1.0 between any two docs (a
-// semantic-only query matches by cosine; the dedup sweep finds one cluster).
 const FAKE_EMBEDDING = [1, 0, 0, 0];
 const OTHER_SPACE_VEC = [0, 1, 0, 0];
 
@@ -103,8 +103,7 @@ class BaseMemory {
   static search(query: any) { return memorySearchGen(query); }
 }
 
-/** A table that yields nothing (every non-Memory table the shipped consumers
- *  touch: Soul, Agent, OrgSkillAssignment, WorkspaceState, OrgEvent, …). */
+/** A table that yields nothing. */
 function emptyTable() {
   return {
     search: () => { async function* gen() {} return gen(); },
@@ -137,7 +136,7 @@ mock.module("harper", () => ({ databases: databasesMock, Resource: class {}, ser
 
 const { BootstrapMemories } = await import("../../resources/MemoryBootstrap.ts");
 const { MemoryDedupStats } = await import("../../resources/MemoryDedupStats.ts");
-const { recomputeLatch, _resetGuardForTests } = await import("../../resources/embedding-space-guard.ts");
+const { recomputeLatch, _resetGuardForTests, _setGuardTableGetterForTests } = await import("../../resources/embedding-space-guard.ts");
 const { _resetLocalInstanceIdCacheForTests } = await import("../../resources/instance-identity.ts");
 
 const AGENT = "agent-a";
@@ -169,6 +168,8 @@ beforeEach(() => {
   memoryStore = new Map();
   memoryGrants = [];
   idCounter = 0;
+  mkdirSync(dirname(statsPath), { recursive: true });
+  writeFileSync(statsPath, "prior stat\n");
   _resetLocalInstanceIdCacheForTests();
   _resetGuardForTests(); // default table getter reads databasesMock; default modelId getter is the mocked CURRENT
 });
@@ -259,6 +260,7 @@ describe("MemoryDedupStats consults the guard (flair#2559)", () => {
     expect(res.largestClusterSize).toBeNull();
     expect(res.totalMemoriesInClusters).toBeNull();
     expect(res.embeddingSpace).toEqual({ state: "mixed", reason: null });
+    expect(readFileSync(statsPath, "utf8")).toBe("prior stat\n");
   });
 
   it("(unknown) returns no counts and names the not-yet-verified state", async () => {
@@ -269,5 +271,19 @@ describe("MemoryDedupStats consults the guard (flair#2559)", () => {
     expect(res.clusterCount).toBeNull();
     expect(res.embeddingSpace?.state).toBe("unverified");
     expect(res.embeddingSpace?.reason).toBeNull();
+    expect(readFileSync(statsPath, "utf8")).toBe("prior stat\n");
+  });
+
+  it("(scan-failed) returns no counts and leaves the stat file unchanged", async () => {
+    _setGuardTableGetterForTests(async () => { throw new Error("scan unavailable"); });
+    expect(await recomputeLatch()).toBe(false);
+
+    const res: any = await makeDedup().post({});
+    expect(res.clusterCount).toBeNull();
+    expect(res.largestClusterSize).toBeNull();
+    expect(res.totalMemoriesInClusters).toBeNull();
+    expect(res.embeddingSpace?.state).toBe("scan-failed");
+    expect(res.embeddingSpace?.reason).toBeTruthy();
+    expect(readFileSync(statsPath, "utf8")).toBe("prior stat\n");
   });
 });

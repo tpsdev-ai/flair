@@ -126,11 +126,9 @@ export class Health extends Resource {
     // doctor`. Sync, no scan, no vector read. `state` is one of
     // uniform | mixed | unverified | scan-failed; `reason` is the bounded error
     // of the last failed scan (on scan-failed, or on mixed when a scan failed
-    // before or after the foreign stamp was seen). In the non-uniform states the
-    // guarded paths — SemanticSearch, MemoryBootstrap's task-relevant selection,
-    // the write-time dedup leg and the /MemoryDedupStats sweep — cosine nothing
-    // against the stored corpus (flair#2559). The field is on the 503
-    // body too; doctor reads it there.
+    // before or after the foreign stamp was seen). Calls that consult a
+    // non-uniform verdict skip vector comparisons against the stored corpus
+    // (flair#2559). The field is on the 503 body too; doctor reads it there.
     body.embeddingSpace = spaceGuardState();
     const multiWorker = multiWorkerHealthField(multiWorkerCondition());
     let status = readiness.status;

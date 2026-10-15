@@ -876,7 +876,7 @@ export class BootstrapMemories extends Resource {
     tokenBudget -= taskReserve;
     let taskRetrievalHint: string | undefined;
     // flair#2559 — the guard verdict when the task-relevant selection's
-    // embedding leg was refused (a non-uniform store). Declared here so the
+    // embedding leg was refused (a non-uniform verdict). Declared here so the
     // response tail can surface the state-named warning; set inside the
     // task-relevant block below.
     let spaceGuardVerdict: EmbeddingSpaceVerdict | null = null;
@@ -1876,7 +1876,7 @@ export class BootstrapMemories extends Resource {
       agentId,
       ...(taskRetrievalHint ? { taskRetrievalHint } : {}),
       // flair#2559 — the task-relevant selection refused its embedding leg for a
-      // non-uniform store; the warning names the guard state (same wording as
+      // non-uniform verdict; the warning names the guard state (same wording as
       // SemanticSearch's `_warning`).
       ...(spaceGuardVerdict ? { _warning: spaceGuardWarning(spaceGuardVerdict, "keyword") } : {}),
       directoryHint: directoryHint(),

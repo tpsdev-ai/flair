@@ -78,15 +78,7 @@ export interface MemoryDedupStatsResult {
   computedAt: string;
 }
 
-/**
- * The response a GUARD-DEGRADED sweep returns in place of a stat (flair#2559).
- * The sweep cosines each memory's own stored embedding against its neighbours;
- * when the store's model stamps are not known uniform in the current embedding
- * space, those edges could be computed across spaces. So the sweep runs no ANN
- * query at all: the three counts are null (no vector-derived count, never a
- * number computed across spaces) and `embeddingSpace` names the guard state
- * that was refused, the same state names the other guarded consumers use.
- */
+/** The response when the sweep's opening guard consult refuses the embedding space (flair#2559). */
 export interface MemoryDedupStatsUnavailable {
   clusterCount: null;
   largestClusterSize: null;
@@ -207,12 +199,8 @@ export class MemoryDedupStats extends Resource {
     const ctx = (this as any).getContext?.();
     try {
       // ─── Vector-space uniformity guard (flair#2559) ──────────────────────
-      // Consult the SAME chokepoint SemanticSearch and the write-time dedup leg
-      // use. The sweep's ANN edges are only trustworthy for a store known
-      // uniform in the current space; on any non-uniform verdict (mixed, or an
-      // unknown verdict: not yet verified / scan-failed) it fails CLOSED and
-      // returns no vector-derived counts, naming the state in the response —
-      // never numbers computed across spaces. Nothing is persisted in that case.
+      // Consult the shared guard at the start of the sweep. A non-uniform
+      // verdict returns no vector-derived counts and persists nothing.
       const verdict = await embeddingSpaceVerdict();
       if (!verdict.uniform) {
         return {
