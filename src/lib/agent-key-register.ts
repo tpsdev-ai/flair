@@ -74,8 +74,9 @@ export function isCanonicalEd25519Base64url(value: unknown): boolean {
 
 /**
  * The audit fingerprint of a registered key: the hex sha256 of its canonical
- * base64url string. The audit row's key field and the OrgEvent's detail carry
- * this in place of the key; their identifier fields carry the agent id. The key
+ * base64url string. The audit `keyFingerprint` and the OrgEvent `detail` carry
+ * this in place of the key; the audit `agentId` and the event `refId` carry the
+ * target agent's id, which the event `summary` also names in text. The key
  * itself is stored on the Agent row. Uses the ambient WebCrypto
  * (the same primitive the auth paths digest/verify with), so this module
  * imports nothing.

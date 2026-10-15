@@ -21,12 +21,13 @@
  * (resources/write-back.ts) before the commit, and the stored key is read back
  * AFTER the commit. The response is returned only when the read-back is equal.
  *
- * Admin is decided by resolveAgentAuth, on two paths. TPS-Ed25519: the gate
- * verified the signature and annotated the agent `tpsAgentIsAdmin`. Basic: the
- * gate checked the credential (a Harper `super_user`, or the `admin` bootstrap
- * password) and annotated it the same way; without that annotation,
- * resolveAgentAuth admits a `super_user` `request.user` only when the request
- * carries a credential header. So the `super_user` that Harper's
+ * Admin is decided by resolveAgentAuth. TPS-Ed25519: the gate verified the
+ * signature and annotated the agent `tpsAgentIsAdmin`. A Harper credential
+ * (Basic, or a Bearer operation token Harper issued): the gate annotates it the
+ * same way when Harper verified it to a `super_user` (or it is the `admin`
+ * bootstrap password); without that annotation, resolveAgentAuth admits a
+ * `super_user` `request.user` only when the request carries a credential
+ * header. So the `super_user` that Harper's
  * `authorizeLocal` forges for a credential-less loopback request never counts.
  * `Flair-Enroll` (a later slice) is refused by Harper's authentication before
  * this handler runs; the handler's own refusal is a fail-closed backstop.
@@ -71,9 +72,9 @@ function readHeader(reqLike: any, name: string): string {
   return reqLike?.headers?.get?.(name) ?? reqLike?.headers?.asObject?.[name] ?? "";
 }
 
-/** The Harper username on the request, if any (Harper's for Basic; the user
- *  the gate maps a TPS-Ed25519 agent to). An audit label only: this value is
- *  never consulted for an authorization decision. */
+/** The Harper username on the request, if any (Harper's for Basic or Bearer;
+ *  the user the gate maps a TPS-Ed25519 agent to). An audit label only: this
+ *  value is never consulted for an authorization decision. */
 function operatorOf(reqLike: any): string | null {
   const username = reqLike?.user?.username;
   return typeof username === "string" && username.length > 0 ? username : null;
@@ -104,8 +105,8 @@ export class AgentKeyRegister extends Resource {
       return jsonRefusal(401, "authentication required", "the Flair-Enroll enrollment scheme is not enabled in this build");
     }
 
-    // An admin only: a TPS-Ed25519 or Basic caller the gate annotated
-    // `tpsAgentIsAdmin`, or a credentialed Basic `super_user`. A credential-less
+    // An admin only: a TPS-Ed25519, Basic or Bearer caller the gate annotated
+    // `tpsAgentIsAdmin`, or a credentialed `super_user`. A credential-less
     // loopback request lands on `anonymous` (the credential-evidence rule).
     const auth = await resolveAgentAuth(ctx);
     if (auth.kind !== "agent" || !auth.isAdmin) {
@@ -113,7 +114,7 @@ export class AgentKeyRegister extends Resource {
         ? jsonRefusal(401, "authentication required", "an admin credential is required to register a key")
         : jsonRefusal(403, "forbidden", "an admin credential is required to register a key");
     }
-    // The admin agent id (TPS-Ed25519) or the Harper username (Basic).
+    // The admin agent id (TPS-Ed25519) or the Harper username (Basic or Bearer).
     const actorId = auth.agentId;
 
     // Validate the body.

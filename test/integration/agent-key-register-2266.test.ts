@@ -130,6 +130,8 @@ describe("flair#2266 — admin key registration on a pending Agent row", () => {
   const successId = `akr-ok-${sfx}`;
   const edAdminId = `akr-edadmin-${sfx}`;
   const edTargetId = `akr-edtarget-${sfx}`;
+  const bearerTargetId = `akr-bearer-${sfx}`;
+  const badBearerId = `akr-badbearer-${sfx}`;
   const nonAdminId = `akr-nonadmin-${sfx}`;
   const repeatId = `akr-repeat-${sfx}`;
   const nonPendingId = `akr-nonpending-${sfx}`;
@@ -177,6 +179,8 @@ describe("flair#2266 — admin key registration on a pending Agent row", () => {
     await seedAgent({ id: nonAdminId, status: "active", publicKey: nonAdminKey.pub });
     await seedAgent({ id: successId, status: "active", publicKey: "pending" });
     await seedAgent({ id: edTargetId, status: "active", publicKey: "pending" });
+    await seedAgent({ id: bearerTargetId, status: "active", publicKey: "pending" });
+    await seedAgent({ id: badBearerId, status: "active", publicKey: "pending" });
     await seedAgent({ id: repeatId, status: "active", publicKey: "pending" });
     await seedAgent({ id: nonPendingId, status: "active", publicKey: mkKey().pub });
     await seedAgent({ id: foreignId, status: "active", publicKey: "pending", originatorInstanceId: FOREIGN_HOME });
@@ -199,7 +203,7 @@ describe("flair#2266 — admin key registration on a pending Agent row", () => {
     if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
   }, 30_000);
 
-  test("an admin registers a caller-held key on a legacy pending row; read-back equals; the audit and OrgEvent key fields carry the fingerprint, the identifier fields the agent id", async () => {
+  test("an admin registers a caller-held key on a legacy pending row; read-back equals; the audit keyFingerprint and event detail carry the fingerprint, the audit agentId and event refId the target id", async () => {
     const before = await rowIn("Agent", successId);
     expect(before?.publicKey).toBe("pending");
 
@@ -215,7 +219,7 @@ describe("flair#2266 — admin key registration on a pending Agent row", () => {
     expect(after?.publicKey).toBe(body.publicKey);
     expect(after?.updatedAt).toBe(body.updatedAt);
 
-    // Audit row: the key field is the fingerprint; the identifier fields are ids.
+    // Audit row: keyFingerprint is the fingerprint; agentId is the target id.
     // This agent's id is not the key, so no field holds the key string.
     const audit = await rowIn("AgentKeyRegistration", body.registrationId);
     expect(audit).not.toBeNull();
@@ -234,7 +238,7 @@ describe("flair#2266 — admin key registration on a pending Agent row", () => {
     expect(JSON.stringify(event)).not.toContain(successKey.pub);
   }, 30_000);
 
-  test("an agent whose id equals its key: the key fields carry the fingerprint, the identifier fields carry the id (which is the key string)", async () => {
+  test("an agent whose id equals its key: keyFingerprint and detail carry the fingerprint; agentId, refId and the summary text carry the id (the key string)", async () => {
     const { status, body } = await registerAsAdmin(keyAsId, keyAsIdKey.pub);
     expect(status, JSON.stringify(body)).toBe(200);
     const fp = await keyFingerprint(keyAsIdKey.pub);
@@ -364,6 +368,35 @@ describe("flair#2266 — admin key registration on a pending Agent row", () => {
     expect(res.status, text.slice(0, 200)).toBe(200);
     expect(JSON.parse(text).publicKey).toBe(key.pub);
     expect((await rowIn("Agent", edTargetId))?.publicKey).toBe(key.pub);
+  }, 30_000);
+
+  test("a Bearer operation token Harper issued to the admin user registers a key; actorId is the Harper username", async () => {
+    const tokens = await ops({ operation: "create_authentication_tokens", username: harper.admin.username, password: harper.admin.password });
+    expect(typeof tokens?.operation_token, JSON.stringify(tokens).slice(0, 200)).toBe("string");
+    const key = mkKey();
+    const res = await fetch(`${harper.httpURL}/AgentKeyRegister`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${tokens.operation_token}` },
+      body: JSON.stringify({ agentId: bearerTargetId, publicKey: key.pub }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    const text = await res.text();
+    expect(res.status, text.slice(0, 200)).toBe(200);
+    const body = JSON.parse(text);
+    expect((await rowIn("Agent", bearerTargetId))?.publicKey).toBe(key.pub);
+    expect((await rowIn("AgentKeyRegistration", body.registrationId))?.actorId).toBe(harper.admin.username);
+  }, 30_000);
+
+  test("an unverifiable Bearer token is refused 401 with no change", async () => {
+    const before = await rowIn("Agent", badBearerId);
+    const res = await fetch(`${harper.httpURL}/AgentKeyRegister`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer not-a-harper-token" },
+      body: JSON.stringify({ agentId: badBearerId, publicKey: mkKey().pub }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    expect(res.status, (await res.text()).slice(0, 200)).toBe(401);
+    expect(await rowIn("Agent", badBearerId)).toEqual(before);
   }, 30_000);
 
   test("two concurrent admin registrations: exactly one wins, the other is refused, no partial state", async () => {

@@ -13,7 +13,7 @@
 # a separate raw-table trust root that this does not govern.
 type AgentKeyRegistration @table(database: "flair", replicate: true) {
   id: ID @primaryKey              # server-generated registrationId
-  actorId: String! @indexed       # the admin that registered the key: an admin agent id (TPS-Ed25519) or a Harper username (Basic)
+  actorId: String! @indexed       # the admin that registered the key: an admin agent id (TPS-Ed25519) or a Harper username (Basic or Bearer)
   operator: String                # the Harper username on the request, if any (an audit label only)
   agentId: String! @indexed       # the agent row whose key was registered
   instanceId: String @indexed     # the local instance id that performed the registration

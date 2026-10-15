@@ -284,10 +284,11 @@ An Agent row seeded with `publicKey: "pending"` is completed by
 operations API can also write the column directly (the documented admin
 trust-root path). Federation cannot complete it: the sync-in merge writes the
 Agent table through the raw table handle, so an inbound Agent record that would
-CHANGE a stored `pending` key is skipped whole. When the status rule has not
-already refused the record, it is counted as `agent_pending_key_not_federated`.
-The status rule runs first and keeps its own name: a record that also changes
-the agent's status is counted as `agent_status_not_federated` (see
+CHANGE a stored `pending` key is skipped whole. A record that reaches the merge
+plan is counted as `agent_pending_key_not_federated` unless the status rule,
+which runs first and keeps its own name, has refused it: a record that also
+changes the agent's status is counted as `agent_status_not_federated`. A record
+refused by earlier validation, such as `future_timestamp`, keeps that reason (see
 [docs/api-reference.md](api-reference.md#federation)).
 
 Peer non-convergence is the consequence. Registration writes only A's local
