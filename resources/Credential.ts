@@ -10,6 +10,8 @@ import { makeReadScope, makeScopedSearch, stampAttribution, UNAUTH } from "./rec
 import { isForbiddenOwnerMutation, ownerMutationRefusal } from "./record-owner-guard.js";
 import { IDP_MAPPING_ADMIN_ONLY, IDP_MAPPING_IDENTITY_FIELDS, IDP_MAPPING_REFUSAL_MESSAGE, isIdpMappingChange } from "../src/lib/idp-mapping-rule.js";
 
+const batchWriteTransactions = new WeakSet<object>();
+
 const credentialReadScope = makeReadScope("owner-only", "principalId");
 const credentialScopedSearch = makeScopedSearch(credentialReadScope);
 
@@ -61,16 +63,26 @@ function isRecordBody(content: unknown): content is Record<string, unknown> {
  * own; DELETE of its own stays allowed under the owner check.
  */
 export class Credential extends (databases as any).flair.Credential {
+  static getResource(target: any, request: any, options?: any): any {
+    if (this === Credential && options?.isCollection && options.method === "put") {
+      return CredentialPutBatch.getResource(target, request, options);
+    }
+    return super.getResource(target, request, options);
+  }
+
   private async writeAgainstStoredRow(stored: any, content: any, write: () => Promise<any>) {
     const ctx = (this as any).getContext?.();
-    return withOwnedTransaction(ctx, async () => {
+    const inBatch = ctx?.transaction && batchWriteTransactions.has(ctx.transaction);
+    if (!inBatch) {
       const pause = txnPausePoint("credential-row-write");
       if (pause) await pause;
+    }
+    const confirmAndWrite = async (shared: any) => {
       const id = (this as any).getId?.() ?? stored?.id ?? content.id;
       if (id != null) {
         let committed: any;
         try {
-          committed = (await (databases as any).flair.Credential.get(id, {})) ?? null;
+          committed = (await (databases as any).flair.Credential.get(id, shared)) ?? null;
         } catch (err) {
           throw ownerCheckUnavailable(err);
         }
@@ -81,8 +93,12 @@ export class Credential extends (databases as any).flair.Credential {
           });
         }
       }
+      // A change committed after the confirmation read and before the commit is not seen.
+      const beforeWrite = txnPausePoint("credential-row-write-confirmed");
+      if (beforeWrite) await beforeWrite;
       return await write();
-    });
+    };
+    return inBatch ? confirmAndWrite(ctx) : withOwnedTransaction(ctx, confirmAndWrite);
   }
 
   /**
@@ -320,5 +336,33 @@ export class Credential extends (databases as any).flair.Credential {
     }
 
     return super.delete(_);
+  }
+}
+
+class CredentialPutBatch extends Credential {
+  static loadAsInstance = false;
+
+  async put(target: any, content?: any) {
+    const ctx = (this as any).getContext();
+    const elements = Array.isArray(content) ? content : [content];
+    const resources = await Promise.all(elements.map((element: any) =>
+      Credential.getResource({ id: element?.id ?? target.id }, ctx, { async: true }),
+    ));
+    const pause = txnPausePoint("credential-batch-row-write");
+    if (pause) await pause;
+    return withOwnedTransaction(ctx, async (shared) => {
+      batchWriteTransactions.add(shared.transaction);
+      try {
+        const results = [];
+        for (const [index, resource] of resources.entries()) {
+          const result = await resource.put(elements[index]);
+          if (result instanceof Response && !result.ok) throw result;
+          results.push(result);
+        }
+        return Array.isArray(content) ? results : results[0];
+      } finally {
+        batchWriteTransactions.delete(shared.transaction);
+      }
+    });
   }
 }

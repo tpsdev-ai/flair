@@ -621,32 +621,32 @@ describe("legitimate writers are unchanged", () => {
   }, 60_000);
 });
 
-async function withPausedCredentialWrite(write: () => ReturnType<typeof signed>, change: () => Promise<void>) {
+async function withPausedCredentialWrite(write: () => ReturnType<typeof signed>, change: () => Promise<void>, point = WRITE_POINT) {
   for (const marker of ["arm", "claimed", "paused", "go", "released"]) {
-    rmSync(join(pauseDir, `${marker}.${WRITE_POINT}`), { force: true });
+    rmSync(join(pauseDir, `${marker}.${point}`), { force: true });
   }
-  writeFileSync(join(pauseDir, `arm.${WRITE_POINT}`), "");
+  writeFileSync(join(pauseDir, `arm.${point}`), "");
   const pending = write();
   try {
     const deadline = Date.now() + 15_000;
-    while (!existsSync(join(pauseDir, `paused.${WRITE_POINT}`)) && Date.now() < deadline) {
+    while (!existsSync(join(pauseDir, `paused.${point}`)) && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
-    expect(existsSync(join(pauseDir, `paused.${WRITE_POINT}`)), "owner write reached the pause").toBe(true);
+    expect(existsSync(join(pauseDir, `paused.${point}`)), "owner write reached the pause").toBe(true);
     await change();
   } finally {
-    writeFileSync(join(pauseDir, `go.${WRITE_POINT}`), "");
+    writeFileSync(join(pauseDir, `go.${point}`), "");
     await pending;
   }
   const response = await pending;
-  expect(readFileSync(join(pauseDir, `released.${WRITE_POINT}`), "utf8")).toBe("go");
+  expect(readFileSync(join(pauseDir, `released.${point}`), "utf8")).toBe("go");
   return response;
 }
 
-describe("owner Credential writes confirm the committed mapping fields", () => {
+describe("owner Credential writes confirm mapping fields", () => {
   for (const method of ["PATCH", "PUT"] as const) {
     for (const field of ["status", "kind", "idpProvider", "idpSubject", "principalId"] as const) {
-      test(`${method} returns stored_row_changed when an administrator commits a ${field} change during the pause`, async () => {
+      test(`${method} returns stored_row_changed for a ${field} difference at confirmation`, async () => {
         const id = `idpw-confirm-${randomUUID()}`;
         const sub = `${id}-subject`;
         const initial = {
@@ -693,6 +693,58 @@ describe("owner Credential writes confirm the committed mapping fields", () => {
       expect([200, 204], result.text).toContain(result.status);
       expect((await readCredential(id)).label).toBe("owner label");
       expect(await mcpActsAs(initial.idpSubject)).toBe(W.id);
+    }, 60_000);
+  }
+});
+
+
+describe("Credential transaction boundaries", () => {
+  test("an owner array PUT commits no owner updates when a mapping confirmation differs", async () => {
+    const rows = [0, 1].map((index) => ({
+      id: `idpw-batch-${index}-${randomUUID()}`, principalId: W.id, kind: "idp", status: "active",
+      idpProvider: "mcp-oauth", idpSubject: `idpw-batch-${randomUUID()}`, label: "mapping",
+      createdAt: new Date().toISOString(),
+    }));
+    for (const row of rows) await seedCredential(row);
+    const sibling = await snapshot(rows[0].id);
+    let changed: Record<string, unknown> | undefined;
+    const result = await withPausedCredentialWrite(
+      () => signed(W, "PUT", "/Credential/", rows.map((row) => ({ ...row, label: "owner label" }))),
+      async () => {
+        await ops({ operation: "update", database: "flair", table: "Credential", records: [{ ...rows[1], status: "revoked" }] });
+        changed = await snapshot(rows[1].id);
+        expect(changed.status).toBe("revoked");
+      },
+      "credential-batch-row-write",
+    );
+    expect(result.status, result.text).toBe(409);
+    expect(JSON.parse(result.text).error).toBe("stored_row_changed");
+    expect(await readCredential(rows[0].id)).toEqual(sibling);
+    expect(await readCredential(rows[1].id)).toEqual(changed);
+    expect(await mcpActsAs(rows[1].idpSubject)).toBeNull();
+  }, 60_000);
+
+  for (const method of ["PUT", "PATCH"] as const) {
+    test(`${method} completes when an administrator changes the row after confirmation`, async () => {
+      const initial = {
+        id: `idpw-confirmed-${randomUUID()}`, principalId: W.id, kind: "idp", status: "active",
+        idpProvider: "mcp-oauth", idpSubject: `idpw-confirmed-${randomUUID()}`, label: "mapping",
+        createdAt: new Date().toISOString(),
+      };
+      await seedCredential(initial);
+      const result = await withPausedCredentialWrite(
+        () => signed(W, method, `/Credential/${initial.id}`, method === "PUT" ? { ...initial, label: "owner label" } : { label: "owner label" }),
+        async () => {
+          await ops({ operation: "update", database: "flair", table: "Credential", records: [{ id: initial.id, principalId: initial.principalId, kind: initial.kind, createdAt: initial.createdAt, status: "revoked" }] });
+          expect((await readCredential(initial.id)).status).toBe("revoked");
+        },
+        "credential-row-write-confirmed",
+      );
+      expect([200, 204], result.text).toContain(result.status);
+      const stored = await readCredential(initial.id);
+      expect(stored.label).toBe("owner label");
+      expect(stored.status).toBe("revoked");
+      expect(await mcpActsAs(initial.idpSubject)).toBeNull();
     }, 60_000);
   }
 });
