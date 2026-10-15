@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 
 describe("flair#2455 slice 2 — the shipped sender count parser", () => {
-  it("the shipped sender's count parser ignores `refused`", async () => {
+  it("the shipped sender's count parser ignores `refused` and `indeterminate`", async () => {
     const { parseSyncBatchCounts } = await import("../../src/commands/federation");
     const body = {
       merged: 1,
@@ -12,9 +12,10 @@ describe("flair#2455 slice 2 — the shipped sender count parser", () => {
         { table: "Memory", id: "b", reason: "no_op_same_hash" },
         { table: "Presence", id: "c", reason: "unknown_table" },
       ],
-      total: 4,
+      indeterminate: [{ table: "Memory", id: "d" }],
+      total: 5,
     };
-    expect(parseSyncBatchCounts(body, 4)).toEqual({ merged: 1, skipped: 3 });
+    expect(parseSyncBatchCounts(body, 5)).toEqual({ merged: 1, skipped: 3 });
   });
 
 });

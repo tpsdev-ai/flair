@@ -51,10 +51,6 @@ export interface WriteBackOptions {
    *  the interleaving where this write's transaction opens first. Named at
    *  the call site, like `pausePre`. */
   pausePoint?: WriteBackPause;
-  /** Deadline for work before commit submission; submitted commits are awaited. */
-  deadlineMs?: number;
-  /** Test-only pause after commit submission. */
-  pauseSubmitted?: WriteBackPause;
 }
 
 /** The fields of `expectedRow` (or of the helper's own first read) it compares
@@ -108,28 +104,10 @@ export const WRITE_BACK_ATTEMPTS = 3;
 
 export class WriteBackConflictError extends Error {
   readonly id: string;
-  constructor(label: string, id: string, attempts: number) {
+  constructor(label: string, id: string, attempts: number, readonly writeAttempted = false) {
     super(`${label}: row ${id} changed; write not applied (${attempts} attempts)`);
     this.name = "WriteBackConflictError";
     this.id = id;
-  }
-}
-
-/** The owned callback exceeded its deadline before commit submission. */
-export class WriteBackDeadlineError extends Error {
-  readonly id: string;
-  constructor(label: string, id: string) {
-    super(`${label}: row ${id} exceeded its write deadline before commit submission`);
-    this.name = "WriteBackDeadlineError";
-    this.id = id;
-  }
-}
-
-/** Commit submission failed or its outcome could not be confirmed. */
-export class WriteBackIndeterminateError extends Error {
-  constructor(label: string, id: string, cause: unknown) {
-    super(`${label}: row ${id} commit outcome unknown`, { cause });
-    this.name = "WriteBackIndeterminateError";
   }
 }
 
@@ -292,61 +270,27 @@ export async function writeBackCommittedRow(
     const pre = opts.pausePre();
     if (pre) await pre;
   }
-
-  let deadlineExpired = false;
-  let commitSubmitted = false;
-  const checkDeadline = () => {
-    if (deadlineExpired) throw new WriteBackDeadlineError(opts.label, id);
-  };
-  const ctx = opts.ctx;
-
-  const run = async (): Promise<WriteBackPlan> => {
-    for (let attempt = 1; ; attempt++) {
-      try {
-        return await withOwnedTransaction(ctx, async (c) => {
-          checkDeadline();
-          const row = await table.get(id, c);
-          checkDeadline();
-          if (opts.matches && !opts.matches(row)) return { skip: true };
-          const decision = await plan(row);
-          checkDeadline();
-          if ("skip" in decision) return decision;
-          if (!sameTarget(row)) throw new WriteBackConflictError(opts.label, id, attempt);
-          // Test-only: inert unless the fault-injection opt-in is armed.
-          if (opts.pausePoint) {
-            const pause = opts.pausePoint();
-            if (pause) await pause;
-          }
-          checkDeadline();
-          if ("update" in decision) await applyFieldUpdate(table, id, decision.update, c);
-          else await table.put(decision.write, c);
-          await confirmCommittedRow(table, id, (committed) => isDeepStrictEqual(committed, row));
-          checkDeadline();
-          if (opts.deadlineMs != null) {
-            // Commit-submission boundary: Harper does not abort a submitted
-            // native commit. From here, await the outcome; never report refusal.
-            commitSubmitted = true;
-            const committed = c.transaction.commit();
-            await Promise.all([committed, Promise.resolve().then(opts.pauseSubmitted)]);
-          }
-          return decision;
-        });
-      } catch (err) {
-        if (commitSubmitted) throw new WriteBackIndeterminateError(opts.label, id, err);
-        if (!(err instanceof CommittedRowChanged)) throw err;
-        if (attempt >= attempts) throw new WriteBackConflictError(opts.label, id, attempts);
-      }
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await withOwnedTransaction(opts.ctx, async (c) => {
+        const row = await table.get(id, c);
+        if (opts.matches && !opts.matches(row)) return { skip: true };
+        const decision = await plan(row);
+        if ("skip" in decision) return decision;
+        if (!sameTarget(row)) throw new WriteBackConflictError(opts.label, id, attempt);
+        // Test-only: inert unless the fault-injection opt-in is armed.
+        if (opts.pausePoint) {
+          const pause = opts.pausePoint();
+          if (pause) await pause;
+        }
+        if ("update" in decision) await applyFieldUpdate(table, id, decision.update, c);
+        else await table.put(decision.write, c);
+        await confirmCommittedRow(table, id, (committed) => isDeepStrictEqual(committed, row));
+        return decision;
+      });
+    } catch (err) {
+      if (!(err instanceof CommittedRowChanged)) throw err;
+      if (attempt >= attempts) throw new WriteBackConflictError(opts.label, id, attempts, true);
     }
-  };
-
-  const timer = opts.deadlineMs == null ? undefined : setTimeout(() => {
-    if (!commitSubmitted) deadlineExpired = true;
-  }, opts.deadlineMs);
-  try {
-    // A pre-submission deadline throws inside the owned callback, so Harper's
-    // rollback completes before this call rejects.
-    return await run();
-  } finally {
-    if (timer !== undefined) clearTimeout(timer);
   }
 }

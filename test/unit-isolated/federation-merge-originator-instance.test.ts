@@ -41,6 +41,10 @@ let peerStore: Map<string, any>;
 let syncLogStore: Map<string, any>;
 let stores: Record<string, Map<string, any>>;
 let loseCommitAck = false;
+let pauseRead: Promise<void> | undefined;
+let pauseCommit: Promise<void> | undefined;
+let signalPause: (() => void) | undefined;
+let changeAfterStage = false;
 
 function emptyGen() {
   async function* gen() {}
@@ -49,7 +53,13 @@ function emptyGen() {
 
 function table(name: string) {
   return {
-    get: async (id: string) => stores[name].get(id) ?? null,
+    get: async (id: string) => {
+      if (name === "Memory" && pauseRead) {
+        signalPause?.();
+        await pauseRead;
+      }
+      return stores[name].get(id) ?? null;
+    },
     put: async (r: any) => {
       if (name === "Memory") {
         for (const field of ["agentId", "content", "createdAt"]) expect(typeof r[field]).toBe("string");
@@ -58,7 +68,10 @@ function table(name: string) {
       // transaction — stage it so the committed re-read still sees the committed
       // store row (as real Harper does), then commit it when the transaction
       // resolves.
-      if (harperTxn.stage(r.id, { table: name, row: r })) return r;
+      if (harperTxn.stage(r.id, { table: name, row: r })) {
+        if (changeAfterStage) stores[name].set(r.id, { ...r, content: "concurrent" });
+        return r;
+      }
       stores[name].set(r.id, JSON.parse(JSON.stringify(r)));
       return r;
     },
@@ -69,6 +82,10 @@ function table(name: string) {
 const harperTxn = installFakeHarperTransaction((id: string, payload: { table: string; row: any }) => {
   stores[payload.table].set(id, JSON.parse(JSON.stringify(payload.row)));
   if (loseCommitAck) throw new Error("commit acknowledgement lost");
+  if (pauseCommit) {
+    signalPause?.();
+    return pauseCommit;
+  }
 });
 
 mock.module("harper", () => ({
@@ -173,6 +190,10 @@ const ROWS: Record<string, { data: (origin: string) => Record<string, any>; fiel
 
 beforeEach(() => {
   loseCommitAck = false;
+  pauseRead = undefined;
+  pauseCommit = undefined;
+  signalPause = undefined;
+  changeAfterStage = false;
   peerStore = new Map();
   syncLogStore = new Map();
   stores = { Memory: new Map(), Soul: new Map(), Agent: new Map(), Relationship: new Map(), Message: new Map() };
@@ -245,7 +266,71 @@ it("a lost commit acknowledgement returns unknown without refusing the committed
   const record = pushedRecord("Memory", data.id, data, NEW, secretKey);
   loseCommitAck = true;
   const response = await postSync({ instanceId: PEER_ID, records: [record], lamportClock: 1 }, secretKey);
-  expect(response.status).toBe(503);
-  expect(await response.json()).toEqual({ error: "sync_merge_outcome_unknown" });
+  expect(response.merged).toBe(0);
+  expect(response.refused).toEqual([]);
+  expect(response.indeterminate).toEqual([{ table: "Memory", id: data.id }]);
+  expect(response.merged + response.refused.length + response.indeterminate.length).toBe(response.total);
   expect(stores.Memory.get(data.id)?.content).toBe(data.content);
+});
+
+for (const stage of ["initial read", "commit outcome"]) {
+  it(`${stage} pending past the deadline is indeterminate`, async () => {
+    const { secretKey, publicKey } = keypair();
+    peerStore.set(PEER_ID, { id: PEER_ID, publicKey, createdAt: OLD, role: "hub", status: "connected" });
+    const data = ROWS.Memory.data(ORIGIN);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const paused = new Promise<void>((resolve) => { signalPause = resolve; });
+    if (stage === "initial read") pauseRead = held;
+    else pauseCommit = held;
+    const pending = postSync({ instanceId: PEER_ID, records: [pushedRecord("Memory", data.id, data, NEW, secretKey)] }, secretKey);
+    try {
+      await paused;
+      const response = await pending;
+      expect(response.refused).toEqual([]);
+      expect(response.indeterminate).toEqual([{ table: "Memory", id: data.id }]);
+      expect(response.merged).toBe(0);
+      expect(response.merged + response.refused.length + response.indeterminate.length).toBe(response.total);
+      release();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(stores.Memory.get(data.id)?.content).toBe(data.content);
+      expect(response.merged).toBe(0);
+      expect(response.refused).toEqual([]);
+    } finally {
+      release();
+    }
+  }, 15_000);
+}
+
+it("a changed committed row after staging is indeterminate", async () => {
+  const { secretKey, publicKey } = keypair();
+  peerStore.set(PEER_ID, { id: PEER_ID, publicKey, createdAt: OLD, role: "hub", status: "connected" });
+  const data = ROWS.Memory.data(ORIGIN);
+  changeAfterStage = true;
+  const response = await postSync({ instanceId: PEER_ID, records: [pushedRecord("Memory", data.id, data, NEW, secretKey)] }, secretKey);
+  expect(response.refused).toEqual([]);
+  expect(response.indeterminate).toEqual([{ table: "Memory", id: data.id }]);
+});
+
+it("a committed Memory remains merged when its post-commit note throws", async () => {
+  const { _resetGuardForTests, _setGuardModelIdForTests, isEmbeddingSpaceUniform, recomputeLatch } = await import("../../resources/embedding-space-guard.ts");
+  const { secretKey, publicKey } = keypair();
+  peerStore.set(PEER_ID, { id: PEER_ID, publicKey, createdAt: OLD, role: "hub", status: "connected" });
+  const data: Record<string, any> = { ...ROWS.Memory.data(ORIGIN), embeddingModel: "foreign:model" };
+  _resetGuardForTests();
+  expect(await recomputeLatch()).toBe(true);
+  let noteCalled = false;
+  _setGuardModelIdForTests(() => { noteCalled = true; throw new Error("model lookup failed"); });
+  try {
+    const response = await postSync({ instanceId: PEER_ID, records: [pushedRecord("Memory", data.id, data, NEW, secretKey)] }, secretKey);
+    expect(noteCalled).toBe(true);
+    expect(stores.Memory.get(data.id)?.content).toBe(data.content);
+    expect(response.merged).toBe(1);
+    expect(response.refused).toEqual([]);
+    expect(response.indeterminate).toEqual([]);
+    expect(response.merged + response.refused.length + response.indeterminate.length).toBe(response.total);
+    expect(await isEmbeddingSpaceUniform()).toBe(false);
+  } finally {
+    _resetGuardForTests();
+  }
 });

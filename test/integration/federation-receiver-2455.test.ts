@@ -1,4 +1,3 @@
-/** Real-Harper coverage for validated unique keys and both sides of commit submission. */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -122,57 +121,47 @@ afterAll(async () => {
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
 });
 
-describe("flair#2455 slice 2 — validated batch keys and the commit-submission deadline (real Harper)", () => {
-  it("a pre-submission timeout is refused after rollback", async () => {
-    const id = `frc-deadline-${Date.now()}`;
-    for (const marker of ["claimed", "paused", "go", "released"]) rmSync(join(pauseDir, `${marker}.${PAUSE}`), { force: true });
-    writeFileSync(join(pauseDir, `arm.${PAUSE}`), "");
-
-    const pending = federatedPush([memoryRecord(id)]);
-    const paused = await waitFor(join(pauseDir, `paused.${PAUSE}`), 20_000);
-    expect(paused, "the merge never reached its in-transaction pause").toBe(true);
-
-    await new Promise((r) => setTimeout(r, 5_500));
-    writeFileSync(join(pauseDir, `go.${PAUSE}`), "");
-    const res = await pending;
-    const body = await res.json() as any;
-    expect(res.status, JSON.stringify(body)).toBe(200);
-    expect(body.merged, JSON.stringify(body)).toBe(0);
-    expect(body.refused, JSON.stringify(body)).toEqual([{ table: "Memory", id, reason: "merge_error" }]);
-    expect(await waitFor(join(pauseDir, `released.${PAUSE}`), 20_000)).toBe(true);
-    for (let i = 0; i < 15; i++) {
-      expect(await readRow("Memory", id), `the merge late-committed after being reported refused (poll ${i})`).toBeNull();
-      await new Promise((r) => setTimeout(r, 200));
-    }
-  }, 60_000);
-
-  it("a submitted commit held past the deadline reports merged and lands", async () => {
-    const id = `frc-submitted-${Date.now()}`;
-    const point = "federation-merge-submitted";
-    for (const marker of ["claimed", "paused", "go", "released"]) rmSync(join(pauseDir, `${marker}.${point}`), { force: true });
-    writeFileSync(join(pauseDir, `arm.${point}`), "");
-    let responded = false;
-    const pending = federatedPush([memoryRecord(id)]).then((res) => {
-      responded = true;
-      return res;
-    });
-    try {
-      expect(await waitFor(join(pauseDir, `paused.${point}`), 20_000)).toBe(true);
-      await new Promise((r) => setTimeout(r, 5_500));
-      expect(responded, "the receiver answered while the submitted outcome was held").toBe(false);
-    } finally {
-      writeFileSync(join(pauseDir, `go.${point}`), "");
-    }
-    const res = await pending;
-    const body = await res.json() as any;
-    expect(res.status, JSON.stringify(body)).toBe(200);
-    expect(body.merged).toBe(1);
-    expect(body.skipped).toBe(0);
-    expect(body.refused).toEqual([]);
-    const row = await readRow("Memory", id);
-    expect(row?.content).toBe(`body ${id}`);
-    expect(row?.agentId).toBe(owner.id);
-  }, 60_000);
+describe("flair#2455 slice 2 — validated batch keys and indeterminate outcomes (real Harper)", () => {
+  for (const point of [PAUSE, "federation-merge-pre"]) {
+    it(`${point}: a paused record is indeterminate before release and can commit afterwards`, async () => {
+      const id = `frc-deadline-${Date.now()}`;
+      const mergedId = `${id}-merged`;
+      const futureId = `${id}-future`;
+      for (const marker of ["claimed", "paused", "go", "released"]) rmSync(join(pauseDir, `${marker}.${point}`), { force: true });
+      writeFileSync(join(pauseDir, `arm.${point}`), "");
+      const records = [
+        memoryRecord(id),
+        memoryRecord(mergedId),
+        memoryRecord(futureId, {}, new Date(Date.now() + 60 * 60 * 1000).toISOString()),
+      ];
+      const pending = federatedPush(records);
+      try {
+        expect(await waitFor(join(pauseDir, `paused.${point}`), 20_000)).toBe(true);
+        const res = await pending;
+        const body = await res.json() as any;
+        expect(res.status, JSON.stringify(body)).toBe(200);
+        expect(existsSync(join(pauseDir, `released.${point}`))).toBe(false);
+        expect(body.merged).toBe(1);
+        expect(body.refused).toEqual([{ table: "Memory", id: futureId, reason: "future_timestamp" }]);
+        expect(body.refused.some((entry: any) => entry.id === id)).toBe(false);
+        expect(body.indeterminate).toEqual([{ table: "Memory", id }]);
+        expect(body.merged + body.refused.length + body.indeterminate.length).toBe(body.total);
+        expect(body.total).toBe(records.length);
+        expect(parseSyncBatchCounts(body, records.length)).toEqual({ merged: 1, skipped: 1 });
+      } finally {
+        writeFileSync(join(pauseDir, `go.${point}`), "");
+      }
+      expect(await waitFor(join(pauseDir, `released.${point}`), 20_000)).toBe(true);
+      let row: any;
+      for (let i = 0; i < 100; i++) {
+        row = await readRow("Memory", id);
+        if (row) break;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      expect(row?.content).toBe(`body ${id}`);
+      expect(row?.agentId).toBe(owner.id);
+    }, 60_000);
+  }
 
   it("a numeric key refuses the whole batch before any merge", async () => {
     const id = `frc-invalid-${Date.now()}`;
@@ -225,10 +214,9 @@ describe("flair#2455 slice 2 — validated batch keys and the commit-submission 
     ];
     const body = await (await federatedPush(records)).json() as any;
 
-    // These validated unique keys are merged or refused.
     expect(body.total, JSON.stringify(body)).toBe(records.length);
     expect(body.merged, JSON.stringify(body)).toBe(1);
-    expect(body.merged + body.refused.length, JSON.stringify(body)).toBe(body.total);
+    expect(body.merged + body.refused.length + body.indeterminate.length, JSON.stringify(body)).toBe(body.total);
     const offered = new Set(records.map((r) => `${r.table}/${r.id}`));
     const keys = body.refused.map((e: any) => `${e.table}/${e.id}`);
     expect(new Set(keys).size, "a refused key was listed more than once").toBe(keys.length);
@@ -246,7 +234,7 @@ describe("flair#2455 slice 2 — validated batch keys and the commit-submission 
     for (const entry of body.refused) counts[entry.reason] = (counts[entry.reason] ?? 0) + 1;
     expect(counts).toEqual(body.skippedReasons);
 
-    // The shipped sender parser ignores the added field.
+    // The shipped sender parser ignores the added lists.
     expect(parseSyncBatchCounts(body, records.length)).toEqual({ merged: body.merged, skipped: body.skipped });
 
     // And the refusals are real: only the mergeable record landed.

@@ -29,7 +29,7 @@ import { stripInboundMemoryRow, stripServerStampedFields } from "./memory-declar
 import { noteWriteStamp } from "./embedding-space-guard.js";
 import { initFederationCleanup } from "./federation-cleanup.js";
 import { verifyFederationRequestBody } from "./replay-store.js";
-import { CommittedRowChanged, confirmCommittedRow, writeBackCommittedRow, WriteBackConflictError, WriteBackIndeterminateError } from "./write-back.js";
+import { CommittedRowChanged, confirmCommittedRow, writeBackCommittedRow, WriteBackConflictError } from "./write-back.js";
 import { withKeyLock } from "./key-lock.js";
 import { withOwnedTransaction } from "./request-transaction.js";
 import { txnPausePoint } from "./txn-pause-point.js";
@@ -213,9 +213,7 @@ export function mergeRecord(local: Record<string, any> | null, remote: SyncRecor
  * cosine that foreign vector = mixed-space garbage — exactly the failure the
  * guard exists to kill. Trip the latch here.
  *
- * `noteWriteStamp` no-ops for a current/bare stamp (a self-originated or
- * same-space sync) and for a non-Memory table (no `embeddingModel`), so only a
- * genuinely foreign Memory sync trips it. Kept as a note-ONLY helper — the
+ * Kept as a note-ONLY helper — the
  * merge's row write stays INLINE at the call site (every synced table's merge
  * through the shared write-back helper, write-back.ts, flair#2441/flair#2450),
  * so the raw-writer coverage gates
@@ -1059,7 +1057,6 @@ async function consumePairingToken(
   return { kind: "consumed" };
 }
 
-/** Deadline for each record's write-back before commit submission. */
 const RECORD_MERGE_DEADLINE_MS = 5_000;
 
 /**
@@ -1124,8 +1121,8 @@ export class FederationSync extends Resource {
     let merged = 0;
     let skipped = 0;
     const skippedReasons: Record<string, number> = {};
-    // Refusals name validated, unique offered keys with a closed reason.
     const refused: Array<{ table: string; id: string; reason: SkipReason }> = [];
+    const indeterminate: Array<{ table: string; id: string }> = [];
     const mergeErrors: string[] = [];
 
     function recordSkip(reason: SkipReason, record: SyncRecord) {
@@ -1161,11 +1158,12 @@ export class FederationSync extends Resource {
     };
     const knownTables = new Set(Object.keys(tableMap));
 
-    for (const record of records as SyncRecord[]) {
+    type MergeOutcome = { reason: SkipReason } | { merged: true } | { indeterminate: true };
+    const mergeOne = async (record: SyncRecord): Promise<MergeOutcome> => {
+      let writeBackStarted = false;
       try {
         if (payloadIdMismatch(record)) {
-          recordSkip("id_mismatch", record);
-          continue;
+          return { reason: "id_mismatch" };
         }
         const table = (record.table in tableMap)
           ? tableMap[record.table as FederationSyncTable]
@@ -1181,8 +1179,7 @@ export class FederationSync extends Resource {
         );
 
         if (decision.action === "skip") {
-          recordSkip(decision.reason, record);
-          continue;
+          return { reason: decision.reason };
         }
 
         // ── Per-record signature verification (federation-edge-hardening slice 3b) ──
@@ -1210,8 +1207,7 @@ export class FederationSync extends Resource {
             : (await (databases as any).flair.Peer.get(originator))?.publicKey;
 
           if (!originatorPublicKey) {
-            recordSkip("unknown_originator_key", record);
-            continue;
+            return { reason: "unknown_originator_key" };
           }
 
           // CONTRACT — reconstruct from the record (v defaults to 1 when
@@ -1227,15 +1223,13 @@ export class FederationSync extends Resource {
             originatorPublicKey,
           );
           if (!signatureValid) {
-            recordSkip("invalid_signature", record);
-            continue;
+            return { reason: "invalid_signature" };
           }
         } else if (requireRecordSignatures()) {
           // require-mode: unsigned records are no longer trusted on
           // batch-level auth alone. Default mode (verify-if-present) falls
           // through here and merges — see requireRecordSignatures() above.
-          recordSkip("missing_signature", record);
-          continue;
+          return { reason: "missing_signature" };
         }
 
         // ── Per-record principal entitlement (flair#1416 / slice 3a) ──
@@ -1248,8 +1242,7 @@ export class FederationSync extends Resource {
           enforceV1Principal: requireRecordPrincipal(),
         });
         if (principalSkip) {
-          recordSkip(principalSkip, record);
-          continue;
+          return { reason: principalSkip };
         }
 
         const incoming = { ...record.data };
@@ -1260,8 +1253,7 @@ export class FederationSync extends Resource {
           // Malformed or out-of-bound ephemeral expiry skips the record before merging.
           const expiryError = stampEphemeralExpiry(incoming, local, { incoming: true });
           if (expiryError) {
-            recordSkip("invalid_expiry", record);
-            continue;
+            return { reason: "invalid_expiry" };
           }
         }
         const mergedData = mergeRecord(local, { ...record, data: incoming });
@@ -1270,8 +1262,7 @@ export class FederationSync extends Resource {
         // rule as a locally-created one. This raw merge is the receiver's write
         // path, so a peer pushing a malformed id must not land a row here.
         if (record.table === "Agent" && !isValidAgentId(record.id)) {
-          recordSkip(AGENT_ID_ERROR, record);
-          continue;
+          return { reason: AGENT_ID_ERROR };
         }
 
         // ── flair#1940 A1'' item 8: the SAME declared-attribute whitelist the
@@ -1290,15 +1281,13 @@ export class FederationSync extends Resource {
         // would land an unscanned, possibly non-persistent skill — bypassing the
         // gate. Skip it: skills are written locally via skill_store, never synced.
         if (record.table === "Memory" && isSkillWrite(mergedData)) {
-          recordSkip("skill_not_federated", record);
-          continue;
+          return { reason: "skill_not_federated" };
         }
 
         // flair#2141 S2: the merge skips a row on the seed's fixed id
         // (resources/seed-reservation.ts), whatever its tags.
         if (isReservedSeedId(record.table, record.id)) {
-          recordSkip("seed_id_not_federated", record);
-          continue;
+          return { reason: "seed_id_not_federated" };
         }
 
         // flair#2307: Harper's REST by-id path reads a trailing `.content` as a
@@ -1307,8 +1296,7 @@ export class FederationSync extends Resource {
         // seed reservation does just above. A legacy row with such an id that
         // already exists on the sending peer is therefore not federated.
         if (record.table === "Memory" && endsWithContentSelectorSuffix(mergedData.id)) {
-          recordSkip("content_suffix_id_not_federated", record);
-          continue;
+          return { reason: "content_suffix_id_not_federated" };
         }
 
         mergedData._originatorInstanceId = decision.originator;
@@ -1360,6 +1348,7 @@ export class FederationSync extends Resource {
         // identity-only check let it put back the changed field's pre-change
         // value.
         let outcome: any;
+        writeBackStarted = true;
         try {
           outcome = await writeBackCommittedRow(
             table,
@@ -1404,40 +1393,28 @@ export class FederationSync extends Resource {
               // identity fields do not move on one either (flair#2450 — see
               // above).
               wholeRow: true,
-              deadlineMs: RECORD_MERGE_DEADLINE_MS,
               pausePre: () => txnPausePoint("federation-merge-pre"),
               pausePoint: () => txnPausePoint("federation-merge"),
-              pauseSubmitted: () => txnPausePoint("federation-merge-submitted"),
             },
           );
         } catch (err) {
-          // The target disappeared or failed the applicable identity or whole-row
-          // comparison. The transaction aborts; one attempt, no retry.
-          if (err instanceof WriteBackConflictError) {
-            recordSkip("merge_target_changed", record);
-            continue;
+          if (err instanceof WriteBackConflictError && !err.writeAttempted) {
+            return { reason: "merge_target_changed" };
           }
           throw err;
         }
         // The plan's only skip is the Agent status guard above.
         if ("skip" in outcome) {
-          recordSkip("agent_status_not_federated", record);
-          continue;
+          return { reason: "agent_status_not_federated" };
         }
-        // embedding-space-guard slice 1: a federation-merged Memory can carry a
-        // FOREIGN embeddingModel (LWW remote-win) — trip the guard's latch so
-        // recall/dedup degrade instead of cosining a foreign vector. See
-        // noteFederationMergedMemory's doc.
-        noteFederationMergedMemory(record.table, mergedData);
-        merged++;
+        try {
+          noteFederationMergedMemory(record.table, mergedData);
+        } catch (err) {
+          console.warn(`[Federation] post-commit note failed for ${record.table}/${record.id}: ${String(err)}`);
+        }
+        return { merged: true };
       } catch (err) {
-        if (err instanceof WriteBackIndeterminateError) {
-          return new Response(JSON.stringify({ error: "sync_merge_outcome_unknown" }), {
-            status: 503, headers: { "content-type": "application/json" },
-          });
-        }
         const msg = err instanceof Error ? err.message : String(err);
-        recordSkip("merge_error", record);
         // Cap the captured-error list so a hostile/buggy peer can't blow up
         // the SyncLog row, but ALWAYS log to console so operators don't lose
         // the per-record signal — the silent-swallow is the bug we're fixing.
@@ -1447,7 +1424,24 @@ export class FederationSync extends Resource {
         console.warn(
           `[Federation] merge error for ${record.table}/${record.id} from ${instanceId}: ${msg}`,
         );
+        return writeBackStarted ? { indeterminate: true } : { reason: "merge_error" };
       }
+    };
+
+    for (const record of records as SyncRecord[]) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const deadline = new Promise<MergeOutcome>((resolve) => {
+        timer = setTimeout(() => resolve({ indeterminate: true }), RECORD_MERGE_DEADLINE_MS);
+      });
+      let outcome: MergeOutcome;
+      try {
+        outcome = await Promise.race([mergeOne(record), deadline]);
+      } finally {
+        clearTimeout(timer);
+      }
+      if ("reason" in outcome) recordSkip(outcome.reason, record);
+      else if ("merged" in outcome) merged++;
+      else indeterminate.push({ table: record.table, id: record.id });
     }
 
     // Peer cursor update — distinguish liveness from progress:
@@ -1487,7 +1481,7 @@ export class FederationSync extends Resource {
       const errorSummary = errorParts.length > 0 ? errorParts.join(" | ") : undefined;
       const status = mergeErrors.length > 0
         ? "partial"
-        : skipped > 0 ? "partial" : "success";
+        : skipped > 0 || indeterminate.length > 0 ? "partial" : "success";
 
       await (databases as any).flair.SyncLog.put({
         id: `sync_${Date.now()}_${randomBytes(4).toString("hex")}`,
@@ -1508,6 +1502,7 @@ export class FederationSync extends Resource {
       skipped,
       skippedReasons,
       refused,
+      indeterminate,
       total: records.length,
       durationMs: Date.now() - startTime,
     };

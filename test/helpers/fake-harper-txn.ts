@@ -24,7 +24,7 @@ export function installFakeHarperTransaction(commit: (id: string, row: any) => v
     const txn = {
       open: 1,
       async commit() {
-        for (const [id, row] of map) commit(id, row);
+        for (const [id, row] of map) await commit(id, row);
         map.clear();
       },
     };
