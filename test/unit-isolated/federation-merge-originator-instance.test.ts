@@ -334,3 +334,21 @@ it("a committed Memory remains merged when its post-commit note throws", async (
     _resetGuardForTests();
   }
 });
+
+for (const field of ["table", "id"] as const) {
+  it(`an empty ${field} returns invalid_sync_batch_key before merging`, async () => {
+    const { secretKey, publicKey } = keypair();
+    peerStore.set(PEER_ID, { id: PEER_ID, publicKey, createdAt: OLD, role: "hub", status: "connected" });
+    const data = ROWS.Memory.data(ORIGIN);
+    const valid = pushedRecord("Memory", data.id, data, NEW, secretKey);
+    const invalid = { table: "Memory", id: "invalid", data: { ...data, id: "invalid" }, updatedAt: NEW };
+    invalid[field] = "";
+    if (field === "id") invalid.data.id = "";
+    const response = await postSync({ instanceId: PEER_ID, records: [valid, invalid] }, secretKey);
+    expect(response).toBeInstanceOf(Response);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "invalid_sync_batch_key" });
+    expect(stores.Memory.size).toBe(0);
+    expect(syncLogStore.size).toBe(0);
+  });
+}

@@ -23,12 +23,12 @@ const PAUSE = "federation-merge";
 let harper: HarperInstance;
 let pauseDir: string;
 
-/** Refuse any target that is not the ephemeral instance this file started. */
+/** Check loopback hosts, exclude ports 9925/9926, and require a positive PID. */
 function assertOwnInstance(h: HarperInstance): void {
   for (const url of [h.httpURL, h.opsURL]) {
     const u = new URL(url);
     expect(["127.0.0.1", "localhost"], url).toContain(u.hostname);
-    expect(["9925", "9926"], `${url} must be this test's own Harper`).not.toContain(u.port);
+    expect(["9925", "9926"], `${url} must avoid ports 9925/9926`).not.toContain(u.port);
   }
   expect(h.process?.pid).toBeGreaterThan(0);
 }
@@ -173,6 +173,19 @@ describe("flair#2455 slice 2 — validated batch keys and indeterminate outcomes
     expect(await res.json()).toEqual({ error: "invalid_sync_batch_key" });
     expect(await readRow("Memory", id)).toBeNull();
   }, 60_000);
+
+  for (const field of ["table", "id"] as const) {
+    it(`an empty ${field} refuses the whole batch before any merge`, async () => {
+      const id = `frc-empty-${field}-${Date.now()}`;
+      const invalid = memoryRecord(`${id}-invalid`);
+      invalid[field] = "";
+      if (field === "id") invalid.data.id = "";
+      const res = await federatedPush([memoryRecord(id), invalid]);
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: "invalid_sync_batch_key" });
+      expect(await readRow("Memory", id)).toBeNull();
+    }, 60_000);
+  }
 
   it("a duplicate key refuses the whole batch before any merge", async () => {
     const id = `frc-duplicate-${Date.now()}`;

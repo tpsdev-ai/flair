@@ -1102,7 +1102,8 @@ export class FederationSync extends Resource {
 
     const offeredKeys = new Set<string>();
     for (const record of records) {
-      if (typeof record?.table !== "string" || typeof record?.id !== "string" ||
+      if (typeof record?.table !== "string" || record.table.length === 0 ||
+        typeof record?.id !== "string" || record.id.length === 0 ||
         record?.data?.id !== record.id) {
         return new Response(JSON.stringify({ error: "invalid_sync_batch_key" }), {
           status: 400, headers: { "content-type": "application/json" },
