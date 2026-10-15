@@ -2,13 +2,8 @@
  * workflow-gate.ts — assert a CI gate step from the workflow's parsed job graph
  * instead of from a substring of its text (flair#2289, flair#2419).
  *
- * `checkCoverageGate` is a whitelist: the gate step must run its command
- * (whitespace-normalised), under the default shell (no `shell:` on the step, no
- * `defaults.run.shell` on the job or workflow), with no `if` and no
- * `continue-on-error` on the step or its job, in a job the required check
- * reaches through `needs` within the same workflow, and the required check's
- * own job must be the canonical `if: always()` adapter. `gateCases` builds the
- * negative cases a test feeds back to the checker.
+ * Gates must cover every PR targeting main, run in directly result-checked
+ * jobs, and use the canonical command and default shell without skip controls.
  */
 
 import { readFileSync, readdirSync } from "node:fs";
@@ -17,7 +12,7 @@ import { load as loadYaml } from "js-yaml";
 
 export type WorkflowStep = { name?: unknown; run?: unknown; if?: unknown; "continue-on-error"?: unknown; shell?: unknown };
 export type WorkflowJob = { name?: unknown; needs?: unknown; if?: unknown; "continue-on-error"?: unknown; shell?: unknown; defaults?: { run?: { shell?: unknown } }; steps?: WorkflowStep[] };
-export type WorkflowDoc = { defaults?: { run?: { shell?: unknown } }; jobs?: Record<string, WorkflowJob> };
+export type WorkflowDoc = { on?: unknown; defaults?: { run?: { shell?: unknown } }; jobs?: Record<string, WorkflowJob> };
 
 export type Gate = {
   /** The `name:` of the step that runs the gate. */
@@ -44,6 +39,9 @@ const ADAPTER_RUN = [
   "exit 1",
   "fi",
 ].join(" ");
+const RESULT_CHECKED_JOBS = new Set(
+  [...ADAPTER_RUN.matchAll(/if \[ "\$\{\{ needs\.([\w-]+)\.result \}\}" != "success" \]; then/g)].map((match) => match[1]),
+);
 const normalise = (text: string) => text.trim().replace(/\s+/g, " ");
 
 /** Parse the `.yml`/`.yaml` files in `dir`, sorted by file name. */
@@ -76,7 +74,34 @@ function requiredUnitJobs(doc: WorkflowDoc): Set<string> {
   return seen;
 }
 
-/** Throws unless `gate` is a canonical, enabled step of a job the required check depends on. */
+function checkPullRequestTrigger(doc: WorkflowDoc): void {
+  const on = doc.on;
+  const missing = "the gate workflow must have a pull_request trigger";
+  if (typeof on === "string") {
+    if (on !== "pull_request") throw new Error(missing);
+    return;
+  }
+  if (Array.isArray(on)) {
+    if (!on.includes("pull_request")) throw new Error(missing);
+    return;
+  }
+  if (!on || typeof on !== "object" || !("pull_request" in on)) throw new Error(missing);
+  const pr = on.pull_request;
+  if (pr === null) return;
+  if (!pr || typeof pr !== "object" || Array.isArray(pr)) throw new Error("pull_request must be a mapping or null");
+  for (const filter of ["paths", "paths-ignore", "branches-ignore"]) {
+    if (filter in pr) throw new Error(`pull_request must not set ${filter}`);
+  }
+  if ("branches" in pr && (!Array.isArray(pr.branches) || pr.branches.length !== 1 || pr.branches[0] !== "main")) {
+    throw new Error("pull_request branches must be absent or exactly [main]");
+  }
+  const types = "types" in pr ? pr.types : undefined;
+  if ("types" in pr && (!Array.isArray(types) || !["opened", "synchronize", "reopened"].every((type) => types.includes(type)))) {
+    throw new Error("pull_request types must include opened, synchronize and reopened");
+  }
+}
+
+/** Throws unless every gate is enabled for PRs targeting main and its job is result-checked. */
 export function checkCoverageGate(docs: WorkflowDoc[], gate: Gate): void {
   const required = new Map(docs.map((doc) => [doc, requiredUnitJobs(doc)]));
   const gates = docs.flatMap((doc) =>
@@ -87,7 +112,12 @@ export function checkCoverageGate(docs: WorkflowDoc[], gate: Gate): void {
   if (gates.length === 0) throw new Error(`no step is named "${gate.step}"`);
   const gated = gates.filter(({ doc, id }) => required.get(doc)?.has(id));
   if (gated.length === 0) throw new Error(`"${gate.step}" runs in no job the required "${REQUIRED_UNIT_CHECK}" check depends on in the same workflow`);
-  for (const { doc, id, job, step } of gated) {
+  for (const { doc, id, job, step } of gates) {
+    checkPullRequestTrigger(doc);
+    const checked = Object.values(doc.jobs ?? {}).some((adapter) =>
+      adapter.name === REQUIRED_UNIT_CHECK && (Array.isArray(adapter.needs) ? adapter.needs : [adapter.needs]).includes(id),
+    );
+    if (!RESULT_CHECKED_JOBS.has(id) || !checked) throw new Error(`the gate job "${id}" must be directly result-checked by the required "${REQUIRED_UNIT_CHECK}" adapter`);
     if ("if" in step) throw new Error(`"${gate.step}" has if; it must be absent`);
     if ("continue-on-error" in step) throw new Error(`"${gate.step}" has continue-on-error; it must be absent`);
     if ("shell" in step) throw new Error(`"${gate.step}" has shell; it must run under the default shell`);
@@ -201,6 +231,35 @@ export function gateCases(dir: string, gate: Gate): GateCase[] {
     ...[true, false].flatMap((value): GateCase[] => [
       [`step continue-on-error: ${value}`, mutate((_doc, _job, step) => { step["continue-on-error"] = value; }), stepContinueError],
       [`job continue-on-error: ${value}`, mutate((_doc, job) => { job["continue-on-error"] = value; }), jobContinueError],
+    ]),
+    ["move gate to unchecked direct need", mutate((doc, job, step) => {
+      const adapter = doc.jobs?.[ADAPTER_JOB];
+      if (!doc.jobs || !job.steps || !adapter || !Array.isArray(adapter.needs)) throw new Error("fixture drift: gate or adapter needs not found");
+      job.steps.splice(job.steps.indexOf(step), 1);
+      doc.jobs["unchecked-direct-need"] = { steps: [step] };
+      adapter.needs.push("unchecked-direct-need");
+    }), `the gate job "unchecked-direct-need" must be directly result-checked by the required "${REQUIRED_UNIT_CHECK}" adapter`],
+    ["unchecked copy alongside checked gate", mutate((doc, _job, step) => {
+      const adapter = doc.jobs?.[ADAPTER_JOB];
+      if (!doc.jobs || !adapter || !Array.isArray(adapter.needs)) throw new Error("fixture drift: adapter needs not found");
+      doc.jobs["unchecked-direct-need"] = { steps: [{ ...step }] };
+      adapter.needs.push("unchecked-direct-need");
+    }), `the gate job "unchecked-direct-need" must be directly result-checked by the required "${REQUIRED_UNIT_CHECK}" adapter`],
+    ["gate reachable only through an intermediate job", mutate((doc) => {
+      const adapter = doc.jobs?.[ADAPTER_JOB];
+      if (!doc.jobs || !adapter) throw new Error("fixture drift: adapter not found");
+      doc.jobs["intermediate"] = { needs: GATE_JOB };
+      adapter.needs = ["intermediate", "test-darwin-gated"];
+    }), `the gate job "${GATE_JOB}" must be directly result-checked by the required "${REQUIRED_UNIT_CHECK}" adapter`],
+    ...["paths", "paths-ignore", "branches-ignore"].map((filter): GateCase => [
+      `pull_request ${filter} filter`, mutate((doc) => { doc.on = { pull_request: { [filter]: ["docs/**"] } }; }), `pull_request must not set ${filter}`,
+    ]),
+    ["missing pull_request trigger", mutate((doc) => { doc.on = { push: null }; }), "the gate workflow must have a pull_request trigger"],
+    ...[["develop"], ["main", "develop"], [], "main", null].map((branches): GateCase => [
+      `pull_request branches ${JSON.stringify(branches)}`, mutate((doc) => { doc.on = { pull_request: { branches } }; }), "pull_request branches must be absent or exactly [main]",
+    ]),
+    ...["opened", "synchronize", "reopened"].map((omitted): GateCase => [
+      `pull_request types omit ${omitted}`, mutate((doc) => { doc.on = { pull_request: { types: ["opened", "synchronize", "reopened"].filter((type) => type !== omitted) } }; }), "pull_request types must include opened, synchronize and reopened",
     ]),
     ["move to doclint", mutate((doc, job, step) => {
       const to = doc.jobs?.[OTHER_JOB];

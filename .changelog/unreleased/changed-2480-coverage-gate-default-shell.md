@@ -4,3 +4,8 @@
   job-level `defaults.run.shell` and a workflow-level `defaults.run.shell` are
   each refused. Fixtures under `test/fixtures/workflow-gate/` cover each
   refusal.
+
+  Gates must cover every PR targeting main: `pull_request` is required,
+  `branches` is absent or exactly `[main]`, path and ignore filters are refused,
+  and explicit `types` must include `opened`, `synchronize` and `reopened`.
+  Every gate job must be directly result-checked by the pinned adapter.

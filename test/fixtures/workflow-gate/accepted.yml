@@ -1,9 +1,6 @@
 # Fixture for the workflow coverage-gate checker (flair#2480).
 #
-# The accepted shape: a gate step that runs under the default shell, in a job
-# the `Unit Tests` adapter reaches through `needs`, reported by the canonical
-# adapter script that fails unless that job succeeded. Mirrors test.yml's
-# `test-unit` gate job and its `test-unit-gate` adapter.
+# Accepted: the gate job is directly result-checked by the pinned adapter.
 name: workflow-gate fixture (accepted)
 on: pull_request
 jobs:

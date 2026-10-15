@@ -1,11 +1,4 @@
 // The workflow coverage-gate checker's own fixtures (flair#2480).
-//
-// `checkCoverageGate` refuses a shell override on the gate or on the
-// `Unit Tests` adapter (a step `shell:`, a job or workflow
-// `defaults.run.shell`); a gate outside the job the adapter reaches through
-// `needs`; and an `if:` or `continue-on-error` on the step or its job. Each
-// fixture below is one such refusal (one workflow file per refusal);
-// `accepted.yml` is none.
 
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -28,6 +21,29 @@ describe("workflow coverage-gate checker — fixtures", () => {
   test("accepts the canonical gate", () => {
     expect(() => checkCoverageGate(fixture("accepted.yml"), GATE)).not.toThrow();
   });
+
+  for (const on of [
+    "pull_request",
+    ["push", "pull_request"],
+    { pull_request: null },
+    { pull_request: {} },
+    { pull_request: { branches: ["main"] } },
+    { pull_request: { types: ["opened", "synchronize", "reopened", "ready_for_review"] } },
+  ]) {
+    test(`accepts trigger ${JSON.stringify(on)}`, () => {
+      const docs = fixture("accepted.yml");
+      docs[0].on = on;
+      expect(() => checkCoverageGate(docs, GATE)).not.toThrow();
+    });
+  }
+
+  for (const on of [undefined, "push", ["push"], { pull_request: false }, { pull_request: [] }]) {
+    test(`refuses trigger ${JSON.stringify(on)}`, () => {
+      const docs = fixture("accepted.yml");
+      docs[0].on = on;
+      expect(() => checkCoverageGate(docs, GATE)).toThrow();
+    });
+  }
 
   for (const [name, error] of [
     ["refused-shell-step.yml", `"${GATE.step}" has shell; it must run under the default shell`],
