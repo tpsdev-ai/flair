@@ -694,7 +694,18 @@ export interface AuthedRequestOptions {
    *  resolved `--admin-user` flag. Falls back to FLAIR_ADMIN_USER env, then
    *  `"admin"`, via resolveAdminUser (flair#1345). */
   adminUser?: string;
+  /**
+   * Send no shared secret (flair#2526): no Basic and no Bearer header, from any
+   * source (an explicit admin pass is refused; FLAIR_TOKEN, FLAIR_ADMIN_PASS,
+   * HDB_ADMIN_PASSWORD and ~/.flair/admin-pass are skipped). Only an Ed25519
+   * agent signature, or nothing, goes out. For a target whose instance is not
+   * proven, such as `flair doctor`'s listener-only fallback.
+   */
+  signedOnly?: boolean;
 }
+
+/** The Authorization scheme of an Ed25519 agent signature (buildEd25519Auth). */
+const ED25519_SCHEME = "TPS-Ed25519 ";
 
 /**
  * The shared resolver: given a Flair REST call and whatever credential
@@ -719,6 +730,13 @@ export async function authedRequest(
   // Which tier supplied authHeader — drives the never-silent override notice
   // below (see describeIdentityOverride).
   let credSource: ResolvedCredentialSource | undefined;
+
+  if (opts.signedOnly && opts.explicitAdminPass) {
+    throw new Error(
+      "refusing to send an admin password to a target that may receive only an Ed25519 signature or no Authorization header " +
+        "(its instance is not proven); pass --agent <a registered agent id> instead",
+    );
+  }
 
   // Tier 1: explicit — caller-resolved flag material always wins.
   if (opts.explicitAdminPass) {
@@ -754,7 +772,8 @@ export async function authedRequest(
   }
 
   // Tier 2: env — FLAIR_TOKEN (Bearer), else FLAIR_ADMIN_PASS/HDB_ADMIN_PASSWORD (Basic).
-  if (!authHeader) {
+  // Skipped when only a signature may be sent.
+  if (!authHeader && !opts.signedOnly) {
     if (process.env.FLAIR_TOKEN) {
       authHeader = `Bearer ${process.env.FLAIR_TOKEN}`;
       credSource = "env-token";
@@ -782,7 +801,8 @@ export async function authedRequest(
   }
 
   // Tier 4: LOCAL TARGETS ONLY — the secure ~/.flair/admin-pass file.
-  if (!authHeader) {
+  // Skipped when only a signature may be sent.
+  if (!authHeader && !opts.signedOnly) {
     try {
       const filePass = resolveLocalAdminPass(undefined, !isLocal);
       if (filePass) {
@@ -810,6 +830,12 @@ export async function authedRequest(
         : process.env.HDB_ADMIN_PASSWORD ? "HDB_ADMIN_PASSWORD" : undefined,
     });
     if (notice) emitIdentityOverrideNotice(notice);
+  }
+
+  // The last word for signedOnly: whatever resolved above, nothing but an
+  // agent signature leaves (flair#2526).
+  if (opts.signedOnly && authHeader !== undefined && !authHeader.startsWith(ED25519_SCHEME)) {
+    throw new Error("refusing to send a Basic or Bearer credential to a target that may receive only an Ed25519 signature or no Authorization header");
   }
 
   try {
