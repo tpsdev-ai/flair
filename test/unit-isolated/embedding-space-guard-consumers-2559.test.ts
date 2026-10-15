@@ -1,0 +1,275 @@
+/**
+ * embedding-space-guard-consumers-2559.test.ts — flair#2559.
+ *
+ * The two remaining consumers of stored vectors now consult the query-time
+ * embedding-space guard (resources/embedding-space-guard.ts) with the same
+ * policy SemanticSearch and the write-time dedup leg use:
+ *   (a) MemoryBootstrap's task-relevant selection REFUSES its task embedding on
+ *       a non-uniform verdict, degrades to its non-vector (lexical) selection
+ *       and surfaces the SAME state-named warning SemanticSearch emits;
+ *   (b) MemoryDedupStats returns NO vector-derived counts (never numbers
+ *       computed across spaces) and names the guard state in the response.
+ *
+ * Each consumer is driven over a controlled corpus against the SHIPPED code, in
+ * its own process, for a uniform verdict (unchanged behaviour), a mixed verdict
+ * and an unknown verdict. This mirrors embedding-space-guard-legs.test.ts:
+ * a real-Harper spawn cannot HOLD a two-space corpus deterministically (the
+ * stamp migration converges it on the next boot), so the shipped consumers are
+ * exercised here against an in-memory harper, and the real-Harper unknown
+ * verdict and foreign-stamp latch are covered by the integration tests
+ * (embedding-space-guard-unknown-2530, embedding-space-guard-consumers-2559).
+ *
+ * Mutation check: delete either consumer's guard consult (the
+ * embeddingSpaceVerdict() block in resources/MemoryBootstrap.ts /
+ * resources/MemoryDedupStats.ts) and the mixed/unknown assertions go red: the
+ * bootstrap warning disappears and the dedup counts come back non-null.
+ */
+import { describe, it, expect, beforeEach, mock } from "bun:test";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+// HOME before the dedup-cluster module (imported by MemoryDedupStats) computes
+// REM_DEDUP_STATS_PATH from homedir() — the sweep writes its stat file there.
+process.env.HOME = mkdtempSync(join(tmpdir(), "flair-2559-home-"));
+process.env.FLAIR_RATE_LIMIT_ENABLED = "false";
+process.env.FLAIR_HYBRID_RETRIEVAL = "false"; // legacy HNSW-only path — no BM25 index service to stand up
+delete (process.env as any).FLAIR_PUBLIC;
+
+const CURRENT = "gguf:nomic-embed-text-v1.5-Q4_K_M+searchprefix";
+const FOREIGN = "gemma-embed:768"; // a genuinely different vector space
+// Constant embedding ⇒ raw cosine is ALWAYS 1.0 between any two docs (a
+// semantic-only query matches by cosine; the dedup sweep finds one cluster).
+const FAKE_EMBEDDING = [1, 0, 0, 0];
+const OTHER_SPACE_VEC = [0, 1, 0, 0];
+
+mock.module("../../resources/embeddings-provider.ts", () => ({
+  getEmbedding: async () => FAKE_EMBEDDING,
+  getMode: () => "local",
+  getModelId: () => CURRENT,
+  EMBEDDING_ENGINE: "gguf",
+}));
+
+function cosineSim(a: number[], b: number[]): number {
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < a.length; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
+  if (na === 0 || nb === 0) return 0;
+  return dot / (Math.sqrt(na) * Math.sqrt(nb));
+}
+
+function matchesCondition(record: any, cond: any): boolean {
+  if (cond.operator && Array.isArray(cond.conditions)) {
+    const results = cond.conditions.map((c: any) => matchesCondition(record, c));
+    return cond.operator === "or" ? results.some(Boolean) : results.every(Boolean);
+  }
+  const fieldVal = record[cond.attribute];
+  if (cond.comparator === "equals") return fieldVal === cond.value;
+  if (cond.comparator === "not_equal" || cond.comparator === "not_equals") return fieldVal !== cond.value;
+  return true;
+}
+
+let memoryStore: Map<string, any>;
+let memoryGrants: any[];
+let idCounter = 0;
+
+function memorySearchGen(query: any) {
+  const conditions = Array.isArray(query) ? query : Array.isArray(query?.conditions) ? query.conditions : [];
+  let records = Array.from(memoryStore.values());
+  for (const cond of conditions) records = records.filter((r) => matchesCondition(r, cond));
+  if (query?.sort?.attribute === "embedding" && query.sort.distance === "cosine") {
+    const target = query.sort.target;
+    records = records
+      .map((r) => ({ ...r, $distance: Array.isArray(r.embedding) ? 1 - cosineSim(r.embedding, target) : 1 }))
+      .sort((a, b) => a.$distance - b.$distance);
+  }
+  const limit = typeof query?.limit === "number" ? query.limit : undefined;
+  const sliced = limit !== undefined ? records.slice(0, limit) : records;
+  async function* gen() { for (const r of sliced) yield r; }
+  return gen();
+}
+
+class BaseMemory {
+  async post(content: any) {
+    const id = content.id ?? `mock-${++idCounter}`;
+    content.id = id;
+    memoryStore.set(id, { ...content });
+    return id;
+  }
+  async put(content: any) { memoryStore.set(content.id, { ...content }); return undefined; }
+  async get(target: any) {
+    const id = typeof target === "string" ? target : target?.id;
+    return memoryStore.get(id) ?? null;
+  }
+  search(query: any) { return memorySearchGen(query); }
+  static async get(id: any) { return memoryStore.get(id) ?? null; }
+  static search(query: any) { return memorySearchGen(query); }
+}
+
+/** A table that yields nothing (every non-Memory table the shipped consumers
+ *  touch: Soul, Agent, OrgSkillAssignment, WorkspaceState, OrgEvent, …). */
+function emptyTable() {
+  return {
+    search: () => { async function* gen() {} return gen(); },
+    get: async () => null,
+  };
+}
+
+const flairTables: Record<string, any> = {
+  Memory: BaseMemory,
+  MemoryGrant: {
+    search: (query: any) => {
+      const conditions = Array.isArray(query?.conditions) ? query.conditions : [];
+      let grants = memoryGrants.slice();
+      for (const cond of conditions) grants = grants.filter((g) => matchesCondition(g, cond));
+      async function* gen() { for (const g of grants) yield g; }
+      return gen();
+    },
+  },
+  Agent: emptyTable(),
+  Instance: emptyTable(),
+};
+const flair = new Proxy(flairTables, {
+  get(target: Record<string, any>, prop: string) {
+    return prop in target ? target[prop] : emptyTable();
+  },
+});
+const databasesMock = { flair };
+
+mock.module("harper", () => ({ databases: databasesMock, Resource: class {}, server: { getUser: async () => null } }));
+
+const { BootstrapMemories } = await import("../../resources/MemoryBootstrap.ts");
+const { MemoryDedupStats } = await import("../../resources/MemoryDedupStats.ts");
+const { recomputeLatch, _resetGuardForTests } = await import("../../resources/embedding-space-guard.ts");
+const { _resetLocalInstanceIdCacheForTests } = await import("../../resources/instance-identity.ts");
+
+const AGENT = "agent-a";
+const OTHER = "agent-b";
+const OLD = new Date(Date.now() - 90 * 24 * 3600_000).toISOString(); // outside every recent window
+
+function makeBootstrap(agentId: string) {
+  const r: any = new (BootstrapMemories as any)();
+  r.getContext = () => ({ request: { tpsAgent: agentId, tpsAgentIsAdmin: false } });
+  return r;
+}
+function makeDedup() {
+  const r: any = new (MemoryDedupStats as any)();
+  r.getContext = () => ({});
+  return r;
+}
+
+/** A non-permanent, old, own row: NOT loaded by any lifecycle section
+ *  (permanent/recent/predicted), so it can only reach the payload through the
+ *  task-relevant (semantic) path — which is what the guard governs. */
+function seedReachableRow(id: string, agentId: string, content: string, embeddingModel: string, embedding: number[]) {
+  memoryStore.set(id, {
+    id, agentId, content, embeddingModel, embedding,
+    durability: "persistent", visibility: "shared", createdAt: OLD, updatedAt: OLD,
+  });
+}
+
+beforeEach(() => {
+  memoryStore = new Map();
+  memoryGrants = [];
+  idCounter = 0;
+  _resetLocalInstanceIdCacheForTests();
+  _resetGuardForTests(); // default table getter reads databasesMock; default modelId getter is the mocked CURRENT
+});
+
+// flair#1940: the Memory write path expects the global `transaction` helper.
+(globalThis as any).transaction = (ctx: any, cb: (txn: any) => any) => {
+  if (ctx?.transaction && ctx.transaction.open === 1) return cb(ctx.transaction);
+  const txn: any = { open: 1, saveCommits: false, abort() { this.open = 0; }, commit() { this.open = 0; } };
+  const c = ctx && typeof ctx === "object" ? ctx : {};
+  c.transaction = txn;
+  let r: any;
+  try { r = cb(txn); } catch (e) { txn.abort(); throw e; }
+  if (r && typeof r.then === "function") {
+    return r.then((v: any) => { txn.commit(); return v; }, (e: any) => { txn.abort(); throw e; });
+  }
+  txn.commit();
+  return r;
+};
+
+describe("MemoryBootstrap's task-relevant selection consults the guard (flair#2559)", () => {
+  it("(uniform) uses the embedding leg and adds no warning", async () => {
+    seedReachableRow("m1", AGENT, "the federation replication knob", CURRENT, FAKE_EMBEDDING);
+    expect(await recomputeLatch()).toBe(true);
+
+    // No keyword overlap with the row, so only the embedding leg can reach it.
+    const res: any = await makeBootstrap(AGENT).post({ agentId: AGENT, currentTask: "zqxnokeyword" });
+    expect(res.memories.map((m: any) => m.id)).toContain("m1");
+    expect(res._warning).toBeUndefined();
+  });
+
+  it("(mixed) refuses the embedding leg, selects lexically and names the state", async () => {
+    seedReachableRow("m1", AGENT, "the federation replication knob", CURRENT, FAKE_EMBEDDING);
+    memoryStore.set("f1", {
+      id: "f1", agentId: OTHER, content: "a foreign-space finding", embeddingModel: FOREIGN,
+      embedding: OTHER_SPACE_VEC, durability: "persistent", visibility: "shared", createdAt: OLD, updatedAt: OLD,
+    });
+    expect(await recomputeLatch()).toBe(false);
+
+    // No-keyword task: the refused embedding leg leaves the lexical leg, which
+    // matches nothing ⇒ the row is dropped and the warning names both spaces.
+    const semantic: any = await makeBootstrap(AGENT).post({ agentId: AGENT, currentTask: "zqxnokeyword" });
+    expect(semantic.memories.map((m: any) => m.id)).not.toContain("m1");
+    expect(String(semantic._warning)).toContain("non-current embedding model stamp was observed");
+    expect(String(semantic._warning)).toContain("flair reembed");
+    expect(String(semantic._warning)).toContain(FOREIGN);
+
+    // A task whose term IS in the content still reaches the row lexically.
+    const keyword: any = await makeBootstrap(AGENT).post({ agentId: AGENT, currentTask: "replication" });
+    expect(keyword.memories.map((m: any) => m.id)).toContain("m1");
+  });
+
+  it("(unknown) fails closed with the not-yet-verified warning", async () => {
+    seedReachableRow("m1", AGENT, "the federation replication knob", CURRENT, FAKE_EMBEDDING);
+    // beforeEach reset the guard: no scan has reached a verdict yet. The
+    // task-relevant consult is the first, so it must fail closed.
+    const res: any = await makeBootstrap(AGENT).post({ agentId: AGENT, currentTask: "zqxnokeyword" });
+    expect(res.memories.map((m: any) => m.id)).not.toContain("m1");
+    expect(String(res._warning)).toContain("embedding space not yet verified");
+    expect(String(res._warning)).not.toContain("non-current embedding model stamp was observed");
+  });
+});
+
+describe("MemoryDedupStats consults the guard (flair#2559)", () => {
+  it("(uniform) returns the vector-derived counts", async () => {
+    seedReachableRow("m1", AGENT, "alpha", CURRENT, FAKE_EMBEDDING);
+    seedReachableRow("m2", AGENT, "beta", CURRENT, FAKE_EMBEDDING);
+    seedReachableRow("m3", AGENT, "gamma", CURRENT, FAKE_EMBEDDING);
+    expect(await recomputeLatch()).toBe(true);
+
+    const res: any = await makeDedup().post({});
+    expect(res.clusterCount).toBe(1);
+    expect(res.largestClusterSize).toBe(3);
+    expect(res.totalMemoriesInClusters).toBe(3);
+    expect(res.embeddingSpace).toBeUndefined();
+  });
+
+  it("(mixed) returns no counts and names the state", async () => {
+    seedReachableRow("m1", AGENT, "alpha", CURRENT, FAKE_EMBEDDING);
+    seedReachableRow("m2", AGENT, "beta", CURRENT, FAKE_EMBEDDING);
+    memoryStore.set("f1", {
+      id: "f1", agentId: OTHER, content: "a foreign-space finding", embeddingModel: FOREIGN,
+      embedding: OTHER_SPACE_VEC, durability: "persistent", visibility: "shared", createdAt: OLD, updatedAt: OLD,
+    });
+    expect(await recomputeLatch()).toBe(false);
+
+    const res: any = await makeDedup().post({});
+    expect(res.clusterCount).toBeNull();
+    expect(res.largestClusterSize).toBeNull();
+    expect(res.totalMemoriesInClusters).toBeNull();
+    expect(res.embeddingSpace).toEqual({ state: "mixed", reason: null });
+  });
+
+  it("(unknown) returns no counts and names the not-yet-verified state", async () => {
+    seedReachableRow("m1", AGENT, "alpha", CURRENT, FAKE_EMBEDDING);
+    seedReachableRow("m2", AGENT, "beta", CURRENT, FAKE_EMBEDDING);
+    // No scan has reached a verdict yet (beforeEach reset).
+    const res: any = await makeDedup().post({});
+    expect(res.clusterCount).toBeNull();
+    expect(res.embeddingSpace?.state).toBe("unverified");
+    expect(res.embeddingSpace?.reason).toBeNull();
+  });
+});
