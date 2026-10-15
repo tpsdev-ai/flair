@@ -2,9 +2,10 @@
 
   `POST` and a single-record `PUT` store the server's time, whatever the body
   says, for agents and administrators alike. An administrator's collection `PUT`
-  of an array, an administrator's array-body `PUT`, and an administrator's
-  `PATCH` that creates a row do the same; a non-admin agent's array-body `PUT`
-  is refused earlier, by attribution, and stores nothing.
+  of an array and an administrator's `PATCH` that creates a row do the same. A
+  non-admin agent's collection `PUT` is refused earlier by the owner-scoped write
+  guard, and a non-admin addressed array-body `PUT` that reaches the resource is
+  refused by attribution; neither stores anything.
 
   The check runs after the earlier checks (authentication, ownership,
   attribution, entity validation), which answer first with their own

@@ -25,10 +25,10 @@
  *
  * resources/OrgEvent.ts runs this check for writes from verified agents and
  * administrators on POST, single-record PUT and PATCH, and for administrators
- * on a collection PUT and on each element of an array-body PUT. A non-admin
- * agent's collection PUT or PATCH is refused before this check by the
- * owner-scoped write guard (resources/owner-scoped-write-policy.ts), and a
- * non-admin agent's array-body PUT is refused before it by attribution. Trusted in-process
+ * on each element of a collection PUT. A non-admin agent's collection PUT or
+ * PATCH is refused before this check by the owner-scoped write guard
+ * (resources/owner-scoped-write-policy.ts), and a non-admin addressed
+ * array-body PUT that reaches the resource is refused before it by attribution. Trusted in-process
  * writers that supply their own createdAt (the migration ledger, the graph-heal migration) write
  * through the raw `databases.flair.OrgEvent` table, not the resource's verbs,
  * and an `internal` verdict on the resource passes through unchanged.
