@@ -9084,6 +9084,7 @@ bindMemoryCli({
   resolveHttpPort,
   parseEntitiesOptionOrExit,
   ENTITIES_OPTION_DESCRIPTION,
+  resolveFabricCredentials,
 });
 registerMemory(program);
 

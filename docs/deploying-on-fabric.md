@@ -331,6 +331,42 @@ flair upgrade --target https://<cluster>.<org>.harperfabric.com --check
 
 Full path: [upgrade.md](upgrade.md#upgrading-a-fabric-deployed-instance).
 
+### Guarding the data: a Memory id checkpoint around a deploy
+
+Component convergence is not data convergence. `flair fleet verify` and the deploy's own
+convergence check compare component files and versions; a component tree can converge
+while a durable Memory row is gone. Checkpoint the instance's Memory ids before the
+operation, then verify after:
+
+```bash
+flair memory checkpoint --target https://<cluster>.<org>.harperfabric.com \
+  --fabric-password-file ~/.tps/secrets/flair-fabric-hdb
+
+# ... the planned cluster operation ...
+
+flair memory verify --target https://<cluster>.<org>.harperfabric.com \
+  --fabric-password-file ~/.tps/secrets/flair-fabric-hdb
+```
+
+The checkpoint command reads Memory ids and durability tiers through the admin operations
+API (paged, never through recall) and writes them to `~/.flair/memory-id-checkpoint.json`
+(mode `0600`); it reads no Memory content. `--checkpoint <path>` picks another file.
+
+The verify command re-reads the same node and compares:
+
+- **verified** (exit 0) — every checkpointed id is still present; new ids are fine;
+- **integrity failure** (exit 2) — a checkpointed id is gone, or a durability tier count
+  dropped; the report names the count of missing ids and up to ten ids;
+- **unknown** (exit 3) — the instance, a page, or the whole table could not be read.
+  Unknown is not reported as verified.
+
+A checkpoint taken from one node address is refused against a different one.
+
+`flair deploy` also takes `--memory-checkpoint <path>`: after the deploy it runs the same
+verify and adds a `Data convergence:` line to the report. Without the flag the report
+says the data was not checked — component convergence alone is not reported as data
+convergence.
+
 ---
 
 ## See also

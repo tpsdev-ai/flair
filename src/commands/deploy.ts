@@ -9,6 +9,7 @@
 import { Command } from "commander";
 import { buildTargetUrl as buildDeployUrl, deploy as deployToFabric, validateOptions as validateDeployOptions } from "../deploy.js";
 import { renderFleetSweepTable, sweepFleet } from "../fleet-verify.js";
+import { readCheckpointFile, verifyCheckpoint } from "../memory-id-checkpoint.js";
 
 export type DeployCli = {
   fleetSweepCallerExitMessage: (...args: any[]) => any;
@@ -81,6 +82,7 @@ program
   .option("--no-verify", "Skip post-deploy served-API verification (default: verify — on by design, so the CLI can't report success on an empty/broken deploy)")
   .option("--verify-timeout <ms>", "Milliseconds to wait for the served API to settle after harper's post-deploy restart before verifying (default: 300000)")
   .option("--verify-resource <name>", "Resource to verify is serving after deploy (repeatable; default: derived from the deployed package's dist/resources)", (val: string, prev: string[]) => [...prev, val], [] as string[])
+  .option("--memory-checkpoint <path>", "After deploy, verify this instance's Memory ids against a `flair memory checkpoint` file and add a data-convergence line to the report")
   .option("--deploy-retries <n>", "Retry the full harper deploy this many times, ONLY when peer replication is positively observed not to converge (default: 0 — retrying re-runs harper's component install and can escalate a transient replication warning into a hard ENOTEMPTY install failure; see flair#878)", "0")
   .option("--ignore-replication-errors", "If peer replication still hasn't converged, treat it as a non-fatal warning and succeed with an origin-only deploy (the peer catches up via federation sync or a later deploy)")
   .option("--no-convergence-check", "Skip the post-replication-error convergence poll and fail on harper's error verbatim (default: poll — Harper replicates asynchronously, so its error is a snapshot, not a verdict; flair#878)")
@@ -161,6 +163,31 @@ program
       }
       console.log(`\n  URL:     ${result.url}`);
       console.log(`  Project: ${result.project}`);
+
+      // ── Data convergence (flair#2218) ─────────────────────────────────────
+      // Component convergence says nothing about the DATA: a tree can converge
+      // byte-for-byte while a durable Memory row is gone. With --memory-checkpoint
+      // the report gains a data line from the same guard the operator runs by
+      // hand; without one it says so, rather than leaving "verified" to be read
+      // from component convergence alone.
+      if (opts.memoryCheckpoint) {
+        const read = readCheckpointFile(opts.memoryCheckpoint);
+        if (read.kind === "ok") {
+          const data = await verifyCheckpoint({
+            checkpoint: read.checkpoint,
+            target: result.url,
+            user: deployOpts.fabricUser,
+            password: deployOpts.fabricPassword,
+          });
+          const color = data.outcome === "verified" ? green : data.outcome === "integrity-failure" ? red : yellow;
+          console.log(`  ${color(`Data convergence: ${data.detail}`)}`);
+        } else {
+          const why = read.kind === "absent" ? `no checkpoint at ${opts.memoryCheckpoint}` : `checkpoint unreadable: ${read.reason}`;
+          console.log(`  ${yellow(`Data convergence: unknown — ${why}`)}`);
+        }
+      } else {
+        console.log(dim("  Data convergence: not checked (component convergence is not data convergence; pass --memory-checkpoint <path> to guard Memory ids across this deploy)"));
+      }
 
       // ── Post-deploy fleet sweep (flair#636) ─────────────────────────────
       // Harper's own "Successfully deployed" (and the served-API verify

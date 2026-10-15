@@ -19,6 +19,21 @@ import { encodeRecordId } from "../lib/record-id-path.js";
 import { DURABILITY_TIERS_HELP } from "../lib/durability-copy.js";
 import { resolveLocalDeleteInstance } from "../lib/local-delete-instance.js";
 import { confirmedPurgeIds } from "../lib/memory-purge-response.js";
+import { resolveHome } from "../lib/home.js";
+import { ALL_TIERS } from "../lib/memory-integrity.js";
+import {
+  buildCheckpoint,
+  buildOpsPost,
+  readMemoryRowCount,
+  readMemoryRowsPaged,
+  readCheckpointFile,
+  writeCheckpointFile,
+  checkpointPath,
+  unknownVerify,
+  verifyCheckpoint,
+  renderVerifyHuman,
+  VERIFY_EXIT_CODES,
+} from "../memory-id-checkpoint.js";
 
 export type MemoryCli = {
   api: (...args: any[]) => Promise<any>;
@@ -31,6 +46,11 @@ export type MemoryCli = {
   resolveHttpPort: (opts: { port?: string | number }) => number;
   parseEntitiesOptionOrExit: (csv: string) => string[];
   ENTITIES_OPTION_DESCRIPTION: string;
+  resolveFabricCredentials: (opts: {
+    fabricUser?: string;
+    fabricPassword?: string;
+    fabricPasswordFile?: string;
+  }) => { fabricUser: string | undefined; fabricPassword: string | undefined; warnings: string[] };
 };
 
 let cli: MemoryCli;
@@ -63,6 +83,13 @@ function resolveOpsPort(opts: { opsPort?: string | number; port?: string | numbe
 }
 function parseEntitiesOptionOrExit(csv: string): string[] {
   return cli.parseEntitiesOptionOrExit(csv);
+}
+function resolveFabricCredentials(opts: {
+  fabricUser?: string;
+  fabricPassword?: string;
+  fabricPasswordFile?: string;
+}): { fabricUser: string | undefined; fabricPassword: string | undefined; warnings: string[] } {
+  return cli.resolveFabricCredentials(opts);
 }
 
 // Exported for unit testing — keeps the predicate logic separable from
@@ -556,4 +583,91 @@ export function register(program: Command): void {
       console.log("tombstone-based distributed delete lands. Until then, run `flair memory");
       console.log("hygiene --apply` on each peer to fan out.");
     });
+
+  // ── flair memory checkpoint / verify (flair#2218) ─────────────────────────
+  // A deploy guard around a planned cluster operation: write this instance's
+  // Memory ids + per-tier counts before, compare after. Never through recall,
+  // and no Memory content is read or printed — ids and counts only.
+  const credentialOptions = (cmd: Command): Command =>
+    cmd
+      .option("--fabric-user <user>", "Admin username (env: FABRIC_USER; inline leaks to ps/shell history)")
+      .option("--fabric-password <pass>", "Admin password (prefer FABRIC_PASSWORD env or --fabric-password-file)")
+      .option("--fabric-password-file <path>", "Read the admin password from a mode-0600 file");
+
+  const requireCredentials = (opts: any, command: string): { user: string; pass: string } => {
+    const { fabricUser, fabricPassword, warnings } = resolveFabricCredentials(opts);
+    for (const w of warnings) console.error(render.wrap(render.c.dim, w));
+    if (!fabricUser || !fabricPassword) {
+      console.error(render.wrap(render.c.red, `${command}: admin credentials required`));
+      console.error("  set FABRIC_USER + FABRIC_PASSWORD env, or --fabric-password-file, or (discouraged) inline --fabric-user/--fabric-password");
+      process.exit(1);
+    }
+    return { user: fabricUser, pass: fabricPassword };
+  };
+
+  const originOf = (target: string, command: string): string => {
+    try {
+      return new URL(target).origin;
+    } catch {
+      console.error(render.wrap(render.c.red, `${command}: --target must be a URL (the instance's own origin)`));
+      process.exit(1);
+    }
+  };
+
+  credentialOptions(
+    memory
+      .command("checkpoint")
+      .description("Write this instance's Memory ids and per-tier counts to an operator-held checkpoint (mode 0600) before a planned cluster operation")
+      .requiredOption("--target <url>", "Instance base URL — the node's own origin, where its admin operations API is served")
+      .option("--checkpoint <path>", "Checkpoint file path (default: ~/.flair/memory-id-checkpoint.json)"),
+  ).action(async (opts: any) => {
+    const { user, pass } = requireCredentials(opts, "flair memory checkpoint");
+    const origin = originOf(opts.target, "flair memory checkpoint");
+    const path: string = opts.checkpoint ?? checkpointPath(resolveHome());
+    try {
+      const opsPost = buildOpsPost(origin, user, pass);
+      const expected = await readMemoryRowCount(opsPost);
+      const rows = await readMemoryRowsPaged(opsPost, { expected });
+      const checkpoint = buildCheckpoint({ node: origin, at: new Date().toISOString(), rows });
+      writeCheckpointFile(path, checkpoint);
+      const counts = ALL_TIERS.map((t) => `${t} ${checkpoint.byDurability[t]}`).join(", ");
+      console.log(`${render.icons.ok} Checkpoint written: ${path}`);
+      console.log(`  node: ${checkpoint.host} at ${checkpoint.at}`);
+      console.log(`  memories: ${checkpoint.ids.length} id(s) — ${counts}`);
+      console.log(render.wrap(render.c.dim, "  ids and counts only; no Memory content was read or written"));
+    } catch (err) {
+      console.error(render.wrap(render.c.red, `${render.icons.error} checkpoint failed: ${err instanceof Error ? err.message : String(err)}`));
+      console.error(render.wrap(render.c.dim, "  no checkpoint was written"));
+      process.exit(1);
+    }
+  });
+
+  credentialOptions(
+    memory
+      .command("verify")
+      .description("Compare this instance's Memory ids with a checkpoint taken before the operation: integrity failure, verified, or unknown")
+      .requiredOption("--target <url>", "Instance base URL — the same node the checkpoint was taken from")
+      .option("--checkpoint <path>", "Checkpoint file path (default: ~/.flair/memory-id-checkpoint.json)")
+      .addHelpText("after", `
+Exit codes:
+  0  verified — every checkpointed Memory id is still present; new ids are fine
+  2  integrity failure — a checkpointed Memory id is missing, or a durability tier count dropped
+  3  unknown — the instance, a page, or the whole table could not be read; never reported as verified
+`),
+  ).action(async (opts: any) => {
+    const { user, pass } = requireCredentials(opts, "flair memory verify");
+    const origin = originOf(opts.target, "flair memory verify");
+    const path: string = opts.checkpoint ?? checkpointPath(resolveHome());
+    const read = readCheckpointFile(path);
+    if (read.kind === "absent") {
+      console.error(render.wrap(render.c.red, `${render.icons.error} no checkpoint at ${path}`));
+      console.error(`  run \`flair memory checkpoint\` before the operation to create one`);
+      process.exit(1);
+    }
+    const result = read.kind === "unreadable"
+      ? unknownVerify(`checkpoint unreadable: ${read.reason}`)
+      : await verifyCheckpoint({ checkpoint: read.checkpoint, target: origin, user, password: pass });
+    console.log(renderVerifyHuman(result, path));
+    process.exit(VERIFY_EXIT_CODES[result.outcome]);
+  });
 }
