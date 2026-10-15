@@ -30,8 +30,9 @@
  * redactor must not fail the dump it is cleaning, so read failures are loud but
  * do not abort the caller's remaining output. `--check` exits 1 on a finding:
  * that path is an assertion, so it must fail the caller. `--check` exits 2 when
- * it could not run at all (its key list failed to load, or an unexpected error),
- * so a caller can tell a crash from a finding — both fail the lane.
+ * it could not run at all (its key list failed to load, a named target cannot
+ * be read, or an unexpected error), so a caller can tell a crash from a finding
+ * — both fail the lane.
  */
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
@@ -54,6 +55,13 @@ import { fileURLToPath } from "node:url";
 let NEVER_GENERATED_SECRET_KEYS;
 try {
   ({ NEVER_GENERATED_SECRET_KEYS } = await import("../../src/lib/secret-keys.ts"));
+  // Validate the export inside the handled path, before the key-list spread
+  // below. A missing or malformed export (not an array) must be a crash (exit
+  // 2); the spread used to run outside this try and threw at module load, which
+  // Node exits 1 for — and a caller reads exit 1 as a scan finding (flair#2589).
+  if (!Array.isArray(NEVER_GENERATED_SECRET_KEYS)) {
+    throw new TypeError("NEVER_GENERATED_SECRET_KEYS is not an array");
+  }
 } catch (err) {
   console.error(`redact-launchd-plist: redaction check could not run: ${err?.message ?? err}`);
   process.exit(2);
@@ -130,14 +138,13 @@ export function unredactedKeyNames(text) {
   return found;
 }
 
-/** Every regular file at or under `path` (a file yields itself). */
+/**
+ * Every regular file at or under `path` (a file yields itself). Throws when
+ * `path` cannot be statted: a named target that is missing or unreadable must
+ * make `--check` exit 2, never report an unscanned target as clean (flair#2589).
+ */
 function filesUnder(path) {
-  let stat;
-  try {
-    stat = statSync(path);
-  } catch {
-    return [];
-  }
+  const stat = statSync(path);
   if (!stat.isDirectory()) return [path];
   return readdirSync(path, { withFileTypes: true }).flatMap((entry) => {
     const child = join(path, entry.name);
@@ -148,19 +155,31 @@ function filesUnder(path) {
 
 /** Assert that no credential key survives with a value under `paths`. */
 function checkPaths(paths) {
-  const targets = paths.flatMap(filesUnder);
   let findings = 0;
-  for (const file of targets) {
-    let text;
+  for (const path of paths) {
+    // A named target that cannot be read is a check that could not run (exit 2),
+    // not a clean result: reporting an unscanned target as clean is the failure
+    // this assertion exists to catch (flair#2589).
+    let targets;
     try {
-      text = readFileSync(file, "utf8");
-    } catch {
-      continue;
+      targets = filesUnder(path);
+    } catch (err) {
+      console.error(`redact-launchd-plist: cannot read ${path}: ${err?.message ?? err}`);
+      return 2;
     }
-    const keys = unredactedKeyNames(text);
-    if (keys.length > 0) {
-      findings += keys.length;
-      console.error(`redact-launchd-plist: unredacted credential key(s) in ${file}: ${keys.join(", ")}`);
+    for (const file of targets) {
+      let text;
+      try {
+        text = readFileSync(file, "utf8");
+      } catch (err) {
+        console.error(`redact-launchd-plist: cannot read ${file}: ${err?.message ?? err}`);
+        return 2;
+      }
+      const keys = unredactedKeyNames(text);
+      if (keys.length > 0) {
+        findings += keys.length;
+        console.error(`redact-launchd-plist: unredacted credential key(s) in ${file}: ${keys.join(", ")}`);
+      }
     }
   }
   return findings > 0 ? 1 : 0;

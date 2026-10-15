@@ -20,7 +20,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, copyFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, copyFileSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -208,7 +208,7 @@ describe("collectAdminPassSecrets", () => {
 const NODE = "node";
 const FIXTURES = join(import.meta.dir, "..", "..", "scripts", "ci", "redact-fixtures");
 
-describe("the fixtures run on every PR (flair#2589)", () => {
+describe("the fixtures run on every PR targeting main (flair#2589)", () => {
   test("a clean (redacted) fixture passes under plain node", () => {
     const run = spawnSync(NODE, [SCRIPT, "--check", join(FIXTURES, "clean")], { encoding: "utf8" });
     expect(run.status).toBe(0);
@@ -237,5 +237,71 @@ describe("--check reports a crash as a crash, distinct from a finding (flair#258
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("--check on a named target that cannot be read exits 2, never 0 (flair#2589)", () => {
+  test("a named target that does not exist exits 2", () => {
+    const dir = mkdtempSync(join(tmpdir(), "redact-check-missing-"));
+    try {
+      const run = spawnSync(NODE, [SCRIPT, "--check", join(dir, "no-such-target")], { encoding: "utf8" });
+      expect(run.status).toBe(2);
+      expect(run.stderr).toContain("cannot read");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a named target that cannot be read exits 2", () => {
+    // A self-referential symlink cannot be statted for ANY uid, so this fails
+    // for root too. CI's Docker jobs run as root, where a mode-based unreadable
+    // case (chmod 000) is ignored and would prove nothing.
+    const dir = mkdtempSync(join(tmpdir(), "redact-check-unreadable-"));
+    try {
+      const target = join(dir, "loop");
+      symlinkSync("loop", target);
+      const run = spawnSync(NODE, [SCRIPT, "--check", target], { encoding: "utf8" });
+      expect(run.status).toBe(2);
+      expect(run.stderr).toContain("cannot read");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("a missing or malformed key-list export is a crash, not a finding (flair#2589)", () => {
+  // The real scanner, but the dependency-free module it imports exports the
+  // wrong thing. That must be exit 2 (could not run): before the guard, a
+  // missing export threw at module load (Node exits 1, which a caller reads as
+  // a finding) and a non-array export spread silently (wrong keys, exit 0).
+  function runWithExported(source: string) {
+    const dir = mkdtempSync(join(tmpdir(), "redact-export-"));
+    try {
+      const ci = join(dir, "scripts", "ci");
+      const lib = join(dir, "src", "lib");
+      mkdirSync(ci, { recursive: true });
+      mkdirSync(lib, { recursive: true });
+      copyFileSync(SCRIPT, join(ci, "redact-launchd-plist.mjs"));
+      writeFileSync(join(lib, "secret-keys.ts"), source);
+      const run = spawnSync(NODE, [join(ci, "redact-launchd-plist.mjs"), "--check", dir], {
+        encoding: "utf8",
+        timeout: 30_000,
+      });
+      return run;
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  test("a missing export exits 2, not 1", () => {
+    const run = runWithExported("export const SOMETHING_ELSE = 1;\n");
+    expect(run.status).toBe(2);
+    expect(run.stderr).toContain("redaction check could not run");
+  });
+
+  test("a non-array export exits 2, not 0", () => {
+    const run = runWithExported('export const NEVER_GENERATED_SECRET_KEYS = "not-an-array";\n');
+    expect(run.status).toBe(2);
+    expect(run.stderr).toContain("redaction check could not run");
   });
 });

@@ -92,9 +92,10 @@ jobs:
 
   # flair#2589 — the macOS launchd lane only runs the diagnostics redaction
   # check when the lane itself fails, so a scanner that cannot load (or a
-  # regression in it) stays invisible across a long green stretch. This runs
-  # `--check` on committed fixtures on every PR: a redacted plist must pass, and
-  # a credential key with a non-REDACTED value must be reported as a finding.
+  # regression the existing unit tests do not catch) stays invisible across a
+  # long green stretch. This runs `--check` on committed fixtures on every PR
+  # targeting main: a redacted plist must pass, and a credential key with a
+  # non-REDACTED value must be reported as a finding.
   redaction-fixtures:
     name: "Launchd diagnostics redaction: fixture check"
     runs-on: ubuntu-latest

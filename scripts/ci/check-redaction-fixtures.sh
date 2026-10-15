@@ -4,7 +4,7 @@
 #
 # The macOS launchd lane runs --check only when the lane itself fails, so a
 # change that broke the scanner (or its ability to load) could stay invisible on
-# a long green stretch. This runs on every PR instead.
+# a long green stretch. This runs on every PR targeting main instead.
 #
 #   clean/  a redacted plist                 -> --check exits 0
 #   leaky/  a credential key, non-REDACTED   -> --check exits 1, naming the key
@@ -31,6 +31,11 @@ if [ "$code" -ne 1 ]; then
 fi
 if ! printf '%s\n' "$out" | grep -q "unredacted credential key"; then
   echo "::error::the leaky fixture was not reported as an unredacted credential key"
+  printf '%s\n' "$out"
+  exit 1
+fi
+if ! printf '%s\n' "$out" | grep -q "HDB_ADMIN_PASSWORD"; then
+  echo "::error::the leaky fixture finding did not name the credential key"
   printf '%s\n' "$out"
   exit 1
 fi
