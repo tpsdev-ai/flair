@@ -36,7 +36,6 @@ for (let i = 0; i < 2; i++) {
   const proc = Bun.spawn([process.execPath, stubPath, "run", "."], {
     env: {
       ...process.env,
-      FLAIR_TEST_ALLOW_BUN_HARPER: "lifetime fixture runs a Bun.serve stub",
       ROOTPATH: join(dir, "root-" + i),
       HTTP_PORT: "127.0.0.1:0",
       STUB_HOLD_ON_SIGTERM: i === 0 ? "1" : "",
@@ -139,8 +138,7 @@ describe("flair#2281 — a stub Harper missing its lifetime env fails closed", (
       const stubPath = join(dir, "harper.js");
       writeFileSync(stubPath, STUB_HARPER);
       const proc = Bun.spawn([process.execPath, stubPath, "run", "."], {
-        env: { PATH: process.env.PATH ?? "/usr/bin:/bin", ROOTPATH: dir, HTTP_PORT: "127.0.0.1:0", ...lifetime,
-          FLAIR_TEST_ALLOW_BUN_HARPER: "lifetime validation requires the Bun.serve stub" },
+        env: { PATH: process.env.PATH ?? "/usr/bin:/bin", ROOTPATH: dir, HTTP_PORT: "127.0.0.1:0", ...lifetime },
         stdout: "ignore",
         stderr: "pipe",
         timeout: 10_000,

@@ -1,4 +1,4 @@
-import { readlinkSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import { basename, dirname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,7 +7,29 @@ const childProcess = createRequire(import.meta.url)("node:child_process");
 const probe = childProcess.execFileSync;
 const which = Bun.which.bind(Bun);
 const ALLOW = "FLAIR_TEST_ALLOW_BUN_HARPER";
+const repositoryRequire = createRequire(new URL("../../package.json", import.meta.url));
+const harperEntry = resolveHarperEntry();
 type Options = { cwd?: string | URL; env?: Record<string, string | undefined>; shell?: boolean | string };
+
+function resolveHarperEntry(): string {
+  for (const name of ["harper", "@harperfast/harper"]) {
+    let entry: string;
+    try { entry = repositoryRequire.resolve(name); } catch { continue; }
+    for (let dir = dirname(entry);; dir = dirname(dir)) {
+      const manifest = resolve(dir, "package.json");
+      if (existsSync(manifest)) {
+        const pkg = JSON.parse(readFileSync(manifest, "utf8"));
+        if (pkg.name === name) {
+          const bin = typeof pkg.bin === "string" ? pkg.bin : pkg.bin?.harper;
+          if (typeof bin !== "string") throw new Error(`${name} has no Harper bin`);
+          return realpathSync(resolve(dir, bin));
+        }
+      }
+      if (dirname(dir) === dir) break;
+    }
+  }
+  throw new Error("Cannot resolve the installed Harper entry from the repository");
+}
 
 function cwdPath(cwd: Options["cwd"]): string {
   return cwd instanceof URL ? fileURLToPath(cwd) : cwd ?? process.cwd();
@@ -48,8 +70,8 @@ type EntryKind = "harper.js" | "dist/cli.js" | "dist/cli-shim.cjs";
 function entryKind(arg: string, options: Options): EntryKind | undefined {
   const entry = resolve(cwdPath(options.cwd), arg);
   const canonical = canonicalPath(entry);
+  if (canonical === harperEntry) return "harper.js";
   for (const path of [entry, canonical].map(value => value.replaceAll(sep, "/"))) {
-    if (basename(path) === "harper.js") return "harper.js";
     if (/\/dist\/(cli\.js|cli-shim\.cjs)$/.test(path)) return basename(path) === "cli.js" ? "dist/cli.js" : "dist/cli-shim.cjs";
   }
 }

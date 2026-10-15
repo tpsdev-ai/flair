@@ -1,12 +1,14 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import childProcess, { execFile, execFileSync, spawn, spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { tempDir } from "../helpers/temp-dir.ts";
 
 const cjs = createRequire(import.meta.url)("node:child_process");
+const harperRoot = resolve(dirname(createRequire(import.meta.url).resolve("harper")), "..");
+const harperEntry = realpathSync(resolve(harperRoot, JSON.parse(readFileSync(join(harperRoot, "package.json"), "utf8")).bin.harper));
 
 function fixture() {
   const root = tempDir("flair-runtime-guard-");
@@ -37,7 +39,7 @@ function allowed(cli: string, args: string[]) {
   expect(JSON.parse(result.stdout)).toEqual(args);
 }
 
-describe("Bun Harper spawn preload with argument-printing scripts standing in for entries", () => {
+describe("Bun Harper spawn preload", () => {
   test("promisified execFile retains output fields and the child handle", async () => {
     const pending = promisify(execFile)(process.execPath, ["-e", "console.log(42)"], { timeout: 5_000 });
     expect(pending.child.pid).toBeGreaterThan(0);
@@ -231,16 +233,16 @@ describe("Bun Harper spawn preload with argument-printing scripts standing in fo
     refused(() => spawnSync(process.execPath, ["--conditions", "x".repeat(2_000), cli, "init"], { timeout: 5_000 }));
     refused(() => spawnSync(process.execPath, ["--inspect", "127.0.0.1:0", cli, "init"], { timeout: 5_000 }));
   }, 20_000);
-  test("symlinks to argument-printing scripts standing in for CLI and Harper entries are refused", () => {
+  test("symlinks to a CLI fixture and the installed Harper entry are refused", () => {
     const { root, cli } = fixture();
     symlinkSync(cli, join(root, "entry"));
-    symlinkSync(join(root, "harper.js"), join(root, "engine"));
+    symlinkSync(harperEntry, join(root, "engine"));
     refused(() => spawnSync(process.execPath, [join(root, "entry"), "init"], { timeout: 5_000 }));
     refused(() => spawnSync(process.execPath, ["--cwd", root, "engine", "run", "."], { timeout: 5_000 }));
   }, 20_000);
-  test("a runtime option value naming Harper is allowed for an argument-printing source-entry script", () => {
+  test("a runtime option value naming the installed Harper entry is allowed for a source fixture", () => {
     const { root } = fixture();
-    const result = spawnSync(process.execPath, ["--title", join(root, "harper.js"), join(root, "source-cli.js"), "init"], {
+    const result = spawnSync(process.execPath, ["--title", harperEntry, join(root, "source-cli.js"), "init"], {
       encoding: "utf8", timeout: 5_000,
     });
     expect(result.status).toBe(0);
@@ -248,7 +250,7 @@ describe("Bun Harper spawn preload with argument-printing scripts standing in fo
   }, 20_000);
   test("an argument-printing source-entry script with a boolean runtime flag may receive a Harper path as data", () => {
     const { root } = fixture();
-    const data = [join(root, "harper.js"), "run", "."];
+    const data = [harperEntry, "run", "."];
     const result = spawnSync(process.execPath, ["--smol", join(root, "source-cli.js"), ...data], {
       encoding: "utf8", timeout: 5_000,
     });
@@ -298,9 +300,14 @@ describe("Bun Harper spawn preload with argument-printing scripts standing in fo
       expect(log.mock.calls.flat().join("\n")).toContain("wrapper fixture delegates to Bun");
     } finally { log.mockRestore(); }
   }, 20_000);
-  test("argument-printing scripts standing in for Harper and the packaged shim are refused", () => {
+  test("a temporary harper.js stub is allowed under Bun", () => {
+    allowed(join(fixture().root, "harper.js"), ["run", "."]);
+  }, 20_000);
+  test("the installed Harper entry is refused under Bun", () => {
+    refused(() => spawnSync(process.execPath, [harperEntry, "run", "."], { timeout: 5_000 }));
+  }, 20_000);
+  test("an argument-printing script standing in for the packaged shim is refused", () => {
     const { root } = fixture();
-    refused(() => spawnSync(process.execPath, [join(root, "harper.js"), "run", "."], { timeout: 5_000 }));
     refused(() => spawnSync(process.execPath, [join(root, "dist", "cli-shim.cjs"), "init"], { timeout: 5_000 }));
   }, 20_000);
   for (const command of ["start", "restart", "upgrade"]) {
