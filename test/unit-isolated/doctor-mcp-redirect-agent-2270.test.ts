@@ -12,6 +12,10 @@ for (const key of Object.keys(process.env)) {
 }
 process.env.HOME = home;
 process.env.FLAIR_AGENT_ID = "ambient-agent";
+// flair#2526: the redirect read is credentialed, so doctor sends it only once
+// the HTTP/ops pair check has proven the port. That check needs an admin
+// credential (a fixture value) and is answered `run` by the binding below.
+process.env.FLAIR_ADMIN_PASS = "fixture-not-a-secret";
 mkdirSync(join(home, ".flair", "keys"), { recursive: true });
 for (const agent of ["flag-agent", "ambient-agent"]) {
   writeFileSync(join(home, ".flair", "keys", `${agent}.key`), randomBytes(32), { mode: 0o600 });
@@ -19,6 +23,7 @@ for (const agent of ["flag-agent", "ambient-agent"]) {
 
 const calls: unknown[][] = [];
 let redirectPresent = false;
+let pairDecision: { kind: "run"; opsPort: number } | { kind: "not-run"; reason: string; remedy: string } = { kind: "run", opsPort: 8 };
 const doctor = await import("../../src/commands/doctor.ts");
 const bindDoctor = doctor.bindCli;
 mock.module("../../src/commands/doctor.ts", () => ({
@@ -34,6 +39,7 @@ mock.module("../../src/commands/doctor.ts", () => ({
     probeFlairReachable: async () => true,
     verifySemanticSearch: async () => ({ state: "skipped", reason: "fixture" }),
     checkAgentRegistered: async () => true,
+    verifyDoctorRosterInstance: async () => pairDecision,
   }),
 }));
 await import("../../src/cli.ts");
@@ -96,4 +102,17 @@ test("doctor omits identity options without an agent flag", async () => {
     baseUrl: "http://127.0.0.1:9",
     keysDir: join(home, ".flair", "keys"),
   }]);
+}, 30_000);
+
+test("flair#2526: with the HTTP/ops pair not proven, doctor sends no credentialed read and says why", async () => {
+  pairDecision = { kind: "not-run", reason: "fixture pair refused", remedy: "fixture remedy" };
+  try {
+    const run = await runDoctor("flag-agent");
+    expect(calls.filter(call => call[1] === "/HealthDetail" || call[1] === "/FederationPeers")).toEqual([]);
+    expect(run.output).toContain("MCP OAuth redirect: NOT RUN — fixture pair refused");
+    expect(run.output).toContain("Embeddings: NOT RUN — fixture pair refused");
+    expect(run.output).toContain("Agent IDs: NOT RUN — fixture pair refused");
+  } finally {
+    pairDecision = { kind: "run", opsPort: 8 };
+  }
 }, 30_000);

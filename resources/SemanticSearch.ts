@@ -1,7 +1,7 @@
 import { Resource, databases } from "harper";
 import { resolveAgentAuth, allowVerified } from "./agent-auth.js";
 import { getEmbedding, getMode } from "./embeddings-provider.js";
-import { isEmbeddingSpaceUniform, spaceGuardDiagnostics } from "./embedding-space-guard.js";
+import { embeddingSpaceVerdict, type EmbeddingSpaceVerdict } from "./embedding-space-guard.js";
 import { withDetachedTxn } from "./table-helpers.js";
 import { applyHitStats, noteSearchHits } from "./hit-tracking.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
@@ -28,6 +28,30 @@ import { bestSemanticSimilarity, evaluateAbstention } from "./abstention.js";
 // Candidate multiplier: fetch more candidates than needed from the HNSW index
 // so composite re-ranking has enough headroom to reorder results.
 const CANDIDATE_MULTIPLIER = 5;
+
+/** The recall leg's `_warning` for a guard-degraded search (flair#2530). The
+ *  verdict is never `uniform` here (that state is never degraded), so the three
+ *  cases are exactly the non-uniform states. Each names itself; the
+ *  non-current-stamp wording is used ONLY for the `mixed` state. `response` says what
+ *  the caller gets back: keyword-only results (the request has query text), no
+ *  results (it has none), or an `explain` plan with no embedding leg. */
+function spaceGuardWarning(v: EmbeddingSpaceVerdict, response: "keyword" | "none" | "plan"): string {
+  const outcome =
+    response === "keyword" ? "results are keyword-only"
+    : response === "none" ? "no results (the request has no query text to fall back on)"
+    : "the plan has no embedding leg";
+  if (v.state === "scan-failed") {
+    return `semantic search unavailable — embedding space unverified: last scan failed (${v.reason}); ${outcome}.`;
+  }
+  if (v.state === "unverified") {
+    return `semantic search unavailable — embedding space not yet verified; ${outcome}.`;
+  }
+  return (
+    `semantic search unavailable — a non-current embedding model stamp was observed ` +
+    `(current: ${v.current}; found: ${v.found.join(", ")}); ${outcome}. ` +
+    `Reconcile to one space with: flair reembed --stale-only`
+  );
+}
 
 export class SemanticSearch extends Resource {
   // Self-authorize via the Ed25519 agent verify instead of relying on the auth
@@ -135,7 +159,11 @@ export class SemanticSearch extends Resource {
     const mode = retrievalMode();
 
     // Generate query embedding
-    let qEmb = queryEmbedding;
+    // bm25-only ranks on the lexical leg alone and never uses a query embedding
+    // (the core ignores one), so a supplied embedding is dropped here: no guard
+    // consult below, and no state warning for an embedding this mode would not
+    // use (flair#2530).
+    let qEmb = mode === "bm25-only" ? undefined : queryEmbedding;
     if (!qEmb && q && mode !== "bm25-only") {
       // Always attempt embedding generation — getEmbedding() handles init internally.
       // Don't gate on getMode() which may return "none" before init completes in worker threads.
@@ -146,22 +174,39 @@ export class SemanticSearch extends Resource {
     }
 
     // ─── Vector-space uniformity guard (embedding-space-guard slice 1) ────────
-    // If the store is NOT uniform in the current embedding space (a mixed-space
-    // corpus during a re-embed / model change), cosining the query against
-    // stored vectors returns garbage — Harper zero-pads a mismatched-dimension
-    // vector and returns a bogus score instead of throwing; same-dims /
-    // different-space is silent garbage too. REFUSE the embedding leg and
-    // degrade to keyword-only LOUDLY: drop qEmb so retrieveCandidates takes the
-    // keyword-only branch (reusing the existing mode:'none' graceful-degrade
-    // contract), and surface a structured warning naming both spaces + the
-    // `flair reembed` remedy below. Never serve mixed-space vectors, never
-    // merely log. Consulted through the SAME single chokepoint the write-time
-    // dedup leg uses (resources/embedding-space-guard.ts) — O(1) on the uniform
-    // happy path.
-    let spaceGuardDegraded = false;
-    if (qEmb && !(await isEmbeddingSpaceUniform())) {
-      qEmb = undefined;
-      spaceGuardDegraded = true;
+    // If the store's model stamps are NOT KNOWN uniform in the current embedding
+    // space — a non-current stamp observed during a re-embed / model change, OR an unknown
+    // verdict (before the first scan completes, or after a scan error) —
+    // cosining the query against stored vectors could cross spaces or produce
+    // an invalid score: Harper zero-pads a mismatched-dimension vector and
+    // returns a bogus score instead of throwing, and a same-dims vector from
+    // another space scores meaninglessly. The guard fails CLOSED:
+    // only a store whose stamps a scan verified uniform serves embeddings
+    // (flair#2530). Take the
+    // SAME path for every non-uniform state — REFUSE the embedding leg and
+    // degrade LOUDLY: drop qEmb so retrieveCandidates takes the keyword-only
+    // branch (reusing the existing mode:'none' graceful-degrade contract) when
+    // the request has query text, return no results when it has none, and
+    // surface a structured warning that NAMES the state (mixed /
+    // not-yet-verified / scan-failed) below. Never cosine a query against a
+    // stored corpus whose `embeddingModel` stamps are not verified to be the
+    // current space, never merely log. (This is stamp-metadata uniformity
+    // only: the scan skips a stored vector with no stamp, and a caller-supplied
+    // `queryEmbedding` carries no space provenance; neither is checked.
+    // Stored-vector provenance is deferred to flair#2573.)
+    // Consulted through the SAME single chokepoint the write-time dedup leg
+    // uses — O(1) on the verified-uniform happy path. The consult, and so the
+    // state warning, happens only when a query embedding is available
+    // (supplied, or generated from `q`) outside bm25-only mode; bm25-only (whose
+    // supplied embedding was dropped above) and a failed embedding generation
+    // never reach it.
+    let spaceGuardVerdict: EmbeddingSpaceVerdict | null = null;
+    if (qEmb) {
+      const verdict = await embeddingSpaceVerdict();
+      if (!verdict.uniform) {
+        qEmb = undefined;
+        spaceGuardVerdict = verdict;
+      }
     }
 
     // ─── Temporal intent detection ────────────────────────────────────────────
@@ -251,6 +296,8 @@ export class SemanticSearch extends Resource {
         plan,
         tag,
         scoring,
+        // flair#2530: a guard-degraded plan has no embedding leg; say why.
+        ...(spaceGuardVerdict ? { _warning: spaceGuardWarning(spaceGuardVerdict, "plan") } : {}),
       };
     }
 
@@ -272,7 +319,10 @@ export class SemanticSearch extends Resource {
     const ctx = (this as any).getContext?.();
 
     let legs: { hnsw: string[]; bm25: string[]; fused: string[] } | undefined;
-    const filteredResults = await retrieveCandidates({
+    // flair#2530: when the refused query embedding was the request's only
+    // ranking signal (no `q`), retrieve nothing. Calling retrieveCandidates with
+    // neither signal would return its unranked corpus listing.
+    const filteredResults = spaceGuardVerdict && !q ? [] : await retrieveCandidates({
       queryEmbedding: qEmb,
       q,
       conditions,
@@ -350,6 +400,7 @@ export class SemanticSearch extends Resource {
           bestScore: abstention.bestScore,
           threshold: abstention.threshold,
           results: [],
+          ...(spaceGuardVerdict ? { _warning: spaceGuardWarning(spaceGuardVerdict, q ? "keyword" : "none") } : {}),
         };
       }
     }
@@ -416,12 +467,8 @@ export class SemanticSearch extends Resource {
       response.bestScore = abstention.bestScore;
       response.threshold = abstention.threshold;
     }
-    if (spaceGuardDegraded) {
-      const diag = spaceGuardDiagnostics();
-      response._warning =
-        `semantic search unavailable — the store has mixed embedding spaces ` +
-        `(current: ${diag.current}; found: ${diag.found.join(", ")}); results are keyword-only. ` +
-        `Reconcile to one space with: flair reembed --stale-only`;
+    if (spaceGuardVerdict) {
+      response._warning = spaceGuardWarning(spaceGuardVerdict, q ? "keyword" : "none");
     } else if (!qEmb && q && getMode() === "none") {
       response._warning = "semantic search unavailable — results are keyword-only";
     }

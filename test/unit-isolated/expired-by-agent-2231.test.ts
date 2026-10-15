@@ -85,7 +85,7 @@ mock.module("../../resources/bm25-index-service.js", () => ({
   bm25IndexStatus: () => ({}),
   noteMemoryUpsert: () => {}, noteMemoryDelete: () => {},
 }));
-mock.module("../../resources/embedding-space-guard.js", () => ({ normalizeStamp: (s: string) => s }));
+mock.module("../../resources/embedding-space-guard.js", () => ({ normalizeStamp: (s: string) => s, spaceGuardState: () => ({ state: "uniform", reason: null }) }));
 mock.module("../../resources/embeddings-provider.js", () => ({ getModelId: () => "fixture-model" }));
 mock.module("../../resources/migrations/stamp-outstanding.js", () => ({
   describeStampOutstanding: () => ({ outstanding: false }), EMBEDDING_STAMP_ID: "fixture",
