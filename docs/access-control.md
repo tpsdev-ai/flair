@@ -140,6 +140,31 @@ name:
   credential matching the written id and principal.
   Principal-less legacy rows are skipped and may remain active.
 
+### Who writes a mapping
+
+Through the `Credential` resource, only an administrator or Flair itself
+creates an `idp` credential, changes its kind or identity fields, or
+reactivates it. Flair writes mappings through `flair mcp enable`,
+`flair principal link` and `unlink`, and just-in-time provisioning (below, and
+the XAA grant's); an administrator can also write one through the `Credential`
+resource.
+
+On POST, PUT and PATCH, the checks that run first decide before this rule:
+authentication, the owner checks, and the request checks (the rate limit and
+kind validation on POST and PUT, the single-record body on PATCH). For a
+non-admin agent, the owner checks keep their own 403: on PATCH and PUT the
+owner-field guard refuses a change to the credential's principal, PUT refuses
+a body that names another principal, and PATCH, PUT and DELETE refuse a write
+to another principal's credential. On POST, a non-admin agent's credential is
+stamped with its own principal; a `principalId` in the body is not used. An
+administrator may write another principal's credential. A non-admin agent's
+write that passes those checks gets HTTP 403
+with the error `idp_mapping_admin_only` when it would create an `idp`
+credential, change a credential's kind to or from `idp`, change an `idp`
+credential's provider or subject, or change its status to anything other than
+`revoked` (so it cannot reactivate one). A non-admin agent may relabel its own
+`idp` credential, set its status to `revoked`, and delete it.
+
 ### Just-in-time provisioning
 
 `FLAIR_MCP_JIT_PROVISION` is off by default; `1`, `true`, `yes` or `on` turns

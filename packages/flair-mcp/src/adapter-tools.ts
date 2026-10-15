@@ -87,13 +87,43 @@ function redactedValuesOf(result: unknown): number {
  * states the redacted-value count and that the stored text was not returned,
  * and never shows the input. With no count (the server reported no
  * replacement), the text is the result's `content`, else the input.
+ *
+ * flair#2541 — `field` "trigger" applies the same rule to a skill's trigger:
+ * with a count, only the result's stored `trigger` (null when the result is
+ * withheld or carries none), never the input.
  */
-function storedTextOf(result: unknown, input: string, redactedValues: number): string | null {
-  const written = result as { content?: unknown; contentWithheld?: unknown } | null;
+function storedTextOf(
+  result: unknown,
+  input: string,
+  redactedValues: number,
+  field: "content" | "trigger" = "content",
+): string | null {
+  const written = result as { content?: unknown; trigger?: unknown; contentWithheld?: unknown } | null;
+  const value = written?.[field];
   if (redactedValues > 0) {
-    return written?.contentWithheld !== true && typeof written?.content === "string" ? written.content : null;
+    return written?.contentWithheld !== true && typeof written?.content === "string" && typeof value === "string"
+      ? value
+      : null;
   }
-  return typeof written?.content === "string" ? written.content : input;
+  return typeof value === "string" ? value : input;
+}
+
+/**
+ * flair#2541 — skill_store writes with a raw PUT /Memory (flair.request), so
+ * its result is the server's response, where a redacted write's stored text
+ * sits in `stored` rather than at the top level of a flair.memory.write
+ * result. This returns that text in the shape storedTextOf reads, as
+ * flair-client does for memory_store: `stored.content` and `stored.trigger`,
+ * or `contentWithheld: true` when `stored` carries no `content` string. With
+ * no redaction count it returns null, so the reply previews the input as
+ * before.
+ */
+function storedWriteOf(response: unknown, redactedValues: number): Record<string, unknown> | null {
+  if (redactedValues <= 0) return null;
+  const stored = (response as { stored?: unknown } | null)?.stored;
+  const text = stored && typeof stored === "object" && !Array.isArray(stored) ? (stored as Record<string, unknown>) : null;
+  if (typeof text?.content !== "string") return { contentWithheld: true };
+  return { content: text.content, ...(typeof text.trigger === "string" ? { trigger: text.trigger } : {}) };
 }
 
 /** The preview line for a counted redaction whose stored text was not
@@ -379,16 +409,29 @@ const skill_store: StdioHandler = async (
     });
     const result = await flair.request<Record<string, unknown>>("PUT", `/Memory/${encodeRecordId(id)}`, body);
     const writtenId = typeof result?.id === "string" && result.id.length > 0 ? result.id : id;
-    const preview = content.length > 120 ? content.slice(0, 120) + "..." : content;
+    const redactedValues = redactedValuesOf(result);
+    // flair#2541 — with a redaction count, the preview and the trigger line
+    // come only from the stored text the write response returned
+    // (storedWriteOf, storedTextOf), never the input; the name is metadata,
+    // which the server does not redact.
+    const written = storedWriteOf(result, redactedValues);
+    const stored = storedTextOf(written, content, redactedValues);
+    const storedTrigger = storedTextOf(written, trigger ?? "", redactedValues, "trigger");
     const lines = [
       `Skill stored (id: ${writtenId})`,
-      `Preview: ${preview}`,
+      stored === null ? withheldPreview(redactedValues) : `Preview: ${previewOf(stored)}`,
       name ? `Name: ${name}` : undefined,
-      trigger ? `Trigger: ${trigger}` : undefined,
+      storedTrigger ? `Trigger: ${storedTrigger}` : undefined,
+      redactedValues > 0 ? `Redacted ${redactedValues} credential-shaped value(s) before storing.` : undefined,
     ].filter((line): line is string => line != null);
     return {
       content: [{ type: "text", text: lines.join("\n") }],
-      structuredContent: { id: writtenId, written: true },
+      structuredContent: {
+        id: writtenId,
+        written: true,
+        ...(redactedValues > 0 ? { redactedValues } : {}),
+        ...(stored === null ? { contentWithheld: true } : {}),
+      },
     };
   } catch (err) {
     return errorResult(err, flair.url);

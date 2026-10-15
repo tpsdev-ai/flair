@@ -75,7 +75,77 @@ export type SkipReason =
   // the final check compares the committed row with the in-transaction read. A
   // change committed after that final check is not seen. Nothing was written on
   // a refusal (flair#2441, flair#2450, flair#2475).
-  | "merge_target_changed";
+  | "merge_target_changed"
+  // ─── flair#2455 slice 1: the reasons recordSkip already emitted as bare
+  // strings. Typing them closes the union at the sites that produced them;
+  // the exhaustive SKIP_REASON_CLASS map below then forces a retryable /
+  // non-retryable decision on every future addition.
+  | "merge_error" // a per-record merge threw (see FederationSync.post's catch)
+  | "invalid_agent_id" // an Agent row whose id fails isValidAgentId (AGENT_ID_ERROR)
+  | "skill_not_federated" // a skill-tagged Memory is a local, gated artifact
+  | "seed_id_not_federated" // a reserved seed id is never merged
+  | "content_suffix_id_not_federated" // a Memory id ending in `.content`
+;
+
+/**
+ * Every SkipReason's retry class (flair#2455 design rev 2, K1/S3).
+ *
+ * The `satisfies Record<SkipReason, …>` makes this map EXHAUSTIVE: adding a
+ * member to {@link SkipReason} without giving it a class here is a type error,
+ * so no reason can silently default to non-retryable — which is the shape the
+ * original bug came from.
+ *
+ * "retryable" means a later re-offer of the SAME record can merge: contention
+ * can clear (`merge_target_changed`), transient storage failures can heal
+ * (`merge_error`), receiver time catches up (`future_timestamp`), and an
+ * authorized pairing can supply the key (`unknown_originator_key`; a retry
+ * never changes trust). The other reasons are classified non-retryable.
+ */
+export const SKIP_REASON_CLASS = {
+  unknown_table: "non_retryable",
+  non_originator: "non_retryable",
+  future_timestamp: "retryable",
+  no_op_same_hash: "non_retryable",
+  unknown_originator_key: "retryable",
+  invalid_signature: "non_retryable",
+  missing_signature: "non_retryable",
+  principal_mismatch: "non_retryable",
+  pointer_not_federated: "non_retryable",
+  agent_status_not_federated: "non_retryable",
+  id_mismatch: "non_retryable",
+  invalid_expiry: "non_retryable",
+  merge_target_changed: "retryable",
+  merge_error: "retryable",
+  invalid_agent_id: "non_retryable",
+  skill_not_federated: "non_retryable",
+  seed_id_not_federated: "non_retryable",
+  content_suffix_id_not_federated: "non_retryable",
+} as const satisfies Record<SkipReason, "retryable" | "non_retryable">;
+
+/**
+ * The retryable subset of {@link SkipReason}, DERIVED from
+ * {@link SKIP_REASON_CLASS} so the two cannot drift apart.
+ */
+export type RetryableSkipReason = {
+  [K in SkipReason]: (typeof SKIP_REASON_CLASS)[K] extends "retryable" ? K : never;
+}[SkipReason];
+
+/** Every SkipReason, as a value — for validating a receiver-supplied reason string. */
+export const SKIP_REASONS: ReadonlySet<SkipReason> = new Set(
+  Object.keys(SKIP_REASON_CLASS) as SkipReason[],
+);
+
+/** The retryable SkipReasons, as a value. */
+export const RETRYABLE_SKIP_REASONS: ReadonlySet<RetryableSkipReason> = new Set(
+  (Object.keys(SKIP_REASON_CLASS) as SkipReason[]).filter(
+    (reason) => SKIP_REASON_CLASS[reason] === "retryable",
+  ) as RetryableSkipReason[],
+);
+
+/** Is `value` one of the closed SkipReason strings? */
+export function isSkipReason(value: unknown): value is SkipReason {
+  return typeof value === "string" && SKIP_REASONS.has(value as SkipReason);
+}
 
 /**
  * Static policy for every table FederationSync will merge.

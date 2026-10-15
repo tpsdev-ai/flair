@@ -33,12 +33,14 @@ import { CommittedRowChanged, confirmCommittedRow, writeBackCommittedRow, WriteB
 import { withKeyLock } from "./key-lock.js";
 import { withOwnedTransaction } from "./request-transaction.js";
 import { txnPausePoint } from "./txn-pause-point.js";
+import { retryRowProblem } from "./federation-retry-lib.js";
 import {
   classifyRecord,
   reconstructRecordVerifyBody,
   checkPrincipalEntitlement,
   inboundChangesExistingPrincipalStatus,
   type FederationSyncTable,
+  type SkipReason,
 } from "./federation-classify.js";
 export {
   classifyRecord,
@@ -49,8 +51,17 @@ export {
   PRINCIPAL_OWNING_TABLES,
   FEDERATION_TABLE_POLICY,
   FEDERATION_SYNC_TABLES,
+  SKIP_REASON_CLASS,
+  SKIP_REASONS,
+  RETRYABLE_SKIP_REASONS,
+  isSkipReason,
 } from "./federation-classify.js";
-export type { SkipReason, ClassifyResult, FederationSyncTable } from "./federation-classify.js";
+export type {
+  SkipReason,
+  RetryableSkipReason,
+  ClassifyResult,
+  FederationSyncTable,
+} from "./federation-classify.js";
 
 // Federation anti-replay: FederationPair and FederationSync both verify through
 // verifyFederationRequestBody (resources/replay-store.ts), which claims each
@@ -1095,7 +1106,7 @@ export class FederationSync extends Resource {
     const skippedReasons: Record<string, number> = {};
     const mergeErrors: string[] = [];
 
-    function recordSkip(reason: string) {
+    function recordSkip(reason: SkipReason) {
       skipped++;
       skippedReasons[reason] = (skippedReasons[reason] ?? 0) + 1;
     }
@@ -1503,6 +1514,53 @@ export class FederationPeers extends Resource {
       }
     } catch {}
     return { peers };
+  }
+}
+
+/**
+ * GET /FederationRetries — the rows of the sender's FederationRetry table
+ * (flair#2455), admin view, split into `pending`, `terminal` and `malformed`.
+ * No production sender path creates rows yet (a later slice activates the
+ * sender); rows an admin writes are readable now.
+ *
+ * A row that breaks a sender convention (retryRowProblem: an id that is not its
+ * tuple's key, an unknown state, reason or outcome) is listed under
+ * `malformed` with the problem's name, and never as pending or terminal.
+ *
+ * allowRead()=allowAdmin, the same gate as FederationPeers above. Read-only:
+ * it never writes a row, and a read failure propagates instead of being
+ * reported as an empty set. `flair federation status` renders it.
+ */
+export class FederationRetries extends Resource {
+  async allowRead(): Promise<boolean> {
+    return allowAdmin((this as any).getContext?.());
+  }
+
+  async get() {
+    const pending: any[] = [];
+    const terminal: any[] = [];
+    const malformed: any[] = [];
+    for await (const r of (databases as any).flair.FederationRetry.search()) {
+      const problem = retryRowProblem(r);
+      if (problem) {
+        malformed.push({ key: r.id, peerId: r.peerId, table: r.table, id: r.recordId, state: r.state, problem });
+        continue;
+      }
+      const row = {
+        peerId: r.peerId,
+        table: r.table,
+        id: r.recordId,
+        reason: r.lastReason,
+        attempts: r.attempts,
+        bound: r.bound,
+        resolution: r.resolution,
+        state: r.state,
+        firstRefusedAt: r.firstRefusedAt,
+        completedAt: r.completedAt,
+      };
+      (r.state === "pending" ? pending : terminal).push(row);
+    }
+    return { pending, terminal, malformed };
   }
 }
 
