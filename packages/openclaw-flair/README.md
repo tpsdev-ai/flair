@@ -157,21 +157,21 @@ are the guarantees it keeps, each with the test that proves it in
   capture cap (`autoCaptureMaxPerSession`) is spent on the last eligible
   positions; that is position, not proof of which run added a message. In a warm
   session a message the cap leaves out stays unseen (deferred) and remains
-  eligible for a later capture scan, subject to that scan's gates and cap, and
-  if a later scan captures it, the row carries that later run's id. Another cap,
-  a `skip`-mode scan, or a refusal before its write starts can leave it unseen.
+  eligible for a later capture scan unless settled, subject to its gates and cap, and
+  if a later scan captures it, the row carries that later run's id. Another cap
+  can leave it unseen. A refused scan settles its occurrences, including
+  identical copies: their origin is ambiguous. Preserving deferred messages
+  while excluding refused-run copies fully needs a stable host-owned message
+  identity; that is a follow-up.
   Same-run excerpt dedup or a failure before the write settles it without a new
   write, and a write that starts and then fails, or whose run is aborted while
   it is in flight, records
   it as skipped, because an aborted write may still have reached Flair —
   `flair#2560 (mutation: oldest first; mutation: a capped message recorded as
   seen): a run's cap is spent from the last snapshot position, and the message
-  it left out is captured by the next capture scan`; `flair#2560 (mutation: a
-  refused scan settles a deferred message): a message an earlier run's cap left
-  out stays unseen through a refused run, and the next capture scan captures
-  it`; `flair#2560 (mutation: a run refused meanwhile settles a deferred
-  message): when a run is aborted before a deferred message's write starts, the
-  message stays unseen, and the next capture scan captures it`; `flair#2560
+  it left out is captured by the next capture scan`; `flair#2560: a refused
+  scan settles a message an earlier cap deferred`; `flair#2560: abort before a
+  deferred message's write starts settles it`; `flair#2560
   (mutation: a discarded write leaves the message deferred): when a run is
   aborted while a deferred message's own write is in flight, the message is
   recorded as skipped and not captured again`. The limit is a session's first

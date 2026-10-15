@@ -2276,7 +2276,7 @@ describe("flair#2513 — agent_end capture is keyed by counted message identitie
     expect(lines[0]).toContain("for agent A");
   });
 
-  test("flair#2560 (mutation: a refused scan settles a deferred message): a message an earlier run's cap left out stays unseen through a refused run, and the next capture scan captures it", async () => {
+  test("flair#2560: a refused scan settles a message an earlier cap deferred", async () => {
     writeKey("A");
     const plugin = await loadPlugin();
     const calls = installFetchStub();
@@ -2292,19 +2292,51 @@ describe("flair#2513 — agent_end capture is keyed by counted message identitie
     await api._fire("agent_end", { runId: "run-1", success: true, messages: [U0] }, ctx);
     // Run 2's cap leaves message a unseen.
     await api._fire("agent_end", { runId: "run-2", success: true, messages: [U0, ...run2] }, ctx);
-    // Run 3 is refused (success: false): it records its new messages as
-    // skipped, but not the deferred one.
+    // Run 3 is refused: it settles the deferred identity too.
     await api._fire("agent_end", { runId: "run-3", success: false, messages: [U0, ...run2, failed] }, ctx);
     await api._fire("agent_end", { runId: "run-4", success: true, messages: [U0, ...run2, failed, next] }, ctx);
 
     const by = (needle: string) => puts(calls).filter((c) => contentOf(c).includes(needle)).map(sourceOf);
-    expect(by("deferred message a")).toEqual(["run-4"]);
+    expect(by("deferred message a")).toEqual([]);
     expect(by("the failed run's message")).toEqual([]);
     expect(by("the next run's message")).toEqual(["run-4"]);
     for (const k of ["kept message b", "kept message c", "kept message d"]) expect(by(k)).toEqual(["run-2"]);
   });
 
-  test("flair#2560 (mutation: a run refused meanwhile settles a deferred message): when a run is aborted before a deferred message's write starts, the message stays unseen, and the next capture scan captures it", async () => {
+  test("flair#2560 (mutation: refused deferred occurrences left unseen): a refused run appends an identical deferred copy and a later scan captures neither copy", async () => {
+    const { dist, version: hostVersion } = supportedRunnerHost();
+    const entry = runnerEntry(dist);
+    expect(entry).toBeDefined();
+    const { createHookRunner } = await import(pathToFileURL(join(dist, entry!)).href);
+    writeKey("A");
+    const calls = installFetchStub();
+    const api = createMockApi({ hostVersion, pluginConfig: { autoCapture: true, autoCaptureMaxPerSession: 1 }, config: captureConfig });
+    (await loadPlugin()).register(api as any);
+    const typedHooks = [...api._hooks].flatMap(([hookName, handlers]) =>
+      handlers.map((handler) => ({ hookName, handler, pluginId: api.id })),
+    );
+    const runner = createHookRunner({ typedHooks }, { catchErrors: false });
+    const ctx = { agentId: "A", sessionId: "sess-deferred-identical-refusal" };
+    const opening = { role: "user", content: "a plain opening note", timestamp: 0 };
+    const waiting = { role: "user", content: "remember this: deferred identical copy", timestamp: 1 };
+    const kept = { role: "user", content: "remember this: the capture cap is spent here", timestamp: 2 };
+    try {
+      await runner.runAgentEnd({ runId: "run-1", success: true, messages: [opening] }, ctx);
+      await runner.runAgentEnd({ runId: "run-2", success: true, messages: [opening, waiting, kept] }, ctx);
+      expect(captureInternals.sessionDeferredCount()).toBe(1);
+      const snapshot = [opening, waiting, kept, { ...waiting }];
+      await runner.runAgentEnd({ runId: "run-3", success: false, messages: snapshot }, ctx);
+      await runner.runAgentEnd({ runId: "run-4", success: true, messages: snapshot }, ctx);
+      expect(puts(calls).some((c) => contentOf(c).includes("deferred identical copy"))).toBe(false);
+      await runner.runAgentEnd({ runId: "run-5", success: true, messages: [...snapshot, { ...waiting }] }, ctx);
+      expect(puts(calls).filter((c) => contentOf(c).includes("deferred identical copy")).map(sourceOf)).toEqual(["run-5"]);
+      expect(puts(calls).filter((c) => contentOf(c).includes("the capture cap is spent here")).map(sourceOf)).toEqual(["run-2"]);
+    } finally {
+      await runner.runGatewayStop({}, {});
+    }
+  });
+
+  test("flair#2560: abort before a deferred message's write starts settles it", async () => {
     writeKey("A");
     const plugin = await loadPlugin();
     const before = installFetchStub();
@@ -2332,7 +2364,7 @@ describe("flair#2513 — agent_end capture is keyed by counted message identitie
 
     const all = [...puts(before), ...puts(after)];
     const by = (needle: string) => all.filter((c) => contentOf(c).includes(needle)).map(sourceOf);
-    expect(by("deferred message a")).toEqual(["run-4"]);
+    expect(by("deferred message a")).toEqual([]);
     expect(by("the next run's message f")).toEqual(["run-4"]);
   });
 

@@ -272,8 +272,8 @@ export function isRepeatLogPoint(n: bigint): boolean {
  * rest of the identifiable messages as seen. If it captures a message that
  * was captured before, the write has a new id, so Flair stores a second row.
  * `deferred` holds the identities a warm scan left unseen because the run's
- * cap was spent. A later scan can leave it unseen through another cap, a
- * `skip`-mode scan (a refused run), or a `refused` result before its write starts.
+ * cap was spent. Another cap can leave it unseen. A refused scan settles its
+ * occurrences: an identical copy cannot be distinguished from the deferred one.
  * Same-run excerpt dedup settles it without a new write, and so does a failure
  * before the write (recorded as skipped if the scan continues). A write that
  * starts and then fails, or whose run is aborted while it is in flight,
@@ -1726,13 +1726,13 @@ export default {
          * recorded as seen, unless the scan stops first: before each message and
          * after each awaited write the scan checks the stop and the session's
          * disabled flag and, if either is set, returns without recording
-         * anything more. The exceptions: in a warm session an occurrence the
+         * anything more. The exception: in a warm session an occurrence the
          * run's cap left out (`capped`) stays unseen and is held in `deferred`,
-         * eligible for a later capture scan, subject to that scan's gates and
-         * cap (a later capture carries that later run's id). Another cap, a
-         * `skip`-mode scan, or a `refused` result before its write starts
-         * can leave a deferred identity unseen; same-run excerpt
-         * dedup, a failure before the write, a write that fails, or a write
+         * eligible for a later capture scan unless settled, subject to its gates and
+         * cap (a later capture carries that later run's id). Another cap can
+         * leave it unseen. Refusal settles its occurrences, since identical
+         * copies cannot be distinguished. Same-run excerpt dedup, a failure
+         * before the write, a write that fails, or a write
          * discarded by an abort settles it (see `SessionCapture`). In the
          * session's first scan in
          * this process a capped occurrence is recorded as seen (see
@@ -1853,9 +1853,6 @@ export default {
               if (r >= n - m) continue;
               // A new occurrence, treated as this run's.
               if (mode.kind === "skip" || !text || !client) {
-                // flair#2560: a refused scan does not settle an identity an
-                // earlier run's cap left unseen.
-                if (mode.kind === "skip" && session.deferred.has(identity)) continue;
                 recordOccurrence(session, identity, total);
                 continue;
               }
@@ -1883,14 +1880,12 @@ export default {
               // already discarded by `tryAutoCapture`, so it records no capture.
               if (outcome === "stored") stored++;
               // flair#2560: left out by the run's cap, in a warm session: it
-              // stays unseen, eligible for a later capture scan. A run refused
-              // before this message's write started does not settle an identity
-              // that is already deferred.
+              // stays unseen, eligible for a later capture scan unless settled.
+              // Refusal settles even deferred copies, whose origin is ambiguous.
               if (outcome === "capped" && warm) {
                 session.deferred.add(identity);
                 continue;
               }
-              if (outcome === "refused" && session.deferred.has(identity)) continue;
               recordOccurrence(session, identity, total);
             }
             session.warm = true;

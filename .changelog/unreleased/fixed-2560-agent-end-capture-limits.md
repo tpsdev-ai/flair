@@ -10,10 +10,12 @@
   so the run's cap
   (`autoCaptureMaxPerSession`) is spent on the last eligible positions. In a
   warm session a message the cap leaves out stays eligible for a later capture
-  scan, subject to that scan's gates and cap; another cap, a refused scan, or a
-  refusal before its write starts can leave it unseen, while same-run
-  excerpt dedup, a failure before the write, a failed write, or a write whose
-  run is aborted while it is in flight settles it. Message identity now encodes
+  scan unless settled, subject to its gates and cap; another cap can leave it unseen.
+  A refused scan settles its occurrences, including identical copies: their
+  origin is ambiguous. Preserving deferred messages while excluding refused-run
+  copies fully needs a stable host-owned message identity; that is a follow-up.
+  Same-run excerpt dedup, a failure before the write, a failed write, or a
+  write whose run is aborted while it is in flight settles it. Message identity now encodes
   the timestamp's type, and the plugin infers nothing from timestamps: the host
   gives a snapshot message no host-owned id or position. The remaining limit is
   a session's first scan in the process (a new session, session state evicted
