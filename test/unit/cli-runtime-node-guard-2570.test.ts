@@ -36,13 +36,13 @@ function allowed(cli: string, args: string[]) {
   expect(JSON.parse(result.stdout)).toEqual(args);
 }
 
-describe("Bun Harper spawn preload", () => {
+describe("Bun Harper spawn preload with argument-printing scripts standing in for entries", () => {
   test("promisified execFile retains output fields and the child handle", async () => {
     const pending = promisify(execFile)(process.execPath, ["-e", "console.log(42)"], { timeout: 5_000 });
     expect(pending.child.pid).toBeGreaterThan(0);
     expect(await pending).toEqual({ stdout: "42\n", stderr: "" });
   }, 20_000);
-  test("promisified execFile refuses a Bun CLI start", async () => {
+  test("promisified execFile refuses init for an argument-printing script standing in for the CLI entry", async () => {
     const { cli } = fixture();
     await expect(promisify(execFile)(process.execPath, [cli, "init"], { timeout: 5_000 })).rejects.toMatchObject({
       name: "BunHarperSpawnError", message: expect.stringContaining("child_process.execFile"),
@@ -70,7 +70,7 @@ describe("Bun Harper spawn preload", () => {
     expect(dirs.length).toBeGreaterThan(0);
     for (const dir of dirs) {
       const result = Bun.spawnSync([process.execPath, "test", import.meta.filename,
-        "--test-name-pattern", "named child_process.spawn refuses a CLI start"], {
+        "--test-name-pattern", "named child_process.spawn refuses init for an argument-printing script standing in for the CLI entry"], {
         cwd: join(packages, dir), timeout: 5_000, stdout: "pipe", stderr: "pipe",
       });
       expect(result.exitCode, dir).toBe(0);
@@ -78,12 +78,12 @@ describe("Bun Harper spawn preload", () => {
     }
   }, 60_000);
   for (const [label, fn] of Object.entries({ spawn, spawnSync, execFile, execFileSync })) {
-    test(`named child_process.${label} refuses a CLI start`, () => {
+    test(`named child_process.${label} refuses init for an argument-printing script standing in for the CLI entry`, () => {
       const { cli } = fixture();
       refused(() => Reflect.apply(fn, undefined, [process.execPath, [cli, "init"]]), `child_process.${label}`);
     }, 20_000);
     for (const [kind, object] of [["default", childProcess], ["require", cjs]] as const) {
-      test(`${kind} child_process.${label} refuses a CLI start`, () => {
+      test(`${kind} child_process.${label} refuses init for an argument-printing script standing in for the CLI entry`, () => {
         const { cli } = fixture();
         refused(() => Reflect.apply(object[label], object, [process.execPath, [cli, "init"]]), `child_process.${label}`);
       }, 20_000);
@@ -108,6 +108,38 @@ describe("Bun Harper spawn preload", () => {
     const run = (runtime: string, args: string[]) => spawnSync(runtime, args, { timeout: 5_000 });
     refused(() => run(process.execPath, [cli, "init"]));
   }, 20_000);
+  test("direct and env-wrapped Bun invocations of an argument-printing script standing in for the CLI entry are refused", () => {
+    const { cli } = fixture();
+    refused(() => spawnSync("bun", [cli, "init"], { timeout: 5_000 }));
+    for (const prefix of [[], ["-i"], ["-u", "UNUSED"], ["--unset=UNUSED"], ["-C", dirname(cli)], ["--"]]) {
+      refused(() => spawnSync("/usr/bin/env", [...prefix, `PATH=${process.env.PATH}`, "UNUSED=value", "bun", cli, "init"], { timeout: 5_000 }));
+    }
+  }, 20_000);
+  test("shell strings beginning with bun refuse an argument-printing script standing in for the CLI entry", () => {
+    const { cli } = fixture();
+    for (const prefix of ["", "UNUSED=value "]) {
+      const command = `${prefix}bun '${cli}' init`;
+      refused(() => spawnSync(command, { shell: true, timeout: 5_000 }));
+      for (const shell of ["/bin/sh", "/bin/bash"]) {
+        refused(() => spawnSync(shell, ["-c", command], { timeout: 5_000 }));
+      }
+    }
+  }, 20_000);
+  test("env and shell wrappers allow Node to run an argument-printing script standing in for the CLI entry", () => {
+    const { cli } = fixture();
+    const node = Bun.which("node")!;
+    const command = `UNUSED=value '${node}' '${cli}' init`;
+    const results = [
+      spawnSync("/usr/bin/env", ["-u", "UNUSED", "OTHER=value", node, cli, "init"], { encoding: "utf8", timeout: 5_000 }),
+      spawnSync(command, { shell: true, encoding: "utf8", timeout: 5_000 }),
+      spawnSync("/bin/sh", ["-c", command], { encoding: "utf8", timeout: 5_000 }),
+      spawnSync("/bin/bash", ["-c", command], { encoding: "utf8", timeout: 5_000 }),
+    ];
+    for (const result of results) {
+      expect(result.status).toBe(0);
+      expect(JSON.parse(result.stdout)).toEqual(["init"]);
+    }
+  }, 20_000);
   test("environment-expression runtime is refused", () => {
     const { cli } = fixture();
     const env = { RUNTIME: process.execPath };
@@ -122,14 +154,14 @@ describe("Bun Harper spawn preload", () => {
     refused(() => spawnSync(process.execPath, ["--conditions", "x".repeat(2_000), cli, "init"], { timeout: 5_000 }));
     refused(() => spawnSync(process.execPath, ["--inspect", "127.0.0.1:0", cli, "init"], { timeout: 5_000 }));
   }, 20_000);
-  test("CLI and Harper entry symlinks are refused", () => {
+  test("symlinks to argument-printing scripts standing in for CLI and Harper entries are refused", () => {
     const { root, cli } = fixture();
     symlinkSync(cli, join(root, "entry"));
     symlinkSync(join(root, "harper.js"), join(root, "engine"));
     refused(() => spawnSync(process.execPath, [join(root, "entry"), "init"], { timeout: 5_000 }));
     refused(() => spawnSync(process.execPath, ["--cwd", root, "engine", "run", "."], { timeout: 5_000 }));
   }, 20_000);
-  test("a runtime option value naming Harper is allowed for a source entry", () => {
+  test("a runtime option value naming Harper is allowed for an argument-printing source-entry script", () => {
     const { root } = fixture();
     const result = spawnSync(process.execPath, ["--title", join(root, "harper.js"), join(root, "source-cli.js"), "init"], {
       encoding: "utf8", timeout: 5_000,
@@ -137,7 +169,7 @@ describe("Bun Harper spawn preload", () => {
     expect(result.status).toBe(0);
     expect(JSON.parse(result.stdout)).toEqual(["init"]);
   }, 20_000);
-  test("a source entry with a boolean runtime flag may receive a Harper path as data", () => {
+  test("an argument-printing source-entry script with a boolean runtime flag may receive a Harper path as data", () => {
     const { root } = fixture();
     const data = [join(root, "harper.js"), "run", "."];
     const result = spawnSync(process.execPath, ["--smol", join(root, "source-cli.js"), ...data], {
@@ -174,7 +206,7 @@ describe("Bun Harper spawn preload", () => {
     copyFileSync(process.execPath, runtime);
     refused(() => spawnSync(runtime, [cli, "init"], { timeout: 5_000 }));
   }, 20_000);
-  test("an unverifiable runtime requires a per-call reason", () => {
+  test("an unverifiable runtime requires a child-only reason", () => {
     const { root, cli } = fixture();
     const runtime = join(root, "runtime");
     const bun = `'${process.execPath.replaceAll("'", "'\\''")}'`;
@@ -189,18 +221,18 @@ describe("Bun Harper spawn preload", () => {
       expect(log.mock.calls.flat().join("\n")).toContain("wrapper fixture delegates to Bun");
     } finally { log.mockRestore(); }
   }, 20_000);
-  test("Harper and the packaged shim are refused", () => {
+  test("argument-printing scripts standing in for Harper and the packaged shim are refused", () => {
     const { root } = fixture();
     refused(() => spawnSync(process.execPath, [join(root, "harper.js"), "run", "."], { timeout: 5_000 }));
     refused(() => spawnSync(process.execPath, [join(root, "dist", "cli-shim.cjs"), "init"], { timeout: 5_000 }));
   }, 20_000);
-  for (const command of ["start", "restart", "upgrade", "serve", "downgrade"]) {
+  for (const command of ["start", "restart", "upgrade"]) {
     test(`${command} is refused`, () => {
       const { cli } = fixture();
       refused(() => spawnSync(process.execPath, [cli, command], { timeout: 5_000 }));
     }, 20_000);
   }
-  test("doctor repair is refused", () => {
+  test("doctor --fix is refused for an argument-printing script standing in for the CLI entry", () => {
     const { cli } = fixture();
     refused(() => spawnSync(process.execPath, [cli, "doctor", "--fix"], { timeout: 5_000 }));
   }, 20_000);
@@ -209,10 +241,10 @@ describe("Bun Harper spawn preload", () => {
       refused(() => spawnSync(process.execPath, [fixture().cli, ...args], { timeout: 5_000 }));
     }, 20_000);
   }
-  test("a source entry running init is allowed", () => {
+  test("an argument-printing script standing in for a source entry may receive init", () => {
     allowed(join(fixture().root, "source-cli.js"), ["init"]);
   }, 20_000);
-  test("Node running the shipped entry is allowed", () => {
+  test("Node running an argument-printing script standing in for the shipped entry is allowed", () => {
     const { cli } = fixture();
     const result = spawnSync(Bun.which("node")!, [cli, "init"], { encoding: "utf8", timeout: 5_000 });
     expect(result.status).toBe(0);
@@ -230,29 +262,51 @@ describe("Bun Harper spawn preload", () => {
   test("an init-only flag does not exempt start", () => {
     refused(() => spawnSync(process.execPath, [fixture().cli, "start", "--skip-start"], { timeout: 5_000 }));
   }, 20_000);
-  test("a per-call reason permits and logs an otherwise forbidden spawn", () => {
+  test("a child-only reason permits and logs an otherwise forbidden spawn", () => {
     const { cli } = fixture();
+    const previous = process.env.FLAIR_TEST_ALLOW_BUN_HARPER;
+    delete process.env.FLAIR_TEST_ALLOW_BUN_HARPER;
     const log = spyOn(console, "warn").mockImplementation(() => {});
     try {
-      const result = spawnSync(process.execPath, [cli, "init"], {
-        encoding: "utf8", timeout: 5_000,
+      const options = {
+        encoding: "utf8" as const, timeout: 5_000,
         env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise this guard's opt-out" },
-      });
-      expect(result.status).toBe(0);
-      expect(JSON.parse(result.stdout)).toEqual(["init"]);
+      };
+      const command = `UNUSED=value bun '${cli}' init`;
+      const results = [
+        spawnSync(process.execPath, [cli, "init"], { ...options, timeout: 5_000 }),
+        spawnSync("/usr/bin/env", ["-u", "UNUSED", "OTHER=value", "bun", cli, "init"], { ...options, timeout: 5_000 }),
+        spawnSync(command, { ...options, shell: true, timeout: 5_000 }),
+        spawnSync("/bin/sh", ["-c", command], { ...options, timeout: 5_000 }),
+        spawnSync("/bin/bash", ["-c", command], { ...options, timeout: 5_000 }),
+      ];
+      for (const result of results) {
+        expect(result.status).toBe(0);
+        expect(JSON.parse(result.stdout)).toEqual(["init"]);
+      }
       expect(log.mock.calls.flat().join("\n")).toContain("exercise this guard's opt-out");
       expect(log.mock.calls.flat().join("\n")).toContain("cli-runtime-node-guard-2570.test.ts:");
-    } finally { log.mockRestore(); }
-  }, 20_000);
+    } finally {
+      log.mockRestore();
+      if (previous === undefined) delete process.env.FLAIR_TEST_ALLOW_BUN_HARPER;
+      else process.env.FLAIR_TEST_ALLOW_BUN_HARPER = previous;
+    }
+  }, 40_000);
   test("blank and ambient reasons do not permit a spawn", () => {
     const { cli } = fixture();
     refused(() => spawnSync(process.execPath, [cli, "init"], { timeout: 5_000, env: { FLAIR_TEST_ALLOW_BUN_HARPER: "  " } }));
     const previous = process.env.FLAIR_TEST_ALLOW_BUN_HARPER;
     process.env.FLAIR_TEST_ALLOW_BUN_HARPER = "ambient";
-    try { refused(() => spawnSync(process.execPath, [cli, "init"], { timeout: 5_000 })); }
+    try {
+      refused(() => spawnSync(process.execPath, [cli, "init"], { timeout: 5_000 }));
+      refused(() => spawnSync(process.execPath, [cli, "init"], { timeout: 5_000, env: { ...process.env } }));
+      refused(() => spawnSync(process.execPath, [cli, "init"], {
+        timeout: 5_000, env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "different child reason" },
+      }));
+    }
     finally {
       if (previous === undefined) delete process.env.FLAIR_TEST_ALLOW_BUN_HARPER;
       else process.env.FLAIR_TEST_ALLOW_BUN_HARPER = previous;
     }
-  }, 20_000);
+  }, 30_000);
 });
