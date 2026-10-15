@@ -1,21 +1,11 @@
-/**
- * dist-freshness.test.ts — flair#2583.
- *
- * startHarper loads the COMPILED dist/resources/*.js, so a resource edit with
- * no rebuild would run the previous build. These tests pin the preflight that
- * refuses to start against a stale/missing dist, using a synthetic Flair-shaped
- * tree (resources/ + tsconfig.json + dist/) whose mtimes are set directly — no
- * real build is needed and nothing in the worktree is touched.
- *
- * The refusal is asserted through the REAL startHarper (test/helpers/
- * harper-lifecycle.ts), which is the seam under test; it throws before any
- * install or spawn, so the case stays fast and leaks no flair-test-* tree.
- */
 import { afterAll, describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { once } from "node:events";
+import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { assertFlairDistFresh, distFreshnessIssues, isFlairSourceRoot } from "../helpers/dist-freshness.js";
+import { spawnCli } from "../helpers/build-cli-once.js";
 import { startHarper } from "../helpers/harper-lifecycle.js";
 
 const roots: string[] = [];
@@ -62,14 +52,14 @@ function makeTree(): Fixture {
   roots.push(root);
   write(join(root, "resources", "foo.ts"));
   write(join(root, "tsconfig.json"), '{ "include": ["resources/**/*.ts"] }\n');
-  write(join(root, "package.json"), '{ "name": "flair-fixture" }\n');
+  write(join(root, "package.json"), '{ "name": "flair-fixture", "version": "1.0.0" }\n');
   write(join(root, "bun.lock"));
   write(join(root, "scripts", "write-build-info.mjs"));
   write(join(root, "src", "cli.ts"));
   write(join(root, "tsconfig.cli.json"), '{ "include": ["src/cli.ts"] }\n');
   write(join(root, "dist", "resources", "foo.js"));
   write(join(root, "dist", "build-info.json"), "{}\n");
-  write(join(root, "dist", "cli.js"));
+  write(join(root, "dist", "cli.js"), 'require("node:fs").writeFileSync(process.argv[2], "ran");\n');
   for (const input of ["resources", "tsconfig.json", "package.json", "bun.lock", "scripts", "src", "tsconfig.cli.json"]) {
     stamp(join(root, input), OLD);
   }
@@ -104,21 +94,51 @@ describe("dist freshness (flair#2583)", () => {
     expect(issues.some((i) => i.message.includes("dist/resources contains no built resources"))).toBe(true);
   });
 
-  it("a missing dist/cli.js is detected with the build:cli remedy", () => {
+  it("fresh resources do not require dist/cli.js or fresh CLI sources", () => {
     const { root } = makeTree();
     rmSync(join(root, "dist", "cli.js"));
-    const issues = distFreshnessIssues(root);
-    expect(issues).toHaveLength(1);
-    expect(issues[0].message).toContain("dist/cli.js is missing");
-    expect(issues[0].remedy).toBe("bun run build:cli");
+    stamp(join(root, "src", "cli.ts"), NEW + 60_000);
+    expect(distFreshnessIssues(root)).toEqual([]);
+    expect(() => assertFlairDistFresh(root)).not.toThrow();
   });
 
-  it("a src newer than dist/cli.js is reported (bun run build wipes the CLI)", () => {
+  it("a copied tree with a null build-info commit is checked by resource mtimes", () => {
     const { root } = makeTree();
-    stamp(join(root, "src", "cli.ts"), NEW + 60_000);
-    const issues = distFreshnessIssues(root);
-    expect(issues.some((i) => i.message.includes("src/cli.ts") && i.remedy === "bun run build:cli")).toBe(true);
+    const result = spawnSync("node", [resolve(import.meta.dirname, "../../scripts/write-build-info.mjs")], {
+      cwd: root, encoding: "utf-8", timeout: 10_000,
+    });
+    expect(result.status).toBe(0);
+    expect(JSON.parse(readFileSync(join(root, "dist", "build-info.json"), "utf-8")).commit).toBeNull();
+    rmSync(join(root, "dist", "cli.js"));
+    expect(distFreshnessIssues(root)).toEqual([]);
+    stamp(join(root, "resources", "foo.ts"), NEW + 60_000);
+    expect(() => assertFlairDistFresh(root)).toThrow("resources/foo.ts");
   });
+
+  for (const state of ["missing", "stale"]) {
+    it(`CLI spawn refuses a ${state} dist/cli.js and names build:cli`, () => {
+      const { root } = makeTree();
+      const marker = join(root, "spawned");
+      if (state === "missing") rmSync(join(root, "dist", "cli.js"));
+      else stamp(join(root, "src", "cli.ts"), NEW + 60_000);
+      expect(() => spawnCli([marker], { timeout: 2000 }, root)).toThrow(/refusing to spawn CLI:.*dist\/cli.js.*bun run build:cli/);
+      expect(existsSync(marker)).toBe(false);
+      expect(existsSync(join(root, "dist", "cli.js"))).toBe(state !== "missing");
+    });
+  }
+
+  it("CLI spawn runs a fresh CLI and rechecks it on the next call", async () => {
+    const { root } = makeTree();
+    const marker = join(root, "spawned");
+    const child = spawnCli([marker], { timeout: 2000 }, root);
+    const [code, signal] = await once(child, "close");
+    expect({ code, signal }).toEqual({ code: 0, signal: null });
+    expect(readFileSync(marker, "utf-8")).toBe("ran");
+    rmSync(marker);
+    rmSync(join(root, "dist", "cli.js"));
+    expect(() => spawnCli([marker], { timeout: 2000 }, root)).toThrow("bun run build:cli");
+    expect(existsSync(marker)).toBe(false);
+  }, 5000);
 
   it("a tree without tsconfig.json is not the Flair source tree and is skipped", () => {
     const { root } = makeTree();
