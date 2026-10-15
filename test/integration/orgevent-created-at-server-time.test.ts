@@ -13,10 +13,13 @@
  *     but a non-empty string or a non-empty array of strings, the empty string
  *     included) is refused with `invalid_event_id` (400) before any write, and
  *     a stored row under such an id is unchanged; a composite id is read;
+ *   - a body that is not a JSON object (a string, a number, a boolean, null, or
+ *     an array of those) is refused with `body_must_be_object` (400) before any
+ *     other check, on POST, PUT and PATCH (resources/object-body-guard.ts);
  *   - for malformed ids and bodies, the status each caller gets is pinned, with
  *     a refusal's `error` or `code` field, including input answered before the
- *     check (POST's generated id, attribution, the ownership lookup, Harper's
- *     own validation);
+ *     check (the object-body guard, POST's generated id, attribution, the
+ *     ownership lookup, Harper's own validation);
  *   - the catch-up feed delivers events in timestamp and ID order, so events
  *     with one server time are delivered in ID order (checked on a second,
  *     frozen-clock instance with IDs in reverse write order);
@@ -353,7 +356,9 @@ describe("refusals that write nothing", () => {
   it("a POST with an array body is refused and stores nothing", async () => {
     const summary = `oect-post-array-${randomUUID()}`;
     const res = await send(agent, "POST", "/OrgEvent", [{ id: summary, authorId: agent.id, kind: "status", summary, createdAt: PAST }]);
-    expect(res.status, (await res.text()).slice(0, 300)).toBe(400);
+    const text = await res.text();
+    expect(res.status, text.slice(0, 300)).toBe(400);
+    expect(JSON.parse(text).error).toBe("body_must_be_object");
     expect(await readEvent(summary)).toBeNull();
     expect(await eventsBySummary(summary)).toEqual([]);
   }, 30_000);
@@ -606,19 +611,19 @@ describe("what each malformed id or body gets", () => {
   // Harper's own validation. A refused case asserts the status plus its `error`
   // field (flair refusals) or `code` field (Harper's problem details); a
   // generated-id POST case asserts a 2xx and exactly one row with a generated
-  // id; the non-admin collection-PUT case whose element is an array asserts
-  // 200 and `[{}]`. Storage is checked for the id cases (a refused one stores
-  // no row with its summary), single-record PUT bodies (no row at the path)
-  // and PATCH (the row is unchanged); the POST-body and collection-element
+  // id. A body that is not a JSON object is answered by the object-body guard
+  // (resources/object-body-guard.ts) before any other check, with
+  // `body_must_be_object` (400). Storage is checked for the id cases (a refused
+  // one stores no row with its summary), single-record PUT bodies (no row at the
+  // path) and PATCH (the row is unchanged); the POST-body and collection-element
   // cases check only the response.
   type Expect = { status: number; error?: string; code?: string };
   const INVALID: Expect = { status: 400, error: INVALID_ID };
   const OWNER_CHANGE: Expect = { status: 403, error: "forbidden: the owner of a record cannot be changed" };
-  const ATTRIBUTION: Expect = { status: 403, error: "forbidden: authorId must match authenticated agent" };
   const OWNER_READ: Expect = { status: 400, error: "owner_check_unavailable" };
   const HARPER_400: Expect = { status: 400, code: "ClientError" };
   const HARPER_500: Expect = { status: 500, code: "Error" };
-  const TYPE_ERROR: Expect = { status: 500, code: "TypeError" };
+  const BODY_OBJECT: Expect = { status: 400, error: "body_must_be_object" };
 
   async function expectResponse(res: Response, want: Expect): Promise<void> {
     const text = await res.text();
@@ -680,19 +685,21 @@ describe("what each malformed id or body gets", () => {
   }
 
   const BODIES: Array<[string, string]> = [["a string", '"abc"'], ["a number", "42"], ["null", "null"], ["true", "true"], ["an array of primitives", '["abc",1]']];
-  // [agent, admin] per verb.
+  // [agent, admin] per verb. Every one of these shapes is answered by the
+  // object-body guard with the named 400, before attribution, ownership or the
+  // createdAt check.
   const BODY_WANT: Record<string, Record<string, [Expect, Expect]>> = {
     POST: {
-      "a string": [TYPE_ERROR, TYPE_ERROR], "a number": [TYPE_ERROR, TYPE_ERROR], null: [TYPE_ERROR, TYPE_ERROR],
-      true: [TYPE_ERROR, TYPE_ERROR], "an array of primitives": [INVALID, INVALID],
+      "a string": [BODY_OBJECT, BODY_OBJECT], "a number": [BODY_OBJECT, BODY_OBJECT], null: [BODY_OBJECT, BODY_OBJECT],
+      true: [BODY_OBJECT, BODY_OBJECT], "an array of primitives": [BODY_OBJECT, BODY_OBJECT],
     },
     PUT: {
-      "a string": [ATTRIBUTION, INVALID], "a number": [ATTRIBUTION, INVALID], null: [TYPE_ERROR, TYPE_ERROR],
-      true: [ATTRIBUTION, INVALID], "an array of primitives": [ATTRIBUTION, INVALID],
+      "a string": [BODY_OBJECT, BODY_OBJECT], "a number": [BODY_OBJECT, BODY_OBJECT], null: [BODY_OBJECT, BODY_OBJECT],
+      true: [BODY_OBJECT, BODY_OBJECT], "an array of primitives": [BODY_OBJECT, BODY_OBJECT],
     },
     PATCH: {
-      "a string": [INVALID, INVALID], "a number": [INVALID, INVALID], null: [INVALID, INVALID],
-      true: [INVALID, INVALID], "an array of primitives": [INVALID, INVALID],
+      "a string": [BODY_OBJECT, BODY_OBJECT], "a number": [BODY_OBJECT, BODY_OBJECT], null: [BODY_OBJECT, BODY_OBJECT],
+      true: [BODY_OBJECT, BODY_OBJECT], "an array of primitives": [BODY_OBJECT, BODY_OBJECT],
     },
   };
 
@@ -717,20 +724,13 @@ describe("what each malformed id or body gets", () => {
         }, 30_000);
       }
 
-      const elementWant: Expect | "element-refused" = label === "an array of primitives"
-        ? (who === admin ? INVALID : "element-refused")
-        : HARPER_400;
-      it(`a collection PUT whose element is ${label}, as ${role}, gets ${elementWant === "element-refused" ? "200 with the element refused" : `${elementWant.status} ${elementWant.error ?? elementWant.code}`}`, async () => {
-        const res = await sendRaw(who, "PUT", "/OrgEvent/", `[${raw}]`);
-        if (elementWant === "element-refused") {
-          // A non-admin agent's element is refused by attribution, which the
-          // collection dispatch reports as that element's value.
-          const text = await res.text();
-          expect(res.status, text.slice(0, 300)).toBe(200);
-          expect(JSON.parse(text)).toEqual([{}]);
-        } else {
-          await expectResponse(res, elementWant);
-        }
+      // An element that is an array of primitives reaches the resource (Harper
+      // dispatches the collection one element at a time), so the object-body
+      // guard answers it; an element that is a primitive is refused by Harper's
+      // own validation before the resource runs (ClientError).
+      const elementWant: Expect = label === "an array of primitives" ? BODY_OBJECT : HARPER_400;
+      it(`a collection PUT whose element is ${label}, as ${role}, gets ${elementWant.status} ${elementWant.error ?? elementWant.code}`, async () => {
+        await expectResponse(await sendRaw(who, "PUT", "/OrgEvent/", `[${raw}]`), elementWant);
       }, 30_000);
     }
   }
