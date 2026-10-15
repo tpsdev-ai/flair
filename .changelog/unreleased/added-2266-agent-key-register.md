@@ -1,11 +1,14 @@
-- **New admin-only `POST /AgentKeyRegister` registers a caller-held Ed25519 key on an agent row whose stored key is exactly `pending`.**
+- **New admin-only `POST /AgentKeyRegister` registers a caller-held Ed25519 key.**
 
   Accepted credentials: Basic admin or an Ed25519 agent with the admin annotation.
-  A Harper Bearer token is refused. The key is written only while the
-  stored value is exactly `pending`, on a local, non-deactivated row; a
-  non-`pending` row is refused with a pointer to key rotation. The operation runs
-  under a per-agent lock in one owned transaction, confirms the committed row
-  before the commit, and returns the stored key read back after the commit. Each
+  A Harper Bearer token is refused. Under Flair's per-agent registration lock,
+  the route reads a fresh local, non-deactivated row with `publicKey: "pending"`
+  and confirms it is unchanged and still `pending` before commit in one owned
+  transaction. The lock serializes Flair registration writers; raw operations-API
+  writes do not take it. A change committed after the confirmation read and before
+  commit is not seen; a commit-time pending check is a follow-up. A non-`pending`
+  row is refused with a pointer to key rotation. The response returns the stored
+  key read back after commit. Each
   committed registration appends an `AgentKeyRegistration` audit row and an
   `agent_key_registered` OrgEvent. The audit `keyFingerprint` and the event
   `detail` carry the key's fingerprint, not the key; the audit `agentId` and the

@@ -1,8 +1,8 @@
 // agent-key-register-2266.test.ts — flair#2266, against a REAL Harper.
 //
 // POST /AgentKeyRegister (resources/AgentKeyRegister.ts) registers a caller-held
-// Ed25519 public key on an Agent row whose stored `publicKey` is exactly
-// `pending`, admin only. Every case below drives this instance's own ephemeral
+// Ed25519 public key, admin only. The route checks a fresh row is `pending` and
+// confirms it before commit. Every case below drives this instance's own ephemeral
 // Harper booted from the built component. The concurrency and rollback cases arm
 // the operation's in-transaction pause point; the read-back case arms the one
 // between the commit and the read-back (resources/txn-pause-point.ts, enabled
@@ -379,10 +379,8 @@ describe("flair#2266 — admin key registration on a pending Agent row", () => {
       body: JSON.stringify({ agentId: enrollId, publicKey: mkKey().pub }),
       signal: AbortSignal.timeout(15_000),
     });
-    // Refused outright: the enrollment scheme is not an accepted credential, so
-    // the request never registers anything. (Harper's own auth refuses the
-    // unparseable Authorization header; the resource's own check is the
-    // fail-closed backstop for any configuration that reaches it.)
+    // Harper defers the unknown scheme; Flair's middleware passes the header on.
+    // This path exercises the route's own scheme check, which returns 401.
     expect(res.status, (await res.text()).slice(0, 200)).toBe(401);
     expect(await rowIn("Agent", enrollId)).toEqual(before);
   }, 30_000);

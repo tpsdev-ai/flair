@@ -1,9 +1,7 @@
 /**
  * AgentKeyRegister.ts — POST /AgentKeyRegister (flair#2266).
  *
- * Register a caller-held Ed25519 public key on an Agent row whose stored
- * `publicKey` is exactly `pending`. Admin only (the first build of the issue's
- * design; token enrollment is a later slice).
+ * Register a caller-held Ed25519 public key. Admin only.
  *
  * A standalone CUSTOM Resource, not a verb on the Agent resource: the ordinary
  * agent-authentication middleware resolves the verification key from the STORED
@@ -19,7 +17,9 @@
  * local / non-deactivated checks, then the key, the private audit row and the
  * OrgEvent (`detail`: fingerprint; `refId` and `summary`: target id) are staged together, the COMMITTED Agent row is confirmed
  * (resources/write-back.ts) before the commit, and the stored key is read back
- * AFTER the commit. The response is returned only when the read-back is equal.
+ * AFTER the commit. The lock serializes Flair registration writers, not raw operations-API writes.
+ * A change committed after confirmation and before commit is not seen; a commit-time pending check is a follow-up.
+ * The response is returned only when the read-back is equal.
  *
  * Accepted credentials: Basic admin or a verified Ed25519 agent with the admin
  * annotation. A Harper Bearer token is refused.
@@ -181,7 +181,7 @@ export class AgentKeyRegister extends Resource {
             // Confirm the COMMITTED Agent row (an explicit fresh context, never
             // this transaction's snapshot or its staged write) is still the very
             // row the decision was made on: a whole-row comparison, so ANY field
-            // a competing writer committed in between — the key, the status, the
+            // a competing writer committed before this read — the key, the status, the
             // originator, an unrelated field — aborts this owned transaction and
             // discards all three staged writes. (Admin is decided at request
             // time by resolveAgentAuth, not from this target row, so there is no

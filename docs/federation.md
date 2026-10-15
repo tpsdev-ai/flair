@@ -279,8 +279,8 @@ Federation uses record-level last-write-wins (LWW) with ISO timestamp comparison
 
 ### A pending agent key is never completed by federation
 
-`POST /AgentKeyRegister` can complete a locally seeded Agent row with
-`publicKey: "pending"` while it remains active and local; the administrator
+`POST /AgentKeyRegister` checks a fresh row is non-deactivated, local and `pending` and
+confirms it before commit (see [registration limits](api-reference.md#identity--agent-presence-soul)); the administrator
 operations API can also write the column directly (the documented admin
 trust-root path). Federation cannot complete it. A record that reaches the merge
 plan with `publicKey` different from stored `pending` is skipped whole as
