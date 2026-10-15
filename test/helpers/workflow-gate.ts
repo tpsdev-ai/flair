@@ -2,8 +2,8 @@
  * workflow-gate.ts — assert a CI gate step from the workflow's parsed job graph
  * instead of from a substring of its text (flair#2289, flair#2419).
  *
- * `checkCoverageGate` is a whitelist: the gate step must run exactly its
- * command, under the default shell (no `shell:` on the step, no
+ * `checkCoverageGate` is a whitelist: the gate step must run its command
+ * (whitespace-normalised), under the default shell (no `shell:` on the step, no
  * `defaults.run.shell` on the job or workflow), with no `if` and no
  * `continue-on-error` on the step or its job, in a job the required check
  * reaches through `needs` within the same workflow, and the required check's
@@ -107,6 +107,7 @@ export function checkCoverageGate(docs: WorkflowDoc[], gate: Gate): void {
       if ("continue-on-error" in job) throw new Error(`${label} has continue-on-error; it must be absent`);
       if ("shell" in job) throw new Error(`${label} has shell; it must run under the default shell`);
       if (job.defaults?.run?.shell !== undefined) throw new Error(`${label} sets defaults.run.shell; it must run under the default shell`);
+      if (doc.defaults?.run?.shell !== undefined) throw new Error(`the workflow sets defaults.run.shell; ${label} must run under the default shell`);
       if (!("if" in job) || normalise(String(job.if).replace(/^\s*\$\{\{(.*)\}\}\s*$/s, "$1")) !== "always()") {
         throw new Error(`${label} must have if: always()`);
       }

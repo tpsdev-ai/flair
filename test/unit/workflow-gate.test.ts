@@ -1,8 +1,8 @@
 // The workflow coverage-gate checker's own fixtures (flair#2480).
 //
-// `checkCoverageGate` refuses a gate that would not actually execute and fail
-// the required check: a step, job or workflow shell override on the gate or on
-// the `Unit Tests` adapter; a gate outside the job the adapter reaches through
+// `checkCoverageGate` refuses a shell override on the gate or on the
+// `Unit Tests` adapter (a step `shell:`, a job or workflow
+// `defaults.run.shell`); a gate outside the job the adapter reaches through
 // `needs`; and an `if:` or `continue-on-error` on the step or its job. Each
 // fixture below is one such refusal (one workflow file per refusal);
 // `accepted.yml` is none.
@@ -43,4 +43,11 @@ describe("workflow coverage-gate checker — fixtures", () => {
       expect(() => checkCoverageGate(fixture(name), GATE)).toThrow(error);
     });
   }
+
+  test("refuses a workflow-level shell override on a Unit Tests adapter in another workflow", () => {
+    const docs = [...fixture("accepted.yml"), ...fixture("refused-adapter-shell-workflow.yml")];
+    expect(() => checkCoverageGate(docs, GATE)).toThrow(
+      `the workflow sets defaults.run.shell; the required "Unit Tests" job "test-unit-gate" must run under the default shell`,
+    );
+  });
 });

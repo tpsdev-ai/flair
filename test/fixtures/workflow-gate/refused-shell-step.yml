@@ -1,7 +1,6 @@
 # Fixture for the workflow coverage-gate checker (flair#2480).
 #
-# Refused: the gate step overrides the shell, so the command the checker pins is
-# not the command a runner would execute.
+# Refused: the gate step overrides the shell, which can change execution semantics.
 name: workflow-gate fixture (step shell override)
 on: pull_request
 jobs:

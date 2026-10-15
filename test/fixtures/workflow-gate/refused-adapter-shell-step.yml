@@ -1,7 +1,7 @@
 # Fixture for the workflow coverage-gate checker (flair#2480).
 #
-# Refused: the Unit Tests adapter step overrides the shell, so the adapter the
-# checker pins is not the script a runner executes.
+# Refused: the Unit Tests adapter step overrides the shell, which can change
+# execution semantics.
 name: workflow-gate fixture (adapter step shell override)
 on: pull_request
 jobs:
