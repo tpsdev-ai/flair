@@ -4,6 +4,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpat
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
+import { nodeBin } from "../helpers/node-runtime.ts";
 import { tempDir } from "../helpers/temp-dir.ts";
 
 const cjs = createRequire(import.meta.url)("node:child_process");
@@ -311,6 +312,34 @@ describe("Bun Harper spawn preload", () => {
       }
     }, 20_000);
   }
+  test("nodeBin and the guard refuse a launcher that probes with Node and dispatches CLI and Harper to Bun", () => {
+    const { root, cli } = fixture();
+    const runtime = join(root, "runtime");
+    const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+    writeFileSync(runtime, `#!/bin/sh\nif [ "$1" = "-p" ]; then exec ${quote(Bun.which("node")!)} "$@"; fi\nexec ${quote(process.execPath)} "$@"\n`, { mode: 0o755 });
+    writeFileSync(cli, "console.log(process.versions.bun ? 'bun' : 'node')");
+    expect(execFileSync(runtime, ["-p", "process.versions.bun ? 'bun' : 'node'"], {
+      encoding: "utf8", timeout: 5_000,
+    }).trim()).toBe("node");
+    expect(() => nodeBin({ env: { ...process.env, NODE_BIN: runtime } })).toThrow("cannot verify direct Node executable");
+    const options = { encoding: "utf8" as const, timeout: 5_000 };
+    for (const args of [[cli, "init"], [harperEntry, "run", "."]]) {
+      refused(() => spawnSync(runtime, args, options), "child_process.spawnSync", "TestRuntimeIdentityError");
+      refused(() => Bun.spawnSync([runtime, ...args], options), "Bun.spawnSync", "TestRuntimeIdentityError");
+      refused(() => spawnSync(runtime, args, { ...options,
+        env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: " " },
+      }), "child_process.spawnSync", "TestRuntimeIdentityError");
+    }
+    const log = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const result = spawnSync(runtime, [cli, "init"], { ...options, timeout: 5_000,
+        env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise argument-dependent launcher" },
+      });
+      expect(result.status).toBe(0);
+      expect(result.stdout.trim()).toBe("bun");
+      expect(log.mock.calls.flat().join("\n")).toContain("exercise argument-dependent launcher");
+    } finally { log.mockRestore(); }
+  }, 20_000);
   test("a renamed Bun executable is refused", () => {
     const { root, cli } = fixture();
     const runtime = join(root, "runtime");

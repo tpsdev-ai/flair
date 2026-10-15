@@ -62,7 +62,13 @@ function runtimeKind(command: string, options: Options): "bun" | "node" | "unkno
       stdio: ["ignore", "pipe", "pipe"],
     }).trim();
     if (identity === "bun") return "bun";
-    return /^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(identity) ? "node" : "unknown";
+    if (!/^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(identity)) return "unknown";
+    const runtime = probe(executable, ["-p", "process.execPath"], {
+      env: options.env, cwd: cwdPath(options.cwd),
+      encoding: "utf8", timeout: 2_000, killSignal: "SIGKILL", maxBuffer: 1_024,
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+    return realpathSync(runtime) === executable ? "node" : "unknown";
   } catch { return "unknown"; }
 }
 

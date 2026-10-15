@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { symlinkSync, writeFileSync } from "node:fs";
+import { realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { nodeBin } from "../helpers/node-runtime.ts";
 import { tempDir } from "../helpers/temp-dir.ts";
@@ -20,13 +20,20 @@ test("nodeBin verifies real Node and the Bun-runner fallback", () => {
   configured(Bun.which("node")!, () => {
     expect(execFileSync(nodeBin(), ["-p", "process.versions.node"], { encoding: "utf8", timeout: 5_000 }).trim()).toMatch(/^\d+\.\d+\.\d+/);
   });
-  configured(undefined, () => expect(nodeBin()).toBe("node"));
+  configured(undefined, () => expect(nodeBin()).toBe(realpathSync(Bun.which("node")!)));
 });
 
 test("nodeBin refuses Bun reached through a symlink", () => {
   const alias = join(tempDir("flair-node-runtime-"), "runtime");
   symlinkSync(process.execPath, alias);
   configured(alias, () => expect(() => nodeBin()).toThrow("refused non-Node executable"));
+});
+
+test("nodeBin returns the direct Node path for a symlink selected through the child PATH", () => {
+  const root = tempDir("flair-node-runtime-");
+  const node = realpathSync(Bun.which("node")!);
+  symlinkSync(node, join(root, "runtime"));
+  expect(nodeBin({ env: { ...process.env, PATH: root, NODE_BIN: "runtime" }, cwd: root })).toBe(node);
 });
 
 test("nodeBin identifies the current Bun runtime through an alias", () => {
@@ -39,7 +46,7 @@ test("nodeBin identifies the current Bun runtime through an alias", () => {
   const output = execFileSync(alias, ["-e", `import { nodeBin } from ${JSON.stringify(helper)}; console.log(nodeBin())`], {
     encoding: "utf8", timeout: 5_000, env,
   });
-  expect(output.trim()).toBe("node");
+  expect(output.trim()).toBe(realpathSync(Bun.which("node")!));
 });
 
 test("nodeBin uses process.execPath when the current runtime is Node", () => {
@@ -77,7 +84,7 @@ for (const context of ["environment", "working directory"]) {
     const condition = context === "environment" ? `[ "$${parentOnly}" = 1 ]` : `[ "$PWD" != ${quote(root)} ]`;
     writeFileSync(runtime, `#!/bin/sh\nif ${condition}; then exec ${quote(Bun.which("node")!)} "$@"; fi\nexec ${quote(process.execPath)} "$@"\n`, { mode: 0o755 });
     try {
-      configured(runtime, () => expect(nodeBin()).toBe(runtime));
+      configured(runtime, () => expect(() => nodeBin()).toThrow("cannot verify direct Node executable"));
       expect(() => nodeBin({ env, cwd: root })).toThrow("refused non-Node executable");
       env.NODE_BIN = Bun.which("node")!;
       expect(execFileSync(nodeBin({ env, cwd: root }), ["-p", "process.versions.bun ? 'bun' : 'node'"], {
