@@ -199,7 +199,7 @@ mock.module("harper", () => ({
 const { Memory } = await import("../../resources/Memory.ts");
 const { FeedMemories } = await import("../../resources/MemoryFeed.ts");
 const { computeContentHash } = await import("../../resources/memory-feed-lib.ts");
-const { isOperatorSeedPut, redactMemoryWrite, storedMemoryText } = await import("../../resources/memory-redaction.ts");
+const { isOperatorSeedPut, redactMemoryWrite, redactSkillWrite, storedMemoryText } = await import("../../resources/memory-redaction.ts");
 const { SEED_SKILL_ROW_ID } = await import("../../resources/seed-ids.ts");
 const { redactSecrets, redactSecretsWithCount } = await import("../../packages/flair-mcp/src/secret-redaction.ts");
 
@@ -384,12 +384,12 @@ describe("flair#2407 — the count covers only values the redactor changed", () 
 });
 
 describe("flair#2575 — a skill write redacts its name, description and tags", () => {
-  it("redactMemoryWrite redacts the metadata name/description and every tags entry", () => {
+  it("redactSkillWrite redacts the metadata name/description and every tags entry", () => {
     const body: any = {
       tags: ["skill", `release-${GITHUB_TOKEN}`, "ops"],
       metadata: JSON.stringify({ name: `deploy ${GITHUB_TOKEN}`, description: `runs the nightly ${AWS_KEY}`, source: "npm:example" }),
     };
-    expect(redactMemoryWrite(body)).toEqual({ count: 3, embeddingDiscarded: false });
+    expect(redactSkillWrite(body)).toBe(3);
     expect(body.tags).toEqual(["skill", `release-${REDACTED}`, "ops"]);
     const meta = JSON.parse(body.metadata);
     expect(meta.name).toBe(`deploy ${REDACTED}`);
@@ -397,21 +397,27 @@ describe("flair#2575 — a skill write redacts its name, description and tags", 
     expect(meta.source).toBe("npm:example");
   });
 
-  it("a non-skill write leaves tags and metadata alone", () => {
+  it("redactSkillWrite leaves a non-skill row's tags and metadata alone", () => {
     const body: any = { content: "plain", tags: [`release-${GITHUB_TOKEN}`], metadata: JSON.stringify({ name: `deploy ${GITHUB_TOKEN}` }) };
-    expect(redactMemoryWrite(body)).toEqual({ count: 0, embeddingDiscarded: false });
+    expect(redactSkillWrite(body)).toBe(0);
     expect(body.tags).toEqual([`release-${GITHUB_TOKEN}`]);
     expect(JSON.parse(body.metadata).name).toBe(`deploy ${GITHUB_TOKEN}`);
   });
 
-  it("storedMemoryText reports the redacted skill fields of a staged skill row", () => {
-    const body: any = { tags: ["skill", `release-${GITHUB_TOKEN}`], metadata: JSON.stringify({ name: `deploy ${GITHUB_TOKEN}` }), content: "procedure", trigger: "when deploying" };
-    redactMemoryWrite(body);
+  it("redactSkillWrite redacts a skill row's string tag entries and keeps a null entry", () => {
+    const body: any = { tags: ["skill", null, `release-${GITHUB_TOKEN}`] };
+    expect(redactSkillWrite(body)).toBe(1);
+    expect(body.tags).toEqual(["skill", null, `release-${REDACTED}`]);
+  });
+
+  it("storedMemoryText reports the redacted skill fields of a staged skill row, including a null tag", () => {
+    const body: any = { tags: ["skill", null, `release-${GITHUB_TOKEN}`], metadata: JSON.stringify({ name: `deploy ${GITHUB_TOKEN}` }), content: "procedure", trigger: "when deploying" };
+    redactSkillWrite(body);
     const stored = storedMemoryText(body);
     expect(stored.content).toBe("procedure");
     expect(stored.trigger).toBe("when deploying");
     expect(stored.name).toBe(`deploy ${REDACTED}`);
-    expect(stored.tags).toEqual(["skill", `release-${REDACTED}`]);
+    expect(stored.tags).toEqual(["skill", null, `release-${REDACTED}`]);
   });
 });
 

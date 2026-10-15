@@ -16,10 +16,13 @@
  * Memory post/put/patch and the feed ingest (resources/MemoryFeed.ts) call
  * redactMemoryWrite() on the write body before the row is persisted; post and
  * put call it before the dedup gate and the stored embedding are computed.
- * When the count is above zero, a Memory post/put/patch response also carries
- * `stored`, the post-redaction values of the REDACTED_MEMORY_FIELDS present
- * in that write (storedMemoryText); the feed ingest's response is already the
- * stored row.
+ * post, put and the feed ingest call redactSkillWrite() on the EFFECTIVE row
+ * after skill-tag inheritance (prepareSkillBody) and before persistence, so an
+ * omitted-tag PUT on a stored skill, a superseding POST and a feed ingest
+ * redact the skill fields of the row they write. When the count is above zero,
+ * a Memory post/put/patch response also carries `stored`, the post-redaction
+ * values of the REDACTED_MEMORY_FIELDS present in that write
+ * (storedMemoryText); the feed ingest's response is already the stored row.
  * put() skips the call for the shipped-skill seed write (isOperatorSeedPut): a
  * PUT of the reserved seed skill id by a verified Basic administrator
  * (src/lib/skill-seed.ts). The seed compares the stored text to its source
@@ -50,11 +53,12 @@ export const REDACTED_MEMORY_FIELDS = Object.freeze(["content", "summary", "trig
 export const REDACTED_SKILL_FIELDS = Object.freeze(["name", "description"] as const);
 
 /** The redacted skill fields of one skill-tagged row, as a write's response
- *  reports them: the `metadata` keys plus the whole `tags` array. */
+ *  reports them: the `metadata` keys plus the accepted `tags` entries (the
+ *  schema declares `[String]`, so an entry is a string or null). */
 export interface StoredSkillText {
   name?: string;
   description?: string;
-  tags?: string[];
+  tags?: (string | null)[];
 }
 
 /** The redacted fields of one row, as a write's response reports them: the
@@ -69,7 +73,7 @@ export type StoredMemoryText =
  * calls it on the row it stages, after redaction, so the copy holds the
  * post-redaction value of each such field that write committed, changed or not.
  * flair#2575: for a skill-tagged row that is also the redacted skill fields — the
- * `metadata` `name`/`description` (parsed out) and the entire `tags` array.
+ * `metadata` `name`/`description` (parsed out) and the accepted `tags` entries.
  * When the write replaced any value, its response carries the copy as `stored`
  * next to `redactedValues`; the writer never has to read the row back, so a
  * later write cannot change what this one reports.
@@ -87,7 +91,11 @@ export function storedMemoryText(row: unknown): StoredMemoryText {
     for (const field of REDACTED_SKILL_FIELDS) {
       if (typeof meta[field] === "string") stored[field] = meta[field] as string;
     }
-    if (Array.isArray(record.tags)) stored.tags = record.tags.filter((tag): tag is string => typeof tag === "string");
+    // Report the entries the schema accepts (`[String]`: a string or null), so
+    // `stored.tags` is what the row carries, not only its string entries.
+    if (Array.isArray(record.tags)) {
+      stored.tags = record.tags.filter((tag): tag is string | null => typeof tag === "string" || tag === null);
+    }
   }
   return stored;
 }
@@ -140,7 +148,6 @@ export function redactMemoryWrite(content: unknown): MemoryWriteRedaction {
       if (EMBEDDING_SOURCE_FIELDS.has(field)) embedSourceChanged = true;
     }
   }
-  if (isSkillWrite(row)) count += redactSkillFields(row);
   if (count === 0) return none;
   const supplied = row.embedding != null || row.embeddingModel != null;
   if (!supplied || !embedSourceChanged) return { count, embeddingDiscarded: false };
@@ -150,11 +157,29 @@ export function redactMemoryWrite(content: unknown): MemoryWriteRedaction {
 }
 
 /**
- * Redact the skill fields of a skill-tagged write body IN PLACE (flair#2575):
+ * Redact the skill fields of an EFFECTIVE skill row IN PLACE (flair#2575):
  * every string entry of `tags`, and the `name`/`description` keys of the
  * `metadata` JSON blob (REDACTED_SKILL_FIELDS), through the SAME redactor as the
- * Memory text fields. Returns the number of values replaced. A skill field is
- * never an embedding source, so this does not affect the embedding decision.
+ * Memory text fields. Returns the number of values replaced.
+ *
+ * A write calls it AFTER prepareSkillBody resolved the effective skill tag
+ * (resources/skill-version-write.ts): a PUT that omits `tags` on a stored
+ * skill, a superseding POST and the feed ingest all inherit the tag from the
+ * row they replace, so deciding from the request body alone would miss them.
+ * A non-skill row is a no-op. A skill field is never an embedding source, so
+ * this does not affect the embedding decision.
+ */
+export function redactSkillWrite(row: unknown): number {
+  if (!row || typeof row !== "object" || Array.isArray(row)) return 0;
+  const record = row as Record<string, unknown>;
+  return isSkillWrite(record) ? redactSkillFields(record) : 0;
+}
+
+/**
+ * Redact the skill fields of a skill-tagged row IN PLACE (flair#2575): every
+ * string entry of `tags`, and the `name`/`description` keys of the `metadata`
+ * JSON blob (REDACTED_SKILL_FIELDS), through the SAME redactor as the Memory
+ * text fields. Returns the number of values replaced.
  */
 function redactSkillFields(row: Record<string, unknown>): number {
   let count = 0;

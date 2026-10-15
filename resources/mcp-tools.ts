@@ -222,7 +222,7 @@ function stripInternalFields(value: any): any {
 const STORED_TEXT_FIELDS = ["content", "summary", "trigger"] as const;
 
 /** The skill fields a redacted skill write's `stored` also reports (flair#2575):
- *  REDACTED_SKILL_FIELDS plus the whole `tags` array. */
+ *  REDACTED_SKILL_FIELDS plus the accepted `tags` entries. */
 const STORED_SKILL_FIELDS = ["name", "description", "tags"] as const;
 
 /**
@@ -235,8 +235,9 @@ const STORED_SKILL_FIELDS = ["name", "description", "tags"] as const;
  * the count and no string `stored.content`, the echo has no `content`,
  * `summary` or `trigger` and sets `contentWithheld: true`; the caller's input
  * is never put in their place. flair#2575: a skill-tagged write's `stored` also
- * carries the redacted `name`, `description` and `tags`, and the echo reports
- * them from `stored` the same way. A response with no count, an error result
+ * carries the redacted `name`, `description` and `tags` when the write supplied
+ * them, and the echo reports them from `stored` the same way. A response with
+ * no count, an error result
  * included, is returned as it came.
  */
 function redactedWriteEcho(response: any): any {
@@ -1311,7 +1312,7 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
   skill_store: {
         impl: skillStore,
     contract: {
-      summary: "Write result { id, written:true, visibility } for the skill-tagged memory. No internal embedding fields; round-trips via memory_get. After a server-side redaction the echo also carries `redactedValues` and the stored text from the write's own response: `content` (with `summary`/`trigger` when written, and `name`/`description`/`tags` for the skill); if that response returned no stored `content`, the echo omits those fields and sets `contentWithheld:true`.",
+      summary: "Write result { id, written:true, visibility } for the skill-tagged memory. No internal embedding fields; round-trips via memory_get. After a server-side redaction the echo also carries `redactedValues` and the stored text from the write's own response: `content` (with `summary`/`trigger` when written, and `name`/`description`/`tags` for the skill when supplied); if that response returned no stored `content`, the echo omits those fields and sets `contentWithheld:true`.",
       requiredFields: ["id", "written"],
       fieldTypes: { id: "string", written: "boolean", deduplicated: "boolean" },
       forbiddenFields: INTERNAL_MEMORY_FIELDS,

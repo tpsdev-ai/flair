@@ -14,9 +14,15 @@
 //            mapped to the agent by the real identity-mapping flow;
 //   - stdio: the shipped `STDIO_TOOL_HANDLERS.skill_store` over the real client.
 //
-// Each redacted field is asserted on the stored row, in the write reply and in
-// the echo; a clean value is unchanged. The stored row is read afterwards
-// through the operations API to prove the reported value is what Harper holds.
+// Coverage per surface: REST and /mcp assert every redacted skill field on the
+// stored row and in the reply/echo; the stdio reply renders only the stored
+// `Name:` line, so it asserts that line and every field on the stored row. A
+// clean value is unchanged. The stored row is read afterwards through the
+// operations API to prove the reported value is what Harper holds.
+//
+// It also drives the built-in /mcp `memory_basement` / `memory_restore` against
+// real Harper and applies each tool's declared contract to its real reply
+// (flair#2575).
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { chmodSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm, mkdir, cp, symlink } from "node:fs/promises";
@@ -24,6 +30,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import nacl from "tweetnacl";
 import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { conform } from "../helpers/mcp-conformance";
 import { provisionIdpIdentityMapping } from "../../src/lib/mcp-enable.ts";
 import { FlairClient } from "../../packages/flair-client/src/client.js";
 import { STDIO_TOOL_HANDLERS } from "../../packages/flair-mcp/src/adapter-tools.ts";
@@ -262,5 +269,102 @@ describe("flair#2575 — stdio skill_store echoes the stored name", () => {
     const text: string = res.content[0].text;
     expect(res.structuredContent.redactedValues).toBeUndefined();
     expect(text).toContain("Name: deploy");
+  }, 120_000);
+});
+
+describe("flair#2575 — a write that INHERITS the skill tag redacts the skill fields", () => {
+  test("a PUT that omits `tags` on a stored skill redacts the supplied metadata name/description", async () => {
+    const created: any = await client.request("POST", "/Memory", {
+      agentId: AGENT,
+      content: "procedure v1",
+      trigger: "when deploying",
+      tags: ["skill"],
+      metadata: JSON.stringify({ name: "deploy", description: "runs the nightly build" }),
+    });
+    const put: any = await client.request("PUT", `/Memory/${created.id}`, {
+      id: created.id,
+      agentId: AGENT,
+      content: "procedure v2",
+      trigger: "when deploying",
+      metadata: JSON.stringify({ name: `deploy ${GITHUB_TOKEN}`, description: `runs the nightly ${AWS_KEY}` }),
+    });
+    expect(put.redactedValues).toBe(2);
+    expect(put.stored.name).toBe(`deploy ${REDACTED}`);
+    expect(put.stored.description).toBe(`runs the nightly ${REDACTED}`);
+    expect(JSON.stringify(put)).not.toContain(GITHUB_TOKEN);
+    const row = await storedRow(put.id);
+    expect(row.tags).toContain("skill");
+    expect(metadataOf(row).name).toBe(`deploy ${REDACTED}`);
+    expect(metadataOf(row).description).toBe(`runs the nightly ${REDACTED}`);
+  }, 120_000);
+
+  test("a superseding POST that omits `tags` inherits the skill tag and redacts the supplied metadata name", async () => {
+    const root: any = await client.request("POST", "/Memory", {
+      agentId: AGENT, content: "root procedure", trigger: "when deploying", tags: ["skill"],
+    });
+    const succ: any = await client.request("POST", "/Memory", {
+      agentId: AGENT, content: "successor procedure", trigger: "when deploying", supersedes: root.id,
+      metadata: JSON.stringify({ name: `deploy ${GITHUB_TOKEN}` }),
+    });
+    expect(succ.redactedValues).toBe(1);
+    expect(succ.stored.name).toBe(`deploy ${REDACTED}`);
+    expect(JSON.stringify(succ)).not.toContain(GITHUB_TOKEN);
+    const row = await storedRow(succ.id);
+    expect(row.tags).toContain("skill");
+    expect(metadataOf(row).name).toBe(`deploy ${REDACTED}`);
+  }, 120_000);
+
+  test("a feed ingest that omits `tags` inherits the skill tag and redacts the supplied metadata name", async () => {
+    const root: any = await client.request("POST", "/Memory", {
+      agentId: AGENT, content: "feed procedure v1", trigger: "when deploying", tags: ["skill"],
+    });
+    const feed: any = await client.request("POST", "/FeedMemories", {
+      id: root.id, agentId: AGENT, content: "feed procedure v2", trigger: "when deploying",
+      metadata: JSON.stringify({ name: `deploy ${GITHUB_TOKEN}` }),
+    });
+    expect(feed.redactedValues).toBe(1);
+    expect(JSON.stringify(feed)).not.toContain(GITHUB_TOKEN);
+    expect(feed.tags).toContain("skill");
+    expect(metadataOf(feed).name).toBe(`deploy ${REDACTED}`);
+    const row = await storedRow(feed.id);
+    expect(metadataOf(row).name).toBe(`deploy ${REDACTED}`);
+  }, 120_000);
+});
+
+describe("flair#2575 — `stored.tags` reports the accepted entries of the stored array", () => {
+  test("a redacted skill write with a null tag reports the array including the null", async () => {
+    const out: any = await client.request("POST", "/Memory", {
+      agentId: AGENT, content: "the procedure", trigger: "when deploying",
+      tags: ["skill", null, `release-${SLACK_TOKEN}`],
+      metadata: JSON.stringify({ name: "deploy" }),
+    });
+    expect(out.redactedValues).toBe(1);
+    expect(out.stored.tags).toEqual(["skill", null, `release-${REDACTED}`]);
+    const row = await storedRow(out.id);
+    expect(row.tags).toEqual(["skill", null, `release-${REDACTED}`]);
+  }, 120_000);
+});
+
+describe("flair#2575 — the archive tools' contracts hold on their real Harper replies", () => {
+  test("memory_basement's declared contract holds on its real reply, including `written`", async () => {
+    const { TOOLS } = await import("../../resources/mcp-tools.ts");
+    const created = await mcpTool("memory_store", { content: "a plain note for basement" });
+    const { echo } = await mcpTool("memory_basement", { id: created.echo.id });
+    conform("memory_basement", echo, TOOLS.memory_basement.contract as any);
+    expect(echo.id).toBe(created.echo.id);
+    expect(echo.written).toBe(true);
+    const row = await storedRow(created.echo.id);
+    expect(row.archived).toBe(true);
+  }, 120_000);
+
+  test("memory_restore's declared contract holds on its real reply, including `written`", async () => {
+    const { TOOLS } = await import("../../resources/mcp-tools.ts");
+    const created = await mcpTool("memory_store", { content: "a plain note for restore" });
+    const { echo } = await mcpTool("memory_restore", { id: created.echo.id });
+    conform("memory_restore", echo, TOOLS.memory_restore.contract as any);
+    expect(echo.id).toBe(created.echo.id);
+    expect(echo.written).toBe(true);
+    const row = await storedRow(created.echo.id);
+    expect(row.archived).toBe(false);
   }, 120_000);
 });

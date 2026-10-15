@@ -1,6 +1,6 @@
 import { databases } from "harper";
 import { randomUUID } from "node:crypto";
-import { isOperatorSeedPut, redactMemoryWrite, storedMemoryText, type StoredMemoryText } from "./memory-redaction.js";
+import { isOperatorSeedPut, redactMemoryWrite, redactSkillWrite, storedMemoryText, type StoredMemoryText } from "./memory-redaction.js";
 import { isDeepStrictEqual } from "node:util";
 import { patchRecord, withDetachedTxn } from "./table-helpers.js";
 import { isAdmin, resolveAgentAuth, type AgentAuthVerdict } from "./agent-auth.js";
@@ -1538,11 +1538,14 @@ export class Memory extends (databases as any).flair.Memory {
     const postStored = content.id ? await (databases as any).flair.Memory.get(content.id) : null;
     // flair#2407: redact credential-shaped text before the dedup gate, its
     // embedding input and the stored embedding are computed from `content`.
-    const redactedValues = redactMemoryWrite(content).count;
+    let redactedValues = redactMemoryWrite(content).count;
     canonicalizeSupersedes(content);
     const preparedSkill = await prepareSkillBody(content, postStored);
     if (preparedSkill instanceof Response) return preparedSkill;
     content = preparedSkill.content;
+    // flair#2575: the effective row now carries the inherited skill tag, so
+    // redact the skill fields of the row this write persists.
+    redactedValues += redactSkillWrite(content);
 
     // flair#744 slice A: citation-on-write — consume-and-strip, same
     // discipline as `claimedClient` below. Pull the optional
@@ -2207,7 +2210,7 @@ export class Memory extends (databases as any).flair.Memory {
     // flair#2407: redact credential-shaped text before the dedup gate / the
     // embedding, and before the row is persisted, except for the shipped-skill
     // seed's Basic PUT of its reserved id (resources/memory-redaction.ts).
-    const redactedValues = isOperatorSeedPut(ctx, auth, writeTargetIds(this, content))
+    let redactedValues = isOperatorSeedPut(ctx, auth, writeTargetIds(this, content))
       ? 0
       : redactMemoryWrite(content).count;
 
@@ -2224,6 +2227,9 @@ export class Memory extends (databases as any).flair.Memory {
     const preparedSkill = await prepareSkillBody(content, preExisting);
     if (preparedSkill instanceof Response) return preparedSkill;
     content = preparedSkill.content;
+    // flair#2575: the effective row now carries the inherited skill tag, so
+    // redact the skill fields of the row this write persists.
+    redactedValues += redactSkillWrite(content);
 
     // flair#744 slice A: citation-on-write — same consume-and-strip
     // discipline as post() above. Strip BEFORE anything else touches
