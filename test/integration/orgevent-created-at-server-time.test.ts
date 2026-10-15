@@ -24,11 +24,12 @@
  *     but a non-empty string or a non-empty array of strings, the empty string
  *     included) is refused with `invalid_event_id` (400) before any write, and
  *     a stored row under such an id is unchanged; a composite id is read;
- *   - a POST body id that is absent, null or empty gets a generated id at the
- *     root collection; any other id that is not a non-empty string or a
- *     non-empty array of strings (0, false, true, 42, [], {} and so on, and an
- *     empty id anywhere but the root collection) is refused with
- *     `invalid_event_id` (400) and stores nothing;
+ *   - POST binds a matching addressed body id before validation; at the root
+ *     collection an absent, null or empty body id gets a generated id. At POST
+ *     id validation, at the root collection or an addressed path whose body id
+ *     differs as text from the addressed id, a remaining id that is not a
+ *     non-empty string or a non-empty array of strings receives
+ *     `invalid_event_id` (400);
  *   - for malformed ids and bodies, the status each caller gets is pinned, with
  *     a refusal's `error` or `code` field, including input answered before the
  *     check (attribution, the owner-scoped write guard, Harper's own
@@ -582,7 +583,7 @@ describe("a record that reaches the check with an id it does not read is refused
     expect(await readEvent("")).toEqual(emptyRow);
   }, 30_000);
 
-  it("an admin POST naming an id that is not a non-empty string or array of strings is refused and stores nothing", async () => {
+  it("an admin root collection POST naming an id that is not a non-empty string or array of strings is refused and stores nothing", async () => {
     const summary = `oect-post-bad-id-${randomUUID()}`;
     const res = await send(admin, "POST", "/OrgEvent", { id: [], authorId: admin.id, kind: "status", summary });
     expectInvalidIdRefusal(res.status, await res.text());
@@ -824,9 +825,9 @@ describe("what each malformed id or body gets", () => {
 
   // POST at a path other than the root collection, [agent, admin]: a missing
   // id takes the path's id (test/integration/owner-scoped-writes.test.ts); an
-  // empty or non-string id does not generate one. A non-admin's scalar id that
-  // differs from an addressed id is refused first by the owner-scoped write
-  // guard; every other case here is refused with invalid_event_id.
+  // empty or non-string id does not generate one. A non-admin's string or
+  // number body id that differs from an addressed id is refused first by the
+  // owner-scoped write guard; every other case here is refused with invalid_event_id.
   const ELSEWHERE_ID: Array<[string, unknown]> = [["empty", ""], ["0", 0], ["false", false], ["[]", []]];
   const ELSEWHERE_WANT: Record<string, Record<string, [Expect, Expect]>> = {
     addressed: {

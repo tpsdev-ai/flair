@@ -260,12 +260,12 @@ describe("target predicates", () => {
     expect(addressesNoSingleRecord({ id: "r1" })).toBe(false);
   });
 
-  it("sees a scalar body id that names a different record than the addressed one", () => {
+  it("sees a string or number body id that names a different record than the addressed one", () => {
     expect(bodyNamesDifferentRecord("fresh", { id: "victim", v: 1 })).toBe(true);
     expect(bodyNamesDifferentRecord("r1", { id: "r1" })).toBe(false);
     expect(bodyNamesDifferentRecord(7, { id: "7" })).toBe(false);       // equal by coercion
     expect(bodyNamesDifferentRecord("r1", { v: 1 })).toBe(false);       // no body id
-    expect(bodyNamesDifferentRecord("r1", { id: ["r1"] })).toBe(false); // non-scalar: left to the resource
+    expect(bodyNamesDifferentRecord("r1", { id: ["r1"] })).toBe(false); // array id: left to the resource
     expect(bodyNamesDifferentRecord("r1", { id: { label: "x" } })).toBe(false);
     expect(bodyNamesDifferentRecord("r1", ["r1"])).toBe(false);         // array body
     expect(bodyNamesDifferentRecord(null, { id: "victim" })).toBe(false); // no addressed id
@@ -274,7 +274,7 @@ describe("target predicates", () => {
 
 describe("a write may name only the record it addresses (through the guard)", () => {
   for (const method of ["put", "patch", "post"]) {
-    it(`refuses a non-admin ${method} whose body names a different record, with the named 403, before any stored read or write`, async () => {
+    it(`refuses a non-admin ${method} whose string or number body id names a different record, with the named 403, before any stored read or write`, async () => {
       const { Table, calls } = makeTable();
       const d = deps();
       guardOwnerScopedWrites({ OrgEvent: Table }, { OrgEvent: "authorId" }, d);

@@ -3,7 +3,7 @@
  * on every table class named in resources/record-owner-guard.ts's OWNER_FIELDS
  * when the component loads. For a non-admin HTTP request to a resource class
  * that extends one of those tables: an addressed write (POST/PUT/PATCH/DELETE
- * to `/<Table>/<id>`) checks a scalar body `id` on POST/PUT/PATCH before the
+ * to `/<Table>/<id>`) checks a string or number body `id` on POST/PUT/PATCH before the
  * stored owner, if reached; middleware can return the owner refusal first. A
  * collection PUT/PATCH/DELETE is refused. A POST to a collection is delegated
  * to each resource's own POST handling. An incomplete installation (a missing or empty

@@ -110,11 +110,10 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
     }
     // flair#2333 (H9): avoids deterministic same-millisecond collisions (random UUID).
     if (!addressed && (content.id == null || content.id === "")) content.id = `${content.authorId}-${new Date().toISOString()}-${randomUUID()}`;
-    // Every other id must be one the createdAt check reads: a non-empty string
-    // or a non-empty array of strings. Any other value (0, false, true, another
-    // number, an object, an empty array, or an empty id anywhere but the root
-    // collection) is refused here with invalid_event_id (400), before the
-    // ownership lookup, and nothing is written.
+    // Matching addressed ids are bound before validation. At the root collection,
+    // or an addressed path whose body id differs as text from the addressed id,
+    // a remaining id that is not a non-empty string or a non-empty array of
+    // strings is refused with invalid_event_id (400) before the ownership lookup.
     if (!isReadableEventId(content.id)) return invalidEventId();
     // A trusted in-process call keeps its existing stamp; every verified agent's
     // createdAt is assigned below, once the write passes its other checks.

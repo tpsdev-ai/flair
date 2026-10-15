@@ -11,10 +11,12 @@
   whose id is not a non-empty string or a non-empty array of strings, is
   refused with 400 `invalid_event_id` and nothing is written. At the root
   collection, `POST` generates an id when the body's id is missing, `null` or
-  empty; on any path, `POST` refuses any other id that is not a non-empty
-  string or a non-empty array of strings (`0`, `false`, `true`, a number, an
-  object, an empty array) with the same 400 before its ownership lookup. An
-  administrator's `PATCH` to the collection names no id and is refused the
+  empty. An addressed `POST` binds a body id equal as text to the addressed
+  id before validation. At `POST` id validation, at the root collection or an
+  addressed path whose body id differs as text from the addressed id, a
+  remaining id that is not a non-empty string or a non-empty array of strings
+  receives the same 400 before the ownership lookup. An administrator's
+  `PATCH` to the collection names no id and is refused the
   same way; a non-admin's collection `PUT` or `PATCH` is refused earlier by
   the owner-scoped write guard. Otherwise the check reads the stored row under
   the event's id. A stored row's `createdAt` is authoritative whatever its
@@ -38,6 +40,7 @@
   > re-sends an existing event with a different `createdAt` now receives 409
   > instead of a stored change (omit `createdAt` on updates), and a write whose
   > event reaches the check with an id that is not a non-empty string or a
-  > non-empty array of strings now receives 400 `invalid_event_id`, as does a
-  > `POST` whose body id is `0` or `false`, which no longer gets a generated
-  > id.
+  > non-empty array of strings receives 400 `invalid_event_id`. `POST` binds
+  > matching addressed body ids before validation; at `POST` id validation,
+  > at the root collection or an addressed path whose body id differs as text
+  > from the addressed id, a remaining id outside those shapes receives the same 400.

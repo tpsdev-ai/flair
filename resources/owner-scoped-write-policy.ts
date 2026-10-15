@@ -6,7 +6,7 @@
  * resources/record-owner-guard.ts's OWNER_FIELDS, through a resource class that
  * extends that table:
  *   - addressed to one record (POST/PUT/PATCH/DELETE to `/<Table>/<id>`) is
- *     checked for a differing scalar body `id` on POST/PUT/PATCH
+ *     checked for a differing string or number body `id` on POST/PUT/PATCH
  *     (`writeIdNotAddressedRefusal`, 403), then for a stored owner other than
  *     the caller (`ownerMutationRefusal`, 403), if reached. The middleware can
  *     return the owner refusal first on a plain addressed URL;
@@ -78,7 +78,7 @@ export const GUARDED_WRITE_METHODS: readonly string[] = Object.freeze(["put", "p
 /** Methods refused on a collection target, where the request does not resolve to one addressed row. */
 const STORED_RECORD_METHODS: ReadonlySet<string> = new Set(["put", "patch", "delete"]);
 
-/** Methods that carry a record body whose `id` must name the addressed record. */
+/** Methods whose string or number body `id` must name the addressed record. */
 const BODY_ID_METHODS: ReadonlySet<string> = new Set(["put", "patch", "post"]);
 
 /**
@@ -103,7 +103,7 @@ export function unverifiedWriteCallerRefusal(table: string): Error & { statusCod
   );
 }
 
-/** The named refusal for an addressed write whose scalar body `id` names a record other than the one it addresses. */
+/** The named refusal for an addressed write whose string or number body `id` names a record other than the one it addresses. */
 export function writeIdNotAddressedRefusal(): Response {
   return new Response(JSON.stringify({
     error: "write_id_not_addressed",
@@ -112,10 +112,8 @@ export function writeIdNotAddressedRefusal(): Response {
 }
 
 /**
- * Whether a parsed request `body` carries a scalar `id` that names a record
- * other than `targetId` (the addressed record). A body with no `id`, an `id`
- * equal to the target, or a non-scalar `id` (left to each resource's own
- * request handling) is not a mismatch.
+ * Whether a parsed request `body` carries a string or number body `id` that
+ * names a record other than `targetId` (the addressed record).
  */
 export function bodyNamesDifferentRecord(targetId: unknown, body: unknown): boolean {
   if (targetId == null) return false;
@@ -134,7 +132,7 @@ export function bodyNamesDifferentRecord(targetId: unknown, body: unknown): bool
  * In order: resolve the caller (an unresolvable one is refused); leave an
  * administrator, a trusted internal call and an anonymous caller to their
  * existing handling; refuse a collection PUT/PATCH/DELETE; refuse an addressed
- * POST/PUT/PATCH whose scalar body `id` names a record other than the
+ * POST/PUT/PATCH whose string or number body `id` names a record other than the
  * addressed one; then refuse a write to a stored record owned by another
  * principal. Each refusal by this guard leaves the target row unchanged.
  */
@@ -159,7 +157,7 @@ export async function admitOwnerScopedWrite(
     return;
   }
 
-  // Addressed write: a scalar body `id` must name the addressed record.
+  // Addressed write: a string or number body `id` must name the addressed record.
   if (BODY_ID_METHODS.has(method)) {
     let body: unknown;
     try {

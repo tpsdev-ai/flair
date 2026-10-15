@@ -3,7 +3,7 @@
 // PUT/PATCH/DELETE to owner-scoped tables served by table-extending resources.
 //
 // Middleware can return the owner refusal first on a plain addressed URL.
-// If reached, the guard checks scalar body ids before stored ownership.
+// If reached, the guard checks string or number body ids before stored ownership.
 // Collection PUT/PATCH/DELETE is refused; collection POST follows the resource.
 //
 // Each refusal case asserts three things: the status is 403, the body is
@@ -356,18 +356,18 @@ describe("owner-scoped writes: non-admin addressed writes and collection PUT/PAT
     }, 30_000);
   });
 
-  // ── A scalar body id must name the addressed record ────────────────────────
+  // ── A string or number body id must name the addressed record ─────────────
   // A non-admin POST, PUT or PATCH addressed to an id the caller may write (a
-  // fresh id, or for Presence the caller's own already-seeded id) whose scalar
-  // body `id` names another principal's existing record is refused with the
+  // fresh id, or for Presence the caller's own already-seeded id) whose string
+  // or number body `id` names another principal's existing record is refused with the
   // named 403 write_id_not_addressed. Both rows are read back and must be
   // unchanged (deeply equal to their earlier reads): the addressed row (absent before and after for a
   // fresh id) and the record named only in the body. Driven over every SPECS
   // table.
-  describe("a non-admin scalar body id must name the addressed record", () => {
+  describe("a non-admin string or number body id must name the addressed record", () => {
     for (const s of SPECS) {
       for (const verb of ["PUT", "PATCH", "POST"] as const) {
-        test(`${s.table}: a ${verb} whose scalar body id names another principal's record is refused with write_id_not_addressed`, async () => {
+        test(`${s.table}: a ${verb} whose string or number body id names another principal's record is refused with write_id_not_addressed`, async () => {
           const f = await fixture(s);
           const before = await storedRow(s.table, s.pk, f.otherId);
           expect(before, `${s.table} fixture row was not seeded`).not.toBeNull();
