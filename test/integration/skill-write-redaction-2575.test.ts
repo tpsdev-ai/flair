@@ -1,7 +1,8 @@
 // Skill POST, PUT without `_reindex`, and feed writes refuse metadata with
 // duplicate top-level keys; otherwise name/description and string tags are redacted.
-// The write response's `stored` names those redacted fields like the Memory
-// fields. After a counted redaction, /mcp echoes the stored skill fields;
+// After a counted redaction, successful Memory POST and PUT responses report
+// the skill fields in `stored`; feed returns the written row directly with
+// `redactedValues`. After a counted redaction, /mcp echoes the stored skill fields;
 // stdio renders the stored name, with no description or tags. On a clean
 // write, stdio uses the input name.
 //
