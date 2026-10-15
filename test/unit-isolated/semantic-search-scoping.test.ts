@@ -70,7 +70,12 @@ function matchesCondition(record: any, cond: any): boolean {
   return true;
 }
 
-let memoryStore: Map<string, any>;
+// Initialized at module scope (not left undefined for reset()): the
+// embedding-space guard's boot pre-warm scans `databases.flair.Memory` before
+// the first test runs (flair#2530 — an unknown verdict now fails closed), and an
+// undefined `memoryStore` would make that scan throw and leave the recall leg
+// keyword-only. A fresh empty store is vacuously uniform under the stamp check.
+let memoryStore: Map<string, any> = new Map();
 let pointerStore: Map<string, any>;
 let memoryGrants: any[];
 

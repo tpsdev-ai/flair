@@ -139,7 +139,7 @@ describe("embedding-space-guard — federation sync-in raw writer (mutation test
     // nothing and carries the structured mixed-space warning...
     const after: any = await makeSearch(AGENT).post({ agentId: AGENT, q: "zqxnokeywordhere" });
     expect(after.results).toEqual([]);
-    expect(String(after._warning)).toContain("mixed embedding spaces");
+    expect(String(after._warning)).toContain("non-current embedding model stamp was observed");
     expect(String(after._warning)).toContain(FOREIGN);
     // ...while keyword-only STILL serves.
     const kw: any = await makeSearch(AGENT).post({ agentId: AGENT, q: "replication" });
