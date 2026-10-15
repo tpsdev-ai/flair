@@ -34,7 +34,7 @@ mock.module("harper", () => ({
   Resource: class {},
 }));
 
-const { resolveAgentAuth, hasCredentialEvidence, allowVerified, allowAdmin } = await import("../../resources/agent-auth.ts");
+const { resolveAgentAuth, hasCredentialEvidence, allowVerified, allowAdmin, resolveHarperBearerAdmin, isUnscopedHarperSuperUser } = await import("../../resources/agent-auth.ts");
 // Zero-import module — safe to load statically alongside the mocked harper.
 import { agentContext, adminContext, internalContext } from "../../resources/in-process.ts";
 
@@ -272,5 +272,113 @@ describe("hasCredentialEvidence — recognizes every credential-bearing header s
   });
   it("header carried on the context object itself (PUT/POST context shape) → true", () => {
     expect(hasCredentialEvidence(asObjectShape("Basic abc"))).toBe(true);
+  });
+});
+
+// ─── resolveHarperBearerAdmin — the Bearer operation token admin credential ───
+//
+// The gate runs before Harper's authentication and cannot verify a Bearer
+// token, so it annotates the request `tpsAnonymous`; Harper then verifies the
+// token and sets `request.user`. These pin which Harper principals the helper
+// admits. The real-Harper path (a token Harper issued, a non-admin user's token,
+// a deactivated super_user's token) is in
+// test/integration/agent-key-register-2266.test.ts.
+
+describe("resolveHarperBearerAdmin — admin only for an unscoped Harper super_user behind a Bearer credential", () => {
+  const BEARER = "Bearer eyJhbGciOiJSUzI1NiJ9.e30.sig";
+  // The context shape a POST handler sees after the gate annotated the request
+  // anonymous and Harper resolved the token's user.
+  // `header` null = no Authorization header.
+  const gated = (user: any, header: string | null = BEARER) => ({ user, request: { ...asObjectShape(header ?? undefined), tpsAnonymous: true, user } });
+
+  it("an unscoped super_user → admin agent named by the Harper username; resolveAgentAuth alone answers anonymous", async () => {
+    const ctx = gated(superUserNamed("ops-admin"));
+    expect(await resolveAgentAuth(ctx)).toEqual({ kind: "anonymous" });
+    expect(await resolveHarperBearerAdmin(ctx)).toEqual({ kind: "agent", agentId: "ops-admin", isAdmin: true });
+  });
+
+  it("the .get() header shape → admin agent", async () => {
+    expect(await resolveHarperBearerAdmin({ user: superUser, ...getShape(BEARER) })).toEqual({ kind: "agent", agentId: "admin", isAdmin: true });
+  });
+
+  it("a Harper user without super_user → null", async () => {
+    expect(await resolveHarperBearerAdmin(gated(perAgentUser))).toBeNull();
+    expect(await resolveHarperBearerAdmin(gated({ username: "reader", role: { permission: { super_user: false } } }))).toBeNull();
+  });
+
+  it("an inline-role scoped token → null, including one marked scoped that still reads super_user", async () => {
+    expect(await resolveHarperBearerAdmin(gated({ username: "scoped:admin", _scopedToken: true, role: { permission: { super_user: false } } }))).toBeNull();
+    expect(await resolveHarperBearerAdmin(gated({ ...superUser, _scopedToken: true }))).toBeNull();
+  });
+
+  it("an operation-scoped super_user token (tokenOperations) → null", async () => {
+    expect(await resolveHarperBearerAdmin(gated({ ...superUser, tokenOperations: ["read_only"] }))).toBeNull();
+    expect(await resolveHarperBearerAdmin(gated({ ...superUser, tokenOperations: [] }))).toBeNull();
+  });
+
+  it("a super_user identity with NO Authorization header (authorizeLocal's loopback identity) → null", async () => {
+    expect(await resolveHarperBearerAdmin(gated(superUser, null))).toBeNull();
+    expect(await resolveHarperBearerAdmin({ user: superUser, ...getShape() })).toBeNull();
+  });
+
+  it("another scheme, a lowercase scheme or an empty token → null", async () => {
+    expect(await resolveHarperBearerAdmin(gated(superUser, BASIC))).toBeNull();
+    expect(await resolveHarperBearerAdmin(gated(superUser, "bearer abc"))).toBeNull();
+    expect(await resolveHarperBearerAdmin(gated(superUser, "Bearer "))).toBeNull();
+    expect(await resolveHarperBearerAdmin(gated(superUser, "TPS-Ed25519 a:1:b:c"))).toBeNull();
+  });
+
+  it("a request the gate verified as a Flair agent (tpsAgent) → null", async () => {
+    expect(await resolveHarperBearerAdmin({ user: superUser, request: { ...asObjectShape(BEARER), tpsAgent: "agent-3", user: superUser } })).toBeNull();
+  });
+
+  it("a super_user with no username → null", async () => {
+    expect(await resolveHarperBearerAdmin(gated({ role: { permission: { super_user: true } } }))).toBeNull();
+    expect(await resolveHarperBearerAdmin(gated(superUserNamed("")))).toBeNull();
+  });
+
+  it("no context → null", async () => {
+    expect(await resolveHarperBearerAdmin(undefined)).toBeNull();
+    expect(await resolveHarperBearerAdmin(null)).toBeNull();
+  });
+
+  it("a super_user whose Agent row is deactivated → anonymous", async () => {
+    agentStore.set("bearer-deact", { id: "bearer-deact", status: "deactivated" });
+    try {
+      expect(await resolveHarperBearerAdmin(gated(superUserNamed("bearer-deact")))).toEqual({ kind: "anonymous" });
+    } finally {
+      agentStore.delete("bearer-deact");
+    }
+  });
+
+  it("a super_user whose Agent row is active → admin agent", async () => {
+    agentStore.set("bearer-active", { id: "bearer-active", status: "active" });
+    try {
+      expect(await resolveHarperBearerAdmin(gated(superUserNamed("bearer-active")))).toEqual({ kind: "agent", agentId: "bearer-active", isAdmin: true });
+    } finally {
+      agentStore.delete("bearer-active");
+    }
+  });
+
+  it("an Agent row read that fails → anonymous with agent_lookup_failed", async () => {
+    const realGet = agentStore.get;
+    agentStore.get = () => { throw new Error("store unavailable"); };
+    try {
+      expect(await resolveHarperBearerAdmin(gated(superUserNamed("bearer-unreadable")))).toEqual({ kind: "anonymous", error: "agent_lookup_failed" });
+    } finally {
+      agentStore.get = realGet;
+    }
+  });
+});
+
+describe("isUnscopedHarperSuperUser", () => {
+  it("true only for a named super_user with no scope marker", () => {
+    expect(isUnscopedHarperSuperUser(superUser)).toBe(true);
+    expect(isUnscopedHarperSuperUser({ ...superUser, tokenOperations: null })).toBe(true);
+    expect(isUnscopedHarperSuperUser({ ...superUser, tokenOperations: ["sql"] })).toBe(false);
+    expect(isUnscopedHarperSuperUser({ ...superUser, _scopedToken: true })).toBe(false);
+    expect(isUnscopedHarperSuperUser({ username: "admin", role: { permission: { super_user: "true" } } })).toBe(false);
+    expect(isUnscopedHarperSuperUser(perAgentUser)).toBe(false);
+    expect(isUnscopedHarperSuperUser(undefined)).toBe(false);
   });
 });

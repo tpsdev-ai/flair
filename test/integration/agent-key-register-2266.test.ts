@@ -68,6 +68,30 @@ async function ops(op: Record<string, unknown>): Promise<any> {
   return text.length ? JSON.parse(text) : null;
 }
 
+/** A Harper operation that takes no `database` (add_role, add_user, tokens). */
+async function harperOp(op: Record<string, unknown>): Promise<any> {
+  const res = await fetch(harper.opsURL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: basic() },
+    body: JSON.stringify(op),
+    signal: AbortSignal.timeout(15_000),
+  });
+  const text = await res.text();
+  expect(res.status, `${op.operation} returned ${res.status}: ${text.slice(0, 300)}`).toBeLessThan(300);
+  return text.length ? JSON.parse(text) : null;
+}
+
+/** POST /AgentKeyRegister with `Authorization: Bearer <token>`. */
+async function registerWithBearer(token: string, agentId: string, publicKey: string): Promise<{ status: number; text: string }> {
+  const res = await fetch(`${harper.httpURL}/AgentKeyRegister`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ agentId, publicKey }),
+    signal: AbortSignal.timeout(15_000),
+  });
+  return { status: res.status, text: await res.text() };
+}
+
 async function rowIn(table: string, id: string): Promise<any | null> {
   const rows = await ops({ operation: "search_by_id", table, ids: [id], get_attributes: ["*"] });
   return Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
@@ -132,6 +156,14 @@ describe("flair#2266 — admin key registration on a pending Agent row", () => {
   const edTargetId = `akr-edtarget-${sfx}`;
   const bearerTargetId = `akr-bearer-${sfx}`;
   const badBearerId = `akr-badbearer-${sfx}`;
+  const refreshBearerId = `akr-refreshbearer-${sfx}`;
+  const nonSuBearerId = `akr-nonsubearer-${sfx}`;
+  const deactSuBearerId = `akr-deactsubearer-${sfx}`;
+  // Harper users: one without super_user, and a super_user whose Agent row is
+  // deactivated.
+  const nonSuUser = `akr-nonsu-${sfx}`;
+  const deactSuUser = `akr-deactsu-${sfx}`;
+  const harperUserPass = `akr-pass-${randomUUID()}`;
   const nonAdminId = `akr-nonadmin-${sfx}`;
   const repeatId = `akr-repeat-${sfx}`;
   const nonPendingId = `akr-nonpending-${sfx}`;
@@ -181,6 +213,14 @@ describe("flair#2266 — admin key registration on a pending Agent row", () => {
     await seedAgent({ id: edTargetId, status: "active", publicKey: "pending" });
     await seedAgent({ id: bearerTargetId, status: "active", publicKey: "pending" });
     await seedAgent({ id: badBearerId, status: "active", publicKey: "pending" });
+    await seedAgent({ id: refreshBearerId, status: "active", publicKey: "pending" });
+    await seedAgent({ id: nonSuBearerId, status: "active", publicKey: "pending" });
+    await seedAgent({ id: deactSuBearerId, status: "active", publicKey: "pending" });
+    await harperOp({ operation: "add_role", role: `akr_nonsu_${sfx}`, permission: { super_user: false, structure_user: false } });
+    await harperOp({ operation: "add_user", username: nonSuUser, password: harperUserPass, role: `akr_nonsu_${sfx}`, active: true });
+    await harperOp({ operation: "add_role", role: `akr_su_${sfx}`, permission: { super_user: true } });
+    await harperOp({ operation: "add_user", username: deactSuUser, password: harperUserPass, role: `akr_su_${sfx}`, active: true });
+    await seedAgent({ id: deactSuUser, status: "deactivated", publicKey: mkKey().pub });
     await seedAgent({ id: repeatId, status: "active", publicKey: "pending" });
     await seedAgent({ id: nonPendingId, status: "active", publicKey: mkKey().pub });
     await seedAgent({ id: foreignId, status: "active", publicKey: "pending", originatorInstanceId: FOREIGN_HOME });
@@ -397,6 +437,40 @@ describe("flair#2266 — admin key registration on a pending Agent row", () => {
     });
     expect(res.status, (await res.text()).slice(0, 200)).toBe(401);
     expect(await rowIn("Agent", badBearerId)).toEqual(before);
+  }, 30_000);
+
+  test("a Bearer operation token Harper issued to a Harper user without super_user is refused 401; the Agent row is unchanged", async () => {
+    const tokens = await harperOp({ operation: "create_authentication_tokens", username: nonSuUser, password: harperUserPass });
+    expect(typeof tokens?.operation_token, JSON.stringify(tokens).slice(0, 200)).toBe("string");
+    const before = await rowIn("Agent", nonSuBearerId);
+    const { status, text } = await registerWithBearer(tokens.operation_token, nonSuBearerId, mkKey().pub);
+    expect(status, text.slice(0, 200)).toBe(401);
+    expect(JSON.parse(text).error).toBe("authentication required");
+    expect(await rowIn("Agent", nonSuBearerId)).toEqual(before);
+    expect(await countRows(`SELECT id FROM flair.AgentKeyRegistration WHERE agentId = '${nonSuBearerId}'`)).toBe(0);
+  }, 30_000);
+
+  test("a Bearer operation token Harper issued to a super_user whose Agent row is deactivated is refused 401; the Agent row is unchanged", async () => {
+    const tokens = await harperOp({ operation: "create_authentication_tokens", username: deactSuUser, password: harperUserPass });
+    expect(typeof tokens?.operation_token, JSON.stringify(tokens).slice(0, 200)).toBe("string");
+    const before = await rowIn("Agent", deactSuBearerId);
+    const { status, text } = await registerWithBearer(tokens.operation_token, deactSuBearerId, mkKey().pub);
+    expect(status, text.slice(0, 200)).toBe(401);
+    expect(await rowIn("Agent", deactSuBearerId)).toEqual(before);
+    expect(await countRows(`SELECT id FROM flair.AgentKeyRegistration WHERE agentId = '${deactSuBearerId}'`)).toBe(0);
+  }, 30_000);
+
+  test("a refresh token Harper issued to the admin user, presented as Bearer, registers nothing; the Agent row is unchanged", async () => {
+    const tokens = await harperOp({ operation: "create_authentication_tokens", username: harper.admin.username, password: harper.admin.password });
+    expect(typeof tokens?.refresh_token, JSON.stringify(tokens).slice(0, 200)).toBe("string");
+    const before = await rowIn("Agent", refreshBearerId);
+    const { status, text } = await registerWithBearer(tokens.refresh_token, refreshBearerId, mkKey().pub);
+    // Harper's authentication declines a refresh token on an HTTP route (it
+    // leaves refresh tokens to the operations API), so the request reaches no
+    // resource and the route answers 404.
+    expect(status, text.slice(0, 200)).toBe(404);
+    expect(await rowIn("Agent", refreshBearerId)).toEqual(before);
+    expect(await countRows(`SELECT id FROM flair.AgentKeyRegistration WHERE agentId = '${refreshBearerId}'`)).toBe(0);
   }, 30_000);
 
   test("two concurrent admin registrations: exactly one wins, the other is refused, no partial state", async () => {

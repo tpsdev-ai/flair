@@ -21,13 +21,15 @@
  * (resources/write-back.ts) before the commit, and the stored key is read back
  * AFTER the commit. The response is returned only when the read-back is equal.
  *
- * resolveAgentAuth admits admin Basic credentials, Harper admin Bearer
- * operation tokens and verified TPS-Ed25519 admin signatures.
+ * Admin is decided by resolveAgentAuth (an admin Basic credential or a verified
+ * TPS-Ed25519 admin signature) and, for a Bearer operation token Harper issued,
+ * by resolveHarperBearerAdmin (resources/agent-auth.ts): the token must verify
+ * to an unscoped Harper `super_user` whose Agent row, if any, is not deactivated.
  */
 import { Resource, databases } from "harper";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { resolveAgentAuth } from "./agent-auth.js";
+import { resolveAgentAuth, resolveHarperBearerAdmin } from "./agent-auth.js";
 import { withKeyLock } from "./key-lock.js";
 import { withOwnedTransaction } from "./request-transaction.js";
 import { CommittedRowChanged, confirmCommittedRow } from "./write-back.js";
@@ -97,10 +99,18 @@ export class AgentKeyRegister extends Resource {
       return jsonRefusal(401, "authentication required", "the Flair-Enroll enrollment scheme is not enabled in this build");
     }
 
-    // An admin only: a TPS-Ed25519, Basic or Bearer caller the gate annotated
-    // `tpsAgentIsAdmin`, or a credentialed `super_user`. A credential-less
-    // loopback request lands on `anonymous` (the credential-evidence rule).
-    const auth = await resolveAgentAuth(ctx);
+    // An admin only: a TPS-Ed25519 or Basic caller the gate verified and
+    // annotated `tpsAgentIsAdmin`, a credentialed `super_user`, or a Bearer
+    // operation token Harper verified to an unscoped `super_user`. The gate
+    // cannot verify a Bearer token, so resolveAgentAuth answers `anonymous` for
+    // one and resolveHarperBearerAdmin decides it from the principal Harper
+    // resolved; a non-admin user's token stays `anonymous`. A named refusal
+    // (a failed principal lookup) stands. A credential-less loopback request
+    // lands on `anonymous` (the credential-evidence rule).
+    let auth = await resolveAgentAuth(ctx);
+    if (auth.kind === "anonymous" && auth.error === undefined) {
+      auth = (await resolveHarperBearerAdmin(ctx)) ?? auth;
+    }
     if (auth.kind !== "agent" || !auth.isAdmin) {
       return auth.kind === "anonymous"
         ? jsonRefusal(401, "authentication required", "an admin credential is required to register a key")
