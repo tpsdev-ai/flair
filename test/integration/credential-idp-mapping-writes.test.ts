@@ -186,6 +186,15 @@ function expectRefused(res: { status: number; text: string }, what: string, sub?
   if (sub) expect(res.text.includes(sub), `${what}: the refusal must not echo the subject`).toBe(false);
 }
 
+// A non-admin collection write to an owner-scoped table is refused before the
+// Credential resource runs: it must address one record by its id.
+const ADDRESSED_WRITE_REFUSAL = "a non-admin write to Credential must address one record by its id";
+function expectAddressedWriteRefusal(res: { status: number; text: string }, what: string, sub?: string): void {
+  expect(res.status, `${what} returned ${res.status}: ${res.text.slice(0, 300)}`).toBe(403);
+  expect(res.text, `${what}: the refusal names the rule`).toContain(ADDRESSED_WRITE_REFUSAL);
+  if (sub) expect(res.text.includes(sub), `${what}: the refusal must not echo the subject`).toBe(false);
+}
+
 function expect4xx(res: { status: number; text: string }, what: string): void {
   expect(res.status >= 400 && res.status < 500, `${what} returned ${res.status}: ${res.text.slice(0, 300)}`).toBe(true);
 }
@@ -365,11 +374,11 @@ describe("only an administrator or the server creates an IdP mapping", () => {
     expect(await mcpActsAs(sub)).toBeNull();
   }, 60_000);
 
-  test("a non-admin multi-record PUT that creates an idp mapping is refused (idp_mapping_admin_only)", async () => {
+  test("a non-admin multi-record PUT that creates an idp mapping is refused by the addressed-write rule", async () => {
     const sub = `idpw-bulk-${sfx}`;
     const id = `idpw-bulk-${randomUUID()}`;
     const res = await signed(W, "PUT", "/Credential/", [{ id, kind: "idp", idpProvider: "mcp-oauth", idpSubject: sub }]);
-    expectRefused(res, "multi-record PUT kind:idp", sub);
+    expectAddressedWriteRefusal(res, "multi-record PUT kind:idp", sub);
     expect(await readCredential(id)).toBeNull();
     expect(await mcpActsAs(sub)).toBeNull();
   }, 60_000);
@@ -521,25 +530,23 @@ describe("a non-admin write that changes an idp mapping is refused", () => {
 });
 
 describe("a non-admin agent writes and deletes only credentials it owns", () => {
-  test("a non-admin PUT to an idp credential it does not own is refused", async () => {
+  test("a non-admin collection PUT to an idp credential it does not own is refused by the addressed-write rule", async () => {
     const linked = `idpw-other-bulk-${sfx}`;
     const id = await link(V.id, linked);
     const before = await readCredential(id);
     // The element names no principalId.
     const res = await signed(W, "PUT", "/Credential/", [{ id, kind: "idp", idpProvider: before.idpProvider, idpSubject: linked, status: "active" }]);
-    expect(res.status, `PUT returned ${res.status}: ${res.text.slice(0, 300)}`).toBe(403);
-    expect(res.text).toContain("owned by another principal");
+    expectAddressedWriteRefusal(res, "collection PUT to another principal's idp credential", linked);
     await expectUnchanged(id, before);
     expect(await mcpActsAs(linked)).toBe(V.id);
   }, 60_000);
 
-  test("a non-admin PUT to a bearer-token credential it does not own is refused", async () => {
+  test("a non-admin collection PUT to a bearer-token credential it does not own is refused by the addressed-write rule", async () => {
     const id = `idpw-other-bearer-${randomUUID()}`;
     await seedCredential({ id, principalId: V.id, kind: "bearer-token", label: "theirs" });
     const before = await snapshot(id);
     const res = await signed(W, "PUT", "/Credential/", [{ id, kind: "bearer-token", label: "mine now" }]);
-    expect(res.status, `PUT returned ${res.status}: ${res.text.slice(0, 300)}`).toBe(403);
-    expect(res.text).toContain("owned by another principal");
+    expectAddressedWriteRefusal(res, "collection PUT to another principal's bearer-token credential");
     await expectUnchanged(id, before);
   }, 60_000);
 
