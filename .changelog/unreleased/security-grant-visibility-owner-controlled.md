@@ -20,7 +20,8 @@
   together in the write's transaction, including a joined request or caller
   transaction: a close that cannot land refuses the whole write, with 409
   `granted_close_revoked` when the grant was revoked and 409
-  `stored_row_changed` when the predecessor changed during the write. The rule
+  `stored_row_changed` when the predecessor changed during the write while
+  keeping visibility the same. The rule
   governs the grant-authorized write: an ordinary successor is the grantee's
   own row, so the grantee may later change that row's visibility as its owner,
   and a skill successor keeps its lineage owner. Owner and admin writes are
