@@ -2,7 +2,8 @@ import { expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import ts from "typescript";
 import { assertFlairDistFresh } from "../helpers/dist-freshness.js";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle.js";
 
@@ -13,6 +14,20 @@ function buildCopiedResources(root: string): void {
   }
   mkdirSync(join(root, "packages"));
   cpSync(join(source, "packages/flair-tool-descriptors"), join(root, "packages/flair-tool-descriptors"), { recursive: true });
+  const config = ts.getParsedCommandLineOfConfigFile(join(source, "tsconfig.json"), {}, {
+    ...ts.sys,
+    onUnRecoverableConfigFileDiagnostic: (diagnostic) => { throw new Error(ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n")); },
+  });
+  if (!config) throw new Error("Could not parse resource build config");
+  expect(config.errors).toEqual([]);
+  const program = ts.createProgram(config.fileNames, config.options);
+  for (const input of program.getSourceFiles()) {
+    if (program.isSourceFileDefaultLibrary(input) || program.isSourceFileFromExternalLibrary(input)) continue;
+    const path = relative(source, input.fileName);
+    expect(isAbsolute(path) || path === ".." || path.startsWith("../"), input.fileName).toBe(false);
+    mkdirSync(dirname(join(root, path)), { recursive: true });
+    cpSync(input.fileName, join(root, path));
+  }
   symlinkSync(join(source, "node_modules"), join(root, "node_modules"), "dir");
   const build = spawnSync("bun", ["run", "build"], { cwd: root, encoding: "utf-8", timeout: 90_000 });
   expect(build.status, build.stdout + build.stderr).toBe(0);
@@ -39,7 +54,7 @@ test("startHarper refuses a copied build after a canonical descriptor edit witho
   }
 }, 120_000);
 
-test("startHarper boots a resources-only copied build with a null commit", async () => {
+test("startHarper boots a copied resource build with a null commit", async () => {
   const root = mkdtempSync(join(tmpdir(), "flair-resource-build-"));
   let harper: HarperInstance | undefined;
   try {
