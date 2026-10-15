@@ -29,7 +29,9 @@
  * Exit codes: 0 on success, 2 when a named file cannot be read. A diagnostics
  * redactor must not fail the dump it is cleaning, so read failures are loud but
  * do not abort the caller's remaining output. `--check` exits 1 on a finding:
- * that path is an assertion, so it must fail the caller.
+ * that path is an assertion, so it must fail the caller. `--check` exits 2 when
+ * it could not run at all (its key list failed to load, or an unexpected error),
+ * so a caller can tell a crash from a finding — both fail the lane.
  */
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
@@ -37,13 +39,25 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-// The product's authoritative "key names that must never carry a secret" list
-// (src/component-env.ts). Importing it instead of copying it is the point: a
-// key added to the product list is covered here in the same change, and the
-// unit test fails if this export and `REDACTED_KEYS` ever drift apart.
-// `FLAIR_TOKEN` is the one credential name the launchd dump can carry that is
-// not a component `.env` secret, so it is appended rather than assumed.
-import { NEVER_GENERATED_SECRET_KEYS } from "../../src/component-env.ts";
+// The product's authoritative "key names that must never carry a secret" list.
+// Importing it instead of copying it is the point: a key added to the product
+// list is covered here in the same change, and the unit test fails if this
+// export and `REDACTED_KEYS` ever drift apart. `FLAIR_TOKEN` is the one
+// credential name the launchd dump can carry that is not a component `.env`
+// secret, so it is appended rather than assumed.
+//
+// The list lives in src/lib/secret-keys.ts, a module with NO imports. A plain
+// `node` load of src/component-env.ts (which imports a `.js` specifier that only
+// the compiled output has) used to fail with ERR_MODULE_NOT_FOUND, so the check
+// could not run at all (flair#2589). The dynamic import lets a load failure be
+// reported as a crash (exit 2), distinct from a scan finding (exit 1).
+let NEVER_GENERATED_SECRET_KEYS;
+try {
+  ({ NEVER_GENERATED_SECRET_KEYS } = await import("../../src/lib/secret-keys.ts"));
+} catch (err) {
+  console.error(`redact-launchd-plist: redaction check could not run: ${err?.message ?? err}`);
+  process.exit(2);
+}
 
 /**
  * Credential `<key>`s that must never appear with their value in a plist we
@@ -180,5 +194,14 @@ export function main(argv = process.argv.slice(2)) {
 
 const isDirect = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
 if (isDirect) {
-  process.exit(main());
+  let code;
+  try {
+    code = main();
+  } catch (err) {
+    // An unexpected throw is a crash, not a scan result: exit 2 so the caller can
+    // tell it apart from a finding (exit 1). Never a silent pass.
+    console.error(`redact-launchd-plist: redaction check could not run: ${err?.message ?? err}`);
+    code = 2;
+  }
+  process.exit(code);
 }

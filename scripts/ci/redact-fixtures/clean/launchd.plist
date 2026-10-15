@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Clean fixture (flair#2589): a redacted launchd plist. `--check` must pass. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>example.launchd.agent</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HDB_ADMIN_USERNAME</key><string>example-admin</string>
+    <key>HDB_ADMIN_PASSWORD</key><string>REDACTED</string>
+    <key>HTTP_PORT</key><string>9926</string>
+  </dict>
+  <key>KeepAlive</key><true/>
+</dict>
+</plist>

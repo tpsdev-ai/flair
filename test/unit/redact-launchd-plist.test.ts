@@ -20,7 +20,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, copyFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -197,5 +197,45 @@ describe("collectAdminPassSecrets", () => {
 
   test("returns no secrets when the file is absent (never throws)", () => {
     expect(collectAdminPassSecrets([join(tmpdir(), "does-not-exist-redact-pass")])).toEqual([]);
+  });
+});
+
+// flair#2589 — the check must load in the form the lane has. The lane invokes
+// it with plain `node` (not bun), and src/component-env.ts imports a `.js`
+// specifier that only the compiled dist/ has, so a load of the source tree
+// failed with ERR_MODULE_NOT_FOUND before scanning anything. These spawn
+// `node` explicitly to pin that the check loads and runs without a build.
+const NODE = "node";
+const FIXTURES = join(import.meta.dir, "..", "..", "scripts", "ci", "redact-fixtures");
+
+describe("the fixtures run on every PR (flair#2589)", () => {
+  test("a clean (redacted) fixture passes under plain node", () => {
+    const run = spawnSync(NODE, [SCRIPT, "--check", join(FIXTURES, "clean")], { encoding: "utf8" });
+    expect(run.status).toBe(0);
+  });
+
+  test("a credential key with a non-REDACTED value is a finding: exit 1, key named, value not printed", () => {
+    const run = spawnSync(NODE, [SCRIPT, "--check", join(FIXTURES, "leaky")], { encoding: "utf8" });
+    expect(run.status).toBe(1);
+    expect(run.stderr).toContain("HDB_ADMIN_PASSWORD");
+    expect(run.stderr).not.toContain("example-placeholder-not-a-secret");
+  });
+});
+
+describe("--check reports a crash as a crash, distinct from a finding (flair#2589)", () => {
+  test("a check that cannot load its key list exits 2 with a named message", () => {
+    // The script's key list is a relative import. A copy with no such sibling
+    // cannot load it — the same shape the lane hit — and that must be exit 2,
+    // not exit 1 (a finding) and never 0.
+    const dir = mkdtempSync(join(tmpdir(), "redact-crash-"));
+    try {
+      const copy = join(dir, "redact-launchd-plist.mjs");
+      copyFileSync(SCRIPT, copy);
+      const run = spawnSync(NODE, [copy, "--check", dir], { encoding: "utf8", timeout: 30_000 });
+      expect(run.status).toBe(2);
+      expect(run.stderr).toContain("redaction check could not run");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

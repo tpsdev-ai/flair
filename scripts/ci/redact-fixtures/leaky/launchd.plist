@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Leaky fixture (flair#2589): a credential key with a NON-REDACTED value.
+     The value is an obvious placeholder, never a real-looking secret.
+     `--check` must report a finding (exit 1), naming the key only. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>example.launchd.agent</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HDB_ADMIN_PASSWORD</key><string>example-placeholder-not-a-secret</string>
+  </dict>
+</dict>
+</plist>
