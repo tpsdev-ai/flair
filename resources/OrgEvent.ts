@@ -65,7 +65,8 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
     // the body's `id` when it supplies one. In either case an id is generated
     // when the result is absent or the empty string. The raw put() below is an
     // upsert: an existing event at that id is updated, subject to the
-    // owner-field rule that follows.
+    // owner-field rule that follows. This id selection applies to every
+    // caller, administrators and in-process calls included.
     const addressedId = (this as any).getId?.();
     if (content && typeof content === "object" &&
       (typeof addressedId === "string" || typeof addressedId === "number") &&

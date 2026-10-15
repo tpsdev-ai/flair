@@ -653,11 +653,12 @@ server.http(async (request: any, nextLayer: any) => {
   // This is an early refusal, made only for the address form whose decoded id
   // is exactly the id Harper resolves (record-owner-guard.ts's
   // resolveGuardedRecord: `/<Table>/<id>`, no trailing slash, no `.` in the
-  // id); every other form is left to the guard below. The complete rule — a non-admin addressed write owner-checked on Harper's
-  // resolved target with a scalar body `id` required to name that record, and
-  // a collection PUT/PATCH/DELETE refused — is applied by
-  // resources/owner-scoped-write-policy.ts to the resource classes that extend
-  // the owner-scoped tables resources/owner-scoped-writes.ts guards.
+  // id). Other addressed forms of a table-backed route are owner-checked by the
+  // owner-scoped write guard on Harper's resolved id; collection
+  // PUT/PATCH/DELETE are refused by that guard; collection POST follows the
+  // resource's own rules. The guard (resources/owner-scoped-write-policy.ts)
+  // applies to the resource classes that extend the owner-scoped tables
+  // resources/owner-scoped-writes.ts guards.
   if (isMutation && !request.tpsAgentIsAdmin) {
     const guarded = resolveGuardedRecord(url.pathname);
     if (guarded) {

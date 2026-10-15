@@ -142,9 +142,11 @@ export function isMutatingMethod(method: string): boolean {
  * whose decoded id is exactly the id Harper resolves: two path segments
  * (`/<Table>/<id>`), no trailing slash, and an id with no `.` (Harper may read
  * a `.` suffix as a content type or attribute and address a different id).
- * Every other form — a dotted id, extra segments, a trailing slash, a
- * collection — returns null and is decided by the owner-scoped write guard
- * (resources/owner-scoped-write-policy.ts) on the id Harper itself resolves.
+ * Every other form returns null. Other addressed forms of a table-backed route
+ * (a dotted id, extra segments) are owner-checked by the owner-scoped write
+ * guard (resources/owner-scoped-write-policy.ts) on the id Harper itself
+ * resolves; a collection PUT/PATCH/DELETE (including a trailing slash) is
+ * refused by that guard; a collection POST follows the resource's own rules.
  * The table segment is matched EXACTLY so `/SoulFeed/x` can never be read as a
  * `Soul` route.
  */
@@ -213,7 +215,7 @@ export function ownerMutationRefusal(table: string): Response {
  * owner-scoped table's collection rather than one record: 403 with a body that
  * names only the table. Such a request does not resolve to one addressed row,
  * so the guard cannot owner-check the rows it would write before the write; a
- * non-admin caller writes one record at a time, by its id
+ * non-admin PUT, PATCH or DELETE addresses one record at a time, by its id
  * (resources/owner-scoped-write-policy.ts).
  */
 export function collectionWriteRefusal(table: string): Response {

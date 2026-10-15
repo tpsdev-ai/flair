@@ -26,17 +26,17 @@
  * The record checked is the id Harper resolved the request's URL to, never a
  * re-parse of the path, so every spelling of a record's address gets the same
  * decision. The owner is read from STORED state, never from the request body.
- * A refused write leaves its target row unchanged (authentication has already
- * recorded the request's replay nonce), and one refusal fails the whole
- * request. When the guard's own stored-record read for an addressed owner check
+ * A write refused by this guard leaves its target row unchanged
+ * (authentication has already recorded the request's replay nonce), and one
+ * such refusal fails the whole request. When the guard's own stored-record read for an addressed owner check
  * fails, the request is refused with the named `owner_check_unavailable`; a
  * resource's own read-failure handling on other paths (for example a Presence
  * heartbeat) is unchanged.
  *
- * Administrators, trusted internal calls and anonymous callers are not decided
- * here (anonymous writes are refused by each resource's own gate). Server code
- * that writes these tables in-process is unchanged: the guard acts only on the
- * entry call of an HTTP request, the one call whose target Harper marks with the
+ * This guard exempts administrators, trusted internal calls and anonymous
+ * callers (anonymous writes are refused by each resource's own gate), and it
+ * does not act on server code that writes these tables in-process: it acts
+ * only on the entry call of an HTTP request, the one call whose target Harper marks with the
  * request's permission set (`checkPermission`) before authorizing it.
  *
  * ── The seam ────────────────────────────────────────────────────────────────
@@ -66,8 +66,9 @@
  * addresses, and a scalar body `id` must name that same record: a non-admin
  * request whose scalar body `id` names a different record is refused with
  * `write_id_not_addressed` (403), which echoes neither id. A body with no `id`,
- * or with the addressed id, proceeds; a non-scalar body `id` is left to each
- * resource's own request handling. A resource whose write path keys its table
+ * or with the addressed id, passes this body-id check and is still subject to
+ * the stored-owner check and the resource's own rules; a non-scalar body `id`
+ * is left to each resource's own request handling. A resource whose write path keys its table
  * write on the body `id` therefore receives the addressed id, no id, or a
  * non-scalar id that the guard leaves to it; where it fills in a missing id for
  * an addressed write it uses the addressed one (Memory's and OrgEvent's
@@ -164,7 +165,7 @@ export function bodyNamesDifferentRecord(targetId: unknown, body: unknown): bool
  * existing handling; refuse a collection PUT/PATCH/DELETE; refuse an addressed
  * POST/PUT/PATCH whose scalar body `id` names a record other than the
  * addressed one; then refuse a write to a stored record owned by another
- * principal. Each refusal leaves the target row unchanged.
+ * principal. Each refusal by this guard leaves the target row unchanged.
  */
 export async function admitOwnerScopedWrite(
   table: string,
