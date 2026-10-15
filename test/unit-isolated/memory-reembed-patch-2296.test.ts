@@ -195,3 +195,20 @@ test("a body that also sets another field is an ordinary PATCH (a skill row stay
   expect(harnessState.memoryStore.get("s1")).toEqual(before);
   expect(documentEmbeds()).toEqual([]);
 }, 10_000);
+
+for (const status of [200, 409]) {
+  test(`re-embed storage Response status ${status} returns write_response_withheld`, async () => {
+    harnessState.memoryStore.set("m1", row("m1"));
+    const update = spyOn(databasesMock.flair.Memory, "update").mockImplementation(async () => Response.json({ embedding: [1] }, { status }));
+    try {
+      const response = await resource("m1", agent("agent-a")).patch({ ...REEMBED });
+      expect(response.status).toBe(500);
+      expect(await response.json()).toEqual({
+        error: "write_response_withheld",
+        message: "the server does not report this write's result; read the row to see what is stored",
+      });
+    } finally {
+      update.mockRestore();
+    }
+  });
+}

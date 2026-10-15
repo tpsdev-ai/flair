@@ -2,7 +2,7 @@
  * write-stored-supplied-fields-2561.test.ts — a Memory write's `stored` reports
  * only the string-valued text fields (`content`, `summary`, `trigger`) the
  * write's own request supplied, as stored, and the POST /FeedMemories response
- * only the non-null Memory attributes its request supplied plus the listed
+ * only the allowlisted primitive Memory attributes its request supplied plus the listed
  * response fields of the row and `redactedValues` when present (flair#2561).
  *
  * Runs against a REAL Harper (test/helpers/harper-lifecycle.ts). A skill
@@ -324,7 +324,7 @@ describe("flair#2561 — a write that supplies one text field gets back only tha
   }, 60_000);
 });
 
-describe("flair#2561 — the feed response reports the non-null Memory attributes the request supplied plus the listed response fields and `redactedValues` when present, and no write response holds an embedding key", () => {
+describe("flair#2561 — the feed response reports the allowlisted primitive Memory attributes the request supplied plus the listed response fields and `redactedValues` when present, and no write response holds an embedding key", () => {
   it("a feed skill successor that omits the descriptive fields gets none of them, and no embedding", async () => {
     const id = `s2561-feed-desc-${randomUUID()}`;
     await makeAuthorSkill(id);
@@ -341,7 +341,7 @@ describe("flair#2561 — the feed response reports the non-null Memory attribute
     expectNoEmbedding("feed successor", body);
     expectNoAuthorText(text);
     expect(body.summary).toBe("rotated, plain");
-    expect(body.tags).toEqual(["skill"]);
+    expect(body.tags).toBeUndefined();
     await expectSuccessorCarriesAuthorText(String(body.id), id);
     expect(Array.isArray((await readStored(String(body.id)))?.embedding)).toBe(true);
   }, 60_000);

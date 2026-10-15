@@ -1,7 +1,7 @@
 import { databases } from "harper";
 import { randomUUID } from "node:crypto";
 import { isOperatorSeedPut, redactMemoryWrite, storedMemoryText, suppliedMemoryTextFields, type MemoryTextField, type StoredMemoryText } from "./memory-redaction.js";
-import { REDACTION_RULES, buildFromAllowlist, storageResult, writeResultResponse, type FieldRules } from "./memory-write-response.js";
+import { REDACTION_RULES, buildFromAllowlist, storageResult, withheldWriteResult, writeResultResponse, type FieldRules } from "./memory-write-response.js";
 import { isDeepStrictEqual } from "node:util";
 import { patchRecord, withDetachedTxn } from "./table-helpers.js";
 import { isAdmin, resolveAgentAuth, type AgentAuthVerdict } from "./agent-auth.js";
@@ -104,15 +104,16 @@ function withoutCallerSelection(query: any): any {
  */
 async function writeMemoryRowPost(cls: any, content: any, c: any): Promise<string | Response> {
   if (typeof cls?.create === "function") {
-    // flair#2561: a Response from the storage layer is not turned into an id (storageResult).
     const created: any = storageResult(await cls.create(content.id ?? null, content, c));
     if (created instanceof Response) return created;
     if (typeof created === "string") return created;
-    return created?.getId?.() ?? created?.id ?? content.id ?? "";
+    const id = created?.getId?.() ?? created?.id;
+    return typeof id === "string" ? id : withheldWriteResult();
   }
   const r: any = storageResult(await (databases as any).flair.Memory.post(content, c));
   if (r instanceof Response) return r;
-  return r?.id ?? content.id ?? "";
+  const id = typeof r === "string" ? r : r?.id;
+  return typeof id === "string" ? id : withheldWriteResult();
 }
 
 /** The authenticated author id for a pointer row, or "" when there is no
@@ -559,14 +560,9 @@ async function runDedupGate(ctx: any, content: any): Promise<DedupMatch | null> 
   return findConservativeDedupMatch(ctx, content.agentId, embedText, embedding, cosineThreshold, lexicalThreshold);
 }
 
-/** The `id` every write response holds: a required string. */
 const RESPONSE_ID = Object.freeze({ type: "string", required: true } as const);
 const RESPONSE_WRITTEN = Object.freeze({ type: "boolean", required: true } as const);
 
-/**
- * flair#2561: the fields of a Memory POST or PUT response (buildWriteResponse).
- * Every value comes from the write itself, never from the storage result.
- */
 const MEMORY_WRITE_RESPONSE_RULES: FieldRules = Object.freeze({
   id: RESPONSE_ID,
   written: RESPONSE_WRITTEN,
@@ -580,39 +576,23 @@ const MEMORY_WRITE_RESPONSE_RULES: FieldRules = Object.freeze({
   ...REDACTION_RULES,
 });
 
-/** flair#2561: the fields of a skill write's result its response reports (skillWriteResponse). */
 const SKILL_RESULT_RULES: FieldRules = Object.freeze({
   id: RESPONSE_ID,
   written: RESPONSE_WRITTEN,
   visibility: Object.freeze({ type: "string" } as const),
 });
 
-/** flair#2561: the fields of a PATCH or `_reindex` response (rowWriteResponse). */
 const ROW_WRITE_RESPONSE_RULES: FieldRules = Object.freeze({ id: RESPONSE_ID, written: RESPONSE_WRITTEN, ...REDACTION_RULES });
 
-/** flair#2561: the fields of the re-embed PATCH's response. */
 const REEMBED_RESPONSE_RULES: FieldRules = Object.freeze({
   id: RESPONSE_ID,
   updatedAt: Object.freeze({ type: "string", required: true } as const),
 });
 
-/**
- * flair#2407, flair#2467: the redaction fields a write response adds when the
- * server replaced any value: the count and `stored`, the post-redaction values
- * of the text fields the write staged (storedMemoryText of the staged row or
- * PATCH body), when the write captured them. flair#2561: `stored` holds only
- * the string-valued text fields the write's request supplied.
- */
 function redactionValues(redactedValues: number, stored?: StoredMemoryText | null): Record<string, unknown> {
   return redactedValues > 0 ? { redactedValues, stored: stored ?? undefined } : {};
 }
 
-/**
- * flair#2561: the response to a skill write, built by allowlist
- * (buildFromAllowlist): the `id`, `written` and `visibility` of the write's
- * result, plus the redaction fields. A refusal Response is returned as built
- * and a successful one is replaced (writeResultResponse).
- */
 function skillWriteResponse(result: any, redactedValues: number, stored?: StoredMemoryText | null): any {
   if (result instanceof Response) return writeResultResponse(result);
   const built = buildFromAllowlist(result, SKILL_RESULT_RULES);
@@ -621,44 +601,11 @@ function skillWriteResponse(result: any, redactedValues: number, stored?: Stored
   return redaction instanceof Response ? redaction : Object.assign(built, redaction);
 }
 
-/**
- * flair#2561: the response to a PATCH or a `_reindex` re-PUT, built by
- * allowlist from the write's own values: `{ id, written: true }`, plus the
- * redaction fields. Nothing is read from the storage result except whether
- * it is a Response: a refusal is returned as built and a successful one is
- * replaced (writeResultResponse).
- */
 function rowWriteResponse(result: any, id: unknown, redactedValues: number, stored?: StoredMemoryText | null): any {
   if (result instanceof Response) return writeResultResponse(result);
   return buildFromAllowlist({ id, written: true, ...redactionValues(redactedValues, stored) }, ROW_WRITE_RESPONSE_RULES);
 }
 
-/** Build the final write response: always `written: true`, always includes
- *  `id`, includes `visibility` when the persisted row has one, and layers the dedup collision signal on top when
- *  present. Never a code path where a match suppresses these base fields.
- *
- *  ── Why `visibility` is in the write response (flair#991) ──────────────────
- *  Visibility is the one field on a memory the caller most often does NOT
- *  set and yet most needs to know: the durability-keyed default above stamps
- *  `private` for a bare write and `shared` for a permanent/persistent one, so
- *  "who can read this" is decided by a rule the writer never typed. Returning
- *  it makes the landed value observable on EVERY write surface at once —
- *  `flair memory add`'s printed JSON, the REST response, the native /mcp
- *  `memory_store` result, and packages/flair-mcp's `effectiveVisibility` line
- *  (which read this field all along and had nothing to read, so it always
- *  rendered "(server default)").
- *
- *  Read from `content`: `content.visibility` is the value that was actually
- *  persisted a few lines earlier. Omitted (not `null`) when unset, which
- *  happens only for an existing record that has no stored writable visibility
- *  — reporting `null` there would read as "no one but the owner", the opposite
- *  of what an absent field means to `isPrivateVisibility()`.
- *
- *  flair#2561: built by allowlist (buildFromAllowlist,
- *  MEMORY_WRITE_RESPONSE_RULES) from the write's own values. Nothing is read
- *  from the storage result except whether it is a Response: a refusal is
- *  returned as built and a successful one is replaced (writeResultResponse).
- *  `rowId` is the id the storage layer gave a POST whose body named none. */
 function buildWriteResponse(content: any, result: any, dedupMatch: DedupMatch | null, redactedValues: number, stored?: StoredMemoryText, rowId?: unknown): any {
   if (result instanceof Response) return writeResultResponse(result);
   return buildFromAllowlist({
@@ -1243,6 +1190,7 @@ const REEMBED_WRITE_ATTEMPTS = 3;
 
 /** What one re-embed attempt's owned transaction decides. */
 type ReembedOutcome =
+  | { kind: "withheld"; response: Response }
   | { kind: "not_found" }
   | { kind: "forbidden" }
   | { kind: "no_text" }
@@ -1304,7 +1252,8 @@ async function reembedStoredRow(
         // transaction by its first read, so this write can land after an edit the
         // owner committed while the vector was computed; a full-row put would
         // carry the row this transaction read and revert that edit.
-        await (databases as any).flair.Memory.update(id, { embedding, embeddingModel: model, updatedAt }, owned);
+        const result = storageResult(await (databases as any).flair.Memory.update(id, { embedding, embeddingModel: model, updatedAt }, owned));
+        if (result instanceof Response) return { kind: "withheld" as const, response: result };
         // Test-only: inert unless the fault-injection env opt-in is set and armed.
         const stagedPause = txnPausePoint("memory-reembed-staged");
         if (stagedPause) await stagedPause;
@@ -1324,6 +1273,7 @@ async function reembedStoredRow(
       if (err instanceof CommittedRowChanged) return storedRowChangedRefusal("Memory");
       throw err;
     }
+    if (outcome.kind === "withheld") return outcome.response;
     if (outcome.kind === "not_found") return NOT_FOUND();
     if (outcome.kind === "forbidden") return FORBIDDEN("forbidden: cannot write memory owned by another agent");
     if (outcome.kind === "no_text") {
@@ -2152,8 +2102,6 @@ export class Memory extends (databases as any).flair.Memory {
     // model stamp the latch never recorded. A PATCH body with no embedding
     // fields is unchanged: noteWriteStamp(undefined) is a no-op.
     noteWriteStamp(content?.embeddingModel as string | null | undefined);
-    // flair#2561: the id the response reports is the body's, else the
-    // URL-bound target's, else the stored row's this PATCH resolved.
     return rowWriteResponse(patched, content?.id ?? (this as any).getId?.() ?? existingForSkill?.id, redactedValues, patchStaged);
   }
 
@@ -2227,7 +2175,8 @@ export class Memory extends (databases as any).flair.Memory {
           if (confirmPause) await confirmPause;
           const confirmed = await (databases as any).flair.Memory.get(reindexExisting!.id, {});
           if (!confirmed || !sameStoredRow(confirmed, reindexExisting)) return storedRowChangedRefusal("Memory");
-          const r: any = await (databases as any).flair.Memory.put(reindexRow, c);
+          const r: any = storageResult(await (databases as any).flair.Memory.put(reindexRow, c));
+          if (r instanceof Response) return r;
           // Test-only: holds the staged re-PUT before its commit, so a delete, a
           // purge or a same-id replace can commit in that window.
           const stagedPause = txnPausePoint("memory-reindex-staged");
@@ -2238,8 +2187,7 @@ export class Memory extends (databases as any).flair.Memory {
             if (err instanceof CommittedRowChanged && reindexJoinsRequestTxn) abortRequestTransaction(c);
             throw err;
           }
-          // flair#2561: a Response from the storage layer is not reported (storageResult).
-          return storageResult(r);
+          return r;
         });
       } catch (err) {
         if (err instanceof CommittedRowChanged) return storedRowChangedRefusal("Memory");
@@ -2251,8 +2199,6 @@ export class Memory extends (databases as any).flair.Memory {
       if (reindexed instanceof Response) return writeResultResponse(reindexed);
       noteMemoryUpsert(content);
       noteWriteStamp(content?.embeddingModel as string | null | undefined); // embedding-space-guard slice 1 (see post())
-      // flair#2561: the response is built by allowlist from the write's own
-      // values (rowWriteResponse); nothing is read from the storage result.
       return rowWriteResponse(reindexed, reindexRow?.id, 0);
     }
 
@@ -2603,7 +2549,8 @@ export class Memory extends (databases as any).flair.Memory {
           if (!confirmed || !sameStoredRow(confirmed, preExisting)) return storedRowChangedRefusal("Memory");
         }
         putStaged = storedMemoryText(content, suppliedText);
-        const r: any = await (databases as any).flair.Memory.put(content, c);
+        const r: any = storageResult(await (databases as any).flair.Memory.put(content, c));
+        if (r instanceof Response) return r;
         if (pointer.row) {
           pointer.row.memoryId = r?.id ?? content.id ?? "";
           const persistDenial = await persistPointerRow(pointer.row, c);
@@ -2626,8 +2573,7 @@ export class Memory extends (databases as any).flair.Memory {
             throw err;
           }
         }
-        // flair#2561: a Response from the storage layer is not reported (storageResult).
-        return storageResult(r);
+        return r;
       });
     } catch (err) {
       if (err instanceof CommittedRowChanged) return storedRowChangedRefusal("Memory");

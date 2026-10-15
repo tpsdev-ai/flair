@@ -1,5 +1,6 @@
 /** Skill writes share the ["flair-instruction-version", "skill"] lock. */
 import { databases } from "harper";
+import { storageResult } from "./memory-write-response.js";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { recordVersion, readHead, skillRefReadable, SKILL_SUBJECT_TYPE, type RecordVersionOutcome } from "./instruction-version-record.js";
@@ -282,10 +283,10 @@ export interface SkillDeletePlan {
 export type SkillWritePlan = SkillSuccessorPlan | SkillDeletePlan;
 
 export interface SkillWriteHooks {
-  /** Create the successor row through the shared transaction; returns its id. */
-  createSuccessor?: (successor: Record<string, any>, shared: any) => Promise<string>;
+  /** Create the successor row through the shared transaction. */
+  createSuccessor?: (successor: Record<string, any>, shared: any) => Promise<string | Response>;
   /** Close the predecessor (or, for a delete, the head) through the shared transaction. */
-  closePredecessor?: (predecessor: Record<string, any>, patch: Record<string, unknown>, shared: any) => Promise<void>;
+  closePredecessor?: (predecessor: Record<string, any>, patch: Record<string, unknown>, shared: any) => Promise<void | Response>;
   /** Pointer writes through the shared transaction; a Response denies and aborts. */
   pointer?: (shared: any) => Promise<Response | null>;
 }
@@ -297,12 +298,14 @@ export interface SkillWriteHooks {
  */
 export const defaultSkillHooks: SkillWriteHooks = {
   createSuccessor: async (successor, shared) => {
-    await (databases as any).flair.Memory.put(successor, shared);
+    const result = storageResult(await (databases as any).flair.Memory.put(successor, shared));
+    if (result instanceof Response) return result;
     return String(successor.id);
   },
   closePredecessor: async (predecessor, patch, shared) => {
     const closed = { ...predecessor, ...patch };
-    await (databases as any).flair.Memory.put(closed, shared);
+    const result = storageResult(await (databases as any).flair.Memory.put(closed, shared));
+    if (result instanceof Response) return result;
   },
 };
 
@@ -410,16 +413,19 @@ async function runSkillVersionWriteInner(args: RunSkillVersionWriteArgs): Promis
       const writePlan = plan!;
       if (writePlan.kind === "delete") {
         maybeThrowSkillWriteFault("close", owner);
-        await args.hooks.closePredecessor!(writePlan.predecessor, writePlan.closePatch, shared);
+        const closed = await args.hooks.closePredecessor!(writePlan.predecessor, writePlan.closePatch, shared);
+        if (closed instanceof Response) return storageResult(closed);
         // flair#2511: the grant re-check, after the close is staged.
         const revoked = await afterCloseStaged(writePlan.grantedClose);
         if (revoked) return revoked;
       } else {
         maybeThrowSkillWriteFault("successor", owner);
-        await args.hooks.createSuccessor!(writePlan.successor, shared);
+        const created = await args.hooks.createSuccessor!(writePlan.successor, shared);
+        if (created instanceof Response) return storageResult(created);
         if (writePlan.predecessor) {
           maybeThrowSkillWriteFault("close", owner);
-          await args.hooks.closePredecessor!(writePlan.predecessor, writePlan.closePatch, shared);
+          const closed = await args.hooks.closePredecessor!(writePlan.predecessor, writePlan.closePatch, shared);
+          if (closed instanceof Response) return storageResult(closed);
           // flair#2511: the grant re-check, after the close is staged.
           const revoked = await afterCloseStaged(writePlan.grantedClose);
           if (revoked) return revoked;
