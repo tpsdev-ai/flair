@@ -14,8 +14,8 @@
  *     predecessor's (private where it is shared, or shared where it is
  *     private) is refused with {@link grantVisibilityRefusal}, a 403 that
  *     carries only its name and a fixed message, unless an earlier validation
- *     refuses it first: an ephemeral write naming "shared" gets the ephemeral
- *     private-only rule's 400 invalid_visibility_for_durability; an ephemeral
+ *     refuses it first: an ordinary, non-skill ephemeral write naming "shared"
+ *     gets 400 invalid_visibility_for_durability; an ephemeral
  *     skill write gets the skill-durability gate's 400 skill_durability; and a
  *     "session" skill write gets 400 invalid_durability on Memory POST and PUT
  *     (durability validation runs first) and 400 skill_durability on

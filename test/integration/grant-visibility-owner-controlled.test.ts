@@ -6,11 +6,14 @@
  * set by the owner or an admin. For the grant-authorized successor write, the
  * successor carries the predecessor's visibility when the write omits one, and
  * a write naming one that reads differently is refused with a named 403 and
- * writes nothing, unless an earlier validation refuses it first (an ephemeral
- * write naming "shared" gets the ephemeral private-only rule's 400; an
- * ephemeral or session skill write gets the skill-durability gate's 400). An
- * ordinary ephemeral successor that omits visibility on a shared predecessor
- * carries "shared" and gets the same ephemeral-rule 400 (a case below). A
+ * writes nothing, unless an earlier validation refuses it first (an ordinary,
+ * non-skill ephemeral write naming "shared" gets 400
+ * invalid_visibility_for_durability; an ephemeral skill write gets 400
+ * skill_durability; a session skill write gets 400 invalid_durability on Memory
+ * POST and PUT (durability validation runs first) and 400 skill_durability on
+ * FeedMemories). An ordinary ephemeral successor that omits visibility on a
+ * shared predecessor carries "shared" and gets the same ephemeral-rule 400 (a
+ * case below). A
  * predecessor whose visibility changes before the close's final committed-state
  * re-read is covered by grant-visibility-close-contention.test.ts. The rule
  * governs that write: an ordinary successor is the grantee's own row, and the
