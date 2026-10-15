@@ -23,6 +23,11 @@
 // It also drives the built-in /mcp `memory_basement` / `memory_restore` against
 // real Harper and applies each tool's declared contract to its real reply
 // (flair#2575).
+//
+// A reserved-seed PUT whose redaction replaces a stored value writes the
+// redacted row and reports what it wrote. The `_reindex` re-PUT, reserved to a
+// Flair admin agent (Agent role "admin"), refuses duplicate top-level metadata
+// keys before row comparison.
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { chmodSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm, mkdir, cp, symlink } from "node:fs/promises";
@@ -34,6 +39,7 @@ import { conform } from "../helpers/mcp-conformance";
 import { provisionIdpIdentityMapping } from "../../src/lib/mcp-enable.ts";
 import { FlairClient } from "../../packages/flair-client/src/client.js";
 import { STDIO_TOOL_HANDLERS } from "../../packages/flair-mcp/src/adapter-tools.ts";
+import { SEED_SKILL_ROW_ID } from "../../resources/seed-ids.js";
 
 const REPO_ROOT = process.cwd();
 const FIXTURE = join(REPO_ROOT, "test", "fixtures", "inproc-app");
@@ -47,6 +53,11 @@ let client: FlairClient;
 const sfx = Date.now().toString(36);
 const AGENT = `skillredact-${sfx}`;
 const SUB = `skillredact-sub-${sfx}`;
+/** A Flair admin agent: Memory.put's `_reindex` re-PUT answers only an admin agent. */
+const REINDEX_ADMIN = (() => {
+  const kp = nacl.sign.keyPair();
+  return { id: `skillredact-admin-${sfx}`, publicKey: Buffer.from(kp.publicKey).toString("base64"), secretKey: kp.secretKey };
+})();
 
 const GITHUB_TOKEN = `ghp_${"a".repeat(24)}`;
 const AWS_KEY = `AKIA${"B".repeat(16)}`;
@@ -89,6 +100,34 @@ async function mcpTool(tool: string, args: Record<string, unknown>): Promise<{ e
   return { echo: rpc.result.structuredContent, text: rpc.result.content[0].text };
 }
 
+/** One operations-API call on this test's own instance; the parsed reply. */
+async function ops(body: Record<string, unknown>): Promise<any> {
+  const res = await fetch(harper.opsURL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: adminAuth() },
+    body: JSON.stringify(body),
+  });
+  const text = await res.text();
+  expect(res.status, `${String(body.operation)}: ${text.slice(0, 300)}`).toBe(200);
+  return JSON.parse(text);
+}
+
+/** One request signed with REINDEX_ADMIN's Ed25519 key. */
+function adminAgentFetch(method: string, path: string, body: unknown): Promise<Response> {
+  const ts = Date.now().toString();
+  const nonce = crypto.randomUUID();
+  const payload = `${REINDEX_ADMIN.id}:${ts}:${nonce}:${method}:${path}`;
+  const sig = nacl.sign.detached(new TextEncoder().encode(payload), REINDEX_ADMIN.secretKey);
+  return fetch(`${harper.httpURL}${path}`, {
+    method,
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `TPS-Ed25519 ${REINDEX_ADMIN.id}:${ts}:${nonce}:${Buffer.from(sig).toString("base64")}`,
+    },
+    body: JSON.stringify(body),
+  });
+}
+
 /** The stored Memory row, read past every resource gate. */
 async function storedRow(id: string): Promise<any> {
   const res = await fetch(harper.opsURL, {
@@ -126,6 +165,11 @@ beforeAll(async () => {
   await symlink(REPO_ROOT, join(appDir, "node_modules", "@tpsdev-ai", "flair"), "dir");
   harper = await startHarper({ cwd: appDir, harperBinDir: REPO_ROOT });
   assertOwnInstance(harper);
+  // Before any signed request, so the instance's admin set includes it.
+  await ops({
+    operation: "insert", database: "flair", table: "Agent",
+    records: [{ id: REINDEX_ADMIN.id, name: REINDEX_ADMIN.id, role: "admin", publicKey: REINDEX_ADMIN.publicKey, createdAt: new Date().toISOString() }],
+  });
 
   // One agent with a real Ed25519 key, so the REST/stdio client can sign as it.
   keyDir = await mkdtemp(join(tmpdir(), "flair-2575-keys-"));
@@ -456,13 +500,63 @@ test("a skill reindex refuses duplicate top-level metadata keys before row compa
     metadata: JSON.stringify({ name: "deploy" }),
   });
   const before = await storedRow(created.id);
-  const response = await fetch(`${harper.httpURL}/Memory/${created.id}`, {
-    method: "PUT", headers: { "Content-Type": "application/json", Authorization: adminAuth() },
-    body: JSON.stringify({ id: created.id, _reindex: true, metadata: `{"name":"${GITHUB_TOKEN}","name":"deploy"}` }),
-  });
-  expect(response.status).toBe(400);
+  const path = `/Memory/${created.id}`;
+  // The admin agent's reindex reaches row comparison: distinct keys whose
+  // metadata differs from the stored row's are refused as a change.
+  const compared = await adminAgentFetch("PUT", path, { id: created.id, _reindex: true, metadata: JSON.stringify({ name: "release" }) });
+  const comparedReply = await compared.text();
+  expect(compared.status, comparedReply.slice(0, 300)).toBe(409);
+  expect(JSON.parse(comparedReply).error).toBe("reindex_would_change_row");
+  // The same request shape with duplicate keys answers the named 400 instead.
+  const response = await adminAgentFetch("PUT", path, { id: created.id, _reindex: true, metadata: `{"name":"${GITHUB_TOKEN}","name":"deploy"}` });
   const reply = await response.text();
+  expect(response.status, reply.slice(0, 300)).toBe(400);
   expect(JSON.parse(reply).error).toBe("skill_metadata_duplicate_key");
   expect(reply).not.toContain(GITHUB_TOKEN);
   expect(await storedRow(created.id)).toEqual(before);
 }, 120_000);
+
+describe("flair#2575 — a reserved-seed PUT whose redaction replaces a stored value writes the redacted row", () => {
+  // The seed row is written through the operations API, which applies no
+  // Memory write redaction, so its metadata and tags hold placeholder
+  // credentials. The PUT supplies fields equal to the stored row's.
+  for (const shape of ["omits", "repeats"] as const) {
+    test(`a seed PUT that ${shape} the stored metadata and tags stores the redacted values it reports`, async () => {
+      const metadata = JSON.stringify({ name: `deploy ${GITHUB_TOKEN}`, description: `runs the nightly ${AWS_KEY}` });
+      const tags = ["skill", `release-${SLACK_TOKEN}`];
+      const seed = {
+        id: SEED_SKILL_ROW_ID, agentId: AGENT, content: `seed procedure ${shape}`, trigger: "when deploying",
+        tags, metadata, skillSubjectId: SEED_SKILL_ROW_ID, durability: "persistent", visibility: "shared",
+        createdAt: new Date().toISOString(),
+      };
+      await ops({ operation: "upsert", database: "flair", table: "Memory", records: [seed] });
+      const raw = await storedRow(SEED_SKILL_ROW_ID);
+      expect(raw.metadata).toBe(metadata);
+      expect(raw.tags).toEqual(tags);
+
+      const body: Record<string, unknown> = { id: SEED_SKILL_ROW_ID, agentId: AGENT, content: seed.content, trigger: seed.trigger };
+      if (shape === "repeats") Object.assign(body, { metadata, tags });
+      const response = await fetch(`${harper.httpURL}/Memory/${encodeURIComponent(SEED_SKILL_ROW_ID)}`, {
+        method: "PUT", headers: { "Content-Type": "application/json", Authorization: adminAuth() },
+        body: JSON.stringify(body),
+      });
+      const reply = await response.text();
+      expect(response.status, reply.slice(0, 300)).toBe(200);
+      const out = JSON.parse(reply);
+      expect(out.redactedValues).toBe(3);
+      expect(out.written).toBe(true);
+
+      const row = await storedRow(SEED_SKILL_ROW_ID);
+      expect(metadataOf(row)).toEqual({ name: `deploy ${REDACTED}`, description: `runs the nightly ${REDACTED}` });
+      expect(row.tags).toEqual(["skill", `release-${REDACTED}`]);
+      expect(out.stored).toEqual({
+        content: row.content, trigger: row.trigger,
+        name: metadataOf(row).name, description: metadataOf(row).description, tags: row.tags,
+      });
+      for (const credential of [GITHUB_TOKEN, AWS_KEY, SLACK_TOKEN]) {
+        expect(reply).not.toContain(credential);
+        expect(JSON.stringify(row)).not.toContain(credential);
+      }
+    }, 120_000);
+  }
+});

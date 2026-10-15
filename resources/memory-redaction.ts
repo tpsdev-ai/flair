@@ -21,6 +21,9 @@
  * a Memory post/put/patch response also carries `stored`, the post-redaction
  * values of the REDACTED_MEMORY_FIELDS present in that write
  * (storedMemoryText); the feed ingest's response is already the stored row.
+ * A skill PUT whose redaction replaced a value always writes its redacted
+ * effective row, so `stored` is what the row holds: the in-place (reserved
+ * seed) PUT's unchanged-row check never skips it.
  * put() skips the call for the shipped-skill seed write (isOperatorSeedPut): a
  * PUT of the reserved seed skill id by a verified Basic administrator
  * (src/lib/skill-seed.ts). The seed compares the stored text to its source

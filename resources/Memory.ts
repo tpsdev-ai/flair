@@ -1024,6 +1024,9 @@ async function writeSkillCreateOrUpdate(
     /** A reserved seed id: version the write IN PLACE (same physical id). */
     inPlaceId?: string | null;
     reembedding?: boolean;
+    /** The fields a PUT supplied. An in-place (reserved seed) PUT whose supplied
+     *  fields equal the live head writes no row. Absent when the PUT's
+     *  redaction replaced a value: that PUT always writes its redacted row. */
     requestedPayload?: Record<string, any>;
     /** flair#2467: receives the post-redaction text fields of the successor
      *  row this write staged and committed (none when it wrote no row). */
@@ -2223,7 +2226,6 @@ export class Memory extends (databases as any).flair.Memory {
     content = preparedSkill.content;
     const operatorSeed = isOperatorSeedPut(ctx, auth, writeTargetIds(this, content));
     let redactedValues = operatorSeed ? 0 : redactMemoryWrite(content).count;
-    if (!operatorSeed) redactMemoryWrite(requestedPayload);
     // Duplicate top-level metadata keys are refused; otherwise redact name/description and tags.
     redactedValues += redactSkillWrite(content);
 
@@ -2478,9 +2480,12 @@ export class Memory extends (databases as any).flair.Memory {
     if (isSkillWrite(content)) {
       const reservedId = [content?.id, (this as any).getId?.()].find((candidate) => isReservedSeedId("Memory", candidate));
       const skillStaged: { text: StoredMemoryText | null } = { text: null };
+      // A PUT whose redaction replaced a value commits its redacted effective
+      // row, inherited fields included, so the reply's `stored` is what the row
+      // holds: the in-place unchanged-row check gets no requested fields for it.
       return withRedactedValues(await writeSkillCreateOrUpdate({
         ctx, auth, content, storedRow: preExisting, explicitPredecessor: preparedSkill.predecessor, method: "put", pointer,
-        reembedding, requestedPayload,
+        reembedding, requestedPayload: redactedValues > 0 ? undefined : requestedPayload,
         inPlaceId: reservedId != null ? String(reservedId) : null, staged: skillStaged,
       }), redactedValues, undefined, skillStaged.text);
     }
