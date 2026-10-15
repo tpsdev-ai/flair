@@ -1,8 +1,9 @@
 # Fixture for the workflow coverage-gate checker (flair#2480).
 #
 # Refused: the workflow sets defaults.run.shell, so the Unit Tests adapter step
-# does not run under the default shell. Its gate-named step is a no-op so the
-# refusal under test is the adapter's, not the gate's.
+# does not run under the default shell. This workflow contains no gate-named
+# step; the test supplies the gate from accepted.yml so it reaches the adapter
+# refusal.
 name: workflow-gate fixture (adapter workflow defaults shell override)
 on: pull_request
 defaults:
