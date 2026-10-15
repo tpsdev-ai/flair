@@ -2071,7 +2071,7 @@ describe("flair#2513 — agent_end capture is keyed by counted message identitie
     expect(api._warnText()).toMatch(/discarded a capture for run run-1 \(agent A\) that completed after the run was aborted/);
   });
 
-  test("round 5 guard (mutation: no identity cap): a session remembers at most max(sessionMessageCap, its latest snapshot's distinct messages) identities", async () => {
+  test("round 5 guard (mutation: no identity cap): a session remembers at most max(sessionMessageCap, its last accounted snapshot's distinct messages) identities", async () => {
     writeKey("A");
     const plugin = await loadPlugin();
     installFetchStub();
@@ -2213,6 +2213,29 @@ describe("flair#2513 — agent_end capture is keyed by counted message identitie
     expect(by("run three's own message")).toEqual(["run-3"]);
   });
 
+  test("flair#2560 (mutation: a later cap settles a deferred message): successive capped scans leave the same message deferred until a scan reaches it", async () => {
+    writeKey("A");
+    const calls = installFetchStub();
+    const api = createMockApi({ pluginConfig: { autoCapture: true, autoCaptureMaxPerSession: 1 }, config: captureConfig });
+    (await loadPlugin()).register(api as any);
+    const ctx = { agentId: "A", sessionId: "sess-repeated-cap" };
+    const say = (text: string, timestamp: number) => ({ role: "user", content: `remember this: ${text}`, timestamp });
+    const opening = say("the opening message", 0);
+    const waiting = say("waiting through caps", 1);
+    const second = say("the second run message", 2);
+    const third = say("the third run message", 3);
+    await api._fire("agent_end", { runId: "run-1", success: true, messages: [opening] }, ctx);
+    await api._fire("agent_end", { runId: "run-2", success: true, messages: [opening, waiting, second] }, ctx);
+    expect(captureInternals.sessionDeferredCount()).toBe(1);
+    await api._fire("agent_end", { runId: "run-3", success: true, messages: [opening, waiting, second, third] }, ctx);
+    expect(captureInternals.sessionDeferredCount()).toBe(1);
+    expect(puts(calls).map(sourceOf)).toEqual(["run-1", "run-2", "run-3"]);
+    expect(puts(calls).some((c) => contentOf(c).includes("waiting through caps"))).toBe(false);
+    await api._fire("agent_end", { runId: "run-4", success: true, messages: [opening, waiting, second, third] }, ctx);
+    expect(puts(calls).filter((c) => contentOf(c).includes("waiting through caps")).map(sourceOf)).toEqual(["run-4"]);
+    expect(captureInternals.sessionDeferredCount()).toBe(0);
+  });
+
   test("flair#2560 cold start (mutation: a cold scan leaves capped messages unseen): a session's first scan captures at most the run's cap, from the last eligible position, and records the rest as seen", async () => {
     writeKey("A");
     const plugin = await loadPlugin();
@@ -2348,7 +2371,7 @@ describe("flair#2513 — agent_end capture is keyed by counted message identitie
     expect(api._warnText()).toMatch(/discarded a capture for run run-3 \(agent A\) that completed after the run was aborted/);
   });
 
-  test("flair#2560 (mutation: deferred is never pruned): entries stay within max(sessionMessageCap, D) and deferred holds only latest-snapshot identities", async () => {
+  test("flair#2560 (mutation: deferred is never pruned): entries stay within max(sessionMessageCap, D) and deferred holds only last-accounted-snapshot identities", async () => {
     writeKey("A");
     const plugin = await loadPlugin();
     installFetchStub();
@@ -2374,6 +2397,43 @@ describe("flair#2513 — agent_end capture is keyed by counted message identitie
     await api._fire("agent_end", { runId: "run-3", success: true, messages: [{ role: "user", content: "a plain note after a rewrite", timestamp: 9 }] }, ctx);
     expect(captureInternals.sessionDeferredCount?.() ?? -1).toBe(0);
     expect(captureInternals.sessionIdentityCount?.() ?? -1).toBe(2);
+  });
+
+  test("flair#2560 (mutation: NUL-joined fields): role and timestamp separators do not alias identities", async () => {
+    const { messageIdentity } = await loadModule();
+    const content = "remember this: separator regression";
+    expect(messageIdentity({ role: "user", content, timestamp: "foo\0n1" })).not.toBe(
+      messageIdentity({ role: "user\0sfoo", content, timestamp: 1 }),
+    );
+  });
+
+  test("flair#2560 (mutation: NUL-joined fields): real host runner: a recorded malformed role does not suppress the valid user message", async () => {
+    const { dist, version: hostVersion } = supportedRunnerHost();
+    const entry = runnerEntry(dist);
+    expect(entry).toBeDefined();
+    const { createHookRunner } = await import(pathToFileURL(join(dist, entry!)).href);
+    writeKey("A");
+    const calls = installFetchStub();
+    const api = createMockApi({ hostVersion, pluginConfig: { autoCapture: true }, config: captureConfig });
+    (await loadPlugin()).register(api as any);
+    const typedHooks = [...api._hooks].flatMap(([hookName, handlers]) =>
+      handlers.map((handler) => ({ hookName, handler, pluginId: api.id })),
+    );
+    const runner = createHookRunner({ typedHooks }, { catchErrors: false });
+    const ctx = { agentId: "A", sessionId: "sess-separator" };
+    const content = "remember this: separator regression";
+    const malformed = { role: "user\0sfoo", content, timestamp: 1 };
+    const valid = { role: "user", content, timestamp: "foo\0n1" };
+    try {
+      await runner.runAgentEnd({ runId: "run-1", success: true, messages: [malformed] }, ctx);
+      expect(captureInternals.sessionIdentityCount()).toBe(1);
+      expect(puts(calls)).toHaveLength(0);
+      await runner.runAgentEnd({ runId: "run-2", success: true, messages: [valid] }, ctx);
+      await runner.runAgentEnd({ runId: "run-3", success: true, messages: [valid] }, ctx);
+      expect(puts(calls).map(sourceOf)).toEqual(["run-2"]);
+    } finally {
+      await runner.runGatewayStop({}, {});
+    }
   });
 
   test("flair#2560 (mutation: untyped timestamp): a numeric and a string timestamp give different identities", async () => {

@@ -3,14 +3,15 @@
   While the plugin holds a session's state, a session-keyed `agent_end` scan's
   identity cap never evicts a recorded identity the current snapshot holds, so
   recorded identities number at most max(4,096 (`sessionMessageCap`), D), D
-  being the distinct identities in the latest snapshot, and a recorded message
-  that stays in the snapshot is not offered again. Deferred identities (below)
-  are a separate set, holding only identities of the latest snapshot, so at most
-  D. The scan walks the snapshot from its last position, so the run's cap
+  being the distinct identities in the last snapshot accounted for (disabled
+  callbacks do not update it), and a recorded message that stays in the snapshot
+  is not offered again. Deferred identities (below) hold only that snapshot's
+  identities, so at most D. The scan walks the snapshot from its last position,
+  so the run's cap
   (`autoCaptureMaxPerSession`) is spent on the last eligible positions. In a
   warm session a message the cap leaves out stays eligible for a later capture
-  scan, subject to that scan's gates and cap; only a refused scan, or a run
-  refused before that message's write starts, leaves it unseen, while same-run
+  scan, subject to that scan's gates and cap; another cap, a refused scan, or a
+  refusal before its write starts can leave it unseen, while same-run
   excerpt dedup, a failure before the write, a failed write, or a write whose
   run is aborted while it is in flight settles it. Message identity now encodes
   the timestamp's type, and the plugin infers nothing from timestamps: the host

@@ -238,7 +238,7 @@ export function messageIdentity(msg: { role?: unknown; content?: unknown; timest
   }
   // A function or symbol serializes to undefined: no identity, not a digest of "".
   if (content === undefined) return null;
-  return hashContent(`${role}\u0000${stamp}\u0000${content}`);
+  return hashContent(JSON.stringify([role, stamp, content]));
 }
 
 /**
@@ -272,14 +272,14 @@ export function isRepeatLogPoint(n: bigint): boolean {
  * rest of the identifiable messages as seen. If it captures a message that
  * was captured before, the write has a new id, so Flair stores a second row.
  * `deferred` holds the identities a warm scan left unseen because the run's
- * cap was spent. A later scan leaves a deferred identity unseen in two cases
- * only: a `skip`-mode scan (a refused run), and a `refused` result, where the
- * run is refused before that message's write starts. Other outcomes settle it.
+ * cap was spent. A later scan can leave it unseen through another cap, a
+ * `skip`-mode scan (a refused run), or a `refused` result before its write starts.
  * Same-run excerpt dedup settles it without a new write, and so does a failure
  * before the write (recorded as skipped if the scan continues). A write that
  * starts and then fails, or whose run is aborted while it is in flight,
  * records it as skipped: an aborted write may still reach Flair, so it is not
- * retried. `deferred` holds only identities of the current snapshot.
+ * retried. `deferred` holds only identities of the last snapshot accounted for;
+ * disabled callbacks do not update it.
  */
 interface SessionCapture {
   agentId: string;
@@ -368,13 +368,13 @@ export const captureBounds = {
    * a recorded identity present in the current snapshot, so while the
    * session's state is retained, `entries` holds at most
    * max(`sessionMessageCap`, D) identities, where D is the number of distinct
-   * identities in its latest snapshot. `deferred` is a separate set with its
-   * own bound: it holds only identities of the latest snapshot, so at most D.
+   * identities in the last snapshot it accounted for. Disabled callbacks do not
+   * update that snapshot. `deferred` holds only its identities, so at most D.
    * (The whole state can still
    * go: see `sessionStateCap` and `gateway_stop`.) When `entries` holds more
-   * than this cap, the identity that has been absent from the snapshots
-   * longest is evicted first. An evicted identity has left the snapshot; if it
-   * re-appears it is treated as new and may be captured again, as a second
+   * than this cap and has an absent prefix, its first identity is evicted. An
+   * evicted identity has left the snapshot; if it re-appears it is treated as new
+   * and may be captured again, as a second
    * row. A message whose encoded fields (`messageIdentity`) differ from an
    * earlier one's has a different identity, barring digest collisions, and is
    * new to the scan whether or not anything was evicted. (A scan also builds a
@@ -1052,9 +1052,9 @@ export default {
     /**
      * flair#2560: start a scan of a snapshot whose identities are the keys of
      * `live`. Every identity the session records that is in the snapshot moves
-     * to the back of `entries`, in snapshot order, so the front holds only
-     * identities that have left the snapshot, least recently present first.
-     * Then `trimEntries` evicts from the front.
+     * to the back of `entries`, in snapshot order, leaving an optional prefix of
+     * absent identities, least recently present first. `trimEntries` evicts
+     * only while that prefix exists.
      */
     function markLive(session: SessionCapture, live: Map<string, number>): void {
       for (const identity of session.deferred) if (!live.has(identity)) session.deferred.delete(identity);
@@ -1069,10 +1069,10 @@ export default {
 
     /**
      * flair#2560: evict identities that have left the snapshot (`live`) while
-     * the session holds more than `sessionMessageCap`. The front of `entries`
-     * holds only such identities (`markLive`, and `recordOccurrence` moves what
-     * it records to the back), so the first live identity ends the eviction:
-     * this never evicts a live identity.
+     * the session holds more than `sessionMessageCap`. `entries` has an optional
+     * prefix of absent identities (`markLive`, and
+     * `recordOccurrence` moves what it records to the back). Eviction stops
+     * when that prefix is empty; no live identity is evicted.
      */
     function trimEntries(session: SessionCapture, live: Map<string, number>): void {
       while (session.entries.size > captureBounds.sessionMessageCap) {
@@ -1729,9 +1729,9 @@ export default {
          * anything more. The exceptions: in a warm session an occurrence the
          * run's cap left out (`capped`) stays unseen and is held in `deferred`,
          * eligible for a later capture scan, subject to that scan's gates and
-         * cap (a later capture carries that later run's id). Only a `skip`-mode
-         * scan, or a `refused` result (the run refused before that message's
-         * write starts), leaves a deferred identity unseen; same-run excerpt
+         * cap (a later capture carries that later run's id). Another cap, a
+         * `skip`-mode scan, or a `refused` result before its write starts
+         * can leave a deferred identity unseen; same-run excerpt
          * dedup, a failure before the write, a write that fails, or a write
          * discarded by an abort settles it (see `SessionCapture`). In the
          * session's first scan in

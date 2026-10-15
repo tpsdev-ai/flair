@@ -142,26 +142,27 @@ are the guarantees it keeps, each with the test that proves it in
   timestamp): a numeric and a string timestamp give different identities`. While
   the state is held, a session's recorded identities number at most
   max(`sessionMessageCap` (4,096), D), where D is the number of distinct
-  identities in its latest snapshot; deferred identities (below) are a separate
-  set, holding only identities of the latest snapshot, so at most D. The cap
-  evicts only identities that have left the snapshot, so a recorded message that
-  stays in the snapshot is not offered again, however long the session; one that
+  identities in the last snapshot it accounted for; disabled callbacks do not
+  update it. Deferred identities (below) hold only that snapshot's identities,
+  so at most D. The cap evicts only identities that have left the snapshot, so a
+  recorded message that stays in the snapshot is not offered again, however
+  long the session; one that
   left the snapshot can be evicted and, if it reappears, captured again —
   `flair#2560 (mutation: a live identity is evicted): a snapshot over
   sessionMessageCap distinct messages, across several runs: the message each run
   appends is captured and nothing earlier is captured again`; `flair#2560
   (mutation: deferred is never pruned): entries stay within
-  max(sessionMessageCap, D) and deferred holds only latest-snapshot identities`.
+  max(sessionMessageCap, D) and deferred holds only last-accounted-snapshot identities`.
   The scan walks the supplied snapshot from its last position, so a run's
   capture cap (`autoCaptureMaxPerSession`) is spent on the last eligible
   positions; that is position, not proof of which run added a message. In a warm
   session a message the cap leaves out stays unseen (deferred) and remains
   eligible for a later capture scan, subject to that scan's gates and cap, and
-  if a later scan captures it, the row carries that later run's id. Only a
-  `skip`-mode scan (a refused run), or a run refused before that message's write
-  starts, leaves it unseen. Other outcomes settle it: same-run excerpt dedup or
-  a failure before the write settles it without a new write, and a write that
-  starts and then fails, or whose run is aborted while it is in flight, records
+  if a later scan captures it, the row carries that later run's id. Another cap,
+  a `skip`-mode scan, or a refusal before its write starts can leave it unseen.
+  Same-run excerpt dedup or a failure before the write settles it without a new
+  write, and a write that starts and then fails, or whose run is aborted while
+  it is in flight, records
   it as skipped, because an aborted write may still have reached Flair —
   `flair#2560 (mutation: oldest first; mutation: a capped message recorded as
   seen): a run's cap is spent from the last snapshot position, and the message
