@@ -4,7 +4,8 @@
  *
  * Each CLI path (all agents, one agent) re-embeds rows seeded with a value for
  * every Memory attribute. Afterwards the stored row may differ only in
- * `embedding`, `embeddingModel` and `updatedAt`, and the new vector must match
+ * `embedding`, `embeddingModel`, `updatedAt` and (flair#2465)
+ * `embeddedContentHash`, and the new vector must match
  * the server's embedding of the row's text (`trigger` for a skill row).
  *
  * The fixtures carry the bare current-space stamp, which the boot migration
@@ -22,13 +23,16 @@ import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-
 import { ensureCliBuild } from "../helpers/build-cli-once.js";
 import { MEMORY_ATTRIBUTES } from "../../src/lib/memory-attributes.ts";
 import { getModelId } from "../../resources/embeddings-provider.ts";
+import { computeContentHash } from "../../resources/memory-feed-lib.ts";
 import { stripEnginePrefix } from "../../resources/embedding-space-guard.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "..", "..");
 const CLI = join(REPO_ROOT, "dist", "cli.js");
 const CURRENT_MODEL_ID = getModelId();
 const BARE_MODEL_ID = stripEnginePrefix(CURRENT_MODEL_ID);
-const ALLOWED_TO_CHANGE = new Set(["embedding", "embeddingModel", "updatedAt"]);
+// flair#2465: a re-embed also records the embedded-text hash of the text it
+// embedded.
+const ALLOWED_TO_CHANGE = new Set(["embedding", "embeddedContentHash", "embeddingModel", "updatedAt"]);
 const FIXTURE_VECTOR = Array.from({ length: 768 }, (_, i) => ((i % 7) + 1) / 1000);
 
 type Agent = { id: string; publicKey: Uint8Array; secretKey: Uint8Array };
@@ -90,15 +94,20 @@ async function signedRequest(who: Agent, method: string, path: string, body?: un
 /** A row carrying a non-default value for every Memory attribute. */
 function fixtureRow(id: string, agentId: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
   const day = (d: number) => `2001-01-0${d}T00:00:00.000Z`;
+  const content = `Release checklist ${id}: verify the tarball checksum before tagging.`;
   return {
     id,
     agentId,
-    content: `Release checklist ${id}: verify the tarball checksum before tagging.`,
+    content,
     contentHash: `hash-${id}`,
     trigger: "trigger fixture",
     visibility: "private",
     embedding: FIXTURE_VECTOR,
     embeddingModel: BARE_MODEL_ID,
+    // A matching binding for the row's embedding text, so the boot
+    // embedding-stamp migration (flair#2465) treats a seeded fixture as current
+    // and never re-embeds it mid-case. The re-embed under test overwrites it.
+    embeddedContentHash: computeContentHash(agentId, content),
     tags: ["release", "fixture"],
     durability: "persistent",
     source: "source-fixture",
@@ -141,9 +150,13 @@ function fixtureRow(id: string, agentId: string, overrides: Record<string, unkno
 }
 
 function skillFixtureRow(id: string, agentId: string): Record<string, unknown> {
+  const trigger = `when cutting a release for ${id}`;
   return fixtureRow(id, agentId, {
     tags: ["skill", "release"],
-    trigger: `when cutting a release for ${id}`,
+    trigger,
+    // A skill row embeds from its trigger (flair#1542), so its binding is over
+    // the trigger, not the content.
+    embeddedContentHash: computeContentHash(agentId, trigger),
     skillSubjectId: id,
     archived: false,
     archivedAt: null,
