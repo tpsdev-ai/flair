@@ -126,7 +126,10 @@ export class Health extends Resource {
     // doctor`. Sync, no scan, no vector read. `state` is one of
     // uniform | mixed | unverified | scan-failed; `reason` is the bounded error
     // of the last failed scan (on scan-failed, or on mixed when a scan failed
-    // before or after the foreign stamp was seen). In the non-uniform states the
+    // before or after the foreign stamp was seen); `excluded` is the last
+    // published scan's count of rows whose vector carries no trusted
+    // current-space stamp, which the vector legs do not cosine (null until a
+    // scan publishes one). In the non-uniform states the
     // guarded paths, SemanticSearch and the write-time dedup leg, cosine nothing
     // against the stored corpus; MemoryBootstrap and MemoryDedupStats call
     // retrieval directly without this guard (#2559). The field is on the 503

@@ -21,7 +21,11 @@
  * the last published verdict. The state becomes `uniform` only when such a scan
  * succeeds and finds the stamps uniform; with no consults, nothing retries.
  * `uniform` means stamp-metadata uniformity: a stored vector without a
- * space-bearing `embeddingModel` stamp is not checked (flair#2573). An absent or
+ * space-bearing `embeddingModel` stamp is not checked (flair#2573). flair#2573
+ * slice 1 adds the guard's `excluded` count — rows whose vector carries no
+ * trusted current-space stamp, which the vector legs do not cosine. When /Health
+ * carries it, each line names it (and the `uniform` line says the verdict covers
+ * stamped rows); an absent or malformed count is not mentioned. An absent or
  * unrecognized field prints nothing: an older or foreign server's verdict is
  * not one to claim.
  */
@@ -49,17 +53,38 @@ export function boundedScanFailureReason(reason: unknown): string {
 }
 
 /**
+ * The guard's `excluded` count as a printable whole number, or null when it is
+ * absent or malformed (an older or foreign server, or no scan has published a
+ * count). Never rendered as zero on unknown evidence.
+ */
+function excludedCount(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
+}
+
+/** The clause naming the excluded count, or "" when it is unknown. */
+function excludedClause(value: unknown): string {
+  const n = excludedCount(value);
+  if (n === null) return "";
+  return `; excluded from the vector leg: ${n} row(s) with no trusted model stamp`;
+}
+
+/**
  * Doctor finding, or null when there is nothing to say. The four states map to
  * a distinct line: `uniform` an OK line; `mixed` a blocking finding with the
  * reembed remedy; `unverified` and `scan-failed` advisories naming the state.
  */
 export function describeEmbeddingSpaceDoctorFinding(field: unknown): EmbeddingSpaceDoctorFinding | null {
   if (field == null || typeof field !== "object" || Array.isArray(field)) return null;
-  const rec = field as { state?: unknown; reason?: unknown };
+  const rec = field as { state?: unknown; reason?: unknown; excluded?: unknown };
   switch (rec.state) {
     case "uniform":
-      // Stamp metadata only; an unstamped stored vector is not checked (flair#2573).
-      return { isIssue: false, icon: "ok", message: "embedding model stamps verified uniform" };
+      // Stamp metadata only; an unstamped stored vector is excluded from the
+      // vector leg and counted (flair#2573). The verdict covers stamped rows.
+      return {
+        isIssue: false,
+        icon: "ok",
+        message: "embedding model stamps verified uniform — the verdict covers stamped rows" + excludedClause(rec.excluded),
+      };
     case "mixed":
       return {
         isIssue: true,
@@ -67,14 +92,15 @@ export function describeEmbeddingSpaceDoctorFinding(field: unknown): EmbeddingSp
         message:
           "a non-current embedding model stamp was observed — the embedding leg is refused" +
           // A known foreign stamp outranks a scan error; name the error too.
-          (rec.reason == null ? "" : `; last scan failed (${boundedScanFailureReason(rec.reason)})`),
+          (rec.reason == null ? "" : `; last scan failed (${boundedScanFailureReason(rec.reason)})`) +
+          excludedClause(rec.excluded),
         fixHint: "Reconcile to one space with: flair reembed --stale-only",
       };
     case "unverified":
       return {
         isIssue: false,
         icon: "warn",
-        message: "embedding space not yet verified — the embedding leg is refused until a scan verifies the stamps",
+        message: "embedding space not yet verified — the embedding leg is refused until a scan verifies the stamps" + excludedClause(rec.excluded),
       };
     case "scan-failed":
       return {
@@ -82,7 +108,7 @@ export function describeEmbeddingSpaceDoctorFinding(field: unknown): EmbeddingSp
         icon: "warn",
         message:
           `embedding space unverified: last scan failed (${boundedScanFailureReason(rec.reason)}) — ` +
-          `the embedding leg is refused`,
+          `the embedding leg is refused` + excludedClause(rec.excluded),
       };
     default:
       return null;

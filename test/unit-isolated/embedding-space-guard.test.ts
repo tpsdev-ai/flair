@@ -148,7 +148,7 @@ describe("embedding-space-guard — latch", () => {
     const v = await embeddingSpaceVerdict();
     expect(v.uniform).toBe(false); // not known uniform ⇒ the caller's mixed path
     expect(v.state).toBe("unverified");
-    expect(spaceGuardState()).toEqual({ state: "unverified", reason: null });
+    expect(spaceGuardState()).toEqual({ state: "unverified", reason: null, excluded: null });
   });
 
   it("a scan that throws leaves an unknown verdict, names it, and logs its class once", async () => {
@@ -182,12 +182,12 @@ describe("embedding-space-guard — latch", () => {
     expect(v.state).toBe("mixed"); // a failed scan never downgrades the mixed state
     expect(v.reason).toBe(SCAN_ERROR_TABLE_UNAVAILABLE); // the scan error is kept alongside
     expect(v.found).toContain(normalizeStamp(FOREIGN)!);
-    expect(spaceGuardState()).toEqual({ state: "mixed", reason: SCAN_ERROR_TABLE_UNAVAILABLE });
+    expect(spaceGuardState()).toEqual({ state: "mixed", reason: SCAN_ERROR_TABLE_UNAVAILABLE, excluded: 0 });
 
     // The foreign row is reconciled; a SUCCESSFUL rescan finds one space.
     _setGuardTableGetterForTests(fakeTableOver([CURRENT, BARE]));
     expect(await recomputeLatch()).toBe(true);
-    expect(spaceGuardState()).toEqual({ state: "uniform", reason: null });
+    expect(spaceGuardState()).toEqual({ state: "uniform", reason: null, excluded: 0 });
   });
 
   // flair#2508 × flair#2530 — a scan's failure obeys the same scan-start order
@@ -215,7 +215,7 @@ describe("embedding-space-guard — latch", () => {
 
       a.settle({ error: new Error("late read failure") }); // scan A now fails
       expect(await scanA).toBe(true);
-      expect(spaceGuardState()).toEqual({ state: "uniform", reason: null });
+      expect(spaceGuardState()).toEqual({ state: "uniform", reason: null, excluded: 0 });
       expect(await isEmbeddingSpaceUniform()).toBe(true);
       expect(warns.some((w) => w.includes("stale scan failure refused"))).toBe(true);
     } finally {
@@ -233,7 +233,7 @@ describe("embedding-space-guard — latch", () => {
 
     a.settle({ table: await fakeTableOver([CURRENT, BARE])() }); // scan A now reads a uniform corpus
     expect(await scanA).toBe(false);
-    expect(spaceGuardState()).toEqual({ state: "scan-failed", reason: SCAN_ERROR_TABLE_UNAVAILABLE });
+    expect(spaceGuardState()).toEqual({ state: "scan-failed", reason: SCAN_ERROR_TABLE_UNAVAILABLE, excluded: null });
     expect(await isEmbeddingSpaceUniform()).toBe(false);
   });
 
@@ -244,7 +244,7 @@ describe("embedding-space-guard — latch", () => {
     noteWriteStamp(FOREIGN); // the epoch changes while scan A is in flight
     a.settle({ error: new Error("late read failure") });
     expect(await scanA).toBe(false);
-    expect(spaceGuardState()).toEqual({ state: "mixed", reason: null });
+    expect(spaceGuardState()).toEqual({ state: "mixed", reason: null, excluded: null });
   });
 
   it("a later successful scan clears the failed state", async () => {

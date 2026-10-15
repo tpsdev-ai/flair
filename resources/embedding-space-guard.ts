@@ -39,8 +39,9 @@
  * (`isEmbeddingSpaceUniform()` returns true). That is STAMP-METADATA
  * uniformity: the scan ignores a missing stamp and the hash-fallback marker
  * `hash-512d`, so the verdict says nothing about the space of a stored vector
- * without a space-bearing stamp, including a hash-fallback vector
- * (stored-vector provenance is deferred to flair#2573). Every other state — pending
+ * without a space-bearing stamp, including a hash-fallback vector: such a row
+ * is excluded from the vector legs by the consumers (flair#2573 slice 1), and
+ * storing a caller-supplied vector unverified is deferred to slice 2). Every other state — pending
  * (`unverified`), a failed scan (`scan-failed`), or a non-current stamp observed
  * by a scan or a foreign write (`mixed`) — makes a consumer take its
  * MIXED-space path: when a query embedding is available outside bm25-only
@@ -164,6 +165,19 @@ let _modelIdGetter: () => string = getModelId;
 // than caching a verdict we could not compute.
 let _uniform: boolean | undefined = undefined;
 let _activeStamps: string[] = []; // normalized, capped — for the degrade diagnostic only
+// flair#2573 slice 1 — how many rows the last published scan found carrying no
+// trusted current-space stamp (absent, `hash-512d`, or a non-current model).
+// `null` until a scan publishes (an unknown count is never reported as zero).
+// Such a row is excluded from every vector-similarity consumer, so its space
+// never enters a cosine; the uniformity verdict covers the stamped rows.
+let _excluded: number | null = null;
+// flair#2573 slice 1 — a write that stores no space-bearing stamp (an absent
+// stamp or the `hash-512d` marker) can add a row the vector legs must exclude,
+// without tripping the uniformity latch (an absent stamp is not a foreign
+// space). Set here so the next consult re-runs the scan and refreshes
+// `_excluded`; cleared when a scan publishes. Never refuses the embedding leg on
+// its own — it only refreshes the count.
+let _excludedStale = false;
 let _lastScanAt = 0;
 let _scanning: Promise<void> | undefined;
 // flair#2481 — foreign-space write notes invalidate an in-flight scan's verdict.
@@ -206,6 +220,10 @@ async function scan(): Promise<void> {
   const current = normalizeStamp(_modelIdGetter());
   const seen = new Set<string>();
   let uniform = true;
+  // Rows whose vector carries no trusted current-space stamp. They are excluded
+  // from the vector-similarity consumers (a query can never cosine against
+  // them), so they are counted apart from the uniformity verdict below.
+  let excluded = 0;
   // Which half of the scan threw, for the bounded failure reason below.
   let phase: "table" | "read" = "table";
   try {
@@ -215,9 +233,11 @@ async function scan(): Promise<void> {
     // cheaper than health.ts's existing full-record corpus read.
     for await (const row of table.search({ select: ["embeddingModel"] })) {
       const n = normalizeStamp((row as { embeddingModel?: unknown }).embeddingModel as string | null | undefined);
-      if (n === null) continue;
+      // No space-bearing stamp (absent / `hash-512d`) ⇒ excluded from the
+      // vector leg; it still matches lexically. Never enters the uniformity set.
+      if (n === null) { excluded++; continue; }
       if (seen.size < MAX_DIAG_STAMPS) seen.add(n);
-      if (n !== current) uniform = false;
+      if (n !== current) { uniform = false; excluded++; }
     }
     // Test-only: inert unless the fault-injection opt-in is set and this point
     // is armed (flair#2508). It holds this scan after its read, so a scan that
@@ -239,6 +259,8 @@ async function scan(): Promise<void> {
     }
     _activeStamps = [...seen];
     _uniform = uniform;
+    _excluded = excluded;
+    _excludedStale = false;
     _publishedScanSeq = scanSeq;
     _lastScanAt = Date.now();
     // A published verdict clears any earlier failed-scan state.
@@ -300,6 +322,11 @@ export interface EmbeddingSpaceVerdict {
    *  later foreign writes, for the diagnostic. An observation can be stale (a
    *  foreign row since deleted) until a successful rescan. */
   found: string[];
+  /** Rows the last published scan found carrying no trusted current-space stamp
+   *  (absent, `hash-512d`, or a non-current model). They are excluded from every
+   *  vector-similarity consumer; the uniformity verdict covers the stamped rows.
+   *  `null` when no scan has published a count — never reported as zero. */
+  excluded: number | null;
 }
 
 /** Bounded, row-content-free reasons a scan can fail with. An error from the
@@ -326,14 +353,15 @@ function noteScanFailure(reason: string): void {
 function guardSnapshot(): EmbeddingSpaceVerdict {
   const current = normalizeStamp(_modelIdGetter()) ?? _modelIdGetter();
   const found = [..._activeStamps];
+  const excluded = _excluded;
   // A known foreign stamp comes first, so no failed scan, earlier or later,
   // turns the `mixed` state into an advisory `scan-failed`; the error rides in `reason`.
-  if (_uniform === false) return { uniform: false, state: "mixed", reason: _lastScanError, current, found };
+  if (_uniform === false) return { uniform: false, state: "mixed", reason: _lastScanError, current, found, excluded };
   if (_lastScanError !== null) {
-    return { uniform: false, state: "scan-failed", reason: _lastScanError, current, found };
+    return { uniform: false, state: "scan-failed", reason: _lastScanError, current, found, excluded };
   }
-  if (_uniform === true) return { uniform: true, state: "uniform", reason: null, current, found };
-  return { uniform: false, state: "unverified", reason: null, current, found };
+  if (_uniform === true) return { uniform: true, state: "uniform", reason: null, current, found, excluded };
+  return { uniform: false, state: "unverified", reason: null, current, found, excluded };
 }
 
 /** The consult decision. Fails closed and never awaits an in-flight scan: an
@@ -343,8 +371,8 @@ function guardSnapshot(): EmbeddingSpaceVerdict {
  *  The snapshot is taken synchronously, so the state cannot drift from the
  *  decision. */
 function consultGuard(): EmbeddingSpaceVerdict {
-  if (_uniform === true && _lastScanError === null) return guardSnapshot();
-  if (_uniform === undefined || Date.now() - _lastScanAt >= RECHECK_MS) {
+  if (_uniform === true && _lastScanError === null && !_excludedStale) return guardSnapshot();
+  if (_uniform === undefined || _excludedStale || Date.now() - _lastScanAt >= RECHECK_MS) {
     void runScan();
   }
   return guardSnapshot();
@@ -352,7 +380,7 @@ function consultGuard(): EmbeddingSpaceVerdict {
 
 /** THE single chokepoint. Returns true when a scan verified every
  *  space-bearing `embeddingModel` stamp to be the current space (stamp metadata
- *  only; a stored vector without such a stamp is not checked, flair#2573), false
+ *  only; the consumers exclude a stored vector without such a stamp, flair#2573), false
  *  otherwise — including the UNKNOWN verdict (pending first scan, or a failed
  *  scan), which fails closed (the caller must take its mixed-space path). O(1)
  *  on the happy path: once verified-uniform, no scan; a pending or tripped
@@ -360,6 +388,42 @@ function consultGuard(): EmbeddingSpaceVerdict {
  *  verdict is reported now, not after the scan. */
 export function isEmbeddingSpaceUniform(): Promise<boolean> {
   return Promise.resolve(consultGuard().uniform);
+}
+
+/**
+ * flair#2573 slice 1 — is `stamp` a trusted current-space model stamp for the
+ * configured model? True only for a space-bearing stamp that denotes the current
+ * space (the engine-qualified id or its bare-name equivalent). An absent stamp,
+ * the `hash-512d` marker and a foreign model are all untrusted: a stored vector
+ * carrying one is excluded from every vector-similarity path. Reads the
+ * injectable model-id getter so tests can pin the space. Metadata compare only
+ * (never a vector-byte comparison).
+ */
+export function isTrustedVectorStamp(stamp: string | null | undefined): boolean {
+  return isCurrentSpaceStamp(stamp, _modelIdGetter());
+}
+
+/**
+ * flair#2573 slice 1 — the Harper condition that admits ONLY rows whose
+ * `embeddingModel` is a trusted current-space stamp (one of
+ * `currentSpaceRawForms()`). A row with an absent stamp, the `hash-512d` marker,
+ * or a foreign model does not match `equals` on any form and is excluded. Used
+ * as an ADDITIONAL condition on a vector (HNSW) query ONLY — never folded into
+ * the caller's `conditions`, which also drive the lexical leg (an excluded row
+ * must still match lexically).
+ */
+export function trustedVectorCondition(): {
+  operator: "or";
+  conditions: { attribute: string; comparator: "equals"; value: string }[];
+} {
+  return {
+    operator: "or",
+    conditions: currentSpaceRawForms(_modelIdGetter()).map((value) => ({
+      attribute: "embeddingModel",
+      comparator: "equals" as const,
+      value,
+    })),
+  };
 }
 
 /** The full verdict for a consumer that must NAME the state it degraded on
@@ -372,9 +436,9 @@ export function embeddingSpaceVerdict(): Promise<EmbeddingSpaceVerdict> {
 
 /** The guard state for an operator surface (`flair doctor` via /Health), without
  *  running a scan. Never blocks, never reads a vector. */
-export function spaceGuardState(): { state: EmbeddingSpaceGuardState; reason: string | null } {
+export function spaceGuardState(): { state: EmbeddingSpaceGuardState; reason: string | null; excluded: number | null } {
   const v = guardSnapshot();
-  return { state: v.state, reason: v.reason };
+  return { state: v.state, reason: v.reason, excluded: v.excluded };
 }
 
 /**
@@ -385,7 +449,14 @@ export function spaceGuardState(): { state: EmbeddingSpaceGuardState; reason: st
  */
 export function noteWriteStamp(stamp: string | null | undefined): void {
   const n = normalizeStamp(stamp);
-  if (n === null) return;
+  if (n === null) {
+    // A stored vector with no space-bearing stamp (an absent stamp, or the
+    // `hash-512d` marker) is excluded from the vector legs; refresh the count on
+    // the next consult. Does NOT trip the uniformity latch — an absent stamp is
+    // not a foreign space.
+    _excludedStale = true;
+    return;
+  }
   if (n !== normalizeStamp(_modelIdGetter())) {
     if (!_activeStamps.includes(n) && _activeStamps.length < MAX_DIAG_STAMPS) _activeStamps.push(n);
     _uniform = false;
@@ -457,6 +528,8 @@ export function _resetGuardForTests(): void {
   _modelIdGetter = getModelId;
   _uniform = undefined;
   _activeStamps = [];
+  _excluded = null;
+  _excludedStale = false;
   _lastScanAt = 0;
   _scanning = undefined;
   _writeEpoch = 0;

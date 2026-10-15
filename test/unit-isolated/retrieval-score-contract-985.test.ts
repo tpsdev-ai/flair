@@ -106,6 +106,10 @@ const databasesMock = {
 mock.module("harper", () => ({ databases: databasesMock, Resource: class {} }));
 
 const { retrieveCandidates } = await import("../../resources/semantic-retrieval-core.ts");
+const { getModelId } = await import("../../resources/embeddings-provider.ts");
+// flair#2573: only a stored vector carrying a trusted current-space
+// `embeddingModel` stamp is cosined, so the fixtures stamp their vectors.
+const CURRENT = getModelId();
 
 // ─── Fixtures (the #985 report's shapes) ─────────────────────────────────────
 
@@ -134,13 +138,13 @@ const newDecision = "Decision: adopt the Vertex feature flag for the next releas
 function seedTwoRecords() {
   memoryStore = new Map();
   getCalls = [];
-  memoryStore.set("mtls", { id: "mtls", agentId: AGENT, content: mtlsContent, embedding: eMtls, durability: "standard", createdAt: new Date().toISOString() });
-  memoryStore.set("copybuf", { id: "copybuf", agentId: AGENT, content: copyContent, embedding: eCopy, durability: "standard", createdAt: new Date().toISOString() });
+  memoryStore.set("mtls", { id: "mtls", agentId: AGENT, content: mtlsContent, embedding: eMtls, embeddingModel: CURRENT, durability: "standard", createdAt: new Date().toISOString() });
+  memoryStore.set("copybuf", { id: "copybuf", agentId: AGENT, content: copyContent, embedding: eCopy, embeddingModel: CURRENT, durability: "standard", createdAt: new Date().toISOString() });
 }
 
 function seedThreeRecords() {
   seedTwoRecords();
-  memoryStore.set("runbook", { id: "runbook", agentId: AGENT, content: runbookContent, embedding: eRunbook, durability: "standard", createdAt: new Date().toISOString() });
+  memoryStore.set("runbook", { id: "runbook", agentId: AGENT, content: runbookContent, embedding: eRunbook, embeddingModel: CURRENT, durability: "standard", createdAt: new Date().toISOString() });
 }
 
 const baseConditions = [
@@ -200,7 +204,7 @@ describe("flair#985 — hybrid raw `_score` is absolute similarity, never rank-n
     // the true-near-dup positive control: dedup consumers must still be able
     // to detect real duplicates.
     memoryStore.set("neardup", {
-      id: "neardup", agentId: AGENT, embedding: qEmb.slice(),
+      id: "neardup", agentId: AGENT, embedding: qEmb.slice(), embeddingModel: CURRENT,
       content: "Decision: adopt the Vertex feature flag for the next release cycle rollout.",
       durability: "standard", createdAt: new Date().toISOString(),
     });
@@ -291,7 +295,7 @@ describe("flair#985 — the singleton corpus (delete+store death-spiral shape)",
     // come from the point-lookup cosine fallback.
     memoryStore = new Map();
     getCalls = [];
-    memoryStore.set("mtls", { id: "mtls", agentId: AGENT, content: mtlsContent, embedding: eMtls, durability: "standard", createdAt: new Date().toISOString() });
+    memoryStore.set("mtls", { id: "mtls", agentId: AGENT, content: mtlsContent, embedding: eMtls, embeddingModel: CURRENT, durability: "standard", createdAt: new Date().toISOString() });
     const results = await run();
     expect(results.length).toBe(1);
     expect(results[0]._score).toBeCloseTo(0.3, 3);

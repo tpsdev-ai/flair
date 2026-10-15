@@ -19,8 +19,18 @@ describe("describeEmbeddingSpaceDoctorFinding (flair#2530)", () => {
     expect(describeEmbeddingSpaceDoctorFinding({ state: "uniform", reason: null })).toEqual({
       isIssue: false,
       icon: "ok",
-      message: "embedding model stamps verified uniform",
+      message: "embedding model stamps verified uniform — the verdict covers stamped rows",
     });
+  });
+
+  test("uniform: names the excluded count when /Health carries one (flair#2573)", () => {
+    const f = describeEmbeddingSpaceDoctorFinding({ state: "uniform", reason: null, excluded: 3 });
+    expect(String(f?.message)).toContain("excluded from the vector leg: 3 row(s) with no trusted model stamp");
+    // An absent or malformed count is never invented as zero.
+    const base = "embedding model stamps verified uniform — the verdict covers stamped rows";
+    expect(describeEmbeddingSpaceDoctorFinding({ state: "uniform", reason: null, excluded: null })?.message).toBe(base);
+    expect(describeEmbeddingSpaceDoctorFinding({ state: "uniform", reason: null, excluded: -1 })?.message).toBe(base);
+    expect(describeEmbeddingSpaceDoctorFinding({ state: "uniform", reason: null, excluded: "3" })?.message).toBe(base);
   });
 
   test("mixed: a blocking finding carrying the reembed remedy", () => {

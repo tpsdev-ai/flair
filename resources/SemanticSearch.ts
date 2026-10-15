@@ -191,9 +191,10 @@ export class SemanticSearch extends Resource {
     // not-yet-verified / scan-failed) below. Never cosine a query against a
     // stored corpus whose `embeddingModel` stamps are not verified to be the
     // current space, never merely log. (This is stamp-metadata uniformity
-    // only: the scan skips a stored vector with no stamp, and a caller-supplied
-    // `queryEmbedding` carries no space provenance; neither is checked.
-    // Stored-vector provenance is deferred to flair#2573.)
+    // only: the guard's own verdict ignores a stored vector with no stamp, and a
+    // caller-supplied `queryEmbedding` carries no space provenance. A stored
+    // vector without a trusted current-space stamp is excluded from the vector
+    // leg by the retrieval core, flair#2573 slice 1.)
     // Consulted through the SAME single chokepoint the write-time dedup leg
     // uses — O(1) on the verified-uniform happy path. The consult, and so the
     // state warning, happens only when a query embedding is available
