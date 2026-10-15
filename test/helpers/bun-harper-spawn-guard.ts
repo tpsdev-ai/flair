@@ -57,6 +57,7 @@ function runtimeKind(command: string, options: Options): "bun" | "node" | "unkno
   if (executable === canonicalPath(process.execPath)) return process.versions.bun ? "bun" : "node";
   try {
     const identity = probe(executable, ["-p", "process.versions.bun ? 'bun' : process.versions.node"], {
+      env: options.env, cwd: cwdPath(options.cwd),
       encoding: "utf8", timeout: 2_000, killSignal: "SIGKILL", maxBuffer: 1_024,
       stdio: ["ignore", "pipe", "pipe"],
     }).trim();
@@ -163,9 +164,6 @@ function shellWords(source: string): string[] | undefined {
   return words;
 }
 
-// Guard direct launches; env COMMAND; env -S STRING / -SSTRING;
-// env --split-string STRING / --split-string=STRING; and shell: true, sh -c,
-// bash -c strings beginning with a runtime after assignments.
 function invocation(command: string, args: string[], options: Options) {
   let words: string[] | undefined = [command, ...args];
   if (options.shell) words = shellWords(words.join(" "));

@@ -279,6 +279,38 @@ describe("Bun Harper spawn preload", () => {
       refused(() => spawnSync(name, [cli, "init"], { timeout: 5_000, cwd: dirname(root), env: { PATH: root } }));
     }
   }, 20_000);
+  for (const context of ["environment", "working directory"]) {
+    test(`a launcher selecting Bun for the child ${context} is refused`, () => {
+      const parentOnly = "FLAIR_GUARD_PARENT_ONLY";
+      if (!process.env[parentOnly]) {
+        const result = spawnSync(process.execPath, ["test", import.meta.filename,
+          "--test-name-pattern", `a launcher selecting Bun for the child ${context} is refused`], {
+          env: { ...process.env, [parentOnly]: "1" }, encoding: "utf8", timeout: 15_000,
+        });
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.stderr).toContain("1 pass");
+        return;
+      }
+      const { root, cli } = fixture();
+      const runtime = join(root, "runtime");
+      const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+      const env = { ...process.env };
+      delete env[parentOnly];
+      const condition = context === "environment" ? `[ "$${parentOnly}" = 1 ]` : `[ "$PWD" != ${quote(root)} ]`;
+      writeFileSync(runtime, `#!/bin/sh\nif ${condition}; then exec ${quote(Bun.which("node")!)} "$@"; fi\nexec ${quote(process.execPath)} "$@"\n`, { mode: 0o755 });
+      expect(spawnSync(runtime, ["-p", "process.versions.bun ? 'bun' : 'node'"], {
+        encoding: "utf8", timeout: 5_000,
+      }).stdout.trim()).toBe("node");
+      const options = { env, cwd: root, timeout: 5_000 };
+      expect(spawnSync("./runtime", ["-p", "process.versions.bun ? 'bun' : 'node'"], {
+        ...options, encoding: "utf8",
+      }).stdout.trim()).toBe("bun");
+      for (const args of [[cli, "init"], [harperEntry, "run", "."]]) {
+        refused(() => spawnSync("./runtime", args, options));
+        refused(() => Bun.spawnSync(["./runtime", ...args], options), "Bun.spawnSync");
+      }
+    }, 20_000);
+  }
   test("a renamed Bun executable is refused", () => {
     const { root, cli } = fixture();
     const runtime = join(root, "runtime");

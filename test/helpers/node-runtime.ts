@@ -1,10 +1,11 @@
 import { execFileSync } from "node:child_process";
 
-export function nodeBin(): string {
-  const executable = process.env.NODE_BIN?.trim() || (process.versions.bun ? "node" : process.execPath);
+export function nodeBin({ env = process.env, cwd = process.cwd() }: { env?: NodeJS.ProcessEnv; cwd?: string | URL } = {}): string {
+  const executable = env.NODE_BIN?.trim() || (process.versions.bun ? "node" : process.execPath);
   let identity: string;
   try {
     identity = execFileSync(executable, ["-p", "process.versions.bun ? 'bun' : process.versions.node"], {
+      env, cwd,
       encoding: "utf8",
       timeout: 2_000,
       killSignal: "SIGKILL",

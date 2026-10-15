@@ -63,3 +63,29 @@ test("nodeBin bounds a stalled identity probe", () => {
   writeFileSync(executable, `#!${Bun.which("node")}\nsetInterval(() => {}, 1000)`, { mode: 0o755 });
   configured(executable, () => expect(() => nodeBin()).toThrow("cannot verify Node executable"));
 });
+
+for (const context of ["environment", "working directory"]) {
+  test(`nodeBin probes a launcher in the child ${context}`, () => {
+    const root = tempDir("flair-node-runtime-");
+    const runtime = join(root, "runtime");
+    const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+    const parentOnly = "FLAIR_NODE_PARENT_ONLY";
+    const previous = process.env[parentOnly];
+    process.env[parentOnly] = "1";
+    const env: NodeJS.ProcessEnv = { ...process.env, NODE_BIN: "./runtime" };
+    delete env[parentOnly];
+    const condition = context === "environment" ? `[ "$${parentOnly}" = 1 ]` : `[ "$PWD" != ${quote(root)} ]`;
+    writeFileSync(runtime, `#!/bin/sh\nif ${condition}; then exec ${quote(Bun.which("node")!)} "$@"; fi\nexec ${quote(process.execPath)} "$@"\n`, { mode: 0o755 });
+    try {
+      configured(runtime, () => expect(nodeBin()).toBe(runtime));
+      expect(() => nodeBin({ env, cwd: root })).toThrow("refused non-Node executable");
+      env.NODE_BIN = Bun.which("node")!;
+      expect(execFileSync(nodeBin({ env, cwd: root }), ["-p", "process.versions.bun ? 'bun' : 'node'"], {
+        env, cwd: root, encoding: "utf8", timeout: 5_000,
+      }).trim()).toBe("node");
+    } finally {
+      if (previous === undefined) delete process.env[parentOnly];
+      else process.env[parentOnly] = previous;
+    }
+  });
+}
