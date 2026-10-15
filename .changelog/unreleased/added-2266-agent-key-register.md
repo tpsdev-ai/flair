@@ -1,6 +1,7 @@
 - **New admin-only `POST /AgentKeyRegister` registers a caller-held Ed25519 key on an agent row whose stored key is exactly `pending`.**
 
-  The caller must be a verified Flair admin. The key is written only while the
+  Accepted credentials: Basic admin or an Ed25519 agent with the admin annotation.
+  A Harper Bearer token is refused. The key is written only while the
   stored value is exactly `pending`, on a local, non-deactivated row; a
   non-`pending` row is refused with a pointer to key rotation. The operation runs
   under a per-agent lock in one owned transaction, confirms the committed row

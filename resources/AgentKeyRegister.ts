@@ -21,15 +21,13 @@
  * (resources/write-back.ts) before the commit, and the stored key is read back
  * AFTER the commit. The response is returned only when the read-back is equal.
  *
- * Admin is decided by resolveAgentAuth (an admin Basic credential or a verified
- * TPS-Ed25519 admin signature) and, for a Bearer operation token Harper issued,
- * by resolveHarperBearerAdmin (resources/agent-auth.ts): the token must verify
- * to an unscoped Harper `super_user` whose Agent row, if any, is not deactivated.
+ * Accepted credentials: Basic admin or a verified Ed25519 agent with the admin
+ * annotation. A Harper Bearer token is refused.
  */
 import { Resource, databases } from "harper";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { resolveAgentAuth, resolveHarperBearerAdmin } from "./agent-auth.js";
+import { resolveAgentAuth } from "./agent-auth.js";
 import { withKeyLock } from "./key-lock.js";
 import { withOwnedTransaction } from "./request-transaction.js";
 import { CommittedRowChanged, confirmCommittedRow } from "./write-back.js";
@@ -66,9 +64,7 @@ function readHeader(reqLike: any, name: string): string {
   return reqLike?.headers?.get?.(name) ?? reqLike?.headers?.asObject?.[name] ?? "";
 }
 
-/** The Harper username on the request, if any (Harper's for Basic or Bearer;
- *  the user the gate maps a TPS-Ed25519 agent to). An audit label only: this
- *  value is never consulted for an authorization decision. */
+/** The Harper username on the request, if any; an audit label only. */
 function operatorOf(reqLike: any): string | null {
   const username = reqLike?.user?.username;
   return typeof username === "string" && username.length > 0 ? username : null;
@@ -99,24 +95,13 @@ export class AgentKeyRegister extends Resource {
       return jsonRefusal(401, "authentication required", "the Flair-Enroll enrollment scheme is not enabled in this build");
     }
 
-    // An admin only: a TPS-Ed25519 or Basic caller the gate verified and
-    // annotated `tpsAgentIsAdmin`, a credentialed `super_user`, or a Bearer
-    // operation token Harper verified to an unscoped `super_user`. The gate
-    // cannot verify a Bearer token, so resolveAgentAuth answers `anonymous` for
-    // one and resolveHarperBearerAdmin decides it from the principal Harper
-    // resolved; a non-admin user's token stays `anonymous`. A named refusal
-    // (a failed principal lookup) stands. A credential-less loopback request
-    // lands on `anonymous` (the credential-evidence rule).
-    let auth = await resolveAgentAuth(ctx);
-    if (auth.kind === "anonymous" && auth.error === undefined) {
-      auth = (await resolveHarperBearerAdmin(ctx)) ?? auth;
-    }
+    const auth = await resolveAgentAuth(ctx);
     if (auth.kind !== "agent" || !auth.isAdmin) {
       return auth.kind === "anonymous"
         ? jsonRefusal(401, "authentication required", "an admin credential is required to register a key")
         : jsonRefusal(403, "forbidden", "an admin credential is required to register a key");
     }
-    // The admin agent id (TPS-Ed25519) or the Harper username (Basic or Bearer).
+    // The admin agent id (TPS-Ed25519) or the Harper username (Basic).
     const actorId = auth.agentId;
 
     // Validate the body.
