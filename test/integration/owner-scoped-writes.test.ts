@@ -406,9 +406,15 @@ describe("owner-scoped writes: non-admin addressed writes and collection PUT/PAT
       const id = `osw-oe-addr-ok-${randomUUID().slice(0, 8)}`;
       const seedRes = await send(caller, "POST", "/OrgEvent/", { id, authorId: caller.id, kind: "k", summary: "orig" });
       expect(seedRes.status, `OrgEvent seed POST returned ${seedRes.status}: ${await seedRes.text()}`).toBeLessThan(300);
-      const res = await send(caller, "PUT", `/OrgEvent/${e(id)}`, { id, authorId: caller.id, kind: "k", summary: "updated", createdAt: NOW });
+      const seeded = await storedRow("OrgEvent", "id", id);
+      expect(seeded?.createdAt, "the seed POST did not store a createdAt").toBeTruthy();
+      // The server assigned createdAt on create and keeps it on update
+      // (resources/org-event-created-at.ts), so the update body omits it.
+      const res = await send(caller, "PUT", `/OrgEvent/${e(id)}`, { id, authorId: caller.id, kind: "k", summary: "updated" });
       expect(res.status, `OrgEvent addressed PUT returned ${res.status}: ${await res.text()}`).toBeLessThan(300);
-      expect((await storedRow("OrgEvent", "id", id))?.summary).toBe("updated");
+      const updated = await storedRow("OrgEvent", "id", id);
+      expect(updated?.summary).toBe("updated");
+      expect(updated?.createdAt, "the owner's update changed the stored createdAt").toBe(seeded?.createdAt);
     }, 30_000);
 
     test("OrgEvent: an addressed POST with no body id writes the addressed record and no other", async () => {

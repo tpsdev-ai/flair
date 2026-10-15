@@ -2,8 +2,19 @@
  * orgevent-created-at-server-time.test.ts — real Harper, over HTTP.
  *
  * The createdAt check for OrgEvent writes (resources/org-event-created-at.ts):
- *   - POST, PUT (single record and a collection PUT of an array) and an admin
- *     PATCH that creates a row store the server's time, whatever the body says;
+ *   - POST, PUT (single record, and an administrator's collection PUT of an
+ *     array) and an admin PATCH that creates a row store the server's time,
+ *     whatever the body says;
+ *   - a non-admin agent's collection PUT or PATCH is refused by the
+ *     owner-scoped write guard (resources/owner-scoped-write-policy.ts) with
+ *     403 `forbidden: a non-admin write to OrgEvent must address one record by
+ *     its id` before the createdAt check: no row is created and a stored row is
+ *     byte-for-byte unchanged, createdAt included. The guard admits a
+ *     collection PUT from an administrator (an admin agent key or a
+ *     credentialed Basic admin) and from a trusted in-process call; the
+ *     createdAt check does not run for an in-process call, and no HTTP request
+ *     resolves to one, so the collection-path createdAt cases run as an
+ *     administrator;
  *   - an update that reaches the check with a createdAt that differs from the
  *     stored one is refused with `created_at_immutable` (409) and the stored
  *     row is unchanged, for agents and admin agents alike, including a stored
@@ -13,15 +24,21 @@
  *     but a non-empty string or a non-empty array of strings, the empty string
  *     included) is refused with `invalid_event_id` (400) before any write, and
  *     a stored row under such an id is unchanged; a composite id is read;
+ *   - a POST body id that is absent, null or empty gets a generated id at the
+ *     root collection; any other id that is not a non-empty string or a
+ *     non-empty array of strings (0, false, true, 42, [], {} and so on, and an
+ *     empty id anywhere but the root collection) is refused with
+ *     `invalid_event_id` (400) and stores nothing;
  *   - for malformed ids and bodies, the status each caller gets is pinned, with
  *     a refusal's `error` or `code` field, including input answered before the
- *     check (POST's generated id, attribution, the ownership lookup, Harper's
- *     own validation);
+ *     check (attribution, the owner-scoped write guard, Harper's own
+ *     validation);
  *   - the catch-up feed delivers events in timestamp and ID order, so events
  *     with one server time are delivered in ID order (checked on a second,
  *     frozen-clock instance with IDs in reverse write order);
- *   - a credentialed Basic admin follows the same rule, and a collection PATCH
- *     is refused with `invalid_event_id` and writes nothing;
+ *   - a credentialed Basic admin follows the same rule; an administrator's
+ *     collection PATCH is refused with `invalid_event_id`, a non-admin's with
+ *     the owner-scoped collection refusal, and neither writes anything;
  *   - a table-level write (the path flair's in-process writers use) keeps the
  *     createdAt it supplies;
  *   - a write whose stored-event read fails is refused and writes nothing.
@@ -83,6 +100,7 @@ const FUTURE = "2099-01-01T00:00:00.000Z";
 const PAST = "2001-01-01T00:00:00.000Z";
 const IMMUTABLE = "created_at_immutable";
 const INVALID_ID = "invalid_event_id";
+const COLLECTION_REFUSAL = "forbidden: a non-admin write to OrgEvent must address one record by its id";
 
 async function send(who: TestAgent, method: string, path: string, body?: unknown, h: HarperInstance = harper, nowMs?: number): Promise<Response> {
   return fetch(`${h.httpURL}${path}`, {
@@ -167,6 +185,37 @@ function expectInvalidIdRefusal(status: number, text: string): void {
   expect(body.error).toBe(INVALID_ID);
   expect(Object.keys(body).sort()).toEqual(["error", "message"]);
 }
+/** The owner-scoped write guard's refusal of a non-admin collection write; it carries nothing else. */
+function expectCollectionRefusal(status: number, text: string): void {
+  expect(status, text.slice(0, 300)).toBe(403);
+  expect(JSON.parse(text)).toEqual({ error: COLLECTION_REFUSAL });
+}
+/** The stored row under `id` exactly as the operations API returns it, for a byte-for-byte comparison. */
+async function rowBytes(id: string): Promise<string> {
+  const res = await adminOp({
+    operation: "search_by_hash", database: "flair", table: "OrgEvent", hash_values: [id], get_attributes: ["*"],
+  });
+  const text = await res.text();
+  expect(res.status, `search_by_hash returned ${res.status}: ${text.slice(0, 200)}`).toBe(200);
+  return text;
+}
+/** The rows whose summary is `summary`, exactly as the operations API returns them. */
+async function summaryBytes(summary: string): Promise<string> {
+  const res = await adminOp({
+    operation: "search_by_value", database: "flair", table: "OrgEvent",
+    search_attribute: "summary", search_value: summary, get_attributes: ["*"],
+  });
+  const text = await res.text();
+  expect(res.status, `search_by_value returned ${res.status}: ${text.slice(0, 200)}`).toBe(200);
+  return text;
+}
+/** How many OrgEvent rows the instance stores. */
+async function countEvents(): Promise<number> {
+  const res = await adminOp({ operation: "sql", sql: "SELECT COUNT(*) AS n FROM flair.OrgEvent" });
+  const text = await res.text();
+  expect(res.status, `count returned ${res.status}: ${text.slice(0, 200)}`).toBe(200);
+  return Number((JSON.parse(text) as Array<{ n: number }>)[0]?.n);
+}
 /** Create an event as `who` and return its stored row. */
 async function createOwn(who: TestAgent, id: string): Promise<any> {
   const res = await send(who, "POST", "/OrgEvent", { id, authorId: who.id, kind: "status", summary: `stored ${id}` });
@@ -213,11 +262,18 @@ describe("on create, an OrgEvent's createdAt is the server's time whatever the b
       expectServerTime((await readEvent(id))?.createdAt, w.from, w.to);
     }, 30_000);
 
-    it(`a collection PUT of an array with a ${label} createdAt stores the server time for each element`, async () => {
+    it(`an admin collection PUT of an array with a ${label} createdAt stores the server time for each element`, async () => {
       const ids = [`oect-arr-${label}-a-${randomUUID()}`, `oect-arr-${label}-b-${randomUUID()}`];
-      const w = await timed(() => send(agent, "PUT", "/OrgEvent/", ids.map((id) => ({ id, authorId: agent.id, kind: "status", summary: "array create", createdAt }))));
+      const w = await timed(() => send(admin, "PUT", "/OrgEvent/", ids.map((id) => ({ id, authorId: admin.id, kind: "status", summary: "array create", createdAt }))));
       expect(w.res.status, w.text.slice(0, 300)).toBeLessThan(300);
       for (const id of ids) expectServerTime((await readEvent(id))?.createdAt, w.from, w.to);
+    }, 30_000);
+
+    it(`a non-admin collection PUT of an array with a ${label} createdAt is refused with 403 and creates no row`, async () => {
+      const ids = [`oect-arr-agent-${label}-a-${randomUUID()}`, `oect-arr-agent-${label}-b-${randomUUID()}`];
+      const res = await send(agent, "PUT", "/OrgEvent/", ids.map((id) => ({ id, authorId: agent.id, kind: "status", summary: "array create", createdAt })));
+      expectCollectionRefusal(res.status, await res.text());
+      for (const id of ids) expect(await readEvent(id), `element ${id} of a refused collection PUT was stored`).toBeNull();
     }, 30_000);
 
     it(`an admin PUT with a ${label} createdAt stores the server time`, async () => {
@@ -241,7 +297,7 @@ describe("an update that changes an OrgEvent's createdAt is refused, and the sto
     { name: "PUT", who: agent, write: (id, createdAt) => send(agent, "PUT", `/OrgEvent/${id}`, { id, authorId: agent.id, kind: "status", summary: "changed", createdAt }) },
     { name: "PATCH", who: agent, write: (id, createdAt) => send(agent, "PATCH", `/OrgEvent/${id}`, { summary: "changed", createdAt }) },
     { name: "POST naming the event's id", who: agent, write: (id, createdAt) => send(agent, "POST", "/OrgEvent", { id, kind: "status", summary: "changed", createdAt }) },
-    { name: "collection PUT of an array", who: agent, write: (id, createdAt) => send(agent, "PUT", "/OrgEvent/", [{ id, authorId: agent.id, kind: "status", summary: "changed", createdAt }]) },
+    { name: "admin collection PUT of an array", who: admin, write: (id, createdAt) => send(admin, "PUT", "/OrgEvent/", [{ id, authorId: admin.id, kind: "status", summary: "changed", createdAt }]) },
     { name: "admin PUT", who: admin, write: (id, createdAt) => send(admin, "PUT", `/OrgEvent/${id}`, { id, authorId: admin.id, kind: "status", summary: "changed", createdAt }) },
     { name: "admin PATCH", who: admin, write: (id, createdAt) => send(admin, "PATCH", `/OrgEvent/${id}`, { summary: "changed", createdAt }) },
     { name: "admin PUT of an array body", who: admin, write: (id, createdAt) => send(admin, "PUT", `/OrgEvent/oect-array-path-${randomUUID()}`, [{ id, authorId: admin.id, kind: "status", summary: "changed", createdAt }]) },
@@ -259,17 +315,44 @@ describe("an update that changes an OrgEvent's createdAt is refused, and the sto
     }
   }
 
-  it("a collection PUT of an array is refused as a whole: a new sibling element is not stored", async () => {
+  for (const [label, createdAt] of [["future", FUTURE], ["past", PAST]] as const) {
+    it(`a non-admin collection PUT of an array with a ${label} createdAt is refused with 403, and the row is byte-for-byte unchanged`, async () => {
+      const id = `oect-upd-coll-agent-${label}-${randomUUID()}`;
+      const before = await createOwn(agent, id);
+      const bytes = await rowBytes(id);
+      const res = await send(agent, "PUT", "/OrgEvent/", [{ id, authorId: agent.id, kind: "status", summary: "changed", createdAt }]);
+      expectCollectionRefusal(res.status, await res.text());
+      expect(await rowBytes(id)).toBe(bytes);
+      expect((await readEvent(id))?.createdAt).toBe(before.createdAt);
+    }, 30_000);
+  }
+
+  it("an admin collection PUT of an array is refused as a whole: a new sibling element is not stored", async () => {
     const id = `oect-batch-old-${randomUUID()}`;
     const sibling = `oect-batch-new-${randomUUID()}`;
-    const before = await createOwn(agent, id);
-    const res = await send(agent, "PUT", "/OrgEvent/", [
-      { id: sibling, authorId: agent.id, kind: "status", summary: "new sibling" },
-      { id, authorId: agent.id, kind: "status", summary: "changed", createdAt: PAST },
+    const before = await createOwn(admin, id);
+    const res = await send(admin, "PUT", "/OrgEvent/", [
+      { id: sibling, authorId: admin.id, kind: "status", summary: "new sibling" },
+      { id, authorId: admin.id, kind: "status", summary: "changed", createdAt: PAST },
     ]);
     expectImmutableRefusal(res.status, await res.text(), before.createdAt, PAST);
     expect(await readEvent(id)).toEqual(before);
     expect(await readEvent(sibling), "a sibling of the refused element was stored").toBeNull();
+  }, 30_000);
+
+  it("a non-admin collection PUT of an array is refused with 403 as a whole: no element is stored and the existing row is byte-for-byte unchanged", async () => {
+    const id = `oect-batch-agent-old-${randomUUID()}`;
+    const sibling = `oect-batch-agent-new-${randomUUID()}`;
+    const before = await createOwn(agent, id);
+    const bytes = await rowBytes(id);
+    const res = await send(agent, "PUT", "/OrgEvent/", [
+      { id: sibling, authorId: agent.id, kind: "status", summary: "new sibling" },
+      { id, authorId: agent.id, kind: "status", summary: "changed", createdAt: PAST },
+    ]);
+    expectCollectionRefusal(res.status, await res.text());
+    expect(await rowBytes(id)).toBe(bytes);
+    expect((await readEvent(id))?.createdAt).toBe(before.createdAt);
+    expect(await readEvent(sibling), "a sibling in the refused request was stored").toBeNull();
   }, 30_000);
 });
 
@@ -405,15 +488,23 @@ describe("a credentialed Basic admin follows the same createdAt rule", () => {
 });
 
 describe("a PATCH to the OrgEvent collection writes nothing", () => {
-  for (const who of [agent, admin]) {
-    it(`${who === admin ? "an admin" : "a non-admin"} collection PATCH is refused with ${INVALID_ID} (400)`, async () => {
-      const id = `oect-coll-patch-${randomUUID()}`;
-      const before = await createOwn(agent, id);
-      const res = await send(who, "PATCH", "/OrgEvent/", { summary: "changed", createdAt: PAST });
-      expectInvalidIdRefusal(res.status, await res.text());
-      expect(await readEvent(id)).toEqual(before);
-    }, 30_000);
-  }
+  it(`an admin collection PATCH is refused with ${INVALID_ID} (400)`, async () => {
+    const id = `oect-coll-patch-${randomUUID()}`;
+    const before = await createOwn(agent, id);
+    const res = await send(admin, "PATCH", "/OrgEvent/", { summary: "changed", createdAt: PAST });
+    expectInvalidIdRefusal(res.status, await res.text());
+    expect(await readEvent(id)).toEqual(before);
+  }, 30_000);
+
+  it("a non-admin collection PATCH is refused with 403, and the row is byte-for-byte unchanged", async () => {
+    const id = `oect-coll-patch-agent-${randomUUID()}`;
+    const before = await createOwn(agent, id);
+    const bytes = await rowBytes(id);
+    const res = await send(agent, "PATCH", "/OrgEvent/", { summary: "changed", createdAt: PAST });
+    expectCollectionRefusal(res.status, await res.text());
+    expect(await rowBytes(id)).toBe(bytes);
+    expect((await readEvent(id))?.createdAt).toBe(before.createdAt);
+  }, 30_000);
 });
 
 describe("a record that reaches the check with an id it does not read is refused before any write", () => {
@@ -433,28 +524,57 @@ describe("a record that reaches the check with an id it does not read is refused
     expect(emptyRow?.createdAt).toBe(EMPTY_AT);
   }, 30_000);
 
-  it("a collection PUT naming the empty id with a different createdAt is refused, and the row is unchanged", async () => {
-    const res = await send(agent, "PUT", "/OrgEvent/", [{ id: "", authorId: agent.id, kind: "status", summary: "changed", createdAt: FUTURE }]);
+  it("an admin collection PUT naming the empty id with a different createdAt is refused, and the row is unchanged", async () => {
+    const res = await send(admin, "PUT", "/OrgEvent/", [{ id: "", authorId: agent.id, kind: "status", summary: "changed", createdAt: FUTURE }]);
     expectInvalidIdRefusal(res.status, await res.text());
     expect(await readEvent("")).toEqual(emptyRow);
   }, 30_000);
 
-  it("a collection PUT naming the empty id without createdAt is refused, and the row is unchanged", async () => {
-    const res = await send(agent, "PUT", "/OrgEvent/", [{ id: "", authorId: agent.id, kind: "status", summary: "changed" }]);
+  it("an admin collection PUT naming the empty id without createdAt is refused, and the row is unchanged", async () => {
+    const res = await send(admin, "PUT", "/OrgEvent/", [{ id: "", authorId: agent.id, kind: "status", summary: "changed" }]);
     expectInvalidIdRefusal(res.status, await res.text());
     expect(await readEvent("")).toEqual(emptyRow);
   }, 30_000);
 
-  it("a collection PUT with the empty id among its elements stores none of them", async () => {
+  it("an admin collection PUT with the empty id among its elements stores none of them", async () => {
     const sibling = `oect-empty-sibling-${randomUUID()}`;
-    const res = await send(agent, "PUT", "/OrgEvent/", [
-      { id: sibling, authorId: agent.id, kind: "status", summary: "new sibling" },
+    const res = await send(admin, "PUT", "/OrgEvent/", [
+      { id: sibling, authorId: admin.id, kind: "status", summary: "new sibling" },
       { id: "", authorId: agent.id, kind: "status", summary: "changed" },
     ]);
     expectInvalidIdRefusal(res.status, await res.text());
     expect(await readEvent(sibling), "a sibling of the refused element was stored").toBeNull();
     expect(await readEvent("")).toEqual(emptyRow);
   }, 30_000);
+
+  // A non-admin collection PUT does not reach the check: the owner-scoped
+  // write guard refuses it first (403), whatever its elements.
+  describe("a non-admin collection PUT naming the empty id is refused before the check", () => {
+    for (const [label, element] of [
+      ["with a different createdAt", { id: "", authorId: agent.id, kind: "status", summary: "changed", createdAt: FUTURE }],
+      ["without createdAt", { id: "", authorId: agent.id, kind: "status", summary: "changed" }],
+    ] as const) {
+      it(`a non-admin collection PUT naming the empty id ${label} is refused with 403, and the row is byte-for-byte unchanged`, async () => {
+        const bytes = await rowBytes("");
+        const res = await send(agent, "PUT", "/OrgEvent/", [element]);
+        expectCollectionRefusal(res.status, await res.text());
+        expect(await rowBytes("")).toBe(bytes);
+        expect(await readEvent("")).toEqual(emptyRow);
+      }, 30_000);
+    }
+
+    it("a non-admin collection PUT with the empty id among its elements is refused with 403 and stores none of them", async () => {
+      const sibling = `oect-empty-sibling-agent-${randomUUID()}`;
+      const bytes = await rowBytes("");
+      const res = await send(agent, "PUT", "/OrgEvent/", [
+        { id: sibling, authorId: agent.id, kind: "status", summary: "new sibling" },
+        { id: "", authorId: agent.id, kind: "status", summary: "changed" },
+      ]);
+      expectCollectionRefusal(res.status, await res.text());
+      expect(await readEvent(sibling), "a sibling in the refused request was stored").toBeNull();
+      expect(await rowBytes("")).toBe(bytes);
+    }, 30_000);
+  });
 
   it("an admin PUT of an array body naming the empty id is refused, and the row is unchanged", async () => {
     const res = await send(admin, "PUT", `/OrgEvent/oect-array-path-${randomUUID()}`, [{ id: "", authorId: agent.id, kind: "status", summary: "changed" }]);
@@ -569,7 +689,9 @@ describe("a stored row's createdAt is kept whatever its value, an empty string i
 });
 
 describe("a composite (array of strings) id follows the same createdAt rule", () => {
-  it("a collection PUT creates it at server time, keeps it when omitted, and refuses a change", async () => {
+  // The row is the agent's (an administrator may name another authorId), so
+  // the agent's own POST naming it reaches the createdAt check.
+  it("an admin collection PUT creates it at server time, keeps it when omitted, and refuses a change; a non-admin collection PUT of it is refused with 403", async () => {
     const id = ["oect-composite", randomUUID()];
     const summary = `oect-composite-${id[1]}`;
     const rowOf = async () => {
@@ -577,45 +699,59 @@ describe("a composite (array of strings) id follows the same createdAt rule", ()
       expect(rows.length, `rows for ${summary}`).toBe(1);
       return rows[0];
     };
-    const w = await timed(() => send(agent, "PUT", "/OrgEvent/", [{ id, authorId: agent.id, kind: "status", summary, createdAt: FUTURE }]));
+    const w = await timed(() => send(admin, "PUT", "/OrgEvent/", [{ id, authorId: agent.id, kind: "status", summary, createdAt: FUTURE }]));
     expect(w.res.status, w.text.slice(0, 300)).toBeLessThan(300);
     const created = await rowOf();
     expect(created.id).toEqual(id);
     expectServerTime(created.createdAt, w.from, w.to);
 
-    const kept = await send(agent, "PUT", "/OrgEvent/", [{ id, authorId: agent.id, kind: "status", summary, detail: "updated" }]);
+    const kept = await send(admin, "PUT", "/OrgEvent/", [{ id, authorId: agent.id, kind: "status", summary, detail: "updated" }]);
     expect(kept.status, (await kept.text()).slice(0, 300)).toBeLessThan(300);
     const afterKeep = await rowOf();
     expect(afterKeep.detail).toBe("updated");
     expect(afterKeep.createdAt).toBe(created.createdAt);
 
     for (const res of [
-      await send(agent, "PUT", "/OrgEvent/", [{ id, authorId: agent.id, kind: "status", summary, createdAt: PAST }]),
+      await send(admin, "PUT", "/OrgEvent/", [{ id, authorId: agent.id, kind: "status", summary, createdAt: PAST }]),
       await send(agent, "POST", "/OrgEvent", { id, kind: "status", summary, createdAt: PAST }),
     ]) {
       expectImmutableRefusal(res.status, await res.text(), created.createdAt, PAST);
       expect(await rowOf()).toEqual(afterKeep);
     }
+
+    const bytes = await summaryBytes(summary);
+    for (const element of [
+      { id, authorId: agent.id, kind: "status", summary, createdAt: PAST },
+      { id, authorId: agent.id, kind: "status", summary, detail: "changed" },
+    ]) {
+      const res = await send(agent, "PUT", "/OrgEvent/", [element]);
+      expectCollectionRefusal(res.status, await res.text());
+      expect(await summaryBytes(summary)).toBe(bytes);
+    }
   }, 30_000);
 });
 
 describe("what each malformed id or body gets", () => {
-  // The createdAt check answers only for input that reaches it. POST generates
-  // an id first when the body's id is missing, empty, null, 0 or false; some
-  // other input is answered earlier by attribution, the ownership lookup, or
-  // Harper's own validation. A refused case asserts the status plus its `error`
-  // field (flair refusals) or `code` field (Harper's problem details); a
-  // generated-id POST case asserts a 2xx and exactly one row with a generated
-  // id; the non-admin collection-PUT case whose element is an array asserts
-  // 200 and `[{}]`. Storage is checked for the id cases (a refused one stores
-  // no row with its summary), single-record PUT bodies (no row at the path)
-  // and PATCH (the row is unchanged); the POST-body and collection-element
-  // cases check only the response.
-  type Expect = { status: number; error?: string; code?: string };
+  // The createdAt check answers only for input that reaches it. At the root
+  // collection, POST generates an id when the body's id is missing, null or
+  // empty, and refuses every other id that is not a non-empty string or a
+  // non-empty array of strings with invalid_event_id (400) before its
+  // ownership lookup. A non-admin collection PUT is refused by the owner-scoped
+  // write guard (403) whatever its body; other input is answered earlier by
+  // attribution or Harper's own validation. A refused case asserts the status
+  // plus its `error` field (flair refusals; the collection refusal's whole
+  // body) or `code` field (Harper's problem details); a generated-id POST case
+  // asserts a 2xx and exactly one row with a generated id. Storage is checked
+  // for the id cases (a refused one stores no row with its summary, and a
+  // stored row under the id it names is byte-for-byte unchanged), single-record
+  // PUT bodies (no row at the path), PATCH (the row is unchanged) and the
+  // non-admin collection-element cases (the table's row count is unchanged);
+  // the POST-body and admin collection-element cases check only the response.
+  type Expect = { status: number; error?: string; code?: string; body?: Record<string, unknown> };
   const INVALID: Expect = { status: 400, error: INVALID_ID };
-  const OWNER_CHANGE: Expect = { status: 403, error: "forbidden: the owner of a record cannot be changed" };
+  const COLLECTION: Expect = { status: 403, error: COLLECTION_REFUSAL, body: { error: COLLECTION_REFUSAL } };
   const ATTRIBUTION: Expect = { status: 403, error: "forbidden: authorId must match authenticated agent" };
-  const OWNER_READ: Expect = { status: 400, error: "owner_check_unavailable" };
+  const NOT_ADDRESSED: Expect = { status: 403, error: "write_id_not_addressed" };
   const HARPER_400: Expect = { status: 400, code: "ClientError" };
   const HARPER_500: Expect = { status: 500, code: "Error" };
   const TYPE_ERROR: Expect = { status: 500, code: "TypeError" };
@@ -626,6 +762,7 @@ describe("what each malformed id or body gets", () => {
     const body = JSON.parse(text);
     if (want.error) expect(body.error).toBe(want.error);
     if (want.code) expect(body.code).toBe(want.code);
+    if (want.body) expect(body).toEqual(want.body);
   }
 
   const IDS: Array<[string, unknown]> = [
@@ -639,17 +776,21 @@ describe("what each malformed id or body gets", () => {
     return { body, summary };
   };
 
-  // POST: a missing, empty, null, 0 or false id gets a generated id.
+  // POST to the root collection, [agent, admin]: a missing, null or empty id
+  // gets a generated id; every other id here is refused with invalid_event_id.
   const POST_ID: Record<string, [Expect | "generated", Expect | "generated"]> = {
     missing: ["generated", "generated"], empty: ["generated", "generated"], null: ["generated", "generated"],
-    "0": ["generated", "generated"], false: ["generated", "generated"],
-    true: [OWNER_READ, INVALID], "42": [INVALID, INVALID], "[]": [OWNER_CHANGE, INVALID],
-    "{a:1}": [OWNER_CHANGE, INVALID], '["x",1]': [INVALID, INVALID],
+    "0": [INVALID, INVALID], false: [INVALID, INVALID],
+    true: [INVALID, INVALID], "42": [INVALID, INVALID], "[]": [INVALID, INVALID],
+    "{a:1}": [INVALID, INVALID], '["x",1]': [INVALID, INVALID],
   };
-  // Collection PUT: each element is addressed by its own id.
-  const COLLECTION_ID: Record<string, Expect> = {
-    missing: INVALID, empty: INVALID, null: INVALID, "0": INVALID, false: HARPER_400,
-    true: HARPER_400, "42": INVALID, "[]": HARPER_500, "{a:1}": HARPER_500, '["x",1]': INVALID,
+  // Collection PUT, [agent, admin]: a non-admin's is refused by the owner-scoped
+  // write guard; an administrator's element is addressed by its own id.
+  const COLLECTION_ID: Record<string, [Expect, Expect]> = {
+    missing: [COLLECTION, INVALID], empty: [COLLECTION, INVALID], null: [COLLECTION, INVALID],
+    "0": [COLLECTION, INVALID], false: [COLLECTION, HARPER_400], true: [COLLECTION, HARPER_400],
+    "42": [COLLECTION, INVALID], "[]": [COLLECTION, HARPER_500], "{a:1}": [COLLECTION, HARPER_500],
+    '["x",1]': [COLLECTION, INVALID],
   };
 
   for (const [label, id] of IDS) {
@@ -670,12 +811,48 @@ describe("what each malformed id or body gets", () => {
         }
       }, 30_000);
 
-      const putWant = COLLECTION_ID[label];
+      const putWant = COLLECTION_ID[label][i];
       it(`a collection PUT element with a ${label} id as ${role} gets ${putWant.status}${putWant.error ? ` ${putWant.error}` : ""}`, async () => {
         const { body, summary } = withId(who, label, id);
+        const named = typeof id === "string" ? await rowBytes(id) : null;
         await expectResponse(await send(who, "PUT", "/OrgEvent/", [body]), putWant);
         expect(await eventsBySummary(summary)).toEqual([]);
+        if (named !== null) expect(await rowBytes(id as string)).toBe(named);
       }, 30_000);
+    }
+  }
+
+  // POST at a path other than the root collection, [agent, admin]: a missing
+  // id takes the path's id (test/integration/owner-scoped-writes.test.ts); an
+  // empty or non-string id does not generate one. A non-admin's scalar id that
+  // differs from an addressed id is refused first by the owner-scoped write
+  // guard; every other case here is refused with invalid_event_id.
+  const ELSEWHERE_ID: Array<[string, unknown]> = [["empty", ""], ["0", 0], ["false", false], ["[]", []]];
+  const ELSEWHERE_WANT: Record<string, Record<string, [Expect, Expect]>> = {
+    addressed: {
+      empty: [NOT_ADDRESSED, INVALID], "0": [NOT_ADDRESSED, INVALID], false: [INVALID, INVALID], "[]": [INVALID, INVALID],
+    },
+    prefixed: {
+      empty: [INVALID, INVALID], "0": [INVALID, INVALID], false: [INVALID, INVALID], "[]": [INVALID, INVALID],
+    },
+  };
+  for (const [where, pathOf] of [
+    ["addressed", (tag: string) => `/OrgEvent/oect-addr-${tag}`],
+    ["prefixed", (tag: string) => `/OrgEvent/oect-prefix-${tag}/`],
+  ] as const) {
+    for (const [label, id] of ELSEWHERE_ID) {
+      for (const [i, who] of [agent, admin].entries()) {
+        const role = who === admin ? "admin" : "agent";
+        const want = ELSEWHERE_WANT[where][label][i];
+        it(`POST at ${where === "addressed" ? "an addressed path" : "a prefixed collection"} with a ${label} id as ${role} gets ${want.status} ${want.error} and stores nothing`, async () => {
+          const tag = randomUUID();
+          const path = pathOf(tag);
+          const { body, summary } = withId(who, label, id);
+          await expectResponse(await send(who, "POST", path, body), want);
+          expect(await eventsBySummary(summary)).toEqual([]);
+          expect(await readEvent(path.slice("/OrgEvent/".length))).toBeNull();
+        }, 30_000);
+      }
     }
   }
 
@@ -717,20 +894,13 @@ describe("what each malformed id or body gets", () => {
         }, 30_000);
       }
 
-      const elementWant: Expect | "element-refused" = label === "an array of primitives"
-        ? (who === admin ? INVALID : "element-refused")
-        : HARPER_400;
-      it(`a collection PUT whose element is ${label}, as ${role}, gets ${elementWant === "element-refused" ? "200 with the element refused" : `${elementWant.status} ${elementWant.error ?? elementWant.code}`}`, async () => {
-        const res = await sendRaw(who, "PUT", "/OrgEvent/", `[${raw}]`);
-        if (elementWant === "element-refused") {
-          // A non-admin agent's element is refused by attribution, which the
-          // collection dispatch reports as that element's value.
-          const text = await res.text();
-          expect(res.status, text.slice(0, 300)).toBe(200);
-          expect(JSON.parse(text)).toEqual([{}]);
-        } else {
-          await expectResponse(res, elementWant);
-        }
+      const elementWant: Expect = who !== admin
+        ? COLLECTION
+        : label === "an array of primitives" ? INVALID : HARPER_400;
+      it(`a collection PUT whose element is ${label}, as ${role}, gets ${elementWant.status} ${elementWant.error ?? elementWant.code}${who !== admin ? " and creates no row" : ""}`, async () => {
+        const before = who !== admin ? await countEvents() : 0;
+        await expectResponse(await sendRaw(who, "PUT", "/OrgEvent/", `[${raw}]`), elementWant);
+        if (who !== admin) expect(await countEvents(), "a refused collection PUT created a row").toBe(before);
       }, 30_000);
     }
   }
