@@ -42,7 +42,8 @@
  *    failed. Do not replay that write blindly: read the row first, and treat a
  *    row that already holds it as written. {@link markMemoryWriteOutcomeUnknown}
  *    records the marker; until a process restart clears it (the fencing step),
- *    later PUT, PATCH and DELETE requests for that id are refused. The other
+ *    later PUT, PATCH and DELETE requests for that id are refused, including
+ *    a DELETE addressed to a stale skill id whose live head is that id. The other
  *    Memory writers (POST, and the background and nested writers part 2
  *    converts) do not check it.
  *

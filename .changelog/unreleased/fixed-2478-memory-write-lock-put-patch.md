@@ -23,8 +23,9 @@
   same way after its own commit, and a `PATCH` or re-embed of a row written
   before incarnation tokens gives it one in the same write. A verification read
   that fails answers 503 `write_outcome_unknown`: later `PUT`, `PATCH` and
-  `DELETE` requests for that id are refused until the instance restarts (the
-  other memory writers do not check this yet), and the row should be read before
+  `DELETE` requests for that id are refused until the instance restarts,
+  including a `DELETE` through a stale skill id that would close it as the live
+  head (the other memory writers do not check this yet), and the row should be read before
   that write is sent again. A `PUT` that names no id is refused 400
   `memory_id_required`. A manual promotion's memory write joins the
   promotion's own transaction, so its approval stamp commits or rolls back with

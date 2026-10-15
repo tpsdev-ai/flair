@@ -343,7 +343,8 @@ async function verifyCommittedWrite(
 }
 
 /** The 503 for a write whose post-commit verification read failed (flair#2478).
- *  The id is marked outcome-unknown, so a later PUT, PATCH or DELETE of it is
+ *  The id is marked outcome-unknown, so a later PUT, PATCH or DELETE of it, or a
+ *  DELETE through a stale skill id that would close it as the live head, is
  *  refused too until restart (other writers do not check the marker). */
 function writeOutcomeUnknownFor(id: any): Response {
   if (typeof id === "string" || typeof id === "number") markMemoryWriteOutcomeUnknown(id);
@@ -1285,6 +1286,10 @@ async function writeSkillDelete(args: { ctx: any; auth: AgentAuthVerdict; record
       const denied = await authorizeSkillOwners(ctx, auth, [record, head], shared);
       if (denied) return denied;
       if (!head) return skillWriteConflict("skill_head_missing");
+      // flair#2478: the head this delete closes can be another id than the one
+      // addressed (a stale id resolves the live head). Its outcome-unknown
+      // marker fences the close as the addressed id's does in delete().
+      if (memoryWriteOutcomeUnknown(String(head.id))) return writeOutcomeUnknownResponse();
       const liveHead = head;
       closedId = String(liveHead.id);
       // flair#2511: a stale id resolves the live head, which can be another
