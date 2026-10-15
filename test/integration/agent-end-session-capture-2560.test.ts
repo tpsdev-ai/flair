@@ -8,7 +8,8 @@
  * Memory row, and the row is read back through the production client. The
  * session id the scan carried is asserted on the stored row, and a later run of
  * the same session that re-delivers the whole snapshot does not store the
- * message again while the session retains the message's identity.
+ * message again while the session retains the message's identity and the
+ * encoded fields are unchanged.
  *
  * The third test pins the stated cold-start limit (flair#2560): the session's
  * identity set is the only record that a message was seen and lives in process

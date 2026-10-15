@@ -131,9 +131,8 @@ are the guarantees it keeps, each with the test that proves it in
 - **While the plugin holds a session's state, a session-keyed `agent_end` scan
   treats a message as already seen only if the session records its identity, and
   the identity cap does not drop a recorded identity the current snapshot
-  holds.** The host gives a snapshot message no host-owned id or position (its
-  only ordering field is a `Date.now()` timestamp, which can tie), so no message
-  is skipped because of its timestamp — `flair#2560 (mutation: a timestamp
+  holds.** Timestamp ordering never suppresses a message — `flair#2560
+  (mutation: a timestamp
   mark): a new message is captured whether its timestamp ties with, precedes or
   follows the session's earlier messages, and a later non-capturable message
   hides none`. The identity hashes the role, the JSON content and the timestamp
@@ -145,14 +144,17 @@ are the guarantees it keeps, each with the test that proves it in
   identities in the last snapshot it accounted for; disabled callbacks do not
   update it. Deferred identities (below) hold only that snapshot's identities,
   so at most D. The cap evicts only identities that have left the snapshot, so a
-  recorded message that stays in the snapshot is not offered again, however
-  long the session; one that
+  recorded message that stays in the snapshot with unchanged encoded identity
+  fields is not offered again; one that
   left the snapshot can be evicted and, if it reappears, captured again —
   `flair#2560 (mutation: a live identity is evicted): a snapshot over
   sessionMessageCap distinct messages, across several runs: the message each run
   appends is captured and nothing earlier is captured again`; `flair#2560
   (mutation: deferred is never pruned): entries stay within
   max(sessionMessageCap, D) and deferred holds only last-accounted-snapshot identities`.
+  A message re-emitted with a different timestamp, as the CLI runner's fresh
+  current-turn timestamp can be, has a new identity and can be offered again,
+  barring digest collisions.
   The scan walks the supplied snapshot from its last position, so a run's
   capture cap (`autoCaptureMaxPerSession`) is spent on the last eligible
   positions; that is position, not proof of which run added a message. In a warm
@@ -175,7 +177,7 @@ are the guarantees it keeps, each with the test that proves it in
   deferred message's write starts settles it`; `flair#2560
   (mutation: a discarded write leaves the message deferred): when a run is
   aborted while a deferred message's own write is in flight, the message is
-  recorded as skipped and not captured again`. The limit is a session's first
+  recorded as skipped and not captured again`. Another limit is a session's first
   scan in this process: for a new session, after its state is evicted past
   `sessionStateCap`, or after a gateway restart (the state is held in process
   memory and cleared at `gateway_stop`). That scan cannot tell which messages a

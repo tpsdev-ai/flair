@@ -355,8 +355,8 @@ export const captureBounds = {
    * the cap. A session with a scan queued or running is never evicted, so the
    * map exceeds the cap only while more sessions than the cap have a scan in
    * flight. Eviction forgets the session: its next `agent_end` scan is a first
-   * scan (flair#2560, `SessionCapture`), which treats every message in its
-   * snapshot as new, offers the last eligible positions of the snapshot up to
+   * scan (flair#2560, `SessionCapture`), which treats every identifiable
+   * occurrence as new, offers the last eligible positions of the snapshot up to
    * the run's cap (a message captured before can be captured again, if it
    * passes the trigger rule, the run's dedup and cap, and its write succeeds;
    * it then lands as a second row) and records the rest of the identifiable
@@ -1714,9 +1714,9 @@ export default {
          * the n - m at the latest positions are treated as new, and as the
          * callback's run's; when n <= m none is new.
          * `entries` is the only "already seen" signal (flair#2560): an identity
-         * the session no longer records is new to the scan, whatever its
-         * timestamp. Every identity in the snapshot is marked live first, so
-         * the identity cap does not evict it while the snapshot holds it
+         * the session no longer records is new to the scan. Timestamp ordering
+         * never suppresses a message. Every identity in the snapshot is marked
+         * live first, so the identity cap does not evict it while the snapshot holds it
          * (`markLive`).
          * flair#2560: the scan walks the snapshot from its LAST position to its
          * first, so the run's capture cap is spent on the last eligible
@@ -1743,9 +1743,9 @@ export default {
          * A failed write is logged and recorded as skipped only if the scan
          * continues past that check. For a session-keyed scan that record keeps
          * a later scan of the session from offering the message again while
-         * the session retains its identity, so no retry follows; a session-less
-         * scan records nothing and a later callback may offer the same message
-         * again. When n < m,
+         * the session retains its identity and its encoded fields are unchanged.
+         * A session-less scan records nothing and a later callback may offer the
+         * same message again. When n < m,
          * nothing of that identity is new, and a `capture` scan logs a
          * diagnostic. In a `capture` scan, a message with capture text and no
          * identity is not captured, with a diagnostic. Without a session key
@@ -1871,7 +1871,7 @@ export default {
               if (captureStopped || session.disabled) break;
               if (failure !== undefined) {
                 // Dropped: recorded as skipped below, so the session does not
-                // retry it while it retains the identity. An abort meanwhile is
+                // retry that identity while retained. An abort meanwhile is
                 // the reason when the run was aborted.
                 const reason = mode.record.phase === "aborted" ? "its run was aborted" : errorClass(failure);
                 logOnce(

@@ -1495,9 +1495,10 @@ describe("slice 2 — capture normalisation, ids and outcomes", () => {
 
 // ── flair#2560 — the pinned host's real agent_end dispatch, synthetic snapshots ──
 //
-// This is a DISPATCH test with synthetic snapshots, not a producer test. The
-// session producer is the pinned host's embedded agent runner
-// (`createOpenClawAgentHarness().runAttempt`). It is not driven by this PR: a
+// This is a DISPATCH test with synthetic snapshots, not a producer test. For
+// embedded runs, the session producer is the pinned host's embedded agent runner
+// (`createOpenClawAgentHarness().runAttempt`). The CLI runner separately produces
+// agent_end messages. The embedded producer is not driven by this PR: a
 // bare `runAttempt({})` enters an embedded run and dies at `mkdir ''`, and an
 // attempt must be fully prepared (resolved config, model registry, session file
 // and lock, sandbox, abort signal) and reach a provider, which this PR does not
@@ -1593,7 +1594,7 @@ describe("flair#2560 — the pinned host's real agent_end dispatch, with synthet
 // The real-runner test drives synthetic events, shaped like the host's
 // `PluginHookAgentEndEvent` and agent context, through the pinned host's real
 // hook runner (`createHookRunner`), the component that dispatches `agent_end` to
-// the plugin. The host's session producer (the embedded agent runner in
+// the plugin. The embedded session producer (the embedded agent runner in
 // `dist/builtin-openclaw-*.mjs`) is not driven here.
 // The host's config reader, plugin loader and conversation-access registration
 // gate are driven, with the plugin loaded from source, by

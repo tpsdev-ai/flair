@@ -1,12 +1,13 @@
-- **`openclaw-flair` stops re-capturing earlier messages a session's snapshot still holds, while it keeps that session's state, and spends a run's cap from the end (#2560).**
+- **`openclaw-flair` retains snapshot identities while session state and encoded fields stay unchanged, and spends each run's cap from the end (#2560).**
 
   While the plugin holds a session's state, a session-keyed `agent_end` scan's
   identity cap never evicts a recorded identity the current snapshot holds, so
   recorded identities number at most max(4,096 (`sessionMessageCap`), D), D
   being the distinct identities in the last snapshot accounted for (disabled
   callbacks do not update it), and a recorded message that stays in the snapshot
-  is not offered again. Deferred identities (below) hold only that snapshot's
-  identities, so at most D. The scan walks the snapshot from its last position,
+  with unchanged encoded identity fields is not offered again. Deferred
+  identities (below) hold only that snapshot's identities, so at most D.
+  The scan walks the snapshot from its last position,
   so the run's cap
   (`autoCaptureMaxPerSession`) is spent on the last eligible positions. In a
   warm session a message the cap leaves out stays eligible for a later capture
@@ -17,8 +18,10 @@
   Same-run excerpt dedup settles it. A failure before the write, a failed write,
   or a write whose run is aborted while it is in flight records it as skipped
   if the scan continues past its stop and disable check. Message identity now encodes
-  the timestamp's type, and the plugin infers nothing from timestamps: the host
-  gives a snapshot message no host-owned id or position. The remaining limit is
+  the timestamp's type. Timestamp ordering never suppresses a message.
+  A message re-emitted with a different timestamp, as the CLI runner's fresh
+  current-turn timestamp can be, has a new identity and can be offered again,
+  barring digest collisions. Another limit is
   a session's first scan in the process (a new session, session state evicted
   past `sessionStateCap`, or a gateway restart): it offers the last eligible
   positions up to the run's cap and records the rest of the identifiable
