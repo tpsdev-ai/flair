@@ -172,3 +172,100 @@ describe("flair#2467 — the real SDK over an older server's response: the MCP r
     expect(res.structuredContent?.contentWithheld).toBe(true);
   });
 });
+
+describe("flair#2541 — skill_store previews the STORED text and trigger and reports the count", () => {
+  const TRIGGER = `when a job needs ${TOKEN}`;
+  const STORED_TRIGGER = "when a job needs [redacted]";
+  const originalFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  /** A FlairClient stand-in whose raw PUT /Memory answers with `response`. */
+  function skillCtx(response: Record<string, unknown>) {
+    const flair = {
+      url: "http://flair.invalid",
+      agentId: AGENT,
+      request: async (method: string, path: string) => {
+        if (method !== "PUT" || !path.startsWith("/Memory/")) throw new Error(`unexpected ${method} ${path}`);
+        return response;
+      },
+    };
+    return { ...ctxWith({}), flair } as any;
+  }
+
+  test("a redacted write previews the stored content and trigger, never the caller's input", async () => {
+    const res = await STDIO_TOOL_HANDLERS.skill_store(
+      { content: ORIGINAL, trigger: TRIGGER, name: "deploy" },
+      skillCtx({ id: "skill-1", written: true, redactedValues: 2, stored: { content: STORED, trigger: STORED_TRIGGER } }),
+    );
+    const text = res.content[0].text;
+    expect(text).toContain("Skill stored (id: skill-1)");
+    expect(text).toContain(`Preview: ${STORED}`);
+    expect(text).toContain(`Trigger: ${STORED_TRIGGER}`);
+    expect(text).toContain("Name: deploy");
+    expect(text).toContain("Redacted 2 credential-shaped value(s) before storing.");
+    expect(text).not.toContain(TOKEN);
+    expect(res.structuredContent).toEqual({ id: "skill-1", written: true, redactedValues: 2 });
+  });
+
+  test("a counted redaction whose stored text carries no trigger omits the trigger line", async () => {
+    const res = await STDIO_TOOL_HANDLERS.skill_store(
+      { content: ORIGINAL, trigger: TRIGGER },
+      skillCtx({ id: "skill-1", written: true, redactedValues: 2, stored: { content: STORED } }),
+    );
+    const text = res.content[0].text;
+    expect(text).toContain(`Preview: ${STORED}`);
+    expect(text).not.toContain("Trigger:");
+    expect(text).not.toContain(TOKEN);
+    expect(res.structuredContent).toEqual({ id: "skill-1", written: true, redactedValues: 2 });
+  });
+
+  test("a counted redaction with no stored text has no preview, no trigger line and no input text", async () => {
+    for (const response of [
+      { id: "skill-1", written: true, redactedValues: 1 },
+      { id: "skill-1", written: true, redactedValues: 1, stored: { trigger: STORED_TRIGGER } },
+    ]) {
+      const res = await STDIO_TOOL_HANDLERS.skill_store({ content: ORIGINAL, trigger: TRIGGER }, skillCtx(response));
+      const text = res.content[0].text;
+      expect(text).toContain(withheld(1));
+      expect(text).toContain("Redacted 1 credential-shaped value(s) before storing.");
+      expect(text).not.toContain("Trigger:");
+      expect(text).not.toContain(TOKEN);
+      expect(text).not.toContain("deploy note");
+      expect(text).not.toContain("when a job");
+      expect(res.structuredContent).toEqual({ id: "skill-1", written: true, redactedValues: 1, contentWithheld: true });
+    }
+  });
+
+  test("a write the server did not redact previews the input and trigger and reports no count", async () => {
+    const plain = "a plain skill body";
+    const res = await STDIO_TOOL_HANDLERS.skill_store(
+      { content: plain, trigger: "when deploying", name: "deploy" },
+      skillCtx({ id: "skill-1", written: true, deduplicated: false }),
+    );
+    expect(res.content[0].text).toBe(
+      ["Skill stored (id: skill-1)", `Preview: ${plain}`, "Name: deploy", "Trigger: when deploying"].join("\n"),
+    );
+    expect(res.structuredContent).toEqual({ id: "skill-1", written: true });
+  });
+
+  test("the real SDK: the raw PUT response's `stored` is what the reply shows", async () => {
+    globalThis.fetch = (async (input: any, init?: any) => {
+      const method = init?.method ?? "GET";
+      const path = new URL(String(input)).pathname;
+      if (method !== "PUT") throw new Error(`unexpected ${method} ${path}`);
+      const id = decodeURIComponent(path.replace(/^\/Memory\//, ""));
+      return Response.json({ id, written: true, redactedValues: 2, stored: { content: STORED, trigger: STORED_TRIGGER } });
+    }) as any;
+    const { privateKey } = generateKeyPairSync("ed25519");
+    const flair = new FlairClient({ agentId: AGENT, url: "http://flair.invalid", privateKey });
+    const res = await STDIO_TOOL_HANDLERS.skill_store({ content: ORIGINAL, trigger: TRIGGER }, { ...ctxWith({}), flair } as any);
+    const text = res.content[0].text;
+    expect(text).toContain(`Preview: ${STORED}`);
+    expect(text).toContain(`Trigger: ${STORED_TRIGGER}`);
+    expect(text).not.toContain(TOKEN);
+    expect(res.structuredContent?.redactedValues).toBe(2);
+    expect(res.structuredContent?.contentWithheld).toBeUndefined();
+  });
+});
