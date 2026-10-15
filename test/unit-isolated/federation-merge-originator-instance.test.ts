@@ -335,6 +335,9 @@ it("a committed Memory remains merged when its post-commit note throws", async (
     expect(response.refused).toEqual([]);
     expect(response.indeterminate).toEqual([]);
     expect(response.merged + response.refused.length + response.indeterminate.length).toBe(response.total);
+    // The verdict read also consults the configured model: answer it now, so the
+    // assertion reads the guard state the failed note left, not the lookup failure.
+    _setGuardModelIdForTests(() => "gguf:nomic-embed-text-v1.5-Q4_K_M+searchprefix");
     expect(await isEmbeddingSpaceUniform()).toBe(false);
   } finally {
     _resetGuardForTests();
