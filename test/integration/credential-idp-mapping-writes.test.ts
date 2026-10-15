@@ -706,29 +706,23 @@ describe("owner Credential writes confirm mapping fields", () => {
 
 
 describe("Credential transaction boundaries", () => {
-  test("an owner array PUT commits no owner updates when a mapping confirmation differs", async () => {
+  // An owner's array (collection) PUT never reaches the Credential resource: the
+  // owner-scoped write rule refuses a non-admin collection write first, so the
+  // resource's batch-wide confirmation (covered directly by
+  // test/unit-isolated/credential-committed-row.test.ts) is not reachable over HTTP
+  // for a non-admin owner.
+  test("an owner array PUT is refused by the addressed-write rule and writes nothing", async () => {
     const rows = [0, 1].map((index) => ({
       id: `idpw-batch-${index}-${randomUUID()}`, principalId: W.id, kind: "idp", status: "active",
       idpProvider: "mcp-oauth", idpSubject: `idpw-batch-${randomUUID()}`, label: "mapping",
       createdAt: new Date().toISOString(),
     }));
     for (const row of rows) await seedCredential(row);
-    const sibling = await snapshot(rows[0].id);
-    let changed: Record<string, unknown> | undefined;
-    const result = await withPausedCredentialWrite(
-      () => signed(W, "PUT", "/Credential/", rows.map((row) => ({ ...row, label: "owner label" }))),
-      async () => {
-        await ops({ operation: "update", database: "flair", table: "Credential", records: [{ ...rows[1], status: "revoked" }] });
-        changed = await snapshot(rows[1].id);
-        expect(changed.status).toBe("revoked");
-      },
-      "credential-batch-row-write",
-    );
-    expect(result.status, result.text).toBe(409);
-    expect(JSON.parse(result.text).error).toBe("stored_row_changed");
-    expect(await readCredential(rows[0].id)).toEqual(sibling);
-    expect(await readCredential(rows[1].id)).toEqual(changed);
-    expect(await mcpActsAs(rows[1].idpSubject)).toBeNull();
+    const before = await Promise.all(rows.map((row) => snapshot(row.id)));
+    const result = await signed(W, "PUT", "/Credential/", rows.map((row) => ({ ...row, label: "owner label" })));
+    expectAddressedWriteRefusal(result, "owner array PUT", rows[1].idpSubject);
+    for (const [i, row] of rows.entries()) await expectUnchanged(row.id, before[i]);
+    expect(await mcpActsAs(rows[0].idpSubject)).toBe(W.id);
   }, 60_000);
 
   for (const method of ["PUT", "PATCH"] as const) {
