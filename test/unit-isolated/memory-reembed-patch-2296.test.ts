@@ -31,6 +31,7 @@ mock.module("harper", () => ({
 }));
 const { Memory } = await import("../../resources/Memory.ts");
 const { getModelId } = await import("../../resources/embeddings-provider.ts");
+const { computeContentHash } = await import("../../resources/memory-feed-lib.ts");
 
 const REEMBED = { embedding: null, embeddingModel: null };
 const agent = (id: string, isAdmin = false) => ({ request: { tpsAgent: id, tpsAgentIsAdmin: isAdmin } });
@@ -68,7 +69,8 @@ test("the owner's request writes embedding, embeddingModel and updatedAt and lea
   const body = await res.json();
   expect(body).toEqual({ id: "m1", embeddingModel: getModelId(), updatedAt: expect.any(String) });
   const after = harnessState.memoryStore.get("m1");
-  expect(after).toEqual({ ...before, embedding: [0.25, 0.5, 0.75], embeddingModel: getModelId(), updatedAt: body.updatedAt });
+  // flair#2465: the re-embed also records the hash of the text it embedded.
+  expect(after).toEqual({ ...before, embedding: [0.25, 0.5, 0.75], embeddingModel: getModelId(), updatedAt: body.updatedAt, embeddedContentHash: computeContentHash("agent-a", "content of m1") });
   expect(documentEmbeds().map((c) => c.text)).toEqual(["content of m1"]);
 }, 10_000);
 

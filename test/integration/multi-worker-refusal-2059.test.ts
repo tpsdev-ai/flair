@@ -105,13 +105,19 @@ describe("multi-worker refusal", () => {
 
       const health = await get("/Health");
       expect(health.status).toBe(503);
-      const healthBody = (await health.json()) as { ok?: boolean; multiWorker?: { state?: string } };
+      const healthBody = (await health.json()) as { ok?: boolean; multiWorker?: { state?: string }; embeddingSpace?: { state?: string } };
       expect(healthBody.ok).toBe(false);
       expect(healthBody.multiWorker?.state).toBe("refused");
+      // flair#2530: the real 503 body carries the guard state, and doctor's probe reads it.
+      expect(["uniform", "mixed", "unverified", "scan-failed"]).toContain(String(healthBody.embeddingSpace?.state));
 
       const probe = await probeFlairHealth(`${base}/Health`);
       expect(probe.reaching).toBe(true);
       expect(probe.observation?.kind).toBe("refused");
+      // (A scan may publish between the two reads, so only the field's presence is compared.)
+      expect(["uniform", "mixed", "unverified", "scan-failed"]).toContain(
+        String((probe.healthBody?.embeddingSpace as { state?: string } | undefined)?.state),
+      );
     },
     240_000,
   );
