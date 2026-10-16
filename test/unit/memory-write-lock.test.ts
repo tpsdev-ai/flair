@@ -52,6 +52,17 @@ afterEach(() => {
 });
 
 describe("withMemoryWriteLock (flair#2478 slice 1)", () => {
+  test("an empty key set is refused without running the callback", async () => {
+    for (const acquire of [withMemoryWriteLock, withMemoryWriteLockOnce]) {
+      const store = fakeStore();
+      let ran = false;
+      const result = await acquire(store, [], async () => { ran = true; });
+      expect({ result, ran, events: store.events }).toEqual({
+        result: { kind: "unavailable" }, ran: false, events: [],
+      });
+    }
+  });
+
   test("two calls on one id never overlap; a throwing function still releases the lock", async () => {
     const store = fakeStore();
     const events: string[] = [];

@@ -272,14 +272,12 @@ function memoryLockRefusal(outcome: MemoryLockOutcome<unknown>, callerId: string
   return null;
 }
 
-/** A PUT names its row by the URL id or the body `id`; there is no idless PUT
- *  (Harper's own table write refuses a null primary key). Refused before the
- *  lock and before any read or write, by name. */
+/** PUT and PATCH require a target id before entering the lock helper. */
 function memoryIdRequiredResponse(): Response {
   return new Response(
     JSON.stringify({
       error: "memory_id_required",
-      message: "a Memory PUT names the memory id in the URL or the body; to create a memory without choosing an id, use POST",
+      message: "a Memory PUT or PATCH names the memory id in the URL or the body; to create a memory without choosing an id, use POST",
     }),
     { status: 400, headers: { "content-type": "application/json" } },
   );
@@ -305,26 +303,12 @@ function sameDeclaredField(stored: unknown, declared: unknown): boolean {
 }
 
 /**
- * POST-COMMIT verification (flair#2478): re-read the COMMITTED row in a fresh
- * context and compare two things. Its `instanceToken` must equal
- * `identity.expectedToken`, the token this write left on the row: the one a PUT
- * stamped, or the one a PATCH or re-embed kept or, for a row that had none,
- * gave it. And each of {@link POSTCOMMIT_VERIFY_FIELDS} (`agentId`, `content`,
- * `visibility`, `durability`) that this write declared must still hold the
- * declared value. Called after the write's owned transaction committed, still
- * under the write lock. The token is compared here only; it is not included in
- * a PUT/PATCH write response. It returns a verdict, never a row: the response is
- * built from the write's own result (see put()).
- *
- *  - `mismatch` — the row is gone, its token differs (a row deleted and
- *    re-created with a different token, even with the same values), or one of
- *    those four declared fields differs: the caller answers 409
- *    stored_row_changed. A replacement that kept the same token and those four
- *    values, or a later write that changed only other fields (not the token),
- *    passes;
- *  - `unknown` — the verification READ failed, or there is no id to read by:
- *    the outcome is not known, never "no row", so the id (when there is one) is
- *    marked outcome-unknown and the caller answers 503.
+ * Compare the token and declared POSTCOMMIT_VERIFY_FIELDS after an ordinary
+ * owned row write with a normal storage result, or a successful re-embed's
+ * inner commit, under the lock. Refusals, storage Responses and skill PUT return before
+ * this read; composed promotion uses its caller's in-transaction existence check.
+ * Return a verdict, never the stored row: mismatch yields 409; a failed read or
+ * missing id yields an unknown outcome (503).
  */
 async function verifyCommittedWrite(
   table: { get(id: any, ctx?: any): Promise<any> },
@@ -1341,8 +1325,7 @@ type ReembedOutcome =
   | { kind: "recompute"; text: string }
   | { kind: "written"; model: string; updatedAt: string; token: string };
 
-/** A re-embed's answer, and on success the incarnation token of the row it
- *  wrote (flair#2478: the PATCH's post-commit identity check compares it). */
+/** A re-embed's answer, with a token only for a written row. */
 type ReembedResult = { response: Response; token?: string };
 
 /** A row's incarnation token, or null when it carries none (a legacy row). */
@@ -1440,9 +1423,7 @@ async function reembedStoredRow(
         // write; the caller answers stored_row_changed (409). Only a text change
         // is logged. Neither the staged vector, its hash, nor a staged legacy
         // token is written. A change committed after this confirm and before the
-        // commit is not seen (no compare-and-set); the calling PATCH's post-commit
-        // verification (flair#2478) then compares the committed row's token with
-        // the one this attempt reports.
+        // commit is not seen (no compare-and-set).
         await confirmCommittedRow((databases as any).flair.Memory, id, (committed) => {
           if (!sameStoredRow(committed, stored)) return false;
           if (skillEmbedText(committed) !== textToEmbed) {
@@ -1479,8 +1460,7 @@ async function reembedStoredRow(
     noteWriteStamp(outcome.model);
     // flair#2561: the response names the row and its new updatedAt, and
     // carries no embedding field; `flair reembed` reads the model stamp from
-    // the stored row. flair#2478: the token of the row written goes to the
-    // calling PATCH's post-commit identity check.
+    // the stored row.
     const body = buildFromAllowlist({ id, updatedAt: outcome.updatedAt }, REEMBED_RESPONSE_RULES);
     return { response: body instanceof Response ? body : Response.json(body), token: outcome.token };
   }
@@ -2077,15 +2057,11 @@ export class Memory extends (databases as any).flair.Memory {
   // PATCH routes past put(), so agentId immutability is enforced on both verbs
   // via the one shared delegate. (Admin/internal — including the _reindex
   // path in put() — pass through the delegate untouched.)
-  /**
-   * flair#2478 slice 1 — a PATCH runs under the per-id memory write lock and its
-   * write owns its transaction, so the read, the decision and the COMMIT all
-   * happen before the lock releases (the protocol's rule). A store with no lock
-   * is refused 503 `memory_lock_unavailable`. See
-   * resources/memory-write-lock.ts.
-   */
+  /** PATCH requires a target id and lock before its body runs. Ordinary and
+   *  re-embed owned writes commit before releasing the lock. */
   async patch(content: any, query?: any) {
     const ids = putLockIds(this, content);
+    if (ids.length === 0) return memoryIdRequiredResponse();
     const outcome = await withMemoryWriteLock(memoryWriteLockStore(), ids, async () => {
       const result = await this.patchLocked(content, query);
       // Test-only: the verb body has returned and the lock is still held. A body
@@ -2100,6 +2076,8 @@ export class Memory extends (databases as any).flair.Memory {
   }
 
   private async patchLocked(content: any, query?: any) {
+    const entry = txnPausePoint("memory-patch-entry");
+    if (entry) await entry;
     // flair#2296: decided on the body as sent; the guards below add fields to it.
     const reembedRequest = isReembedPatch(content);
     // flair#2141 S2: check the seed's fixed id against the operator-source
@@ -2234,8 +2212,8 @@ export class Memory extends (databases as any).flair.Memory {
       // (flair#2465). A row gone or changed in either at confirmation aborts with
       // 409 stored_row_changed. The vector is computed for the re-read text; a
       // change committed after confirmation and before commit is not seen by that
-      // confirmation. After the commit, the post-commit verification below
-      // compares the row's token with the one the re-embed wrote (flair#2478).
+      // confirmation. After a normal storage result and inner commit, PATCH
+      // compares the token; a storage Response returns before that read.
       if (reembedRequest) {
         if (!existingForSkill) return NOT_FOUND();
         const auth = await resolveAgentAuth((this as any).getContext?.());
@@ -2356,8 +2334,7 @@ export class Memory extends (databases as any).flair.Memory {
       // flair#2467: a PATCH commits only the fields in its body; these are the
       // post-redaction text fields among them, for the response.
       patchStaged = storedMemoryText(content, suppliedText);
-      // flair#2478: the incarnation token the row carries after this PATCH, for
-      // the post-commit identity check. A stored row that has one keeps it (the
+      // flair#2478: a stored row that has a token keeps it (the
       // body's own was stripped above); a legacy row without one, or a row this
       // PATCH creates (an admin or internal caller only), is given a fresh one
       // in this same write.
@@ -2378,14 +2355,11 @@ export class Memory extends (databases as any).flair.Memory {
     // successful Response is replaced by the write_response_withheld refusal
     // (writeResultResponse).
     if (patched instanceof Response) return writeResultResponse(patched);
-    // Post-commit verification (flair#2478): the write has committed (the
-    // ordinary PATCH's owned transaction, or the re-embed's own). The committed
-    // row must still carry the token this PATCH left and, of the fields the PATCH
-    // declared, the same `agentId`, `content`, `visibility` and `durability`. A
-    // row replaced with a different token, or one where a later write changed
-    // one of those four, is refused by name; a later write that changed only
-    // other fields (not the token) is not. A failed verification read is an
-    // UNKNOWN outcome (503, never "no row").
+    // Verify the ordinary owned PATCH after a normal storage result; refusals
+    // and storage Responses return above before this read. A successful re-embed is also
+    // checked after its inner owned commit; refusals return above.
+    // Compare the token and declared agentId/content/visibility/durability;
+    // other field changes pass. A failed read is an unknown outcome (503).
     // Test-only: holds the PATCH after its commit, before the verification read.
     const verifyPause = txnPausePoint("memory-patch-verify");
     if (verifyPause) await verifyPause;
@@ -2599,7 +2573,7 @@ export class Memory extends (databases as any).flair.Memory {
           const attr = stampAttribution(auth, content, RECORD_TYPES.Memory.ownerField, RECORD_TYPES.Memory.attribution.put, "forbidden: cannot write memory owned by another agent");
           if (attr.denied) return attr.denied;
         }
-    
+
         // flair#2407: redact credential-shaped text before the dedup gate / the
         // embedding, and before the row is persisted, except for the shipped-skill
         // seed's Basic PUT of its reserved id (resources/memory-redaction.ts).
@@ -2610,7 +2584,7 @@ export class Memory extends (databases as any).flair.Memory {
         // before the stored row or a skill predecessor is merged into the body;
         // `stored` reports only these.
         const suppliedText = suppliedMemoryTextFields(content);
-    
+
         canonicalizeSupersedes(content);
         const requestedPayload = { ...content };
         const urlTargetId = (this as any).getId?.();
@@ -2626,14 +2600,14 @@ export class Memory extends (databases as any).flair.Memory {
         content = preparedSkill.content;
         const putCarriedVector = putOmitsEmbedding && Array.isArray(content?.embedding) && content.embedding.length > 0;
         const putCarriedHash = putCarriedVector ? (content.embeddedContentHash ?? null) : null;
-    
+
         // flair#744 slice A: citation-on-write — same consume-and-strip
         // discipline as post() above. Strip BEFORE anything else touches
         // `content` so it is never persisted on the row; recorded post-commit
         // below only when present.
         const usedMemoryIds = content?.usedMemoryIds;
         if (content && typeof content === "object") delete content.usedMemoryIds;
-    
+
         // ── flair#1238: refuse an unrecognised durability (mirrors post()) ──
         // put() is the other HTTP-reachable write path (fresh create via CLI, and
         // the update/patch path). Same guard as post(): a present-but-unknown
@@ -2647,7 +2621,7 @@ export class Memory extends (databases as any).flair.Memory {
             );
           }
         }
-    
+
         // ── flair#1542: skills are forced durability=persistent (mirrors post()) ──
         // put() stamps no durability default (updates carry the pre-existing tier),
         // so this runs on the raw write value: a skill-tagged write with an explicit
@@ -2657,14 +2631,14 @@ export class Memory extends (databases as any).flair.Memory {
           const skillDurabilityDenial = enforceSkillDurability(content);
           if (skillDurabilityDenial) return skillDurabilityDenial;
         }
-    
+
         const now = new Date().toISOString();
         content.updatedAt = now;
         // Set defaults that post() sets — put() is also used for new records via CLI
         content.archived = content.archived ?? false;
         content.createdAt = content.createdAt ?? now;
-    
-    
+
+
         // Preserve stored visibility on updates before applying write policy
         // (only the two writable values; the guards below see the result).
         if (
@@ -2674,7 +2648,7 @@ export class Memory extends (databases as any).flair.Memory {
         ) {
           content.visibility = preExisting.visibility;
         }
-    
+
         // ─── Default visibility (durability-keyed) — Layer 1, part A ────────────
         // Explicit visibility on the write ALWAYS overrides; only stamp the
         // default when the caller left it unset AND this is a fresh record.
@@ -2699,7 +2673,7 @@ export class Memory extends (databases as any).flair.Memory {
               );
             }
           }
-    
+
           // ── flair#1257: ephemeral memories are private-only (hard precondition) ──
           // Same rule as post(), with one PUT-specific wrinkle: an update payload
           // may omit durability entirely (put() stamps no durability default), so
@@ -2720,14 +2694,14 @@ export class Memory extends (databases as any).flair.Memory {
               );
             }
           }
-    
+
         if (!preExisting && (content.visibility === undefined || content.visibility === null)) {
           content.visibility = defaultVisibilityForDurability(content.durability);
         }
-    
+
         const expiryError = stampEphemeralExpiry(content, preExisting);
         if (expiryError) return Response.json({ error: "invalid_expiry", message: expiryError }, { status: 400 });
-    
+
         // supersedes: optional reference to the ID of the memory this one
         // replaces. Validates shape + cross-agent-write authorization (shared
         // with post() — see validateAndAuthorizeSupersedes doc for why PUT needs
@@ -2737,11 +2711,11 @@ export class Memory extends (databases as any).flair.Memory {
         if (content.supersedes && !content.validFrom) {
           content.validFrom = content.createdAt;
         }
-    
+
         // attention-plane vocabulary gate (flair#675) — see post()'s comment above.
         const entitiesError = invalidEntitiesResponse(content.entities);
         if (entitiesError) return entitiesError;
-    
+
         // Content safety scan on updated content + summary.
         if (content.content || content.summary) {
           const safety = scanFields(content, ["content", "summary"]);
@@ -2759,7 +2733,7 @@ export class Memory extends (databases as any).flair.Memory {
             content._safetyFlags = null;
           }
         }
-    
+
         // ── flair#1542: SkillScan gate BEFORE the embed (mirrors post()) ──
         // Every skill-tagged write is statically scanned before any embedding is
         // computed, so a rejected write pays no embed. Fail-closed on high/critical;
@@ -2772,7 +2746,7 @@ export class Memory extends (databases as any).flair.Memory {
           const skillSourceDenial = refuseSkillWriteSource(content);
           if (skillSourceDenial) return skillSourceDenial;
         }
-    
+
         // Server-side conservative-duplicate gate (memory-integrity fix). PUT is
         // an upsert: only run the gate for a FRESH create (target id does not yet
         // exist) that is NOT a supersede-link write. An update of an EXISTING id
@@ -2799,7 +2773,7 @@ export class Memory extends (databases as any).flair.Memory {
         } else {
           dedupMatch = await runDedupGate(ctx, content);
         }
-    
+
         // Re-generate embedding if content changed (no-op if the dedup gate above
         // already computed one for this content). flair#504 Phase 2: 'document'
         const embedText = skillEmbedText(content);
@@ -2807,13 +2781,13 @@ export class Memory extends (databases as any).flair.Memory {
           const vec = await getEmbedding(embedText, "document");
           if (vec) { content.embedding = vec; content.embeddingModel = getModelId(); }
         }
-    
+
         // If archiving, record who + when
         if (content.archived === true && !content.archivedAt) {
           content.archivedAt = now;
           // archivedBy should be set by the caller (CLI stamps req.tpsAgent via query param)
         }
-    
+
         // ── flair#1940 slice 1 (A1'): the host pointer is NOT a Memory attribute. ──
         // Identical rule to post(): consume the write-body-only pointer inputs OUT
         // of the row, validate them, and build the pointer row written alongside
@@ -2859,7 +2833,7 @@ export class Memory extends (databases as any).flair.Memory {
         }
         const pointer = buildPointerForWrite({ inputs: pointerInputs, memoryId: content.id ?? "", visibility: effectiveVisibility, auth, memoryInstanceToken: content.instanceToken, storedPointer });
         if (pointer.denial) return pointer.denial;
-    
+
         // Write-time provenance stamp (memory-provenance slice 1) — see
         // buildProvenance's doc above post(). Applies to every put() (fresh
         // create AND update/patch) — never gated on preExisting, so an update
@@ -2873,7 +2847,7 @@ export class Memory extends (databases as any).flair.Memory {
         // strip the write-body-only `claimedClient` passthrough now that it's
         // folded into `provenance.claimed.client`. Never persisted as a row field.
         delete content.claimedClient;
-    
+
         // Write-time originatorInstanceId (federation-edge-hardening slice 1):
         // a CREATE (no pre-existing row) stamps this instance's own id, ignoring
         // any body value; an UPDATE keeps the STORED value — a body value neither
@@ -2885,7 +2859,7 @@ export class Memory extends (databases as any).flair.Memory {
         // and a client body may not set it on a create. See
         // resources/originator-instance.ts.
         applyFederationBookkeeping(content, preExisting);
-    
+
         // ── Write the new/updated record FIRST ──────────────────────────────────
         // A1' item 1: persist ONLY declared Memory attributes (see post()).
         // Pinned by test/unit/memory-host-source.test.ts (r20-put) — RED if this
@@ -2941,8 +2915,6 @@ export class Memory extends (databases as any).flair.Memory {
             throw err;
           }
         }
-        // The owned transaction commits when this callback returns; the post-commit
-        // verification, supersede close, citation record and response body run below.
         return { content, result: r, dedupMatch, redactedValues, usedMemoryIds, close: supersede.close, auth, fallbackId: preExisting?.id };
       });
     } catch (err) {
@@ -2955,16 +2927,11 @@ export class Memory extends (databases as any).flair.Memory {
     // successful Response is replaced by the write_response_withheld refusal
     // (a storage-layer Response was replaced in the transaction, storageResult).
     if (putResult instanceof Response) return writeResultResponse(putResult);
-    // Post-commit verification (flair#2478): the owned transaction has committed.
-    // A fresh read must still find the token this PUT stamped and, of the fields
-    // it declared, the same `agentId`, `content`, `visibility` and `durability`.
-    // A row replaced with a different token, or one where a later write changed
-    // one of those four, is refused by name instead of answered with success; a
-    // later write that changed only other fields (not the token) is not. A
-    // failed verification read is an UNKNOWN outcome (never "no row"): the id is
-    // marked and the caller gets 503.
-    // A composed put has not committed yet (its caller commits), so a fresh
-    // read could not see the row; it is not verified here.
+    // Verify the ordinary owned row PUT after a normal storage result.
+    // Refusals, storage Responses and skill PUT return above; composed promotion skips
+    // this read and uses its caller's in-transaction existence check.
+    // Compare the token and declared agentId/content/visibility/durability;
+    // other field changes pass. A failed read marks the id and answers 503.
     if (!composed) {
       // Test-only: holds the PUT after its commit, before the verification read.
       const verifyPause = txnPausePoint("memory-put-verify");

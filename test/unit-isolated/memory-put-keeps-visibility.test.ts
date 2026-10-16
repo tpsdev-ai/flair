@@ -78,6 +78,7 @@ const { Memory } = await import("../../resources/Memory.ts");
 function makeMemory(id: string) {
   const r: any = new (Memory as any)();
   r.id = id;
+  r.getId = () => id;
   r.getContext = () => ({ request: { tpsAgent: "alice", tpsAgentIsAdmin: false } });
   return r;
 }

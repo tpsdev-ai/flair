@@ -84,8 +84,8 @@ interface WriteCase {
   via: "owner-guard" | "resolveStoredRow";
 }
 
-// At least the two mutating write verbs for every caller; Memory's PATCH reads
-// the row once for the authority guard first, so its owner-guard read is the 2nd.
+// At least the two mutating write verbs for every caller. Memory PATCH reads
+// its target, then the authority guard, before its owner guard reads.
 const CASES: WriteCase[] = [
   { module: "Asset", cls: "Asset", verb: "patch", body: { memoryId: "m", contentType: "image/png" }, ctx: AGENT, failFrom: 1, via: "owner-guard" },
   { module: "Asset", cls: "Asset", verb: "put", body: { memoryId: "m", contentType: "image/png" }, ctx: AGENT, failFrom: 1, via: "owner-guard" },
@@ -97,7 +97,7 @@ const CASES: WriteCase[] = [
   // any read). Read 1 is the stored-row resolver's read by that id (no row);
   // read 2, the owner guard's, is the one that fails.
   { module: "Memory", cls: "Memory", verb: "put", body: { id: "mem-owner-guard", content: "hi" }, ctx: AGENT, failFrom: 2, via: "owner-guard" },
-  { module: "Memory", cls: "Memory", verb: "patch", body: { content: "hi" }, ctx: AGENT, failFrom: 2, via: "owner-guard" },
+  { module: "Memory", cls: "Memory", verb: "patch", body: { id: "mem-owner-guard", content: "hi" }, ctx: AGENT, failFrom: 3, via: "owner-guard" },
   { module: "MemoryCandidate", cls: "MemoryCandidate", verb: "patch", body: { status: "promoted" }, ctx: AGENT, failFrom: 1, via: "owner-guard" },
   { module: "MemoryCandidate", cls: "MemoryCandidate", verb: "put", body: { status: "pending" }, ctx: AGENT, failFrom: 1, via: "owner-guard" },
   { module: "MemoryGrant", cls: "MemoryGrant", verb: "patch", body: { scope: "all" }, ctx: AGENT, failFrom: 1, via: "owner-guard" },

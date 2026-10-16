@@ -146,7 +146,7 @@ function releaseAll(lock: KeyLockStore, acquired: string[][]): void {
  * deduplicated), up to {@link MEMORY_LOCK_ATTEMPTS} attempts spaced
  * {@link MEMORY_LOCK_WAIT_MS}. Returns `busy` when the budget is exhausted;
  * `unknown` when one of the ids carries an unknown-outcome marker; `unavailable`
- * when the store has no lock. `fn` does not run in those cases.
+ * when the store has no lock or `ids` is empty. `fn` does not run in those cases.
  */
 export async function withMemoryWriteLock<T>(
   store: unknown,
@@ -174,7 +174,7 @@ async function acquire<T>(
   waitMs: number,
   fn: (locked: MemoryLockedScope) => Promise<T>,
 ): Promise<MemoryLockOutcome<T>> {
-  if (!lock) return { kind: "unavailable" };
+  if (!lock || normalized.keys.length === 0) return { kind: "unavailable" };
   const scope: MemoryLockedScope = { keys: normalized.keys, ids: normalized.ids };
   const acquired: string[][] = [];
   for (let attempt = 0; attempt < attempts; attempt++) {

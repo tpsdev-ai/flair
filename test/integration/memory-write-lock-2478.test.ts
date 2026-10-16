@@ -2,27 +2,19 @@
  * memory-write-lock-2478.test.ts — the per-id memory write lock serializes the
  * ordinary owner PUT/PATCH (flair#2478 slice 1, part 1), real Harper.
  *
- * The converted verbs acquire the lock BEFORE their first stored read, and
- * their row write owns its transaction, so the read, the decision and the
- * COMMIT all happen before the lock releases. (A put composed into its caller's
- * own transaction — manual promotion — commits after the lock releases; that
- * path is covered by promotion-stamp-failure-2354 and memory-authority-fields.)
- * Two owner PUT/PATCH writers on one id that own their transactions therefore
- * cannot interleave (writers that take no lock, part 2, are not covered). A second writer
- * waits for the lock within its budget (200 attempts, 10 ms apart):
+ * Ordinary owner row PUT/PATCH acquire the per-id lock before their first
+ * stored read and commit their owned transaction before releasing it. Re-embed
+ * PATCH uses an inner owned transaction. Composed promotion and an admin
+ * `_reindex` joining an open transaction can commit after release.
+ * A same-id writer waits within its budget (200 attempts, 10 ms apart), then
+ * acquires the lock or answers 503 memory_busy without writing.
  *
- *   - if the first releases inside the budget, the second takes the lock, reads
- *     the first's COMMITTED row (an owner PUT/PATCH owns its transaction, so it
- *     committed before it released) and commits its own write — no lost write
- *     and no spurious 409;
- *   - otherwise it answers 503 memory_busy (the caller id only, byte-identical
- *     for an existing and an absent target), and does not write.
- *
- * After its commit, a write re-reads the row and answers 409 stored_row_changed
- * when the row carries a different incarnation token, even with the same values (a
- * legacy row without a token is given one by its PATCH, so this holds for it
- * too, and a re-embed PATCH is checked the same way). A PUT
- * that names no id is refused 400 memory_id_required before it locks or writes.
+ * After a normal storage result, the ordinary owned row write verifies its
+ * token and declared agentId/content/visibility/durability after commit; a
+ * successful re-embed checks its token after its inner commit. Refusals and
+ * storage Responses return before the read. Skill PUT has no ordinary-row verification;
+ * composed promotion uses its caller's in-transaction existence check.
+ * PUT and PATCH require an id before entering the lock helper.
  *
  * DETERMINISTIC ORDERING via the `memory-put-committed` / `memory-patch-committed`
  * pause points (resources/txn-pause-point.ts, enabled by
@@ -469,5 +461,43 @@ describe("flair#2478 — a PUT must name its id", () => {
       search_attribute: "agentId", search_value: owner.id, get_attributes: ["id", "content"],
     });
     expect((rows as any[]).filter((row) => row.content === marker)).toEqual([]);
+  }, 120_000);
+});
+
+describe("flair#2478 — a PATCH must name its id", () => {
+  it("refuses an idless HTTP PATCH before running the verb body", async () => {
+    const point = "memory-patch-entry";
+    const id = `wlk-entry-${randomUUID()}`;
+    await seedMemory(id, "the entry probe");
+    arm(point);
+    release(point);
+    try {
+      const probe = await patchBodyAs(owner, id, { tags: ["entry-probe"] });
+      expect(probe.status, await probe.clone().text()).toBeLessThan(300);
+      expect(existsSync(join(pauseDir, `claimed.${point}`))).toBe(true);
+    } finally {
+      rmSync(join(pauseDir, `arm.${point}`), { force: true });
+      clearMarkers(point);
+    }
+    for (const path of ["/Memory/", "/Memory"]) {
+      arm(point);
+      release(point);
+      try {
+        const res = await fetch(`${harper.httpURL}${path}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json", Authorization: ed25519Header(owner, "PATCH", path) },
+          body: JSON.stringify({ agentId: owner.id, content: "an idless PATCH" }),
+          signal: AbortSignal.timeout(60_000),
+        });
+        expect({
+          status: res.status,
+          error: (await res.json() as any).error,
+          bodyEntered: existsSync(join(pauseDir, `claimed.${point}`)),
+        }, path).toEqual({ status: 400, error: "memory_id_required", bodyEntered: false });
+      } finally {
+        rmSync(join(pauseDir, `arm.${point}`), { force: true });
+        clearMarkers(point);
+      }
+    }
   }, 120_000);
 });

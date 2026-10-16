@@ -2559,6 +2559,27 @@ describe("flair#1965 r2 — Memory PUT resolves the URL-bound target; PATCH crea
   });
 });
 
+describe("flair#2478 — idless PATCH", () => {
+  it("refuses before accessing the lock store or entering the verb body", async () => {
+    const m: any = makeMemory(agentCtx("agent-1"));
+    m.getId = () => undefined;
+    m.patchLocked = async () => { throw new Error("idless PATCH entered its verb body"); };
+    const descriptor = Object.getOwnPropertyDescriptor(BaseMemory, "primaryStore")!;
+    Object.defineProperty(BaseMemory, "primaryStore", {
+      configurable: true,
+      get() { throw new Error("idless PATCH reached the lock helper's store"); },
+    });
+    try {
+      const res = await m.patch({ agentId: "agent-1", content: "an idless PATCH" });
+      expect({ status: res.status, error: (await res.json()).error }).toEqual({
+        status: 400, error: "memory_id_required",
+      });
+    } finally {
+      Object.defineProperty(BaseMemory, "primaryStore", descriptor);
+    }
+  });
+});
+
 // flair#2478 — Memory PUT and PATCH run under `Memory.primaryStore`'s per-id
 // lock. A store with no lock is refused by name through the resource, and
 // nothing is read or written: the verb never runs unserialized.

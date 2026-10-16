@@ -315,8 +315,6 @@ describe("flair#2465 — a re-embed keeps a concurrent owner edit (real Harper)"
     const row = await readRow(id);
     expect(row.content, "the re-embed did not leave the owner's committed edit").toBe(EDITED);
     expect(row.embeddingModel).toBe(CURRENT_MODEL_ID);
-    // The re-embed re-read the committed row, saw the edited text, and stored the
-    // vector for THAT text — never the superseded original.
     const editedVector = await serverEmbedding(EDITED);
     const originalVector = await serverEmbedding(ORIGINAL);
     expect(cosine(row.embedding, editedVector), "the re-embed stored a vector for the superseded text").toBeGreaterThan(0.999);

@@ -542,10 +542,9 @@ describe("flair#2561 — `stored` reports only the string-valued text fields the
     const body = redacted ? `rotate ${GITHUB_TOKEN}` : "a changed note";
     const answers: Array<[string, any]> = [];
     BaseMemory.post = async () => result();
-    // The table put stores the row as real storage does (staged in an open
-    // transaction) and answers with the shaped result: flair#2478's post-commit
-    // verification reads the committed row, so a stand-in that wrote nothing
-    // would be refused 409 stored_row_changed before the answer is built.
+    // Stage the row for ordinary owned PUT verification after a normal result.
+    // Refusals, storage Responses and skill PUT return before that read; composed
+    // promotion uses its caller's in-transaction existence check.
     BaseMemory.put = async (content: any, ctx?: any) => {
       await oldPut.call(BaseMemory, content, ctx);
       return result();
