@@ -5,4 +5,4 @@
   a later migration cycle can retry. `/MemoryDedupStats` preserves the existing
   stat file and returns the guard state when its pre-persist recheck refuses.
   REM records guard
-  refusals with null counts and a known refusal state.
+  refusals with null counts and any nonempty guard state other than `uniform`.
