@@ -33,7 +33,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import nacl from "tweetnacl";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { HARPER_STOP_BUDGET_MS, startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 
 interface TestAgent { id: string; publicKey: Uint8Array; secretKey: Uint8Array; }
 const newAgent = (id: string): TestAgent => ({ id, ...nacl.sign.keyPair() });
@@ -188,7 +188,7 @@ afterAll(async () => {
   if (harper) await stopHarper(harper).catch(() => {});
   if (home) rmSync(home, { recursive: true, force: true });
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 const POINT = "memory-put-committed";
 
