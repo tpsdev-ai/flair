@@ -1,0 +1,1 @@
+- `startHarper` checks membership under `dist/resources/` and source mtimes of the files the resources build compiles for local Flair source trees; reported issues refuse startup (#2583).

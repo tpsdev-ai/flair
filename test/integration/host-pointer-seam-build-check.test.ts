@@ -12,7 +12,8 @@
  * and proves the scan goes RED before any real assertion is judged.
  */
 import { describe, it, expect } from "bun:test";
-import { readdirSync, readFileSync, existsSync, writeFileSync, rmSync, mkdirSync } from "node:fs";
+import { readdirSync, readFileSync, existsSync, writeFileSync, rmSync, mkdirSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const DIST = join(import.meta.dir, "..", "..", "dist");
@@ -44,17 +45,24 @@ describe("flair#1940 A1-iv item 6 — production output has no pointer failure s
     expect(scanForSeams(DIST)).toEqual([]); // assertion: no seam/switch anywhere under dist/
   });
 
-  it("(positive control) a planted NESTED dist file makes the scan FAIL, then its removal restores green", () => {
-    const nestedDir = join(DIST, "resources", "nested-scratch");
-    const planted = join(nestedDir, "planted.js");
-    mkdirSync(nestedDir, { recursive: true });
+  it("(positive control) a planted NESTED file makes the scan FAIL, then its removal restores green", () => {
+    // Planted in a scratch tree shaped like dist/, never in the real build output:
+    // adding and removing an entry under dist/resources would make the build look
+    // stale to later local starts against this source root before a rebuild.
+    const root = mkdtempSync(join(tmpdir(), "flair-seam-scan-"));
     try {
+      const nestedDir = join(root, "resources", "nested-scratch");
+      const planted = join(nestedDir, "planted.js");
+      mkdirSync(nestedDir, { recursive: true });
+      writeFileSync(join(root, "resources", "clean.js"), "exports.clean = true;\n");
+      expect(scanForSeams(root)).toEqual([]); // assertion: green before the plant
       // A symbol in a nested file is EXACTLY what a top-level-only glob misses.
       writeFileSync(planted, `exports.${SEAM_SYMBOL} = function () {};\n`);
-      expect(scanForSeams(DIST)).toContain(`${planted}: seam setter`); // assertion: the scan is RED
-    } finally {
+      expect(scanForSeams(root)).toContain(`${planted}: seam setter`); // assertion: the scan is RED
       rmSync(nestedDir, { recursive: true, force: true });
+      expect(scanForSeams(root)).toEqual([]); // assertion: green again once removed
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
-    expect(scanForSeams(DIST)).toEqual([]); // assertion: green again once removed
   });
 });

@@ -14,6 +14,7 @@ import {
 } from "../../src/lib/scratch-owner.js";
 import { isStartTimeMatch } from "../../src/lib/daemon-liveness.js";
 import { readProcessStartTimeMs } from "../../src/lib/process-start-time.js";
+import { assertFlairDistFresh } from "./dist-freshness.js";
 
 // flair#1450: test-harness Harper only. NODE_OPTIONS --require of this file
 // makes the child exit on EPIPE / reparent rather than loop into a multi-GB
@@ -967,6 +968,10 @@ export async function startHarper(opts: StartHarperOptions = {}): Promise<Harper
   }
 
   // ── Local mode: spawn Harper from node_modules ────────────────────────────
+  assertFlairDistFresh(cwd);
+  // The supplied harperBinDir is held to the same check. The probe-app fixtures
+  // set it to the Flair root they link, whose dist/ the app runs.
+  if (opts.harperBinDir && opts.harperBinDir !== cwd) assertFlairDistFresh(opts.harperBinDir);
   const readinessTimeoutMs = opts.readinessTimeoutMs ?? HARPER_STARTUP_BUDGET_MS;
   const ownsInstallDir = !opts.installDir;
   // Boot sweep first: leftovers from SIGKILL / cancelled CI are not small,
