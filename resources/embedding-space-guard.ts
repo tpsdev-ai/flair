@@ -302,6 +302,33 @@ export interface EmbeddingSpaceVerdict {
   found: string[];
 }
 
+/** The state-named warning a guard-degraded consumer surfaces when it refuses
+ *  its embedding leg (flair#2530, flair#2559). The verdict is never `uniform`
+ *  here (that state is never degraded), so the three cases are exactly the
+ *  non-uniform states. Each names itself; the non-current-stamp wording is used
+ *  ONLY for the `mixed` state. `response` says what the caller gets back:
+ *  keyword-only results (the request has query text), no results (it has none),
+ *  or an `explain` plan with no embedding leg. Shared by the recall leg
+ *  (resources/SemanticSearch.ts) and MemoryBootstrap's task-relevant selection
+ *  (resources/MemoryBootstrap.ts) so both name the state with ONE wording. */
+export function spaceGuardWarning(v: EmbeddingSpaceVerdict, response: "keyword" | "none" | "plan"): string {
+  const outcome =
+    response === "keyword" ? "results are keyword-only"
+    : response === "none" ? "no results (the request has no query text to fall back on)"
+    : "the plan has no embedding leg";
+  if (v.state === "scan-failed") {
+    return `semantic search unavailable — embedding space unverified: last scan failed (${v.reason}); ${outcome}.`;
+  }
+  if (v.state === "unverified") {
+    return `semantic search unavailable — embedding space not yet verified; ${outcome}.`;
+  }
+  return (
+    `semantic search unavailable — a non-current embedding model stamp was observed ` +
+    `(current: ${v.current}; found: ${v.found.join(", ")}); ${outcome}. ` +
+    `Reconcile to one space with: flair reembed --stale-only`
+  );
+}
+
 /** Bounded, row-content-free reasons a scan can fail with. An error from the
  *  scan's table lookup or corpus read is classified into one of these; the raw
  *  message is never surfaced or logged. */

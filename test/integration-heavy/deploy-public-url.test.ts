@@ -29,7 +29,7 @@ import { createRequire } from "node:module";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle.js";
+import { startHarper, stopHarpers, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle.js";
 import { resolveDeployPublicUrl, stageDeployRoot } from "../../src/deploy.js";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
@@ -57,13 +57,13 @@ function tempDir(prefix: string): string {
 }
 
 afterAll(async () => {
-  for (const h of instances) {
-    try { await stopHarper(h); } catch { /* best effort */ }
-  }
+  // flair#2568: every instance this file started, stopped concurrently (one
+  // stop deadline for the set, not one per instance); best effort, as before.
+  await stopHarpers(instances).catch(() => { /* best effort */ });
   for (const d of tmpDirs) {
     try { rmSync(d, { recursive: true, force: true }); } catch { /* best effort */ }
   }
-});
+}, HARPER_STOP_BUDGET_MS);
 
 /**
  * A package root shaped like the PUBLISHED flair package — the layout

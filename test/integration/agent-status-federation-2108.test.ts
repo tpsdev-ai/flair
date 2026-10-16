@@ -10,7 +10,7 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { signBodyFresh } from "../../resources/federation-crypto.js";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 const sfx = Date.now().toString(36);
 const HUB = `afs-hub-${sfx}`;
@@ -80,7 +80,7 @@ describe("flair#2108 — an inbound federated record cannot change an existing l
     });
   }, 180_000);
 
-  afterAll(async () => { if (harper) await stopHarper(harper); });
+  afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
 
   test("a peer record whose `status` differs from the stored value is skipped whole: status and a second field are unchanged", async () => {
     const out = await sync({ data: { id: TARGET, status: "deactivated", runtime: "remote" } });

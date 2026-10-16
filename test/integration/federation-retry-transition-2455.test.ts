@@ -20,7 +20,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseRetryEntryKey, retryEntryKey } from "../../resources/federation-retry-lib.js";
 import { componentWithRetryProbe, type RetryProbeComponent } from "../helpers/federation-retry-probe-component";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 const sfx = Date.now().toString(36);
 const PEER = `retry-transition-peer-${sfx}`;
@@ -115,7 +115,7 @@ describe("flair#2455 — retry transition is atomic and fail-closed (real Harper
     if (harper) await stopHarper(harper);
     if (component) component.cleanup();
     if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test("the transition probe is admin-only", async () => {
     const res = await probe({ peerId: PEER, table: "Memory", recordId: "x", resolution: "merged" }, false);

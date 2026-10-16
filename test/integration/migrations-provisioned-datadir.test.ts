@@ -60,7 +60,7 @@ import {
   bootLogRefs,
   dumpBootLogs,
   throwIfComponentInstallFailed,
-  type HarperInstance,
+  type HarperInstance, HARPER_STOP_BUDGET_MS,
 } from "../helpers/harper-lifecycle";
 import { assertSeedOnlyPrecondition } from "../helpers/migration-precondition";
 import {
@@ -378,7 +378,7 @@ describe("zero-touch migrations — provisioned shape whose ~/.flair/data is unu
       const { rm } = await import("node:fs/promises");
       await rm(installDir, { recursive: true, force: true, maxRetries: 4 }).catch(() => {});
     }
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test("boot 1 ran the composed resource set — the boot-cycle trigger never loaded (flair#1785 slice 2)", () =>
     withBootLogs(() => {

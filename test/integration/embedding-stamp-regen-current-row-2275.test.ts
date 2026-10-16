@@ -17,7 +17,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 const POINT = "embedding-stamp-regen-pre";
 const ROW_ID = `esr-${randomUUID()}`;
@@ -114,7 +114,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (harper) await stopHarper(harper).catch(() => {});
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair#2275 — the embedding-stamp re-embed under a change committed after its read (real Harper)", () => {
   it("a content edit committed after the migration read the row is kept, and the row is re-embedded", async () => {

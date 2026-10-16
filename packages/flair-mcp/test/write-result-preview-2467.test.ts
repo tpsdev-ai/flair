@@ -197,7 +197,7 @@ describe("flair#2541 — skill_store previews the STORED text and trigger and re
   test("a redacted write previews the stored content and trigger, never the caller's input", async () => {
     const res = await STDIO_TOOL_HANDLERS.skill_store(
       { content: ORIGINAL, trigger: TRIGGER, name: "deploy" },
-      skillCtx({ id: "skill-1", written: true, redactedValues: 2, stored: { content: STORED, trigger: STORED_TRIGGER } }),
+      skillCtx({ id: "skill-1", written: true, redactedValues: 2, stored: { content: STORED, trigger: STORED_TRIGGER, name: "deploy" } }),
     );
     const text = res.content[0].text;
     expect(text).toContain("Skill stored (id: skill-1)");
@@ -207,6 +207,26 @@ describe("flair#2541 — skill_store previews the STORED text and trigger and re
     expect(text).toContain("Redacted 2 credential-shaped value(s) before storing.");
     expect(text).not.toContain(TOKEN);
     expect(res.structuredContent).toEqual({ id: "skill-1", written: true, redactedValues: 2 });
+  });
+
+  test("flair#2575 — after a counted redaction, the name line comes from the stored name", async () => {
+    const res = await STDIO_TOOL_HANDLERS.skill_store(
+      { content: ORIGINAL, trigger: TRIGGER, name: `deploy ${TOKEN}` },
+      skillCtx({ id: "skill-1", written: true, redactedValues: 2, stored: { content: STORED, trigger: STORED_TRIGGER, name: "deploy [redacted]" } }),
+    );
+    const text = res.content[0].text;
+    expect(text).toContain("Name: deploy [redacted]");
+    expect(text).not.toContain(TOKEN);
+  });
+
+  test("flair#2575 — a counted redaction whose stored text carries no name omits the name line", async () => {
+    const res = await STDIO_TOOL_HANDLERS.skill_store(
+      { content: ORIGINAL, trigger: TRIGGER, name: `deploy ${TOKEN}` },
+      skillCtx({ id: "skill-1", written: true, redactedValues: 2, stored: { content: STORED, trigger: STORED_TRIGGER } }),
+    );
+    const text = res.content[0].text;
+    expect(text).not.toContain("Name:");
+    expect(text).not.toContain(TOKEN);
   });
 
   test("a counted redaction whose stored text carries no trigger omits the trigger line", async () => {

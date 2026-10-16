@@ -1,6 +1,6 @@
 import { databases } from "harper";
 import { randomUUID } from "node:crypto";
-import { isOperatorSeedPut, redactMemoryWrite, storedMemoryText, suppliedMemoryTextFields, type MemoryTextField, type StoredMemoryText } from "./memory-redaction.js";
+import { isOperatorSeedPut, redactMemoryWrite, redactSkillWrite, storedMemoryText, suppliedMemoryTextFields, suppliedStoredTextFields, type StoredMemoryText, type StoredTextField } from "./memory-redaction.js";
 import { REDACTION_RULES, buildFromAllowlist, storageResult, withheldWriteResult, writeResultResponse, type FieldRules } from "./memory-write-response.js";
 import { isDeepStrictEqual } from "node:util";
 import { patchRecord, withDetachedTxn } from "./table-helpers.js";
@@ -31,7 +31,7 @@ import { isJoinableTransaction, withOwnedTransaction, withSharedWriteTransaction
 import { CommittedRowChanged, GrantedCloseRevoked, confirmCommittedRow, sameStoredRow, storedRowChangedRefusal, writeGrantHeld } from "./write-back.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 import { assertValidDurability, stampEphemeralExpiry } from "./memory-durability.js";
-import { embedTextField, enforceSkillDurability, isSkillWrite, type MemoryEmbeddingInputField, rejectSkillWritePath, refuseSkillWriteSource, skillEmbedText, skillScanGate } from "./skill-write.js";
+import { embedTextField, enforceSkillDurability, isSkillWrite, type MemoryEmbeddingInputField, rejectSkillWritePath, refuseSkillWriteSource, skillEmbedText, skillScanGate, skillMetadataHasDuplicateKey } from "./skill-write.js";
 import { embeddedTextHash, hashEmbeddedText } from "./memory-embed-hash.js";
 import { buildSkillSuccessorRow, closedSkillPayloadReadable, defaultSkillHooks, grantedSkillClose, resolveSkillHead, rowIsSkill, runSkillVersionWrite, skillVersionVisibility, skillPayloadUnchanged, prepareSkillBody, validateSkillSnapshots, authorizeSkillOwners, skillWriteConflict } from "./skill-version-write.js";
 import { deriveSkillSubjectId } from "./skill-subject.js";
@@ -658,7 +658,7 @@ function reindexDrift(content: any, existing: Record<string, any>): string | nul
 export function buildReindexRow(
   content: any,
   existing: Record<string, any> | null | undefined,
-): { row: Record<string, any> } | { status: 404 | 409; error: string; message: string } {
+): { row: Record<string, any> } | { status: 400 | 404 | 409; error: string; message: string } {
   delete content._reindex;
   // A1' item 1: the reindex branch keeps declared and named retained
   // attributes. Pinned by test/unit/memory-host-source.test.ts
@@ -673,6 +673,10 @@ export function buildReindexRow(
   // refused — it is never re-created/re-stamped.
   if (!existing) {
     return { status: 404, error: "reindex_row_not_found", message: "the _reindex re-PUT requires an existing stored row" };
+  }
+  const effective = { ...existing, ...content };
+  if (rowIsSkill(effective) && skillMetadataHasDuplicateKey(effective.metadata)) {
+    return { status: 400, error: "skill_metadata_duplicate_key", message: "skill metadata requires distinct top-level keys" };
   }
   const drift = reindexDrift(reindexBody, existing);
   if (drift) {
@@ -1034,13 +1038,17 @@ async function writeSkillCreateOrUpdate(
     /** A reserved seed id: version the write IN PLACE (same physical id). */
     inPlaceId?: string | null;
     reembedding?: boolean;
+    /** The fields a PUT supplied. An in-place (reserved seed) PUT whose supplied
+     *  fields equal the live head writes no row. Absent when the PUT's
+     *  redaction replaced a value: that PUT always writes its redacted row. */
     requestedPayload?: Record<string, any>;
     /** flair#2467: receives the post-redaction text fields of the successor
      *  row this write staged and committed (none when it wrote no row).
      *  flair#2561: only the `supplied` fields, the string-valued text fields
-     *  the request supplied; the successor row also holds the fields it
-     *  carries over from its predecessor, and those are not reported. */
-    staged?: { supplied: readonly MemoryTextField[]; text: StoredMemoryText | null };
+     *  and (flair#2575) the skill fields the request supplied; the successor
+     *  row also holds the fields it carries over from its predecessor, and
+     *  those are not reported. */
+    staged?: { supplied: readonly StoredTextField[]; text: StoredMemoryText | null };
   },
 ): Promise<any> {
   const { ctx, auth, content, storedRow, explicitPredecessor, method, pointer, inPlaceId, reembedding, requestedPayload } = args;
@@ -1570,13 +1578,13 @@ export class Memory extends (databases as any).flair.Memory {
       content.id = postUrlTargetId;
     }
     const postStored = content.id ? await (databases as any).flair.Memory.get(content.id) : null;
-    // flair#2407: redact credential-shaped text before the dedup gate, its
-    // embedding input and the stored embedding are computed from `content`.
-    const redactedValues = redactMemoryWrite(content).count;
-    // flair#2561: the string-valued text fields this request supplies, read
-    // before a skill predecessor is merged into the body; `stored` reports
-    // only these.
-    const suppliedText = suppliedMemoryTextFields(content);
+    // flair#2561: the fields this request supplies that `stored` can report —
+    // its string-valued text fields and, for a skill, the skill fields it
+    // supplies (flair#2575) — read before a skill predecessor is merged into the
+    // body; `stored` reports only these. Redaction runs after prepareSkillBody
+    // (below) and keeps a string a string, so reading them first names the
+    // same fields.
+    const suppliedText = suppliedStoredTextFields(content);
     canonicalizeSupersedes(content);
     // flair#2465: a body that omits `embedding` can have the stored row's vector
     // carried in by prepareSkillBody, with the hash it retained for that vector.
@@ -1584,6 +1592,9 @@ export class Memory extends (databases as any).flair.Memory {
     const preparedSkill = await prepareSkillBody(content, postStored);
     if (preparedSkill instanceof Response) return preparedSkill;
     content = preparedSkill.content;
+    let redactedValues = redactMemoryWrite(content).count;
+    // Duplicate top-level metadata keys are refused; otherwise redact name/description and tags.
+    redactedValues += redactSkillWrite(content);
     const postCarriedHash = postOmitsEmbedding && Array.isArray(content?.embedding) && content.embedding.length > 0
       ? (content.embeddedContentHash ?? null)
       : null;
@@ -1841,7 +1852,7 @@ export class Memory extends (databases as any).flair.Memory {
     stripUndeclaredMemoryAttributes(content);
     if (isSkillWrite(content)) {
       const reservedId = [content?.id, (this as any).getId?.()].find((candidate) => isReservedSeedId("Memory", candidate));
-      const skillStaged: { supplied: readonly MemoryTextField[]; text: StoredMemoryText | null } = { supplied: suppliedText, text: null };
+      const skillStaged: { supplied: readonly StoredTextField[]; text: StoredMemoryText | null } = { supplied: suppliedText, text: null };
       const skillResult = await writeSkillCreateOrUpdate({
         ctx, auth, content, storedRow: postStored, explicitPredecessor: preparedSkill.predecessor, method: "post", pointer,
         inPlaceId: reservedId != null ? String(reservedId) : null, staged: skillStaged,
@@ -2281,16 +2292,13 @@ export class Memory extends (databases as any).flair.Memory {
       if (attr.denied) return attr.denied;
     }
 
-    // flair#2407: redact credential-shaped text before the dedup gate / the
-    // embedding, and before the row is persisted, except for the shipped-skill
-    // seed's Basic PUT of its reserved id (resources/memory-redaction.ts).
-    const redactedValues = isOperatorSeedPut(ctx, auth, writeTargetIds(this, content))
-      ? 0
-      : redactMemoryWrite(content).count;
-    // flair#2561: the string-valued text fields this request supplies, read
-    // before the stored row or a skill predecessor is merged into the body;
-    // `stored` reports only these.
-    const suppliedText = suppliedMemoryTextFields(content);
+    // flair#2561: the fields this request supplies that `stored` can report —
+    // its string-valued text fields and, for a skill, the skill fields it
+    // supplies (flair#2575) — read before the stored row or a skill predecessor
+    // is merged into the body; `stored` reports only these. Redaction runs after
+    // prepareSkillBody (below) and keeps a string a string, so reading them
+    // first names the same fields.
+    const suppliedText = suppliedStoredTextFields(content);
 
     const resolvedExisting = await resolveStoredRow(this, "Memory", content, () => super.get());
     if (resolvedExisting.denial) return resolvedExisting.denial;
@@ -2308,6 +2316,10 @@ export class Memory extends (databases as any).flair.Memory {
     const preparedSkill = await prepareSkillBody(content, preExisting);
     if (preparedSkill instanceof Response) return preparedSkill;
     content = preparedSkill.content;
+    const operatorSeed = isOperatorSeedPut(ctx, auth, writeTargetIds(this, content));
+    let redactedValues = operatorSeed ? 0 : redactMemoryWrite(content).count;
+    // Duplicate top-level metadata keys are refused; otherwise redact name/description and tags.
+    redactedValues += redactSkillWrite(content);
     const putCarriedVector = putOmitsEmbedding && Array.isArray(content?.embedding) && content.embedding.length > 0;
     const putCarriedHash = putCarriedVector ? (content.embeddedContentHash ?? null) : null;
 
@@ -2576,10 +2588,14 @@ export class Memory extends (databases as any).flair.Memory {
     stripUndeclaredMemoryAttributes(content);
     if (isSkillWrite(content)) {
       const reservedId = [content?.id, (this as any).getId?.()].find((candidate) => isReservedSeedId("Memory", candidate));
-      const skillStaged: { supplied: readonly MemoryTextField[]; text: StoredMemoryText | null } = { supplied: suppliedText, text: null };
+      const skillStaged: { supplied: readonly StoredTextField[]; text: StoredMemoryText | null } = { supplied: suppliedText, text: null };
+      // A PUT whose redaction replaced a value commits its redacted effective
+      // row, inherited fields included, so each field the reply's `stored`
+      // reports (the fields the request supplied, flair#2561) is what the row
+      // holds: the in-place unchanged-row check gets no requested fields for it.
       return skillWriteResponse(await writeSkillCreateOrUpdate({
         ctx, auth, content, storedRow: preExisting, explicitPredecessor: preparedSkill.predecessor, method: "put", pointer,
-        reembedding, requestedPayload,
+        reembedding, requestedPayload: redactedValues > 0 ? undefined : requestedPayload,
         inPlaceId: reservedId != null ? String(reservedId) : null, staged: skillStaged,
       }), redactedValues, skillStaged.text);
     }

@@ -1,7 +1,7 @@
 import { Resource, databases } from "harper";
 import { resolveAgentAuth, allowVerified } from "./agent-auth.js";
 import { getEmbedding, getMode } from "./embeddings-provider.js";
-import { embeddingSpaceVerdict, type EmbeddingSpaceVerdict } from "./embedding-space-guard.js";
+import { embeddingSpaceVerdict, spaceGuardWarning, type EmbeddingSpaceVerdict } from "./embedding-space-guard.js";
 import { withDetachedTxn } from "./table-helpers.js";
 import { applyHitStats, noteSearchHits } from "./hit-tracking.js";
 import { checkRateLimit, rateLimitResponse } from "./rate-limiter.js";
@@ -28,30 +28,6 @@ import { bestSemanticSimilarity, evaluateAbstention } from "./abstention.js";
 // Candidate multiplier: fetch more candidates than needed from the HNSW index
 // so composite re-ranking has enough headroom to reorder results.
 const CANDIDATE_MULTIPLIER = 5;
-
-/** The recall leg's `_warning` for a guard-degraded search (flair#2530). The
- *  verdict is never `uniform` here (that state is never degraded), so the three
- *  cases are exactly the non-uniform states. Each names itself; the
- *  non-current-stamp wording is used ONLY for the `mixed` state. `response` says what
- *  the caller gets back: keyword-only results (the request has query text), no
- *  results (it has none), or an `explain` plan with no embedding leg. */
-function spaceGuardWarning(v: EmbeddingSpaceVerdict, response: "keyword" | "none" | "plan"): string {
-  const outcome =
-    response === "keyword" ? "results are keyword-only"
-    : response === "none" ? "no results (the request has no query text to fall back on)"
-    : "the plan has no embedding leg";
-  if (v.state === "scan-failed") {
-    return `semantic search unavailable — embedding space unverified: last scan failed (${v.reason}); ${outcome}.`;
-  }
-  if (v.state === "unverified") {
-    return `semantic search unavailable — embedding space not yet verified; ${outcome}.`;
-  }
-  return (
-    `semantic search unavailable — a non-current embedding model stamp was observed ` +
-    `(current: ${v.current}; found: ${v.found.join(", ")}); ${outcome}. ` +
-    `Reconcile to one space with: flair reembed --stale-only`
-  );
-}
 
 export class SemanticSearch extends Resource {
   // Self-authorize via the Ed25519 agent verify instead of relying on the auth
@@ -335,7 +311,7 @@ export class SemanticSearch extends Resource {
       minScore,
       agentId,
       isAllowed: scope?.isAllowed,
-      mode,
+      mode: spaceGuardVerdict && mode === "vector-only" ? "bm25-only" : mode,
       ctx,
       onLegs: includeLegs ? (l) => { legs = l; } : undefined,
       // flair#744 slice 1: the trust block needs `provenance`, which the

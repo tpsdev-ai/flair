@@ -27,7 +27,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { HarperInstance, startHarper, stopHarper } from "../helpers/harper-lifecycle";
+import { HarperInstance, startHarper, stopHarper, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 const PAST = "2000-01-01T00:00:00.000Z";
 const POINTER = { v: 1, host: "host-a", kind: "run", id: "run-aaaaaaaa" };
@@ -177,7 +177,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair#2275 — MemoryMaintenance acts on the current row (real Harper)", () => {
   it("expiry control: an unchanged expired ephemeral row is still deleted", async () => {

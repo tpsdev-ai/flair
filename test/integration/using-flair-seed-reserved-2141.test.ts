@@ -23,7 +23,7 @@ import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import nacl from "tweetnacl";
 import { ensureCliBuild } from "../helpers/build-cli-once.js";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { signBodyFresh } from "../../resources/federation-crypto.js";
 import {
   currentSeed,
@@ -175,7 +175,7 @@ describe("flair#2141 S2 — the seed's fixed ids belong to the operator", () => 
   afterAll(async () => {
     if (harper) await stopHarper(harper);
     if (scratchHome) { try { rmSync(scratchHome, { recursive: true, force: true }); } catch {} }
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test("an agent cannot create the seed row through PUT, POST or PATCH /Memory, or POST /FeedMemories", async () => {
     expectReserved(await asAgent(AGENT, "PUT", ROW_PATH, skillBody(AGENT)), "PUT /Memory/<seed>");

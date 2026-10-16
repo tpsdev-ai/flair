@@ -1,7 +1,7 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { signBodyFresh } from "../../resources/federation-crypto.js";
 import { stampEphemeralExpiry } from "../../resources/memory-durability.ts";
 
@@ -81,7 +81,7 @@ afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (PRIOR_TTL === undefined) delete process.env.FLAIR_EPHEMERAL_TTL_HOURS;
   else process.env.FLAIR_EPHEMERAL_TTL_HOURS = PRIOR_TTL;
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("feed-written ephemeral expiry (flair#2274)", () => {
   test("a fresh ephemeral feed write without expiry gets the tier TTL", async () => {
