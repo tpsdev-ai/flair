@@ -20,7 +20,12 @@ export type WriteBackPause = () => Promise<void> | undefined;
 export type WriteBackPlan =
   | { write: Record<string, unknown> }
   | { update: Record<string, unknown> }
-  | { skip: true };
+  // A plan may name WHY it skipped, so a caller that maps a skip to an operator-
+  // visible reason (FederationSync's skip log) can tell two skip causes apart
+  // instead of labeling every skip with one hardcoded name (flair#2266). The
+  // field is optional so the many plans that return a bare `{ skip: true }` are
+  // unchanged; a caller reading it falls back to its own default.
+  | { skip: true; reason?: string };
 
 export interface WriteBackOptions {
   /** The request context, if any. Its transaction is detached for the owned

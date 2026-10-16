@@ -20,6 +20,7 @@ import { ensureCliBuild } from "../helpers/build-cli-once.js";
 import { HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle.js";
 import { seedAgentViaOpsApi } from "../../src/cli.js";
 import { detectPersistedAdminUser } from "../../src/lib/init-admin-pass.ts";
+import { nodeBin } from "../helpers/node-runtime.js";
 
 const REPO_ROOT = resolve(import.meta.dir, "..", "..");
 const CLI = join(REPO_ROOT, "dist", "cli.js");
@@ -82,9 +83,10 @@ interface Run {
 
 function runInit(args: string[], extraEnv: Record<string, string | undefined> = {}): Promise<Run> {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(process.execPath, [CLI, "init", ...args], {
+    const env = initEnv(extraEnv);
+    const child = spawn(nodeBin({ env, cwd: REPO_ROOT }), [CLI, "init", ...args], {
       cwd: REPO_ROOT,
-      env: initEnv(extraEnv),
+      env,
       stdio: ["ignore", "pipe", "pipe"],
       // Numeric literal: check-cli-spawn-budgets does not read CLI_DEADLINE_MS.
       timeout: 120_000,
@@ -159,8 +161,9 @@ describe.skipIf(process.platform !== "linux")("fresh explicit credentials on a r
       expect(statSync(adminPassPath).mode & 0o777).toBe(0o600);
       expect(detectPersistedAdminUser(dataDir)).toBe(true);
       expect(realpathSync(join(home, ".flair", "data"))).toBe(realpathSync(dataDir));
-      const doctor = spawnSync(process.execPath, [CLI, "doctor", "--port", String(httpPort)], {
-        cwd: REPO_ROOT, env: initEnv(), encoding: "utf8", timeout: 30_000,
+      const doctorEnv = initEnv();
+      const doctor = spawnSync(nodeBin({ env: doctorEnv, cwd: REPO_ROOT }), [CLI, "doctor", "--port", String(httpPort)], {
+        cwd: REPO_ROOT, env: doctorEnv, encoding: "utf8", timeout: 30_000,
       });
       expect(doctor.error).toBeUndefined();
       expect(doctor.signal).toBeNull();

@@ -274,3 +274,15 @@ describe("hasCredentialEvidence — recognizes every credential-bearing header s
     expect(hasCredentialEvidence(asObjectShape("Basic abc"))).toBe(true);
   });
 });
+
+it("AgentKeyRegister refuses a gate-anonymous Harper Bearer admin with 401", async () => {
+  const { AgentKeyRegister } = await import("../../resources/AgentKeyRegister.ts");
+  const resource = new AgentKeyRegister() as any;
+  resource.getContext = () => ({
+    user: superUser,
+    request: { ...asObjectShape("Bearer operation-token"), tpsAnonymous: true, user: superUser },
+  });
+  const response = await resource.post({});
+  expect(response.status).toBe(401);
+  expect(await response.json()).toMatchObject({ error: "authentication required" });
+});
