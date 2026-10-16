@@ -164,9 +164,11 @@ export class SemanticSearch extends Resource {
     // count stale. The writes that notify are Memory POST, PUT and PATCH (a PATCH
     // when it changes the vector or the stamp), the re-embed PATCH, the reindex
     // PUT, skill version writes made through Memory, the FederationSync merge and
-    // the auto-embed backfill. Writes that keep or copy the vector and stamp an
-    // existing row already holds, such as the supersede close, the skill
-    // predecessor close and a FeedMemories skill successor, do not notify. A raw
+    // the auto-embed backfill. Writes that carry over an existing row's
+    // non-empty vector and stamp, such as the supersede close, the skill
+    // predecessor close and a FeedMemories skill successor, do not notify; when
+    // the carried vector is empty they clear it to null, also without notifying
+    // (that can only remove a vector, never add one). A raw
     // operations-API insert is seen only by the next scan. (This is
     // stamp metadata only: a caller-supplied `queryEmbedding` carries no space
     // provenance, so its bytes are not verified either — flair#2573 slice 2.)

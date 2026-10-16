@@ -34,9 +34,6 @@
  *    verdict is non-uniform (drop the known-previous-row exemption) — the
  *    trusted write before the doctor case turns the state `unverified`, and the
  *    doctor case goes red;
- *  - in resources/Memory.ts put(), remove the empty-embedding normalization
- *    before the dedup gate (the later one stays) — the rescan case never
- *    returns to `uniform`;
  *  - in put(), remove the removal of an empty body `embedding` before the
  *    omission check — the skill update case goes red;
  *  - in resources/auth-middleware.ts backfillEmbedding, drop the

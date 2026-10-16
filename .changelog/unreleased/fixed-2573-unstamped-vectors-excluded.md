@@ -6,7 +6,8 @@
   the row remains eligible for lexical matching. Guard-notified writes invalidate
   the count when their stamp is untrusted or they may repair an untrusted vector.
   `flair doctor` prints the last published count in the `excluded` state. Raw operations-API inserts are uncovered until a rescan.
-  An empty Memory `embedding` stores no empty array: POST and PUT treat it exactly as an
+  An empty `embedding` sent to the Memory resource's POST, PUT or PATCH stores no empty array
+  (a raw operations-API insert can still store one; the next scan counts it): POST and PUT treat it exactly as an
   omitted `embedding` (an unchanged skill update keeps its stored vector and stamp), and
   PATCH clears the stored vector as `embedding: null` does. The auto-embed backfill stamps
   the vector it stores with the current model and notifies the guard after it commits.
