@@ -343,7 +343,7 @@ function writeOutcomeUnknownFor(id: any): Response {
   return writeOutcomeUnknownResponse();
 }
 
-/** Refuse a provider call still pending at the bound or settling after it. */
+/** Refuse a provider call still pending when the timeout callback runs, or settling after the bound. */
 function embedUnderLock(text: string): Promise<number[] | null> {
   return boundLockedProviderCall(() => getEmbedding(text, "document"));
 }

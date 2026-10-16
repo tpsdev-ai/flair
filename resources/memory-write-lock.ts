@@ -59,8 +59,10 @@
  * PUT's regen (and its create-path dedup probe), the re-embed PATCH's compute
  * and its recompute, and the PATCH embedding refresh — and each is bounded by
  * {@link MEMORY_LOCKED_PROVIDER_TIMEOUT_MS} through {@link boundLockedProviderCall};
- * a call still pending at the bound or settling after it is refused with
- * `503 memory_provider_timeout` and nothing is written. A hold longer than
+ * a call still pending when the timeout callback runs, or one that settles after
+ * the bound, is refused with `503 memory_provider_timeout` and nothing is
+ * written. An in-process timeout cannot preempt a provider that never yields the
+ * event loop. A hold longer than
  * {@link MEMORY_LOCK_HOLD_WATCHDOG_MS} is logged — the lock keys and the phase
  * named in {@link MemoryWriteLockOptions.phase}, and elapsed time — when the
  * timer runs or the callback settles. The watchdog never releases a key.
@@ -105,7 +107,7 @@ export const MEMORY_LOCK_HOLD_WATCHDOG_MS = 5_000;
 export const MEMORY_PROVIDER_TIMEOUT_ENV = "FLAIR_MEMORY_LOCK_PROVIDER_TIMEOUT_MS";
 export const MEMORY_LOCK_HOLD_WATCHDOG_ENV = "FLAIR_MEMORY_LOCK_HOLD_WATCHDOG_MS";
 
-/** A provider call still pending at the bound or settling after it is refused with this error. */
+/** A provider call still pending when the timeout callback runs, or settling after the bound, is refused with this error. */
 export class MemoryProviderTimeout extends Error {
   constructor(readonly ms: number) {
     super(`an embedding provider call made under the memory write lock did not settle within ${ms}ms`);
@@ -137,9 +139,11 @@ function testBound(env: NodeJS.ProcessEnv, name: string): number | undefined {
 /**
  * Run one embedding provider call bounded by {@link memoryLockedProviderTimeoutMs}.
  * `getEmbedding` takes no AbortSignal and swallows its own failures (returning
- * null). A call still pending at the bound or settling after it rejects with
+ * null). A call still pending when the timeout callback runs, or one that settles
+ * after the bound (checked against elapsed time at settlement), rejects with
  * {@link MemoryProviderTimeout}; the caller refuses 503 `memory_provider_timeout`
- * without writing. The provider call itself is not cancelled.
+ * without writing. The provider call itself is not cancelled, and a provider that
+ * never yields the event loop cannot be preempted.
  */
 export function boundLockedProviderCall<T>(call: () => Promise<T>, env: NodeJS.ProcessEnv = process.env): Promise<T> {
   const ms = memoryLockedProviderTimeoutMs(env);

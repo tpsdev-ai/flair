@@ -1,8 +1,8 @@
 /**
  * memory-locked-provider-timeout-2478.test.ts — every embedding provider call a
  * Memory write makes while it holds the per-id write lock is refused if still
- * pending at the bound or settling after it: 503 `memory_provider_timeout`,
- * nothing written (flair#2478).
+ * pending when the timeout callback runs, or if it settles after the bound:
+ * 503 `memory_provider_timeout`, nothing written (flair#2478).
  *
  * Calls resources/Memory.ts put()/patch() against a mocked harper (same
  * technique as patch-refreshes-embedding-2466.test.ts), with the embeddings
