@@ -40,6 +40,10 @@
  * real one, then a wrong one that the ops endpoint refuses), and asserts that
  * no Authorization header reaches it.
  *
+ * Every doctor run executes dist/cli.js under Node (test/helpers/node-runtime.ts),
+ * the runtime the published CLI runs on; a run that needs a preload module gets
+ * it through `node --import`.
+ *
  * Build prerequisite: dist/cli.js and dist/resources/*.js
  * (`bun run build && bun run build:cli`).
  */
@@ -50,7 +54,9 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { createServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { nodeBin } from "../helpers/node-runtime";
 import { proveLocalInstancePair } from "../../src/lib/local-instance-pair";
 
 const CLI = join(process.cwd(), "dist", "cli.js");
@@ -102,14 +108,14 @@ function listeningPidOn(port: number): number | null {
   return null;
 }
 
-/** Run `flair doctor` with an isolated HOME; returns the process's code + streams. */
+/** Run `flair doctor` under Node with an isolated HOME; returns the process's code + streams. */
 function runDoctor(opts: {
   args: string[];
   opsPort?: string;
   adminPass?: string;
   /** Extra environment; an `undefined` value removes the variable. */
   env?: Record<string, string | undefined>;
-  /** A `bun --preload` module for the doctor process. */
+  /** A module the doctor process loads with `node --import`, before dist/cli.js runs. */
   preload?: string;
 }): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
@@ -126,8 +132,8 @@ function runDoctor(opts: {
     if (opts.opsPort === undefined) delete env.FLAIR_OPS_PORT;
     else env.FLAIR_OPS_PORT = opts.opsPort;
     for (const [key, value] of Object.entries(env)) if (value === undefined) delete env[key];
-    const args = [...(opts.preload ? ["--preload", opts.preload] : []), CLI, "doctor", ...opts.args];
-    const child = spawn(process.execPath, args, { env: env as Record<string, string>, timeout: 60_000 });
+    const args = [...(opts.preload ? ["--import", pathToFileURL(opts.preload).href] : []), CLI, "doctor", ...opts.args];
+    const child = spawn(nodeBin({ env }), args, { env: env as Record<string, string>, timeout: 60_000 });
     let stdout = "";
     let stderr = "";
     child.stdout?.on("data", (d: Buffer) => { stdout += d.toString(); });
@@ -512,7 +518,12 @@ describe("flair#2526 — doctor sends no credential to an unproven HTTP port", (
   }, 90_000);
 });
 
-/** A `bun --preload` module that records every fetch the doctor process makes: its URL and only the Authorization scheme. */
+/**
+ * A CommonJS module, loaded into the doctor process with `node --import`, that
+ * records every fetch the process makes: its URL and only the Authorization
+ * scheme. It replaces `globalThis.fetch` before dist/cli.js runs and passes each
+ * call through unchanged.
+ */
 function fetchRecorder(): { preload: string; log: string; calls: () => Array<{ url: string; scheme: string | null }>; cleanup: () => void } {
   const dir = mkdtempSync(join(tmpdir(), "flair-2526-fetch-log-"));
   const log = join(dir, "fetches.jsonl");
@@ -580,7 +591,13 @@ describe("flair#2526 — the listener-only fallback sends no Basic and no Bearer
       writeHomeConfig(`opsPort: ${opsPort(a)}\n`);
       const r = await runDoctor({ args: ["--port", httpPort(b)], opsPort: opsPort(a), preload: recorder.preload });
       expect(r.stdout, r.stdout).toContain("the configuration request answered HTTP 401");
-      const toB = recorder.calls().filter((c) => new URL(c.url).port === httpPort(b));
+      const calls = recorder.calls();
+      expect(calls.length, `the --import recorder logged no fetch, so it did not run in the doctor process:\n${r.stdout}\n${r.stderr}`).toBeGreaterThan(0);
+      for (const call of calls) {
+        expect(typeof call.url, JSON.stringify(call)).toBe("string");
+        expect(call.scheme === null || typeof call.scheme === "string", JSON.stringify(call)).toBe(true);
+      }
+      const toB = calls.filter((c) => new URL(c.url).port === httpPort(b));
       expect(toB.length, "doctor never reached B, so the test proves nothing").toBeGreaterThan(0);
       const shared = toB.filter((c) => c.scheme === "Basic" || c.scheme === "Bearer").map((c) => `${new URL(c.url).pathname} ${c.scheme}`);
       expect(shared, `a Basic or Bearer credential reached B's HTTP port:\n${r.stdout}`).toEqual([]);
