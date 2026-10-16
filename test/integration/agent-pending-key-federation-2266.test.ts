@@ -17,7 +17,7 @@ import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
 import { signBodyFresh } from "../../resources/federation-crypto.js";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { HARPER_STOP_BUDGET_MS, startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 
 const sfx = Date.now().toString(36);
 const HUB = `apk-hub-${sfx}`;
@@ -119,7 +119,7 @@ describe("flair#2266 — an inbound federated Agent record cannot complete a pen
     });
   }, 180_000);
 
-  afterAll(async () => { if (harper) await stopHarper(harper); });
+  afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
 
   test("merge-plan pending-key refusal", async () => {
     const out = await sync(PENDING, { data: { id: PENDING, publicKey: aKey, runtime: "remote" } });
