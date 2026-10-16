@@ -133,7 +133,12 @@ describe("flair#2216 — compare Memory ids across two real nodes", () => {
         nodes: { node: string; verdict: string; newestWrite: string | null; missing: { sample: string[] } }[];
       };
       expect(comparison.verdict).toBe("divergent");
-      expect(comparison.nodes.find((node) => node.node === a.opsURL)?.newestWrite).toBe(stored[0].updatedAt);
+      // newestWrite is the node's latest stored timestamp across ALL its rows; a server-side
+      // write (the embedding backfill) can move a row's updatedAt after the read above, so
+      // the row's read time is a lower bound, not an equality.
+      const newestWrite = comparison.nodes.find((node) => node.node === a.opsURL)?.newestWrite;
+      expect(newestWrite).not.toBeNull();
+      expect(Date.parse(newestWrite!)).toBeGreaterThanOrEqual(Date.parse(stored[0].updatedAt));
       expect(comparison.nodes.find((node) => node.node === b.opsURL)).toMatchObject({
         verdict: "lagging", missing: { sample: ["node-mem-3"] },
       });
