@@ -8,10 +8,10 @@
 // request target (repeated or encoded slashes and dot segments included).
 // Collection PUT/PATCH/DELETE is refused; collection POST follows the resource.
 //
-// Each refusal case asserts three things: the status is 403, the body is
+// Each owner or collection refusal in the matrix asserts three things: the status is 403, the body is
 // exactly the named refusal (it carries nothing from the stored row), and the
 // target row read afterwards deeply equals its earlier read (stored rows
-// compared as parsed objects). An owned, addressed POST/PUT/PATCH whose JSON
+// compared as parsed objects); the malformed-body cases assert 400 instead. An owned, addressed POST/PUT/PATCH whose JSON
 // body does not parse is refused with 400 write_body_unreadable and leaves the
 // row unchanged. Positive controls cover owner writes, collection and
 // addressed creates, and administrator requests.
