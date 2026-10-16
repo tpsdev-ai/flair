@@ -1088,14 +1088,19 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
           computedAt: obj.computedAt,
         };
       } else if (
-        // Accept the guard's refusal only with null counts and a known refusal state.
+        // Accept the guard's refusal only with null counts and a refusal state: any
+        // non-empty state other than "uniform" (a refusal claiming "uniform" is
+        // contradictory and stays an unexpected shape). Not an enumeration of
+        // today's states, so a new guard state is recorded rather than an error.
         obj.clusterCount === null &&
         obj.largestClusterSize === null &&
         obj.totalMemoriesInClusters === null &&
         typeof obj.computedAt === "string" &&
         obj.embeddingSpace !== null && typeof obj.embeddingSpace === "object" &&
         !Array.isArray(obj.embeddingSpace) &&
-        ["mixed", "unverified", "scan-failed"].includes((obj.embeddingSpace as { state: string }).state) &&
+        typeof (obj.embeddingSpace as { state?: unknown }).state === "string" &&
+        (obj.embeddingSpace as { state: string }).state.length > 0 &&
+        (obj.embeddingSpace as { state: string }).state !== "uniform" &&
         ((obj.embeddingSpace as { reason?: unknown }).reason === null ||
           typeof (obj.embeddingSpace as { reason?: unknown }).reason === "string")
       ) {

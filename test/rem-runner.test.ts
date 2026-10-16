@@ -346,7 +346,9 @@ describe("step 6: instance-wide dedup-cluster stat (flair-quality Slice 1c)", ()
     expect(r.logRow.errors).toEqual(["dedup: unexpected /MemoryDedupStats response shape"]);
   });
 
-  for (const state of ["mixed", "unverified", "scan-failed"]) {
+  // "excluded" and "a-future-state" pin the generic rule: any non-uniform state is
+  // a refusal, not just the states that existed when the runner was written.
+  for (const state of ["mixed", "unverified", "scan-failed", "excluded", "a-future-state"]) {
     it(`records the guard refusal state ${state}`, async () => {
       const refusal = {
         clusterCount: null, largestClusterSize: null, totalMemoriesInClusters: null,
@@ -374,7 +376,8 @@ describe("step 6: instance-wide dedup-cluster stat (flair-quality Slice 1c)", ()
   };
   for (const [label, body] of Object.entries({
     "uniform state": { ...refusal, embeddingSpace: { state: "uniform", reason: null } },
-    "unknown state": { ...refusal, embeddingSpace: { state: "future-state", reason: null } },
+    // An unknown non-empty state is a refusal (the generic rule above); an empty one is not.
+    "empty state": { ...refusal, embeddingSpace: { state: "", reason: null } },
     "missing state": { ...refusal, embeddingSpace: { reason: null } },
     "non-string state": { ...refusal, embeddingSpace: { state: 1, reason: null } },
     "null space": { ...refusal, embeddingSpace: null },
