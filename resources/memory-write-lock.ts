@@ -193,8 +193,7 @@ export function resetMemoryWriteOutcomeUnknownForTest(id: string | number): void
 }
 
 /** The keys a locked call holds, in acquisition order, and the stored ids they
- *  name. Handed to the callback as the explicit locked capability nested
- *  helpers receive (flair#2478 build spec). */
+ *  name. Passed to the lock callback (flair#2478 build spec). */
 export interface MemoryLockedScope {
   readonly keys: readonly (readonly string[])[];
   readonly ids: readonly string[];
