@@ -60,7 +60,7 @@ import { dirname } from "node:path";
 import { allowAdmin } from "./agent-auth.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 import { retrieveCandidates } from "./semantic-retrieval-core.js";
-import { embeddingSpaceVerdict, type EmbeddingSpaceGuardState, type EmbeddingSpaceVerdict } from "./embedding-space-guard.js";
+import { embeddingSpaceVerdict, spaceGuardState, type EmbeddingSpaceGuardState, type EmbeddingSpaceVerdict } from "./embedding-space-guard.js";
 import { DEDUP_COSINE_THRESHOLD_DEFAULT } from "./dedup.js";
 import {
   countDedupClusters,
@@ -98,7 +98,7 @@ function persistStat(stat: MemoryDedupStatsResult, pathOverride?: string): void 
 /** The refusal body when uniformity is not established: no vector-derived counts, the
  *  guard's named state instead. Shared by the opening consult and the pre-persist
  *  re-check (flair#2596). */
-function guardRefusal(v: EmbeddingSpaceVerdict, computedAt: string): MemoryDedupStatsUnavailable {
+function guardRefusal(v: Pick<EmbeddingSpaceVerdict, "state" | "reason">, computedAt: string): MemoryDedupStatsUnavailable {
   return {
     clusterCount: null,
     largestClusterSize: null,
@@ -203,8 +203,9 @@ async function computeAndPersist(ctx: any, opts?: { annK?: number; maxMemories?:
   // the latch during the sweep. Refuse new counts unless uniformity still holds.
   const pause = txnPausePoint("dedup-sweep-persist");
   if (pause) await pause;
-  const finalVerdict = await embeddingSpaceVerdict();
-  if (!finalVerdict.uniform) return guardRefusal(finalVerdict, computedAt);
+  await embeddingSpaceVerdict();
+  const finalVerdict = spaceGuardState();
+  if (finalVerdict.state !== "uniform") return guardRefusal(finalVerdict, computedAt);
 
   // ── 5. Persist server-side ONLY the aggregate (never per-memory edges).
   persistStat(result, opts?.pathOverride);

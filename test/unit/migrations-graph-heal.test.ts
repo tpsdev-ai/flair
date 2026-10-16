@@ -19,7 +19,7 @@ import { mock } from "bun:test";
 mock.module("harper", () => ({ server: { http: () => {}, getUser: async () => null }, databases: {}, Resource: class {} }));
 
 const { createGraphHealMigration, GRAPH_HEAL_ID } = await import("../../resources/migrations/graph-heal.ts");
-const { _resetGuardForTests, _setGuardModelIdForTests, _setGuardTableGetterForTests, recomputeLatch, noteWriteStamp } =
+const { _resetGuardForTests, _setGuardModelIdForTests, _setGuardTableGetterForTests, recomputeLatch, noteWriteStamp, scheduleSpaceGuardPrewarm, _prewarmSettledForTests, spaceGuardState } =
   await import("../../resources/embedding-space-guard.ts");
 const { runMigrationCycle } = await import("../../resources/migrations/runner.ts");
 const { MigrationRegistry } = await import("../../resources/migrations/registry.ts");
@@ -280,6 +280,51 @@ describe("graph-heal migration — consults the embedding-space guard (flair#259
     expect(readMigrationState(defaultStatePath(dataDir))[GRAPH_HEAL_ID]).toMatchObject({
       lastOutcome: "success", completedAtVersion: VERSION,
     });
+  });
+
+  it("retries a failed startup guard scan through a later migration cycle and completes", async () => {
+    _resetGuardForTests();
+    _resetProgressForTests();
+    _resetInProcessLockForTests();
+    _setGuardModelIdForTests(() => GUARD_CURRENT);
+    let tableReads = 0;
+    let releaseRetry!: () => void;
+    const retryReady = new Promise<void>((resolve) => { releaseRetry = resolve; });
+    const { table, store } = healthyStore();
+    for (const row of store.values()) row.embeddingModel = GUARD_CURRENT;
+    _setGuardTableGetterForTests(async () => {
+      if (++tableReads === 1) throw new Error("Memory not ready");
+      await retryReady;
+      return table;
+    });
+    scheduleSpaceGuardPrewarm();
+    await _prewarmSettledForTests({ FLAIR_ENABLE_TEST_FAULT_INJECTION: "1" });
+    expect(tableReads).toBe(1);
+    expect(spaceGuardState().state).toBe("scan-failed");
+
+    const dataDir = tempDir("flair-graph-heal-startup-retry-");
+    const { table: oe } = makeFakeOrgEventTable();
+    const registry = new MigrationRegistry().register(createGraphHealMigration(() => table, () => oe, () => VERSION));
+    const deps = {
+      registry, dataDir, runningVersion: VERSION,
+      getTable: () => table,
+      spaceProbe: { getFreeBytes: () => 10 * 1024 ** 3, getTotalBytes: () => 20 * 1024 ** 3 },
+      ledgerDeps: { orgEventTable: oe },
+    };
+    try {
+      expect(await runMigrationCycle(deps)).toEqual({ ran: false, reason: "nothing pending" });
+      expect(tableReads).toBe(2);
+      expect(readMigrationState(defaultStatePath(dataDir))[GRAPH_HEAL_ID]?.completedAtVersion).toBeUndefined();
+    } finally {
+      releaseRetry();
+    }
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(spaceGuardState().state).toBe("uniform");
+    expect(await runMigrationCycle(deps)).toEqual({ ran: true });
+    expect(readMigrationState(defaultStatePath(dataDir))[GRAPH_HEAL_ID]).toMatchObject({
+      lastOutcome: "success", completedAtVersion: VERSION,
+    });
+    expect(tableReads).toBe(2);
   });
 
   it("(uniform) verifies the canary self-recall — behaviour unchanged", async () => {

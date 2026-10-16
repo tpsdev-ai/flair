@@ -56,7 +56,7 @@ import { databases } from "harper";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { spaceGuardState } from "../embedding-space-guard.js";
+import { embeddingSpaceVerdict } from "../embedding-space-guard.js";
 import type { Migration, RunBatchResult } from "./types.js";
 
 export const GRAPH_HEAL_ID = "graph-heal";
@@ -151,12 +151,11 @@ async function topNeighborId(table: MemoryTableLike, target: number[]): Promise<
  * mid-rebuild index throws or returns nothing; a store with no embedded rows
  * has no canary). Never throws (invariant II).
  *
- * Reads the guard's non-scanning snapshot before the cosine-sort query.
  * A state other than `uniform` skips the comparison and logs the state.
  */
 async function recallHealthy(table: MemoryTableLike): Promise<{ verified: boolean; hasData: boolean }> {
   try {
-    const { state } = spaceGuardState();
+    const { state } = await embeddingSpaceVerdict();
     if (state !== "uniform") {
       console.warn(
         `graph-heal: canary recall verification skipped — embedding space is not known uniform (state: ${state})`,

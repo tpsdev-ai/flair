@@ -110,8 +110,20 @@ const flair = new Proxy(flairTables, {
 });
 mock.module("harper", () => ({ databases: { flair }, Resource: class {}, server: { getUser: async () => null } }));
 
+const guard = await import("../../resources/embedding-space-guard.ts");
+const realEmbeddingSpaceVerdict = guard.embeddingSpaceVerdict;
+let tripOnVerdict = 0;
+let verdictCalls = 0;
+mock.module("../../resources/embedding-space-guard.ts", () => ({
+  ...guard,
+  embeddingSpaceVerdict: () => {
+    const verdict = realEmbeddingSpaceVerdict();
+    if (++verdictCalls === tripOnVerdict) queueMicrotask(() => guard.noteWriteStamp(FOREIGN));
+    return verdict;
+  },
+}));
 const { MemoryDedupStats } = await import("../../resources/MemoryDedupStats.ts");
-const { noteWriteStamp, recomputeLatch, _resetGuardForTests } = await import("../../resources/embedding-space-guard.ts");
+const { noteWriteStamp, recomputeLatch, _resetGuardForTests } = guard;
 
 const AGENT = "agent-a";
 const OLD = new Date(Date.now() - 90 * 24 * 3600_000).toISOString();
@@ -132,6 +144,8 @@ function seedRow(id: string, content: string) {
 beforeEach(() => {
   memoryStore = new Map();
   tripAfterFirstScanRow = undefined;
+  tripOnVerdict = 0;
+  verdictCalls = 0;
   mkdirSync(dirname(statsPath), { recursive: true });
   writeFileSync(statsPath, "prior stat\n");
   _resetGuardForTests(); // default table getter reads databasesMock; default modelId getter is the mocked CURRENT
@@ -148,6 +162,20 @@ describe("MemoryDedupStats re-checks the verdict before persisting (flair#2596)"
     expect(typeof res.clusterCount).toBe("number");
     expect(res.embeddingSpace).toBeUndefined();
     expect(JSON.parse(readFileSync(statsPath, "utf8")).clusterCount).toBe(res.clusterCount);
+  });
+
+  it("a guard trip while awaiting the final verdict leaves the stat file unchanged", async () => {
+    seedRow("m1", "alpha");
+    expect(await recomputeLatch()).toBe(true);
+    tripOnVerdict = 2;
+
+    const res: any = await makeDedup().post({});
+    expect(verdictCalls).toBe(2);
+    expect(res.clusterCount).toBeNull();
+    expect(res.largestClusterSize).toBeNull();
+    expect(res.totalMemoriesInClusters).toBeNull();
+    expect(res.embeddingSpace).toEqual({ state: "mixed", reason: null });
+    expect(readFileSync(statsPath, "utf8")).toBe("prior stat\n");
   });
 
   it("a simulated guard trip during the sweep leaves the stat file unchanged and names the state", async () => {
