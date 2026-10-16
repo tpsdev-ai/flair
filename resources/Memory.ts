@@ -28,7 +28,8 @@ import {
 import { putPointerRow, deletePointerRowViaTable } from "./host-pointer-adapter.js";
 import { DECLARED_MEMORY_ATTRIBUTES, stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./memory-declared-attributes.js";
 import { composesCallerWrite, isJoinableTransaction, withOwnedTransaction, withSharedWriteTransaction } from "./request-transaction.js";
-import { CommittedRowChanged, GrantedCloseRevoked, confirmCommittedRow, sameStoredRow, storedRowChangedRefusal, writeGrantHeld } from "./write-back.js";
+import { PredecessorVisibilityChanged, applyGrantedVisibility, committedVisibilityDiffers, predecessorVisibilityChangedRefusal } from "./grant-visibility.js";
+import { CommittedRowChanged, GrantedCloseRevoked, confirmCommittedRow, grantedCloseRevokedRefusal, sameStoredRow, storedRowChangedRefusal, writeGrantHeld } from "./write-back.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 import {
   markMemoryWriteOutcomeUnknown,
@@ -859,16 +860,10 @@ const SUPERSEDE_CLOSE_ATTEMPTS = 3;
  * most two retries. A change committed after that re-read and before the commit is not
  * seen by it; Harper orders the two writes by timestamp.
  *
- * flair#2333 (H10): `granteeId` is set for a CROSS-agent close that a "write"
- * memory grant authorized. The grant is re-checked on committed state inside the
- * transaction, AFTER the write is staged — the same write-back confirm the target
- * row gets above, over the same empty-context read. A grant revoked and committed
- * before that re-check aborts the close (GrantedCloseRevoked, not retried) instead
- * of letting the grantee close the owner's memory. As with the target-row re-read,
- * a revocation committed after this re-check and before the transaction commits is
- * not seen by it; Harper orders the two writes by timestamp.
+ * A close a "write" grant authorizes does not run here: it is staged in the
+ * successor's own transaction (stageGrantedClose).
  */
-async function closeSupersededRecord(ctx: any, oldId: string, patch: Record<string, unknown>, expectedOwner?: string, granteeId?: string): Promise<void> {
+async function closeSupersededRecord(ctx: any, oldId: string, patch: Record<string, unknown>, expectedOwner?: string): Promise<void> {
   for (let attempt = 1; ; attempt++) {
     let closedRow: any;
     try {
@@ -893,14 +888,6 @@ async function closeSupersededRecord(ctx: any, oldId: string, patch: Record<stri
         if (stagedPause) await stagedPause;
         const committed = await (databases as any).flair.Memory.get(oldId, {});
         if (!isDeepStrictEqual(committed, existing)) throw new CloseTargetChanged();
-        // flair#2333 (H10): a grant-authorized, non-admin cross-agent close stands
-        // on the grant checked at authorization time. Re-read it on committed state
-        // HERE — after the write is staged, as the last read before this transaction
-        // commits — so a grant revoked and committed before this point aborts the
-        // close; this close attempt does not retry.
-        if (granteeId !== undefined && !(await writeGrantHeld((databases as any).flair.MemoryGrant, granteeId, expectedOwner as string, {}))) {
-          throw new GrantedCloseRevoked();
-        }
         return closed;
       });
     } catch (err) {
@@ -973,9 +960,26 @@ async function hasWriteGrant(granteeId: string, ownerId: string, ctx?: unknown):
  * unchanged from the stored row's own `supersedes` (a re-PUT of a successor
  * whose predecessor was since deleted), which is kept and closes nothing.
  * For a non-admin agent's ordinary Memory write, the close carries the owner the read saw;
- * closeSupersededRecord aborts on a change visible at its committed re-read.
+ * a change visible at the close's committed re-read stops it from landing over
+ * that change: closeSupersededRecord (the owner's own close) retries from the
+ * committed row, and stageGrantedClose (a grant-authorized one) refuses the
+ * whole write.
  * Later changes follow Harper's timestamp order (see the PR residual-gap note).
  * An admin or internal write has no authorization read or owner comparison.
+ *
+ * A write grant does not include changing a record's visibility; visibility is
+ * set by the owner or an admin. For the grant-authorized supersede write,
+ * `requestedVisibility` (the visibility the caller's body named, read before
+ * any merge, carry or default) must read the same as the target's as this
+ * authorization read sees it, and the successor is given that visibility. The
+ * close, staged in the successor's transaction, then compares it with the
+ * target's visibility at its final committed-state re-read (stageGrantedClose;
+ * the skill-version writer for a skill); a mismatch writes nothing, and a
+ * change committed after that re-read is not seen by it. The rule governs this
+ * write: an ordinary successor
+ * is the grantee's own row, so the grantee may later change that row's
+ * visibility as its owner, and a skill successor keeps its lineage owner
+ * (resources/grant-visibility.ts).
  *
  * flair#704: an explicit `supersedes: null` — the shape most JSON writers
  * produce for an unset optional field (`JSON.stringify({supersedes: undefined})`
@@ -997,6 +1001,7 @@ async function validateAndAuthorizeSupersedes(
   auth: AgentAuthVerdict,
   ctx: any,
   stored: Record<string, any> | null,
+  requestedVisibility: unknown,
 ): Promise<{ denial: Response | null; close: SupersedeClose | null }> {
   const refuse = (denial: Response) => ({ denial, close: null });
   if (content.supersedes === null) {
@@ -1027,6 +1032,21 @@ async function validateAndAuthorizeSupersedes(
     if (!(await hasWriteGrant(auth.agentId, target.agentId))) {
       return refuse(FORBIDDEN("forbidden: cannot supersede a memory owned by another agent without a write grant"));
     }
+    // A write grant does not include changing a record's visibility; visibility
+    // is set by the owner or an admin. This grant-authorized write gives the
+    // successor the predecessor's visibility as read here, and the ephemeral
+    // private-only rule (flair#1257) is applied to that value. The close
+    // compares it with the predecessor's visibility at its final
+    // committed-state re-read (stageGrantedClose, resources/grant-visibility.ts).
+    const visibilityDenial = applyGrantedVisibility(content, target, requestedVisibility);
+    if (visibilityDenial) return refuse(visibilityDenial);
+    const tierError = assertVisibilityAllowedForDurability(content.durability ?? stored?.durability, content.visibility);
+    if (tierError) {
+      return refuse(new Response(
+        JSON.stringify({ error: "invalid_visibility_for_durability", message: tierError }),
+        { status: 400, headers: { "content-type": "application/json" } },
+      ));
+    }
     // flair#2333 (H10): the close re-checks this grant against committed state
     // before it lands, so the grantee id travels with the close plan.
     return { denial: null, close: { id: content.supersedes, ownerId: target.agentId, granteeId: auth.agentId } };
@@ -1041,8 +1061,9 @@ interface SupersedeClose {
   ownerId?: string;
   /**
    * flair#2333 (H10): the grantee whose "write" grant authorized a CROSS-agent
-   * close. Set only when the caller is not the owner, so the close can re-check
-   * the grant against committed state before it lands.
+   * close. Set only when the caller is not the owner. Such a close is staged in
+   * the successor's own transaction and re-checks the grant against committed
+   * state before that transaction commits (stageGrantedClose).
    */
   granteeId?: string;
 }
@@ -1060,20 +1081,26 @@ function canonicalizeSupersedes(content: any): void {
   }
 }
 
+/** The patch a supersede's close applies to its predecessor. */
+function supersedeClosePatch(content: any): Record<string, unknown> {
+  return {
+    validTo: content.validFrom ?? content.createdAt,
+    updatedAt: content.createdAt ?? content.updatedAt,
+  };
+}
+
 /**
  * Close the superseded record — called AFTER the new record has already been
  * written (write-new-BEFORE-close-old). Safe failure state is
  * two active records (recoverable), never a tombstoned-old-with-lost-new.
  * Failure is logged (observable), never silently swallowed. No-op when
- * validateAndAuthorizeSupersedes authorized no close.
+ * validateAndAuthorizeSupersedes authorized no close. A grant-authorized close
+ * (`close.granteeId`) does not run here (closeGrantedSupersedeStaged).
  */
 async function closeSupersededIfNeeded(ctx: any, content: any, close: SupersedeClose | null, methodLabel: "post" | "put"): Promise<void> {
   if (!close) return;
   try {
-    await closeSupersededRecord(ctx, close.id, {
-      validTo: content.validFrom ?? content.createdAt,
-      updatedAt: content.createdAt ?? content.updatedAt,
-    }, close.ownerId, close.granteeId);
+    await closeSupersededRecord(ctx, close.id, supersedeClosePatch(content), close.ownerId);
   } catch (err) {
     // Constant format string + structured data: memory ids are agent-controlled,
     // so interpolating them into console.error's format position (with a trailing
@@ -1085,6 +1112,97 @@ async function closeSupersededIfNeeded(ctx: any, content: any, close: SupersedeC
       { method: methodLabel, supersededId: close.id, newRecordId: content.id, err },
     );
   }
+}
+
+/** A grant-authorized close found its predecessor gone, owned by another
+ *  agent, or changed since the write's transaction read it (stageGrantedClose). */
+class GrantedCloseTargetChanged extends Error {}
+
+class GrantedCloseStorageRefused extends Error {}
+
+/**
+ * flair#2564: stage a grant-authorized supersede's close (`close.granteeId`)
+ * in `shared`, the successor's transaction (request, caller or write-owned).
+ *
+ * A storage Response aborts the write with write_response_withheld. After
+ * staging the close, the committed row (an empty context) is checked:
+ *
+ *   - the committed visibility must read the same as the successor's
+ *     (`successorVisibility`): a write grant does not include changing a
+ *     record's visibility (grant-visibility.ts). A mismatch throws
+ *     PredecessorVisibilityChanged;
+ *   - the committed row must still be the one read: a staged write carries its
+ *     transaction's timestamp, and Harper orders it before any later-committed
+ *     change, so a close staged over a changed row is not retried here. It
+ *     throws GrantedCloseTargetChanged, as does a predecessor that is gone or
+ *     owned by another agent at the read;
+ *   - flair#2333 (H10): the grant is re-checked on committed state; a revoked
+ *     grant throws GrantedCloseRevoked.
+ *
+ * The caller aborts the transaction on any of these, so nothing is written,
+ * and a retry runs in a new transaction. As with the other committed re-reads,
+ * a change committed after this final re-read and before the transaction
+ * commits is not seen by it; Harper orders the writes by transaction timestamp.
+ */
+async function stageGrantedClose(
+  shared: any,
+  close: SupersedeClose & { granteeId: string },
+  patch: Record<string, unknown>,
+  successorVisibility: unknown,
+): Promise<Record<string, any>> {
+  const existing = await (databases as any).flair.Memory.get(close.id, shared);
+  if (!existing || existing.agentId !== close.ownerId) throw new GrantedCloseTargetChanged();
+  // Test-only: inert unless the fault-injection env opt-in is set and armed.
+  const pause = txnPausePoint("granted-close");
+  if (pause) await pause;
+  const closed = { ...existing, ...patch };
+  stripUndeclaredMemoryAttributes(closed);
+  const result = await (databases as any).flair.Memory.put(closed, shared);
+  if (result instanceof Response) throw new GrantedCloseStorageRefused();
+  // Test-only: inert unless armed — here the close is staged, so a competing
+  // write and the committed-state re-reads below can be exercised in either
+  // order.
+  const stagedPause = txnPausePoint("granted-close-staged");
+  if (stagedPause) await stagedPause;
+  const committed = await (databases as any).flair.Memory.get(close.id, {});
+  if (committedVisibilityDiffers(committed, successorVisibility)) throw new PredecessorVisibilityChanged();
+  if (!isDeepStrictEqual(committed, existing)) throw new GrantedCloseTargetChanged();
+  if (!(await writeGrantHeld((databases as any).flair.MemoryGrant, close.granteeId, close.ownerId as string, {}))) {
+    throw new GrantedCloseRevoked();
+  }
+  return closed;
+}
+
+/**
+ * Run a grant-authorized close (stageGrantedClose) inside the write's
+ * transaction callback, after the successor and its pointer row are staged.
+ * On any failure the whole write aborts: a joined request or caller
+ * transaction is aborted here, and a transaction withSharedWriteTransaction
+ * owns aborts when the error leaves its callback. Returns the staged closed row,
+ * or null for an owner, admin or internal close (closeSupersededIfNeeded).
+ */
+async function closeGrantedSupersedeStaged(
+  shared: any,
+  content: any,
+  close: SupersedeClose | null,
+  joinsRequestTxn: boolean,
+): Promise<Record<string, any> | null> {
+  if (!close || close.granteeId === undefined) return null;
+  try {
+    return await stageGrantedClose(shared, close as SupersedeClose & { granteeId: string }, supersedeClosePatch(content), content.visibility);
+  } catch (err) {
+    if (joinsRequestTxn) abortRequestTransaction(shared);
+    throw err;
+  }
+}
+
+/** The named refusal for a grant-authorized close that did not land, else null. */
+function grantedCloseRefusal(err: unknown): Response | null {
+  if (err instanceof GrantedCloseStorageRefused) return withheldWriteResult();
+  if (err instanceof PredecessorVisibilityChanged) return predecessorVisibilityChangedRefusal();
+  if (err instanceof GrantedCloseRevoked) return grantedCloseRevokedRefusal();
+  if (err instanceof GrantedCloseTargetChanged) return storedRowChangedRefusal("Memory");
+  return null;
 }
 
 /**
@@ -1730,6 +1848,8 @@ export class Memory extends (databases as any).flair.Memory {
     // same fields.
     const suppliedText = suppliedStoredTextFields(content);
     canonicalizeSupersedes(content);
+    // The visibility the caller named, before any merge or default fills it.
+    const requestedVisibility = content?.visibility;
     // flair#2465: a body that omits `embedding` can have the stored row's vector
     // carried in by prepareSkillBody, with the hash it retained for that vector.
     const postOmitsEmbedding = content?.embedding === undefined;
@@ -1853,7 +1973,7 @@ export class Memory extends (databases as any).flair.Memory {
     // supersedes: optional reference to the ID of the memory this one
     // replaces. Validates shape + cross-agent-write authorization (shared
     // with put() — see validateAndAuthorizeSupersedes doc).
-    const supersede = await validateAndAuthorizeSupersedes(content, auth, ctx, postStored);
+    const supersede = await validateAndAuthorizeSupersedes(content, auth, ctx, postStored, requestedVisibility);
     if (supersede.denial) return supersede.denial;
 
     // Temporal validity: validFrom defaults to now, validTo left null for active facts.
@@ -2013,20 +2133,34 @@ export class Memory extends (databases as any).flair.Memory {
     // owned-transaction branch is bypassed.
     // flair#2467: the post-redaction text fields this write stages, for the response.
     let postStaged: StoredMemoryText = {};
+    // Read before the write: inside withSharedWriteTransaction an owned
+    // transaction is joinable too.
+    const postJoinsRequestTxn = isJoinableTransaction(ctx);
+    let postResult: Response | null;
     let postRowId: string | undefined;
-    const postResult = await withSharedWriteTransaction(ctx, async (c) => {
-      postStaged = storedMemoryText(content, suppliedText);
-      const newId = await writeMemoryRowPost((this as any).constructor, content, c);
-      if (newId instanceof Response) return newId;
-      postRowId = newId;
-      if (pointer.row) {
-        pointer.row.memoryId = newId;
-        const persistDenial = await persistPointerRow(pointer.row, c);
-        if (persistDenial) return persistDenial;
-      }
-      return null;
-    });
+    let grantedClosed: Record<string, any> | null = null;
+    try {
+      postResult = await withSharedWriteTransaction(ctx, async (c) => {
+        postStaged = storedMemoryText(content, suppliedText);
+        const newId = await writeMemoryRowPost((this as any).constructor, content, c);
+        if (newId instanceof Response) return newId;
+        postRowId = newId;
+        if (pointer.row) {
+          pointer.row.memoryId = newId;
+          const persistDenial = await persistPointerRow(pointer.row, c);
+          if (persistDenial) return persistDenial;
+        }
+        // Stage a grant-authorized close in the successor's transaction.
+        grantedClosed = await closeGrantedSupersedeStaged(c, content, supersede.close, postJoinsRequestTxn);
+        return null;
+      });
+    } catch (err) {
+      const refusal = grantedCloseRefusal(err);
+      if (refusal) return refusal;
+      throw err;
+    }
     if (postResult instanceof Response) return writeResultResponse(postResult);
+    if (grantedClosed) noteMemoryUpsert(grantedClosed);
     const result: any = {};
     // flair#1357 — read-your-write for the lexical leg. The table change feed
     // (resources/bm25-index-service.ts) is the CORRECTNESS mechanism; this
@@ -2045,7 +2179,9 @@ export class Memory extends (databases as any).flair.Memory {
     // old record and then lose the new one if the write failed afterward.
     // Now the safe failure state is two active records (recoverable), never
     // a lost write — and the failure is logged, never silently swallowed.
-    await closeSupersededIfNeeded(ctx, content, supersede.close, "post");
+    // A grant-authorized close was staged in the successor's transaction
+    // (closeGrantedSupersedeStaged).
+    if (supersede.close?.granteeId === undefined) await closeSupersededIfNeeded(ctx, content, supersede.close, "post");
     await markDerivedSourcesReflected(content);
 
     // flair#744 slice A: citation-on-write — POST-COMMIT, fully
@@ -2545,6 +2681,7 @@ export class Memory extends (databases as any).flair.Memory {
     let putResult: any;
     // flair#2467: the post-redaction text fields this write stages, for the response.
     let putStaged: StoredMemoryText = {};
+    let putGrantedClosed: Record<string, any> | null = null;
     try {
       putResult = await (composed ? withSharedWriteTransaction : withOwnedTransaction)(ctx, async (c) => {
         // The authoritative stored read: the FIRST operation of an ordinary PUT's
@@ -2595,6 +2732,8 @@ export class Memory extends (databases as any).flair.Memory {
 
         canonicalizeSupersedes(content);
         const requestedPayload = { ...content };
+        // The visibility the caller named, before any merge, carry or default fills it.
+        const requestedVisibility = content?.visibility;
         const urlTargetId = (this as any).getId?.();
         if (content && typeof content === "object" && content.id == null &&
           (typeof urlTargetId === "string" || typeof urlTargetId === "number")) {
@@ -2718,7 +2857,7 @@ export class Memory extends (databases as any).flair.Memory {
         // replaces. Validates shape + cross-agent-write authorization (shared
         // with post() — see validateAndAuthorizeSupersedes doc for why PUT needs
         // this too: it's the only HTTP-reachable create path).
-        const supersede = await validateAndAuthorizeSupersedes(content, auth, ctx, preExisting);
+        const supersede = await validateAndAuthorizeSupersedes(content, auth, ctx, preExisting, requestedVisibility);
         if (supersede.denial) return supersede.denial;
         if (content.supersedes && !content.validFrom) {
           content.validFrom = content.createdAt;
@@ -2931,10 +3070,16 @@ export class Memory extends (databases as any).flair.Memory {
             throw err;
           }
         }
+        // Stage a grant-authorized close in the successor's transaction: the
+        // transaction this put owns (a throw leaves this callback and aborts it)
+        // or, for a composed put, its caller's (aborted explicitly).
+        putGrantedClosed = await closeGrantedSupersedeStaged(c, content, supersede.close, composed);
         return { content, result: r, dedupMatch, redactedValues, usedMemoryIds, close: supersede.close, auth, fallbackId: preExisting?.id };
       });
     } catch (err) {
       if (err instanceof CommittedRowChanged) return storedRowChangedRefusal("Memory");
+      const refusal = grantedCloseRefusal(err);
+      if (refusal) return refusal;
       throw err;
     }
     // A skill PUT answers from its own write (no ordinary-row post-commit step).
@@ -2972,7 +3117,10 @@ export class Memory extends (databases as any).flair.Memory {
     noteWriteStamp(putResult.content?.embeddingModel as string | null | undefined); // embedding-space-guard slice 1 (see post())
 
     // ── THEN close the superseded record (see post()) ───────────────────────
-    await closeSupersededIfNeeded(ctx, putResult.content, putResult.close, "put");
+    // A grant-authorized close was staged in the successor's transaction
+    // (closeGrantedSupersedeStaged).
+    if (putGrantedClosed) noteMemoryUpsert(putGrantedClosed);
+    if (putResult.close?.granteeId === undefined) await closeSupersededIfNeeded(ctx, putResult.content, putResult.close, "put");
 
     // flair#744 slice A: citation-on-write — POST-COMMIT, fully
     // failure-isolated (see post()'s identical comment above).

@@ -86,6 +86,9 @@ const CLASSIFICATIONS: Array<{ file: string; via: WriterVia; needle: string; kin
   { file: "resources/promotion-stamp.ts", via: "write-back", needle: 'label: "promotion-stamp"', kind: "trusted-stamp" },
   { file: "resources/promotion-stamp.ts", via: "alias-source", needle: "put(row, stagedContext)", kind: "trusted-stamp" },
   { file: "resources/Memory.ts", via: "direct-put", needle: "put(closed, c)", kind: "echo" },
+  // flair#2564: the grant-authorized close staged in the successor's transaction restates
+  // the predecessor row with the close patch, like the owned close above.
+  { file: "resources/Memory.ts", via: "direct-put", needle: "flair.Memory.put(closed, shared)", kind: "echo" },
   // The re-embed's field-only update: the vector, its model and updatedAt, the
   // hash of the text it embedded (flair#2465), plus a fresh instanceToken for a
   // legacy row that has none (flair#2478) — no authority field. The needle names

@@ -36,14 +36,14 @@ const add = (file: string, sites: string[], reason: string) => {
 add("MemoryArchive", ["writer:Memory.put#1"], "GUARDED: Memory.put().");
 add("Memory", [
   "writer:cls.create#1", "writer:(databases as any).flair.Memory.post#1",
-  "writer:(databases as any).flair.Memory.put#2",
   "writer:(databases as any).flair.Memory.put#3",
+  "writer:(databases as any).flair.Memory.put#4",
   "writer:(databases as any).flair.Memory.update#1",
   "writer:super.patch#1",
   "writer:(databases as any).flair.Memory.delete#1",
 ], "GUARDED: Memory.post/put/patch/delete call the decision on the URL and body ids first (the put _reindex branch included).");
-add("Memory", ["writer:(databases as any).flair.Memory.put#1"],
-  "GUARDED: closeSupersededRecord closes `supersedes`, which validateAndAuthorizeSupersedes ran through the decision before the new row was written.");
+add("Memory", ["writer:(databases as any).flair.Memory.put#1", "writer:(databases as any).flair.Memory.put#2"],
+  "GUARDED: closeSupersededRecord and stageGrantedClose close `supersedes`, which validateAndAuthorizeSupersedes ran through the decision before the new row was written.");
 add("MemoryFeed", ["alias-source:(databases as any).flair.Memory#1", "writer:writeBackCommittedRow#1"],
   "GUARDED: FeedMemories.post calls the decision on the body id before the write-back through the shared helper (flair#2354).");
 add("MemoryFeed", ["writer:table.put#1"],

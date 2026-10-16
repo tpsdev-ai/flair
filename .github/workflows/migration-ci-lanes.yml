@@ -432,12 +432,12 @@ jobs:
 
               # Assert the refusal message names the engine version change
               # and a recovery path.
-              if ! echo "$BASELINE_STDERR" | grep -q "Harper"; then
+              if ! grep -q "Harper" <<< "$BASELINE_STDERR"; then
                 echo "::error::baseline refused but stderr does not name Harper — unexpected failure mode"
                 echo "--- stderr ---"; echo "$BASELINE_STDERR"; echo "---"
                 exit 1
               fi
-              if ! echo "$BASELINE_STDERR" | grep -q "data directory"; then
+              if ! grep -q "data directory" <<< "$BASELINE_STDERR"; then
                 echo "::error::baseline refused but stderr does not name the data directory"
                 echo "--- stderr ---"; echo "$BASELINE_STDERR"; echo "---"
                 exit 1

@@ -34,7 +34,7 @@ const add = (file: string, sites: string[], reason: string) => {
 
 // ── GATED skill-writer sinks (run SkillScan + forced durability) ──
 add("MemoryArchive", ["writer:Memory.put#1"], "Guarded by Memory.put().");
-add("Memory", ["writer:cls.create#1", "writer:(databases as any).flair.Memory.post#1", "writer:(databases as any).flair.Memory.put#3"],
+add("Memory", ["writer:cls.create#1", "writer:(databases as any).flair.Memory.post#1", "writer:(databases as any).flair.Memory.put#4"],
   "Skill-writer: routes through the SkillScan gate + forced durability in Memory.post()/put() (flair#1542).");
 add("skill-version-write", ["writer:(databases as any).flair.Memory.put#1"],
   "Memory post/put and FeedMemories scan the merged successor body before calling this writer.");
@@ -56,10 +56,12 @@ add("skill-version-write", ["writer:(databases as any).flair.Memory.put#2"],
   "Skill predecessor close: preserves stored content and tags.");
 add("Memory", ["writer:(databases as any).flair.Memory.update#1"],
   "Re-embed request (flair#2465): an incremental update of only embedding/embeddingModel/updatedAt for a locally computed vector; it does not carry the re-read row's other fields.");
-add("Memory", ["writer:(databases as any).flair.Memory.put#2"],
+add("Memory", ["writer:(databases as any).flair.Memory.put#3"],
   "Admin-only _reindex re-PUT (reindex_admin_only gate) — preserves existing content and tags.");
 add("Memory", ["writer:(databases as any).flair.Memory.put#1"],
   "closeSupersededRecord: read-modify-write close of an existing record (stamps validTo), preserves existing content/tags — not a new skill write.");
+add("Memory", ["writer:(databases as any).flair.Memory.put#2"],
+  "stageGrantedClose: read-modify-write close of an existing record (stamps validTo), staged in the successor's transaction; preserves existing content/tags — not a new skill write.");
 // ── Bookkeeping, removal and read-only aliases inside Memory.ts ──
 add("Memory", ["writer:patchRecord#1"],
   "derivedFrom/lastReflected bookkeeping patch — never writes skill content.");

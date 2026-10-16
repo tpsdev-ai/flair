@@ -13,13 +13,16 @@
  * fixtures below pin both directions.
  */
 import { afterEach, describe, expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { nodeBin } from "../helpers/node-runtime.ts";
 import {
   BUDGET_REL,
   FLAIR_PACKAGE,
-  evaluateInstall,
+  evaluateInstall as evaluateInstallNative,
   hasDamagedLockfileWarning,
   parseAddedCount,
   readMinPackages,
@@ -29,6 +32,20 @@ import {
 } from "../../scripts/check-global-install-lockfile.mjs";
 
 const REPO = join(import.meta.dir, "../..");
+function evaluateInstall(options: Parameters<typeof evaluateInstallNative>[0]): ReturnType<typeof evaluateInstallNative> {
+  const script = pathToFileURL(join(REPO, "scripts/check-global-install-lockfile.mjs")).href;
+  const output = execFileSync(nodeBin(), ["--input-type=module", "-e", `
+    import { readFileSync } from 'node:fs';
+    import { evaluateInstall } from ${JSON.stringify(script)};
+    const runtime = process.versions.bun ? 'bun' : process.versions.node;
+    try { console.log(JSON.stringify({ runtime, value: evaluateInstall(JSON.parse(readFileSync(0, 'utf8'))) })); }
+    catch (error) { console.log(JSON.stringify({ runtime, error: error.message })); }
+  `], { input: JSON.stringify(options), encoding: "utf8", timeout: 5_000, killSignal: "SIGKILL" });
+  const result = JSON.parse(output);
+  expect(result.runtime).toMatch(/^\d+\.\d+\.\d+/);
+  if ("error" in result) throw new Error(result.error);
+  return result.value;
+}
 /** The reviewed floor, read the same way CI reads it. */
 const MIN = readMinPackages(REPO);
 
