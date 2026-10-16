@@ -6,7 +6,8 @@
   own larger explicit budget keep it unchanged. `stopHarper` bounds the
   caller's wait, not the work: past its deadline it rejects with
   `HarperStopTimeoutError`, naming the pid and the phase it stalled in, while
-  the termination it raced keeps running in the background; a stop that fails
+  the stop work it raced (termination, lock wait, or install-dir removal) can
+  continue in the background; a stop that fails
   some other way first rejects with that error. `stopHarpers` runs several
   stops concurrently, and the `HARPER_STOP_BUDGET_MS` hooks that stopped
   several Harpers in sequence now use it (or, for a replicated pair, a pair
