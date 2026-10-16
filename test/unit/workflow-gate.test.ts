@@ -51,6 +51,7 @@ describe("workflow coverage-gate checker — fixtures", () => {
     ["refused-shell-workflow.yml", "the workflow sets defaults.run.shell; the gate must run under the default shell"],
     ["refused-adapter-shell-step.yml", `the required "Unit Tests" job "test-unit-gate" has a step with shell; it must run under the default shell`],
     ["refused-adapter-shell-job.yml", `the required "Unit Tests" job "test-unit-gate" sets defaults.run.shell; it must run under the default shell`],
+    ["refused-adapter-joined-exit.yml", `the required "Unit Tests" job "test-unit-gate" must run the canonical adapter script`],
     ["refused-unchecked-job.yml", `"${GATE.step}" runs in no job the required "Unit Tests" check depends on in the same workflow`],
     ["refused-skip-if.yml", `"${GATE.step}" has if; it must be absent`],
     ["refused-continue-on-error.yml", `"${GATE.step}" has continue-on-error; it must be absent`],
@@ -59,6 +60,14 @@ describe("workflow coverage-gate checker — fixtures", () => {
       expect(() => checkCoverageGate(fixture(name), GATE)).toThrow(error);
     });
   }
+
+  test("accepts the adapter script with re-indented, trailing-whitespace lines", () => {
+    const docs = fixture("accepted.yml");
+    const step = docs[0].jobs?.["test-unit-gate"]?.steps?.[0];
+    if (typeof step?.run !== "string") throw new Error("fixture drift: adapter run not found");
+    step.run = step.run.split("\n").map((line) => `\t${line}  `).join("\n");
+    expect(() => checkCoverageGate(docs, GATE)).not.toThrow();
+  });
 
   test("refuses a workflow-level shell override on a Unit Tests adapter in another workflow", () => {
     const docs = [...fixture("accepted.yml"), ...fixture("refused-adapter-shell-workflow.yml")];
