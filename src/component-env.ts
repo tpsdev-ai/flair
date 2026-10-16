@@ -54,9 +54,9 @@ export const PUBLIC_URL_KEY = "FLAIR_PUBLIC_URL";
 export const MCP_ISSUER_KEY = "FLAIR_MCP_ISSUER";
 
 // Re-exported from ./lib/secret-keys.js, which has no imports so a plain
-// `node` script can load it without a build step (flair#2589). The list and
-// the reasoning behind it live there; this module keeps the public name stable
-// for existing importers.
+// `node` script can load it without a build step (flair#2589). The list lives
+// there; the deploy-payload rationale remains above. This module keeps the
+// public name stable for existing importers.
 export { NEVER_GENERATED_SECRET_KEYS };
 
 /**
