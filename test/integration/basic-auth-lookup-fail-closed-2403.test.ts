@@ -13,7 +13,7 @@
 // real Harper) and test/integration/auth-middleware-e2e.test.ts (real HTTP, real auth).
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { join } from "node:path";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { componentWithReplayProbe, type ProbeComponent, type ProbeFiles } from "../helpers/component-with-replay-probe";
 
 const PROBE: ProbeFiles = {
@@ -94,7 +94,7 @@ describe("flair#2403 — a failed Agent lookup on the Basic-auth path is refused
   afterAll(async () => {
     if (harper) await stopHarper(harper);
     composed?.cleanup();
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test("a FAILED lookup for a credentialed Basic request is refused with agent_lookup_failed", async () => {
     const res = await fetch(`${harper.httpURL}/Agent`, {

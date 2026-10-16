@@ -39,7 +39,7 @@ import { mkdtemp, rm, mkdir, cp, symlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 const REPO_ROOT = process.cwd();
 const FIXTURE = join(REPO_ROOT, "test", "fixtures", "inproc-app");
@@ -103,7 +103,7 @@ afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (dataDir) await rm(dataDir, { recursive: true, force: true, maxRetries: 4 });
   if (appDir) await rm(appDir, { recursive: true, force: true });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair#1181 — by-id read uses the static Cls.get (loads the row, fires the gate)", () => {
   test("POSITIVE + MUTATION: the caller reads its OWN record by id via STATIC get; the pre-fix INSTANCE read returns null", async () => {

@@ -36,16 +36,18 @@ const add = (file: string, sites: string[], reason: string) => {
 add("MemoryArchive", ["writer:Memory.put#1"], "GUARDED: Memory.put().");
 add("Memory", [
   "writer:cls.create#1", "writer:(databases as any).flair.Memory.post#1",
-  "writer:(databases as any).flair.Memory.put#2",
   "writer:(databases as any).flair.Memory.put#3",
+  "writer:(databases as any).flair.Memory.put#4",
   "writer:(databases as any).flair.Memory.update#1",
   "writer:super.patch#1",
   "writer:(databases as any).flair.Memory.delete#1",
 ], "GUARDED: Memory.post/put/patch/delete call the decision on the URL and body ids first (the put _reindex branch included).");
-add("Memory", ["writer:(databases as any).flair.Memory.put#1"],
-  "GUARDED: closeSupersededRecord closes `supersedes`, which validateAndAuthorizeSupersedes ran through the decision before the new row was written.");
+add("Memory", ["writer:(databases as any).flair.Memory.put#1", "writer:(databases as any).flair.Memory.put#2"],
+  "GUARDED: closeSupersededRecord and stageGrantedClose close `supersedes`, which validateAndAuthorizeSupersedes ran through the decision before the new row was written.");
 add("MemoryFeed", ["alias-source:(databases as any).flair.Memory#1", "writer:writeBackCommittedRow#1"],
   "GUARDED: FeedMemories.post calls the decision on the body id before the write-back through the shared helper (flair#2354).");
+add("MemoryFeed", ["writer:table.put#1"],
+  "GUARDED: the full-row put of the table adapter FeedMemories.post hands the shared write-back helper (flair#2561); the helper writes only the row it plans under `record.id`, which is the body or URL id the decision ran on, or a server-generated `<agentId>-<time>-<uuid>` id.");
 add("MemoryFeed", ["writer:(databases as any).flair.Memory.update#1"],
   "GUARDED: the dedup expiry repair (flair#2358) calls the decision on the id it writes before the incremental update (flair#2470).");
 add("Federation", ["writer:writeBackCommittedRow#1"],
@@ -155,9 +157,8 @@ function denialReturnEnd(body: string, call: string, denialField?: string): numb
   return match ? match.index + match[0].length : -1;
 }
 
-/** The end of `recordSkip("<reason>");` immediately followed by `continue;`; -1 otherwise. */
-function skipContinueEnd(src: string, reason: string): number {
-  const match = new RegExp(`recordSkip\\("${reason}"\\);\\s*continue;`).exec(src);
+function refusalReturnEnd(src: string, reason: string): number {
+  const match = new RegExp(`return\\s+\\{\\s*reason: "${reason}"\\s*\\};`).exec(src);
   return match ? match.index + match[0].length : -1;
 }
 
@@ -207,10 +208,10 @@ test("the listed entry paths run the decision, and its denial stops the path bef
 
   const feed = readFileSync("resources/MemoryFeed.ts", "utf8");
   expect(feed).toContain('reservedSeedFeedWriteDenial("Memory", [...writeTargetIds(this, content), content?.supersedes])');
-  expectWritesAfter(feed, denialReturnEnd(feed, "reservedSeedFeedWriteDenial"), "FeedMemories.post");
+  expectWritesAfter(feed, denialReturnEnd(feed, "reservedSeedFeedWriteDenial"), "FeedMemories.post", [...WRITES, "table.put(", "writeBackCommittedRow("]);
 
   const federation = readFileSync("resources/Federation.ts", "utf8");
-  const skip = skipContinueEnd(federation, "seed_id_not_federated");
+  const skip = refusalReturnEnd(federation, "seed_id_not_federated");
   expect(skip, "the seed skip does not stop the record").toBeGreaterThan(-1);
   expect(federation.indexOf("await writeBackCommittedRow(", skip)).toBeGreaterThan(skip);
 });
@@ -241,9 +242,9 @@ test("the listed entry paths run the .content-suffix id decision on the ids it w
   // The federation merge: the predicate runs on the id of the row it writes
   // (`mergedData`), the skip stops the record, and the put of that row follows.
   const federation = readFileSync("resources/Federation.ts", "utf8");
-  const guard = /if \(record\.table === "Memory" && endsWithContentSelectorSuffix\(mergedData\.id\)\) \{\s*recordSkip\("content_suffix_id_not_federated"\);\s*continue;/.exec(federation);
+  const guard = /if \(record\.table === "Memory" && endsWithContentSelectorSuffix\(mergedData\.id\)\) \{\s*return\s+\{\s*reason: "content_suffix_id_not_federated"\s*\};/.exec(federation);
   expect(guard, "the federation merge does not test endsWithContentSelectorSuffix(mergedData.id) before skipping, or the skip does not stop the record").not.toBeNull();
-  const skip = skipContinueEnd(federation, "content_suffix_id_not_federated");
+  const skip = refusalReturnEnd(federation, "content_suffix_id_not_federated");
   expect(skip).toBe(guard!.index + guard![0].length);
   expect(federation.indexOf("await writeBackCommittedRow(", skip), "the merge does not write the row the predicate checked after the skip").toBeGreaterThan(skip);
 });

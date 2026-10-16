@@ -19,7 +19,7 @@ import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 const REPO_ROOT = process.cwd();
 // CI keeps this small; the 1-in-500 race is proven by running a larger loop
@@ -37,7 +37,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (installDir) await rm(installDir, { recursive: true, force: true, maxRetries: 4 });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair#1440 — restart waits for the lock, not just the exit", () => {
   test(`stop(keepInstallDir) → start(same dir) succeeds ${LOOPS}× in a row`, async () => {

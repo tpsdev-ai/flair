@@ -110,7 +110,7 @@ const POLICY: Record<string, PolicyEntry | PolicyEntry[]> = {
   "resources/AgentSeed.ts|Memory|put": { count: 1, disposition: "stamped-create", note: "POST /AgentSeed raw starter-Memory create" },
   "resources/XAA.ts|Agent|put": { count: 1, disposition: "stamped-create", note: "IdP principal raw Agent create" },
   "resources/mcp-handler.ts|Agent|put": { count: 1, disposition: "stamped-create", note: "JIT OAuth principal raw Agent create" },
-  "resources/MemoryFeed.ts|Memory|write-back": { count: 1, disposition: "stamped-create", note: "POST /FeedMemories raw Memory create/update, through the shared write-back helper (flair#2354); its plan applies applyOriginatorInstanceId" },
+  "resources/MemoryFeed.ts|?|write-back": { count: 1, disposition: "stamped-create", note: "POST /FeedMemories raw Memory create/update, through the shared write-back helper (flair#2354); its plan applies applyOriginatorInstanceId" },
   "resources/auth-middleware.ts|Memory|write-back": { count: 1, disposition: "update-only", note: "embedding backfill on an EXISTING row, through the shared write-back helper (flair#2354)" },
   "resources/MemoryReindex.ts|Memory|write-back": { count: 1, disposition: "update-only", note: "admin reindex re-PUT of an EXISTING row; buildReindexRow keeps the stored originatorInstanceId (flair#2354)" },
   "resources/promotion-stamp.ts|Memory|write-back": { count: 1, disposition: "update-only", note: "auto-promotion verdict stamp on the row its Memory write produced (flair#2354)" },
@@ -121,7 +121,7 @@ const POLICY: Record<string, PolicyEntry | PolicyEntry[]> = {
   "resources/skill-version-write.ts|Memory|put": { count: 2, disposition: "resource-internal", note: "Memory and FeedMemories stamp successors in their transaction plans; predecessor closes retain stored stamps." },
   // Update-only / resource-internal raw writes — they re-write an existing row.
   "resources/Memory.ts|Memory|post": { count: 1, disposition: "resource-internal", note: "Memory writeMemoryRowPost fallback (content already stamped)" },
-  "resources/Memory.ts|Memory|put": { count: 3, disposition: "resource-internal", note: "Memory.put shared-txn persist + closeSupersededRecord + the admin _reindex re-PUT (flair#2450); the re-embed is an incremental update (flair#2465), not a put" },
+  "resources/Memory.ts|Memory|put": { count: 4, disposition: "resource-internal", note: "Memory.put shared-txn persist + closeSupersededRecord + stageGrantedClose + the admin _reindex re-PUT (flair#2450); the re-embed is an incremental update (flair#2465), not a put" },
   "resources/Memory.ts|Memory|delete": { count: 1, disposition: "resource-internal", note: "Memory.delete raw table delete" },
   "resources/MemoryMaintenance.ts|Memory|delete": { count: 1, disposition: "resource-internal", note: "reap/delete of existing rows" },
   "resources/usage-recording.ts|Memory|write-back": { count: 1, disposition: "update-only", note: "usage counters on an EXISTING row, through the shared write-back helper (flair#2441)" },

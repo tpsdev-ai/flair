@@ -18,7 +18,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import nacl from "tweetnacl";
 import { sealMessage, type MessageEnvelope } from "../../resources/relay-lib.js";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { ensureFlairAgentRole, ensureFlairAgentUser } from "../../src/cli";
 
 // A production Flair's HTTP and ops API ports: this test must never target them.
@@ -210,7 +210,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair#2462 — the recipient-wide inbox cap holds under concurrent senders (real Harper)", () => {
   it("CONTROL: an uncontended send to the recipient is delivered", async () => {

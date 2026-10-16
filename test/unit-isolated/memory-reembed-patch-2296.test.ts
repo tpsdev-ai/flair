@@ -31,6 +31,7 @@ mock.module("harper", () => ({
 }));
 const { Memory } = await import("../../resources/Memory.ts");
 const { getModelId } = await import("../../resources/embeddings-provider.ts");
+const { computeContentHash } = await import("../../resources/memory-feed-lib.ts");
 
 const REEMBED = { embedding: null, embeddingModel: null };
 const agent = (id: string, isAdmin = false) => ({ request: { tpsAgent: id, tpsAgentIsAdmin: isAdmin } });
@@ -66,9 +67,11 @@ test("the owner's request writes embedding, embeddingModel and updatedAt and lea
   const res = await resource("m1", agent("agent-a")).patch({ ...REEMBED });
   expect(res.status).toBe(200);
   const body = await res.json();
-  expect(body).toEqual({ id: "m1", embeddingModel: getModelId(), updatedAt: expect.any(String) });
+  // flair#2561: the response names the row and its updatedAt, and carries no embedding field.
+  expect(body).toEqual({ id: "m1", updatedAt: expect.any(String) });
   const after = harnessState.memoryStore.get("m1");
-  expect(after).toEqual({ ...before, embedding: [0.25, 0.5, 0.75], embeddingModel: getModelId(), updatedAt: body.updatedAt });
+  // flair#2465: the re-embed also records the hash of the text it embedded.
+  expect(after).toEqual({ ...before, embedding: [0.25, 0.5, 0.75], embeddingModel: getModelId(), updatedAt: body.updatedAt, embeddedContentHash: computeContentHash("agent-a", "content of m1") });
   expect(documentEmbeds().map((c) => c.text)).toEqual(["content of m1"]);
 }, 10_000);
 
@@ -194,3 +197,20 @@ test("a body that also sets another field is an ordinary PATCH (a skill row stay
   expect(harnessState.memoryStore.get("s1")).toEqual(before);
   expect(documentEmbeds()).toEqual([]);
 }, 10_000);
+
+for (const status of [200, 409]) {
+  test(`re-embed storage Response status ${status} returns write_response_withheld`, async () => {
+    harnessState.memoryStore.set("m1", row("m1"));
+    const update = spyOn(databasesMock.flair.Memory, "update").mockImplementation(async () => Response.json({ embedding: [1] }, { status }));
+    try {
+      const response = await resource("m1", agent("agent-a")).patch({ ...REEMBED });
+      expect(response.status).toBe(500);
+      expect(await response.json()).toEqual({
+        error: "write_response_withheld",
+        message: "the server does not report this write's result; read the row to see what is stored",
+      });
+    } finally {
+      update.mockRestore();
+    }
+  });
+}

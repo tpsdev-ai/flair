@@ -51,7 +51,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import {
   buildJournalRow,
   continuityTag,
@@ -251,7 +251,7 @@ describe("continuity REM promotion (flair#1257 slice 3)", () => {
   afterAll(async () => {
     if (harper) await stopHarper(harper);
     rmSync(stubDir, { recursive: true, force: true });
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   // ── META ROUND-TRIP ────────────────────────────────────────────────────────
 

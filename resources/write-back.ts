@@ -20,7 +20,12 @@ export type WriteBackPause = () => Promise<void> | undefined;
 export type WriteBackPlan =
   | { write: Record<string, unknown> }
   | { update: Record<string, unknown> }
-  | { skip: true };
+  // A plan may name WHY it skipped, so a caller that maps a skip to an operator-
+  // visible reason (FederationSync's skip log) can tell two skip causes apart
+  // instead of labeling every skip with one hardcoded name (flair#2266). The
+  // field is optional so the many plans that return a bare `{ skip: true }` are
+  // unchanged; a caller reading it falls back to its own default.
+  | { skip: true; reason?: string };
 
 export interface WriteBackOptions {
   /** The request context, if any. Its transaction is detached for the owned
@@ -102,6 +107,14 @@ export function writeBackIdentity(row: Record<string, any>): Record<string, unkn
 /** Attempts of a write-back before it gives up on a row that keeps changing. */
 export const WRITE_BACK_ATTEMPTS = 3;
 
+/**
+ * The helper's named refusal: the row changed and nothing was written. Both
+ * checks that lead to it (the in-transaction comparison, and the committed-row
+ * confirmation after the write is staged) run inside the owned transaction
+ * before any commit is submitted, and their throw aborts that transaction, so
+ * its staged write is discarded. Whichever check fails, the outcome is known:
+ * not written.
+ */
 export class WriteBackConflictError extends Error {
   readonly id: string;
   constructor(label: string, id: string, attempts: number) {

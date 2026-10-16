@@ -21,7 +21,7 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { OWNER_FIELDS } from "../../resources/record-owner-guard.js";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
@@ -170,7 +170,7 @@ describe("shared record-ownership guard", () => {
     for (const c of CASES) await seed(harper, c.table, c.seed);
   }, 240_000);
 
-  afterAll(async () => { if (harper) await stopHarper(harper); });
+  afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
 
   describe("a non-owner cannot mutate another principal's record", () => {
     for (const c of CASES) {

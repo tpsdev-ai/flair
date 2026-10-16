@@ -17,7 +17,7 @@ import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { createHash, randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { ensureFlairAgentRole, ensureFlairAgentUser } from "../../src/cli";
 import { FLAIR_AGENT_PERMISSION } from "../../src/lib/flair-agent-role";
 
@@ -128,7 +128,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (installDir) await rm(installDir, { recursive: true, force: true, maxRetries: 4 });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair#2139 S1 — the version read path", () => {
   test("anonymous is denied; a verified agent reads a soul version; an unhandled subjectType is denied", async () => {

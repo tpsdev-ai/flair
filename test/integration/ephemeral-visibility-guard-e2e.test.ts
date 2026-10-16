@@ -20,7 +20,7 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
 
@@ -82,7 +82,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (harper) await stopHarper(harper);
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("ephemeral memories are private-only (flair#1257)", () => {
   test("POSITIVE CONTROL (a): POST ephemeral+shared is refused with 400, and nothing is stored", async () => {

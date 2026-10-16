@@ -14,7 +14,7 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import nacl from "tweetnacl";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 function makeTmpDir(prefix: string): string {
   const dir = join(tmpdir(), `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -143,7 +143,7 @@ describe("flair#1146 status --json federation.peers on a real instance", () => {
   afterAll(async () => {
     if (harper) await stopHarper(harper);
     try { rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test("HealthDetail and status --json agree: both peers with lastSyncAt count as connected", async () => {
     const healthRes = await fetch(`${harper.httpURL}/HealthDetail`, {

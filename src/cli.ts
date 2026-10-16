@@ -556,7 +556,11 @@ const DEFAULT_OPS_PORT = 19925;
 const FABRIC_OPS_PORT = 9925;
 // DEFAULT_ADMIN_USER + resolveAdminUser (flag > FLAIR_ADMIN_USER env > "admin")
 // live in src/lib/auth-resolve.ts — imported above (flair#1345).
-const STARTUP_TIMEOUT_MS = 60_000;
+//
+// Exported (flair#2568) so the test harness's readiness budget
+// (HARPER_STARTUP_BUDGET_MS in test/helpers/harper-lifecycle.ts) can be pinned
+// equal to the budget `flair init`'s TCP readiness check polls under.
+export const STARTUP_TIMEOUT_MS = 60_000;
 const ADOPT_STOP_TIMEOUT_MS = 60_000;
 const HEALTH_POLL_INTERVAL_MS = 500;
 
@@ -1526,6 +1530,11 @@ function applyAdminPassFile(opts: { adminPass?: string; adminPassFile?: string }
 // Ops port resolution: valid --ops-port flag > FLAIR_OPS_PORT env > config opsPort > httpPort - 1.
 // An explicit invalid --ops-port refuses; it never falls through to another rung.
 //
+// `httpPortBase` is the HTTP port the last rung derives from. A caller that
+// already resolved the HTTP port — or, for `flair doctor`, probed the port it
+// actually reached — passes it so that rung matches that port rather than
+// re-resolving the configured one (flair#2562).
+//
 // Deliberately NOT routed through Harper's per-instance config the way
 // resolveHttpPort is (flair#914). The last rung couples the ops port to the HTTP
 // port the CALLER named, and that coupling is what makes `flair init --port N`
@@ -1534,7 +1543,7 @@ function applyAdminPassFile(opts: { adminPass?: string; adminPassFile?: string }
 // which is the bug flair#914 fixed pointing the other way. The ops port becomes
 // per-instance when the lifecycle commands grow `--data-dir` and there is a
 // named instance to attribute it to.
-function resolveOpsPort(opts: { opsPort?: string | number; port?: string | number }): number {
+function resolveOpsPort(opts: { opsPort?: string | number; port?: string | number }, httpPortBase?: number): number {
   if (opts.opsPort !== undefined && opts.opsPort !== null) {
     const n = Number(opts.opsPort);
     if (Number.isInteger(n) && n >= 1 && n <= 65535) return n;
@@ -1556,7 +1565,7 @@ function resolveOpsPort(opts: { opsPort?: string | number; port?: string | numbe
     }
   } catch { /* ignore */ }
   // Default: httpPort - 1
-  return resolveHttpPort(opts) - 1;
+  return (httpPortBase ?? resolveHttpPort(opts)) - 1;
 }
 
 /** The named refusal for a configured-pair conflict or an unpaired one-sided target (flair#2474). */
@@ -1577,7 +1586,7 @@ export interface AgentHomeTargetInputs {
   configuredHttp: number | null;
   /** The ops port resolved from config, or null. */
   configuredOps: number | null;
-  /** The ops port the ordinary ladder (`resolveOpsPort`) derives; used only when neither port is named and the config records no complete pair. */
+  /** The ops port the ordinary ladder (`resolveOpsPort`) derives from the resolved HTTP port `httpPort`; used only when neither port is named and the config records no complete pair. */
   deriveOps: () => number;
 }
 
@@ -1653,7 +1662,10 @@ export function resolveAgentHomeTarget(opts: { port?: string | number; opsPort?:
 } {
   // `flair doctor` probes the port it actually reached (a PID-discovered
   // `effectivePort` can differ from the configured one), so it passes that port
-  // here; every other caller lets the resolver resolve it.
+  // here; every other caller lets the resolver resolve it. When neither port is
+  // named and the config records no complete pair, `deriveOps` takes THIS port
+  // as the base for its port-minus-one default, so the fallback matches the
+  // port doctor reached rather than the configured one (flair#2562).
   const httpPort = httpPortOverride ?? resolveHttpPort(opts);
   const dataDir = instanceDataDir(opts);
   const fromHarper = harperPortValue(readHarperConfig(dataDir)?.operationsApi?.network?.port);
@@ -1677,7 +1689,7 @@ export function resolveAgentHomeTarget(opts: { port?: string | number; opsPort?:
     namedOps,
     configuredHttp,
     configuredOps,
-    deriveOps: () => resolveOpsPort(opts),
+    deriveOps: () => resolveOpsPort(opts, httpPort),
   });
 }
 
@@ -8974,6 +8986,7 @@ registerTest(program);
 // Command registration lives in src/commands/deploy.ts (flair#1636).
 // Bind shared cli-locals first so the extracted module never imports this file.
 bindDeployCli({
+  resolveEffectiveOpsUrl,
   fleetSweepCallerExitMessage,
   resolveFabricCredentials,
   shouldRunFleetVerify,
@@ -9074,6 +9087,7 @@ const ENTITIES_OPTION_DESCRIPTION =
 // Command group lives in src/commands/memory.ts (flair#1621). Bind shared
 // helpers first so the extracted module never imports this file.
 bindMemoryCli({
+  resolveEffectiveOpsUrl,
   api,
   resolveBaseUrl,
   resolveSigningAgentId,
@@ -9084,6 +9098,7 @@ bindMemoryCli({
   resolveHttpPort,
   parseEntitiesOptionOrExit,
   ENTITIES_OPTION_DESCRIPTION,
+  resolveFabricCredentials,
 });
 registerMemory(program);
 

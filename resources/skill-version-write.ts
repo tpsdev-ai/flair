@@ -1,9 +1,10 @@
 /** Skill writes share the ["flair-instruction-version", "skill"] lock. */
 import { databases } from "harper";
+import { storageResult } from "./memory-write-response.js";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { recordVersion, readHead, skillRefReadable, SKILL_SUBJECT_TYPE, type RecordVersionOutcome } from "./instruction-version-record.js";
-import { SKILL_TAG, enforceSkillDurability, skillEmbedText } from "./skill-write.js";
+import { SKILL_TAG, enforceSkillDurability, skillEmbedText, skillMetadataHasDuplicateKey } from "./skill-write.js";
 import { stripUndeclaredMemoryAttributes } from "./memory-declared-attributes.js";
 import { skillWriteSource } from "./skill-write-policy.js";
 import type { AgentAuthVerdict } from "./agent-auth.js";
@@ -13,6 +14,7 @@ import { maybeThrowSkillWriteFault } from "./skill-write-fault.js";
 import { supersedesTargetUnreadable } from "./memory-id-guard.js";
 import { grantedCloseRevokedRefusal, writeGrantHeld } from "./write-back.js";
 import { txnPausePoint } from "./txn-pause-point.js";
+import { committedVisibilityDiffers, grantedSuccessorVisibilityDenial, predecessorVisibilityChangedRefusal } from "./grant-visibility.js";
 
 /** Durability-keyed default visibility (mirrors Memory's write default). */
 function defaultVisibilityForDurability(durability: unknown): "private" | "shared" {
@@ -123,7 +125,7 @@ export function rowIsSkill(row: Record<string, any> | null | undefined): boolean
 
 export function skillPayloadUnchanged(base: Record<string, any>, head: Record<string, any>): boolean {
   const bookkeeping = new Set([
-    "embedding", "embeddingModel", "contentHash", "updatedAt", "instanceToken",
+    "embedding", "embeddingModel", "embeddedContentHash", "contentHash", "updatedAt", "instanceToken",
     "provenance", "skillSubjectId", "_safetyFlags", "_skillScan",
     "retrievalCount", "lastRetrieved",
   ]);
@@ -159,12 +161,26 @@ export async function prepareSkillBody(content: any, stored: Record<string, any>
   if ((content.archived != null && content.archived !== false) || (content.validTo != null && content.validTo !== "")) {
     return Response.json({ error: "skill_state_requires_delete" }, { status: 400 });
   }
-  const effective = { ...(stored ?? predecessor ?? {}), ...content };
+  const source = stored ?? predecessor ?? {};
+  const effective = { ...source, ...content };
   effective.tags = content.tags ?? (rowIsSkill(stored) ? stored!.tags : predecessor?.tags);
-  if (content.embedding === undefined && skillEmbedText(effective) !== skillEmbedText(stored ?? predecessor ?? {})) {
+  if (skillMetadataHasDuplicateKey(effective.metadata)) {
+    return Response.json({ error: "skill_metadata_duplicate_key" }, { status: 400 });
+  }
+  const textUnchanged = skillEmbedText(effective) === skillEmbedText(source);
+  if (content.embedding === undefined && !textUnchanged) {
     effective.embedding = null;
     effective.embeddingModel = null;
   }
+  // flair#2465: the successor keeps the stored `embeddedContentHash` only when
+  // the stored row has a vector, the body omits `embedding` (so that vector is
+  // carried), and the embedding text is unchanged; otherwise null. A body value
+  // is never kept. A Feed successor stores this value; Memory.post()/put() keep
+  // it when they store the carried vector, and otherwise set their own.
+  const sourceHasVector = Array.isArray(source.embedding) && source.embedding.length > 0;
+  effective.embeddedContentHash = sourceHasVector && content.embedding === undefined && textUnchanged
+    ? (source.embeddedContentHash ?? null)
+    : null;
   if (content.id === undefined) delete effective.id;
   return { content: effective, predecessor };
 }
@@ -259,6 +275,10 @@ export interface SkillSuccessorPlan {
    * Required, so every plan states it. When set, the shared writer re-checks the
    * grant on committed state after it stages the close and refuses the whole
    * write — no close, no successor, no version — when the grant is gone.
+   * When set, this grant-authorized write must also carry a successor that
+   * reads with the predecessor's visibility, both as planned and on committed
+   * state after the close is staged: a write grant does not include changing a
+   * record's visibility (grant-visibility.ts).
    */
   grantedClose: GrantedClose | null;
 }
@@ -282,10 +302,10 @@ export interface SkillDeletePlan {
 export type SkillWritePlan = SkillSuccessorPlan | SkillDeletePlan;
 
 export interface SkillWriteHooks {
-  /** Create the successor row through the shared transaction; returns its id. */
-  createSuccessor?: (successor: Record<string, any>, shared: any) => Promise<string>;
+  /** Create the successor row through the shared transaction. */
+  createSuccessor?: (successor: Record<string, any>, shared: any) => Promise<string | Response>;
   /** Close the predecessor (or, for a delete, the head) through the shared transaction. */
-  closePredecessor?: (predecessor: Record<string, any>, patch: Record<string, unknown>, shared: any) => Promise<void>;
+  closePredecessor?: (predecessor: Record<string, any>, patch: Record<string, unknown>, shared: any) => Promise<void | Response>;
   /** Pointer writes through the shared transaction; a Response denies and aborts. */
   pointer?: (shared: any) => Promise<Response | null>;
 }
@@ -297,12 +317,14 @@ export interface SkillWriteHooks {
  */
 export const defaultSkillHooks: SkillWriteHooks = {
   createSuccessor: async (successor, shared) => {
-    await (databases as any).flair.Memory.put(successor, shared);
+    const result = storageResult(await (databases as any).flair.Memory.put(successor, shared));
+    if (result instanceof Response) return result;
     return String(successor.id);
   },
   closePredecessor: async (predecessor, patch, shared) => {
     const closed = { ...predecessor, ...patch };
-    await (databases as any).flair.Memory.put(closed, shared);
+    const result = storageResult(await (databases as any).flair.Memory.put(closed, shared));
+    if (result instanceof Response) return result;
   },
 };
 
@@ -333,14 +355,29 @@ export interface RunSkillVersionWriteArgs {
  * 409 when the grant is gone — the caller returns it, so the whole transaction
  * rolls back: no close, no successor, no version — else null. A plan with no
  * grant (same-agent, operator, internal) reads nothing.
+ *
+ * For a grant-authorized supersede, `successor` is the planned successor row.
+ * Before the grant re-check, the predecessor's COMMITTED row (an empty-context
+ * read, as for the grant) must read with the successor's visibility: a write
+ * grant does not include changing a record's visibility (grant-visibility.ts).
+ * A mismatch returns the named 409 predecessor_visibility_changed, and the
+ * whole write rolls back the same way. As with the grant, a change committed
+ * after this re-read and before the transaction commits is not seen by it.
  */
-async function afterCloseStaged(granted: GrantedClose | null | undefined): Promise<Response | null> {
+async function afterCloseStaged(
+  granted: GrantedClose | null | undefined,
+  supersede?: { predecessorId: string; successor: Record<string, any> },
+): Promise<Response | null> {
   // Test-only: inert unless armed — here the close write is staged, so a
-  // competing grant revocation and the committed-state re-check below can be
-  // exercised in either order (Memory's "supersede-close-staged").
+  // competing grant revocation or row change and the committed-state re-checks
+  // below can be exercised in either order (the skill-path counterpart of Memory's "granted-close-staged").
   const stagedPause = txnPausePoint("skill-close-staged");
   if (stagedPause) await stagedPause;
   if (!granted) return null;
+  if (supersede) {
+    const committed = await (databases as any).flair.Memory.get(supersede.predecessorId, {});
+    if (committedVisibilityDiffers(committed, supersede.successor.visibility)) return predecessorVisibilityChangedRefusal();
+  }
   const held = await writeGrantHeld((databases as any).flair.MemoryGrant, granted.granteeId, granted.ownerId, {});
   return held ? null : grantedCloseRevokedRefusal();
 }
@@ -388,6 +425,12 @@ async function runSkillVersionWriteInner(args: RunSkillVersionWriteArgs): Promis
         const built = await args.plan(head, shared);
         if (built === null) return null;
         if (built instanceof Response) return built;
+        // A write grant does not include changing a record's visibility;
+        // visibility is set by the owner or an admin (grant-visibility.ts). The
+        // plan is checked here and again on committed state once the close is
+        // staged (afterCloseStaged).
+        const visibilityDenial = grantedSuccessorVisibilityDenial(built);
+        if (visibilityDenial) return visibilityDenial;
         plan = built;
         const target = built.kind === "delete" ? built.predecessor : built.successor;
         owner = String(target.agentId);
@@ -410,18 +453,24 @@ async function runSkillVersionWriteInner(args: RunSkillVersionWriteArgs): Promis
       const writePlan = plan!;
       if (writePlan.kind === "delete") {
         maybeThrowSkillWriteFault("close", owner);
-        await args.hooks.closePredecessor!(writePlan.predecessor, writePlan.closePatch, shared);
+        const closed = await args.hooks.closePredecessor!(writePlan.predecessor, writePlan.closePatch, shared);
+        if (closed instanceof Response) return storageResult(closed);
         // flair#2511: the grant re-check, after the close is staged.
         const revoked = await afterCloseStaged(writePlan.grantedClose);
         if (revoked) return revoked;
       } else {
         maybeThrowSkillWriteFault("successor", owner);
-        await args.hooks.createSuccessor!(writePlan.successor, shared);
+        const created = await args.hooks.createSuccessor!(writePlan.successor, shared);
+        if (created instanceof Response) return storageResult(created);
         if (writePlan.predecessor) {
           maybeThrowSkillWriteFault("close", owner);
-          await args.hooks.closePredecessor!(writePlan.predecessor, writePlan.closePatch, shared);
-          // flair#2511: the grant re-check, after the close is staged.
-          const revoked = await afterCloseStaged(writePlan.grantedClose);
+          const closed = await args.hooks.closePredecessor!(writePlan.predecessor, writePlan.closePatch, shared);
+          if (closed instanceof Response) return storageResult(closed);
+          // flair#2511: the grant re-check, after the close is staged, with the
+          // committed-visibility check for a grant-authorized successor.
+          const revoked = await afterCloseStaged(writePlan.grantedClose, {
+            predecessorId: String(writePlan.predecessor.id), successor: writePlan.successor,
+          });
           if (revoked) return revoked;
         }
       }

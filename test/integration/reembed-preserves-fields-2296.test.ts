@@ -4,7 +4,8 @@
  *
  * Each CLI path (all agents, one agent) re-embeds rows seeded with a value for
  * every Memory attribute. Afterwards the stored row may differ only in
- * `embedding`, `embeddingModel` and `updatedAt`, and the new vector must match
+ * `embedding`, `embeddingModel`, `updatedAt` and (flair#2465)
+ * `embeddedContentHash`, and the new vector must match
  * the server's embedding of the row's text (`trigger` for a skill row).
  *
  * The fixtures carry the bare current-space stamp, which the boot migration
@@ -18,17 +19,20 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { ensureCliBuild } from "../helpers/build-cli-once.js";
 import { MEMORY_ATTRIBUTES } from "../../src/lib/memory-attributes.ts";
 import { getModelId } from "../../resources/embeddings-provider.ts";
+import { computeContentHash } from "../../resources/memory-feed-lib.ts";
 import { stripEnginePrefix } from "../../resources/embedding-space-guard.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "..", "..");
 const CLI = join(REPO_ROOT, "dist", "cli.js");
 const CURRENT_MODEL_ID = getModelId();
 const BARE_MODEL_ID = stripEnginePrefix(CURRENT_MODEL_ID);
-const ALLOWED_TO_CHANGE = new Set(["embedding", "embeddingModel", "updatedAt"]);
+// flair#2465: a re-embed also records the embedded-text hash of the text it
+// embedded.
+const ALLOWED_TO_CHANGE = new Set(["embedding", "embeddedContentHash", "embeddingModel", "updatedAt"]);
 const FIXTURE_VECTOR = Array.from({ length: 768 }, (_, i) => ((i % 7) + 1) / 1000);
 
 type Agent = { id: string; publicKey: Uint8Array; secretKey: Uint8Array };
@@ -36,6 +40,8 @@ const newAgent = (id: string): Agent => ({ id, ...nacl.sign.keyPair() });
 const agentA = newAgent("reembed-agent-a");
 const agentB = newAgent("reembed-agent-b");
 const agentC = newAgent("reembed-agent-c");
+// flair#2561: runs the single-agent path without administrator credentials.
+const agentE = newAgent("reembed-agent-e");
 // Has a key file but no Agent row, so its signed requests are refused.
 const unregistered = newAgent("reembed-agent-d");
 
@@ -88,15 +94,20 @@ async function signedRequest(who: Agent, method: string, path: string, body?: un
 /** A row carrying a non-default value for every Memory attribute. */
 function fixtureRow(id: string, agentId: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
   const day = (d: number) => `2001-01-0${d}T00:00:00.000Z`;
+  const content = `Release checklist ${id}: verify the tarball checksum before tagging.`;
   return {
     id,
     agentId,
-    content: `Release checklist ${id}: verify the tarball checksum before tagging.`,
+    content,
     contentHash: `hash-${id}`,
     trigger: "trigger fixture",
     visibility: "private",
     embedding: FIXTURE_VECTOR,
     embeddingModel: BARE_MODEL_ID,
+    // A matching binding for the row's embedding text, so the boot
+    // embedding-stamp migration (flair#2465) treats a seeded fixture as current
+    // and never re-embeds it mid-case. The re-embed under test overwrites it.
+    embeddedContentHash: computeContentHash(agentId, content),
     tags: ["release", "fixture"],
     durability: "persistent",
     source: "source-fixture",
@@ -139,9 +150,13 @@ function fixtureRow(id: string, agentId: string, overrides: Record<string, unkno
 }
 
 function skillFixtureRow(id: string, agentId: string): Record<string, unknown> {
+  const trigger = `when cutting a release for ${id}`;
   return fixtureRow(id, agentId, {
     tags: ["skill", "release"],
-    trigger: `when cutting a release for ${id}`,
+    trigger,
+    // A skill row embeds from its trigger (flair#1542), so its binding is over
+    // the trigger, not the content.
+    embeddedContentHash: computeContentHash(agentId, trigger),
     skillSubjectId: id,
     archived: false,
     archivedAt: null,
@@ -161,16 +176,17 @@ async function seedRows(rows: Record<string, unknown>[]): Promise<Map<string, an
   return before;
 }
 
-function runReembed(args: string[]): { code: number | null; out: string } {
+function runReembed(args: string[], opts: { admin?: boolean } = {}): { code: number | null; out: string } {
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(FLAIR_|HARPER_|HDB_|FABRIC_)/.test(key)));
+  const admin = opts.admin !== false
+    ? { FLAIR_OPS_PORT: new URL(harper.opsURL).port, FLAIR_ADMIN_USER: harper.admin.username, FLAIR_ADMIN_PASS: harper.admin.password }
+    : {};
   const r = spawnSync(process.execPath, [CLI, "reembed", "--port", new URL(harper.httpURL).port, ...args], {
     encoding: "utf-8",
     env: {
       ...env,
       HOME: home,
-      FLAIR_OPS_PORT: new URL(harper.opsURL).port,
-      FLAIR_ADMIN_USER: harper.admin.username,
-      FLAIR_ADMIN_PASS: harper.admin.password,
+      ...admin,
     },
     timeout: 90_000, // flair#1807: the CLI child's own deadline
     killSignal: "SIGTERM",
@@ -229,7 +245,7 @@ beforeAll(async () => {
   }
   const keysDir = join(home, ".flair", "keys");
   mkdirSync(keysDir, { recursive: true });
-  for (const agent of [agentA, agentB, agentC, unregistered]) {
+  for (const agent of [agentA, agentB, agentC, agentE, unregistered]) {
     writeFileSync(join(keysDir, `${agent.id}.key`), agent.secretKey.slice(0, 32), { mode: 0o600 });
   }
   const now = new Date().toISOString();
@@ -237,7 +253,7 @@ beforeAll(async () => {
     operation: "upsert",
     database: "flair",
     table: "Agent",
-    records: [agentA, agentB, agentC].map((a) => ({
+    records: [agentA, agentB, agentC, agentE].map((a) => ({
       id: a.id, name: a.id, role: "agent", publicKey: Buffer.from(a.publicKey).toString("base64"), createdAt: now,
     })),
   });
@@ -246,7 +262,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (home) rmSync(home, { recursive: true, force: true });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair#2296: flair reembed", () => {
   test("the fixture covers every Memory attribute", () => {
@@ -281,6 +297,21 @@ describe("flair#2296: flair reembed", () => {
 
     const r = runReembed(["--agent", agentC.id, "--batch-size", "1", "--delay-ms", "0"]);
     expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain("Re-embedding complete: 2 updated, 0 errors");
+    for (const row of before.values()) await expectOnlyEmbeddingChanged(row);
+  }, 240_000);
+
+  test("single-agent path without administrator credentials, including a skill row", async () => {
+    // Listed through POST /SemanticSearch as the agent, which returns rows that
+    // are not archived; each re-embedded row's model is read with a signed GET.
+    const live = { archived: false, archivedAt: null, archivedBy: null, validTo: null };
+    const before = await seedRows([
+      fixtureRow("one-e", agentE.id, live),
+      { ...skillFixtureRow("one-e-skill", agentE.id) },
+    ]);
+    const r = runReembed(["--agent", agentE.id, "--batch-size", "1", "--delay-ms", "0"], { admin: false });
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain("Candidates for re-embedding: 2");
     expect(r.out).toContain("Re-embedding complete: 2 updated, 0 errors");
     for (const row of before.values()) await expectOnlyEmbeddingChanged(row);
   }, 240_000);
