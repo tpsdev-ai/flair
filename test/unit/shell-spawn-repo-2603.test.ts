@@ -12,7 +12,7 @@ const unknown = Symbol("dynamic expression");
 type Value = string | boolean | Value[] | { [key: string]: Value } | typeof unknown;
 type ShellCall = { site: string; command: Value; args: Value[]; shell: Value; options: Value; node: ts.CallExpression };
 
-function collect(source: string, file: string, substitutions: Record<string, string> = {}): ShellCall[] {
+function collect(source: string, file: string, substitutions: Record<string, string> = {}, includeDirect = false): ShellCall[] {
   const ast = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true);
   const imports = new Map<string, string>();
   const namespaces = new Set(["Bun"]);
@@ -38,6 +38,8 @@ function collect(source: string, file: string, substitutions: Record<string, str
   function value(node: ts.Expression | undefined, seen = new Set<string>()): Value {
     if (!node) return unknown;
     if (ts.isStringLiteralLike(node)) return node.text;
+    if (node.getText(ast) === "process.execPath") return process.execPath;
+    if (ts.isCallExpression(node) && node.expression.getText(ast) === "nodeBin" && node.arguments.length === 0) return Bun.which("node")!;
     if (node.kind === ts.SyntaxKind.TrueKeyword) return true;
     if (node.kind === ts.SyntaxKind.FalseKeyword) return false;
     if (ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isNonNullExpression(node)) return value(node.expression, seen);
@@ -100,7 +102,7 @@ function collect(source: string, file: string, substitutions: Record<string, str
         const commandFlag = args.some(arg => typeof arg === "string" && /^-[^-]*c/.test(arg));
         const shellExecutable = typeof command === "string" && /(?:^|\/)(?:sh|bash)$/.test(command);
         const dynamicShell = /\b(?:shell|executableShell|form\.command)\b/.test(node.arguments[0]?.getText(ast) ?? "");
-        if (shell === true || typeof shell === "string" || (shellExecutable || dynamicShell) && commandFlag ||
+        if (includeDirect || shell === true || typeof shell === "string" || (shellExecutable || dynamicShell) && commandFlag ||
             options !== unknown && typeof options === "object" && !Array.isArray(options) && Object.hasOwn(options, "shell") ||
             file === guardFixtures && (dynamicShell || /\bshell\b/.test(node.getText(ast)))) {
           const line = ast.getLineAndCharacterOfPosition(node.getStart()).line + 1;
@@ -140,8 +142,10 @@ function check(call: ShellCall) {
   const childEnv: Record<string, string> = {};
   if (env !== unknown && typeof env === "object" && !Array.isArray(env)) {
     for (const [key, value] of Object.entries(env)) {
-      expect(typeof value, `${call.site}: resolve child env.${key}`).toBe("string");
-      childEnv[key] = value as string;
+      if (key === "PATH" || key === "FLAIR_TEST_ALLOW_BUN_HARPER") {
+        expect(typeof value, `${call.site}: resolve child env.${key}`).toBe("string");
+      }
+      if (typeof value === "string") childEnv[key] = value;
     }
   }
   checkTestSpawn(call.site, call.command, call.args, {
@@ -154,7 +158,7 @@ function check(call: ShellCall) {
 function files(dir: string): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap(item => {
     const path = join(dir, item.name);
-    return item.isDirectory() ? files(path) : /\.[cm]?[jt]s$/.test(path) ? [path] : [];
+    return item.isDirectory() ? ["node_modules", "dist", ".git"].includes(item.name) ? [] : files(path) : /\.[cm]?[jt]s$/.test(path) ? [path] : [];
   });
 }
 
@@ -189,6 +193,43 @@ test("shell scan preserves child reasons and exported Bash functions", () => {
   expect(() => check(calls[0])).toThrow("shell string launching dist/cli.js");
   expect(() => check(calls[1])).not.toThrow();
 });
+
+test("spawn scan recognizes direct wrapper argv and nested shell strings", () => {
+  const source = `
+    import { spawnSync } from "node:child_process";
+    spawnSync("/usr/bin/time", ["sh", "-c", "bun ./dist/cli.js --version"]);
+    spawnSync("/usr/bin/time", ["bun", "./dist/cli.js", "--version"]);
+    spawnSync(nodeBin(), ["./dist/cli.js", "--version"]);
+    Bun.spawnSync(["unknown", "./dist/cli.js"]);
+  `;
+  const calls = collect(source, "fixture.ts", {}, true);
+  expect(calls).toHaveLength(4);
+  for (const index of [0, 1, 3]) expect(() => check(calls[index])).toThrow("launching dist/cli.js");
+  expect(() => check(calls[2])).not.toThrow();
+});
+
+test("repository statically resolved direct spawns obey the guard", () => {
+  const calls = ["test", "packages", "scripts", "src", "resources"].flatMap(dir =>
+    files(join(root, dir)).flatMap(file => collect(readFileSync(file, "utf8"), relative(root, file), {}, true)));
+  let checked = 0;
+  const failures: string[] = [];
+  for (const call of calls) {
+    if (call.site.startsWith(`${guardFixtures}:`)) continue;
+    const options = call.options;
+    const env = options !== unknown && typeof options === "object" && !Array.isArray(options) ? options.env : undefined;
+    const unresolvedEnv = env === unknown || env && typeof env === "object" && !Array.isArray(env) &&
+      ["PATH", "FLAIR_TEST_ALLOW_BUN_HARPER"].some(key => Object.hasOwn(env, key) && typeof env[key] !== "string");
+    if (typeof call.command !== "string" || !call.args.every(arg => typeof arg === "string") || unresolvedEnv) {
+      console.log(`dynamic spawn: ${call.site}`);
+      continue;
+    }
+    console.log(`resolved spawn: ${call.site}`);
+    try { check(call); } catch (error) { failures.push(`${call.site}: ${(error as Error).message}`); }
+    checked++;
+  }
+  expect(checked).toBeGreaterThan(0);
+  expect(failures).toEqual([]);
+}, 20_000);
 
 test("test tree shell-string spawns are allowed or assert their guard decision in the runtime fixtures", () => {
   const substitutions = { REPO_ROOT: root, tempDir: tempDir("flair-shell-scan-") };

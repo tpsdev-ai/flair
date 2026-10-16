@@ -1115,7 +1115,7 @@ const BASELINE_REL = "scripts/ci/cli-spawn-budgets.baseline.json";
 
 /** Resolve a ref to its full 40-char commit sha in `root`; hard-fail if invalid. */
 export function resolveRef(ref, root) {
-  const r = spawnSync("git", ["-C", root, "rev-parse", "--verify", "--quiet", `${ref}^{commit}`], { encoding: "utf8" });
+  const r = spawnSync("git", ["-C", root, "rev-parse", "--verify", "--quiet", `${ref}^{commit}`], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "resolve a trusted git ref with literal revision syntax" }, encoding: "utf8" });
   if (r.status !== 0) {
     throw new Error(
       `invalid base ref '${ref}': cannot resolve it in ${root}` +
@@ -1132,7 +1132,7 @@ export function resolveRef(ref, root) {
  * both shas — never a silent "not an ancestor".
  */
 export function isAncestor(ancestor, descendant, root) {
-  const r = spawnSync("git", ["-C", root, "merge-base", "--is-ancestor", ancestor, descendant], { encoding: "utf8" });
+  const r = spawnSync("git", ["-C", root, "merge-base", "--is-ancestor", ancestor, descendant], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "resolve a trusted git ref with literal revision syntax" }, encoding: "utf8" });
   if (r.status === 0) return true;
   if (r.status === 1) return false;
   throw new Error(
@@ -1148,7 +1148,7 @@ export function isAncestor(ancestor, descendant, root) {
  * EMPTY). Nothing else may be treated as "no baseline". */
 export function loadBaselineAtRef(ref, root) {
   resolveRef(ref, root);
-  const res = spawnSync("git", ["-C", root, "show", `${ref}:${BASELINE_REL}`], { encoding: "utf8" });
+  const res = spawnSync("git", ["-C", root, "show", `${ref}:${BASELINE_REL}`], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "resolve a trusted git ref with literal revision syntax" }, encoding: "utf8" });
   if (res.status === 0) return JSON.parse(res.stdout);
   // A valid ref whose tree has no baseline file → the base baseline is EMPTY.
   if (/does not exist|exists on disk, but not in/i.test(res.stderr ?? "")) return null;

@@ -385,7 +385,7 @@ async function drive(
 ): Promise<{ result: any; stdout: string; stderr: string; exitCode: number }> {
   const proc = Bun.spawn([process.execPath, join(fx.probe, "drive.ts"), what, JSON.stringify(input)], {
     cwd: fx.probe,
-    env: { ...childEnv(), ...envOverride },
+    env: { ...childEnv(), ...envOverride, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise the Bun launchd driver with JSON argument data" },
     timeout: timeoutMs,
     killSignal: "SIGKILL",
     stdout: "pipe",

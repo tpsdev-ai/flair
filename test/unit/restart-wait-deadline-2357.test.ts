@@ -1,3 +1,4 @@
+import { nodeBin } from "../helpers/node-runtime.ts";
 /**
  * restart-wait-deadline-2357.test.ts — flair#2357.
  */
@@ -69,7 +70,7 @@ describe("flair#2357 — the restart wait caps sleeps and probes once after the 
   }
 
   test("waits for a real child process to exit", async () => {
-    const child = Bun.spawn([process.execPath, "-e", "setTimeout(() => process.exit(0), 10)"], {
+    const child = Bun.spawn([nodeBin(), "-e", "setTimeout(() => process.exit(0), 10)"], {
       stdout: "ignore",
       stderr: "ignore",
     });

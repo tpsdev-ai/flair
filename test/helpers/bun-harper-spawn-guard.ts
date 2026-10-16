@@ -4,7 +4,7 @@ import { basename, dirname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const childProcess = createRequire(import.meta.url)("node:child_process");
-const probe = childProcess.execFileSync;
+const probe = Bun.spawnSync.bind(Bun);
 const which = Bun.which.bind(Bun);
 const ALLOW = "FLAIR_TEST_ALLOW_BUN_HARPER";
 const repositoryRequire = createRequire(new URL("../../package.json", import.meta.url));
@@ -44,10 +44,11 @@ function canonicalPath(path: string): string {
 }
 
 function resolvedExecutable(command: string, options: Options): string | undefined {
-  const executable = which(command, {
+  let executable: string | null;
+  try { executable = which(command, {
     cwd: cwdPath(options.cwd),
     PATH: options.env?.PATH ?? process.env.PATH ?? "/usr/bin:/bin",
-  });
+  }); } catch { return; }
   if (executable) return canonicalPath(executable);
 }
 
@@ -55,20 +56,20 @@ function runtimeKind(command: string, options: Options): "bun" | "node" | "unkno
   const executable = resolvedExecutable(command, options);
   if (!executable) return "missing";
   if (executable === canonicalPath(process.execPath)) return process.versions.bun ? "bun" : "node";
+  if (entryKind(executable, options)) return "unknown";
   try {
-    const identity = probe(executable, ["-p", "process.versions.bun ? 'bun' : process.versions.node"], {
-      env: options.env, cwd: cwdPath(options.cwd),
-      encoding: "utf8", timeout: 2_000, killSignal: "SIGKILL", maxBuffer: 1_024,
-      stdio: ["ignore", "pipe", "pipe"],
-    }).trim();
+    const evaluate = (expression: string) => {
+      const result = probe([executable, "-p", expression], {
+        env: options.env, cwd: cwdPath(options.cwd), stdin: "ignore", stdout: "pipe", stderr: "pipe",
+        timeout: 2_000, killSignal: "SIGKILL", maxBuffer: 1_024,
+      });
+      if (result.exitCode !== 0) throw new Error("runtime probe failed");
+      return result.stdout.toString().trim();
+    };
+    const identity = evaluate("process.versions.bun ? 'bun' : process.versions.node");
     if (identity === "bun") return "bun";
     if (!/^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(identity)) return "unknown";
-    const runtime = probe(executable, ["-p", "process.execPath"], {
-      env: options.env, cwd: cwdPath(options.cwd),
-      encoding: "utf8", timeout: 2_000, killSignal: "SIGKILL", maxBuffer: 1_024,
-      stdio: ["ignore", "pipe", "pipe"],
-    }).trim();
-    return realpathSync(runtime) === executable ? "node" : "unknown";
+    return realpathSync(evaluate("process.execPath")) === executable ? "node" : "unknown";
   } catch { return "unknown"; }
 }
 
@@ -83,56 +84,8 @@ function entryKind(arg: string, options: Options): EntryKind | undefined {
   }
 }
 
-function scriptIndex(args: string[], options: Options): number {
-  const valueFlags = new Set([
-    "-r", "--require", "--preload", "--import", "--loader", "--experimental-loader", "--env-file",
-    "-c", "--config", "--conditions", "--port", "--fetch-preconnect", "--max-http-header-size",
-    "--dns-result-order", "--title", "--unhandled-rejections", "--console-depth", "--user-agent",
-    "--elide-lines", "-F", "--filter", "--shell", "--cpu-prof-name", "--cpu-prof-dir",
-    "--cpu-prof-interval", "--heap-prof-name", "--heap-prof-dir", "--install",
-  ]);
-  const booleanFlags = new Set([
-    "--watch", "--hot", "--no-clear-screen", "--smol", "--cpu-prof", "--cpu-prof-md", "--heap-prof",
-    "--heap-prof-md", "--if-present", "--no-install", "-i", "--prefer-offline", "--prefer-latest",
-    "--expose-gc", "--no-deprecation", "--throw-deprecation", "--zero-fill-buffers", "--use-system-ca",
-    "--use-openssl-ca", "--use-bundled-ca", "--redis-preconnect", "--sql-preconnect", "--no-addons",
-    "--silent", "-v", "--version", "--revision", "-b", "--bun", "--workspaces", "--parallel",
-    "--sequential", "--no-exit-on-error", "--no-env-file", "-h", "--help",
-  ]);
-  let uncertain = false;
-  const initialCwd = cwdPath(options.cwd);
-  for (let i = 0; i < args.length; i++) {
-    if (!uncertain && /^(?:--(?:eval|print)(?:=|$)|-[ep])/.test(args[i])) return -1;
-    if (args[i] === "--cwd" && args[i + 1]) {
-      options.cwd = resolve(initialCwd, args[++i]);
-      continue;
-    }
-    if (args[i].startsWith("--cwd=")) {
-      options.cwd = resolve(initialCwd, args[i].slice(6));
-      continue;
-    }
-    if (valueFlags.has(args[i])) { i++; continue; }
-    if (args[i] === "--") return i + 1;
-    if (args[i] === "run") continue;
-    if (args[i].startsWith("-")) {
-      if (!booleanFlags.has(args[i]) && !args[i].includes("=")) uncertain = true;
-      continue;
-    }
-    if (!uncertain || entryKind(args[i], options)) return i;
-  }
-  return -1;
-}
-
-// Test-harness check for the installed Harper entry and built CLI, regardless of subcommand.
-function guardedEntry(args: string[], options: Options): EntryKind | undefined {
-  options = { ...options };
-  const index = scriptIndex(args, options);
-  if (index < 0 || !args[index]) return undefined;
-  return entryKind(args[index], options);
-}
-
 function shellWords(source: string): string[] | undefined {
-  // Refuse expansion characters even when quoted or escaped.
+  // Expansion characters cannot be classified, including when quoted or escaped.
   if (/[*?\[\]$`{}~]/.test(source)) return;
   const words: string[] = [];
   let word = "";
@@ -171,14 +124,15 @@ function shellWords(source: string): string[] | undefined {
   return words;
 }
 
-function shellEntry(words: string[], options: Options): EntryKind | undefined {
+function shellEntry(words: string[], options: Options, uncertainty = { value: false }): EntryKind | undefined {
   for (const word of words) {
     const entry = entryKind(word, options)
       ?? entryKind(resolvedExecutable(word, options) ?? word, options);
     if (entry) return entry;
     const nested = shellWords(word);
+    if (!nested) uncertainty.value = true;
     if (nested && (nested.length > 1 || nested[0] !== word)) {
-      const entry = shellEntry(nested, options);
+      const entry = shellEntry(nested, options, uncertainty);
       if (entry) return entry;
     }
   }
@@ -205,7 +159,15 @@ function invocation(command: string, args: string[], options: Options) {
     args: [], options: probeOptions, shellString, entry: undefined, failure: reason,
   });
   if (!words) return failure("unclassifiable shell string");
-  const protectedEntry = shellString ? shellEntry(words, probeOptions) : undefined;
+  const protectedEntry = shellEntry([command, ...args, ...words], probeOptions);
+  for (let i = 0; i < words.length; i++) {
+    if (!["sh", "bash"].includes(basename(words[i]))) continue;
+    for (let j = i + 1; words[j]?.startsWith("-"); j++) {
+      if (!/^-[^-]*c/.test(words[j])) continue;
+      if (!shellWords(words[j + 1] ?? "")) return failure("unclassifiable shell string");
+      break;
+    }
+  }
   while (words.length && assignment(words[0])) words.shift();
   if (basename(words[0] ?? "") === "env") {
     words.shift();
@@ -241,7 +203,7 @@ function invocation(command: string, args: string[], options: Options) {
     return failure("unresolved shell executable");
   }
   return { command: words[0], args: words.slice(1), options: probeOptions, shellString,
-    entry: protectedEntry ?? (shellString ? shellEntry(words, probeOptions) : undefined), failure: undefined };
+    entry: protectedEntry ?? shellEntry(words, probeOptions), failure: undefined };
 }
 
 export class BunHarperSpawnError extends Error {
@@ -261,24 +223,37 @@ export class TestRuntimeIdentityError extends Error {
 // Test-harness guard against accidental Bun launches, not a security boundary.
 // It does not model hostile process environments.
 // Wrapped APIs: child_process spawn, spawnSync, execFile, execFileSync, exec, execSync; Bun.spawn and Bun.spawnSync.
-// These APIs require a child-only reason for direct non-Node and shell-string launches of protected entries.
+// Direct executables classified as Node may launch protected entries without a reason; direct Bun launches are refused without one.
+// Every other wrapped launch naming a protected entry anywhere in argv, nested shell tokens, or shell: true command strings
+// requires a nonempty, child-only FLAIR_TEST_ALLOW_BUN_HARPER reason, regardless of leading executable. Other launches with unclassifiable tokens require it too.
 export function checkTestSpawn(api: string, command: unknown, args: unknown, options: Options = {}): void {
   if (typeof command !== "string" || !Array.isArray(args)) return;
-  const launch = invocation(command, args, options);
-  if (launch.failure) throw new TestRuntimeIdentityError(api, launch.command!, launch.failure);
-  if (!launch.command) return;
-  const entry = launch.entry ?? guardedEntry(launch.args, launch.options);
-  if (!entry) return;
-  const runtime = launch.shellString ? "unknown" : runtimeKind(launch.command, launch.options);
-  if (runtime === "node" || runtime === "missing") return;
-  const error = runtime === "bun" ? new BunHarperSpawnError(api, launch.command, entry)
-    : new TestRuntimeIdentityError(api, launch.command, `${launch.shellString ? "shell string" : "unverified runtime"} launching ${entry}`);
+  const uncertainty = { value: false };
+  const originalEntry = shellEntry([command, ...args], options, uncertainty);
+  const scanOptions = { ...options };
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--cwd" && args[i + 1]) scanOptions.cwd = resolve(cwdPath(scanOptions.cwd), args[++i]);
+    else if (args[i].startsWith("--cwd=")) scanOptions.cwd = resolve(cwdPath(scanOptions.cwd), args[i].slice(6));
+  }
+  const launch = invocation(command, args, scanOptions);
+  launch.entry ??= originalEntry;
+  launch.failure ??= uncertainty.value ? "unclassifiable command tokens" : undefined;
+  if (!launch.failure && !launch.entry) return;
   const reason = !Object.hasOwn(process.env, ALLOW) && options.env && Object.hasOwn(options.env, ALLOW)
     ? options.env[ALLOW]?.trim() : undefined;
+  const displayCommand = options.shell ? typeof options.shell === "string" ? options.shell : "sh" : command;
   if (reason) {
+    const error = new TestRuntimeIdentityError(api, displayCommand, launch.failure ?? `launching ${launch.entry}`);
     console.warn(`${error.stack}\n${ALLOW}: ${reason}`);
     return;
   }
+  const runtime = options.shell ? "unknown" : runtimeKind(command, options);
+  if (runtime === "node") return;
+  const diagnosticRuntime = launch.shellString || launch.failure ? "unknown"
+    : launch.command === command ? runtime : runtimeKind(launch.command!, launch.options);
+  const error = launch.failure ? new TestRuntimeIdentityError(api, displayCommand, launch.failure)
+    : diagnosticRuntime === "bun" ? new BunHarperSpawnError(api, displayCommand, launch.entry!)
+    : new TestRuntimeIdentityError(api, displayCommand, `${launch.shellString ? "shell string" : "unverified runtime"} launching ${launch.entry}`);
   throw error;
 }
 

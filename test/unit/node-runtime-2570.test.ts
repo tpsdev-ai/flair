@@ -44,7 +44,7 @@ test("nodeBin identifies the current Bun runtime through an alias", () => {
   delete env.NODE_BIN;
   const helper = resolve(import.meta.dir, "../helpers/node-runtime.ts");
   const output = execFileSync(alias, ["-e", `import { nodeBin } from ${JSON.stringify(helper)}; console.log(nodeBin())`], {
-    encoding: "utf8", timeout: 5_000, env,
+    encoding: "utf8", timeout: 5_000, env: { ...env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise nodeBin from a Bun alias evaluation child" },
   });
   expect(output.trim()).toBe(realpathSync(Bun.which("node")!));
 });

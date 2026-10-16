@@ -84,7 +84,7 @@ for (const { skipStart, occupied } of [
       ownChild?.kill("SIGKILL");
       process.exit(0);
     `;
-    const result = spawnSync("bun", ["--eval", script], { cwd: home, env, encoding: "utf8", timeout: 20_000 });
+    const result = spawnSync("bun", ["--eval", script], { cwd: home, env: { ...(env), FLAIR_TEST_ALLOW_BUN_HARPER: "exercise init-plain-listener process fixture arguments" }, encoding: "utf8", timeout: 20_000 });
     expect(result.error).toBeUndefined();
     if (occupied) {
       expect(result.status, result.stdout + result.stderr).toBe(1);

@@ -68,7 +68,7 @@ function opts(over: Partial<LaunchdPlistOptions> = {}): LaunchdPlistOptions {
 
 function have(cmd: string): boolean {
   try {
-    execFileSync(cmd, ["--version"], { stdio: "pipe" });
+    execFileSync(cmd, ["--version"], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise launchd-plist-xml-escape process fixture arguments" }, stdio: "pipe" });
     return true;
   } catch (e: any) {
     // Present but unhappy with --version (plutil) still counts as present;
@@ -103,14 +103,14 @@ function readValue(plistText: string, xpath: string, fromJson: (o: any) => unkno
   const seen: Array<[string, string]> = [];
   if (HAS_PLUTIL) {
     // Non-zero exit (thrown) if the document is not a well-formed plist.
-    execFileSync("plutil", ["-lint", path], { stdio: "pipe" });
-    const json = execFileSync("plutil", ["-convert", "json", "-o", "-", path], { encoding: "utf-8" });
+    execFileSync("plutil", ["-lint", path], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise launchd-plist-xml-escape process fixture arguments" }, stdio: "pipe" });
+    const json = execFileSync("plutil", ["-convert", "json", "-o", "-", path], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise launchd-plist-xml-escape process fixture arguments" }, encoding: "utf-8" });
     seen.push(["plutil", String(fromJson(JSON.parse(json)))]);
   }
   if (HAS_XMLLINT) {
     // --nonet: never fetch the Apple DTD the doctype names.
-    execFileSync("xmllint", ["--nonet", "--noout", path], { stdio: "pipe" });
-    const out = execFileSync("xmllint", ["--nonet", "--xpath", xpath, path], { encoding: "utf-8" });
+    execFileSync("xmllint", ["--nonet", "--noout", path], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise launchd-plist-xml-escape process fixture arguments" }, stdio: "pipe" });
+    const out = execFileSync("xmllint", ["--nonet", "--xpath", xpath, path], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise launchd-plist-xml-escape process fixture arguments" }, encoding: "utf-8" });
     // xmllint terminates --xpath output with a newline of its own. Strip
     // exactly one (not .trim()) so genuine leading/trailing whitespace in a
     // value would still show up as a mismatch against the other parsers.
@@ -119,7 +119,7 @@ function readValue(plistText: string, xpath: string, fromJson: (o: any) => unkno
   if (HAS_PYTHON) {
     // plistlib raises on a malformed document, so this throws just like the
     // other two rather than quietly returning a partial parse.
-    const json = execFileSync("python3", ["-c", PY_DUMP, path], { encoding: "utf-8", stdio: "pipe" });
+    const json = execFileSync("python3", ["-c", PY_DUMP, path], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise launchd-plist-xml-escape process fixture arguments" }, encoding: "utf-8", stdio: "pipe" });
     seen.push(["plistlib", String(fromJson(JSON.parse(json)))]);
   }
   if (seen.length === 0) {

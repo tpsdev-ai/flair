@@ -1,3 +1,4 @@
+import { nodeBin } from "../helpers/node-runtime.ts";
 /**
  * flair#2062 — the unit lane's service-manager tripwire fails closed.
  *
@@ -59,7 +60,7 @@ describe("flair#2062 — the unit lane fails a step that reaches a host service 
     const dir = fixture();
     const { result: code, errors } = captureErrors(() => runUnitSteps(
       [{ name: "reaches launchctl", cwd: dir, args: ["-e", swallowLaunchctl(["list", "ai.example"])], files: [] }],
-      process.execPath,
+      nodeBin(),
       dir,
     ));
     // The step exits 0 (it swallowed the failure); only the tripwire fails it.
@@ -74,7 +75,7 @@ describe("flair#2062 — the unit lane fails a step that reaches a host service 
     const dir = fixture();
     const { result: code, errors } = captureErrors(() => runUnitSteps(
       [{ name: "reaches launchctl with no arguments", cwd: dir, args: ["-e", swallowLaunchctl([])], files: [] }],
-      process.execPath,
+      nodeBin(),
       dir,
     ));
     expect(code).toBe(1);
@@ -87,7 +88,7 @@ describe("flair#2062 — the unit lane fails a step that reaches a host service 
     const script = `try { require("node:child_process").execFileSync("systemctl", ["--user", "restart", "flair"], { stdio: "pipe" }); } catch {}`;
     const { result: code, errors } = captureErrors(() => runUnitSteps(
       [{ name: "reaches systemctl", cwd: dir, args: ["-e", script], files: [] }],
-      process.execPath,
+      nodeBin(),
       dir,
     ));
     expect(code).toBe(1);
@@ -110,7 +111,7 @@ describe("flair#2062 — the unit lane fails a step that reaches a host service 
     try {
       const code = runUnitSteps(
         [{ name: "uses its own fake", cwd: dir, args: ["-e", script], files: [] }],
-        process.execPath,
+        nodeBin(),
         dir,
         { tripwire },
       );
@@ -130,7 +131,7 @@ describe("flair#2062 — the unit lane fails a step that reaches a host service 
     try {
       const { result: code, errors } = captureErrors(() => runUnitSteps(
         [{ name: "a passing step", cwd: dir, args: ["-e", "process.exit(0)"], files: [] }],
-        process.execPath,
+        nodeBin(),
         dir,
         { tripwire },
       ));
@@ -171,7 +172,7 @@ describe("flair#2062 — the unit lane fails a step that reaches a host service 
       try {
         const { result: code, errors } = captureErrors(() => runUnitSteps(
           [{ name: "swallows the tripwire", cwd: dir, args: ["-e", swallowLaunchctl(["list"])], files: [] }],
-          process.execPath,
+          nodeBin(),
           dir,
           { tripwire },
         ));

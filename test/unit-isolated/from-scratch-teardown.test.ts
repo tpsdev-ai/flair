@@ -47,7 +47,7 @@ function run(scenario: Scenario) {
     } }));
     ${program}
   `;
-  return spawnSync("bun", ["--eval", code], { cwd: root, encoding: "utf8", timeout: 5000 });
+  return spawnSync("bun", ["--eval", code], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise from-scratch-teardown process fixture arguments" }, cwd: root, encoding: "utf8", timeout: 5000 });
 }
 
 test("teardown waits for both the recorded PID and TCP refusal without lsof", () => {

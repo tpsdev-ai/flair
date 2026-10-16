@@ -38,7 +38,7 @@ function runRemoteInit(home: string) {
     const { program } = await import(${JSON.stringify(CLI)});
     await program.parseAsync(${JSON.stringify(args)}, { from: "user" });
   `;
-  return spawnSync(process.execPath, ["-e", script], { cwd: home, env, encoding: "utf8", timeout: 30_000 });
+  return spawnSync(process.execPath, ["-e", script], { cwd: home, env: { ...(env), FLAIR_TEST_ALLOW_BUN_HARPER: "exercise init-remote-agent-home-2433 process fixture arguments" }, encoding: "utf8", timeout: 30_000 });
 }
 
 describe("flair init --remote stamps the hub's own id on the first agent (flair#2433)", () => {

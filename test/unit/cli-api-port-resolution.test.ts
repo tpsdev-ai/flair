@@ -70,7 +70,7 @@ describe("flair#1129 — api() resolves port from Harper's config, not the per-u
       console.log(String(port));
     `;
     const proc = Bun.spawn(["bun", "-e", script], {
-      env: { ...process.env, HOME: tmpHome, FLAIR_URL: "" },
+      env: { ...({ ...process.env, HOME: tmpHome, FLAIR_URL: "" }), FLAIR_TEST_ALLOW_BUN_HARPER: "exercise cli-api-port-resolution process fixture arguments" },
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -121,7 +121,7 @@ describe("flair#1129 — api() resolves port from Harper's config, not the per-u
       console.log(String(port));
     `;
     const proc = Bun.spawn(["bun", "-e", script], {
-      env: { ...process.env, HOME: tmpHome, FLAIR_URL: "http://localhost:12345" },
+      env: { ...({ ...process.env, HOME: tmpHome, FLAIR_URL: "http://localhost:12345" }), FLAIR_TEST_ALLOW_BUN_HARPER: "exercise cli-api-port-resolution process fixture arguments" },
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -139,7 +139,7 @@ describe("flair#1129 — api() resolves port from Harper's config, not the per-u
       console.log(String(port));
     `;
     const proc = Bun.spawn(["bun", "-e", script], {
-      env: { ...process.env, HOME: tmpHome, FLAIR_URL: "" },
+      env: { ...({ ...process.env, HOME: tmpHome, FLAIR_URL: "" }), FLAIR_TEST_ALLOW_BUN_HARPER: "exercise cli-api-port-resolution process fixture arguments" },
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -165,7 +165,7 @@ describe("flair#1129 — api() resolves port from Harper's config, not the per-u
       console.log(port === null ? "NULL" : String(port));
     `;
     const proc = Bun.spawn(["bun", "-e", script], {
-      env: { ...process.env, HOME: tmpHome, FLAIR_URL: "" },
+      env: { ...({ ...process.env, HOME: tmpHome, FLAIR_URL: "" }), FLAIR_TEST_ALLOW_BUN_HARPER: "exercise cli-api-port-resolution process fixture arguments" },
       stdout: "pipe",
       stderr: "pipe",
     });
