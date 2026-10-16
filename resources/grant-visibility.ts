@@ -77,8 +77,9 @@ export function grantVisibilityRefusal(): Response {
 /**
  * 409: the predecessor's committed visibility no longer reads the same as the
  * successor's, so nothing was written. A retry that omits visibility carries
- * the predecessor's current visibility; a retry that names the earlier value
- * gets the 403 {@link grantVisibilityRefusal}.
+ * the predecessor's current visibility; while the predecessor still has the
+ * changed visibility, a retry that names the earlier value gets the 403
+ * {@link grantVisibilityRefusal}.
  */
 export function predecessorVisibilityChangedRefusal(): Response {
   return new Response(
