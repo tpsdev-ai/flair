@@ -25,7 +25,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import nacl from "tweetnacl";
-import { HarperInstance, startHarper, stopHarper } from "../helpers/harper-lifecycle";
+import { HarperInstance, startHarper, stopHarper, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { getModelId } from "../../resources/embeddings-provider.ts";
 
 const POINT = "supersede-close";
@@ -157,7 +157,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair#2307 — the supersede close under a change committed after its read (real Harper)", () => {
   it("an owner change visible at the committed re-read aborts the ordinary close", async () => {

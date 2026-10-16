@@ -15,7 +15,7 @@ import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { mkdtemp, rm, mkdir, cp, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 const REPO_ROOT = process.cwd();
 const FIXTURE = join(REPO_ROOT, "test", "fixtures", "inproc-app");
@@ -77,7 +77,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (appDir) await rm(appDir, { recursive: true, force: true, maxRetries: 4 });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair#2139 S2c (6) — in-process POST / MCP skill update returns the successor id", () => {
   test("skill_store (in-process Memory.post) appends a create version at the returned id", async () => {

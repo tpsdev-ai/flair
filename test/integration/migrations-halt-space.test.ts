@@ -14,7 +14,7 @@
  * the acceptable simulation ("a tiny quota or injected space-check").
  */
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 const RESERVED_TEST_AGENT_ID = "__flair_migration_synthetic_test_agent__";
 const SYNTHETIC_MIGRATION_ID = "synthetic-ci-schema-stamp";
@@ -82,7 +82,7 @@ describe("zero-touch migrations — halt on blocked disk space (real Harper)", (
       await stopHarper(harper);
       await rm(installDir, { recursive: true, force: true, maxRetries: 4 }).catch(() => {});
     }
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test("the migration halts with a 'blocked on disk' reason, Harper keeps serving, and the seeded row is left completely untouched", async () => {
     const deadline = Date.now() + 30_000;

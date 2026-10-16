@@ -28,7 +28,7 @@ import { spawn } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 // The CLI this file drives is BUILT here (flair#1898): `bun run build` does not
 // emit dist/cli.js — `bun run build:cli` does — so a file that assumes a
 // pre-built dist/cli.js fails as though the product were broken. `ensureCliBuild`
@@ -196,7 +196,7 @@ describe("init --remote identity reconcile (live Harper)", () => {
 
   afterAll(async () => {
     if (harper) await stopHarper(harper);
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test("fresh instance → creates ONE row with role hub", async () => {
     await clearInstanceRows();

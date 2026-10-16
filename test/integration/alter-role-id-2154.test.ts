@@ -8,7 +8,7 @@
 // spawned Harper and down each one's existing-role (alter) path.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { ensureFlairAgentRole, ensureFlairPairInitiatorRole } from "../../src/cli";
-import { type HarperInstance, startHarper, stopHarper } from "../helpers/harper-lifecycle";
+import { type HarperInstance, startHarper, stopHarper, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 let harper: HarperInstance;
 
@@ -65,7 +65,7 @@ describe("CLI role update sends the id alter_role needs (flair#2154)", () => {
   }, 180_000);
   afterAll(async () => {
     if (harper) await stopHarper(harper);
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test("ensureFlairAgentRole updates an existing flair_agent role", async () => {
     await ensureFlairAgentRole(harper.opsURL, harper.admin.username, harper.admin.password);

@@ -60,7 +60,7 @@ import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SignJWT, exportJWK, generateKeyPair } from "jose";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 // A production Flair's HTTP and ops API ports: this test must never target them.
 const FORBIDDEN_PORTS = new Set([9925, 9926]);
@@ -272,7 +272,7 @@ afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (jwksServer) jwksServer.close();
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair#2333 slice 2 — credential lifecycle writes preserve committed revocations within one Harper process (real Harper)", () => {
   // ── OAuth refresh vs revoke ────────────────────────────────────────────────

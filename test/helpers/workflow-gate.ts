@@ -27,7 +27,7 @@ const ADAPTER_JOB = "test-unit-gate";
 const GATE_JOB = "test-unit";
 const OTHER_JOB = "doclint";
 
-const ADAPTER_RUN = [
+const ADAPTER_RUN_LINES = [
   'echo "test-unit matrix result: ${{ needs.test-unit.result }}"',
   'echo "test-darwin-gated result: ${{ needs.test-darwin-gated.result }}"',
   'if [ "${{ needs.test-unit.result }}" != "success" ]; then',
@@ -38,11 +38,25 @@ const ADAPTER_RUN = [
   'echo "::error::Darwin-gated unit tests did not succeed (flair#1012)"',
   "exit 1",
   "fi",
-].join(" ");
+];
+const ADAPTER_RUN = ADAPTER_RUN_LINES.join(" ");
 const RESULT_CHECKED_JOBS = new Set(
   [...ADAPTER_RUN.matchAll(/if \[ "\$\{\{ needs\.([\w-]+)\.result \}\}" != "success" \]; then/g)].map((match) => match[1]),
 );
 const normalise = (text: string) => text.trim().replace(/\s+/g, " ");
+/** The script's commands, one per non-blank line, with surrounding whitespace trimmed. */
+const scriptLines = (text: string) => text.split("\n").map((line) => line.trim()).filter((line) => line !== "");
+/**
+ * Whether `run` is the canonical adapter script, compared command by command.
+ * Each command must be on its own line: an `exit 1` joined onto the preceding
+ * `echo` is a single `echo` command and is refused (flair#2584). Surrounding
+ * whitespace on each line is trimmed, so indentation and trailing spaces are
+ * accepted.
+ */
+const isCanonicalAdapterRun = (run: string) => {
+  const lines = scriptLines(run);
+  return lines.length === ADAPTER_RUN_LINES.length && lines.every((line, index) => line === ADAPTER_RUN_LINES[index]);
+};
 
 /** Parse the `.yml`/`.yaml` files in `dir`, sorted by file name. */
 export function parseWorkflows(dir: string): WorkflowDoc[] {
@@ -147,7 +161,7 @@ export function checkCoverageGate(docs: WorkflowDoc[], gate: Gate): void {
       if ("continue-on-error" in step) throw new Error(`${label} has a step with continue-on-error; it must be absent`);
       if ("if" in step) throw new Error(`${label} has a step with if; it must be absent`);
       if ("shell" in step) throw new Error(`${label} has a step with shell; it must run under the default shell`);
-      if (typeof step.run !== "string" || normalise(step.run) !== ADAPTER_RUN) {
+      if (typeof step.run !== "string" || !isCanonicalAdapterRun(step.run)) {
         throw new Error(`${label} must run the canonical adapter script`);
       }
     }
@@ -214,6 +228,12 @@ export function gateCases(dir: string, gate: Gate): GateCase[] {
     ["adapter step if: false", adapt((_job, step) => { step.if = false; }), `${adapter} has a step with if; it must be absent`],
     ["adapter emptied run", adapt((_job, step) => { step.run = ""; }), `${adapter} must run the canonical adapter script`],
     ["adapter altered run", adapt((_job, step) => { step.run = String(step.run).replace("exit 1", "exit 0"); }), `${adapter} must run the canonical adapter script`],
+    ["adapter joins exit 1 onto the error echo", adapt((_job, step) => {
+      if (typeof step.run !== "string") throw new Error("fixture drift: adapter run not found");
+      const joined = step.run.replace(/\n[ \t]*exit 1\n/, " exit 1\n");
+      if (joined === step.run) throw new Error("fixture drift: adapter run has no standalone exit 1");
+      step.run = joined;
+    }), `${adapter} must run the canonical adapter script`],
     ["rename the step", mutate((_doc, _job, step) => { step.name = "Verify coverage"; }), `no step is named "${gate.step}"`],
     ["drop --verify", mutate((_doc, _job, step) => { step.run = gate.command.replace(" --verify", ""); }), runError],
     ["drop the last argument", mutate((_doc, _job, step) => { step.run = gate.command.split(" ").slice(0, -1).join(" "); }), runError],

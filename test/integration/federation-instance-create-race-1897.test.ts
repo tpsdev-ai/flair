@@ -12,7 +12,7 @@
 // test/unit/instance-create-lock-cross-realm-1897.test.ts.
 
 import { describe, test, beforeAll, afterAll, expect } from "bun:test";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 const ROUNDS = 50;
 
@@ -87,7 +87,7 @@ describe("GET /FederationInstance first-boot create is serialised (flair#1897 sl
   }, 240_000);
   afterAll(async () => {
     if (harper) await stopHarper(harper);
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test(`three concurrent first-boot GETs create exactly one row across ${ROUNDS} jittered rounds (1 thread)`, async () => {
     expect(await runRounds(harper, "1-thread")).toBe(0);
@@ -101,7 +101,7 @@ describe("GET /FederationInstance create across TWO workers (flair#1897 slice 1)
   }, 240_000);
   afterAll(async () => {
     if (harper) await stopHarper(harper);
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   // Harper forces one worker on darwin; the two-worker case cannot exist there.
   test.skipIf(process.platform === "darwin")(`three concurrent first-boot GETs create exactly one row across ${ROUNDS} jittered rounds (2 threads)`, async () => {

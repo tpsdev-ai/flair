@@ -54,7 +54,7 @@ import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { rm } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { getModelId } from "../../resources/embeddings-provider";
 
 const RESERVED_TEST_AGENT_ID = "__flair_migration_synthetic_test_agent__";
@@ -184,7 +184,7 @@ describe("zero-touch migrations — resume after a mid-migration process kill (r
     delete process.env.FLAIR_EMBEDDING_MODEL;
     if (harper) await stopHarper(harper).catch(() => {});
     await rm(installDir, { recursive: true, force: true, maxRetries: 4 }).catch(() => {});
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test("kills mid-migration, restarts against the same data dir, and the migration resumes to completion with every row correctly stamped", async () => {
     harper = await startHarper({ installDir });

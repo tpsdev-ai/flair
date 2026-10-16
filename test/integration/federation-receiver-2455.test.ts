@@ -7,7 +7,7 @@ import nacl from "tweetnacl";
 import { signBodyFresh } from "../../resources/federation-crypto.js";
 import { SKIP_REASONS } from "../../resources/federation-classify.js";
 import { parseSyncBatchCounts } from "../../src/commands/federation";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { HARPER_STOP_BUDGET_MS, startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
 function mkAgent(id: string): TestAgent {
@@ -139,7 +139,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair#2455 slice 2 — validated batch keys and indeterminate outcomes (real Harper)", () => {
   for (const point of [PAUSE, "federation-merge-pre"]) {

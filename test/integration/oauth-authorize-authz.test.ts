@@ -21,7 +21,7 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 const ALLOWED_REDIRECT_URI = "https://claude.com/api/mcp/auth_callback";
 
@@ -110,7 +110,7 @@ describe("OAuthAuthorize.post() authz (flair#604 authorizeLocal escalation)", ()
 
   afterAll(async () => {
     if (harper) await stopHarper(harper);
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   // ── THE ESCALATION: credential-less loopback POST must NOT mint a code ────
 
