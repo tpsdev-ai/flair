@@ -8,7 +8,7 @@
 // ensureFlairPairInitiatorRole). This test runs the REAL function against a spawned
 // Harper so that class of bug can't recur behind the mock.
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { ensureFlairPairInitiatorRole } from "../../src/cli";
 
 let harper: HarperInstance;
@@ -28,7 +28,7 @@ async function listRoleNames(): Promise<string[]> {
 
 describe("ensureFlairPairInitiatorRole (live add_role)", () => {
   beforeAll(async () => { harper = await startHarper(); }, 180_000);
-  afterAll(async () => { if (harper) await stopHarper(harper); });
+  afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
 
   test("add_role accepts the spec and the role is created", async () => {
     // Must not throw — a 400 from add_role (the old bug) surfaces as a thrown error.

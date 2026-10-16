@@ -411,6 +411,19 @@ describe("memory_store redacted reply — real extension (flair#2537)", () => {
     expect(readCalls()).toBe(0);
   });
 
+  test("a `stored` with no content shows no preview and sets contentWithheld (flair#2561)", async () => {
+    const { result, readCalls } = await executeMemoryStoreSeq(
+      { id: "pi-2561-a", written: true, redactedValues: 1, stored: { summary: "a stored summary" } },
+      { content: ORIGINAL_REDACT },
+    );
+    const text = result.content[0].text;
+    expect(text).toContain("Preview: none. The server redacted 1 value(s) in this write; the stored text was not returned.");
+    expect(text).not.toContain(TOKEN_REDACT);
+    expect(text).not.toContain("a stored summary");
+    expect(result.details.contentWithheld).toBe(true);
+    expect(readCalls()).toBe(0);
+  });
+
   test("a write the server did not redact gets the reply it always had", async () => {
     const { result, readCalls } = await executeMemoryStoreSeq(
       { id: "pi-2537-b", written: true },

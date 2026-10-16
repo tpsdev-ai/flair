@@ -16,7 +16,7 @@ import { join, resolve } from "node:path";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
 import { ensureCliBuild } from "../helpers/build-cli-once.js";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import {
   currentSeed,
   runSkillSeed,
@@ -146,7 +146,7 @@ describe("flair#2141 S2 — seed a using-flair skill on install", () => {
   afterAll(async () => {
     if (harper) await stopHarper(harper);
     if (scratchHome) { try { rmSync(scratchHome, { recursive: true, force: true }); } catch {} }
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test("before the seed, the agent's bootstrap lists no using-flair", async () => {
     const boot = await bootstrap(AGENT);

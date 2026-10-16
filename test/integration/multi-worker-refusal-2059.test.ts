@@ -1,5 +1,5 @@
 import { describe, test, beforeAll, afterAll, expect } from "bun:test";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { probeFlairHealth } from "../../src/lib/doctor-run.js";
 
 const priorOAuth = {
@@ -40,7 +40,7 @@ describe("single-worker control", () => {
   }, 240_000);
   afterAll(async () => {
     if (harper) await stopHarper(harper);
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test(
     "serves sampled routes",
@@ -66,7 +66,7 @@ describe("multi-worker refusal", () => {
   }, 240_000);
   afterAll(async () => {
     if (harper) await stopHarper(harper);
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test.skipIf(process.platform !== "linux")(
     "refuses sampled routes and reports Health",

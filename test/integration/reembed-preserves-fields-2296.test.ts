@@ -19,7 +19,7 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { ensureCliBuild } from "../helpers/build-cli-once.js";
 import { MEMORY_ATTRIBUTES } from "../../src/lib/memory-attributes.ts";
 import { getModelId } from "../../resources/embeddings-provider.ts";
@@ -40,6 +40,8 @@ const newAgent = (id: string): Agent => ({ id, ...nacl.sign.keyPair() });
 const agentA = newAgent("reembed-agent-a");
 const agentB = newAgent("reembed-agent-b");
 const agentC = newAgent("reembed-agent-c");
+// flair#2561: runs the single-agent path without administrator credentials.
+const agentE = newAgent("reembed-agent-e");
 // Has a key file but no Agent row, so its signed requests are refused.
 const unregistered = newAgent("reembed-agent-d");
 
@@ -174,16 +176,17 @@ async function seedRows(rows: Record<string, unknown>[]): Promise<Map<string, an
   return before;
 }
 
-function runReembed(args: string[]): { code: number | null; out: string } {
+function runReembed(args: string[], opts: { admin?: boolean } = {}): { code: number | null; out: string } {
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(FLAIR_|HARPER_|HDB_|FABRIC_)/.test(key)));
+  const admin = opts.admin !== false
+    ? { FLAIR_OPS_PORT: new URL(harper.opsURL).port, FLAIR_ADMIN_USER: harper.admin.username, FLAIR_ADMIN_PASS: harper.admin.password }
+    : {};
   const r = spawnSync(process.execPath, [CLI, "reembed", "--port", new URL(harper.httpURL).port, ...args], {
     encoding: "utf-8",
     env: {
       ...env,
       HOME: home,
-      FLAIR_OPS_PORT: new URL(harper.opsURL).port,
-      FLAIR_ADMIN_USER: harper.admin.username,
-      FLAIR_ADMIN_PASS: harper.admin.password,
+      ...admin,
     },
     timeout: 90_000, // flair#1807: the CLI child's own deadline
     killSignal: "SIGTERM",
@@ -242,7 +245,7 @@ beforeAll(async () => {
   }
   const keysDir = join(home, ".flair", "keys");
   mkdirSync(keysDir, { recursive: true });
-  for (const agent of [agentA, agentB, agentC, unregistered]) {
+  for (const agent of [agentA, agentB, agentC, agentE, unregistered]) {
     writeFileSync(join(keysDir, `${agent.id}.key`), agent.secretKey.slice(0, 32), { mode: 0o600 });
   }
   const now = new Date().toISOString();
@@ -250,7 +253,7 @@ beforeAll(async () => {
     operation: "upsert",
     database: "flair",
     table: "Agent",
-    records: [agentA, agentB, agentC].map((a) => ({
+    records: [agentA, agentB, agentC, agentE].map((a) => ({
       id: a.id, name: a.id, role: "agent", publicKey: Buffer.from(a.publicKey).toString("base64"), createdAt: now,
     })),
   });
@@ -259,7 +262,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (home) rmSync(home, { recursive: true, force: true });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair#2296: flair reembed", () => {
   test("the fixture covers every Memory attribute", () => {
@@ -294,6 +297,21 @@ describe("flair#2296: flair reembed", () => {
 
     const r = runReembed(["--agent", agentC.id, "--batch-size", "1", "--delay-ms", "0"]);
     expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain("Re-embedding complete: 2 updated, 0 errors");
+    for (const row of before.values()) await expectOnlyEmbeddingChanged(row);
+  }, 240_000);
+
+  test("single-agent path without administrator credentials, including a skill row", async () => {
+    // Listed through POST /SemanticSearch as the agent, which returns rows that
+    // are not archived; each re-embedded row's model is read with a signed GET.
+    const live = { archived: false, archivedAt: null, archivedBy: null, validTo: null };
+    const before = await seedRows([
+      fixtureRow("one-e", agentE.id, live),
+      { ...skillFixtureRow("one-e-skill", agentE.id) },
+    ]);
+    const r = runReembed(["--agent", agentE.id, "--batch-size", "1", "--delay-ms", "0"], { admin: false });
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain("Candidates for re-embedding: 2");
     expect(r.out).toContain("Re-embedding complete: 2 updated, 0 errors");
     for (const row of before.values()) await expectOnlyEmbeddingChanged(row);
   }, 240_000);

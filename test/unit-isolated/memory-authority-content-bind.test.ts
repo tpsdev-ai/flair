@@ -20,6 +20,11 @@ let memoryStore: Map<string, any>;
 let staged: Map<string, any> | null = null;
 
 class BaseMemory {
+  // Harper's resource instance reports its URL-bound id through getId(); a
+  // write response names the row by it (flair#2561).
+  getId() {
+    return (this as any).id;
+  }
   async get(target?: any) {
     const id = typeof target === "string" ? target : target?.id ?? (this as any).id;
     return memoryStore.get(id) ?? null;

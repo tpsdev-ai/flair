@@ -10,7 +10,7 @@ import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { ensureFlairAgentRole, ensureFlairAgentUser } from "../../src/cli";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array }
@@ -106,7 +106,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (installDir) await rm(installDir, { recursive: true, force: true, maxRetries: 4 });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair#2139 S2 — skill create appends a version and sets the stable subject", () => {
   test("a REST PUT create appends a create version whose subject is the physical id", async () => {
@@ -224,7 +224,10 @@ describe("flair#2139 S2 — the FeedMemories ingest is versioned", () => {
     expect(successor.id).not.toBe(id);
     expect(successor.supersedes).toBe(id);
     expect(successor.trigger).toBe("changed trigger");
-    expect(successor.tags).toContain("skill");
+    // The successor row inherits the tags; the response reports only the fields
+    // the request supplied, so it carries no tags (flair#2561).
+    expect((await memoryRow(successor.id)).tags).toContain("skill");
+    expect("tags" in successor).toBe(false);
     expect((await memoryRow(id)).validTo).toBeString();
     expect((await versionsOf(id)).map((v) => v.kind)).toEqual(["create", "update"]);
   }, 120_000);

@@ -17,7 +17,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import nacl from "tweetnacl";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { redactSecrets, redactSecretsWithCount } from "../../packages/flair-mcp/src/secret-redaction.js";
 import { computeContentHash } from "../../resources/memory-feed-lib.js";
 import { signBody, signBodyFresh } from "../../resources/federation-crypto.js";
@@ -125,7 +125,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (harper) await stopHarper(harper);
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair#2407 — real-Harper REST write paths redact and report the count", () => {
   it("POST /Memory stores the redacted content and reports one redacted value", async () => {
@@ -348,7 +348,10 @@ describe("flair#2407 — a deduplicated feed write reports the count in its resp
     const stored = await readStored(firstBody.id);
     expect(stored && "redactedValues" in stored).toBe(false);
     expect(stored?.content).toBe(original.replace(SLACK_TOKEN, REDACTED));
-    expect(rest).toEqual(stored!);
+    // flair#2561: the stored row less contentHash, which the request did not supply.
+    const { contentHash, ...reported } = stored!;
+    expect(typeof contentHash).toBe("string");
+    expect(rest).toEqual(reported);
   }, 60_000);
 
   it("the expiry repair of a deduplicated ephemeral row returns the repaired row plus the count", async () => {
@@ -370,7 +373,10 @@ describe("flair#2407 — a deduplicated feed write reports the count in its resp
     const stored = await readStored(id);
     expect(typeof stored?.expiresAt).toBe("string");
     expect(stored && "redactedValues" in stored).toBe(false);
-    expect(rest).toEqual(stored!);
+    // flair#2561: the stored row less contentHash, which the request did not supply.
+    const { contentHash, ...reported } = stored!;
+    expect(typeof contentHash).toBe("string");
+    expect(rest).toEqual(reported);
   }, 60_000);
 });
 
@@ -473,7 +479,7 @@ describe("flair#2467 — a redacting write's response carries the stored text it
     expect(res.status, JSON.stringify(body)).toBe(200);
     expect(body.redactedValues).toBe(2);
     expect(body.id).not.toBe(root);
-    expect(body.stored).toEqual({ content: `skill v2 reads ${REDACTED}`, trigger: `when deploying with ${REDACTED}` });
+    expect(body.stored).toEqual({ content: `skill v2 reads ${REDACTED}`, trigger: `when deploying with ${REDACTED}`, tags: ["skill"] });
     const successor = await readStored(body.id);
     expect(successor?.supersedes).toBe(root);
     expect(successor?.content).toBe(body.stored.content);

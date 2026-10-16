@@ -17,6 +17,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { ensureCliBuild } from "../helpers/build-cli-once.js";
+import { HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle.js";
 import { seedAgentViaOpsApi } from "../../src/cli.js";
 import { detectPersistedAdminUser } from "../../src/lib/init-admin-pass.ts";
 import { nodeBin } from "../helpers/node-runtime.js";
@@ -133,7 +134,7 @@ beforeAll(() => {
 afterAll(() => {
   try { stopHarper(); } catch { /* best effort */ }
   if (root) rmSync(root, { recursive: true, force: true });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe.skipIf(process.platform !== "linux")("fresh explicit credentials on a real Harper install", () => {
   for (const source of ["inline", "file", "FLAIR_ADMIN_PASS", "HDB_ADMIN_PASSWORD"] as const) {

@@ -38,7 +38,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import nacl from "tweetnacl";
-import { HarperInstance, startHarper, stopHarper } from "../helpers/harper-lifecycle";
+import { HARPER_STOP_BUDGET_MS, HarperInstance, startHarper, stopHarper } from "../helpers/harper-lifecycle";
 import {
   componentWithOwnerGuardLoadFailure,
   LOAD_FAILURE_MARKER,
@@ -195,7 +195,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (harper) { disarmLookupFailure(); await stopHarper(harper); }
   if (component) component.cleanup();
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("on create, an OrgEvent's createdAt is the server's time whatever the body says", () => {
   for (const [label, createdAt] of [["future", FUTURE], ["past", PAST]] as const) {
@@ -493,7 +493,7 @@ describe("catch-up delivers events that share one server time in ID order", () =
     await seedAgent(tieReader, "agent", frozen);
   }, 240_000);
 
-  afterAll(async () => { if (frozen) await stopHarper(frozen); });
+  afterAll(async () => { if (frozen) await stopHarper(frozen); }, HARPER_STOP_BUDGET_MS);
 
   it("events written in reverse ID order at one server time are delivered in ID order", async () => {
     const tag = randomUUID();

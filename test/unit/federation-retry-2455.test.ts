@@ -7,7 +7,7 @@
 // is derived from the map itself, so comparing the two here proves nothing
 // about a missing reason. This lane instead reads the SOURCE as an independent
 // oracle: the members of the `SkipReason` union in federation-classify.ts and
-// every literal `recordSkip("…")` reason in Federation.ts must each have a
+// every literal refusal reason in Federation.ts must each have a
 // class. The same approach checks RETRY_ROW_FIELDS against the schema file.
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -43,10 +43,9 @@ function skipReasonUnionFromSource(): string[] {
   return [...src.slice(start, end).matchAll(/^\s*\|\s*"([a-z_]+)"/gm)].map((m) => m[1]);
 }
 
-/** The reasons FederationSync.post passes to recordSkip as string literals. */
-function literalRecordSkipReasons(): string[] {
+function literalRefusalReasons(): string[] {
   const src = read("resources/Federation.ts");
-  return [...new Set([...src.matchAll(/recordSkip\("([a-z_]+)"\)/g)].map((m) => m[1]))];
+  return [...new Set([...src.matchAll(/\{\s*reason:\s*"([a-z_]+)"\s*\}/g)].map((m) => m[1]))];
 }
 
 /** The field names declared in the FederationRetry type of schemas/federation.graphql. */
@@ -69,10 +68,10 @@ describe("flair#2455 — closed SkipReason union and retry classification", () =
   });
 
   test("every literal reason FederationSync.post records is classified", () => {
-    const emitted = literalRecordSkipReasons();
-    expect(emitted, "the oracle found the literal recordSkip sites").toContain("merge_error");
+    const emitted = literalRefusalReasons();
+    expect(emitted, "the oracle found literal refusal reasons").toContain("merge_error");
     for (const reason of emitted) {
-      expect(Object.keys(SKIP_REASON_CLASS), `recordSkip("${reason}") has no class`).toContain(reason);
+      expect(Object.keys(SKIP_REASON_CLASS), `refusal reason "${reason}" has no class`).toContain(reason);
     }
   });
 

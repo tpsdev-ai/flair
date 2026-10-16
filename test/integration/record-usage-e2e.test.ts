@@ -27,7 +27,7 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
 
@@ -153,7 +153,7 @@ describe("RecordUsage e2e (real Harper) — flair#683 usage-feedback signal", ()
 
   afterAll(async () => {
     if (harper) await stopHarper(harper);
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test("auth: anonymous (unsigned) call is denied — 403 (allowCreate gate denies anonymous, same convention as every other action resource — see auth-middleware-e2e.test.ts's AUTH INVARIANT tests), no ledger side effect", async () => {
     const owner = mkAgent(`ru-anon-owner-${randomUUID()}`);

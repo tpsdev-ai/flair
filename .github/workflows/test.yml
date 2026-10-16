@@ -571,12 +571,15 @@ jobs:
     # alone 10m17s) and the gate failed, as designed, because a cancelled shard
     # is not a success; the cap was then 25. By 2026-10-13 main's shards ran
     # 15-25 min (ca9af70e: 3/3 24m50s, 2/3 21m20s) and PR runs of shard 3 hit
-    # that cap, so the cap below is 40 until the shards are rebalanced
-    # (flair#2554). Each shard runs the same
-    # steps on its share of test/integration/*.test.ts
+    # that cap, so the cap was raised to 40 until the shards were rebalanced
+    # (#2556). After the rebalance the shards ran 14-23 min on the three main
+    # runs with completed integration jobs (3b040f1e, 6ab0d351, d6463b1e); the
+    # slowest, shard 1/3, was 22m33s, so the cap below is 34 — 1.5x the slowest
+    # measured shard. Each shard runs the same steps on its share of
+    # test/integration/*.test.ts
     # (scripts/ci/integration-shards.mjs), and the final job named
     # `Integration Tests` (below) requires every shard to succeed.
-    timeout-minutes: 40
+    timeout-minutes: 34
     strategy:
       # fail-fast: false — one failed shard does not cancel the others; the
       # aggregate job below fails unless each one succeeded.
