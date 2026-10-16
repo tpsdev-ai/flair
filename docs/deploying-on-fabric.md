@@ -368,7 +368,7 @@ fail the deploy. Without the flag it says `not checked`.
 
 ### Memory ids: comparing nodes
 
-`flair memory checkpoint` writes one instance's state to a file, and `flair memory verify` compares an instance with that file. To see whether two or more
+`flair memory checkpoint` writes one instance's observed Memory ids and per-tier counts to a file; `flair memory verify` compares a later read of those ids and counts with that file. To see whether two or more
 physical nodes have the same observed Memory ids, name each node's operations API origin explicitly:
 
 ```bash
