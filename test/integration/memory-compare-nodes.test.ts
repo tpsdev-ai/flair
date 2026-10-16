@@ -135,7 +135,7 @@ describe("flair#2216 — compare Memory ids across two real nodes", () => {
       expect(comparison.verdict).toBe("divergent");
       // newestWrite is the node's latest stored timestamp across ALL its rows; a server-side
       // write (the embedding backfill) can move a row's updatedAt after the read above, so
-      // the row's read time is a lower bound, not an equality.
+      // the row's updatedAt value observed by the earlier SQL read is a lower bound, not an equality.
       const newestWrite = comparison.nodes.find((node) => node.node === a.opsURL)?.newestWrite;
       expect(newestWrite).not.toBeNull();
       expect(Date.parse(newestWrite!)).toBeGreaterThanOrEqual(Date.parse(stored[0].updatedAt));
