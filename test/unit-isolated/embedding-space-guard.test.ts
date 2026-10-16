@@ -8,7 +8,7 @@
  * below never collides with another file's harper import/mock in a shared
  * `bun test test/unit` process.
  */
-import { describe, it, expect, beforeEach, mock } from "bun:test";
+import { describe, it, expect, beforeEach, mock, spyOn } from "bun:test";
 
 // The guard dynamic-imports "harper" only inside its scan (deferred). Mock it
 // so the module-scope boot pre-warm's scan resolves to a stub and never loads
@@ -336,4 +336,69 @@ describe("embedding-space-guard — latch", () => {
     expect(v.state).toBe("uniform");
     expect(await isEmbeddingSpaceUniform()).toBe(true);
   });
+});
+
+describe("repair consults", () => {
+  beforeEach(() => {
+    _resetGuardForTests();
+    _setGuardModelIdForTests(() => CURRENT);
+  });
+
+  for (const stamp of [null, FOREIGN]) {
+    it(`rescans a repaired ${stamp === null ? "excluded" : "mixed"} corpus after the retry interval`, async () => {
+      const rows = [{ stamp, vec: true }];
+      let scans = 0;
+      const getter = fakeRows(rows);
+      _setGuardTableGetterForTests(async () => { scans++; return getter(); });
+      const clock = spyOn(Date, "now").mockReturnValue(100_000);
+      try {
+        expect(await recomputeLatch()).toBe(false);
+        rows[0].stamp = CURRENT;
+        expect((await embeddingSpaceVerdict()).uniform).toBe(false);
+        expect(scans).toBe(1);
+        clock.mockReturnValue(130_000);
+        expect((await embeddingSpaceVerdict()).uniform).toBe(false);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(scans).toBe(2);
+        expect(spaceGuardState()).toEqual({ state: "uniform", reason: null, excluded: 0 });
+      } finally {
+        clock.mockRestore();
+      }
+    });
+  }
+
+  it("a trusted repair marks the count stale and a consult republishes it", async () => {
+    const rows: { stamp: string | null; vec: boolean }[] = [{ stamp: null, vec: true }];
+    _setGuardTableGetterForTests(fakeRows(rows));
+    expect(await recomputeLatch()).toBe(false);
+    rows[0].stamp = CURRENT;
+    noteWriteStamp(CURRENT);
+    expect(spaceGuardState()).toEqual({ state: "unverified", reason: null, excluded: 1 });
+    expect((await embeddingSpaceVerdict()).uniform).toBe(false);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(spaceGuardState()).toEqual({ state: "uniform", reason: null, excluded: 0 });
+  });
+});
+
+it("a trusted replacement of an untrusted vector invalidates a uniform count and an in-flight scan", async () => {
+  _resetGuardForTests();
+  _setGuardModelIdForTests(() => CURRENT);
+  _setGuardTableGetterForTests(fakeRows([]));
+  expect(await recomputeLatch()).toBe(true);
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  _setGuardTableGetterForTests(async () => ({
+    async *search() { yield { embedding: [1], embeddingModel: null }; await held; },
+  }));
+  const scan = recomputeLatch();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  noteWriteStamp(CURRENT, { embedding: [1], embeddingModel: null });
+  expect(spaceGuardState()).toEqual({ state: "unverified", reason: null, excluded: 0 });
+  release();
+  await scan;
+  expect(spaceGuardState()).toEqual({ state: "unverified", reason: null, excluded: 0 });
+  _setGuardTableGetterForTests(fakeRows([{ stamp: CURRENT, vec: true }]));
+  await embeddingSpaceVerdict();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(spaceGuardState()).toEqual({ state: "uniform", reason: null, excluded: 0 });
 });

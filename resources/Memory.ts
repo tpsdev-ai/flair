@@ -1,3 +1,4 @@
+import { isEmptyEmbedding, normalizeEmptyEmbedding } from "./memory-embedding-value.js";
 import { databases } from "harper";
 import { randomUUID } from "node:crypto";
 import { isOperatorSeedPut, redactMemoryWrite, redactSkillWrite, storedMemoryText, suppliedMemoryTextFields, suppliedStoredTextFields, type StoredMemoryText, type StoredTextField } from "./memory-redaction.js";
@@ -524,6 +525,7 @@ async function runDedupGate(ctx: any, content: any): Promise<DedupMatch | null> 
   // skill's dedup cosine would cross the trigger-space vector against
   // content-space candidates. Non-skill rows are byte-identical (skillEmbedText
   // returns `content`).
+  if (isEmptyEmbedding(content.embedding)) return null;
   const embedText = skillEmbedText(content);
   if (typeof embedText !== "string" || embedText.length < DEDUP_MIN_CONTENT_LENGTH) {
     return null;
@@ -712,6 +714,7 @@ export function buildReindexRow(
       content.visibility = existing.visibility;
     }
   }
+  normalizeEmptyEmbedding(content);
   return { row: content };
 }
 
@@ -772,6 +775,7 @@ async function closeSupersededRecord(ctx: any, oldId: string, patch: Record<stri
         if (pause) await pause;
         const closed = { ...existing, ...patch };
         stripUndeclaredMemoryAttributes(closed);
+        normalizeEmptyEmbedding(closed);
         await (databases as any).flair.Memory.put(closed, c);
         // Test-only: inert unless armed — here the write is staged, so a
         // competing write and the committed-state re-reads below can be exercised
@@ -1131,7 +1135,7 @@ async function writeSkillCreateOrUpdate(
   if (captured.closed) noteMemoryDelete(String(captured.closed.id));
   if (captured.row) {
     noteMemoryUpsert(captured.row);
-    noteWriteStamp(captured.row.embeddingModel);
+    noteWriteStamp(captured.row.embeddingModel, captured.closed);
   }
   if (args.staged) args.staged.text = captured.row ? storedMemoryText(captured.row, args.staged.supplied) : null;
   return { id: successorId, written: captured.row !== null, visibility: skillVersionVisibility(captured.row ?? unchangedHead) };
@@ -1323,7 +1327,7 @@ async function reembedStoredRow(
       embedding = recomputed;
       continue;
     }
-    noteWriteStamp(outcome.model);
+    noteWriteStamp(outcome.model, preRead);
     // flair#2561: the response names the row and its new updatedAt, and
     // carries no embedding field; `flair reembed` reads the model stamp from
     // the stored row.
@@ -1850,6 +1854,7 @@ export class Memory extends (databases as any).flair.Memory {
     // Pinned by test/unit/memory-host-source.test.ts (r20-post) — RED if this
     // call is removed.
     stripUndeclaredMemoryAttributes(content);
+    normalizeEmptyEmbedding(content);
     if (isSkillWrite(content)) {
       const reservedId = [content?.id, (this as any).getId?.()].find((candidate) => isReservedSeedId("Memory", candidate));
       const skillStaged: { supplied: readonly StoredTextField[]; text: StoredMemoryText | null } = { supplied: suppliedText, text: null };
@@ -1893,7 +1898,7 @@ export class Memory extends (databases as any).flair.Memory {
     // a persisted FOREIGN stamp (federation / replication / an explicit-stamp
     // write) trips the gate; a normal local write stamps the current id and
     // never does.
-    noteWriteStamp(content?.embeddingModel as string | null | undefined);
+    noteWriteStamp(content?.embeddingModel as string | null | undefined, postStored);
 
     // ── THEN close the superseded record ────────────────────────────────────
     // Write-new-BEFORE-close-old: the previous order (close-old via a fire-
@@ -2157,6 +2162,7 @@ export class Memory extends (databases as any).flair.Memory {
     // flair#2467: a PATCH commits only the fields in its body; these are the
     // post-redaction text fields among them, for the response.
     const patchStaged = storedMemoryText(content, suppliedText);
+    normalizeEmptyEmbedding(body);
     // Notify when staged vector or stamp fields differ from the row read before the write.
     const embeddingChanged = Object.prototype.hasOwnProperty.call(body, "embedding") &&
       !isDeepStrictEqual(body.embedding, existingForSkill?.embedding);
@@ -2166,7 +2172,7 @@ export class Memory extends (databases as any).flair.Memory {
     const patched = storageResult(await super.patch(content, query));
     if (embeddingChanged || stampChanged) {
       noteWriteStamp(Object.prototype.hasOwnProperty.call(body, "embeddingModel")
-        ? body.embeddingModel : existingForSkill?.embeddingModel);
+        ? body.embeddingModel : existingForSkill?.embeddingModel, existingForSkill);
     }
     return rowWriteResponse(patched, content?.id ?? (this as any).getId?.() ?? existingForSkill?.id, redactedValues, patchStaged);
   }
@@ -2264,7 +2270,7 @@ export class Memory extends (databases as any).flair.Memory {
       // refusal (writeResultResponse).
       if (reindexed instanceof Response) return writeResultResponse(reindexed);
       noteMemoryUpsert(content);
-      noteWriteStamp(content?.embeddingModel as string | null | undefined); // embedding-space-guard slice 1 (see post())
+      noteWriteStamp(reindexRow?.embeddingModel as string | null | undefined, reindexExisting); // embedding-space-guard slice 1 (see post())
       return rowWriteResponse(reindexed, reindexRow?.id, 0);
     }
 
@@ -2589,6 +2595,7 @@ export class Memory extends (databases as any).flair.Memory {
     // Pinned by test/unit/memory-host-source.test.ts (r20-put) — RED if this
     // call is removed.
     stripUndeclaredMemoryAttributes(content);
+    normalizeEmptyEmbedding(content);
     if (isSkillWrite(content)) {
       const reservedId = [content?.id, (this as any).getId?.()].find((candidate) => isReservedSeedId("Memory", candidate));
       const skillStaged: { supplied: readonly StoredTextField[]; text: StoredMemoryText | null } = { supplied: suppliedText, text: null };
@@ -2677,7 +2684,7 @@ export class Memory extends (databases as any).flair.Memory {
     const result: any = putResult;
     // flair#1357 — read-your-write for the lexical leg (see post()).
     noteMemoryUpsert(content);
-    noteWriteStamp(content?.embeddingModel as string | null | undefined); // embedding-space-guard slice 1 (see post())
+    noteWriteStamp(content?.embeddingModel as string | null | undefined, preExisting); // embedding-space-guard slice 1 (see post())
 
     // ── THEN close the superseded record (see post()) ───────────────────────
     await closeSupersededIfNeeded(ctx, content, supersede.close, "put");

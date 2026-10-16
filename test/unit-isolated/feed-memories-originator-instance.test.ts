@@ -175,3 +175,12 @@ describe("flair#1965 r2 — FeedMemories.post applies the originator rule", () =
     expect(updated._syncedAt).toBe("2026-01-01T00:00:00.000Z");
   });
 });
+
+for (const empty of [[], new Float32Array(0), new Uint8Array(0)]) {
+  test(`feed refuses a supplied empty ${empty.constructor.name} before storage`, async () => {
+    const result = await feed().post({ id: "empty-feed", content: "feed fixture", embedding: empty });
+    expect(result.status).toBe(400);
+    expect((await result.json()).error).toBe("feed_embedding_not_writable");
+    expect(memoryStore.has("empty-feed")).toBe(false);
+  });
+}

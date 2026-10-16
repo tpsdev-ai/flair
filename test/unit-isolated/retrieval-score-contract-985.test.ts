@@ -107,8 +107,6 @@ mock.module("harper", () => ({ databases: databasesMock, Resource: class {} }));
 
 const { retrieveCandidates } = await import("../../resources/semantic-retrieval-core.ts");
 const { getModelId } = await import("../../resources/embeddings-provider.ts");
-// flair#2573: only a stored vector carrying a trusted current-space
-// `embeddingModel` stamp is cosined, so the fixtures stamp their vectors.
 const CURRENT = getModelId();
 
 // ─── Fixtures (the #985 report's shapes) ─────────────────────────────────────

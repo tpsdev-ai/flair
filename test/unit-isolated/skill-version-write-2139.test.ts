@@ -34,6 +34,10 @@ const InstructionVersionTable = {
 };
 
 const MemoryTable = {
+  async put(row: Row, ctx?: any) {
+    (ctx?.transaction?.memories ?? memoryStore).set(row.id, { ...row });
+    return row;
+  },
   async *search(query: any, ctx?: any): AsyncGenerator<Row> {
     const conds: any[] = query?.conditions ?? [];
     for (const row of [...(ctx?.transaction?.memories ?? memoryStore).values()]) {
@@ -81,7 +85,7 @@ function mockTransaction(ctx: any, cb: (txn: any) => any): any {
   return result;
 }
 
-const { runSkillVersionWrite, resolveSkillHead, closedSkillPayloadReadable } = await import("../../resources/skill-version-write.ts");
+const { runSkillVersionWrite, resolveSkillHead, closedSkillPayloadReadable, defaultSkillHooks } = await import("../../resources/skill-version-write.ts");
 const { recordDigest, valueDigest } = await import("../../resources/instruction-version-record.ts");
 const { deriveSkillSubjectId } = await import("../../resources/skill-subject.ts");
 
@@ -361,3 +365,14 @@ test("a live successor does not bypass a missing or inconsistent version authori
   authority.agentId = "agent-a";
   expect(await closedSkillPayloadReadable(root, "reader")).toBe(true);
 });
+
+for (const empty of [[], new Float32Array(0), new Uint8Array(0)]) {
+  test(`skill successor and predecessor writes store empty ${empty.constructor.name} as null`, async () => {
+    const successor = { ...liveSkill("successor", "root", "new"), embedding: empty };
+    const predecessor = { ...liveSkill("root", "root", "old"), embedding: empty };
+    await defaultSkillHooks.createSuccessor!(successor, {});
+    await defaultSkillHooks.closePredecessor!(predecessor, { validTo: new Date().toISOString() }, {});
+    expect(memoryStore.get("successor")?.embedding).toBeNull();
+    expect(memoryStore.get("root")?.embedding).toBeNull();
+  });
+}

@@ -1,3 +1,4 @@
+import { normalizeEmptyEmbedding } from "./memory-embedding-value.js";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { Resource, databases } from "harper";
@@ -318,6 +319,7 @@ export class FeedMemories extends Resource {
         {
           get: (id, shared) => table.get(id, shared),
           put: async (row, shared) => {
+            normalizeEmptyEmbedding(row);
             const result = storageResult(await table.put(row, shared));
             if (result instanceof Response) refusal = result;
           },

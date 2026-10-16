@@ -68,6 +68,7 @@ function makeHarness(get: () => HarperInstance) {
   const basicAuth = () => "Basic " + btoa(`${get().admin.username}:${get().admin.password}`);
   async function adminOp(op: Record<string, unknown>): Promise<Response> {
     return fetch(get().opsURL, {
+      signal: AbortSignal.timeout(15_000),
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: basicAuth() },
       body: JSON.stringify(op),
@@ -76,6 +77,7 @@ function makeHarness(get: () => HarperInstance) {
   async function putMemory(id: string, body: Record<string, unknown>): Promise<any> {
     const path = `/Memory/${id}`;
     const res = await fetch(`${get().httpURL}${path}`, {
+      signal: AbortSignal.timeout(15_000),
       method: "PUT",
       headers: { Authorization: ed25519Header(agent, "PUT", path), "Content-Type": "application/json" },
       body: JSON.stringify({ id, agentId: AGENT, visibility: "shared", ...body }),
@@ -96,6 +98,7 @@ function makeHarness(get: () => HarperInstance) {
   async function patchMemory(id: string, body: Record<string, unknown>): Promise<void> {
     const path = `/Memory/${id}`;
     const res = await fetch(`${get().httpURL}${path}`, {
+      signal: AbortSignal.timeout(15_000),
       method: "PATCH",
       headers: { Authorization: ed25519Header(agent, "PATCH", path), "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -105,6 +108,7 @@ function makeHarness(get: () => HarperInstance) {
   }
   async function semanticSearch(body: Record<string, unknown>): Promise<any> {
     const res = await fetch(`${get().httpURL}/SemanticSearch`, {
+      signal: AbortSignal.timeout(15_000),
       method: "POST",
       headers: { Authorization: ed25519Header(agent, "POST", "/SemanticSearch"), "Content-Type": "application/json" },
       body: JSON.stringify({ agentId: AGENT, ...body }),
@@ -114,7 +118,7 @@ function makeHarness(get: () => HarperInstance) {
     return JSON.parse(text);
   }
   async function health(): Promise<any> {
-    const res = await fetch(`${get().httpURL}/Health`);
+    const res = await fetch(`${get().httpURL}/Health`, { signal: AbortSignal.timeout(15_000) });
     const text = await res.text();
     // /Health is 200 once serving and 503 during the boot window; both carry the
     // guard's field (flair#2530).
@@ -137,7 +141,39 @@ function makeHarness(get: () => HarperInstance) {
     }
     return space;
   }
-  return { agent, adminOp, putMemory, patchMemory, memoryRow, semanticSearch, health, consult, waitGuard };
+  async function doctor(): Promise<string> {
+    const home = mkdtempSync(join(tmpdir(), "flair-2573-home-"));
+    try {
+      const env: Record<string, string> = {
+        ...(process.env as Record<string, string>),
+        HOME: home,
+        FLAIR_URL: "",
+        FLAIR_TOKEN: "",
+        FLAIR_OPS_PORT: String(new URL(get().opsURL).port),
+        NO_COLOR: "1",
+      };
+      delete env.FLAIR_ADMIN_PASS;
+      delete env.FLAIR_AGENT_ID;
+      const out = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
+        const child = spawn(process.execPath, [CLI, "doctor", "--port", String(new URL(get().httpURL).port)], {
+          env, timeout: 90_000,
+        });
+        let stdout = "";
+        let stderr = "";
+        child.stdout?.on("data", (d: Buffer) => { stdout += d.toString(); });
+        child.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
+        child.on("error", reject);
+        child.on("exit", (code, signal) => {
+          if (signal !== null) { reject(new Error(`flair doctor overran: ${signal}\n${stdout}`)); return; }
+          resolve({ code, stdout, stderr });
+        });
+      });
+      return out.stdout;
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  }
+  return { agent, adminOp, putMemory, patchMemory, memoryRow, semanticSearch, health, consult, waitGuard, doctor };
 }
 
 /** Spawn a Harper with the migration regen held, register the agent, return the harness. */
@@ -240,38 +276,25 @@ describe("flair#2573 slice 1 — signed unstamped vector writes close the guard 
   }, 60_000);
 
   test("the real flair doctor prints the last published count in excluded", async () => {
-    const home = mkdtempSync(join(tmpdir(), "flair-2573-home-"));
-    try {
-      const env: Record<string, string> = {
-        ...(process.env as Record<string, string>),
-        HOME: home,
-        FLAIR_URL: "",
-        FLAIR_TOKEN: "",
-        FLAIR_OPS_PORT: String(new URL(harper!.opsURL).port),
-        NO_COLOR: "1",
-      };
-      delete env.FLAIR_ADMIN_PASS;
-      delete env.FLAIR_AGENT_ID;
-      const out = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
-        const child = spawn(process.execPath, [CLI, "doctor", "--port", String(new URL(harper!.httpURL).port)], {
-          env, timeout: 90_000,
-        });
-        let stdout = "";
-        let stderr = "";
-        child.stdout?.on("data", (d: Buffer) => { stdout += d.toString(); });
-        child.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
-        child.on("error", reject);
-        child.on("exit", (code, signal) => {
-          if (signal !== null) { reject(new Error(`flair doctor overran: ${signal}\n${stdout}`)); return; }
-          resolve({ code, stdout, stderr });
-        });
-      });
-      expect(out.stdout).toContain("the last scan found a stored vector with no trusted current-space stamp");
-      expect(out.stdout).toContain("excluded from the vector leg: 1 row(s) with no trusted model stamp");
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-    }
+    const stdout = await h.doctor();
+    expect(stdout).toContain("the last scan found a stored vector with no trusted current-space stamp");
+    expect(stdout).toContain("excluded from the vector leg: 1 row(s) with no trusted model stamp");
   }, 120_000);
+
+  test("a trusted repair followed by a consult makes Health and doctor report uniform", async () => {
+    expect((await h.health()).embeddingSpace.state).toBe("excluded");
+    await h.patchMemory(U_ID, { embedding: STAMPED_VEC, embeddingModel: CURRENT_STAMP });
+    const repaired = await h.memoryRow(U_ID);
+    expect(repaired.embedding).toEqual(STAMPED_VEC);
+    expect(repaired.embeddingModel).toBe(CURRENT_STAMP);
+    await h.consult();
+    const space = await h.waitGuard((s) => s.state === "uniform" && s.excluded === 0, 60_000);
+    expect(space).toEqual({ state: "uniform", reason: null, excluded: 0 });
+    const stdout = await h.doctor();
+    expect(stdout).toContain("embedding model stamps verified uniform");
+    expect(stdout).not.toContain("excluded from the vector leg:");
+  }, 240_000);
+
 });
 
 describe("flair#2573 slice 1 — PATCH guard notifications (real Harper)", () => {
@@ -290,6 +313,49 @@ describe("flair#2573 slice 1 — PATCH guard notifications (real Harper)", () =>
   afterAll(async () => {
     await releaseAndStop(harper, pauseDir);
   }, 60_000);
+
+  test("signed PATCH of an empty embedding stores null, preserves uniform, and removes the row from vector results", async () => {
+    const id = "mem-2573-empty-patch";
+    await h.putMemory(id, { content: "empty vector boundary fixture", embedding: UNTRUSTED_VEC, embeddingModel: CURRENT_STAMP });
+    const before = await h.waitGuard((s) => s.state === "uniform", 60_000);
+    expect(before?.state).toBe("uniform");
+    expect((await h.semanticSearch({ queryEmbedding: UNTRUSTED_VEC, limit: 20 })).results.map((r: any) => r.id)).toContain(id);
+    await h.patchMemory(id, { embedding: [] });
+    const row = await h.memoryRow(id);
+    expect(row.embedding ?? null).toBeNull();
+    expect(row.embeddingModel).toBe(CURRENT_STAMP);
+    expect((await h.health()).embeddingSpace).toEqual(before);
+    await h.consult();
+    expect((await h.health()).embeddingSpace).toEqual(before);
+    const result = await h.semanticSearch({ queryEmbedding: UNTRUSTED_VEC, limit: 20 });
+    expect(result.results.map((r: any) => r.id)).not.toContain(id);
+  }, 120_000);
+
+  test("the vector stamp condition filters an untrusted row while the guard stays uniform", async () => {
+    const id = "mem-2573-filter";
+    const control = "mem-2573-filter-control";
+    await h.putMemory(control, { content: "vector condition control fixture", embedding: STAMPED_VEC, embeddingModel: CURRENT_STAMP });
+    const rawRow = { id, agentId: AGENT, content: "raw vector condition fixture", createdAt: new Date().toISOString(),
+      visibility: "shared", embedding: UNTRUSTED_VEC, embeddingModel: CURRENT_STAMP };
+    const inserted = await h.adminOp({
+      operation: "insert", database: "flair", table: "Memory", records: [rawRow],
+    });
+    expect(inserted.status).toBe(200);
+    expect((await h.waitGuard((s) => s.state === "uniform", 60_000))?.state).toBe("uniform");
+    const before = await h.semanticSearch({ queryEmbedding: UNTRUSTED_VEC, limit: 20 });
+    expect(before.results.map((r: any) => r.id)).toContain(id);
+    const updated = await h.adminOp({
+      operation: "update", database: "flair", table: "Memory", records: [{ ...rawRow, embeddingModel: null }],
+    });
+    expect(updated.status).toBe(200);
+    expect((await h.memoryRow(id)).embedding).toEqual(UNTRUSTED_VEC);
+    const after = await h.semanticSearch({ queryEmbedding: UNTRUSTED_VEC, limit: 20 });
+    expect((await h.health()).embeddingSpace.state).toBe("uniform");
+    expect(after.results.map((r: any) => r.id)).toContain(control);
+    expect(after.results.map((r: any) => r.id)).not.toContain(id);
+    const removed = await h.adminOp({ operation: "delete", database: "flair", table: "Memory", ids: [id] });
+    expect(removed.status).toBe(200);
+  }, 120_000);
 
   test("metadata-only PATCH preserves a uniform verdict; an unstamped vector PATCH closes it", async () => {
     await h.putMemory(A_ID, { content: STAMPED_TEXT, embedding: STAMPED_VEC, embeddingModel: CURRENT_STAMP });

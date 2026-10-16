@@ -411,10 +411,7 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
         const projected: any = {};
         for (const key of select) if (key in full) projected[key] = (full as any)[key];
         allowedById.set(id, projected);
-        // flair#2573 slice 1: a lexical rescue is scored with a cosine only when
-        // the row's stored vector carries a trusted current-space stamp (defence
-        // in depth alongside the guard's verdict); the row remains eligible
-        // for lexical matching either way.
+        // A trusted stamp permits cosine scoring; an absent vector scores zero.
         if (qEmb && isTrustedVectorStamp((full as any).embeddingModel)) {
           const storedEmbedding = Array.isArray((full as any).embedding) ? (full as any).embedding : [];
           semSimById.set(id, cosineSimilarity(qEmb, storedEmbedding));
@@ -474,9 +471,7 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
         let semSim = semSimById.get(id);
         if (semSim === undefined && qEmb) {
           const full = await withDetachedTxn(ctx, () => (databases as any).flair.Memory.get(id));
-          // flair#2573 slice 1: only a stored vector with a trusted current-space
-          // stamp is cosined (defence in depth); an untrusted one leaves `semSim`
-          // undefined, so the lexical rescue reports no semantic evidence.
+          // A trusted stamp permits cosine scoring; an absent vector scores zero.
           if (isTrustedVectorStamp(full?.embeddingModel)) {
             const storedEmbedding = Array.isArray(full?.embedding) ? full.embedding : [];
             semSim = cosineSimilarity(qEmb, storedEmbedding);

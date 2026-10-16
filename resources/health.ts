@@ -128,8 +128,8 @@ export class Health extends Resource {
     // bounded error
     // of the last failed scan (on scan-failed, or on mixed when a scan failed
     // before or after the foreign stamp was seen); `excluded` is the last
-    // published scan's count of rows that store a vector and carry no trusted
-    // current-space stamp (null until a scan publishes one). Calls that consult a
+    // published count of nonempty embeddings without a trusted current-space
+    // stamp (null until a scan publishes one). Calls that consult a
     // non-uniform verdict skip vector comparisons against the stored corpus
     // (flair#2559). The field is on the 503 body too; doctor reads it there.
     body.embeddingSpace = spaceGuardState();

@@ -131,8 +131,7 @@ export function isCurrentSpaceStamp(stamp: string | null | undefined, currentMod
   return n !== null && n === normalizeStamp(currentModelId);
 }
 
-/** Pure: does the row store a vector? A row with no vector never enters the
- *  HNSW graph, so it is no hazard to a vector query whatever its stamp. */
+/** Pure: does the value contain vector elements? */
 export function hasStoredVector(value: unknown): boolean {
   return Array.isArray(value) ? value.length > 0 : ArrayBuffer.isView(value) ? value.byteLength > 0 : false;
 }
@@ -248,8 +247,7 @@ async function scan(): Promise<void> {
     //    the current space makes the corpus `mixed`, whether or not the row
     //    stores a vector;
     //  - the excluded count (flair#2573): a row that stores a vector without a
-    //    trusted current-space stamp. A row with no vector never enters the HNSW
-    //    graph, so it is not counted.
+    //    trusted current-space stamp.
     for await (const row of table.search({ select: ["embeddingModel", "embedding"] })) {
       const rec = row as { embeddingModel?: unknown; embedding?: unknown };
       const raw = typeof rec.embeddingModel === "string" ? rec.embeddingModel : null;
@@ -438,7 +436,7 @@ function guardSnapshot(): EmbeddingSpaceVerdict {
  *  The snapshot is taken synchronously, so the state cannot drift from the
  *  decision. */
 function consultGuard(): EmbeddingSpaceVerdict {
-  if (_uniform === true && _lastScanError === null && !_excludedStale) return guardSnapshot();
+  if (guardSnapshot().uniform) return guardSnapshot();
   if (_uniform === undefined || _excludedStale || Date.now() - _lastScanAt >= RECHECK_MS) {
     void runScan();
   }
@@ -512,14 +510,19 @@ export function spaceGuardState(): { state: EmbeddingSpaceGuardState; reason: st
 /**
  * Call after persisting a vector or embeddingModel write, passing the resulting
  * stamp (possibly absent). Metadata-only PATCHes must not call this hook.
- * An untrusted stamp invalidates the count; a foreign space also closes the latch.
+ * A write invalidates a non-uniform count; a foreign space also closes the latch.
  */
-export function noteWriteStamp(stamp: string | null | undefined): void {
+export function noteWriteStamp(
+  stamp: string | null | undefined,
+  previous?: { embedding?: unknown; embeddingModel?: unknown } | null,
+): void {
   let n: string | null;
   let current: string | null;
   try {
     const currentStamp = _modelIdGetter();
-    if (isTrustedRawStamp(stamp, currentStamp)) return; // a trusted current-space stamp
+    const replacesUntrusted = hasStoredVector(previous?.embedding) &&
+      !isTrustedRawStamp(typeof previous?.embeddingModel === "string" ? previous.embeddingModel : null, currentStamp);
+    if (isTrustedRawStamp(stamp, currentStamp) && guardSnapshot().uniform && !replacesUntrusted) return;
     n = normalizeStamp(stamp);
     current = normalizeStamp(currentStamp);
   } catch (err) {

@@ -2624,3 +2624,53 @@ describe("Memory.patch embedding-space notifications", () => {
     guard._resetGuardForTests();
   });
 });
+
+describe("empty embedding writes", () => {
+  for (const method of ["post", "put", "patch"] as const) {
+    for (const empty of [[], new Float32Array(0), new Uint8Array(0)]) {
+      it(`${method} stores ${empty.constructor.name} with no elements as null`, async () => {
+        const id = "empty-vector";
+        if (method === "patch") {
+          memoryStore.set(id, { id, agentId: "agent-1", content: FINDING_A,
+            createdAt: new Date().toISOString(), embedding: FAKE_EMBEDDING,
+            embeddingModel: "mock-embedding-model" });
+        }
+        const m: any = makeMemory(agentCtx("agent-1"));
+        m._targetId = id;
+        const result = await m[method]({ id, agentId: "agent-1", content: FINDING_A, embedding: empty });
+        expect(result instanceof Response).toBe(false);
+        expect(memoryStore.get(id).embedding).toBeNull();
+        expect(embedInputTypeCalls).toEqual([]);
+      });
+    }
+  }
+});
+
+it("reindex stores a supplied empty embedding as null", async () => {
+  const id = "empty-reindex";
+  memoryStore.set(id, { id, agentId: "agent-1", content: FINDING_A,
+    createdAt: new Date().toISOString(), embedding: [] });
+  const m: any = makeMemory({});
+  m._targetId = id;
+  const result = await m.put({ id, agentId: "agent-1", _reindex: true, embedding: [] });
+  expect(result instanceof Response).toBe(false);
+  expect(memoryStore.get(id).embedding).toBeNull();
+});
+
+it("a trusted PATCH repair invalidates a uniform verdict that did not cover the untrusted row", async () => {
+  const guard = await import("../../resources/embedding-space-guard.ts");
+  guard._resetGuardForTests();
+  guard._setGuardModelIdForTests(() => "mock-embedding-model");
+  guard._setGuardTableGetterForTests(async () => ({ search: () => memorySearchGen({}) }));
+  expect(await guard.recomputeLatch()).toBe(true);
+  const id = "raw-untrusted-repair";
+  memoryStore.set(id, { id, agentId: "agent-1", content: FINDING_A,
+    createdAt: new Date().toISOString(), embedding: FAKE_EMBEDDING, embeddingModel: null });
+  const m: any = makeMemory(agentCtx("agent-1"));
+  m._targetId = id;
+  await m.patch({ embedding: FAKE_EMBEDDING, embeddingModel: "mock-embedding-model" });
+  expect(guard.spaceGuardState().state).toBe("unverified");
+  await guard.embeddingSpaceVerdict();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(guard.spaceGuardState()).toEqual({ state: "uniform", reason: null, excluded: 0 });
+});

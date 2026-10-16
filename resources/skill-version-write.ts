@@ -1,3 +1,4 @@
+import { normalizeEmptyEmbedding } from "./memory-embedding-value.js";
 /** Skill writes share the ["flair-instruction-version", "skill"] lock. */
 import { databases } from "harper";
 import { storageResult } from "./memory-write-response.js";
@@ -312,12 +313,14 @@ export interface SkillWriteHooks {
  */
 export const defaultSkillHooks: SkillWriteHooks = {
   createSuccessor: async (successor, shared) => {
+    normalizeEmptyEmbedding(successor);
     const result = storageResult(await (databases as any).flair.Memory.put(successor, shared));
     if (result instanceof Response) return result;
     return String(successor.id);
   },
   closePredecessor: async (predecessor, patch, shared) => {
     const closed = { ...predecessor, ...patch };
+    normalizeEmptyEmbedding(closed);
     const result = storageResult(await (databases as any).flair.Memory.put(closed, shared));
     if (result instanceof Response) return result;
   },
