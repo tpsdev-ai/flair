@@ -72,14 +72,6 @@
     "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
   },
   {
-    "file": "test/integration/onboarding-smoke.test.ts",
-    "scope": "runCli",
-    "fingerprint": "process.execPath [CLI,...args] ; { env: { ...process.env,HOME: cliHome,// isolates ~/.flair (keys,config,admin-pass) FLAIR_URL: harper.httpURL,FLAIR_OPS_PORT: opsPort,// Defensive: ensure no inherited token/admin identity leaks in. The // agent identity comes from the on-disk key written by `agent add` // (under cliHome/.flair/keys),resolved via FLAIR_AGENT_ID per-command. FLAIR_TOKEN: \"\",FLAIR_ADMIN_PASS: \"\",...extraEnv,},// flair#1807: the child carries its OWN deadline (it replaces the manual // 30 s kill this used to arm); a signal kill is named,with its output. timeout: CHILD_DEADLINE_MS,}",
-    "kind": "spawn-no-timeout",
-    "occurrence": 0,
-    "reason": "flair#1825 inventory: CLI-entry spawn with no child deadline (flair#1807 class); budget in #1921."
-  },
-  {
     "file": "test/integration/status-federation-spoke-peers-1146.test.ts",
     "scope": "runCli",
     "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
@@ -531,30 +523,6 @@
     "file": "test/integration/init-remote-instance-identity.test.ts",
     "scope": "prune warns that ANY deleted row may be the identity a peer pinned, and the printed --apply form really deletes",
     "fingerprint": "process.execPath [CLI,...args] ; { env: { ...process.env,HOME: home,FLAIR_URL: harper.httpURL,FLAIR_TOKEN: \"\",FLAIR_ADMIN_PASS: \"\",},timeout: CHILD_DEADLINE_MS,}",
-    "kind": "case-no-budget",
-    "occurrence": 0,
-    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
-  },
-  {
-    "file": "test/integration/onboarding-smoke.test.ts",
-    "scope": "agent add seeds via ops API (#499)",
-    "fingerprint": "process.execPath [CLI,...args] ; { env: { ...process.env,HOME: cliHome,// isolates ~/.flair (keys,config,admin-pass) FLAIR_URL: harper.httpURL,FLAIR_OPS_PORT: opsPort,// Defensive: ensure no inherited token/admin identity leaks in. The // agent identity comes from the on-disk key written by `agent add` // (under cliHome/.flair/keys),resolved via FLAIR_AGENT_ID per-command. FLAIR_TOKEN: \"\",FLAIR_ADMIN_PASS: \"\",...extraEnv,},// flair#1807: the child carries its OWN deadline (it replaces the manual // 30 s kill this used to arm); a signal kill is named,with its output. timeout: CHILD_DEADLINE_MS,}",
-    "kind": "case-no-budget",
-    "occurrence": 0,
-    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
-  },
-  {
-    "file": "test/integration/onboarding-smoke.test.ts",
-    "scope": "soul set succeeds via PUT /Soul/{id} (#498)",
-    "fingerprint": "process.execPath [CLI,...args] ; { env: { ...process.env,HOME: cliHome,// isolates ~/.flair (keys,config,admin-pass) FLAIR_URL: harper.httpURL,FLAIR_OPS_PORT: opsPort,// Defensive: ensure no inherited token/admin identity leaks in. The // agent identity comes from the on-disk key written by `agent add` // (under cliHome/.flair/keys),resolved via FLAIR_AGENT_ID per-command. FLAIR_TOKEN: \"\",FLAIR_ADMIN_PASS: \"\",...extraEnv,},// flair#1807: the child carries its OWN deadline (it replaces the manual // 30 s kill this used to arm); a signal kill is named,with its output. timeout: CHILD_DEADLINE_MS,}",
-    "kind": "case-no-budget",
-    "occurrence": 0,
-    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
-  },
-  {
-    "file": "test/integration/onboarding-smoke.test.ts",
-    "scope": "agent list does not null-scan the PK (#500)",
-    "fingerprint": "process.execPath [CLI,...args] ; { env: { ...process.env,HOME: cliHome,// isolates ~/.flair (keys,config,admin-pass) FLAIR_URL: harper.httpURL,FLAIR_OPS_PORT: opsPort,// Defensive: ensure no inherited token/admin identity leaks in. The // agent identity comes from the on-disk key written by `agent add` // (under cliHome/.flair/keys),resolved via FLAIR_AGENT_ID per-command. FLAIR_TOKEN: \"\",FLAIR_ADMIN_PASS: \"\",...extraEnv,},// flair#1807: the child carries its OWN deadline (it replaces the manual // 30 s kill this used to arm); a signal kill is named,with its output. timeout: CHILD_DEADLINE_MS,}",
     "kind": "case-no-budget",
     "occurrence": 0,
     "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."

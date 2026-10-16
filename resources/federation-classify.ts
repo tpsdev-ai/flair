@@ -65,6 +65,10 @@ export type SkipReason =
   // administrator authority for that principal, so the whole record is skipped
   // rather than merged without `status`.
   | "agent_status_not_federated"
+  // ─── flair#2266 (pending-key guard) ──
+  // A record reaching the merge plan with publicKey different from stored `pending`,
+  // unless the status guard refused it first. Earlier validation keeps its reason.
+  | "agent_pending_key_not_federated"
   // Emitted by FederationSync.post before the row is read: the payload's id is
   // missing or is not the envelope's id, so the record is not applied.
   | "id_mismatch"
@@ -112,6 +116,7 @@ export const SKIP_REASON_CLASS = {
   principal_mismatch: "non_retryable",
   pointer_not_federated: "non_retryable",
   agent_status_not_federated: "non_retryable",
+  agent_pending_key_not_federated: "non_retryable",
   id_mismatch: "non_retryable",
   invalid_expiry: "non_retryable",
   merge_target_changed: "retryable",
@@ -359,4 +364,22 @@ export function inboundChangesExistingPrincipalStatus(
   const data = record.data;
   if (!data || typeof data !== "object") return false;
   return effectiveAgentStatus(data.status) !== effectiveAgentStatus(local.status);
+}
+
+/** The stored `publicKey` value of an Agent row seeded but not yet registered. */
+export const PENDING_PUBLIC_KEY = "pending";
+
+/**
+ * flair#2266: true for an inbound Agent record carrying a `publicKey` different
+ * from an existing local row's stored `pending`, regardless of timestamps.
+ */
+export function inboundChangesExistingPendingKey(
+  record: SyncRecord,
+  local: Record<string, any> | null,
+): boolean {
+  if (record.table !== "Agent" || local == null) return false;
+  if (local.publicKey !== PENDING_PUBLIC_KEY) return false;
+  const data = record.data;
+  if (!data || typeof data !== "object") return false;
+  return Object.prototype.hasOwnProperty.call(data, "publicKey") && (data as any).publicKey !== local.publicKey;
 }

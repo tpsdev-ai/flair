@@ -1,0 +1,22 @@
+# AgentKeyRegistration — the private audit record for one committed key
+# registration (POST /AgentKeyRegister, resources/AgentKeyRegister.ts).
+#
+# One row per committed registration. It carries NO secret: the actor, the
+# operator, the target agent's id, this instance's id, the key's FINGERPRINT in
+# place of the key, and the time. Because it holds no secret it is `replicate: true` —
+# a deliberate choice, in contrast to the token-enrollment table the design
+# thread records for a later slice, which must be `replicate: false`.
+#
+# On the Flair resource route (resources/AgentKeyRegistration.ts) reads are
+# admin-only and every write is refused; the registration operation is its only
+# application writer, through the raw table handle. The Harper operations API is
+# a separate raw-table trust root that this does not govern.
+type AgentKeyRegistration @table(database: "flair", replicate: true) {
+  id: ID @primaryKey              # server-generated registrationId
+  actorId: String! @indexed       # the admin that registered the key: an admin agent id (TPS-Ed25519) or a Harper username (Basic)
+  operator: String                # the Harper username on the request, if any (an audit label only)
+  agentId: String! @indexed       # the agent row whose key was registered
+  instanceId: String @indexed     # the local instance id that performed the registration
+  keyFingerprint: String!         # sha256 (hex) of the registered key's canonical base64url string, stored in place of the key
+  createdAt: String!
+}

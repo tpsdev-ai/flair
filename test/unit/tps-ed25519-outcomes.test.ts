@@ -20,6 +20,8 @@ const getOutcomes: Array<[string, number | readonly number[], string]> = [
   ["AdminPrincipals", 403, "resources/AdminPrincipals.ts:12: allowRead allowAdmin refuses before get:16; no search"],
   ["Agent", 200, "resources/Agent.ts:28: allowRead allowVerified; inherited table get/search serve collection"],
   ["AgentCard", 400, "resources/AgentCard.ts:8: allowRead true; get:12 requires path agentId; no search"],
+  ["AgentKeyRegister", 404, "resources/AgentKeyRegister.ts:80: no get/search/allowRead override"],
+  ["AgentKeyRegistration", 403, "resources/AgentKeyRegistration.ts:16: allowRead allowAdmin refuses; inherited table get/search"],
   ["AgentReadPosition", 400, "resources/AgentReadPosition.ts:48: allowRead allowVerified; get:56 requires path agentId; no search"],
   ["AgentSeed", 404, "resources/AgentSeed.ts:48: no get/search/allowRead override"],
   ["Asset", 200, "resources/Asset.ts:59: verified read gate; get:61 delegates collection to scoped search:68"],
