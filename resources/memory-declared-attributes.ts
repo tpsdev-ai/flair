@@ -64,7 +64,8 @@ export function stripUndeclaredMemoryAttributes(content: unknown): string[] {
  * it. Memory's REST write paths remove `instanceToken` and `provenance` from the
  * request body. `post()`/`put()` re-stamp `provenance` (via `buildProvenance`)
  * and `instanceToken` after the strip; the other writers strip and preserve the
- * stored value.
+ * stored value, except that a Memory PATCH or re-embed gives a row with no
+ * `instanceToken` a fresh one (flair#2478).
  *
  * `originatorInstanceId` is NOT in this set (flair#1965): its write rule is
  * create-vs-update — a CREATE stamps the local id, an UPDATE keeps the stored

@@ -218,7 +218,7 @@ function putBranchTrips(source: string, branch: "reindex" | "ordinary"): boolean
   const ast = ts.createSourceFile("f.ts", source, ts.ScriptTarget.Latest, true);
   let trips = false;
   const visit = (node: ts.Node): void => {
-    if (ts.isMethodDeclaration(node) && node.name && ts.isIdentifier(node.name) && node.name.text === "put" && node.body) {
+    if (ts.isMethodDeclaration(node) && node.name && ts.isIdentifier(node.name) && node.name.text === "putLocked" && node.body) {
       const statements = node.body.statements;
       const index = statements.findIndex(statement => {
         if (!ts.isIfStatement(statement)) return false;
@@ -285,8 +285,8 @@ test("an uncalled nested function does not trip the named body's latch", () => {
 // through. Each named body must trip the latch itself.
 const TRIPPING_WRITE_BODIES: ReadonlyArray<readonly [file: string, fn: string]> = [
   ["resources/Memory.ts", "post"],
-  ["resources/Memory.ts", "put"],
-  ["resources/Memory.ts", "patch"],
+  ["resources/Memory.ts", "putLocked"],
+  ["resources/Memory.ts", "patchLocked"],
   ["resources/Federation.ts", "noteFederationMergedMemory"],
 ];
 

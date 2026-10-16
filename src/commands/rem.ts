@@ -956,11 +956,14 @@ export function register(program: Command): void {
         if (row.autoPromoted) {
           console.log(`Auto-promoted: ${row.autoPromoted.promoted} to own memory (${row.autoPromoted.skipped} left pending)`);
         }
-        // row.dedup populates when step 6 (instance-wide dedup-cluster stat,
-        // flair-quality Slice 1c) succeeded this cycle. Absent on dry-run skip
-        // or a non-fatal failure (see Errors below — e.g. non-admin caller).
-        if (row.dedup) {
-          console.log(`Dedup:      ${row.dedup.clusterCount} cluster${row.dedup.clusterCount === 1 ? "" : "s"} (${row.dedup.totalMemoriesInClusters} memories, largest ${row.dedup.largestClusterSize})`);
+        // A guard refusal carries null counts and the guard's named state.
+        const dedupRow = row.dedup;
+        if (dedupRow) {
+          if ("embeddingSpace" in dedupRow) {
+            console.log(`Dedup:      not computed — embedding space ${dedupRow.embeddingSpace.state} (no new counts were written)`);
+          } else {
+            console.log(`Dedup:      ${dedupRow.clusterCount} cluster${dedupRow.clusterCount === 1 ? "" : "s"} (${dedupRow.totalMemoriesInClusters} memories, largest ${dedupRow.largestClusterSize})`);
+          }
         }
         console.log(`Duration:   ${row.durationMs}ms`);
         if (result.status === "refused") {

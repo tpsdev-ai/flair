@@ -58,8 +58,9 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { setImmediate as yieldToRequests } from "node:timers/promises";
 import { dirname } from "node:path";
 import { allowAdmin } from "./agent-auth.js";
+import { txnPausePoint } from "./txn-pause-point.js";
 import { retrieveCandidates } from "./semantic-retrieval-core.js";
-import { embeddingSpaceVerdict, type EmbeddingSpaceGuardState } from "./embedding-space-guard.js";
+import { embeddingSpaceVerdict, spaceGuardState, type EmbeddingSpaceGuardState, type EmbeddingSpaceVerdict } from "./embedding-space-guard.js";
 import { DEDUP_COSINE_THRESHOLD_DEFAULT } from "./dedup.js";
 import {
   countDedupClusters,
@@ -78,7 +79,7 @@ export interface MemoryDedupStatsResult {
   computedAt: string;
 }
 
-/** The response when the sweep's opening guard consult refuses the embedding space (flair#2559). */
+/** The response when the guard refuses the sweep. */
 export interface MemoryDedupStatsUnavailable {
   clusterCount: null;
   largestClusterSize: null;
@@ -94,6 +95,19 @@ function persistStat(stat: MemoryDedupStatsResult, pathOverride?: string): void 
   writeFileSync(path, JSON.stringify(stat, null, 2) + "\n", { mode: 0o600 });
 }
 
+/** The refusal body when uniformity is not established: no vector-derived counts, the
+ *  guard's named state instead. Shared by the opening consult and the pre-persist
+ *  re-check (flair#2596). */
+function guardRefusal(v: Pick<EmbeddingSpaceVerdict, "state" | "reason">, computedAt: string): MemoryDedupStatsUnavailable {
+  return {
+    clusterCount: null,
+    largestClusterSize: null,
+    totalMemoriesInClusters: null,
+    computedAt,
+    embeddingSpace: { state: v.state, reason: v.reason },
+  };
+}
+
 /**
  * The DB-touching sweep, factored out of post() so it takes an explicit
  * `ctx` and `nowOverride`/`pathOverride` rather than reaching for Resource
@@ -102,7 +116,7 @@ function persistStat(stat: MemoryDedupStatsResult, pathOverride?: string): void 
  * PURE part (countDedupClusters) is what's unit-tested, in
  * dedup-cluster.ts's own test file.
  */
-async function computeAndPersist(ctx: any, opts?: { annK?: number; maxMemories?: number; nowOverride?: Date; pathOverride?: string }): Promise<MemoryDedupStatsResult> {
+async function computeAndPersist(ctx: any, opts?: { annK?: number; maxMemories?: number; nowOverride?: Date; pathOverride?: string }): Promise<MemoryDedupStatsResult | MemoryDedupStatsUnavailable> {
   const annK = opts?.annK ?? DEDUP_CLUSTER_ANN_K_DEFAULT;
   const maxMemories = opts?.maxMemories ?? DEDUP_CLUSTER_MAX_MEMORIES_DEFAULT;
 
@@ -184,7 +198,16 @@ async function computeAndPersist(ctx: any, opts?: { annK?: number; maxMemories?:
   const computedAt = (opts?.nowOverride ?? new Date()).toISOString();
   const result: MemoryDedupStatsResult = { ...clusters, computedAt };
 
-  // ── 4. Persist server-side ONLY the aggregate (never per-memory edges).
+  // ── 4. Re-check the guard (flair#2596). The opening consult ran before any
+  // of the ANN work above; a guarded write carrying a foreign stamp can trip
+  // the latch during the sweep. Refuse new counts unless uniformity still holds.
+  const pause = txnPausePoint("dedup-sweep-persist");
+  if (pause) await pause;
+  await embeddingSpaceVerdict();
+  const finalVerdict = spaceGuardState();
+  if (finalVerdict.state !== "uniform") return guardRefusal(finalVerdict, computedAt);
+
+  // ── 5. Persist server-side ONLY the aggregate (never per-memory edges).
   persistStat(result, opts?.pathOverride);
 
   return result;
@@ -199,18 +222,9 @@ export class MemoryDedupStats extends Resource {
     const ctx = (this as any).getContext?.();
     try {
       // ─── Vector-space uniformity guard (flair#2559) ──────────────────────
-      // Consult the shared guard at the start of the sweep. A non-uniform
-      // verdict returns no vector-derived counts and persists nothing.
+      // Consult the shared guard at the start of the sweep.
       const verdict = await embeddingSpaceVerdict();
-      if (!verdict.uniform) {
-        return {
-          clusterCount: null,
-          largestClusterSize: null,
-          totalMemoriesInClusters: null,
-          computedAt: new Date().toISOString(),
-          embeddingSpace: { state: verdict.state, reason: verdict.reason },
-        };
-      }
+      if (!verdict.uniform) return guardRefusal(verdict, new Date().toISOString());
       return await computeAndPersist(ctx);
     } catch (err: any) {
       return new Response(
