@@ -190,7 +190,42 @@ async function successorsOf(predecessorId: string): Promise<any[]> {
   return (await rowsFor(GRANTEE)).filter((r) => r.supersedes === predecessorId);
 }
 
-describe("in-process Memory.post(): a grant-authorized successor is written only with the predecessor's committed visibility", () => {
+describe("ordinary granted close refusal rolls back the successor and preserves the predecessor", () => {
+  for (const method of ["POST", "PUT"]) {
+    for (const joined of [false, true]) {
+      test(`${method}, ${joined ? "caller" : "write"}-owned transaction: fixed refusal and unchanged rows`, async () => {
+        const pred = await fleet("remember", {
+          agentId: OWNER, content: `gvm refusal predecessor ${method} ${joined}`, durability: "persistent", visibility: "shared",
+        });
+        expect(pred.ok, JSON.stringify(pred)).toBe(true);
+        const predId = pred.value.id;
+        const readRow = (id: string) => ops({
+          operation: "search_by_hash", database: "flair", table: "Memory", hash_values: [id], get_attributes: ["*"],
+        });
+        const before = await readRow(predId);
+        expect(before).toHaveLength(1);
+        expect(before[0].validTo ?? null).toBeNull();
+        const id = `${GRANTEE}-refusal-${method}-${joined}`;
+        const res = await fleet("supersedeWithCloseStorageRefusal", {
+          id, agentId: GRANTEE, content: `gvm refusal successor ${method} ${joined}`, supersedes: predId, method, joined,
+        });
+        expect(res.ok, JSON.stringify(res)).toBe(true);
+        expect(res.value.refusedCloses).toBe(1);
+        expect(await readRow(id), "the successor did not commit").toEqual([]);
+        expect(await successorsOf(predId)).toEqual([]);
+        expect(await readRow(predId), "the predecessor is unchanged").toEqual(before);
+        expect(res.value.reply.ok).toBe(false);
+        expect(res.value.reply.status).toBe(500);
+        expect(JSON.parse(res.value.reply.body)).toEqual({
+          error: "write_response_withheld",
+          message: "the server does not report this write's result; read the row to see what is stored",
+        });
+      }, 120_000);
+    }
+  }
+});
+
+describe("in-process Memory.post(): the final committed-visibility check refuses a mismatch", () => {
   test("the predecessor is made private while the close is held: the named 409, no successor, the predecessor open", async () => {
     const pred = await fleet("remember", { agentId: OWNER, content: "gvm in-process shared predecessor", durability: "persistent", visibility: "shared" });
     expect(pred.ok, JSON.stringify(pred).slice(0, 300)).toBe(true);

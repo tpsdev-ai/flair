@@ -3,10 +3,10 @@
  *
  * A grant-authorized, non-admin cross-agent Memory supersede stands on a "write"
  * MemoryGrant. The authorization check and the close that follows it are separate
- * reads, so the close re-checks the grant on committed state after it stages its
- * write. The successor and the close are staged in one transaction (flair#2564),
- * so a revoked grant refuses the whole write with 409 granted_close_revoked: no
- * successor, no close. These cases hold the close (the "granted-close" test
+ * reads. After staging the close, the writer re-checks the grant on committed
+ * state. A grant refusal aborts the successor and close's shared transaction
+ * (flair#2564) with 409 granted_close_revoked: no successor, no close.
+ * These cases hold the close (the "granted-close" test
  * pause, before the close is staged), revoke the grant so the revocation is
  * committed, release the close, and assert the refusal and that the target row
  * is NOT closed. The third case pauses at "granted-close-staged" instead —

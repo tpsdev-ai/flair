@@ -2,7 +2,7 @@
  * grant-visibility-close-contention.test.ts — real Harper.
  *
  * A write grant does not include changing a record's visibility. For the
- * grant-authorized successor write, the close stages its write and then
+ * grant-authorized successor write, after staging the close the writer
  * re-reads the predecessor's committed row; if that row's visibility no longer
  * reads the same as the successor's, the whole write is refused with the named
  * 409 predecessor_visibility_changed — no successor, no close, no version row

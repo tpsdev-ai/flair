@@ -20,7 +20,7 @@
  *     "session" skill write gets 400 invalid_durability on Memory POST and PUT
  *     (durability validation runs first) and 400 skill_durability on
  *     FeedMemories;
- *   - the close stages its write and then re-reads the predecessor's committed
+ *   - after staging the close, the writer re-reads the predecessor's committed
  *     row; if that row's visibility no longer reads the same as the
  *     successor's, the whole write is refused with
  *     {@link predecessorVisibilityChangedRefusal}, a 409: no successor, no
@@ -116,8 +116,8 @@ export function visibilityChanges(prior: unknown, next: unknown): boolean {
 /**
  * The close's check for a grant-authorized successor: does the predecessor's
  * committed row (read with an empty context once the close's write is staged)
- * read with a different visibility from the successor's? A row that is gone is
- * left to the close's own missing-row handling.
+ * read with a different visibility from the successor's? The ordinary close
+ * handles a missing row separately.
  */
 export function committedVisibilityDiffers(committed: Record<string, any> | null | undefined, successorVisibility: unknown): boolean {
   return !!committed && visibilityChanges(committed.visibility, successorVisibility);

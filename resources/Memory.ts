@@ -1001,19 +1001,14 @@ async function closeSupersededIfNeeded(ctx: any, content: any, close: SupersedeC
  *  agent, or changed since the write's transaction read it (stageGrantedClose). */
 class GrantedCloseTargetChanged extends Error {}
 
+class GrantedCloseStorageRefused extends Error {}
+
 /**
- * flair#2564: the close of a grant-authorized supersede (`close.granteeId`: a
- * cross-agent close a "write" MemoryGrant authorized). It is staged in
- * `shared`, the transaction the successor and its pointer row were just staged
- * in (a joined request or caller transaction, or the one
- * withSharedWriteTransaction owns), so the successor and the close commit or
- * abort together: if that transaction aborts after this write, no successor is
- * written and the predecessor stays open.
+ * flair#2564: stage a grant-authorized supersede's close (`close.granteeId`)
+ * in `shared`, the successor's transaction (request, caller or write-owned).
  *
- * The predecessor is read through `shared` (that transaction's snapshot), the
- * close is staged over that row, and the row is then confirmed against the
- * COMMITTED row (an empty context), the same confirmation Memory.put() applies
- * to its own row:
+ * A storage Response aborts the write with write_response_withheld. After
+ * staging the close, the committed row (an empty context) is checked:
  *
  *   - the committed visibility must read the same as the successor's
  *     (`successorVisibility`): a write grant does not include changing a
@@ -1045,7 +1040,8 @@ async function stageGrantedClose(
   if (pause) await pause;
   const closed = { ...existing, ...patch };
   stripUndeclaredMemoryAttributes(closed);
-  await (databases as any).flair.Memory.put(closed, shared);
+  const result = await (databases as any).flair.Memory.put(closed, shared);
+  if (result instanceof Response) throw new GrantedCloseStorageRefused();
   // Test-only: inert unless armed — here the close is staged, so a competing
   // write and the committed-state re-reads below can be exercised in either
   // order.
@@ -1065,10 +1061,8 @@ async function stageGrantedClose(
  * transaction callback, after the successor and its pointer row are staged.
  * On any failure the whole write aborts: a joined request or caller
  * transaction is aborted here, and a transaction withSharedWriteTransaction
- * owns aborts when the error leaves its callback; the caller answers the named
- * refusal (grantedCloseRefusal). Returns the staged closed row, or null when
- * the close is not grant-authorized: an owner, admin or internal close runs
- * after the write (closeSupersededIfNeeded), unchanged.
+ * owns aborts when the error leaves its callback. Returns the staged closed row,
+ * or null for an owner, admin or internal close (closeSupersededIfNeeded).
  */
 async function closeGrantedSupersedeStaged(
   shared: any,
@@ -1087,6 +1081,7 @@ async function closeGrantedSupersedeStaged(
 
 /** The named refusal for a grant-authorized close that did not land, else null. */
 function grantedCloseRefusal(err: unknown): Response | null {
+  if (err instanceof GrantedCloseStorageRefused) return withheldWriteResult();
   if (err instanceof PredecessorVisibilityChanged) return predecessorVisibilityChangedRefusal();
   if (err instanceof GrantedCloseRevoked) return grantedCloseRevokedRefusal();
   if (err instanceof GrantedCloseTargetChanged) return storedRowChangedRefusal("Memory");
@@ -2000,7 +1995,7 @@ export class Memory extends (databases as any).flair.Memory {
           const persistDenial = await persistPointerRow(pointer.row, c);
           if (persistDenial) return persistDenial;
         }
-        // A grant-authorized close is staged here, in the successor's transaction.
+        // Stage a grant-authorized close in the successor's transaction.
         grantedClosed = await closeGrantedSupersedeStaged(c, content, supersede.close, postJoinsRequestTxn);
         return null;
       });
@@ -2789,7 +2784,7 @@ export class Memory extends (databases as any).flair.Memory {
             throw err;
           }
         }
-        // A grant-authorized close is staged here, in the successor's transaction.
+        // Stage a grant-authorized close in the successor's transaction.
         putGrantedClosed = await closeGrantedSupersedeStaged(c, content, supersede.close, joinsRequestTxn);
         return r;
       });

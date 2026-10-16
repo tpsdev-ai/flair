@@ -52,7 +52,7 @@ describe("grant-visibility: a write grant does not include changing a record's v
     expect(legacy.visibility).toBe("shared");
   });
 
-  it("a named visibility equal to the predecessor's lands", () => {
+  it("a named visibility equal to the predecessor's is accepted", () => {
     const content: Record<string, any> = { visibility: "private" };
     expect(applyGrantedVisibility(content, { visibility: "private" }, "private")).toBeNull();
     expect(content.visibility).toBe("private");
@@ -80,7 +80,7 @@ describe("grant-visibility: a write grant does not include changing a record's v
     expect(committedVisibilityDiffers({}, "private")).toBe(true);
     expect(committedVisibilityDiffers({ visibility: "private" }, "private")).toBe(false);
     expect(committedVisibilityDiffers({}, "shared")).toBe(false);
-    // A row that is gone is left to the close's own missing-row handling.
+    // The ordinary close handles a missing row separately.
     expect(committedVisibilityDiffers(null, "shared")).toBe(false);
     expect(committedVisibilityDiffers(undefined, "private")).toBe(false);
   });

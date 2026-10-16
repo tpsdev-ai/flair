@@ -139,6 +139,37 @@ async function supersedeInCallerTransaction(agentId, { id, content, durability =
   return { aborted: false, written: written != null };
 }
 
+async function supersedeWithCloseStorageRefusal(agentId, { id, content, supersedes, method, joined }) {
+  const ctx = agentContext(agentId);
+  const table = databases.flair.Memory;
+  const originalPut = table.put;
+  let refusedCloses = 0;
+  table.put = function (row, shared) {
+    if (row.id === supersedes && row.validTo != null) {
+      refusedCloses++;
+      return Promise.resolve(new Response("fixture storage refusal", { status: 503 }));
+    }
+    return originalPut.call(this, row, shared);
+  };
+  let written;
+  const write = async () => {
+    const body = { id, agentId, content, durability: "persistent", supersedes };
+    if (method === "POST") {
+      const h = await collectionResource(flair("Memory"), ctx);
+      written = await h.post(body);
+    } else {
+      written = await flair("Memory").put(body, ctx);
+    }
+  };
+  try {
+    if (joined) await transaction(ctx, write);
+    else await write();
+    return { refusedCloses, reply: await run(() => written) };
+  } finally {
+    table.put = originalPut;
+  }
+}
+
 /**
  * Everything `agentId` is allowed to see: its own records, plus every other
  * agent's non-private ones. Same boundary as `remember` — see its doc for where
@@ -386,6 +417,8 @@ export class AgentFleet extends Resource {
         return run(() => remember(body.agentId, body));
       case "supersedeInCallerTransaction":
         return run(() => supersedeInCallerTransaction(body.agentId, body));
+      case "supersedeWithCloseStorageRefusal":
+        return run(() => supersedeWithCloseStorageRefusal(body.agentId, body));
       case "recall":
         return run(() => recall(body.agentId, body));
       case "recallById":
