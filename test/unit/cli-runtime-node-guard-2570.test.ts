@@ -308,10 +308,14 @@ describe("Bun Harper spawn preload", () => {
       `(bun '${cli}' status)`, `echo $(bun '${cli}' status)`,
       `echo \`bun '${cli}' status\``, `echo "$(bun '${cli}' status)"`,
       `echo "\`bun '${cli}' status\`"`, `echo $RUNTIME`,
+      `/usr/bin/time sh -c "true; bun '${cli}' status"`,
+      `env sh -c "true; bun '${cli}' status"`,
       "echo \\\nvalue", "echo 'unterminated",
     ]) {
       for (const shell of ["/bin/sh", "/bin/bash"]) {
-        const error = refused(() => spawnSync(shell, ["-c", command], { timeout: 5_000 }),
+        const error = refused(() => spawnSync(shell, ["-c", command], { timeout: 5_000,
+          env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise compound shell refusal" },
+        }),
           "child_process.spawnSync", "TestRuntimeIdentityError");
         expect(error.message).toContain("unclassifiable shell string");
       }
@@ -377,6 +381,46 @@ describe("Bun Harper spawn preload", () => {
       expect(log).toHaveBeenCalled();
     } finally { log.mockRestore(); }
   }, 40_000);
+  for (const wrapper of ["/usr/bin/time", "env", "nice -n 5", "xargs -I ARG", "sh -c", "env sh -c", "env env", "custom", ...(Bun.which("timeout") ? ["timeout 5"] : [])]) {
+    test(`${wrapper} shell tokens naming protected entries require a child-only reason`, () => {
+      const { root } = fixture();
+      const custom = join(root, "wrapper");
+      writeFileSync(custom, '#!/bin/sh\nexec "$@"\n', { mode: 0o755 });
+      const prefix = wrapper === "custom" ? custom : wrapper;
+      const log = spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        for (const entry of ["./dist/cli.js", "./dist/cli-shim.cjs", harperEntry]) {
+          const argument = entry === "./dist/cli.js" ? wrapper === "env" || wrapper === "nice -n 5" ? "" : "status" : protectedArgument(entry);
+          const inner = `bun ${entry} ${argument}`;
+          const command = wrapper.endsWith("sh -c") ? `${wrapper === "sh -c" ? "/usr/bin/time sh -c" : wrapper} '${inner}'` : `${prefix} ${inner}`;
+          const options = { cwd: root, shell: true, encoding: "utf8" as const, timeout: 5_000,
+            input: "run\n",
+          };
+          const error = refused(() => spawnSync(command, { ...options, timeout: 5_000 }),
+            "child_process.spawnSync", "TestRuntimeIdentityError");
+          expect(error.message).toContain("shell string launching");
+          const result = spawnSync(command, { ...options, timeout: 5_000,
+            env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise wrapped protected entries through a real shell" },
+          });
+          expect(result.status, result.stderr).toBe(0);
+          if (entry !== harperEntry) expect(JSON.parse(result.stdout)).toEqual(argument ? [argument] : []);
+        }
+        expect(log).toHaveBeenCalled();
+      } finally { log.mockRestore(); }
+    }, 30_000);
+  }
+  test("shell strings require a reason even when a protected entry is an ordinary argument", () => {
+    const { cli } = fixture();
+    for (const command of [`printf '%s' '${cli}'`, `env printf '%s' '${cli}'`, `nice -n 5 printf '%s' '${cli}'`]) {
+      refused(() => spawnSync(command, { shell: true, timeout: 5_000 }),
+        "child_process.spawnSync", "TestRuntimeIdentityError");
+    }
+  }, 20_000);
+  test("shell strings without protected entries retain nested env refusal", () => {
+    const error = refused(() => spawnSync("env sh -c 'printf ordinary'", { shell: true, timeout: 5_000 }),
+      "child_process.spawnSync", "TestRuntimeIdentityError");
+    expect(error.message).toContain("unsupported nested env wrapper");
+  }, 20_000);
   test("spawnSync with a real Bash exported node function requires a child-only reason for the built CLI", () => {
     ensureCliBuild();
     const marker = join(tempDir("flair-bash-runtime-"), "runtime.cjs");

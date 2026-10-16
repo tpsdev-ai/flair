@@ -158,7 +158,30 @@ function shellWords(source: string): string[] | undefined {
   }
   if (quote) return;
   if (started) words.push(word);
+  for (let i = 0; i < words.length; i++) {
+    if (!["sh", "bash"].includes(basename(words[i]))) continue;
+    for (let j = i + 1; words[j]?.startsWith("-"); j++) {
+      if (!/^-[^-]*c/.test(words[j])) continue;
+      const nested = shellWords(words[j + 1] ?? "");
+      if (!nested) return;
+      words.splice(j + 1, 1, ...nested);
+      break;
+    }
+  }
   return words;
+}
+
+function shellEntry(words: string[], options: Options): EntryKind | undefined {
+  for (const word of words) {
+    const entry = entryKind(word, options)
+      ?? entryKind(resolvedExecutable(word, options) ?? word, options);
+    if (entry) return entry;
+    const nested = shellWords(word);
+    if (nested && (nested.length > 1 || nested[0] !== word)) {
+      const entry = shellEntry(nested, options);
+      if (entry) return entry;
+    }
+  }
 }
 
 function invocation(command: string, args: string[], options: Options) {
@@ -179,9 +202,10 @@ function invocation(command: string, args: string[], options: Options) {
   };
   const failure = (reason: string) => ({
     command: options.shell ? typeof options.shell === "string" ? options.shell : "sh" : command,
-    args: [], options: probeOptions, shellString, failure: reason,
+    args: [], options: probeOptions, shellString, entry: undefined, failure: reason,
   });
   if (!words) return failure("unclassifiable shell string");
+  const protectedEntry = shellString ? shellEntry(words, probeOptions) : undefined;
   while (words.length && assignment(words[0])) words.shift();
   if (basename(words[0] ?? "") === "env") {
     words.shift();
@@ -210,13 +234,14 @@ function invocation(command: string, args: string[], options: Options) {
       else return failure("unsupported env option");
     }
     if (!words[0]) return failure("missing env executable");
-    if (["env", "sh", "bash"].includes(basename(words[0]))) return failure("unsupported nested env wrapper");
+    if (!protectedEntry && ["env", "sh", "bash"].includes(basename(words[0]))) return failure("unsupported nested env wrapper");
     if (!resolvedExecutable(words[0], probeOptions)) return failure("unresolved env executable");
   }
   if (shellString && (!words[0] || !resolvedExecutable(words[0], probeOptions))) {
     return failure("unresolved shell executable");
   }
-  return { command: words[0], args: words.slice(1), options: probeOptions, shellString, failure: undefined };
+  return { command: words[0], args: words.slice(1), options: probeOptions, shellString,
+    entry: protectedEntry ?? (shellString ? shellEntry(words, probeOptions) : undefined), failure: undefined };
 }
 
 export class BunHarperSpawnError extends Error {
@@ -242,8 +267,7 @@ export function checkTestSpawn(api: string, command: unknown, args: unknown, opt
   const launch = invocation(command, args, options);
   if (launch.failure) throw new TestRuntimeIdentityError(api, launch.command!, launch.failure);
   if (!launch.command) return;
-  const entry = (launch.shellString ? entryKind(resolvedExecutable(launch.command, launch.options)!, launch.options) : undefined)
-    ?? guardedEntry(launch.args, launch.options);
+  const entry = launch.entry ?? guardedEntry(launch.args, launch.options);
   if (!entry) return;
   const runtime = launch.shellString ? "unknown" : runtimeKind(launch.command, launch.options);
   if (runtime === "node" || runtime === "missing") return;
