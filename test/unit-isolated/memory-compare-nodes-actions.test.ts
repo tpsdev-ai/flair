@@ -101,11 +101,42 @@ describe("Memory compare-nodes Commander action", () => {
     expect(parsed.nodes.map((n) => n.node).sort()).toEqual([NODE_A, NODE_B]);
   }, 10_000);
 
-  test("an unreachable node is unknown (exit 3), never healthy", async () => {
-    const rows = { [NODE_A]: [row("mem-1", T1)], [NODE_B]: [row("mem-1", T1)] };
-    const result = await action(args(NODE_A, NODE_B), rows, { failHosts: [NODE_B] });
+  test("a failed node and differences without a usable peer are UNAVAILABLE in human and JSON output", async () => {
+    const rows = { [NODE_A]: [row("mem-1", T1)] };
+    const human = await action(args(NODE_A, NODE_B), rows, { failHosts: [NODE_B] });
+    expect(human.code, human.output).toBe(3);
+    expect(human.output).toContain(`${NODE_A}  UNKNOWN  (1 id(s), maximum timestamp ${T1})`);
+    expect(human.output).toContain(`${NODE_B}  UNKNOWN  (UNAVAILABLE id(s), maximum timestamp UNAVAILABLE)`);
+    expect(human.output.match(/missing: UNAVAILABLE/g)).toHaveLength(2);
+    expect(human.output.match(/extra: UNAVAILABLE/g)).toHaveLength(2);
+    expect(human.output).not.toContain("holds ");
+    const json = await action([...args(NODE_A, NODE_B), "--json"], rows, { failHosts: [NODE_B] });
+    expect(json.code).toBe(3);
+    expect(JSON.parse(json.output).nodes).toMatchObject([
+      { rowCount: 1, newestWrite: T1, missing: "UNAVAILABLE", extra: "UNAVAILABLE" },
+      { rowCount: "UNAVAILABLE", newestWrite: "UNAVAILABLE", missing: "UNAVAILABLE", extra: "UNAVAILABLE" },
+    ]);
+  }, 10_000);
+
+  test("two divergent nodes plus an unknown node exit 3", async () => {
+    const nodeC = "https://node-c.example.invalid";
+    const rows = { [NODE_A]: [row("only-a", T1)], [NODE_B]: [row("only-b", T1)] };
+    const json = await action([...args(NODE_A, NODE_B, nodeC), "--json"], rows, { failHosts: [nodeC] });
+    expect(json.code, json.output).toBe(3);
+    expect(JSON.parse(json.output).nodes.map((node: { verdict: string }) => node.verdict)).toEqual(["divergent", "divergent", "unknown"]);
+    const human = await action(args(NODE_A, NODE_B, nodeC), rows, { failHosts: [nodeC] });
+    expect(human.code).toBe(3);
+    expect(human.output).toContain("holds 1 id(s) absent from the other usable readings: only-a");
+    expect(human.output).toContain("holds 1 id(s) absent from the other usable readings: only-b");
+    expect(human.output).not.toContain("no other node has");
+  }, 10_000);
+
+  test("a readable empty node without a timestamp for missing ids exits 3", async () => {
+    const result = await action([...args(NODE_A, NODE_B), "--json"], { [NODE_A]: [row("mem-1", T1)], [NODE_B]: [] });
     expect(result.code, result.output).toBe(3);
-    expect(result.output).toContain("UNKNOWN");
+    expect(JSON.parse(result.output).nodes[1]).toMatchObject({
+      verdict: "unknown", rowCount: 0, newestWrite: null, missing: { count: 1, sample: ["mem-1"] },
+    });
   }, 10_000);
 
   test("fewer than two --node values is a usage error (exit 1)", async () => {

@@ -38,8 +38,6 @@ describe("flair#2216 — node id-set classifier", () => {
   });
 
   test("a node missing only an id timestamp greater than its own maximum is lagging, never healthy", () => {
-    // The lagging id is held by two other nodes, so no node counts it as an id
-    // no other node has; the overall result is lagging, not divergent.
     const result = classifyNodeSets([
       read(NODE_A, [["mem-1", T0], ["mem-2", T1], ["mem-3", T2]]),
       read(NODE_B, [["mem-1", T0], ["mem-2", T1], ["mem-3", T2]]),
@@ -52,8 +50,6 @@ describe("flair#2216 — node id-set classifier", () => {
   });
 
   test("in a two-node comparison a node with an extra id and a lagging peer is divergent, and the overall result is divergent", () => {
-    // The lagging node's missing id is held by exactly one node, so that node
-    // holds an id no other node has.
     const result = classifyNodeSets([
       read(NODE_A, [["mem-1", T0], ["mem-2", T1], ["mem-3", T2]]),
       read(NODE_B, [["mem-1", T0], ["mem-2", T1]]),
@@ -80,7 +76,7 @@ describe("flair#2216 — node id-set classifier", () => {
     expect(result.nodes[1].verdict).toBe("divergent");
   });
 
-  test("a node holding an id no other node has is divergent", () => {
+  test("an id unique to one of two usable nodes is extra", () => {
     const result = classifyNodeSets([
       read(NODE_A, [["mem-1", T0]]),
       read(NODE_B, [["mem-1", T0], ["only-on-b", T1]]),
@@ -118,7 +114,10 @@ describe("flair#2216 — node id-set classifier", () => {
     ]);
     expect(result.verdict).toBe("unknown");
     expect(result.nodes[0].verdict).toBe("unknown");
-    expect(result.nodes[0].reason).toContain("no other node");
+    expect(result.nodes[0].reason).toContain("no usable peer");
+    expect(result.nodes[0].missing).toBe("UNAVAILABLE");
+    expect(result.nodes[0].extra).toBe("UNAVAILABLE");
+    expect(result.nodes[1]).toMatchObject({ rowCount: "UNAVAILABLE", newestWrite: "UNAVAILABLE", missing: "UNAVAILABLE", extra: "UNAVAILABLE" });
   });
 
   test("a row with no usable stored timestamp makes its node unknown, not empty", () => {
@@ -144,7 +143,8 @@ describe("flair#2216 — node id-set classifier", () => {
     const many: [string, string][] = Array.from({ length: NODE_ID_SAMPLE_LIMIT + 2 }, (_, i) => [`mem-${i}`, T0]);
     const result = classifyNodeSets([read(NODE_A, many), read(NODE_B, [])]);
     const b = result.nodes[1];
-    expect(b.missing.count).toBe(NODE_ID_SAMPLE_LIMIT + 2);
+    expect(b.missing).toMatchObject({ count: NODE_ID_SAMPLE_LIMIT + 2 });
+    if (b.missing === "UNAVAILABLE") throw new Error("expected available missing ids");
     expect(b.missing.sample).toHaveLength(NODE_ID_SAMPLE_LIMIT);
     // Only ids — never a content field.
     expect(JSON.stringify(result)).not.toContain("content");

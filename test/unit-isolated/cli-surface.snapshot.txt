@@ -5479,8 +5479,8 @@ any unknown makes the overall result unknown.
 Exit codes:
   0  healthy — every node has the same observed Memory ids
   1  usage — fewer than two --node values, a duplicate node, or an invalid HTTP(S) URL
-  2  divergent — at least one node is classified divergent
-  3  unknown — at least one node's reading could not be used
+  2  divergent — at least one divergent node and no unknown node
+  3  unknown — at least one node could not be classified
   4  lagging — at least one node is lagging, with no divergent or unknown nodes
 
 

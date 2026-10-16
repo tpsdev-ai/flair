@@ -393,7 +393,9 @@ A missing id uses the maximum timestamp among usable peers holding it. Per node 
 
 The overall result is healthy only when every node is in-sync. A lagging node is reported as such
 and is never healthy; any unknown makes the overall result unknown. The report lists the missing
-and extra ids per node (a count, then the ids up to ten). `--json` prints the same result as JSON.
+and extra ids against other usable readings (a count, then the ids up to ten). Failed reads report
+counts, ids and timestamps as `UNAVAILABLE`; differences without a usable peer are `UNAVAILABLE`.
+`--json` prints the same result as JSON.
 
 Exit codes: `0` healthy, `2` divergent, `3` unknown, `4` lagging. Fewer than two `--node` values, a
 repeated node, or an invalid HTTP(S) URL exits `1`. Paths, queries and fragments are removed from

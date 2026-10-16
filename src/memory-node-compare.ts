@@ -68,11 +68,11 @@ export interface NodeVerdict {
   verdict: NodeClass;
   /** Present for `unknown`: why the node could not be classified. */
   reason?: string;
-  rowCount: number;
-  /** The maximum parsed stored timestamp as ISO, or null when unavailable. */
+  rowCount: number | "UNAVAILABLE";
+  /** ISO maximum, null for an empty usable reading, or UNAVAILABLE. */
   newestWrite: string | null;
-  missing: NodeIdSample;
-  extra: NodeIdSample;
+  missing: NodeIdSample | "UNAVAILABLE";
+  extra: NodeIdSample | "UNAVAILABLE";
 }
 
 export interface CompareNodesResult {
@@ -86,9 +86,8 @@ interface Prepared {
   node: string;
   ok: boolean;
   reason?: string;
-  rowCount: number;
+  rowCount: number | "UNAVAILABLE";
   idSet: Set<string>;
-  /** id -> stored timestamp in ms; only for ok nodes with usable timestamps. */
   timeById: Map<string, number>;
   /** max of timeById's values, or null when no timestamp is usable. */
   newestMs: number | null;
@@ -116,7 +115,7 @@ function sample(ids: readonly string[]): NodeIdSample {
 
 function prepare(reading: NodeReading): Prepared {
   if (reading.kind === "failed") {
-    return { node: reading.node, ok: false, reason: reading.reason, rowCount: 0, idSet: new Set(), timeById: new Map(), newestMs: null };
+    return { node: reading.node, ok: false, reason: reading.reason, rowCount: "UNAVAILABLE", idSet: new Set(), timeById: new Map(), newestMs: null };
   }
   const idSet = new Set<string>();
   const timeById = new Map<string, number>();
@@ -141,7 +140,7 @@ function prepare(reading: NodeReading): Prepared {
 export function classifyNodeSets(readings: readonly NodeReading[]): CompareNodesResult {
   if (readings.length < 2) throw new Error("compare-nodes needs at least two nodes to compare");
   const prepared = readings.map(prepare);
-  const readable = prepared.filter((p) => p.ok);
+  const usable = prepared.filter((p) => p.ok);
 
   const nodes: NodeVerdict[] = prepared.map((p) => {
     if (!p.ok) {
@@ -150,34 +149,30 @@ export function classifyNodeSets(readings: readonly NodeReading[]): CompareNodes
         verdict: "unknown",
         reason: p.reason,
         rowCount: p.rowCount,
-        newestWrite: null,
-        missing: { count: 0, sample: [] },
-        extra: { count: 0, sample: [] },
+        newestWrite: "UNAVAILABLE",
+        missing: "UNAVAILABLE",
+        extra: "UNAVAILABLE",
       };
     }
 
-    // The union of the OTHER readable nodes' ids. A failed node's ids are not
-    // used: its set is not trustworthy, and comparing against it would invent
-    // missing/extra ids. With no other readable node there is nothing to
-    // compare against, so this node cannot be classified either.
-    const others = new Set<string>();
-    const peers = readable.filter((q) => q !== p);
-    for (const q of peers) for (const id of q.idSet) others.add(id);
-
-    const extra = [...p.idSet].filter((id) => !others.has(id));
-    const missing = [...others].filter((id) => !p.idSet.has(id));
-
+    // Compare only with other usable readings; no usable peer means unavailable differences.
+    const peers = usable.filter((q) => q !== p);
     const base = { node: p.node, rowCount: p.rowCount, newestWrite: p.newestMs === null ? null : new Date(p.newestMs).toISOString() };
-
     if (peers.length === 0) {
       return {
         ...base,
         verdict: "unknown",
-        reason: "no other node could be read to compare against",
-        missing: sample(missing),
-        extra: sample(extra),
+        reason: "no usable peer to compare against",
+        missing: "UNAVAILABLE",
+        extra: "UNAVAILABLE",
       };
     }
+
+    const others = new Set<string>();
+    for (const q of peers) for (const id of q.idSet) others.add(id);
+    const extra = [...p.idSet].filter((id) => !others.has(id));
+    const missing = [...others].filter((id) => !p.idSet.has(id));
+
     if (extra.length > 0) {
       return { ...base, verdict: "divergent", missing: sample(missing), extra: sample(extra) };
     }
@@ -269,11 +264,15 @@ export function renderCompareNodesHuman(result: CompareNodesResult): string {
   for (const n of result.nodes) {
     lines.push(`  ${n.node}  ${n.verdict.toUpperCase()}  (${n.rowCount} id(s), maximum timestamp ${n.newestWrite ?? "none"})`);
     if (n.verdict === "unknown") lines.push(`    ⚠️  ${n.reason ?? "the node could not be classified"}; NOT healthy`);
-    if (n.missing.count > 0) {
+    if (n.missing === "UNAVAILABLE") {
+      lines.push("    missing: UNAVAILABLE");
+    } else if (n.missing.count > 0) {
       lines.push(`    missing ${n.missing.count} id(s): ${n.missing.sample.join(", ")}${n.missing.count > n.missing.sample.length ? ", …" : ""}`);
     }
-    if (n.extra.count > 0) {
-      lines.push(`    holds ${n.extra.count} id(s) no other node has: ${n.extra.sample.join(", ")}${n.extra.count > n.extra.sample.length ? ", …" : ""}`);
+    if (n.extra === "UNAVAILABLE") {
+      lines.push("    extra: UNAVAILABLE");
+    } else if (n.extra.count > 0) {
+      lines.push(`    holds ${n.extra.count} id(s) absent from the other usable readings: ${n.extra.sample.join(", ")}${n.extra.count > n.extra.sample.length ? ", …" : ""}`);
     }
   }
   return lines.join("\n");

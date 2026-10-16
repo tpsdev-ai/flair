@@ -145,6 +145,15 @@ describe("flair#2216 — compare Memory ids across two real nodes", () => {
       const unreachable = await run([a.opsURL, `http://127.0.0.1:${deadPort}`]);
       expect(unreachable.code, `unreadable node → unknown\n${unreachable.output}`).toBe(3);
       expect(unreachable.output).toContain("UNKNOWN");
+      expect(unreachable.output).toContain("(UNAVAILABLE id(s), maximum timestamp UNAVAILABLE)");
+      expect(unreachable.output.match(/missing: UNAVAILABLE/g)).toHaveLength(2);
+      expect(unreachable.output.match(/extra: UNAVAILABLE/g)).toHaveLength(2);
+      const unavailableJson = await run([a.opsURL, `http://127.0.0.1:${deadPort}`], true);
+      expect(unavailableJson.code, unavailableJson.output).toBe(3);
+      expect(JSON.parse(unavailableJson.output).nodes).toMatchObject([
+        { rowCount: 3, missing: "UNAVAILABLE", extra: "UNAVAILABLE" },
+        { rowCount: "UNAVAILABLE", newestWrite: "UNAVAILABLE", missing: "UNAVAILABLE", extra: "UNAVAILABLE" },
+      ]);
     },
     10 * 60_000,
   );
