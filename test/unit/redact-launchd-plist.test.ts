@@ -271,8 +271,9 @@ describe("--check on a named target that cannot be read exits 2, never 0 (flair#
 describe("a missing or malformed key-list export is a crash, not a finding (flair#2589)", () => {
   // The real scanner, but the dependency-free module it imports exports the
   // wrong thing. That must be exit 2 (could not run): before the guard, a
-  // missing export threw at module load (Node exits 1, which a caller reads as
-  // a finding) and a non-array export spread silently (wrong keys, exit 0).
+  // missing export threw at module load (Node exits 1, which a caller that
+  // reads exit status alone would take as a finding) and a non-array export
+  // spread silently (wrong keys, exit 0).
   function runWithExported(source: string) {
     const dir = mkdtempSync(join(tmpdir(), "redact-export-"));
     try {

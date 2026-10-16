@@ -61,8 +61,8 @@ try {
   // Validate and construct the key list inside the handled path. A missing or
   // non-array export, an element that is not a non-empty string, or a spread
   // that throws must all be a crash (exit 2) — never a silent wrong key list
-  // (exit 0) or a module-load throw Node exits 1 for, which a caller reads as a
-  // scan finding (flair#2589).
+  // (exit 0) or a module-load throw Node exits 1 for, which a caller that reads
+  // exit status alone would take as a scan finding (flair#2589).
   if (!Array.isArray(NEVER_GENERATED_SECRET_KEYS)) {
     throw new TypeError("NEVER_GENERATED_SECRET_KEYS is not an array");
   }
