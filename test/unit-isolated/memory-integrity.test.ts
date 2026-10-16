@@ -22,6 +22,7 @@
 import { describe, it, expect, beforeEach, mock, spyOn } from "bun:test";
 import { agentStore, middlewareCapture } from "../helpers/harper-mock.js";
 import { createFakeReplayNonceTable } from "../helpers/fake-replay-store.ts";
+import { memoryLockDouble } from "../helpers/memory-lock-double";
 
 // Defensive: `bun test <dir>` runs every file in one process, and
 // resources/rate-limiter.ts reads process.env LAZILY (not cached at import
@@ -138,6 +139,9 @@ function memorySearchGen(query: any) {
 }
 
 class BaseMemory {
+  /** flair#2478: Memory PUT/PATCH refuse a store with no per-id lock; this
+   *  double injects one (test/helpers/memory-lock-double.ts). */
+  static primaryStore = memoryLockDouble();
   // ── post()/put() return what REAL Harper returns, not the record ──────────
   // node_modules/harper/dist/resources/Resource.js's `async post(target,
   // newRecord)` returns `resource.#id` (or `newRecord?.[primaryKey]` on the
@@ -2552,5 +2556,87 @@ describe("flair#1965 r2 — Memory PUT resolves the URL-bound target; PATCH crea
     const res: any = await m.patch({ agentId: "agent-1", content: "brand new via patch, long enough for the gate." });
     expect(res instanceof Response).toBe(false);
     expect(memoryStore.get("mem-patch-create").originatorInstanceId).toBe("flair_local_test");
+  });
+});
+
+describe("flair#2478 — idless PATCH", () => {
+  it("refuses before accessing the lock store or entering the verb body", async () => {
+    const m: any = makeMemory(agentCtx("agent-1"));
+    m.getId = () => undefined;
+    m.patchLocked = async () => { throw new Error("idless PATCH entered its verb body"); };
+    const descriptor = Object.getOwnPropertyDescriptor(BaseMemory, "primaryStore")!;
+    Object.defineProperty(BaseMemory, "primaryStore", {
+      configurable: true,
+      get() { throw new Error("idless PATCH reached the lock helper's store"); },
+    });
+    try {
+      const res = await m.patch({ agentId: "agent-1", content: "an idless PATCH" });
+      expect({ status: res.status, error: (await res.json()).error }).toEqual({
+        status: 400, error: "memory_id_required",
+      });
+    } finally {
+      Object.defineProperty(BaseMemory, "primaryStore", descriptor);
+    }
+  });
+});
+
+// flair#2478 — Memory PUT and PATCH run under `Memory.primaryStore`'s per-id
+// lock. A store with no lock is refused by name through the resource, and
+// nothing is read or written: the verb never runs unserialized.
+describe("flair#2478 — a Memory store with no per-id lock refuses PUT and PATCH (fail closed)", () => {
+  async function withoutLock<T>(fn: () => Promise<T>): Promise<T> {
+    const saved = (BaseMemory as any).primaryStore;
+    (BaseMemory as any).primaryStore = undefined;
+    try {
+      return await fn();
+    } finally {
+      (BaseMemory as any).primaryStore = saved;
+    }
+  }
+
+  it("a PUT is refused 503 memory_lock_unavailable and the row is unchanged", async () => {
+    memoryStore.set("mem-nolock-put", { id: "mem-nolock-put", agentId: "agent-1", content: "the stored row", visibility: "shared" });
+    const before = JSON.stringify(memoryStore.get("mem-nolock-put"));
+    const m: any = makeMemory(agentCtx("agent-1"));
+    m._targetId = "mem-nolock-put";
+    const res: any = await withoutLock(() => m.put({ id: "mem-nolock-put", agentId: "agent-1", content: "a PUT that must not land, long enough for the gate.", visibility: "shared" }));
+    expect(res instanceof Response).toBe(true);
+    expect((res as Response).status).toBe(503);
+    expect((await (res as Response).json()).error).toBe("memory_lock_unavailable");
+    expect(JSON.stringify(memoryStore.get("mem-nolock-put"))).toBe(before);
+  });
+
+  it("a PATCH is refused 503 memory_lock_unavailable and the row is unchanged", async () => {
+    memoryStore.set("mem-nolock-patch", { id: "mem-nolock-patch", agentId: "agent-1", content: "the stored row", visibility: "shared" });
+    const before = JSON.stringify(memoryStore.get("mem-nolock-patch"));
+    const m: any = makeMemory(agentCtx("agent-1"));
+    m._targetId = "mem-nolock-patch";
+    const res: any = await withoutLock(() => m.patch({ agentId: "agent-1", content: "a PATCH that must not land, long enough for the gate." }));
+    expect(res instanceof Response).toBe(true);
+    expect((res as Response).status).toBe(503);
+    expect((await (res as Response).json()).error).toBe("memory_lock_unavailable");
+    expect(JSON.stringify(memoryStore.get("mem-nolock-patch"))).toBe(before);
+  });
+});
+
+// flair#2478 — a DELETE of an id whose last owned PUT/PATCH settled with an
+// unknown outcome is refused until restart, as a later PUT or PATCH of it is.
+describe("flair#2478 — the outcome-unknown fence covers DELETE", () => {
+  it("a DELETE of an outcome-unknown id answers 503 write_outcome_unknown and the row stays", async () => {
+    const { markMemoryWriteOutcomeUnknown, resetMemoryWriteOutcomeUnknownForTest } = await import("../../resources/memory-write-lock.ts");
+    memoryStore.set("mem-fenced", { id: "mem-fenced", agentId: "agent-owner", durability: "standard" });
+    markMemoryWriteOutcomeUnknown("mem-fenced");
+    try {
+      const res: any = await (makeMemory(agentCtx("agent-owner")) as any).delete("mem-fenced");
+      expect(res instanceof Response).toBe(true);
+      expect((res as Response).status).toBe(503);
+      expect((await (res as Response).json()).error).toBe("write_outcome_unknown");
+      expect(await BaseMemory.get("mem-fenced")).not.toBeNull();
+    } finally {
+      resetMemoryWriteOutcomeUnknownForTest("mem-fenced");
+    }
+    // Once the marker is gone the same DELETE proceeds.
+    await (makeMemory(agentCtx("agent-owner")) as any).delete("mem-fenced");
+    expect(await BaseMemory.get("mem-fenced")).toBeNull();
   });
 });

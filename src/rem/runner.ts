@@ -360,12 +360,23 @@ export interface RunnerLogRow {
    * federated flairUrl deployments would leave HealthDetail with nothing to
    * read otherwise). Absent when dry-run skipped the step, the call failed
    * (see `errors`), or the response didn't carry the expected shape.
+   *
+   * flair#2596: when the embedding-space guard refused the sweep (the store's
+   * model stamps were not verified uniform), the resource answers with null
+   * counts and the guard's named state; that response is recorded HERE, below,
+   * as the second variant rather than treated as an unexpected shape.
    */
   dedup?: {
     clusterCount: number;
     largestClusterSize: number;
     totalMemoriesInClusters: number;
     computedAt: string;
+  } | {
+    clusterCount: null;
+    largestClusterSize: null;
+    totalMemoriesInClusters: null;
+    computedAt: string;
+    embeddingSpace: { state: string; reason: string | null };
   };
   /**
    * #1515: per-run distillation bound actually applied this cycle. Absent
@@ -1067,13 +1078,39 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
         typeof obj.clusterCount === "number" &&
         typeof obj.largestClusterSize === "number" &&
         typeof obj.totalMemoriesInClusters === "number" &&
-        typeof obj.computedAt === "string"
+        typeof obj.computedAt === "string" &&
+        obj.embeddingSpace === undefined
       ) {
         dedup = {
           clusterCount: obj.clusterCount,
           largestClusterSize: obj.largestClusterSize,
           totalMemoriesInClusters: obj.totalMemoriesInClusters,
           computedAt: obj.computedAt,
+        };
+      } else if (
+        // Accept the guard's refusal only with null counts and a refusal state: any
+        // non-empty state other than "uniform" (a refusal claiming "uniform" is
+        // contradictory and stays an unexpected shape). Not an enumeration of
+        // today's states, so a new guard state is recorded rather than an error.
+        obj.clusterCount === null &&
+        obj.largestClusterSize === null &&
+        obj.totalMemoriesInClusters === null &&
+        typeof obj.computedAt === "string" &&
+        obj.embeddingSpace !== null && typeof obj.embeddingSpace === "object" &&
+        !Array.isArray(obj.embeddingSpace) &&
+        typeof (obj.embeddingSpace as { state?: unknown }).state === "string" &&
+        (obj.embeddingSpace as { state: string }).state.length > 0 &&
+        (obj.embeddingSpace as { state: string }).state !== "uniform" &&
+        ((obj.embeddingSpace as { reason?: unknown }).reason === null ||
+          typeof (obj.embeddingSpace as { reason?: unknown }).reason === "string")
+      ) {
+        const space = obj.embeddingSpace as { state: string; reason: string | null };
+        dedup = {
+          clusterCount: null,
+          largestClusterSize: null,
+          totalMemoriesInClusters: null,
+          computedAt: obj.computedAt,
+          embeddingSpace: { state: space.state, reason: space.reason },
         };
       } else {
         errors.push("dedup: unexpected /MemoryDedupStats response shape");
