@@ -106,7 +106,8 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
     const addressed = typeof addressedId === "string" || typeof addressedId === "number";
     // A missing or null body id binds to the address; a string or number body id
     // binds when it equals the address as text. Any other id is left unchanged
-    // and is refused only if it fails isReadableEventId.
+    // by this binding step; isReadableEventId, the ownership check and the
+    // createdAt check still apply to it later.
     if (content && typeof content === "object" && addressed &&
       (content.id == null ||
         ((typeof content.id === "string" || typeof content.id === "number") &&

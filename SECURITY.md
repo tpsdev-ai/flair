@@ -101,8 +101,10 @@ OrgEvent, WorkspaceState, Presence):
 A refusal by this guard leaves its target row unchanged and carries no record
 content. A POST to a collection is delegated to each resource's own
 POST handling — its create and attribution rules (for example, an OrgEvent
-collection POST that names an existing event owned by another agent is
-refused, one that names the caller's own existing event updates it, and a
+collection POST that names an existing event owned by another agent reaches
+OrgEvent's ownership check and is refused, one that names the caller's own
+existing event can update it when OrgEvent's other checks pass (a changed
+`createdAt` is refused with 409), and a
 Presence heartbeat writes the caller's own row). Routes served
 by a custom resource rather than a table-backed one, such as
 `/AgentReadPosition`, apply their own ownership rule and response.

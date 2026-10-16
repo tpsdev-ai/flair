@@ -102,7 +102,6 @@ export function unverifiedWriteCallerRefusal(table: string): Error & { statusCod
   );
 }
 
-/** The named refusal for an addressed write whose string or number body `id` names a record other than the one it addresses. */
 /** A non-admin addressed write whose body could not be read: refused, never admitted. */
 export function writeBodyUnreadableRefusal(table: string): Response {
   return new Response(JSON.stringify({
@@ -111,6 +110,7 @@ export function writeBodyUnreadableRefusal(table: string): Response {
   }), { status: 400, headers: { "Content-Type": "application/json" } });
 }
 
+/** The named refusal for an addressed write whose string or number body `id` names a record other than the one it addresses. */
 export function writeIdNotAddressedRefusal(): Response {
   return new Response(JSON.stringify({
     error: "write_id_not_addressed",
