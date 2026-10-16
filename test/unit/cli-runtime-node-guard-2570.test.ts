@@ -1,6 +1,6 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import childProcess, { exec, execSync, execFile, execFileSync, spawn, spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -180,7 +180,7 @@ describe("Bun Harper spawn preload", () => {
         for (const form of cases) {
           const options = { shell: form.shell, timeout: 5_000, encoding: "utf8" as const };
           const error = refused(() => spawnSync(form.command, form.args, options),
-            "child_process.spawnSync", runtime === unknown ? "TestRuntimeIdentityError" : "BunHarperSpawnError");
+            "child_process.spawnSync", runtime === unknown || form.shell || form.command === "/bin/sh" ? "TestRuntimeIdentityError" : "BunHarperSpawnError");
           expect(error.message).toContain("launching dist/cli.js");
           expect(error.message).not.toContain(marker);
           expect(error.stack).not.toContain(marker);
@@ -200,9 +200,9 @@ describe("Bun Harper spawn preload", () => {
     const { cli } = fixture();
     for (const prefix of ["", "UNUSED=value "]) {
       const command = `${prefix}bun '${cli}' init`;
-      refused(() => spawnSync(command, { shell: true, timeout: 5_000 }));
+      refused(() => spawnSync(command, { shell: true, timeout: 5_000 }), "child_process.spawnSync", "TestRuntimeIdentityError");
       for (const shell of ["/bin/sh", "/bin/bash"]) {
-        refused(() => spawnSync(shell, ["-c", command], { timeout: 5_000 }));
+        refused(() => spawnSync(shell, ["-c", command], { timeout: 5_000 }), "child_process.spawnSync", "TestRuntimeIdentityError");
       }
     }
   }, 20_000);
@@ -230,7 +230,7 @@ describe("Bun Harper spawn preload", () => {
         ], { encoding: "utf8", timeout: 10_000 });
         expect(JSON.parse(unguarded)).toEqual(["status"]);
         const error = refused(() => spawnSync(executableShell, args, options),
-          "child_process.spawnSync", syntax === "literal Bun" ? "BunHarperSpawnError" : "TestRuntimeIdentityError");
+          "child_process.spawnSync", "TestRuntimeIdentityError");
         expect(error.message).toContain(syntax === "literal Bun" ? "launching dist/cli.js" : "unclassifiable shell string");
       }, 20_000);
     }
@@ -279,7 +279,7 @@ describe("Bun Harper spawn preload", () => {
     test(`bash ${flag} refuses a Bun CLI fixture with a reason`, () => {
       const error = refused(() => spawnSync("/bin/bash", [flag, `'${process.execPath}' '${fixture().cli}' status`], {
         timeout: 5_000,
-      }));
+      }), "child_process.spawnSync", "TestRuntimeIdentityError");
       expect(error.message).toContain("launching dist/cli.js");
     }, 20_000);
   }
@@ -309,20 +309,89 @@ describe("Bun Harper spawn preload", () => {
       }
     }
   }, 20_000);
-  test("env and shell wrappers allow Node to run an argument-printing script standing in for the CLI entry", () => {
-    const { cli } = fixture();
-    const node = Bun.which("node")!;
-    const command = `UNUSED=value '${node}' '${cli}' init`;
-    const results = [
-      spawnSync("/usr/bin/env", ["-u", "UNUSED", "OTHER=value", node, cli, "init"], { encoding: "utf8", timeout: 5_000 }),
-      spawnSync(command, { shell: true, encoding: "utf8", timeout: 5_000 }),
-      spawnSync("/bin/sh", ["-c", command], { encoding: "utf8", timeout: 5_000 }),
-      spawnSync("/bin/bash", ["-c", command], { encoding: "utf8", timeout: 5_000 }),
-    ];
-    for (const result of results) {
+  test("direct env allows Node while shell strings require a child-only reason for protected entries", () => {
+    const { root, cli } = fixture();
+    const node = nodeBin();
+    const direct = spawnSync("/usr/bin/env", ["-u", "UNUSED", "OTHER=value", node, cli, "init"], {
+      encoding: "utf8", timeout: 5_000,
+    });
+    expect(direct.status).toBe(0);
+    expect(JSON.parse(direct.stdout)).toEqual(["init"]);
+    const log = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      for (const entry of [cli, join(root, "dist", "cli-shim.cjs"), harperEntry]) {
+        const command = `UNUSED=value '${node}' '${entry}' --version`;
+        for (const shell of ["shell: true", "/bin/sh", "/bin/bash"]) {
+          const executable = shell === "shell: true" ? command : shell;
+          const args = shell === "shell: true" ? [] : ["-c", command];
+          const options = { shell: shell === "shell: true", encoding: "utf8" as const, timeout: 5_000 };
+          const error = refused(() => spawnSync(executable, args, options),
+            "child_process.spawnSync", "TestRuntimeIdentityError");
+          expect(error.message).toContain("shell string launching");
+          for (const env of [undefined, { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: " " }]) {
+            refused(() => spawnSync(executable, args, { ...options, env }),
+              "child_process.spawnSync", "TestRuntimeIdentityError");
+          }
+          const result = spawnSync(executable, args, { ...options,
+            env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise protected Node entries through real shells" },
+          });
+          expect(result.status).toBe(0);
+          if (entry !== harperEntry) expect(JSON.parse(result.stdout)).toEqual(["--version"]);
+        }
+      }
+      expect(log.mock.calls.flat().join("\n")).toContain("exercise protected Node entries through real shells");
+    } finally { log.mockRestore(); }
+  }, 40_000);
+  test("shell commands naming a protected entry as the executable require a child-only reason", () => {
+    const { root, cli } = fixture();
+    const log = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      for (const entry of [cli, join(root, "dist", "cli-shim.cjs"), harperEntry]) {
+        if (entry !== harperEntry) {
+          writeFileSync(entry, "#!/usr/bin/env node\nconsole.log(JSON.stringify(process.argv.slice(2)))", { mode: 0o755 });
+          chmodSync(entry, 0o755);
+        }
+        const alias = join(root, entry === cli ? "cli" : entry === harperEntry ? "harper" : "shim");
+        symlinkSync(entry, alias);
+        for (const command of [`'${entry}' --version`, `${alias.split("/").at(-1)} --version`]) {
+          const options = { shell: true, timeout: 5_000, encoding: "utf8" as const,
+            env: { ...process.env, PATH: `${root}:${process.env.PATH}` },
+          };
+          refused(() => spawnSync(command, { ...options, timeout: 5_000 }), "child_process.spawnSync", "TestRuntimeIdentityError");
+          const result = spawnSync(command, { ...options, timeout: 5_000,
+            env: { ...options.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise shell entry executables and PATH aliases" },
+          });
+          expect(result.status).toBe(0);
+          if (entry !== harperEntry) expect(JSON.parse(result.stdout)).toEqual(["--version"]);
+        }
+      }
+      expect(log).toHaveBeenCalled();
+    } finally { log.mockRestore(); }
+  }, 40_000);
+  test("real Bash exported node function requires a child-only reason for the built CLI", () => {
+    ensureCliBuild();
+    const marker = join(tempDir("flair-bash-runtime-"), "runtime.cjs");
+    writeFileSync(marker, "console.error('Bash function runtime: ' + (process.versions.bun ? 'bun' : 'node'))");
+    const env = {
+      ...process.env,
+      "BASH_FUNC_node%%": `() { '${process.execPath}' --preload '${marker}' "$@"; }`,
+    };
+    const options = { cwd: resolve(import.meta.dir, "../.."), env, encoding: "utf8" as const, timeout: 5_000 };
+    const error = refused(() => spawnSync("/bin/bash", ["-c", "node ./dist/cli.js --version"], { ...options, timeout: 5_000 }),
+      "child_process.spawnSync", "TestRuntimeIdentityError");
+    expect(error.message).toContain("shell string launching dist/cli.js");
+    const log = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const result = spawnSync("/bin/bash", ["-c", "node ./dist/cli.js --version"], { ...options,
+        timeout: 5_000,
+        env: { ...env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise Bash exported node function dispatching to Bun" },
+      });
       expect(result.status).toBe(0);
-      expect(JSON.parse(result.stdout)).toEqual(["init"]);
-    }
+      expect(result.stderr).toContain("Bash function runtime: bun");
+      expect(result.stdout.trim()).toBe(JSON.parse(readFileSync(resolve(import.meta.dir, "../../package.json"), "utf8")).version);
+      expect(log.mock.calls.flat().join("\n")).toContain("exercise Bash exported node function dispatching to Bun");
+    } finally { log.mockRestore(); }
+    expect(process.env["BASH_FUNC_node%%"]).toBeUndefined();
   }, 20_000);
   test("environment-expression runtime is refused", () => {
     const { cli } = fixture();

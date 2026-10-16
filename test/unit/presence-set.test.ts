@@ -16,10 +16,7 @@ import { childOverranDeadline, cliLeg } from "../helpers/child-deadline.js";
 import { nodeBin } from "../helpers/node-runtime.js";
 
 // flair#1807: the spawned CLI's OWN deadline, and the per-case budget above it.
-// Every case here runs the built CLI once against a local mock server, so 20 s
-// covers a cold `bun dist/cli.js` start many times over; the budget is the
-// deadline + 5 s for the mock-server setup, the assertions and the teardown. A
-// hung child is named by ITS deadline, with its captured output — never bun's
+// A hung child is named by ITS deadline, with its captured output — never bun's
 // bare per-test "timed out".
 const CHILD_DEADLINE_MS = 20_000;
 const CASE_BUDGET_MS = 25_000;

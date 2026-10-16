@@ -179,7 +179,7 @@ function invocation(command: string, args: string[], options: Options) {
   };
   const failure = (reason: string) => ({
     command: options.shell ? typeof options.shell === "string" ? options.shell : "sh" : command,
-    args: [], options: probeOptions, failure: reason,
+    args: [], options: probeOptions, shellString, failure: reason,
   });
   if (!words) return failure("unclassifiable shell string");
   while (words.length && assignment(words[0])) words.shift();
@@ -213,14 +213,10 @@ function invocation(command: string, args: string[], options: Options) {
     if (["env", "sh", "bash"].includes(basename(words[0]))) return failure("unsupported nested env wrapper");
     if (!resolvedExecutable(words[0], probeOptions)) return failure("unresolved env executable");
   }
-  // Shell strings (shell options or sh/bash short-flag clusters containing c) refuse
-  // compound syntax, expansion characters even when quoted/escaped, and unresolved executables.
-  // Resolve with child env.PATH when present, else process.env.PATH; allow ordinary commands.
-  // Guarded entries require Node or a nonempty child-only reason.
   if (shellString && (!words[0] || !resolvedExecutable(words[0], probeOptions))) {
     return failure("unresolved shell executable");
   }
-  return { command: words[0], args: words.slice(1), options: probeOptions, failure: undefined };
+  return { command: words[0], args: words.slice(1), options: probeOptions, shellString, failure: undefined };
 }
 
 export class BunHarperSpawnError extends Error {
@@ -237,17 +233,21 @@ export class TestRuntimeIdentityError extends Error {
   }
 }
 
+// Test-harness guard against accidental Bun launches, not a security boundary.
+// It does not model hostile process environments.
+// Direct non-Node runtimes and every shell-string launch of a protected entry need a child-only reason.
 export function checkTestSpawn(api: string, command: unknown, args: unknown, options: Options = {}): void {
   if (typeof command !== "string" || !Array.isArray(args)) return;
   const launch = invocation(command, args, options);
   if (launch.failure) throw new TestRuntimeIdentityError(api, launch.command!, launch.failure);
   if (!launch.command) return;
-  const entry = guardedEntry(launch.args, launch.options);
+  const entry = (launch.shellString ? entryKind(resolvedExecutable(launch.command, launch.options)!, launch.options) : undefined)
+    ?? guardedEntry(launch.args, launch.options);
   if (!entry) return;
-  const runtime = runtimeKind(launch.command, launch.options);
+  const runtime = launch.shellString ? "unknown" : runtimeKind(launch.command, launch.options);
   if (runtime === "node" || runtime === "missing") return;
   const error = runtime === "bun" ? new BunHarperSpawnError(api, launch.command, entry)
-    : new TestRuntimeIdentityError(api, launch.command, `unverified runtime launching ${entry}`);
+    : new TestRuntimeIdentityError(api, launch.command, `${launch.shellString ? "shell string" : "unverified runtime"} launching ${entry}`);
   const reason = !Object.hasOwn(process.env, ALLOW) && options.env && Object.hasOwn(options.env, ALLOW)
     ? options.env[ALLOW]?.trim() : undefined;
   if (reason) {

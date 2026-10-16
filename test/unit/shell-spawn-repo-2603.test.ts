@@ -61,6 +61,7 @@ function collect(source: string, file: string, substitutions: Record<string, str
       const result: Record<string, Value> = {};
       for (const property of node.properties) {
         if (ts.isPropertyAssignment(property)) result[property.name.getText(ast).replaceAll(/["']/g, "")] = value(property.initializer, seen);
+        else if (ts.isShorthandPropertyAssignment(property)) result[property.name.text] = value(property.name, seen);
         else if (ts.isSpreadAssignment(property)) {
           const spread = value(property.expression, seen);
           if (spread !== unknown && typeof spread === "object" && !Array.isArray(spread)) Object.assign(result, spread);
@@ -136,12 +137,17 @@ function collect(source: string, file: string, substitutions: Record<string, str
 function check(call: ShellCall) {
   const options = call.options !== unknown && typeof call.options === "object" && !Array.isArray(call.options) ? call.options : {};
   const env = options.env;
-  const path = env !== unknown && typeof env === "object" && !Array.isArray(env) ? env.PATH : undefined;
-  if (path !== undefined) expect(typeof path, `${call.site}: resolve child PATH`).toBe("string");
+  const childEnv: Record<string, string> = {};
+  if (env !== unknown && typeof env === "object" && !Array.isArray(env)) {
+    for (const [key, value] of Object.entries(env)) {
+      expect(typeof value, `${call.site}: resolve child env.${key}`).toBe("string");
+      childEnv[key] = value as string;
+    }
+  }
   checkTestSpawn(call.site, call.command, call.args, {
     shell: call.shell === unknown ? undefined : call.shell as boolean | string,
     cwd: typeof options.cwd === "string" ? options.cwd : undefined,
-    env: typeof path === "string" ? { PATH: path } : undefined,
+    env: Object.keys(childEnv).length ? childEnv : undefined,
   });
 }
 
@@ -167,6 +173,21 @@ test("shell scan recognizes child_process aliases, namespaces and Bun command fo
   for (const call of calls) {
     expect(() => check(call)).not.toThrow();
   }
+});
+
+test("shell scan preserves child reasons and exported Bash functions", () => {
+  const source = `
+    import { spawnSync } from "node:child_process";
+    const env = { "BASH_FUNC_node%%": "() { bun \\\"$@\\\"; }" };
+    spawnSync("/bin/bash", ["-c", "node ./dist/cli.js --version"], { env });
+    spawnSync("/bin/bash", ["-c", "node ./dist/cli.js --version"], {
+      env: { ...env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise exported node function" },
+    });
+  `;
+  const calls = collect(source, "fixture.ts");
+  expect(calls).toHaveLength(2);
+  expect(() => check(calls[0])).toThrow("shell string launching dist/cli.js");
+  expect(() => check(calls[1])).not.toThrow();
 });
 
 test("test tree shell-string spawns are allowed or assert their guard decision in the runtime fixtures", () => {
