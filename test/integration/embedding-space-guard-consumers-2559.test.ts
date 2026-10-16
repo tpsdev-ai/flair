@@ -7,8 +7,8 @@
  *     verdict; on a mixed or unknown one it returns no counts and names the
  *     guard state.
  *   - MemoryBootstrap's task-relevant selection refuses its task embedding on a
- *     non-uniform verdict and surfaces the state-named warning SemanticSearch
- *     emits. (Gated on the embedding model, like the other bootstrap
+ *     verdict that does not establish uniformity and surfaces SemanticSearch's warning.
+ *     (Gated on the embedding model, like the other bootstrap
  *     real-Harper tests — the consult only happens when a query embedding was
  *     generated.)
  *
@@ -21,7 +21,7 @@
  * ephemeral instance this file started.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -30,6 +30,7 @@ import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-
 import { TEST_FAULT_INJECTION_ENV, TEST_PAUSE_DIR_ENV } from "../../resources/txn-pause-point.ts";
 
 const POINT = "space-guard-scan";
+const SWEEP_POINT = "dedup-sweep-persist";
 const AGENT = "agent-a";
 const ROW = "row-a";
 const FOREIGN = "other-engine:not-the-current-space"; // a genuinely different vector space
@@ -131,18 +132,19 @@ describe("MemoryDedupStats consults the guard against a real Harper (flair#2559)
     // not affect the stamp scan (a missing stamp is ignored).
     await adminOp(h, {
       operation: "insert", database: "flair", table: "Memory", records: [
-        { id: ROW, agentId: AGENT, content: "seeded row", durability: "standard", visibility: "shared", createdAt: new Date().toISOString() },
+        { id: ROW, agentId: AGENT, content: "seeded row", embedding: [1, 0, 0, 0], durability: "standard", visibility: "shared", createdAt: new Date().toISOString() },
       ],
     });
   }, 180_000);
 
   afterAll(async () => {
     if (pauseDir) writeFileSync(join(pauseDir, `go.${POINT}`), ""); // never leave a scan parked
+    if (pauseDir) writeFileSync(join(pauseDir, `go.${SWEEP_POINT}`), "");
     if (h) await stopHarper(h);
     if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
   }, 60_000);
 
-  test("unknown → uniform → mixed: counts only on uniform, state named otherwise", async () => {
+  test("a foreign-stamp Memory PATCH during a paused sweep returns mixed and preserves the existing stat file", async () => {
     // The boot pre-warm's scan is parked ⇒ the guard verdict is unknown.
     expect(await waitFor(join(pauseDir, `paused.${POINT}`), 30_000), "no scan reached the boot pause").toBe(true);
 
@@ -161,11 +163,28 @@ describe("MemoryDedupStats consults the guard against a real Harper (flair#2559)
     expect(typeof uniform.clusterCount).toBe("number");
     expect(uniform.embeddingSpace).toBeUndefined();
 
-    // A foreign-stamp PATCH trips the latch: the sweep must not count across spaces.
-    await patchForeignStamp(h!);
-    const mixed = await dedupStats(h!);
+    const statsPath = join(h!.installDir, ".flair", "rem-dedup-stats.json");
+    const priorStat = readFileSync(statsPath);
+    expect(JSON.parse(priorStat.toString())).toEqual(uniform);
+    writeFileSync(join(pauseDir, `arm.${SWEEP_POINT}`), "");
+    const sweep = dedupStats(h!);
+    let mixed: any;
+    try {
+      expect(await waitFor(join(pauseDir, `paused.${SWEEP_POINT}`), 10_000)).toBe(true);
+      expect(readFileSync(join(pauseDir, `released.${SWEEP_POINT}`), "utf8")).toBe("");
+      await patchForeignStamp(h!);
+      expect(await waitForGuardState(h!, "mixed", 10_000)).toBe("mixed");
+    } finally {
+      writeFileSync(join(pauseDir, `go.${SWEEP_POINT}`), "");
+      mixed = await sweep;
+    }
+    expect(readFileSync(join(pauseDir, `released.${SWEEP_POINT}`), "utf8")).toBe("go");
     expect(mixed.clusterCount).toBeNull();
+    expect(mixed.largestClusterSize).toBeNull();
+    expect(mixed.totalMemoriesInClusters).toBeNull();
     expect(mixed.embeddingSpace).toEqual({ state: "mixed", reason: null });
+    expect(readFileSync(statsPath)).toEqual(priorStat);
+    expect((await dedupStats(h!)).embeddingSpace).toEqual({ state: "mixed", reason: null });
   }, 120_000);
 });
 

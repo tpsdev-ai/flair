@@ -956,15 +956,11 @@ export function register(program: Command): void {
         if (row.autoPromoted) {
           console.log(`Auto-promoted: ${row.autoPromoted.promoted} to own memory (${row.autoPromoted.skipped} left pending)`);
         }
-        // row.dedup populates when step 6 (instance-wide dedup-cluster stat,
-        // flair-quality Slice 1c) succeeded this cycle. Absent on dry-run skip
-        // or a non-fatal failure (see Errors below — e.g. non-admin caller).
-        // flair#2596: it may also carry the guard's named state (null counts)
-        // when the sweep refused a non-uniform embedding space.
+        // A guard refusal carries null counts and the guard's named state.
         const dedupRow = row.dedup;
         if (dedupRow) {
           if ("embeddingSpace" in dedupRow) {
-            console.log(`Dedup:      not computed — embedding space ${dedupRow.embeddingSpace.state} (no counts persisted)`);
+            console.log(`Dedup:      not computed — embedding space ${dedupRow.embeddingSpace.state} (no new counts were written)`);
           } else {
             console.log(`Dedup:      ${dedupRow.clusterCount} cluster${dedupRow.clusterCount === 1 ? "" : "s"} (${dedupRow.totalMemoriesInClusters} memories, largest ${dedupRow.largestClusterSize})`);
           }

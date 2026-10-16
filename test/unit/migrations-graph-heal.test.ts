@@ -9,6 +9,7 @@
  * event.
  */
 import { describe, it, expect, beforeEach } from "bun:test";
+import { tempDir } from "../helpers/temp-dir.ts";
 
 // graph-heal.ts imports `{ databases } from "harper"` for its
 // DEFAULT accessors only (never used here — every test injects fakes). Same
@@ -18,8 +19,13 @@ import { mock } from "bun:test";
 mock.module("harper", () => ({ server: { http: () => {}, getUser: async () => null }, databases: {}, Resource: class {} }));
 
 const { createGraphHealMigration, GRAPH_HEAL_ID } = await import("../../resources/migrations/graph-heal.ts");
-const { _resetGuardForTests, _setGuardModelIdForTests, _setGuardTableGetterForTests, recomputeLatch } =
+const { _resetGuardForTests, _setGuardModelIdForTests, _setGuardTableGetterForTests, recomputeLatch, noteWriteStamp } =
   await import("../../resources/embedding-space-guard.ts");
+const { runMigrationCycle } = await import("../../resources/migrations/runner.ts");
+const { MigrationRegistry } = await import("../../resources/migrations/registry.ts");
+const { readMigrationState, defaultStatePath } = await import("../../resources/migrations/state.ts");
+const { listMigrationProgress, _resetProgressForTests } = await import("../../resources/migrations/progress.ts");
+const { _resetInProcessLockForTests } = await import("../../resources/migrations/lock.ts");
 
 const GUARD_CURRENT = "gguf:test-model";
 const GUARD_FOREIGN = "other-engine:not-the-current-space";
@@ -204,7 +210,7 @@ describe("graph-heal migration — run() (verify + structural-only ledger)", () 
     expect(blob).not.toContain("m2");
   });
 
-  it("never throws even if the OrgEvent write fails — observability must not brick the runner", async () => {
+  it("returns zero processed when verified recall's OrgEvent write fails", async () => {
     const { table } = makeFakeMemoryTable([
       { id: "m1", embedding: emb(1), embeddingModel: "real" },
     ]);
@@ -221,11 +227,60 @@ describe("graph-heal migration — run() (verify + structural-only ledger)", () 
 
 describe("graph-heal migration — consults the embedding-space guard (flair#2596)", () => {
   function healthyStore() {
+    const createdAt = new Date().toISOString();
     return makeFakeMemoryTable([
-      { id: "m1", embedding: emb(1), embeddingModel: "real" },
-      { id: "m2", embedding: emb(2), embeddingModel: "real" },
+      { id: "m1", agentId: "agent-a", content: "alpha", createdAt, embedding: emb(1), embeddingModel: "real" },
+      { id: "m2", agentId: "agent-a", content: "beta", createdAt, embedding: emb(2), embeddingModel: "real" },
     ]);
   }
+
+  it("halts without a success marker after a guard trip between detect and run, continues the cycle, and retries", async () => {
+    _resetProgressForTests();
+    _resetInProcessLockForTests();
+    const dataDir = tempDir("flair-graph-heal-guard-");
+    const { table } = healthyStore();
+    const { table: oe, puts } = makeFakeOrgEventTable();
+    const migration = createGraphHealMigration(() => table, () => oe, () => VERSION);
+    expect(await migration.detect()).toBe(true);
+    let continued = false;
+    let trip = true;
+    const registry = new MigrationRegistry().register(migration).register({
+      id: "after-graph-heal", riskClass: "derived-only", affectsTables: ["Memory"],
+      detect: async () => true,
+      countPending: async () => 0,
+      run: async () => { continued = true; return { processed: 0, touchedIds: [] }; },
+    });
+    const deps = {
+      registry, dataDir, runningVersion: VERSION,
+      getTable: (name: string) => name === "Memory" ? table : makeFakeMemoryTable([]).table,
+      spaceProbe: {
+        getFreeBytes: () => {
+          if (trip) { trip = false; noteWriteStamp(GUARD_FOREIGN); }
+          return 10 * 1024 ** 3;
+        },
+        getTotalBytes: () => 20 * 1024 ** 3,
+      },
+      ledgerDeps: { orgEventTable: oe },
+    };
+    expect(await runMigrationCycle(deps)).toEqual({ ran: true });
+    expect(continued).toBe(true);
+    const state = readMigrationState(defaultStatePath(dataDir));
+    expect(state[GRAPH_HEAL_ID]?.lastOutcome).toBe("halted");
+    expect(state[GRAPH_HEAL_ID]?.completedAtVersion).toBeUndefined();
+    expect(state[GRAPH_HEAL_ID]?.completedAt).toBeUndefined();
+    expect(state["after-graph-heal"]?.lastOutcome).toBe("success");
+    expect(listMigrationProgress().find((p) => p.id === GRAPH_HEAL_ID)).toMatchObject({
+      state: "halted", reason: "run() threw mid-batch: graph-heal: recall re-verification failed",
+    });
+    expect(puts.map((p) => JSON.parse(p.detail)).filter((p) => p.migrationId === GRAPH_HEAL_ID))
+      .toEqual([expect.objectContaining({ outcome: "halted" })]);
+
+    expect(await guardVerdict([])).toBe(true);
+    expect(await runMigrationCycle(deps)).toEqual({ ran: true });
+    expect(readMigrationState(defaultStatePath(dataDir))[GRAPH_HEAL_ID]).toMatchObject({
+      lastOutcome: "success", completedAtVersion: VERSION,
+    });
+  });
 
   it("(uniform) verifies the canary self-recall — behaviour unchanged", async () => {
     const { table } = healthyStore();

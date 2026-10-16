@@ -1,22 +1,7 @@
 /**
- * dedup-sweep-recheck-2596.test.ts — flair#2596.
- *
- * The /MemoryDedupStats sweep (resources/MemoryDedupStats.ts) consults the
- * query-time embedding-space guard (resources/embedding-space-guard.ts) once at
- * its start (#2559). A write carrying a foreign stamp DURING the sweep trips the
- * write-maintained latch after that consult, so the sweep must re-check the
- * verdict immediately before it persists and persist nothing when it is no
- * longer uniform — otherwise it would record counts computed across spaces.
- *
- * The sweep is driven in this file's process against a Map-backed Harper mock.
- * A foreign-stamp write is injected mid-sweep through the guard's own
- * write-maintained trip (`noteWriteStamp`, the entry the Memory write path
- * calls), so the re-check sees the changed verdict. The stat file is a real
- * temporary file, so "persists nothing" is asserted by reading it back.
- *
- * Mutation check: delete the pre-persist `embeddingSpaceVerdict()` re-check in
- * resources/MemoryDedupStats.ts and the mid-sweep assertion goes red — the
- * counts come back non-null and the stat file is overwritten.
+ * Exercises the pre-persist guard recheck against a Map-backed Harper mock.
+ * Calls `noteWriteStamp` mid-sweep to simulate a guard trip and reads back
+ * the temporary stat file to check that it is unchanged.
  */
 import { describe, it, expect, beforeEach, afterAll, mock } from "bun:test";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -66,8 +51,7 @@ function matchesCondition(record: any, cond: any): boolean {
 
 let memoryStore: Map<string, any>;
 
-/** One-shot hook fired after the FIRST row a Memory.search generator yields —
- *  the seam for a foreign-stamp write that lands DURING the sweep. */
+/** One-shot guard trip after the first row a Memory.search generator yields. */
 let tripAfterFirstScanRow: (() => void) | undefined;
 
 function memorySearchGen(query: any) {
@@ -166,7 +150,7 @@ describe("MemoryDedupStats re-checks the verdict before persisting (flair#2596)"
     expect(JSON.parse(readFileSync(statsPath, "utf8")).clusterCount).toBe(res.clusterCount);
   });
 
-  it("a foreign-stamp write during the sweep persists nothing and names the state", async () => {
+  it("a simulated guard trip during the sweep leaves the stat file unchanged and names the state", async () => {
     seedRow("m1", "alpha");
     seedRow("m2", "beta");
     seedRow("m3", "gamma");

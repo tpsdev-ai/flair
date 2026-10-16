@@ -32,15 +32,10 @@
  * healthy after the boot, so the heal is auditable and version-gated (runs
  * once per upgrade, then the runner's state-file short-circuit — state.ts —
  * skips it). It touches ZERO rows: riskClass 'derived-only', countPending()
- * is always 0, run() writes one structural-only OrgEvent and returns
- * `processed: 0`. The runner (resources/migrations/runner.ts) then records
- * success in the state file, short-circuiting every subsequent boot at this
- * version.
+ * is always 0. After verified recall, run() attempts a structural-only
+ * OrgEvent and returns `processed: 0`.
  *
- * NON-THROWING throughout (invariant II — the runner halts-not-bricks): a
- * canary that can't run, an index still mid-rebuild, or a ledger-write
- * failure all degrade to "not verified this boot, retry next boot" or a
- * best-effort skip — never an exception into the boot path.
+ * Failed re-verification throws to the runner's halt path; boot continues.
  *
  * DEFENSE-IN-DEPTH RULE (a prudent, version-independent default — NOT a
  * workaround for a live bug): any BULK re-embed of the corpus should be paired
@@ -135,7 +130,7 @@ async function pickCanary(table: MemoryTableLike): Promise<{ id: string; embeddi
  * The id of the HNSW nearest neighbor of `target` — the exact cosine-sort
  * query the retrieval path (resources/semantic-retrieval-core.ts) uses,
  * bounded to rank 1. Throws if the index is unavailable / mid-rebuild; the
- * caller treats a throw as "not verified this boot".
+ * caller treats a throw as failed verification.
  */
 async function topNeighborId(table: MemoryTableLike, target: number[]): Promise<string | null> {
   for await (const row of table.search({
@@ -156,14 +151,8 @@ async function topNeighborId(table: MemoryTableLike, target: number[]): Promise<
  * mid-rebuild index throws or returns nothing; a store with no embedded rows
  * has no canary). Never throws (invariant II).
  *
- * flair#2596 — consults the query-time embedding-space guard
- * (embedding-space-guard.ts) before the cosine-sort query, the same chokepoint
- * SemanticSearch / MemoryBootstrap / the dedup sweep use (#2559). It reads the
- * guard's non-scanning snapshot (`spaceGuardState`), not the scan-triggering
- * verdict accessor: graph-heal runs at boot beside the guard's own pre-warm
- * scan, so its consult must not start a second scan. A state other than
- * `uniform` skips the comparison and logs the state; the caller reads that as
- * "not verified this boot".
+ * Reads the guard's non-scanning snapshot before the cosine-sort query.
+ * A state other than `uniform` skips the comparison and logs the state.
  */
 async function recallHealthy(table: MemoryTableLike): Promise<{ verified: boolean; hasData: boolean }> {
   try {
@@ -253,15 +242,7 @@ export function createGraphHealMigration(
     riskClass: "derived-only",
     affectsTables: ["Memory"],
 
-    /**
-     * True only when recall is confirmed healthy AND there is embedded data
-     * to verify — i.e. the graph rebuilt and is serving. Returns false (the
-     * runner marks the migration completed for this boot WITHOUT writing a
-     * success state entry, so detect() runs again next boot) when the index
-     * is still mid-rebuild or the store has nothing embedded yet. This is the
-     * enrollment gate: only a confirmed-healthy boot proceeds to run() +
-     * ledger + the version short-circuit.
-     */
+    /** A false detect writes no durable success entry; a later cycle can retry. */
     async detect(): Promise<boolean> {
       const { verified } = await recallHealthy(getTable());
       return verified;
@@ -272,16 +253,11 @@ export function createGraphHealMigration(
       return 0;
     },
 
-    /**
-     * Called exactly once (countPending() is 0 → the runner's batch loop runs
-     * once and breaks). Re-verifies recall for the ledger snapshot, counts
-     * the embedded vectors, writes ONE structural-only OrgEvent, and returns
-     * `processed: 0` so the completion gate (count+marker, derived-only)
-     * passes and the runner records success → short-circuit next boot.
-     */
+    /** Re-verifies recall before the observation and the runner's completion gate. */
     async run(_batchSize: number): Promise<RunBatchResult> {
       const table = getTable();
       const { verified } = await recallHealthy(table);
+      if (!verified) throw new Error("graph-heal: recall re-verification failed");
       const embeddedVectorCount = await countEmbeddedVectors(table);
       try {
         await writeGraphHealEvent(

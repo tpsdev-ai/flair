@@ -3,7 +3,7 @@ import { Command } from "commander";
 import { bindCli, register } from "../../src/commands/rem.ts";
 import { ApiHttpError } from "../../src/lib/auth-resolve.ts";
 
-test("run-once prints skips with mixed dedup errors and exits only for errors", async () => {
+test("flair rem nightly run-once prints guard refusals and rejects malformed refusals", async () => {
   const output: string[] = [];
   const log = spyOn(console, "log").mockImplementation((...args: unknown[]) => { output.push(args.map(String).join(" ")); });
   const exit = spyOn(process, "exit").mockImplementation((() => {}) as never);
@@ -12,7 +12,7 @@ test("run-once prints skips with mixed dedup errors and exits only for errors", 
   const savedAdmin = process.env.FLAIR_ADMIN_PASS;
   delete process.env.FLAIR_REM_PAUSE;
   delete process.env.FLAIR_ADMIN_PASS;
-  let mixed = false;
+  let scenario = "counts";
   bindCli({
     api: async (method: string, path: string) => {
       if (method === "GET") return [];
@@ -21,7 +21,11 @@ test("run-once prints skips with mixed dedup errors and exits only for errors", 
         error: "No generative backend configured. See the models configuration docs.",
       }));
       if (path === "/MemoryDedupStats") {
-        if (mixed) throw new ApiHttpError(403, "agent-identity dedup #809");
+        if (scenario === "error") throw new ApiHttpError(403, "agent-identity dedup #809");
+        if (scenario !== "counts") return {
+          clusterCount: null, largestClusterSize: null, totalMemoriesInClusters: null,
+          computedAt: "fixture", embeddingSpace: { state: scenario, reason: null },
+        };
         return { clusterCount: 0, largestClusterSize: 0, totalMemoriesInClusters: 0, computedAt: "fixture" };
       }
       throw new Error("unexpected route " + path);
@@ -31,7 +35,8 @@ test("run-once prints skips with mixed dedup errors and exits only for errors", 
     DEFAULT_PORT: 1, pkgVersion: "fixture",
   });
   try {
-    for (mixed of [false, true]) {
+    for (scenario of ["counts", "error", "mixed", "unverified", "scan-failed", "uniform", "unknown"]) {
+      exit.mockClear();
       output.length = 0;
       const program = new Command();
       register(program);
@@ -40,16 +45,21 @@ test("run-once prints skips with mixed dedup errors and exits only for errors", 
       expect(text).toContain("Skips:\n  - distillation skipped: no generative backend configured");
       expect(text).toContain("Archived:   0 (validTo-expired + old sessions)");
       expect(text).toContain("Expired:    0 (ephemeral rows past expiresAt)");
-      if (mixed) {
+      if (["error", "uniform", "unknown"].includes(scenario)) {
         expect(text).toContain("Status:     failed");
-        expect(text).toContain("Errors:\n  - dedup: agent-identity dedup #809");
+        expect(text).toContain(scenario === "error"
+          ? "Errors:\n  - dedup: agent-identity dedup #809"
+          : "Errors:\n  - dedup: unexpected /MemoryDedupStats response shape");
         expect(exit.mock.calls).toEqual([[1]]);
       } else {
         expect(text).toContain("Status:     completed");
         expect(exit).not.toHaveBeenCalled();
+        if (scenario !== "counts") {
+          expect(text).toContain(`Dedup:      not computed — embedding space ${scenario} (no new counts were written)`);
+        }
       }
     }
-    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(fetchSpy).toHaveBeenCalledTimes(7);
   } finally {
     if (savedPause === undefined) delete process.env.FLAIR_REM_PAUSE; else process.env.FLAIR_REM_PAUSE = savedPause;
     if (savedAdmin === undefined) delete process.env.FLAIR_ADMIN_PASS; else process.env.FLAIR_ADMIN_PASS = savedAdmin;

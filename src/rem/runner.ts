@@ -1078,7 +1078,8 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
         typeof obj.clusterCount === "number" &&
         typeof obj.largestClusterSize === "number" &&
         typeof obj.totalMemoriesInClusters === "number" &&
-        typeof obj.computedAt === "string"
+        typeof obj.computedAt === "string" &&
+        obj.embeddingSpace === undefined
       ) {
         dedup = {
           clusterCount: obj.clusterCount,
@@ -1087,23 +1088,24 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
           computedAt: obj.computedAt,
         };
       } else if (
-        // flair#2596: the guard refused the sweep — the resource answers with
-        // null counts plus its named state. Record the state; an expected
-        // non-uniform embedding space is not a shape surprise and not an error.
+        // Accept the guard's refusal only with null counts and a known refusal state.
         obj.clusterCount === null &&
         obj.largestClusterSize === null &&
         obj.totalMemoriesInClusters === null &&
         typeof obj.computedAt === "string" &&
         obj.embeddingSpace !== null && typeof obj.embeddingSpace === "object" &&
-        typeof (obj.embeddingSpace as { state?: unknown }).state === "string"
+        !Array.isArray(obj.embeddingSpace) &&
+        ["mixed", "unverified", "scan-failed"].includes((obj.embeddingSpace as { state: string }).state) &&
+        ((obj.embeddingSpace as { reason?: unknown }).reason === null ||
+          typeof (obj.embeddingSpace as { reason?: unknown }).reason === "string")
       ) {
-        const space = obj.embeddingSpace as { state: string; reason?: unknown };
+        const space = obj.embeddingSpace as { state: string; reason: string | null };
         dedup = {
           clusterCount: null,
           largestClusterSize: null,
           totalMemoriesInClusters: null,
           computedAt: obj.computedAt,
-          embeddingSpace: { state: space.state, reason: typeof space.reason === "string" ? space.reason : null },
+          embeddingSpace: { state: space.state, reason: space.reason },
         };
       } else {
         errors.push("dedup: unexpected /MemoryDedupStats response shape");

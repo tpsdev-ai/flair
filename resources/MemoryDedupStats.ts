@@ -58,6 +58,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { setImmediate as yieldToRequests } from "node:timers/promises";
 import { dirname } from "node:path";
 import { allowAdmin } from "./agent-auth.js";
+import { txnPausePoint } from "./txn-pause-point.js";
 import { retrieveCandidates } from "./semantic-retrieval-core.js";
 import { embeddingSpaceVerdict, type EmbeddingSpaceGuardState, type EmbeddingSpaceVerdict } from "./embedding-space-guard.js";
 import { DEDUP_COSINE_THRESHOLD_DEFAULT } from "./dedup.js";
@@ -78,7 +79,7 @@ export interface MemoryDedupStatsResult {
   computedAt: string;
 }
 
-/** The response when the sweep's opening guard consult refuses the embedding space (flair#2559). */
+/** The response when the guard refuses the sweep. */
 export interface MemoryDedupStatsUnavailable {
   clusterCount: null;
   largestClusterSize: null;
@@ -94,7 +95,7 @@ function persistStat(stat: MemoryDedupStatsResult, pathOverride?: string): void 
   writeFileSync(path, JSON.stringify(stat, null, 2) + "\n", { mode: 0o600 });
 }
 
-/** The refusal body for a non-uniform verdict: no vector-derived counts, the
+/** The refusal body when uniformity is not established: no vector-derived counts, the
  *  guard's named state instead. Shared by the opening consult and the pre-persist
  *  re-check (flair#2596). */
 function guardRefusal(v: EmbeddingSpaceVerdict, computedAt: string): MemoryDedupStatsUnavailable {
@@ -198,10 +199,10 @@ async function computeAndPersist(ctx: any, opts?: { annK?: number; maxMemories?:
   const result: MemoryDedupStatsResult = { ...clusters, computedAt };
 
   // ── 4. Re-check the guard (flair#2596). The opening consult ran before any
-  // of the ANN work above; a write carrying a foreign stamp during the sweep
-  // trips the latch after it. Persisting `clusters` then would record counts
-  // computed across spaces, so on a non-uniform verdict now the sweep persists
-  // nothing and names the state — the same refusal as the opening one.
+  // of the ANN work above; a guarded write carrying a foreign stamp can trip
+  // the latch during the sweep. Refuse new counts unless uniformity still holds.
+  const pause = txnPausePoint("dedup-sweep-persist");
+  if (pause) await pause;
   const finalVerdict = await embeddingSpaceVerdict();
   if (!finalVerdict.uniform) return guardRefusal(finalVerdict, computedAt);
 
@@ -220,8 +221,7 @@ export class MemoryDedupStats extends Resource {
     const ctx = (this as any).getContext?.();
     try {
       // ─── Vector-space uniformity guard (flair#2559) ──────────────────────
-      // Consult the shared guard at the start of the sweep. A non-uniform
-      // verdict returns no vector-derived counts and persists nothing.
+      // Consult the shared guard at the start of the sweep.
       const verdict = await embeddingSpaceVerdict();
       if (!verdict.uniform) return guardRefusal(verdict, new Date().toISOString());
       return await computeAndPersist(ctx);
