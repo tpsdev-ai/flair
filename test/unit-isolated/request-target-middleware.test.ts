@@ -382,12 +382,35 @@ describe("the embedding backfill targets only the committed record", () => {
     expect(backfillReads).not.toContain("predecessor-id");
   });
 
-  it("skips the backfill when the committed id is unavailable from the result", async () => {
-    const url = "/Memory/no-result-id";
+  it("a PATCH whose result has no body id backfills the routed id", async () => {
+    // A Memory PATCH answers 204 with no body; it commits to the routed row,
+    // so the backfill runs for the routed id.
+    const url = "/Memory/patched-id";
     const req = makeRequest(url, "PATCH", signedAuthorization("PATCH", url));
-    // A 204-style result with no body: the committed id is not available.
+    req.headers.set("x-memory-id", "attacker-row");
     const res = await mw(req, () => { nextCalls++; return { status: 204, headers: { get: () => null }, body: undefined } as any; });
     expect(res.status).toBe(204);
+    await new Promise((r) => setTimeout(r, 10));
+    const backfillReads = tableGets.Memory!.filter((c) => c.args === 2).map((c) => c.id);
+    expect(backfillReads).toEqual(["patched-id"]);
+  });
+
+  it("a PUT whose result has no body id backfills the routed id", async () => {
+    const url = "/Memory/put-id";
+    const req = makeRequest(url, "PUT", signedAuthorization("PUT", url));
+    const res = await mw(req, () => { nextCalls++; return { status: 204, headers: { get: () => null }, body: undefined } as any; });
+    expect(res.status).toBe(204);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(tableGets.Memory!.filter((c) => c.args === 2).map((c) => c.id)).toEqual(["put-id"]);
+  });
+
+  it("skips the backfill for a POST whose result names no id (no routed fallback for POST)", async () => {
+    // A by-id POST can commit a successor with a different id, so its URL id is
+    // never assumed: with no id in the result, nothing is backfilled.
+    const url = "/Memory/posted-id";
+    const req = makeRequest(url, "POST", signedAuthorization("POST", url));
+    const res = await mw(req, () => { nextCalls++; return { status: 200, headers: { get: () => null }, body: undefined } as any; });
+    expect(res.status).toBe(200);
     await new Promise((r) => setTimeout(r, 10));
     expect(tableGets.Memory!.some((c) => c.args === 2)).toBe(false);
   });

@@ -279,10 +279,10 @@ function ownerReadFailedRefusal(table: string): Response {
 /**
  * The id a Memory write COMMITTED, read from the writer's own response result
  * (its `id` field) — the trustworthy source, since a by-id write can commit a
- * successor with a different id. Returns null when the committed id cannot be
- * read from the result as a plain string body (a 204, a streamed or compressed
- * body), in which case the backfill is skipped rather than guessed. Reads only
- * the already-serialized string body; never consumes a stream.
+ * successor with a different id. Returns null when the result names no id as a
+ * plain string body (a 204, a streamed or compressed body); the caller then
+ * falls back to the routed id for a PUT or PATCH, and otherwise skips. Reads
+ * only the already-serialized string body; never consumes a stream.
  */
 function committedMemoryIdFromResult(response: any): string | null {
   const body = response?.body;
@@ -984,21 +984,30 @@ server.http(async (request: any, nextLayer: any) => {
   }
 
   // ── Embedding backfill ─────────────────────────────────────────────────────
-  // The backfill runs ONLY for the record the write actually COMMITTED, read
-  // from the Memory writer's own result — never the URL id and never a
-  // caller-supplied header. A by-id write can commit a SUCCESSOR with a
-  // different id (skill versioning, flair#2263), so even a by-id write's
-  // committed id comes from the result, not the path. When the committed id is
-  // not available from the result (e.g. a 204 PATCH, or a compressed/streamed
-  // body), the backfill is skipped — Memory.patch refreshes its own embedding,
-  // and a later maintenance pass covers the rest. A DELETE commits no row.
+  // The backfill runs ONLY for the record the write COMMITTED, never for an id a
+  // caller names in a header:
+  //   1. The Memory writer's own result body, when it names an id. A POST —
+  //      including a by-id POST that commits a SUCCESSOR with a different id
+  //      (skill versioning, flair#2263) — reports the committed id there.
+  //   2. Otherwise, for a PUT or PATCH to `/Memory/<id>`, the record id Harper
+  //      ROUTED: those verbs commit to the routed row (a PUT whose body names a
+  //      different id is refused, id_target_mismatch), and a PATCH answers 204
+  //      with no body, so the routed id is its committed id.
+  // A POST whose result names no id, a collection write with no reported id, and
+  // a DELETE (which commits no row) schedule no backfill.
   const isMemoryWrite = isMutation && method !== "DELETE" &&
     (routedDecisionPath === "/Memory" || routedDecisionPath.startsWith("/Memory/"));
+  // The routed id, captured before the next layer runs: Harper's own routing
+  // when the registry is present, the pure mirror otherwise.
+  const routedMemoryWrite = routed
+    ? (routed.resource === "Memory" ? routed.recordId : null)
+    : (() => { const r = routedRecordId(targetPath); return r?.resource === "Memory" ? r.id : null; })();
+  const routedCommittedId = (method === "PUT" || method === "PATCH") ? routedMemoryWrite : null;
 
   const response = await nextLayer(request);
 
   if (isMemoryWrite && response.status >= 200 && response.status < 300) {
-    const committedId = committedMemoryIdFromResult(response);
+    const committedId = committedMemoryIdFromResult(response) ?? routedCommittedId;
     if (committedId) backfillEmbedding(committedId).catch(() => {});
   }
 
