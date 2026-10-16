@@ -38,6 +38,7 @@ function resourceBuild(root: string): { inputs: string[]; config: ts.ParsedComma
     config,
     inputs: [
       join(root, "resources"),
+      join(root, "src"), // Resources import src/ modules emitted into dist/src/ for runtime.
       ...configs,
       join(root, "package.json"),
       join(root, "bun.lock"),
@@ -81,6 +82,7 @@ export interface DistIssue {
   remedy: string;
 }
 
+/** Membership is scoped to dist/resources/; mtimes cover every watched input, including src/. */
 export function distFreshnessIssues(root: string): DistIssue[] {
   const issues: DistIssue[] = [];
   const report = (message: string) => issues.push({ message, remedy: "bun run build" });
@@ -89,7 +91,6 @@ export function distFreshnessIssues(root: string): DistIssue[] {
     readFileSync(stamp);
     const stampMtime = statSync(stamp).mtimeMs;
     const { inputs, config } = resourceBuild(root);
-    const sourceEntries = entriesUnder(join(root, "resources"));
     const expected = new Set<string>();
     for (const source of config.fileNames) {
       if (/\.d\.[cm]?ts$/.test(source)) continue;
@@ -110,11 +111,12 @@ export function distFreshnessIssues(root: string): DistIssue[] {
     if (!built.length) report(`${relative(root, builtResources)} contains no built resources`);
     else {
       const oldest = built.reduce((a, b) => a.mtimeMs < b.mtimeMs ? a : b);
-      const watched = [...sourceEntries, ...inputs.filter((p) => p !== join(root, "resources")).map((path) => {
+      const watched = inputs.flatMap((path) => {
+        if (path === join(root, "resources") || path === join(root, "src")) return entriesUnder(path);
         const st = statSync(path);
         readFileSync(path);
-        return { path, mtimeMs: st.mtimeMs };
-      })];
+        return [{ path, mtimeMs: st.mtimeMs, directory: false }];
+      });
       for (const entry of watched) {
         if (entry.mtimeMs > oldest.mtimeMs) {
           report(`${relative(root, entry.path)} (${new Date(entry.mtimeMs).toISOString()}) is newer than the oldest built resource ${relative(root, oldest.path)} (${new Date(oldest.mtimeMs).toISOString()})`);

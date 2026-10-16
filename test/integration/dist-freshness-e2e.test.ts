@@ -74,6 +74,7 @@ test("startHarper boots a copied resource build with a null commit", async () =>
   }
 }, 300_000);
 
+// This test requires the enclosing source root to be freshly built.
 test("startHarper boots a compiled-only Flair component copy", async () => {
   const source = resolve(import.meta.dirname, "../..");
   const root = mkdtempSync(join(tmpdir(), "flair-compiled-build-"));

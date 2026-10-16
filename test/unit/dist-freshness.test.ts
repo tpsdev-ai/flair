@@ -85,16 +85,18 @@ describe("dist freshness (flair#2583)", () => {
     expect(() => assertFlairDistFresh(root)).not.toThrow();
   });
 
-  it("a resource newer than the build is reported, naming the source and the command", () => {
-    const { root } = makeTree();
-    stamp(join(root, "resources", "foo.ts"), NEW + 60_000);
-    const issues = distFreshnessIssues(root);
-    expect(issues).toHaveLength(1);
-    expect(issues[0].message).toContain("resources/foo.ts");
-    expect(issues[0].message).toContain("newer than the oldest built resource");
-    expect(issues[0].remedy).toBe("bun run build");
-    expect(() => assertFlairDistFresh(root)).toThrow(/dist\/ freshness could not be verified/);
-  });
+  for (const input of ["resources/foo.ts", "src/cli.ts"]) {
+    it(`a newer ${input} is reported, naming the source and the command`, () => {
+      const { root } = makeTree();
+      stamp(join(root, input), NEW + 60_000);
+      const issues = distFreshnessIssues(root);
+      expect(issues).toHaveLength(1);
+      expect(issues[0].message).toStartWith(`${input} (2026-01-01T00:02:00.000Z) is newer than the oldest built resource `);
+      expect(issues[0].message).toMatch(/dist\/resources\/(foo|peer)\.js \(2026-01-01T00:01:00.000Z\)$/);
+      expect(issues[0].remedy).toBe("bun run build");
+      expect(() => assertFlairDistFresh(root)).toThrow(/dist\/ freshness could not be verified/);
+    });
+  }
 
   it("a missing dist/resources is reported", () => {
     const { root } = makeTree();
@@ -103,10 +105,9 @@ describe("dist freshness (flair#2583)", () => {
     expect(issues.some((i) => i.message.includes("dist/resources"))).toBe(true);
   });
 
-  it("fresh resources do not require dist/cli.js or fresh CLI sources", () => {
+  it("fresh resources do not require dist/cli.js", () => {
     const { root } = makeTree();
     rmSync(join(root, "dist", "cli.js"));
-    stamp(join(root, "src", "cli.ts"), NEW + 60_000);
     expect(distFreshnessIssues(root)).toEqual([]);
     expect(() => assertFlairDistFresh(root)).not.toThrow();
   });
@@ -198,7 +199,7 @@ describe("dist freshness (flair#2583)", () => {
     expect(() => assertFlairDistFresh(root)).not.toThrow("Rebuild first");
   });
 
-  for (const input of ["packages/flair-tool-descriptors/src/index.ts", "scripts/vendor-tool-descriptors.mjs", "resources/foo.ts"]) {
+  for (const input of ["packages/flair-tool-descriptors/src/index.ts", "scripts/vendor-tool-descriptors.mjs", "resources/foo.ts", "src/cli.ts"]) {
     it(`startup refuses a newer ${input}`, async () => {
       const { root } = makeTree();
       stamp(join(root, input), NEW + 60_000);

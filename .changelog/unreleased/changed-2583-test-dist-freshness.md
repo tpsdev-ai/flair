@@ -1,1 +1,1 @@
-- `startHarper` checks local resource output membership, readability and mtimes for Flair source trees; reported issues refuse local startup (#2583).
+- `startHarper` checks membership under `dist/resources/` and mtimes of every watched input, including `src/`, for local Flair source trees; reported issues refuse startup (#2583).
