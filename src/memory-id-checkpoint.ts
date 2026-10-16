@@ -97,8 +97,8 @@ export interface KeysetReadOptions {
  * Walk `flair.<table>` by primary key: `SELECT <select> ... [WHERE <filter> AND] id > cursor
  * ORDER BY id LIMIT <pageSize>`, resuming strictly after the last id read. A duplicate id
  * across pages, a full final page at the page cap, or a read that differs in size from
- * `expected` refuses. A duplicate or a size mismatch is an InconsistentReadError; every
- * other failure is a plain error.
+ * `expected` refuses. Duplicates raise InconsistentReadError; size mismatches do too by
+ * default, but `mismatch` can return any Error. Errors from `opsPost` propagate unchanged.
  */
 export async function readTableByIdPaged(opsPost: OpsPost, opts: KeysetReadOptions): Promise<any[]> {
   const pageSize = opts.pageSize ?? MEMORY_PAGE_SIZE;
