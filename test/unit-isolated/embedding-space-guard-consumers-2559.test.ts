@@ -1,7 +1,7 @@
 /**
  * embedding-space-guard-consumers-2559.test.ts — flair#2559.
  *
- * The remaining runtime vector-comparison consumers now consult the query-time
+ * The remaining request and maintenance paths covered by #2559 now consult the query-time
  * embedding-space guard (resources/embedding-space-guard.ts) with the same
  * policy SemanticSearch and the write-time dedup leg use:
  *   (a) MemoryBootstrap's task-relevant selection REFUSES its task embedding on
@@ -10,7 +10,7 @@
  *   (b) MemoryDedupStats returns NO vector-derived counts (never numbers
  *       computed across spaces) and names the guard state in the response.
  *
- * Both consumers run in this file's process against an in-memory Harper for
+ * Both consumers run in this file's process against a Map-backed Harper mock for
  * uniform, mixed and unknown verdicts. Boot stamp migration converges a seeded
  * mixed corpus; the integration tests apply a foreign stamp after boot.
  *

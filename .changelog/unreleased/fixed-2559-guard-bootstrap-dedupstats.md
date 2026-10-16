@@ -1,6 +1,6 @@
 - **MemoryBootstrap's task-relevant selection and the `/MemoryDedupStats` sweep now consult the embedding-space guard (#2559).**
 
-  They were the remaining runtime vector-comparison consumers without the guard
+  They were the remaining request and maintenance paths covered by #2559 without the guard
   `SemanticSearch` and the write-time dedup leg already use. On a non-uniform
   verdict, MemoryBootstrap refuses its task embedding and returns the same
   state-named warning `SemanticSearch` emits; both use BM25 for guarded
