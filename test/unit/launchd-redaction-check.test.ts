@@ -4,15 +4,9 @@
  * on Linux, so the assertion lives in a sourced helper
  * (scripts/ci/launchd-redaction-check.sh) that this test drives directly.
  *
- * The classification reads the scanner's `--report` file — its finding-record
- * channel — never its stdout, stderr or exit code alone: Node prints the
- * offending source line of a syntax error, so a scanner that cannot start can
- * print a line that reads like the finding marker and exit 1. The fake scanner
- * in the first blocks is a real `node` program whose report, stderr and exit
- * code are env-driven. The real-scanner block runs the REAL helper against a
- * real scanner whose syntax-error source line starts with the complete finding
- * marker and key, and the fixture-script block runs the REAL fixture script
- * against that same scanner.
+ * The classification pairs the exit status with a valid `--report`: exit 0
+ * needs empty findings; exit 1 needs non-empty findings. All other outcomes
+ * are could-not-run. Tests also exercise the real Node startup-error boundary.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -46,7 +40,7 @@ if (process.env.FAKE_SCAN_STDERR) process.stderr.write(process.env.FAKE_SCAN_STD
 process.exit(Number(process.env.FAKE_SCAN_EXIT ?? "0"));
 `;
 
-/** A well-formed finding record naming one credential key. */
+const EMPTY_REPORT = JSON.stringify({ schema: "redact-launchd-plist/report/1", findings: [] });
 const FINDING_REPORT = JSON.stringify({
   schema: "redact-launchd-plist/report/1",
   findings: [{ file: "fixture", keys: ["HDB_ADMIN_PASSWORD"] }],
@@ -100,11 +94,38 @@ function runAssertion({
   }
 }
 
-describe("the assertion classifies the check by its report channel (flair#2589)", () => {
-  test("exit 0 (ran, found nothing) passes", () => {
-    const { status, output } = runAssertion({ exitCode: 0 });
+describe("the assertion pairs exit status and report (flair#2589)", () => {
+  test("exit 0 with a valid empty report passes", () => {
+    const { status, output } = runAssertion({ exitCode: 0, report: EMPTY_REPORT });
     expect(status).toBe(0);
     expect(output).not.toContain("::error::");
+  });
+
+  test("exit 0 with no report is could-not-run", () => {
+    const { status, output } = runAssertion({ exitCode: 0 });
+    expect(status).toBe(1);
+    expect(output).toContain("redaction check could not run");
+  });
+
+  test.each(["{ not json", "null", '{}', '{"findings":[]}', '{"schema":"wrong","findings":[]}'])(
+    "exit 0 with a malformed report %s is could-not-run",
+    (report) => {
+      const { status, output } = runAssertion({ exitCode: 0, report });
+      expect(status).toBe(1);
+      expect(output).toContain("redaction check could not run");
+    },
+  );
+
+  test("exit 0 with non-empty findings is could-not-run", () => {
+    const { status, output } = runAssertion({ exitCode: 0, report: FINDING_REPORT });
+    expect(status).toBe(1);
+    expect(output).toContain("redaction check could not run");
+  });
+
+  test.each([2, 3, 127])("exit %i with a valid empty report is could-not-run", (exitCode) => {
+    const { status, output } = runAssertion({ exitCode, report: EMPTY_REPORT });
+    expect(status).toBe(1);
+    expect(output).toContain("redaction check could not run");
   });
 
   test("exit 1 with a well-formed finding record fails, naming a non-REDACTED credential key", () => {
@@ -116,7 +137,7 @@ describe("the assertion classifies the check by its report channel (flair#2589)"
   test("exit 1 whose output reads like the finding marker but writes no report is could-not-run", () => {
     // The counterexample from the review: a Node syntax diagnostic prints the
     // offending source line, which can read like the finding marker, and Node
-    // exits 1. Only the report channel decides.
+    // exits 1. The paired exit-status/report check must reject it.
     const { status, output } = runAssertion({
       exitCode: 1,
       stderr: "redact-launchd-plist: unredacted credential key(s) in fixture: HDB_ADMIN_PASSWORD\n",
@@ -134,7 +155,7 @@ describe("the assertion classifies the check by its report channel (flair#2589)"
   });
 
   test("exit 1 with an empty findings array is not a finding", () => {
-    const { status, output } = runAssertion({ exitCode: 1, report: '{"findings":[]}' });
+    const { status, output } = runAssertion({ exitCode: 1, report: EMPTY_REPORT });
     expect(status).toBe(1);
     expect(output).toContain("redaction check could not run");
     expect(output).not.toContain("a credential key with a non-REDACTED value");
@@ -143,7 +164,7 @@ describe("the assertion classifies the check by its report channel (flair#2589)"
   test("exit 1 with a finding entry that names no key is not a finding", () => {
     const { status, output } = runAssertion({
       exitCode: 1,
-      report: '{"findings":[{"file":"fixture","keys":[]}]}',
+      report: '{"schema":"redact-launchd-plist/report/1","findings":[{"file":"fixture","keys":[]}]}',
     });
     expect(status).toBe(1);
     expect(output).toContain("redaction check could not run");
@@ -247,7 +268,7 @@ describe("the real helper drives the real scanner at the crash/finding seam (fla
   });
 });
 
-describe("the fixture script classifies by the report channel (flair#2589)", () => {
+describe("the fixture script pairs exit status and report (flair#2589)", () => {
   test("the committed fixtures pass and the leaky one is a finding", () => {
     const r = spawnSync("bash", [FIXTURE_SCRIPT], { encoding: "utf8", timeout: 60_000 });
     expect(r.status).toBe(0);

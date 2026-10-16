@@ -10,9 +10,8 @@
 #   clean/  a redacted plist                 -> reported clean
 #   leaky/  a credential key, non-REDACTED   -> reported as a finding, key named
 #
-# Both verdicts come from the scanner's report channel, so a scanner that
-# crashes (a Node startup syntax error, say) is could-not-run, never a finding:
-# this script fails rather than crediting a broken scanner.
+# Exit 0 needs a valid empty-findings report; exit 1 needs a valid non-empty
+# report. Any mismatch or other outcome fails as could-not-run.
 set -Eeuo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

@@ -24,17 +24,16 @@
  *   cat plist | node redact-launchd-plist.mjs  # redacted plist to stdout
  *   node redact-launchd-plist.mjs --check [--report <file>] <path>...
  *                                              # assert no credential key
- *                                              # survives with a value; with
+ *                                              # survives with a value other
+ *                                              # than REDACTED; with
  *                                              # --report, write the findings
  *                                              # to <file> as JSON
  *
  * `--check` publishes its finding records on a channel of its own: the JSON
  * report file named by `--report`, never stdout or stderr. It writes that
- * report only when it finishes scanning, so a caller must call exit 1 a finding
- * only when the report holds a well-formed finding record. Node prints the
- * offending source line of a syntax error, so a scanner that cannot start can
- * print a line that reads like a finding marker and exit 1; such a run writes
- * no report and is a check that could not run (flair#2589).
+ * report only when it finishes scanning. Callers accept exit 0 only with a
+ * valid empty-findings report and exit 1 only with a valid non-empty report;
+ * all other outcomes are checks that could not run (flair#2589).
  *
  * Exit codes: in redaction mode, 0 on success and 2 when a named file cannot be
  * read — a diagnostics redactor must not fail the dump it is cleaning, so read
@@ -50,7 +49,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-// The product's authoritative "key names that must never carry a secret" list.
+// Credential keys excluded from generated component `.env` files and
+// redacted in printed diagnostics.
 // Importing it instead of copying it is the point: a key added to the product
 // list is covered here in the same change, with no second list in this file to
 // drift from it. `FLAIR_TOKEN` is the one credential name the launchd dump can
@@ -171,11 +171,7 @@ function filesUnder(path) {
   });
 }
 
-/**
- * The `--check` report's schema tag. The report is the finding-record channel:
- * a caller reads it — not stdout, stderr or the exit code alone — to tell a
- * finding from a check that could not run.
- */
+/** Schema tag for completed `--check` reports. */
 export const REPORT_SCHEMA = "redact-launchd-plist/report/1";
 
 /** Write the `--check` finding records to `reportPath`. Returns true on success. */
@@ -190,9 +186,9 @@ function writeReport(reportPath, findings) {
 }
 
 /**
- * Assert that no credential key survives with a value under `paths`. With
- * `reportPath`, write the finding records there when the scan finishes so a
- * caller can classify the exit code on that channel.
+ * Assert that no supported credential key/string pair under `paths` has a
+ * value other than `REDACTED`. With `reportPath`, write the finding records
+ * there when the scan finishes so a caller can validate the exit code.
  */
 function checkPaths(paths, reportPath) {
   const findings = [];
@@ -233,7 +229,7 @@ function checkPaths(paths, reportPath) {
 
 /**
  * Redact every named file (or stdin when none are named) to stdout; `--check`
- * instead asserts the named files/directories carry no unredacted credential
+ * instead checks supported credential key/string pairs in named files/directories
  * and, when `--report <file>` is given, writes the finding records there.
  */
 export function main(argv = process.argv.slice(2)) {
@@ -249,6 +245,10 @@ export function main(argv = process.argv.slice(2)) {
     argv = [...argv.slice(0, reportAt), ...argv.slice(reportAt + 2)];
   }
   if (argv[0] === "--check") {
+    if (argv.length === 1) {
+      console.error("redact-launchd-plist: usage error: --check requires at least one target path");
+      return 2;
+    }
     return checkPaths(argv.slice(1), reportPath);
   }
   const secrets = collectAdminPassSecrets();

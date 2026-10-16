@@ -67,7 +67,7 @@ describe("redactPlist — inline credential plist", () => {
     const out = redactPlist(INLINE_PLIST);
     // The key stays so the diagnostics still name the shape that leaked…
     for (const key of REDACTED_KEYS) {
-      // …while no credential value survives.
+      // …with REDACTED as the string value.
       expect(out).not.toMatch(new RegExp(`<key>${key}</key>\\s*<string>(?!REDACTED)[^<]`));
     }
     expect(out).toContain("<key>Label</key><string>ai.tpsdev.flair.abcdef</string>");
@@ -121,7 +121,7 @@ describe("redactPlist — inline credential plist", () => {
 });
 
 describe("REDACTED_KEYS — derived, not hand-maintained (flair#1696)", () => {
-  test("covers every key the product says must never carry a generated secret", () => {
+  test("covers every credential key excluded from generated component .env files", () => {
     // Pins that the redactor covers every key the product export names; there
     // is deliberately no copy of the list here or in the redactor.
     for (const key of NEVER_GENERATED_SECRET_KEYS) {
@@ -157,7 +157,7 @@ describe("redactPlist — product secret names (flair#1696)", () => {
   });
 });
 
-describe("--check — fails on a surviving credential key, names it not its value", () => {
+describe("--check — flags supported credential key/string pairs with non-REDACTED values", () => {
   test("exits 1 on the FLAIR_ADMIN_PASS fails-first fixture", () => {
     const dir = mkdtempSync(join(tmpdir(), "redact-check-bad-"));
     try {
@@ -185,6 +185,26 @@ describe("--check — fails on a surviving credential key, names it not its valu
 
 describe("--check publishes findings on its own report channel (flair#2589)", () => {
   const fixtures = join(import.meta.dir, "..", "..", "scripts", "ci", "redact-fixtures");
+
+  test("--check without a target exits 2 with a named usage error", () => {
+    const run = spawnSync("node", [SCRIPT, "--check"], { encoding: "utf8" });
+    expect(run.status).toBe(2);
+    expect(run.stderr).toContain("redact-launchd-plist: usage error: --check requires at least one target path");
+  });
+
+  test("--check without a target leaves the report untouched", () => {
+    const dir = mkdtempSync(join(tmpdir(), "redact-report-no-target-"));
+    try {
+      const report = join(dir, "report.json");
+      writeFileSync(report, "SENTINEL");
+      const run = spawnSync("node", [SCRIPT, "--check", "--report", report], { encoding: "utf8" });
+      expect(run.status).toBe(2);
+      expect(run.stderr).toContain("usage error: --check requires at least one target path");
+      expect(readFileSync(report, "utf8")).toBe("SENTINEL");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
   test("a clean scan writes an empty-findings report and exits 0", () => {
     const dir = mkdtempSync(join(tmpdir(), "redact-report-clean-"));
