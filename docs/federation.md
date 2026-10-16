@@ -290,8 +290,9 @@ plan with `publicKey` different from stored `pending` is skipped whole as
 
 Peer non-convergence is the consequence. Registration writes only A's local
 tables; when A's registered-key row later reaches peer B through a sync, the
-skip rule leaves B's copy exactly `pending`. B's `POST /AgentKeyRegister` will not complete it either: the copy
-carries A's `originatorInstanceId`, so B refuses it as `agent_not_local`. The two
+skip rule leaves B's copy exactly `pending`. B's `POST /AgentKeyRegister` will not complete it either: B
+stamps sync provenance on a row it receives through a sync, and a sync-originated row (or one whose
+`originatorInstanceId` names another instance, when A's row carries one) is refused as `agent_not_local`. The two
 instances therefore do not converge on one key for that row: syncing A's
 registered-key row cannot complete B's pending key, and that key needs direct
 action on B. The remedy is on B: B's administrator writes the agent's

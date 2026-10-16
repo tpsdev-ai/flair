@@ -6,11 +6,13 @@
 // it first. Earlier validation keeps its own reason.
 //
 // The last two cases are the peer non-convergence consequence and its remedy. A
-// pending copy that arrived from another instance (A) carries A's
-// `originatorInstanceId`, so this instance (B) refuses to register it
-// (`agent_not_local`), and syncing A's registered-key row cannot complete B's
-// pending key; that key needs direct action on B. B's administrator writes
-// the key onto B's copy through B's operations API; the key then authenticates.
+// pending row that this instance (B) holds for an agent homed elsewhere is
+// refused registration (`agent_not_local`): a synced copy carries B's sync
+// provenance, and a row whose `originatorInstanceId` names another instance is
+// refused too. The fixture below is inserted directly through the operations API
+// with a foreign `originatorInstanceId`; it did not arrive through a sync.
+// Syncing A's registered-key row cannot complete B's pending key; that key
+// needs direct action on B. B's administrator writes the key onto B's copy through B's operations API; the key then authenticates.
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
@@ -105,8 +107,8 @@ describe("flair#2266 — an inbound federated Agent record cannot complete a pen
         records: [{ id, name: id, role: "agent", admin: false, status: "active", runtime: "local", publicKey: "pending", createdAt: t, updatedAt: t }],
       });
     }
-    // A pending copy that arrived from another instance: it carries that
-    // instance's home.
+    // A pending row inserted directly with another instance's home (the
+    // foreign-home case of agent_not_local); no sync is involved.
     await ops({
       operation: "insert", table: "Agent",
       records: [{ id: PEER_COPY, name: PEER_COPY, role: "agent", admin: false, status: "active", runtime: "local", publicKey: "pending", originatorInstanceId: HUB, createdAt: t, updatedAt: t }],
