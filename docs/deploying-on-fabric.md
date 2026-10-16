@@ -331,7 +331,7 @@ flair upgrade --target https://<cluster>.<org>.harperfabric.com --check
 
 Full path: [upgrade.md](upgrade.md#upgrading-a-fabric-deployed-instance).
 
-### Guarding the data: a Memory id checkpoint around a deploy
+### Memory ids: operator-run checkpoint and post-operation check
 
 Component convergence is not data convergence. `flair fleet verify` and the deploy's own
 convergence check compare component files and versions; a component tree can converge
@@ -349,10 +349,11 @@ flair memory verify --target https://<cluster>.<org>.harperfabric.com \
 ```
 
 The checkpoint command reads Memory ids and durability tiers through the admin operations
-API (primary-key pages, never through recall) and writes them to `~/.flair/memory-id-checkpoint.json`
-(mode `0600`); it reads no Memory content. `--checkpoint <path>` picks another file.
+API (primary-key pages, never through recall) and writes IDs and aggregate tier counts to
+`~/.flair/memory-id-checkpoint.json` (mode `0600`); it reads no Memory content.
+`--checkpoint <path>` picks another file.
 
-The verify command re-reads the same node and compares:
+The verify command re-reads the same operations origin and compares:
 
 - **verified** (exit 0) — checkpointed ids present and no tier-count drop; new ids are fine;
 - **integrity failure** (exit 2) — a checkpointed id is gone, or a durability tier count
@@ -363,8 +364,8 @@ The verify command re-reads the same node and compares:
 A different origin (scheme, host or port) is refused.
 
 `flair deploy` also takes `--memory-checkpoint <path>`: after the deploy it runs the same
-verify and adds a `Memory id/tier check:` line to the report. Without the flag it says
-`not checked`.
+verify and adds a `Memory id/tier check:` line to the report; an integrity failure does not
+fail the deploy. Without the flag it says `not checked`.
 
 ---
 

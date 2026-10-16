@@ -2198,7 +2198,7 @@ flair memory verify
   usage: [options]
   options:
     --target <url>
-      description: Instance base URL — the same node the checkpoint was taken from
+      description: Instance served URL — must resolve to the same operations origin
       attr: target
       mandatory: true
     --checkpoint <path>
@@ -5390,8 +5390,8 @@ Compare this instance's Memory ids with a checkpoint taken before the operation:
 integrity failure, verified, or unknown
 
 Options:
-  --target <url>                 Instance base URL — the same node the
-                                 checkpoint was taken from
+  --target <url>                 Instance served URL — must resolve to the same
+                                 operations origin
   --checkpoint <path>            Checkpoint file path (default:
                                  ~/.flair/memory-id-checkpoint.json)
   --ops-target <url>             Operations API URL override (env:

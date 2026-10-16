@@ -647,7 +647,7 @@ export function register(program: Command): void {
     memory
       .command("verify")
       .description("Compare this instance's Memory ids with a checkpoint taken before the operation: integrity failure, verified, or unknown")
-      .requiredOption("--target <url>", "Instance base URL — the same node the checkpoint was taken from")
+      .requiredOption("--target <url>", "Instance served URL — must resolve to the same operations origin")
       .option("--checkpoint <path>", "Checkpoint file path (default: ~/.flair/memory-id-checkpoint.json)")
       .addHelpText("after", `
 Exit codes:

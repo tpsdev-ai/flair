@@ -32,7 +32,7 @@ export interface MemoryCheckpoint {
   byDurability: Record<Tier, number>;
 }
 
-/** The default checkpoint location: the operator's Flair data directory. */
+/** The default checkpoint file is under ~/.flair/. */
 export function checkpointPath(home: string): string {
   return join(home, ".flair", CHECKPOINT_FILENAME);
 }
