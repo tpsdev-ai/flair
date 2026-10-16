@@ -379,14 +379,21 @@ export function spaceGuardState(): { state: EmbeddingSpaceGuardState; reason: st
 
 /**
  * Write-maintained trip: a persisted FOREIGN-space stamp closes the gate
- * immediately, no rescan. A normal local write always stamps the current id
- * (`getModelId()`), so it never trips; only a federation/replication write or
- * an explicit-stamp PUT carrying another space's stamp does.
+ * immediately, no rescan.
  */
 export function noteWriteStamp(stamp: string | null | undefined): void {
-  const n = normalizeStamp(stamp);
-  if (n === null) return;
-  if (n !== normalizeStamp(_modelIdGetter())) {
+  let n: string | null;
+  let current: string | null;
+  try {
+    n = normalizeStamp(stamp);
+    if (n === null) return;
+    current = normalizeStamp(_modelIdGetter());
+  } catch (err) {
+    _uniform = false;
+    _writeEpoch++;
+    throw err;
+  }
+  if (n !== current) {
     if (!_activeStamps.includes(n) && _activeStamps.length < MAX_DIAG_STAMPS) _activeStamps.push(n);
     _uniform = false;
     _writeEpoch++;
