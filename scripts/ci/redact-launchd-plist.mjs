@@ -44,10 +44,10 @@ import { fileURLToPath } from "node:url";
 
 // The product's authoritative "key names that must never carry a secret" list.
 // Importing it instead of copying it is the point: a key added to the product
-// list is covered here in the same change, and the unit test fails if this
-// export and `REDACTED_KEYS` ever drift apart. `FLAIR_TOKEN` is the one
-// credential name the launchd dump can carry that is not a component `.env`
-// secret, so it is appended rather than assumed.
+// list is covered here in the same change, with no second list in this file to
+// drift from it. `FLAIR_TOKEN` is the one credential name the launchd dump can
+// carry that is not a component `.env` secret, so it is appended rather than
+// assumed.
 //
 // The list lives in src/lib/secret-keys.ts, a module with NO imports. A plain
 // `node` load of src/component-env.ts (which imports a `.js` specifier that only
