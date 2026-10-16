@@ -19,7 +19,9 @@
  * ({@link MEMORY_LOCK_ATTEMPTS} attempts with a {@link MEMORY_LOCK_WAIT_MS} ms
  * wait between them — the bound resources/usage-recording.ts and
  * resources/instruction-version-record.ts use). If the holder releases inside
- * the budget, the writer takes the key. A writer that then opens a new owned
+ * the budget, the writer takes the key, unless an attempt observes an
+ * outcome-unknown marker for the id (then it is refused `write_outcome_unknown`,
+ * below, even while the key is held). A writer that then opens a new owned
  * transaction (the ordinary PUT and PATCH) reads the row as stored at that
  * moment: the holder's committed row when the holder owned its transaction (a
  * composed or `_reindex` holder that joined another transaction may release

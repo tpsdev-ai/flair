@@ -7,8 +7,9 @@
   within its budget, then opens its transaction and reads the row as stored at
   that moment (a manual promotion's write, or an admin `_reindex` re-PUT, that
   joins an already-open request transaction reads that transaction's earlier
-  snapshot instead); if the lock stays held for the whole budget it answers 503
-  `memory_busy`, and if the store has no lock the write is refused 503
+  snapshot instead); if an attempt observes an outcome-unknown marker for the id
+  it answers 503 `write_outcome_unknown`; if the lock stays held for the whole
+  budget it answers 503 `memory_busy`, and if the store has no lock the write is refused 503
   `memory_lock_unavailable` instead of running unserialized. Harper orders a
   transaction by its first read, so the read, the decision and the commit share
   one transaction (re-embed `PATCH` writes in an inner owned transaction) — a

@@ -327,7 +327,8 @@ describe("flair#2465 — a re-embed keeps a concurrent owner edit (real Harper)"
 
     // Pins the LOCK contract in the other direction: the PUT takes the lock first
     // (held here after its first read, before its write); the re-embed on the same
-    // id cannot take it, waits its whole budget and answers 503 memory_busy. It
+    // id cannot take it, waits its whole budget and answers 503 memory_busy (no
+    // outcome-unknown marker is set here, which would answer write_outcome_unknown). It
     // never reads a snapshot that predates the edit, so it cannot revert it — the
     // edit is the committed row and carries the edit's vector.
     for (const marker of ["claimed", "paused", "go", "released"]) rmSync(join(pauseDir, `${marker}.${PUT_POINT}`), { force: true });
