@@ -16,14 +16,16 @@
  * (`updatedAt`, else `createdAt`) to that read and classifies the id sets.
  *
  * ── Classes ───────────────────────────────────────────────────────────────
- *  - `in-sync`  — the node's id set equals every other readable node's.
+ *  - `in-sync`  — it holds every id the other readable nodes hold, and holds no
+ *                  id they do not.
  *  - `lagging`  — it is missing only ids written AFTER its own newest write; it
  *                  may still be catching up.
  *  - `divergent`— it is missing an id written AT OR BEFORE its own newest write,
  *                  or it holds an id no other readable node has.
- *  - `unknown`  — its read failed, or was inconsistent (a row with no usable
- *                  write time), or it is missing ids but has no persisted write
- *                  time to compare them against.
+ *  - `unknown`  — its read failed, its read was inconsistent (a row with no usable
+ *                  write time), there was no other readable node to compare it
+ *                  with, or it is missing ids but has no persisted write time to
+ *                  compare them against.
  *
  * A node's newest write is the latest row write time it reports (max of
  * `updatedAt`, else `createdAt`, per row). A missing id's write time is the

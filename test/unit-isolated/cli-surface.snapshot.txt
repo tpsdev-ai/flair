@@ -5467,10 +5467,10 @@ Each --node is that node's own operations API origin, supplied explicitly. Physi
 peers are never inferred from Flair federation peers.
 
 Per-node classes:
-  in-sync    the node's Memory id set equals every other readable node's
+  in-sync    holds every id the other readable nodes hold, and no id they do not
   lagging    missing only ids written after the node's own newest write; it may be catching up
   divergent  missing an id written at or before its own newest write, or holding an id no other node has
-  unknown    the node could not be read, its read was inconsistent, or it has no write time to compare
+  unknown    the node could not be read, its read was inconsistent, or there was nothing usable to compare
 
 The overall result is healthy only when every node is in-sync. A lagging node is not
 healthy, and any unknown makes the overall result unknown, never healthy.

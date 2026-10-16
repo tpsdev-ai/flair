@@ -383,13 +383,13 @@ federation peers: a node is compared only when `--node` names it. Each node is r
 paged operations-API read the checkpoint uses, plus each row's write time. Per node the report
 gives one of:
 
-- **in-sync** — its Memory id set equals every other readable node's;
+- **in-sync** — it holds every id the other readable nodes hold, and no id they do not;
 - **lagging** — it is missing only ids written after its own newest write; it may still be
   catching up;
 - **divergent** — it is missing an id written at or before its own newest write, or it holds an id
   no other node has;
-- **unknown** — it could not be read, its read was inconsistent, or it has no persisted write time
-  to compare against.
+- **unknown** — it could not be read, its read was inconsistent or carried no usable
+  write time, or there was nothing usable to compare it against.
 
 The overall result is healthy only when every node is in-sync. A lagging node is reported as such
 and is never healthy; any unknown makes the overall result unknown. The report lists the missing
