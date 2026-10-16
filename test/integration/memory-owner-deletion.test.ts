@@ -1,7 +1,7 @@
 import { beforeAll, afterAll, describe, expect, test } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS, HARPER_START_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 const agent = (id: string) => ({ id, ...nacl.sign.keyPair() });
 const owner = agent("authority-owner"), other = agent("authority-other");
@@ -28,8 +28,8 @@ beforeAll(async () => {
   if (process.env.HARPER_HTTP_URL) throw new Error("requires isolated Harper; unset HARPER_HTTP_URL");
   harper = await startHarper();
   await seed("Agent", [owner, other].map(a => ({ id: a.id, name: a.id, role: "agent", publicKey: Buffer.from(a.publicKey).toString("base64"), createdAt: now })));
-}, 120_000);
-afterAll(async () => { if (harper) await stopHarper(harper); });
+}, HARPER_START_BUDGET_MS);
+afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
 
 describe("Memory owner deletion over HTTP", () => {
   test("REST permanent-memory lifecycle is owner-controlled, with admin override", async () => {

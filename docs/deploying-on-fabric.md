@@ -331,6 +331,41 @@ flair upgrade --target https://<cluster>.<org>.harperfabric.com --check
 
 Full path: [upgrade.md](upgrade.md#upgrading-a-fabric-deployed-instance).
 
+### Memory ids: operator-run checkpoint and post-operation check
+
+`flair fleet verify` probes health and version. Deploy's replication-error check compares
+component-tree metadata. Neither checks Memory rows. Checkpoint the instance's Memory ids
+before the operation, then verify after:
+
+```bash
+flair memory checkpoint --target https://<cluster>.<org>.harperfabric.com \
+  --fabric-user admin --fabric-password-file ~/.tps/secrets/flair-fabric-hdb
+
+# ... the planned cluster operation ...
+
+flair memory verify --target https://<cluster>.<org>.harperfabric.com \
+  --fabric-user admin --fabric-password-file ~/.tps/secrets/flair-fabric-hdb
+```
+
+The checkpoint command reads Memory ids and durability tiers through the admin operations
+API (primary-key pages, never through recall) and writes IDs and aggregate tier counts to
+`~/.flair/memory-id-checkpoint.json` (mode `0600`); it reads no Memory content.
+`--checkpoint <path>` picks another file.
+
+The verify command re-reads the same operations origin and compares:
+
+- **verified** (exit 0) — checkpointed ids present and no tier-count drop; new ids are fine;
+- **integrity failure** (exit 2) — a checkpointed id is gone, or a durability tier count
+  dropped; the report names the count of missing ids and up to ten ids;
+- **unknown** (exit 3) — the comparison could not be completed: for example, an unreadable
+  checkpoint, a different operations origin, a failed read, or a count change.
+
+An absent checkpoint exits 1 without a verification outcome.
+
+`flair deploy` also takes `--memory-checkpoint <path>`: after the deploy it runs the same
+verify and adds a `Memory id/tier check:` line to the report; an integrity failure does not
+fail the deploy. Without the flag it says `not checked`.
+
 ---
 
 ## See also

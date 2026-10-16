@@ -62,7 +62,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import nacl from "tweetnacl";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { getModelId } from "../../resources/embeddings-provider.ts";
 import { stripEnginePrefix } from "../../resources/embedding-space-guard.ts";
 import { computeContentHash } from "../../resources/memory-feed-lib.ts";
@@ -279,7 +279,7 @@ afterAll(async () => {
   if (harper) await stopHarper(harper).catch(() => {});
   if (home) rmSync(home, { recursive: true, force: true });
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair#2465 — a re-embed keeps a concurrent owner edit (real Harper)", () => {
   it("(a) an owner PUT on the re-embed's id waits out the lock and commits on the re-embed's row", async () => {

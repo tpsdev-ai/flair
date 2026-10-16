@@ -29,7 +29,7 @@ import nacl from "tweetnacl";
 import { signBodyFresh } from "../../resources/federation-crypto.js";
 import { parseRetryEntryKey, retryEntryKey } from "../../resources/federation-retry-lib.js";
 import { componentWithRetryProbe, type RetryProbeComponent } from "../helpers/federation-retry-probe-component";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 const sfx = Date.now().toString(36);
 const PEER = `retry-peer-${sfx}`;
@@ -196,7 +196,7 @@ describe("flair#2455 — FederationRetry storage, gating and the operator query 
     if (component) component.cleanup();
     if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
     if (tmpHome) rmSync(tmpHome, { recursive: true, force: true });
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   /**
    * The seven requests below, as `who`: GET, PUT, PATCH and DELETE on the

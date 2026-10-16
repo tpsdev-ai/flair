@@ -701,14 +701,22 @@ program
       console.error(foreignOccupiedListenerDetail(listener));
       process.exit(1);
     };
-    const refuseFreePort = (listener: OccupiedHarperListener): void => {
+    // `detail` is the credential-gate diagnostic (attributeBeforeCredential);
+    // the pre-start refusals pass none.
+    const refuseFreePort = (listener: OccupiedHarperListener, detail?: string): void => {
       const pid = listener.pids.length === 1 ? `, pid ${listener.pids[0]}` : "";
-      console.error(`Refusing init: port ${listener.port}${pid}: TCP readiness check failed.`);
+      console.error(`Refusing init: port ${listener.port}${pid}: TCP readiness check failed${detail ? `: ${detail}` : ""}.`);
       console.error("Remedy: start the instance, then rerun init.");
       process.exit(1);
     };
+    // The readiness budget here is `cli.STARTUP_TIMEOUT_MS`, the same duration
+    // as the test-harness readiness poll's `HARPER_STARTUP_BUDGET_MS`
+    // (test/helpers/harper-lifecycle.ts); test/unit/harper-lifecycle-budgets
+    // .test.ts keeps the two durations equal. The probes (a TCP connect here, an
+    // HTTP request there) and the points the timers start from differ.
     const attributeBeforeCredential = async (port: number, host: string): Promise<void> => {
-      const deadline = Date.now() + STARTUP_TIMEOUT_MS;
+      const startedAt = Date.now();
+      const deadline = startedAt + STARTUP_TIMEOUT_MS;
       let listener = readOccupiedListener(port);
       let state = await localPortState(port, host);
       while (ownChild && state === "free" && Date.now() < deadline) {
@@ -716,7 +724,14 @@ program
         listener = readOccupiedListener(port);
         state = await localPortState(port, host);
       }
-      if (state === "free") refuseFreePort(listener);
+      // Only a child this init spawned is waited for. Without one (init found
+      // an instance already running and did not spawn) the port is checked
+      // once, so the diagnostic must not claim a wait or a spawned instance.
+      if (state === "free") {
+        refuseFreePort(listener, ownChild
+          ? `still free after ${Date.now() - startedAt}ms (phase: waiting for the spawned instance to listen)`
+          : "no listener (phase: TCP readiness check of an instance this init did not spawn; checked once, no wait)");
+      }
       if (state === "listening") listener = readOccupiedListener(port);
       if (state === "unknown") refuseUnknownListener(listener);
       refuseUnattributedListener(listener);
