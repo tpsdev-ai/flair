@@ -70,6 +70,7 @@ function cosine(a: number[], b: number[]): number {
 
 function makeFakeMemoryTable(rows: Row[], opts: { throwOnSort?: boolean } = {}) {
   const store = new Map<string, Row>(rows.map((r) => [r.id, { ...r }]));
+  let cosineSearches = 0;
   const table = {
     async get(id: string) {
       return store.has(id) ? { ...store.get(id)! } : null;
@@ -77,6 +78,7 @@ function makeFakeMemoryTable(rows: Row[], opts: { throwOnSort?: boolean } = {}) 
     search(query: any): AsyncIterable<Row> {
       // Cosine-sort (HNSW nearest-neighbor) query.
       if (query?.sort?.distance === "cosine") {
+        cosineSearches++;
         if (opts.throwOnSort) throw new Error("HNSW index unavailable (mid-rebuild)");
         const target = query.sort.target as number[];
         const limit = typeof query.limit === "number" ? query.limit : Infinity;
@@ -98,7 +100,7 @@ function makeFakeMemoryTable(rows: Row[], opts: { throwOnSort?: boolean } = {}) 
       })();
     },
   };
-  return { store, table };
+  return { store, table, cosineSearches: () => cosineSearches };
 }
 
 function makeFakeOrgEventTable() {
@@ -335,7 +337,7 @@ describe("graph-heal migration — consults the embedding-space guard (flair#259
   });
 
   it("(non-uniform) skips the cosine comparison and logs the guard state", async () => {
-    const { table } = healthyStore();
+    const { table, cosineSearches } = healthyStore();
     const { table: oe } = makeFakeOrgEventTable();
     const m = createGraphHealMigration(() => table, () => oe, () => VERSION);
 
@@ -352,5 +354,6 @@ describe("graph-heal migration — consults the embedding-space guard (flair#259
       console.warn = saved;
     }
     expect(warns.some((w) => w.includes("graph-heal") && w.includes("mixed"))).toBe(true);
+    expect(cosineSearches()).toBe(0);
   });
 });
