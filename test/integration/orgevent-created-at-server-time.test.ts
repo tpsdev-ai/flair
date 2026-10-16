@@ -828,13 +828,13 @@ describe("what each malformed id or body gets", () => {
   // empty or non-string id does not generate one. A non-admin's string or
   // number body id that differs from an addressed id is refused first by the
   // owner-scoped write guard; every other case here is refused with invalid_event_id.
-  const ELSEWHERE_ID: Array<[string, unknown]> = [["empty", ""], ["0", 0], ["false", false], ["[]", []]];
+  const ELSEWHERE_ID: Array<[string, unknown]> = [["empty", ""], ["0", 0], ["false", false], ["[]", []], ["object", { toString: null }]];
   const ELSEWHERE_WANT: Record<string, Record<string, [Expect, Expect]>> = {
     addressed: {
-      empty: [NOT_ADDRESSED, INVALID], "0": [NOT_ADDRESSED, INVALID], false: [INVALID, INVALID], "[]": [INVALID, INVALID],
+      empty: [NOT_ADDRESSED, INVALID], "0": [NOT_ADDRESSED, INVALID], false: [INVALID, INVALID], "[]": [INVALID, INVALID], object: [INVALID, INVALID],
     },
     prefixed: {
-      empty: [INVALID, INVALID], "0": [INVALID, INVALID], false: [INVALID, INVALID], "[]": [INVALID, INVALID],
+      empty: [INVALID, INVALID], "0": [INVALID, INVALID], false: [INVALID, INVALID], "[]": [INVALID, INVALID], object: [INVALID, INVALID],
     },
   };
   for (const [where, pathOf] of [
