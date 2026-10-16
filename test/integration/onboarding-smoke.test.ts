@@ -27,14 +27,13 @@
  */
 
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
-import { spawn } from "node:child_process";
+import { spawnCli } from "../helpers/build-cli-once.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS, HARPER_START_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { httpStatus } from "../helpers/http-status";
 import { childOverranDeadline, cliLeg } from "../helpers/child-deadline.js";
-import { nodeBin } from "../helpers/node-runtime.js";
 
 // flair#1807: the CLI child's OWN deadline, and the per-case budget above it.
 // This is the integration lane's own invocation (`bun test
@@ -48,7 +47,6 @@ import { nodeBin } from "../helpers/node-runtime.js";
 const CHILD_DEADLINE_MS = 20_000;
 const CASE_BUDGET_MS = 25_000;
 
-const CLI = join(process.cwd(), "dist", "cli.js");
 const AGENT_ID = "krais-onboarding";
 const ADMIN_PASS = "test123"; // matches harper-lifecycle's seeded admin pass
 
@@ -68,20 +66,19 @@ function runCli(args: string[], extraEnv: Record<string, string> = {}): Promise<
   const opsPort = new URL(harper.opsURL).port;
   return new Promise((resolve, reject) => {
     const startedAt = Date.now();
-    const env = {
-      ...process.env,
-      HOME: cliHome, // isolates ~/.flair (keys, config, admin-pass)
-      FLAIR_URL: harper.httpURL,
-      FLAIR_OPS_PORT: opsPort,
-      // Defensive: ensure no inherited token/admin identity leaks in. The
-      // agent identity comes from the on-disk key written by `agent add`
-      // (under cliHome/.flair/keys), resolved via FLAIR_AGENT_ID per-command.
-      FLAIR_TOKEN: "",
-      FLAIR_ADMIN_PASS: "",
-      ...extraEnv,
-    };
-    const child = spawn(nodeBin({ env }), [CLI, ...args], {
-      env,
+    const child = spawnCli(args, {
+      env: {
+        ...process.env,
+        HOME: cliHome, // isolates ~/.flair (keys, config, admin-pass)
+        FLAIR_URL: harper.httpURL,
+        FLAIR_OPS_PORT: opsPort,
+        // Defensive: ensure no inherited token/admin identity leaks in. The
+        // agent identity comes from the on-disk key written by `agent add`
+        // (under cliHome/.flair/keys), resolved via FLAIR_AGENT_ID per-command.
+        FLAIR_TOKEN: "",
+        FLAIR_ADMIN_PASS: "",
+        ...extraEnv,
+      },
       // flair#1807: the child carries its OWN deadline (it replaces the manual
       // 30 s kill this used to arm); a signal kill is named, with its output.
       timeout: 20_000, // literal so the spawn-budget gate reads a child deadline

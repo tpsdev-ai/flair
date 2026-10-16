@@ -49,14 +49,13 @@
  * Not a CLI spawn: a build entry is not the CLI, so flair#1807's class gate
  * (a spawned CLI ENTRY with no deadline) neither flags nor counts it.
  */
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync, type SpawnOptionsWithoutStdio } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { shellScript } from "./shell-script.ts";
+import { nodeBin } from "./node-runtime.ts";
 
 const ROOT = resolve(import.meta.dirname, "..", "..");
-const CLI_JS = join(ROOT, "dist", "cli.js");
-const SRC_DIR = join(ROOT, "src");
 const TSCONFIG_CLI = join(ROOT, "tsconfig.cli.json");
 const TSC_JS = join(ROOT, "node_modules", "typescript", "bin", "tsc");
 const WRITE_BUILD_INFO = join(ROOT, "scripts", "write-build-info.mjs");
@@ -84,8 +83,7 @@ function newestMtimeMs(path: string): number {
   return st.mtimeMs;
 }
 
-/** A tsconfig and every file it `extends`, transitively (none today). */
-function tsconfigInputs(path: string, seen = new Set<string>()): string[] {
+function tsconfigInputs(root: string, path: string, seen = new Set<string>()): string[] {
   const out: string[] = [];
   if (seen.has(path) || !existsSync(path)) return out;
   seen.add(path);
@@ -96,8 +94,8 @@ function tsconfigInputs(path: string, seen = new Set<string>()): string[] {
     const text = readFileSync(path, "utf-8");
     const m = text.match(/"extends"\s*:\s*"([^"]+)"/);
     if (m) {
-      const base = m[1].startsWith(".") ? resolve(path, "..", m[1]) : resolve(ROOT, "node_modules", m[1]);
-      out.push(...tsconfigInputs(base, seen));
+      const base = m[1].startsWith(".") ? resolve(path, "..", m[1]) : resolve(root, "node_modules", m[1]);
+      out.push(...tsconfigInputs(root, base, seen));
     }
   } catch {
     /* unreadable — the file's own mtime still counts via the caller */
@@ -105,27 +103,37 @@ function tsconfigInputs(path: string, seen = new Set<string>()): string[] {
   return out;
 }
 
-/** Every build INPUT whose change must make dist/cli.js stale. Exported so a
- *  fixture pins the set — a stale-dist escape here is silent. */
-export function buildCliInputs(): string[] {
+export function buildCliInputs(root = ROOT): string[] {
   return [
-    SRC_DIR,
-    ...tsconfigInputs(TSCONFIG_CLI),
-    join(ROOT, "package.json"),
-    join(ROOT, "bun.lock"),
-    WRITE_BUILD_INFO,
+    join(root, "src"),
+    ...tsconfigInputs(root, join(root, "tsconfig.cli.json")),
+    join(root, "package.json"),
+    join(root, "bun.lock"),
+    join(root, "scripts", "write-build-info.mjs"),
   ];
 }
 
-/** dist/cli.js exists and is at least as new as the newest build input. */
-export function cliIsFresh(): boolean {
+export function cliIsFresh(root = ROOT): boolean {
   try {
-    if (!existsSync(CLI_JS)) return false;
-    const cli = statSync(CLI_JS).mtimeMs;
-    return buildCliInputs().every((input) => cli >= newestMtimeMs(input));
+    const cliPath = join(root, "dist", "cli.js");
+    if (!existsSync(cliPath)) return false;
+    const cli = statSync(cliPath).mtimeMs;
+    return buildCliInputs(root).every((input) => cli >= newestMtimeMs(input));
   } catch {
     return false;
   }
+}
+
+export function assertCliBuildFresh(root = ROOT): void {
+  if (cliIsFresh(root)) return;
+  const cli = join(root, "dist", "cli.js");
+  throw new Error(`[build-cli-once] refusing to spawn CLI: ${cli} freshness could not be verified. Rebuild first: \`bun run build:cli\`.`);
+}
+
+export function spawnCli(args: string[], options: SpawnOptionsWithoutStdio & { timeout: number }, root = ROOT) {
+  assertCliBuildFresh(root);
+  // Under Node, not the test runner's own runtime (flair#2594): the CLI's tests launch it as users do.
+  return spawn(nodeBin({ env: options.env, cwd: options.cwd }), [join(root, "dist", "cli.js"), ...args], { ...options, timeout: options.timeout });
 }
 
 interface BuildStep {
@@ -190,7 +198,7 @@ export function ensureCliBuild(opts: { timeoutMs?: number } = {}): void {
 
   if (!stub) {
     if (!cliIsFresh()) {
-      throw new Error(`build:cli did not produce a fresh ${CLI_JS}`);
+      throw new Error(`build:cli did not produce a fresh ${join(ROOT, "dist", "cli.js")}`);
     }
     builtThisProcess = true; // set ONLY after a build succeeded AND validated
   }

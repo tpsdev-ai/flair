@@ -136,6 +136,7 @@ is `GET /Name/<id>` unless noted.
 | POST | `/Agent` | Admin Basic | Create principal. Also `POST /AgentSeed` (operator/internal only — not an admin-agent key). |
 | PUT / PATCH | `/Agent/<id>` | Ed25519 | An agent updates **only its own** record. |
 | DELETE | `/Agent/<id>` | Admin Basic | Deprovision. |
+| POST | `/AgentKeyRegister` | Basic admin / Ed25519 agent with the admin annotation | Register an agent key. Under Flair's per-agent registration lock, reads a fresh local, non-deactivated row with `publicKey: "pending"` and, at the confirmation read, requires the committed row to equal the fresh-read snapshot and still be `pending` before commit. The lock serializes registrations for that agent within one Harper process; raw operations-API writes and other processes do not take it. A change committed after the confirmation read and before commit is not seen, and a change restored before the confirmation read is not observed; a commit-time pending check is a follow-up. Unsupported schemes that reach the handler receive 401 before Flair's `resolveAgentAuth`, body validation and table reads. Harper handles some Authorization values upstream: a Bearer refresh token receives Harper's 404 before any resource runs. Refuses 409 `agent_key_not_pending` (a non-`pending` row points to key rotation), 403 `agent_not_local` / `agent_inactive`, 404 `agent_not_found`, 400 `registration_request_invalid`, 409 `registration_conflict`, 503 `registration_unavailable`. Writes an `AgentKeyRegistration` audit row and an `agent_key_registered` OrgEvent. The audit `keyFingerprint` and the event `detail` carry the key fingerprint, not the key; the audit `agentId` and the event `refId` carry the target agent's id, which the event `summary` names in text. |
 | GET | `/Presence` | Verified reader | Roster. Requires a valid `TPS-Ed25519` agent signature or the admin credential; an anonymous request gets 401. An instance may opt in to a public roster with `PRESENCE_PUBLIC_ROSTER=true`, in which case an unverified reader gets the allowlisted roster with `currentTask`, `flairVersion`, and `harperVersion` as null. Thresholds: [Presence for API consumers](#presence-for-api-consumers). |
 | POST | `/Presence` | Ed25519 | Heartbeat. Agent writes only its own row (403 cross-agent). Stamps `flairVersion` / `harperVersion` on the row. |
 | PUT / DELETE | `/Presence/<id>` | Ed25519 | Own row only. Collection PUT is not a public bypass. |
@@ -149,7 +150,9 @@ credential, changes its kind or identity fields, or reactivates it, and its
 owner may relabel, revoke or delete it, see
 [Who writes a mapping](access-control.md#who-writes-a-mapping)) and
 `Integration` (legacy 0.x platform rows; verified, prefer Credential) sit on
-the same identity plane.
+the same identity plane. `AgentKeyRegistration`
+(agent-key-registration.graphql) is the admin-read-only audit log of committed
+registrations; its key field is the fingerprint, not the key.
 
 ### Memory, search, bootstrap
 
@@ -163,7 +166,7 @@ the same identity plane.
 | POST | `/BootstrapMemories` | Ed25519 | Cold-start context (soul + predicted memories + optional org events). |
 | POST | `/RecordUsage` | Ed25519 | Cross-agent usage signal (`Memory.usageCount`). No ownership requirement; counts only memories in the caller's read scope (`resolveReadScope`: own at any visibility, others' non-private), admin callers included even though admin Memory reads are unfiltered; an out-of-scope id is handled like a missing one. No existence oracle in the response. Prefer this over writing `/MemoryUsage` directly. |
 | GET | `/MemoryUsage` | Ed25519 | Non-admin reads: own ledger rows only, about memories the caller can currently read; any other row reads as not found. Admin and internal reads are unchanged. PUT/DELETE are admin/internal — agents must not delete their row to re-count. |
-| GET / write | `/MemoryGrant` | Ed25519 | Read: owner or grantee. Write/delete: owner only (you share your own memories). |
+| GET / write | `/MemoryGrant` | Ed25519 | Read: owner or grantee. Write/delete: owner only (you share your own memories). A `write` grant lets the grantee write a successor of the owner's memory or skill (`supersedes`). A write grant does not include changing a record's visibility; visibility is set by the owner or an admin. For that grant-authorized write, the successor carries the predecessor's visibility, and a write naming a different one is refused with 403 `grant_cannot_change_visibility` unless an earlier validation refuses it first (an ordinary, non-skill ephemeral write naming `shared` gets 400 `invalid_visibility_for_durability`; an ephemeral skill write gets 400 `skill_durability`, and a `session` skill write gets 400 `invalid_durability` on Memory POST/PUT (durability validation runs first) and 400 `skill_durability` on FeedMemories). After staging the close, the writer re-reads the predecessor's committed row; a visibility that no longer reads the same refuses the write with 409 `predecessor_visibility_changed`, and a change committed after that final re-read is not seen. An ordinary successor and its close share the write's transaction. An ordinary close refusal aborts the whole write: a storage Response returns the fixed 500 `write_response_withheld`; grant revocation returns 409 `granted_close_revoked`; a predecessor change that keeps visibility the same returns 409 `stored_row_changed`. No refusal writes anything. An ordinary successor is the grantee's own row, so the grantee may later change its visibility as its owner; a skill successor keeps its lineage owner. |
 | GET / write | `/Asset` | Ed25519 | Owner-only blobs linked by `memoryId`. No MCP and no federation in this slice. |
 | GET / write | `/MemoryCandidate` | Ed25519 | Owner-only REM drafts. Never auto-promoted except the narrow ADK path. |
 | POST | `/PromoteMemoryCandidate` | Ed25519 | Promote/reject with required rationale. |
@@ -505,6 +508,7 @@ ed25519 / idp) and **Integration** (legacy platform connection).
 | **WorkspaceState** | workspace.graphql | yes | Current work (`ref`, `provider`, `phase`, `entities`) |
 | **OrgEvent** | event.graphql | yes | Org-visible event (`authorId`, `kind`, `summary`, `entities`) |
 | **AgentReadPosition** | agent.graphql | no | Per-agent watermark (`agentId`, `stream`, `position`). HTTP via `/AgentReadPosition`, not raw-table REST. |
+| **AgentKeyRegistration** | agent-key-registration.graphql | yes (admin read only) | Audit log of committed `POST /AgentKeyRegister` calls (`actorId`, `operator`, `agentId`, `instanceId`, `keyFingerprint`, `createdAt`). The Flair resource route refuses every write; the registration operation is its only application writer. The operations API is a separate raw-table trust root. `replicate: true` is declared explicitly to state the database default (a table replicates unless it opts out). |
 | **Message** | message.graphql | yes | Signed envelope (`from`, `to`, `threadId`, `seq`, `state`, `signature`) |
 | **OAuthClient** | oauth.graphql | yes | Registered OAuth clients |
 | **OAuthAuthCode** | oauth.graphql | no | Single-use codes + PKCE |
