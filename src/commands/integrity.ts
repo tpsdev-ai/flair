@@ -11,6 +11,7 @@
  */
 import { Command } from "commander";
 import { readExactCountSince, readExactTableCount } from "../lib/ops-table-count.js";
+import { InconsistentReadError, readTableByIdPaged } from "../memory-id-checkpoint.js";
 import { writeConfirmed } from "../lib/instance-identity-row.js";
 import { resolveHome } from "../lib/home.js";
 import {
@@ -45,8 +46,6 @@ export function bindIntegrityCli(fns: IntegrityCli): void {
 const OPS_TIMEOUT_MS = 30_000;
 const READ_ATTEMPTS = 3;
 const READ_RETRY_DELAY_MS = 25;
-
-class InconsistentReadError extends Error {}
 
 async function pruneDeletionHistory(opsPort: number | string, auth: string, checkpoint: IntegrityCheckpoint, deletions: readonly DeletionRecordLite[]): Promise<void> {
   await deleteHistoryIds(opsPort, auth, deletionRecordsToPrune(checkpoint, deletions));
@@ -92,8 +91,18 @@ function opsUrl(opsPort: number | string): string {
 
 const DELETION_HISTORY_ATTRIBUTES = ["id", "memoryId", "memoryInstanceToken", "durability", "at"];
 
+/**
+ * The operations-API reads the integrity commands share. `search` reads a whole table
+ * (bracketed by its exact count); `searchDeletionsSince` reads only history at or after
+ * `since`, bracketed by the exact count of that range. Both walk the table by keyset on
+ * `id`, so a duplicate id across pages is a read error and no id after the cursor is
+ * skipped. A read that is short, long or duplicated under the count is retried within
+ * READ_ATTEMPTS and reports UNKNOWN otherwise. This does not establish a transactional
+ * snapshot: a balanced concurrent write (an insert behind the cursor plus a delete of an
+ * already-read row) preserves the counts without a matching id set.
+ */
 function integrityReader(opsPort: number | string, auth: string) {
-  const opsPost = async (body: Record<string, unknown>, context: string): Promise<unknown> => {
+  const opsPost = async (body: Record<string, unknown>, context = "read"): Promise<unknown> => {
     const res = await fetch(opsUrl(opsPort), {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: auth },
@@ -106,40 +115,26 @@ function integrityReader(opsPort: number | string, auth: string) {
     }
     return res.json();
   };
-  const project = (table: string, attributes: string[], body: unknown): any[] => {
-    if (!Array.isArray(body)) throw new Error(`operations API ${table} search returned a non-array body`);
-    const ids = new Map<string, Record<string, unknown>>();
-    const rows: any[] = [];
-    for (const row of body) {
-      if (!row || typeof row.id !== "string" || !row.id.trim()) {
-        throw new Error(`operations API ${table} search returned an invalid id`);
-      }
-      const previous = ids.get(row.id);
-      if (previous) {
-        if (attributes.some(field => Object.hasOwn(previous, field) !== Object.hasOwn(row, field) || !Object.is(previous[field], row[field]))) {
-          throw new InconsistentReadError(`${table}: differing duplicate projection for id ${row.id}`);
-        }
-        continue;
-      }
-      ids.set(row.id, row);
-      rows.push(row);
-    }
-    return rows;
-  };
   const read = async (
     table: string,
     attributes: string[],
     count: () => Promise<number>,
-    query: Record<string, unknown>,
-    bounded = false,
+    filter: string | undefined,
+    bounded: boolean,
   ): Promise<any[]> => {
+    const label = bounded ? "the bounded read" : "server";
     for (let attempt = 1; ; attempt++) {
       try {
         const expected = await count();
-        const rows = project(table, attributes, await opsPost(query, `${table} search`));
-        if (rows.length !== expected) {
-          throw new InconsistentReadError(`${table}: ${bounded ? "the bounded read" : "server"} reports ${expected} rows, integrity read ${rows.length}; retry integrity check when writes are paused`);
-        }
+        const rows = await readTableByIdPaged(opsPost, {
+          table,
+          select: attributes.join(", "),
+          filter,
+          expected,
+          mismatch: (want, read) => new InconsistentReadError(
+            `${table}: ${label} reports ${want} rows, integrity read ${read}; retry integrity check when writes are paused`,
+          ),
+        });
         const after = await count();
         if (after !== expected) {
           throw new InconsistentReadError(`${table}: ${bounded ? "the bounded read count" : "source count"} changed from ${expected} to ${after}; integrity read ${rows.length}; retry integrity check when writes are paused`);
@@ -154,27 +149,14 @@ function integrityReader(opsPort: number | string, auth: string) {
       }
     }
   };
-  const search = (table: string, attributes: string[]): Promise<any[]> => read(
-    table, attributes, () => readExactTableCount(opsPost, table), {
-      operation: "search_by_value",
-      database: "flair",
-      table,
-      search_attribute: "id",
-      search_value: "*",
-      get_attributes: attributes,
-    },
-  );
-  const searchDeletionsSince = (since: string): Promise<any[]> => read(
-    "MemoryDeletionHistory", DELETION_HISTORY_ATTRIBUTES,
-    () => readExactCountSince(opsPost, "MemoryDeletionHistory", "at", since), {
-      operation: "search_by_conditions",
-      database: "flair",
-      table: "MemoryDeletionHistory",
-      operator: "and",
-      conditions: [{ search_attribute: "at", search_type: "greater_than_equal", search_value: since }],
-      get_attributes: DELETION_HISTORY_ATTRIBUTES,
-    }, true,
-  );
+  const search = (table: string, attributes: string[]): Promise<any[]> =>
+    read(table, attributes, () => readExactTableCount(opsPost, table), undefined, false);
+  const searchDeletionsSince = (since: string): Promise<any[]> =>
+    read(
+      "MemoryDeletionHistory", DELETION_HISTORY_ATTRIBUTES,
+      () => readExactCountSince(opsPost, "MemoryDeletionHistory", "at", since),
+      `at >= '${since.replace(/'/g, "''")}'`, true,
+    );
   return { search, searchDeletionsSince };
 }
 

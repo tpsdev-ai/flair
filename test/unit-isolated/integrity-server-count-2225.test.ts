@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { bindIntegrityCli, register } from "../../src/commands/integrity";
 import { emptyCheckpoint } from "../../src/lib/memory-integrity";
 import { tempDir } from "../helpers/temp-dir";
+import { opsTable } from "../helpers/ops-table";
 
 const memory = { id: "m", durability: "permanent", instanceToken: "token", validTo: "closed", visibility: "private" };
 const deletion = { id: "d", memoryId: "gone", memoryInstanceToken: "old", at: "deleted" };
@@ -35,7 +36,8 @@ async function scan(options: Options = {}) {
     bindIntegrityCli({ resolveOpsPort: () => 19925, resolveAdminUser: () => "admin" });
     globalThis.fetch = (async (_url: any, init: any) => {
       const body = JSON.parse(init.body);
-      const { operation, table } = body;
+      const { operation } = body;
+      const table = opsTable(body);
       calls.push(`${operation}:${table}`);
       if (operation === "delete") return new Response(JSON.stringify({ deleted_hashes: body.hash_values }));
       if (operation === "describe_table") {
@@ -46,9 +48,7 @@ async function scan(options: Options = {}) {
           ? options.counts[Math.min(index, options.counts.length - 1)] : table === "Memory" ? memoryRows.length : 1;
         return new Response(JSON.stringify({ record_count: count }), { status: table === options.table ? options.countStatus ?? 200 : 200 });
       }
-      expect(operation).toBe("search_by_value");
-      expect(body.search_attribute).toBe("id");
-      expect(body.search_value).toBe("*");
+      expect(operation).toBe("sql");
       const rows = table === options.table && options.rows ? options.rows : table === "Memory" ? memoryRows : [deletion];
       return new Response(JSON.stringify(rows));
     }) as typeof fetch;
@@ -100,7 +100,7 @@ for (const table of ["Memory", "MemoryDeletionHistory"]) {
     const row = table === "Memory" ? memory : deletion;
     const result = await scan({ table, rows: [row, row], counts: [2] });
     expectRefusal(result);
-    expect(result.verdict.reason).toContain(`${table}: server reports 2 rows, integrity read 1`);
+    expect(result.verdict.reason).toContain("duplicate id");
   });
 
   test(`${table}: unavailable or invalid exact counts refuse scans`, async () => {
@@ -119,8 +119,8 @@ test("exact counts bracket both searches and closed/private rows remain in the b
   expect(result.verdict.status).toBe("baseline");
   expect(JSON.parse(result.saved!).ids.m).toBe("permanent");
   expect(result.calls).toEqual([
-    "describe_table:Memory", "search_by_value:Memory", "describe_table:Memory",
-    "describe_table:MemoryDeletionHistory", "search_by_value:MemoryDeletionHistory", "describe_table:MemoryDeletionHistory",
+    "describe_table:Memory", "sql:Memory", "describe_table:Memory",
+    "describe_table:MemoryDeletionHistory", "sql:MemoryDeletionHistory", "describe_table:MemoryDeletionHistory",
     "delete:MemoryDeletionHistory",
   ]);
 });
