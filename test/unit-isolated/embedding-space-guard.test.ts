@@ -22,9 +22,12 @@ const {
   isCurrentSpaceStamp,
   isUniformStampSet,
   isEmbeddingSpaceUniform,
+  embeddingSpaceVerdict,
+  spaceGuardState,
   noteWriteStamp,
   recomputeLatch,
   spaceGuardDiagnostics,
+  SCAN_ERROR_TABLE_UNAVAILABLE,
   _setGuardTableGetterForTests,
   _setGuardModelIdForTests,
   _resetGuardForTests,
@@ -139,13 +142,119 @@ describe("embedding-space-guard — latch", () => {
     expect(d.found).toContain(FOREIGN);
   });
 
-  it("a failed scan does not cache a verdict (fails open, retries next consult)", async () => {
-    _setGuardTableGetterForTests(async () => {
-      throw new Error("no live table (boot race)");
+  it("before the first scan completes the verdict is UNKNOWN and fails CLOSED", async () => {
+    // A table read that never resolves: no scan reaches a verdict.
+    _setGuardTableGetterForTests(() => new Promise<never>(() => {}));
+    const v = await embeddingSpaceVerdict();
+    expect(v.uniform).toBe(false); // not known uniform ⇒ the caller's mixed path
+    expect(v.state).toBe("unverified");
+    expect(spaceGuardState()).toEqual({ state: "unverified", reason: null });
+  });
+
+  it("a scan that throws leaves an unknown verdict, names it, and logs its class once", async () => {
+    const warns: string[] = [];
+    const orig = console.warn;
+    console.warn = (...a: unknown[]) => { warns.push(a.map(String).join(" ")); };
+    try {
+      _setGuardTableGetterForTests(async () => { throw new Error("no live table (boot race)"); });
+      expect(await recomputeLatch()).toBe(false); // scan A fails; fail closed, not a cached true
+      const v = await embeddingSpaceVerdict(); // a consult fires scan B, snapshots now
+      expect(v.uniform).toBe(false);
+      expect(v.state).toBe("scan-failed");
+      expect(v.reason).toBe(SCAN_ERROR_TABLE_UNAVAILABLE);
+      // scan B fails too; still only ONE log line for the error class.
+      await new Promise((r) => setTimeout(r, 25));
+      expect(warns.filter((w) => w.includes("corpus scan failed")).length).toBe(1);
+    } finally {
+      console.warn = orig;
+    }
+  });
+
+  it("a known foreign stamp stays MIXED through a failed scan; a successful uniform rescan clears both", async () => {
+    _setGuardTableGetterForTests(fakeTableOver([BARE]));
+    expect(await recomputeLatch()).toBe(true);
+    noteWriteStamp(FOREIGN); // a foreign write: the store is now known mixed
+
+    _setGuardTableGetterForTests(async () => { throw new Error("transient"); });
+    expect(await recomputeLatch()).toBe(false); // the rescan fails
+    const v = await embeddingSpaceVerdict();
+    expect(v.uniform).toBe(false);
+    expect(v.state).toBe("mixed"); // a failed scan never downgrades the mixed state
+    expect(v.reason).toBe(SCAN_ERROR_TABLE_UNAVAILABLE); // the scan error is kept alongside
+    expect(v.found).toContain(normalizeStamp(FOREIGN)!);
+    expect(spaceGuardState()).toEqual({ state: "mixed", reason: SCAN_ERROR_TABLE_UNAVAILABLE });
+
+    // The foreign row is reconciled; a SUCCESSFUL rescan finds one space.
+    _setGuardTableGetterForTests(fakeTableOver([CURRENT, BARE]));
+    expect(await recomputeLatch()).toBe(true);
+    expect(spaceGuardState()).toEqual({ state: "uniform", reason: null });
+  });
+
+  // flair#2508 × flair#2530 — a scan's failure obeys the same scan-start order
+  // as its verdict. Deterministic interleave: scan A's table read is held on a
+  // deferred promise while scan B (started later) runs to completion.
+  function deferredTable() {
+    let settle!: (outcome: { table?: Awaited<ReturnType<ReturnType<typeof fakeTableOver>>>; error?: Error }) => void;
+    const held = new Promise<Awaited<ReturnType<ReturnType<typeof fakeTableOver>>>>((resolve, reject) => {
+      settle = (o) => (o.error ? reject(o.error) : resolve(o.table!));
     });
-    expect(await isEmbeddingSpaceUniform()).toBe(true); // unknown ⇒ safe default, not a cached false
-    // Now a real table appears — the next consult recomputes correctly.
-    _setGuardTableGetterForTests(fakeTableOver([BARE, FOREIGN]));
+    return { getter: () => held, settle };
+  }
+
+  it("an earlier-started scan that FAILS after a later uniform scan published leaves the store uniform, no error", async () => {
+    const warns: string[] = [];
+    const orig = console.warn;
+    console.warn = (...a: unknown[]) => { warns.push(a.map(String).join(" ")); };
+    try {
+      const a = deferredTable();
+      _setGuardTableGetterForTests(a.getter);
+      const scanA = recomputeLatch(); // scan A starts first and waits on its table read
+
+      _setGuardTableGetterForTests(fakeTableOver([CURRENT, BARE]));
+      expect(await recomputeLatch()).toBe(true); // scan B starts later and publishes uniform
+
+      a.settle({ error: new Error("late read failure") }); // scan A now fails
+      expect(await scanA).toBe(true);
+      expect(spaceGuardState()).toEqual({ state: "uniform", reason: null });
+      expect(await isEmbeddingSpaceUniform()).toBe(true);
+      expect(warns.some((w) => w.includes("stale scan failure refused"))).toBe(true);
+    } finally {
+      console.warn = orig;
+    }
+  });
+
+  it("an earlier-started UNIFORM scan finishing after a later failed scan does not reopen the gate", async () => {
+    const a = deferredTable();
+    _setGuardTableGetterForTests(a.getter);
+    const scanA = recomputeLatch(); // scan A starts first and waits on its table read
+
+    _setGuardTableGetterForTests(async () => { throw new Error("no live table"); });
+    expect(await recomputeLatch()).toBe(false); // scan B starts later and fails
+
+    a.settle({ table: await fakeTableOver([CURRENT, BARE])() }); // scan A now reads a uniform corpus
+    expect(await scanA).toBe(false);
+    expect(spaceGuardState()).toEqual({ state: "scan-failed", reason: SCAN_ERROR_TABLE_UNAVAILABLE });
+    expect(await isEmbeddingSpaceUniform()).toBe(false);
+  });
+
+  it("a scan that fails after a foreign write is discarded first (flair#2481): mixed, no error recorded", async () => {
+    const a = deferredTable();
+    _setGuardTableGetterForTests(a.getter);
+    const scanA = recomputeLatch();
+    noteWriteStamp(FOREIGN); // the epoch changes while scan A is in flight
+    a.settle({ error: new Error("late read failure") });
+    expect(await scanA).toBe(false);
+    expect(spaceGuardState()).toEqual({ state: "mixed", reason: null });
+  });
+
+  it("a later successful scan clears the failed state", async () => {
+    _setGuardTableGetterForTests(async () => { throw new Error("transient"); });
     expect(await recomputeLatch()).toBe(false);
+    _setGuardTableGetterForTests(fakeTableOver([BARE, BARE, null]));
+    expect(await recomputeLatch()).toBe(true);
+    const v = await embeddingSpaceVerdict();
+    expect(v.uniform).toBe(true);
+    expect(v.state).toBe("uniform");
+    expect(await isEmbeddingSpaceUniform()).toBe(true);
   });
 });

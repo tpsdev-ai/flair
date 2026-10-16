@@ -15,6 +15,7 @@ export const DECLARED_MEMORY_ATTRIBUTES = Object.freeze([
   "visibility",
   "embedding",
   "embeddingModel",
+  "embeddedContentHash",
   "tags",
   "durability",
   "source",
