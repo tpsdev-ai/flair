@@ -12,6 +12,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { bindIntegrityCli, register } from "../../src/commands/integrity";
+import { opsTable } from "../helpers/ops-table";
 import {
   DELETION_HISTORY_MARGIN_MS,
   deletionReadSince,
@@ -98,8 +99,9 @@ async function prune(args: { checkpoints: string[]; deletions: DeletionRecordLit
     bindIntegrityCli({ resolveOpsPort: () => 19925, resolveAdminUser: () => "admin" });
     globalThis.fetch = (async (_url: any, init: any) => {
       const body = JSON.parse(init.body);
-      const { operation, table, hash_values } = body;
-      tables.push(typeof table === "string" ? table : "");
+      const { operation, hash_values } = body;
+      const table = opsTable(body);
+      tables.push(table);
       if (operation === "delete") {
         expect(table).toBe("MemoryDeletionHistory");
         if (args.failDeleteCall === deletes.length) return new Response("boom", { status: 500 });
@@ -109,7 +111,7 @@ async function prune(args: { checkpoints: string[]; deletions: DeletionRecordLit
       if (operation === "describe_table") {
         return new Response(JSON.stringify({ record_count: table === "Memory" ? 0 : args.deletions.length }));
       }
-      expect(operation).toBe("search_by_value");
+      expect(operation).toBe("sql");
       return new Response(JSON.stringify(table === "Memory" ? [] : args.deletions));
     }) as typeof fetch;
     process.exit = ((value: number) => { code = value; throw new Error(`exit:${value}`); }) as typeof process.exit;
@@ -212,20 +214,21 @@ test("prune-history reads the checkpoints and the history it may prune — no Me
   expect(r.tables).not.toContain("Memory");
 });
 
-test("check: a known watermark reads deletion history by condition; an unknown one reads the whole table", async () => {
+test("check: a known watermark bounds the deletion-history read; an unknown one reads the whole table", async () => {
   const originalFetch = globalThis.fetch;
   const originalExit = process.exit;
   const originalWrite = process.stdout.write;
-  const calls: string[] = [];
+  const sqls: string[] = [];
   try {
     bindIntegrityCli({ resolveOpsPort: () => 19925, resolveAdminUser: () => "admin" });
     globalThis.fetch = (async (_url: any, init: any) => {
       const body = JSON.parse(init.body);
-      calls.push(body.operation === "search_by_conditions"
-        ? `${body.operation}:${body.table}:${body.conditions?.[0]?.search_attribute}`
-        : `${body.operation}:${body.table}`);
       if (body.operation === "describe_table") return new Response(JSON.stringify({ record_count: 0 }));
-      if (body.operation === "sql") return new Response(JSON.stringify([{ n: 0 }]));
+      if (body.operation === "sql") {
+        if (/COUNT\(\*\)/i.test(String(body.sql))) return new Response(JSON.stringify([{ n: 0 }]));
+        sqls.push(String(body.sql));
+        return new Response(JSON.stringify([]));
+      }
       if (body.operation === "delete") return new Response(JSON.stringify({ deleted_hashes: body.hash_values ?? [] }));
       return new Response(JSON.stringify([]));
     }) as typeof fetch;
@@ -234,21 +237,20 @@ test("check: a known watermark reads deletion history by condition; an unknown o
 
     const known = join(tmp(), "known.json");
     writeFileSync(known, JSON.stringify(emptyCheckpoint("2026-10-02T00:00:00.000Z", [])));
-    calls.length = 0;
+    sqls.length = 0;
     let program = new Command();
     register(program);
     await expect(program.parseAsync(["integrity", "check", "--json", "--checkpoint", known, "--admin-pass", "secret"], { from: "user" })).rejects.toThrow("exit:");
-    expect(calls).toContain("search_by_conditions:MemoryDeletionHistory:at");
-    expect(calls).not.toContain("search_by_value:MemoryDeletionHistory");
+    expect(sqls.some((sql) => sql.includes("FROM flair.MemoryDeletionHistory WHERE (at >= '"))).toBe(true);
 
     const unknown = join(tmp(), "unknown.json");
     writeFileSync(unknown, JSON.stringify({ ...emptyCheckpoint("2026-10-02T00:00:00.000Z", []), watermark: "not-a-date" }));
-    calls.length = 0;
+    sqls.length = 0;
     program = new Command();
     register(program);
     await expect(program.parseAsync(["integrity", "check", "--json", "--checkpoint", unknown, "--admin-pass", "secret"], { from: "user" })).rejects.toThrow("exit:");
-    expect(calls).toContain("search_by_value:MemoryDeletionHistory");
-    expect(calls).not.toContain("search_by_conditions:MemoryDeletionHistory:at");
+    expect(sqls.some((sql) => sql.includes("FROM flair.MemoryDeletionHistory"))).toBe(true);
+    expect(sqls.every((sql) => !sql.includes("at >= '"))).toBe(true);
   } finally {
     globalThis.fetch = originalFetch;
     process.exit = originalExit;

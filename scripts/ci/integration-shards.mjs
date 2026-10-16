@@ -86,8 +86,16 @@ export function loadWeights(path = WEIGHTS_FILE) {
   return parsed;
 }
 
-/** Measured wall seconds per integration file (repo-relative path). */
-export const SECONDS_BY_FILE = loadWeights();
+let weightsCache = null;
+
+/**
+ * Measured wall seconds per integration file (repo-relative path), loaded lazily
+ * so importing the updater does not read the table.
+ */
+export function secondsByFile() {
+  if (weightsCache === null) weightsCache = loadWeights();
+  return weightsCache;
+}
 
 /** Every `*.test.ts` under `dir`, recursively, as paths relative to ROOT, sorted. */
 export function listIntegrationFiles(dir = INTEGRATION_DIR) {
@@ -107,7 +115,7 @@ export function listIntegrationFiles(dir = INTEGRATION_DIR) {
 
 /** The weight a file contributes to its shard's load. */
 export function weightOf(file) {
-  return SECONDS_BY_FILE[file] ?? DEFAULT_WEIGHT;
+  return secondsByFile()[file] ?? DEFAULT_WEIGHT;
 }
 
 /**
@@ -119,6 +127,7 @@ export function assignShards(files, shards) {
   if (!Number.isInteger(shards) || shards < 1) {
     throw new Error(`shard count must be a positive integer, got ${shards}`);
   }
+  secondsByFile();
   const ordered = [...files].sort(
     (a, b) => weightOf(b) - weightOf(a) || (a < b ? -1 : 1),
   );
@@ -136,6 +145,7 @@ export function assignShards(files, shards) {
 /** Shard `index` (1-based) of `of`. Throws when the index is out of range. */
 export function shardFiles(index, of, files = listIntegrationFiles()) {
   if (!Number.isInteger(of) || of < 1) throw new Error(`--of must be a positive integer, got ${of}`);
+  secondsByFile();
   if (!Number.isInteger(index) || index < 1 || index > of) {
     throw new Error(`--shard must be 1..${of}, got ${index}`);
   }
@@ -148,6 +158,8 @@ export function shardFiles(index, of, files = listIntegrationFiles()) {
  * from the union means it would run in NO shard, which check must catch.
  */
 export function verifyShards(of, files = listIntegrationFiles()) {
+  if (!Number.isInteger(of) || of < 1) throw new Error(`--of must be a positive integer, got ${of}`);
+  secondsByFile();
   const all = new Set(files);
   const seen = new Set();
   const duplicated = [];

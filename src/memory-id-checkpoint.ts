@@ -18,6 +18,9 @@ export const OPS_READ_TIMEOUT_MS = 30_000;
 /** How many missing ids the failure report names. */
 export const MISSING_SAMPLE_LIMIT = 10;
 
+/** A read inconsistent with the exact count of the same range: a duplicate id or a size that differs. */
+export class InconsistentReadError extends Error {}
+
 export interface MemoryCheckpoint {
   version: typeof CHECKPOINT_VERSION;
   /** Operations API origin (scheme://host[:port]) read for this checkpoint. */
@@ -72,50 +75,95 @@ function asRows(body: unknown): any[] | null {
   return Array.isArray(results) ? results : null;
 }
 
+/** The parameters of one keyset page walk over `flair.<table>`. */
+export interface KeysetReadOptions {
+  /** Unqualified table name inside the `flair` database. */
+  table: string;
+  /** Projected columns, `id` first (e.g. "id, durability"). */
+  select: string;
+  /** An extra SQL predicate ANDed with the keyset cursor, or omitted for none. */
+  filter?: string;
+  /** Exact row count over the same range; a read of any other size refuses. */
+  expected: number;
+  /** Rows per page (default MEMORY_PAGE_SIZE). */
+  pageSize?: number;
+  /** Hard page cap (default MAX_MEMORY_PAGES). */
+  maxPages?: number;
+  /** Builds the error a read size that differs from `expected` raises. */
+  mismatch?: (expected: number, read: number) => Error;
+}
+
+/**
+ * Walk `flair.<table>` by primary key: `SELECT <select> ... [WHERE <filter> AND] id > cursor
+ * ORDER BY id LIMIT <pageSize>`, resuming strictly after the last id read. A duplicate id
+ * across pages, a full final page at the page cap, or a read that differs in size from
+ * `expected` refuses. Duplicates raise InconsistentReadError; size mismatches do too by
+ * default, but `mismatch` can return any Error. Errors from `opsPost` propagate unchanged.
+ */
+export async function readTableByIdPaged(opsPost: OpsPost, opts: KeysetReadOptions): Promise<any[]> {
+  const pageSize = opts.pageSize ?? MEMORY_PAGE_SIZE;
+  const maxPages = opts.maxPages ?? MAX_MEMORY_PAGES;
+  if (!Number.isSafeInteger(pageSize) || pageSize < 1 || !Number.isSafeInteger(maxPages) || maxPages < 1) {
+    throw new Error("invalid keyset paging bounds");
+  }
+  const mismatch = opts.mismatch ?? ((expected: number, read: number) => new InconsistentReadError(`${opts.table}: server reports ${expected} rows, integrity read ${read}`));
+  const rows: any[] = [];
+  let lastId: string | undefined;
+  const seen = new Set<string>();
+
+  for (let page = 0; page < maxPages; page++) {
+    if (lastId?.includes("\\")) throw new Error(`${opts.table} cursor contains an unsupported backslash`);
+    const where: string[] = [];
+    if (opts.filter) where.push(`(${opts.filter})`);
+    if (lastId !== undefined) where.push(`id > '${lastId.replace(/'/g, "''")}'`);
+    const clause = where.length > 0 ? ` WHERE ${where.join(" AND ")}` : "";
+    const body = await opsPost({
+      operation: "sql",
+      sql: `SELECT ${opts.select} FROM flair.${opts.table}${clause} ORDER BY id LIMIT ${pageSize}`,
+    });
+    const batch = asRows(body);
+    if (batch === null) throw new Error(`${opts.table} search returned a body that is neither a row array nor { results: [...] }`);
+    for (const r of batch) {
+      if (!r || typeof r.id !== "string" || r.id.length === 0) {
+        throw new Error(`${opts.table} search returned a row without a usable id`);
+      }
+      if (seen.has(r.id)) throw new InconsistentReadError(`${opts.table} search returned duplicate id ${r.id} across pages`);
+      seen.add(r.id);
+      lastId = r.id;
+      rows.push(r);
+    }
+    if (batch.length < pageSize) break;
+    if (page === maxPages - 1) {
+      throw new Error(`${opts.table} read reached the ${maxPages}-page cap`);
+    }
+  }
+
+  if (rows.length !== opts.expected) throw mismatch(opts.expected, rows.length);
+  return rows;
+}
+
 /** Read id and durability in primary-key order. */
 export async function readMemoryRowsPaged(
   opsPost: OpsPost,
   opts: { pageSize?: number; maxPages?: number; expected?: number } = {},
 ): Promise<MemoryRowLite[]> {
-  const pageSize = opts.pageSize ?? MEMORY_PAGE_SIZE;
-  const maxPages = opts.maxPages ?? MAX_MEMORY_PAGES;
-  if (!Number.isSafeInteger(pageSize) || pageSize < 1 || !Number.isSafeInteger(maxPages) || maxPages < 1) {
-    throw new Error("invalid Memory paging bounds");
-  }
   const expected = opts.expected ?? await readMemoryRowCount(opsPost);
-  const rows: MemoryRowLite[] = [];
-  let lastId: string | undefined;
-  const seen = new Set<string>();
-
-  for (let page = 0; page < maxPages; page++) {
-    if (lastId?.includes("\\")) throw new Error("Memory cursor contains an unsupported backslash");
-    const where = lastId === undefined ? "" : ` WHERE id > '${lastId.replace(/'/g, "''")}'`;
-    const body = await opsPost({
-      operation: "sql",
-      sql: `SELECT id, durability FROM flair.Memory${where} ORDER BY id LIMIT ${pageSize}`,
-    });
-    const batch = asRows(body);
-    if (batch === null) throw new Error("Memory search returned a body that is neither a row array nor { results: [...] }");
-    for (const r of batch) {
-      if (!r || typeof r.id !== "string" || r.id.length === 0) {
-        throw new Error("Memory search returned a row without a usable id");
-      }
-      if (seen.has(r.id)) throw new Error(`Memory search returned duplicate id ${r.id} across pages`);
-      seen.add(r.id);
-      lastId = r.id;
-      rows.push({ id: r.id, durability: typeof r.durability === "string" ? r.durability : "standard" });
-    }
-    if (batch.length < pageSize) break;
-    if (page === maxPages - 1) {
-      throw new Error(`Memory read reached the ${maxPages}-page cap`);
-    }
-  }
-
+  const raw = await readTableByIdPaged(opsPost, {
+    table: "Memory",
+    select: "id, durability",
+    expected,
+    pageSize: opts.pageSize,
+    maxPages: opts.maxPages,
+    mismatch: () => new InconsistentReadError("writes during checkpoint"),
+  });
   const after = await readMemoryRowCount(opsPost);
-  if (after !== expected || rows.length !== expected) {
-    throw new Error("writes during checkpoint");
+  if (after !== expected) {
+    throw new InconsistentReadError("writes during checkpoint");
   }
-  return rows;
+  return raw.map((r) => ({
+    id: r.id,
+    durability: typeof r.durability === "string" ? r.durability : "standard",
+  }));
 }
 
 /** The instance's own exact Memory row count (describe_table, exact_count). */
