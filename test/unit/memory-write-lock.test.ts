@@ -1,7 +1,7 @@
 // flair#2478 slice 1 — resources/memory-write-lock.ts, the per-memory-id write
 // serialization protocol: sorted/deduplicated acquisition, release-before-wait
 // on a partial failure, the bounded busy budget, the per-id unknown-outcome
-// marker, and the three 503 refusals.
+// marker, and three lock refusals plus the provider timeout.
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   MEMORY_BUSY_ERROR,
@@ -287,7 +287,31 @@ describe("the observe-only hold watchdog (flair#2478)", () => {
         // ...and did NOT release the key: a one-shot same-id writer is still busy.
         expect(await withMemoryWriteLockOnce(store, ["a"], async () => "second")).toEqual({ kind: "busy" });
         expect(await pending).toEqual({ kind: "done", value: "a" });
+        expect(warnings).toHaveLength(1);
+        expect(warnings[0]).toMatch(/elapsed=\d+ms/);
         expect(store.held.size).toBe(0);
+      });
+    });
+  }, 10_000);
+
+  test("an event-loop-blocking callback logs once at settlement", async () => {
+    await withEnv({ [GATE]: "1", [MEMORY_LOCK_HOLD_WATCHDOG_ENV]: "10" }, async () => {
+      const store = fakeStore();
+      await withWarnings(async (warnings) => {
+        const result = await withMemoryWriteLock(store, ["a"], async () => {
+          const started = performance.now();
+          while (performance.now() - started < 40) {}
+          expect(warnings).toEqual([]);
+          expect(store.held.has(KEY_A)).toBe(true);
+          return "a";
+        }, { phase: "blocking-callback" });
+        expect(result).toEqual({ kind: "done", value: "a" });
+        expect(warnings).toHaveLength(1);
+        expect(warnings[0]).toContain(`keys=[${KEY_A}] phase=blocking-callback`);
+        expect(Number(warnings[0].match(/elapsed=(\d+)ms/)?.[1])).toBeGreaterThan(10);
+        expect(store.held.size).toBe(0);
+        await sleep(30);
+        expect(warnings).toHaveLength(1);
       });
     });
   }, 10_000);

@@ -349,8 +349,8 @@ function writeOutcomeUnknownFor(id: any): Response {
  * Resolves with the vector, or null when the engine answers with no vector, and
  * rejects with {@link MemoryProviderTimeout} once the bound passes; the caller
  * then fails that write closed with 503 `memory_provider_timeout` and writes
- * nothing. The four write paths that compute a vector under the lock (the
- * ordinary PUT's regen, the re-embed PATCH's compute and recompute, and the
+ * nothing. The provider calls under the lock (the ordinary PUT's regen and
+ * create-path dedup probe, the re-embed PATCH's compute and recompute, and the
  * PATCH embedding refresh) go through this.
  */
 function embedUnderLock(text: string): Promise<number[] | null> {

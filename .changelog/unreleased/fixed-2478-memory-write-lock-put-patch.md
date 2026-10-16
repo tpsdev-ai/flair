@@ -40,11 +40,13 @@
 
   The critical section contains the write paths' embedding calls — the
   ordinary `PUT`'s regen and its create-path dedup probe, the re-embed `PATCH`'s
-  compute and its recompute, and the `PATCH` embedding refresh — so the text they
-  embed is the text they write. Each such call is bounded; a provider that does
+  compute and its recompute, and the `PATCH` embedding refresh. Text/vector parity
+  is protected against writers serialized by this lock; a change after confirmation
+  is not seen. Each such call is bounded; a provider that does
   not answer within its bound refuses that write 503 `memory_provider_timeout`
-  and writes nothing. An observe-only watchdog logs a hold longer than 5 s (the
-  lock keys and the phase) and never releases the lock. The global lock order is:
+  and writes nothing. An observe-only watchdog logs a hold longer than 5 s (lock
+  keys, phase and elapsed time) when its timer runs, or at settlement if the event
+  loop cannot resume during the hold. It never releases the lock. The global lock order is:
   a writer takes its sorted Memory id locks first, then the instruction-version
   lock, then the usage ledger; part 2 converts the writers that take the
   instruction lock and write Memory to take their Memory id locks before it.

@@ -4,7 +4,7 @@
  * run under it; the other Memory writers convert in part 2.
  *
  * A writer that must make its read, decision and write on one committed basis
- * runs under ONE key of `Memory.primaryStore`'s lock: `["memory", fullStoredId]`.
+ * runs under one key per ID of `Memory.primaryStore`'s lock: `["memory", fullStoredId]`.
  * Within one Harper process the lock is per key and shared by its threads
  * (resources/key-lock.ts). A caller opens and settles its owned transaction
  * inside the callback, so the key is held across the commit. Two PUT paths can
@@ -62,8 +62,8 @@
  * a call that outlasts the bound fails that write closed with `503
  * memory_provider_timeout` and nothing is written. A hold longer than
  * {@link MEMORY_LOCK_HOLD_WATCHDOG_MS} is logged — the lock keys and the phase
- * named in {@link MemoryWriteLockOptions.phase} — by an observe-only watchdog
- * that never releases a key.
+ * named in {@link MemoryWriteLockOptions.phase}, and elapsed time — when the
+ * timer runs or the callback settles. The watchdog never releases a key.
  *
  * Global lock order: a writer takes its sorted Memory id locks first, then the
  * instruction-version lock (resources/instruction-version-record.ts), then the
@@ -96,9 +96,8 @@ export const MEMORY_PROVIDER_TIMEOUT_ERROR = "memory_provider_timeout";
 /** The bound on one embedding provider call made while the per-id write lock is
  *  held (flair#2478). See {@link boundLockedProviderCall}. */
 export const MEMORY_LOCKED_PROVIDER_TIMEOUT_MS = 20_000;
-/** The observe-only hold watchdog's threshold (flair#2478): a hold longer than
- *  this is logged with the lock keys and the phase. The timer never releases the
- *  lock. */
+/** The observe-only hold watchdog's threshold (flair#2478). If the event loop
+ *  cannot resume during a long hold, logging waits for settlement. No lock release. */
 export const MEMORY_LOCK_HOLD_WATCHDOG_MS = 5_000;
 /** Env overrides, honoured only under the fault-injection gate, that lower the
  *  two bounds for tests (a never-resolving stub or a long hold would otherwise
@@ -257,16 +256,22 @@ export async function withMemoryWriteLockOnce<T>(
   return acquire(lockStore(store), normalizeIds(ids), 1, 0, fn, options);
 }
 
-/** Start the observe-only hold watchdog for `keys` in `phase`. It logs once, with
- *  the keys and the phase, and NEVER releases a key; the caller clears it when
- *  `fn` settles. */
-function startHoldWatchdog(keys: readonly (readonly string[])[], phase: string): ReturnType<typeof setTimeout> {
+/** Start the observe-only watchdog; return its settlement check. */
+function startHoldWatchdog(keys: readonly (readonly string[])[], phase: string): () => void {
   const ms = memoryLockHoldWatchdogMs();
-  const timer = setTimeout(() => {
-    console.warn(`[memory-write-lock] hold exceeded ${ms}ms: keys=${JSON.stringify(keys)} phase=${phase}`);
-  }, ms);
+  const started = performance.now();
+  let logged = false;
+  const logHold = () => {
+    if (logged) return;
+    logged = true;
+    console.warn(`[memory-write-lock] hold exceeded ${ms}ms: keys=${JSON.stringify(keys)} phase=${phase} elapsed=${Math.round(performance.now() - started)}ms`);
+  };
+  const timer = setTimeout(logHold, ms);
   (timer as unknown as { unref?: () => void }).unref?.();
-  return timer;
+  return () => {
+    clearTimeout(timer);
+    if (performance.now() - started > ms) logHold();
+  };
 }
 
 async function acquire<T>(
@@ -299,7 +304,7 @@ async function acquire<T>(
         // that check and here yields, so it cannot have changed.
         return { kind: "done", value: await fn(scope) };
       } finally {
-        clearTimeout(watchdog);
+        watchdog();
         // Release only after `fn` returns. A callback that owns its transaction
         // has settled it by then, so the lock spans that commit; a transaction
         // the callback only joined commits later, after this release.

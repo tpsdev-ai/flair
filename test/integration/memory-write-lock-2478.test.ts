@@ -29,7 +29,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, cpSync, existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import nacl from "tweetnacl";
@@ -502,3 +502,64 @@ describe("flair#2478 — a PATCH must name its id", () => {
     }
   }, 120_000);
 });
+
+it("a PUT provider timeout preserves the row and releases the real Harper lock", async () => {
+  const component = mkdtempSync(join(tmpdir(), "flair-2478-provider-timeout-"));
+  let instance: HarperInstance | undefined;
+  try {
+    for (const entry of ["config.yaml", "package.json", "dist", "schemas"]) {
+      cpSync(join(process.cwd(), entry), join(component, entry), { recursive: true });
+    }
+    symlinkSync(join(process.cwd(), "node_modules"), join(component, "node_modules"), "dir");
+    appendFileSync(join(component, "dist/resources/embeddings-provider.js"),
+      "\ngetEmbedding = async () => new Promise(() => {});\n");
+    instance = await startHarper({
+      cwd: component,
+      env: { FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_MEMORY_LOCK_PROVIDER_TIMEOUT_MS: "50" },
+    });
+    const basic = "Basic " + Buffer.from(`${instance.admin.username}:${instance.admin.password}`).toString("base64");
+    const ops = async (body: Record<string, unknown>): Promise<any> => {
+      const response = await fetch(instance!.opsURL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: basic },
+        body: JSON.stringify(body), signal: AbortSignal.timeout(20_000),
+      });
+      expect(response.status, await response.clone().text()).toBe(200);
+      return response.json();
+    };
+    await ops({ operation: "upsert", database: "flair", table: "Agent", records: [{
+      id: owner.id, name: owner.id, publicKey: Buffer.from(owner.publicKey).toString("base64"),
+      createdAt: new Date().toISOString(),
+    }] });
+    const id = `wlk-timeout-${randomUUID()}`;
+    await ops({ operation: "insert", database: "flair", table: "Memory", records: [{
+      id, agentId: owner.id, content: "the original text", createdAt: new Date().toISOString(),
+      embedding: [0.1, 0.2, 0.3], instanceToken: randomUUID(),
+      durability: "standard", visibility: "shared",
+    }] });
+    const read = async () => (await ops({
+      operation: "search_by_id", database: "flair", table: "Memory", ids: [id], get_attributes: ["*"],
+    }))[0];
+    const before = await read();
+    expect(before?.content).toBe("the original text");
+    const path = `/Memory/${id}`;
+    const write = (method: string, body: Record<string, unknown>) => fetch(`${instance!.httpURL}${path}`, {
+      method,
+      headers: { "Content-Type": "application/json", Authorization: ed25519Header(owner, method, path) },
+      body: JSON.stringify(body), signal: AbortSignal.timeout(20_000),
+    });
+    const refused = await write("PUT", { agentId: owner.id, content: "the edited text" });
+    expect(refused.status).toBe(503);
+    expect((await refused.json() as any).error).toBe("memory_provider_timeout");
+    expect(await read()).toEqual(before);
+    const next = await write("PATCH", { tags: ["after-timeout"] });
+    expect(next.status, await next.clone().text()).toBeLessThan(300);
+    expect((await read())?.tags).toEqual(["after-timeout"]);
+  } finally {
+    try {
+      if (instance) await stopHarper(instance);
+    } finally {
+      rmSync(component, { recursive: true, force: true });
+    }
+  }
+}, 240_000 + HARPER_STOP_BUDGET_MS);

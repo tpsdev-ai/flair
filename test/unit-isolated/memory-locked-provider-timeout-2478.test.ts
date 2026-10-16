@@ -292,6 +292,7 @@ describe("flair#2478 — a provider call under the id lock is bounded", () => {
 
   it("a re-embed PATCH whose recompute never answers refuses memory_provider_timeout and writes nothing", async () => {
     seed("mem-recompute", "the first text");
+    const before = structuredClone(memoryStore.get("mem-recompute"));
     const calls: string[] = [];
     embedImpl = (text: string) => {
       calls.push(text);
@@ -313,6 +314,7 @@ describe("flair#2478 — a provider call under the id lock is bounded", () => {
       expect(res.status).toBe(503);
       expect((await res.json()).error).toBe("memory_provider_timeout");
       expect(calls).toEqual(["the first text", "the second text"]);
+      expect(memoryStore.get("mem-recompute")).toEqual(before);
     } finally {
       BaseMemory.get = staticGet;
     }
