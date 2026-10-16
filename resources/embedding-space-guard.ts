@@ -168,8 +168,8 @@ let _activeStamps: string[] = []; // normalized, capped — for the degrade diag
 // flair#2573 slice 1 — how many rows the last published scan found carrying no
 // trusted current-space stamp (absent, `hash-512d`, or a non-current model).
 // `null` until a scan publishes (an unknown count is never reported as zero).
-// Such a row is excluded from every vector-similarity consumer, so its space
-// never enters a cosine; the uniformity verdict covers the stamped rows.
+// Such a row is excluded from the retrieval vector legs, so its space never
+// enters a cosine there; the uniformity verdict covers the stamped rows.
 let _excluded: number | null = null;
 // flair#2573 slice 1 — a write that stores no space-bearing stamp (an absent
 // stamp or the `hash-512d` marker) can add a row the vector legs must exclude,
@@ -221,8 +221,8 @@ async function scan(): Promise<void> {
   const seen = new Set<string>();
   let uniform = true;
   // Rows whose vector carries no trusted current-space stamp. They are excluded
-  // from the vector-similarity consumers (a query can never cosine against
-  // them), so they are counted apart from the uniformity verdict below.
+  // from the retrieval vector legs (a query can never cosine against them
+  // there), so they are counted apart from the uniformity verdict below.
   let excluded = 0;
   // Which half of the scan threw, for the bounded failure reason below.
   let phase: "table" | "read" = "table";
@@ -323,8 +323,8 @@ export interface EmbeddingSpaceVerdict {
    *  foreign row since deleted) until a successful rescan. */
   found: string[];
   /** Rows the last published scan found carrying no trusted current-space stamp
-   *  (absent, `hash-512d`, or a non-current model). They are excluded from every
-   *  vector-similarity consumer; the uniformity verdict covers the stamped rows.
+   *  (absent, `hash-512d`, or a non-current model). They are excluded from the
+   *  retrieval vector legs; the uniformity verdict covers the stamped rows.
    *  `null` when no scan has published a count — never reported as zero. */
   excluded: number | null;
 }
@@ -395,7 +395,7 @@ export function isEmbeddingSpaceUniform(): Promise<boolean> {
  * configured model? True only for a space-bearing stamp that denotes the current
  * space (the engine-qualified id or its bare-name equivalent). An absent stamp,
  * the `hash-512d` marker and a foreign model are all untrusted: a stored vector
- * carrying one is excluded from every vector-similarity path. Reads the
+ * carrying one is excluded from the retrieval vector legs. Reads the
  * injectable model-id getter so tests can pin the space. Metadata compare only
  * (never a vector-byte comparison).
  */
