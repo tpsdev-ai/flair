@@ -366,6 +366,38 @@ An absent checkpoint exits 1 without a verification outcome.
 verify and adds a `Memory id/tier check:` line to the report; an integrity failure does not
 fail the deploy. Without the flag it says `not checked`.
 
+### Memory ids: comparing nodes
+
+`flair memory checkpoint`/`verify` compare one instance with a file. To see whether two or more
+physical nodes hold the same Memory ids, name each node's operations API origin explicitly:
+
+```bash
+flair memory compare-nodes \
+  --node <node-a-ops-origin> --node <node-b-ops-origin> \
+  --fabric-user admin --fabric-password-file ~/.tps/secrets/flair-fabric-hdb
+```
+
+Each `--node` is the address that node's operations API is read at (the address `flair memory
+checkpoint` reaches through `--ops-target`). Physical peers are never inferred from Flair's
+federation peers: a node is compared only when `--node` names it. Each node is read with the same
+paged operations-API read the checkpoint uses, plus each row's write time. Per node the report
+gives one of:
+
+- **in-sync** — its Memory id set equals every other readable node's;
+- **lagging** — it is missing only ids written after its own newest write; it may still be
+  catching up;
+- **divergent** — it is missing an id written at or before its own newest write, or it holds an id
+  no other node has;
+- **unknown** — it could not be read, its read was inconsistent, or it has no persisted write time
+  to compare against.
+
+The overall result is healthy only when every node is in-sync. A lagging node is reported as such
+and is never healthy; any unknown makes the overall result unknown. The report lists the missing
+and extra ids per node (a count, then the ids up to ten). `--json` prints the same result as JSON.
+
+Exit codes: `0` healthy, `2` divergent, `3` unknown, `4` lagging. Fewer than two `--node` values, a
+repeated node, or a node that is not an HTTP(S) origin exits `1`.
+
 ---
 
 ## See also

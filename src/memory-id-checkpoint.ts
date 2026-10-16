@@ -72,13 +72,18 @@ function asRows(body: unknown): any[] | null {
   return Array.isArray(results) ? results : null;
 }
 
-/** Read id and durability in primary-key order. */
+function asTime(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+/** Read id and durability (and, when asked, the row write times) in primary-key order. */
 export async function readMemoryRowsPaged(
   opsPost: OpsPost,
-  opts: { pageSize?: number; maxPages?: number; expected?: number } = {},
+  opts: { pageSize?: number; maxPages?: number; expected?: number; withWriteTimes?: boolean } = {},
 ): Promise<MemoryRowLite[]> {
   const pageSize = opts.pageSize ?? MEMORY_PAGE_SIZE;
   const maxPages = opts.maxPages ?? MAX_MEMORY_PAGES;
+  const withWriteTimes = opts.withWriteTimes ?? false;
   if (!Number.isSafeInteger(pageSize) || pageSize < 1 || !Number.isSafeInteger(maxPages) || maxPages < 1) {
     throw new Error("invalid Memory paging bounds");
   }
@@ -86,13 +91,14 @@ export async function readMemoryRowsPaged(
   const rows: MemoryRowLite[] = [];
   let lastId: string | undefined;
   const seen = new Set<string>();
+  const columns = withWriteTimes ? "id, durability, createdAt, updatedAt" : "id, durability";
 
   for (let page = 0; page < maxPages; page++) {
     if (lastId?.includes("\\")) throw new Error("Memory cursor contains an unsupported backslash");
     const where = lastId === undefined ? "" : ` WHERE id > '${lastId.replace(/'/g, "''")}'`;
     const body = await opsPost({
       operation: "sql",
-      sql: `SELECT id, durability FROM flair.Memory${where} ORDER BY id LIMIT ${pageSize}`,
+      sql: `SELECT ${columns} FROM flair.Memory${where} ORDER BY id LIMIT ${pageSize}`,
     });
     const batch = asRows(body);
     if (batch === null) throw new Error("Memory search returned a body that is neither a row array nor { results: [...] }");
@@ -103,7 +109,11 @@ export async function readMemoryRowsPaged(
       if (seen.has(r.id)) throw new Error(`Memory search returned duplicate id ${r.id} across pages`);
       seen.add(r.id);
       lastId = r.id;
-      rows.push({ id: r.id, durability: typeof r.durability === "string" ? r.durability : "standard" });
+      rows.push(
+        withWriteTimes
+          ? { id: r.id, durability: typeof r.durability === "string" ? r.durability : "standard", createdAt: asTime(r.createdAt), updatedAt: asTime(r.updatedAt) }
+          : { id: r.id, durability: typeof r.durability === "string" ? r.durability : "standard" },
+      );
     }
     if (batch.length < pageSize) break;
     if (page === maxPages - 1) {

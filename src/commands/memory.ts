@@ -35,6 +35,12 @@ import {
   renderVerifyHuman,
   VERIFY_EXIT_CODES,
 } from "../memory-id-checkpoint.js";
+import {
+  classifyNodeSets,
+  readNode,
+  renderCompareNodesHuman,
+  COMPARE_EXIT_CODES,
+} from "../memory-node-compare.js";
 
 export type MemoryCli = {
   api: (...args: any[]) => Promise<any>;
@@ -671,5 +677,60 @@ Exit codes:
       : await verifyCheckpoint({ checkpoint: read.checkpoint, target: origin, opsTarget: cli.resolveEffectiveOpsUrl({ ...opts, target: origin }), user, password: pass });
     console.log(renderVerifyHuman(result, path));
     process.exit(VERIFY_EXIT_CODES[result.outcome]);
+  });
+
+  // ── flair memory compare-nodes (flair#2216, slice 2 of #971) ──────────────
+  credentialOptions(
+    memory
+      .command("compare-nodes")
+      .description("Compare the Memory ids of two or more explicitly named nodes; healthy only when every node carries the same ids")
+      .option("--node <ops-url>", "A node's operations API origin (repeat once per node; at least two)", (value: string, seen: string[]) => [...seen, value], [] as string[])
+      .option("--json", "Print the comparison as JSON")
+      .addHelpText("after", `
+Each --node is that node's own operations API origin, supplied explicitly. Physical
+peers are never inferred from Flair federation peers.
+
+Per-node classes:
+  in-sync    the node's Memory id set equals every other readable node's
+  lagging    missing only ids written after the node's own newest write; it may be catching up
+  divergent  missing an id written at or before its own newest write, or holding an id no other node has
+  unknown    the node could not be read, its read was inconsistent, or it has no write time to compare
+
+The overall result is healthy only when every node is in-sync. A lagging node is not
+healthy, and any unknown makes the overall result unknown, never healthy.
+
+Exit codes:
+  0  healthy — every node carries the same Memory ids
+  1  usage — fewer than two --node values, a duplicate node, or a bad origin
+  2  divergent — a node disagrees with the others on its persisted ids
+  3  unknown — at least one node's reading could not be used
+  4  lagging — a node is missing only ids written after its own newest write
+`),
+  ).action(async (opts: any) => {
+    const provided: string[] = opts.node ?? [];
+    if (provided.length < 2) {
+      console.error(render.wrap(render.c.red, `${render.icons.error} flair memory compare-nodes: at least two --node values are required`));
+      process.exit(1);
+    }
+    const nodes: string[] = [];
+    for (const raw of provided) {
+      let origin: string;
+      try {
+        origin = normalizeOrigin(raw);
+      } catch {
+        console.error(render.wrap(render.c.red, `${render.icons.error} --node must be an HTTP(S) operations API origin without credentials: ${raw}`));
+        process.exit(1);
+      }
+      if (nodes.includes(origin)) {
+        console.error(render.wrap(render.c.red, `${render.icons.error} --node ${origin} was given more than once`));
+        process.exit(1);
+      }
+      nodes.push(origin);
+    }
+    const { user, pass } = requireCredentials(opts, "flair memory compare-nodes");
+    const readings = await Promise.all(nodes.map((node) => readNode(node, { user, password: pass })));
+    const result = classifyNodeSets(readings);
+    console.log(opts.json ? JSON.stringify(result, null, 2) : renderCompareNodesHuman(result));
+    process.exit(COMPARE_EXIT_CODES[result.verdict]);
   });
 }
