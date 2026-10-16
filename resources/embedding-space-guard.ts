@@ -234,7 +234,8 @@ async function scan(): Promise<void> {
     for await (const row of table.search({ select: ["embeddingModel"] })) {
       const n = normalizeStamp((row as { embeddingModel?: unknown }).embeddingModel as string | null | undefined);
       // No space-bearing stamp (absent / `hash-512d`) ⇒ excluded from the
-      // vector leg; it still matches lexically. Never enters the uniformity set.
+      // vector leg; it can still match on a lexical leg. Never enters the
+      // uniformity set.
       if (n === null) { excluded++; continue; }
       if (seen.size < MAX_DIAG_STAMPS) seen.add(n);
       if (n !== current) { uniform = false; excluded++; }
