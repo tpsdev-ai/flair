@@ -20,7 +20,7 @@ import { randomUUID } from "node:crypto";
 import nacl from "tweetnacl";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { componentWithFailingHostPointer, ADAPTER_REL, FAILING_ADAPTER_SRC, type FailingComponent } from "../helpers/host-pointer-failing-component";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
@@ -68,7 +68,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (component) component.cleanup();
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair#1940 A1-iv item 7 — real-Harper atomicity + REST refusal", () => {
   it("ctrl: the composed copy IS the ESM failing adapter and its injected failure is observed", async () => {

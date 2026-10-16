@@ -24,7 +24,7 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
 
@@ -104,7 +104,7 @@ describe("flair#941 — one meaning, one answer, on every surface", () => {
     await seed({ id: plain.id, name: plain.id, role: "agent", admin: false, publicKey: plain.publicKey, createdAt: now });
   }, 180_000);
 
-  afterAll(async () => { if (harper) await stopHarper(harper); });
+  afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
 
   // ── POSITIVE CONTROL ──────────────────────────────────────────────────────
   // Without this, every "denied" assertion below would also pass if the change

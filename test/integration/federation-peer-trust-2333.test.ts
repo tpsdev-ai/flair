@@ -12,7 +12,7 @@ import { join } from "node:path";
 import nacl from "tweetnacl";
 import { signBodyFresh } from "../../resources/federation-crypto.js";
 import { ensureFlairPairInitiatorRole } from "../../src/cli";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { componentWithFailingRepairPeerWrite, type FailingComponent } from "../helpers/host-pointer-failing-component";
 
 const sfx = Date.now().toString(36);
@@ -206,7 +206,7 @@ afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (component) component.cleanup();
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair#2333 — a pairing token pairs at most one peer (real Harper)", () => {
   it("two concurrent pairings with the same token: one consumes it, the other is refused", async () => {

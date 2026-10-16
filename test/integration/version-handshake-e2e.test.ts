@@ -13,7 +13,7 @@ import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS, HARPER_START_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { checkServerHandshake, formatHandshakeNudge } from "../../src/version-handshake";
 
 let harper: HarperInstance;
@@ -23,12 +23,12 @@ describe("version handshake — real Harper /Health", () => {
   beforeAll(async () => {
     harper = await startHarper();
     cacheDir = mkdtempSync(join(tmpdir(), "flair-handshake-e2e-"));
-  }, 120_000);
+  }, HARPER_START_BUDGET_MS);
 
   afterAll(async () => {
     if (harper) await stopHarper(harper);
     rmSync(cacheDir, { recursive: true, force: true });
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test("GET /Health is unauthenticated and reports `version` as a non-empty string", async () => {
     const res = await fetch(`${harper.httpURL}/Health`);

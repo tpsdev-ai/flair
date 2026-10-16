@@ -24,7 +24,7 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
 
@@ -106,7 +106,7 @@ describe("within-org-read-open — private/shared visibility + centralized read-
 
   afterAll(async () => {
     if (harper) await stopHarper(harper);
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   // ─── Path 1a: Memory.get() (by-id) + the auth-middleware by-id guard ───────
   describe("Memory GET by id (Memory.get() + auth-middleware's guard, path 1 + 4)", () => {

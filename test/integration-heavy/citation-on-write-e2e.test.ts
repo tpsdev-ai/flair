@@ -25,7 +25,7 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
 
@@ -105,7 +105,7 @@ describe("citation-on-write e2e (real Harper) — flair#744 slice A", () => {
 
   afterAll(async () => {
     if (harper) await stopHarper(harper);
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test("citing a memory on write bumps its usageCount through the SAME shared ledger as POST /RecordUsage", async () => {
     const owner = mkAgent(`cow-owner-${randomUUID()}`);
