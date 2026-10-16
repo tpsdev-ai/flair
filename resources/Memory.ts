@@ -36,6 +36,9 @@ import {
   memoryWriteOutcomeUnknown,
   memoryBusyResponse,
   memoryLockUnavailableResponse,
+  boundLockedProviderCall,
+  MemoryProviderTimeout,
+  memoryProviderTimeoutResponse,
   withMemoryWriteLock,
   writeOutcomeUnknownResponse,
   type MemoryLockOutcome,
@@ -341,6 +344,20 @@ function writeOutcomeUnknownFor(id: any): Response {
 }
 
 /**
+ * flair#2478 — one embedding provider call made while the per-id write lock is
+ * held is bounded (resources/memory-write-lock.ts, MEMORY_LOCKED_PROVIDER_TIMEOUT_MS).
+ * Resolves with the vector, or null when the engine answers with no vector, and
+ * rejects with {@link MemoryProviderTimeout} once the bound passes; the caller
+ * then fails that write closed with 503 `memory_provider_timeout` and writes
+ * nothing. The four write paths that compute a vector under the lock (the
+ * ordinary PUT's regen, the re-embed PATCH's compute and recompute, and the
+ * PATCH embedding refresh) go through this.
+ */
+function embedUnderLock(text: string): Promise<number[] | null> {
+  return boundLockedProviderCall(() => getEmbedding(text, "document"));
+}
+
+/**
  * flair#1940 A1' item 2 — persist the pointer row in the SAME request
  * transaction as the Memory row. The request context is passed to the table
  * write so Harper's `txnForContext` joins the write to the request's open
@@ -626,7 +643,7 @@ async function findConservativeDedupMatch(
  *
  * Returns the match signal, or null (no match / gate not applicable).
  */
-async function runDedupGate(ctx: any, content: any): Promise<DedupMatch | null> {
+async function runDedupGate(ctx: any, content: any, bounded = false): Promise<DedupMatch | null> {
   const cosineThreshold = typeof content.dedupThreshold === "number" ? content.dedupThreshold : DEDUP_COSINE_THRESHOLD_DEFAULT;
   const lexicalThreshold = typeof content.lexicalThreshold === "number" ? content.lexicalThreshold : DEDUP_LEXICAL_THRESHOLD_DEFAULT;
   delete content.dedup;
@@ -666,8 +683,14 @@ async function runDedupGate(ctx: any, content: any): Promise<DedupMatch | null> 
   let embedding: number[] | null = Array.isArray(content.embedding) ? content.embedding : null;
   if (!embedding) {
     try {
-      embedding = await getEmbedding(embedText, "document");
-    } catch {
+      // flair#2478: the PUT path calls this with `bounded`, because this probe's
+      // vector IS the create's stored vector and the call runs while the per-id
+      // lock is held; a provider that outlasts the bound rethrows
+      // MemoryProviderTimeout (never swallowed into "no embedding") and the write
+      // is refused. post() is not locked, so it calls the unbounded form.
+      embedding = bounded ? await embedUnderLock(embedText) : await getEmbedding(embedText, "document");
+    } catch (err) {
+      if (err instanceof MemoryProviderTimeout) throw err;
       embedding = null;
     }
     if (embedding) {
@@ -1576,7 +1599,15 @@ async function reembedStoredRow(
         return { response: Response.json({ error: "reembed_row_changed", message: "the stored text changed during each re-embed attempt; retry" }, { status: 409 }) };
       }
       textToEmbed = outcome.text;
-      const recomputed = await getEmbedding(textToEmbed, "document");
+      // flair#2478: the recompute is bounded (embedUnderLock); a call that
+      // outlasts the bound refuses 503 memory_provider_timeout and writes nothing.
+      let recomputed: number[] | null;
+      try {
+        recomputed = await embedUnderLock(textToEmbed);
+      } catch (err) {
+        if (err instanceof MemoryProviderTimeout) return { response: memoryProviderTimeoutResponse() };
+        throw err;
+      }
       if (!isUsableEmbeddingVector(recomputed)) {
         return { response: Response.json({ error: "embedding_unavailable", message: "the embedding engine returned no vector; the stored row is unchanged, retry" }, { status: 503 }) };
       }
@@ -2217,7 +2248,7 @@ export class Memory extends (databases as any).flair.Memory {
       const committed = txnPausePoint("memory-patch-committed");
       if (committed) await committed;
       return result;
-    });
+    }, { phase: "patch" });
     if (outcome.kind === "done") return outcome.value;
     return memoryLockRefusal(outcome, memoryLockCallerId(this))!;
   }
@@ -2375,7 +2406,16 @@ export class Memory extends (databases as any).flair.Memory {
         // Test-only: inert unless the fault-injection env opt-in is set and armed.
         const pause = txnPausePoint("memory-reembed");
         if (pause) await pause;
-        const embedding = await getEmbedding(embedText, "document");
+        // flair#2478: the compute is bounded (embedUnderLock); a call that
+        // outlasts the bound refuses the PATCH 503 memory_provider_timeout and
+        // writes nothing.
+        let embedding: number[] | null;
+        try {
+          embedding = await embedUnderLock(embedText);
+        } catch (err) {
+          if (err instanceof MemoryProviderTimeout) return memoryProviderTimeoutResponse();
+          throw err;
+        }
         if (!isUsableEmbeddingVector(embedding)) {
           return Response.json({ error: "embedding_unavailable", message: "the embedding engine returned no vector; the stored row is unchanged, retry" }, { status: 503 });
         }
@@ -2454,9 +2494,20 @@ export class Memory extends (databases as any).flair.Memory {
         if (stored == null) return redaction.embeddingDiscarded ? field : null;
         return skillEmbedText({ ...stored, ...body }) !== skillEmbedText(stored) ? field : null;
       };
-      const storeVectorFor = async (field: MemoryEmbeddingInputField): Promise<void> => {
+      const storeVectorFor = async (field: MemoryEmbeddingInputField): Promise<Response | null> => {
         const embedText = body[field];
-        const vec = typeof embedText === "string" && embedText.length > 0 ? await getEmbedding(embedText, "document") : null;
+        // flair#2478: the refresh's provider call is bounded (embedUnderLock); a
+        // call that outlasts the bound refuses the PATCH 503 memory_provider_timeout
+        // and writes nothing.
+        let vec: number[] | null = null;
+        if (typeof embedText === "string" && embedText.length > 0) {
+          try {
+            vec = await embedUnderLock(embedText);
+          } catch (err) {
+            if (err instanceof MemoryProviderTimeout) return memoryProviderTimeoutResponse();
+            throw err;
+          }
+        }
         const computed = Array.isArray(vec) && vec.length > 0;
         body.embedding = computed ? vec : null;
         body.embeddingModel = computed ? getModelId() : null;
@@ -2464,9 +2515,13 @@ export class Memory extends (databases as any).flair.Memory {
         // it embedded (null for an empty owner).
         body.embeddedContentHash = computed ? (embeddedTextHash({ ...(existingForSkill ?? {}), ...body }) ?? null) : null;
         body.updatedAt = new Date().toISOString();
+        return null;
       };
       const readField = vectorFieldOver(existingForSkill);
-      if (readField) await storeVectorFor(readField);
+      if (readField) {
+        const denied = await storeVectorFor(readField);
+        if (denied) return denied;
+      }
       // Test-only: inert unless the fault-injection env opt-in is set and armed.
       // Holds the PATCH after its stored-row read and any embed, before the
       // conditional committed-row read and the write.
@@ -2476,7 +2531,10 @@ export class Memory extends (databases as any).flair.Memory {
         Object.prototype.hasOwnProperty.call(body, embedTextField({ ...existingForSkill, ...body }))) {
         const committed = await (databases as any).flair.Memory.get(String(existingForSkill.id), {});
         const committedField = committed ? vectorFieldOver(committed) : null;
-        if (committedField) await storeVectorFor(committedField);
+        if (committedField) {
+          const denied = await storeVectorFor(committedField);
+          if (denied) return denied;
+        }
       }
       // flair#2467: a PATCH commits only the fields in its body; these are the
       // post-redaction text fields among them, for the response.
@@ -2549,7 +2607,7 @@ export class Memory extends (databases as any).flair.Memory {
       const committed = txnPausePoint("memory-put-committed");
       if (committed) await committed;
       return result;
-    });
+    }, { phase: "put" });
     if (outcome.kind === "done") return outcome.value;
     return memoryLockRefusal(outcome, memoryLockCallerId(this))!;
   }
@@ -2909,27 +2967,45 @@ export class Memory extends (databases as any).flair.Memory {
         // flair#2465: did the caller supply a vector? See post().
         const embeddingSupplied = Array.isArray(content.embedding) && content.embedding.length > 0;
         let dedupMatch: DedupMatch | null = null;
-        if (content.supersedes) {
-          delete content.dedup;
-          delete content.dedupThreshold;
-          delete content.lexicalThreshold;
-        } else if (content.id) {
-          if (!preExisting) {
-            dedupMatch = await runDedupGate(ctx, content);
-          } else {
+        // flair#2478: this gate's provider probe runs under the per-id lock on the
+        // create path, so it is bounded (bounded=true); a call that outlasts the
+        // bound throws out of the gate and the PUT is refused 503
+        // memory_provider_timeout with nothing written.
+        try {
+          if (content.supersedes) {
             delete content.dedup;
             delete content.dedupThreshold;
             delete content.lexicalThreshold;
+          } else if (content.id) {
+            if (!preExisting) {
+              dedupMatch = await runDedupGate(ctx, content, true);
+            } else {
+              delete content.dedup;
+              delete content.dedupThreshold;
+              delete content.lexicalThreshold;
+            }
+          } else {
+            dedupMatch = await runDedupGate(ctx, content, true);
           }
-        } else {
-          dedupMatch = await runDedupGate(ctx, content);
+        } catch (err) {
+          if (err instanceof MemoryProviderTimeout) return memoryProviderTimeoutResponse();
+          throw err;
         }
 
         // Re-generate embedding if content changed (no-op if the dedup gate above
         // already computed one for this content). flair#504 Phase 2: 'document'
+        // flair#2478: the call is bounded (embedUnderLock); a call that outlasts
+        // the bound refuses the write 503 memory_provider_timeout and writes
+        // nothing.
         const embedText = skillEmbedText(content);
         if (embedText && !content.embedding) {
-          const vec = await getEmbedding(embedText, "document");
+          let vec: number[] | null;
+          try {
+            vec = await embedUnderLock(embedText);
+          } catch (err) {
+            if (err instanceof MemoryProviderTimeout) return memoryProviderTimeoutResponse();
+            throw err;
+          }
           if (vec) { content.embedding = vec; content.embeddingModel = getModelId(); }
         }
 

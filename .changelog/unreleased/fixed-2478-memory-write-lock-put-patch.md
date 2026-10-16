@@ -37,3 +37,24 @@
   `_reindex` re-PUT's when the request carries an open transaction it joins. The
   lock is per process, and it serializes only owner `PUT`/`PATCH` writes that
   commit under it, within one instance.
+
+  The critical section contains the write paths' embedding calls — the
+  ordinary `PUT`'s regen and its create-path dedup probe, the re-embed `PATCH`'s
+  compute and its recompute, and the `PATCH` embedding refresh — so the text they
+  embed is the text they write. Each such call is bounded; a provider that does
+  not answer within its bound refuses that write 503 `memory_provider_timeout`
+  and writes nothing. An observe-only watchdog logs a hold longer than 5 s (the
+  lock keys and the phase) and never releases the lock. The global lock order is:
+  a writer takes its sorted Memory id locks first, then the instruction-version
+  lock, then the usage ledger; part 2 converts the writers that take the
+  instruction lock and write Memory to take their Memory id locks before it.
+
+  A `PUT` that supersedes a target does not yet lock the predecessor's id: the
+  grant-authorized close is staged in the successor's transaction, but the
+  ordinary supersede close runs after the commit, best-effort, without the
+  predecessor's lock. The predecessor id joins the lock set in part 2.
+
+  Client contract: a caller that gets `memory_busy` may resend the same write
+  unchanged, within a bounded retry — the refusal wrote nothing. A caller that
+  gets `write_outcome_unknown` must read the affected row first and treat a row
+  that already holds the write as written, never replaying that write blindly.

@@ -6,11 +6,21 @@ import { afterEach, describe, expect, test } from "bun:test";
 import {
   MEMORY_BUSY_ERROR,
   MEMORY_LOCK_UNAVAILABLE_ERROR,
+  MEMORY_LOCKED_PROVIDER_TIMEOUT_MS,
+  MEMORY_LOCK_HOLD_WATCHDOG_MS,
+  MEMORY_PROVIDER_TIMEOUT_ERROR,
+  MEMORY_PROVIDER_TIMEOUT_ENV,
+  MEMORY_LOCK_HOLD_WATCHDOG_ENV,
   WRITE_OUTCOME_UNKNOWN_ERROR,
+  MemoryProviderTimeout,
+  boundLockedProviderCall,
   markMemoryWriteOutcomeUnknown,
   memoryBusyResponse,
   memoryLockKey,
   memoryLockUnavailableResponse,
+  memoryLockHoldWatchdogMs,
+  memoryLockedProviderTimeoutMs,
+  memoryProviderTimeoutResponse,
   memoryWriteOutcomeUnknown,
   resetMemoryWriteOutcomeUnknownForTest,
   withMemoryWriteLock,
@@ -199,7 +209,101 @@ describe("withMemoryWriteLock (flair#2478 slice 1)", () => {
   }, 10_000);
 });
 
-describe("the three 503 refusals (flair#2478 slice 1)", () => {
+describe("the bounded provider call (flair#2478)", () => {
+  const GATE = "FLAIR_ENABLE_TEST_FAULT_INJECTION";
+
+  test("the bounds default to the named constants; the override applies only under the fault-injection gate", () => {
+    expect(memoryLockedProviderTimeoutMs({})).toBe(MEMORY_LOCKED_PROVIDER_TIMEOUT_MS);
+    expect(memoryLockHoldWatchdogMs({})).toBe(MEMORY_LOCK_HOLD_WATCHDOG_MS);
+    expect(memoryLockedProviderTimeoutMs({ [MEMORY_PROVIDER_TIMEOUT_ENV]: "5" })).toBe(MEMORY_LOCKED_PROVIDER_TIMEOUT_MS);
+    expect(memoryLockHoldWatchdogMs({ [MEMORY_LOCK_HOLD_WATCHDOG_ENV]: "5" })).toBe(MEMORY_LOCK_HOLD_WATCHDOG_MS);
+    expect(memoryLockedProviderTimeoutMs({ [GATE]: "1", [MEMORY_PROVIDER_TIMEOUT_ENV]: "5" })).toBe(5);
+    expect(memoryLockHoldWatchdogMs({ [GATE]: "1", [MEMORY_LOCK_HOLD_WATCHDOG_ENV]: "7" })).toBe(7);
+  });
+
+  test("boundLockedProviderCall passes a settled value through, and rejects a hung call once the bound passes", async () => {
+    const env = { [GATE]: "1", [MEMORY_PROVIDER_TIMEOUT_ENV]: "40" };
+    expect(await boundLockedProviderCall(async () => "vector", env)).toBe("vector");
+
+    const started = Date.now();
+    const err = await boundLockedProviderCall(() => new Promise<never>(() => {}), env).catch((e) => e);
+    expect(err).toBeInstanceOf(MemoryProviderTimeout);
+    expect((err as MemoryProviderTimeout).ms).toBe(40);
+    const elapsed = Date.now() - started;
+    expect(elapsed).toBeGreaterThanOrEqual(35);
+    expect(elapsed).toBeLessThan(2_000);
+  }, 10_000);
+
+  test("memory_provider_timeout is 503, named, and says nothing was written", async () => {
+    const res = memoryProviderTimeoutResponse();
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.error).toBe(MEMORY_PROVIDER_TIMEOUT_ERROR);
+    expect(body.message).toContain("nothing was written");
+  });
+});
+
+describe("the observe-only hold watchdog (flair#2478)", () => {
+  const GATE = "FLAIR_ENABLE_TEST_FAULT_INJECTION";
+
+  async function withEnv<T>(env: Record<string, string>, body: () => Promise<T>): Promise<T> {
+    const saved = new Map<string, string | undefined>();
+    for (const [name, value] of Object.entries(env)) {
+      saved.set(name, process.env[name]);
+      process.env[name] = value;
+    }
+    try {
+      return await body();
+    } finally {
+      for (const [name, value] of saved) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  }
+
+  async function withWarnings<T>(body: (warnings: string[]) => Promise<T>): Promise<T> {
+    const warnings: string[] = [];
+    const realWarn = console.warn;
+    console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
+    try {
+      return await body(warnings);
+    } finally {
+      console.warn = realWarn;
+    }
+  }
+
+  test("a hold past the threshold logs the lock key and the phase, and the timer never releases the lock", async () => {
+    await withEnv({ [GATE]: "1", [MEMORY_LOCK_HOLD_WATCHDOG_ENV]: "25" }, async () => {
+      const store = fakeStore();
+      await withWarnings(async (warnings) => {
+        const pending = withMemoryWriteLock(store, ["a"], async () => {
+          await sleep(300);
+          return "a";
+        }, { phase: "unit-hold-phase" });
+        await sleep(150);
+        // The watchdog logged with the key and the phase...
+        expect(warnings.some((w) => w.includes(KEY_A) && w.includes("unit-hold-phase"))).toBe(true);
+        // ...and did NOT release the key: a one-shot same-id writer is still busy.
+        expect(await withMemoryWriteLockOnce(store, ["a"], async () => "second")).toEqual({ kind: "busy" });
+        expect(await pending).toEqual({ kind: "done", value: "a" });
+        expect(store.held.size).toBe(0);
+      });
+    });
+  }, 10_000);
+
+  test("a hold inside the threshold logs nothing", async () => {
+    await withEnv({ [GATE]: "1", [MEMORY_LOCK_HOLD_WATCHDOG_ENV]: "5000" }, async () => {
+      const store = fakeStore();
+      await withWarnings(async (warnings) => {
+        expect(await withMemoryWriteLock(store, ["a"], async () => { await sleep(30); return "a"; }, { phase: "quiet" })).toEqual({ kind: "done", value: "a" });
+        expect(warnings).toEqual([]);
+      });
+    });
+  }, 10_000);
+});
+
+describe("the busy, unknown and no-lock 503 refusals (flair#2478 slice 1)", () => {
   // The helper takes the caller id and nothing about the target row. That the
   // RESOURCE answers the same bytes for an existing and an absent target is
   // asserted through real Harper in test/integration/memory-write-lock-2478.test.ts.

@@ -34,7 +34,7 @@
  *    caller id and nothing else: it is byte-identical whether the target id
  *    exists or not, so a lock miss never reveals stored-row state (Sherlock S7).
  *
- * Two more refusals, also `503`:
+ * Two more lock refusals, also `503`:
  *
  *  - `memory_lock_unavailable` — `Memory.primaryStore` has no lock. The write
  *    is refused, never run unserialized, and nothing was written. There is no
@@ -55,11 +55,28 @@
  * Under the explicit `FLAIR_MULTI_WORKER_UNSAFE=1` opt-in, a marker set on one
  * worker is not seen by another.
  *
+ * The critical section contains the write paths' embedding calls — the ordinary
+ * PUT's regen (and its create-path dedup probe), the re-embed PATCH's compute
+ * and its recompute, and the PATCH embedding refresh — and each is bounded by
+ * {@link MEMORY_LOCKED_PROVIDER_TIMEOUT_MS} through {@link boundLockedProviderCall};
+ * a call that outlasts the bound fails that write closed with `503
+ * memory_provider_timeout` and nothing is written. A hold longer than
+ * {@link MEMORY_LOCK_HOLD_WATCHDOG_MS} is logged — the lock keys and the phase
+ * named in {@link MemoryWriteLockOptions.phase} — by an observe-only watchdog
+ * that never releases a key.
+ *
+ * Global lock order: a writer takes its sorted Memory id locks first, then the
+ * instruction-version lock (resources/instruction-version-record.ts), then the
+ * usage ledger (resources/usage-recording.ts). Part 2 converts the writers that
+ * take the instruction lock and write Memory to take their Memory id locks
+ * before it.
+ *
  * Acquisition is sorted and deduplicated, so two writers that share ids take
  * them in the same order. A partial acquisition is released before the wait, so
  * a writer never blocks on the next key while holding one.
  */
 
+import { TEST_FAULT_INJECTION_ENV } from "./txn-pause-point.js";
 import type { KeyLockStore } from "./key-lock.js";
 
 /** The `Memory.primaryStore` key namespace (flair#2478). */
@@ -73,6 +90,70 @@ export const MEMORY_BUSY_ERROR = "memory_busy";
 export const WRITE_OUTCOME_UNKNOWN_ERROR = "write_outcome_unknown";
 /** The no-lock error code: the store has no per-id lock, so the write is refused. */
 export const MEMORY_LOCK_UNAVAILABLE_ERROR = "memory_lock_unavailable";
+/** The provider-bound error code: an embedding call made under the lock outlasted its bound. */
+export const MEMORY_PROVIDER_TIMEOUT_ERROR = "memory_provider_timeout";
+
+/** The bound on one embedding provider call made while the per-id write lock is
+ *  held (flair#2478). See {@link boundLockedProviderCall}. */
+export const MEMORY_LOCKED_PROVIDER_TIMEOUT_MS = 20_000;
+/** The observe-only hold watchdog's threshold (flair#2478): a hold longer than
+ *  this is logged with the lock keys and the phase. The timer never releases the
+ *  lock. */
+export const MEMORY_LOCK_HOLD_WATCHDOG_MS = 5_000;
+/** Env overrides, honoured only under the fault-injection gate, that lower the
+ *  two bounds for tests (a never-resolving stub or a long hold would otherwise
+ *  cost the test its own bound). */
+export const MEMORY_PROVIDER_TIMEOUT_ENV = "FLAIR_MEMORY_LOCK_PROVIDER_TIMEOUT_MS";
+export const MEMORY_LOCK_HOLD_WATCHDOG_ENV = "FLAIR_MEMORY_LOCK_HOLD_WATCHDOG_MS";
+
+/** The provider call {@link boundLockedProviderCall} rejects with once its bound passes. */
+export class MemoryProviderTimeout extends Error {
+  constructor(readonly ms: number) {
+    super(`an embedding provider call made under the memory write lock did not settle within ${ms}ms`);
+    this.name = "MemoryProviderTimeout";
+  }
+}
+
+/** The provider bound in force: {@link MEMORY_LOCKED_PROVIDER_TIMEOUT_MS}, or the
+ *  test override when the fault-injection gate is on. */
+export function memoryLockedProviderTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const override = testBound(env, MEMORY_PROVIDER_TIMEOUT_ENV);
+  return override ?? MEMORY_LOCKED_PROVIDER_TIMEOUT_MS;
+}
+
+/** The hold-watchdog threshold in force: {@link MEMORY_LOCK_HOLD_WATCHDOG_MS},
+ *  or the test override when the fault-injection gate is on. */
+export function memoryLockHoldWatchdogMs(env: NodeJS.ProcessEnv = process.env): number {
+  const override = testBound(env, MEMORY_LOCK_HOLD_WATCHDOG_ENV);
+  return override ?? MEMORY_LOCK_HOLD_WATCHDOG_MS;
+}
+
+/** A positive, finite override read only under the fault-injection gate. */
+function testBound(env: NodeJS.ProcessEnv, name: string): number | undefined {
+  if (env[TEST_FAULT_INJECTION_ENV] !== "1") return undefined;
+  const value = Number(env[name]);
+  return Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+/**
+ * Run one embedding provider call bounded by {@link memoryLockedProviderTimeoutMs}.
+ * `getEmbedding` takes no AbortSignal and swallows its own failures (returning
+ * null), so this is a race: a call that outlasts the bound rejects with
+ * {@link MemoryProviderTimeout}, and the caller fails the write closed with 503
+ * `memory_provider_timeout`, writing nothing. The provider call itself is not
+ * cancelled and the refusal does not wait for it.
+ */
+export function boundLockedProviderCall<T>(call: () => Promise<T>, env: NodeJS.ProcessEnv = process.env): Promise<T> {
+  const ms = memoryLockedProviderTimeoutMs(env);
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new MemoryProviderTimeout(ms)), ms);
+    (timer as unknown as { unref?: () => void }).unref?.();
+    call().then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (error) => { clearTimeout(timer); reject(error); },
+    );
+  });
+}
 
 /** Per-id unknown-outcome markers (Kern pin 2 / Flint decision). Module state:
  *  one set per worker thread, which is the whole instance in the supported
@@ -107,6 +188,11 @@ export function resetMemoryWriteOutcomeUnknownForTest(id: string | number): void
 export interface MemoryLockedScope {
   readonly keys: readonly (readonly string[])[];
   readonly ids: readonly string[];
+}
+
+/** The optional per-call context: the phase the hold warning names. */
+export interface MemoryWriteLockOptions {
+  readonly phase?: string;
 }
 
 export type MemoryLockOutcome<T> =
@@ -154,8 +240,9 @@ export async function withMemoryWriteLock<T>(
   store: unknown,
   ids: readonly (string | number)[],
   fn: (locked: MemoryLockedScope) => Promise<T>,
+  options: MemoryWriteLockOptions = {},
 ): Promise<MemoryLockOutcome<T>> {
-  return acquire(lockStore(store), normalizeIds(ids), MEMORY_LOCK_ATTEMPTS, MEMORY_LOCK_WAIT_MS, fn);
+  return acquire(lockStore(store), normalizeIds(ids), MEMORY_LOCK_ATTEMPTS, MEMORY_LOCK_WAIT_MS, fn, options);
 }
 
 /** One attempt, no wait. No writer calls it yet: it is the shape part 2's
@@ -165,8 +252,21 @@ export async function withMemoryWriteLockOnce<T>(
   store: unknown,
   ids: readonly (string | number)[],
   fn: (locked: MemoryLockedScope) => Promise<T>,
+  options: MemoryWriteLockOptions = {},
 ): Promise<MemoryLockOutcome<T>> {
-  return acquire(lockStore(store), normalizeIds(ids), 1, 0, fn);
+  return acquire(lockStore(store), normalizeIds(ids), 1, 0, fn, options);
+}
+
+/** Start the observe-only hold watchdog for `keys` in `phase`. It logs once, with
+ *  the keys and the phase, and NEVER releases a key; the caller clears it when
+ *  `fn` settles. */
+function startHoldWatchdog(keys: readonly (readonly string[])[], phase: string): ReturnType<typeof setTimeout> {
+  const ms = memoryLockHoldWatchdogMs();
+  const timer = setTimeout(() => {
+    console.warn(`[memory-write-lock] hold exceeded ${ms}ms: keys=${JSON.stringify(keys)} phase=${phase}`);
+  }, ms);
+  (timer as unknown as { unref?: () => void }).unref?.();
+  return timer;
 }
 
 async function acquire<T>(
@@ -175,6 +275,7 @@ async function acquire<T>(
   attempts: number,
   waitMs: number,
   fn: (locked: MemoryLockedScope) => Promise<T>,
+  options: MemoryWriteLockOptions = {},
 ): Promise<MemoryLockOutcome<T>> {
   if (!lock || normalized.keys.length === 0) return { kind: "unavailable" };
   const scope: MemoryLockedScope = { keys: normalized.keys, ids: normalized.ids };
@@ -191,12 +292,14 @@ async function acquire<T>(
       }
     }
     if (gotAll) {
+      const watchdog = startHoldWatchdog(normalized.keys, options.phase ?? "unknown");
       try {
         lock.resetReadTxn?.();
         // The marker was checked at the top of this attempt; nothing between
         // that check and here yields, so it cannot have changed.
         return { kind: "done", value: await fn(scope) };
       } finally {
+        clearTimeout(watchdog);
         // Release only after `fn` returns. A callback that owns its transaction
         // has settled it by then, so the lock spans that commit; a transaction
         // the callback only joined commits later, after this release.
@@ -224,6 +327,17 @@ export function writeOutcomeUnknownResponse(): Response {
     JSON.stringify({
       error: WRITE_OUTCOME_UNKNOWN_ERROR,
       message: "the write outcome is unknown. Read the affected row before writing again.",
+    }),
+    { status: 503, headers: { "content-type": "application/json" } },
+  );
+}
+
+/** The provider-bound refusal: `503 memory_provider_timeout`. Nothing was written. */
+export function memoryProviderTimeoutResponse(): Response {
+  return new Response(
+    JSON.stringify({
+      error: MEMORY_PROVIDER_TIMEOUT_ERROR,
+      message: "the embedding provider did not answer within its bound; nothing was written, retry",
     }),
     { status: 503, headers: { "content-type": "application/json" } },
   );
