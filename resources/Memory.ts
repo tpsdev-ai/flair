@@ -2157,14 +2157,17 @@ export class Memory extends (databases as any).flair.Memory {
     // flair#2467: a PATCH commits only the fields in its body; these are the
     // post-redaction text fields among them, for the response.
     const patchStaged = storedMemoryText(content, suppliedText);
+    // Notify only when PATCH changes the stored vector or its model stamp.
+    const embeddingChanged = Object.prototype.hasOwnProperty.call(body, "embedding") &&
+      !isDeepStrictEqual(body.embedding, existingForSkill?.embedding);
+    const stampChanged = Object.prototype.hasOwnProperty.call(body, "embeddingModel") &&
+      !isDeepStrictEqual(body.embeddingModel, existingForSkill?.embeddingModel);
     // flair#2561: a Response from the storage layer is not reported (storageResult).
     const patched = storageResult(await super.patch(content, query));
-    // embedding-space-guard slice 1 (flair#2425): a PATCH that stores an
-    // embedding stamp must consult the latch the same way post()/put() do, so a
-    // body-supplied foreign stamp closes the gate instead of the row carrying a
-    // model stamp the latch never recorded. A PATCH body with no embedding
-    // fields is unchanged: noteWriteStamp(undefined) is a no-op.
-    noteWriteStamp(content?.embeddingModel as string | null | undefined);
+    if (embeddingChanged || stampChanged) {
+      noteWriteStamp(Object.prototype.hasOwnProperty.call(body, "embeddingModel")
+        ? body.embeddingModel : existingForSkill?.embeddingModel);
+    }
     return rowWriteResponse(patched, content?.id ?? (this as any).getId?.() ?? existingForSkill?.id, redactedValues, patchStaged);
   }
 

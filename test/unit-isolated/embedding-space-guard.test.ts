@@ -24,6 +24,7 @@ const {
   isEmbeddingSpaceUniform,
   embeddingSpaceVerdict,
   spaceGuardState,
+  spaceGuardWarning,
   noteWriteStamp,
   recomputeLatch,
   spaceGuardDiagnostics,
@@ -148,7 +149,7 @@ describe("embedding-space-guard — latch", () => {
     expect(await isEmbeddingSpaceUniform()).toBe(false);
   });
 
-  it("a stored vector with no trusted stamp makes the verdict non-uniform (excluded)", async () => {
+  it("scan counts an unstamped stored vector", async () => {
     // A stamped row plus a row that stores a vector and carries no stamp: the
     // stamp metadata a scan sees is uniform, yet the corpus holds a vector the
     // runtime cosine legs must not touch.
@@ -160,6 +161,7 @@ describe("embedding-space-guard — latch", () => {
     expect(v.excluded).toBe(1);
     expect(spaceGuardState()).toEqual({ state: "excluded", reason: null, excluded: 1 });
     expect(await isEmbeddingSpaceUniform()).toBe(false); // the caller's mixed path
+    expect(spaceGuardWarning(v, "keyword")).toContain("the last scan found a stored vector");
 
     // A no-stamp row that stores NO vector is not a hazard: it cannot be cosined.
     _setGuardTableGetterForTests(fakeRows([{ stamp: BARE, vec: true }, { stamp: null, vec: false }]));
@@ -288,7 +290,7 @@ describe("embedding-space-guard — latch", () => {
     expect(spaceGuardState()).toEqual({ state: "mixed", reason: null, excluded: null });
   });
 
-  it("a write that stores a vector without a trusted stamp marks the count stale and fails closed until a fresh scan", async () => {
+  it("a guard-notified vector write without a trusted stamp fails closed until a fresh scan", async () => {
     _setGuardTableGetterForTests(fakeTableOver([BARE]));
     expect(await recomputeLatch()).toBe(true);
     expect(spaceGuardState()).toEqual({ state: "uniform", reason: null, excluded: 0 });
@@ -303,7 +305,7 @@ describe("embedding-space-guard — latch", () => {
     expect(spaceGuardState()).toEqual({ state: "uniform", reason: null, excluded: 0 });
   });
 
-  it("a write during an in-flight scan invalidates it: no older count published, the flag not cleared", async () => {
+  it("a guard-notified write invalidates an in-flight scan: no older count published, the flag not cleared", async () => {
     _setGuardTableGetterForTests(fakeRows([{ stamp: BARE, vec: true }]));
     expect(await recomputeLatch()).toBe(true);
     expect(spaceGuardState().excluded).toBe(0);

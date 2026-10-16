@@ -23,19 +23,26 @@ describe("describeEmbeddingSpaceDoctorFinding (flair#2530)", () => {
     });
   });
 
-  test("excluded: a blocking finding naming the count of rows with no trusted stamp (flair#2573)", () => {
+  test("excluded: a blocking finding naming the last published count (flair#2573)", () => {
     const f = describeEmbeddingSpaceDoctorFinding({ state: "excluded", reason: null, excluded: 3 });
     expect(f?.isIssue).toBe(true);
     expect(f?.icon).toBe("error");
-    expect(String(f?.message)).toContain("a stored vector carries no trusted current-space stamp");
+    expect(String(f?.message)).toContain("the last scan found a stored vector with no trusted current-space stamp");
     expect(String(f?.message)).toContain("excluded from the vector leg: 3 row(s) with no trusted model stamp");
   });
 
   test("excluded: an absent or malformed count is never invented as zero", () => {
-    const base = "a stored vector carries no trusted current-space stamp — the embedding leg is refused";
+    const base = "the last scan found a stored vector with no trusted current-space stamp — the embedding leg is refused";
     expect(describeEmbeddingSpaceDoctorFinding({ state: "excluded", reason: null, excluded: null })?.message).toBe(base);
     expect(describeEmbeddingSpaceDoctorFinding({ state: "excluded", reason: null, excluded: -1 })?.message).toBe(base);
     expect(describeEmbeddingSpaceDoctorFinding({ state: "excluded", reason: null, excluded: "3" })?.message).toBe(base);
+  });
+
+  test("only excluded renders the last published count", () => {
+    for (const state of ["uniform", "mixed", "unverified", "scan-failed"]) {
+      const f = describeEmbeddingSpaceDoctorFinding({ state, reason: null, excluded: 3 });
+      expect(f?.message).not.toContain("3 row(s)");
+    }
   });
 
   test("mixed: a blocking finding carrying the reembed remedy", () => {

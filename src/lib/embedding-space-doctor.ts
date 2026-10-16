@@ -14,7 +14,7 @@
  * exit code.
  *
  * `mixed` and `excluded` are blocking findings: a non-current model stamp was
- * observed, or a stored vector carries no trusted stamp, which warrants
+ * observed, or the last scan found a stored vector with no trusted stamp, which warrants
  * investigation (`flair reembed --stale-only` reconciles a real one).
  * `unverified` and
  * `scan-failed` are advisories, and `uniform` is an OK line. A rescan starts
@@ -98,7 +98,7 @@ export function describeEmbeddingSpaceDoctorFinding(field: unknown): EmbeddingSp
         isIssue: true,
         icon: "error",
         message:
-          "a stored vector carries no trusted current-space stamp — the embedding leg is refused" +
+          "the last scan found a stored vector with no trusted current-space stamp — the embedding leg is refused" +
           excludedClause(rec.excluded),
         fixHint: "Re-embed or remove the stored vector, then re-run: flair doctor",
       };

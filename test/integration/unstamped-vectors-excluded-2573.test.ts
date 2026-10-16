@@ -1,18 +1,10 @@
 /**
  * unstamped-vectors-excluded-2573.test.ts — flair#2573 slice 1 (real Harper).
  *
- * A Memory write that supplies its own `embedding` and no `embeddingModel` stamp
- * stores a vector of unknown space. flair#2573 slice 1 makes the query-time
- * embedding-space guard's verdict non-uniform while any row stores a vector with
- * no trusted current-space stamp: the guard's scan counts those rows (`excluded`)
- * and every guard consumer takes its existing non-uniform path. This test drives
- * a REAL Harper agent write (the ed25519 REST path) that supplies its own vector
- * with no stamp, and covers:
- *   - the write-time near-duplicate query (control: it compares vectors while the
- *     store is uniform; then it does not, once one unstamped vector exists);
- *   - the recall leg: a vector-only query returns no rows, the lexical leg still
- *     finds the row, and /Health reports the excluded count;
- *   - the real `flair doctor` command printing the excluded count line.
+ * A published scan counts stored vectors without trusted current-space stamps.
+ * Raw operations-API inserts remain uncovered until a rescan. Covers signed
+ * Memory PUT/PATCH, dedup, recall, /Health, and doctor's last published count
+ * in the `excluded` state.
  * A second spawned instance runs with FLAIR_RETRIEVAL_MODE=vector-only to show
  * that branch falling back and naming the guard state.
  *
@@ -21,10 +13,6 @@
  * test-only `embedding-stamp-regen-pre` point for the span of each describe
  * (released in afterAll). The fault-injection gate is the environment the spawned
  * Harper inherits.
- *
- * Memory exposes only PUT over real HTTP (with the id in the path) — a bare
- * `POST /Memory` is 405 "does not have a post method implemented", so every write
- * here is a PUT /Memory/{id}, the path real callers use.
  *
  * Mutation check (fails on an assertion): in resources/embedding-space-guard.ts,
  * make the scan not count a stored vector with no trusted stamp (skip the
@@ -96,6 +84,25 @@ function makeHarness(get: () => HarperInstance) {
     expect(res.status, `PUT ${path} returned ${res.status}: ${text.slice(0, 300)}`).toBeLessThan(300);
     return JSON.parse(text);
   }
+  async function memoryRow(id: string): Promise<any> {
+    const res = await adminOp({
+      operation: "search_by_id", database: "flair", table: "Memory", ids: [id], get_attributes: ["*"],
+    });
+    expect(res.status).toBe(200);
+    const rows = await res.json() as any[];
+    expect(rows.length).toBe(1);
+    return rows[0];
+  }
+  async function patchMemory(id: string, body: Record<string, unknown>): Promise<void> {
+    const path = `/Memory/${id}`;
+    const res = await fetch(`${get().httpURL}${path}`, {
+      method: "PATCH",
+      headers: { Authorization: ed25519Header(agent, "PATCH", path), "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const text = await res.text();
+    expect(res.status, `PATCH ${path}: ${text.slice(0, 300)}`).toBeLessThan(300);
+  }
   async function semanticSearch(body: Record<string, unknown>): Promise<any> {
     const res = await fetch(`${get().httpURL}/SemanticSearch`, {
       method: "POST",
@@ -130,7 +137,7 @@ function makeHarness(get: () => HarperInstance) {
     }
     return space;
   }
-  return { agent, adminOp, putMemory, semanticSearch, health, consult, waitGuard };
+  return { agent, adminOp, putMemory, patchMemory, memoryRow, semanticSearch, health, consult, waitGuard };
 }
 
 /** Spawn a Harper with the migration regen held, register the agent, return the harness. */
@@ -172,7 +179,7 @@ async function releaseAndStop(harper: HarperInstance | undefined, pauseDir: stri
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
 }
 
-describe("flair#2573 slice 1 — an unstamped stored vector makes the guard verdict non-uniform (real Harper)", () => {
+describe("flair#2573 slice 1 — signed unstamped vector writes close the guard (real Harper)", () => {
   let harper: HarperInstance | undefined;
   let pauseDir = "";
   let h: ReturnType<typeof makeHarness>;
@@ -204,13 +211,13 @@ describe("flair#2573 slice 1 — an unstamped stored vector makes the guard verd
     expect(b.matchedId).toBe(A_ID);
   }, 120_000);
 
-  test("one unstamped stored vector makes the verdict non-uniform: excluded count, no vector recall, lexical still matches", async () => {
+  test("a signed PUT of an unstamped vector makes the verdict non-uniform: excluded count, no vector recall, lexical still matches", async () => {
     const u = await h.putMemory(U_ID, { content: `a caller-supplied vector of unknown space ${KEYWORD}`, embedding: UNTRUSTED_VEC });
     expect(u.id).toBe(U_ID);
     // The write stored a vector with no stamp: the guard's count is stale, and a
     // consult republishes it as non-uniform.
     const space = await h.waitGuard((s) => s.state === "excluded" && s.excluded === 1, 60_000);
-    expect(space?.state, "one unstamped stored vector makes the verdict non-uniform").toBe("excluded");
+    expect(space?.state, "a signed PUT of an unstamped vector makes the verdict non-uniform").toBe("excluded");
     expect(space?.excluded, "the unstamped vector row must be counted").toBe(1);
 
     // A vector-only query (a query embedding, no `q`): the embedding leg is
@@ -232,7 +239,7 @@ describe("flair#2573 slice 1 — an unstamped stored vector makes the guard verd
     expect(c.matchedId).toBeUndefined();
   }, 60_000);
 
-  test("the real flair doctor prints the excluded count line", async () => {
+  test("the real flair doctor prints the last published count in excluded", async () => {
     const home = mkdtempSync(join(tmpdir(), "flair-2573-home-"));
     try {
       const env: Record<string, string> = {
@@ -259,12 +266,49 @@ describe("flair#2573 slice 1 — an unstamped stored vector makes the guard verd
           resolve({ code, stdout, stderr });
         });
       });
-      expect(out.stdout).toContain("a stored vector carries no trusted current-space stamp");
+      expect(out.stdout).toContain("the last scan found a stored vector with no trusted current-space stamp");
       expect(out.stdout).toContain("excluded from the vector leg: 1 row(s) with no trusted model stamp");
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
   }, 120_000);
+});
+
+describe("flair#2573 slice 1 — PATCH guard notifications (real Harper)", () => {
+  let harper: HarperInstance | undefined;
+  let pauseDir = "";
+  let h: ReturnType<typeof makeHarness>;
+  const A_ID = "mem-2573-patch";
+
+  beforeAll(async () => {
+    const spawned = await spawnWithHarness();
+    harper = spawned.harper;
+    pauseDir = spawned.pauseDir;
+    h = spawned.h;
+  }, 180_000);
+
+  afterAll(async () => {
+    await releaseAndStop(harper, pauseDir);
+  }, 60_000);
+
+  test("metadata-only PATCH preserves a uniform verdict; an unstamped vector PATCH closes it", async () => {
+    await h.putMemory(A_ID, { content: STAMPED_TEXT, embedding: STAMPED_VEC, embeddingModel: CURRENT_STAMP });
+    expect((await h.waitGuard((s) => s.state === "uniform", 60_000))?.state).toBe("uniform");
+    await h.patchMemory(A_ID, { tags: ["metadata-only"] });
+    const metadataPatched = await h.memoryRow(A_ID);
+    expect(metadataPatched.tags).toEqual(["metadata-only"]);
+    expect(metadataPatched.embedding).toEqual(STAMPED_VEC);
+    expect(metadataPatched.embeddingModel).toBe(CURRENT_STAMP);
+    expect((await h.health()).embeddingSpace.state).toBe("uniform");
+    await h.consult();
+    expect((await h.health()).embeddingSpace.state).toBe("uniform");
+    await h.patchMemory(A_ID, { embedding: UNTRUSTED_VEC, embeddingModel: null });
+    const vectorPatched = await h.memoryRow(A_ID);
+    expect(vectorPatched.embedding).toEqual(UNTRUSTED_VEC);
+    expect(vectorPatched.embeddingModel ?? null).toBeNull();
+    expect((await h.health()).embeddingSpace.state).not.toBe("uniform");
+    expect((await h.waitGuard((s) => s.state === "excluded" && s.excluded === 1, 60_000))?.state).toBe("excluded");
+  }, 180_000);
 });
 
 describe("flair#2573 slice 1 — vector-only mode falls back and names the guard state (real Harper)", () => {
@@ -286,7 +330,7 @@ describe("flair#2573 slice 1 — vector-only mode falls back and names the guard
     await releaseAndStop(harper, pauseDir);
   }, 60_000);
 
-  test("one unstamped stored vector makes the vector-only branch fall back, reporting the guard state", async () => {
+  test("a signed unstamped-vector PUT makes the vector-only branch fall back, reporting the guard state", async () => {
     await h.putMemory(A_ID, { content: `a stamped row mentioning ${TOKEN}`, embedding: STAMPED_VEC, embeddingModel: CURRENT_STAMP });
     await h.putMemory(U_ID, { content: `an untrusted vector row ${KEYWORD}`, embedding: UNTRUSTED_VEC });
     const space = await h.waitGuard((s) => s.state === "excluded" && s.excluded === 1, 60_000);

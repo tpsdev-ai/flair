@@ -9,9 +9,7 @@
  * and returns a garbage score instead of throwing (same-dims/different-space
  * is silent garbage too), and `health.ts` only *warns*. So a mixed-space
  * corpus — the transient state during ANY re-embed / model change — serves
- * silently-wrong recall. This module makes a mismatched-space cosine
- * impossible by construction on BOTH runtime cosine legs (recall + write-time
- * dedup), the load-bearing safety piece Kern made a condition of sign-off.
+ * silently-wrong recall.
  *
  * ─── Shape ──────────────────────────────────────────────────────────────────
  * A PURE core (`normalizeStamp` / `currentSpaceRawForms` / `isUniformStampSet`
@@ -42,8 +40,9 @@
  * stamp — an absent stamp, the hash-fallback marker `hash-512d`, or a foreign
  * model — with the same raw comparison the vector query's stamp condition uses,
  * and a count above zero makes the verdict non-uniform (flair#2573 slice 1).
- * What a caller-supplied vector's bytes contain is still not verified; that is
- * deferred to slice 2). Every non-uniform state — pending
+ * Raw operations-API inserts are uncovered until a rescan; the latch observes
+ * only writes that call `noteWriteStamp`. Caller-supplied vector bytes remain
+ * unverified (slice 2). Every non-uniform state — pending
  * (`unverified`), a failed scan (`scan-failed`), a non-current stamp observed
  * by a scan or a foreign write (`mixed`), or a stored vector without a trusted
  * stamp (`excluded`) — makes a consumer take its
@@ -133,11 +132,6 @@ export function isCurrentSpaceStamp(stamp: string | null | undefined, currentMod
   return n !== null && n === normalizeStamp(currentModelId);
 }
 
-/**
- * Pure: is every active (real-vector) stamp in the set the current space? An
- * empty set (fresh store) is uniform. No-vector stamps (null / `hash-512d`)
- * are ignored — they carry no cross-space cosine hazard.
- */
 /** Pure: does the row store a vector? A row with no vector never enters the
  *  HNSW graph, so it is no hazard to a vector query whatever its stamp. */
 export function hasStoredVector(value: unknown): boolean {
@@ -151,9 +145,7 @@ export function isTrustedRawStamp(stamp: string | null | undefined, currentModel
   return typeof stamp === "string" && currentSpaceRawForms(currentModelId).includes(stamp);
 }
 
-/** Pure: is every active (real-vector) stamp in the set the current space? An
- *  empty set (fresh store) is uniform. No-vector stamps (null / `hash-512d`)
- *  are ignored — they carry no cross-space cosine hazard. */
+/** Pure: are all space-bearing stamps current? An empty set is uniform. */
 export function isUniformStampSet(
   distinctStamps: Iterable<string | null | undefined>,
   currentModelId: string,
@@ -190,7 +182,7 @@ let _activeStamps: string[] = []; // normalized, capped — for the degrade diag
 // reported as zero). A count above zero makes the verdict non-uniform: a stored
 // vector of unknown space is one the runtime cosine legs must not touch.
 let _excluded: number | null = null;
-// flair#2573 slice 1 — a write that stores a vector without a trusted stamp (an
+// flair#2573 slice 1 — a guard-notified write without a trusted stamp (an
 // absent stamp, the `hash-512d` marker, or a foreign space) can change the
 // count, and advances `_writeEpoch` so an in-flight scan cannot publish the
 // older count or clear this flag. While set, the consult fails closed; a scan
@@ -335,8 +327,8 @@ function runScan(): Promise<void> {
 // a write may since have changed the count), `scan-failed` (the last scan to
 // publish an outcome threw, and no foreign
 // stamp is known), `mixed` (a scan or a foreign write observed a
-// non-current stamp), and `excluded` (every stamp a scan saw is current, but the
-// scan also found a stored vector with no trusted current-space stamp). `mixed`
+// non-current stamp), and `excluded` (no foreign space-bearing stamp was found,
+// but the scan found a stored vector with no trusted current-space stamp). `mixed`
 // outranks `scan-failed`: a known foreign stamp
 // decides the state whether a failed scan came before or after it.
 export type EmbeddingSpaceGuardState = "uniform" | "mixed" | "unverified" | "scan-failed" | "excluded";
@@ -385,7 +377,7 @@ export function spaceGuardWarning(v: EmbeddingSpaceVerdict, response: "keyword" 
   }
   if (v.state === "excluded") {
     return (
-      `semantic search unavailable — the store holds a stored vector with no trusted current-space stamp ` +
+      `semantic search unavailable — the last scan found a stored vector with no trusted current-space stamp ` +
       `(${v.excluded ?? "unknown"} row(s)); ${outcome}. Re-embed or remove the row`
     );
   }
@@ -427,14 +419,12 @@ function guardSnapshot(): EmbeddingSpaceVerdict {
   if (_lastScanError !== null) {
     return { uniform: false, state: "scan-failed", reason: _lastScanError, current, found, excluded };
   }
-  // flair#2573 — a write may have stored a vector without a trusted stamp since
-  // the published count. An unknown count fails closed until a scan republishes.
+  // flair#2573 — a guard-notified write may have changed the count since
+  // publication. An unknown count fails closed until a scan republishes.
   if (_excludedStale) return { uniform: false, state: "unverified", reason: null, current, found, excluded };
   if (_uniform === true) {
-    // A count above zero means a stored vector the runtime cosine legs must not
-    // touch, so the verdict is non-uniform even though every stamp a scan saw is
-    // in the current space.
     if (excluded !== null && excluded > 0) {
+      // The scan found an untrusted stored vector and no foreign space-bearing stamp.
       return { uniform: false, state: "excluded", reason: null, current, found, excluded };
     }
     return { uniform: true, state: "uniform", reason: null, current, found, excluded };
@@ -458,8 +448,7 @@ function consultGuard(): EmbeddingSpaceVerdict {
 
 /** THE single chokepoint. Returns true when a scan found every row that stores
  *  a vector to carry a trusted current-space `embeddingModel` stamp (stamp
- *  metadata only; a stored vector with no such stamp makes the verdict
- *  non-uniform, flair#2573), false
+ *  metadata only, flair#2573), false
  *  otherwise — including the UNKNOWN verdict (pending first scan, or a failed
  *  scan), which fails closed (the caller must take its mixed-space path). O(1)
  *  on the happy path: once verified-uniform, no scan; a pending or tripped
@@ -474,9 +463,7 @@ export function isEmbeddingSpaceUniform(): Promise<boolean> {
  * configured model? True only for a space-bearing stamp that denotes the current
  * space (the engine-qualified id or its bare-name equivalent), compared exactly
  * as the vector query's stamp condition compares it. An absent stamp, the
- * `hash-512d` marker and a foreign model are all untrusted: a row carrying one
- * is a stored vector whose space the runtime cosine legs must not touch, and the
- * guard's verdict is non-uniform while one is stored. Reads the injectable
+ * `hash-512d` marker and a foreign model are all untrusted. Reads the injectable
  * model-id getter so tests can pin the space. Metadata compare only (never a
  * vector-byte comparison).
  */
@@ -525,8 +512,9 @@ export function spaceGuardState(): { state: EmbeddingSpaceGuardState; reason: st
 }
 
 /**
- * Write-maintained trip: a persisted FOREIGN-space stamp closes the gate
- * immediately, no rescan.
+ * Call after persisting a vector or embeddingModel write, passing the resulting
+ * stamp (possibly absent). Metadata-only PATCHes must not call this hook.
+ * An untrusted stamp invalidates the count; a foreign space also closes the latch.
  */
 export function noteWriteStamp(stamp: string | null | undefined): void {
   let n: string | null;
@@ -544,10 +532,8 @@ export function noteWriteStamp(stamp: string | null | undefined): void {
     _writeEpoch++;
     throw err;
   }
-  // The write stored a vector without a trusted stamp — an absent/empty stamp,
-  // the `hash-512d` marker, or a foreign space. The published count no longer
-  // covers it. Advance the epoch so an in-flight scan cannot publish the older
-  // count or clear the stale flag; the next scan republishes.
+  // This notified write may change the excluded count. Invalidate an in-flight
+  // scan; the next published scan clears the stale flag.
   _excludedStale = true;
   _writeEpoch++;
   // A space-bearing, non-current stamp additionally trips the uniformity latch

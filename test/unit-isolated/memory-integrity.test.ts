@@ -2554,3 +2554,73 @@ describe("flair#1965 r2 — Memory PUT resolves the URL-bound target; PATCH crea
     expect(memoryStore.get("mem-patch-create").originatorInstanceId).toBe("flair_local_test");
   });
 });
+
+describe("Memory.patch embedding-space notifications", () => {
+  it("metadata and identical vector fields preserve the verdict and in-flight scan epoch", async () => {
+    const guard = await import("../../resources/embedding-space-guard.ts");
+    guard._resetGuardForTests();
+    const id = "patch-guard-meta";
+    const row = { id, agentId: "agent-1", content: "unchanged body", createdAt: new Date().toISOString(), embedding: FAKE_EMBEDDING, embeddingModel: "mock-embedding-model" };
+    memoryStore.set(id, row);
+    guard._setGuardTableGetterForTests(async () => ({ search: async function* () { yield row; } }));
+    expect(await guard.recomputeLatch()).toBe(true);
+    let release!: () => void;
+    let started!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    const reading = new Promise<void>((r) => { started = r; });
+    guard._setGuardTableGetterForTests(async () => ({ search: async function* () {
+      yield row;
+      started();
+      await held;
+      yield { embedding: FAKE_EMBEDDING };
+    } }));
+    const scan = guard.recomputeLatch();
+    await reading;
+    try {
+      const m = makeMemory(agentCtx("agent-1"));
+      m._targetId = id;
+      await m.patch({ tags: ["metadata-only"] });
+      await m.patch({ embedding: [...FAKE_EMBEDDING], embeddingModel: row.embeddingModel });
+      expect(memoryStore.get(id).tags).toEqual(["metadata-only"]);
+      expect(guard.spaceGuardState().state).toBe("uniform");
+    } finally {
+      release();
+      await scan;
+    }
+    expect(guard.spaceGuardState().state).toBe("excluded");
+    guard._resetGuardForTests();
+  });
+
+  it("a stamp-only PATCH closes the guard when a trusted vector loses its stamp", async () => {
+    const guard = await import("../../resources/embedding-space-guard.ts");
+    guard._resetGuardForTests();
+    const id = "patch-guard-stamp";
+    memoryStore.set(id, { id, agentId: "agent-1", content: "unchanged body", createdAt: new Date().toISOString(), embedding: FAKE_EMBEDDING, embeddingModel: "mock-embedding-model" });
+    guard._setGuardTableGetterForTests(async () => ({ search: async function* () { yield memoryStore.get(id); } }));
+    expect(await guard.recomputeLatch()).toBe(true);
+    const m = makeMemory(agentCtx("agent-1"));
+    m._targetId = id;
+    await m.patch({ embeddingModel: null });
+    expect(memoryStore.get(id).embedding).toEqual(FAKE_EMBEDDING);
+    expect(memoryStore.get(id).embeddingModel).toBeNull();
+    expect(guard.spaceGuardState().state).toBe("unverified");
+    guard._resetGuardForTests();
+  });
+
+  it("a changed unstamped vector closes the guard; an omitted stamp retains the stored stamp", async () => {
+    const guard = await import("../../resources/embedding-space-guard.ts");
+    for (const stamp of [undefined, "mock-embedding-model"]) {
+      guard._resetGuardForTests();
+      const id = "patch-guard-vector";
+      memoryStore.set(id, { id, agentId: "agent-1", content: "unchanged body", createdAt: new Date().toISOString(), embeddingModel: stamp });
+      guard._setGuardTableGetterForTests(async () => ({ search: async function* () { yield memoryStore.get(id); } }));
+      expect(await guard.recomputeLatch()).toBe(true);
+      const m = makeMemory(agentCtx("agent-1"));
+      m._targetId = id;
+      await m.patch({ embedding: FAKE_EMBEDDING });
+      expect(memoryStore.get(id).embedding).toEqual(FAKE_EMBEDDING);
+      expect(guard.spaceGuardState().state).toBe(stamp ? "uniform" : "unverified");
+    }
+    guard._resetGuardForTests();
+  });
+});
