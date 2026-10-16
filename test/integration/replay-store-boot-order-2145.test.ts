@@ -2,7 +2,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { componentWithReplayProbe, type ProbeComponent } from "../helpers/component-with-replay-probe";
 
 let component: ProbeComponent | undefined;
@@ -30,7 +30,7 @@ describe("XAA replay-store boot report ordering (flair#2145)", () => {
   afterAll(async () => {
     if (harper) await stopHarper(harper);
     component?.cleanup();
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test("the warning precedes a served resource request", async () => {
     const warning = "ReplayStoreUnavailable at boot (XAA jti: flair.IdJagReplay keeps rows 3600000 ms";

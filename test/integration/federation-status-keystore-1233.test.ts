@@ -33,7 +33,7 @@ import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { existsSync, lstatSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 function makeTmpDir(prefix: string): string {
   const dir = join(tmpdir(), `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -99,7 +99,7 @@ describe("flair#1233: GET /FederationInstance with an unusable keystore (HOME/.f
     writeFileSync(blockedFlairPath, "flair#1233: this path is deliberately not a directory\n");
   }, 240_000);
 
-  afterAll(async () => { if (harper) await stopHarper(harper); });
+  afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
 
   test("the blocker really is in place — <HOME>/.flair is a regular file", () => {
     expect(existsSync(blockedFlairPath)).toBe(true);
@@ -209,7 +209,7 @@ describe("flair#1233 control: genuine first boot with a writable HOME", () => {
     harper = await startHarper();
   }, 240_000);
 
-  afterAll(async () => { if (harper) await stopHarper(harper); });
+  afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
 
   test("first admin GET → 200, identity created, signingKeyAvailable:true", async () => {
     const res = await fetch(`${harper.httpURL}/FederationInstance`, {

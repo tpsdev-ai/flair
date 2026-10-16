@@ -27,7 +27,7 @@
 // MODEL: test/integration/oauth-authorize-authz.test.ts (the #604 fix's
 // test, same authorizeLocal escalation class).
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 let harper: HarperInstance;
 
@@ -38,7 +38,7 @@ describe("IssueTokens removal (authorizeLocal escalation class)", () => {
 
   afterAll(async () => {
     if (harper) await stopHarper(harper);
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test("credential-less loopback GET /IssueTokens mints NO token (route removed)", async () => {
     const res = await fetch(`${harper.httpURL}/IssueTokens`);

@@ -39,7 +39,7 @@ import { signBodyFresh } from "../../resources/federation-crypto.js";
 import { computeContentHash } from "../../resources/relay-lib.js";
 import { runFederationSyncOnce } from "../../src/cli.js";
 import { keystore } from "../../src/keystore.js";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
 function mkAgent(id: string): TestAgent {
@@ -200,7 +200,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 // ── item 1: Memory.put's admin _reindex re-PUT ───────────────────────────────
 

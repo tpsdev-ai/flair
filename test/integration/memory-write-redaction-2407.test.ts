@@ -17,7 +17,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import nacl from "tweetnacl";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { redactSecrets, redactSecretsWithCount } from "../../packages/flair-mcp/src/secret-redaction.js";
 import { computeContentHash } from "../../resources/memory-feed-lib.js";
 import { signBody, signBodyFresh } from "../../resources/federation-crypto.js";
@@ -125,7 +125,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (harper) await stopHarper(harper);
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair#2407 — real-Harper REST write paths redact and report the count", () => {
   it("POST /Memory stores the redacted content and reports one redacted value", async () => {
@@ -479,7 +479,7 @@ describe("flair#2467 — a redacting write's response carries the stored text it
     expect(res.status, JSON.stringify(body)).toBe(200);
     expect(body.redactedValues).toBe(2);
     expect(body.id).not.toBe(root);
-    expect(body.stored).toEqual({ content: `skill v2 reads ${REDACTED}`, trigger: `when deploying with ${REDACTED}` });
+    expect(body.stored).toEqual({ content: `skill v2 reads ${REDACTED}`, trigger: `when deploying with ${REDACTED}`, tags: ["skill"] });
     const successor = await readStored(body.id);
     expect(successor?.supersedes).toBe(root);
     expect(successor?.content).toBe(body.stored.content);

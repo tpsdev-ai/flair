@@ -227,7 +227,92 @@ export function sweepStaleHarperTrees(opts?: { olderThanMs?: number }): number {
 }
 
 const STARTUP_TIMEOUT_MS = 45_000;
+const INSTALL_TIMEOUT_MS = 20_000;
 const MAX_SPAWN_ATTEMPTS = 3;
+
+// ─── Lifecycle budgets for before/after hooks (flair#2568) ──────────────────
+//
+// Bun applies a 5 s default to before/after hooks. That is below what a
+// cold-runner Harper boot or stop costs. The hooks flair#2568 found relying on
+// that default (or on a bare `120_000` literal) now pass one of the constants
+// below; hooks that already carried their own larger explicit budget (180 s,
+// 240 s, 300 s, ...) keep it unchanged.
+//
+// HARPER_STARTUP_BUDGET_MS is the readiness budget: how long a spawned
+// Harper's HTTP/ops ports may take to answer before the boot is declared
+// failed. `waitForHealth` defaults to it, and a LOCAL `startHarper` passes it
+// unless the caller lowers it (`StartHarperOptions.readinessTimeoutMs`). In
+// external mode (`HARPER_HTTP_URL` set) `startHarper` instead waits up to
+// `HARPER_START_BUDGET_MS` for the external service, which may still be
+// installing. `flair
+// init`'s TCP readiness check (`attributeBeforeCredential` in
+// src/commands/init.ts) polls under `cli.STARTUP_TIMEOUT_MS`;
+// test/unit/harper-lifecycle-budgets.test.ts asserts the two durations are
+// equal, so changing one without the other fails there first. Equal durations
+// do not make the two readiness decisions equivalent: the probes differ (an
+// HTTP request here, a TCP connect there) and so do the points the timers
+// start from.
+export const HARPER_STARTUP_BUDGET_MS = 60_000;
+
+/**
+ * The hook allowance for a `beforeAll`/`beforeEach` that calls `startHarper`
+ * once: the 120 s those hooks already used, named. It is an allowance, not a
+ * sum of the stage ceilings — install (20 s), the startup-banner wait (45 s)
+ * and readiness (60 s) total 125 s, which exceeds it before spawn retries or
+ * overhead. A boot that uses every stage ceiling can therefore still hit Bun's
+ * hook timeout first; a hook that needs that guarantee must budget the sum.
+ */
+export const HARPER_START_BUDGET_MS = 2 * HARPER_STARTUP_BUDGET_MS;
+
+/**
+ * The hook allowance for a hook that stops its Harpers: ONE `stopHarper`, or
+ * several run concurrently through `stopHarpers`. The wait on each stop is
+ * bounded by `HARPER_STOP_DEADLINE_MS` (covering the TERM→SIGKILL wait in
+ * `killProcess`, the RocksDB lock wait in `waitForLocksFree` and the
+ * install-tree removal); the remaining margin is for the hook's own cleanup. A
+ * hook that awaits stops one after another needs the SUM of their deadlines and
+ * must not use this constant — the scanner in
+ * test/unit/harper-lifecycle-budgets.test.ts refuses that shape when the stops
+ * are direct `stopHarper` calls in the hook (not stops a helper makes for it).
+ */
+export const HARPER_STOP_BUDGET_MS = 30_000;
+
+// `stopHarper`'s own deadline sits a margin below HARPER_STOP_BUDGET_MS. In a
+// hook that makes one stop, or runs its stops concurrently via `stopHarpers`,
+// an overrunning stop therefore rejects with the named `HarperStopTimeoutError`
+// (pid + the phase it stalled in) before that hook's budget expires. The hook
+// REPORTS it only if it lets the rejection propagate: a best-effort hook that
+// catches stop failures swallows it, as it swallows every other stop error. A
+// stop that fails some other way first (e.g. the lock wait's own error)
+// rejects with that error instead.
+const HARPER_STOP_MARGIN_MS = 5_000;
+const HARPER_STOP_DEADLINE_MS = HARPER_STOP_BUDGET_MS - HARPER_STOP_MARGIN_MS;
+
+// Harper's own startup diagnostic, as harper 5.3.1 prints it to the console
+// (server/threads/socketRouter.js `describeStartup`), e.g.
+//   HTTP worker slot 0 exited before ready (thread 1, attempt 1, phase loading components)
+//   HTTP worker slot 0 has not become ready after 60000ms before ready (thread 1, attempt 1, phase loading components)
+// The "exited" line is logged as soon as a worker dies before ready; the "has
+// not become ready" line only after Harper's fixed 60 s watchdog, which runs
+// alongside the harness's own 60 s readiness deadline from a different start
+// point. A stalled worker can therefore fail the harness before or after that
+// line exists; when no matching line exists the harness reports its own phase
+// label.
+const HARPER_STARTUP_DIAGNOSTIC_RE = /before ready \(thread [^,()\n]*, attempt [^,()\n]*, phase ([^)\n]+)\)/g;
+
+/**
+ * The phase named by the LAST captured log line matching the shape of Harper's
+ * startup diagnostic (above), or null when none matches — callers then report
+ * their own phase label. The match is on text, not on who wrote it: the
+ * harness captures one combined stdout/stderr stream, so a component that
+ * logged a line of the same shape would be read the same way. Anchoring on the
+ * shape keeps text that merely says "phase" from being read as one.
+ */
+export function harperStartupPhase(log: string): string | null {
+  let last: string | null = null;
+  for (const m of String(log).matchAll(HARPER_STARTUP_DIAGNOSTIC_RE)) last = m[1].trim();
+  return last;
+}
 
 // Harper logs exactly this ("Unable to bind to port NNNNN: Address already in
 // use") when its HTTP/ops listener can't bind, but it STILL prints "successfully
@@ -635,7 +720,8 @@ export async function awaitMigrationStateFile(opts: {
 
 async function waitForHealth(
   httpURL: string,
-  timeoutMs = 60_000,
+  phase: string,
+  timeoutMs = HARPER_STARTUP_BUDGET_MS,
   // Optional probes into the spawned process. When Harper dies mid-startup, or
   // fails to bind its port, we want to fail fast and loud with its log instead
   // of blindly polling a dead port for the full timeout (the failure mode that
@@ -644,15 +730,22 @@ async function waitForHealth(
   getLog?: () => string,
 ): Promise<void> {
   const url = `${httpURL}/health`;
-  const deadline = Date.now() + timeoutMs;
+  const startedAt = Date.now();
+  const deadline = startedAt + timeoutMs;
   let attempt = 0;
-  console.log(`[harper-lifecycle] waitForHealth: polling ${url} (timeout ${timeoutMs}ms)`);
+  console.log(`[harper-lifecycle] waitForHealth: polling ${url} (phase ${phase}, timeout ${timeoutMs}ms)`);
   while (Date.now() < deadline) {
     const exit = getExited?.();
     if (exit) {
+      // A captured line shaped like Harper's startup diagnostic ("exited
+      // before ready (..., phase loading components)") names the phase a
+      // worker died in; prefer it to this poll's label, which only says which
+      // port was being waited on.
+      const captured = getLog?.() ?? "";
       throw new Error(
         `Harper exited (code=${exit.code} signal=${exit.signal}) while waiting for ${url} ` +
-        `to become healthy. Harper log:\n${getLog?.() ?? "(not captured)"}`,
+        `to become healthy (${Date.now() - startedAt}ms elapsed, stopped in phase: ${harperStartupPhase(captured) ?? phase}). ` +
+        `Harper log:\n${captured || "(not captured)"}`,
       );
     }
     // Harper prints "successfully started" even when a port bind failed, so the
@@ -665,7 +758,7 @@ async function waitForHealth(
       );
     }
     attempt++;
-    const elapsed = Date.now() - (deadline - timeoutMs);
+    const elapsed = Date.now() - startedAt;
     try {
       const res = await fetch(url, { signal: AbortSignal.timeout(2000) });
       console.log(`[harper-lifecycle] waitForHealth: attempt ${attempt} → HTTP ${res.status} (${elapsed}ms elapsed)`);
@@ -680,20 +773,33 @@ async function waitForHealth(
     await new Promise(r => setTimeout(r, 500));
   }
   const exit = getExited?.();
+  const captured = getLog?.() ?? "";
+  const stoppedIn = harperStartupPhase(captured) ?? phase;
   throw new Error(
-    `Harper at ${httpURL} did not respond within ${timeoutMs}ms (${attempt} attempts). ` +
+    `Harper at ${httpURL} did not respond within ${timeoutMs}ms ` +
+    `(${attempt} attempts, ${Date.now() - startedAt}ms elapsed, stopped in phase: ${stoppedIn}). ` +
     `Process ${exit ? `exited (code=${exit.code} signal=${exit.signal})` : "still alive"}. ` +
-    `Harper log:\n${getLog?.() ?? "(not captured)"}`,
+    `Harper log:\n${captured || "(not captured)"}`,
   );
 }
 
 // Wait for Harper's startup banner. Resolves on the banner, rejects fast on
 // process exit or a port-bind error (the latter as a retryable PortInUseError).
+//
+// Measured on harper 5.3.1 (flair#2568): "listening on" also matches the main
+// thread's "Domain socket listening on <rootPath>/operations-server" line,
+// logged BEFORE the HTTP worker loads components. So a component that crashes
+// or stalls its worker passes this wait and fails in the readiness poll
+// (`waitForHealth`), whose diagnostics carry the phase and elapsed time; this
+// wait's own timeout fires only when Harper logs neither line.
 function awaitStartup(proc: ChildProcess, getLog: () => string, getExited: () => HarperExit | null): Promise<void> {
   return new Promise<void>((resolve, reject) => {
+    const startedAt = Date.now();
     const timer = setTimeout(() => {
       cleanup();
-      reject(new Error(`Harper startup timed out after ${STARTUP_TIMEOUT_MS}ms. Log:\n${getLog()}`));
+      const log = getLog();
+      const phase = harperStartupPhase(log) ?? "startup banner";
+      reject(new Error(`Harper startup timed out after ${STARTUP_TIMEOUT_MS}ms (${Date.now() - startedAt}ms elapsed, stopped in phase: ${phase}). Log:\n${log}`));
     }, STARTUP_TIMEOUT_MS);
 
     const check = () => {
@@ -798,6 +904,15 @@ export interface StartHarperOptions {
   /** Environment overrides for this instance's child processes. */
   env?: Record<string, string>;
   /**
+   * LOWER the readiness budget for this local spawn (default
+   * `HARPER_STARTUP_BUDGET_MS`). Meant for tests of the readiness-failure
+   * diagnostic itself (test/integration/harper-startup-failure-diagnostic-2568
+   * .test.ts), which need a real stalled Harper to fail in seconds rather than
+   * a minute. `startHarper` refuses a value that is not a positive number at
+   * most `HARPER_STARTUP_BUDGET_MS`, so it cannot give a slow boot more time.
+   */
+  readinessTimeoutMs?: number;
+  /**
    * When false, skip the #1450 orphan-exit preload so a SIGKILL of this
    * parent leaves Harper alive (the #1372 reap-on-start known-answer).
    * Default true: production startHarper always injects the preload.
@@ -817,6 +932,15 @@ export function applyMultiWorkerUnsafeSpawnOption(
 }
 
 export async function startHarper(opts: StartHarperOptions = {}): Promise<HarperInstance> {
+  if (
+    opts.readinessTimeoutMs !== undefined &&
+    !(Number.isFinite(opts.readinessTimeoutMs) && opts.readinessTimeoutMs > 0 && opts.readinessTimeoutMs <= HARPER_STARTUP_BUDGET_MS)
+  ) {
+    throw new Error(
+      `startHarper: readinessTimeoutMs ${opts.readinessTimeoutMs} refused — it may only lower the readiness budget ` +
+      `(a positive number at most HARPER_STARTUP_BUDGET_MS = ${HARPER_STARTUP_BUDGET_MS}).`,
+    );
+  }
   const cwd = opts.cwd ?? process.cwd();
   const harperBinDir = opts.harperBinDir ?? cwd;
   const HARPER_BIN = harperBinPath(harperBinDir);
@@ -829,7 +953,7 @@ export async function startHarper(opts: StartHarperOptions = {}): Promise<Harper
     const httpURL = HARPER_HTTP_URL;
     const opsURL = HARPER_OPS_URL_ENV ?? httpURL.replace(/:(\d+)($|\/)/, (_, port, rest) => `:${Number(port) - 1}${rest}`);
     console.log(`[harper-lifecycle] external mode: httpURL=${httpURL} opsURL=${opsURL} user=${HARPER_ADMIN_USER}`);
-    await waitForHealth(httpURL, 120_000); // allow time for Docker install + start
+    await waitForHealth(httpURL, "http readiness", HARPER_START_BUDGET_MS); // allow time for Docker install + start
     return {
       httpURL,
       opsURL,
@@ -843,6 +967,7 @@ export async function startHarper(opts: StartHarperOptions = {}): Promise<Harper
   }
 
   // ── Local mode: spawn Harper from node_modules ────────────────────────────
+  const readinessTimeoutMs = opts.readinessTimeoutMs ?? HARPER_STARTUP_BUDGET_MS;
   const ownsInstallDir = !opts.installDir;
   // Boot sweep first: leftovers from SIGKILL / cancelled CI are not small,
   // and a handler cannot cover those exits (flair#1032).
@@ -933,7 +1058,7 @@ export async function startHarper(opts: StartHarperOptions = {}): Promise<Harper
     install.stderr?.on("data", (d: Buffer) => output += d.toString());
     install.on("exit", (code) => code === 0 ? resolve() : reject(new Error(`Harper install exited ${code}: ${output}`)));
     install.on("error", reject);
-    setTimeout(() => { install.kill(); reject(new Error(`Harper install timed out: ${output}`)); }, 20_000);
+    setTimeout(() => { install.kill(); reject(new Error(`Harper install timed out: ${output}`)); }, INSTALL_TIMEOUT_MS);
   });
 
   // Append caller-supplied top-level config blocks (see StartHarperOptions.
@@ -996,8 +1121,8 @@ export async function startHarper(opts: StartHarperOptions = {}): Promise<Harper
       // during startup; callers hit opsURL immediately (admin seed), so
       // returning as soon as httpURL answered was racy.
       await Promise.all([
-        waitForHealth(httpURL, 60_000, () => exited, () => log),
-        waitForHealth(opsURL, 60_000, () => exited, () => log),
+        waitForHealth(httpURL, "http readiness", readinessTimeoutMs, () => exited, () => log),
+        waitForHealth(opsURL, "ops readiness", readinessTimeoutMs, () => exited, () => log),
       ]);
       // pid is filled in now that spawn succeeded. The registry entry itself
       // was added before install so a thrown start still reaps the tree.
@@ -1049,28 +1174,107 @@ export interface StopHarperOptions {
    * `startHarper({ installDir })` call against a different build.
    */
   keepInstallDir?: boolean;
+  /**
+   * Override the stop deadline. Defaults to `HARPER_STOP_BUDGET_MS` minus a
+   * margin, so in a hook that makes one stop (or runs its stops concurrently
+   * through `stopHarpers`) a slow stop rejects with the named
+   * `HarperStopTimeoutError` before that hook's `HARPER_STOP_BUDGET_MS`
+   * expires — reported only if the hook lets the rejection propagate. Stops
+   * awaited one after another start their deadlines one after another, so that
+   * does not hold for them. Tests pass a short value to exercise the timeout
+   * path.
+   */
+  timeoutMs?: number;
+}
+
+/**
+ * Raised when `stopHarper` overruns its budget, so a slow teardown reports as a
+ * stop timeout naming the pid and the phase it stalled in.
+ */
+export class HarperStopTimeoutError extends Error {
+  constructor(pid: number | undefined, phase: string, budgetMs: number) {
+    super(`Harper stop did not finish within ${budgetMs}ms (pid ${pid ?? "(none)"}, phase: ${phase})`);
+    this.name = "HarperStopTimeoutError";
+  }
 }
 
 export async function stopHarper(inst: HarperInstance, opts: StopHarperOptions = {}): Promise<void> {
   if (inst.external) return;
 
-  // Deregister first: a clean stop must not leave the exit hook holding a stale
-  // entry that would SIGKILL a reused pid later.
-  if (inst.__tracked) LIVE_INSTANCES.delete(inst.__tracked);
+  const pid = inst.process?.pid;
+  const budgetMs = opts.timeoutMs ?? HARPER_STOP_DEADLINE_MS;
+  // The phase the stop is in when the budget expires — updated between awaits
+  // so the timeout error names where it stalled, not just "stopHarper".
+  let phase = "terminate";
+  let timer: NodeJS.Timeout | undefined;
 
-  if (inst.process) await killProcess(inst.process);
-  // flair#1440: when the install dir is kept for reuse, wait for the RocksDB
-  // LOCK to be released — not just for the process to exit. The next install
-  // contends for the LOCK, and Harper's detached children release it a beat
-  // after the parent exits.
-  const keepDir = !inst.ownsInstallDir || opts.keepInstallDir;
-  if (inst.installDir && keepDir) {
-    await waitForLocksFree(inst.installDir);
+  const work = (async () => {
+    // Deregister first: a clean stop must not leave the exit hook holding a stale
+    // entry that would SIGKILL a reused pid later.
+    if (inst.__tracked) LIVE_INSTANCES.delete(inst.__tracked);
+
+    if (inst.process) await killProcess(inst.process);
+    // flair#1440: when the install dir is kept for reuse, wait for the RocksDB
+    // LOCK to be released — not just for the process to exit. The next install
+    // contends for the LOCK, and Harper's detached children release it a beat
+    // after the parent exits.
+    phase = "release database locks";
+    const keepDir = !inst.ownsInstallDir || opts.keepInstallDir;
+    if (inst.installDir && keepDir) {
+      await waitForLocksFree(inst.installDir);
+    }
+    // Never remove a directory this instance didn't create (ownsInstallDir
+    // false — the caller supplied it and owns its lifecycle), and never remove
+    // one the caller explicitly asked to keep.
+    phase = "remove install dir";
+    if (inst.installDir && inst.ownsInstallDir && !opts.keepInstallDir) {
+      await rm(inst.installDir, { recursive: true, force: true, maxRetries: 4 });
+    }
+  })();
+  // The deadline bounds the CALLER's wait, not the work: when it wins the race
+  // this rejects with the named error while the termination, lock wait or
+  // removal it raced keeps running in the background (a real child can exit
+  // after the rejection). A late failure from `work` is swallowed here rather
+  // than surfacing as an unhandled rejection.
+  work.catch(() => {});
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new HarperStopTimeoutError(pid, phase, budgetMs)), budgetMs);
+  });
+  try {
+    await Promise.race([work, deadline]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
-  // Never remove a directory this instance didn't create (ownsInstallDir
-  // false — the caller supplied it and owns its lifecycle), and never remove
-  // one the caller explicitly asked to keep.
-  if (inst.installDir && inst.ownsInstallDir && !opts.keepInstallDir) {
-    await rm(inst.installDir, { recursive: true, force: true, maxRetries: 4 });
+}
+
+/**
+ * Stop several instances CONCURRENTLY and wait for every result (flair#2568).
+ *
+ * Awaited one after another, each `stopHarper` starts its deadline only when
+ * the previous stop has finished, so a later slow stop can outlast the hook
+ * before its own `HarperStopTimeoutError` exists — Bun then reports an
+ * unnamed hook timeout. Run together, every deadline starts at once and the
+ * whole set settles within one stop deadline — with the default deadline,
+ * inside `HARPER_STOP_BUDGET_MS`. A caller that catches the result (a
+ * best-effort teardown) still finishes in that time but discards the named
+ * error.
+ *
+ * Every stop is awaited (allSettled), so one failure never abandons a
+ * sibling's teardown. Failures are rethrown afterwards: one as itself (a
+ * `HarperStopTimeoutError` stays named), several as an `AggregateError` whose
+ * message carries each one. `null`/`undefined` entries (an instance a failed
+ * `beforeAll` never assigned) are skipped.
+ */
+export async function stopHarpers(
+  instances: ReadonlyArray<HarperInstance | null | undefined>,
+  opts: StopHarperOptions = {},
+): Promise<void> {
+  const live = instances.filter((inst): inst is HarperInstance => inst != null);
+  const results = await Promise.allSettled(live.map((inst) => stopHarper(inst, opts)));
+  const failures = results.flatMap((r) => (r.status === "rejected" ? [r.reason as unknown] : []));
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1) {
+    const messages = failures.map((f) => (f instanceof Error ? `${f.name}: ${f.message}` : String(f)));
+    throw new AggregateError(failures, `${failures.length} Harper stops failed: ${messages.join("; ")}`);
   }
 }

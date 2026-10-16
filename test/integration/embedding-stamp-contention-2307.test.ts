@@ -27,7 +27,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 const POINT = "embedding-stamp-content-suffix";
 const LEGACY_ID = "esc-legacy.content";
@@ -109,7 +109,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (harper) await stopHarper(harper).catch(() => {});
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair#2307 — the `.content`-suffix re-embed under a change committed after its read (real Harper)", () => {
   it("the competing content is kept, and the row stays pending with its stale stamp", async () => {

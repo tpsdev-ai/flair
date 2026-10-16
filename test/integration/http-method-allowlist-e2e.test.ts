@@ -5,7 +5,7 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
 
@@ -42,7 +42,7 @@ describe("HTTP method allowlist on real Harper", () => {
     expect(res.status).toBe(200);
   }, 180_000);
 
-  afterAll(async () => { if (harper) await stopHarper(harper); });
+  afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
 
   for (const path of ["/Memory/", "/Relationship/", "/Credential/"]) {
     test(`a signed agent's PROPFIND ${path} gets 405 with an Allow header`, async () => {

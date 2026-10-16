@@ -10,7 +10,7 @@
 // MODEL: test/integration/oauth-authorize-authz.test.ts.
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { randomBytes } from "node:crypto";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 const ALLOWED_REDIRECT_URI = "https://claude.com/api/mcp/auth_callback";
 const HEADER = "x-flair-initial-access-token";
@@ -73,7 +73,7 @@ describe("DCR is closed on a default install (real Harper)", () => {
     else process.env.FLAIR_OAUTH_DCR_TOKEN = savedToken;
     if (savedRegisterLimit === undefined) delete process.env.FLAIR_OAUTH_REGISTER_RATE_LIMIT;
     else process.env.FLAIR_OAUTH_REGISTER_RATE_LIMIT = savedRegisterLimit;
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test("an anonymous POST /OAuthRegister is refused with 403", async () => {
     const res = await register(harper, "uninvited");
@@ -146,7 +146,7 @@ describe("DCR when an operator has opted in (real Harper)", () => {
     else process.env.FLAIR_OAUTH_DCR_TOKEN = savedToken;
     if (savedRegisterLimit === undefined) delete process.env.FLAIR_OAUTH_REGISTER_RATE_LIMIT;
     else process.env.FLAIR_OAUTH_REGISTER_RATE_LIMIT = savedRegisterLimit;
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test("POSITIVE CONTROL: the right initial access token registers a client", async () => {
     const res = await register(harper, "invited", { [HEADER]: TOKEN });
@@ -217,7 +217,7 @@ describe("the registration rate limiter runs BEFORE the DCR gate (real Harper)",
     else process.env.FLAIR_OAUTH_DCR_TOKEN = savedToken;
     if (savedRegisterLimit === undefined) delete process.env.FLAIR_OAUTH_REGISTER_RATE_LIMIT;
     else process.env.FLAIR_OAUTH_REGISTER_RATE_LIMIT = savedRegisterLimit;
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test("refused registrations still spend budget, and the limiter answers once it is gone", async () => {
     const seen: number[] = [];

@@ -22,7 +22,7 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { generateKeyPairSync } from "node:crypto";
 import { SignJWT, importPKCS8 } from "jose";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 const ISSUER = "https://mcp-aud-test.flair.internal";
 const RESOURCE = `${ISSUER}/mcp`;
@@ -121,7 +121,7 @@ describe("MCP audience binding (ops-igmt) — executed must-fail", () => {
 
   afterAll(async () => {
     await stopHarper(harper);
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test("(1) wrong audience -> 401 invalid_token + resource_metadata", async () => {
     const token = await signToken({ audience: OTHER_RESOURCE, issuer: ISSUER });
