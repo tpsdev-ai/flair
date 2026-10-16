@@ -1,4 +1,4 @@
-import { isEmptyEmbedding, normalizeEmptyEmbedding } from "./memory-embedding-value.js";
+import { normalizeEmptyEmbedding } from "./memory-embedding-value.js";
 import { databases } from "harper";
 import { randomUUID } from "node:crypto";
 import { isOperatorSeedPut, redactMemoryWrite, redactSkillWrite, storedMemoryText, suppliedMemoryTextFields, suppliedStoredTextFields, type StoredMemoryText, type StoredTextField } from "./memory-redaction.js";
@@ -525,7 +525,6 @@ async function runDedupGate(ctx: any, content: any): Promise<DedupMatch | null> 
   // skill's dedup cosine would cross the trigger-space vector against
   // content-space candidates. Non-skill rows are byte-identical (skillEmbedText
   // returns `content`).
-  if (isEmptyEmbedding(content.embedding)) return null;
   const embedText = skillEmbedText(content);
   if (typeof embedText !== "string" || embedText.length < DEDUP_MIN_CONTENT_LENGTH) {
     return null;
@@ -1135,7 +1134,10 @@ async function writeSkillCreateOrUpdate(
   if (captured.closed) noteMemoryDelete(String(captured.closed.id));
   if (captured.row) {
     noteMemoryUpsert(captured.row);
-    noteWriteStamp(captured.row.embeddingModel, captured.closed);
+    // An in-place update replaces the live head without recording it in
+    // `captured.closed`, so no closed row is passed as unknown (undefined),
+    // never as "replaced no row".
+    noteWriteStamp(captured.row.embeddingModel, captured.closed ?? undefined);
   }
   if (args.staged) args.staged.text = captured.row ? storedMemoryText(captured.row, args.staged.supplied) : null;
   return { id: successorId, written: captured.row !== null, visibility: skillVersionVisibility(captured.row ?? unchangedHead) };
@@ -1775,6 +1777,10 @@ export class Memory extends (databases as any).flair.Memory {
     // this a duplicate of something else" situation — bypass the gate for it
     // (this also gives memory_update's preserveHistory mode dedup-bypass for
     // free, without a separate flag). NEVER suppresses the write either way.
+    // flair#2573: an empty embedding is no vector supplied. Normalized before
+    // the dedup gate and the embed step below, so this write embeds and stamps
+    // the row as it does when the body omits `embedding`.
+    normalizeEmptyEmbedding(content);
     // flair#2465: did the caller supply a vector that survived redaction? A
     // vector accepted from the caller gets no newly computed hash.
     const embeddingSupplied = Array.isArray(content.embedding) && content.embedding.length > 0;
@@ -1898,7 +1904,9 @@ export class Memory extends (databases as any).flair.Memory {
     // a persisted FOREIGN stamp (federation / replication / an explicit-stamp
     // write) trips the gate; a normal local write stamps the current id and
     // never does.
-    noteWriteStamp(content?.embeddingModel as string | null | undefined, postStored);
+    // `postStored` is the row this write replaces; a read that found none is
+    // passed as null (no previous row), not as unknown.
+    noteWriteStamp(content?.embeddingModel as string | null | undefined, postStored ?? null);
 
     // ── THEN close the superseded record ────────────────────────────────────
     // Write-new-BEFORE-close-old: the previous order (close-old via a fire-
@@ -2486,6 +2494,8 @@ export class Memory extends (databases as any).flair.Memory {
     // version-link — neither is an ambiguous "is this a duplicate of
     // something else" write, so both are dedup-bypassed automatically, no
     // separate flag needed. NEVER suppresses the write either way.
+    // flair#2573: an empty embedding is no vector supplied (see post()).
+    normalizeEmptyEmbedding(content);
     // flair#2465: did the caller supply a vector? See post().
     const embeddingSupplied = Array.isArray(content.embedding) && content.embedding.length > 0;
     let dedupMatch: DedupMatch | null = null;

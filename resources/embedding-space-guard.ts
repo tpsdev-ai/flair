@@ -477,8 +477,13 @@ export function spaceGuardState(): { state: EmbeddingSpaceGuardState; reason: st
 
 /**
  * Call after persisting a vector or embeddingModel write, passing the resulting
- * stamp (possibly absent). Metadata-only PATCHes must not call this hook.
- * A write invalidates a non-uniform count; a foreign space also closes the latch.
+ * stamp (possibly absent) and the row the write replaced: `null` when there was
+ * none, omitted when the caller did not read it. Metadata-only PATCHes must not
+ * call this hook. A write invalidates the count when its stamp is untrusted or it
+ * may repair an untrusted vector: the replaced row stored one, or the replaced
+ * row is unknown while the verdict is non-uniform. A trusted write over a known
+ * row with no untrusted vector leaves the published count, and so the state,
+ * as it was. A foreign space also closes the latch.
  */
 export function noteWriteStamp(
   stamp: string | null | undefined,
@@ -490,7 +495,8 @@ export function noteWriteStamp(
     const currentStamp = _modelIdGetter();
     const replacesUntrusted = hasStoredVector(previous?.embedding) &&
       !isTrustedRawStamp(typeof previous?.embeddingModel === "string" ? previous.embeddingModel : null, currentStamp);
-    if (isTrustedRawStamp(stamp, currentStamp) && guardSnapshot().uniform && !replacesUntrusted) return;
+    if (isTrustedRawStamp(stamp, currentStamp) && !replacesUntrusted &&
+      (previous !== undefined || guardSnapshot().uniform)) return;
     n = normalizeStamp(stamp);
     current = normalizeStamp(currentStamp);
   } catch (err) {

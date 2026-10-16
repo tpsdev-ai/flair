@@ -8,40 +8,71 @@
  * A separate instance runs with FLAIR_RETRIEVAL_MODE=vector-only to show
  * that branch falling back and naming the guard state.
  *
- * The always-on embedding-stamp migration would otherwise re-embed a no-stamp row
- * (which removes the very state under test), so its regen is held at the
- * test-only `embedding-stamp-regen-pre` point for the span of each describe
- * (released in afterAll). The fault-injection gate is the environment the spawned
- * Harper inherits.
+ * Each instance runs from a copy of the built component without
+ * `migration-boot.js` (test/helpers/component-without-migration-boot.ts), so the
+ * always-on embedding-stamp migration never runs: it would re-embed a no-stamp
+ * row and remove the very state under test.
  *
- * Mutation check (fails on an assertion): in resources/embedding-space-guard.ts,
- * make the scan not count a stored vector with no trusted stamp (skip the
- * `excluded++` for a missing stamp), leaving everything else — the store is then
- * read as uniform, the near-duplicate query compares vectors, and the excluded
- * count assertions go red. Restore with a file copy, never git.
+ * Fixture vectors have 768 entries. After a signed Memory write, the auto-embed
+ * backfill (resources/auth-middleware.ts) re-embeds from its text a row whose
+ * stored vector has at most 100 entries, when an embedding model is available;
+ * a shorter fixture vector would be replaced by a server-computed one. Every
+ * case outside the vector-only describe holds with and without a model; that
+ * describe embeds query text, so it runs only when the model file is present.
+ *
+ * Mutation checks (each fails on an assertion; restore with a file copy, never
+ * git):
+ *  - in resources/embedding-space-guard.ts, make the scan not count a stored
+ *    vector with no trusted stamp (skip the `excluded++` for a missing stamp),
+ *    leaving everything else — the store is then read as uniform, the
+ *    near-duplicate query compares vectors, and the excluded count assertions
+ *    go red;
+ *  - in noteWriteStamp, invalidate the count on every trusted write while the
+ *    verdict is non-uniform (drop the known-previous-row exemption) — the
+ *    trusted write before the doctor case turns the state `unverified`, and the
+ *    doctor case goes red;
+ *  - in resources/Memory.ts put(), remove the empty-embedding normalization
+ *    before the dedup gate (the later one stays) — the rescan case never
+ *    returns to `uniform`.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import nacl from "tweetnacl";
 import { signBodyFresh } from "../../resources/federation-crypto.js";
 import { randomUUID, randomBytes } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { componentWithoutMigrationBoot, type ComposedComponent } from "../helpers/component-without-migration-boot";
 import { getModelId } from "../../resources/embeddings-provider.ts";
-import { TEST_FAULT_INJECTION_ENV, TEST_PAUSE_DIR_ENV } from "../../resources/txn-pause-point.ts";
 
-const REGEN_POINT = "embedding-stamp-regen-pre";
 const AGENT = "agent-a"; // neutral fixture name (no fleet host/agent)
 const CLI = join(process.cwd(), "dist", "cli.js");
 
 /** The stamp the spawned instance writes when it embeds. Same env, same value. */
 const CURRENT_STAMP = getModelId();
 
+const MODEL_FILE = "nomic-embed-text-v1.5.Q4_K_M.gguf";
+function modelPresent(): boolean {
+  const dirs = [process.env.FLAIR_MODELS_DIR, join(process.cwd(), "models")].filter(Boolean) as string[];
+  return dirs.some((d) => existsSync(join(d, MODEL_FILE)));
+}
+const HAS_MODEL = modelPresent();
+
+/** A 768-entry vector with 1 at each `hot` index: longer than the 100 entries
+ *  below which the auto-embed backfill replaces a stored vector (header). */
+function basis(...hot: number[]): number[] {
+  const v = new Array<number>(768).fill(0);
+  for (const i of hot) v[i] = 1;
+  return v;
+}
+
 /** A vector the untrusted row stores and a query can target. */
-const UNTRUSTED_VEC = [1, 0, 0, 0];
-const STAMPED_VEC = [1, 1, 0, 0]; // cosine 0.7071 against UNTRUSTED_VEC
+const UNTRUSTED_VEC = basis(0);
+const STAMPED_VEC = basis(0, 1); // cosine 0.7071 against UNTRUSTED_VEC
+/** A similarity floor only a near-exact match of UNTRUSTED_VEC clears. */
+const EXACT_MATCH = 0.9;
 
 const KEYWORD = "zqxuntrustedkeyword"; // lexical-only token, absent from the stamped rows
 const STAMPED_TEXT = "a row the server-stamped vector space covers for the dedup control";
@@ -177,26 +208,17 @@ function makeHarness(get: () => HarperInstance) {
   return { agent, adminOp, putMemory, patchMemory, memoryRow, semanticSearch, health, consult, waitGuard, doctor };
 }
 
-/** Spawn a Harper with the migration regen held, register the agent, return the harness. */
+/** Spawn a Harper from a component copy without migration-boot (header),
+ *  register the agent, return the harness. */
 async function spawnWithHarness(env?: Record<string, string>):
-  Promise<{ harper: HarperInstance; pauseDir: string; h: ReturnType<typeof makeHarness> }> {
-  const pauseDir = mkdtempSync(join(tmpdir(), "flair-2573-pause-"));
-  // Hold the stamp migration's regen so a no-stamp row keeps its state under test.
-  writeFileSync(join(pauseDir, `arm.${REGEN_POINT}`), "");
-  const saved: Record<string, string | undefined> = {
-    [TEST_FAULT_INJECTION_ENV]: process.env[TEST_FAULT_INJECTION_ENV],
-    [TEST_PAUSE_DIR_ENV]: process.env[TEST_PAUSE_DIR_ENV],
-  };
-  process.env[TEST_FAULT_INJECTION_ENV] = "1";
-  process.env[TEST_PAUSE_DIR_ENV] = pauseDir;
+  Promise<{ harper: HarperInstance; component: ComposedComponent; h: ReturnType<typeof makeHarness> }> {
+  const component = componentWithoutMigrationBoot();
   let harper: HarperInstance;
   try {
-    harper = await startHarper(env ? { env } : {});
-  } finally {
-    for (const [key, value] of Object.entries(saved)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
+    harper = await startHarper({ cwd: component.dir, harperBinDir: component.sourceRoot, ...(env ? { env } : {}) });
+  } catch (err) {
+    component.cleanup();
+    throw err;
   }
   expect(harper.external).toBe(false);
   expect(harper.ownsInstallDir).toBe(true);
@@ -207,18 +229,33 @@ async function spawnWithHarness(env?: Record<string, string>):
     records: [{ id: AGENT, name: AGENT, role: "agent", publicKey: h.agent.publicKey, createdAt: new Date().toISOString() }],
   });
   expect(insert.status).toBe(200);
-  return { harper, pauseDir, h };
+  return { harper, component, h };
 }
 
-async function releaseAndStop(harper: HarperInstance | undefined, pauseDir: string): Promise<void> {
-  if (pauseDir) writeFileSync(join(pauseDir, `go.${REGEN_POINT}`), "");
-  if (harper) await stopHarper(harper);
-  if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
+async function stopAndClean(harper: HarperInstance | undefined, component: ComposedComponent | undefined): Promise<void> {
+  try {
+    if (harper) await stopHarper(harper);
+  } finally {
+    component?.cleanup();
+  }
+}
+
+/** `[]` stores no empty array: the row holds no vector, or, with an embedding
+ *  model, one the server computed from the row's text (the auto-embed backfill
+ *  after a PATCH, the write's own embed after a PUT), recorded with the hash of
+ *  that text. */
+function expectNoVectorOrServerComputed(row: any): void {
+  expect(row.embedding).not.toEqual([]);
+  if (row.embedding == null) return;
+  expect(Array.isArray(row.embedding)).toBe(true);
+  expect(row.embedding.length).toBeGreaterThan(100);
+  expect(row.embedding).not.toEqual(UNTRUSTED_VEC);
+  expect(typeof row.embeddedContentHash).toBe("string");
 }
 
 describe("flair#2573 slice 1 — signed unstamped vector writes close the guard (real Harper)", () => {
   let harper: HarperInstance | undefined;
-  let pauseDir = "";
+  let component: ComposedComponent | undefined;
   let h: ReturnType<typeof makeHarness>;
   const A_ID = "mem-2573-stamped-a";
   const B_ID = "mem-2573-stamped-b";
@@ -228,12 +265,12 @@ describe("flair#2573 slice 1 — signed unstamped vector writes close the guard 
   beforeAll(async () => {
     const spawned = await spawnWithHarness();
     harper = spawned.harper;
-    pauseDir = spawned.pauseDir;
+    component = spawned.component;
     h = spawned.h;
   }, 180_000);
 
   afterAll(async () => {
-    await releaseAndStop(harper, pauseDir);
+    await stopAndClean(harper, component);
   }, 60_000);
 
   test("control: while the store is uniform the write-time near-duplicate query compares vectors", async () => {
@@ -300,36 +337,45 @@ describe("flair#2573 slice 1 — signed unstamped vector writes close the guard 
 
 describe("flair#2573 slice 1 — PATCH guard notifications (real Harper)", () => {
   let harper: HarperInstance | undefined;
-  let pauseDir = "";
+  let component: ComposedComponent | undefined;
   let h: ReturnType<typeof makeHarness>;
   const A_ID = "mem-2573-patch";
 
   beforeAll(async () => {
     const spawned = await spawnWithHarness();
     harper = spawned.harper;
-    pauseDir = spawned.pauseDir;
+    component = spawned.component;
     h = spawned.h;
   }, 180_000);
 
   afterAll(async () => {
-    await releaseAndStop(harper, pauseDir);
+    await stopAndClean(harper, component);
   }, 60_000);
 
-  test("signed PATCH of an empty embedding stores null, preserves uniform, and removes the row from vector results", async () => {
+  test("signed PATCH of an empty embedding clears the stored vector, preserves uniform, and removes the row from the vector's matches", async () => {
     const id = "mem-2573-empty-patch";
     await h.putMemory(id, { content: "empty vector boundary fixture", embedding: UNTRUSTED_VEC, embeddingModel: CURRENT_STAMP });
     const before = await h.waitGuard((s) => s.state === "uniform", 60_000);
     expect(before?.state).toBe("uniform");
-    expect((await h.semanticSearch({ queryEmbedding: UNTRUSTED_VEC, limit: 20 })).results.map((r: any) => r.id)).toContain(id);
+    const exactMatches = async () =>
+      (await h.semanticSearch({ queryEmbedding: UNTRUSTED_VEC, limit: 20, minScore: EXACT_MATCH })).results.map((r: any) => r.id);
+    expect(await exactMatches()).toContain(id);
+    // PATCH `embedding: []` is `embedding: null`: the stored vector is cleared,
+    // never kept. With a model, the auto-embed backfill then recomputes one from
+    // the row's text; the PATCH leaves the stamp as it was (current).
     await h.patchMemory(id, { embedding: [] });
     const row = await h.memoryRow(id);
-    expect(row.embedding ?? null).toBeNull();
+    expectNoVectorOrServerComputed(row);
     expect(row.embeddingModel).toBe(CURRENT_STAMP);
     expect((await h.health()).embeddingSpace).toEqual(before);
     await h.consult();
     expect((await h.health()).embeddingSpace).toEqual(before);
-    const result = await h.semanticSearch({ queryEmbedding: UNTRUSTED_VEC, limit: 20 });
-    expect(result.results.map((r: any) => r.id)).not.toContain(id);
+    expect(await exactMatches()).not.toContain(id);
+    // Read again after the consult and search: a backfill that landed since holds.
+    const later = await h.memoryRow(id);
+    expectNoVectorOrServerComputed(later);
+    expect(later.embeddingModel).toBe(CURRENT_STAMP);
+    expect((await h.health()).embeddingSpace).toEqual(before);
   }, 120_000);
 
   test("the returned-set filter admits qualified and bare current stamps and rejects a null stamp while uniform", async () => {
@@ -402,6 +448,8 @@ describe("flair#2573 slice 1 — PATCH guard notifications (real Harper)", () =>
 
   test("a rescan counts a raw unstamped empty array and Health and doctor report non-uniform", async () => {
     const id = "mem-2573-raw-empty";
+    const trigger = "mem-2573-rescan-trigger";
+    const putEmpty = "mem-2573-put-empty";
     const inserted = await h.adminOp({
       operation: "insert", database: "flair", table: "Memory",
       records: [{ id, agentId: AGENT, content: "raw empty embedding", createdAt: new Date().toISOString(),
@@ -411,20 +459,35 @@ describe("flair#2573 slice 1 — PATCH guard notifications (real Harper)", () =>
     const raw = await h.memoryRow(id);
     expect(raw.embedding).toEqual([]);
     expect(raw.embeddingModel ?? null).toBeNull();
-    // A notified no-stamp write invalidates the count so the consult rescans.
-    await h.putMemory("mem-2573-rescan-trigger", { content: "rescan trigger", embedding: [] });
-    expect((await h.memoryRow("mem-2573-rescan-trigger")).embedding).toBeNull();
-    const space = await h.waitGuard((s) => s.state === "excluded" && s.excluded === 1, 60_000);
+    // A signed PUT of `[]` stores no empty array: no vector, or (with a model)
+    // the write's own embed of the text under the current stamp.
+    await h.putMemory(putEmpty, { content: "a signed empty embedding is not stored as an empty array", embedding: [] });
+    const expectPutEmptyRow = async () => {
+      const putRow = await h.memoryRow(putEmpty);
+      expectNoVectorOrServerComputed(putRow);
+      if (putRow.embedding != null) expect(putRow.embeddingModel).toBe(CURRENT_STAMP);
+    };
+    await expectPutEmptyRow();
+    // The raw insert is not notified. A signed write storing an unstamped vector
+    // is, so the count goes stale and the consult rescans; the rescan counts both
+    // rows — two only because the raw empty array is counted.
+    await h.putMemory(trigger, { content: "a rescan trigger that stores a caller-supplied vector", embedding: UNTRUSTED_VEC });
+    const space = await h.waitGuard((s) => s.state === "excluded" && s.excluded === 2, 60_000);
     expect(space?.state).toBe("excluded");
-    expect(space?.excluded).toBe(1);
-    expect(await h.doctor()).toContain("excluded from the vector leg: 1 row(s) with no trusted model stamp");
+    expect(space?.excluded).toBe(2);
+    expect(await h.doctor()).toContain("excluded from the vector leg: 2 row(s) with no trusted model stamp");
     const result = await h.semanticSearch({ queryEmbedding: UNTRUSTED_VEC, limit: 20 });
     expect(result.results).toEqual([]);
     expect((await h.memoryRow(id)).embedding).toEqual([]);
     const removed = await h.adminOp({ operation: "delete", database: "flair", table: "Memory", ids: [id] });
     expect(removed.status).toBe(200);
-    await h.putMemory("mem-2573-rescan-trigger", { embedding: STAMPED_VEC, embeddingModel: CURRENT_STAMP });
+    // A trusted PUT replacing the trigger's untrusted vector marks the count
+    // stale; the rescan finds neither row.
+    await h.putMemory(trigger, { content: "a rescan trigger that stores a caller-supplied vector", embedding: STAMPED_VEC, embeddingModel: CURRENT_STAMP });
     expect((await h.waitGuard((s) => s.state === "uniform" && s.excluded === 0, 60_000))?.state).toBe("uniform");
+    // Re-read after the doctor run and rescans above: a later write to the row
+    // (the auto-embed backfill) left no vector without the current stamp.
+    await expectPutEmptyRow();
   }, 180_000);
 
   test("metadata-only PATCH preserves a uniform verdict; an unstamped vector PATCH closes it", async () => {
@@ -447,9 +510,10 @@ describe("flair#2573 slice 1 — PATCH guard notifications (real Harper)", () =>
   }, 180_000);
 });
 
-describe("flair#2573 slice 1 — vector-only mode falls back and names the guard state (real Harper)", () => {
+// The vector-only branch embeds the query text, so this describe needs the model.
+(HAS_MODEL ? describe : describe.skip)("flair#2573 slice 1 — vector-only mode falls back and names the guard state (real Harper)", () => {
   let harper: HarperInstance | undefined;
-  let pauseDir = "";
+  let component: ComposedComponent | undefined;
   let h: ReturnType<typeof makeHarness>;
   const U_ID = "mem-2573-vo-unstamped";
   const A_ID = "mem-2573-vo-stamped";
@@ -458,12 +522,12 @@ describe("flair#2573 slice 1 — vector-only mode falls back and names the guard
   beforeAll(async () => {
     const spawned = await spawnWithHarness({ FLAIR_RETRIEVAL_MODE: "vector-only" });
     harper = spawned.harper;
-    pauseDir = spawned.pauseDir;
+    component = spawned.component;
     h = spawned.h;
   }, 180_000);
 
   afterAll(async () => {
-    await releaseAndStop(harper, pauseDir);
+    await stopAndClean(harper, component);
   }, 60_000);
 
   test("a signed unstamped-vector PUT makes the vector-only branch fall back, reporting the guard state", async () => {

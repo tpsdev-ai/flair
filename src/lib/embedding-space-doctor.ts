@@ -7,7 +7,8 @@
  * The guard fails closed: only `state: "uniform"` serves the embedding leg; a
  * `mixed` state, an `excluded` state (a scan found an array or typed array, empty
  * included, without a trusted current-space stamp), an `unverified` verdict
- * (before the first scan completes, or a write since the published count) and a
+ * (before the first scan completes, or after a guard-notified write that may
+ * have changed the published count) and a
  * `scan-failed` verdict (the last published scan threw, no foreign stamp known)
  * all make the recall leg refuse a query embedding. This module is the single
  * decision: given that field, what doctor prints and whether it weighs on the

@@ -2628,19 +2628,31 @@ describe("Memory.patch embedding-space notifications", () => {
 describe("empty embedding writes", () => {
   for (const method of ["post", "put", "patch"] as const) {
     for (const empty of [[], new Float32Array(0), new Uint8Array(0)]) {
-      it(`${method} stores ${empty.constructor.name} with no elements as null`, async () => {
+      it(`${method} treats ${empty.constructor.name} with no elements as no vector supplied`, async () => {
         const id = "empty-vector";
         if (method === "patch") {
           memoryStore.set(id, { id, agentId: "agent-1", content: FINDING_A,
-            createdAt: new Date().toISOString(), embedding: FAKE_EMBEDDING,
+            createdAt: new Date().toISOString(), embedding: [0, 1, 0, 0],
             embeddingModel: "mock-embedding-model" });
         }
         const m: any = makeMemory(agentCtx("agent-1"));
         m._targetId = id;
         const result = await m[method]({ id, agentId: "agent-1", content: FINDING_A, embedding: empty });
         expect(result instanceof Response).toBe(false);
-        expect(memoryStore.get(id).embedding).toBeNull();
-        expect(embedInputTypeCalls).toEqual([]);
+        const stored = memoryStore.get(id);
+        if (method === "patch") {
+          // As `embedding: null`: the stored vector is cleared, nothing is
+          // embedded, and the stored stamp is kept.
+          expect(stored.embedding).toBeNull();
+          expect(stored.embeddingModel).toBe("mock-embedding-model");
+          expect(embedInputTypeCalls).toEqual([]);
+        } else {
+          // As an omitted embedding: the write embeds the text and stamps the
+          // vector it stores with the current model.
+          expect(stored.embedding).toEqual(FAKE_EMBEDDING);
+          expect(stored.embeddingModel).toBe("mock-embedding-model");
+          expect(embedInputTypeCalls).toEqual(["document"]);
+        }
       });
     }
   }

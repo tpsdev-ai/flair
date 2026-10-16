@@ -378,6 +378,21 @@ describe("repair consults", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(spaceGuardState()).toEqual({ state: "uniform", reason: null, excluded: 0 });
   });
+
+  it("a trusted write over a known row with no untrusted vector keeps the published count", async () => {
+    _setGuardTableGetterForTests(fakeRows([{ stamp: null, vec: true }]));
+    expect(await recomputeLatch()).toBe(false);
+    expect(spaceGuardState()).toEqual({ state: "excluded", reason: null, excluded: 1 });
+    noteWriteStamp(CURRENT, null); // a new row: nothing replaced
+    noteWriteStamp(CURRENT, { embedding: [1], embeddingModel: BARE }); // over a trusted vector
+    noteWriteStamp(BARE, { embedding: null, embeddingModel: null }); // over a row with no vector
+    // None of these can change the count, so the excluded state and its count stand.
+    expect(spaceGuardState()).toEqual({ state: "excluded", reason: null, excluded: 1 });
+    expect((await embeddingSpaceVerdict()).state).toBe("excluded");
+    // The replaced row is unknown: it may be the untrusted one, so the count is stale.
+    noteWriteStamp(CURRENT);
+    expect(spaceGuardState()).toEqual({ state: "unverified", reason: null, excluded: 1 });
+  });
 });
 
 it("a trusted replacement of an untrusted vector invalidates a uniform count and an in-flight scan", async () => {
