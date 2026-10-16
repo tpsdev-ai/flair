@@ -2,38 +2,27 @@
  * memory-node-compare.ts — `flair memory compare-nodes` (flair#2216, slice 2 of
  * #971).
  *
- * Compares the Memory id sets of two or more explicitly configured physical
- * nodes, so a node that silently lost or never received writes is visible.
- * Physical peers come only from the operator's `--node` list: they are NEVER
- * inferred from Flair's federation peer table (src/fleet-verify.ts's header
- * states why — a Flair federation peer is a distinct, higher-level concept,
- * not a Fabric replica).
+ * Compares observed Memory id sets of explicitly named physical nodes.
+ * Peers come only from `--node`, never Flair's federation peer table.
  *
- * Each node is read with the SAME operations-API read the memory checkpoint
- * uses (src/memory-id-checkpoint.ts: keyset paging in primary-key order, then
- * an exact-count recheck; a write during the read is an inconsistent read), and
- * with the same admin credentials. This module adds the row write time
- * (`updatedAt`, else `createdAt`) to that read and classifies the id sets.
+ * Reads use the checkpoint's keyset paging and exact-count recheck, with the
+ * same admin credentials. Count checks cannot detect equal-count concurrent
+ * updates or replacements. An id absent on every named node is invisible
+ * without a reference set.
  *
- * ── Classes ───────────────────────────────────────────────────────────────
- *  - `in-sync`  — it holds every id the other readable nodes hold, and holds no
- *                  id they do not.
- *  - `lagging`  — it is missing only ids written AFTER its own newest write; it
- *                  may still be catching up.
- *  - `divergent`— it is missing an id written AT OR BEFORE its own newest write,
- *                  or it holds an id no other readable node has.
- *  - `unknown`  — its read failed, its read was inconsistent (a row with no usable
- *                  write time), there was no other readable node to compare it
- *                  with, or it is missing ids but has no persisted write time to
- *                  compare them against.
- *
- * A node's newest write is the latest row write time it reports (max of
- * `updatedAt`, else `createdAt`, per row). A missing id's write time is the
- * latest such value among the readable nodes that hold it.
- *
- * The overall result is `healthy` ONLY when every node is `in-sync`. Any
- * `unknown` makes the overall result `unknown`, never healthy. This is the
- * data-convergence half of #971: a green health probe is not data convergence.
+ * Classes use stored timestamps: parseable `updatedAt`, else `createdAt`.
+ * `createdAt` can be caller-supplied and nodes can use different clocks;
+ * timestamp comparisons do not establish actual write order.
+ *  - `in-sync` — observed ids equal the union of the other usable readings.
+ *  - `lagging` — missing ids only, each with a timestamp greater than this
+ *                node's maximum timestamp.
+ *  - `divergent` — an extra id, or a missing id whose timestamp is at or below
+ *                  this node's maximum timestamp.
+ *  - `unknown` — failed read, unusable row timestamp, no usable peer, or
+ *                missing ids with no local timestamp to compare against.
+ * A missing id uses the maximum timestamp among usable peers holding it.
+ * The overall result is `healthy` only when every node is `in-sync`;
+ * any `unknown` makes the overall result `unknown`.
  */
 import {
   buildOpsPost,
@@ -58,7 +47,7 @@ export const COMPARE_EXIT_CODES: Record<CompareNodesVerdict, number> = {
   lagging: 4,
 };
 
-/** One row's id and its persisted write time (ISO), or null when it has none. */
+/** One row's id and stored timestamp string, or null when unavailable. */
 export interface NodeRowTime {
   id: string;
   writeTime: string | null;
@@ -80,7 +69,7 @@ export interface NodeVerdict {
   /** Present for `unknown`: why the node could not be classified. */
   reason?: string;
   rowCount: number;
-  /** The node's newest persisted write time (ISO), or null when it has none. */
+  /** The maximum parsed stored timestamp as ISO, or null when unavailable. */
   newestWrite: string | null;
   missing: NodeIdSample;
   extra: NodeIdSample;
@@ -99,20 +88,20 @@ interface Prepared {
   reason?: string;
   rowCount: number;
   idSet: Set<string>;
-  /** id -> write time in ms; only for ok nodes, and only for ids with a usable time. */
+  /** id -> stored timestamp in ms; only for ok nodes with usable timestamps. */
   timeById: Map<string, number>;
-  /** max of timeById's values, or null when the node has no usable write time. */
+  /** max of timeById's values, or null when no timestamp is usable. */
   newestMs: number | null;
 }
 
-/** Parse a node row's write time. A value that is absent or unparseable is null. */
+/** Parse a stored timestamp; absent or unparseable values yield null. */
 export function parseWriteTime(value: string | null | undefined): number | null {
   if (typeof value !== "string" || value.length === 0) return null;
   const ms = Date.parse(value);
   return Number.isFinite(ms) ? ms : null;
 }
 
-/** A row's write time: `updatedAt` when present, else `createdAt`; null when neither parses. */
+/** First parseable timestamp: `updatedAt`, then `createdAt`; null when neither parses. */
 export function rowWriteTime(row: MemoryRowLite): string | null {
   for (const value of [row.updatedAt, row.createdAt]) {
     if (typeof value === "string" && value.length > 0 && Number.isFinite(Date.parse(value))) return value;
@@ -136,8 +125,8 @@ function prepare(reading: NodeReading): Prepared {
     idSet.add(row.id);
     const ms = parseWriteTime(row.writeTime);
     if (ms === null) {
-      // A read that cannot say when a row was written cannot be classified.
-      return { node: reading.node, ok: false, reason: `row ${row.id} has no usable write time`, rowCount: reading.rows.length, idSet, timeById, newestMs };
+      // A row without a usable timestamp makes this reading unknown.
+      return { node: reading.node, ok: false, reason: `row ${row.id} has no usable stored timestamp`, rowCount: reading.rows.length, idSet, timeById, newestMs };
     }
     timeById.set(row.id, ms);
     if (newestMs === null || ms > newestMs) newestMs = ms;
@@ -196,20 +185,18 @@ export function classifyNodeSets(readings: readonly NodeReading[]): CompareNodes
       return { ...base, verdict: "in-sync", missing: sample([]), extra: sample([]) };
     }
     if (p.newestMs === null) {
-      // Missing ids, but no write time of its own to compare them against: it
-      // cannot be shown to be catching up, so its class is unknown.
+      // Missing ids with no local timestamp to compare against yield unknown.
       return {
         ...base,
         verdict: "unknown",
-        reason: `missing ${missing.length} id(s) but reports no persisted write time to compare against`,
+        reason: `missing ${missing.length} id(s) but reports no stored timestamp to compare against`,
         missing: sample(missing),
         extra: sample([]),
       };
     }
 
-    // A missing id written at or before this node's newest write should already
-    // be here — an id at exactly the boundary counts as divergence (the node
-    // wrote it or newer and still lacks it).
+    // A missing id's maximum peer timestamp at or below the local maximum
+    // counts as divergence, including equality.
     const older = missing.filter((id) => {
       let latest: number | null = null;
       for (const q of peers) {
@@ -237,7 +224,7 @@ export function classifyNodeSets(readings: readonly NodeReading[]): CompareNodes
   for (const n of nodes) counts[n.verdict]++;
   const detail =
     verdict === "healthy"
-      ? `healthy — all ${nodes.length} node(s) carry the same Memory ids`
+      ? `healthy — all ${nodes.length} node(s) have the same observed Memory ids`
       : `${verdict} — ${(["in-sync", "lagging", "divergent", "unknown"] as NodeClass[])
           .filter((c) => counts[c] > 0)
           .map((c) => `${counts[c]} ${c}`)
@@ -256,7 +243,7 @@ export interface ReadNodeOptions {
 }
 
 /**
- * Read one node's Memory ids and write times through the admin operations API,
+ * Read one node's Memory ids and stored timestamps through the admin operations API,
  * using the checkpoint's read (keyset paging + exact-count recheck). A read
  * failure is a `failed` reading, never an empty id set.
  */
@@ -280,7 +267,7 @@ export function renderCompareNodesHuman(result: CompareNodesResult): string {
   lines.push(`Memory node comparison: ${result.verdict.toUpperCase()}`);
   if (result.verdict !== "healthy") lines.push(`  ⚠️  ${result.detail}`);
   for (const n of result.nodes) {
-    lines.push(`  ${n.node}  ${n.verdict.toUpperCase()}  (${n.rowCount} id(s), newest write ${n.newestWrite ?? "none"})`);
+    lines.push(`  ${n.node}  ${n.verdict.toUpperCase()}  (${n.rowCount} id(s), maximum timestamp ${n.newestWrite ?? "none"})`);
     if (n.verdict === "unknown") lines.push(`    ⚠️  ${n.reason ?? "the node could not be classified"}; NOT healthy`);
     if (n.missing.count > 0) {
       lines.push(`    missing ${n.missing.count} id(s): ${n.missing.sample.join(", ")}${n.missing.count > n.missing.sample.length ? ", …" : ""}`);

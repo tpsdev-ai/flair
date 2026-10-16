@@ -69,7 +69,7 @@ function args(...nodes: string[]) {
 }
 
 describe("Memory compare-nodes Commander action", () => {
-  test("two nodes with the same ids are healthy and the read asks for the write-time columns", async () => {
+  test("two nodes with the same ids are healthy and the read asks for the stored-timestamp columns", async () => {
     calls.length = 0;
     const rows = { [NODE_A]: [row("mem-1", T1), row("mem-2", null)], [NODE_B]: [row("mem-1", T1), row("mem-2", null)] };
     const result = await action(args(NODE_A, NODE_B), rows);
@@ -120,12 +120,35 @@ describe("Memory compare-nodes Commander action", () => {
     expect(result.output).toContain("given more than once");
   }, 10_000);
 
-  test("a node URL that is not an HTTP(S) origin is refused before any request (exit 1)", async () => {
+  test("a non-HTTP(S) node URL is refused before any request (exit 1)", async () => {
     calls.length = 0;
     const result = await action(args("file:///etc/passwd", NODE_A), { [NODE_A]: [] });
     expect(result.code).toBe(1);
     expect(result.output).toContain("must be an HTTP(S) operations API origin");
     expect(calls).toEqual([]);
+  }, 10_000);
+
+  test("a rejected credential-bearing node URL exits without printing either credential", async () => {
+    const child = Bun.spawn([
+      process.execPath, "src/cli.ts",
+      ...args("https://compare-url-user:compare-url-password@node-a.example.invalid/", NODE_B),
+    ], { stdout: "pipe", stderr: "pipe", timeout: 10_000 });
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited,
+    ]);
+    expect(code).toBe(1);
+    for (const output of [stdout, stderr]) {
+      expect(output).not.toContain("compare-url-user");
+      expect(output).not.toContain("compare-url-password");
+    }
+  }, 15_000);
+
+  test("node URL paths, queries and fragments are removed before reading", async () => {
+    calls.length = 0;
+    const result = await action(args(`${NODE_A}/path?query=1#fragment`, NODE_B), {});
+    expect(result.code).toBe(0);
+    expect(calls.map((call) => call.url)).toContain(`${NODE_A}/`);
+    expect(calls.every((call) => call.url === `${NODE_A}/` || call.url === `${NODE_B}/`)).toBe(true);
   }, 10_000);
 
   test("without credentials it exits 1 before reading any node", async () => {

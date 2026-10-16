@@ -146,7 +146,7 @@ export async function readTableByIdPaged(opsPost: OpsPost, opts: KeysetReadOptio
   return rows;
 }
 
-/** Read id and durability (and, when asked, the row write times) in primary-key order. */
+/** Read id and durability (and, when asked, the stored row timestamps) in primary-key order. */
 export async function readMemoryRowsPaged(
   opsPost: OpsPost,
   opts: { pageSize?: number; maxPages?: number; expected?: number; withWriteTimes?: boolean } = {},

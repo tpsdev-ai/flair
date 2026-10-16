@@ -593,12 +593,13 @@ export function register(program: Command): void {
     });
 
   // ── flair memory checkpoint / verify (flair#2218) ─────────────────────────
-  const credentialOptions = (cmd: Command): Command =>
-    cmd
-      .option("--ops-target <url>", "Operations API URL override (env: FLAIR_OPS_TARGET)")
+  const credentialOptions = (cmd: Command, withOpsTarget = true): Command => {
+    if (withOpsTarget) cmd.option("--ops-target <url>", "Operations API URL override (env: FLAIR_OPS_TARGET)");
+    return cmd
       .option("--fabric-user <user>", "Admin username (env: FABRIC_USER; inline leaks to ps/shell history)")
       .option("--fabric-password <pass>", "Admin password (prefer FABRIC_PASSWORD env or --fabric-password-file)")
       .option("--fabric-password-file <path>", "Read the admin password from a mode-0600 file");
+  };
 
   const requireCredentials = (opts: any, command: string): { user: string; pass: string } => {
     const { fabricUser, fabricPassword, warnings } = resolveFabricCredentials(opts);
@@ -683,29 +684,38 @@ Exit codes:
   credentialOptions(
     memory
       .command("compare-nodes")
-      .description("Compare the Memory ids of two or more explicitly named nodes; healthy only when every node carries the same ids")
-      .option("--node <ops-url>", "A node's operations API origin (repeat once per node; at least two)", (value: string, seen: string[]) => [...seen, value], [] as string[])
+      .description("Compare observed Memory id sets of two or more explicitly named nodes")
+      .option("--node <ops-url>", "A node's operations API URL (repeat once per node; at least two)", (value: string, seen: string[]) => [...seen, value], [] as string[])
       .option("--json", "Print the comparison as JSON")
       .addHelpText("after", `
-Each --node is that node's own operations API origin, supplied explicitly. Physical
-peers are never inferred from Flair federation peers.
+Each --node explicitly names an HTTP(S) operations API URL; its path, query and
+fragment are removed. Peers are never inferred from Flair federation peers.
+
+The command compares observed id sets. Count checks cannot detect equal-count
+concurrent updates or replacements. An id absent on every named node is invisible
+without a reference set.
+
+Classes use stored timestamps: parseable updatedAt, else createdAt. createdAt can
+be caller-supplied and node clocks can differ; these do not prove write order.
+A missing id uses the maximum timestamp among usable peers holding it.
 
 Per-node classes:
-  in-sync    holds every id the other readable nodes hold, and no id they do not
-  lagging    missing only ids written after the node's own newest write; it may be catching up
-  divergent  missing an id written at or before its own newest write, or holding an id no other node has
-  unknown    the node could not be read, its read was inconsistent, or there was nothing usable to compare
+  in-sync    observed ids equal the union of the other usable readings
+  lagging    missing ids only, each timestamp greater than this node's maximum
+  divergent  an extra id, or a missing id timestamp at or below this node's maximum
+  unknown    failed read, unusable timestamp, no usable peer, or no local timestamp for missing ids
 
-The overall result is healthy only when every node is in-sync. A lagging node is not
-healthy, and any unknown makes the overall result unknown, never healthy.
+The overall result is healthy only when every node is in-sync;
+any unknown makes the overall result unknown.
 
 Exit codes:
-  0  healthy — every node carries the same Memory ids
-  1  usage — fewer than two --node values, a duplicate node, or a bad origin
-  2  divergent — a node disagrees with the others on its persisted ids
+  0  healthy — every node has the same observed Memory ids
+  1  usage — fewer than two --node values, a duplicate node, or an invalid HTTP(S) URL
+  2  divergent — at least one node is classified divergent
   3  unknown — at least one node's reading could not be used
-  4  lagging — a node is missing only ids written after its own newest write
+  4  lagging — at least one node is lagging, with no divergent or unknown nodes
 `),
+    false,
   ).action(async (opts: any) => {
     const provided: string[] = opts.node ?? [];
     if (provided.length < 2) {
@@ -718,7 +728,7 @@ Exit codes:
       try {
         origin = normalizeOrigin(raw);
       } catch {
-        console.error(render.wrap(render.c.red, `${render.icons.error} --node must be an HTTP(S) operations API origin without credentials: ${raw}`));
+        console.error(render.wrap(render.c.red, `${render.icons.error} --node must be an HTTP(S) operations API origin without credentials`));
         process.exit(1);
       }
       if (nodes.includes(origin)) {

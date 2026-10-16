@@ -369,7 +369,7 @@ fail the deploy. Without the flag it says `not checked`.
 ### Memory ids: comparing nodes
 
 `flair memory checkpoint`/`verify` compare one instance with a file. To see whether two or more
-physical nodes hold the same Memory ids, name each node's operations API origin explicitly:
+physical nodes have the same observed Memory ids, name each node's operations API origin explicitly:
 
 ```bash
 flair memory compare-nodes \
@@ -380,23 +380,24 @@ flair memory compare-nodes \
 Each `--node` is the address that node's operations API is read at (the address `flair memory
 checkpoint` reaches through `--ops-target`). Physical peers are never inferred from Flair's
 federation peers: a node is compared only when `--node` names it. Each node is read with the same
-paged operations-API read the checkpoint uses, plus each row's write time. Per node the report
-gives one of:
+paged operations-API read the checkpoint uses, plus stored timestamps. Count checks cannot detect
+equal-count concurrent updates or replacements; an id absent on every named node is invisible
+without a reference set. Timestamps use parseable `updatedAt`, else `createdAt`, which can be
+caller-supplied. Node clocks can differ; timestamp comparisons do not establish actual write order.
+A missing id uses the maximum timestamp among usable peers holding it. Per node the report gives:
 
-- **in-sync** — it holds every id the other readable nodes hold, and no id they do not;
-- **lagging** — it is missing only ids written after its own newest write; it may still be
-  catching up;
-- **divergent** — it is missing an id written at or before its own newest write, or it holds an id
-  no other node has;
-- **unknown** — it could not be read, its read was inconsistent or carried no usable
-  write time, or there was nothing usable to compare it against.
+- **in-sync** — observed ids equal the union of the other usable readings;
+- **lagging** — missing ids only, each timestamp greater than this node's maximum timestamp;
+- **divergent** — an extra id, or a missing id timestamp at or below this node's maximum;
+- **unknown** — failed read, unusable timestamp, no usable peer, or no local timestamp for missing ids.
 
 The overall result is healthy only when every node is in-sync. A lagging node is reported as such
 and is never healthy; any unknown makes the overall result unknown. The report lists the missing
 and extra ids per node (a count, then the ids up to ten). `--json` prints the same result as JSON.
 
 Exit codes: `0` healthy, `2` divergent, `3` unknown, `4` lagging. Fewer than two `--node` values, a
-repeated node, or a node that is not an HTTP(S) origin exits `1`.
+repeated node, or an invalid HTTP(S) URL exits `1`. Paths, queries and fragments are removed from
+node URLs before comparison.
 
 ---
 

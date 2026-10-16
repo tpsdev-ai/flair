@@ -37,7 +37,7 @@ describe("flair#2216 — node id-set classifier", () => {
     expect(classifyNodeSets([read(NODE_A, []), read(NODE_B, [])]).verdict).toBe("healthy");
   });
 
-  test("a node missing only an id newer than its own newest write is lagging, never healthy", () => {
+  test("a node missing only an id timestamp greater than its own maximum is lagging, never healthy", () => {
     // The lagging id is held by two other nodes, so no node counts it as an id
     // no other node has; the overall result is lagging, not divergent.
     const result = classifyNodeSets([
@@ -51,7 +51,7 @@ describe("flair#2216 — node id-set classifier", () => {
     expect(COMPARE_EXIT_CODES.lagging).not.toBe(0);
   });
 
-  test("in a two-node comparison a node ahead of a lagging peer is divergent, and the overall result is divergent", () => {
+  test("in a two-node comparison a node with an extra id and a lagging peer is divergent, and the overall result is divergent", () => {
     // The lagging node's missing id is held by exactly one node, so that node
     // holds an id no other node has.
     const result = classifyNodeSets([
@@ -62,8 +62,8 @@ describe("flair#2216 — node id-set classifier", () => {
     expect(result.nodes.map((n) => n.verdict)).toEqual(["divergent", "lagging"]);
   });
 
-  test("a node missing an id older than its own newest write is divergent", () => {
-    // B's newest write is T2; the id it lacks was written at T0.
+  test("a missing id timestamp below the local maximum is divergent", () => {
+    // B's maximum timestamp is T2; the id it lacks has timestamp T0.
     const result = classifyNodeSets([
       read(NODE_A, [["mem-1", T0], ["mem-2", T2]]),
       read(NODE_B, [["mem-2", T2]]),
@@ -72,7 +72,7 @@ describe("flair#2216 — node id-set classifier", () => {
     expect(result.nodes[1].verdict).toBe("divergent");
   });
 
-  test("a tie at the boundary is divergent: an id written exactly at the node's newest write is not lag", () => {
+  test("a missing id timestamp equal to the local maximum is divergent", () => {
     const result = classifyNodeSets([
       read(NODE_A, [["mem-1", T1], ["mem-2", T1]]),
       read(NODE_B, [["mem-2", T1]]),
@@ -121,17 +121,17 @@ describe("flair#2216 — node id-set classifier", () => {
     expect(result.nodes[0].reason).toContain("no other node");
   });
 
-  test("a row with no usable write time makes its node unknown, not empty", () => {
+  test("a row with no usable stored timestamp makes its node unknown, not empty", () => {
     const result = classifyNodeSets([
       read(NODE_A, [["mem-1", T0]]),
       { kind: "read", node: NODE_B, rows: [{ id: "mem-1", writeTime: null }] },
     ]);
     expect(result.verdict).toBe("unknown");
     expect(result.nodes[1].verdict).toBe("unknown");
-    expect(result.nodes[1].reason).toContain("no usable write time");
+    expect(result.nodes[1].reason).toContain("no usable stored timestamp");
   });
 
-  test("a node missing ids but with no persisted write time is unknown, never lagging", () => {
+  test("a node missing ids but with no stored timestamp is unknown, never lagging", () => {
     const result = classifyNodeSets([
       read(NODE_A, [["mem-1", T0]]),
       read(NODE_B, []),
@@ -155,11 +155,13 @@ describe("flair#2216 — node id-set classifier", () => {
   });
 });
 
-describe("flair#2216 — write-time parsing", () => {
-  test("updatedAt wins over createdAt; a missing or unparseable value is null", () => {
+describe("flair#2216 — stored-timestamp parsing", () => {
+  test("uses the first parseable stored timestamp, or null", () => {
     expect(rowWriteTime({ id: "m", durability: "standard", createdAt: T0, updatedAt: T1 })).toBe(T1);
     expect(rowWriteTime({ id: "m", durability: "standard", createdAt: T0, updatedAt: null })).toBe(T0);
     expect(rowWriteTime({ id: "m", durability: "standard", createdAt: T0 })).toBe(T0);
+    expect(rowWriteTime({ id: "m", durability: "standard", createdAt: T0, updatedAt: "invalid" })).toBe(T0);
+    expect(rowWriteTime({ id: "m", durability: "standard", createdAt: "October 1, 2026" })).toBe("October 1, 2026");
     expect(rowWriteTime({ id: "m", durability: "standard", createdAt: "not-a-time", updatedAt: "" })).toBeNull();
     expect(rowWriteTime({ id: "m", durability: "standard" })).toBeNull();
     expect(parseWriteTime("2026-10-01T00:00:00.000Z")).toBe(Date.parse(T0));
@@ -168,7 +170,7 @@ describe("flair#2216 — write-time parsing", () => {
 });
 
 describe("flair#2216 — reading one node with the checkpoint's paged read", () => {
-  test("reads ids and write times through the operations API and rechecks the count", async () => {
+  test("reads ids and stored timestamps through the operations API and rechecks the count", async () => {
     const calls: Record<string, unknown>[] = [];
     const opsPost = async (body: Record<string, unknown>) => {
       calls.push(body);
@@ -187,7 +189,7 @@ describe("flair#2216 — reading one node with the checkpoint's paged read", () 
     if (reading.kind === "failed") expect(reading.reason).toContain("401");
   }, 5_000);
 
-  test("a node URL that is not an HTTP(S) origin is refused before any request", async () => {
+  test("a non-HTTP(S) node URL is refused before any request", async () => {
     let called = false;
     const reading = await readNode("file:///etc/passwd", { opsPost: async () => { called = true; return []; } });
     expect(reading.kind).toBe("failed");

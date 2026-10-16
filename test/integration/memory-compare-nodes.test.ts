@@ -2,25 +2,20 @@
  * memory-compare-nodes.test.ts — flair#2216, the issue's acceptance, on two
  * REAL Harper nodes.
  *
- * `flair memory compare-nodes` reads each node's Memory ids and newest write
- * time through the admin operations API (the same keyset-paged read and
- * exact-count recheck the memory checkpoint uses) and reports whether the
- * nodes agree. This file drives the built CLI against two ephemeral Harpers:
+ * The built CLI compares observed Memory ids and stored timestamps through
+ * the admin operations API on two ephemeral Harpers: equal ids, a keyset page
+ * boundary, an additional Memory POST on node-a, and an unreadable node.
+ * Node-b receives no additional write.
  *
- *   1. both nodes seeded with the same ids → healthy (exit 0);
- *   2. one node frozen — it accepts no new write while the other does → the
- *      check reports divergent, lagging or unknown, NEVER healthy;
- *   3. a node that cannot be read → unknown, never healthy.
- *
- * It writes to each node's own operations API, so it does not depend on the
- * OSS core's replication transport (which is not implemented; see
- * test/helpers/replicated-nodes.ts). Fixtures use neutral names (node-a/node-b).
+ * Checks the Memory POST's updatedAt stamp with caller-supplied createdAt.
+ * Timestamp comparisons classify stored values, not actual write order.
  */
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { HARPER_STOP_BUDGET_MS, startHarper, stopHarpers, type HarperInstance } from "../helpers/harper-lifecycle.js";
+import { readNode } from "../../src/memory-node-compare.js";
 import { assertOwnedInstance } from "../helpers/replicated-nodes.js";
 
 const cliPath = resolve("dist/cli.js");
@@ -55,7 +50,7 @@ async function insert(inst: HarperInstance, id: string, createdAt: string): Prom
 
 describe("flair#2216 — compare Memory ids across two real nodes", () => {
   test(
-    "same ids → healthy; a frozen node → never healthy; an unreadable node → unknown",
+    "same ids → healthy; a Memory POST → divergent with a lagging peer; unreadable → unknown",
     async () => {
       const a = await startHarper();
       instances.push(a);
@@ -78,9 +73,9 @@ describe("flair#2216 — compare Memory ids across two real nodes", () => {
       env.FABRIC_USER = a.admin.username;
 
       /** Run the built CLI against the named nodes; returns exit code and combined output. */
-      const run = async (nodes: string[]) => {
+      const run = async (nodes: string[], json = false) => {
         const child = Bun.spawn(
-          ["node", cliPath, "memory", "compare-nodes", ...nodes.flatMap((n) => ["--node", n]), "--fabric-password-file", passwordFile],
+          ["node", cliPath, "memory", "compare-nodes", ...nodes.flatMap((n) => ["--node", n]), "--fabric-password-file", passwordFile, ...(json ? ["--json"] : [])],
           { env, stdout: "pipe", stderr: "pipe", timeout: CLI_TIMEOUT_MS },
         );
         const [stdout, stderr, code] = await Promise.all([
@@ -96,18 +91,52 @@ describe("flair#2216 — compare Memory ids across two real nodes", () => {
       await insert(a, "node-mem-2", OLD);
       await insert(b, "node-mem-1", OLD);
       await insert(b, "node-mem-2", OLD);
+      const paged = await readNode(a.opsURL, { pageSize: 1, user: a.admin.username, password: a.admin.password });
+      expect(paged.kind).toBe("read");
+      if (paged.kind === "read") expect(paged.rows.map((row) => row.id)).toEqual(["node-mem-1", "node-mem-2"]);
       const healthy = await run([a.opsURL, b.opsURL]);
       expect(healthy.code, `in-sync pair → healthy\n${healthy.output}`).toBe(0);
       expect(healthy.output).toContain("HEALTHY");
 
-      // 2. Freeze node-b: node-a takes a newer write, node-b does not. node-b may
-      //    still be catching up, node-a holds an id no other node has, so the
-      //    overall result is divergent, lagging or unknown — never healthy.
-      await insert(a, "node-mem-3", new Date().toISOString());
-      const frozen = await run([a.opsURL, b.opsURL]);
-      expect(frozen.code, `frozen node-b → not healthy\n${frozen.output}`).not.toBe(0);
-      expect(frozen.output).not.toContain("HEALTHY");
-      expect([2, 3, 4], `frozen node-b → a classified non-healthy result\n${frozen.output}`).toContain(frozen.code);
+      // 2. Write through Flair's Memory resource; node-b receives no write.
+      const written = await fetch(`${a.httpURL}/Memory`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Basic ${Buffer.from(`${a.admin.username}:${a.admin.password}`).toString("base64")}`,
+        },
+        body: JSON.stringify({
+          id: "node-mem-3", agentId: "compare-agent", content: "Memory resource fixture",
+          createdAt: OLD, updatedAt: OLD, durability: "standard",
+        }),
+        signal: AbortSignal.timeout(60_000),
+      });
+      expect(written.ok, await written.text()).toBe(true);
+      const storedResponse = await fetch(a.opsURL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Basic ${Buffer.from(`${a.admin.username}:${a.admin.password}`).toString("base64")}`,
+        },
+        body: JSON.stringify({ operation: "sql", sql: "SELECT createdAt, updatedAt FROM flair.Memory WHERE id = 'node-mem-3'" }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      expect(storedResponse.ok).toBe(true);
+      const stored = await storedResponse.json() as { createdAt: string; updatedAt: string }[];
+      expect(stored).toHaveLength(1);
+      expect(stored[0].createdAt).toBe(OLD);
+      expect(Date.parse(stored[0].updatedAt)).toBeGreaterThan(Date.parse(OLD));
+      const different = await run([a.opsURL, b.opsURL], true);
+      expect(different.code, different.output).toBe(2);
+      const comparison = JSON.parse(different.output) as {
+        verdict: string;
+        nodes: { node: string; verdict: string; newestWrite: string | null; missing: { sample: string[] } }[];
+      };
+      expect(comparison.verdict).toBe("divergent");
+      expect(comparison.nodes.find((node) => node.node === a.opsURL)?.newestWrite).toBe(stored[0].updatedAt);
+      expect(comparison.nodes.find((node) => node.node === b.opsURL)).toMatchObject({
+        verdict: "lagging", missing: { sample: ["node-mem-3"] },
+      });
 
       // 3. A node that cannot be read (a closed port) → unknown, never healthy.
       const probe = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch() { return new Response("x"); } });
