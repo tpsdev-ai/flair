@@ -15,7 +15,7 @@ import {
   lastRawPathSegment,
   nonCanonicalRequestTargetRefusal,
   rawPathSegments,
-  recordIdSegment,
+  routedRecordId,
   requestPath,
 } from "../../resources/request-target.ts";
 import { resolveGuardedRecord } from "../../resources/record-owner-guard.ts";
@@ -145,7 +145,7 @@ describe("a record id built by Flair's own clients is a canonical target", () =>
       expect(isCanonicalRequestTarget(memoryPutPath(id))).toBe(true);
       expect(isCanonicalRequestTarget(`/Memory/${mcpEncodeRecordId(id)}?limit=1`)).toBe(true);
       // ...and the id is decided as ONE segment that decodes back to it.
-      expect(recordIdSegment(recordIdPath("Memory", id))).toBe(id);
+      expect(routedRecordId(recordIdPath("Memory", id))?.id).toBe(id);
       expect(resolveGuardedRecord(recordIdPath("Memory", id))?.id).toBe(id);
     });
   }
@@ -192,13 +192,15 @@ describe("raw-path helpers: split on `/` first, then decode one segment", () => 
     expect(decodePathSegment("a%E0%A4")).toBeNull();
   });
 
-  test("recordIdSegment decodes the id segment on its own", () => {
-    expect(recordIdSegment("/OrgEvent/a%2Fb")).toBe("a/b");
-    expect(recordIdSegment("/WorkspaceState/ws%2F1")).toBe("ws/1");
-    expect(recordIdSegment("/OrgEvent/a%2F..%2Fb")).toBe("a/../b");
-    expect(recordIdSegment("/OrgEvent")).toBeNull();
-    expect(recordIdSegment("/OrgEvent/")).toBeNull();
-    expect(recordIdSegment("/OrgEvent/bad%E0%A4")).toBeNull();
+  test("routedRecordId decodes the FULL remainder after the table, as Harper routes it", () => {
+    expect(routedRecordId("/OrgEvent/a%2Fb")).toEqual({ resource: "OrgEvent", id: "a/b" });
+    expect(routedRecordId("/WorkspaceState/ws%2F1")).toEqual({ resource: "WorkspaceState", id: "ws/1" });
+    expect(routedRecordId("/OrgEvent/a%2F..%2Fb")).toEqual({ resource: "OrgEvent", id: "a/../b" });
+    // A raw multi-segment remainder is ONE id (the whole decoded remainder).
+    expect(routedRecordId("/OrgEvent/a/b/c")).toEqual({ resource: "OrgEvent", id: "a/b/c" });
+    expect(routedRecordId("/OrgEvent")).toBeNull();
+    expect(routedRecordId("/OrgEvent/")).toBeNull();
+    expect(routedRecordId("/OrgEvent/bad%E0%A4")).toBeNull();
   });
 
   test("resolveGuardedRecord decides an encoded-slash id as one id", () => {

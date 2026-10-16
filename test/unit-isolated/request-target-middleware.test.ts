@@ -220,6 +220,17 @@ describe("an id containing `/`, sent as `%2F`, is decided as ONE segment at ever
     expect(tableGets.Memory!.some((c) => c.args === 2)).toBe(true);
   });
 
+  it("a RAW multi-segment id resolves to the FULL routed id, not the first sub-segment", async () => {
+    // `/Memory/a/b` routes to id `a/b`; the owner guard must read `a/b`, never `a`.
+    const url = "/Memory/a/b";
+    const req = makeRequest(url, "PATCH", signedAuthorization("PATCH", url));
+    const res = await mw(req, next);
+    expect(res.status).toBe(200);
+    const ownerReads = tableGets.Memory!.filter((c) => c.args === 1).map((c) => c.id);
+    expect(ownerReads).toContain("a/b");
+    expect(ownerReads).not.toContain("a");
+  });
+
   it("the stored-owner rule refuses a write to another agent's `a/b`", async () => {
     tableRows.Memory!.set("a/b", { id: "a/b", agentId: "someone-else" });
     const url = "/Memory/a%2Fb";
@@ -289,5 +300,65 @@ describe("no path decision reads the URL-normalized pathname", () => {
     const uses = src.split("\n").filter((line) => line.includes("url.pathname"));
     expect(uses).toHaveLength(1);
     expect(uses[0]).toContain("const payload = `${agentId}:${tsRaw}:${nonce}:${request.method}:${url.pathname}${url.search}`");
+  });
+});
+
+describe("the routed resource name drives the public-path and suffix decisions", () => {
+  it("a file-type-suffix form of a public route is allowed (routes to the public resource)", async () => {
+    for (const path of ["/health.json", "/Health.cbor", "/AgentCard.json"]) {
+      const before = nextCalls;
+      const res = await mw(makeRequest(path, "GET"), next);
+      expect(res.status, path).toBe(200);
+      expect(nextCalls, path).toBe(before + 1);
+    }
+  });
+
+  it("a suffix that does not resolve to a known resource is left exactly as sent", async () => {
+    // `/Memoryx` is not a known decision-resource, so it is not rewritten to
+    // `/Memory`; an anonymous read of it is not treated as public.
+    const req = makeRequest("/Nonsense.json", "GET");
+    const res = await mw(req, next);
+    // Not a public passthrough: anonymous annotation was applied, then passed on.
+    expect(res.status).toBe(200);
+    expect(req.tpsAnonymous).toBe(true);
+  });
+});
+
+describe("the embedding backfill targets only the committed record", () => {
+  it("a by-id write ignores a mismatched x-memory-id header and backfills the routed id", async () => {
+    const url = "/Memory/committed-id";
+    const req = makeRequest(url, "PUT", signedAuthorization("PUT", url));
+    req.headers.set("x-memory-id", "attacker-row");
+    const res = await mw(req, next);
+    expect(res.status).toBe(200);
+    await new Promise((r) => setTimeout(r, 10));
+    const ids = tableGets.Memory!.map((c) => c.id);
+    expect(ids.length).toBeGreaterThanOrEqual(1);
+    expect(ids.every((id) => id === "committed-id")).toBe(true);
+    expect(ids).not.toContain("attacker-row");
+  });
+
+  it("a collection create backfills the id Harper reports in Location, never the caller header", async () => {
+    const url = "/Memory";
+    const req = makeRequest(url, "POST", signedAuthorization("POST", url));
+    req.headers.set("x-memory-id", "attacker-row");
+    const created = () => { nextCalls++; return new Response("ok", { status: 201, headers: { location: "server-chosen-id" } }); };
+    const res = await mw(req, created);
+    expect(res.status).toBe(201);
+    await new Promise((r) => setTimeout(r, 10));
+    const ids = tableGets.Memory!.map((c) => c.id);
+    expect(ids).toContain("server-chosen-id");
+    expect(ids).not.toContain("attacker-row");
+  });
+
+  it("a DELETE schedules no backfill", async () => {
+    const url = "/Memory/deleted-id";
+    const req = makeRequest(url, "DELETE", signedAuthorization("DELETE", url));
+    const res = await mw(req, next);
+    expect(res.status).toBe(200);
+    await new Promise((r) => setTimeout(r, 10));
+    // The owner guard may read the row (one argument); the backfill never runs
+    // for a DELETE, so there is no backfill-shaped read (`get(id, {})`).
+    expect(tableGets.Memory!.some((c) => c.args === 2)).toBe(false);
   });
 });

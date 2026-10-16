@@ -75,6 +75,7 @@
  * nor exempted with a stated reason. A table added later enters that test's
  * scope the moment it declares the column — nobody has to know this file exists.
  */
+import { routedRecordId } from "./request-target.js";
 
 /**
  * Table → the attribute naming the principal that owns a row.
@@ -146,29 +147,23 @@ export function isMutatingMethod(method: string): boolean {
  * null when the path is not a guarded single-record route.
  *
  * `pathname` is the RAW request path (the target before its `?`, as Harper
- * routes it). It is split on `/` FIRST and only then is the id segment decoded,
- * so an encoded `/` (`%2F`) inside the id stays part of that one id.
+ * routes it). The id is the FULL decoded remainder after the table segment —
+ * the same id Harper's `RequestTarget` resolves (`id = decodeURIComponent(path)`)
+ * — so an id that itself contains `/`, raw or as `%2F`, resolves to the whole id
+ * and the guard reads the row Harper actually mutates, never a shorter prefix.
  *
- * Matches `/<Table>/<id>` ONLY. A collection path (`/<Table>`) addresses no
- * existing record, so there is nothing to own and nothing to check — that is the
- * "creation is untouched" property, expressed as a parse rather than a special
- * case. The table segment is matched EXACTLY so `/SoulFeed/x` can never be read
- * as a `Soul` route.
+ * Matches `/<Table>/<id>` ONLY. A collection path (`/<Table>` or `/<Table>/`)
+ * addresses no existing record, so there is nothing to own and nothing to
+ * check — that is the "creation is untouched" property, expressed as a parse
+ * rather than a special case. The table segment is matched EXACTLY so
+ * `/SoulFeed/x` can never be read as a `Soul` route.
  */
 export function resolveGuardedRecord(pathname: string): { table: string; ownerField: string; id: string } | null {
-  const parts = pathname.split("/").filter(Boolean);
-  if (parts.length < 2) return null;
-  const table = parts[0];
-  const ownerField = OWNER_FIELDS[table];
+  const routed = routedRecordId(pathname);
+  if (!routed) return null; // collection, or malformed percent-encoding
+  const ownerField = OWNER_FIELDS[routed.resource];
   if (!ownerField) return null;
-  let id: string;
-  try {
-    id = decodeURIComponent(parts[1]);
-  } catch {
-    return null; // malformed percent-encoding addresses no record we can resolve
-  }
-  if (!id) return null;
-  return { table, ownerField, id };
+  return { table: routed.resource, ownerField, id: routed.id };
 }
 
 /**

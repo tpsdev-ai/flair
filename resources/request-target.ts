@@ -85,11 +85,86 @@ export function decodePathSegment(segment: string): string | null {
 }
 
 /**
- * The decoded record-id segment of a `/<Collection>/<id>` path: the second raw
- * segment, decoded on its own. Null when there is none, or when it is not valid
- * percent-encoding.
+ * The resource name and still-encoded remainder Harper's routing hands a
+ * RequestTarget: the first path segment, and everything after it with the one
+ * leading slash removed. A collection path (`/<resource>` or `/<resource>/`)
+ * has an empty or trailing-slash remainder. Mirrors `Resources.getMatch`'s
+ * `relativeURL` for a one-level resource and `RequestTarget`'s leading-slash
+ * removal.
  */
-export function recordIdSegment(path: string): string | null {
-  const segment = rawPathSegments(path)[1];
-  return segment ? decodePathSegment(segment) : null;
+export function routedResourceAndRemainder(path: string): { resource: string; remainder: string } {
+  const p = path.startsWith("/") ? path.slice(1) : path;
+  const slash = p.indexOf("/");
+  if (slash === -1) return { resource: p, remainder: "" };
+  return { resource: p.slice(0, slash), remainder: p.slice(slash + 1) };
+}
+
+/**
+ * The record id Harper routes a `/<resource>/<remainder>` path to: the FULL
+ * decoded remainder, exactly as `RequestTarget` sets
+ * `id = decodeURIComponent(path)` — NOT just the first sub-segment. So an id
+ * that itself contains `/` (sent raw or as `%2F`) resolves to the whole id, the
+ * same row Harper operates on.
+ *
+ * Null for a collection path (empty or trailing-slash remainder) and for a
+ * remainder that is not valid percent-encoding (Harper answers that itself).
+ */
+export function routedRecordId(path: string): { resource: string; id: string } | null {
+  const { resource, remainder } = routedResourceAndRemainder(path);
+  if (remainder === "" || remainder.endsWith("/")) return null;
+  let id: string;
+  try {
+    id = decodeURIComponent(remainder);
+  } catch {
+    return null;
+  }
+  if (id === "") return null;
+  return { resource, id };
+}
+
+/**
+ * Harper's first-dot property rule (`Resource.parsePath`): when the text after
+ * the id's FIRST dot is a declared attribute of the resource, that suffix is a
+ * property selector and the row is addressed by the id BEFORE the dot. Returns
+ * the id Harper reads, given the resource's declared attribute names. A suffix
+ * that is not a declared attribute is left as part of the id, exactly as Harper
+ * leaves it.
+ */
+export function routedIdAfterPropertyRule(id: string, declaredAttributes: ReadonlySet<string>): string {
+  const dot = id.indexOf(".");
+  if (dot > -1 && declaredAttributes.has(id.slice(dot + 1))) return id.slice(0, dot);
+  return id;
+}
+
+/**
+ * The resource name Harper routes the path's FIRST segment to, honoring the
+ * file-type-suffix fallback in `Resources.getMatch`: when the whole first
+ * segment is not a known resource but its text before the first `.` is, the
+ * request routes to that shorter name (e.g. `OAuthToken.json` → `OAuthToken`).
+ * `isKnown` answers whether a name is one of the resources the calling decision
+ * distinguishes; an unknown first segment is returned unchanged, so no
+ * unrelated path is rewritten.
+ */
+export function routedFirstResourceName(path: string, isKnown: (name: string) => boolean): string {
+  const seg = rawPathSegments(path)[0] ?? "";
+  if (isKnown(seg)) return seg;
+  const dot = seg.indexOf(".");
+  if (dot > -1 && isKnown(seg.slice(0, dot))) return seg.slice(0, dot);
+  return seg;
+}
+
+/**
+ * `path` with its first segment replaced by the resource Harper routes it to
+ * (see `routedFirstResourceName`), so a decision that compares the first
+ * segment against `known` sees the routed resource for a suffix form. The rest
+ * of the path is preserved. Unchanged when the first segment is already a known
+ * resource or resolves to none.
+ */
+export function routedResourcePath(path: string, known: ReadonlySet<string>): string {
+  const segs = rawPathSegments(path);
+  const first = segs[0];
+  if (first === undefined) return path;
+  const name = routedFirstResourceName(path, (n) => known.has(n));
+  if (name === first) return path;
+  return `/${name}${path.slice(1 + first.length)}`;
 }

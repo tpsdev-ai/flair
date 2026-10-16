@@ -17,9 +17,11 @@ import {
   isCanonicalRequestTarget,
   nonCanonicalRequestTargetRefusal,
   requestPath,
-  rawPathSegments,
   lastRawPathSegment,
-  recordIdSegment,
+  routedRecordId,
+  routedResourceAndRemainder,
+  routedIdAfterPropertyRule,
+  routedResourcePath,
 } from "./request-target.js";
 
 // --- Non-admin Memory read: ignore the caller's selection --------------------
@@ -57,26 +59,25 @@ function stripMemorySelection(rawUrl: string): string {
   let query = q === -1 ? "" : rawUrl.slice(q + 1);
 
   // Path form: Harper reads a trailing `.<declared>` on the id as `property`.
-  // Harper decides on the DECODED path — RequestTarget decodes the path
-  // (`this.id = decodeURIComponent(path)`) and Resource.parsePath then splits at
-  // the first dot — so the middleware must decide on the decoded segment too, or
-  // it misses a percent-encoded dot: `%2E` (and `%2e`) IS a dot to Harper. Drop
-  // that suffix so the id addresses the full row; a suffix that is not a
-  // declared Memory attribute stays part of the id, exactly as Harper's own rule
-  // leaves it (a content-type extension such as `json` is not a declared
-  // attribute, so it is left for Harper to read as a content type).
-  const slash = pathPart.lastIndexOf("/");
-  const seg = pathPart.slice(slash + 1);
-  const decodedSeg = decodeMemoryIdSegment(seg);
-  const dot = decodedSeg.indexOf(".");
-  // An encoded `/` in the id segment makes the segment ambiguous: the trailing
-  // `.<declared attribute>` could be part of the id, or a selector on a
-  // slash-containing id.
-  if (!idSegmentHasEncodedSlash(seg) &&
-      dot > -1 && DECLARED_MEMORY_ATTRIBUTE_SET.has(decodedSeg.slice(dot + 1))) {
+  // Decide on the SAME id Harper routes: RequestTarget decodes the WHOLE
+  // remainder after `/Memory` (`this.id = decodeURIComponent(path)`) and
+  // Resource.parsePath splits that full id at its FIRST dot — not the last path
+  // segment. So the middleware decodes the full remainder and applies the same
+  // first-dot rule, or it would rewrite to a DIFFERENT row than Harper reads
+  // (e.g. `/Memory/a.b/x.agentId`, whose first-dot suffix is not a declared
+  // attribute, must be left whole). `%2E`/`%2e` IS a dot to Harper, so deciding
+  // on the decoded id covers a percent-encoded dot. A suffix that is not a
+  // declared attribute stays part of the id, exactly as Harper leaves it.
+  const { remainder } = routedResourceAndRemainder(pathPart);
+  const decodedId = decodeMemoryIdSegment(remainder);
+  const stripped = routedIdAfterPropertyRule(decodedId, DECLARED_MEMORY_ATTRIBUTE_SET);
+  // An encoded `/` in the id makes the suffix ambiguous (the caller is refused
+  // upstream in the middleware), so only rewrite when there is no encoded slash
+  // and the first-dot rule actually dropped a declared-attribute suffix.
+  if (!idSegmentHasEncodedSlash(remainder) && stripped !== decodedId) {
     // Rebuild the id from its decoded form. Harper decodes the path it is handed,
-    // so this re-encoded segment addresses the SAME id, without the property.
-    pathPart = `${pathPart.slice(0, slash + 1)}${encodeURIComponent(decodedSeg.slice(0, dot))}`;
+    // so this re-encoded id addresses the SAME row, without the property.
+    pathPart = `/Memory/${encodeURIComponent(stripped)}`;
   }
 
   // Query form: drop every `select(...)` token and every `property` parameter.
@@ -95,19 +96,19 @@ function stripMemorySelection(rawUrl: string): string {
 }
 
 /**
- * True when a Memory by-id read path names an id segment that carries an encoded
- * `/` (`%2F`/`%2f`) AND would otherwise be given the property-suffix rewrite in
- * stripMemorySelection. Such a segment is ambiguous — the trailing
+ * True when a Memory by-id read path names an id that carries an encoded `/`
+ * (`%2F`/`%2f`) AND would otherwise be given the property-suffix rewrite in
+ * stripMemorySelection. Such an id is ambiguous — the trailing
  * `.<declared attribute>` could be part of the id or a selector on an id that
- * contains a slash (flair#2199).
+ * contains a slash (flair#2199). Decided on the FULL decoded remainder after
+ * `/Memory`, the same id Harper routes to, with its first dot (not the last
+ * path segment's).
  */
 function isAmbiguousEncodedSlashSelector(rawUrl: string): boolean {
-  // Split the raw path on `/` first, then decode the last segment on its own.
-  const seg = lastRawPathSegment(requestPath(rawUrl));
-  if (!idSegmentHasEncodedSlash(seg)) return false;
-  const decodedSeg = decodeMemoryIdSegment(seg);
-  const dot = decodedSeg.indexOf(".");
-  return dot > -1 && DECLARED_MEMORY_ATTRIBUTE_SET.has(decodedSeg.slice(dot + 1));
+  const { remainder } = routedResourceAndRemainder(requestPath(rawUrl));
+  if (!idSegmentHasEncodedSlash(remainder)) return false;
+  const decodedId = decodeMemoryIdSegment(remainder);
+  return routedIdAfterPropertyRule(decodedId, DECLARED_MEMORY_ATTRIBUTE_SET) !== decodedId;
 }
 
 // [start, end) ranges of every `select(...)` call in a query string, accounting
@@ -267,6 +268,23 @@ const ALLOWED_HTTP_METHODS: ReadonlySet<string> = new Set([
   "GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE",
 ]);
 
+// The resources the middleware makes a by-NAME decision on: the public-path
+// allowance and the OAuth rate-limit policy. Harper's file-type-suffix fallback
+// (Resources.getMatch) routes `<name>.<ext>` to `<name>` when `<name>.<ext>` is
+// not itself a resource, so the first path segment is resolved to the routed
+// resource before these decisions — otherwise a suffixed form (`OAuthToken.json`)
+// would miss the OAuth budget or the public allowance it routes to. Only names in
+// this set are resolved; any other first segment is left exactly as sent, so no
+// unrelated path is rewritten. The raw-query block resolves `sql`/`graphql`
+// separately, on its lower-cased path.
+const NAME_ROUTED_RESOURCES: ReadonlySet<string> = new Set([
+  "health", "Health", "a2a", "A2AAdapter", "AgentCard",
+  "FederationSync", "FederationPair",
+  "OAuthRegister", "OAuthAuthorize", "OAuthToken", "OAuthRevoke", "OAuthMetadata",
+  "Admin",
+]);
+const RAW_QUERY_RESOURCES: ReadonlySet<string> = new Set(["sql", "graphql"]);
+
 server.http(async (request: any, nextLayer: any) => {
   // ── Canonical request target, FIRST ────────────────────────────────────────
   // Every decision below is made about the RAW request target, which is what
@@ -326,7 +344,13 @@ server.http(async (request: any, nextLayer: any) => {
   // Only the OAuth endpoints named in rate-limit.ts's PATH_POLICY are affected.
   // Every other path — /Memory, /Presence, /FederationSync, everything agents
   // actually use — returns null here and is untouched.
-  const limited = checkHttpRateLimit(request, targetPath);
+  //
+  // The decision is made on the resource Harper ROUTES to, including its
+  // file-type-suffix fallback (`OAuthToken.json` routes to `OAuthToken`), so a
+  // suffixed form receives the same budget and the same public allowance as the
+  // bare route rather than slipping past an exact-string match.
+  const routedDecisionPath = routedResourcePath(targetPath, NAME_ROUTED_RESOURCES);
+  const limited = checkHttpRateLimit(request, routedDecisionPath);
   if (limited) return limited;
 
   // ── Malformed `.content` Memory path: the named 400, for every caller ────────
@@ -357,16 +381,16 @@ server.http(async (request: any, nextLayer: any) => {
   // select the Basic branch below, exactly as "Basic" does. Used for both the
   // /FederationPair public-bypass test and the Basic branch itself.
   const isBasic = /^Basic /i.test(header);
-  const isA2APath = targetPath === "/a2a" || targetPath === "/A2AAdapter" || targetPath.startsWith("/A2AAdapter/");
+  const isA2APath = routedDecisionPath === "/a2a" || routedDecisionPath === "/A2AAdapter" || routedDecisionPath.startsWith("/A2AAdapter/");
   if (!isTpsEd25519 && (
-    targetPath === "/health" ||
-    targetPath === "/Health" ||
+    routedDecisionPath === "/health" ||
+    routedDecisionPath === "/Health" ||
     (request.method === "GET" && isA2APath) ||
-    targetPath === "/AgentCard" ||
-    targetPath.startsWith("/AgentCard/") ||
+    routedDecisionPath === "/AgentCard" ||
+    routedDecisionPath.startsWith("/AgentCard/") ||
     // FederationSync uses Ed25519 body-signature auth with anti-replay, validated
     // by the resource handler (allowCreate=true, same pattern as FederationPair).
-    targetPath === "/FederationSync" ||
+    routedDecisionPath === "/FederationSync" ||
     // FederationPair uses one-time PairingToken in the request body, validated
     // by the resource itself (allowCreate=true on the Resource lets anonymous
     // POST through Harper's role gate). Bearer can't be used here because
@@ -379,19 +403,19 @@ server.http(async (request: any, nextLayer: any) => {
     // (PR-4, resources/Federation.ts) could never see a caller and never
     // refused a mismatch. An anonymous pair request (no Authorization header)
     // still passes through.
-    (targetPath === "/FederationPair" && !isBasic) ||
+    (routedDecisionPath === "/FederationPair" && !isBasic) ||
     // OAuth 2.1 public endpoints (spec requires no pre-auth)
-    targetPath === "/OAuthRegister" ||
-    targetPath === "/OAuthAuthorize" ||
-    targetPath === "/OAuthToken" ||
-    targetPath === "/OAuthRevoke" ||
+    routedDecisionPath === "/OAuthRegister" ||
+    routedDecisionPath === "/OAuthAuthorize" ||
+    routedDecisionPath === "/OAuthToken" ||
+    routedDecisionPath === "/OAuthRevoke" ||
     // Belt-and-braces since flair#1000: `/.well-known/oauth-authorization-server`
     // is served from its OWN urlPath mount (resources/oauth-wellknown.ts), which
     // gets its own dispatch chain — this middleware never sees a request for it.
     // The entry stays so the path is still public if that mount ever moves back
     // onto the default chain.
-    targetPath === "/.well-known/oauth-authorization-server" ||
-    targetPath === "/OAuthMetadata"
+    routedDecisionPath === "/.well-known/oauth-authorization-server" ||
+    routedDecisionPath === "/OAuthMetadata"
   )) return nextLayer(request);
 
   // If Harper has already authorized this request (e.g. Basic admin, or
@@ -491,7 +515,7 @@ server.http(async (request: any, nextLayer: any) => {
       // Path 3: flair_pair_initiator — restricted to /FederationPair only.
       // Bootstrap credentials (pair-bootstrap-<id>) may only be used on this
       // one endpoint. Any other path must fall through to 401.
-      if (targetPath === "/FederationPair" && user.startsWith("pair-bootstrap-")) {
+      if (routedDecisionPath === "/FederationPair" && user.startsWith("pair-bootstrap-")) {
         let pairUser: any = null;
         try {
           pairUser = await (server as any).getUser(user, pass, request);
@@ -538,7 +562,7 @@ server.http(async (request: any, nextLayer: any) => {
     // the browser shows a native auth dialog instead of a bare 401 page.
     // JSON API endpoints don't get this — they should keep the structured
     // 401 body so the client can parse the error.
-    const isAdminPage = targetPath === "/Admin" || targetPath.startsWith("/Admin");
+    const isAdminPage = routedDecisionPath === "/Admin" || routedDecisionPath.startsWith("/Admin");
     if (isAdminPage) {
       return new Response("Authentication required.", {
         status: 401,
@@ -648,8 +672,10 @@ server.http(async (request: any, nextLayer: any) => {
   // ── Raw query endpoint block (non-admins) ─────────────────────────────────
   // SQL and GraphQL endpoints bypass all resource-level scoping — block them
   // for non-admin agents. Admins (bootstrap, consolidation scripts) still pass.
+  // Decided on the resource Harper routes to, including the file-type-suffix
+  // fallback (`/sql.json` → `sql`), so a suffixed form cannot slip past.
   if (!request.tpsAgentIsAdmin) {
-    const lowerPath = targetPath.toLowerCase();
+    const lowerPath = routedResourcePath(targetPath.toLowerCase(), RAW_QUERY_RESOURCES);
     if (
       lowerPath === "/sql" || lowerPath.startsWith("/sql/") ||
       lowerPath === "/graphql" || lowerPath.startsWith("/graphql/")
@@ -721,7 +747,7 @@ server.http(async (request: any, nextLayer: any) => {
     if (targetPath.startsWith("/OrgEvent/") && method === "DELETE") {
       if (!request.tpsAgentIsAdmin) {
         try {
-          const eventId = recordIdSegment(targetPath);
+          const eventId = routedRecordId(targetPath)?.id ?? null;
           if (eventId) {
             const record = await (databases as any).flair.OrgEvent.get(eventId);
             if (record && record.authorId && record.authorId !== agentId) {
@@ -759,7 +785,7 @@ server.http(async (request: any, nextLayer: any) => {
     if ((targetPath.startsWith("/WorkspaceState/")) && method === "DELETE") {
       if (!request.tpsAgentIsAdmin) {
         try {
-          const wsId = recordIdSegment(targetPath);
+          const wsId = routedRecordId(targetPath)?.id ?? null;
           if (wsId) {
             const record = await (databases as any).flair.WorkspaceState.get(wsId);
             if (record && record.agentId && record.agentId !== agentId) {
@@ -889,18 +915,26 @@ server.http(async (request: any, nextLayer: any) => {
   }
 
   // ── Embedding backfill ─────────────────────────────────────────────────────
-
-  const isMemoryWrite = isMutation && (targetPath === "/Memory" || targetPath.startsWith("/Memory/"));
-  let memoryId: string | null = null;
-  if (isMemoryWrite) {
-    const pathParts = rawPathSegments(targetPath);
-    memoryId = pathParts.length >= 2 ? decodeMemoryIdSegment(pathParts[1]) : (request.headers.get("x-memory-id") ?? null);
-  }
+  // The backfill runs ONLY for the record the write actually committed, taken
+  // from the write's own result — never from a caller-supplied header, which
+  // names a row the caller does not necessarily own or write. A by-id write
+  // committed the id Harper routed to (the full decoded remainder). A
+  // collection create committed the id Harper reported in its `Location`
+  // response header (resources/Resource.js sets newLocation to the new record's
+  // key). A DELETE commits no row to embed, so it is skipped.
+  const routedWrite = routedRecordId(targetPath);
+  const isMemoryCollectionWrite = targetPath === "/Memory" || targetPath === "/Memory/";
+  const isMemoryByIdWrite = routedWrite?.resource === "Memory";
+  const isMemoryWrite = isMutation && method !== "DELETE" && (isMemoryCollectionWrite || isMemoryByIdWrite);
+  // A by-id write's committed id is known before the write (it is the routed
+  // target); a collection create's is only known from the response.
+  const byIdCommittedId = isMemoryByIdWrite ? routedWrite!.id : null;
 
   const response = await nextLayer(request);
 
-  if (isMemoryWrite && memoryId && response.status >= 200 && response.status < 300) {
-    backfillEmbedding(memoryId).catch(() => {});
+  if (isMemoryWrite && response.status >= 200 && response.status < 300) {
+    const committedId = byIdCommittedId ?? (response.headers?.get?.("location") ?? null);
+    if (committedId) backfillEmbedding(committedId).catch(() => {});
   }
 
   return response;

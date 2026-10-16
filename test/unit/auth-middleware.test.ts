@@ -349,7 +349,7 @@ describe("auth middleware: the Basic scheme name is case-insensitive (RFC 9110)"
     expect(src).toContain("const isBasic = /^Basic /i.test(header)");
     // …used by BOTH the /FederationPair bypass and the Basic branch, and the
     // case-sensitive exact match is gone.
-    expect(src).toContain('targetPath === "/FederationPair" && !isBasic');
+    expect(src).toContain('routedDecisionPath === "/FederationPair" && !isBasic');
     expect(src).toContain("if (isBasic) {");
     expect(src).not.toContain('startsWith("Basic ")');
     const isBasic = (h: string) => /^Basic /i.test(h);
