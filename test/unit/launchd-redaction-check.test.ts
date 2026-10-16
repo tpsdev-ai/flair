@@ -28,7 +28,14 @@ const FIXTURES = join(REPO_ROOT, "scripts", "ci", "redact-fixtures");
  */
 function runAssertion(
   exitCode: number,
-  { targetContents = "", adminPass = "", writeTarget = true, findingMarker = true } = {},
+  {
+    targetContents = "",
+    adminPass = "",
+    writeTarget = true,
+    findingMarker = true,
+    bigOutput = false,
+    laneFlags = false,
+  } = {},
 ) {
   const dir = mkdtempSync(join(tmpdir(), "launchd-redaction-assert-"));
   try {
@@ -41,12 +48,18 @@ function runAssertion(
         'if [ "${FAKE_NODE_EXIT:?}" = "1" ] && [ "${FAKE_NODE_MARKER:-1}" = "1" ]; then\n' +
         '  echo "redact-launchd-plist: unredacted credential key(s) in fixture: FLAIR_ADMIN_PASS" >&2\n' +
         "fi\n" +
+        'if [ "${FAKE_NODE_BIG:-0}" = "1" ]; then\n' +
+        "  head -c 200000 /dev/zero | tr '\\000' x\n" +
+        "fi\n" +
         'exit "${FAKE_NODE_EXIT:?}"\n',
     );
     chmodSync(shim, 0o755);
     const target = join(dir, "target");
     if (writeTarget) writeFileSync(target, targetContents);
-    const r = spawnSync("bash", ["-c", 'source "$LIB"; assert_no_inline_credentials "$TARGET"'], {
+    // `laneFlags` reproduces the lane's own `set -Eeuo pipefail` so a marker
+    // check that pipes captured output is exercised under it (flair#2589).
+    const prefix = laneFlags ? "set -Eeuo pipefail; " : "";
+    const r = spawnSync("bash", ["-c", `${prefix}source "$LIB"; assert_no_inline_credentials "$TARGET"`], {
       encoding: "utf8",
       timeout: 30_000,
       env: {
@@ -58,6 +71,7 @@ function runAssertion(
         ADMIN_PASS: adminPass,
         FAKE_NODE_EXIT: String(exitCode),
         FAKE_NODE_MARKER: findingMarker ? "1" : "0",
+        FAKE_NODE_BIG: bigOutput ? "1" : "0",
       },
     });
     return { status: r.status, output: `${r.stdout ?? ""}${r.stderr ?? ""}` };
@@ -124,6 +138,29 @@ describe("launchd redaction assertion classifies the check's exit code (flair#25
     expect(status).toBe(1);
     expect(output).toContain("admin password reached the diagnostics output");
   });
+
+  test("the admin-password layer scans binary content: a NUL before the password does not hide it (flair#2589)", () => {
+    // `grep -I` skips binary-looking input, so a password after a NUL byte would
+    // be missed; the layer must scan binary content too. The real `grep` runs
+    // against a real file whose first byte is NUL.
+    const { status, output } = runAssertion(0, {
+      targetContents: "\u0000binary-admin-value\n",
+      adminPass: "binary-admin-value",
+    });
+    expect(status).toBe(1);
+    expect(output).toContain("admin password reached the diagnostics output");
+  });
+
+  test("a finding with output larger than the pipe buffer stays a finding under the lane's pipefail flags (flair#2589)", () => {
+    // Under `set -o pipefail`, `printf | grep -q` lets grep stop early, SIGPIPEs
+    // printf and turns a real finding into a false "could not run". The lane
+    // runs with `set -Eeuo pipefail`, so this drives the helper under exactly
+    // those flags with output larger than a pipe buffer.
+    const { status, output } = runAssertion(1, { bigOutput: true, laneFlags: true });
+    expect(status).toBe(1);
+    expect(output).toContain("a credential key with a non-REDACTED value");
+    expect(output).not.toContain("redaction check could not run");
+  });
 });
 
 describe("the real helper drives the real scanner at the crash/finding seam (flair#2589)", () => {
@@ -150,16 +187,17 @@ describe("the real helper drives the real scanner at the crash/finding seam (fla
     expect(output).not.toContain("example-placeholder-not-a-secret");
   });
 
-  test("a scanner that cannot start is reported as could-not-run, not as a finding", () => {
+  test("a startup crash whose output quotes the finding phrase is reported as could-not-run, not as a finding", () => {
     const dir = mkdtempSync(join(tmpdir(), "redact-real-crash-"));
     try {
       const ci = join(dir, "scripts", "ci");
       mkdirSync(ci, { recursive: true });
-      // The real scanner plus a startup syntax error: Node exits 1 with no
-      // finding marker, which the helper must report as could-not-run.
+      // The real scanner plus a startup syntax error whose offending source line
+      // quotes the finding phrase: Node exits 1 and prints that line, but not
+      // anchored as a finding marker, so the helper must report could-not-run.
       const broken = join(ci, "redact-launchd-plist.mjs");
       copyFileSync(SCANNER, broken);
-      appendFileSync(broken, "\nconst =\n");
+      appendFileSync(broken, '\nconst = "unredacted credential key(s) in x";\n');
       const { status, output } = runReal(join(FIXTURES, "leaky"), dir);
       expect(status).toBe(1);
       expect(output).toContain("redaction check could not run");

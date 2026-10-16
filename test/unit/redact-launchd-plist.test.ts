@@ -121,9 +121,8 @@ describe("redactPlist — inline credential plist", () => {
 
 describe("REDACTED_KEYS — derived, not hand-maintained (flair#1696)", () => {
   test("covers every key the product says must never carry a generated secret", () => {
-    // The load-bearing drift guard: importing the product export means a key
-    // added to src/component-env.ts fails THIS test until the redactor covers
-    // it. There is deliberately no copy of the list here or in the redactor.
+    // Pins that the redactor covers every key the product export names; there
+    // is deliberately no copy of the list here or in the redactor.
     for (const key of NEVER_GENERATED_SECRET_KEYS) {
       expect(REDACTED_KEYS).toContain(key);
     }
@@ -301,6 +300,31 @@ describe("a missing or malformed key-list export is a crash, not a finding (flai
 
   test("a non-array export exits 2, not 0", () => {
     const run = runWithExported('export const NEVER_GENERATED_SECRET_KEYS = "not-an-array";\n');
+    expect(run.status).toBe(2);
+    expect(run.stderr).toContain("redaction check could not run");
+  });
+
+  test("an array with a non-string or empty element exits 2, not 0", () => {
+    // Array.isArray alone accepts this, and a null element would build a key
+    // pattern that matches nothing.
+    const run = runWithExported(
+      'export const NEVER_GENERATED_SECRET_KEYS = ["HDB_ADMIN_PASSWORD", null, ""];\n',
+    );
+    expect(run.status).toBe(2);
+    expect(run.stderr).toContain("redaction check could not run");
+  });
+
+  test("a key list whose construction throws exits 2, not 0", () => {
+    // A Proxy over an array passes Array.isArray but throws when the list is
+    // spread into REDACTED_KEYS; that construction failure must be a crash.
+    const run = runWithExported(
+      'export const NEVER_GENERATED_SECRET_KEYS = new Proxy(["HDB_ADMIN_PASSWORD"], {\n' +
+        "  get(target, prop, receiver) {\n" +
+        '    if (prop === Symbol.iterator) throw new Error("no iterator");\n' +
+        "    return Reflect.get(target, prop, receiver);\n" +
+        "  },\n" +
+        "});\n",
+    );
     expect(run.status).toBe(2);
     expect(run.stderr).toContain("redaction check could not run");
   });

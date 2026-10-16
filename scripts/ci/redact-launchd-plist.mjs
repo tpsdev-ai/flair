@@ -28,11 +28,13 @@
  *
  * Exit codes: 0 on success, 2 when a named file cannot be read. A diagnostics
  * redactor must not fail the dump it is cleaning, so read failures are loud but
- * do not abort the caller's remaining output. `--check` exits 1 on a finding:
- * that path is an assertion, so it must fail the caller. `--check` exits 2 when
- * it could not run at all (its key list failed to load, a named target cannot
- * be read, or an unexpected error), so a caller can tell a crash from a finding
- * — both fail the lane.
+ * do not abort the caller's remaining output. `--check` exits 1 on a finding,
+ * printed with a line beginning `redact-launchd-plist: unredacted credential
+ * key`. It exits 2 when the check could not run (the key list failed to validate
+ * or construct, a named target cannot be read, or an unexpected error). A syntax
+ * error in this file exits 1 before this code runs and carries no finding
+ * marker, so a caller must key on the marker, not the exit code alone, to tell a
+ * crash from a finding — both fail the lane.
  */
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
@@ -53,15 +55,24 @@ import { fileURLToPath } from "node:url";
 // could not run at all (flair#2589). The dynamic import lets a load failure be
 // reported as a crash (exit 2), distinct from a scan finding (exit 1).
 let NEVER_GENERATED_SECRET_KEYS;
+let REDACTED_KEYS;
 try {
   ({ NEVER_GENERATED_SECRET_KEYS } = await import("../../src/lib/secret-keys.ts"));
-  // Validate the export inside the handled path, before the key-list spread
-  // below. A missing or malformed export (not an array) must be a crash (exit
-  // 2); the spread used to run outside this try and threw at module load, which
-  // Node exits 1 for — and a caller reads exit 1 as a scan finding (flair#2589).
+  // Validate and construct the key list inside the handled path. A missing or
+  // non-array export, an element that is not a non-empty string, or a spread
+  // that throws must all be a crash (exit 2) — never a silent wrong key list
+  // (exit 0) or a module-load throw Node exits 1 for, which a caller reads as a
+  // scan finding (flair#2589).
   if (!Array.isArray(NEVER_GENERATED_SECRET_KEYS)) {
     throw new TypeError("NEVER_GENERATED_SECRET_KEYS is not an array");
   }
+  for (let i = 0; i < NEVER_GENERATED_SECRET_KEYS.length; i += 1) {
+    const key = NEVER_GENERATED_SECRET_KEYS[i];
+    if (typeof key !== "string" || key.length === 0) {
+      throw new TypeError(`NEVER_GENERATED_SECRET_KEYS[${i}] is not a non-empty string`);
+    }
+  }
+  REDACTED_KEYS = [...new Set([...NEVER_GENERATED_SECRET_KEYS, "FLAIR_TOKEN"])];
 } catch (err) {
   console.error(`redact-launchd-plist: redaction check could not run: ${err?.message ?? err}`);
   process.exit(2);
@@ -72,7 +83,7 @@ try {
  * print or upload. Derived from the product export plus `FLAIR_TOKEN`; a key
  * is deduplicated so the product list gaining `FLAIR_TOKEN` later is a no-op.
  */
-export const REDACTED_KEYS = [...new Set([...NEVER_GENERATED_SECRET_KEYS, "FLAIR_TOKEN"])];
+export { REDACTED_KEYS };
 
 /** Where the admin-pass file is expected to live. */
 export function adminPassFileCandidates(env = process.env) {

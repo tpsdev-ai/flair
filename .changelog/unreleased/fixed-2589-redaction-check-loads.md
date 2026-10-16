@@ -1,7 +1,8 @@
-- **The macOS launchd lane's diagnostics redaction check loads without a build
-  step, reports a crash as a crash, and runs on every PR targeting main.**
+- **The launchd redaction check loads without a build, runs on PRs targeting
+  main, and tells a check that could not run from a finding.**
 
   The credential-key list it needs moves to a dependency-free module, so plain
   `node` loads the check without the compiled `dist/`. `--check` now exits `2`
-  when it cannot run, which the lane reports as "redaction check could not run"
-  with the exit code, distinct from a credential finding.
+  when it cannot run; the lane reports that as "redaction check could not run"
+  with the exit code, and reports an exit `1` carrying the redactor's finding
+  marker as a credential finding.

@@ -135,7 +135,7 @@ redact_plist() {
 # The "no inline credential reached the output" assertion (flair#2589) lives
 # in a shared helper so a unit test can exercise the crash-vs-finding
 # classification against it. It uses the redactor's --check exit code (0 clean,
-# 1 a finding that printed the finding marker, 2 could not run) and fails on
+# 1 a finding whose finding-marker line is present, 2 could not run) and fails on
 # either a finding or a crash.
 source "$WORKSPACE/scripts/ci/launchd-redaction-check.sh"
 
