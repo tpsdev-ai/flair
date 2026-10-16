@@ -9,8 +9,10 @@
 // Each refusal case asserts three things: the status is 403, the body is
 // exactly the named refusal (it carries nothing from the stored row), and the
 // target row read afterwards deeply equals its earlier read (stored rows
-// compared as parsed objects). Positive controls cover owner writes,
-// collection and addressed creates, and administrator requests.
+// compared as parsed objects). An owned, addressed POST/PUT/PATCH whose JSON
+// body does not parse is refused with 400 write_body_unreadable and leaves the
+// row unchanged. Positive controls cover owner writes, collection and
+// addressed creates, and administrator requests.
 //
 // Agents resolve to the least-privilege `flair-agent` user here, as they do in
 // production (ensureFlairAgentRole/ensureFlairAgentUser), so the cases exercise
@@ -83,6 +85,15 @@ async function send(a: TestAgent, method: string, path: string, body?: unknown):
     method,
     headers: { "Content-Type": "application/json", Authorization: ed25519Header(a, method, path) },
     body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+}
+
+/** A signed request whose body bytes are sent exactly as given, labelled as JSON. */
+async function sendRaw(a: TestAgent, method: string, path: string, rawBody: string): Promise<Response> {
+  return fetch(`${harper.httpURL}${path}`, {
+    method,
+    headers: { "Content-Type": "application/json", Authorization: ed25519Header(a, method, path) },
+    body: rawBody,
   });
 }
 
@@ -432,8 +443,8 @@ describe("owner-scoped writes: non-admin addressed writes and collection PUT/PAT
     }, 30_000);
 
     test("OrgEvent: an addressed POST whose numeric body id equals the address writes the addressed record and no other", async () => {
-      // `/OrgEvent/0` with `{"id": 0}`: the body id names the addressed record
-      // (equal as text), so the write lands on the addressed id, not elsewhere.
+      // `/OrgEvent/0` with `{"id": 0}`: a number body id whose text matches the
+      // address is bound to it, so the write lands on the addressed id, not elsewhere.
       const kind = `osw-kind-${randomUUID().slice(0, 8)}`;
       expect(await storedRow("OrgEvent", "id", "0"), "the addressed id must start empty").toBeNull();
       const res = await send(caller, "POST", "/OrgEvent/0", { id: 0, kind, summary: "addressed-numeric-id" });
@@ -486,6 +497,41 @@ describe("owner-scoped writes: non-admin addressed writes and collection PUT/PAT
       const written = (await rowsWhere("Memory", "agentId", caller.id)).filter((r) => r.content === content);
       expect(written.map((r) => r.id), "the request wrote an id other than the addressed one").toEqual([id]);
     }, 30_000);
+  });
+
+  // ── A malformed JSON body on an owned, addressed write ────────────────────
+  // A non-admin POST, PUT or PATCH addressed to the caller's own OrgEvent, sent
+  // through real Harper HTTP with a body labelled JSON that does not parse, is
+  // refused with the guard's 400 write_body_unreadable and the row is unchanged.
+  // The same caller, verb and address with a well-formed body then writes the
+  // row, so the refusal comes from the body alone.
+  describe("a non-admin addressed write whose JSON body does not parse fails closed", () => {
+    const MALFORMED_JSON = `{"summary":"changed",`;
+    for (const verb of ["POST", "PUT", "PATCH"] as const) {
+      test(`OrgEvent: an owned, addressed ${verb} with a malformed JSON body is refused with 400 write_body_unreadable and leaves the row unchanged`, async () => {
+        const s = SPECS.find((x) => x.table === "OrgEvent")!;
+        const f = await fixture(s);
+        const path = `/${s.table}/${e(f.mineId)}`;
+        const before = await storedRow(s.table, s.pk, f.mineId);
+        expect(before?.authorId, "the caller's own OrgEvent was not seeded").toBe(caller.id);
+
+        const res = await sendRaw(caller, verb, path, MALFORMED_JSON);
+        const text = await res.text();
+        expect(res.status, `${verb} ${path} returned ${res.status}: ${text.slice(0, 200)}`).toBe(400);
+        expect(JSON.parse(text), `${verb} ${path} answered with a different refusal`).toEqual({
+          error: "write_body_unreadable",
+          message: "the OrgEvent write's body could not be read, so the record it names could not be checked",
+        });
+        expect(await storedRow(s.table, s.pk, f.mineId), `the refused ${verb} changed the caller's row`).toEqual(before);
+
+        // Positive control. The body omits createdAt: the stored value is kept.
+        const { createdAt: _kept, ...mine } = f.mine;
+        const wellFormed = verb === "PATCH" ? { summary: "well-formed" } : { ...mine, summary: "well-formed" };
+        const ok = await send(caller, verb, path, wellFormed);
+        expect(ok.status, `well-formed ${verb} ${path} returned ${ok.status}: ${await ok.text()}`).toBeLessThan(300);
+        expect((await storedRow(s.table, s.pk, f.mineId))?.summary, `the well-formed ${verb} did not write the caller's row`).toBe("well-formed");
+      }, 30_000);
+    }
   });
 
   describe("administrator collection PUT and suffixed PATCH", () => {
