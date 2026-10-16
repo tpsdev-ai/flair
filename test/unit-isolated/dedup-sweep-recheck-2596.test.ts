@@ -50,11 +50,13 @@ function matchesCondition(record: any, cond: any): boolean {
 }
 
 let memoryStore: Map<string, any>;
+let sweepSearchCalls = 0;
 
 /** One-shot guard trip after the first row a Memory.search generator yields. */
 let tripAfterFirstScanRow: (() => void) | undefined;
 
 function memorySearchGen(query: any) {
+  if (query?.select?.includes("embedding")) sweepSearchCalls++;
   const conditions = Array.isArray(query) ? query : Array.isArray(query?.conditions) ? query.conditions : [];
   let records = Array.from(memoryStore.values());
   for (const cond of conditions) records = records.filter((r) => matchesCondition(r, cond));
@@ -123,6 +125,7 @@ mock.module("../../resources/embedding-space-guard.ts", () => ({
   },
 }));
 const { MemoryDedupStats } = await import("../../resources/MemoryDedupStats.ts");
+const { createGraphHealMigration } = await import("../../resources/migrations/graph-heal.ts");
 const { noteWriteStamp, recomputeLatch, _resetGuardForTests } = guard;
 
 const AGENT = "agent-a";
@@ -143,6 +146,7 @@ function seedRow(id: string, content: string) {
 
 beforeEach(() => {
   memoryStore = new Map();
+  sweepSearchCalls = 0;
   tripAfterFirstScanRow = undefined;
   tripOnVerdict = 0;
   verdictCalls = 0;
@@ -152,6 +156,40 @@ beforeEach(() => {
 });
 
 describe("MemoryDedupStats re-checks the verdict before persisting (flair#2596)", () => {
+  it("a pending boot scan keeps counts null after graph-heal consults the guard", async () => {
+    seedRow("m1", "alpha");
+    let releaseScan!: () => void;
+    let enteredScan!: () => void;
+    const blocked = new Promise<void>((resolve) => { releaseScan = resolve; });
+    const entered = new Promise<void>((resolve) => { enteredScan = resolve; });
+    let tableCalls = 0;
+    guard._setGuardTableGetterForTests(async () => {
+      if (++tableCalls === 1) {
+        enteredScan();
+        await blocked;
+      }
+      return BaseMemory;
+    });
+    guard.scheduleSpaceGuardPrewarm();
+    await entered;
+    try {
+      expect(await createGraphHealMigration().detect()).toBe(false);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(guard.spaceGuardState().state).toBe("unverified");
+      expect(tableCalls).toBe(1);
+      const res: any = await makeDedup().post({});
+      expect(res.clusterCount).toBeNull();
+      expect(res.largestClusterSize).toBeNull();
+      expect(res.totalMemoriesInClusters).toBeNull();
+      expect(res.embeddingSpace).toEqual({ state: "unverified", reason: null });
+      expect(sweepSearchCalls).toBe(0);
+      expect(readFileSync(statsPath, "utf8")).toBe("prior stat\n");
+    } finally {
+      releaseScan();
+      await guard._prewarmSettledForTests({ FLAIR_ENABLE_TEST_FAULT_INJECTION: "1" });
+    }
+  });
+
   it("(control) a sweep with no intervening write persists the counts", async () => {
     seedRow("m1", "alpha");
     seedRow("m2", "beta");

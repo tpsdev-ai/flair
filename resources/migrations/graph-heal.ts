@@ -56,7 +56,7 @@ import { databases } from "harper";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { embeddingSpaceVerdict } from "../embedding-space-guard.js";
+import { embeddingSpaceVerdict, spaceGuardState } from "../embedding-space-guard.js";
 import type { Migration, RunBatchResult } from "./types.js";
 
 export const GRAPH_HEAL_ID = "graph-heal";
@@ -155,7 +155,8 @@ async function topNeighborId(table: MemoryTableLike, target: number[]): Promise<
  */
 async function recallHealthy(table: MemoryTableLike): Promise<{ verified: boolean; hasData: boolean }> {
   try {
-    const { state } = await embeddingSpaceVerdict();
+    let { state } = spaceGuardState();
+    if (state !== "unverified") ({ state } = await embeddingSpaceVerdict());
     if (state !== "uniform") {
       console.warn(
         `graph-heal: canary recall verification skipped — embedding space is not known uniform (state: ${state})`,
