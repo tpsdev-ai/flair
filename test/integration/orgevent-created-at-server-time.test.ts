@@ -24,12 +24,13 @@
  *     but a non-empty string or a non-empty array of strings, the empty string
  *     included) is refused with `invalid_event_id` (400) before any write, and
  *     a stored row under such an id is unchanged; a composite id is read;
- *   - POST binds a matching addressed body id before validation; at the root
- *     collection an absent, null or empty body id gets a generated id. At POST
- *     id validation, at the root collection or an addressed path whose body id
- *     differs as text from the addressed id, a remaining id that is not a
- *     non-empty string or a non-empty array of strings receives
- *     `invalid_event_id` (400);
+ *   - before validation, an addressed POST binds a missing or null body id to
+ *     the addressed id, and a string or number body id when its text matches
+ *     the address; any other id type is left unchanged by this step. At the
+ *     root collection an absent, null or empty body id gets a generated id. At
+ *     POST id validation, at the root collection or an addressed path whose
+ *     body id was not bound, a remaining id that is not a non-empty string or
+ *     a non-empty array of strings receives `invalid_event_id` (400);
  *   - for malformed ids and bodies, the status each caller gets is pinned, with
  *     a refusal's `error` or `code` field, including input answered before the
  *     check (attribution, the owner-scoped write guard, Harper's own

@@ -14,11 +14,12 @@
   whose id is not a non-empty string or a non-empty array of strings, is
   refused with 400 `invalid_event_id` and nothing is written. At the root
   collection, `POST` generates an id when the body's id is missing, `null` or
-  empty. An addressed `POST` binds a body id equal as text to the addressed
-  id before validation. At `POST` id validation, at the root collection or an
-  addressed path whose body id differs as text from the addressed id, a
-  remaining id that is not a non-empty string or a non-empty array of strings
-  receives the same 400 before the ownership lookup. An administrator's
+  empty. Before validation, an addressed `POST` binds a missing or `null` body
+  id to the addressed id, and a string or number body id when its text matches
+  the address; any other id type is left unchanged by this step. At `POST` id
+  validation, at the root collection or an addressed path whose body id was
+  not bound, a remaining id that is not a non-empty string or a non-empty
+  array of strings receives the same 400 before the ownership lookup. An administrator's
   `PATCH` to the collection names no id and is refused the
   same way; a non-admin's collection `PUT` or `PATCH` is refused earlier by
   the owner-scoped write guard. Otherwise the check reads the stored row under
@@ -43,7 +44,9 @@
   > re-sends an existing event with a different `createdAt` now receives 409
   > instead of a stored change (omit `createdAt` on updates), and a write whose
   > event reaches the check with an id that is not a non-empty string or a
-  > non-empty array of strings receives 400 `invalid_event_id`. `POST` binds
-  > matching addressed body ids before validation; at `POST` id validation,
-  > at the root collection or an addressed path whose body id differs as text
-  > from the addressed id, a remaining id outside those shapes receives the same 400.
+  > non-empty array of strings receives 400 `invalid_event_id`. Before
+  > validation, an addressed `POST` binds a missing or `null` body id, and a
+  > string or number body id whose text matches the address, to the addressed
+  > id; any other id type is left unchanged by this step. At `POST` id
+  > validation, at the root collection or an addressed path whose body id was
+  > not bound, a remaining id outside those shapes receives the same 400.

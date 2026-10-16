@@ -10,11 +10,13 @@
  *
  *   - a record that is not an object, or whose id is not a non-empty string or
  *     a non-empty array of strings, is not read: it is refused with
- *     `invalid_event_id` (400) before any write. POST binds a matching addressed
- *     body id before validation; at the root collection it generates an id
- *     when the body's id is missing, null or empty. At the root collection, or
- *     an addressed path whose body id differs as text from the addressed id,
- *     a remaining id outside those shapes receives the same 400 before the
+ *     `invalid_event_id` (400) before any write. Before validation, an
+ *     addressed POST binds a missing or null body id to the addressed id, and
+ *     a string or number body id when its text matches the address; any other
+ *     id type is left unchanged by this step. At the root collection, POST
+ *     generates an id when the body's id is missing, null or empty. At the
+ *     root collection, or an addressed path whose body id was not bound, a
+ *     remaining id outside those shapes receives the same 400 before the
  *     ownership lookup;
  *   - otherwise the check reads the stored row under that id. With no stored
  *     row (a create), createdAt is the server's time, whatever the body says;
