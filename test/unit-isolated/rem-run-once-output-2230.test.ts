@@ -35,7 +35,9 @@ test("flair rem nightly run-once prints guard refusals and rejects malformed ref
     DEFAULT_PORT: 1, pkgVersion: "fixture",
   });
   try {
-    for (scenario of ["counts", "error", "mixed", "unverified", "scan-failed", "uniform", "unknown"]) {
+    // "excluded" is a guard state the runner never enumerated: any non-uniform state is a
+    // refusal. An empty state (like "uniform") stays an unexpected shape.
+    for (scenario of ["counts", "error", "mixed", "unverified", "scan-failed", "excluded", "uniform", ""]) {
       exit.mockClear();
       output.length = 0;
       const program = new Command();
@@ -45,7 +47,7 @@ test("flair rem nightly run-once prints guard refusals and rejects malformed ref
       expect(text).toContain("Skips:\n  - distillation skipped: no generative backend configured");
       expect(text).toContain("Archived:   0 (validTo-expired + old sessions)");
       expect(text).toContain("Expired:    0 (ephemeral rows past expiresAt)");
-      if (["error", "uniform", "unknown"].includes(scenario)) {
+      if (["error", "uniform", ""].includes(scenario)) {
         expect(text).toContain("Status:     failed");
         expect(text).toContain(scenario === "error"
           ? "Errors:\n  - dedup: agent-identity dedup #809"
@@ -59,7 +61,7 @@ test("flair rem nightly run-once prints guard refusals and rejects malformed ref
         }
       }
     }
-    expect(fetchSpy).toHaveBeenCalledTimes(7);
+    expect(fetchSpy).toHaveBeenCalledTimes(8);
   } finally {
     if (savedPause === undefined) delete process.env.FLAIR_REM_PAUSE; else process.env.FLAIR_REM_PAUSE = savedPause;
     if (savedAdmin === undefined) delete process.env.FLAIR_ADMIN_PASS; else process.env.FLAIR_ADMIN_PASS = savedAdmin;
