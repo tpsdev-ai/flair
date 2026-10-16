@@ -102,8 +102,7 @@ const { getModelId } = await import("../../resources/embeddings-provider.ts");
 // ─── Fixture: the two legs point in opposite directions ──────────────────────
 
 const AGENT = "agent-a";
-// flair#2573: a stored vector is cosined only when it carries a trusted
-// current-space `embeddingModel` stamp, so the fixtures stamp their vectors.
+// These fixtures need trusted stamps to pass the returned-set filter.
 const CURRENT = getModelId();
 
 const qText = "apples oranges";

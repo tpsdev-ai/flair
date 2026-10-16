@@ -402,3 +402,18 @@ it("a trusted replacement of an untrusted vector invalidates a uniform count and
   await new Promise((resolve) => setTimeout(resolve, 0));
   expect(spaceGuardState()).toEqual({ state: "uniform", reason: null, excluded: 0 });
 });
+
+for (const embedding of [[], [1], new Float32Array(), new Float32Array([1]), new Uint8Array()]) {
+  for (const stamp of [undefined, "hash-512d", FOREIGN, BARE, CURRENT]) {
+    it(`counts ${embedding.constructor.name} length ${embedding.length} with stamp ${stamp}`, async () => {
+      _resetGuardForTests();
+      _setGuardModelIdForTests(() => CURRENT);
+      _setGuardTableGetterForTests(async () => ({
+        async *search() { yield { embedding, embeddingModel: stamp }; },
+      }));
+      const trusted = stamp === BARE || stamp === CURRENT;
+      expect(await recomputeLatch()).toBe(trusted);
+      expect(spaceGuardState().excluded).toBe(trusted ? 0 : 1);
+    });
+  }
+}

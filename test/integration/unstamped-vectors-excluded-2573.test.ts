@@ -1,7 +1,7 @@
 /**
  * unstamped-vectors-excluded-2573.test.ts — flair#2573 slice 1 (real Harper).
  *
- * A published scan counts stored vectors without trusted current-space stamps.
+ * A published scan counts arrays and typed arrays without trusted stamps, including empty ones.
  * Raw operations-API inserts remain uncovered until a rescan. Covers signed
  * Memory PUT/PATCH, dedup, recall, /Health, and doctor's last published count
  * in the `excluded` state.
@@ -22,6 +22,7 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import nacl from "tweetnacl";
+import { signBodyFresh } from "../../resources/federation-crypto.js";
 import { randomUUID, randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -331,7 +332,7 @@ describe("flair#2573 slice 1 — PATCH guard notifications (real Harper)", () =>
     expect(result.results.map((r: any) => r.id)).not.toContain(id);
   }, 120_000);
 
-  test("the vector stamp condition filters an untrusted row while the guard stays uniform", async () => {
+  test("the returned-set filter admits qualified and bare current stamps and rejects a null stamp while uniform", async () => {
     const id = "mem-2573-filter";
     const control = "mem-2573-filter-control";
     await h.putMemory(control, { content: "vector condition control fixture", embedding: STAMPED_VEC, embeddingModel: CURRENT_STAMP });
@@ -344,6 +345,16 @@ describe("flair#2573 slice 1 — PATCH guard notifications (real Harper)", () =>
     expect((await h.waitGuard((s) => s.state === "uniform", 60_000))?.state).toBe("uniform");
     const before = await h.semanticSearch({ queryEmbedding: UNTRUSTED_VEC, limit: 20 });
     expect(before.results.map((r: any) => r.id)).toContain(id);
+    const bare = CURRENT_STAMP.slice(CURRENT_STAMP.indexOf(":") + 1);
+    expect(bare).not.toBe(CURRENT_STAMP);
+    const bareUpdate = await h.adminOp({
+      operation: "update", database: "flair", table: "Memory", records: [{ ...rawRow, embeddingModel: bare }],
+    });
+    expect(bareUpdate.status).toBe(200);
+    expect((await h.memoryRow(id)).embeddingModel).toBe(bare);
+    const bareResult = await h.semanticSearch({ queryEmbedding: UNTRUSTED_VEC, limit: 20 });
+    expect((await h.health()).embeddingSpace.state).toBe("uniform");
+    expect(bareResult.results.map((r: any) => r.id)).toContain(id);
     const updated = await h.adminOp({
       operation: "update", database: "flair", table: "Memory", records: [{ ...rawRow, embeddingModel: null }],
     });
@@ -356,6 +367,65 @@ describe("flair#2573 slice 1 — PATCH guard notifications (real Harper)", () =>
     const removed = await h.adminOp({ operation: "delete", database: "flair", table: "Memory", ids: [id] });
     expect(removed.status).toBe(200);
   }, 120_000);
+
+  test("signed federation normalizes an empty Memory embedding before storage", async () => {
+    const id = "mem-2573-federated-empty";
+    const peer = "peer-2573-empty";
+    const keys = nacl.sign.keyPair();
+    const createdAt = new Date().toISOString();
+    const paired = await h.adminOp({
+      operation: "insert", database: "flair", table: "Peer",
+      records: [{ id: peer, publicKey: Buffer.from(keys.publicKey).toString("base64url"), role: "spoke", status: "paired", createdAt }],
+    });
+    expect(paired.status).toBe(200);
+    const signed = signBodyFresh({
+      instanceId: peer, lamportClock: Date.now(),
+      records: [{ table: "Memory", id, updatedAt: createdAt,
+        data: { id, agentId: AGENT, content: "federated empty embedding", createdAt, visibility: "shared", embedding: [] } }],
+    }, keys.secretKey);
+    const response = await fetch(`${harper!.httpURL}/FederationSync`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(signed),
+      signal: AbortSignal.timeout(60_000),
+    });
+    const body = await response.json() as any;
+    expect(response.status, JSON.stringify(body)).toBe(200);
+    expect(body.merged).toBe(1);
+    expect((await h.memoryRow(id)).embedding).toBeNull();
+    const space = await h.waitGuard((s) => s.state === "uniform" && s.excluded === 0, 60_000);
+    expect(space?.state).toBe("uniform");
+    expect(space?.excluded).toBe(0);
+    expect(await h.doctor()).toContain("embedding model stamps verified uniform");
+    const result = await h.semanticSearch({ queryEmbedding: UNTRUSTED_VEC, limit: 20 });
+    expect(result.results.map((r: any) => r.id)).toContain("mem-2573-filter-control");
+    expect(result.results.map((r: any) => r.id)).not.toContain(id);
+  }, 240_000);
+
+  test("a rescan counts a raw unstamped empty array and Health and doctor report non-uniform", async () => {
+    const id = "mem-2573-raw-empty";
+    const inserted = await h.adminOp({
+      operation: "insert", database: "flair", table: "Memory",
+      records: [{ id, agentId: AGENT, content: "raw empty embedding", createdAt: new Date().toISOString(),
+        visibility: "shared", embedding: [] }],
+    });
+    expect(inserted.status).toBe(200);
+    const raw = await h.memoryRow(id);
+    expect(raw.embedding).toEqual([]);
+    expect(raw.embeddingModel ?? null).toBeNull();
+    // A notified no-stamp write invalidates the count so the consult rescans.
+    await h.putMemory("mem-2573-rescan-trigger", { content: "rescan trigger", embedding: [] });
+    expect((await h.memoryRow("mem-2573-rescan-trigger")).embedding).toBeNull();
+    const space = await h.waitGuard((s) => s.state === "excluded" && s.excluded === 1, 60_000);
+    expect(space?.state).toBe("excluded");
+    expect(space?.excluded).toBe(1);
+    expect(await h.doctor()).toContain("excluded from the vector leg: 1 row(s) with no trusted model stamp");
+    const result = await h.semanticSearch({ queryEmbedding: UNTRUSTED_VEC, limit: 20 });
+    expect(result.results).toEqual([]);
+    expect((await h.memoryRow(id)).embedding).toEqual([]);
+    const removed = await h.adminOp({ operation: "delete", database: "flair", table: "Memory", ids: [id] });
+    expect(removed.status).toBe(200);
+    await h.putMemory("mem-2573-rescan-trigger", { embedding: STAMPED_VEC, embeddingModel: CURRENT_STAMP });
+    expect((await h.waitGuard((s) => s.state === "uniform" && s.excluded === 0, 60_000))?.state).toBe("uniform");
+  }, 180_000);
 
   test("metadata-only PATCH preserves a uniform verdict; an unstamped vector PATCH closes it", async () => {
     await h.putMemory(A_ID, { content: STAMPED_TEXT, embedding: STAMPED_VEC, embeddingModel: CURRENT_STAMP });

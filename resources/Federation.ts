@@ -1,3 +1,4 @@
+import { normalizeEmptyEmbedding } from "./memory-embedding-value.js";
 import { Resource, databases, server } from "harper";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import nacl from "tweetnacl";
@@ -1382,6 +1383,7 @@ export class FederationSync extends Resource {
                   mergedData.consumedAt = row?.consumedAt ?? mergedData.consumedAt ?? null;
                 }
               }
+              if (record.table === "Memory") normalizeEmptyEmbedding(mergedData);
               return { write: mergedData };
             },
             {

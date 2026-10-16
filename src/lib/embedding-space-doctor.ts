@@ -5,24 +5,23 @@
  * resources/embedding-space-guard.ts runs inside the Harper worker and reports
  * its verdict on the public /Health body as `embeddingSpace: { state, reason }`.
  * The guard fails closed: only `state: "uniform"` serves the embedding leg; a
- * `mixed` state, an `excluded` state (a scan found a stored vector with no
- * trusted current-space stamp), an `unverified` verdict (before the first scan
- * completes, or a write since the published count) and a
+ * `mixed` state, an `excluded` state (a scan found an array or typed array, empty
+ * included, without a trusted current-space stamp), an `unverified` verdict
+ * (before the first scan completes, or a write since the published count) and a
  * `scan-failed` verdict (the last published scan threw, no foreign stamp known)
  * all make the recall leg refuse a query embedding. This module is the single
  * decision: given that field, what doctor prints and whether it weighs on the
  * exit code.
  *
  * `mixed` and `excluded` are blocking findings: a non-current model stamp was
- * observed, or the last scan found a stored vector with no trusted stamp, which warrants
- * investigation (`flair reembed --stale-only` reconciles a real one).
+ * observed, or the scan counted an array or typed array without a trusted stamp.
  * `unverified` and
  * `scan-failed` are advisories, and `uniform` is an OK line. A rescan starts
  * only on a later guard consult (a recall with a query embedding outside
  * bm25-only mode, or a write-time dedup check; /Health does not consult): at
- * once while no verdict is known, otherwise once RECHECK_MS has passed since
- * the last published verdict. The state becomes `uniform` only when such a scan
- * succeeds with no untrusted stored vectors or foreign space-bearing stamps;
+ * once while the verdict is unknown or the count is stale, otherwise after
+ * RECHECK_MS while the verdict is non-uniform. A successful scan with no excluded
+ * arrays or typed arrays and no foreign space-bearing stamps permits `uniform`;
  * with no consults, nothing retries.
  * `uniform` means stamp-metadata uniformity (flair#2573 slice 1). The `excluded`
  * line names the count when a valid published count is present; the other lines

@@ -150,16 +150,9 @@ export class SemanticSearch extends Resource {
     }
 
     // ─── Vector-space uniformity guard (embedding-space-guard slice 1) ────────
-    // If the store is NOT KNOWN uniform in the current embedding space — a
-    // non-current stamp observed during a re-embed / model change, a stored vector
-    // with no trusted current-space stamp, OR an unknown
-    // verdict (before the first scan completes, or after a scan error) —
-    // cosining the query against stored vectors could cross spaces or produce
-    // an invalid score: Harper zero-pads a mismatched-dimension vector and
-    // returns a bogus score instead of throwing, and a same-dims vector from
-    // another space scores meaninglessly. The guard fails CLOSED:
-    // Take the
-    // SAME path for every non-uniform state — REFUSE the embedding leg and
+    // A non-uniform guard verdict refuses the query embedding. Its scan counts
+    // arrays and typed arrays without trusted stamps, including empty ones.
+    // Take the same path for every non-uniform state — REFUSE the embedding leg and
     // degrade LOUDLY: drop qEmb so retrieveCandidates takes the keyword-only
     // branch (reusing the existing mode:'none' graceful-degrade contract) when
     // the request has query text, return no results when it has none, and
