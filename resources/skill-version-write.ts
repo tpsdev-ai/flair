@@ -367,7 +367,7 @@ async function afterCloseStaged(
 ): Promise<Response | null> {
   // Test-only: inert unless armed — here the close write is staged, so a
   // competing grant revocation or row change and the committed-state re-checks
-  // below can be exercised in either order (Memory's "supersede-close-staged").
+  // below can be exercised in either order (the skill-path counterpart of Memory's "granted-close-staged").
   const stagedPause = txnPausePoint("skill-close-staged");
   if (stagedPause) await stagedPause;
   if (!granted) return null;
