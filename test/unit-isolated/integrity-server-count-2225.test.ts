@@ -100,7 +100,7 @@ for (const table of ["Memory", "MemoryDeletionHistory"]) {
     const row = table === "Memory" ? memory : deletion;
     const result = await scan({ table, rows: [row, row], counts: [2] });
     expectRefusal(result);
-    expect(result.verdict.reason).toContain("duplicate id");
+    expect(result.verdict.reason).toContain(`${table}: server reports 2 rows, integrity read 1`);
   });
 
   test(`${table}: unavailable or invalid exact counts refuse scans`, async () => {

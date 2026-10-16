@@ -111,13 +111,24 @@ function integrityReader(opsPort: number | string, auth: string) {
   const project = (table: string, body: unknown): any[] => {
     if (!Array.isArray(body)) throw new Error(`operations API ${table} search returned a non-array body`);
     const ids = new Set<string>();
+    const rows: any[] = [];
     for (const row of body) {
-      if (!row || typeof row.id !== "string" || !row.id.trim() || ids.has(row.id)) {
-        throw new Error(`operations API ${table} search returned an invalid or duplicate id`);
+      if (!row || typeof row.id !== "string" || !row.id.trim()) {
+        throw new Error(`operations API ${table} search returned an invalid id`);
       }
+      // The operations API can return the same id more than once: a row carries
+      // its version history, and a write that lands during the read can surface a
+      // row's second version at a page boundary (flair#2597). Keeping the first
+      // sighting and letting the exact-count recheck below decide the read's
+      // consistency — the way the checkpoint reader's keyset page cursor does —
+      // means a benign duplicate is not a scan failure. A read that drops an id
+      // while duplicating another never matches its count, so it is still a
+      // refusal, never a silent loss.
+      if (ids.has(row.id)) continue;
       ids.add(row.id);
+      rows.push(row);
     }
-    return body as any[];
+    return rows;
   };
   const search = async (table: string, attributes: string[]): Promise<any[]> => {
     const expected = await readExactTableCount(opsPost, table);
