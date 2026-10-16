@@ -2,7 +2,8 @@
  * integrity-scan-read-2597.test.ts — the integrity scan's reads against a real Harper
  * instance (flair#2597). The scan walks Memory and its deletion history by keyset on `id`;
  * a duplicate id across pages or a size that differs from the exact count is refused and
- * retried, then reports UNKNOWN.
+ * retried; it reports UNKNOWN only when every attempt stays inconsistent, and a retry that
+ * reads consistently returns a normal verdict.
  */
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { Command } from "commander";
