@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, it } from "bun:test";
 import { once } from "node:events";
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { assertFlairDistFresh, distFreshnessIssues, isFlairSourceRoot } from "../helpers/dist-freshness.js";
@@ -226,6 +226,10 @@ describe("dist freshness (flair#2583)", () => {
     roots.push(app);
     mkdirSync(join(app, "resources"), { recursive: true });
     writeFileSync(join(app, "config.yaml"), "rest: true\n");
+    // Linked the way the real probe-app fixtures link it (bootstrap-event-query).
+    mkdirSync(join(app, "node_modules", "@tpsdev-ai"), { recursive: true });
+    symlinkSync(root, join(app, "node_modules", "@tpsdev-ai", "flair"), "dir");
+    expect(realpathSync(join(app, "node_modules", "@tpsdev-ai", "flair"))).toBe(realpathSync(root));
     expect(isFlairSourceRoot(app)).toBe(false); // the app itself is not checked
     const before = new Set(readdirSync(tmpdir()).filter((n) => n.startsWith("flair-test-")));
     await expect(startHarper({ cwd: app, harperBinDir: root })).rejects.toThrow(/freshness could not be verified/);

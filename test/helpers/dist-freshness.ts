@@ -56,8 +56,9 @@ export function isFlairSourceRoot(root: string): boolean {
   // Treat a Flair root as source if any root marker exists, even when another
   // watched input is missing. A directory whose only marker is resources/ and
   // that has no package.json entry at all (a test's probe app: a Harper
-  // component that links the Flair package) is not the Flair package; the
-  // Flair root it links is checked by its caller.
+  // component that links the Flair package) is not the Flair package. Its caller
+  // checks the supplied harperBinDir, which the probe-app fixtures set to the
+  // Flair root they link.
   const present = (entry: string): boolean => {
     try {
       lstatSync(join(root, entry));

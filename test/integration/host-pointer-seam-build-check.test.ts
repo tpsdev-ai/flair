@@ -48,7 +48,7 @@ describe("flair#1940 A1-iv item 6 — production output has no pointer failure s
   it("(positive control) a planted NESTED file makes the scan FAIL, then its removal restores green", () => {
     // Planted in a scratch tree shaped like dist/, never in the real build output:
     // adding and removing an entry under dist/resources would make the build look
-    // stale to every later startHarper in the same run.
+    // stale to later local starts against this source root before a rebuild.
     const root = mkdtempSync(join(tmpdir(), "flair-seam-scan-"));
     try {
       const nestedDir = join(root, "resources", "nested-scratch");
