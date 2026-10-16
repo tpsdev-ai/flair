@@ -88,7 +88,7 @@ const JOINED_FIXTURE = join(FIXTURES, "refused-adapter-joined-exit.yml");
 const DEPENDENCY_EXPRESSION = String.raw`\$\{\{\s*needs\.([\w-]+)\.result\s*\}\}`;
 const DEPENDENCY_RESULTS = ["success", "failure", "cancelled", "skipped"];
 
-// The brief allows a clean skip only where bash is absent; CI has bash.
+// Skip where bash is absent; CI has bash.
 const HAS_BASH = !spawnSync("bash", ["-c", "exit 0"]).error;
 const BASH_SKIP = HAS_BASH ? "" : " — skipped: bash is not available";
 
