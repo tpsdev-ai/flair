@@ -6,8 +6,11 @@
  * A standalone CUSTOM Resource, not a verb on the Agent resource: the ordinary
  * agent-authentication middleware resolves the verification key from the STORED
  * row (resources/agent-auth.ts), and a pending row's stored value is the literal
- * string `pending`, which can never verify — so the Agent resource's allow* can
- * never admit this flow. Here `allowCreate()` returns true and the handler
+ * string `pending`, which can never verify — so a pending agent cannot
+ * authenticate as itself. The Agent resource's `allowUpdate()` admits a Basic
+ * admin, but its PUT and PATCH handlers strip `publicKey` from the body
+ * (resources/Agent.ts), so neither verb writes the key. Here
+ * `allowCreate()` returns true and the handler
  * decides: it admits only an admin and re-reads the row, failing closed on
  * absent evidence.
  *
@@ -17,7 +20,8 @@
  * local / non-deactivated checks, then the key, the private audit row and the
  * OrgEvent (`detail`: fingerprint; `refId` and `summary`: target id) are staged together, the COMMITTED Agent row is confirmed
  * (resources/write-back.ts) before the commit, and the stored key is read back
- * AFTER the commit. The lock serializes Flair registration writers, not raw operations-API writes.
+ * AFTER the commit. The lock serializes registrations for that agent within one
+ * Harper process; raw operations-API writes and other processes do not take it.
  * A change committed after confirmation and before commit is not seen; a commit-time pending check is a follow-up.
  * The response is returned only when the read-back is equal.
  *

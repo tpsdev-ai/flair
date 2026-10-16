@@ -1,7 +1,8 @@
 /**
  * agent-key-register.ts — the pure helpers for the admin-only key-registration
  * operation (POST /AgentKeyRegister, flair#2266). The federation rule that ships
- * with it lives in resources/federation-classify.ts.
+ * with it has its predicate in resources/federation-classify.ts, applied by
+ * FederationSync in resources/Federation.ts.
  *
  * Kept out of the resource so the key-format rule and the fingerprint are
  * unit-tested without Harper (test/unit/agent-key-register-2266.test.ts). The

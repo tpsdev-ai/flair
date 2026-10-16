@@ -288,18 +288,22 @@ plan with `publicKey` different from stored `pending` is skipped whole as
 `agent_status_not_federated`. Earlier validation keeps its own reason, such as
 `future_timestamp` (see [docs/api-reference.md](api-reference.md#federation)).
 
-Peer non-convergence is the consequence. Registration writes only A's local
-tables; when A's registered-key row later reaches peer B through a sync, the
-skip rule leaves B's copy exactly `pending`. B's `POST /AgentKeyRegister` will not complete it either: B
-stamps sync provenance on a row it receives through a sync, and a sync-originated row (or one whose
-`originatorInstanceId` names another instance, when A's row carries one) is refused as `agent_not_local`. The two
-instances therefore do not converge on one key for that row: syncing A's
-registered-key row cannot complete B's pending key, and that key needs direct
-action on B. The remedy is on B: B's administrator writes the agent's
+Peer non-convergence is the consequence for a copy B already holds. Registration
+writes only A's local tables; when B already holds a pending copy and A's
+registered-key row later reaches B through a sync, the skip rule leaves that copy
+exactly `pending`. B's `POST /AgentKeyRegister` will not complete it either: B
+stamps sync provenance on a row it receives through a sync, and a sync-originated
+copy (or one whose `originatorInstanceId` names another instance, when A's row
+carries one) is refused as `agent_not_local`. The two instances therefore do not
+converge on one key for that copy: syncing A's registered-key row cannot complete
+B's pending copy, and that key needs direct action on B. The remedy is on B, for
+a sync-originated or foreign-home copy: B's administrator writes the agent's
 public key (the one registered on A) onto B's copy through B's operations API,
 an `update` of `flair.Agent` with `{id, publicKey, updatedAt}`. That is the raw
 write `flair agent rotate-key` makes, but `rotate-key` generates a new keypair,
-so B's copy would then hold a different key from A's.
+so B's copy would then hold a different key from A's. A B row that is absent
+can receive A's registered-key row: the pending-key guard applies only to a row B
+already holds with `publicKey: "pending"`.
 
 ## Troubleshooting
 
