@@ -17,7 +17,7 @@
  * Kept as plain JS (no build step) so it loads through the `jsResource` glob
  * exactly as a hand-written application component would.
  */
-import { Resource, server } from "harper";
+import { Resource, server, transaction } from "harper";
 // The in-process call seam. Deep-imported from the installed package the same
 // way an application would — Flair ships `dist/`, and this module has no
 // dependencies of its own.
@@ -100,14 +100,74 @@ const actingAs = (agentId, asAdmin) => (asAdmin === true ? adminContext(agentId)
  * `internal` verdict. An application never has to remember that rule — but it
  * should still resolve `agentId` before it gets here, not hope for the throw.
  */
-async function remember(agentId, { content, durability = "standard", visibility, ownerAgentId, asAdmin }) {
+async function remember(agentId, { content, durability = "standard", visibility, ownerAgentId, asAdmin, supersedes }) {
   const h = await collectionResource(flair("Memory"), actingAs(agentId, asAdmin));
   // `ownerAgentId` exists only so the test can attempt a forgery — acting as
   // one agent while claiming another owns the record. Flair 403s that; an
   // application would simply pass `agentId` and never expose the distinction.
   const body = { agentId: ownerAgentId ?? agentId, content, durability };
   if (visibility) body.visibility = visibility;
+  // Optional: the id of the record this one replaces (a supersede).
+  if (supersedes) body.supersedes = supersedes;
   return h.post(body);
+}
+
+/** Thrown by {@link supersedeInCallerTransaction} to abort its own transaction. */
+class CallerAbort extends Error {}
+
+/**
+ * A supersede written inside a transaction THIS caller owns (Harper's
+ * `transaction()`), the shape of an in-process caller that composes a Memory
+ * write with writes of its own: the Memory write joins the caller's
+ * transaction, and the caller's commit or abort decides it. With `abort`, the
+ * caller throws after the write returns, so its transaction aborts.
+ */
+async function supersedeInCallerTransaction(agentId, { id, content, durability = "standard", supersedes, abort }) {
+  const ctx = agentContext(agentId);
+  let written = null;
+  try {
+    await transaction(ctx, async () => {
+      const h = await collectionResource(flair("Memory"), ctx);
+      written = await h.post({ id, agentId, content, durability, supersedes });
+      if (abort && !(written instanceof Response)) throw new CallerAbort("the caller aborts its transaction after the write");
+    });
+  } catch (err) {
+    if (!(err instanceof CallerAbort)) throw err;
+    return { aborted: true, written: true };
+  }
+  if (written instanceof Response) return written;
+  return { aborted: false, written: written != null };
+}
+
+async function supersedeWithCloseStorageRefusal(agentId, { id, content, supersedes, method, joined }) {
+  const ctx = agentContext(agentId);
+  const table = databases.flair.Memory;
+  const originalPut = table.put;
+  let refusedCloses = 0;
+  table.put = function (row, shared) {
+    if (row.id === supersedes && row.validTo != null) {
+      refusedCloses++;
+      return Promise.resolve(new Response("fixture storage refusal", { status: 503 }));
+    }
+    return originalPut.call(this, row, shared);
+  };
+  let written;
+  const write = async () => {
+    const body = { id, agentId, content, durability: "persistent", supersedes };
+    if (method === "POST") {
+      const h = await collectionResource(flair("Memory"), ctx);
+      written = await h.post(body);
+    } else {
+      written = await flair("Memory").put(body, ctx);
+    }
+  };
+  try {
+    if (joined) await transaction(ctx, write);
+    else await write();
+    return { refusedCloses, reply: await run(() => written) };
+  } finally {
+    table.put = originalPut;
+  }
 }
 
 /**
@@ -355,6 +415,10 @@ export class AgentFleet extends Resource {
         return run(() => registerAgent(body));
       case "remember":
         return run(() => remember(body.agentId, body));
+      case "supersedeInCallerTransaction":
+        return run(() => supersedeInCallerTransaction(body.agentId, body));
+      case "supersedeWithCloseStorageRefusal":
+        return run(() => supersedeWithCloseStorageRefusal(body.agentId, body));
       case "recall":
         return run(() => recall(body.agentId, body));
       case "recallById":
