@@ -182,8 +182,11 @@ describe("deduplicated ephemeral feed expiry (flair#2358)", () => {
     expect(typeof stored?.expiresAt).toBe("string");
     expect(Date.parse(stored!.expiresAt!)).toBeGreaterThanOrEqual(before + Number(TTL_HOURS) * 3600000);
     expect(Date.parse(stored!.expiresAt!)).toBeLessThanOrEqual(Date.now() + Number(TTL_HOURS) * 3600000);
-    // The response body is the stored row.
-    expect(body).toEqual(stored!);
+    // The response body is the stored row, less contentHash, which the request
+    // did not supply (flair#2561).
+    const { contentHash, ...reported } = stored!;
+    expect(typeof contentHash).toBe("string");
+    expect(body).toEqual(reported);
 
     // The repaired expiry is the reap signal: once it passes, maintenance reaps.
     await new Promise((r) => setTimeout(r, 6000));
@@ -263,7 +266,10 @@ describe("deduplicated ephemeral feed expiry (flair#2358)", () => {
     expect(typeof stored?.expiresAt).toBe("string");
     expect(competed?.body.expiresAt).toBe(stored!.expiresAt);
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual(stored!);
+    // The stored row, less contentHash, which the request did not supply (flair#2561).
+    const { contentHash, ...reported } = stored!;
+    expect(typeof contentHash).toBe("string");
+    expect(await response.json()).toEqual(reported);
   }, 60_000);
 
   test("a matched row whose id the feed does not write is refused and left unchanged", async () => {

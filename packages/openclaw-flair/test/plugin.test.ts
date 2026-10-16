@@ -3653,6 +3653,19 @@ describe("flair#2537 — memory_store replies report the STORED (redacted) conte
     expect(memoryReads(calls).length).toBe(0);
   });
 
+  test("a `stored` with no content shows no preview and sets contentWithheld (flair#2561)", async () => {
+    const { res, calls } = await storeWith(
+      (call) => ({ id: (call.body as any)?.id, written: true, deduplicated: false, redactedValues: 1, stored: { summary: "a stored summary" } }),
+      ORIGINAL,
+    );
+    const text = res.content[0].text;
+    expect(text).toContain(WITHHELD);
+    expect(text).not.toContain(TOKEN);
+    expect(text).not.toContain("a stored summary");
+    expect(res.details.contentWithheld).toBe(true);
+    expect(memoryReads(calls).length).toBe(0);
+  });
+
   test("a write the server did not redact gets the reply it always had", async () => {
     const plain = await storeWith((call) => ({ id: (call.body as any)?.id, written: true, deduplicated: false }), "plain note");
     expect(plain.res.content[0].text).toBe(`Memory stored (id: ${plain.res.details.id})`);
