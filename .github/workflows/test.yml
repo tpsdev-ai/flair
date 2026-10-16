@@ -1129,7 +1129,7 @@ jobs:
 
           # Post-init status sanity
           STATUS=$($FLAIR status --port $PORT); echo "$STATUS"
-          echo "$STATUS" | grep -q "running" || { echo "FAIL: not running after init"; exit 1; }
+          grep -q "running" <<< "$STATUS" || { echo "FAIL: not running after init"; exit 1; }
 
           # ── flair#654 HARD GATE: authorizeLocal now defaults to false ──────────
           # Proves the bootstrap-ordering invariant K&S required: the admin
@@ -1170,11 +1170,11 @@ jobs:
           INIT_REMOTE_OUT=$($FLAIR init --target "http://127.0.0.1:$PORT" --remote --force \
             --admin-pass "$FLAIR_ADMIN_PASS" --agent-id smoke-hub-agent 2>&1)
           echo "$INIT_REMOTE_OUT"
-          echo "$INIT_REMOTE_OUT" | grep -q "registered on remote instance" || {
+          grep -q "registered on remote instance" <<< "$INIT_REMOTE_OUT" || {
             echo "FAIL: federation-seed init did not report the agent seed succeeding"
             exit 1
           }
-          echo "$INIT_REMOTE_OUT" | grep -q "Federation Instance created" || {
+          grep -q "Federation Instance created" <<< "$INIT_REMOTE_OUT" || {
             echo "FAIL: federation-seed init did not report the FederationInstance seed succeeding"
             exit 1
           }
@@ -1289,7 +1289,7 @@ jobs:
           $FLAIR memory add --agent smoke --content "pack-smoke-roundtrip-marker-unique"
           SEARCH=$($FLAIR memory search --agent smoke --q "pack-smoke-roundtrip-marker-unique")
           echo "$SEARCH"
-          echo "$SEARCH" | grep -q "pack-smoke-roundtrip-marker-unique" || {
+          grep -q "pack-smoke-roundtrip-marker-unique" <<< "$SEARCH" || {
             echo "FAIL: memory write/search round-trip did not return the marker"
             exit 1
           }
@@ -1632,7 +1632,7 @@ jobs:
           $BASE_FLAIR memory add --agent upgrade --content "upgrade-smoke-pre-marker"
 
           PRE=$($BASE_FLAIR memory search --agent upgrade --q "upgrade-smoke-pre-marker")
-          echo "$PRE" | grep -q "upgrade-smoke-pre-marker" || {
+          grep -q "upgrade-smoke-pre-marker" <<< "$PRE" || {
             echo "FAIL: baseline write/search didn't work — setup broken, not an upgrade regression"
             exit 1
           }
@@ -1742,7 +1742,7 @@ jobs:
           }
 
           MIGRATION_RECALL=$($FLAIR memory search --agent "$RESERVED_TEST_AGENT_ID" --admin-pass "$FLAIR_ADMIN_PASS" --q "upgrade-lane-migration-seed-row-0")
-          echo "$MIGRATION_RECALL" | grep -q "upgrade-lane-migration-seed-row-0" || {
+          grep -q "upgrade-lane-migration-seed-row-0" <<< "$MIGRATION_RECALL" || {
             echo "FAIL: migration-seeded ground truth not retrievable by search post-migration (recall parity broken)"
             exit 1
           }
@@ -1757,7 +1757,7 @@ jobs:
           # 5. Pre-upgrade memory must still be readable (the core regression guard)
           POST=$($FLAIR memory search --agent upgrade --q "upgrade-smoke-pre-marker")
           echo "$POST"
-          echo "$POST" | grep -q "upgrade-smoke-pre-marker" || {
+          grep -q "upgrade-smoke-pre-marker" <<< "$POST" || {
             echo "FAIL: pre-upgrade memory lost upgrading $BASELINE → $NEW"
             exit 1
           }
@@ -1765,7 +1765,7 @@ jobs:
           # 6. New writes must work post-upgrade (schema didn't silently break writes)
           $FLAIR memory add --agent upgrade --content "upgrade-smoke-post-marker"
           POST_NEW=$($FLAIR memory search --agent upgrade --q "upgrade-smoke-post-marker")
-          echo "$POST_NEW" | grep -q "upgrade-smoke-post-marker" || {
+          grep -q "upgrade-smoke-post-marker" <<< "$POST_NEW" || {
             echo "FAIL: post-upgrade write didn't round-trip"
             exit 1
           }
