@@ -29,19 +29,13 @@
  *                                              # --report, write the findings
  *                                              # to <file> as JSON
  *
- * `--check` publishes its finding records on a channel of its own: the JSON
- * report file named by `--report`, never stdout or stderr. It writes that
- * report only when it finishes scanning. Callers accept exit 0 only with a
- * valid empty-findings report and exit 1 only with a valid non-empty report;
- * all other outcomes are checks that could not run (flair#2589).
+ * When `--report` is supplied, completed scans write finding records as JSON.
+ * The shared helper pairs scanner status and report: exit 0 needs a valid
+ * empty-findings report; exit 1 needs a valid non-empty report. Other outcomes,
+ * including Node startup exit 1 without a report, are could-not-run.
  *
- * Exit codes: in redaction mode, 0 on success and 2 when a named file cannot be
- * read — a diagnostics redactor must not fail the dump it is cleaning, so read
- * failures are loud but do not abort the caller's remaining output. `--check`
- * is a machine-checked contract: 0 the scan ran and found nothing, 1 it ran and
- * found something (the records are in the `--report` file), 2 the check could
- * not run. Human-readable finding lines go to stderr, but they are not the
- * classification signal — see above.
+ * Handled exits: 0 for success, 1 for check findings, 2 for usage, read,
+ * report-write or handled startup errors. Finding lines go to stderr.
  */
 
 import { readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
@@ -49,8 +43,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-// Credential keys excluded from generated component `.env` files and
-// redacted in printed diagnostics.
+// Credential keys Flair must not add to component `.env` files.
 // Importing it instead of copying it is the point: a key added to the product
 // list is covered here in the same change, with no second list in this file to
 // drift from it. `FLAIR_TOKEN` is the one credential name the launchd dump can

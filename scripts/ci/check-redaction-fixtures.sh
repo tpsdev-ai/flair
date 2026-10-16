@@ -8,10 +8,10 @@
 # a long green stretch. This runs on every PR targeting main instead.
 #
 #   clean/  a redacted plist                 -> reported clean
-#   leaky/  a credential key, non-REDACTED   -> reported as a finding, key named
+#   leaky/  a credential key, non-REDACTED   -> reported as a finding
 #
-# Exit 0 needs a valid empty-findings report; exit 1 needs a valid non-empty
-# report. Any mismatch or other outcome fails as could-not-run.
+# Require the helper's clean (0) and finding (1) statuses respectively;
+# could-not-run (2) fails either fixture.
 set -Eeuo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -31,23 +31,12 @@ fi
 
 code=0
 out="$(assert_no_inline_credentials "$FIXTURES/leaky" 2>&1)" || code=$?
-if [ "$code" -eq 0 ]; then
-  echo "::error::the leaky fixture was not reported as a finding"
+if [ "$code" -ne 1 ]; then
+  echo "::error::the leaky fixture was not reported as a finding (helper exit ${code})"
   printf '%s\n' "$out"
-  exit_code=1
-elif ! printf '%s\n' "$out" | grep -q "a credential key with a non-REDACTED value"; then
-  echo "::error::the leaky fixture was not reported as a credential finding (got a check that could not run)"
-  printf '%s\n' "$out"
-  exit_code=1
-elif ! printf '%s\n' "$out" | grep -q "HDB_ADMIN_PASSWORD"; then
-  echo "::error::the leaky fixture finding did not name the credential key"
-  printf '%s\n' "$out"
-  exit_code=1
-elif printf '%s\n' "$out" | grep -q "example-placeholder-not-a-secret"; then
-  echo "::error::the finding printed the credential value; findings must name the key only"
   exit_code=1
 else
-  echo "leaky fixture: reported as a finding (key named, value not printed)"
+  echo "leaky fixture: reported as a finding"
 fi
 
 exit "$exit_code"

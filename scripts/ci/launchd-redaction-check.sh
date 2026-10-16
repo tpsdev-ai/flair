@@ -13,9 +13,9 @@
 #   (2) the redactor must report no credential key in the supported key/string
 #       shape with a value other than REDACTED.
 #
-# Exit 0 requires a valid empty-findings report; exit 1 requires a valid
-# non-empty report. All other outcomes are could-not-run. Findings and
-# could-not-run both fail the caller.
+# Scanner exit 0 requires a valid empty-findings report; exit 1 requires a
+# valid non-empty report. The helper returns 0 for clean, 1 for a finding,
+# and 2 for could-not-run, including startup exit 1 without a report.
 
 report_matches_exit() {
   node -e '
@@ -52,7 +52,7 @@ assert_no_inline_credentials() {
     fi
     if [ "$admin_code" -gt 1 ]; then
       echo "::error::redaction check could not run (grep exit ${admin_code}) for ${target}"
-      return 1
+      return 2
     fi
   fi
   local report code=0
@@ -60,7 +60,7 @@ assert_no_inline_credentials() {
   # `|| code=$?` avoids the ERR trap.
   report="$(mktemp "${TMPDIR:-/tmp}/redact-check-report.XXXXXX")" || {
     echo "::error::redaction check could not run (cannot create the report file for ${target})"
-    return 1
+    return 2
   }
   out="$(node "$WORKSPACE/scripts/ci/redact-launchd-plist.mjs" --check --report "$report" "$target" 2>&1)" || code=$?
   if [ "$code" -eq 0 ] && report_matches_exit "$report" "$code"; then
@@ -76,5 +76,5 @@ assert_no_inline_credentials() {
   rm -f "$report"
   echo "::error::redaction check could not run (exit ${code}) for ${target}"
   printf '%s\n' "$out" >&2
-  return 1
+  return 2
 }

@@ -133,8 +133,8 @@ redact_plist() {
 }
 
 # The shared assertion checks the run's password and supported credential
-# key/string shapes. Exit 0 needs a valid empty-findings report; exit 1 needs a
-# valid non-empty report. Findings and could-not-run both fail the lane.
+# key/string shapes. Findings and could-not-run are reported during an
+# already-failing lane.
 source "$WORKSPACE/scripts/ci/launchd-redaction-check.sh"
 
 dump_diagnostics() {

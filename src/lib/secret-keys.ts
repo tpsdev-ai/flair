@@ -1,5 +1,4 @@
-// NEVER_GENERATED_SECRET_KEYS — the product's authoritative list of credential
-// key NAMES that must never appear in a `.env` flair GENERATES.
+// Credential key names Flair must not add to component `.env` files.
 //
 // This module deliberately has NO imports. flair#2589: a plain `node` script
 // (scripts/ci/redact-launchd-plist.mjs) imports this list to avoid drifting
@@ -10,10 +9,6 @@
 // imports loads in the form `node` has (the source `.ts`, type-stripped) as
 // well as in the compiled dist/. src/component-env.ts re-exports it, so its
 // public API is unchanged.
-//
-// An operator's own file is a different matter — see `planComponentEnv`, which
-// preserves whatever they wrote and warns by key NAME (never value) rather than
-// silently dropping or shipping it.
 export const NEVER_GENERATED_SECRET_KEYS = [
   "HDB_ADMIN_PASSWORD",
   "FLAIR_ADMIN_PASSWORD",

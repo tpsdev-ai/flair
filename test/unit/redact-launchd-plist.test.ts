@@ -121,7 +121,7 @@ describe("redactPlist — inline credential plist", () => {
 });
 
 describe("REDACTED_KEYS — derived, not hand-maintained (flair#1696)", () => {
-  test("covers every credential key excluded from generated component .env files", () => {
+  test("covers every credential key Flair must not add to component .env files", () => {
     // Pins that the redactor covers every key the product export names; there
     // is deliberately no copy of the list here or in the redactor.
     for (const key of NEVER_GENERATED_SECRET_KEYS) {
@@ -183,7 +183,7 @@ describe("--check — flags supported credential key/string pairs with non-REDAC
   });
 });
 
-describe("--check publishes findings on its own report channel (flair#2589)", () => {
+describe("--check writes reports when --report is supplied (flair#2589)", () => {
   const fixtures = join(import.meta.dir, "..", "..", "scripts", "ci", "redact-fixtures");
 
   test("--check without a target exits 2 with a named usage error", () => {
@@ -206,7 +206,7 @@ describe("--check publishes findings on its own report channel (flair#2589)", ()
     }
   });
 
-  test("a clean scan writes an empty-findings report and exits 0", () => {
+  test("--report writes empty findings for a clean scan with exit 0", () => {
     const dir = mkdtempSync(join(tmpdir(), "redact-report-clean-"));
     try {
       const report = join(dir, "report.json");
@@ -222,7 +222,7 @@ describe("--check publishes findings on its own report channel (flair#2589)", ()
     }
   });
 
-  test("a finding is written to the report, naming the key and not the value", () => {
+  test("--report writes finding keys without values", () => {
     const dir = mkdtempSync(join(tmpdir(), "redact-report-leaky-"));
     try {
       const report = join(dir, "report.json");
@@ -297,7 +297,7 @@ describe("the fixtures run on every PR targeting main (flair#2589)", () => {
   });
 });
 
-describe("--check reports a crash as a crash, distinct from a finding (flair#2589)", () => {
+describe("--check handles key-list import failures (flair#2589)", () => {
   test("a check that cannot load its key list exits 2 with a named message", () => {
     // The script's key list is a relative import. A copy with no such sibling
     // cannot load it — the same shape the lane hit — and that must be exit 2,
