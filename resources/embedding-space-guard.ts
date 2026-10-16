@@ -145,8 +145,8 @@ export function hasStoredVector(value: unknown): boolean {
 }
 
 /** Pure: is `stamp` EXACTLY one of the current space's raw forms? The vector
- *  query's stamp condition compares raw strings (Harper `equals`), so this is
- *  the comparison the admission rule makes — no trimming, no engine prefixing. */
+ *  query's stamp condition matches raw strings (Harper `equals`), so this is the
+ *  comparison the admission rule makes — no trimming. */
 export function isTrustedRawStamp(stamp: string | null | undefined, currentModelId: string): boolean {
   return typeof stamp === "string" && currentSpaceRawForms(currentModelId).includes(stamp);
 }
@@ -194,7 +194,7 @@ let _excluded: number | null = null;
 // absent stamp, the `hash-512d` marker, or a foreign space) can change the
 // count, and advances `_writeEpoch` so an in-flight scan cannot publish the
 // older count or clear this flag. While set, the consult fails closed; a scan
-// that publishes a fresh count clears it. Never cleared by anything else.
+// that publishes a fresh count clears it.
 let _excludedStale = false;
 let _lastScanAt = 0;
 let _scanning: Promise<void> | undefined;
@@ -254,7 +254,7 @@ async function scan(): Promise<void> {
     phase = "read";
     // Project the stamp and the vector attribute: a row is a hazard, and is
     // counted, only when it actually stores a vector. A row with no vector never
-    // enters the HNSW graph, so it cannot be cosined however it is stamped.
+    // enters the HNSW graph, so it is no hazard to a vector query.
     for await (const row of table.search({ select: ["embeddingModel", "embedding"] })) {
       const rec = row as { embeddingModel?: unknown; embedding?: unknown };
       if (!hasStoredVector(rec.embedding)) continue; // no vector ⇒ no cosine hazard
