@@ -164,13 +164,16 @@ beforeEach(() => {
   stagedCommits = new Map();
 });
 
-const nextLayer = () => new Response("ok", { status: 200 });
+// A Harper-shaped write result carrying the committed id: the backfill reads
+// the committed id from the writer's own response body (flair#2263), so the
+// next layer must return it for the backfill to run.
+const resultLayer = (id: string) => () => ({ status: 200, headers: { get: () => null }, body: JSON.stringify({ id, written: true }) } as any);
 
 async function runBackfill(id: string): Promise<void> {
   const mw = await loadMiddleware();
   // A Memory write reaches the next layer with a 2xx; the middleware then runs
   // backfillEmbedding asynchronously (not awaited by the request).
-  const res: Response = await mw(makeRequest(`/Memory/${id}`, "PUT", "agent-a"), nextLayer);
+  const res: any = await mw(makeRequest(`/Memory/${id}`, "PUT", "agent-a"), resultLayer(id));
   expect(res.status, "the write was passed to the next layer").toBe(200);
   // Wait for the provider call and a stored embedding, each up to its deadline.
   const deadline = Date.now() + 5_000;

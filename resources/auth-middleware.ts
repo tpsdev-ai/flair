@@ -7,7 +7,8 @@ import { MEMORY_EMBEDDING_INPUT_FIELDS, skillEmbedText } from "./skill-write.js"
 import { isAdmin, isPrincipalDeactivated, FLAIR_AGENT_USERNAME, readCredentialedPrincipal, AGENT_LOOKUP_FAILED } from "./agent-auth.js";
 import { WINDOW_MS, importEd25519Key, b64ToArrayBuffer, parseTpsEd25519Header } from "./ed25519-auth.js";
 import { isKnownAgentReplay, claimAgentNonce } from "./replay-store.js";
-import { isForbiddenOwnerMutation, ownerMutationRefusal, resolveGuardedRecord } from "./record-owner-guard.js";
+import { isForbiddenOwnerMutation, ownerMutationRefusal, resolveGuardedRecord, resolveGuardedRecordById } from "./record-owner-guard.js";
+import { routeWithHarper, type HarperRoute } from "./harper-routing.js";
 import { checkHttpRateLimit } from "./rate-limit.js";
 import { FLAIR_AUTH_MIDDLEWARE_HTTP_NAME } from "./multi-worker-guard.js";
 import { DECLARED_MEMORY_ATTRIBUTES } from "./memory-declared-attributes.js";
@@ -259,6 +260,42 @@ function credentialedLookupRefusal(username: string, error: unknown): Response {
   }), { status: 500, headers: { "content-type": "application/json" } });
 }
 
+/**
+ * A guarded mutation whose stored-owner read FAILED is refused, not allowed
+ * through. The ownership read is the authorization input; a failed read is not
+ * "no owner", so it must fail closed. 503 because a retry can succeed.
+ */
+function ownerReadFailedRefusal(table: string): Response {
+  console.error(
+    "auth-middleware: the stored-owner read failed, so the mutation was refused",
+    { table },
+  );
+  return new Response(JSON.stringify({
+    error: "owner_lookup_failed",
+    message: "the record's owner could not be read, so the write was refused",
+  }), { status: 503, headers: { "content-type": "application/json" } });
+}
+
+/**
+ * The id a Memory write COMMITTED, read from the writer's own response result
+ * (its `id` field) — the trustworthy source, since a by-id write can commit a
+ * successor with a different id. Returns null when the committed id cannot be
+ * read from the result as a plain string body (a 204, a streamed or compressed
+ * body), in which case the backfill is skipped rather than guessed. Reads only
+ * the already-serialized string body; never consumes a stream.
+ */
+function committedMemoryIdFromResult(response: any): string | null {
+  const body = response?.body;
+  if (typeof body !== "string" || body.length === 0) return null;
+  try {
+    const parsed = JSON.parse(body);
+    const id = parsed?.id;
+    return typeof id === "string" && id.length > 0 ? id : null;
+  } catch {
+    return null;
+  }
+}
+
 // Flair's clients use exactly these HTTP methods. Harper routes other methods
 // to resource handlers as well; refusing them here, before any other branch of
 // the default REST middleware, keeps the tables it serves to the methods their
@@ -303,6 +340,15 @@ server.http(async (request: any, nextLayer: any) => {
   // stays part of that one segment, as it does for Harper.
   const targetPath = requestPath(rawTarget);
 
+  // ── Resolve the target through Harper's OWN routing, FIRST ──────────────────
+  // So the middleware decides about exactly the resource, record id and property
+  // Harper dispatches — content-type suffixes, a suffixed resource name routed to
+  // the bare resource, and the first-dot property rule included. Synchronous and
+  // before any await (getMatch mutates its entry in place; see harper-routing.ts).
+  // Returns null only when the live registry is absent (a unit test mocking
+  // `harper`), where the pure mirror in request-target.ts is the fallback.
+  const routed: HarperRoute | null = routeWithHarper(rawTarget, request.headers);
+
   // ── HTTP method allowlist ──────────────────────────────────────────────────
   // Right after the canonical-target check: before the public-path passthrough
   // and before any auth branch, so no path and no caller (anonymous, agent or
@@ -346,10 +392,12 @@ server.http(async (request: any, nextLayer: any) => {
   // actually use — returns null here and is untouched.
   //
   // The decision is made on the resource Harper ROUTES to, including its
-  // file-type-suffix fallback (`OAuthToken.json` routes to `OAuthToken`), so a
-  // suffixed form receives the same budget and the same public allowance as the
-  // bare route rather than slipping past an exact-string match.
-  const routedDecisionPath = routedResourcePath(targetPath, NAME_ROUTED_RESOURCES);
+  // file-type-suffix fallback (`OAuthToken.json` routes to `OAuthToken`) and a
+  // suffixed name followed by a remainder, so a suffixed form receives the same
+  // budget and the same public allowance as the bare route rather than slipping
+  // past an exact-string match. `routed.decisionPath` is Harper's own match;
+  // the pure mirror is the fallback when the registry is absent.
+  const routedDecisionPath = routed?.decisionPath ?? routedResourcePath(targetPath, NAME_ROUTED_RESOURCES);
   const limited = checkHttpRateLimit(request, routedDecisionPath);
   if (limited) return limited;
 
@@ -675,7 +723,7 @@ server.http(async (request: any, nextLayer: any) => {
   // Decided on the resource Harper routes to, including the file-type-suffix
   // fallback (`/sql.json` → `sql`), so a suffixed form cannot slip past.
   if (!request.tpsAgentIsAdmin) {
-    const lowerPath = routedResourcePath(targetPath.toLowerCase(), RAW_QUERY_RESOURCES);
+    const lowerPath = (routed ? routedDecisionPath : routedResourcePath(targetPath, RAW_QUERY_RESOURCES)).toLowerCase();
     if (
       lowerPath === "/sql" || lowerPath.startsWith("/sql/") ||
       lowerPath === "/graphql" || lowerPath.startsWith("/graphql/")
@@ -709,21 +757,42 @@ server.http(async (request: any, nextLayer: any) => {
   // resource's own no-forge attribution. That keeps this incapable of breaking a
   // create, a self-write, or a legitimate cross-agent field like MemoryGrant's
   // granteeId — it can only narrow mutation of another agent's stored row.
-  if (isMutation && !request.tpsAgentIsAdmin) {
-    const guarded = resolveGuardedRecord(targetPath);
+  // A Memory mutation whose raw id ends in the reserved `.content` suffix is a
+  // request the resource layer refuses by SHAPE (flair#2199, 400
+  // memory_id_content_suffix) and commits no row — Harper mutates nothing, so
+  // the ownership guard below must not pre-empt that with a 403 on the base row
+  // the `.content` property parse happens to name. Skip the guard for it and let
+  // the resource's named 400 answer, as it did before the routed-id resolution.
+  const isReservedContentMutation = isMutation &&
+    (routedDecisionPath === "/Memory" || routedDecisionPath.startsWith("/Memory/")) &&
+    decodeMemoryIdSegment(lastRawPathSegment(targetPath)).endsWith(MEMORY_CONTENT_SELECTOR_SUFFIX);
+
+  if (isMutation && !request.tpsAgentIsAdmin && !isReservedContentMutation) {
+    // The guarded record is resolved from Harper's own routing (resource + final
+    // id) when the registry is present, so the guard checks the row Harper
+    // mutates, not a differently-parsed one; the pure mirror is the fallback.
+    const guarded = routed
+      ? resolveGuardedRecordById(routed.resource, routed.recordId)
+      : resolveGuardedRecord(targetPath);
     if (guarded) {
+      let record: any;
       try {
-        const record = await (databases as any).flair[guarded.table]?.get(guarded.id);
-        if (isForbiddenOwnerMutation(record, guarded.ownerField, agentId)) {
-          return ownerMutationRefusal(guarded.table);
-        }
-      } catch { /* unreadable row → fall through to the resource's own rules */ }
+        record = await (databases as any).flair[guarded.table]?.get(guarded.id);
+      } catch {
+        // The ownership read is the authorization input. A read that FAILED is
+        // not "no owner" and must not fall through to the resource's allow* as
+        // though the check passed — fail closed with a named, retryable refusal.
+        return ownerReadFailedRefusal(guarded.table);
+      }
+      if (isForbiddenOwnerMutation(record, guarded.ownerField, agentId)) {
+        return ownerMutationRefusal(guarded.table);
+      }
     }
   }
 
   if (isMutation) {
     // OrgEvent: authorId must match authenticated agent
-    if ((targetPath === "/OrgEvent" || targetPath.startsWith("/OrgEvent/")) &&
+    if ((routedDecisionPath === "/OrgEvent" || routedDecisionPath.startsWith("/OrgEvent/")) &&
         (method === "POST" || method === "PUT" || method === "PATCH")) {
       if (!request.tpsAgentIsAdmin) {
         try {
@@ -744,10 +813,10 @@ server.http(async (request: any, nextLayer: any) => {
     }
 
     // OrgEvent DELETE: ownership check
-    if (targetPath.startsWith("/OrgEvent/") && method === "DELETE") {
+    if (routedDecisionPath.startsWith("/OrgEvent/") && method === "DELETE") {
       if (!request.tpsAgentIsAdmin) {
         try {
-          const eventId = routedRecordId(targetPath)?.id ?? null;
+          const eventId = routed ? routed.recordId : (routedRecordId(targetPath)?.id ?? null);
           if (eventId) {
             const record = await (databases as any).flair.OrgEvent.get(eventId);
             if (record && record.authorId && record.authorId !== agentId) {
@@ -761,7 +830,7 @@ server.http(async (request: any, nextLayer: any) => {
     }
 
     // WorkspaceState: agent-scoped mutations (non-admin can only write own records)
-    if ((targetPath === "/WorkspaceState" || targetPath.startsWith("/WorkspaceState/")) &&
+    if ((routedDecisionPath === "/WorkspaceState" || routedDecisionPath.startsWith("/WorkspaceState/")) &&
         (method === "POST" || method === "PUT" || method === "PATCH")) {
       if (!request.tpsAgentIsAdmin) {
         try {
@@ -782,10 +851,10 @@ server.http(async (request: any, nextLayer: any) => {
     }
 
     // WorkspaceState DELETE: ownership check
-    if ((targetPath.startsWith("/WorkspaceState/")) && method === "DELETE") {
+    if ((routedDecisionPath.startsWith("/WorkspaceState/")) && method === "DELETE") {
       if (!request.tpsAgentIsAdmin) {
         try {
-          const wsId = routedRecordId(targetPath)?.id ?? null;
+          const wsId = routed ? routed.recordId : (routedRecordId(targetPath)?.id ?? null);
           if (wsId) {
             const record = await (databases as any).flair.WorkspaceState.get(wsId);
             if (record && record.agentId && record.agentId !== agentId) {
@@ -830,7 +899,7 @@ server.http(async (request: any, nextLayer: any) => {
     // The path test stays `startsWith("/Soul")` so sibling routes keep the
     // body check they already had; the record lookup is scoped to the real
     // `/Soul/<id>` collection so it never resolves an unrelated id.
-    if (targetPath.startsWith("/Soul") &&
+    if (routedDecisionPath.startsWith("/Soul") &&
         (method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE")) {
       if (!request.tpsAgentIsAdmin) {
         // (a) A PRESENT, mismatched body agentId is a forged attribution.
@@ -866,7 +935,7 @@ server.http(async (request: any, nextLayer: any) => {
 
   // ── WorkspaceState read guard: agent-scoped reads ───────────────────────────
   if (method === "GET" && !request.tpsAgentIsAdmin) {
-    if (targetPath === "/WorkspaceState" || targetPath === "/WorkspaceState/") {
+    if (routedDecisionPath === "/WorkspaceState" || routedDecisionPath === "/WorkspaceState/") {
       const queryAgent = url.searchParams.get("agentId");
       if (queryAgent && queryAgent !== agentId) {
         return new Response(JSON.stringify({
@@ -898,7 +967,7 @@ server.http(async (request: any, nextLayer: any) => {
   // read-scope denial is enforced by the resource layer (memoryByIdReadGate),
   // which returns the same 404 this middleware used to return.
   // (A malformed `.content` segment was refused before any auth branch, above.)
-  if (!request.tpsAgentIsAdmin && (method === "GET" || method === "HEAD") && isMemoryReadPath(targetPath)) {
+  if (!request.tpsAgentIsAdmin && (method === "GET" || method === "HEAD") && isMemoryReadPath(routedDecisionPath)) {
     // flair#2199: an id segment carrying an encoded `/` before a declared
     // property suffix is ambiguous — the suffix could be part of the id or a
     // selector on a slash-containing id. This branch runs for a signed
@@ -915,25 +984,21 @@ server.http(async (request: any, nextLayer: any) => {
   }
 
   // ── Embedding backfill ─────────────────────────────────────────────────────
-  // The backfill runs ONLY for the record the write actually committed, taken
-  // from the write's own result — never from a caller-supplied header, which
-  // names a row the caller does not necessarily own or write. A by-id write
-  // committed the id Harper routed to (the full decoded remainder). A
-  // collection create committed the id Harper reported in its `Location`
-  // response header (resources/Resource.js sets newLocation to the new record's
-  // key). A DELETE commits no row to embed, so it is skipped.
-  const routedWrite = routedRecordId(targetPath);
-  const isMemoryCollectionWrite = targetPath === "/Memory" || targetPath === "/Memory/";
-  const isMemoryByIdWrite = routedWrite?.resource === "Memory";
-  const isMemoryWrite = isMutation && method !== "DELETE" && (isMemoryCollectionWrite || isMemoryByIdWrite);
-  // A by-id write's committed id is known before the write (it is the routed
-  // target); a collection create's is only known from the response.
-  const byIdCommittedId = isMemoryByIdWrite ? routedWrite!.id : null;
+  // The backfill runs ONLY for the record the write actually COMMITTED, read
+  // from the Memory writer's own result — never the URL id and never a
+  // caller-supplied header. A by-id write can commit a SUCCESSOR with a
+  // different id (skill versioning, flair#2263), so even a by-id write's
+  // committed id comes from the result, not the path. When the committed id is
+  // not available from the result (e.g. a 204 PATCH, or a compressed/streamed
+  // body), the backfill is skipped — Memory.patch refreshes its own embedding,
+  // and a later maintenance pass covers the rest. A DELETE commits no row.
+  const isMemoryWrite = isMutation && method !== "DELETE" &&
+    (routedDecisionPath === "/Memory" || routedDecisionPath.startsWith("/Memory/"));
 
   const response = await nextLayer(request);
 
   if (isMemoryWrite && response.status >= 200 && response.status < 300) {
-    const committedId = byIdCommittedId ?? (response.headers?.get?.("location") ?? null);
+    const committedId = committedMemoryIdFromResult(response);
     if (committedId) backfillEmbedding(committedId).catch(() => {});
   }
 

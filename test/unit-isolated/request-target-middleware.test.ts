@@ -39,6 +39,8 @@ let agentGets = 0;
 // Every id a table read was asked for, by table.
 const tableGets: Record<string, Array<{ id: unknown; args: number }>> = {};
 const tableRows: Record<string, Map<string, any>> = {};
+// Ids whose stored-owner read throws, to exercise the fail-closed path.
+const throwOnGet = new Set<string>();
 
 function table(name: string) {
   tableGets[name] = [];
@@ -46,6 +48,7 @@ function table(name: string) {
   return {
     get: async (...args: unknown[]) => {
       tableGets[name]!.push({ id: args[0], args: args.length });
+      if (throwOnGet.has(String(args[0]))) throw new Error("simulated read failure");
       return tableRows[name]!.get(String(args[0])) ?? null;
     },
   };
@@ -115,6 +118,12 @@ function makeRequest(url: string, method: string, authorization?: string, user?:
 
 let nextCalls = 0;
 const next = () => { nextCalls++; return new Response("ok", { status: 200 }); };
+// A Harper-shaped write result: the backfill reads the committed id from the
+// writer's own response body, so a stub that drives the backfill must carry one.
+const resultNext = (id: string, status = 200) => () => {
+  nextCalls++;
+  return { status, headers: { get: () => null }, body: JSON.stringify({ id, written: true }) } as any;
+};
 
 beforeEach(() => {
   agents.clear();
@@ -125,6 +134,7 @@ beforeEach(() => {
     tableGets[name]!.length = 0;
     tableRows[name]!.clear();
   }
+  throwOnGet.clear();
 });
 
 const NON_CANONICAL: Array<[string, string]> = [
@@ -207,7 +217,7 @@ describe("an id containing `/`, sent as `%2F`, is decided as ONE segment at ever
   it("the stored-owner rule and the embedding backfill read Memory id `a/b`", async () => {
     const url = "/Memory/a%2Fb";
     const req = makeRequest(url, "PUT", signedAuthorization("PUT", url));
-    const res = await mw(req, next);
+    const res = await mw(req, resultNext("a/b"));
     expect(res.status).toBe(200);
     expect(nextCalls).toBe(1);
     // The backfill runs after the response; let it reach its read.
@@ -329,7 +339,7 @@ describe("the embedding backfill targets only the committed record", () => {
     const url = "/Memory/committed-id";
     const req = makeRequest(url, "PUT", signedAuthorization("PUT", url));
     req.headers.set("x-memory-id", "attacker-row");
-    const res = await mw(req, next);
+    const res = await mw(req, resultNext("committed-id"));
     expect(res.status).toBe(200);
     await new Promise((r) => setTimeout(r, 10));
     const ids = tableGets.Memory!.map((c) => c.id);
@@ -338,12 +348,11 @@ describe("the embedding backfill targets only the committed record", () => {
     expect(ids).not.toContain("attacker-row");
   });
 
-  it("a collection create backfills the id Harper reports in Location, never the caller header", async () => {
+  it("a collection create backfills the committed id from the write result, never the caller header", async () => {
     const url = "/Memory";
     const req = makeRequest(url, "POST", signedAuthorization("POST", url));
     req.headers.set("x-memory-id", "attacker-row");
-    const created = () => { nextCalls++; return new Response("ok", { status: 201, headers: { location: "server-chosen-id" } }); };
-    const res = await mw(req, created);
+    const res = await mw(req, resultNext("server-chosen-id", 201));
     expect(res.status).toBe(201);
     await new Promise((r) => setTimeout(r, 10));
     const ids = tableGets.Memory!.map((c) => c.id);
@@ -360,5 +369,38 @@ describe("the embedding backfill targets only the committed record", () => {
     // The owner guard may read the row (one argument); the backfill never runs
     // for a DELETE, so there is no backfill-shaped read (`get(id, {})`).
     expect(tableGets.Memory!.some((c) => c.args === 2)).toBe(false);
+  });
+
+  it("a by-id write that commits a SUCCESSOR backfills the successor, not the URL id", async () => {
+    const url = "/Memory/predecessor-id";
+    const req = makeRequest(url, "POST", signedAuthorization("POST", url));
+    const res = await mw(req, resultNext("successor-id", 200));
+    expect(res.status).toBe(200);
+    await new Promise((r) => setTimeout(r, 10));
+    const backfillReads = tableGets.Memory!.filter((c) => c.args === 2).map((c) => c.id);
+    expect(backfillReads).toContain("successor-id");
+    expect(backfillReads).not.toContain("predecessor-id");
+  });
+
+  it("skips the backfill when the committed id is unavailable from the result", async () => {
+    const url = "/Memory/no-result-id";
+    const req = makeRequest(url, "PATCH", signedAuthorization("PATCH", url));
+    // A 204-style result with no body: the committed id is not available.
+    const res = await mw(req, () => { nextCalls++; return { status: 204, headers: { get: () => null }, body: undefined } as any; });
+    expect(res.status).toBe(204);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(tableGets.Memory!.some((c) => c.args === 2)).toBe(false);
+  });
+});
+
+describe("a guarded mutation fails closed when its owner row cannot be read", () => {
+  it("refuses with a named 503 when the stored-owner read throws", async () => {
+    throwOnGet.add("unreadable");
+    const url = "/Memory/unreadable";
+    const req = makeRequest(url, "PATCH", signedAuthorization("PATCH", url));
+    const res = await mw(req, next);
+    expect(res.status).toBe(503);
+    expect((await res.json()).error).toBe("owner_lookup_failed");
+    expect(nextCalls).toBe(0);
   });
 });

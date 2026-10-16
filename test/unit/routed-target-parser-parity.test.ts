@@ -1,12 +1,17 @@
 /**
- * routed-target-parser-parity.test.ts — the request-target helpers derive the
- * SAME record id and property that Harper's own routing does.
+ * routed-target-parser-parity.test.ts — a differential check of the pure
+ * request-target helpers against Harper's installed parser, over a corpus.
  *
- * The oracle is Harper's installed parser: `RequestTarget` (which sets
- * `id = decodeURIComponent(path)` over the whole resource-relative remainder)
- * and `Resource.parsePath` (its first-dot property rule). The helpers in
- * resources/request-target.ts must agree with it, so what the middleware decides
- * about is exactly the row Harper operates on.
+ * At request time the middleware resolves a target through Harper's OWN routing
+ * (resources/harper-routing.ts), so the helpers here are only the fallback used
+ * when the live registry is absent (a unit mock). This test fixes the fallback
+ * to Harper's parser for the part it covers — the id over the whole remainder
+ * (`RequestTarget`) and the first-dot DECLARED-ATTRIBUTE property rule
+ * (`Resource.parsePath` with no request context). Harper's content-type-suffix
+ * rule fires only with a request context; the final group below checks that
+ * behaviour directly against Harper (it is what harper-routing relies on), and
+ * the pure fallback deliberately does not reproduce it (a content-type suffix
+ * addresses the same row either way).
  */
 import { describe, expect, test } from "bun:test";
 import { createRequire } from "node:module";
@@ -101,5 +106,27 @@ describe("routedResourceAndRemainder splits where Harper routes", () => {
     expect(routedResourceAndRemainder("/Memory/a%2Fb")).toEqual({ resource: "Memory", remainder: "a%2Fb" });
     expect(routedResourceAndRemainder("/Memory")).toEqual({ resource: "Memory", remainder: "" });
     expect(routedResourceAndRemainder("/Memory/")).toEqual({ resource: "Memory", remainder: "" });
+  });
+});
+
+describe("Harper's content-type-suffix rule (what harper-routing relies on)", () => {
+  // With a request context, Harper STRIPS a recognised content-type extension
+  // and returns the bare id; the middleware's live path (harper-routing.ts)
+  // calls parsePath with the request headers, so the resolved id is the row.
+  const withCtx = (id: string) => Resource.parsePath.call(fixtureResource, id, { headers: {} }, undefined);
+  for (const ext of ["json", "cbor", "msgpack", "csv"]) {
+    test(`\`x.${ext}\` strips to \`x\` with a request context`, () => {
+      expect(withCtx(`x.${ext}`)).toBe("x");
+    });
+    test(`\`x.${ext}\` without a context is left whole (no headers → no strip)`, () => {
+      expect(Resource.parsePath.call(fixtureResource, `x.${ext}`, undefined, undefined)).toBe(`x.${ext}`);
+    });
+  }
+  test("an unrecognised extension is left whole even with a context", () => {
+    expect(withCtx("x.yaml")).toBe("x.yaml");
+  });
+  test("a declared attribute is still a property selector, not a content type", () => {
+    const parsed: any = withCtx("x.content");
+    expect(parsed).toEqual({ id: "x", property: "content" });
   });
 });

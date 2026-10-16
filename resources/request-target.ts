@@ -8,11 +8,16 @@
  * or `\` (`%5C`) inside a segment is part of that one segment — which is how an
  * id containing a reserved character addresses its record.
  *
- * The auth middleware (resources/auth-middleware.ts) reads the same raw path:
- * it splits on `/` FIRST and only then decodes a segment, so what it decides
- * about is exactly what Harper routes.
+ * At request time the auth middleware resolves the resource, record id and
+ * property through Harper's OWN routing (resources/harper-routing.ts), so it
+ * decides about exactly what Harper dispatches, content-type suffixes and
+ * suffixed-name fallbacks included. The helpers here mirror the first-dot
+ * DECLARED-ATTRIBUTE rule and the split-then-decode of the remainder; they are
+ * the FALLBACK used only when the live route registry is unavailable (a unit
+ * mock), and they do not reproduce the content-type-suffix or suffixed-name
+ * dispatch rules — those are left to the live routing.
  *
- * And before any other request processing, it answers a target that is not in
+ * Before any other request processing, the middleware answers a target that is not in
  * canonical form with a named 400 (`non_canonical_request_target`). A raw
  * target is canonical unless its path (the part before the first `?`) has:
  *

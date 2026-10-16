@@ -187,6 +187,17 @@ describe("(1) the owner guard decides on the full routed record id", () => {
     const row = await readRow("Asset", "rtr-own/slash", ["id", "agentId", "memoryId"]);
     expect(row?.memoryId).toBe("m-own-changed");
   }, 60_000);
+
+  it("a non-owner PATCH of a content-type-SUFFIXED id is decided on Harper's parsed id", async () => {
+    // `/Asset/rtr-safe%2Fvictim.json` routes to Asset id `rtr-safe/victim`
+    // (Harper strips the `.json` content-type suffix). The guard must resolve
+    // the same id and refuse, leaving the other-owned row unchanged.
+    const res = await signed(owner, "PATCH", "/Asset/rtr-safe%2Fvictim.json", { memoryId: "m-hijacked-suffix" });
+    expect([401, 403]).toContain(res.status);
+    const row = await readRow("Asset", "rtr-safe/victim", ["id", "agentId", "memoryId"]);
+    expect(row?.agentId).toBe(other.id);
+    expect(row?.memoryId).toBe("m-victim");
+  }, 60_000);
 });
 
 describe("(2) rate-limit and public decisions use the routed resource name", () => {
@@ -205,6 +216,15 @@ describe("(2) rate-limit and public decisions use the routed resource name", () 
     expect(saw429, "the suffixed OAuth route reached the rate limiter").toBe(true);
   }, 60_000);
 
+  it("a suffixed-name-PLUS-remainder OAuth form (routed to the bare resource) is also counted", async () => {
+    // `/OAuthToken.json/x` is dispatched by Harper's matcher to `OAuthToken`
+    // with an empty remainder; the limiter must count it too. The bucket from
+    // the previous case is already spent in this 60s window, so one request
+    // suffices — assert it is throttled rather than served unthrottled.
+    const res = await rawRequest(harper.httpURL, "POST", "/OAuthToken.json/x", { "content-type": "application/json" }, JSON.stringify({ grant_type: "authorization_code", code: "nope", client_id: "nope" }));
+    expect(res.status, `${res.status}: ${res.body.slice(0, 200)}`).toBe(429);
+  }, 60_000);
+
   it("a suffixed form of a public route is served, not refused", async () => {
     // Positive control: the bare public route answers 200.
     const control = await rawRequest(harper.httpURL, "GET", "/Health", {});
@@ -219,22 +239,52 @@ describe("(2) rate-limit and public decisions use the routed resource name", () 
 });
 
 describe("(3) the embedding backfill targets only the committed record", () => {
-  it("a successful create whose header names another owner's row leaves that row untouched", async () => {
-    const before = await readRow("Memory", "rtr-victim-mem", ["id", "agentId", "content", "embedding"]);
+  it("a successful create whose header names another owner's row commits the caller's own new row", async () => {
+    const before = await readRow("Memory", "rtr-victim-mem", ["id", "agentId", "content"]);
     expect(before?.agentId).toBe(other.id);
 
     // A canonical collection create by `owner`, with a caller header naming the
-    // other-owned row. The create must succeed as the caller's own new row.
+    // other-owned row. The create must succeed as the caller's own new row, and
+    // the committed id (what the backfill targets) is that new row — never the
+    // header's id.
     const res = await signed(owner, "POST", "/Memory", {
       agentId: owner.id, content: "my own new memory", durability: "persistent",
     }, { "x-memory-id": "rtr-victim-mem" });
     expect(res.status, `create ${res.status}: ${res.body.slice(0, 200)}`).toBeLessThan(300);
+    const committedId = JSON.parse(res.body).id as string;
+    expect(committedId).not.toBe("rtr-victim-mem");
 
-    // Let any asynchronous backfill settle, then the other-owned row is unchanged.
+    // The other-owned row keeps its owner and content — no caller data crossed
+    // into it. (Its embedding is the system's own derivation of its OWN content
+    // and may be filled by the background embedder, so it is not asserted here.)
     await new Promise((r) => setTimeout(r, 750));
-    const after = await readRow("Memory", "rtr-victim-mem", ["id", "agentId", "content", "embedding"]);
+    const after = await readRow("Memory", "rtr-victim-mem", ["id", "agentId", "content"]);
     expect(after?.agentId).toBe(other.id);
     expect(after?.content).toBe("victim content");
-    expect(JSON.stringify(after?.embedding ?? null)).toBe(JSON.stringify(before?.embedding ?? null));
   }, 60_000);
+
+  it("a by-id POST that commits a SUCCESSOR with a different id is handled end to end", async () => {
+    // A skill POST to a URL id, then an identical retry commits a SUCCESSOR with
+    // a different id (flair#2263). The committed id the backfill uses comes from
+    // the write RESULT, not the URL id — the discriminating observation of that
+    // (which id the backfill reads) is in the unit test; here we confirm the
+    // successor path works end to end over real Harper and both rows are the
+    // caller's own. The embedding itself is written by Memory's own write path,
+    // so it is not the signal asserted here.
+    const skillId = `rtr-skill-${randomUUID()}`;
+    const body = { agentId: owner.id, content: "successor backfill body", trigger: "when the committed id differs from the url", tags: ["skill"], durability: "persistent" };
+
+    const first = await signed(owner, "POST", `/Memory/${encodeURIComponent(skillId)}`, body);
+    expect(first.status, `first ${first.status}: ${first.body.slice(0, 200)}`).toBeLessThan(300);
+    expect(JSON.parse(first.body).id).toBe(skillId);
+
+    const retry = await signed(owner, "POST", `/Memory/${encodeURIComponent(skillId)}`, body);
+    expect(retry.status, `retry ${retry.status}: ${retry.body.slice(0, 200)}`).toBeLessThan(300);
+    const successorId = JSON.parse(retry.body).id as string;
+    expect(successorId).not.toBe(skillId);
+
+    const successor = await readRow("Memory", successorId, ["id", "agentId", "supersedes"]);
+    expect(successor?.agentId).toBe(owner.id);
+    expect(successor?.supersedes).toBe(skillId);
+  }, 120_000);
 });

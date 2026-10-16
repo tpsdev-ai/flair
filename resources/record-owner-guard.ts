@@ -146,11 +146,14 @@ export function isMutatingMethod(method: string): boolean {
  * Resolve a request path to the guarded table and record id it addresses, or
  * null when the path is not a guarded single-record route.
  *
- * `pathname` is the RAW request path (the target before its `?`, as Harper
- * routes it). The id is the FULL decoded remainder after the table segment —
- * the same id Harper's `RequestTarget` resolves (`id = decodeURIComponent(path)`)
- * — so an id that itself contains `/`, raw or as `%2F`, resolves to the whole id
- * and the guard reads the row Harper actually mutates, never a shorter prefix.
+ * `pathname` is the RAW request path (the target before its `?`). The id is the
+ * FULL decoded remainder after the table segment, so an id that itself contains
+ * `/`, raw or as `%2F`, resolves to the whole id rather than a shorter prefix.
+ * This mirrors Harper's `RequestTarget` for a path with no first-dot property or
+ * content-type suffix; at request time the middleware resolves the final id
+ * through Harper's own routing (resources/harper-routing.ts) and passes it to
+ * `resolveGuardedRecordById`, so this path-parsing form is the fallback used
+ * only when the live registry is unavailable.
  *
  * Matches `/<Table>/<id>` ONLY. A collection path (`/<Table>` or `/<Table>/`)
  * addresses no existing record, so there is nothing to own and nothing to
@@ -161,9 +164,24 @@ export function isMutatingMethod(method: string): boolean {
 export function resolveGuardedRecord(pathname: string): { table: string; ownerField: string; id: string } | null {
   const routed = routedRecordId(pathname);
   if (!routed) return null; // collection, or malformed percent-encoding
-  const ownerField = OWNER_FIELDS[routed.resource];
+  return resolveGuardedRecordById(routed.resource, routed.id);
+}
+
+/**
+ * The guarded record for a resource and record id already resolved by Harper's
+ * own routing (resources/harper-routing.ts). Null when the resource is not a
+ * guarded table, or there is no single record (a collection). This is the form
+ * the middleware uses at request time, where the id has had Harper's
+ * content-type-suffix and property rules applied.
+ */
+export function resolveGuardedRecordById(
+  resource: string,
+  id: string | null | undefined,
+): { table: string; ownerField: string; id: string } | null {
+  if (id == null || id === "") return null;
+  const ownerField = OWNER_FIELDS[resource];
   if (!ownerField) return null;
-  return { table: routed.resource, ownerField, id: routed.id };
+  return { table: resource, ownerField, id };
 }
 
 /**

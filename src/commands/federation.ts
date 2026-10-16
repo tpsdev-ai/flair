@@ -1470,9 +1470,9 @@ export function register(program: Command): void {
     .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET)")
     .option("--ops-target <url>", "Explicit ops API URL (env: FLAIR_OPS_TARGET; bypasses port derivation)")
     .action(async (hubUrlArg: string, opts: any) => {
-      // Strip trailing slashes once, before the hub URL is used or stored, so
-      // the pairing request and the stored hub-peer endpoint never carry an
-      // empty path segment.
+      // Strip trailing slashes once, before the hub URL is used or stored, so a
+      // trailing slash on the typed URL does not add an empty path segment to
+      // the appended pairing route or the stored hub-peer endpoint.
       const hubUrl = normalizeHubUrl(hubUrlArg);
       const target = resolveTarget(opts);
       // flair#1873: resolve the SPOKE admin credential FIRST, before any
