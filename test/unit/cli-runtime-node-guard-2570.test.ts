@@ -249,7 +249,7 @@ describe("Bun Harper spawn preload", () => {
       }
     }, 20_000);
   }
-  test("resolved ordinary shell commands use the child PATH", async () => {
+  test("spawnSync classifiable shell commands without refused shell characters use the child PATH", async () => {
     const { root } = fixture();
     const bin = join(root, "bin");
     mkdirSync(bin);
@@ -309,7 +309,7 @@ describe("Bun Harper spawn preload", () => {
       }
     }
   }, 20_000);
-  test("direct env allows Node while shell strings require a child-only reason for protected entries", () => {
+  test("spawnSync direct env allows Node while shell strings require a child-only reason for protected entries", () => {
     const { root, cli } = fixture();
     const node = nodeBin();
     const direct = spawnSync("/usr/bin/env", ["-u", "UNUSED", "OTHER=value", node, cli, "init"], {
@@ -342,7 +342,7 @@ describe("Bun Harper spawn preload", () => {
       expect(log.mock.calls.flat().join("\n")).toContain("exercise protected Node entries through real shells");
     } finally { log.mockRestore(); }
   }, 40_000);
-  test("shell commands naming a protected entry as the executable require a child-only reason", () => {
+  test("spawnSync shell commands naming a protected entry as the executable require a child-only reason", () => {
     const { root, cli } = fixture();
     const log = spyOn(console, "warn").mockImplementation(() => {});
     try {
@@ -368,7 +368,7 @@ describe("Bun Harper spawn preload", () => {
       expect(log).toHaveBeenCalled();
     } finally { log.mockRestore(); }
   }, 40_000);
-  test("real Bash exported node function requires a child-only reason for the built CLI", () => {
+  test("spawnSync with a real Bash exported node function requires a child-only reason for the built CLI", () => {
     ensureCliBuild();
     const marker = join(tempDir("flair-bash-runtime-"), "runtime.cjs");
     writeFileSync(marker, "console.error('Bash function runtime: ' + (process.versions.bun ? 'bun' : 'node'))");
@@ -392,6 +392,79 @@ describe("Bun Harper spawn preload", () => {
       expect(log.mock.calls.flat().join("\n")).toContain("exercise Bash exported node function dispatching to Bun");
     } finally { log.mockRestore(); }
     expect(process.env["BASH_FUNC_node%%"]).toBeUndefined();
+  }, 20_000);
+  for (const api of ["exec", "execSync"] as const) {
+    test(`child_process.${api} guards shell strings independently of Bun.spawn and Bun.spawnSync`, () => {
+      ensureCliBuild();
+      const source = `
+        const rawSpawn = Bun.spawn;
+        const rawSpawnSync = Bun.spawnSync;
+        await import(${JSON.stringify(resolve(import.meta.dir, "../helpers/bun-harper-spawn-guard.ts"))});
+        Bun.spawn = rawSpawn;
+        Bun.spawnSync = rawSpawnSync;
+        const { ${api}: run } = await import("node:child_process");
+        let error;
+        try { run("bun ./dist/cli.js --version", { timeout: 5000 }); }
+        catch (caught) { error = caught; }
+        if (error?.name !== "TestRuntimeIdentityError" || !error.message.includes("child_process.${api}")) {
+          throw new Error("${api} did not refuse the protected entry before invoking Bun.spawn/Bun.spawnSync");
+        }
+        console.log("${api} refused at its own boundary");
+      `;
+      const output = execFileSync(process.execPath, ["--eval", source], { encoding: "utf8", timeout: 10_000 });
+      expect(output.trim()).toBe(`${api} refused at its own boundary`);
+    }, 20_000);
+    test(`child_process.${api} refuses bun ./dist/cli.js --version without a child-only reason`, () => {
+      ensureCliBuild();
+      const command = "bun ./dist/cli.js --version";
+      for (const fn of [childProcess[api], cjs[api], api === "exec" ? exec : execSync]) {
+        for (const env of [undefined, { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: " " }]) {
+          const error = refused(() => fn(command, { env, timeout: 5_000 }),
+            `child_process.${api}`, "TestRuntimeIdentityError");
+          expect(error.message).toContain("shell string launching dist/cli.js");
+        }
+      }
+      const previous = process.env.FLAIR_TEST_ALLOW_BUN_HARPER;
+      process.env.FLAIR_TEST_ALLOW_BUN_HARPER = "ambient reason";
+      try {
+        refused(() => childProcess[api](command, { timeout: 5_000,
+          env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "child reason" },
+        }), `child_process.${api}`, "TestRuntimeIdentityError");
+      } finally {
+        if (previous === undefined) delete process.env.FLAIR_TEST_ALLOW_BUN_HARPER;
+        else process.env.FLAIR_TEST_ALLOW_BUN_HARPER = previous;
+      }
+    }, 20_000);
+    test(`child_process.${api} runs bun ./dist/cli.js --version with a child-only reason`, async () => {
+      ensureCliBuild();
+      const options = { encoding: "utf8" as const, timeout: 5_000,
+        env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: `exercise ${api} built CLI under Bun` },
+      };
+      const log = spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const command = "bun ./dist/cli.js --version";
+        const output = api === "execSync" ? execSync(command, options)
+          : await new Promise<string>((resolve, reject) => {
+            exec(command, options, (error, stdout) => error ? reject(error) : resolve(stdout));
+          });
+        expect(output.trim()).toBe(JSON.parse(readFileSync(resolve(import.meta.dir, "../../package.json"), "utf8")).version);
+        expect(log.mock.calls.flat().join("\n")).toContain(`exercise ${api} built CLI under Bun`);
+      } finally { log.mockRestore(); }
+    }, 20_000);
+    test(`child_process.${api} refuses compound syntax before a child-only override`, () => {
+      const error = refused(() => childProcess[api]("true; bun ./dist/cli.js --version", { timeout: 5_000,
+        env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: `exercise ${api} compound refusal` },
+      }), `child_process.${api}`, "TestRuntimeIdentityError");
+      expect(error.message).toContain("unclassifiable shell string");
+    }, 20_000);
+  }
+  test("promisified exec refuses a protected shell string and retains ordinary output and the child handle", async () => {
+    await expect(promisify(exec)("bun ./dist/cli.js --version", { timeout: 5_000 })).rejects.toMatchObject({
+      name: "TestRuntimeIdentityError", message: expect.stringContaining("child_process.exec"),
+    });
+    const pending = promisify(exec)("printf ordinary", { timeout: 5_000 });
+    expect(pending.child.pid).toBeGreaterThan(0);
+    expect(await pending).toEqual({ stdout: "ordinary", stderr: "" });
   }, 20_000);
   test("environment-expression runtime is refused", () => {
     const { cli } = fixture();

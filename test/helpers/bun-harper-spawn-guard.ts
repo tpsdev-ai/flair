@@ -235,7 +235,8 @@ export class TestRuntimeIdentityError extends Error {
 
 // Test-harness guard against accidental Bun launches, not a security boundary.
 // It does not model hostile process environments.
-// Direct non-Node runtimes and every shell-string launch of a protected entry need a child-only reason.
+// Wrapped APIs: child_process spawn, spawnSync, execFile, execFileSync, exec, execSync; Bun.spawn and Bun.spawnSync.
+// These APIs require a child-only reason for direct non-Node and shell-string launches of protected entries.
 export function checkTestSpawn(api: string, command: unknown, args: unknown, options: Options = {}): void {
   if (typeof command !== "string" || !Array.isArray(args)) return;
   const launch = invocation(command, args, options);
@@ -269,7 +270,8 @@ function wrap(target: Record<string, unknown>, key: string, api: string, bun: bo
     } else {
       const argv = Array.isArray(args[1]) ? args[1] : [];
       const options = (Array.isArray(args[1]) ? args[2] : args[1]) as Options | undefined;
-      checkTestSpawn(api, args[0], argv, options && typeof options === "object" ? options : {});
+      const childOptions = options && typeof options === "object" ? options : {};
+      checkTestSpawn(api, args[0], argv, key === "exec" || key === "execSync" ? { ...childOptions, shell: true } : childOptions);
     }
   };
   const guarded = function(this: unknown, ...args: unknown[]) {
@@ -293,10 +295,10 @@ function wrap(target: Record<string, unknown>, key: string, api: string, bun: bo
   if (target[key] !== guarded) throw new Error(`Cannot wrap ${api}: assignment did not replace the function`);
 }
 
-for (const api of ["spawn", "spawnSync", "execFile", "execFileSync"]) wrap(childProcess, api, `child_process.${api}`, false);
+for (const api of ["spawn", "spawnSync", "execFile", "execFileSync", "exec", "execSync"]) wrap(childProcess, api, `child_process.${api}`, false);
 syncBuiltinESMExports();
 const named = await import("node:child_process");
-for (const api of ["spawn", "spawnSync", "execFile", "execFileSync"] as const) {
+for (const api of ["spawn", "spawnSync", "execFile", "execFileSync", "exec", "execSync"] as const) {
   if (named[api] !== childProcess[api]) throw new Error(`Cannot wrap child_process.${api}: named export did not update`);
 }
 for (const api of ["spawn", "spawnSync"]) wrap(Bun as unknown as Record<string, unknown>, api, `Bun.${api}`, true);
