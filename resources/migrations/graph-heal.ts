@@ -61,7 +61,7 @@ import { databases } from "harper";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { embeddingSpaceVerdict } from "../embedding-space-guard.js";
+import { spaceGuardState } from "../embedding-space-guard.js";
 import type { Migration, RunBatchResult } from "./types.js";
 
 export const GRAPH_HEAL_ID = "graph-heal";
@@ -158,17 +158,19 @@ async function topNeighborId(table: MemoryTableLike, target: number[]): Promise<
  *
  * flair#2596 — consults the query-time embedding-space guard
  * (embedding-space-guard.ts) before the cosine-sort query, the same chokepoint
- * SemanticSearch / MemoryBootstrap / the dedup sweep use (#2559). On a
- * non-uniform verdict it skips the comparison and logs the guard's state; the
- * caller reads that as "not verified this boot" (retry next boot). The check is
- * on the verdict's uniformity, so a state added later needs no change here.
+ * SemanticSearch / MemoryBootstrap / the dedup sweep use (#2559). It reads the
+ * guard's non-scanning snapshot (`spaceGuardState`), not the scan-triggering
+ * verdict accessor: graph-heal runs at boot beside the guard's own pre-warm
+ * scan, so its consult must not start a second scan. A state other than
+ * `uniform` skips the comparison and logs the state; the caller reads that as
+ * "not verified this boot".
  */
 async function recallHealthy(table: MemoryTableLike): Promise<{ verified: boolean; hasData: boolean }> {
   try {
-    const verdict = await embeddingSpaceVerdict();
-    if (!verdict.uniform) {
+    const { state } = spaceGuardState();
+    if (state !== "uniform") {
       console.warn(
-        `graph-heal: canary recall verification skipped — embedding space is not known uniform (state: ${verdict.state})`,
+        `graph-heal: canary recall verification skipped — embedding space is not known uniform (state: ${state})`,
       );
       return { verified: false, hasData: true };
     }
