@@ -16,9 +16,11 @@
  * Fixture vectors have 768 entries. After a signed Memory write, the auto-embed
  * backfill (resources/auth-middleware.ts) re-embeds from its text a row whose
  * stored vector has at most 100 entries, when an embedding model is available;
- * a shorter fixture vector would be replaced by a server-computed one. Every
- * case outside the vector-only describe holds with and without a model; that
- * describe embeds query text, so it runs only when the model file is present.
+ * a shorter fixture vector would be replaced by a server-computed one. The
+ * backfill describe holds that backfill at its test-only
+ * `backfill-embedding-pre` pause point. It and the vector-only describe (which
+ * embeds query text) need the model and run only when the model file is
+ * present; every other case holds with and without a model.
  *
  * Mutation checks (each fails on an assertion; restore with a file copy, never
  * git):
@@ -33,19 +35,27 @@
  *    doctor case goes red;
  *  - in resources/Memory.ts put(), remove the empty-embedding normalization
  *    before the dedup gate (the later one stays) — the rescan case never
- *    returns to `uniform`.
+ *    returns to `uniform`;
+ *  - in put(), remove the removal of an empty body `embedding` before the
+ *    omission check — the skill update case goes red;
+ *  - in resources/auth-middleware.ts backfillEmbedding, drop the
+ *    noteWriteStamp call — the untrusted-vector backfill case stays `excluded`
+ *    past its 15 s window;
+ *  - drop `embeddingModel` from the backfill's update — the vectorless backfill
+ *    case never sees the current stamp.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import nacl from "tweetnacl";
 import { signBodyFresh } from "../../resources/federation-crypto.js";
 import { randomUUID, randomBytes } from "node:crypto";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 import { componentWithoutMigrationBoot, type ComposedComponent } from "../helpers/component-without-migration-boot";
 import { getModelId } from "../../resources/embeddings-provider.ts";
+import { TEST_FAULT_INJECTION_ENV, TEST_PAUSE_DIR_ENV } from "../../resources/txn-pause-point.ts";
 
 const AGENT = "agent-a"; // neutral fixture name (no fleet host/agent)
 const CLI = join(process.cwd(), "dist", "cli.js");
@@ -106,17 +116,21 @@ function makeHarness(get: () => HarperInstance) {
       body: JSON.stringify(op),
     });
   }
-  async function putMemory(id: string, body: Record<string, unknown>): Promise<any> {
-    const path = `/Memory/${id}`;
+  /** A signed Memory write: PUT /Memory/<id>, or POST /Memory with the id in the body. */
+  async function writeMemory(method: "PUT" | "POST", id: string, body: Record<string, unknown>): Promise<any> {
+    const path = method === "PUT" ? `/Memory/${id}` : "/Memory";
     const res = await fetch(`${get().httpURL}${path}`, {
       signal: AbortSignal.timeout(15_000),
-      method: "PUT",
-      headers: { Authorization: ed25519Header(agent, "PUT", path), "Content-Type": "application/json" },
+      method,
+      headers: { Authorization: ed25519Header(agent, method, path), "Content-Type": "application/json" },
       body: JSON.stringify({ id, agentId: AGENT, visibility: "shared", ...body }),
     });
     const text = await res.text();
-    expect(res.status, `PUT ${path} returned ${res.status}: ${text.slice(0, 300)}`).toBeLessThan(300);
+    expect(res.status, `${method} ${path} (${id}) returned ${res.status}: ${text.slice(0, 300)}`).toBeLessThan(300);
     return JSON.parse(text);
+  }
+  async function putMemory(id: string, body: Record<string, unknown>): Promise<any> {
+    return writeMemory("PUT", id, body);
   }
   async function memoryRow(id: string): Promise<any> {
     const res = await adminOp({
@@ -205,7 +219,7 @@ function makeHarness(get: () => HarperInstance) {
       rmSync(home, { recursive: true, force: true });
     }
   }
-  return { agent, adminOp, putMemory, patchMemory, memoryRow, semanticSearch, health, consult, waitGuard, doctor };
+  return { agent, adminOp, writeMemory, putMemory, patchMemory, memoryRow, semanticSearch, health, consult, waitGuard, doctor };
 }
 
 /** Spawn a Harper from a component copy without migration-boot (header),
@@ -507,6 +521,137 @@ describe("flair#2573 slice 1 — PATCH guard notifications (real Harper)", () =>
     expect(vectorPatched.embeddingModel ?? null).toBeNull();
     expect((await h.health()).embeddingSpace.state).not.toBe("uniform");
     expect((await h.waitGuard((s) => s.state === "excluded" && s.excluded === 1, 60_000))?.state).toBe("excluded");
+  }, 180_000);
+
+  test("an unchanged skill update stores the same vector and stamp whether `embedding` is `[]` or omitted (POST and PUT)", async () => {
+    // A caller-supplied current-stamped vector the server would not compute:
+    // an update that carries it keeps it, one that re-embeds or clears it does not.
+    const SKILL_VEC = basis(5);
+    for (const method of ["PUT", "POST"] as const) {
+      const id = `mem-2573-skill-${method.toLowerCase()}`;
+      const skill = {
+        content: `a skill procedure for the ${method} empty-embedding check`,
+        trigger: `when checking how ${method} stores an empty embedding`,
+        tags: ["skill"], durability: "persistent",
+      };
+      await h.putMemory(id, { ...skill, embedding: SKILL_VEC, embeddingModel: CURRENT_STAMP });
+      const created = await h.memoryRow(id);
+      expect(created.embedding).toEqual(SKILL_VEC);
+      expect(created.embeddingModel).toBe(CURRENT_STAMP);
+      const omitted = await h.writeMemory(method, id, { ...skill });
+      expect(omitted.id, "an update versions the skill").not.toBe(id);
+      const afterOmitted = await h.memoryRow(omitted.id);
+      const empty = await h.writeMemory(method, omitted.id, { ...skill, embedding: [] });
+      expect(empty.id, "an update versions the skill").not.toBe(omitted.id);
+      const afterEmpty = await h.memoryRow(empty.id);
+      for (const head of [afterOmitted, afterEmpty]) {
+        expect(head.embedding, `${method}: the stored vector is carried`).toEqual(SKILL_VEC);
+        expect(head.embeddingModel, `${method}: the stored stamp is carried`).toBe(CURRENT_STAMP);
+      }
+      expect(afterEmpty.embeddedContentHash ?? null).toEqual(afterOmitted.embeddedContentHash ?? null);
+    }
+  }, 120_000);
+});
+
+// The auto-embed backfill (resources/auth-middleware.ts) computes a vector only
+// with an embedding model, so this describe needs the model.
+(HAS_MODEL ? describe : describe.skip)("flair#2573 slice 1 — the auto-embed backfill stamps its vector and notifies the guard (real Harper)", () => {
+  let harper: HarperInstance | undefined;
+  let component: ComposedComponent | undefined;
+  let h: ReturnType<typeof makeHarness>;
+  let pauseDir = "";
+  // Held after the backfill computed its vector and before its write transaction.
+  const POINT = "backfill-embedding-pre";
+  const BACKFILL_TEXT = "a row the auto-embed backfill embeds while the guard publishes a clean scan";
+
+  function armBackfillPause(): void {
+    for (const marker of ["claimed", "paused", "released", "go"]) rmSync(join(pauseDir, `${marker}.${POINT}`), { force: true });
+    writeFileSync(join(pauseDir, `arm.${POINT}`), "");
+  }
+  async function waitForPausedBackfill(): Promise<void> {
+    const deadline = Date.now() + 30_000;
+    while (!existsSync(join(pauseDir, `paused.${POINT}`)) && Date.now() < deadline) await delay(20);
+    expect(existsSync(join(pauseDir, `paused.${POINT}`)), "no backfill reached the pause").toBe(true);
+  }
+  async function releaseBackfill(id: string): Promise<any> {
+    writeFileSync(join(pauseDir, `go.${POINT}`), "");
+    const deadline = Date.now() + 30_000;
+    let row = await h.memoryRow(id);
+    while (row.embeddingModel !== CURRENT_STAMP && Date.now() < deadline) {
+      await delay(50);
+      row = await h.memoryRow(id);
+    }
+    expect(readFileSync(join(pauseDir, `released.${POINT}`), "utf8"), "the backfill was released by the test, not its limit").toBe("go");
+    return row;
+  }
+
+  beforeAll(async () => {
+    pauseDir = mkdtempSync(join(tmpdir(), "flair-2573-backfill-pause-"));
+    const spawned = await spawnWithHarness({ [TEST_FAULT_INJECTION_ENV]: "1", [TEST_PAUSE_DIR_ENV]: pauseDir });
+    harper = spawned.harper;
+    component = spawned.component;
+    h = spawned.h;
+  }, 180_000);
+
+  afterAll(async () => {
+    if (pauseDir) writeFileSync(join(pauseDir, `go.${POINT}`), ""); // never leave a backfill parked
+    await stopAndClean(harper, component);
+    if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
+  }, 60_000);
+
+  test("a backfill landing after a clean scan stores a current-stamped vector; the verdict stays uniform and a rescan agrees", async () => {
+    const id = "mem-2573-backfill-vectorless";
+    expect((await h.waitGuard((s) => s.state === "uniform", 60_000))?.state).toBe("uniform");
+    // A row with text, no vector and no stamp.
+    const inserted = await h.adminOp({
+      operation: "insert", database: "flair", table: "Memory",
+      records: [{ id, agentId: AGENT, content: BACKFILL_TEXT, createdAt: new Date().toISOString(), visibility: "shared" }],
+    });
+    expect(inserted.status).toBe(200);
+    armBackfillPause();
+    // The signed PATCH stores no vector and marks the count stale; the backfill
+    // it starts computes a vector and is held before writing it.
+    await h.patchMemory(id, { embedding: [] });
+    await waitForPausedBackfill();
+    expect((await h.memoryRow(id)).embedding ?? null).toBeNull();
+    // A consult publishes a clean scan while the backfill is held.
+    const clean = await h.waitGuard((s) => s.state === "uniform" && s.excluded === 0, 60_000);
+    expect(clean).toEqual({ state: "uniform", reason: null, excluded: 0 });
+    const row = await releaseBackfill(id);
+    // The backfill stored a server-computed vector with the trusted current stamp,
+    // so the published count is still right and the verdict stays uniform.
+    expect(Array.isArray(row.embedding) && row.embedding.length > 100).toBe(true);
+    expect(row.embeddingModel).toBe(CURRENT_STAMP);
+    expect(typeof row.embeddedContentHash).toBe("string");
+    expect((await h.health()).embeddingSpace).toEqual(clean);
+    // A rescan agrees: with one unstamped vector added, it counts exactly that one.
+    const probe = "mem-2573-backfill-probe";
+    await h.putMemory(probe, { content: "a probe that stores a caller-supplied vector", embedding: UNTRUSTED_VEC });
+    expect((await h.waitGuard((s) => s.state === "excluded" && s.excluded === 1, 60_000))?.excluded).toBe(1);
+    await h.putMemory(probe, { content: "a probe that stores a caller-supplied vector", embedding: STAMPED_VEC, embeddingModel: CURRENT_STAMP });
+    expect((await h.waitGuard((s) => s.state === "uniform" && s.excluded === 0, 60_000))?.state).toBe("uniform");
+    // Write-time dedup compares against the backfilled vector only because it
+    // carries the trusted stamp: a near-duplicate of its text matches it.
+    const dup = await h.putMemory("mem-2573-backfill-dup", { content: BACKFILL_TEXT });
+    expect(dup.deduplicated).toBe(true);
+    expect(dup.matchedId).toBe(id);
+  }, 180_000);
+
+  test("a backfill replacing an untrusted vector notifies the guard, which reopens without waiting for its retry interval", async () => {
+    const id = "mem-2573-backfill-untrusted";
+    expect((await h.waitGuard((s) => s.state === "uniform" && s.excluded === 0, 60_000))?.state).toBe("uniform");
+    armBackfillPause();
+    // A 4-entry vector with no stamp: counted, and short enough for the backfill.
+    await h.putMemory(id, { content: "a row whose short caller-supplied vector the backfill replaces", embedding: [1, 0, 0, 0] });
+    await waitForPausedBackfill();
+    expect((await h.waitGuard((s) => s.state === "excluded" && s.excluded === 1, 60_000))?.excluded).toBe(1);
+    const row = await releaseBackfill(id);
+    expect(Array.isArray(row.embedding) && row.embedding.length > 100).toBe(true);
+    expect(row.embeddingModel).toBe(CURRENT_STAMP);
+    // The guard rescans a non-uniform verdict on its own only every 30 s; within
+    // 15 s, only the backfill's notification can make the consult rescan.
+    const reopened = await h.waitGuard((s) => s.state === "uniform" && s.excluded === 0, 15_000);
+    expect(reopened).toEqual({ state: "uniform", reason: null, excluded: 0 });
   }, 180_000);
 });
 

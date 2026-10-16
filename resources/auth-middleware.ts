@@ -1,7 +1,8 @@
 import { WRITE_BACK_ATTEMPTS, WriteBackConflictError, writeBackCommittedRow } from "./write-back.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 import { server, databases } from "harper";
-import { getEmbedding } from "./embeddings-provider.js";
+import { getEmbedding, getModelId } from "./embeddings-provider.js";
+import { noteWriteStamp } from "./embedding-space-guard.js";
 import { hashEmbeddedText } from "./memory-embed-hash.js";
 import { MEMORY_EMBEDDING_INPUT_FIELDS, skillEmbedText } from "./skill-write.js";
 import { isAdmin, isPrincipalDeactivated, FLAIR_AGENT_USERNAME, readCredentialedPrincipal, AGENT_LOOKUP_FAILED } from "./agent-auth.js";
@@ -191,13 +192,22 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
     // observed by either check aborts the attempt; remaining outer attempts
     // re-read and may recompute. Changes after confirmation and before commit
     // are not detected by these checks.
+    //
+    // flair#2573: the vector is stamped with the current model id, the space it
+    // was computed in, and the embedding-space guard is notified after the write
+    // commits with that stamp and the row it replaced, as for any other notified
+    // vector write.
     for (let attempt = 1; attempt <= WRITE_BACK_ATTEMPTS; attempt++) {
       const record = await table.get(memoryId, {});
       const text = record ? skillEmbedText(record) : undefined;
       if (typeof text !== "string" || text.length === 0) return;
       if (record.embedding?.length > 100) return;
       const embedding = await getEmbedding(text, "document");
-      if (!embedding) return;
+      if (!Array.isArray(embedding) || embedding.length === 0) return;
+      const model = getModelId();
+      // The vector fields of the committed row the update replaces, for the
+      // guard notification.
+      let replaced: { embedding?: unknown; embeddingModel?: unknown } | null = null;
       try {
         const outcome = await writeBackCommittedRow(
           table,
@@ -206,11 +216,12 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
             const rowText = row ? skillEmbedText(row) : undefined;
             if (typeof rowText !== "string" || rowText.length === 0) return { skip: true };
             if (row.embedding?.length > 100) return { skip: true };
-            // Only `embedding` and its text hash: an incremental update, never a
-            // full-row put of the row read above (flair#2470, flair#2465). The
-            // newly computed hash is of `text`, the text this vector was computed
-            // from (null for an empty owner).
-            return { update: { embedding, embeddedContentHash: hashEmbeddedText(row.agentId, text) ?? null } };
+            replaced = { embedding: row.embedding, embeddingModel: row.embeddingModel };
+            // Only `embedding`, its model stamp and its text hash: an incremental
+            // update, never a full-row put of the row read above (flair#2470,
+            // flair#2465). The newly computed hash is of `text`, the text this
+            // vector was computed from (null for an empty owner).
+            return { update: { embedding, embeddingModel: model, embeddedContentHash: hashEmbeddedText(row.agentId, text) ?? null } };
           },
           {
             label: "backfillEmbedding",
@@ -221,7 +232,12 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
             pausePoint: () => txnPausePoint("backfill-embedding"),
           },
         );
-        if ("update" in outcome) console.log(`[auto-embed] ${memoryId}: ${(outcome.update.embedding as number[]).length}d`);
+        if ("update" in outcome) {
+          // After the commit: the stamp the update stored (an absent one reads as
+          // untrusted and closes the guard) and the row it replaced.
+          noteWriteStamp(outcome.update.embeddingModel as string | null | undefined, replaced);
+          console.log(`[auto-embed] ${memoryId}: ${(outcome.update.embedding as number[]).length}d`);
+        }
         return;
       } catch (err) {
         if (err instanceof WriteBackConflictError && attempt < WRITE_BACK_ATTEMPTS) continue;

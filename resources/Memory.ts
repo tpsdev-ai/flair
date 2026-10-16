@@ -1,4 +1,4 @@
-import { normalizeEmptyEmbedding } from "./memory-embedding-value.js";
+import { isEmptyEmbedding, normalizeEmptyEmbedding } from "./memory-embedding-value.js";
 import { databases } from "harper";
 import { randomUUID } from "node:crypto";
 import { isOperatorSeedPut, redactMemoryWrite, redactSkillWrite, storedMemoryText, suppliedMemoryTextFields, suppliedStoredTextFields, type StoredMemoryText, type StoredTextField } from "./memory-redaction.js";
@@ -1592,6 +1592,10 @@ export class Memory extends (databases as any).flair.Memory {
     // same fields.
     const suppliedText = suppliedStoredTextFields(content);
     canonicalizeSupersedes(content);
+    // flair#2573: an empty `embedding` in the body is an omitted one. It is
+    // removed before the omission check and prepareSkillBody, so every later
+    // step, a skill update's carried vector included, sees a body without it.
+    if (isEmptyEmbedding(content?.embedding)) delete content.embedding;
     // flair#2465: a body that omits `embedding` can have the stored row's vector
     // carried in by prepareSkillBody, with the hash it retained for that vector.
     const postOmitsEmbedding = content?.embedding === undefined;
@@ -1777,9 +1781,10 @@ export class Memory extends (databases as any).flair.Memory {
     // this a duplicate of something else" situation — bypass the gate for it
     // (this also gives memory_update's preserveHistory mode dedup-bypass for
     // free, without a separate flag). NEVER suppresses the write either way.
-    // flair#2573: an empty embedding is no vector supplied. Normalized before
-    // the dedup gate and the embed step below, so this write embeds and stamps
-    // the row as it does when the body omits `embedding`.
+    // flair#2573: an empty vector that reaches this point (one carried from a
+    // stored skill row; the body's own was removed above) is no vector. It is
+    // normalized before the dedup gate and the embed step, which then compute
+    // and stamp one.
     normalizeEmptyEmbedding(content);
     // flair#2465: did the caller supply a vector that survived redaction? A
     // vector accepted from the caller gets no newly computed hash.
@@ -2321,6 +2326,8 @@ export class Memory extends (databases as any).flair.Memory {
     if (resolvedExisting.denial) return resolvedExisting.denial;
     const preExisting = resolvedExisting.row;
     canonicalizeSupersedes(content);
+    // flair#2573: an empty `embedding` in the body is an omitted one (see post()).
+    if (isEmptyEmbedding(content?.embedding)) delete content.embedding;
     const requestedPayload = { ...content };
     const urlTargetId = (this as any).getId?.();
     if (content && typeof content === "object" && content.id == null &&
@@ -2494,7 +2501,7 @@ export class Memory extends (databases as any).flair.Memory {
     // version-link — neither is an ambiguous "is this a duplicate of
     // something else" write, so both are dedup-bypassed automatically, no
     // separate flag needed. NEVER suppresses the write either way.
-    // flair#2573: an empty embedding is no vector supplied (see post()).
+    // flair#2573: an empty vector that reaches this point is no vector (see post()).
     normalizeEmptyEmbedding(content);
     // flair#2465: did the caller supply a vector? See post().
     const embeddingSupplied = Array.isArray(content.embedding) && content.embedding.length > 0;

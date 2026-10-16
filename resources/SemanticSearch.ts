@@ -157,10 +157,15 @@ export class SemanticSearch extends Resource {
     // branch (reusing the existing mode:'none' graceful-degrade contract) when
     // the request has query text, return no results when it has none, and
     // surface a structured warning that NAMES the state (mixed / excluded /
-    // not-yet-verified / scan-failed) below. Never cosine a query against a
-    // stored corpus that is not known uniform. (This is stamp metadata only: a
-    // caller-supplied `queryEmbedding` carries no space provenance, so its bytes
-    // are not verified either — flair#2573 slice 2.)
+    // not-yet-verified / scan-failed) below. The query is cosined against the
+    // stored corpus only while the guard reads `uniform`: the last published
+    // scan found no foreign stamp and no stored vector without a trusted
+    // current-space stamp, and no guard-notified write has since marked that
+    // count stale. Every resource write that can store a vector the scan would
+    // count notifies the guard; a raw operations-API insert is seen only by the
+    // next scan. (This is
+    // stamp metadata only: a caller-supplied `queryEmbedding` carries no space
+    // provenance, so its bytes are not verified either — flair#2573 slice 2.)
     // Consulted through the SAME single chokepoint the write-time dedup leg
     // uses — O(1) on the verified-uniform happy path. The consult, and so the
     // state warning, happens only when a query embedding is available
