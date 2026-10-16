@@ -224,7 +224,10 @@ describe("flair#2139 S2 — the FeedMemories ingest is versioned", () => {
     expect(successor.id).not.toBe(id);
     expect(successor.supersedes).toBe(id);
     expect(successor.trigger).toBe("changed trigger");
-    expect(successor.tags).toContain("skill");
+    // The successor row inherits the tags; the response reports only the fields
+    // the request supplied, so it carries no tags (flair#2561).
+    expect((await memoryRow(successor.id)).tags).toContain("skill");
+    expect("tags" in successor).toBe(false);
     expect((await memoryRow(id)).validTo).toBeString();
     expect((await versionsOf(id)).map((v) => v.kind)).toEqual(["create", "update"]);
   }, 120_000);
