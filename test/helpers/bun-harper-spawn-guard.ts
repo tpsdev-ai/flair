@@ -46,7 +46,7 @@ function canonicalPath(path: string): string {
 function resolvedExecutable(command: string, options: Options): string | undefined {
   const executable = which(command, {
     cwd: cwdPath(options.cwd),
-    PATH: (options.env ? options.env.PATH : process.env.PATH) ?? "/usr/bin:/bin",
+    PATH: options.env?.PATH ?? process.env.PATH ?? "/usr/bin:/bin",
   });
   if (executable) return canonicalPath(executable);
 }
@@ -213,10 +213,12 @@ function invocation(command: string, args: string[], options: Options) {
     if (["env", "sh", "bash"].includes(basename(words[0]))) return failure("unsupported nested env wrapper");
     if (!resolvedExecutable(words[0], probeOptions)) return failure("unresolved env executable");
   }
-  if (shellString) {
-    if (!words[0]) return failure("unclassifiable shell executable");
-    const runtime = runtimeKind(words[0], probeOptions);
-    if (runtime === "missing" || runtime === "unknown") return failure("unclassifiable shell executable");
+  // Shell strings (shell options or sh/bash short-flag clusters containing c) refuse
+  // compound syntax, expansion characters even when quoted/escaped, and unresolved executables.
+  // Resolve with child env.PATH when present, else process.env.PATH; allow ordinary commands.
+  // Guarded entries require Node or a nonempty child-only reason.
+  if (shellString && (!words[0] || !resolvedExecutable(words[0], probeOptions))) {
+    return failure("unresolved shell executable");
   }
   return { command: words[0], args: words.slice(1), options: probeOptions, failure: undefined };
 }
@@ -235,7 +237,7 @@ export class TestRuntimeIdentityError extends Error {
   }
 }
 
-function check(api: string, command: unknown, args: unknown, options: Options = {}): void {
+export function checkTestSpawn(api: string, command: unknown, args: unknown, options: Options = {}): void {
   if (typeof command !== "string" || !Array.isArray(args)) return;
   const launch = invocation(command, args, options);
   if (launch.failure) throw new TestRuntimeIdentityError(api, launch.command!, launch.failure);
@@ -263,11 +265,11 @@ function wrap(target: Record<string, unknown>, key: string, api: string, bun: bo
       const first = args[0] as { cmd?: string[] } | string[];
       const cmd = Array.isArray(first) ? first : first?.cmd;
       const options = (Array.isArray(first) ? args[1] : first) as Options | undefined;
-      if (cmd) check(api, cmd[0], cmd.slice(1), options);
+      if (cmd) checkTestSpawn(api, cmd[0], cmd.slice(1), options);
     } else {
       const argv = Array.isArray(args[1]) ? args[1] : [];
       const options = (Array.isArray(args[1]) ? args[2] : args[1]) as Options | undefined;
-      check(api, args[0], argv, options && typeof options === "object" ? options : {});
+      checkTestSpawn(api, args[0], argv, options && typeof options === "object" ? options : {});
     }
   };
   const guarded = function(this: unknown, ...args: unknown[]) {

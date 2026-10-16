@@ -1,5 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import childProcess, { execFile, execFileSync, spawn, spawnSync } from "node:child_process";
+import childProcess, { exec, execSync, execFile, execFileSync, spawn, spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
@@ -179,14 +179,12 @@ describe("Bun Harper spawn preload", () => {
         ];
         for (const form of cases) {
           const options = { shell: form.shell, timeout: 5_000, encoding: "utf8" as const };
-          const unclassifiable = runtime === unknown && (form.shell || form.command === "/bin/sh");
           const error = refused(() => spawnSync(form.command, form.args, options),
             "child_process.spawnSync", runtime === unknown ? "TestRuntimeIdentityError" : "BunHarperSpawnError");
-          expect(error.message).toContain(unclassifiable ? "unclassifiable shell executable" : "launching dist/cli.js");
+          expect(error.message).toContain("launching dist/cli.js");
           expect(error.message).not.toContain(marker);
           expect(error.stack).not.toContain(marker);
           expect(error.message).not.toContain(root);
-          if (unclassifiable) continue;
           const result = spawnSync(form.command, form.args, { ...options,
             env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise redacted warning" },
           });
@@ -236,23 +234,47 @@ describe("Bun Harper spawn preload", () => {
         expect(error.message).toContain(syntax === "literal Bun" ? "launching dist/cli.js" : "unclassifiable shell string");
       }, 20_000);
     }
-    test(`${shell} refuses missing and unknown shell executables with a reason`, () => {
+    test(`${shell} refuses unresolved shell executables with a reason`, () => {
       const { root, cli } = fixture();
-      const unknown = join(root, "runtime");
-      writeFileSync(unknown, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
-      for (const executable of [join(root, "missing"), "flair-missing-runtime-2603", unknown]) {
+      for (const executable of [join(root, "missing"), "flair-missing-runtime-2603"]) {
         for (const entry of ["", ` '${cli}' status`]) {
           const command = `'${executable}'${entry}`;
           const error = refused(() => spawnSync(shell === "shell: true" ? command : shell,
             shell === "shell: true" ? [] : [shell === "/bin/bash" ? "-ec" : "-c", command], {
               shell: shell === "shell: true", timeout: 5_000,
-              env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "cannot classify shell executable" },
+              env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "unresolved shell commands cannot be overridden" },
             }), "child_process.spawnSync", "TestRuntimeIdentityError");
-          expect(error.message).toContain("unclassifiable shell executable");
+          expect(error.message).toContain("unresolved shell executable");
         }
       }
     }, 20_000);
   }
+  test("resolved ordinary shell commands use the child PATH", async () => {
+    const { root } = fixture();
+    const bin = join(root, "bin");
+    mkdirSync(bin);
+    symlinkSync(Bun.which("cp")!, join(bin, "copy-fixture"));
+    const source = join(root, "source");
+    writeFileSync(source, "ordinary command");
+    for (const [index, shell] of ["shell: true", "/bin/sh", "/bin/bash"].entries()) {
+      const target = join(root, `copied-${index}`);
+      const command = `copy-fixture '${source}' '${target}'`;
+      const result = spawnSync(shell === "shell: true" ? command : shell,
+        shell === "shell: true" ? [] : ["-ec", command], {
+          shell: shell === "shell: true", env: { PATH: bin }, timeout: 5_000,
+        });
+      expect(result.status).toBe(0);
+      expect(readFileSync(target, "utf8")).toBe("ordinary command");
+    }
+    const copied = join(root, "exec-copy");
+    execSync(`cp '${source}' '${copied}'`, { timeout: 5_000 });
+    expect(readFileSync(copied, "utf8")).toBe("ordinary command");
+    await promisify(exec)(`rm -f '${copied}'`, { timeout: 5_000 });
+    expect(existsSync(copied)).toBe(false);
+    refused(() => spawnSync("copy-fixture source target", {
+      shell: true, env: { PATH: root }, timeout: 5_000,
+    }), "child_process.spawnSync", "TestRuntimeIdentityError");
+  }, 20_000);
   for (const flag of ["-ec", "-xc", "-lc", "-excl"]) {
     test(`bash ${flag} refuses a Bun CLI fixture with a reason`, () => {
       const error = refused(() => spawnSync("/bin/bash", [flag, `'${process.execPath}' '${fixture().cli}' status`], {
