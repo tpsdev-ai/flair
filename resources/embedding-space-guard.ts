@@ -204,8 +204,10 @@ async function scan(): Promise<void> {
   const currentNorm = normalizeStamp(currentStamp);
   // The raw forms that denote the current space, compared EXACTLY as the vector
   // query's stamp condition compares them (Harper `equals` applies no whitespace
-  // or prefix normalisation). A row whose raw stamp is not one of these is not
-  // one the vector legs may touch.
+  // or prefix normalisation). The query's stamp condition filters a row whose raw
+  // stamp is not one of these from the returned set; HNSW can still compute that
+  // row's distance during traversal, so the protection at traversal level is this
+  // scan's verdict, not the condition.
   const trustedRaw = new Set(currentSpaceRawForms(currentStamp));
   const seen = new Set<string>();
   let uniform = true;
