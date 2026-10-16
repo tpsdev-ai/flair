@@ -59,6 +59,7 @@ import { setImmediate as yieldToRequests } from "node:timers/promises";
 import { dirname } from "node:path";
 import { allowAdmin } from "./agent-auth.js";
 import { retrieveCandidates } from "./semantic-retrieval-core.js";
+import { embeddingSpaceVerdict, type EmbeddingSpaceGuardState } from "./embedding-space-guard.js";
 import { DEDUP_COSINE_THRESHOLD_DEFAULT } from "./dedup.js";
 import {
   countDedupClusters,
@@ -75,6 +76,15 @@ export interface MemoryDedupStatsResult {
   largestClusterSize: number;
   totalMemoriesInClusters: number;
   computedAt: string;
+}
+
+/** The response when the sweep's opening guard consult refuses the embedding space (flair#2559). */
+export interface MemoryDedupStatsUnavailable {
+  clusterCount: null;
+  largestClusterSize: null;
+  totalMemoriesInClusters: null;
+  computedAt: string;
+  embeddingSpace: { state: EmbeddingSpaceGuardState; reason: string | null };
 }
 
 function persistStat(stat: MemoryDedupStatsResult, pathOverride?: string): void {
@@ -188,6 +198,19 @@ export class MemoryDedupStats extends Resource {
   async post(_data: any) {
     const ctx = (this as any).getContext?.();
     try {
+      // ─── Vector-space uniformity guard (flair#2559) ──────────────────────
+      // Consult the shared guard at the start of the sweep. A non-uniform
+      // verdict returns no vector-derived counts and persists nothing.
+      const verdict = await embeddingSpaceVerdict();
+      if (!verdict.uniform) {
+        return {
+          clusterCount: null,
+          largestClusterSize: null,
+          totalMemoriesInClusters: null,
+          computedAt: new Date().toISOString(),
+          embeddingSpace: { state: verdict.state, reason: verdict.reason },
+        };
+      }
       return await computeAndPersist(ctx);
     } catch (err: any) {
       return new Response(

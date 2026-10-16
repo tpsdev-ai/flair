@@ -8982,6 +8982,7 @@ registerTest(program);
 // Command registration lives in src/commands/deploy.ts (flair#1636).
 // Bind shared cli-locals first so the extracted module never imports this file.
 bindDeployCli({
+  resolveEffectiveOpsUrl,
   fleetSweepCallerExitMessage,
   resolveFabricCredentials,
   shouldRunFleetVerify,
@@ -9082,6 +9083,7 @@ const ENTITIES_OPTION_DESCRIPTION =
 // Command group lives in src/commands/memory.ts (flair#1621). Bind shared
 // helpers first so the extracted module never imports this file.
 bindMemoryCli({
+  resolveEffectiveOpsUrl,
   api,
   resolveBaseUrl,
   resolveSigningAgentId,
@@ -9092,6 +9094,7 @@ bindMemoryCli({
   resolveHttpPort,
   parseEntitiesOptionOrExit,
   ENTITIES_OPTION_DESCRIPTION,
+  resolveFabricCredentials,
 });
 registerMemory(program);
 

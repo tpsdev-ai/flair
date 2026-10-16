@@ -200,7 +200,7 @@ mock.module("harper", () => ({
 const { Memory } = await import("../../resources/Memory.ts");
 const { FeedMemories } = await import("../../resources/MemoryFeed.ts");
 const { computeContentHash } = await import("../../resources/memory-feed-lib.ts");
-const { isOperatorSeedPut, redactMemoryWrite, storedMemoryText, suppliedMemoryTextFields } = await import("../../resources/memory-redaction.ts");
+const { isOperatorSeedPut, redactMemoryWrite, redactSkillWrite, storedMemoryText, suppliedMemoryTextFields, suppliedSkillTextFields, suppliedStoredTextFields } = await import("../../resources/memory-redaction.ts");
 const { WRITE_RESPONSE_WITHHELD, WRITE_RESPONSE_WITHHELD_MESSAGE, buildFromAllowlist, feedResponseFields, REDACTION_RULES, storageResult, suppliedMemoryFields, writeResultResponse } = await import("../../resources/memory-write-response.ts");
 const { SEED_SKILL_ROW_ID } = await import("../../resources/seed-ids.ts");
 const { redactSecrets, redactSecretsWithCount } = await import("../../packages/flair-mcp/src/secret-redaction.ts");
@@ -385,6 +385,91 @@ describe("flair#2407 — the count covers only values the redactor changed", () 
   });
 });
 
+describe("flair#2575 — skill fields with distinct top-level metadata keys", () => {
+  it("redactSkillWrite redacts the metadata name/description and every tags entry", () => {
+    const body: any = {
+      tags: ["skill", `release-${GITHUB_TOKEN}`, "ops"],
+      metadata: JSON.stringify({ name: `deploy ${GITHUB_TOKEN}`, description: `runs the nightly ${AWS_KEY}`, source: "npm:example" }),
+    };
+    expect(redactSkillWrite(body)).toBe(3);
+    expect(body.tags).toEqual(["skill", `release-${REDACTED}`, "ops"]);
+    const meta = JSON.parse(body.metadata);
+    expect(meta.name).toBe(`deploy ${REDACTED}`);
+    expect(meta.description).toBe(`runs the nightly ${REDACTED}`);
+    expect(meta.source).toBe("npm:example");
+  });
+
+  it("redactSkillWrite leaves a non-skill row's tags and metadata alone", () => {
+    const body: any = { content: "plain", tags: [`release-${GITHUB_TOKEN}`], metadata: JSON.stringify({ name: `deploy ${GITHUB_TOKEN}` }) };
+    expect(redactSkillWrite(body)).toBe(0);
+    expect(body.tags).toEqual([`release-${GITHUB_TOKEN}`]);
+    expect(JSON.parse(body.metadata).name).toBe(`deploy ${GITHUB_TOKEN}`);
+  });
+
+  it("redactSkillWrite redacts a skill row's string tag entries and keeps a null entry", () => {
+    const body: any = { tags: ["skill", null, `release-${GITHUB_TOKEN}`] };
+    expect(redactSkillWrite(body)).toBe(1);
+    expect(body.tags).toEqual(["skill", null, `release-${REDACTED}`]);
+  });
+
+  it("storedMemoryText reports the redacted skill fields of a staged skill row, including a null tag", () => {
+    const body: any = { tags: ["skill", null, `release-${GITHUB_TOKEN}`], metadata: JSON.stringify({ name: `deploy ${GITHUB_TOKEN}` }), content: "procedure", trigger: "when deploying" };
+    // flair#2561: the supplied fields are read from the body as the request sent it.
+    const supplied = suppliedStoredTextFields(body);
+    redactSkillWrite(body);
+    const stored = storedMemoryText(body, supplied);
+    expect(stored).toEqual({
+      content: "procedure",
+      trigger: "when deploying",
+      name: `deploy ${REDACTED}`,
+      tags: ["skill", null, `release-${REDACTED}`],
+    });
+  });
+
+  it("suppliedSkillTextFields names the metadata name/description and the tags the request body carries", () => {
+    expect(suppliedSkillTextFields({ tags: ["skill"], metadata: JSON.stringify({ name: "n", description: "d", source: "s" }) })).toEqual(["name", "description", "tags"]);
+    expect(suppliedSkillTextFields({ metadata: { name: "n", description: 4 } })).toEqual(["name"]);
+    expect(suppliedSkillTextFields({ metadata: "not json", tags: null })).toEqual([]);
+    expect(suppliedSkillTextFields({ content: "c", summary: "s" })).toEqual([]);
+    expect(suppliedSkillTextFields(null)).toEqual([]);
+    expect(suppliedStoredTextFields({ content: "c", trigger: 4, tags: ["skill"], metadata: JSON.stringify({ description: "d" }) }))
+      .toEqual(["content", "description", "tags"]);
+  });
+
+  it("storedMemoryText reports, of a skill row's skill fields, only those the request supplied (flair#2561)", () => {
+    // The staged row inherited its tags and metadata from a predecessor; the
+    // request supplied only `summary`.
+    const row: any = {
+      content: "inherited procedure", summary: `rotated ${REDACTED}`, trigger: "inherited trigger",
+      tags: ["skill", `release-${REDACTED}`],
+      metadata: JSON.stringify({ name: `deploy ${REDACTED}`, description: "inherited description" }),
+    };
+    expect(storedMemoryText(row, suppliedStoredTextFields({ summary: `rotated ${GITHUB_TOKEN}` }))).toEqual({ summary: `rotated ${REDACTED}` });
+    // The request supplied `metadata` with a name but no description, and `tags`.
+    const supplied = suppliedStoredTextFields({ summary: "s", tags: ["skill"], metadata: JSON.stringify({ name: "deploy" }) });
+    expect(storedMemoryText(row, supplied)).toEqual({ summary: `rotated ${REDACTED}`, name: `deploy ${REDACTED}`, tags: ["skill", `release-${REDACTED}`] });
+    // A row that is not skill-tagged reports no skill field, supplied or not.
+    expect(storedMemoryText({ content: "c", tags: ["note"], metadata: JSON.stringify({ name: "n" }) }, ["content", "name", "tags"])).toEqual({ content: "c" });
+  });
+
+  it("the write-response allowlist copies the supplied skill fields of `stored` by name and type", () => {
+    const rules = { id: { type: "string", required: true }, ...REDACTION_RULES } as const;
+    const tags = ["skill", null, `release-${REDACTED}`];
+    const stored = { content: "c", name: `deploy ${REDACTED}`, description: "d", tags };
+    const result: any = buildFromAllowlist({ id: "r1", redactedValues: 2, stored }, rules);
+    expect(result).toEqual({ id: "r1", redactedValues: 2, stored: { content: "c", name: `deploy ${REDACTED}`, description: "d", tags: ["skill", null, `release-${REDACTED}`] } });
+    expect(result.stored.tags).not.toBe(tags);
+    tags[0] = "changed";
+    expect(result.stored.tags[0]).toBe("skill");
+    // A `tags` value that is not an array of strings and nulls, or a non-string
+    // name/description, is left out.
+    for (const bad of [["skill", 4], ["skill", { embedding: [1] }], "skill", { 0: "skill", length: 1 }, null]) {
+      expect(buildFromAllowlist({ id: "r1", stored: { content: "c", name: 4, description: { embedding: [1] }, tags: bad } }, rules))
+        .toEqual({ id: "r1", stored: { content: "c" } });
+    }
+  });
+});
+
 describe("flair#2407 — a supplied embedding is replaced when redaction changes its source text", () => {
   const SUPPLIED = [0, 0, 0, 1];
   it("Memory.post discards the supplied vector and stores the one computed from the redacted text", async () => {
@@ -463,6 +548,45 @@ describe("flair#2407 — a deduplicated feed write reports the count in its resp
     expect(memoryStore.size).toBe(1);
     expect("redactedValues" in memoryStore.get(first.id)).toBe(false);
   });
+});
+
+
+describe("skill metadata validation before redaction", () => {
+  for (const path of ["POST", "PUT", "feed", "superseding POST"]) {
+    it(`${path} refuses duplicate metadata without changing the supplied text or stored rows`, async () => {
+      const root = { id: "metadata-root", agentId: AGENT, content: "procedure", trigger: "when deploying", tags: ["skill"], createdAt: new Date().toISOString() };
+      memoryStore.set(root.id, root);
+      const body: any = {
+        agentId: AGENT, content: `procedure ${GITHUB_TOKEN}`, summary: `summary ${AWS_KEY}`,
+        metadata: `{"name":"${GITHUB_TOKEN}","name":"deploy"}`,
+      };
+      if (path === "POST") body.tags = ["skill"];
+      else if (path === "superseding POST") body.supersedes = root.id;
+      else body.id = root.id;
+      const original = structuredClone(body);
+      const m: any = makeMemory(agentCtx(AGENT));
+      const f: any = new (FeedMemories as any)();
+      f.getContext = () => ({ request: agentCtx(AGENT) });
+      if (path === "PUT") m._targetId = root.id;
+      const result = path === "feed" ? await f.post(body) : path === "PUT" ? await m.put(body) : await m.post(body);
+      expect(result).toBeInstanceOf(Response);
+      expect(result.status).toBe(400);
+      expect(await result.json()).toEqual({ error: "skill_metadata_duplicate_key" });
+      for (const field of ["content", "summary", "metadata"]) expect(body[field]).toBe(original[field]);
+      expect([...memoryStore.values()]).toEqual([root]);
+      expect(embedInputs).toEqual([]);
+    });
+  }
+});
+
+
+it("a skill reindex requires distinct supplied or retained top-level metadata keys", async () => {
+  const { buildReindexRow } = await import("../../resources/Memory.ts");
+  const root = { id: "metadata-reindex", agentId: AGENT, content: "procedure", tags: ["skill"], createdAt: new Date().toISOString() };
+  const metadata = `{"name":"${GITHUB_TOKEN}","name":"deploy"}`;
+  for (const [body, stored] of [[{ ...root, metadata }, root], [root, { ...root, metadata }]]) {
+    expect(buildReindexRow({ ...body, _reindex: true }, stored)).toMatchObject({ status: 400, error: "skill_metadata_duplicate_key" });
+  }
 });
 
 describe("flair#2561 — `stored` reports only the string-valued text fields the request supplied, and the feed response the allowlisted primitive Memory attributes it supplied plus the listed response fields and `redactedValues` when present", () => {

@@ -1,7 +1,9 @@
 /**
  * write-stored-supplied-fields-2561.test.ts — a Memory write's `stored` reports
  * only the string-valued text fields (`content`, `summary`, `trigger`) the
- * write's own request supplied, as stored, and the POST /FeedMemories response
+ * write's own request supplied, as stored (for a skill, also the skill fields
+ * it supplied: its `tags` and its `metadata` `name`/`description`,
+ * flair#2575), and the POST /FeedMemories response
  * only the allowlisted primitive Memory attributes its request supplied plus the listed
  * response fields of the row and `redactedValues` when present (flair#2561).
  *
@@ -174,7 +176,7 @@ describe("flair#2561 — a skill successor that omits content and trigger gets n
     expectNoAuthorText(text);
   }, 60_000);
 
-  it("PUT /Memory/<id>: `stored` is the redacted summary the request supplied, and nothing else", async () => {
+  it("PUT /Memory/<id>: `stored` is the redacted summary and the tags the request supplied, and nothing else", async () => {
     const id = `s2561-put-${randomUUID()}`;
     await makeAuthorSkill(id);
     const succ = `s2561-put-succ-${randomUUID()}`;
@@ -186,12 +188,15 @@ describe("flair#2561 — a skill successor that omits content and trigger gets n
     const body = JSON.parse(text);
     expect(body.id).toBe(succ);
     expect(body.redactedValues).toBe(1);
-    expect(body.stored).toEqual({ summary: `rotated ${REDACTED}` });
+    // flair#2575: a skill write's `stored` also reports the skill fields the
+    // request supplied (`tags` here), as stored; never the predecessor's
+    // metadata name/description (expectNoAuthorText).
+    expect(body.stored).toEqual({ summary: `rotated ${REDACTED}`, tags: ["skill"] });
     expectNoAuthorText(text);
     await expectSuccessorCarriesAuthorText(succ, id);
   }, 60_000);
 
-  it("POST /Memory: `stored` is the redacted summary the request supplied, and nothing else", async () => {
+  it("POST /Memory: `stored` is the redacted summary and the tags the request supplied, and nothing else", async () => {
     const id = `s2561-post-${randomUUID()}`;
     await makeAuthorSkill(id);
     const res = await send(writer, "POST", `/Memory`, {
@@ -201,7 +206,8 @@ describe("flair#2561 — a skill successor that omits content and trigger gets n
     expect(res.status, text.slice(0, 300)).toBeLessThan(300);
     const body = JSON.parse(text);
     expect(body.redactedValues).toBe(1);
-    expect(body.stored).toEqual({ summary: `rotated ${REDACTED}` });
+    // flair#2575: the supplied `tags` too, as stored (see the PUT case).
+    expect(body.stored).toEqual({ summary: `rotated ${REDACTED}`, tags: ["skill"] });
     expectNoAuthorText(text);
     await expectSuccessorCarriesAuthorText(String(body.id), id);
   }, 60_000);
@@ -276,10 +282,11 @@ describe("flair#2561 — a write that supplies every text field gets all three b
     const body = await res.json();
     expect(res.status, JSON.stringify(body)).toBe(200);
     expect(body.redactedValues).toBe(3);
-    expect(body.stored).toEqual(allRedacted("skill"));
+    // flair#2575: a skill write's `stored` also reports the `tags` it supplied, as stored.
+    expect(body.stored).toEqual({ ...allRedacted("skill"), tags: ["skill"] });
     const row = await readStored(succ);
     expect(row?.supersedes).toBe(id);
-    expect({ content: row?.content, summary: row?.summary, trigger: row?.trigger }).toEqual(body.stored);
+    expect({ content: row?.content, summary: row?.summary, trigger: row?.trigger, tags: row?.tags }).toEqual(body.stored);
   }, 60_000);
 
   it("POST /FeedMemories of the author's own memory", async () => {
