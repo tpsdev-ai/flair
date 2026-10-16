@@ -106,8 +106,9 @@ OrgEvent's ownership check and is refused, one that names the caller's own
 existing event can update it when OrgEvent's other checks pass (a changed
 `createdAt` is refused with 409), and a
 Presence heartbeat writes the caller's own row). Routes served
-by a custom resource rather than a table-backed one, such as
-`/AgentReadPosition`, apply their own ownership rule and response.
+by a custom resource rather than a table-backed one are outside this table
+guard and apply their own rules; `/AgentReadPosition`, for example, enforces
+its own ownership rule.
 The guard exempts administrator and in-process calls. OrgEvent POST id
 selection also applies to administrator and in-process calls.
 

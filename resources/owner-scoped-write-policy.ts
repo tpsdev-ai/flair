@@ -230,10 +230,11 @@ export function guardOwnerScopedWrites(
 
 /**
  * What an installation left unguarded, given the registry, the owner-scoped
- * tables and the names `guardOwnerScopedWrites` returned. Empty when every
- * owner-scoped table in the registry is guarded. A table listed in
- * `ownerFields` but absent from the registry has no table class to guard and
- * is reported too, so a renamed table cannot drop out silently.
+ * tables and the names `guardOwnerScopedWrites` returned. An empty or missing
+ * registry yields one generic gap. Otherwise the result names every table in
+ * `ownerFields` that was not guarded, including one absent from the registry
+ * (it has no table class to guard), so a renamed table cannot drop out
+ * silently; it is empty only when every table in `ownerFields` was guarded.
  */
 export function ownerScopedWriteGuardGaps(
   tables: Record<string, unknown> | null | undefined,
