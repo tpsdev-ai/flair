@@ -479,7 +479,7 @@ describe("flair#2467 — a redacting write's response carries the stored text it
     expect(res.status, JSON.stringify(body)).toBe(200);
     expect(body.redactedValues).toBe(2);
     expect(body.id).not.toBe(root);
-    expect(body.stored).toEqual({ content: `skill v2 reads ${REDACTED}`, trigger: `when deploying with ${REDACTED}` });
+    expect(body.stored).toEqual({ content: `skill v2 reads ${REDACTED}`, trigger: `when deploying with ${REDACTED}`, tags: ["skill"] });
     const successor = await readStored(body.id);
     expect(successor?.supersedes).toBe(root);
     expect(successor?.content).toBe(body.stored.content);

@@ -48,6 +48,7 @@ export function writeResultResponse(response: Response): Response {
 
 export type FieldRule =
   | { readonly type: "string" | "integer" | "number" | "boolean"; readonly nullable?: boolean; readonly required?: boolean }
+  | { readonly type: "stringArray"; readonly required?: boolean }
   | { readonly type: "object"; readonly fields: FieldRules; readonly required?: boolean };
 
 export type FieldRules = Readonly<Record<string, FieldRule>>;
@@ -64,7 +65,7 @@ function namedField(source: unknown, name: string): unknown {
 }
 
 function typedValue(value: unknown, rule: FieldRule): unknown {
-  if (value === null) return rule.type !== "object" && rule.nullable === true ? null : SKIP;
+  if (value === null) return rule.type !== "object" && rule.type !== "stringArray" && rule.nullable === true ? null : SKIP;
   switch (rule.type) {
     case "string":
       return typeof value === "string" ? value : SKIP;
@@ -74,6 +75,21 @@ function typedValue(value: unknown, rule: FieldRule): unknown {
       return typeof value === "number" && Number.isFinite(value) ? value : SKIP;
     case "boolean":
       return typeof value === "boolean" ? value : SKIP;
+    case "stringArray": {
+      // flair#2575: an array whose every entry is a string or null (a skill's
+      // `tags`, schema `[String]`), copied entry by entry; any other value or
+      // entry skips the field.
+      if (!Array.isArray(value)) return SKIP;
+      const length = namedField(value, "length");
+      if (!Number.isSafeInteger(length)) return SKIP;
+      const copy: (string | null)[] = [];
+      for (let i = 0; i < (length as number); i++) {
+        const entry = namedField(value, String(i));
+        if (typeof entry !== "string" && entry !== null) return SKIP;
+        copy.push(entry);
+      }
+      return copy;
+    }
     case "object": {
       if (!isPlainRecord(value)) return SKIP;
       const built = buildFromAllowlist(value, rule.fields);
@@ -118,6 +134,11 @@ export const STORED_TEXT_RULES: FieldRules = Object.freeze({
   content: Object.freeze({ type: "string" }),
   summary: Object.freeze({ type: "string" }),
   trigger: Object.freeze({ type: "string" }),
+  // flair#2575: a skill write's `stored` also names the skill fields its
+  // request supplied (resources/memory-redaction.ts, storedMemoryText).
+  name: Object.freeze({ type: "string" }),
+  description: Object.freeze({ type: "string" }),
+  tags: Object.freeze({ type: "stringArray" }),
 });
 
 export const REDACTION_RULES: FieldRules = Object.freeze({

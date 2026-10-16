@@ -163,9 +163,8 @@ function denialReturnEnd(body: string, call: string, denialField?: string): numb
   return match ? match.index + match[0].length : -1;
 }
 
-/** The end of `recordSkip("<reason>");` immediately followed by `continue;`; -1 otherwise. */
-function skipContinueEnd(src: string, reason: string): number {
-  const match = new RegExp(`recordSkip\\("${reason}"\\);\\s*continue;`).exec(src);
+function refusalReturnEnd(src: string, reason: string): number {
+  const match = new RegExp(`return\\s+\\{\\s*reason: "${reason}"\\s*\\};`).exec(src);
   return match ? match.index + match[0].length : -1;
 }
 
@@ -218,7 +217,7 @@ test("the listed entry paths run the decision, and its denial stops the path bef
   expectWritesAfter(feed, denialReturnEnd(feed, "reservedSeedFeedWriteDenial"), "FeedMemories.post", [...WRITES, "table.put(", "writeBackCommittedRow("]);
 
   const federation = readFileSync("resources/Federation.ts", "utf8");
-  const skip = skipContinueEnd(federation, "seed_id_not_federated");
+  const skip = refusalReturnEnd(federation, "seed_id_not_federated");
   expect(skip, "the seed skip does not stop the record").toBeGreaterThan(-1);
   expect(federation.indexOf("await writeBackCommittedRow(", skip)).toBeGreaterThan(skip);
 });
@@ -249,9 +248,9 @@ test("the listed entry paths run the .content-suffix id decision on the ids it w
   // The federation merge: the predicate runs on the id of the row it writes
   // (`mergedData`), the skip stops the record, and the put of that row follows.
   const federation = readFileSync("resources/Federation.ts", "utf8");
-  const guard = /if \(record\.table === "Memory" && endsWithContentSelectorSuffix\(mergedData\.id\)\) \{\s*recordSkip\("content_suffix_id_not_federated"\);\s*continue;/.exec(federation);
+  const guard = /if \(record\.table === "Memory" && endsWithContentSelectorSuffix\(mergedData\.id\)\) \{\s*return\s+\{\s*reason: "content_suffix_id_not_federated"\s*\};/.exec(federation);
   expect(guard, "the federation merge does not test endsWithContentSelectorSuffix(mergedData.id) before skipping, or the skip does not stop the record").not.toBeNull();
-  const skip = skipContinueEnd(federation, "content_suffix_id_not_federated");
+  const skip = refusalReturnEnd(federation, "content_suffix_id_not_federated");
   expect(skip).toBe(guard!.index + guard![0].length);
   expect(federation.indexOf("await writeBackCommittedRow(", skip), "the merge does not write the row the predicate checked after the skip").toBeGreaterThan(skip);
 });
