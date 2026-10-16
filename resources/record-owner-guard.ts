@@ -135,32 +135,38 @@ export function isMutatingMethod(method: string): boolean {
 }
 
 /**
- * Resolve a request path to the guarded table and record id it addresses, or
- * null when the path is not one this early check decides.
+ * Resolve a raw request target to the guarded table and record id it
+ * addresses, or null when the target is not one this early check decides.
  *
- * This is the middleware's early check, and it decides only the address form
- * whose decoded id is exactly the id Harper resolves: two path segments
- * (`/<Table>/<id>`), no trailing slash, and an id with no `.` (Harper may read
- * a `.` suffix as a content type or attribute and address a different id).
- * Every other form returns null. Other addressed forms of a table-backed route
- * (a dotted id, extra segments) use the guard on Harper's resolved id. On
- * POST/PUT/PATCH, its body-id check precedes stored ownership. For collection
- * PUT/PATCH/DELETE (including a trailing slash), if reached, the table guard
- * returns the collection refusal; existing DELETE middleware may refuse earlier.
- * A collection POST follows the resource's own rules.
- * The table segment is matched EXACTLY so `/SoulFeed/x` can never be read as a
- * `Soul` route.
+ * This is the middleware's early check. It reads the raw request target that
+ * Harper's REST layer routes (the path before any `?`, with no dot-segment
+ * resolution and no merging of slashes), not a normalized URL, and decides only
+ * the form `/<Table>/<id>`: exactly two non-empty segments after a single
+ * leading slash, and an id with no `.` once decoded (Harper may read a `.`
+ * suffix as a content type or attribute and address a different id). For that
+ * form, Harper resolves the same table and the same decoded id. Every other
+ * target returns null: a dotted id, more segments, an empty segment (a
+ * trailing, repeated or extra leading slash) or malformed percent-encoding.
+ * Other addressed forms of a table-backed route use the guard on Harper's
+ * resolved id. On POST/PUT/PATCH, its body-id check precedes stored ownership.
+ * For collection PUT/PATCH/DELETE (including a trailing slash), if reached, the
+ * table guard returns the collection refusal; existing DELETE middleware may
+ * refuse earlier. A collection POST follows the resource's own rules.
+ * The table segment is matched EXACTLY against the owner-scoped table names, so
+ * `/SoulFeed/x` can never be read as a `Soul` route.
  */
-export function resolveGuardedRecord(pathname: string): { table: string; ownerField: string; id: string } | null {
-  if (pathname.endsWith("/")) return null;
-  const parts = pathname.split("/").filter(Boolean);
-  if (parts.length !== 2) return null;
-  const table = parts[0];
+export function resolveGuardedRecord(requestTarget: string): { table: string; ownerField: string; id: string } | null {
+  const queryStart = requestTarget.indexOf("?");
+  const path = queryStart === -1 ? requestTarget : requestTarget.slice(0, queryStart);
+  // Empty segments are kept, not filtered: Harper keeps them in the id it resolves.
+  const parts = path.split("/");
+  if (parts.length !== 3 || parts[0] !== "") return null;
+  const [, table, rawId] = parts;
+  if (!Object.prototype.hasOwnProperty.call(OWNER_FIELDS, table) || !rawId) return null;
   const ownerField = OWNER_FIELDS[table];
-  if (!ownerField) return null;
   let id: string;
   try {
-    id = decodeURIComponent(parts[1]);
+    id = decodeURIComponent(rawId);
   } catch {
     return null; // malformed percent-encoding addresses no record we can resolve
   }

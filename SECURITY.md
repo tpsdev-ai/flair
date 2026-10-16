@@ -88,7 +88,10 @@ OrgEvent, WorkspaceState, Presence):
 
 - The middleware can return
   `403 forbidden: cannot modify <Table> owned by another principal` before the
-  table guard runs on `/<Table>/<id>` with no trailing slash or decoded `.`.
+  table guard runs on a request target of exactly `/<Table>/<id>` (two
+  non-empty path segments, no `.` in the decoded id), for which Harper resolves
+  the same record id. Other addressed forms are left to the guard, which uses
+  Harper's resolved id.
 - If reached, the guard checks a differing string or number body `id` on POST/PUT/PATCH
   first (`403 write_id_not_addressed`), then stored ownership (the same owner
   refusal), using Harper's resolved record id. An absent or matching body `id`

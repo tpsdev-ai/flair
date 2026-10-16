@@ -4,6 +4,8 @@
 //
 // Middleware can return the owner refusal first on a plain addressed URL.
 // If reached, the guard checks string or number body ids before stored ownership.
+// Whichever check decides, it decides on the id Harper resolves from the
+// request target (repeated or encoded slashes and dot segments included).
 // Collection PUT/PATCH/DELETE is refused; collection POST follows the resource.
 //
 // Each refusal case asserts three things: the status is 403, the body is
@@ -20,6 +22,7 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
+import { connect } from "node:net";
 import { join } from "node:path";
 import { HARPER_STOP_BUDGET_MS, startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
 import { ensureFlairAgentRole, ensureFlairAgentUser } from "../../src/cli";
@@ -86,6 +89,52 @@ async function send(a: TestAgent, method: string, path: string, body?: unknown):
     headers: { "Content-Type": "application/json", Authorization: ed25519Header(a, method, path) },
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
+}
+
+/**
+ * One signed HTTP/1.1 request whose request target is sent byte for byte as
+ * given. A client URL parser would merge or resolve some path forms before
+ * sending; this does not, so the test controls the target Harper routes. The
+ * signature covers the target as the auth middleware reconstructs it.
+ */
+async function sendRawTarget(a: TestAgent, method: string, target: string, body: unknown): Promise<{ status: number; text: string }> {
+  const base = new URL(harper.httpURL);
+  const payload = JSON.stringify(body);
+  const head = [
+    `${method} ${target} HTTP/1.1`,
+    `Host: ${base.host}`,
+    "Content-Type: application/json",
+    `Content-Length: ${Buffer.byteLength(payload)}`,
+    `Authorization: ${ed25519Header(a, method, target)}`,
+    "Connection: close",
+    "",
+    "",
+  ].join("\r\n");
+  const raw = await new Promise<Buffer>((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    const socket = connect(Number(base.port), base.hostname, () => socket.write(head + payload));
+    socket.setTimeout(20_000, () => socket.destroy(new Error(`no response to ${method} ${target}`)));
+    socket.on("data", (chunk) => chunks.push(chunk));
+    socket.on("end", () => resolve(Buffer.concat(chunks)));
+    socket.on("error", reject);
+  });
+  const split = raw.indexOf("\r\n\r\n");
+  expect(split, `malformed response to ${method} ${target}`).toBeGreaterThan(0);
+  const headLines = raw.subarray(0, split).toString("latin1").split("\r\n");
+  const status = Number(headLines[0].split(" ")[1]);
+  let rest = raw.subarray(split + 4);
+  if (headLines.some((l) => /^transfer-encoding:\s*chunked/i.test(l))) {
+    const parts: Buffer[] = [];
+    for (;;) {
+      const lineEnd = rest.indexOf("\r\n");
+      const size = parseInt(rest.subarray(0, lineEnd).toString("latin1"), 16);
+      if (!size) break;
+      parts.push(rest.subarray(lineEnd + 2, lineEnd + 2 + size));
+      rest = rest.subarray(lineEnd + 2 + size + 2);
+    }
+    rest = Buffer.concat(parts);
+  }
+  return { status, text: rest.toString("utf8") };
 }
 
 /** A signed request whose body bytes are sent exactly as given, labelled as JSON. */
@@ -530,6 +579,63 @@ describe("owner-scoped writes: non-admin addressed writes and collection PUT/PAT
         const ok = await send(caller, verb, path, wellFormed);
         expect(ok.status, `well-formed ${verb} ${path} returned ${ok.status}: ${await ok.text()}`).toBeLessThan(300);
         expect((await storedRow(s.table, s.pk, f.mineId))?.summary, `the well-formed ${verb} did not write the caller's row`).toBe("well-formed");
+      }, 30_000);
+    }
+  });
+
+  // ── The decision follows the id Harper resolves from the request target ───
+  // Each request target below is sent byte for byte. Harper resolves it to a
+  // record id (`resolved`) that differs from the plain id `r`. Two rows exist:
+  // `r` and the resolved id, each owned by a different principal. A caller that
+  // owns the resolved row writes it, and only it; a caller that owns `r` but
+  // not the resolved row is refused with the owner refusal. Both rows are read
+  // back in every case.
+  describe("an addressed write is decided on the id Harper resolves from the request target", () => {
+    const FORMS = [
+      { label: "a repeated slash before the id", target: (r: string) => `/Relationship//${r}`, resolved: (r: string) => `/${r}` },
+      { label: "a percent-encoded slash before the id", target: (r: string) => `/Relationship/%2F${r}`, resolved: (r: string) => `/${r}` },
+      { label: "a dot segment in the path", target: (r: string) => `/Relationship/${r}-x/../${r}`, resolved: (r: string) => `${r}-x/../${r}` },
+    ];
+    const rel = (id: string, agentId: string) => ({ id, agentId, subject: "s", predicate: "p", object: "orig", createdAt: NOW });
+
+    for (const form of FORMS) {
+      for (const verb of ["PATCH", "PUT"] as const) {
+        test(`Relationship: the caller's ${verb} through ${form.label} writes the caller's resolved row and leaves another principal's row r unchanged`, async () => {
+          const r = `osw-rel-tgt-${randomUUID().slice(0, 8)}`;
+          const resolved = form.resolved(r);
+          await seed("Relationship", rel(r, owner.id));
+          await seed("Relationship", rel(resolved, caller.id));
+          const otherBefore = await storedRow("Relationship", "id", r);
+          expect(otherBefore?.agentId).toBe(owner.id);
+
+          const object = `via-${verb.toLowerCase()}-${randomUUID().slice(0, 6)}`;
+          const body = verb === "PATCH" ? { object } : { id: resolved, agentId: caller.id, subject: "s", predicate: "p", object };
+          const res = await sendRawTarget(caller, verb, form.target(r), body);
+          expect(res.status, `${verb} ${form.target(r)} returned ${res.status}: ${res.text.slice(0, 200)}`).toBeLessThan(300);
+
+          const mine = await storedRow("Relationship", "id", resolved);
+          expect(mine?.object, "the caller's resolved row was not written").toBe(object);
+          expect(mine?.agentId).toBe(caller.id);
+          expect(await storedRow("Relationship", "id", r), "another principal's row r changed").toEqual(otherBefore);
+          const written = (await rowsWhere("Relationship", "object", object)).map((row) => row.id);
+          expect(written, "the write reached a row other than the resolved one").toEqual([resolved]);
+        }, 30_000);
+      }
+
+      test(`Relationship: a PATCH through ${form.label} to a resolved row owned by another principal is refused, even when the caller owns r`, async () => {
+        const r = `osw-rel-tgt-${randomUUID().slice(0, 8)}`;
+        const resolved = form.resolved(r);
+        await seed("Relationship", rel(r, caller.id));
+        await seed("Relationship", rel(resolved, owner.id));
+        const mineBefore = await storedRow("Relationship", "id", r);
+        const otherBefore = await storedRow("Relationship", "id", resolved);
+        expect(otherBefore?.agentId).toBe(owner.id);
+
+        const res = await sendRawTarget(caller, "PATCH", form.target(r), { object: "changed" });
+        expect(res.status, `PATCH ${form.target(r)} returned ${res.status}: ${res.text.slice(0, 200)}`).toBe(403);
+        expect(JSON.parse(res.text)).toEqual(RECORD_REFUSAL("Relationship"));
+        expect(await storedRow("Relationship", "id", resolved), "another principal's resolved row changed").toEqual(otherBefore);
+        expect(await storedRow("Relationship", "id", r), "the caller's row r changed").toEqual(mineBefore);
       }, 30_000);
     }
   });

@@ -1,7 +1,8 @@
 - **Owner-scoped addressed writes check body ids and stored ownership.**
   For non-admin writes through a table-extending resource, middleware can return
-  `403 forbidden: cannot modify <Table> owned by another principal` first on
-  `/<Table>/<id>` with no trailing slash or decoded `.`. If reached, the guard
+  `403 forbidden: cannot modify <Table> owned by another principal` first on a
+  request target of exactly `/<Table>/<id>` (two non-empty path segments, no `.`
+  in the decoded id), for which Harper resolves the same record id. If reached, the guard
   checks a differing string or number body `id` on `POST`/`PUT`/`PATCH` first
   (`403 write_id_not_addressed`), then stored ownership (the same owner refusal),
   using Harper's resolved record id. OrgEvent binds an addressed `POST`'s missing
