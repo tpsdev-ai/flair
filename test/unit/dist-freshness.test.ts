@@ -219,6 +219,20 @@ describe("dist freshness (flair#2583)", () => {
     });
   }
 
+  it("a probe app that links a stale Flair root is refused before any scratch install is created", async () => {
+    const { root } = makeTree();
+    stamp(join(root, "resources", "foo.ts"), NEW + 60_000); // the linked Flair root is stale
+    const app = mkdtempSync(join(tmpdir(), "flair-2583-probe-app-"));
+    roots.push(app);
+    mkdirSync(join(app, "resources"), { recursive: true });
+    writeFileSync(join(app, "config.yaml"), "rest: true\n");
+    expect(isFlairSourceRoot(app)).toBe(false); // the app itself is not checked
+    const before = new Set(readdirSync(tmpdir()).filter((n) => n.startsWith("flair-test-")));
+    await expect(startHarper({ cwd: app, harperBinDir: root })).rejects.toThrow(/freshness could not be verified/);
+    const created = readdirSync(tmpdir()).filter((n) => n.startsWith("flair-test-") && !before.has(n));
+    expect(created).toEqual([]);
+  });
+
   for (const unreadable of ["resources/foo.ts", "dist/resources/foo.js", "tsconfig.json", "package.json", "dist/build-info.json"]) {
     it(`startup refuses a dangling path at ${unreadable}`, async () => {
       const { root } = makeTree();
