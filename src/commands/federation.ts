@@ -12,6 +12,7 @@
  * non-strict entry into the strict check.
  */
 import { encodeRecordId } from "../lib/record-id-path.js";
+import { normalizeHubUrl } from "../lib/hub-url.js";
 import { PEER_STATUS, isPeerMemberStatus } from "../lib/peer-status.js";
 import { protoSafeRecord } from "../lib/proto-safe-record.js";
 import { Command } from "commander";
@@ -708,7 +709,8 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
     const auth = `Basic ${Buffer.from(`${resolveAdminUser(opts.adminUser)}:${adminPass}`).toString("base64")}`;
     const tables = ["Memory", "Soul", "Agent", "Relationship"];
     const instance = await api("GET", "/FederationInstance", undefined, apiOpts);
-    const hubUrl = hub.endpoint ?? hub.id;
+    // A stored endpoint with a trailing slash still yields `<hub>/FederationSync`.
+    const hubUrl = normalizeHubUrl(hub.endpoint ?? hub.id);
 
     // ── Batching constants ──────────────────────────────────────────────
     // 2MB JSON budget (server cap is 10MB; 2MB leaves headroom for headers
@@ -1467,7 +1469,11 @@ export function register(program: Command): void {
     .option("--token-from <file>", "Read bootstrap triple from JSON file (use '-' for stdin)")
     .option("--target <url>", "Remote Flair URL (env: FLAIR_TARGET)")
     .option("--ops-target <url>", "Explicit ops API URL (env: FLAIR_OPS_TARGET; bypasses port derivation)")
-    .action(async (hubUrl: string, opts: any) => {
+    .action(async (hubUrlArg: string, opts: any) => {
+      // Strip trailing slashes once, before the hub URL is used or stored, so
+      // the pairing request and the stored hub-peer endpoint never carry an
+      // empty path segment.
+      const hubUrl = normalizeHubUrl(hubUrlArg);
       const target = resolveTarget(opts);
       // flair#1873: resolve the SPOKE admin credential FIRST, before any
       // request. `--admin-pass-file` is read in-process (mode 0600 enforced),

@@ -53,7 +53,7 @@ describe("federation liveness ping on no-change sync", () => {
     setSystemTime();
   });
 
-  function installNoChangeMock(pingStatus: number = 200, onFirstTableQuery?: () => void) {
+  function installNoChangeMock(pingStatus: number = 200, onFirstTableQuery?: () => void, hubEndpoint: string = "http://hub:9926") {
     let advanced = false;
     globalThis.fetch = mock(async (urlInput: string | URL | Request, init?: RequestInit) => {
       const url = typeof urlInput === "string" ? urlInput : urlInput.toString();
@@ -62,7 +62,7 @@ describe("federation liveness ping on no-change sync", () => {
       capturedCalls.push({ url, body, method });
 
       if (method === "GET" && url.includes("/FederationPeers")) {
-        return res(true, 200, { peers: [{ id: "hub-1", role: "hub", status: "connected", endpoint: "http://hub:9926", lastSyncAt: "2025-01-01T00:00:00.000Z" }] });
+        return res(true, 200, { peers: [{ id: "hub-1", role: "hub", status: "connected", endpoint: hubEndpoint, lastSyncAt: "2025-01-01T00:00:00.000Z" }] });
       }
       if (method === "GET" && url.includes("/FederationInstance")) {
         return res(true, 200, { id: "spoke-alpha", publicKey: Buffer.from(testKp.publicKey).toString("base64url"), role: "spoke" });
@@ -77,7 +77,7 @@ describe("federation liveness ping on no-change sync", () => {
           publicKey: "hub-pk",
           role: "hub",
           status: "paired",
-          endpoint: "http://hub:9926",
+          endpoint: hubEndpoint,
           lastSyncAt: "2025-01-01T00:00:00.000Z",
         }]);
       }
@@ -133,6 +133,21 @@ describe("federation liveness ping on no-change sync", () => {
     expect(pingCall.body!._ts).toBeDefined();
     expect(pingCall.body!._nonce).toBeDefined();
     expect(pingCall.body!.signature).toBeDefined();
+  });
+
+  it("a stored hub endpoint with trailing slashes still pings `<hub>/FederationSync`", async () => {
+    for (const endpoint of ["http://hub:9926/", "http://hub:9926//", "http://hub:9926/flair/"]) {
+      capturedCalls = [];
+      installNoChangeMock(200, undefined, endpoint);
+
+      const { runFederationSyncOnce } = await import("../../src/cli");
+      await runFederationSyncOnce({ adminPass: "test-admin-pass", opsPort: "9925" });
+
+      const ping = capturedCalls.filter((c) => c.url.includes("/FederationSync") && c.method === "POST");
+      expect(ping, endpoint).toHaveLength(1);
+      expect(ping[0]!.url, endpoint).toBe(`${endpoint.replace(/\/+$/, "")}/FederationSync`);
+      expect(new URL(ping[0]!.url).pathname.includes("//"), endpoint).toBe(false);
+    }
   });
 
   it("sync succeeds even when liveness ping returns non-ok (warning only)", async () => {
