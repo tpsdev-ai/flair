@@ -89,10 +89,8 @@ export function loadWeights(path = WEIGHTS_FILE) {
 let weightsCache = null;
 
 /**
- * Measured wall seconds per integration file (repo-relative path). The table is
- * read and validated on first use, not at import: update-integration-shard-weights.mjs
- * imports this module and must run when the checked-in table is missing or
- * malformed, so it can replace it.
+ * Measured wall seconds per integration file (repo-relative path), loaded lazily
+ * so importing the updater does not read the table.
  */
 export function secondsByFile() {
   if (weightsCache === null) weightsCache = loadWeights();
@@ -129,6 +127,7 @@ export function assignShards(files, shards) {
   if (!Number.isInteger(shards) || shards < 1) {
     throw new Error(`shard count must be a positive integer, got ${shards}`);
   }
+  secondsByFile();
   const ordered = [...files].sort(
     (a, b) => weightOf(b) - weightOf(a) || (a < b ? -1 : 1),
   );
@@ -146,6 +145,7 @@ export function assignShards(files, shards) {
 /** Shard `index` (1-based) of `of`. Throws when the index is out of range. */
 export function shardFiles(index, of, files = listIntegrationFiles()) {
   if (!Number.isInteger(of) || of < 1) throw new Error(`--of must be a positive integer, got ${of}`);
+  secondsByFile();
   if (!Number.isInteger(index) || index < 1 || index > of) {
     throw new Error(`--shard must be 1..${of}, got ${index}`);
   }
@@ -158,6 +158,8 @@ export function shardFiles(index, of, files = listIntegrationFiles()) {
  * from the union means it would run in NO shard, which check must catch.
  */
 export function verifyShards(of, files = listIntegrationFiles()) {
+  if (!Number.isInteger(of) || of < 1) throw new Error(`--of must be a positive integer, got ${of}`);
+  secondsByFile();
   const all = new Set(files);
   const seen = new Set();
   const duplicated = [];

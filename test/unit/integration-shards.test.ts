@@ -275,13 +275,13 @@ describe("integration-shards — the weight updater over a bad existing table (#
       "2026-01-01T00:00:31.0000000Z ##[endgroup]",
     ].join("\n") + "\n";
 
-  // A scratch checkout with the two scripts, two integration files and a job
-  // log that names them; the checked-in table starts in the state under test.
-  function fixture(existing: string | null) {
+  // A scratch directory with copied scripts; the table starts in the state
+  // under test.
+  function fixture(existing: string | null, files = FILES) {
     const root = scratch("flair-shard-table-");
     mkdirSync(join(root, "scripts/ci"), { recursive: true });
     mkdirSync(join(root, "test/integration"), { recursive: true });
-    for (const file of FILES) {
+    for (const file of files) {
       writeFileSync(join(root, "test/integration", `${file}.test.ts`), "");
     }
     for (const script of ["integration-shards.mjs", "update-integration-shard-weights.mjs"]) {
@@ -331,6 +331,25 @@ describe("integration-shards — the weight updater over a bad existing table (#
       expect(r.stderr).toContain("shard weights file");
       expect(r.stdout).not.toContain("files covered");
     });
+  }
+
+  for (const args of [["--verify"], ["--shard", "1"]]) {
+    for (const [name, existing, error] of [
+      ["missing", null, "cannot read shard weights file"],
+      ["malformed", "{ not json", "cannot parse shard weights file"],
+    ] as const) {
+      test(`${args[0]} rejects a ${name} table with an empty integration directory`, () => {
+        const { root } = fixture(existing, []);
+        const r = spawnSync(
+          "node",
+          [join(root, "scripts/ci/integration-shards.mjs"), ...args, "--of", "1"],
+          { cwd: root, encoding: "utf8", timeout: 20_000 },
+        );
+        expect(r.status).toBe(1);
+        expect(r.stderr).toContain(error);
+        expect(r.stdout).toBe("");
+      });
+    }
   }
 });
 
