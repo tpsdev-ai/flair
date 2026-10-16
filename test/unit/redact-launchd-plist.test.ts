@@ -183,7 +183,7 @@ describe("--check — flags supported credential key/string pairs with non-REDAC
   });
 });
 
-describe("--check writes reports when --report is supplied (flair#2589)", () => {
+describe("a completed --check with --report writes its report (flair#2589)", () => {
   const fixtures = join(import.meta.dir, "..", "..", "scripts", "ci", "redact-fixtures");
 
   test("--check without a target exits 2 with a named usage error", () => {
@@ -239,7 +239,7 @@ describe("--check writes reports when --report is supplied (flair#2589)", () => 
     }
   });
 
-  test("a check that could not run leaves the report untouched", () => {
+  test("a target-read failure leaves the report untouched", () => {
     // The report is written only when the scan finishes. On a target that
     // cannot be read the scanner exits 2 and writes nothing, so a caller that
     // finds no finding record there falls back to could-not-run.
