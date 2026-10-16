@@ -206,8 +206,10 @@ describe("the visibility guard stays wired into the write paths (post, put, patc
     // trailing "(". put()'s call must see the EFFECTIVE durability — the
     // pre-existing row's when the update payload omits it — or a partial PUT
     // flipping a stored ephemeral row to shared sails past the guard.
-    // patch() also checks the effective durability and visibility.
-    expect(calls.length).toBe(3);
+    // patch() also checks the effective durability and visibility. The fourth
+    // is the grant-authorized supersede, which applies the rule to the
+    // visibility the successor carries from its predecessor.
+    expect(calls.length).toBe(4);
     expect(src).toContain("content.durability ?? preExisting?.durability");
   });
 });

@@ -3,4 +3,4 @@
 # module loads (flair#1853). The root bunfig.toml does not reach a `bun test`
 # run from a package dir, and CI runs some package suites that way. The preload
 # path is relative to THIS file.
-preload = ["../../test/helpers/sandbox-home.ts"]
+preload = ["../../test/helpers/bun-harper-spawn-guard.ts", "../../test/helpers/sandbox-home.ts"]
