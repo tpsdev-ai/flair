@@ -2614,8 +2614,8 @@ export class Memory extends (databases as any).flair.Memory {
         const putCarriedHash = putCarriedVector ? (content.embeddedContentHash ?? null) : null;
 
         // flair#744 slice A: citation-on-write — same consume-and-strip
-        // discipline as post() above. Strip BEFORE anything else touches
-        // `content` so it is never persisted on the row; recorded post-commit
+        // discipline as post() above. Stripped before persistence so it is
+        // never stored on the row; recorded post-commit
         // below only when present.
         const usedMemoryIds = content?.usedMemoryIds;
         if (content && typeof content === "object") delete content.usedMemoryIds;
@@ -2964,7 +2964,8 @@ export class Memory extends (databases as any).flair.Memory {
     // stored row carries per-row values that are not part of the write response
     // (`instanceToken`, `embedding`, `provenance`). Built this way, two otherwise
     // identical writes, one citing a memory the writer cannot read and one citing
-    // a nonexistent id, answer byte-identically (flair#775).
+    // a nonexistent id, answer identically once writer ids and timestamps are
+    // normalized: nothing in the answer depends on the cited id (flair#775).
     const result: any = putResult.result;
     // flair#1357 — read-your-write for the lexical leg (see post()).
     noteMemoryUpsert(putResult.content);

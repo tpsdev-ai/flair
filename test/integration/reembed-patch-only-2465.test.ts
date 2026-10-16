@@ -18,7 +18,9 @@
  * The re-embed is an owner PATCH and the competitor is an owner PUT, so BOTH
  * writers are owner verbs and the per-id memory write lock (flair#2478 slice 1)
  * serializes them: the writer that takes the lock first holds it, and the second
- * is refused `503 memory_busy` when it cannot take the lock within its budget or,
+ * is refused `503 memory_busy` when it cannot take the lock within its budget
+ * (or `503 write_outcome_unknown` if an attempt observes an outcome-unknown
+ * marker for the id), or,
  * if the first releases inside that budget, waits and then commits on the first's
  * committed row. The two interleavings this file used to force at a pre-write
  * pause point are therefore impossible by design; the cases below pin the lock

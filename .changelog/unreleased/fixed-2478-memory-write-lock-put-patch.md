@@ -11,8 +11,9 @@
   it answers 503 `write_outcome_unknown`; if the lock stays held for the whole
   budget it answers 503 `memory_busy`, and if the store has no lock the write is refused 503
   `memory_lock_unavailable` instead of running unserialized. Harper orders a
-  transaction by its first read, so the read, the decision and the commit share
-  one transaction (re-embed `PATCH` writes in an inner owned transaction) — a
+  transaction by its first read, so the authoritative row read, the decisions
+  drawn from that row and the commit share one transaction (preflight checks,
+  such as seed authorization, run under the lock before it opens) (re-embed `PATCH` writes in an inner owned transaction) — a
   background field-only write started later therefore folds around this older full update
   instead of being overwritten. After a normal storage result, the ordinary
   owned row write re-reads its id after commit and confirms the committed row
