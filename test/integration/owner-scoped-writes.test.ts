@@ -19,7 +19,7 @@ import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { HARPER_STOP_BUDGET_MS, startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
 import { ensureFlairAgentRole, ensureFlairAgentUser } from "../../src/cli";
 import { OWNER_FIELDS } from "../../resources/record-owner-guard.js";
 import { ownerScopedInventory, resourceClasses } from "../helpers/owner-scoped-resource-inventory";
@@ -244,7 +244,7 @@ describe("owner-scoped writes: non-admin addressed writes and collection PUT/PAT
     await seed("Agent", { id: adminAgent.id, name: adminAgent.id, role: "admin", publicKey: adminAgent.publicKey, createdAt: NOW });
   }, 240_000);
 
-  afterAll(async () => { if (harper) await stopHarper(harper); });
+  afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
 
   for (const s of SPECS) {
     describe(s.table, () => {
