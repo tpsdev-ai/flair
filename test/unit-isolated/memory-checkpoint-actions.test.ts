@@ -17,7 +17,7 @@ afterAll(() => rmSync(dir, { recursive: true, force: true }));
 const calls: { url: string; body: Record<string, unknown>; auth: string | null }[] = [];
 let rows = [{ id: "memory-a", durability: "permanent" }, { id: "memory-b", durability: "standard" }];
 
-async function action(args: string[], afterCount?: number) {
+async function action(args: string[], afterCount?: number, inheritedUser = "admin") {
   let countReads = 0;
   const originalFetch = globalThis.fetch;
   const originalExit = process.exit;
@@ -28,7 +28,7 @@ async function action(args: string[], afterCount?: number) {
   const output: string[] = [];
   const exited = Symbol("exit");
   let code = 0;
-  process.env.FABRIC_USER = "admin";
+  process.env.FABRIC_USER = inheritedUser;
   delete process.env.FLAIR_OPS_TARGET;
   globalThis.fetch = (async (url, init) => {
     const body = JSON.parse(String(init?.body));
@@ -56,7 +56,7 @@ async function action(args: string[], afterCount?: number) {
 }
 
 function memoryArgs(command: string, path = checkpoint) {
-  return ["memory", command, "--target", target, "--fabric-password-file", password, "--checkpoint", path];
+  return ["memory", command, "--target", target, "--fabric-user", "admin", "--fabric-password-file", password, "--checkpoint", path];
 }
 
 function projection() {
@@ -89,13 +89,15 @@ function deployArgs(path: string) {
 }
 
 describe("Memory checkpoint Commander actions", () => {
-  test("checkpoint and verify use password-file credentials and the Fabric ops port", async () => {
+  test("checkpoint and verify use admin password-file credentials despite a different FABRIC_USER", async () => {
     calls.length = 0;
-    const saved = await action(memoryArgs("checkpoint"));
+    const saved = await action(memoryArgs("checkpoint"), undefined, "cluster-admin");
     expect(saved.code).toBe(0);
     expect(saved.output).toContain("Checkpoint written");
     expect(JSON.parse(readFileSync(checkpoint, "utf8")).ids).toEqual(["memory-a", "memory-b"]);
-    const verified = await action(memoryArgs("verify"));
+    projection();
+    calls.length = 0;
+    const verified = await action(memoryArgs("verify"), undefined, "cluster-admin");
     expect(verified.code).toBe(0);
     expect(verified.output).toContain("VERIFIED");
     projection();

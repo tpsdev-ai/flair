@@ -618,7 +618,7 @@ export function register(program: Command): void {
     memory
       .command("checkpoint")
       .description("Write this instance's Memory ids and per-tier counts to an operator-held checkpoint (mode 0600) before a planned cluster operation")
-      .requiredOption("--target <url>", "Instance served URL; operations API address is derived unless --ops-target is set")
+      .requiredOption("--target <url>", "Instance served URL; operations API address is derived unless --ops-target or FLAIR_OPS_TARGET is set")
       .option("--checkpoint <path>", "Checkpoint file path (default: ~/.flair/memory-id-checkpoint.json)"),
   ).action(async (opts: any) => {
     const { user, pass } = requireCredentials(opts, "flair memory checkpoint");

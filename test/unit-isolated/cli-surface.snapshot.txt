@@ -2174,7 +2174,7 @@ flair memory checkpoint
   usage: [options]
   options:
     --target <url>
-      description: Instance served URL; operations API address is derived unless --ops-target is set
+      description: Instance served URL; operations API address is derived unless --ops-target or FLAIR_OPS_TARGET is set
       attr: target
       mandatory: true
     --checkpoint <path>
@@ -5368,7 +5368,8 @@ checkpoint (mode 0600) before a planned cluster operation
 
 Options:
   --target <url>                 Instance served URL; operations API address is
-                                 derived unless --ops-target is set
+                                 derived unless --ops-target or FLAIR_OPS_TARGET
+                                 is set
   --checkpoint <path>            Checkpoint file path (default:
                                  ~/.flair/memory-id-checkpoint.json)
   --ops-target <url>             Operations API URL override (env:

@@ -38,13 +38,13 @@ async function remove(id: string) {
   await post({ operation: "delete", database: "flair", table: "Memory", ids: [id] });
 }
 
-async function command(args: string[]) {
+async function command(args: string[], inheritedUser = harper.admin.username) {
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
     if (value !== undefined && !/^(FLAIR_|FABRIC_|HARPER_|HDB_)/.test(key)) env[key] = value;
   }
   const child = Bun.spawn(["node", cliPath, ...args], {
-    env: { ...env, HOME: dir, USERPROFILE: dir, FABRIC_USER: harper.admin.username },
+    env: { ...env, HOME: dir, USERPROFILE: dir, FABRIC_USER: inheritedUser },
     stdout: "pipe", stderr: "pipe", timeout: 30_000,
   });
   const [stdout, stderr, code] = await Promise.all([
@@ -106,9 +106,9 @@ afterAll(async () => {
 }, 60_000);
 
 describe("Memory checkpoint actions and real Harper", () => {
-  test("documented served-target commands resolve the separate ops port and password file", async () => {
+  test("documented credentials override inherited FABRIC_USER", async () => {
     requests.length = 0;
-    const checkpoint = await command(memoryArgs("checkpoint"));
+    const checkpoint = await command([...memoryArgs("checkpoint"), "--fabric-user", "admin"], "cluster-admin");
     expect(checkpoint.code, checkpoint.output).toBe(0);
     expect(checkpoint.output).toContain("Checkpoint written");
     const read = readCheckpointFile(checkpointFile);
@@ -117,7 +117,7 @@ describe("Memory checkpoint actions and real Harper", () => {
     for (const row of seed) expect(read.checkpoint.ids).toContain(row.id);
     expect(read.checkpoint.node).toBe(proxy.url.origin);
     expect(readFileSync(checkpointFile, "utf8")).not.toContain("fixture content");
-    const result = await command(memoryArgs("verify"));
+    const result = await command([...memoryArgs("verify"), "--fabric-user", "admin"], "cluster-admin");
     expect(result.code, result.output).toBe(0);
     expect(result.output).toContain("VERIFIED");
     expect(result.output).toContain("no tier-count drop");

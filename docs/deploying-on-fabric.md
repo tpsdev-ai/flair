@@ -339,12 +339,12 @@ before the operation, then verify after:
 
 ```bash
 flair memory checkpoint --target https://<cluster>.<org>.harperfabric.com \
-  --fabric-password-file ~/.tps/secrets/flair-fabric-hdb
+  --fabric-user admin --fabric-password-file ~/.tps/secrets/flair-fabric-hdb
 
 # ... the planned cluster operation ...
 
 flair memory verify --target https://<cluster>.<org>.harperfabric.com \
-  --fabric-password-file ~/.tps/secrets/flair-fabric-hdb
+  --fabric-user admin --fabric-password-file ~/.tps/secrets/flair-fabric-hdb
 ```
 
 The checkpoint command reads Memory ids and durability tiers through the admin operations
