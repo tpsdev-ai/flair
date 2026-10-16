@@ -42,8 +42,9 @@
   ordinary `PUT`'s regen and its create-path dedup probe, the re-embed `PATCH`'s
   compute and its recompute, and the `PATCH` embedding refresh. For a server-computed
   vector, text/vector parity is protected against writers serialized by this lock; a
-  change after confirmation is not seen. A caller-supplied vector (PUT or PATCH) is
-  stored as given and is not validated against the text. A provider call still pending when the timeout callback runs, or one
+  change after confirmation is not seen. On ordinary PUT/PATCH paths, a caller-supplied
+  vector is not checked against the text. If it survives redaction and the write
+  succeeds, it is stored as supplied; redaction of the embedding source can discard it. A provider call still pending when the timeout callback runs, or one
   that settles after the bound, refuses that write 503 `memory_provider_timeout`
   and writes nothing; an in-process timeout cannot preempt a provider that never
   yields the event loop. An
