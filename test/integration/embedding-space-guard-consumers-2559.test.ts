@@ -192,7 +192,7 @@ gate("MemoryBootstrap's task-relevant selection consults the guard against a rea
     const res = await fetch(`${h!.httpURL}${path}`, {
       method: "POST",
       headers: { Authorization: ed25519Header("POST", path), "Content-Type": "application/json" },
-      body: JSON.stringify({ agentId: AGENT, currentTask: "federation replication direction" }),
+      body: JSON.stringify({ agentId: AGENT, currentTask: "federation direction" }),
       signal: AbortSignal.timeout(60_000),
     });
     const text = await res.text();
@@ -210,7 +210,7 @@ gate("MemoryBootstrap's task-relevant selection consults the guard against a rea
     process.env[TEST_FAULT_INJECTION_ENV] = "1";
     process.env[TEST_PAUSE_DIR_ENV] = pauseDir;
     try {
-      h = await startHarper();
+      h = await startHarper({ env: { FLAIR_RETRIEVAL_MODE: "vector-only" } });
     } finally {
       for (const [key, value] of Object.entries(saved)) {
         if (value === undefined) delete process.env[key];

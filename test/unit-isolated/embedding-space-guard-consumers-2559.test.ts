@@ -33,7 +33,7 @@ mock.module("../../resources/dedup-cluster.ts", () => ({
   REM_DEDUP_STATS_PATH: statsPath,
 }));
 process.env.FLAIR_RATE_LIMIT_ENABLED = "false";
-process.env.FLAIR_HYBRID_RETRIEVAL = "false"; // legacy HNSW-only path — no BM25 index service to stand up
+process.env.FLAIR_RETRIEVAL_MODE = "vector-only";
 delete (process.env as any).FLAIR_PUBLIC;
 
 const CURRENT = "gguf:nomic-embed-text-v1.5-Q4_K_M+searchprefix";
@@ -135,6 +135,7 @@ const databasesMock = { flair };
 mock.module("harper", () => ({ databases: databasesMock, Resource: class {}, server: { getUser: async () => null } }));
 
 const { BootstrapMemories } = await import("../../resources/MemoryBootstrap.ts");
+const { SemanticSearch } = await import("../../resources/SemanticSearch.ts");
 const { MemoryDedupStats } = await import("../../resources/MemoryDedupStats.ts");
 const { recomputeLatch, _resetGuardForTests, _setGuardTableGetterForTests } = await import("../../resources/embedding-space-guard.ts");
 const { _resetLocalInstanceIdCacheForTests } = await import("../../resources/instance-identity.ts");
@@ -229,6 +230,37 @@ describe("MemoryBootstrap's task-relevant selection consults the guard (flair#25
     expect(res.memories.map((m: any) => m.id)).not.toContain("m1");
     expect(String(res._warning)).toContain("embedding space not yet verified");
     expect(String(res._warning)).not.toContain("non-current embedding model stamp was observed");
+  });
+
+  it.each(["mixed", "unverified", "scan-failed"])("(%s) retrieves separated task terms in vector-only mode", async (state) => {
+    seedReachableRow("m1", AGENT, "federation replication direction", CURRENT, FAKE_EMBEDDING);
+    if (state === "mixed") {
+      seedReachableRow("f1", OTHER, "foreign-space finding", FOREIGN, OTHER_SPACE_VEC);
+      expect(await recomputeLatch()).toBe(false);
+    } else if (state === "scan-failed") {
+      _setGuardTableGetterForTests(async () => { throw new Error("scan unavailable"); });
+      expect(await recomputeLatch()).toBe(false);
+    }
+
+    const res: any = await makeBootstrap(AGENT).post({ agentId: AGENT, currentTask: "federation direction" });
+    expect(res.memories).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "m1", section: "relevant" }),
+    ]));
+    expect(res._warning).toBeTruthy();
+  });
+});
+
+describe("SemanticSearch's guarded vector-only retrieval", () => {
+  it("retrieves separated query terms on a mixed verdict", async () => {
+    seedReachableRow("m1", AGENT, "federation replication direction", CURRENT, FAKE_EMBEDDING);
+    seedReachableRow("f1", OTHER, "foreign-space finding", FOREIGN, OTHER_SPACE_VEC);
+    expect(await recomputeLatch()).toBe(false);
+    const search: any = new (SemanticSearch as any)();
+    search.getContext = () => ({ request: { tpsAgent: AGENT, tpsAgentIsAdmin: false } });
+
+    const res: any = await search.post({ agentId: AGENT, q: "federation direction" });
+    expect(res.results.map((r: any) => r.id)).toContain("m1");
+    expect(String(res._warning)).toContain("non-current embedding model stamp was observed");
   });
 });
 

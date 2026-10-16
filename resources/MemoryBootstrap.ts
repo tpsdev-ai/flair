@@ -1121,7 +1121,6 @@ export class BootstrapMemories extends Resource {
     tokenBudget += taskReserve;
     if (currentTask && tokenBudget <= 0) taskRetrievalHint = "Task retrieval skipped: no content budget remains.";
     if (currentTask && tokenBudget > 0) {
-      // Resolve the mode ONCE here so the embedding guard and the core agree.
       // The bm25-only arm ranks on the lexical leg alone and needs NO query
       // embedding — gating it on one being available would skip the lexical
       // search entirely and lose task-relevant memories for no reason.
@@ -1182,23 +1181,7 @@ export class BootstrapMemories extends Resource {
           queryEmbedding,
           conditions: [scope.condition, { attribute: "archived", comparator: "not_equal", value: true }],
           limit: candidatePoolK,
-          // flair#1246 — ONE RANKER, ONE SCALE: this pass now invokes the
-          // core in the SAME mode memory_search does (hybrid + q via the
-          // shared retrievalMode() selector, so the FLAIR_RETRIEVAL_MODE /
-          // FLAIR_HYBRID_RETRIEVAL kill-switch moves BOTH surfaces together —
-          // a split mode IS the #1246 bug). HNSW-only here was an accident of early code, and it
-          // made bootstrap's teammate picks diverge from search on the same
-          // store+query: a record whose task-relevance is LEXICAL (exact task
-          // terms in semantically-atypical prose) ranks BELOW bland-generic
-          // noise on pure cosine (measured at N=21: on-task 0.5656 vs noise
-          // 0.6086 — HNSW rank 6 while search fused it to rank 1), and at
-          // field scale (corpus >> candidatePoolK) that inversion becomes
-          // exclusion from the K-bounded pool entirely. The BM25 leg is the
-          // rescue: it admits the record at lexical rank 1 and union-RRF
-          // fusion carries it to the top, same as search. Perf (Kern-ratified
-          // trade): the BM25 corpus scan this adds to the bootstrap path is
-          // the same per-call scan every memory_search request already runs.
-          mode,
+          mode: spaceGuardVerdict && mode === "vector-only" ? "bm25-only" : mode,
           // The lexical leg — same query text the embedding was computed
           // from, so both legs rank the same question (parity with search,
           // where `q` drives BM25 and the keyword bump).

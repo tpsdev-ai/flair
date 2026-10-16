@@ -311,7 +311,7 @@ export class SemanticSearch extends Resource {
       minScore,
       agentId,
       isAllowed: scope?.isAllowed,
-      mode,
+      mode: spaceGuardVerdict && mode === "vector-only" ? "bm25-only" : mode,
       ctx,
       onLegs: includeLegs ? (l) => { legs = l; } : undefined,
       // flair#744 slice 1: the trust block needs `provenance`, which the
