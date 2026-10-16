@@ -274,7 +274,7 @@ export function readCheckpointFile(path: string): CheckpointRead {
     if (new URL(node).host !== parsed.host) {
       return { kind: "unreadable", reason: "checkpoint host does not match its origin" };
     }
-    return { kind: "ok", checkpoint: { ...parsed, node } };
+    return { kind: "ok", checkpoint: Object.assign(Object.create(null), parsed, { node }) };
   } catch {
     return { kind: "unreadable", reason: "checkpoint is not valid JSON or has an invalid origin" };
   }

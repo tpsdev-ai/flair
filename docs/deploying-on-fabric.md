@@ -333,10 +333,9 @@ Full path: [upgrade.md](upgrade.md#upgrading-a-fabric-deployed-instance).
 
 ### Memory ids: operator-run checkpoint and post-operation check
 
-Component convergence is not data convergence. `flair fleet verify` and the deploy's own
-convergence check compare component files and versions; a component tree can converge
-while a durable Memory row is gone. Checkpoint the instance's Memory ids before the
-operation, then verify after:
+`flair fleet verify` probes health and version. Deploy's replication-error check compares
+component-tree metadata. Neither checks Memory rows. Checkpoint the instance's Memory ids
+before the operation, then verify after:
 
 ```bash
 flair memory checkpoint --target https://<cluster>.<org>.harperfabric.com \
@@ -358,10 +357,10 @@ The verify command re-reads the same operations origin and compares:
 - **verified** (exit 0) — checkpointed ids present and no tier-count drop; new ids are fine;
 - **integrity failure** (exit 2) — a checkpointed id is gone, or a durability tier count
   dropped; the report names the count of missing ids and up to ten ids;
-- **unknown** (exit 3) — the instance, a page, or the whole table could not be read.
-  Unknown is not reported as verified.
+- **unknown** (exit 3) — the comparison could not be completed: for example, an unreadable
+  checkpoint, a different operations origin, a failed read, or a count change.
 
-A different origin (scheme, host or port) is refused.
+An absent checkpoint exits 1 without a verification outcome.
 
 `flair deploy` also takes `--memory-checkpoint <path>`: after the deploy it runs the same
 verify and adds a `Memory id/tier check:` line to the report; an integrity failure does not

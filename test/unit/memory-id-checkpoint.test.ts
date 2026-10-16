@@ -192,6 +192,7 @@ describe("flair#2218 — checkpoint file", () => {
       const read = readCheckpointFile(path);
       expect(read.kind).toBe("ok");
       if (read.kind === "ok") {
+        expect(Object.getPrototypeOf(read.checkpoint)).toBeNull();
         expect(read.checkpoint.ids).toEqual(["mem-1", "mem-2"]);
         expect(read.checkpoint.byDurability).toEqual({ permanent: 1, persistent: 0, standard: 0, ephemeral: 1 });
         expect(read.checkpoint.host).toBe("node-a.example.invalid");

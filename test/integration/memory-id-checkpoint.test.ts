@@ -188,6 +188,16 @@ describe("Memory checkpoint actions and real Harper", () => {
     } finally { await insert("c-drop"); }
   }, 60_000);
 
+  test("deploy action reports a missing checkpointed id and exits 0", async () => {
+    await remove("c-drop");
+    try {
+      const result = await command(deployArgs(checkpointFile));
+      expect(result.output).toContain("Memory id/tier check: INTEGRITY FAILURE");
+      expect(result.output).toContain("c-drop");
+      expect(result.code, result.output).toBe(0);
+    } finally { await insert("c-drop"); }
+  }, 60_000);
+
   test("verify action returns unknown for an unreachable ops port", async () => {
     const closed = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
     const target = closed.url.origin;

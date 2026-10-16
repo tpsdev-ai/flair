@@ -652,8 +652,9 @@ export function register(program: Command): void {
       .addHelpText("after", `
 Exit codes:
   0  verified — checkpointed ids present and no tier-count drop; new ids are fine
+  1  absent checkpoint — no verification outcome
   2  integrity failure — a checkpointed Memory id is missing, or a durability tier count dropped
-  3  unknown — the instance, a page, or the whole table could not be read; never reported as verified
+  3  unknown — comparison could not be completed: e.g. unreadable checkpoint, different operations origin, failed read, or count change
 `),
   ).action(async (opts: any) => {
     const { user, pass } = requireCredentials(opts, "flair memory verify");
