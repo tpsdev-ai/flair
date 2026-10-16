@@ -291,12 +291,15 @@ plan with `publicKey` different from stored `pending` is skipped whole as
 Peer non-convergence is the consequence for a copy B already holds. Registration
 writes only A's local tables; when B already holds a pending copy and A's
 registered-key row later reaches B through a sync, the skip rule leaves that copy
-exactly `pending`. B's `POST /AgentKeyRegister` will not complete it either: B
-stamps sync provenance on a row it receives through a sync, and a sync-originated
-copy (or one whose `originatorInstanceId` names another instance, when A's row
-carries one) is refused as `agent_not_local`. The two instances therefore do not
-converge on one key for that copy: syncing A's registered-key row cannot complete
-B's pending copy, and that key needs direct action on B. The remedy is on B, for
+exactly `pending`. Sync alone therefore does not converge that copy. Whether B's
+own `POST /AgentKeyRegister` can complete it depends on how B's copy was created:
+B stamps sync provenance on a row it receives through a sync, and a copy that
+carries sync provenance (or whose `originatorInstanceId` names another instance)
+is refused there as `agent_not_local`. A pending copy created locally on B, with
+neither marker, is a local agent: B's own registration can complete it. For a
+sync-originated or foreign-home copy, the two instances do not converge on one
+key: syncing A's registered-key row cannot complete B's pending copy, and that
+key needs direct action on B. The remedy is on B, for
 a sync-originated or foreign-home copy: B's administrator writes the agent's
 public key (the one registered on A) onto B's copy through B's operations API,
 an `update` of `flair.Agent` with `{id, publicKey, updatedAt}`. That is the raw
