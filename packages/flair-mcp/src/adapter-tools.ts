@@ -114,16 +114,29 @@ function storedTextOf(
  * sits in `stored` rather than at the top level of a flair.memory.write
  * result. This returns that text in the shape storedTextOf reads, as
  * flair-client does for memory_store: `stored.content` and `stored.trigger`,
- * or `contentWithheld: true` when `stored` carries no `content` string. With
- * no redaction count it returns null, so the reply previews the input as
- * before.
+ * plus the skill's `stored.name`/`stored.description`/`stored.tags`
+ * (flair#2575), or `contentWithheld: true` when `stored` carries no `content`
+ * string. With no redaction count it returns null, so the reply previews the
+ * input as before.
  */
 function storedWriteOf(response: unknown, redactedValues: number): Record<string, unknown> | null {
   if (redactedValues <= 0) return null;
   const stored = (response as { stored?: unknown } | null)?.stored;
   const text = stored && typeof stored === "object" && !Array.isArray(stored) ? (stored as Record<string, unknown>) : null;
   if (typeof text?.content !== "string") return { contentWithheld: true };
-  return { content: text.content, ...(typeof text.trigger === "string" ? { trigger: text.trigger } : {}) };
+  const out: Record<string, unknown> = { content: text.content };
+  for (const field of ["trigger", "name", "description"] as const) {
+    if (typeof text[field] === "string") out[field] = text[field];
+  }
+  if (Array.isArray(text.tags)) out.tags = text.tags;
+  return out;
+}
+
+/** The skill_store reply's `Name:` line after a redaction comes from the stored
+ *  `name` (never the input); with no count, from the input as before. */
+function storedNameOf(written: Record<string, unknown> | null, inputName: unknown, redactedValues: number): string | null {
+  if (redactedValues > 0) return typeof written?.name === "string" ? (written.name as string) : null;
+  return typeof inputName === "string" && inputName.length > 0 ? inputName : null;
 }
 
 /** The preview line for a counted redaction whose stored text was not
@@ -412,15 +425,16 @@ const skill_store: StdioHandler = async (
     const redactedValues = redactedValuesOf(result);
     // flair#2541 — with a redaction count, the preview and the trigger line
     // come only from the stored text the write response returned
-    // (storedWriteOf, storedTextOf), never the input; the name is metadata,
-    // which the server does not redact.
+    // (storedWriteOf, storedTextOf), never the input; flair#2575 — the name
+    // line comes from the stored `name` the same way.
     const written = storedWriteOf(result, redactedValues);
     const stored = storedTextOf(written, content, redactedValues);
     const storedTrigger = storedTextOf(written, trigger ?? "", redactedValues, "trigger");
+    const storedName = storedNameOf(written, name, redactedValues);
     const lines = [
       `Skill stored (id: ${writtenId})`,
       stored === null ? withheldPreview(redactedValues) : `Preview: ${previewOf(stored)}`,
-      name ? `Name: ${name}` : undefined,
+      storedName ? `Name: ${storedName}` : undefined,
       storedTrigger ? `Trigger: ${storedTrigger}` : undefined,
       redactedValues > 0 ? `Redacted ${redactedValues} credential-shaped value(s) before storing.` : undefined,
     ].filter((line): line is string => line != null);

@@ -4,7 +4,7 @@ import { storageResult } from "./memory-write-response.js";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { recordVersion, readHead, skillRefReadable, SKILL_SUBJECT_TYPE, type RecordVersionOutcome } from "./instruction-version-record.js";
-import { SKILL_TAG, enforceSkillDurability, skillEmbedText } from "./skill-write.js";
+import { SKILL_TAG, enforceSkillDurability, skillEmbedText, skillMetadataHasDuplicateKey } from "./skill-write.js";
 import { stripUndeclaredMemoryAttributes } from "./memory-declared-attributes.js";
 import { skillWriteSource } from "./skill-write-policy.js";
 import type { AgentAuthVerdict } from "./agent-auth.js";
@@ -164,6 +164,9 @@ export async function prepareSkillBody(content: any, stored: Record<string, any>
   const source = stored ?? predecessor ?? {};
   const effective = { ...source, ...content };
   effective.tags = content.tags ?? (rowIsSkill(stored) ? stored!.tags : predecessor?.tags);
+  if (skillMetadataHasDuplicateKey(effective.metadata)) {
+    return Response.json({ error: "skill_metadata_duplicate_key" }, { status: 400 });
+  }
   const textUnchanged = skillEmbedText(effective) === skillEmbedText(source);
   if (content.embedding === undefined && !textUnchanged) {
     effective.embedding = null;

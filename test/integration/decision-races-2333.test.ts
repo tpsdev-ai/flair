@@ -20,7 +20,7 @@ import { join } from "node:path";
 import nacl from "tweetnacl";
 import { SignJWT, exportJWK, generateKeyPair } from "jose";
 import { sealMessage, type MessageEnvelope } from "../../resources/relay-lib.js";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { ensureFlairAgentRole, ensureFlairAgentUser } from "../../src/cli";
 
 // A production Flair's HTTP and ops API ports: this test must never target them.
@@ -312,7 +312,7 @@ afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (jwksServer) jwksServer.close();
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair#2333 slice 3 — decision writes serialize within one Harper process (real Harper)", () => {
   // ── H6 relay send ──────────────────────────────────────────────────────────

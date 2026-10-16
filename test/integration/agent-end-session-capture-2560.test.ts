@@ -29,7 +29,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import nacl from "tweetnacl";
-import { HarperInstance, startHarper, stopHarper } from "../helpers/harper-lifecycle";
+import { HARPER_STOP_BUDGET_MS, HarperInstance, startHarper, stopHarper } from "../helpers/harper-lifecycle";
 import { FlairClient } from "../../packages/flair-client/src/client";
 import plugin from "../../packages/openclaw-flair/index.ts";
 
@@ -122,7 +122,7 @@ describe("flair#2560 — a session-keyed agent_end capture reads back from real 
   afterAll(async () => {
     if (harper) await stopHarper(harper);
     if (keyDir) await rm(keyDir, { recursive: true, force: true, maxRetries: 4 });
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   /** A plugin host wired to the running Harper for the single allowed agent. */
   function hostForCapture(): ReturnType<typeof makeHost> {

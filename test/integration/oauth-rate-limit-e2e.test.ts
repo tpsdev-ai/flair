@@ -14,7 +14,7 @@
 // MODEL: test/integration/oauth-authorize-authz.test.ts.
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 const ALLOWED_REDIRECT_URI = "https://claude.com/api/mcp/auth_callback";
 // Registration is gated (see resources/dcr-gate.ts); this instance opts in so
@@ -106,7 +106,7 @@ describe("OAuth rate limiting (real Harper, real HTTP)", () => {
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;
     }
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   // ── POSITIVE CONTROL ──────────────────────────────────────────────────────
 
@@ -270,7 +270,7 @@ describe("OAuth rate limiting keys per caller (trusted-proxy mode, real Harper)"
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;
     }
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test("one caller's exhausted budget does not limit a DIFFERENT caller", async () => {
     // With one trusted hop the rightmost X-Forwarded-For entry is the key, so

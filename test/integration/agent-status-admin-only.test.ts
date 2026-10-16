@@ -31,7 +31,7 @@ import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { componentWithReplayProbe, type ProbeComponent, type ProbeFiles } from "../helpers/component-with-replay-probe";
 
 /** The test-only resource that calls the Agent resource with internalContext(). */
@@ -121,7 +121,7 @@ describe("flair#2108 — a PUT or PATCH that includes Agent.status needs an admi
   afterAll(async () => {
     if (harper) await stopHarper(harper);
     composed?.cleanup();
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test("an administrator can set a principal's status", async () => {
     const path = `/Agent/${target.id}`;

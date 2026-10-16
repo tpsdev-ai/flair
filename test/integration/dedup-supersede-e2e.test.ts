@@ -31,7 +31,7 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 // ─── Crypto / header helpers (same pattern as ed25519-auth-hnsw.test.ts /
 //      auth-middleware-e2e.test.ts) ──────────────────────────────────────────
@@ -199,7 +199,7 @@ describe("dedup / supersede / memory_update e2e (real Harper)", () => {
 
   afterAll(async () => {
     if (harper) await stopHarper(harper);
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   // ═══════════════════════════════════════════════════════════════════════
   // Scenario 1 — #526 replay: two topically-close but DISTINCT writes both

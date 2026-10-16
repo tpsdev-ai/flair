@@ -23,7 +23,7 @@ import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import nacl from "tweetnacl";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS, HARPER_START_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 const CLI = join(process.cwd(), "dist", "cli.js");
 // flair#1807: the child's OWN deadline + a per-case budget. Each case issues
@@ -88,12 +88,12 @@ function runCli(args: string[], extraEnv: Record<string, string> = {}): Promise<
 beforeAll(async () => {
   harper = await startHarper();
   cliHome = await mkdtemp(join(tmpdir(), "flair-fleet-doctor-home-"));
-}, 120_000);
+}, HARPER_START_BUDGET_MS);
 
 afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (cliHome) await rm(cliHome, { recursive: true, force: true, maxRetries: 4 });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 const httpPort = () => new URL(harper.httpURL).port;
 const opsPort = () => new URL(harper.opsURL).port;

@@ -49,7 +49,7 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 // NOTE: nothing from resources/ is imported here on purpose — those modules
 // import `harper`, and importing it into the TEST process (rather than the
 // spawned instance) fails with "Unable to determine database storage path".
@@ -172,7 +172,7 @@ beforeAll(async () => {
   }
 }, 240_000);
 
-afterAll(async () => { if (harper) await stopHarper(harper); });
+afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
 
 describe("flair#1357 — real-Harper premises of the persistent BM25 index", () => {
   test("PREMISE 1: the multi-agent scope scan is NOT primary-key order — own rows lead", async () => {

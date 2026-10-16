@@ -161,8 +161,13 @@ export async function startReplicatedPair(opts: { mutateConfig?: (shipped: strin
     throw err;
   }
   const stop = async () => {
-    try { await stopHarper(b!); } catch { /* best effort */ }
-    try { await stopHarper(a); } catch { /* best effort */ }
+    // flair#2568: both nodes at once, so the two stops settle within one stop
+    // deadline rather than two; the work-dir removals below follow them. Best
+    // effort, as before: every stop result — a HarperStopTimeoutError
+    // included — is discarded. allSettled over `stopHarper` rather than
+    // `stopHarpers`, which module mocks of harper-lifecycle
+    // (replicated-nodes-probe) do not provide.
+    await Promise.allSettled([b!, a].map((inst) => stopHarper(inst)));
     try { rmSync(workDirA, { recursive: true, force: true }); } catch { /* best effort */ }
     try { rmSync(workDirB, { recursive: true, force: true }); } catch { /* best effort */ }
   };
