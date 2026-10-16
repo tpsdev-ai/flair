@@ -67,6 +67,18 @@ function makeTree(): Fixture {
 }
 
 describe("dist freshness (flair#2583)", () => {
+  it("a probe app with resources/ and no package.json is not a Flair root, and the check does not throw", () => {
+    const app = mkdtempSync(join(tmpdir(), "flair-2583-probe-app-"));
+    try {
+      mkdirSync(join(app, "resources"), { recursive: true });
+      writeFileSync(join(app, "config.yaml"), "rest: true\n");
+      expect(isFlairSourceRoot(app)).toBe(false);
+      expect(() => assertFlairDistFresh(app)).not.toThrow();
+    } finally {
+      rmSync(app, { recursive: true, force: true });
+    }
+  });
+
   it("a fresh tree has no issues and does not throw", () => {
     const { root } = makeTree();
     expect(distFreshnessIssues(root)).toEqual([]);

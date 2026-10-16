@@ -54,17 +54,22 @@ export function resourcesInputs(root: string): string[] {
 
 export function isFlairSourceRoot(root: string): boolean {
   // Treat a Flair root as source if any root marker exists, even when another
-  // watched input is missing.
-  const hasSourceMarker = ["resources", "tsconfig.json", "scripts", "packages"].some((marker) => {
+  // watched input is missing. A directory whose only marker is resources/ and
+  // that has no package.json entry at all (a test's probe app: a Harper
+  // component that links the Flair package) is not the Flair package; the
+  // Flair root it links is checked by its caller.
+  const present = (entry: string): boolean => {
     try {
-      lstatSync(join(root, marker));
+      lstatSync(join(root, entry));
       return true;
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
       throw err;
     }
-  });
-  if (!hasSourceMarker) return false;
+  };
+  const markers = ["resources", "tsconfig.json", "scripts", "packages"].filter(present);
+  if (markers.length === 0) return false;
+  if (markers.length === 1 && markers[0] === "resources" && !present("package.json")) return false;
   const text = readFileSync(join(root, "package.json"), "utf-8");
   const pkg = JSON.parse(text);
   return pkg.name === "@tpsdev-ai/flair" && pkg.main === "./dist/resources/in-process-api.js";

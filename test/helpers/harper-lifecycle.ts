@@ -845,6 +845,9 @@ export async function startHarper(opts: StartHarperOptions = {}): Promise<Harper
 
   // ── Local mode: spawn Harper from node_modules ────────────────────────────
   assertFlairDistFresh(cwd);
+  // A probe app that links the Flair package runs Flair's dist from the bin
+  // dir's root, so that root is held to the same check.
+  if (opts.harperBinDir && opts.harperBinDir !== cwd) assertFlairDistFresh(opts.harperBinDir);
   const ownsInstallDir = !opts.installDir;
   // Boot sweep first: leftovers from SIGKILL / cancelled CI are not small,
   // and a handler cannot cover those exits (flair#1032).
