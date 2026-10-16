@@ -338,26 +338,26 @@ describe("the embedding backfill targets only the committed record", () => {
   it("a by-id write ignores a mismatched x-memory-id header and backfills the routed id", async () => {
     const url = "/Memory/committed-id";
     const req = makeRequest(url, "PUT", signedAuthorization("PUT", url));
-    req.headers.set("x-memory-id", "attacker-row");
+    req.headers.set("x-memory-id", "header-named-row");
     const res = await mw(req, resultNext("committed-id"));
     expect(res.status).toBe(200);
     await new Promise((r) => setTimeout(r, 10));
     const ids = tableGets.Memory!.map((c) => c.id);
     expect(ids.length).toBeGreaterThanOrEqual(1);
     expect(ids.every((id) => id === "committed-id")).toBe(true);
-    expect(ids).not.toContain("attacker-row");
+    expect(ids).not.toContain("header-named-row");
   });
 
   it("a collection create backfills the committed id from the write result, never the caller header", async () => {
     const url = "/Memory";
     const req = makeRequest(url, "POST", signedAuthorization("POST", url));
-    req.headers.set("x-memory-id", "attacker-row");
+    req.headers.set("x-memory-id", "header-named-row");
     const res = await mw(req, resultNext("server-chosen-id", 201));
     expect(res.status).toBe(201);
     await new Promise((r) => setTimeout(r, 10));
     const ids = tableGets.Memory!.map((c) => c.id);
     expect(ids).toContain("server-chosen-id");
-    expect(ids).not.toContain("attacker-row");
+    expect(ids).not.toContain("header-named-row");
   });
 
   it("a DELETE schedules no backfill", async () => {
@@ -387,7 +387,7 @@ describe("the embedding backfill targets only the committed record", () => {
     // so the backfill runs for the routed id.
     const url = "/Memory/patched-id";
     const req = makeRequest(url, "PATCH", signedAuthorization("PATCH", url));
-    req.headers.set("x-memory-id", "attacker-row");
+    req.headers.set("x-memory-id", "header-named-row");
     const res = await mw(req, () => { nextCalls++; return { status: 204, headers: { get: () => null }, body: undefined } as any; });
     expect(res.status).toBe(204);
     await new Promise((r) => setTimeout(r, 10));
