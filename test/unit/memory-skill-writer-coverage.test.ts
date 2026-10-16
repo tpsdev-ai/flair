@@ -69,7 +69,7 @@ add("Memory", ["alias-source:(databases as any).flair.Memory#1", "alias-source:(
   "Table handles: #1 is the table handed to patchRecord (that write is classified above as writer:patchRecord#1); the others are read-only — #3 is the class heritage, and #2, #4 and #5 are committed-row re-checks (confirmCommittedRow, which takes only `get`) — #2 the re-embed's (flair#2465), #4 the _reindex re-PUT's (flair#2450) and #5 Memory.put's (flair#2441).");
 
 // ── Non-skill writers in other modules ──
-add("MemoryFeed", ["alias-source:(databases as any).flair.Memory#1", "writer:writeBackCommittedRow#1"],
+add("MemoryFeed", ["alias-source:(databases as any).flair.Memory#1", "writer:writeBackCommittedRow#1", "writer:table.put#1"],
   "Non-skill feed write through the shared write-back helper (flair#2354); a skill-tagged feed write returns earlier through the skill version writer (FeedMemories.post's isSkillWrite branch).");
 add("MemoryMaintenance", ["writer:(databases as any).flair.Memory.delete#1", "writer:(databases as any).flair.Memory.update#1"],
   "Maintenance (archive/expiry) — non-skill.");

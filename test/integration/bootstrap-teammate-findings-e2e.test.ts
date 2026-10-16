@@ -46,7 +46,7 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
 
@@ -211,7 +211,7 @@ describe("flair#550 — MemoryBootstrap 'Teammate findings relevant to your task
     });
   }, 180_000);
 
-  afterAll(async () => { if (harper) await stopHarper(harper); });
+  afterAll(async () => { if (harper) await stopHarper(harper); }, HARPER_STOP_BUDGET_MS);
 
   test("grantee's bootstrap surfaces the teammate's SHARED finding attributed in 'Teammate findings', keeps own finding in 'Relevant Knowledge', excludes the teammate's PRIVATE finding entirely", async () => {
     const body = await bootstrap(harper, grantee, { agentId: grantee.id, maxTokens: 8000, currentTask: CURRENT_TASK });

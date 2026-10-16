@@ -6,7 +6,7 @@ import { buildEd25519Auth } from "../../src/lib/auth-resolve.ts";
 import { childOverranDeadline } from "../helpers/child-deadline.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle.js";
+import { startHarper, stopHarpers, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle.js";
 import { planRedirectMigration, readTargetMcpRedirectFinding } from "../../src/lib/mcp-oauth-env.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
@@ -39,13 +39,9 @@ function clearMcpEnv(): void {
   for (const k of MCP_ENV_KEYS) delete process.env[k];
 }
 afterAll(async () => {
-  for (const h of instances) {
-    try {
-      await stopHarper(h);
-    } catch {
-      /* best effort */
-    }
-  }
+  // flair#2568: every instance this file started, stopped concurrently (one
+  // stop deadline for the set, not one per instance); best effort, as before.
+  await stopHarpers(instances).catch(() => { /* best effort */ });
   for (const d of tempDirs) {
     try {
       rmSync(d, { recursive: true, force: true });
@@ -55,7 +51,7 @@ afterAll(async () => {
   }
   instances = [];
   tempDirs = [];
-});
+}, HARPER_STOP_BUDGET_MS);
 
 function makeWorkDir(prefix: string): string {
   const workDir = mkdtempSync(join(tmpdir(), prefix));

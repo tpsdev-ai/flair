@@ -102,6 +102,14 @@ export function writeBackIdentity(row: Record<string, any>): Record<string, unkn
 /** Attempts of a write-back before it gives up on a row that keeps changing. */
 export const WRITE_BACK_ATTEMPTS = 3;
 
+/**
+ * The helper's named refusal: the row changed and nothing was written. Both
+ * checks that lead to it (the in-transaction comparison, and the committed-row
+ * confirmation after the write is staged) run inside the owned transaction
+ * before any commit is submitted, and their throw aborts that transaction, so
+ * its staged write is discarded. Whichever check fails, the outcome is known:
+ * not written.
+ */
 export class WriteBackConflictError extends Error {
   readonly id: string;
   constructor(label: string, id: string, attempts: number) {

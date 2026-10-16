@@ -20,6 +20,7 @@
  */
 
 import { mock, describe, it, expect, beforeEach, afterEach, afterAll } from "bun:test";
+import { conform } from "../helpers/mcp-conformance";
 
 // ─── Capture state for the mocked handlers ───────────────────────────────────
 let lastCall: { resource: string; ctx: any; args: any } | null = null;
@@ -87,22 +88,28 @@ function makeHandlerMock(resource: string, method: string) {
 // "REDACT-ME": `redactedValues` and `stored`, the post-redaction text that
 // write committed (flair#2467). "WITHHELD" models a server that reports the
 // count without `stored`. Any other body gets the response it always had.
+// flair#2561: "SUMMARY-ONLY" models a `stored` that holds a summary and no
+// content; "WITH-SUMMARY" a response that also carries the body's own
+// `summary` beside a `stored` that holds only the content.
 const REDACTED_ROW_ID = "mock-redacted-row";
 function redactedWriteResponse(body: any): Record<string, unknown> {
   const content = typeof body?.content === "string" ? body.content : "";
   if (!content.includes("REDACT-ME")) return {};
-  const stored: Record<string, string> = { content: content.replaceAll("REDACT-ME", "[redacted]") };
+  let stored: Record<string, string> | undefined = { content: content.replaceAll("REDACT-ME", "[redacted]") };
   for (const field of ["summary", "trigger"] as const) {
     const v = body?.[field];
     if (typeof v === "string" && v.includes("REDACT-ME")) stored[field] = v.replaceAll("REDACT-ME", "[redacted]");
   }
+  if (content.includes("WITHHELD")) stored = undefined;
+  else if (content.includes("SUMMARY-ONLY")) stored = { summary: "a stored summary" };
   return {
     // Always this id: Memory.get throws on it, so an echo that read the row after
     // the write would fail (flair#2537).
     id: REDACTED_ROW_ID,
     written: true,
     redactedValues: 1,
-    ...(content.includes("WITHHELD") ? {} : { stored }),
+    ...(content.includes("WITH-SUMMARY") ? { summary: "a summary REDACT-ME" } : {}),
+    ...(stored ? { stored } : {}),
   };
 }
 
@@ -1499,6 +1506,27 @@ describe("flair#2537 — /mcp write replies report the STORED (redacted) content
     expect(body.result.content[0].text).not.toContain("REDACT-ME");
   });
 
+  it("a `stored` with a summary and no content gives an echo with no text and contentWithheld (flair#2561)", async () => {
+    const body = await parse(await call("memory_store", { content: "a note with REDACT-ME and SUMMARY-ONLY" }));
+    expect(body.error).toBeUndefined();
+    const echo = body.result.structuredContent;
+    expect(echo.written).toBe(true);
+    expect(echo.contentWithheld).toBe(true);
+    expect(echo.redactedValues).toBe(1);
+    for (const field of ["content", "summary", "trigger", "stored"]) expect(field in echo, field).toBe(false);
+    expect(body.result.content[0].text).not.toContain("REDACT-ME");
+  });
+
+  it("a `stored` with only the content gives an echo with that content and no summary or trigger (flair#2561)", async () => {
+    const body = await parse(await call("memory_store", { content: "a note with REDACT-ME and WITH-SUMMARY" }));
+    expect(body.error).toBeUndefined();
+    const echo = body.result.structuredContent;
+    expect(echo.content).toBe("a note with [redacted] and WITH-SUMMARY");
+    expect(echo.contentWithheld).toBeUndefined();
+    expect("summary" in echo || "trigger" in echo).toBe(false);
+    expect(body.result.content[0].text).not.toContain("REDACT-ME");
+  });
+
   it("a write the server did not redact returns its response unchanged", async () => {
     const body = await parse(await call("memory_store", { content: "a plain note" }));
     expect(lastCall?.resource).toBe("Memory.post");
@@ -1577,4 +1605,56 @@ describe("flair#2541 — /mcp skill_store / memory_basement / memory_restore wri
     expect(lastCall?.resource).toBe("Memory.put");
     expect(body.result.structuredContent).toEqual({ ok: true, resource: "Memory.put", agentId: "agt_bob" });
   });
+});
+
+// ─── flair#2575 — the archive tools' contract matches the reply they return ──
+//
+// `memory_basement` / `memory_restore` answer with the Memory write result
+// (`id`, `written`). Their contract must declare
+// exactly those required fields, and the shipped reply must carry them. The
+// real-Harper counterpart is test/integration/skill-write-redaction-2575.test.ts.
+describe("flair#2575 — the archive tools' contract matches their write reply", () => {
+  beforeEach(() => {
+    credentials = [{ principalId: "agt_bob", kind: "idp", idpSubject: "sub-bob", status: "active" }];
+    agents["agt_bob"] = { id: "agt_bob", status: "active" };
+  });
+
+  // A Memory double whose put answers with the real server's reply shape.
+  class ArchiveReplyMemory extends HarperShapedBase {
+    static async put(record: any, ctx: any) {
+      lastCall = { resource: "Memory.put", ctx, args: record };
+      return { id: record?.id, written: true };
+    }
+    static async get(target: any, ctx: any) {
+      const id = typeof target === "string" ? target : target?.id;
+      return { id, agentId: ctx?.request?.tpsAgent, content: "a plain note", tags: [], archived: false };
+    }
+  }
+
+  function call(name: string, args: Record<string, unknown>) {
+    return mcpHandler(post(
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } },
+      { sub: "sub-bob" },
+    ));
+  }
+
+  for (const name of ["memory_basement", "memory_restore"] as const) {
+    it(`${name}: requiredFields are id/written and the reply carries them`, async () => {
+      const { TOOLS } = await import("../../resources/mcp-tools.ts");
+      const restore = __setHandlers({ Memory: ArchiveReplyMemory as any });
+      try {
+        const contract = TOOLS[name].contract;
+        expect(contract.requiredFields).toEqual(["id", "written"]);
+        expect(contract.fieldTypes).toEqual({ id: "string", written: "boolean" });
+        const body = await parse(await call(name, { id: "mem-1" }));
+        expect(body.error).toBeUndefined();
+        const echo = body.result.structuredContent;
+        conform(name, echo, contract as any);
+        expect(echo.id).toBe("mem-1");
+        expect(echo.written).toBe(true);
+      } finally {
+        restore();
+      }
+    });
+  }
 });

@@ -24,7 +24,7 @@ import { mkdtemp, rm, mkdir, cp, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import nacl from "tweetnacl";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { provisionIdpIdentityMapping } from "../../src/lib/mcp-enable.ts";
 import registerPiFlair from "../../packages/pi-flair/src/index.ts";
 import openclawPlugin from "../../packages/openclaw-flair/index.ts";
@@ -135,7 +135,7 @@ afterAll(async () => {
   if (dataDir) await rm(dataDir, { recursive: true, force: true, maxRetries: 4 });
   if (appDir) await rm(appDir, { recursive: true, force: true });
   if (keyDir) await rm(keyDir, { recursive: true, force: true });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair#2537 — the built-in /mcp write echo reports the stored text (shipped mcpHandler)", () => {
   test("memory_store: the echo carries the stored text and the count, never the input", async () => {

@@ -29,7 +29,7 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 const PRM_PATH = "/.well-known/oauth-protected-resource";
 const AS_METADATA_PATH = "/.well-known/oauth-authorization-server";
@@ -84,7 +84,7 @@ describe("OAuth discovery at the well-known paths (real Harper)", () => {
 
   afterAll(async () => {
     if (harper) await stopHarper(harper);
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   // ── RFC 8414 ───────────────────────────────────────────────────────────────
 

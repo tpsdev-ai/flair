@@ -57,7 +57,7 @@ import { existsSync } from "node:fs";
 import { mkdtemp, rm, mkdir, cp, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path, { join } from "node:path";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { TOOLS } from "../../resources/mcp-tools";
 import { CORPUS, QUERIES } from "../bench/recall-harness/corpus-v2";
 // The SAME assertion engine the connector-conformance suite runs — one checker,
@@ -186,7 +186,7 @@ gate("flair#1290 — large-store bootstrap conformance (corpus-v2 across live-sk
     if (harper) await stopHarper(harper);
     if (dataDir) await rm(dataDir, { recursive: true, force: true, maxRetries: 4 });
     if (appDir) await rm(appDir, { recursive: true, force: true });
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test("the full declared contract holds on a store where the budget is actually fought over", async () => {
     expect(QUERY, "corpus-v2 must contain a ground-truth query answered by a light agent's non-ephemeral record").toBeDefined();

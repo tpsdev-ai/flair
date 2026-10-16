@@ -63,7 +63,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarpers, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { getModelId } from "../../resources/embeddings-provider.ts";
 import { stripEnginePrefix } from "../../resources/embedding-space-guard.ts";
 
@@ -271,12 +271,13 @@ beforeAll(async () => {
 }, 180_000);
 
 afterAll(async () => {
-  if (main?.harper) await stopHarper(main.harper).catch(() => {});
-  if (failing?.harper) await stopHarper(failing.harper).catch(() => {});
+  // flair#2568: both instances concurrently (one stop deadline for the pair);
+  // best effort, as before.
+  await stopHarpers([main?.harper, failing?.harper]).catch(() => {});
   if (home) rmSync(home, { recursive: true, force: true });
   if (failingHome) rmSync(failingHome, { recursive: true, force: true });
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair#2466 — ordinary PATCH embedding cases (real Harper)", () => {
   it("(a) a redacting PATCH of content with no vector stores the vector of the redacted text", async () => {
