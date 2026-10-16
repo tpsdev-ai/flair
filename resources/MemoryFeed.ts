@@ -16,6 +16,7 @@ import { deletePointerRowViaTable } from "./host-pointer-adapter.js";
 import { stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./memory-declared-attributes.js";
 import { buildProvenance } from "./provenance.js";
 import { redactMemoryWrite, redactSkillWrite } from "./memory-redaction.js";
+import { REDACTION_RULES, buildFromAllowlist, feedResponseFields, storageResult, suppliedMemoryFields } from "./memory-write-response.js";
 import { applyFederationBookkeeping, applyOriginatorInstanceId, resolveStoredRow } from "./originator-instance.js";
 import { resolveReadScope } from "./memory-read-scope.js";
 import { reservedSeedFeedWriteDenial, reservedSeedSubjectDenial, writeTargetIds } from "./seed-reservation.js";
@@ -40,6 +41,11 @@ export class FeedMemories extends Resource {
     if (auth.kind === "anonymous") {
       return UNAUTH();
     }
+
+    // flair#2561: the non-null-valued fields this request supplies, read from
+    // the body as sent, before anything is merged into it; the response
+    // reports only named primitive fields (feedWriteResponse).
+    const supplied = suppliedMemoryFields(content);
 
     const seedDenial = reservedSeedFeedWriteDenial("Memory", [...writeTargetIds(this, content), content?.supersedes]);
     if (seedDenial) return seedDenial;
@@ -251,7 +257,7 @@ export class FeedMemories extends Resource {
       const written = captured.row;
       if (captured.closed) noteMemoryDelete(String(captured.closed.id));
       if (written) noteMemoryUpsert(written);
-      return withRedactedValues(written ?? { id: successorId, written: true, durability: "persistent" }, redactedValues);
+      return feedWriteResponse(written ?? { id: successorId, written: true, durability: "persistent" }, redactedValues, supplied);
     }
 
     const now = new Date().toISOString();
@@ -260,9 +266,10 @@ export class FeedMemories extends Resource {
     const existing = await findExistingMemoryByContentHash((databases as any).flair.Memory.search(), agentId, contentHash);
     if (existing) {
       if (existing.durability === "ephemeral" && existing.expiresAt == null) {
-        return withRedactedValues(await repairDeduplicatedExpiry(ctx, existing), redactedValues);
+        const repaired = await repairDeduplicatedExpiry(ctx, existing);
+        return repaired instanceof Response ? repaired : feedWriteResponse(repaired, redactedValues, supplied);
       }
-      return withRedactedValues(existing, redactedValues);
+      return feedWriteResponse(existing, redactedValues, supplied);
     }
 
     const record = {
@@ -305,9 +312,16 @@ export class FeedMemories extends Resource {
     stripServerStampedFields(record);
     let refusal: Response | undefined;
     let outcome: Awaited<ReturnType<typeof writeBackCommittedRow>>;
+    const table = (databases as any).flair.Memory;
     try {
       outcome = await writeBackCommittedRow(
-        (databases as any).flair.Memory,
+        {
+          get: (id, shared) => table.get(id, shared),
+          put: async (row, shared) => {
+            const result = storageResult(await table.put(row, shared));
+            if (result instanceof Response) refusal = result;
+          },
+        },
         record.id,
         async (priorById: any) => {
           if (priorById && priorById.agentId !== agentId) {
@@ -363,6 +377,7 @@ export class FeedMemories extends Resource {
         { ctx, label: "MemoryFeed.ingest", pausePre: () => txnPausePoint("feed-ingest-pre"), pausePoint: () => txnPausePoint("feed-ingest"), expectedRow: existingRecord },
       );
     } catch (err) {
+      if (refusal) return refusal;
       // The target row was replaced, or kept changing: nothing was written.
       if (err instanceof WriteBackConflictError) return feedTargetChanged(record.id);
       throw err;
@@ -373,7 +388,7 @@ export class FeedMemories extends Resource {
     const written = outcome.write;
     // flair#1357 — raw-table write: hook it explicitly (see bm25-index-service).
     noteMemoryUpsert(written);
-    return withRedactedValues(written, redactedValues);
+    return feedWriteResponse(written, redactedValues, supplied);
   }
 
   // Subscription admission: verified agents, admins and trusted internal
@@ -591,14 +606,11 @@ function isDedupMatch(row: any, match: any): boolean {
     row.agentId === match.agentId && row.contentHash === match.contentHash;
 }
 
-/**
- * flair#2407: a response-only copy of a feed result carrying the redaction
- * count. The stored row is not modified. A Response, a non-object result or a
- * zero count is returned unchanged.
- */
-function withRedactedValues(result: any, redactedValues: number): any {
-  if (redactedValues <= 0 || result instanceof Response || !result || typeof result !== "object") return result;
-  return { ...result, redactedValues };
+function feedWriteResponse(result: any, redactedValues: number, supplied: ReadonlySet<string>): any {
+  const response = feedResponseFields(result, supplied);
+  if (response instanceof Response || redactedValues <= 0) return response;
+  const redaction = buildFromAllowlist({ redactedValues }, REDACTION_RULES);
+  return redaction instanceof Response ? redaction : Object.assign(response, redaction);
 }
 
 /**
@@ -621,7 +633,7 @@ async function repairDeduplicatedExpiry(ctx: unknown, match: any): Promise<any> 
   const idDenial = reservedSeedFeedWriteDenial("Memory", [id]) ?? refuseContentSuffixId([id]);
   if (idDenial) return idDenial;
   for (let attempt = 1; attempt <= FEED_DEDUP_REPAIR_ATTEMPTS; attempt++) {
-    const outcome: { kind: "changed" } | { kind: "retry" } | { kind: "current"; row: any } | { kind: "written"; row: any } =
+    const outcome: { kind: "withheld"; response: Response } | { kind: "changed" } | { kind: "retry" } | { kind: "current"; row: any } | { kind: "written"; row: any } =
       await withOwnedTransaction(ctx, async (c) => {
         const stored = await (databases as any).flair.Memory.get(id, c);
         if (!isDedupMatch(stored, match)) return { kind: "changed" as const };
@@ -640,9 +652,11 @@ async function repairDeduplicatedExpiry(ctx: unknown, match: any): Promise<any> 
         if (error) throw new Error(`flair: deduplicated ephemeral row ${id} could not be repaired (${error})`);
         // Only `expiresAt`: an incremental update, never a
         // full-row put of the row read above (flair#2470).
-        await (databases as any).flair.Memory.update(id, { expiresAt: row.expiresAt }, c);
+        const result = storageResult(await (databases as any).flair.Memory.update(id, { expiresAt: row.expiresAt }, c));
+        if (result instanceof Response) return { kind: "withheld" as const, response: result };
         return { kind: "written" as const, row };
       });
+    if (outcome.kind === "withheld") return outcome.response;
     if (outcome.kind === "retry") continue;
     if (outcome.kind === "changed") return feedDedupTargetChanged(id);
     if (outcome.kind === "current") return stripInlinePointerFields(outcome.row);

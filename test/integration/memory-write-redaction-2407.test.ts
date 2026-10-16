@@ -348,7 +348,10 @@ describe("flair#2407 — a deduplicated feed write reports the count in its resp
     const stored = await readStored(firstBody.id);
     expect(stored && "redactedValues" in stored).toBe(false);
     expect(stored?.content).toBe(original.replace(SLACK_TOKEN, REDACTED));
-    expect(rest).toEqual(stored!);
+    // flair#2561: the stored row less contentHash, which the request did not supply.
+    const { contentHash, ...reported } = stored!;
+    expect(typeof contentHash).toBe("string");
+    expect(rest).toEqual(reported);
   }, 60_000);
 
   it("the expiry repair of a deduplicated ephemeral row returns the repaired row plus the count", async () => {
@@ -370,7 +373,10 @@ describe("flair#2407 — a deduplicated feed write reports the count in its resp
     const stored = await readStored(id);
     expect(typeof stored?.expiresAt).toBe("string");
     expect(stored && "redactedValues" in stored).toBe(false);
-    expect(rest).toEqual(stored!);
+    // flair#2561: the stored row less contentHash, which the request did not supply.
+    const { contentHash, ...reported } = stored!;
+    expect(typeof contentHash).toBe("string");
+    expect(rest).toEqual(reported);
   }, 60_000);
 });
 

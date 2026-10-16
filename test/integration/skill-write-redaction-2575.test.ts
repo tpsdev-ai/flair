@@ -1,8 +1,10 @@
 // Skill POST, PUT without `_reindex`, and feed writes refuse metadata with
 // duplicate top-level keys; otherwise name/description and string tags are redacted.
 // After a counted redaction, successful Memory POST and PUT responses report
-// the skill fields in `stored`; feed returns the written row directly with
-// `redactedValues`. After a counted redaction, /mcp echoes the stored skill fields;
+// in `stored` the skill fields the request supplied, as stored (flair#2561:
+// `stored` names only request-supplied fields); the feed reply holds the
+// supplied primitive fields as stored (its `metadata`), with `redactedValues`.
+// After a counted redaction, /mcp echoes the stored skill fields;
 // stdio renders the stored name, with no description or tags. On a clean
 // write, stdio uses the input name.
 //
@@ -368,9 +370,12 @@ describe("flair#2575 — inherited skill tags with distinct top-level metadata k
     });
     expect(feed.redactedValues).toBe(1);
     expect(JSON.stringify(feed)).not.toContain(GITHUB_TOKEN);
-    expect(feed.tags).toContain("skill");
+    // flair#2561: the feed reply holds only primitive fields, and the request
+    // supplied no `tags`; the row it wrote carries the inherited skill tag.
+    expect(feed.tags).toBeUndefined();
     expect(metadataOf(feed).name).toBe(`deploy ${REDACTED}`);
     const row = await storedRow(feed.id);
+    expect(row.tags).toContain("skill");
     expect(metadataOf(row).name).toBe(`deploy ${REDACTED}`);
   }, 120_000);
 });
@@ -549,10 +554,14 @@ describe("flair#2575 — a reserved-seed PUT whose redaction replaces a stored v
       const row = await storedRow(SEED_SKILL_ROW_ID);
       expect(metadataOf(row)).toEqual({ name: `deploy ${REDACTED}`, description: `runs the nightly ${REDACTED}` });
       expect(row.tags).toEqual(["skill", `release-${REDACTED}`]);
-      expect(out.stored).toEqual({
-        content: row.content, trigger: row.trigger,
-        name: metadataOf(row).name, description: metadataOf(row).description, tags: row.tags,
-      });
+      // flair#2561: `stored` names only the fields the request supplied, each
+      // as the row holds it. The PUT that repeats the metadata and tags gets
+      // the redacted skill fields back; the PUT that omits them supplied none,
+      // so its row holds them redacted (above) and `stored` does not name them.
+      const suppliedSkillFields = shape === "repeats"
+        ? { name: metadataOf(row).name, description: metadataOf(row).description, tags: row.tags }
+        : {};
+      expect(out.stored).toEqual({ content: row.content, trigger: row.trigger, ...suppliedSkillFields });
       for (const credential of [GITHUB_TOKEN, AWS_KEY, SLACK_TOKEN]) {
         expect(reply).not.toContain(credential);
         expect(JSON.stringify(row)).not.toContain(credential);

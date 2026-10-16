@@ -17,13 +17,20 @@
  * post, put and the feed ingest call redactSkillWrite() on the EFFECTIVE row
  * after skill-tag inheritance (prepareSkillBody) and before persistence, so an
  * omitted-tag PUT on a stored skill, a superseding POST and a feed ingest
- * redact the skill fields of the row they write. When the count is above zero,
- * a Memory post/put/patch response also carries `stored`, the post-redaction
- * values of the REDACTED_MEMORY_FIELDS present in that write
- * (storedMemoryText); the feed ingest's response is already the stored row.
+ * redact the skill fields of the row they write.
+ * When the count is above zero, a Memory post/put/patch response also carries
+ * `stored`: the stored (post-redaction) values of the fields that write's
+ * request supplied (flair#2561) — the REDACTED_MEMORY_FIELDS it supplied as
+ * strings (suppliedMemoryTextFields) and, for a skill-tagged row, the skill
+ * fields it supplied (suppliedSkillTextFields, flair#2575). The supplied
+ * fields are read from the body as the request sent it, before a stored row or
+ * a skill predecessor is merged into it (suppliedStoredTextFields,
+ * storedMemoryText). The feed ingest's response holds, of the row it stored or
+ * matched, only named primitive fields, plus `redactedValues` when present
+ * (resources/memory-write-response.ts).
  * A skill PUT whose redaction replaced a value always writes its redacted
- * effective row, so `stored` is what the row holds: the in-place (reserved
- * seed) PUT's unchanged-row check never skips it.
+ * effective row, so each field `stored` reports is what the row holds: the
+ * in-place (reserved seed) PUT's unchanged-row check never skips it.
  * put() skips the call for the shipped-skill seed write (isOperatorSeedPut): a
  * PUT of the reserved seed skill id by a verified Basic administrator
  * (src/lib/skill-seed.ts). The seed compares the stored text to its source
@@ -48,8 +55,18 @@ import { skillWriteSource } from "./skill-write-policy.js";
 /** The Memory text fields redacted on a write. */
 export const REDACTED_MEMORY_FIELDS = Object.freeze(["content", "summary", "trigger"] as const);
 
+/** One of the REDACTED_MEMORY_FIELDS. */
+export type MemoryTextField = (typeof REDACTED_MEMORY_FIELDS)[number];
+
 /** Metadata fields selected after duplicate-key validation. */
 export const REDACTED_SKILL_FIELDS = Object.freeze(["name", "description"] as const);
+
+/** A skill field a write's `stored` can report (flair#2575): one of the
+ *  REDACTED_SKILL_FIELDS (a `metadata` key) or `tags`. */
+export type SkillTextField = (typeof REDACTED_SKILL_FIELDS)[number] | "tags";
+
+/** A field a write's `stored` can report: a MemoryTextField or a SkillTextField. */
+export type StoredTextField = MemoryTextField | SkillTextField;
 
 /** The redacted skill fields of one skill-tagged row, as a write's response
  *  reports them: the `metadata` keys plus the accepted `tags` entries (the
@@ -62,37 +79,79 @@ export interface StoredSkillText {
 
 /** The redacted fields of one row, as a write's response reports them: the
  *  REDACTED_MEMORY_FIELDS that hold a string, plus the skill fields when the row
- *  is skill-tagged (StoredSkillText). */
+ *  is skill-tagged (StoredSkillText), each only when the request supplied it. */
 export type StoredMemoryText =
-  & Partial<Record<(typeof REDACTED_MEMORY_FIELDS)[number], string>>
+  & Partial<Record<MemoryTextField, string>>
   & StoredSkillText;
 
 /**
- * flair#2467: the redacted fields that hold a value on `row`, copied. A write
- * calls it on the row it stages, after redaction, so the copy holds the
- * post-redaction value of each such field that write committed, changed or not.
- * flair#2575: for a skill-tagged row that is also the redacted skill fields — the
- * `metadata` `name`/`description` (parsed out) and the accepted `tags` entries.
- * When the write replaced any value, its response carries the copy as `stored`
- * next to `redactedValues`; the writer never has to read the row back, so a
- * later write cannot change what this one reports.
+ * flair#2561: the string-valued text fields a write request supplies: each of
+ * the REDACTED_MEMORY_FIELDS that holds a string in the request body. A field
+ * the body sends as null or as a non-string is not in the list. A write reads
+ * them from the body as the request sent it, before a stored row or a skill
+ * predecessor is merged into that body, so the list names only text fields the
+ * request itself carried.
  */
-export function storedMemoryText(row: unknown): StoredMemoryText {
+export function suppliedMemoryTextFields(body: unknown): MemoryTextField[] {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return [];
+  return REDACTED_MEMORY_FIELDS.filter((field) => typeof (body as Record<string, unknown>)[field] === "string");
+}
+
+/**
+ * flair#2561, flair#2575: the skill fields a write request supplies: `name` and
+ * `description` when the body's own `metadata` holds a string under that key,
+ * and `tags` when the body carries a `tags` array. Read, like
+ * suppliedMemoryTextFields, from the body as the request sent it, before a
+ * stored row or a skill predecessor is merged into it, so a field the row
+ * inherits (an omitted `tags` array, or a predecessor's `metadata`) is not in
+ * the list.
+ */
+export function suppliedSkillTextFields(body: unknown): SkillTextField[] {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return [];
+  const record = body as Record<string, unknown>;
+  const meta = parseSkillMetadata(record.metadata);
+  const supplied: SkillTextField[] = REDACTED_SKILL_FIELDS.filter((field) => typeof meta[field] === "string");
+  if (Array.isArray(record.tags)) supplied.push("tags");
+  return supplied;
+}
+
+/** The fields a Memory POST or PUT request supplies that its `stored` can
+ *  report: suppliedMemoryTextFields plus suppliedSkillTextFields. */
+export function suppliedStoredTextFields(body: unknown): StoredTextField[] {
+  return [...suppliedMemoryTextFields(body), ...suppliedSkillTextFields(body)];
+}
+
+/**
+ * flair#2467, flair#2561, flair#2575: the values on `row` of the `supplied`
+ * fields, copied; a supplied field that holds no value on `row` is left out. A
+ * write calls it on the row it stages, after redaction, with the fields its own
+ * request supplied (suppliedMemoryTextFields, suppliedStoredTextFields), so the
+ * copy holds the stored (post-redaction) value of each of those fields, changed
+ * or not, and no other field of the row: a field the row holds from a merged
+ * stored row or a skill predecessor is not in it. For a skill-tagged row the
+ * supplied skill fields are the `metadata` `name`/`description` (parsed out of
+ * the row) and the accepted `tags` entries. When the write replaced any value,
+ * its response carries the copy as `stored` next to `redactedValues`; the
+ * writer never has to read the row back, so a later write cannot change what
+ * this one reports.
+ */
+export function storedMemoryText(row: unknown, supplied: readonly StoredTextField[]): StoredMemoryText {
   const stored: StoredMemoryText = {};
   if (!row || typeof row !== "object" || Array.isArray(row)) return stored;
   const record = row as Record<string, unknown>;
   for (const field of REDACTED_MEMORY_FIELDS) {
+    if (!supplied.includes(field)) continue;
     const value = record[field];
     if (typeof value === "string") stored[field] = value;
   }
   if (isSkillWrite(record)) {
     const meta = parseSkillMetadata(record.metadata);
     for (const field of REDACTED_SKILL_FIELDS) {
-      if (typeof meta[field] === "string") stored[field] = meta[field] as string;
+      if (supplied.includes(field) && typeof meta[field] === "string") stored[field] = meta[field] as string;
     }
     // Report the entries the schema accepts (`[String]`: a string or null), so
     // `stored.tags` is what the row carries, not only its string entries.
-    if (Array.isArray(record.tags)) {
+    if (supplied.includes("tags") && Array.isArray(record.tags)) {
       stored.tags = record.tags.filter((tag): tag is string | null => typeof tag === "string" || tag === null);
     }
   }

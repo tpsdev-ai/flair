@@ -3,8 +3,10 @@
   entries are redacted (#2575).
 
   After a counted redaction, successful Memory POST and PUT responses report
-  the skill fields in `stored`; feed returns the written row directly with
-  `redactedValues`. After a counted redaction, the built-in /mcp `skill_store`
+  in `stored` the skill fields the request supplied (`tags`, and the `name`
+  and `description` of its `metadata`), each as stored, next to the supplied
+  text fields (#2561); the feed reply holds the supplied `metadata` as stored,
+  with `redactedValues`. After a counted redaction, the built-in /mcp `skill_store`
   reply echoes the stored skill fields; stdio renders the stored name, with no
   description or tags.
   On a clean write, stdio uses the input name. Clean field values are unchanged;
