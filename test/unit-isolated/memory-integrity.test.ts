@@ -312,7 +312,7 @@ function makeMemory(ctxRequest: any) {
 const agentCtx = (agentId: string, isAdmin = false) => ({ tpsAgent: agentId, tpsAgentIsAdmin: isAdmin });
 const anonCtx = () => ({ tpsAnonymous: true });
 
-beforeEach(() => {
+beforeEach(async () => {
   memoryStore = new Map();
   memoryGrants = [];
   callOrder = [];
@@ -322,6 +322,17 @@ beforeEach(() => {
   extraInstanceRows = [];
   embedInputTypeCalls = [];
   _resetLocalInstanceIdCacheForTests();
+  // The embedding-space guard is module state shared by every test file in one
+  // bun process, and it binds its model-id getter when it is first imported:
+  // another file can load it first against the real provider and leave a
+  // verdict behind (flair#2307 item 6). Every test here starts from the same
+  // guard state: this file's mocked model id, a scan of this file's (empty)
+  // store, and the verdict that scan publishes.
+  const guard = await import("../../resources/embedding-space-guard.ts");
+  guard._resetGuardForTests();
+  guard._setGuardModelIdForTests(() => "mock-embedding-model");
+  guard._setGuardTableGetterForTests(async () => ({ search: () => memorySearchGen({}) }));
+  expect(await guard.recomputeLatch(), "the guard did not verify this file's store uniform").toBe(true);
 });
 
 // ─── Fixture text for the #526 replay ────────────────────────────────────────
