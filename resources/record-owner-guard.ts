@@ -145,6 +145,10 @@ export function isMutatingMethod(method: string): boolean {
  * Resolve a request path to the guarded table and record id it addresses, or
  * null when the path is not a guarded single-record route.
  *
+ * `pathname` is the RAW request path (the target before its `?`, as Harper
+ * routes it). It is split on `/` FIRST and only then is the id segment decoded,
+ * so an encoded `/` (`%2F`) inside the id stays part of that one id.
+ *
  * Matches `/<Table>/<id>` ONLY. A collection path (`/<Table>`) addresses no
  * existing record, so there is nothing to own and nothing to check — that is the
  * "creation is untouched" property, expressed as a parse rather than a special

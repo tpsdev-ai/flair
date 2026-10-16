@@ -13,6 +13,14 @@ import { FLAIR_AUTH_MIDDLEWARE_HTTP_NAME } from "./multi-worker-guard.js";
 import { DECLARED_MEMORY_ATTRIBUTES } from "./memory-declared-attributes.js";
 import { idSegmentHasEncodedSlash, decodeMemoryIdSegment, MEMORY_CONTENT_SELECTOR_SUFFIX } from "../src/lib/memory-id-policy.js";
 import { contentSuffixIdDenial } from "./memory-id-guard.js";
+import {
+  isCanonicalRequestTarget,
+  nonCanonicalRequestTargetRefusal,
+  requestPath,
+  rawPathSegments,
+  lastRawPathSegment,
+  recordIdSegment,
+} from "./request-target.js";
 
 // --- Non-admin Memory read: ignore the caller's selection --------------------
 //
@@ -94,10 +102,8 @@ function stripMemorySelection(rawUrl: string): string {
  * contains a slash (flair#2199).
  */
 function isAmbiguousEncodedSlashSelector(rawUrl: string): boolean {
-  const q = rawUrl.indexOf("?");
-  const pathPart = q === -1 ? rawUrl : rawUrl.slice(0, q);
-  const slash = pathPart.lastIndexOf("/");
-  const seg = pathPart.slice(slash + 1);
+  // Split the raw path on `/` first, then decode the last segment on its own.
+  const seg = lastRawPathSegment(requestPath(rawUrl));
   if (!idSegmentHasEncodedSlash(seg)) return false;
   const decodedSeg = decodeMemoryIdSegment(seg);
   const dot = decodedSeg.indexOf(".");
@@ -262,10 +268,27 @@ const ALLOWED_HTTP_METHODS: ReadonlySet<string> = new Set([
 ]);
 
 server.http(async (request: any, nextLayer: any) => {
-  // ── HTTP method allowlist, FIRST ───────────────────────────────────────────
-  // Before the public-path passthrough and before any auth branch, so no path
-  // and no caller (anonymous, agent or admin) can reach a handler through any
-  // other method.
+  // ── Canonical request target, FIRST ────────────────────────────────────────
+  // Every decision below is made about the RAW request target, which is what
+  // Harper routes. A target that is not in canonical form (a `.`/`..` segment,
+  // raw or percent-encoded; an empty segment; a raw backslash) is answered with
+  // the named 400 here, before any other request processing: no method check,
+  // no rate-limit budget, no credential read, no next layer. See
+  // resources/request-target.ts.
+  const rawTarget: string = typeof request.url === "string" ? request.url : String(request.url ?? "");
+  if (!isCanonicalRequestTarget(rawTarget)) {
+    return nonCanonicalRequestTargetRefusal(String(request.method ?? ""));
+  }
+  // The raw path (everything before the first `?`), exactly as Harper's own
+  // Request.pathname reads it. Path decisions split it on `/` FIRST and decode
+  // a segment only afterwards, so an encoded `/` (`%2F`) inside an id segment
+  // stays part of that one segment, as it does for Harper.
+  const targetPath = requestPath(rawTarget);
+
+  // ── HTTP method allowlist ──────────────────────────────────────────────────
+  // Right after the canonical-target check: before the public-path passthrough
+  // and before any auth branch, so no path and no caller (anonymous, agent or
+  // admin) can reach a handler through any other method.
   // Exact match: HTTP methods are case-sensitive, and these are the spellings
   // Flair's clients send.
   const httpMethod = String(request.method ?? "");
@@ -279,6 +302,9 @@ server.http(async (request: any, nextLayer: any) => {
     });
   }
 
+  // The parsed URL is read for the signed payload (the client signs the
+  // pathname and search of the URL it built) and for query parameters only.
+  // Every PATH decision reads `targetPath` above, never the parsed pathname.
   const url = new URL(request.url, "http://" + (request.headers.get("host") || "localhost"));
 
   // ── Rate limiting, right after the method check ────────────────────────────
@@ -300,7 +326,7 @@ server.http(async (request: any, nextLayer: any) => {
   // Only the OAuth endpoints named in rate-limit.ts's PATH_POLICY are affected.
   // Every other path — /Memory, /Presence, /FederationSync, everything agents
   // actually use — returns null here and is untouched.
-  const limited = checkHttpRateLimit(request, url.pathname);
+  const limited = checkHttpRateLimit(request, targetPath);
   if (limited) return limited;
 
   // ── Malformed `.content` Memory path: the named 400, for every caller ────────
@@ -311,8 +337,8 @@ server.http(async (request: any, nextLayer: any) => {
   // before every auth branch (the public-path passthrough, the Basic-admin and
   // anonymous early returns, the signed-agent path), so the refusal does not
   // depend on the request's credential, and no row is read or written for it.
-  if (isMemoryReadPath(url.pathname)) {
-    const seg = url.pathname.slice(url.pathname.lastIndexOf("/") + 1);
+  if (isMemoryReadPath(targetPath)) {
+    const seg = lastRawPathSegment(targetPath);
     if (seg.endsWith(MEMORY_CONTENT_SELECTOR_SUFFIX) && !isValidPercentEncoding(seg)) {
       return contentSuffixIdDenial(seg);
     }
@@ -331,16 +357,16 @@ server.http(async (request: any, nextLayer: any) => {
   // select the Basic branch below, exactly as "Basic" does. Used for both the
   // /FederationPair public-bypass test and the Basic branch itself.
   const isBasic = /^Basic /i.test(header);
-  const isA2APath = url.pathname === "/a2a" || url.pathname === "/A2AAdapter" || url.pathname.startsWith("/A2AAdapter/");
+  const isA2APath = targetPath === "/a2a" || targetPath === "/A2AAdapter" || targetPath.startsWith("/A2AAdapter/");
   if (!isTpsEd25519 && (
-    url.pathname === "/health" ||
-    url.pathname === "/Health" ||
+    targetPath === "/health" ||
+    targetPath === "/Health" ||
     (request.method === "GET" && isA2APath) ||
-    url.pathname === "/AgentCard" ||
-    url.pathname.startsWith("/AgentCard/") ||
+    targetPath === "/AgentCard" ||
+    targetPath.startsWith("/AgentCard/") ||
     // FederationSync uses Ed25519 body-signature auth with anti-replay, validated
     // by the resource handler (allowCreate=true, same pattern as FederationPair).
-    url.pathname === "/FederationSync" ||
+    targetPath === "/FederationSync" ||
     // FederationPair uses one-time PairingToken in the request body, validated
     // by the resource itself (allowCreate=true on the Resource lets anonymous
     // POST through Harper's role gate). Bearer can't be used here because
@@ -353,19 +379,19 @@ server.http(async (request: any, nextLayer: any) => {
     // (PR-4, resources/Federation.ts) could never see a caller and never
     // refused a mismatch. An anonymous pair request (no Authorization header)
     // still passes through.
-    (url.pathname === "/FederationPair" && !isBasic) ||
+    (targetPath === "/FederationPair" && !isBasic) ||
     // OAuth 2.1 public endpoints (spec requires no pre-auth)
-    url.pathname === "/OAuthRegister" ||
-    url.pathname === "/OAuthAuthorize" ||
-    url.pathname === "/OAuthToken" ||
-    url.pathname === "/OAuthRevoke" ||
+    targetPath === "/OAuthRegister" ||
+    targetPath === "/OAuthAuthorize" ||
+    targetPath === "/OAuthToken" ||
+    targetPath === "/OAuthRevoke" ||
     // Belt-and-braces since flair#1000: `/.well-known/oauth-authorization-server`
     // is served from its OWN urlPath mount (resources/oauth-wellknown.ts), which
     // gets its own dispatch chain — this middleware never sees a request for it.
     // The entry stays so the path is still public if that mount ever moves back
     // onto the default chain.
-    url.pathname === "/.well-known/oauth-authorization-server" ||
-    url.pathname === "/OAuthMetadata"
+    targetPath === "/.well-known/oauth-authorization-server" ||
+    targetPath === "/OAuthMetadata"
   )) return nextLayer(request);
 
   // If Harper has already authorized this request (e.g. Basic admin, or
@@ -465,7 +491,7 @@ server.http(async (request: any, nextLayer: any) => {
       // Path 3: flair_pair_initiator — restricted to /FederationPair only.
       // Bootstrap credentials (pair-bootstrap-<id>) may only be used on this
       // one endpoint. Any other path must fall through to 401.
-      if (url.pathname === "/FederationPair" && user.startsWith("pair-bootstrap-")) {
+      if (targetPath === "/FederationPair" && user.startsWith("pair-bootstrap-")) {
         let pairUser: any = null;
         try {
           pairUser = await (server as any).getUser(user, pass, request);
@@ -512,7 +538,7 @@ server.http(async (request: any, nextLayer: any) => {
     // the browser shows a native auth dialog instead of a bare 401 page.
     // JSON API endpoints don't get this — they should keep the structured
     // 401 body so the client can parse the error.
-    const isAdminPage = url.pathname === "/Admin" || url.pathname.startsWith("/Admin");
+    const isAdminPage = targetPath === "/Admin" || targetPath.startsWith("/Admin");
     if (isAdminPage) {
       return new Response("Authentication required.", {
         status: 401,
@@ -623,10 +649,10 @@ server.http(async (request: any, nextLayer: any) => {
   // SQL and GraphQL endpoints bypass all resource-level scoping — block them
   // for non-admin agents. Admins (bootstrap, consolidation scripts) still pass.
   if (!request.tpsAgentIsAdmin) {
-    const rawPath = url.pathname.toLowerCase();
+    const lowerPath = targetPath.toLowerCase();
     if (
-      rawPath === "/sql" || rawPath.startsWith("/sql/") ||
-      rawPath === "/graphql" || rawPath.startsWith("/graphql/")
+      lowerPath === "/sql" || lowerPath.startsWith("/sql/") ||
+      lowerPath === "/graphql" || lowerPath.startsWith("/graphql/")
     ) {
       return new Response(
         JSON.stringify({ error: "forbidden: raw query endpoints require admin access" }),
@@ -658,7 +684,7 @@ server.http(async (request: any, nextLayer: any) => {
   // create, a self-write, or a legitimate cross-agent field like MemoryGrant's
   // granteeId — it can only narrow mutation of another agent's stored row.
   if (isMutation && !request.tpsAgentIsAdmin) {
-    const guarded = resolveGuardedRecord(url.pathname);
+    const guarded = resolveGuardedRecord(targetPath);
     if (guarded) {
       try {
         const record = await (databases as any).flair[guarded.table]?.get(guarded.id);
@@ -671,7 +697,7 @@ server.http(async (request: any, nextLayer: any) => {
 
   if (isMutation) {
     // OrgEvent: authorId must match authenticated agent
-    if ((url.pathname === "/OrgEvent" || url.pathname.startsWith("/OrgEvent/")) &&
+    if ((targetPath === "/OrgEvent" || targetPath.startsWith("/OrgEvent/")) &&
         (method === "POST" || method === "PUT" || method === "PATCH")) {
       if (!request.tpsAgentIsAdmin) {
         try {
@@ -692,11 +718,10 @@ server.http(async (request: any, nextLayer: any) => {
     }
 
     // OrgEvent DELETE: ownership check
-    if (url.pathname.startsWith("/OrgEvent/") && method === "DELETE") {
+    if (targetPath.startsWith("/OrgEvent/") && method === "DELETE") {
       if (!request.tpsAgentIsAdmin) {
         try {
-          const pathParts = url.pathname.split("/").filter(Boolean);
-          const eventId = pathParts[1] ? decodeURIComponent(pathParts[1]) : null;
+          const eventId = recordIdSegment(targetPath);
           if (eventId) {
             const record = await (databases as any).flair.OrgEvent.get(eventId);
             if (record && record.authorId && record.authorId !== agentId) {
@@ -710,7 +735,7 @@ server.http(async (request: any, nextLayer: any) => {
     }
 
     // WorkspaceState: agent-scoped mutations (non-admin can only write own records)
-    if ((url.pathname === "/WorkspaceState" || url.pathname.startsWith("/WorkspaceState/")) &&
+    if ((targetPath === "/WorkspaceState" || targetPath.startsWith("/WorkspaceState/")) &&
         (method === "POST" || method === "PUT" || method === "PATCH")) {
       if (!request.tpsAgentIsAdmin) {
         try {
@@ -731,11 +756,10 @@ server.http(async (request: any, nextLayer: any) => {
     }
 
     // WorkspaceState DELETE: ownership check
-    if ((url.pathname.startsWith("/WorkspaceState/")) && method === "DELETE") {
+    if ((targetPath.startsWith("/WorkspaceState/")) && method === "DELETE") {
       if (!request.tpsAgentIsAdmin) {
         try {
-          const pathParts = url.pathname.split("/").filter(Boolean);
-          const wsId = pathParts[1] ? decodeURIComponent(pathParts[1]) : null;
+          const wsId = recordIdSegment(targetPath);
           if (wsId) {
             const record = await (databases as any).flair.WorkspaceState.get(wsId);
             if (record && record.agentId && record.agentId !== agentId) {
@@ -780,7 +804,7 @@ server.http(async (request: any, nextLayer: any) => {
     // The path test stays `startsWith("/Soul")` so sibling routes keep the
     // body check they already had; the record lookup is scoped to the real
     // `/Soul/<id>` collection so it never resolves an unrelated id.
-    if (url.pathname.startsWith("/Soul") &&
+    if (targetPath.startsWith("/Soul") &&
         (method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE")) {
       if (!request.tpsAgentIsAdmin) {
         // (a) A PRESENT, mismatched body agentId is a forged attribution.
@@ -816,7 +840,7 @@ server.http(async (request: any, nextLayer: any) => {
 
   // ── WorkspaceState read guard: agent-scoped reads ───────────────────────────
   if (method === "GET" && !request.tpsAgentIsAdmin) {
-    if (url.pathname === "/WorkspaceState" || url.pathname === "/WorkspaceState/") {
+    if (targetPath === "/WorkspaceState" || targetPath === "/WorkspaceState/") {
       const queryAgent = url.searchParams.get("agentId");
       if (queryAgent && queryAgent !== agentId) {
         return new Response(JSON.stringify({
@@ -848,7 +872,7 @@ server.http(async (request: any, nextLayer: any) => {
   // read-scope denial is enforced by the resource layer (memoryByIdReadGate),
   // which returns the same 404 this middleware used to return.
   // (A malformed `.content` segment was refused before any auth branch, above.)
-  if (!request.tpsAgentIsAdmin && (method === "GET" || method === "HEAD") && isMemoryReadPath(url.pathname)) {
+  if (!request.tpsAgentIsAdmin && (method === "GET" || method === "HEAD") && isMemoryReadPath(targetPath)) {
     // flair#2199: an id segment carrying an encoded `/` before a declared
     // property suffix is ambiguous — the suffix could be part of the id or a
     // selector on a slash-containing id. This branch runs for a signed
@@ -866,10 +890,10 @@ server.http(async (request: any, nextLayer: any) => {
 
   // ── Embedding backfill ─────────────────────────────────────────────────────
 
-  const isMemoryWrite = isMutation && (url.pathname === "/Memory" || url.pathname.startsWith("/Memory/"));
+  const isMemoryWrite = isMutation && (targetPath === "/Memory" || targetPath.startsWith("/Memory/"));
   let memoryId: string | null = null;
   if (isMemoryWrite) {
-    const pathParts = url.pathname.split("/").filter(Boolean);
+    const pathParts = rawPathSegments(targetPath);
     memoryId = pathParts.length >= 2 ? decodeMemoryIdSegment(pathParts[1]) : (request.headers.get("x-memory-id") ?? null);
   }
 
