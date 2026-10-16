@@ -360,12 +360,23 @@ export interface RunnerLogRow {
    * federated flairUrl deployments would leave HealthDetail with nothing to
    * read otherwise). Absent when dry-run skipped the step, the call failed
    * (see `errors`), or the response didn't carry the expected shape.
+   *
+   * flair#2596: when the embedding-space guard refused the sweep (the store's
+   * model stamps were not verified uniform), the resource answers with null
+   * counts and the guard's named state; that response is recorded HERE, below,
+   * as the second variant rather than treated as an unexpected shape.
    */
   dedup?: {
     clusterCount: number;
     largestClusterSize: number;
     totalMemoriesInClusters: number;
     computedAt: string;
+  } | {
+    clusterCount: null;
+    largestClusterSize: null;
+    totalMemoriesInClusters: null;
+    computedAt: string;
+    embeddingSpace: { state: string; reason: string | null };
   };
   /**
    * #1515: per-run distillation bound actually applied this cycle. Absent
@@ -1074,6 +1085,25 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
           largestClusterSize: obj.largestClusterSize,
           totalMemoriesInClusters: obj.totalMemoriesInClusters,
           computedAt: obj.computedAt,
+        };
+      } else if (
+        // flair#2596: the guard refused the sweep — the resource answers with
+        // null counts plus its named state. Record the state; an expected
+        // non-uniform embedding space is not a shape surprise and not an error.
+        obj.clusterCount === null &&
+        obj.largestClusterSize === null &&
+        obj.totalMemoriesInClusters === null &&
+        typeof obj.computedAt === "string" &&
+        obj.embeddingSpace !== null && typeof obj.embeddingSpace === "object" &&
+        typeof (obj.embeddingSpace as { state?: unknown }).state === "string"
+      ) {
+        const space = obj.embeddingSpace as { state: string; reason?: unknown };
+        dedup = {
+          clusterCount: null,
+          largestClusterSize: null,
+          totalMemoriesInClusters: null,
+          computedAt: obj.computedAt,
+          embeddingSpace: { state: space.state, reason: typeof space.reason === "string" ? space.reason : null },
         };
       } else {
         errors.push("dedup: unexpected /MemoryDedupStats response shape");

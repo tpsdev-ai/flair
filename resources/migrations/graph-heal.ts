@@ -61,6 +61,7 @@ import { databases } from "harper";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { embeddingSpaceVerdict } from "../embedding-space-guard.js";
 import type { Migration, RunBatchResult } from "./types.js";
 
 export const GRAPH_HEAL_ID = "graph-heal";
@@ -154,9 +155,23 @@ async function topNeighborId(table: MemoryTableLike, target: number[]): Promise<
  * and the cleanest black-box proof the graph rebuilt and is serving (a
  * mid-rebuild index throws or returns nothing; a store with no embedded rows
  * has no canary). Never throws (invariant II).
+ *
+ * flair#2596 — consults the query-time embedding-space guard
+ * (embedding-space-guard.ts) before the cosine-sort query, the same chokepoint
+ * SemanticSearch / MemoryBootstrap / the dedup sweep use (#2559). On a
+ * non-uniform verdict it skips the comparison and logs the guard's state; the
+ * caller reads that as "not verified this boot" (retry next boot). The check is
+ * on the verdict's uniformity, so a state added later needs no change here.
  */
 async function recallHealthy(table: MemoryTableLike): Promise<{ verified: boolean; hasData: boolean }> {
   try {
+    const verdict = await embeddingSpaceVerdict();
+    if (!verdict.uniform) {
+      console.warn(
+        `graph-heal: canary recall verification skipped — embedding space is not known uniform (state: ${verdict.state})`,
+      );
+      return { verified: false, hasData: true };
+    }
     const canary = await pickCanary(table);
     if (!canary) return { verified: false, hasData: false };
     const top = await topNeighborId(table, canary.embedding);

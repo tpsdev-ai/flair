@@ -8,7 +8,7 @@
  * observe-only (zero row work) semantics, and the structural-only ledger
  * event.
  */
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect, beforeEach } from "bun:test";
 
 // graph-heal.ts imports `{ databases } from "harper"` for its
 // DEFAULT accessors only (never used here — every test injects fakes). Same
@@ -18,6 +18,35 @@ import { mock } from "bun:test";
 mock.module("harper", () => ({ server: { http: () => {}, getUser: async () => null }, databases: {}, Resource: class {} }));
 
 const { createGraphHealMigration, GRAPH_HEAL_ID } = await import("../../resources/migrations/graph-heal.ts");
+const { _resetGuardForTests, _setGuardModelIdForTests, _setGuardTableGetterForTests, recomputeLatch } =
+  await import("../../resources/embedding-space-guard.ts");
+
+const GUARD_CURRENT = "gguf:test-model";
+const GUARD_FOREIGN = "other-engine:not-the-current-space";
+
+/** A fake guard table over a fixed list of `embeddingModel` stamps. */
+function guardTableOver(stamps: (string | null)[]) {
+  return async () => ({
+    search(_q: unknown) {
+      async function* gen(): AsyncIterable<Record<string, unknown>> { for (const s of stamps) yield { embeddingModel: s }; }
+      return gen();
+    },
+  });
+}
+
+/** Drive the guard to a verdict from the given stamps. */
+async function guardVerdict(stamps: (string | null)[]): Promise<boolean> {
+  _setGuardModelIdForTests(() => GUARD_CURRENT);
+  _setGuardTableGetterForTests(guardTableOver(stamps));
+  return recomputeLatch();
+}
+
+beforeEach(async () => {
+  _resetGuardForTests();
+  // Default: a uniform (empty) store, so the comparison tests below are
+  // unchanged; the guard-specific tests re-drive it with a foreign stamp.
+  expect(await guardVerdict([])).toBe(true);
+});
 
 type Row = Record<string, unknown> & { id: string };
 
@@ -187,5 +216,41 @@ describe("graph-heal migration — run() (verify + structural-only ledger)", () 
     const m = createGraphHealMigration(() => table, () => throwingOrgEvent, () => VERSION);
     const result = await m.run(50);
     expect(result.processed).toBe(0);
+  });
+});
+
+describe("graph-heal migration — consults the embedding-space guard (flair#2596)", () => {
+  function healthyStore() {
+    return makeFakeMemoryTable([
+      { id: "m1", embedding: emb(1), embeddingModel: "real" },
+      { id: "m2", embedding: emb(2), embeddingModel: "real" },
+    ]);
+  }
+
+  it("(uniform) verifies the canary self-recall — behaviour unchanged", async () => {
+    const { table } = healthyStore();
+    const { table: oe } = makeFakeOrgEventTable();
+    const m = createGraphHealMigration(() => table, () => oe, () => VERSION);
+    expect(await m.detect()).toBe(true);
+  });
+
+  it("(non-uniform) skips the cosine comparison and logs the guard state", async () => {
+    const { table } = healthyStore();
+    const { table: oe } = makeFakeOrgEventTable();
+    const m = createGraphHealMigration(() => table, () => oe, () => VERSION);
+
+    // Same store as the control above — it WOULD self-recall — but a foreign
+    // stamp makes the guard's verdict non-uniform, so the comparison is skipped.
+    expect(await guardVerdict([GUARD_CURRENT, GUARD_FOREIGN])).toBe(false);
+
+    const warns: string[] = [];
+    const saved = console.warn;
+    console.warn = (...args: unknown[]) => { warns.push(args.map(String).join(" ")); };
+    try {
+      expect(await m.detect()).toBe(false);
+    } finally {
+      console.warn = saved;
+    }
+    expect(warns.some((w) => w.includes("graph-heal") && w.includes("mixed"))).toBe(true);
   });
 });

@@ -346,6 +346,33 @@ describe("step 6: instance-wide dedup-cluster stat (flair-quality Slice 1c)", ()
     expect(r.logRow.errors).toEqual(["dedup: unexpected /MemoryDedupStats response shape"]);
   });
 
+  it("records the guard's named state when the sweep is refused, not an unexpected-shape error (#2596)", async () => {
+    const r = await runNightlyCycle(baseOpts({
+      apiCall: makeApi({
+        "GET:/Memory": () => sampleMemories,
+        "GET:/Soul": () => [sampleSoul],
+          "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
+        "POST:/ReflectMemories": () => ({ candidates: [], count: 0, model: "default", gathered: 1, unreflected: 1 }),
+        "POST:/MemoryDedupStats": () => ({
+          clusterCount: null,
+          largestClusterSize: null,
+          totalMemoriesInClusters: null,
+          computedAt: "2026-07-22T03:00:00.000Z",
+          embeddingSpace: { state: "mixed", reason: "the Memory corpus scan failed" },
+        }),
+      }),
+    }));
+    expect(r.status).toBe("completed");
+    expect(r.logRow.errors).toEqual([]);
+    expect(r.logRow.dedup).toEqual({
+      clusterCount: null,
+      largestClusterSize: null,
+      totalMemoriesInClusters: null,
+      computedAt: "2026-07-22T03:00:00.000Z",
+      embeddingSpace: { state: "mixed", reason: "the Memory corpus scan failed" },
+    });
+  });
+
   it("dry-run skips the /MemoryDedupStats call entirely — persisting the stat is a side effect", async () => {
     const calls: string[] = [];
     const r = await runNightlyCycle(baseOpts({
