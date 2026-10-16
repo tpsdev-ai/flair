@@ -1,0 +1,39 @@
+# Fixture for the workflow coverage-gate checker (flair#2480).
+#
+# Refused: the job holding the gate sets defaults.run.shell, so the gate step
+# does not run under the default shell.
+name: workflow-gate fixture (job defaults shell override)
+on: pull_request
+jobs:
+  test-unit:
+    name: Unit lane
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Verify root unit shard coverage
+        run: node scripts/ci/unit-shards.mjs --verify
+  test-darwin-gated:
+    name: Darwin-gated unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "fixture"
+  test-unit-gate:
+    name: Unit Tests
+    needs: [test-unit, test-darwin-gated]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Require all Node-version legs and the darwin-gated lane to pass
+        run: |
+          echo "test-unit matrix result: ${{ needs.test-unit.result }}"
+          echo "test-darwin-gated result: ${{ needs.test-darwin-gated.result }}"
+          if [ "${{ needs.test-unit.result }}" != "success" ]; then
+            echo "::error::One or more Unit Tests Node-version legs did not succeed"
+            exit 1
+          fi
+          if [ "${{ needs.test-darwin-gated.result }}" != "success" ]; then
+            echo "::error::Darwin-gated unit tests did not succeed (flair#1012)"
+            exit 1
+          fi
