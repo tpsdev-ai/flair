@@ -4,8 +4,9 @@
  * when the component loads. For a non-admin HTTP request to a resource class
  * that extends one of those tables: an addressed write (POST/PUT/PATCH/DELETE
  * to `/<Table>/<id>`) checks a string or number body `id` on POST/PUT/PATCH before the
- * stored owner, if reached; middleware can return the owner refusal first. A
- * collection PUT/PATCH/DELETE is refused. A POST to a collection is delegated
+ * stored owner, if reached; middleware can return the owner refusal first.
+ * For collection PUT/PATCH/DELETE, if reached, the table guard returns the
+ * collection refusal; existing DELETE middleware may refuse earlier. A POST to a collection is delegated
  * to each resource's own POST handling. An incomplete installation (a missing or empty
  * registry, or an owner-scoped table that could not be guarded) is logged as an
  * error at load.

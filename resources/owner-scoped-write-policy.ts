@@ -11,10 +11,9 @@
  *     the caller (`ownerMutationRefusal`, 403), if reached. The middleware can
  *     return the owner refusal first on a plain addressed URL;
  *   - addressed to no single record (the table's collection, with or without a
- *     query) is refused on PUT, PATCH and DELETE with `collectionWriteRefusal`
- *     (403): such a request does not resolve to one addressed row, so the
- *     guard cannot owner-check the rows it would write before the write. A
- *     POST to a collection is NOT decided here: it is delegated to the
+ *     query): if reached, the table guard returns `collectionWriteRefusal` (403)
+ *     on PUT, PATCH and DELETE; existing DELETE middleware may refuse earlier.
+ *     A POST to a collection is NOT decided here: it is delegated to the
  *     resource's own POST handling (its create and attribution rules;
  *     OrgEvent's post() can also update a caller-owned record its body names).
  * A write refused by this guard leaves its target row unchanged

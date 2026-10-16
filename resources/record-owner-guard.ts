@@ -144,9 +144,10 @@ export function isMutatingMethod(method: string): boolean {
  * a `.` suffix as a content type or attribute and address a different id).
  * Every other form returns null. Other addressed forms of a table-backed route
  * (a dotted id, extra segments) use the guard on Harper's resolved id. On
- * POST/PUT/PATCH, its body-id check precedes stored ownership. A collection
- * PUT/PATCH/DELETE (including a trailing slash) is
- * refused by that guard; a collection POST follows the resource's own rules.
+ * POST/PUT/PATCH, its body-id check precedes stored ownership. For collection
+ * PUT/PATCH/DELETE (including a trailing slash), if reached, the table guard
+ * returns the collection refusal; existing DELETE middleware may refuse earlier.
+ * A collection POST follows the resource's own rules.
  * The table segment is matched EXACTLY so `/SoulFeed/x` can never be read as a
  * `Soul` route.
  */

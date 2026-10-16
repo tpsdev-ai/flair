@@ -7,9 +7,9 @@
   using Harper's resolved record id. OrgEvent binds an addressed `POST`'s missing
   body `id` to the addressed id, including administrator and in-process calls.
 
-  A non-admin `PUT`, `PATCH` or `DELETE` addressed to a table's collection
-  rather than to one record is refused with
-  `403 forbidden: a non-admin write to <Table> must address one record by its id`.
+  For a non-admin collection `PUT`, `PATCH` or `DELETE`, if reached, the table guard
+  returns `403 forbidden: a non-admin write to <Table> must address one record by its id`;
+  existing DELETE middleware may refuse earlier.
   A `POST` to a collection is delegated to each resource's own `POST`
   handling. The guard exempts administrator and in-process calls. A refusal
   by this guard leaves its target row unchanged.

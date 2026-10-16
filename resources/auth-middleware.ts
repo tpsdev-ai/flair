@@ -654,9 +654,10 @@ server.http(async (request: any, nextLayer: any) => {
   // is exactly the id Harper resolves (record-owner-guard.ts's
   // resolveGuardedRecord: `/<Table>/<id>`, no trailing slash, no `.` in the
   // id). This owner check precedes the guard's body-id check. On other addressed
-  // forms, the guard checks string or number body ids on POST/PUT/PATCH before stored ownership; collection
-  // PUT/PATCH/DELETE are refused by that guard; collection POST follows the
-  // resource's own rules. The guard (resources/owner-scoped-write-policy.ts)
+  // forms, the guard checks string or number body ids on POST/PUT/PATCH before
+  // stored ownership. For collection PUT/PATCH/DELETE, if reached, the table guard
+  // returns the collection refusal; existing DELETE middleware may refuse earlier.
+  // Collection POST follows the resource's own rules. The guard (resources/owner-scoped-write-policy.ts)
   // applies to the resource classes that extend the owner-scoped tables
   // resources/owner-scoped-writes.ts guards.
   if (isMutation && !request.tpsAgentIsAdmin) {

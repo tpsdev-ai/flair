@@ -94,9 +94,9 @@ OrgEvent, WorkspaceState, Presence):
   refusal), using Harper's resolved record id. An absent or matching body `id`
   passes the body-id check. OrgEvent and Memory bind an addressed POST's
   missing body `id` to the addressed id.
-- A PUT, PATCH or DELETE addressed to a table's collection rather than to one
-  record is refused with `403 forbidden: a non-admin write to <Table> must
-  address one record by its id`.
+- For a collection PUT, PATCH or DELETE, if reached, the table guard returns
+  `403 forbidden: a non-admin write to <Table> must address one record by its id`;
+  existing DELETE middleware may refuse earlier.
 
 A refusal by this guard leaves its target row unchanged and carries no record
 content. A POST to a collection is delegated to each resource's own

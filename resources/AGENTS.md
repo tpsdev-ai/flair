@@ -18,7 +18,7 @@ whether it is loaded. Check the loader configuration when extracting code.
 
 Preserve these boundaries:
 
-- For non-admin addressed writes, middleware can return the owner refusal before the table guard runs. The table guard checks a string or number body `id` on POST/PUT/PATCH before stored ownership, using Harper's resolved record id (`owner-scoped-write-policy.ts`); collection PUT/PATCH/DELETE is refused, and collection POST follows the resource's rules. A custom resource that extends `Resource` applies its own rule. Memory and OrgEvent bind an addressed POST's missing `id` to the addressed id.
+- For non-admin addressed writes, middleware can return the owner refusal before the table guard runs. The table guard checks a string or number body `id` on POST/PUT/PATCH before stored ownership, using Harper's resolved record id (`owner-scoped-write-policy.ts`). For collection PUT/PATCH/DELETE, if reached, the table guard returns the collection refusal; existing DELETE middleware may refuse earlier. Collection POST follows the resource's rules. A custom resource that extends `Resource` applies its own rule. Memory and OrgEvent bind an addressed POST's missing `id` to the addressed id.
 - Resolve identity from the resource context. Keep authenticated HTTP and deliberate internal calls distinct.
 - Compose caller filters inside the authoritative read scope; preserve the row re-check after retrieval.
 - Audit each exposed mutation verb. A `put()` guard does not automatically cover `patch()` or `post()`.
