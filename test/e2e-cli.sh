@@ -3,11 +3,9 @@
 set -euo pipefail
 
 FLAIR_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-if command -v bun > /dev/null 2>&1; then
-  FLAIR=(bun "${FLAIR_DIR}/dist/cli.js")
-else
-  FLAIR=(node "${FLAIR_DIR}/dist/cli.js")
-fi
+# The shipped package bin runs Node ("#!/usr/bin/env node"), so run the built CLI
+# under Node here too and exercise the shipped path.
+FLAIR=(node "${FLAIR_DIR}/dist/cli.js")
 
 AGENT_ID="e2e-test-$$"
 PORT="${FLAIR_PORT:-9926}"
