@@ -556,7 +556,11 @@ const DEFAULT_OPS_PORT = 19925;
 const FABRIC_OPS_PORT = 9925;
 // DEFAULT_ADMIN_USER + resolveAdminUser (flag > FLAIR_ADMIN_USER env > "admin")
 // live in src/lib/auth-resolve.ts — imported above (flair#1345).
-const STARTUP_TIMEOUT_MS = 60_000;
+//
+// Exported (flair#2568) so the test harness's readiness budget
+// (HARPER_STARTUP_BUDGET_MS in test/helpers/harper-lifecycle.ts) can be pinned
+// equal to the budget `flair init`'s TCP readiness check polls under.
+export const STARTUP_TIMEOUT_MS = 60_000;
 const ADOPT_STOP_TIMEOUT_MS = 60_000;
 const HEALTH_POLL_INTERVAL_MS = 500;
 
@@ -8982,6 +8986,7 @@ registerTest(program);
 // Command registration lives in src/commands/deploy.ts (flair#1636).
 // Bind shared cli-locals first so the extracted module never imports this file.
 bindDeployCli({
+  resolveEffectiveOpsUrl,
   fleetSweepCallerExitMessage,
   resolveFabricCredentials,
   shouldRunFleetVerify,
@@ -9082,6 +9087,7 @@ const ENTITIES_OPTION_DESCRIPTION =
 // Command group lives in src/commands/memory.ts (flair#1621). Bind shared
 // helpers first so the extracted module never imports this file.
 bindMemoryCli({
+  resolveEffectiveOpsUrl,
   api,
   resolveBaseUrl,
   resolveSigningAgentId,
@@ -9092,6 +9098,7 @@ bindMemoryCli({
   resolveHttpPort,
   parseEntitiesOptionOrExit,
   ENTITIES_OPTION_DESCRIPTION,
+  resolveFabricCredentials,
 });
 registerMemory(program);
 

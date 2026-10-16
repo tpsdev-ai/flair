@@ -8,7 +8,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { cp, mkdir, symlink } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { FlairClient } from "../../packages/flair-client/src/client";
 import { STDIO_TOOL_HANDLERS } from "../../packages/flair-mcp/src/adapter-tools";
 
@@ -197,7 +197,7 @@ describe("team directory on Harper", () => {
     if (harper) await stopHarper(harper);
     if (keyDir) rmSync(keyDir, { recursive: true, force: true });
     if (appDir) rmSync(appDir, { recursive: true, force: true });
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test("a non-operator publish is refused by the real resource (refusal shape)", async () => {
     const res = await publishAsAgent(reader, {

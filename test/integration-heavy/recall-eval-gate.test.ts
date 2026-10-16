@@ -24,7 +24,7 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { existsSync } from "node:fs";
 import path from "node:path";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { mkAgent, registerAgent, type BenchClient } from "../../packages/flair-bench/lib/index";
 import { runRecallEval } from "../bench/recall-eval/eval";
 import { AGENT_ID, FLOORS, deriveLexicalOverlapLabels } from "../bench/recall-eval/labels";
@@ -63,7 +63,7 @@ gate("deterministic recall-quality gate (#1216-a / #17)", () => {
 
   afterAll(async () => {
     if (harper) await stopHarper(harper, { keepInstallDir: false });
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test("ingest wrote the whole corpus with real timestamps", () => {
     expect(curated.ingest.written).toBeGreaterThan(0);

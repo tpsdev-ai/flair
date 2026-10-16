@@ -25,7 +25,7 @@ import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
 import { writeFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import {
   componentWithOwnerGuardLoadFailure,
   LOAD_FAILURE_MARKER,
@@ -105,7 +105,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (harper) { disarm(); await stopHarper(harper); }
   if (component) component.cleanup();
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("flair#2468 — initial row-load failures on addressed single-record Harper requests", () => {
   test("addressed single-record PUT/PATCH: an unreadable stored row is refused with owner_check_unavailable, and an administrator gets Harper's 500", async () => {

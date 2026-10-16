@@ -26,7 +26,7 @@ import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 const RESERVED_TEST_AGENT_ID = "__flair_migration_synthetic_test_agent__";
 const SYNTHETIC_TARGET_MARKER = "synthetic-ci-schema-stamp-done";
@@ -116,7 +116,7 @@ describe("zero-touch migrations — synthetic CI variant end-to-end (real Harper
       const { rm } = await import("node:fs/promises");
       await rm(homeDir, { recursive: true, force: true, maxRetries: 4 });
     }
-  });
+  }, HARPER_STOP_BUDGET_MS);
 
   test("the synthetic migration runs to completion: health reports completed, every seeded row stamped", async () => {
     const deadline = Date.now() + 60_000;

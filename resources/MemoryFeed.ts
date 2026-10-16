@@ -15,7 +15,7 @@ import { extractPointerInputs } from "./memory-host-source.js";
 import { deletePointerRowViaTable } from "./host-pointer-adapter.js";
 import { stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./memory-declared-attributes.js";
 import { buildProvenance } from "./provenance.js";
-import { redactMemoryWrite } from "./memory-redaction.js";
+import { redactMemoryWrite, redactSkillWrite } from "./memory-redaction.js";
 import { REDACTION_RULES, buildFromAllowlist, feedResponseFields, storageResult, suppliedMemoryFields } from "./memory-write-response.js";
 import { applyFederationBookkeeping, applyOriginatorInstanceId, resolveStoredRow } from "./originator-instance.js";
 import { resolveReadScope } from "./memory-read-scope.js";
@@ -114,13 +114,12 @@ export class FeedMemories extends Resource {
       }
     }
 
-    // flair#2407: this raw-table ingest is a Memory write too; redact
-    // credential-shaped text before the skill body is prepared, before the
-    // content hash is computed from it and before the row is stored.
-    const redactedValues = redactMemoryWrite(content).count;
     const preparedSkill = await prepareSkillBody(content, existingRecord);
     if (preparedSkill instanceof Response) return preparedSkill;
     content = preparedSkill.content;
+    let redactedValues = redactMemoryWrite(content).count;
+    // Duplicate top-level metadata keys are refused; otherwise redact name/description and tags.
+    redactedValues += redactSkillWrite(content);
     const agentId = content.agentId;
     const body = String(content?.content ?? "");
     if (!agentId || !body) {
