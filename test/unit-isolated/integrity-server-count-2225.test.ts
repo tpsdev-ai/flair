@@ -90,7 +90,7 @@ for (const table of ["Memory", "MemoryDeletionHistory"]) {
   }
 
   test(`${table}: a before/after exact-count difference around the search reports UNKNOWN`, async () => {
-    const result = await scan({ table, counts: [1, 2] });
+    const result = await scan({ table, counts: [1, 2, 1, 2, 1, 2] });
     expectRefusal(result);
     expect(result.verdict.reason).toContain(`${table}: source count changed`);
     expect(result.verdict.reason).toContain("retry");

@@ -55,7 +55,7 @@ async function runCheckFake(opts: {
       if (body.operation === "describe_table") return new Response(JSON.stringify({ record_count: (opts.memoryRows ?? []).length }));
       if (body.operation === "sql") {
         sqlCalls += 1;
-        return new Response(JSON.stringify([{ n: sqlCalls > 1 ? (opts.windowCountAfter ?? opts.windowCount) : opts.windowCount }]));
+        return new Response(JSON.stringify([{ n: sqlCalls % 2 === 0 ? (opts.windowCountAfter ?? opts.windowCount) : opts.windowCount }]));
       }
       if (body.operation === "search_by_conditions") return new Response(JSON.stringify(opts.windowRows ?? []));
       if (body.operation === "search_by_value") return new Response(JSON.stringify(body.table === "Memory" ? (opts.memoryRows ?? []) : []));
