@@ -324,11 +324,15 @@ describe("a write may name only the record it addresses (through the guard)", ()
     expect(calls.length).toBe(2);
   });
 
-  it("admits a caller-owned record when the body cannot be read", async () => {
-    const { Table, calls } = makeTable();
-    const d = deps({ r1: { id: "r1", authorId: "caller" } }, { readBody: async () => { throw new Error("unparsable"); } });
-    guardOwnerScopedWrites({ OrgEvent: Table }, { OrgEvent: "authorId" }, d);
-    expect("ok" in await outcome((Table as any).getResource(entry("r1"), ctxWith(AGENT, undefined), { method: "put" }))).toBe(true);
-    expect(calls.length).toBe(1);
-  });
+  for (const method of ["post", "put", "patch"]) {
+    it(`refuses a non-admin addressed ${method} whose body cannot be read, and never calls the write`, async () => {
+      const { Table, calls } = makeTable();
+      const d = deps({ r1: { id: "r1", authorId: "caller" } }, { readBody: async () => { throw new Error("unparsable"); } });
+      guardOwnerScopedWrites({ OrgEvent: Table }, { OrgEvent: "authorId" }, d);
+      const r = await refusalBody((Table as any).getResource(entry("r1"), ctxWith(AGENT, undefined), { method }));
+      expect(r.status).toBe(400);
+      expect(r.body.error).toBe("write_body_unreadable");
+      expect(calls).toEqual([]);
+    });
+  }
 });

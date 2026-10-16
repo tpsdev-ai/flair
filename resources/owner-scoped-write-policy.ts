@@ -103,6 +103,14 @@ export function unverifiedWriteCallerRefusal(table: string): Error & { statusCod
 }
 
 /** The named refusal for an addressed write whose string or number body `id` names a record other than the one it addresses. */
+/** A non-admin addressed write whose body could not be read: refused, never admitted. */
+export function writeBodyUnreadableRefusal(table: string): Response {
+  return new Response(JSON.stringify({
+    error: "write_body_unreadable",
+    message: `the ${table} write's body could not be read, so the record it names could not be checked`,
+  }), { status: 400, headers: { "Content-Type": "application/json" } });
+}
+
 export function writeIdNotAddressedRefusal(): Response {
   return new Response(JSON.stringify({
     error: "write_id_not_addressed",
@@ -162,7 +170,8 @@ export async function admitOwnerScopedWrite(
     try {
       body = await deps.readBody(context);
     } catch {
-      body = undefined;
+      // A body that cannot be read cannot be checked: refuse rather than admit.
+      throw writeBodyUnreadableRefusal(table);
     }
     if (bodyNamesDifferentRecord(target.id, body)) throw writeIdNotAddressedRefusal();
   }
