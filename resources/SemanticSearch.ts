@@ -30,7 +30,7 @@ import { bestSemanticSimilarity, evaluateAbstention } from "./abstention.js";
 const CANDIDATE_MULTIPLIER = 5;
 
 /** The recall leg's `_warning` for a guard-degraded search (flair#2530). The
- *  verdict is never `uniform` here (that state is never degraded), so the three
+ *  verdict is never `uniform` here (that state is never degraded), so the
  *  cases are exactly the non-uniform states. Each names itself; the
  *  non-current-stamp wording is used ONLY for the `mixed` state. `response` says what
  *  the caller gets back: keyword-only results (the request has query text), no
@@ -45,6 +45,12 @@ function spaceGuardWarning(v: EmbeddingSpaceVerdict, response: "keyword" | "none
   }
   if (v.state === "unverified") {
     return `semantic search unavailable — embedding space not yet verified; ${outcome}.`;
+  }
+  if (v.state === "excluded") {
+    return (
+      `semantic search unavailable — the store holds a stored vector with no trusted current-space stamp ` +
+      `(${v.excluded ?? "unknown"} row(s)); ${outcome}. Re-embed or remove the row`
+    );
   }
   return (
     `semantic search unavailable — a non-current embedding model stamp was observed ` +
@@ -174,27 +180,25 @@ export class SemanticSearch extends Resource {
     }
 
     // ─── Vector-space uniformity guard (embedding-space-guard slice 1) ────────
-    // If the store's model stamps are NOT KNOWN uniform in the current embedding
-    // space — a non-current stamp observed during a re-embed / model change, OR an unknown
+    // If the store is NOT KNOWN uniform in the current embedding space — a
+    // non-current stamp observed during a re-embed / model change, a stored vector
+    // with no trusted current-space stamp, OR an unknown
     // verdict (before the first scan completes, or after a scan error) —
     // cosining the query against stored vectors could cross spaces or produce
     // an invalid score: Harper zero-pads a mismatched-dimension vector and
     // returns a bogus score instead of throwing, and a same-dims vector from
     // another space scores meaninglessly. The guard fails CLOSED:
-    // only a store whose stamps a scan verified uniform serves embeddings
+    // only a store a scan found fully stamped in the current space serves embeddings
     // (flair#2530). Take the
     // SAME path for every non-uniform state — REFUSE the embedding leg and
     // degrade LOUDLY: drop qEmb so retrieveCandidates takes the keyword-only
     // branch (reusing the existing mode:'none' graceful-degrade contract) when
     // the request has query text, return no results when it has none, and
-    // surface a structured warning that NAMES the state (mixed /
+    // surface a structured warning that NAMES the state (mixed / excluded /
     // not-yet-verified / scan-failed) below. Never cosine a query against a
-    // stored corpus whose `embeddingModel` stamps are not verified to be the
-    // current space, never merely log. (This is stamp-metadata uniformity
-    // only: the guard's own verdict ignores a stored vector with no stamp, and a
-    // caller-supplied `queryEmbedding` carries no space provenance. A stored
-    // vector without a trusted current-space stamp is excluded from the vector
-    // leg by the retrieval core, flair#2573 slice 1.)
+    // stored corpus that is not known uniform. (This is stamp metadata only: a
+    // caller-supplied `queryEmbedding` carries no space provenance, so its bytes
+    // are not verified either — flair#2573 slice 2.)
     // Consulted through the SAME single chokepoint the write-time dedup leg
     // uses — O(1) on the verified-uniform happy path. The consult, and so the
     // state warning, happens only when a query embedding is available

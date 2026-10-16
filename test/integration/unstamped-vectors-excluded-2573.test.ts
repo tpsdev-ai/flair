@@ -1,48 +1,51 @@
 /**
  * unstamped-vectors-excluded-2573.test.ts — flair#2573 slice 1 (real Harper).
  *
- * A Memory write that supplies its own `embedding` and no `embeddingModel`
- * stamp stores a vector of unknown space. The query-time embedding-space guard's
- * scan reads `embeddingModel` and skips a row with no space-bearing stamp, so
- * its "uniform" verdict covers the stamped rows only — and before this slice a
- * vector query could cosine against an untrusted stored vector.
+ * A Memory write that supplies its own `embedding` and no `embeddingModel` stamp
+ * stores a vector of unknown space. flair#2573 slice 1 makes the query-time
+ * embedding-space guard's verdict non-uniform while any row stores a vector with
+ * no trusted current-space stamp: the guard's scan counts those rows (`excluded`)
+ * and every guard consumer takes its existing non-uniform path. This test drives
+ * a REAL Harper agent write (the ed25519 REST path) that supplies its own vector
+ * with no stamp, and covers:
+ *   - the write-time near-duplicate query (control: it compares vectors while the
+ *     store is uniform; then it does not, once one unstamped vector exists);
+ *   - the recall leg: a vector-only query returns no rows, the lexical leg still
+ *     finds the row, and /Health reports the excluded count;
+ *   - the real `flair doctor` command printing the excluded count line.
+ * A second spawned instance runs with FLAIR_RETRIEVAL_MODE=vector-only to show
+ * that branch falling back and naming the guard state.
  *
- * This test drives a REAL Harper agent write (the ed25519 REST path) that
- * supplies its own embedding with no stamp, then:
- *   - a vector-only query (a query embedding, no `q`) does NOT return that row,
- *     while a stamped row IS returned (unaffected);
- *   - the guard's /Health line counts the excluded row;
- *   - the same row IS found by the lexical leg.
+ * The always-on embedding-stamp migration would otherwise re-embed a no-stamp row
+ * (which removes the very state under test), so its regen is held at the
+ * test-only `embedding-stamp-regen-pre` point for the span of each describe
+ * (released in afterAll). The fault-injection gate is the environment the spawned
+ * Harper inherits.
  *
- * Determinism: the guard's boot pre-warm scan is held at the test-only
- * `scan-verdict` pause point (armed before Harper starts), i.e. after its own
- * read of the empty store. The rows are written while it is parked, and a
- * recall consult starts the scan that reads them — the same start order
- * embedding-space-scan-order-2508 pins. The always-on embedding-stamp migration
- * would otherwise re-embed a no-stamp row (which removes the very state under
- * test), so its regen is held at `embedding-stamp-regen-pre` for the same span.
- * Both are released in afterAll; the fault-injection gate is the environment the
- * spawned Harper inherits.
+ * Memory exposes only PUT over real HTTP (with the id in the path) — a bare
+ * `POST /Memory` is 405 "does not have a post method implemented", so every write
+ * here is a PUT /Memory/{id}, the path real callers use.
  *
- * Mutation check (fails on an assertion): in
- * resources/semantic-retrieval-core.ts, drop `trustedVectorCondition()` from the
- * HNSW query's conditions (both vector legs), leaving everything else — the
- * vector-only query then returns the unstamped row and the exclusion assertion
- * goes red.
+ * Mutation check (fails on an assertion): in resources/embedding-space-guard.ts,
+ * make the scan not count a stored vector with no trusted stamp (skip the
+ * `excluded++` for a missing stamp), leaving everything else — the store is then
+ * read as uniform, the near-duplicate query compares vectors, and the excluded
+ * count assertions go red. Restore with a file copy, never git.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import nacl from "tweetnacl";
-import { randomUUID } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { randomUUID, randomBytes } from "node:crypto";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawn } from "node:child_process";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 import { getModelId } from "../../resources/embeddings-provider.ts";
 import { TEST_FAULT_INJECTION_ENV, TEST_PAUSE_DIR_ENV } from "../../resources/txn-pause-point.ts";
 
-const SCAN_POINT = "scan-verdict";
 const REGEN_POINT = "embedding-stamp-regen-pre";
 const AGENT = "agent-a"; // neutral fixture name (no fleet host/agent)
+const CLI = join(process.cwd(), "dist", "cli.js");
 
 /** The stamp the spawned instance writes when it embeds. Same env, same value. */
 const CURRENT_STAMP = getModelId();
@@ -51,7 +54,8 @@ const CURRENT_STAMP = getModelId();
 const UNTRUSTED_VEC = [1, 0, 0, 0];
 const STAMPED_VEC = [1, 1, 0, 0]; // cosine 0.7071 against UNTRUSTED_VEC
 
-const KEYWORD = "zqxuntrustedkeyword"; // lexical-only token, absent from the stamped row
+const KEYWORD = "zqxuntrustedkeyword"; // lexical-only token, absent from the stamped rows
+const STAMPED_TEXT = "a row the server-stamped vector space covers for the dedup control";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
 function mkAgent(id: string): TestAgent {
@@ -66,163 +70,238 @@ function ed25519Header(agent: TestAgent, method: string, path: string): string {
   return `TPS-Ed25519 ${agent.id}:${ts}:${nonce}:${Buffer.from(sig).toString("base64")}`;
 }
 
-async function waitFor(path: string, timeoutMs: number): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (existsSync(path)) return true;
-    await new Promise((r) => setTimeout(r, 25));
-  }
-  return false;
+function delay(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
-describe("flair#2573 slice 1 — a stored vector with no trusted stamp is excluded from the vector leg (real Harper)", () => {
-  let harper: HarperInstance | undefined;
-  let pauseDir = "";
+/** A harness around one spawned Harper: agent writes, agent search, /Health. */
+function makeHarness(get: () => HarperInstance) {
   const agent = mkAgent(AGENT);
-
-  const basicAuth = () => "Basic " + btoa(`${harper!.admin.username}:${harper!.admin.password}`);
+  const basicAuth = () => "Basic " + btoa(`${get().admin.username}:${get().admin.password}`);
   async function adminOp(op: Record<string, unknown>): Promise<Response> {
-    return fetch(harper!.opsURL, {
+    return fetch(get().opsURL, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: basicAuth() },
       body: JSON.stringify(op),
     });
   }
-  async function agentFetch(method: string, path: string, body: unknown): Promise<Response> {
-    return fetch(`${harper!.httpURL}${path}`, {
-      method,
-      headers: { Authorization: ed25519Header(agent, method, path), "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+  async function putMemory(id: string, body: Record<string, unknown>): Promise<any> {
+    const path = `/Memory/${id}`;
+    const res = await fetch(`${get().httpURL}${path}`, {
+      method: "PUT",
+      headers: { Authorization: ed25519Header(agent, "PUT", path), "Content-Type": "application/json" },
+      body: JSON.stringify({ id, agentId: AGENT, visibility: "shared", ...body }),
     });
+    const text = await res.text();
+    expect(res.status, `PUT ${path} returned ${res.status}: ${text.slice(0, 300)}`).toBeLessThan(300);
+    return JSON.parse(text);
   }
   async function semanticSearch(body: Record<string, unknown>): Promise<any> {
-    const res = await agentFetch("POST", "/SemanticSearch", body);
+    const res = await fetch(`${get().httpURL}/SemanticSearch`, {
+      method: "POST",
+      headers: { Authorization: ed25519Header(agent, "POST", "/SemanticSearch"), "Content-Type": "application/json" },
+      body: JSON.stringify({ agentId: AGENT, ...body }),
+    });
     const text = await res.text();
     expect(res.status, `SemanticSearch returned ${res.status}: ${text.slice(0, 300)}`).toBe(200);
     return JSON.parse(text);
   }
   async function health(): Promise<any> {
-    const res = await fetch(`${harper!.httpURL}/Health`);
+    const res = await fetch(`${get().httpURL}/Health`);
     const text = await res.text();
-    expect(res.status, `/Health returned ${res.status}: ${text.slice(0, 300)}`).toBe(200);
+    // /Health is 200 once serving and 503 during the boot window; both carry the
+    // guard's field (flair#2530).
+    expect([200, 503]).toContain(res.status);
     return JSON.parse(text);
   }
+  /** A recall consult: any query embedding makes the guard consult and rescans
+   *  when the count is stale or unknown. */
+  async function consult(): Promise<void> {
+    await semanticSearch({ queryEmbedding: UNTRUSTED_VEC, limit: 1 });
+  }
+  async function waitGuard(want: (space: any) => boolean, timeoutMs: number): Promise<any> {
+    const deadline = Date.now() + timeoutMs;
+    let space: any;
+    while (Date.now() < deadline) {
+      space = (await health()).embeddingSpace;
+      if (space && want(space)) return space;
+      await consult();
+      await delay(150);
+    }
+    return space;
+  }
+  return { agent, adminOp, putMemory, semanticSearch, health, consult, waitGuard };
+}
+
+/** Spawn a Harper with the migration regen held, register the agent, return the harness. */
+async function spawnWithHarness(env?: Record<string, string>):
+  Promise<{ harper: HarperInstance; pauseDir: string; h: ReturnType<typeof makeHarness> }> {
+  const pauseDir = mkdtempSync(join(tmpdir(), "flair-2573-pause-"));
+  // Hold the stamp migration's regen so a no-stamp row keeps its state under test.
+  writeFileSync(join(pauseDir, `arm.${REGEN_POINT}`), "");
+  const saved: Record<string, string | undefined> = {
+    [TEST_FAULT_INJECTION_ENV]: process.env[TEST_FAULT_INJECTION_ENV],
+    [TEST_PAUSE_DIR_ENV]: process.env[TEST_PAUSE_DIR_ENV],
+  };
+  process.env[TEST_FAULT_INJECTION_ENV] = "1";
+  process.env[TEST_PAUSE_DIR_ENV] = pauseDir;
+  let harper: HarperInstance;
+  try {
+    harper = await startHarper(env ? { env } : {});
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+  expect(harper.external).toBe(false);
+  expect(harper.ownsInstallDir).toBe(true);
+  const h = makeHarness(() => harper);
+  // Register the agent (publicKey) so the ed25519 write/search paths accept it.
+  const insert = await h.adminOp({
+    operation: "insert", database: "flair", table: "Agent",
+    records: [{ id: AGENT, name: AGENT, role: "agent", publicKey: h.agent.publicKey, createdAt: new Date().toISOString() }],
+  });
+  expect(insert.status).toBe(200);
+  return { harper, pauseDir, h };
+}
+
+async function releaseAndStop(harper: HarperInstance | undefined, pauseDir: string): Promise<void> {
+  if (pauseDir) writeFileSync(join(pauseDir, `go.${REGEN_POINT}`), "");
+  if (harper) await stopHarper(harper);
+  if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
+}
+
+describe("flair#2573 slice 1 — an unstamped stored vector makes the guard verdict non-uniform (real Harper)", () => {
+  let harper: HarperInstance | undefined;
+  let pauseDir = "";
+  let h: ReturnType<typeof makeHarness>;
+  const A_ID = "mem-2573-stamped-a";
+  const B_ID = "mem-2573-stamped-b";
+  const C_ID = "mem-2573-stamped-c";
+  const U_ID = "mem-2573-unstamped";
 
   beforeAll(async () => {
-    pauseDir = mkdtempSync(join(tmpdir(), "flair-2573-pause-"));
-    // Hold the guard's boot scan AFTER its (empty-store) read, and hold the
-    // stamp migration's regen so the no-stamp state persists. The rows written
-    // below are read by the consult scan the first query starts.
-    writeFileSync(join(pauseDir, `arm.${SCAN_POINT}`), "");
-    writeFileSync(join(pauseDir, `arm.${REGEN_POINT}`), "");
-    const saved: Record<string, string | undefined> = {
-      [TEST_FAULT_INJECTION_ENV]: process.env[TEST_FAULT_INJECTION_ENV],
-      [TEST_PAUSE_DIR_ENV]: process.env[TEST_PAUSE_DIR_ENV],
-    };
-    process.env[TEST_FAULT_INJECTION_ENV] = "1";
-    process.env[TEST_PAUSE_DIR_ENV] = pauseDir;
-    try {
-      harper = await startHarper();
-    } finally {
-      for (const [key, value] of Object.entries(saved)) {
-        if (value === undefined) delete process.env[key];
-        else process.env[key] = value;
-      }
-    }
-    expect(harper.external).toBe(false);
-    expect(harper.ownsInstallDir).toBe(true);
-
-    // The guard's boot scan must be parked after its read before rows exist.
-    expect(
-      await waitFor(join(pauseDir, `paused.${SCAN_POINT}`), 30_000),
-      "no guard scan reached the boot pause (the boot pre-warm should have)",
-    ).toBe(true);
-
-    // Register the agent (publicKey) so the ed25519 write/search paths accept it.
-    const insert = await adminOp({
-      operation: "insert", database: "flair", table: "Agent",
-      records: [{ id: agent.id, name: agent.id, role: "agent", publicKey: agent.publicKey, createdAt: new Date().toISOString() }],
-    });
-    expect(insert.status).toBe(200);
-
-    // THE agent write under test: a caller-supplied embedding with no stamp.
-    const untrusted = await agentFetch("POST", "/Memory", {
-      agentId: AGENT,
-      content: `a caller-supplied vector of unknown space ${KEYWORD}`,
-      embedding: UNTRUSTED_VEC,
-      visibility: "shared",
-    });
-    expect(untrusted.status, `untrusted write returned ${untrusted.status}: ${(await untrusted.text()).slice(0, 300)}`).toBeLessThan(300);
-
-    // A stamped row on the current space — unaffected by the exclusion.
-    const stamped = await agentFetch("POST", "/Memory", {
-      agentId: AGENT,
-      content: "a row the server-stamped vector space covers",
-      embedding: STAMPED_VEC,
-      embeddingModel: CURRENT_STAMP,
-      visibility: "shared",
-    });
-    expect(stamped.status, `stamped write returned ${stamped.status}: ${(await stamped.text()).slice(0, 300)}`).toBeLessThan(300);
-
-    // A recall consult starts the scan that reads both rows; the parked boot
-    // scan never sees them and is refused as stale when released in afterAll.
-    // A supplied query embedding guarantees the consult (no model needed).
-    await semanticSearch({ agentId: AGENT, queryEmbedding: UNTRUSTED_VEC, limit: 1 });
+    const spawned = await spawnWithHarness();
+    harper = spawned.harper;
+    pauseDir = spawned.pauseDir;
+    h = spawned.h;
   }, 180_000);
 
   afterAll(async () => {
-    // Never leave the guard scan or the migration regen parked.
-    if (pauseDir) {
-      writeFileSync(join(pauseDir, `go.${SCAN_POINT}`), "");
-      writeFileSync(join(pauseDir, `go.${REGEN_POINT}`), "");
-    }
-    if (harper) await stopHarper(harper);
-    if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
+    await releaseAndStop(harper, pauseDir);
   }, 60_000);
 
-  test("the unstamped row is excluded from the vector leg and counted; the stamped row and the lexical leg are unaffected", async () => {
-    // Wait for the released scan's verdict to publish, then read /Health: the
-    // store is uniform over stamped rows and one row is excluded.
-    let space: any;
-    const deadline = Date.now() + 20_000;
-    while (Date.now() < deadline) {
-      space = (await health()).embeddingSpace;
-      if (space?.state === "uniform" && space?.excluded === 1) break;
-      await new Promise((r) => setTimeout(r, 100));
-    }
-    expect(space?.state, "guard state should be uniform over the stamped rows").toBe("uniform");
-    expect(space?.excluded, "the unstamped row must be counted").toBe(1);
-
-    // Vector-only query: only the query embedding, no `q`. The unstamped row's
-    // vector is a perfect cosine match, yet it must not be returned; the stamped
-    // row is.
-    const vectorOnly = await semanticSearch({ agentId: AGENT, queryEmbedding: UNTRUSTED_VEC, limit: 20 });
-    const vecIds = vectorOnly.results.map((r: any) => r.content as string);
-    expect(vecIds.some((c: string) => c.includes("unknown space")), "the unstamped vector row must not be returned by a vector-only query").toBe(false);
-    expect(vecIds.some((c: string) => c.includes("server-stamped vector space")), "the stamped row must still be returned").toBe(true);
-
-    // The same row still matches lexically.
-    const lexical = await semanticSearch({ agentId: AGENT, q: KEYWORD, limit: 20 });
-    const lexIds = lexical.results.map((r: any) => r.content as string);
-    expect(lexIds.some((c: string) => c.includes("unknown space")), "the excluded row must still match on the lexical leg").toBe(true);
+  test("control: while the store is uniform the write-time near-duplicate query compares vectors", async () => {
+    const space = await h.waitGuard((s) => s.state === "uniform", 60_000);
+    expect(space?.state, "the boot scan should verify an empty store uniform").toBe("uniform");
+    // The first write has nothing to match.
+    await h.putMemory(A_ID, { content: STAMPED_TEXT, embedding: STAMPED_VEC, embeddingModel: CURRENT_STAMP });
+    // A near-duplicate of A: same content, same vector. The dedup cosine leg
+    // matches it (the store is uniform).
+    const b = await h.putMemory(B_ID, { content: STAMPED_TEXT, embedding: STAMPED_VEC, embeddingModel: CURRENT_STAMP });
+    expect(b.deduplicated).toBe(true);
+    expect(b.matchedId).toBe(A_ID);
   }, 120_000);
 
-  test("the unstamped row is not returned even when it is the only vector match", async () => {
-    // A query embedding that only the unstamped row's vector matches closely.
-    const res = await semanticSearch({ agentId: AGENT, queryEmbedding: UNTRUSTED_VEC, minScore: 0.9, limit: 20 });
-    expect(res.results.map((r: any) => r.content as string).some((c: string) => c.includes("unknown space"))).toBe(false);
+  test("one unstamped stored vector makes the verdict non-uniform: excluded count, no vector recall, lexical still matches", async () => {
+    const u = await h.putMemory(U_ID, { content: `a caller-supplied vector of unknown space ${KEYWORD}`, embedding: UNTRUSTED_VEC });
+    expect(u.id).toBe(U_ID);
+    // The write stored a vector with no stamp: the guard's count is stale, and a
+    // consult republishes it as non-uniform.
+    const space = await h.waitGuard((s) => s.state === "excluded" && s.excluded === 1, 60_000);
+    expect(space?.state, "one unstamped stored vector makes the verdict non-uniform").toBe("excluded");
+    expect(space?.excluded, "the unstamped vector row must be counted").toBe(1);
+
+    // A vector-only query (a query embedding, no `q`): the embedding leg is
+    // refused, so nothing comes back — the untrusted row's perfect cosine match
+    // included.
+    const vectorOnly = await h.semanticSearch({ queryEmbedding: UNTRUSTED_VEC, limit: 20 });
+    expect(vectorOnly.results.length, "the refused embedding leg returns no rows").toBe(0);
+
+    // The same row still matches on the lexical leg.
+    const lexical = await h.semanticSearch({ q: KEYWORD, limit: 20 });
+    const lexIds = lexical.results.map((r: any) => r.content as string);
+    expect(lexIds.some((c: string) => c.includes(KEYWORD)), "the row must still match lexically").toBe(true);
+  }, 120_000);
+
+  test("the write-time near-duplicate query does not compare vectors while the verdict is non-uniform", async () => {
+    const c = await h.putMemory(C_ID, { content: STAMPED_TEXT, embedding: STAMPED_VEC, embeddingModel: CURRENT_STAMP });
+    expect(c.written).toBe(true); // the write never stops
+    expect(c.deduplicated, "the dedup leg must not use vectors while the verdict is non-uniform").toBe(false);
+    expect(c.matchedId).toBeUndefined();
   }, 60_000);
 
-  test("the migration regen pause was not needed to change the outcome (sanity: the untrusted row persists)", async () => {
-    // Read the stored row straight off the ops API: it still carries a vector and
-    // no stamp, i.e. the exclusion above was not a missing-vector artifact.
-    const res = await adminOp({
-      operation: "search_by_value", database: "flair", table: "Memory",
-      search_attribute: "agentId", search_type: "equals", search_value: AGENT, get_attributes: ["id", "embedding", "embeddingModel"],
-    });
-    expect(res.status).toBe(200);
-    const rows: any[] = await res.json();
-    const untrusted = rows.find((r) => Array.isArray(r.embedding) && r.embedding.length === 4 && !r.embeddingModel);
-    expect(untrusted, "the unstamped row must still exist with its vector and no stamp").toBeTruthy();
+  test("the real flair doctor prints the excluded count line", async () => {
+    const home = mkdtempSync(join(tmpdir(), "flair-2573-home-"));
+    try {
+      const env: Record<string, string> = {
+        ...(process.env as Record<string, string>),
+        HOME: home,
+        FLAIR_URL: "",
+        FLAIR_TOKEN: "",
+        FLAIR_OPS_PORT: String(new URL(harper!.opsURL).port),
+        NO_COLOR: "1",
+      };
+      delete env.FLAIR_ADMIN_PASS;
+      delete env.FLAIR_AGENT_ID;
+      const out = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
+        const child = spawn(process.execPath, [CLI, "doctor", "--port", String(new URL(harper!.httpURL).port)], {
+          env, timeout: 90_000,
+        });
+        let stdout = "";
+        let stderr = "";
+        child.stdout?.on("data", (d: Buffer) => { stdout += d.toString(); });
+        child.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
+        child.on("error", reject);
+        child.on("exit", (code, signal) => {
+          if (signal !== null) { reject(new Error(`flair doctor overran: ${signal}\n${stdout}`)); return; }
+          resolve({ code, stdout, stderr });
+        });
+      });
+      expect(out.stdout).toContain("a stored vector carries no trusted current-space stamp");
+      expect(out.stdout).toContain("excluded from the vector leg: 1 row(s) with no trusted model stamp");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 120_000);
+});
+
+describe("flair#2573 slice 1 — vector-only mode falls back and names the guard state (real Harper)", () => {
+  let harper: HarperInstance | undefined;
+  let pauseDir = "";
+  let h: ReturnType<typeof makeHarness>;
+  const U_ID = "mem-2573-vo-unstamped";
+  const A_ID = "mem-2573-vo-stamped";
+  const TOKEN = "zqxvectorkeyword";
+
+  beforeAll(async () => {
+    const spawned = await spawnWithHarness({ FLAIR_RETRIEVAL_MODE: "vector-only" });
+    harper = spawned.harper;
+    pauseDir = spawned.pauseDir;
+    h = spawned.h;
+  }, 180_000);
+
+  afterAll(async () => {
+    await releaseAndStop(harper, pauseDir);
   }, 60_000);
+
+  test("one unstamped stored vector makes the vector-only branch fall back, reporting the guard state", async () => {
+    await h.putMemory(A_ID, { content: `a stamped row mentioning ${TOKEN}`, embedding: STAMPED_VEC, embeddingModel: CURRENT_STAMP });
+    await h.putMemory(U_ID, { content: `an untrusted vector row ${KEYWORD}`, embedding: UNTRUSTED_VEC });
+    const space = await h.waitGuard((s) => s.state === "excluded" && s.excluded === 1, 60_000);
+    expect(space?.state).toBe("excluded");
+
+    // vector-only mode: the query text is embedded, then the guard refuses the
+    // embedding leg. The response falls back to keyword-only and names the state.
+    const res = await h.semanticSearch({ q: TOKEN, limit: 20 });
+    expect(String(res._warning ?? "")).toContain("semantic search unavailable");
+    expect(String(res._warning ?? "")).toContain("stored vector with no trusted current-space stamp");
+    expect(res.results.map((r: any) => r.content as string).some((c: string) => c.includes(TOKEN))).toBe(true);
+  }, 120_000);
+});
+
+/** Guard against a leaked temp tree from THIS file's own fixtures. */
+afterAll(() => {
+  expect(existsSync(tmpdir())).toBe(true);
 });

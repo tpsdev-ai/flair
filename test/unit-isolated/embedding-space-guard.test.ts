@@ -37,13 +37,29 @@ const CURRENT = "gguf:nomic-embed-text-v1.5-Q4_K_M+searchprefix";
 const BARE = "nomic-embed-text-v1.5-Q4_K_M+searchprefix";
 const FOREIGN = "gemma-embed:768"; // a genuinely different vector space
 
+/** A fake Memory table over rows of `{stamp, vec}`: `vec` true ⇒ the row stores
+ *  a vector (the only rows the guard counts). */
+function fakeRows(rows: { stamp?: string | null; vec?: boolean }[]) {
+  return async () => ({
+    search(_q: unknown) {
+      async function* gen() {
+        for (const r of rows) yield { embeddingModel: r.stamp, embedding: r.vec ? [1, 0, 0, 0] : undefined };
+      }
+      return gen();
+    },
+  });
+}
+
 /** A fake Memory table over a MUTABLE stamp list (mutate then recomputeLatch()
- *  to simulate a re-embed converging the corpus). */
+ *  to simulate a re-embed converging the corpus). A space-bearing stamp carries
+ *  a vector; a no-stamp / `hash-512d` row carries none (a legacy lexical row). */
 function fakeTableOver(stamps: (string | null | undefined)[]) {
   return async () => ({
     search(_q: unknown) {
       async function* gen() {
-        for (const s of stamps) yield { embeddingModel: s };
+        for (const s of stamps) {
+          yield { embeddingModel: s, embedding: s != null && s !== "hash-512d" ? [1, 0, 0, 0] : undefined };
+        }
       }
       return gen();
     },
@@ -127,11 +143,36 @@ describe("embedding-space-guard — latch", () => {
     expect(await isEmbeddingSpaceUniform()).toBe(true);
     noteWriteStamp(BARE); // bare == current space
     expect(await isEmbeddingSpaceUniform()).toBe(true);
-    noteWriteStamp("hash-512d"); // no real vector — never a space
-    expect(await isEmbeddingSpaceUniform()).toBe(true);
 
     noteWriteStamp("milton:foo"); // a foreign space (federation / replication)
     expect(await isEmbeddingSpaceUniform()).toBe(false);
+  });
+
+  it("a stored vector with no trusted stamp makes the verdict non-uniform (excluded)", async () => {
+    // A stamped row plus a row that stores a vector and carries no stamp: the
+    // stamp metadata a scan sees is uniform, yet the corpus holds a vector the
+    // runtime cosine legs must not touch.
+    _setGuardTableGetterForTests(fakeRows([{ stamp: BARE, vec: true }, { stamp: null, vec: true }]));
+    expect(await recomputeLatch()).toBe(false); // not a cached true
+    const v = await embeddingSpaceVerdict();
+    expect(v.uniform).toBe(false);
+    expect(v.state).toBe("excluded");
+    expect(v.excluded).toBe(1);
+    expect(spaceGuardState()).toEqual({ state: "excluded", reason: null, excluded: 1 });
+    expect(await isEmbeddingSpaceUniform()).toBe(false); // the caller's mixed path
+
+    // A no-stamp row that stores NO vector is not a hazard: it cannot be cosined.
+    _setGuardTableGetterForTests(fakeRows([{ stamp: BARE, vec: true }, { stamp: null, vec: false }]));
+    expect(await recomputeLatch()).toBe(true);
+    expect(spaceGuardState()).toEqual({ state: "uniform", reason: null, excluded: 0 });
+  });
+
+  it("the count uses the vector query's raw stamp comparison — no trimming", async () => {
+    // The HNSW stamp condition compares raw strings, so a whitespace-padded
+    // current stamp is one the query does not admit; the count must agree.
+    _setGuardTableGetterForTests(fakeRows([{ stamp: ` ${BARE} `, vec: true }]));
+    expect(await recomputeLatch()).toBe(false);
+    expect(spaceGuardState()).toEqual({ state: "excluded", reason: null, excluded: 1 });
   });
 
   it("diagnostics name the current space and the foreign stamps observed", async () => {
@@ -245,6 +286,42 @@ describe("embedding-space-guard — latch", () => {
     a.settle({ error: new Error("late read failure") });
     expect(await scanA).toBe(false);
     expect(spaceGuardState()).toEqual({ state: "mixed", reason: null, excluded: null });
+  });
+
+  it("a write that stores a vector without a trusted stamp marks the count stale and fails closed until a fresh scan", async () => {
+    _setGuardTableGetterForTests(fakeTableOver([BARE]));
+    expect(await recomputeLatch()).toBe(true);
+    expect(spaceGuardState()).toEqual({ state: "uniform", reason: null, excluded: 0 });
+
+    noteWriteStamp(undefined); // a stored vector with no trusted stamp
+    // The published count no longer covers the corpus; an unknown count fails closed.
+    expect(spaceGuardState()).toEqual({ state: "unverified", reason: null, excluded: 0 });
+    expect(await isEmbeddingSpaceUniform()).toBe(false);
+
+    // A fresh scan over the corpus republishes and reopens the gate (no such row).
+    expect(await recomputeLatch()).toBe(true);
+    expect(spaceGuardState()).toEqual({ state: "uniform", reason: null, excluded: 0 });
+  });
+
+  it("a write during an in-flight scan invalidates it: no older count published, the flag not cleared", async () => {
+    _setGuardTableGetterForTests(fakeRows([{ stamp: BARE, vec: true }]));
+    expect(await recomputeLatch()).toBe(true);
+    expect(spaceGuardState().excluded).toBe(0);
+
+    const a = deferredTable();
+    _setGuardTableGetterForTests(a.getter);
+    const scanA = recomputeLatch(); // in flight, held on its table read
+    noteWriteStamp(undefined); // the write stores a vector with no trusted stamp
+    // Scan A's read: a corpus whose stamps are all current (= excluded 0).
+    a.settle({ table: await fakeRows([{ stamp: BARE, vec: true }])() });
+    await scanA; // discarded by the epoch check — it publishes nothing
+    // The flag survived the scan and the verdict fails closed on the unknown count.
+    expect(spaceGuardState()).toEqual({ state: "unverified", reason: null, excluded: 0 });
+
+    // A fresh scan over the corpus that holds the unstamped vector publishes it.
+    _setGuardTableGetterForTests(fakeRows([{ stamp: BARE, vec: true }, { stamp: null, vec: true }]));
+    expect(await recomputeLatch()).toBe(false);
+    expect(spaceGuardState()).toEqual({ state: "excluded", reason: null, excluded: 1 });
   });
 
   it("a later successful scan clears the failed state", async () => {
