@@ -100,7 +100,7 @@ add("MemoryFeed", ["writer:(databases as any).flair.Memory.update#1"], "NON_EMBE
   "Dedup repair: writes only expiresAt (flair#2358/#2470).");
 add("AgentSeed", ["writer:(databases as any).flair.Memory.put#1"], "NON_EMBED",
   "Admin-only starter memories — the record carries no embedding/embeddingModel.");
-add("MemoryFeed", ["writer:writeBackCommittedRow#1"], "NON_EMBED",
+add("MemoryFeed", ["writer:writeBackCommittedRow#1", "writer:table.put#1"], "NON_EMBED",
   "Feed rows through the shared write-back helper (flair#2354): POST /FeedMemories refuses a body embedding or embeddingModel (400 feed_embedding_not_writable), so the record carries neither.");
 add("MemoryMaintenance", ["writer:(databases as any).flair.Memory.update#1", "writer:(databases as any).flair.Memory.delete#1"], "NON_EMBED",
   "Archive/expiry maintenance — partial update (archive fields) / delete; never touches the stamp.");

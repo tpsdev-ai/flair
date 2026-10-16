@@ -177,6 +177,24 @@ describe("flair#2139 S2 — skill version write: supersede and delete", () => {
     expect(memoryStore.get("m2")!.skillSubjectId).toBe("m1");
   });
 
+  for (const status of [200, 409]) {
+    test(`delete close Response status ${status} returns write_response_withheld without a version append`, async () => {
+      memoryStore.set("m1", liveSkill("m1", "m1", "c1"));
+      const result = await runSkillVersionWrite({
+        ctx: agentCtx(), subjectId: "m1", agentId: "agent-a",
+        head: (shared) => resolveSkillHead("m1", null, shared),
+        plan: (head) => ({ kind: "delete", predecessor: head!, closePatch: { validTo: "t" }, value: null, visibility: "shared", grantedClose: null }),
+        hooks: { createSuccessor, closePredecessor: async () => Response.json({ embedding: [1] }, { status }) },
+      });
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error("expected a refusal");
+      expect(result.response.status).toBe(500);
+      expect((await result.response.json()).error).toBe("write_response_withheld");
+      expect(memoryStore.get("m1")!.validTo).toBeUndefined();
+      expect(store.size).toBe(0);
+    });
+  }
+
   test("a logical delete closes the head and appends a tombstone with no payload", async () => {
     memoryStore.set("m1", liveSkill("m1", "m1", "c1"));
     const res = await runSkillVersionWrite({
@@ -210,6 +228,24 @@ describe("flair#2139 S2 — skill version write atomicity", () => {
       plan: () => ({ kind: "update", predecessor: memoryStore.get("m1") ?? null, successor, closePatch: { validTo: "2020-01-02T00:00:00.000Z" }, value: "c2", visibility: "shared", grantedClose: null }),
       hooks: { createSuccessor, closePredecessor, ...overrides },
     });
+  }
+
+  for (const hook of ["createSuccessor", "closePredecessor"]) {
+    for (const status of [200, 409]) {
+      test(`${hook} Response status ${status} returns write_response_withheld without a version append`, async () => {
+        const result = await attemptUpdate({ [hook]: async () => Response.json({ embedding: [1] }, { status }) });
+        expect(result.ok).toBe(false);
+        if (result.ok) throw new Error("expected a refusal");
+        expect(result.response.status).toBe(500);
+        expect(await result.response.json()).toEqual({
+          error: "write_response_withheld",
+          message: "the server does not report this write's result; read the row to see what is stored",
+        });
+        expect(memoryStore.get("m1")!.validTo).toBeUndefined();
+        expect(memoryStore.has("m2")).toBe(false);
+        expect(store.size).toBe(0);
+      });
+    }
   }
 
   test("a successor-write failure leaves NO successor, NO close and NO version", async () => {
