@@ -221,7 +221,7 @@ describe("the bounded provider call (flair#2478)", () => {
     expect(memoryLockHoldWatchdogMs({ [GATE]: "1", [MEMORY_LOCK_HOLD_WATCHDOG_ENV]: "7" })).toBe(7);
   });
 
-  test("boundLockedProviderCall passes a settled value through, and rejects a hung call once the bound passes", async () => {
+  test("boundLockedProviderCall passes a timely value through, and rejects a hung call at the bound", async () => {
     const env = { [GATE]: "1", [MEMORY_PROVIDER_TIMEOUT_ENV]: "40" };
     expect(await boundLockedProviderCall(async () => "vector", env)).toBe("vector");
 
@@ -233,6 +233,32 @@ describe("the bounded provider call (flair#2478)", () => {
     expect(elapsed).toBeGreaterThanOrEqual(35);
     expect(elapsed).toBeLessThan(2_000);
   }, 10_000);
+
+  test.each(["resolve", "reject"])("a blocking provider that settles late (%s) is refused and releases the lock without writing", async (settlement) => {
+    const env = { [GATE]: "1", [MEMORY_PROVIDER_TIMEOUT_ENV]: "10" };
+    const store = fakeStore();
+    let written: number[] | undefined;
+    const err = await withMemoryWriteLock(store, ["a"], async () => {
+      written = await boundLockedProviderCall(async () => {
+        const started = performance.now();
+        while (performance.now() - started < 40) {}
+        if (settlement === "reject") throw new Error("late provider failure");
+        return [1, 0, 0];
+      }, env);
+    }).catch((error) => error);
+    expect(err).toBeInstanceOf(MemoryProviderTimeout);
+    expect(err.ms).toBe(10);
+    expect(memoryProviderTimeoutResponse().status).toBe(503);
+    expect(written).toBeUndefined();
+    expect(store.held.size).toBe(0);
+    expect(await withMemoryWriteLockOnce(store, ["a"], async () => "next")).toEqual({ kind: "done", value: "next" });
+  });
+
+  test("a provider failure within the bound retains its error", async () => {
+    const error = new Error("provider failure");
+    const result = await boundLockedProviderCall(async () => { throw error; }).catch((err) => err);
+    expect(result).toBe(error);
+  });
 
   test("memory_provider_timeout is 503, named, and says nothing was written", async () => {
     const res = memoryProviderTimeoutResponse();

@@ -503,7 +503,10 @@ describe("flair#2478 — a PATCH must name its id", () => {
   }, 120_000);
 });
 
-it("a PUT provider timeout preserves the row and releases the real Harper lock", async () => {
+it.each([
+  ["pending", "getEmbedding = async () => new Promise(() => {});"],
+  ["late vector", "getEmbedding = async () => { const started = performance.now(); while (performance.now() - started < 100) {} return [1, 0, 0]; };"],
+])("a PUT provider timeout (%s) preserves the row and releases the real Harper lock", async (_settlement, provider) => {
   const component = mkdtempSync(join(tmpdir(), "flair-2478-provider-timeout-"));
   let instance: HarperInstance | undefined;
   try {
@@ -512,7 +515,7 @@ it("a PUT provider timeout preserves the row and releases the real Harper lock",
     }
     symlinkSync(join(process.cwd(), "node_modules"), join(component, "node_modules"), "dir");
     appendFileSync(join(component, "dist/resources/embeddings-provider.js"),
-      "\ngetEmbedding = async () => new Promise(() => {});\n");
+      `\n${provider}\n`);
     instance = await startHarper({
       cwd: component,
       env: { FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_MEMORY_LOCK_PROVIDER_TIMEOUT_MS: "50" },

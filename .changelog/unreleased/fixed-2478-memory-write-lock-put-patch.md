@@ -42,10 +42,9 @@
   ordinary `PUT`'s regen and its create-path dedup probe, the re-embed `PATCH`'s
   compute and its recompute, and the `PATCH` embedding refresh. Text/vector parity
   is protected against writers serialized by this lock; a change after confirmation
-  is not seen. Each such call is bounded; a provider that does
-  not answer within its bound refuses that write 503 `memory_provider_timeout`
-  and writes nothing. An observe-only watchdog logs a hold longer than 5 s (lock
-  keys, phase and elapsed time) when its timer runs, or at settlement if the event
+  is not seen. A provider call still pending at the bound or settling after it
+  refuses that write 503 `memory_provider_timeout` and writes nothing. An
+  observe-only watchdog logs a hold longer than 5 s (lock keys, phase and elapsed time) when its timer runs, or at settlement if the event
   loop cannot resume during the hold. It never releases the lock. The global lock order is:
   a writer takes its sorted Memory id locks first, then the instruction-version
   lock, then the usage ledger; part 2 converts the writers that take the

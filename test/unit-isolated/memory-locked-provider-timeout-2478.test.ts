@@ -1,8 +1,8 @@
 /**
  * memory-locked-provider-timeout-2478.test.ts — every embedding provider call a
- * Memory write makes while it holds the per-id write lock is bounded, and a
- * provider that never answers fails that write closed with 503
- * `memory_provider_timeout` and writes nothing (flair#2478).
+ * Memory write makes while it holds the per-id write lock is refused if still
+ * pending at the bound or settling after it: 503 `memory_provider_timeout`,
+ * nothing written (flair#2478).
  *
  * Calls resources/Memory.ts put()/patch() against a mocked harper (same
  * technique as patch-refreshes-embedding-2466.test.ts), with the embeddings
@@ -255,6 +255,28 @@ describe("flair#2478 — a provider call under the id lock is bounded", () => {
     embedImpl = () => FAKE_EMBEDDING;
     await memoryFor("mem-put").put({ content: "the edited text" });
     expect((await (BaseMemory as any).get("mem-put")).content).toBe("the edited text");
+  }, 10_000);
+
+  it("a PUT regen whose provider blocks past the bound then resolves refuses 503, writes nothing, and releases the lock", async () => {
+    seed("mem-put-blocked", "the stored text");
+    const before = structuredClone(memoryStore.get("mem-put-blocked"));
+    embedImpl = () => {
+      const started = performance.now();
+      while (performance.now() - started < 100) {}
+      return FAKE_EMBEDDING;
+    };
+    const res: any = await memoryFor("mem-put-blocked").put({ content: "the edited text" });
+
+    expect(embedInputs).toEqual(["the edited text"]);
+    expect(res.status).toBe(503);
+    expect((await res.json()).error).toBe("memory_provider_timeout");
+    expect(memoryStore.get("mem-put-blocked")).toEqual(before);
+
+    embedImpl = () => FAKE_EMBEDDING;
+    const next: any = await memoryFor("mem-put-blocked").put({ content: "the edited text" });
+    expect(next instanceof Response ? next.status : 200).toBeLessThan(300);
+    expect(memoryStore.get("mem-put-blocked").content).toBe("the edited text");
+    expect(memoryStore.get("mem-put-blocked").embedding).toEqual(FAKE_EMBEDDING);
   }, 10_000);
 
   it("a creating PUT whose dedup probe provider never answers refuses memory_provider_timeout and writes no row", async () => {
