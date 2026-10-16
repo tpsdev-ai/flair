@@ -2,10 +2,10 @@
  * integrity-keyset-paging-2597.test.ts — the integrity scan's Memory read (and its
  * bounded deletion-history read) walk the table by keyset on `id` (flair#2597).
  *
- * The fake operations API models a real keyset page server: it answers
+ * The fake operations API models a keyset page server: it answers
  * `SELECT <cols> FROM flair.<table> [WHERE (filter) AND] id > 'cursor' ORDER BY id LIMIT n`
- * from a live store, so a write between two page requests is visible to the next page
- * exactly as Harper would present it. A page size of MEMORY_PAGE_SIZE (10000) forces the
+ * from a live store, so a write between two page requests is visible to the next page as a
+ * keyset page server would present it. A page size of MEMORY_PAGE_SIZE (10000) forces the
  * boundary with a store of one page plus one row.
  */
 import { expect, test } from "bun:test";
