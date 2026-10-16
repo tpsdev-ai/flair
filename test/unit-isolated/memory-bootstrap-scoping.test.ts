@@ -70,7 +70,11 @@ function matchesCondition(record: any, cond: any): boolean {
   return true;
 }
 
-let memoryStore: Map<string, any>;
+// Initialized at module scope: the embedding-space guard's boot pre-warm scans
+// `databases.flair.Memory` before the first test runs, and an undefined store
+// would make that scan throw and leave the task-relevant leg keyword-only
+// (flair#2559). An empty store is vacuously uniform under the stamp check.
+let memoryStore: Map<string, any> = new Map();
 // flair#2141 — when set, the skill-row read (a Memory search on the `skill`
 // tag) fails, for the failed-read case: "call" throws from the search call,
 // "iterate" from the first read of its results.

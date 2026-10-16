@@ -129,12 +129,9 @@ export class Health extends Resource {
     // of the last failed scan (on scan-failed, or on mixed when a scan failed
     // before or after the foreign stamp was seen); `excluded` is the last
     // published scan's count of rows that store a vector and carry no trusted
-    // current-space stamp (null until a scan publishes one). In the non-uniform
-    // states the
-    // guarded paths, SemanticSearch and the write-time dedup leg, do not cosine
-    // the stored corpus; MemoryBootstrap and MemoryDedupStats call
-    // retrieval directly without this guard (#2559). The field is on the 503
-    // body too; doctor reads it there.
+    // current-space stamp (null until a scan publishes one). Calls that consult a
+    // non-uniform verdict skip vector comparisons against the stored corpus
+    // (flair#2559). The field is on the 503 body too; doctor reads it there.
     body.embeddingSpace = spaceGuardState();
     const multiWorker = multiWorkerHealthField(multiWorkerCondition());
     let status = readiness.status;
