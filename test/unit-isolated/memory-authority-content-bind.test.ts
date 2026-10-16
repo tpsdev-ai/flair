@@ -24,6 +24,11 @@ class BaseMemory {
   /** flair#2478: Memory PUT/PATCH refuse a store with no per-id lock; this
    *  double injects one (test/helpers/memory-lock-double.ts). */
   static primaryStore = memoryLockDouble();
+  // Harper's resource instance reports its URL-bound id through getId(); a
+  // write response names the row by it (flair#2561).
+  getId() {
+    return (this as any).id;
+  }
   async get(target?: any) {
     const id = typeof target === "string" ? target : target?.id ?? (this as any).id;
     return memoryStore.get(id) ?? null;

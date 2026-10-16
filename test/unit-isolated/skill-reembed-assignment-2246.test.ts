@@ -399,7 +399,9 @@ test("feed re-ingest inherits skill tags and supersedes even when content is unc
   const next = await feed().post({ id: first.id, agentId: "owner", content: first.content, trigger: "changed trigger" });
   expect(next.id).not.toBe(first.id);
   expect(next.supersedes).toBe(first.id);
-  expect(next.tags).toEqual(["skill"]);
+  // The successor retains its tags; the response omits arrays.
+  expect(harnessState.memoryStore.get(next.id)?.tags).toEqual(["skill"]);
+  expect("tags" in next).toBe(false);
   expect(next.trigger).toBe("changed trigger");
   expect(harnessState.memoryStore.get(first.id)?.validTo).toBeString();
   expect([...versions.values()].map((v) => v.kind)).toEqual(["create", "update"]);

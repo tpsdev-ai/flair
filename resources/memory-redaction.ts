@@ -15,9 +15,11 @@
  * redactMemoryWrite() on the write body before the row is persisted; post and
  * put call it before the dedup gate and the stored embedding are computed.
  * When the count is above zero, a Memory post/put/patch response also carries
- * `stored`, the post-redaction values of the REDACTED_MEMORY_FIELDS present
- * in that write (storedMemoryText); the feed ingest's response is already the
- * stored row.
+ * `stored`: the stored (post-redaction) values of the REDACTED_MEMORY_FIELDS
+ * that write's request supplied as strings (suppliedMemoryTextFields,
+ * storedMemoryText). The feed ingest's response holds, of the row it stored or
+ * matched, only named primitive fields, plus `redactedValues` when present
+ * (resources/memory-write-response.ts).
  * put() skips the call for the shipped-skill seed write (isOperatorSeedPut): a
  * PUT of the reserved seed skill id by a verified Basic administrator
  * (src/lib/skill-seed.ts). The seed compares the stored text to its source
@@ -41,21 +43,41 @@ import { skillWriteSource } from "./skill-write-policy.js";
 /** The Memory fields redacted on a write. */
 export const REDACTED_MEMORY_FIELDS = Object.freeze(["content", "summary", "trigger"] as const);
 
+/** One of the REDACTED_MEMORY_FIELDS. */
+export type MemoryTextField = (typeof REDACTED_MEMORY_FIELDS)[number];
+
 /** The REDACTED_MEMORY_FIELDS of one row, as a write's response reports them. */
-export type StoredMemoryText = Partial<Record<(typeof REDACTED_MEMORY_FIELDS)[number], string>>;
+export type StoredMemoryText = Partial<Record<MemoryTextField, string>>;
 
 /**
- * flair#2467: the REDACTED_MEMORY_FIELDS that hold a string on `row`, copied.
- * A write calls it on the row it stages, after redaction, so the copy holds
- * the post-redaction value of each such field that write committed, changed
- * or not. When the write replaced any value, its response
- * carries the copy as `stored` next to `redactedValues`; the writer never has
- * to read the row back, so a later write cannot change what this one reports.
+ * flair#2561: the string-valued text fields a write request supplies: each of
+ * the REDACTED_MEMORY_FIELDS that holds a string in the request body. A field
+ * the body sends as null or as a non-string is not in the list. A write reads
+ * them from the body as the request sent it, before a stored row or a skill
+ * predecessor is merged into that body, so the list names only text fields the
+ * request itself carried.
  */
-export function storedMemoryText(row: unknown): StoredMemoryText {
+export function suppliedMemoryTextFields(body: unknown): MemoryTextField[] {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return [];
+  return REDACTED_MEMORY_FIELDS.filter((field) => typeof (body as Record<string, unknown>)[field] === "string");
+}
+
+/**
+ * flair#2467, flair#2561: the values on `row` of the `supplied` text fields,
+ * copied; a supplied field that holds no string on `row` is left out. A write
+ * calls it on the row it stages, after redaction, with the string-valued text
+ * fields its own request supplied (suppliedMemoryTextFields), so the copy holds
+ * the stored (post-redaction) value of each of those fields, changed or not,
+ * and no other text field of the row: a field the row holds from a merged
+ * stored row or a skill predecessor is not in it. When the write replaced any
+ * value, its response carries the copy as `stored` next to `redactedValues`;
+ * the writer never has to read the row back, so a later write cannot change
+ * what this one reports.
+ */
+export function storedMemoryText(row: unknown, supplied: readonly MemoryTextField[]): StoredMemoryText {
   const stored: StoredMemoryText = {};
   if (!row || typeof row !== "object" || Array.isArray(row)) return stored;
-  for (const field of REDACTED_MEMORY_FIELDS) {
+  for (const field of supplied) {
     const value = (row as Record<string, unknown>)[field];
     if (typeof value === "string") stored[field] = value;
   }

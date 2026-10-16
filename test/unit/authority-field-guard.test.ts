@@ -79,6 +79,7 @@ interface RawMemoryWriter {
 
 const CLASSIFICATIONS: Array<{ file: string; via: WriterVia; needle: string; kind: WriterKind }> = [
   { file: "resources/MemoryFeed.ts", via: "write-back", needle: 'label: "MemoryFeed.ingest"', kind: "strip" },
+  { file: "resources/MemoryFeed.ts", via: "alias-source", needle: "table.put(row, shared)", kind: "strip" },
   { file: "resources/MemoryFeed.ts", via: "direct-update", needle: "update(id, { expiresAt", kind: "echo" },
   // flair#2450: every synced table's merge runs through the write-back helper.
   { file: "resources/Federation.ts", via: "write-back", needle: "mergedData", kind: "federation-merge" },
