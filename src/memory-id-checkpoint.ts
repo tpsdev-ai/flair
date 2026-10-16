@@ -274,7 +274,18 @@ export function readCheckpointFile(path: string): CheckpointRead {
     if (new URL(node).host !== parsed.host) {
       return { kind: "unreadable", reason: "checkpoint host does not match its origin" };
     }
-    return { kind: "ok", checkpoint: Object.assign(Object.create(null), parsed, { node }) };
+    // Built from the validated fields only: a key the file adds beyond the
+    // version-1 shape is not carried into the checkpoint.
+    const byDurability = Object.create(null) as Record<Tier, number>;
+    for (const t of ALL_TIERS) byDurability[t] = parsed.byDurability[t];
+    const checkpoint = Object.create(null) as MemoryCheckpoint;
+    checkpoint.version = CHECKPOINT_VERSION;
+    checkpoint.node = node;
+    checkpoint.host = parsed.host;
+    checkpoint.at = parsed.at;
+    checkpoint.ids = [...parsed.ids];
+    checkpoint.byDurability = byDurability;
+    return { kind: "ok", checkpoint };
   } catch {
     return { kind: "unreadable", reason: "checkpoint is not valid JSON or has an invalid origin" };
   }

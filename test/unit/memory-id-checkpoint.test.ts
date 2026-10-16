@@ -203,6 +203,26 @@ describe("flair#2218 — checkpoint file", () => {
     }
   });
 
+  test("a checkpoint read carries only the version-1 fields", () => {
+    const dir = mkdtempSync(join(tmpdir(), "flair-2218-unit-"));
+    try {
+      const path = join(dir, "extra.json");
+      const cp = checkpointOf([["mem-1", "permanent"]]);
+      writeFileSync(path, `{"__proto__":{"polluted":true},"extra":"x",${JSON.stringify({ ...cp, byDurability: { ...cp.byDurability, other: 3 } }).slice(1)}`);
+      const read = readCheckpointFile(path);
+      expect(read.kind).toBe("ok");
+      if (read.kind === "ok") {
+        expect(Object.getPrototypeOf(read.checkpoint)).toBeNull();
+        expect(Object.keys(read.checkpoint).sort()).toEqual(["at", "byDurability", "host", "ids", "node", "version"]);
+        expect(Object.getPrototypeOf(read.checkpoint.byDurability)).toBeNull();
+        expect(Object.keys(read.checkpoint.byDurability).sort()).toEqual(["ephemeral", "permanent", "persistent", "standard"]);
+        expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("a malformed checkpoint file is unreadable, not 'absent'", () => {
     const dir = mkdtempSync(join(tmpdir(), "flair-2218-unit-"));
     try {
