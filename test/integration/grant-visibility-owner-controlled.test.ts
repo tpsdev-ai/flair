@@ -32,7 +32,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import nacl from "tweetnacl";
-import { HarperInstance, startHarper, stopHarper } from "../helpers/harper-lifecycle";
+import { HARPER_STOP_BUDGET_MS, HarperInstance, startHarper, stopHarper } from "../helpers/harper-lifecycle";
 
 const REFUSAL = "grant_cannot_change_visibility";
 
@@ -164,7 +164,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (harper) await stopHarper(harper);
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("a write grant does not include changing a skill's visibility", () => {
   it("PUT /Memory: a grantee's skill successor naming visibility shared on a private skill is refused", async () => {

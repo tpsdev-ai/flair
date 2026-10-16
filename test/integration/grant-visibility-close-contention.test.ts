@@ -40,7 +40,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import nacl from "tweetnacl";
-import { HarperInstance, startHarper, stopHarper } from "../helpers/harper-lifecycle";
+import { HARPER_STOP_BUDGET_MS, HarperInstance, startHarper, stopHarper } from "../helpers/harper-lifecycle";
 
 const REFUSAL = "predecessor_visibility_changed";
 
@@ -208,7 +208,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("a grant-authorized ordinary successor: a predecessor visibility change before the close's final re-read refuses the write (real Harper)", () => {
   it("PUT /Memory: the owner makes the shared predecessor private while the close is held before staging: 409, nothing written", async () => {

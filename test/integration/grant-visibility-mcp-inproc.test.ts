@@ -38,7 +38,7 @@ import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { cp, mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { HARPER_STOP_BUDGET_MS, startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 
 const REPO_ROOT = process.cwd();
 const FIXTURE = join(REPO_ROOT, "test", "fixtures", "inproc-app");
@@ -121,7 +121,7 @@ afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (appDir) await rm(appDir, { recursive: true, force: true, maxRetries: 4 });
   if (pauseDir) await rm(pauseDir, { recursive: true, force: true });
-});
+}, HARPER_STOP_BUDGET_MS);
 
 describe("MCP tools: a grantee's calls leave the owner's rows and their visibility unchanged", () => {
   test("memory_update (default and preserveHistory) on the owner's shared memory and skill is refused for the grantee by the attribution check", async () => {
