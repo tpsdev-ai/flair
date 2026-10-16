@@ -86,8 +86,18 @@ export function loadWeights(path = WEIGHTS_FILE) {
   return parsed;
 }
 
-/** Measured wall seconds per integration file (repo-relative path). */
-export const SECONDS_BY_FILE = loadWeights();
+let weightsCache = null;
+
+/**
+ * Measured wall seconds per integration file (repo-relative path). The table is
+ * read and validated on first use, not at import: update-integration-shard-weights.mjs
+ * imports this module and must run when the checked-in table is missing or
+ * malformed, so it can replace it.
+ */
+export function secondsByFile() {
+  if (weightsCache === null) weightsCache = loadWeights();
+  return weightsCache;
+}
 
 /** Every `*.test.ts` under `dir`, recursively, as paths relative to ROOT, sorted. */
 export function listIntegrationFiles(dir = INTEGRATION_DIR) {
@@ -107,7 +117,7 @@ export function listIntegrationFiles(dir = INTEGRATION_DIR) {
 
 /** The weight a file contributes to its shard's load. */
 export function weightOf(file) {
-  return SECONDS_BY_FILE[file] ?? DEFAULT_WEIGHT;
+  return secondsByFile()[file] ?? DEFAULT_WEIGHT;
 }
 
 /**

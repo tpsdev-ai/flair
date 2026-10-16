@@ -5,26 +5,38 @@
 // out of the union would run in no shard and gate nothing, so that case fails
 // here and in the job's `--verify` step.
 
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
   DEFAULT_WEIGHT,
   ROOT,
-  SECONDS_BY_FILE,
   assignShards,
   listIntegrationFiles,
   loadWeights,
+  secondsByFile,
   shardFiles,
   verifyShards,
   weightOf,
 } from "../../scripts/ci/integration-shards.mjs";
-import { parseJobLog } from "../../scripts/ci/update-integration-shard-weights.mjs";
+import { aggregate, parseJobLog } from "../../scripts/ci/update-integration-shard-weights.mjs";
 
 const ALL = listIntegrationFiles();
+
+/** Scratch directories this file creates, removed after each test. */
+const SCRATCH: string[] = [];
+afterEach(() => {
+  for (const dir of SCRATCH.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+
+function scratch(prefix: string): string {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
+  SCRATCH.push(dir);
+  return dir;
+}
 
 /** A real `Integration Tests (shard 1/3)` job log, trimmed to five file blocks. */
 const REAL_LOG = join(ROOT, "test", "fixtures", "integration-shard-log.txt");
@@ -81,7 +93,7 @@ describe("integration-shards — the partition", () => {
   });
 
   test("the three heaviest weighted files land in three different shards", () => {
-    const heaviest = Object.entries(SECONDS_BY_FILE)
+    const heaviest = Object.entries(secondsByFile())
       .sort((a, b) => b[1] - a[1])
       .slice(0, 3)
       .map(([file]) => file);
@@ -94,7 +106,7 @@ describe("integration-shards — the partition", () => {
 
   test("a file absent from the weights table falls back to DEFAULT_WEIGHT and still lands in a shard", () => {
     const unmeasured = "test/integration/not-yet-measured.test.ts";
-    expect(unmeasured in SECONDS_BY_FILE).toBe(false);
+    expect(unmeasured in secondsByFile()).toBe(false);
     expect(weightOf(unmeasured)).toBe(DEFAULT_WEIGHT);
     expect(DEFAULT_WEIGHT).toBeGreaterThan(0);
     expect(assignShards([...ALL, unmeasured], 3).flat()).toContain(unmeasured);
@@ -103,13 +115,13 @@ describe("integration-shards — the partition", () => {
 
 describe("integration-shards — weights", () => {
   test("a measured file's weight is its entry in the weights file", () => {
-    const [file, seconds] = Object.entries(SECONDS_BY_FILE).sort((a, b) => b[1] - a[1])[0];
+    const [file, seconds] = Object.entries(secondsByFile()).sort((a, b) => b[1] - a[1])[0];
     expect(ALL).toContain(file);
     expect(weightOf(file)).toBe(seconds);
   });
 
   test("every weight is a positive number keyed by an integration file", () => {
-    for (const [file, seconds] of Object.entries(SECONDS_BY_FILE)) {
+    for (const [file, seconds] of Object.entries(secondsByFile())) {
       expect(ALL, file).toContain(file);
       expect(Number.isFinite(seconds) && seconds > 0, file).toBe(true);
     }
@@ -167,6 +179,33 @@ describe("integration-shards — the weight parser", () => {
   });
 });
 
+describe("integration-shards — the weight aggregation", () => {
+  // One job-log block: `##[group]<file>:` and its `##[endgroup]`, `ms` apart.
+  const START = Date.parse("2026-01-01T00:00:00.000Z");
+  const stamp = (ms: number) => new Date(START + ms).toISOString();
+  const log = (...blocks: Array<[string, number]>) =>
+    `${blocks.map(([file, ms]) => `${stamp(0)} ##[group]${file}:\n${stamp(ms)} ##[endgroup]`).join("\n")}\n`;
+  const A = "test/integration/a.test.ts";
+
+  test("keeps the maximum within a log and the median across logs", () => {
+    // Two blocks for one file in one log: the mutation step re-runs a file, and
+    // the per-log value is the longer of the two.
+    expect(aggregate([log([A, 10_000], [A, 30_000])])).toEqual({ [A]: 30 });
+    expect(
+      aggregate([log([A, 10_000]), log([A, 20_000]), log([A, 100_000])]),
+    ).toEqual({ [A]: 20 });
+  });
+
+  test("rounds the median to whole seconds", () => {
+    expect(aggregate([log([A, 12_000]), log([A, 13_000])])).toEqual({ [A]: 13 });
+    expect(aggregate([log([A, 12_000]), log([A, 12_400])])).toEqual({ [A]: 12 });
+  });
+
+  test("floors a sub-second median at one second", () => {
+    expect(aggregate([log([A, 400])])).toEqual({ [A]: 1 });
+  });
+});
+
 describe("integration-shards — the weight updater CLI", () => {
   const run = (...args: string[]) =>
     spawnSync("node", ["scripts/ci/update-integration-shard-weights.mjs", ...args], {
@@ -175,12 +214,17 @@ describe("integration-shards — the weight updater CLI", () => {
       timeout: 20_000,
     });
 
-  test("regenerates a weights table from the real job log", () => {
-    const out = join(mkdtempSync(join(tmpdir(), "shard-regen-")), "w.json");
+  test("regenerates the complete weight map from the real job log", () => {
+    const out = join(scratch("shard-regen-"), "w.json");
     const r = run("--out", out, "test/fixtures/integration-shard-log.txt");
     expect(r.status).toBe(0);
-    const written = JSON.parse(readFileSync(out, "utf8"));
-    expect(Object.keys(written).length).toBe(5);
+    expect(JSON.parse(readFileSync(out, "utf8"))).toEqual({
+      "test/integration/host-pointer-negatives-1940.test.ts": 12,
+      "test/integration/local-delete-instance-2225.test.ts": 17,
+      "test/integration/memory-purge-unconfirmed-2290.test.ts": 12,
+      "test/integration/patch-refreshes-embedding-2466.test.ts": 26,
+      "test/integration/skill-version-completion-inproc-2139.test.ts": 13,
+    });
   });
 
   test("refuses to write when the logs carry no file timings", () => {
@@ -219,6 +263,75 @@ describe("integration-shards — the weight updater CLI", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+});
+
+describe("integration-shards — the weight updater over a bad existing table (#2604)", () => {
+  const FILES = ["alpha", "beta"];
+  const LOG =
+    [
+      "2026-01-01T00:00:00.0000000Z ##[group]test/integration/alpha.test.ts:",
+      "2026-01-01T00:00:20.0000000Z ##[endgroup]",
+      "2026-01-01T00:00:20.0000000Z ##[group]test/integration/beta.test.ts:",
+      "2026-01-01T00:00:31.0000000Z ##[endgroup]",
+    ].join("\n") + "\n";
+
+  // A scratch checkout with the two scripts, two integration files and a job
+  // log that names them; the checked-in table starts in the state under test.
+  function fixture(existing: string | null) {
+    const root = scratch("flair-shard-table-");
+    mkdirSync(join(root, "scripts/ci"), { recursive: true });
+    mkdirSync(join(root, "test/integration"), { recursive: true });
+    for (const file of FILES) {
+      writeFileSync(join(root, "test/integration", `${file}.test.ts`), "");
+    }
+    for (const script of ["integration-shards.mjs", "update-integration-shard-weights.mjs"]) {
+      cpSync(join(ROOT, "scripts/ci", script), join(root, "scripts/ci", script));
+    }
+    const table = join(root, "scripts/ci/integration-shard-weights.json");
+    if (existing !== null) writeFileSync(table, existing);
+    const log = join(root, "job.log");
+    writeFileSync(log, LOG);
+    return { root, table, log };
+  }
+
+  const VALID = {
+    "test/integration/alpha.test.ts": 20,
+    "test/integration/beta.test.ts": 11,
+  };
+
+  const BAD: Array<[string, string | null]> = [
+    ["missing", null],
+    ["merge-conflict markers", "<<<<<<< HEAD\n{}\n=======\n{}\n>>>>>>> other\n"],
+    ["an empty table", "{}"],
+    ["a zero weight", '{"test/integration/alpha.test.ts": 0}\n'],
+  ];
+
+  for (const [name, existing] of BAD) {
+    test(`writes a valid table when the existing table is ${name}`, () => {
+      const { root, table, log } = fixture(existing);
+      const r = spawnSync(
+        "node",
+        [join(root, "scripts/ci/update-integration-shard-weights.mjs"), "--out", table, log],
+        { cwd: root, encoding: "utf8", timeout: 20_000 },
+      );
+      expect(r.status, r.stderr).toBe(0);
+      expect(JSON.parse(readFileSync(table, "utf8"))).toEqual(VALID);
+    });
+  }
+
+  for (const [name, existing] of BAD) {
+    test(`the shard-assignment command still fails loudly on a bad table (${name})`, () => {
+      const { root } = fixture(existing);
+      const r = spawnSync(
+        "node",
+        [join(root, "scripts/ci/integration-shards.mjs"), "--verify", "--of", "1"],
+        { cwd: root, encoding: "utf8", timeout: 20_000 },
+      );
+      expect(r.status).toBe(1);
+      expect(r.stderr).toContain("shard weights file");
+      expect(r.stdout).not.toContain("files covered");
+    });
+  }
 });
 
 describe("integration-shards — the CLI", () => {
