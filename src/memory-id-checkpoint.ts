@@ -18,7 +18,7 @@ export const OPS_READ_TIMEOUT_MS = 30_000;
 /** How many missing ids the failure report names. */
 export const MISSING_SAMPLE_LIMIT = 10;
 
-/** A read whose result disagrees with the exact count of the same range. */
+/** A read inconsistent with the exact count of the same range: a duplicate id or a size that differs. */
 export class InconsistentReadError extends Error {}
 
 export interface MemoryCheckpoint {
