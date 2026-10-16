@@ -134,9 +134,10 @@ redact_plist() {
 
 # The "no inline credential reached the output" assertion (flair#2589) lives
 # in a shared helper so a unit test can exercise the crash-vs-finding
-# classification against it. It uses the redactor's --check exit code (0 clean,
-# 1 a finding whose finding-marker line is present, 2 could not run) and fails on
-# either a finding or a crash.
+# classification against it. It reads the redactor's --report file: a scan is a
+# finding only when that file holds a well-formed finding record, so a scanner
+# that crashes (a Node startup syntax error, say) is could-not-run, not a
+# finding. Both fail the lane.
 source "$WORKSPACE/scripts/ci/launchd-redaction-check.sh"
 
 dump_diagnostics() {

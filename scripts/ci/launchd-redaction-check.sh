@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # launchd-redaction-check.sh — the "no inline credential reached the output"
-# assertion, shared by scripts/ci/macos-launchd-upgrade-lane.sh and its unit
-# test (flair#2589). Sourced, not executed.
+# assertion, shared by scripts/ci/macos-launchd-upgrade-lane.sh and
+# scripts/ci/check-redaction-fixtures.sh (flair#2589). Sourced, not executed.
 #
 # Expects:
 #   WORKSPACE   the checkout root (used to locate the redactor)
@@ -10,26 +10,37 @@
 # Two independent layers:
 #   (1) the run's own admin password value must not appear in the scanned target
 #       (binary content included: the grep has no -I); and
-#   (2) no credential KEY in the redactor's list may appear in the supported
-#       key/string shape with a value other than REDACTED.
+#   (2) the redactor must report no credential key in the supported key/string
+#       shape with a value other than REDACTED.
 #
-# The redactor's --check exit code is authoritative: 0 = ran and found nothing,
-# 1 = a finding (its stderr carries a line beginning `redact-launchd-plist:
-# unredacted credential key`), 2 = the check could not run. An exit 1 with no
-# such marker line is a startup crash, reported as could-not-run — not as a
-# finding. A finding and a crash both fail the caller (flair#2589).
+# The redactor's report file is authoritative, not its exit code or its
+# stdout/stderr. `--check` writes a JSON finding record to the file named by
+# `--report`, and a scan is a finding only when that file holds a well-formed
+# record. Node prints the offending source line of a syntax error, so a scanner
+# that cannot start can print a line that reads like the finding marker and exit
+# 1; that run writes no report and is reported as could-not-run. A finding and a
+# could-not-run both fail the caller.
 
-# True when the captured redactor output carries a finding-marker line, anchored
-# at the start of a line so a Node diagnostic that merely quotes the phrase (a
-# syntax error's source line, say) is not read as a finding. Compared with a
-# shell pattern, never `... | grep -q`: under `set -o pipefail` a large captured
-# output makes grep stop early, SIGPIPEs the producer, and turns a real finding
-# into a false "could not run" (flair#2589).
-has_finding_marker() {
-  case $'\n'"$1" in
-    *$'\n'"redact-launchd-plist: unredacted credential key"*) return 0 ;;
-    *) return 1 ;;
-  esac
+# True when the report file (the redactor's finding-record channel) holds a
+# well-formed finding record: a JSON object whose `findings` array is non-empty
+# and whose every entry names a file and at least one credential key. A missing,
+# unreadable or malformed file is NOT a finding — it is a check that could not
+# run. Deliberately a self-contained `node -e` snippet, not an import of the
+# scanner, so a scanner that cannot load cannot decide its own verdict.
+report_holds_finding() {
+  node -e '
+    const fs = require("node:fs");
+    let doc;
+    try { doc = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); } catch { process.exit(1); }
+    const findings = doc && doc.findings;
+    if (!Array.isArray(findings) || findings.length === 0) process.exit(1);
+    for (const f of findings) {
+      if (!f || typeof f.file !== "string" || f.file.length === 0) process.exit(1);
+      if (!Array.isArray(f.keys) || f.keys.length === 0) process.exit(1);
+      for (const k of f.keys) if (typeof k !== "string" || k.length === 0) process.exit(1);
+    }
+    process.exit(0);
+  ' "$1"
 }
 
 assert_no_inline_credentials() {
@@ -50,21 +61,31 @@ assert_no_inline_credentials() {
       return 1
     fi
   fi
-  local code=0
+  local report code=0
   local out
-  # `|| code=$?` keeps a non-zero exit out of the ERR trap's path.
-  out="$(node "$WORKSPACE/scripts/ci/redact-launchd-plist.mjs" --check "$target" 2>&1)" || code=$?
+  # The report starts empty and is written only by the redactor, only when it
+  # finishes a scan. A crash (a Node startup syntax error, say) leaves it empty,
+  # so an exit 1 with no report is could-not-run, never a finding. `|| code=$?`
+  # keeps a non-zero exit out of the ERR trap's path.
+  report="$(mktemp "${TMPDIR:-/tmp}/redact-check-report.XXXXXX")" || {
+    echo "::error::redaction check could not run (cannot create the report file for ${target})"
+    return 1
+  }
+  out="$(node "$WORKSPACE/scripts/ci/redact-launchd-plist.mjs" --check --report "$report" "$target" 2>&1)" || code=$?
   if [ "$code" -eq 0 ]; then
+    rm -f "$report"
     return 0
   fi
-  # Exit 1 is a finding only when the redactor printed its finding marker on a
-  # line of its own; a bare exit 1 (a startup syntax error, say) does not carry
-  # that line and is a crash, not a credential finding.
-  if [ "$code" -eq 1 ] && has_finding_marker "$out"; then
+  # Exit 1 is a finding only when the report file holds a well-formed finding
+  # record. The exit code and the printed output are not the signal: a Node
+  # diagnostic can quote the finding phrase and exit 1 (flair#2589).
+  if [ "$code" -eq 1 ] && report_holds_finding "$report"; then
+    rm -f "$report"
     echo "::error::a credential key with a non-REDACTED value reached the diagnostics output under ${target}"
     printf '%s\n' "$out" >&2
     return 1
   fi
+  rm -f "$report"
   echo "::error::redaction check could not run (exit ${code}) for ${target}"
   printf '%s\n' "$out" >&2
   return 1

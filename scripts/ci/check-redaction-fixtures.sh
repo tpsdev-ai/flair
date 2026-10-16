@@ -1,46 +1,54 @@
 #!/usr/bin/env bash
-# check-redaction-fixtures.sh — exercise scripts/ci/redact-launchd-plist.mjs
-# --check on committed fixtures (flair#2589).
+# check-redaction-fixtures.sh — exercise the launchd diagnostics redaction
+# (scripts/ci/redact-launchd-plist.mjs via scripts/ci/launchd-redaction-check.sh)
+# on committed fixtures (flair#2589).
 #
-# The macOS launchd lane runs --check only when the lane itself fails, so a
+# The macOS launchd lane runs the check only when the lane itself fails, so a
 # change that broke the scanner (or its ability to load) could stay invisible on
 # a long green stretch. This runs on every PR targeting main instead.
 #
-#   clean/  a redacted plist                 -> --check exits 0
-#   leaky/  a credential key, non-REDACTED   -> --check exits 1, naming the key
+#   clean/  a redacted plist                 -> reported clean
+#   leaky/  a credential key, non-REDACTED   -> reported as a finding, key named
 #
-# The finding must name the credential KEY only, never its value.
+# Both verdicts come from the scanner's report channel, so a scanner that
+# crashes (a Node startup syntax error, say) is could-not-run, never a finding:
+# this script fails rather than crediting a broken scanner.
 set -Eeuo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-SCRIPT="$ROOT/scripts/ci/redact-launchd-plist.mjs"
 FIXTURES="$ROOT/scripts/ci/redact-fixtures"
+# The shared assertion locates the redactor under WORKSPACE.
+WORKSPACE="$ROOT"
+source "$ROOT/scripts/ci/launchd-redaction-check.sh"
 
-if ! node "$SCRIPT" --check "$FIXTURES/clean"; then
-  echo "::error::the clean fixture did not pass --check (expected exit 0)"
-  exit 1
+exit_code=0
+
+if assert_no_inline_credentials "$FIXTURES/clean"; then
+  echo "clean fixture: passed"
+else
+  echo "::error::the clean fixture did not pass the redaction check (expected a clean scan)"
+  exit_code=1
 fi
-echo "clean fixture: passed"
 
 code=0
-out="$(node "$SCRIPT" --check "$FIXTURES/leaky" 2>&1)" || code=$?
-if [ "$code" -ne 1 ]; then
-  echo "::error::the leaky fixture was not reported as a finding: expected exit 1, got ${code}"
+out="$(assert_no_inline_credentials "$FIXTURES/leaky" 2>&1)" || code=$?
+if [ "$code" -eq 0 ]; then
+  echo "::error::the leaky fixture was not reported as a finding"
   printf '%s\n' "$out"
-  exit 1
-fi
-if ! printf '%s\n' "$out" | grep -q "unredacted credential key"; then
-  echo "::error::the leaky fixture was not reported as an unredacted credential key"
+  exit_code=1
+elif ! printf '%s\n' "$out" | grep -q "a credential key with a non-REDACTED value"; then
+  echo "::error::the leaky fixture was not reported as a credential finding (got a check that could not run)"
   printf '%s\n' "$out"
-  exit 1
-fi
-if ! printf '%s\n' "$out" | grep -q "HDB_ADMIN_PASSWORD"; then
+  exit_code=1
+elif ! printf '%s\n' "$out" | grep -q "HDB_ADMIN_PASSWORD"; then
   echo "::error::the leaky fixture finding did not name the credential key"
   printf '%s\n' "$out"
-  exit 1
-fi
-if printf '%s\n' "$out" | grep -q "example-placeholder-not-a-secret"; then
+  exit_code=1
+elif printf '%s\n' "$out" | grep -q "example-placeholder-not-a-secret"; then
   echo "::error::the finding printed the credential value; findings must name the key only"
-  exit 1
+  exit_code=1
+else
+  echo "leaky fixture: reported as a finding (key named, value not printed)"
 fi
-echo "leaky fixture: reported as a finding (key named, value not printed)"
+
+exit "$exit_code"

@@ -2,77 +2,97 @@
  * flair#2589 — the macOS launchd lane must distinguish the redaction check
  * CRASHING from a scan finding, and fail on both. The lane's shell cannot run
  * on Linux, so the assertion lives in a sourced helper
- * (scripts/ci/launchd-redaction-check.sh) that this test drives directly: a
- * fake `node` stands in for the redactor so each exit code can be produced
- * deterministically, the real `grep`-based admin-password layer is exercised
- * with a real file, and a separate block runs the REAL helper against the REAL
- * scanner (clean, finding, and a scanner that cannot start).
+ * (scripts/ci/launchd-redaction-check.sh) that this test drives directly.
+ *
+ * The classification reads the scanner's `--report` file — its finding-record
+ * channel — never its stdout, stderr or exit code alone: Node prints the
+ * offending source line of a syntax error, so a scanner that cannot start can
+ * print a line that reads like the finding marker and exit 1. The fake scanner
+ * in the first blocks is a real `node` program whose report, stderr and exit
+ * code are env-driven. The real-scanner block runs the REAL helper against a
+ * real scanner whose syntax-error source line starts with the complete finding
+ * marker and key, and the fixture-script block runs the REAL fixture script
+ * against that same scanner.
  */
 
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { appendFileSync, chmodSync, copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 const LIB = join(REPO_ROOT, "scripts", "ci", "launchd-redaction-check.sh");
 const SCANNER = join(REPO_ROOT, "scripts", "ci", "redact-launchd-plist.mjs");
+const FIXTURE_SCRIPT = join(REPO_ROOT, "scripts", "ci", "check-redaction-fixtures.sh");
 const FIXTURES = join(REPO_ROOT, "scripts", "ci", "redact-fixtures");
 
+/** A fake scanner (real `node`) whose report, stderr and exit code are env-driven. */
+const FAKE_SCANNER = `import { writeFileSync } from "node:fs";
+const args = process.argv.slice(2);
+const at = args.indexOf("--report");
+const report = at >= 0 ? args[at + 1] : undefined;
+if (report && process.env.FAKE_SCAN_REPORT !== undefined) {
+  writeFileSync(report, process.env.FAKE_SCAN_REPORT);
+}
+if (process.env.FAKE_SCAN_STDERR) process.stderr.write(process.env.FAKE_SCAN_STDERR);
+process.exit(Number(process.env.FAKE_SCAN_EXIT ?? "0"));
+`;
+
+/** A well-formed finding record naming one credential key. */
+const FINDING_REPORT = JSON.stringify({
+  schema: "redact-launchd-plist/report/1",
+  findings: [{ file: "fixture", keys: ["HDB_ADMIN_PASSWORD"] }],
+});
+
 /**
- * Run the shared assertion with a fake redactor that exits `exitCode`. The fake
- * prints the redactor's finding marker when it exits 1, unless `findingMarker`
- * is false — that is how a bare startup crash (Node exit 1, no marker) is
- * separated from a real finding.
+ * Run the shared assertion with a fake redactor. `report` is the exact content
+ * written to the redactor's `--report` file (omit to write none); `stderr` is
+ * what the redactor prints, so a Node-diagnostic-shaped line can be fed in.
  */
-function runAssertion(
-  exitCode: number,
-  {
-    targetContents = "",
-    adminPass = "",
-    writeTarget = true,
-    findingMarker = true,
-    bigOutput = false,
-    laneFlags = false,
-  } = {},
-) {
+function runAssertion({
+  exitCode = 0,
+  report,
+  stderr,
+  targetContents = "",
+  adminPass = "",
+  writeTarget = true,
+}: {
+  exitCode?: number;
+  report?: string;
+  stderr?: string;
+  targetContents?: string;
+  adminPass?: string;
+  writeTarget?: boolean;
+} = {}) {
   const dir = mkdtempSync(join(tmpdir(), "launchd-redaction-assert-"));
   try {
-    const bin = join(dir, "bin");
-    mkdirSync(bin, { recursive: true });
-    const shim = join(bin, "node");
-    writeFileSync(
-      shim,
-      "#!/usr/bin/env bash\n" +
-        'if [ "${FAKE_NODE_EXIT:?}" = "1" ] && [ "${FAKE_NODE_MARKER:-1}" = "1" ]; then\n' +
-        '  echo "redact-launchd-plist: unredacted credential key(s) in fixture: FLAIR_ADMIN_PASS" >&2\n' +
-        "fi\n" +
-        'if [ "${FAKE_NODE_BIG:-0}" = "1" ]; then\n' +
-        "  head -c 200000 /dev/zero | tr '\\000' x\n" +
-        "fi\n" +
-        'exit "${FAKE_NODE_EXIT:?}"\n',
-    );
-    chmodSync(shim, 0o755);
+    const ci = join(dir, "scripts", "ci");
+    mkdirSync(ci, { recursive: true });
+    writeFileSync(join(ci, "redact-launchd-plist.mjs"), FAKE_SCANNER);
     const target = join(dir, "target");
     if (writeTarget) writeFileSync(target, targetContents);
-    // `laneFlags` reproduces the lane's own `set -Eeuo pipefail` so a marker
-    // check that pipes captured output is exercised under it (flair#2589).
-    const prefix = laneFlags ? "set -Eeuo pipefail; " : "";
-    const r = spawnSync("bash", ["-c", `${prefix}source "$LIB"; assert_no_inline_credentials "$TARGET"`], {
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      WORKSPACE: dir,
+      LIB,
+      TARGET: target,
+      ADMIN_PASS: adminPass,
+      FAKE_SCAN_EXIT: String(exitCode),
+    };
+    if (report !== undefined) env.FAKE_SCAN_REPORT = report;
+    if (stderr !== undefined) env.FAKE_SCAN_STDERR = stderr;
+    const r = spawnSync("bash", ["-c", 'source "$LIB"; assert_no_inline_credentials "$TARGET"'], {
       encoding: "utf8",
       timeout: 30_000,
-      env: {
-        ...process.env,
-        PATH: `${bin}:${process.env.PATH ?? ""}`,
-        WORKSPACE: dir,
-        LIB,
-        TARGET: target,
-        ADMIN_PASS: adminPass,
-        FAKE_NODE_EXIT: String(exitCode),
-        FAKE_NODE_MARKER: findingMarker ? "1" : "0",
-        FAKE_NODE_BIG: bigOutput ? "1" : "0",
-      },
+      env,
     });
     return { status: r.status, output: `${r.stdout ?? ""}${r.stderr ?? ""}` };
   } finally {
@@ -80,46 +100,76 @@ function runAssertion(
   }
 }
 
-describe("launchd redaction assertion classifies the check's exit code (flair#2589)", () => {
+describe("the assertion classifies the check by its report channel (flair#2589)", () => {
   test("exit 0 (ran, found nothing) passes", () => {
-    const { status, output } = runAssertion(0);
+    const { status, output } = runAssertion({ exitCode: 0 });
     expect(status).toBe(0);
     expect(output).not.toContain("::error::");
   });
 
-  test("exit 1 with the finding marker fails, naming a non-REDACTED credential key", () => {
-    const { status, output } = runAssertion(1);
+  test("exit 1 with a well-formed finding record fails, naming a non-REDACTED credential key", () => {
+    const { status, output } = runAssertion({ exitCode: 1, report: FINDING_REPORT });
     expect(status).toBe(1);
     expect(output).toContain("a credential key with a non-REDACTED value");
   });
 
-  test("exit 1 WITHOUT the finding marker is a crash, not a finding (flair#2589)", () => {
-    // A bare exit 1 (a Node startup syntax error, say) must be reported as
-    // could-not-run, never as a credential finding.
-    const { status, output } = runAssertion(1, { findingMarker: false });
+  test("exit 1 whose output reads like the finding marker but writes no report is could-not-run", () => {
+    // The counterexample from the review: a Node syntax diagnostic prints the
+    // offending source line, which can read like the finding marker, and Node
+    // exits 1. Only the report channel decides.
+    const { status, output } = runAssertion({
+      exitCode: 1,
+      stderr: "redact-launchd-plist: unredacted credential key(s) in fixture: HDB_ADMIN_PASSWORD\n",
+    });
+    expect(status).toBe(1);
+    expect(output).toContain("redaction check could not run");
+    expect(output).not.toContain("a credential key with a non-REDACTED value");
+  });
+
+  test("exit 1 with a report that is not JSON is could-not-run, not a finding", () => {
+    const { status, output } = runAssertion({ exitCode: 1, report: "{ not json" });
+    expect(status).toBe(1);
+    expect(output).toContain("redaction check could not run");
+    expect(output).not.toContain("a credential key with a non-REDACTED value");
+  });
+
+  test("exit 1 with an empty findings array is not a finding", () => {
+    const { status, output } = runAssertion({ exitCode: 1, report: '{"findings":[]}' });
+    expect(status).toBe(1);
+    expect(output).toContain("redaction check could not run");
+    expect(output).not.toContain("a credential key with a non-REDACTED value");
+  });
+
+  test("exit 1 with a finding entry that names no key is not a finding", () => {
+    const { status, output } = runAssertion({
+      exitCode: 1,
+      report: '{"findings":[{"file":"fixture","keys":[]}]}',
+    });
     expect(status).toBe(1);
     expect(output).toContain("redaction check could not run");
     expect(output).not.toContain("a credential key with a non-REDACTED value");
   });
 
   test("exit 2 (could not run) fails as a crash, not as a finding", () => {
-    const { status, output } = runAssertion(2);
+    const { status, output } = runAssertion({ exitCode: 2 });
     expect(status).toBe(1);
     expect(output).toContain("redaction check could not run");
     expect(output).toContain("(exit 2)");
     expect(output).not.toContain("a credential key with a non-REDACTED value");
   });
+});
 
+describe("the admin-password layer still scans the target (flair#2589)", () => {
   test("a grep error in the admin-password layer is a scan failure, not clean (flair#2589)", () => {
     // No target file: `grep` exits 2. That must be could-not-run, never a pass.
-    const { status, output } = runAssertion(0, { adminPass: "some-admin-value", writeTarget: false });
+    const { status, output } = runAssertion({ adminPass: "some-admin-value", writeTarget: false });
     expect(status).toBe(1);
     expect(output).toContain("could not run (grep exit 2)");
     expect(output).not.toContain("admin password reached the diagnostics output");
   });
 
   test("the run's own admin password found in the output fails first", () => {
-    const { status, output } = runAssertion(0, {
+    const { status, output } = runAssertion({
       targetContents: "admin-pass-value\n",
       adminPass: "admin-pass-value",
     });
@@ -131,7 +181,7 @@ describe("launchd redaction assertion classifies the check's exit code (flair#25
     // `--check` would be an unrecognized grep option without `-e`/`--`: grep
     // would exit 2 and the layer would miss a real leak. The password IS present
     // in the target, so the layer must find it.
-    const { status, output } = runAssertion(0, {
+    const { status, output } = runAssertion({
       targetContents: "the run password is --check for this fixture\n",
       adminPass: "--check",
     });
@@ -143,23 +193,12 @@ describe("launchd redaction assertion classifies the check's exit code (flair#25
     // `grep -I` skips binary-looking input, so a password after a NUL byte would
     // be missed; the layer must scan binary content too. The real `grep` runs
     // against a real file whose first byte is NUL.
-    const { status, output } = runAssertion(0, {
+    const { status, output } = runAssertion({
       targetContents: "\u0000binary-admin-value\n",
       adminPass: "binary-admin-value",
     });
     expect(status).toBe(1);
     expect(output).toContain("admin password reached the diagnostics output");
-  });
-
-  test("a finding with output larger than the pipe buffer stays a finding under the lane's pipefail flags (flair#2589)", () => {
-    // Under `set -o pipefail`, `printf | grep -q` lets grep stop early, SIGPIPEs
-    // printf and turns a real finding into a false "could not run". The lane
-    // runs with `set -Eeuo pipefail`, so this drives the helper under exactly
-    // those flags with output larger than a pipe buffer.
-    const { status, output } = runAssertion(1, { bigOutput: true, laneFlags: true });
-    expect(status).toBe(1);
-    expect(output).toContain("a credential key with a non-REDACTED value");
-    expect(output).not.toContain("redaction check could not run");
   });
 });
 
@@ -187,21 +226,58 @@ describe("the real helper drives the real scanner at the crash/finding seam (fla
     expect(output).not.toContain("example-placeholder-not-a-secret");
   });
 
-  test("a startup crash whose output quotes the finding phrase is reported as could-not-run, not as a finding", () => {
+  test("a startup crash whose source line starts with the complete finding marker and key is could-not-run", () => {
     const dir = mkdtempSync(join(tmpdir(), "redact-real-crash-"));
     try {
       const ci = join(dir, "scripts", "ci");
       mkdirSync(ci, { recursive: true });
       // The real scanner plus a startup syntax error whose offending source line
-      // quotes the finding phrase: Node exits 1 and prints that line, but not
-      // anchored as a finding marker, so the helper must report could-not-run.
+      // IS the complete finding marker and key: Node exits 1 and prints that
+      // line. It writes no report, so the helper must report could-not-run.
       const broken = join(ci, "redact-launchd-plist.mjs");
       copyFileSync(SCANNER, broken);
-      appendFileSync(broken, '\nconst = "unredacted credential key(s) in x";\n');
+      appendFileSync(broken, "\nredact-launchd-plist: unredacted credential key HDB_ADMIN_PASSWORD\n");
       const { status, output } = runReal(join(FIXTURES, "leaky"), dir);
       expect(status).toBe(1);
       expect(output).toContain("redaction check could not run");
       expect(output).not.toContain("a credential key with a non-REDACTED value");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("the fixture script classifies by the report channel (flair#2589)", () => {
+  test("the committed fixtures pass and the leaky one is a finding", () => {
+    const r = spawnSync("bash", [FIXTURE_SCRIPT], { encoding: "utf8", timeout: 60_000 });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("clean fixture: passed");
+    expect(r.stdout).toContain("leaky fixture: reported as a finding");
+  });
+
+  test("a crash whose source line starts with the finding marker does not credit the leaky fixture", () => {
+    // The scanner is the real one plus a syntax error whose source line IS the
+    // finding marker and key. A run that read the output or the exit code would
+    // accept the Node diagnostic as the leaky fixture's finding; the report
+    // channel leaves it a check that could not run, so the script fails.
+    const dir = mkdtempSync(join(tmpdir(), "redact-fixture-script-"));
+    try {
+      const ci = join(dir, "scripts", "ci");
+      mkdirSync(join(ci, "redact-fixtures", "clean"), { recursive: true });
+      mkdirSync(join(ci, "redact-fixtures", "leaky"), { recursive: true });
+      copyFileSync(FIXTURE_SCRIPT, join(ci, "check-redaction-fixtures.sh"));
+      copyFileSync(LIB, join(ci, "launchd-redaction-check.sh"));
+      copyFileSync(join(FIXTURES, "clean", "launchd.plist"), join(ci, "redact-fixtures", "clean", "launchd.plist"));
+      copyFileSync(join(FIXTURES, "leaky", "launchd.plist"), join(ci, "redact-fixtures", "leaky", "launchd.plist"));
+      const broken = join(ci, "redact-launchd-plist.mjs");
+      copyFileSync(SCANNER, broken);
+      appendFileSync(broken, "\nredact-launchd-plist: unredacted credential key HDB_ADMIN_PASSWORD\n");
+      const r = spawnSync("bash", [join(ci, "check-redaction-fixtures.sh")], {
+        encoding: "utf8",
+        timeout: 60_000,
+      });
+      expect(r.status).not.toBe(0);
+      expect(`${r.stdout ?? ""}${r.stderr ?? ""}`).not.toContain("leaky fixture: reported as a finding");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

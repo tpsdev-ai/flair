@@ -20,13 +20,14 @@
 
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, copyFileSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, copyFileSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { NEVER_GENERATED_SECRET_KEYS } from "../../src/component-env.js";
 import {
   REDACTED_KEYS,
+  REPORT_SCHEMA,
   collectAdminPassSecrets,
   redactPlist,
   unredactedKeyNames,
@@ -176,6 +177,61 @@ describe("--check — fails on a surviving credential key, names it not its valu
       writeFileSync(join(dir, "redacted.plist"), redactPlist(INLINE_PLIST));
       const run = spawnSync(process.execPath, [SCRIPT, "--check", dir], { encoding: "utf8" });
       expect(run.status).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("--check publishes findings on its own report channel (flair#2589)", () => {
+  const fixtures = join(import.meta.dir, "..", "..", "scripts", "ci", "redact-fixtures");
+
+  test("a clean scan writes an empty-findings report and exits 0", () => {
+    const dir = mkdtempSync(join(tmpdir(), "redact-report-clean-"));
+    try {
+      const report = join(dir, "report.json");
+      const run = spawnSync(process.execPath, [SCRIPT, "--check", "--report", report, join(fixtures, "clean")], {
+        encoding: "utf8",
+      });
+      expect(run.status).toBe(0);
+      const doc = JSON.parse(readFileSync(report, "utf8"));
+      expect(doc.schema).toBe(REPORT_SCHEMA);
+      expect(doc.findings).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a finding is written to the report, naming the key and not the value", () => {
+    const dir = mkdtempSync(join(tmpdir(), "redact-report-leaky-"));
+    try {
+      const report = join(dir, "report.json");
+      const run = spawnSync(process.execPath, [SCRIPT, "--check", "--report", report, join(fixtures, "leaky")], {
+        encoding: "utf8",
+      });
+      expect(run.status).toBe(1);
+      const doc = JSON.parse(readFileSync(report, "utf8"));
+      expect(doc.findings).toHaveLength(1);
+      expect(doc.findings[0].keys).toEqual(["HDB_ADMIN_PASSWORD"]);
+      expect(readFileSync(report, "utf8")).not.toContain("example-placeholder-not-a-secret");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a check that could not run leaves the report untouched", () => {
+    // The report is written only when the scan finishes. On a target that
+    // cannot be read the scanner exits 2 and writes nothing, so a caller that
+    // finds no finding record there falls back to could-not-run.
+    const dir = mkdtempSync(join(tmpdir(), "redact-report-missing-"));
+    try {
+      const report = join(dir, "report.json");
+      writeFileSync(report, "SENTINEL");
+      const run = spawnSync(process.execPath, [SCRIPT, "--check", "--report", report, join(dir, "no-such-target")], {
+        encoding: "utf8",
+      });
+      expect(run.status).toBe(2);
+      expect(readFileSync(report, "utf8")).toBe("SENTINEL");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

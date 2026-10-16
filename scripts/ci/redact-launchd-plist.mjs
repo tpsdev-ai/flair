@@ -22,22 +22,30 @@
  * Usage:
  *   node redact-launchd-plist.mjs <file>...    # redacted plist(s) to stdout
  *   cat plist | node redact-launchd-plist.mjs  # redacted plist to stdout
- *   node redact-launchd-plist.mjs --check <path>...
+ *   node redact-launchd-plist.mjs --check [--report <file>] <path>...
  *                                              # assert no credential key
- *                                              # survives with a value
+ *                                              # survives with a value; with
+ *                                              # --report, write the findings
+ *                                              # to <file> as JSON
  *
- * Exit codes: 0 on success, 2 when a named file cannot be read. A diagnostics
- * redactor must not fail the dump it is cleaning, so read failures are loud but
- * do not abort the caller's remaining output. `--check` exits 1 on a finding,
- * printed with a line beginning `redact-launchd-plist: unredacted credential
- * key`. It exits 2 when the check could not run (the key list failed to validate
- * or construct, a named target cannot be read, or an unexpected error). A syntax
- * error in this file exits 1 before this code runs and carries no finding
- * marker, so a caller must key on the marker, not the exit code alone, to tell a
- * crash from a finding — both fail the lane.
+ * `--check` publishes its finding records on a channel of its own: the JSON
+ * report file named by `--report`, never stdout or stderr. It writes that
+ * report only when it finishes scanning, so a caller must call exit 1 a finding
+ * only when the report holds a well-formed finding record. Node prints the
+ * offending source line of a syntax error, so a scanner that cannot start can
+ * print a line that reads like a finding marker and exit 1; such a run writes
+ * no report and is a check that could not run (flair#2589).
+ *
+ * Exit codes: in redaction mode, 0 on success and 2 when a named file cannot be
+ * read — a diagnostics redactor must not fail the dump it is cleaning, so read
+ * failures are loud but do not abort the caller's remaining output. `--check`
+ * is a machine-checked contract: 0 the scan ran and found nothing, 1 it ran and
+ * found something (the records are in the `--report` file), 2 the check could
+ * not run. Human-readable finding lines go to stderr, but they are not the
+ * classification signal — see above.
  */
 
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -61,8 +69,7 @@ try {
   // Validate and construct the key list inside the handled path. A missing or
   // non-array export, an element that is not a non-empty string, or a spread
   // that throws must all be a crash (exit 2) — never a silent wrong key list
-  // (exit 0) or a module-load throw Node exits 1 for, which a caller that reads
-  // exit status alone would take as a scan finding (flair#2589).
+  // (exit 0) or a module-load throw Node exits 1 for (flair#2589).
   if (!Array.isArray(NEVER_GENERATED_SECRET_KEYS)) {
     throw new TypeError("NEVER_GENERATED_SECRET_KEYS is not an array");
   }
@@ -164,9 +171,31 @@ function filesUnder(path) {
   });
 }
 
-/** Assert that no credential key survives with a value under `paths`. */
-function checkPaths(paths) {
-  let findings = 0;
+/**
+ * The `--check` report's schema tag. The report is the finding-record channel:
+ * a caller reads it — not stdout, stderr or the exit code alone — to tell a
+ * finding from a check that could not run.
+ */
+export const REPORT_SCHEMA = "redact-launchd-plist/report/1";
+
+/** Write the `--check` finding records to `reportPath`. Returns true on success. */
+function writeReport(reportPath, findings) {
+  try {
+    writeFileSync(reportPath, `${JSON.stringify({ schema: REPORT_SCHEMA, findings })}\n`);
+    return true;
+  } catch (err) {
+    console.error(`redact-launchd-plist: cannot write report ${reportPath}: ${err?.message ?? err}`);
+    return false;
+  }
+}
+
+/**
+ * Assert that no credential key survives with a value under `paths`. With
+ * `reportPath`, write the finding records there when the scan finishes so a
+ * caller can classify the exit code on that channel.
+ */
+function checkPaths(paths, reportPath) {
+  const findings = [];
   for (const path of paths) {
     // A named target that cannot be read is a check that could not run (exit 2),
     // not a clean result: reporting an unscanned target as clean is the failure
@@ -188,22 +217,39 @@ function checkPaths(paths) {
       }
       const keys = unredactedKeyNames(text);
       if (keys.length > 0) {
-        findings += keys.length;
+        findings.push({ file, keys });
         console.error(`redact-launchd-plist: unredacted credential key(s) in ${file}: ${keys.join(", ")}`);
       }
     }
   }
-  return findings > 0 ? 1 : 0;
+  // Written only when the scan finishes (exit 0 or 1). A write failure is
+  // could-not-run: the caller classifies on this channel, so a finding it cannot
+  // read there must never be reported as one (flair#2589).
+  if (reportPath !== undefined && !writeReport(reportPath, findings)) {
+    return 2;
+  }
+  return findings.length > 0 ? 1 : 0;
 }
 
 /**
  * Redact every named file (or stdin when none are named) to stdout; `--check`
- * instead asserts the named files/directories carry no unredacted credential.
+ * instead asserts the named files/directories carry no unredacted credential
+ * and, when `--report <file>` is given, writes the finding records there.
  */
 export function main(argv = process.argv.slice(2)) {
   let failed = false;
+  let reportPath;
+  const reportAt = argv.indexOf("--report");
+  if (reportAt !== -1) {
+    reportPath = argv[reportAt + 1];
+    if (typeof reportPath !== "string" || reportPath.length === 0) {
+      console.error("redact-launchd-plist: --report needs a file path");
+      return 2;
+    }
+    argv = [...argv.slice(0, reportAt), ...argv.slice(reportAt + 2)];
+  }
   if (argv[0] === "--check") {
-    return checkPaths(argv.slice(1));
+    return checkPaths(argv.slice(1), reportPath);
   }
   const secrets = collectAdminPassSecrets();
   if (argv.length === 0) {
