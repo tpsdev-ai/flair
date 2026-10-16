@@ -132,13 +132,13 @@ describe("flair#2307 — the content-suffix re-embed validates the vector and co
     const result = await migration().run(10);
     expect(result).toEqual({ processed: 1, touchedIds: [LEGACY_ID] });
     expect(store.get(LEGACY_ID)).toMatchObject({ id: LEGACY_ID, agentId: "a", content: "legacy body", embedding: [0.5, 0.25, 0.125], embeddingModel: CURRENT });
-    // flair#2465: an incremental update, never a full-row put — updatedAt is the
-    // only other field the write touches.
-    expect(Object.keys(store.get(LEGACY_ID)!).sort()).toEqual(["agentId", "content", "embedding", "embeddingModel", "id", "updatedAt"]);
-    // Exactly one update, naming only the embedding fields and updatedAt; no
-    // full-row put (flair#2494). A whole-row update would name extra fields and
-    // fail this assertion; a full-row put would fail the method check.
-    expect(writeCalls).toEqual([{ method: "update", id: LEGACY_ID, fields: ["embedding", "embeddingModel", "updatedAt"] }]);
+    // flair#2465: an incremental update, never a full-row put — updatedAt and the
+    // embedded-text hash binding are the only other fields the write touches.
+    expect(Object.keys(store.get(LEGACY_ID)!).sort()).toEqual(["agentId", "content", "embeddedContentHash", "embedding", "embeddingModel", "id", "updatedAt"]);
+    // Exactly one update, naming only the embedding fields, their text binding and
+    // updatedAt; no full-row put (flair#2494). A whole-row update would name extra
+    // fields and fail this assertion; a full-row put would fail the method check.
+    expect(writeCalls).toEqual([{ method: "update", id: LEGACY_ID, fields: ["embeddedContentHash", "embedding", "embeddingModel", "updatedAt"] }]);
     expect(await migration().countPending()).toBe(0);
   });
 

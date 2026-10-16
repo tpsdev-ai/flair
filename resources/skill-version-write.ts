@@ -123,7 +123,7 @@ export function rowIsSkill(row: Record<string, any> | null | undefined): boolean
 
 export function skillPayloadUnchanged(base: Record<string, any>, head: Record<string, any>): boolean {
   const bookkeeping = new Set([
-    "embedding", "embeddingModel", "contentHash", "updatedAt", "instanceToken",
+    "embedding", "embeddingModel", "embeddedContentHash", "contentHash", "updatedAt", "instanceToken",
     "provenance", "skillSubjectId", "_safetyFlags", "_skillScan",
     "retrievalCount", "lastRetrieved",
   ]);
@@ -159,12 +159,23 @@ export async function prepareSkillBody(content: any, stored: Record<string, any>
   if ((content.archived != null && content.archived !== false) || (content.validTo != null && content.validTo !== "")) {
     return Response.json({ error: "skill_state_requires_delete" }, { status: 400 });
   }
-  const effective = { ...(stored ?? predecessor ?? {}), ...content };
+  const source = stored ?? predecessor ?? {};
+  const effective = { ...source, ...content };
   effective.tags = content.tags ?? (rowIsSkill(stored) ? stored!.tags : predecessor?.tags);
-  if (content.embedding === undefined && skillEmbedText(effective) !== skillEmbedText(stored ?? predecessor ?? {})) {
+  const textUnchanged = skillEmbedText(effective) === skillEmbedText(source);
+  if (content.embedding === undefined && !textUnchanged) {
     effective.embedding = null;
     effective.embeddingModel = null;
   }
+  // flair#2465: the successor keeps the stored `embeddedContentHash` only when
+  // the stored row has a vector, the body omits `embedding` (so that vector is
+  // carried), and the embedding text is unchanged; otherwise null. A body value
+  // is never kept. A Feed successor stores this value; Memory.post()/put() keep
+  // it when they store the carried vector, and otherwise set their own.
+  const sourceHasVector = Array.isArray(source.embedding) && source.embedding.length > 0;
+  effective.embeddedContentHash = sourceHasVector && content.embedding === undefined && textUnchanged
+    ? (source.embeddedContentHash ?? null)
+    : null;
   if (content.id === undefined) delete effective.id;
   return { content: effective, predecessor };
 }
