@@ -468,6 +468,54 @@ describe("flair#2573 slice 1 — PATCH guard notifications (real Harper)", () =>
     expect(result.results.map((r: any) => r.id)).not.toContain(id);
   }, 240_000);
 
+  test("signed trusted federation merges preserve a clean predecessor's excluded count and invalidate an untrusted predecessor's count", async () => {
+    const id = "mem-2573-federated-clean";
+    const probe = "mem-2573-federated-untrusted";
+    const peer = "peer-2573-count";
+    const keys = nacl.sign.keyPair();
+    const createdAt = new Date().toISOString();
+    const paired = await h.adminOp({
+      operation: "insert", database: "flair", table: "Peer",
+      records: [{ id: peer, publicKey: Buffer.from(keys.publicKey).toString("base64url"), role: "spoke", status: "paired", createdAt }],
+    });
+    expect(paired.status).toBe(200);
+    const inserted = await h.adminOp({
+      operation: "insert", database: "flair", table: "Memory",
+      records: [{ id, agentId: AGENT, content: "clean federation predecessor", createdAt,
+        visibility: "shared", embedding: STAMPED_VEC, embeddingModel: CURRENT_STAMP }],
+    });
+    expect(inserted.status).toBe(200);
+    await h.putMemory(probe, { content: "untrusted federation predecessor", embedding: UNTRUSTED_VEC });
+    const published = { state: "excluded", reason: null, excluded: 1 } as const;
+    expect(await h.waitGuard((s) => s.state === "excluded" && s.excluded === 1, 60_000)).toEqual(published);
+    for (const target of [id, probe]) {
+      const previous = await h.memoryRow(target);
+      const updatedAt = new Date(Date.now() + 60_000).toISOString();
+      const content = `trusted federation replacement ${target}`;
+      const signed = signBodyFresh({
+        instanceId: peer, lamportClock: Date.now(),
+        records: [{ table: "Memory", id: target, updatedAt,
+          data: { ...previous, content, updatedAt, embedding: STAMPED_VEC, embeddingModel: CURRENT_STAMP } }],
+      }, keys.secretKey);
+      const response = await fetch(`${harper!.httpURL}/FederationSync`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(signed),
+        signal: AbortSignal.timeout(60_000),
+      });
+      const body = await response.json() as any;
+      expect(response.status, JSON.stringify(body)).toBe(200);
+      expect(body.merged).toBe(1);
+      const stored = await h.memoryRow(target);
+      expect(stored.content).toBe(content);
+      expect(stored.embeddingModel).toBe(CURRENT_STAMP);
+      expect(stored.embedding).toEqual(STAMPED_VEC);
+      expect((await h.health()).embeddingSpace).toEqual(target === id
+        ? published
+        : { state: "unverified", reason: null, excluded: 1 });
+    }
+    expect(await h.waitGuard((s) => s.state === "uniform" && s.excluded === 0, 60_000))
+      .toEqual({ state: "uniform", reason: null, excluded: 0 });
+  }, 180_000);
+
   test("a rescan counts a raw unstamped empty array and Health and doctor report non-uniform", async () => {
     const id = "mem-2573-raw-empty";
     const trigger = "mem-2573-rescan-trigger";

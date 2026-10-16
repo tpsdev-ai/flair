@@ -90,7 +90,7 @@ mock.module("harper", () => ({ databases: databasesMock, Resource: class {}, ser
 
 const { noteFederationMergedMemory } = await import("../../resources/Federation.ts");
 const { SemanticSearch } = await import("../../resources/SemanticSearch.ts");
-const { recomputeLatch, isEmbeddingSpaceUniform, _resetGuardForTests } = await import("../../resources/embedding-space-guard.ts");
+const { recomputeLatch, isEmbeddingSpaceUniform, spaceGuardState, _resetGuardForTests } = await import("../../resources/embedding-space-guard.ts");
 
 const AGENT = "agent-me";
 function makeSearch(agentId: string) {
@@ -100,13 +100,10 @@ function makeSearch(agentId: string) {
 }
 const FINDING = "Federation replication direction is governed by a per-pair sends and receives knob in the pairing config.";
 
-// Mirror the sync-in loop's two statements for a Memory record: the RAW
-// table.put (kept inline in Federation.ts) + the latch trip
-// (noteFederationMergedMemory). This is exactly what resources/Federation.ts
-// runs per merged record.
 async function syncInMemory(mergedData: Record<string, any>) {
+  const previous = await databasesMock.flair.Memory.get(mergedData.id) ?? null;
   await (databasesMock.flair.Memory as any).put(mergedData);
-  noteFederationMergedMemory("Memory", mergedData);
+  noteFederationMergedMemory("Memory", mergedData, previous);
 }
 
 beforeEach(() => {
@@ -118,6 +115,31 @@ beforeEach(() => {
 });
 
 describe("embedding-space-guard — federation sync-in raw writer (mutation test)", () => {
+  it("a trusted same-space merge over a known clean row keeps the published excluded count", async () => {
+    memoryStore.set("untrusted", { id: "untrusted", agentId: AGENT, content: "unstamped vector", createdAt: new Date().toISOString(), embedding: OTHER_SPACE_VEC });
+    expect(await recomputeLatch()).toBe(false);
+    const published = { state: "excluded", reason: null, excluded: 1 } as const;
+    expect(spaceGuardState()).toEqual(published);
+    await syncInMemory({ ...memoryStore.get("m1"), content: "merged clean row" });
+    expect(spaceGuardState()).toEqual(published);
+  });
+
+  it("a trusted same-space merge with an unknown previous row invalidates the excluded count", async () => {
+    memoryStore.set("untrusted", { id: "untrusted", agentId: AGENT, content: "unstamped vector", createdAt: new Date().toISOString(), embedding: OTHER_SPACE_VEC });
+    expect(await recomputeLatch()).toBe(false);
+    expect(spaceGuardState()).toEqual({ state: "excluded", reason: null, excluded: 1 });
+    noteFederationMergedMemory("Memory", memoryStore.get("m1"), undefined);
+    expect(spaceGuardState()).toEqual({ state: "unverified", reason: null, excluded: 1 });
+  });
+
+  it("a trusted same-space merge replacing an untrusted vector invalidates the excluded count", async () => {
+    memoryStore.set("untrusted", { id: "untrusted", agentId: AGENT, content: "unstamped vector", createdAt: new Date().toISOString(), embedding: OTHER_SPACE_VEC });
+    expect(await recomputeLatch()).toBe(false);
+    expect(spaceGuardState()).toEqual({ state: "excluded", reason: null, excluded: 1 });
+    await syncInMemory({ ...memoryStore.get("untrusted"), embeddingModel: CURRENT });
+    expect(spaceGuardState()).toEqual({ state: "unverified", reason: null, excluded: 1 });
+  });
+
   it("a federation-merged FOREIGN-stamped Memory trips the latch → recall degrades to keyword-only", async () => {
     expect(await recomputeLatch()).toBe(true); // uniform to start
     // Sanity: gate open, semantic-only query returns the row, no warning.

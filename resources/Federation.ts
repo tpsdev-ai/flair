@@ -228,9 +228,10 @@ export function mergeRecord(local: Record<string, any> | null, remote: SyncRecor
 export function noteFederationMergedMemory(
   recordTable: string,
   mergedData: { embeddingModel?: unknown },
+  previous?: { embedding?: unknown; embeddingModel?: unknown } | null,
 ): void {
   if (recordTable === "Memory") {
-    noteWriteStamp(mergedData.embeddingModel as string | null | undefined);
+    noteWriteStamp(mergedData.embeddingModel as string | null | undefined, previous);
   }
 }
 
@@ -1426,7 +1427,7 @@ export class FederationSync extends Resource {
           return { reason: outcome.reason ?? "agent_status_not_federated" };
         }
         try {
-          noteFederationMergedMemory(record.table, mergedData);
+          noteFederationMergedMemory(record.table, mergedData, local ?? null);
         } catch (err) {
           console.warn(`[Federation] post-commit note failed for ${record.table}/${record.id}: ${String(err)}`);
         }
