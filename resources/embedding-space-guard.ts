@@ -252,21 +252,22 @@ async function scan(): Promise<void> {
   try {
     const table = await _tableGetter();
     phase = "read";
-    // Project the stamp and the vector attribute: a row is a hazard, and is
-    // counted, only when it actually stores a vector. A row with no vector never
-    // enters the HNSW graph, so it is no hazard to a vector query.
+    // Project the stamp and the vector attribute. Two rules, kept separate:
+    //  - uniformity (flair#2481, unchanged): any space-bearing stamp that is not
+    //    the current space makes the corpus `mixed`, whether or not the row
+    //    stores a vector;
+    //  - the excluded count (flair#2573): a row that stores a vector without a
+    //    trusted current-space stamp. A row with no vector never enters the HNSW
+    //    graph, so it is not counted.
     for await (const row of table.search({ select: ["embeddingModel", "embedding"] })) {
       const rec = row as { embeddingModel?: unknown; embedding?: unknown };
-      if (!hasStoredVector(rec.embedding)) continue; // no vector ⇒ no cosine hazard
       const raw = typeof rec.embeddingModel === "string" ? rec.embeddingModel : null;
       const n = normalizeStamp(raw);
-      if (n !== null && seen.size < MAX_DIAG_STAMPS) seen.add(n);
-      if (raw !== null && trustedRaw.has(raw)) continue; // trusted current-space stamp
-      excluded++;
-      // A space-bearing but non-current stamp is a foreign space (the `mixed`
-      // state); an absent stamp or `hash-512d` is not a foreign space, yet still
-      // leaves the vector's space unverified.
-      if (n !== null && n !== currentNorm) uniform = false;
+      if (n !== null) {
+        if (seen.size < MAX_DIAG_STAMPS) seen.add(n);
+        if (n !== currentNorm) uniform = false;
+      }
+      if (hasStoredVector(rec.embedding) && !(raw !== null && trustedRaw.has(raw))) excluded++;
     }
     // Test-only: inert unless the fault-injection opt-in is set and this point
     // is armed (flair#2508). It holds this scan after its read, so a scan that
