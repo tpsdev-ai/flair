@@ -44,7 +44,9 @@ function makeTree(): Fixture {
   const root = mkdtempSync(join(tmpdir(), "flair-2583-fixture-"));
   roots.push(root);
   write(join(root, "resources", "foo.ts"));
-  write(join(root, "resources", "peer.ts"));
+  write(join(root, "resources", "peer.ts"), 'import "../src/shared.js";\n');
+  write(join(root, "src", "shared.ts"), 'import "./transitive.js";\n');
+  write(join(root, "src", "transitive.ts"), 'export {};\n');
   write(join(root, "tsconfig.json"), '{ "compilerOptions": { "outDir": "dist", "rootDir": "." }, "include": ["resources/**/*.ts"] }\n');
   write(join(root, "package.json"), '{ "name": "@tpsdev-ai/flair", "version": "1.0.0", "main": "./dist/resources/in-process-api.js" }\n');
   write(join(root, "bun.lock"));
@@ -85,9 +87,10 @@ describe("dist freshness (flair#2583)", () => {
     expect(() => assertFlairDistFresh(root)).not.toThrow();
   });
 
-  for (const input of ["resources/foo.ts", "src/cli.ts"]) {
+  for (const input of ["resources/foo.ts", "src/shared.ts", "src/transitive.ts"]) {
     it(`a newer ${input} is reported, naming the source and the command`, () => {
       const { root } = makeTree();
+      write(join(root, input), readFileSync(join(root, input), "utf-8") + "\n");
       stamp(join(root, input), NEW + 60_000);
       const issues = distFreshnessIssues(root);
       expect(issues).toHaveLength(1);
@@ -97,6 +100,14 @@ describe("dist freshness (flair#2583)", () => {
       expect(() => assertFlairDistFresh(root)).toThrow(/dist\/ freshness could not be verified/);
     });
   }
+
+  it("editing src/cli.ts alone does not refuse the resources check", () => {
+    const { root } = makeTree();
+    write(join(root, "src/cli.ts"), "export const edited = true;\n");
+    stamp(join(root, "src/cli.ts"), NEW + 60_000);
+    expect(distFreshnessIssues(root)).toEqual([]);
+    expect(() => assertFlairDistFresh(root)).not.toThrow();
+  });
 
   it("a missing dist/resources is reported", () => {
     const { root } = makeTree();
@@ -199,9 +210,10 @@ describe("dist freshness (flair#2583)", () => {
     expect(() => assertFlairDistFresh(root)).not.toThrow("Rebuild first");
   });
 
-  for (const input of ["packages/flair-tool-descriptors/src/index.ts", "scripts/vendor-tool-descriptors.mjs", "resources/foo.ts", "src/cli.ts"]) {
+  for (const input of ["packages/flair-tool-descriptors/src/index.ts", "scripts/vendor-tool-descriptors.mjs", "resources/foo.ts", "src/shared.ts"]) {
     it(`startup refuses a newer ${input}`, async () => {
       const { root } = makeTree();
+      write(join(root, input), readFileSync(join(root, input), "utf-8") + "\n");
       stamp(join(root, input), NEW + 60_000);
       await expect(startHarper({ cwd: root, harperBinDir: root })).rejects.toThrow(input);
     });

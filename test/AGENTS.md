@@ -20,8 +20,8 @@ Package tests also live under `packages/*/test/`. TypeScript consumers may need
 the built `flair-client` workspace dependency. Python packages have separate
 tooling. Do not infer coverage from the root unit group's pass count.
 
-`startHarper` checks output membership only under `dist/resources/`; its mtime
-watch covers every watched input, including `src/`.
+`startHarper` checks output membership only under `dist/resources/`; its source
+mtime watch covers the files the resources build compiles.
 
 For reliable fixtures:
 

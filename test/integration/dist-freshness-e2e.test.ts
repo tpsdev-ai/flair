@@ -54,6 +54,25 @@ test("startHarper refuses a copied build after a canonical descriptor edit witho
   }
 }, 120_000);
 
+test("startHarper refuses a compiled src edit after accepting a CLI-only edit in a copied build", async () => {
+  const root = mkdtempSync(join(tmpdir(), "flair-src-build-"));
+  try {
+    buildCopiedResources(root);
+    const newer = new Date(Date.now() + 60_000);
+    const cli = join(root, "src/cli.ts");
+    cpSync(resolve(import.meta.dirname, "../../src/cli.ts"), cli);
+    appendFileSync(cli, "\n");
+    utimesSync(cli, newer, newer);
+    expect(() => assertFlairDistFresh(root)).not.toThrow();
+    const compiled = join(root, "src/lib/harper-port-value.ts");
+    appendFileSync(compiled, "\n");
+    utimesSync(compiled, newer, newer);
+    await expect(startHarper({ cwd: root })).rejects.toThrow("src/lib/harper-port-value.ts");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}, 120_000);
+
 test("startHarper boots a copied resource build with a null commit", async () => {
   const root = mkdtempSync(join(tmpdir(), "flair-resource-build-"));
   let harper: HarperInstance | undefined;

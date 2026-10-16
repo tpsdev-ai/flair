@@ -18,6 +18,15 @@ function entriesUnder(path: string): FileMtime[] {
   return [entry];
 }
 
+function resourceDirectories(path: string): FileMtime[] {
+  return [
+    { path, mtimeMs: statSync(path).mtimeMs, directory: true },
+    ...readdirSync(path, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() || (entry.isSymbolicLink() && statSync(join(path, entry.name)).isDirectory()))
+      .flatMap((entry) => resourceDirectories(join(path, entry.name))),
+  ];
+}
+
 function resourceBuild(root: string): { inputs: string[]; config: ts.ParsedCommandLine } {
   const configs = new Set<string>();
   const config = ts.getParsedCommandLineOfConfigFile(join(root, "tsconfig.json"), {}, {
@@ -34,11 +43,14 @@ function resourceBuild(root: string): { inputs: string[]; config: ts.ParsedComma
   if (!config || config.errors.length) {
     throw new Error(config?.errors.map((d) => ts.flattenDiagnosticMessageText(d.messageText, "\n")).join("\n") || "could not parse tsconfig.json");
   }
+  const program = ts.createProgram(config.fileNames, config.options);
+  const sources = program.getSourceFiles()
+    .filter((source) => !program.isSourceFileDefaultLibrary(source) && !program.isSourceFileFromExternalLibrary(source))
+    .map((source) => source.fileName);
   return {
     config,
     inputs: [
-      join(root, "resources"),
-      join(root, "src"), // Resources import src/ modules emitted into dist/src/ for runtime.
+      ...new Set([...config.fileNames, ...sources]),
       ...configs,
       join(root, "package.json"),
       join(root, "bun.lock"),
@@ -82,7 +94,7 @@ export interface DistIssue {
   remedy: string;
 }
 
-/** Membership is scoped to dist/resources/; mtimes cover every watched input, including src/. */
+/** Source mtimes cover the files the resources build compiles. */
 export function distFreshnessIssues(root: string): DistIssue[] {
   const issues: DistIssue[] = [];
   const report = (message: string) => issues.push({ message, remedy: "bun run build" });
@@ -111,12 +123,11 @@ export function distFreshnessIssues(root: string): DistIssue[] {
     if (!built.length) report(`${relative(root, builtResources)} contains no built resources`);
     else {
       const oldest = built.reduce((a, b) => a.mtimeMs < b.mtimeMs ? a : b);
-      const watched = inputs.flatMap((path) => {
-        if (path === join(root, "resources") || path === join(root, "src")) return entriesUnder(path);
+      const watched = [...resourceDirectories(join(root, "resources")), ...inputs.map((path) => {
         const st = statSync(path);
         readFileSync(path);
-        return [{ path, mtimeMs: st.mtimeMs, directory: false }];
-      });
+        return { path, mtimeMs: st.mtimeMs, directory: false };
+      })];
       for (const entry of watched) {
         if (entry.mtimeMs > oldest.mtimeMs) {
           report(`${relative(root, entry.path)} (${new Date(entry.mtimeMs).toISOString()}) is newer than the oldest built resource ${relative(root, oldest.path)} (${new Date(oldest.mtimeMs).toISOString()})`);
