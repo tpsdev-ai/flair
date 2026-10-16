@@ -13,10 +13,11 @@
  * always-on embedding-stamp migration never runs: it would re-embed a no-stamp
  * row and remove the very state under test.
  *
- * Fixture vectors have 768 entries. After a signed Memory write, the auto-embed
- * backfill (resources/auth-middleware.ts) re-embeds from its text a row whose
- * stored vector has at most 100 entries, when an embedding model is available;
- * a shorter fixture vector would be replaced by a server-computed one. The
+ * Fixture vectors have 768 entries. After a successful Memory write whose id is
+ * in the URL (PUT and PATCH /Memory/<id> here), the auto-embed backfill
+ * (resources/auth-middleware.ts) re-embeds from its text a row whose stored
+ * vector has at most 100 entries, when embedding succeeds; a shorter fixture
+ * vector would be replaced by a server-computed one. The
  * backfill describe holds that backfill at its test-only
  * `backfill-embedding-pre` pause point. It and the vector-only describe (which
  * embeds query text) need the model and run only when the model file is
@@ -39,8 +40,8 @@
  *  - in put(), remove the removal of an empty body `embedding` before the
  *    omission check — the skill update case goes red;
  *  - in resources/auth-middleware.ts backfillEmbedding, drop the
- *    noteWriteStamp call — the untrusted-vector backfill case stays `excluded`
- *    past its 15 s window;
+ *    noteWriteStamp call — after release, /Health never reads `unverified`
+ *    without a consult, and the untrusted-vector backfill case goes red;
  *  - drop `embeddingModel` from the backfill's update — the vectorless backfill
  *    case never sees the current stamp.
  */
@@ -176,6 +177,16 @@ function makeHarness(get: () => HarperInstance) {
   async function consult(): Promise<void> {
     await semanticSearch({ queryEmbedding: UNTRUSTED_VEC, limit: 1 });
   }
+  /** Poll /Health without consulting the guard (no rescan can start here). */
+  async function healthUntil(want: (space: any) => boolean, timeoutMs: number): Promise<any> {
+    const deadline = Date.now() + timeoutMs;
+    let space = (await health()).embeddingSpace;
+    while (!(space && want(space)) && Date.now() < deadline) {
+      await delay(50);
+      space = (await health()).embeddingSpace;
+    }
+    return space;
+  }
   async function waitGuard(want: (space: any) => boolean, timeoutMs: number): Promise<any> {
     const deadline = Date.now() + timeoutMs;
     let space: any;
@@ -219,7 +230,7 @@ function makeHarness(get: () => HarperInstance) {
       rmSync(home, { recursive: true, force: true });
     }
   }
-  return { agent, adminOp, writeMemory, putMemory, patchMemory, memoryRow, semanticSearch, health, consult, waitGuard, doctor };
+  return { agent, adminOp, writeMemory, putMemory, patchMemory, memoryRow, semanticSearch, health, healthUntil, consult, waitGuard, doctor };
 }
 
 /** Spawn a Harper from a component copy without migration-boot (header),
@@ -630,14 +641,15 @@ describe("flair#2573 slice 1 — PATCH guard notifications (real Harper)", () =>
     expect((await h.waitGuard((s) => s.state === "excluded" && s.excluded === 1, 60_000))?.excluded).toBe(1);
     await h.putMemory(probe, { content: "a probe that stores a caller-supplied vector", embedding: STAMPED_VEC, embeddingModel: CURRENT_STAMP });
     expect((await h.waitGuard((s) => s.state === "uniform" && s.excluded === 0, 60_000))?.state).toBe("uniform");
-    // Write-time dedup compares against the backfilled vector only because it
-    // carries the trusted stamp: a near-duplicate of its text matches it.
+    // The verdict stays uniform, so write-time dedup compares vectors: a
+    // near-duplicate of the text matches the backfilled row, which carries the
+    // trusted current stamp.
     const dup = await h.putMemory("mem-2573-backfill-dup", { content: BACKFILL_TEXT });
     expect(dup.deduplicated).toBe(true);
     expect(dup.matchedId).toBe(id);
   }, 180_000);
 
-  test("a backfill replacing an untrusted vector notifies the guard, which reopens without waiting for its retry interval", async () => {
+  test("a backfill replacing an untrusted vector notifies the guard: /Health reads unverified before any consult, and a consult rescans", async () => {
     const id = "mem-2573-backfill-untrusted";
     expect((await h.waitGuard((s) => s.state === "uniform" && s.excluded === 0, 60_000))?.state).toBe("uniform");
     armBackfillPause();
@@ -648,10 +660,15 @@ describe("flair#2573 slice 1 — PATCH guard notifications (real Harper)", () =>
     const row = await releaseBackfill(id);
     expect(Array.isArray(row.embedding) && row.embedding.length > 100).toBe(true);
     expect(row.embeddingModel).toBe(CURRENT_STAMP);
-    // The guard rescans a non-uniform verdict on its own only every 30 s; within
-    // 15 s, only the backfill's notification can make the consult rescan.
-    const reopened = await h.waitGuard((s) => s.state === "uniform" && s.excluded === 0, 15_000);
-    expect(reopened).toEqual({ state: "uniform", reason: null, excluded: 0 });
+    // No consult runs from here until the notification is observed: /Health and
+    // the ops-API row read never consult, so no rescan can run. Only the
+    // backfill's notification can move the published `excluded` to `unverified`.
+    const notified = await h.healthUntil((s) => s.state !== "excluded", 15_000);
+    expect(notified).toEqual({ state: "unverified", reason: null, excluded: 1 });
+    // One consult starts the rescan; /Health then publishes its result.
+    await h.consult();
+    const rescanned = await h.healthUntil((s) => s.state !== "unverified", 30_000);
+    expect(rescanned).toEqual({ state: "uniform", reason: null, excluded: 0 });
   }, 180_000);
 });
 

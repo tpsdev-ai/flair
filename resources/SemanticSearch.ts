@@ -161,9 +161,13 @@ export class SemanticSearch extends Resource {
     // stored corpus only while the guard reads `uniform`: the last published
     // scan found no foreign stamp and no stored vector without a trusted
     // current-space stamp, and no guard-notified write has since marked that
-    // count stale. Every resource write that can store a vector the scan would
-    // count notifies the guard; a raw operations-API insert is seen only by the
-    // next scan. (This is
+    // count stale. The writes that notify are Memory POST, PUT and PATCH (a PATCH
+    // when it changes the vector or the stamp), the re-embed PATCH, the reindex
+    // PUT, skill version writes made through Memory, the FederationSync merge and
+    // the auto-embed backfill. Writes that keep or copy the vector and stamp an
+    // existing row already holds, such as the supersede close, the skill
+    // predecessor close and a FeedMemories skill successor, do not notify. A raw
+    // operations-API insert is seen only by the next scan. (This is
     // stamp metadata only: a caller-supplied `queryEmbedding` carries no space
     // provenance, so its bytes are not verified either — flair#2573 slice 2.)
     // Consulted through the SAME single chokepoint the write-time dedup leg

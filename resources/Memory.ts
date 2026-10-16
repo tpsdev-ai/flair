@@ -1783,8 +1783,8 @@ export class Memory extends (databases as any).flair.Memory {
     // free, without a separate flag). NEVER suppresses the write either way.
     // flair#2573: an empty vector that reaches this point (one carried from a
     // stored skill row; the body's own was removed above) is no vector. It is
-    // normalized before the dedup gate and the embed step, which then compute
-    // and stamp one.
+    // normalized before the dedup gate and the embed step, which can then
+    // compute and stamp one when embedding succeeds.
     normalizeEmptyEmbedding(content);
     // flair#2465: did the caller supply a vector that survived redaction? A
     // vector accepted from the caller gets no newly computed hash.

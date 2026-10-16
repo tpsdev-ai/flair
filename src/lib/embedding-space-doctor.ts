@@ -3,7 +3,8 @@
  * embedding-space guard's verdict (flair#2530).
  *
  * resources/embedding-space-guard.ts runs inside the Harper worker and reports
- * its verdict on the public /Health body as `embeddingSpace: { state, reason }`.
+ * its verdict on the public /Health body as
+ * `embeddingSpace: { state, reason, excluded }`.
  * The guard fails closed: only `state: "uniform"` serves the embedding leg; a
  * `mixed` state, an `excluded` state (a scan found an array or typed array, empty
  * included, without a trusted current-space stamp), an `unverified` verdict
