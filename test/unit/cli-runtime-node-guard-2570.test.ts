@@ -179,12 +179,14 @@ describe("Bun Harper spawn preload", () => {
         ];
         for (const form of cases) {
           const options = { shell: form.shell, timeout: 5_000, encoding: "utf8" as const };
+          const unclassifiable = runtime === unknown && (form.shell || form.command === "/bin/sh");
           const error = refused(() => spawnSync(form.command, form.args, options),
             "child_process.spawnSync", runtime === unknown ? "TestRuntimeIdentityError" : "BunHarperSpawnError");
-          expect(error.message).toContain("launching dist/cli.js");
+          expect(error.message).toContain(unclassifiable ? "unclassifiable shell executable" : "launching dist/cli.js");
           expect(error.message).not.toContain(marker);
           expect(error.stack).not.toContain(marker);
           expect(error.message).not.toContain(root);
+          if (unclassifiable) continue;
           const result = spawnSync(form.command, form.args, { ...options,
             env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise redacted warning" },
           });
@@ -212,6 +214,62 @@ describe("Bun Harper spawn preload", () => {
     const error = refused(() => spawnSync(`true; bun '${cli}' status`, [], { shell: true, timeout: 5_000 }),
       "child_process.spawnSync", "TestRuntimeIdentityError");
     expect(error.message).toContain("unclassifiable shell string");
+  }, 20_000);
+  for (const shell of ["shell: true", "/bin/sh", "/bin/bash"]) {
+    for (const syntax of ["glob", "command substitution", "literal Bun"]) {
+      test(`${shell} refuses ${syntax} with a reason`, () => {
+        const { root, cli } = fixture();
+        symlinkSync(process.execPath, join(root, "bun"));
+        const executable = syntax === "glob" ? "./b*n"
+          : syntax === "command substitution" ? "$(printf '%s' './bun')" : "./bun";
+        const command = `${executable} '${cli}' status`;
+        const executableShell = shell === "shell: true" ? command : shell;
+        const args = shell === "shell: true" ? [] : [shell === "/bin/bash" ? "-ec" : "-c", command];
+        const options = { cwd: root, shell: shell === "shell: true", encoding: "utf8" as const, timeout: 5_000 };
+        const unguarded = execFileSync(nodeBin(), ["-e",
+          "const [command,args,options] = JSON.parse(process.argv[1]); const result = require('node:child_process').spawnSync(command,args,options); process.stdout.write(result.stdout); process.exit(result.status ?? 1);",
+          JSON.stringify([executableShell, args, options]),
+        ], { encoding: "utf8", timeout: 10_000 });
+        expect(JSON.parse(unguarded)).toEqual(["status"]);
+        const error = refused(() => spawnSync(executableShell, args, options),
+          "child_process.spawnSync", syntax === "literal Bun" ? "BunHarperSpawnError" : "TestRuntimeIdentityError");
+        expect(error.message).toContain(syntax === "literal Bun" ? "launching dist/cli.js" : "unclassifiable shell string");
+      }, 20_000);
+    }
+    test(`${shell} refuses missing and unknown shell executables with a reason`, () => {
+      const { root, cli } = fixture();
+      const unknown = join(root, "runtime");
+      writeFileSync(unknown, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+      for (const executable of [join(root, "missing"), "flair-missing-runtime-2603", unknown]) {
+        for (const entry of ["", ` '${cli}' status`]) {
+          const command = `'${executable}'${entry}`;
+          const error = refused(() => spawnSync(shell === "shell: true" ? command : shell,
+            shell === "shell: true" ? [] : [shell === "/bin/bash" ? "-ec" : "-c", command], {
+              shell: shell === "shell: true", timeout: 5_000,
+              env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "cannot classify shell executable" },
+            }), "child_process.spawnSync", "TestRuntimeIdentityError");
+          expect(error.message).toContain("unclassifiable shell executable");
+        }
+      }
+    }, 20_000);
+  }
+  for (const flag of ["-ec", "-xc", "-lc", "-excl"]) {
+    test(`bash ${flag} refuses a Bun CLI fixture with a reason`, () => {
+      const error = refused(() => spawnSync("/bin/bash", [flag, `'${process.execPath}' '${fixture().cli}' status`], {
+        timeout: 5_000,
+      }));
+      expect(error.message).toContain("launching dist/cli.js");
+    }, 20_000);
+  }
+  test("shell expansion characters are refused even when quoted or escaped", () => {
+    for (const char of ["*", "?", "[", "]", "$", "`", "{", "}", "~"]) {
+      for (const value of [char, `'${char}'`, `"${char}"`, `\\${char}`]) {
+        const error = refused(() => spawnSync(`'${nodeBin()}' -p ${value}`, {
+          shell: true, timeout: 5_000,
+        }), "child_process.spawnSync", "TestRuntimeIdentityError");
+        expect(error.message).toContain("unclassifiable shell string");
+      }
+    }
   }, 20_000);
   test("compound and ambiguous shell strings are refused with a reason", () => {
     const { cli } = fixture();

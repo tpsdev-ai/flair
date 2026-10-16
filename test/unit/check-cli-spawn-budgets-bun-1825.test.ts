@@ -78,7 +78,7 @@ describe("exception baseline is ungameable (flair#1825)", () => {
     expect(errs.join("\n")).toMatch(/duplicate fingerprint/);
   });
 
-  it("an entry that no longer offends FAILS the gate (the list can only shrink)", () => {
+  it("an entry that no longer offends FAILS the gate", () => {
     const { staleEntries, ok: passed } = diffAgainstBaseline([], [], [ok]);
     expect(staleEntries.length).toBe(1);
     expect(passed).toBe(false);

@@ -90,7 +90,7 @@ const DEPENDENCY_EXPRESSION = String.raw`\$\{\{\s*needs\.([\w-]+)\.result\s*\}\}
 const DEPENDENCY_RESULTS = ["success", "failure", "cancelled", "skipped"];
 
 // Skip where bash is absent; CI has bash.
-const HAS_BASH = !spawnSync("bash", ["-c", "exit 0"]).error;
+const HAS_BASH = !spawnSync("bash", ["--version"]).error;
 const BASH_SKIP = HAS_BASH ? "" : " — skipped: bash is not available";
 
 /** The adapter job's step script in the workflow at `path`. */

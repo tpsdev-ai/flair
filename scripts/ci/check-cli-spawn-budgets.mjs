@@ -38,7 +38,7 @@
 // (plus an occurrence ordinal — never `file:line`); keys are unique, so one
 // entry covers exactly one call; the run is DIFFED against the committed
 // baseline, so a PR cannot add an offender together with its own exception; and
-// an entry that no longer offends FAILS, so the list can only shrink. There is
+// an entry that no longer offends FAILS. New exception keys FAIL. There is
 // no skip flag and no whole-file skip.
 //
 // SCOPE — EVERY SPAWN FAMILY THIS REPO USES (flair#1825). The node
@@ -1162,7 +1162,7 @@ export function readPrBaseline(root) {
   return JSON.parse(readFileSync(join(root, BASELINE_REL), "utf8"));
 }
 
-/** Entries a PR ADDED relative to the trusted base. A PR may only REMOVE. */
+/** Entries with exception keys absent from the trusted base. */
 export function addedExceptions(baseEntries, prEntries) {
   const baseKeys = new Set(baseEntries.map(offenderKey));
   return prEntries.filter((e) => !baseKeys.has(offenderKey(e)));
@@ -1192,7 +1192,7 @@ export function runGate({ root, baseRef = gateBaseRef(), env = process.env, seed
   // The PR copy is the working list: new offenders, multiplicity, and stale
   // entries are measured against it.
   const diff = diffAgainstBaseline(spawnOffenders, caseOffenders, prEntries);
-  // Added exceptions: the PR copy may only REMOVE relative to the base. When the
+  // Added exception keys are rejected relative to the base. When the
   // base has NO baseline file the base baseline is EMPTY, so EVERY PR entry is an
   // addition → fail — UNLESS the base DESCENDS from the seed-introduction anchor
   // (flair#1825). An exact-sha equality can never survive main moving. The anchor
@@ -1290,7 +1290,7 @@ if (isMain) {
     process.stdout.write(`  STALE    ${o.file}  ${o.scope}  ${o.kind}  ${o.fingerprint.slice(0, 50)}\n`);
   }
   for (const o of added) {
-    process.stdout.write(`  ADDED-EX ${o.file}  ${o.scope}  ${o.kind}  ${o.fingerprint.slice(0, 50)}  (a PR may only REMOVE baseline entries)\n`);
+    process.stdout.write(`  ADDED-EX ${o.file}  ${o.scope}  ${o.kind}  ${o.fingerprint.slice(0, 50)}  (new exception key)\n`);
   }
   process.stdout.write(
     `check-cli-spawn-budgets: ${spawnOffenders.length} spawn(s) with no timeout, ${caseOffenders.length} case(s) offending, ` +

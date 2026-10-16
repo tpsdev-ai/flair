@@ -123,15 +123,7 @@ function scriptIndex(args: string[], options: Options): number {
   return -1;
 }
 
-/**
- * The entry a spawn launches, when that entry is one this guard protects: the
- * installed Harper entry, or the built CLI (`dist/cli.js` / `dist/cli-shim.cjs`).
- *
- * A test that starts the built CLI under Bun exercises a different module loader
- * than the shipped Node entry point, for every subcommand — not only the ones
- * that start Harper. The guard therefore refuses a protected entry under a
- * non-Node runtime, without a subcommand exemption.
- */
+// Test-harness check for the installed Harper entry and built CLI, regardless of subcommand.
 function guardedEntry(args: string[], options: Options): EntryKind | undefined {
   options = { ...options };
   const index = scriptIndex(args, options);
@@ -140,14 +132,14 @@ function guardedEntry(args: string[], options: Options): EntryKind | undefined {
 }
 
 function shellWords(source: string): string[] | undefined {
-  // Refuse compound syntax and expansions rather than split ambiguous shell input.
+  // Refuse expansion characters even when quoted or escaped.
+  if (/[*?\[\]$`{}~]/.test(source)) return;
   const words: string[] = [];
   let word = "";
   let quote = "";
   let started = false;
   for (let i = 0; i < source.length; i++) {
     const char = source[i];
-    if (quote !== "'" && /[$`]/.test(char)) return;
     if (char === "\\" && quote !== "'") {
       if (++i === source.length) return;
       if (source[i] === "\n") return;
@@ -171,9 +163,12 @@ function shellWords(source: string): string[] | undefined {
 
 function invocation(command: string, args: string[], options: Options) {
   let words: string[] | undefined = [command, ...args];
+  const commandFlag = ["sh", "bash"].includes(basename(command))
+    ? args.findIndex(arg => /^-[^-]*c/.test(arg)) : -1;
+  const shellString = !!options.shell || commandFlag >= 0;
   if (options.shell) words = shellWords(words.join(" "));
-  else if (["sh", "bash"].includes(basename(command)) && args.includes("-c")) {
-    words = shellWords(args[args.indexOf("-c") + 1] ?? "");
+  else if (commandFlag >= 0) {
+    words = shellWords(args[commandFlag + 1] ?? "");
   }
   const probeOptions = { ...options, env: { ...(options.env ?? process.env) } };
   const assignment = (word: string): boolean => {
@@ -217,6 +212,11 @@ function invocation(command: string, args: string[], options: Options) {
     if (!words[0]) return failure("missing env executable");
     if (["env", "sh", "bash"].includes(basename(words[0]))) return failure("unsupported nested env wrapper");
     if (!resolvedExecutable(words[0], probeOptions)) return failure("unresolved env executable");
+  }
+  if (shellString) {
+    if (!words[0]) return failure("unclassifiable shell executable");
+    const runtime = runtimeKind(words[0], probeOptions);
+    if (runtime === "missing" || runtime === "unknown") return failure("unclassifiable shell executable");
   }
   return { command: words[0], args: words.slice(1), options: probeOptions, failure: undefined };
 }

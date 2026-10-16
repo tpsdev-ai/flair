@@ -100,14 +100,8 @@ function startHarperEntry(root: string, runtime = "node"): number {
   return startBackground([runtime, script, "run", "."]);
 }
 
-/**
- * A live `sh -c '<cmd>' /tmp/node_modules/harper.js`. `<cmd>` is the builtin
- * `read` on a pipe this process holds open, so the shell itself stays the
- * process (`sh -c 'sleep 60'` would exec `sleep` in its place, dropping the
- * argument) and exits when that pipe closes.
- */
 function startShellWithHarperArg(): number {
-  return startBackground(["sh", "-c", "read -r line", "/tmp/node_modules/harper.js"], "pipe");
+  return startBackground(["sh", shellScript("read -r line"), "/tmp/node_modules/harper.js"], "pipe");
 }
 
 /** A live `node -e` whose arguments include a `harper.js` path that it does not run. */

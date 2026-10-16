@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { shellScript } from "../helpers/shell-script.ts";
 
 import {
   SESSION_START_HOOK_MARKER,
@@ -275,7 +276,7 @@ describe("inspectSessionStartHook — REAL probe against a command that cannot r
 
     // And the control: without probe mode the stub would have produced the
     // other branch, so the assertion above is not vacuous.
-    const direct = Bun.spawnSync(["/bin/sh", "-c", buildSessionStartHookCommand("me")], {
+    const direct = Bun.spawnSync(["/bin/sh", shellScript(buildSessionStartHookCommand("me"))], {
       env: { PATH: binDir, HOME: isoHome },
     });
     expect(new TextDecoder().decode(direct.stdout)).toBe("SIDE_EFFECTS_RAN");

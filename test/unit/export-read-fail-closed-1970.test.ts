@@ -1,6 +1,6 @@
 /**
  * flair#1970: the built export CLI refuses failed reads before writing a file.
- * A Bun preload replaces fetch inside the child, so the test exercises the
+ * A preload replaces fetch inside the child, so the test exercises the
  * command boundary without requiring a loopback socket.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
