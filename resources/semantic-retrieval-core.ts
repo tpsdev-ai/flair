@@ -283,9 +283,9 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
       // verdict is the load-bearing exclusion — a non-uniform verdict makes the
       // caller drop the query embedding. This condition is added to the HNSW
       // query alone — never to `conditions`, which the lexical leg shares (a row
-      // with an untrusted stamp must still match lexically). A query condition
-      // cannot keep a vector out of Harper's HNSW traversal; it only excludes the
-      // row from the returned set.
+      // with an untrusted stamp remains eligible for lexical matching). A query
+      // condition cannot keep a vector out of Harper's HNSW traversal; it only
+      // excludes the row from the returned set.
       semQuery.conditions = [...conditions, trustedVectorCondition()];
       const semResults = withDetachedTxn(ctx, () => (databases as any).flair.Memory.search(semQuery));
       for await (const record of semResults) {
@@ -413,8 +413,8 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
         allowedById.set(id, projected);
         // flair#2573 slice 1: a lexical rescue is scored with a cosine only when
         // the row's stored vector carries a trusted current-space stamp (defence
-        // in depth alongside the guard's verdict); the row still returns
-        // lexically either way.
+        // in depth alongside the guard's verdict); the row remains eligible
+        // for lexical matching either way.
         if (qEmb && isTrustedVectorStamp((full as any).embeddingModel)) {
           const storedEmbedding = Array.isArray((full as any).embedding) ? (full as any).embedding : [];
           semSimById.set(id, cosineSimilarity(qEmb, storedEmbedding));
@@ -476,8 +476,7 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
           const full = await withDetachedTxn(ctx, () => (databases as any).flair.Memory.get(id));
           // flair#2573 slice 1: only a stored vector with a trusted current-space
           // stamp is cosined (defence in depth); an untrusted one leaves `semSim`
-          // undefined, so the lexical rescue reports no semantic evidence (it
-          // still returns).
+          // undefined, so the lexical rescue reports no semantic evidence.
           if (isTrustedVectorStamp(full?.embeddingModel)) {
             const storedEmbedding = Array.isArray(full?.embedding) ? full.embedding : [];
             semSim = cosineSimilarity(qEmb, storedEmbedding);

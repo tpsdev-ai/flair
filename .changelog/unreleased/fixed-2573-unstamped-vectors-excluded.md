@@ -6,7 +6,7 @@
   stamp, compared exactly as the vector query's stamp condition compares it. A
   count above zero makes the verdict non-uniform, so the recall leg refuses the
   query embedding and the write-time near-duplicate query compares no vectors;
-  the row still matches on a lexical leg. A guard-notified write without a
+  the row remains eligible for lexical matching. A guard-notified write without a
   trusted stamp advances the guard's scan epoch, so an in-flight scan cannot
   publish an older count. `flair doctor` prints the last published count in the
   `excluded` state. Raw operations-API inserts are uncovered until a rescan.

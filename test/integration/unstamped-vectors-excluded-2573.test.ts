@@ -5,7 +5,7 @@
  * Raw operations-API inserts remain uncovered until a rescan. Covers signed
  * Memory PUT/PATCH, dedup, recall, /Health, and doctor's last published count
  * in the `excluded` state.
- * A second spawned instance runs with FLAIR_RETRIEVAL_MODE=vector-only to show
+ * A separate instance runs with FLAIR_RETRIEVAL_MODE=vector-only to show
  * that branch falling back and naming the guard state.
  *
  * The always-on embedding-stamp migration would otherwise re-embed a no-stamp row
@@ -23,7 +23,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID, randomBytes } from "node:crypto";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
@@ -211,7 +211,7 @@ describe("flair#2573 slice 1 — signed unstamped vector writes close the guard 
     expect(b.matchedId).toBe(A_ID);
   }, 120_000);
 
-  test("a signed PUT of an unstamped vector makes the verdict non-uniform: excluded count, no vector recall, lexical still matches", async () => {
+  test("a signed PUT of an unstamped vector makes the verdict non-uniform: excluded count, no vector recall, a matching lexical query finds the row", async () => {
     const u = await h.putMemory(U_ID, { content: `a caller-supplied vector of unknown space ${KEYWORD}`, embedding: UNTRUSTED_VEC });
     expect(u.id).toBe(U_ID);
     // The write stored a vector with no stamp: the guard's count is stale, and a
@@ -226,10 +226,10 @@ describe("flair#2573 slice 1 — signed unstamped vector writes close the guard 
     const vectorOnly = await h.semanticSearch({ queryEmbedding: UNTRUSTED_VEC, limit: 20 });
     expect(vectorOnly.results.length, "the refused embedding leg returns no rows").toBe(0);
 
-    // The same row still matches on the lexical leg.
+    // A matching lexical query finds the same row.
     const lexical = await h.semanticSearch({ q: KEYWORD, limit: 20 });
     const lexIds = lexical.results.map((r: any) => r.content as string);
-    expect(lexIds.some((c: string) => c.includes(KEYWORD)), "the row must still match lexically").toBe(true);
+    expect(lexIds.some((c: string) => c.includes(KEYWORD)), "the matching lexical query finds the row").toBe(true);
   }, 120_000);
 
   test("the write-time near-duplicate query does not compare vectors while the verdict is non-uniform", async () => {
@@ -343,9 +343,4 @@ describe("flair#2573 slice 1 — vector-only mode falls back and names the guard
     expect(String(res._warning ?? "")).toContain("stored vector with no trusted current-space stamp");
     expect(res.results.map((r: any) => r.content as string).some((c: string) => c.includes(TOKEN))).toBe(true);
   }, 120_000);
-});
-
-/** Guard against a leaked temp tree from THIS file's own fixtures. */
-afterAll(() => {
-  expect(existsSync(tmpdir())).toBe(true);
 });

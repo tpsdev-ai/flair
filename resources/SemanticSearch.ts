@@ -158,8 +158,8 @@ export class SemanticSearch extends Resource {
     // an invalid score: Harper zero-pads a mismatched-dimension vector and
     // returns a bogus score instead of throwing, and a same-dims vector from
     // another space scores meaninglessly. The guard fails CLOSED:
-    // only a store a scan found fully stamped in the current space serves embeddings
-    // (flair#2530). Take the
+    // a scan must find trusted current-space stamps on all stored vectors and
+    // no foreign space-bearing stamp on any row (flair#2530). Take the
     // SAME path for every non-uniform state — REFUSE the embedding leg and
     // degrade LOUDLY: drop qEmb so retrieveCandidates takes the keyword-only
     // branch (reusing the existing mode:'none' graceful-degrade contract) when

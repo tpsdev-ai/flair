@@ -2157,7 +2157,7 @@ export class Memory extends (databases as any).flair.Memory {
     // flair#2467: a PATCH commits only the fields in its body; these are the
     // post-redaction text fields among them, for the response.
     const patchStaged = storedMemoryText(content, suppliedText);
-    // Notify only when PATCH changes the stored vector or its model stamp.
+    // Notify when staged vector or stamp fields differ from the row read before the write.
     const embeddingChanged = Object.prototype.hasOwnProperty.call(body, "embedding") &&
       !isDeepStrictEqual(body.embedding, existingForSkill?.embedding);
     const stampChanged = Object.prototype.hasOwnProperty.call(body, "embeddingModel") &&

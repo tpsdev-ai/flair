@@ -32,10 +32,9 @@
  * ─── Unknown verdict = FAIL CLOSED (flair#2530) ──────────────────────────────
  * A scan can be pending (before the first scan completes) or fail (a boot race,
  * a transient read error). The verdict is then UNKNOWN, and "unknown" is NOT
- * "known uniform": only a scan that found every row which stores a vector to
- * carry a trusted current-space `embeddingModel` stamp opens the gate
- * (`isEmbeddingSpaceUniform()` returns true). That is STAMP-METADATA
- * uniformity over the rows that store a vector: the scan counts a row that
+ * "known uniform": only a scan with no untrusted stored vectors and no foreign
+ * space-bearing stamps opens the gate
+ * (`isEmbeddingSpaceUniform()` returns true). The scan counts a row that
  * stores a vector and whose `embeddingModel` is not a trusted current-space
  * stamp — an absent stamp, the hash-fallback marker `hash-512d`, or a foreign
  * model — with the same raw comparison the vector query's stamp condition uses,
@@ -321,7 +320,7 @@ function runScan(): Promise<void> {
 
 // ─── Verdict state (flair#2530, flair#2573) ──────────────────────────────────
 // The latch's verdict has FIVE operator-visible states. Only `uniform` — a scan
-// that found every row storing a vector stamped with the current space — opens
+// with no untrusted stored vectors or foreign space-bearing stamps — opens
 // the gate. The other four are NOT "known
 // uniform" and fail closed: `unverified` (no scan has reached a verdict yet, or
 // a write may since have changed the count), `scan-failed` (the last scan to
@@ -350,8 +349,8 @@ export interface EmbeddingSpaceVerdict {
   found: string[];
   /** Rows the last published scan found that store a vector but carry no trusted
    *  current-space stamp (absent, `hash-512d`, or a non-current model). A count
-   *  above zero makes the verdict non-uniform; the row still matches on a lexical
-   *  leg. `null` when no scan has published a count — never reported as zero. */
+   *  above zero makes the verdict non-uniform; the row remains eligible for lexical
+   *  matching. `null` when no scan has published a count — never reported as zero. */
   excluded: number | null;
 }
 
@@ -446,11 +445,10 @@ function consultGuard(): EmbeddingSpaceVerdict {
   return guardSnapshot();
 }
 
-/** THE single chokepoint. Returns true when a scan found every row that stores
- *  a vector to carry a trusted current-space `embeddingModel` stamp (stamp
- *  metadata only, flair#2573), false
- *  otherwise — including the UNKNOWN verdict (pending first scan, or a failed
- *  scan), which fails closed (the caller must take its mixed-space path). O(1)
+/** THE single chokepoint. Returns true when a scan found no untrusted stored
+ *  vectors and no foreign space-bearing stamp, including on vectorless rows
+ *  (stamp metadata only, flair#2573), false otherwise — including UNKNOWN
+ *  (pending first scan or a failed scan), which fails closed (the caller must take its mixed-space path). O(1)
  *  on the happy path: once verified-uniform, no scan; a pending or tripped
  *  verdict kicks off a (re)scan the caller does NOT wait for, so the unknown
  *  verdict is reported now, not after the scan. */
@@ -479,8 +477,8 @@ export function isTrustedVectorStamp(stamp: string | null | undefined): boolean 
  * a vector out of Harper's HNSW traversal — its distance is computed before an
  * admission condition is applied. Used as an ADDITIONAL condition on a vector
  * (HNSW) query ONLY — never folded into the caller's `conditions`, which also
- * drive the lexical leg (a row with an untrusted stamp must still match
- * lexically).
+ * drive the lexical leg (a row with an untrusted stamp remains eligible for
+ * lexical matching).
  */
 export function trustedVectorCondition(): {
   operator: "or";

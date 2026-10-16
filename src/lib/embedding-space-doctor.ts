@@ -22,11 +22,11 @@
  * bm25-only mode, or a write-time dedup check; /Health does not consult): at
  * once while no verdict is known, otherwise once RECHECK_MS has passed since
  * the last published verdict. The state becomes `uniform` only when such a scan
- * succeeds and finds every row that stores a vector stamped in the current
- * space; with no consults, nothing retries.
+ * succeeds with no untrusted stored vectors or foreign space-bearing stamps;
+ * with no consults, nothing retries.
  * `uniform` means stamp-metadata uniformity (flair#2573 slice 1). The `excluded`
- * line names the count the scan published; the other lines do not name a count
- * (it may be stale after a write). An absent or
+ * line names the count when a valid published count is present; the other lines
+ * do not name a count (it may be stale after a write). An absent or
  * unrecognized field prints nothing: an older or foreign server's verdict is
  * not one to claim.
  */
@@ -80,8 +80,6 @@ export function describeEmbeddingSpaceDoctorFinding(field: unknown): EmbeddingSp
   const rec = field as { state?: unknown; reason?: unknown; excluded?: unknown };
   switch (rec.state) {
     case "uniform":
-      // Stamp metadata only; uniform means every row that stores a vector was
-      // found stamped in the current space (flair#2573).
       return { isIssue: false, icon: "ok", message: "embedding model stamps verified uniform" };
     case "mixed":
       return {
@@ -100,7 +98,7 @@ export function describeEmbeddingSpaceDoctorFinding(field: unknown): EmbeddingSp
         message:
           "the last scan found a stored vector with no trusted current-space stamp — the embedding leg is refused" +
           excludedClause(rec.excluded),
-        fixHint: "Re-embed or remove the stored vector, then re-run: flair doctor",
+        fixHint: "Re-embed or remove the stored vector; a later embedding query must trigger and complete a rescan before flair doctor can confirm the repair",
       };
     case "unverified":
       return {
