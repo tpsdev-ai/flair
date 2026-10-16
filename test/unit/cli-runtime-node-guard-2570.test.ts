@@ -35,6 +35,14 @@ function refused(call: () => unknown, api = "child_process.spawnSync", name = "B
   return error;
 }
 
+// The installed Harper entry is a real binary, and its CLI implements `version`.
+// The GNU `--version` is not a Harper subcommand: it falls through to `run`, which
+// bootstraps the installer and exits 130 at its first non-interactive prompt in a
+// fresh HOME (flair#2603). The fixture printers echo whatever argv they get.
+function protectedArgument(entry: string): string {
+  return entry === harperEntry ? "version" : "--version";
+}
+
 function allowed(cli: string, args: string[]) {
   const result = spawnSync(process.execPath, [cli, ...args], { encoding: "utf8", timeout: 5_000 });
   expect(result.status).toBe(0);
@@ -320,7 +328,7 @@ describe("Bun Harper spawn preload", () => {
     const log = spyOn(console, "warn").mockImplementation(() => {});
     try {
       for (const entry of [cli, join(root, "dist", "cli-shim.cjs"), harperEntry]) {
-        const command = `UNUSED=value '${node}' '${entry}' --version`;
+        const command = `UNUSED=value '${node}' '${entry}' ${protectedArgument(entry)}`;
         for (const shell of ["shell: true", "/bin/sh", "/bin/bash"]) {
           const executable = shell === "shell: true" ? command : shell;
           const args = shell === "shell: true" ? [] : ["-c", command];
@@ -353,7 +361,8 @@ describe("Bun Harper spawn preload", () => {
         }
         const alias = join(root, entry === cli ? "cli" : entry === harperEntry ? "harper" : "shim");
         symlinkSync(entry, alias);
-        for (const command of [`'${entry}' --version`, `${alias.split("/").at(-1)} --version`]) {
+        const argument = protectedArgument(entry);
+        for (const command of [`'${entry}' ${argument}`, `${alias.split("/").at(-1)} ${argument}`]) {
           const options = { shell: true, timeout: 5_000, encoding: "utf8" as const,
             env: { ...process.env, PATH: `${root}:${process.env.PATH}` },
           };
