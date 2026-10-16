@@ -5,6 +5,7 @@ import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { nodeBin } from "../helpers/node-runtime.ts";
+import { ensureCliBuild } from "../helpers/build-cli-once.js";
 import { tempDir } from "../helpers/temp-dir.ts";
 
 const cjs = createRequire(import.meta.url)("node:child_process");
@@ -202,6 +203,29 @@ describe("Bun Harper spawn preload", () => {
       refused(() => spawnSync(command, { shell: true, timeout: 5_000 }));
       for (const shell of ["/bin/sh", "/bin/bash"]) {
         refused(() => spawnSync(shell, ["-c", command], { timeout: 5_000 }));
+      }
+    }
+  }, 20_000);
+  test("a compound shell command launching the built CLI under Bun is refused with a reason", () => {
+    ensureCliBuild();
+    const cli = resolve(import.meta.dir, "../../dist/cli.js");
+    const error = refused(() => spawnSync(`true; bun '${cli}' status`, [], { shell: true, timeout: 5_000 }),
+      "child_process.spawnSync", "TestRuntimeIdentityError");
+    expect(error.message).toContain("unclassifiable shell string");
+  }, 20_000);
+  test("compound and ambiguous shell strings are refused with a reason", () => {
+    const { cli } = fixture();
+    for (const command of [
+      ...[";", "&&", "||", "|", "\n", "&"].map(separator => `true ${separator} bun '${cli}' status`),
+      `(bun '${cli}' status)`, `echo $(bun '${cli}' status)`,
+      `echo \`bun '${cli}' status\``, `echo "$(bun '${cli}' status)"`,
+      `echo "\`bun '${cli}' status\`"`, `echo $RUNTIME`,
+      "echo \\\nvalue", "echo 'unterminated",
+    ]) {
+      for (const shell of ["/bin/sh", "/bin/bash"]) {
+        const error = refused(() => spawnSync(shell, ["-c", command], { timeout: 5_000 }),
+          "child_process.spawnSync", "TestRuntimeIdentityError");
+        expect(error.message).toContain("unclassifiable shell string");
       }
     }
   }, 20_000);

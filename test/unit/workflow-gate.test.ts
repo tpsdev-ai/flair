@@ -1,5 +1,6 @@
 // The workflow coverage-gate checker's own fixtures (flair#2480).
 
+import { shellScript } from "../helpers/shell-script.ts";
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -121,7 +122,7 @@ function resultCombinations(jobs: string[]): Record<string, string>[] {
 
 /** The adapter script as real `bash -e` would run it. */
 function execute(script: string) {
-  return spawnSync("bash", ["-e", "-c", script]);
+  return spawnSync("bash", ["-e", shellScript(script)]);
 }
 
 describe("workflow coverage-gate checker — the adapter script on real bash", () => {

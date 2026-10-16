@@ -1881,7 +1881,9 @@ function spawnProbeBounded(
   pinPath: string,
 ): ProbeSpawn {
   const pinSeconds = String(Math.ceil(timeoutMs / 1000) + PROBE_PIN_MARGIN_S);
-  const args = ["-c", PROBE_WRAPPER, "flair-hook-probe", pinPath, pinSeconds, command];
+  const wrapperPath = join(dirname(pinPath), "wrapper.sh");
+  writeFileSync(wrapperPath, PROBE_WRAPPER, { mode: 0o600 });
+  const args = [wrapperPath, pinPath, pinSeconds, command];
   if (bunRuntime) {
     try {
       const r = bunRuntime.spawnSync(["/bin/sh", ...args], {

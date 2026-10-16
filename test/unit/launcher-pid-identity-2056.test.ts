@@ -23,6 +23,7 @@
 // timeout. The background processes this file starts are killed in afterEach
 // by the pids it recorded; each also exits by itself within 120 s, or (the
 // `sh` reading a pipe) when this process exits.
+import { shellScript } from "../helpers/shell-script.ts";
 import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -149,7 +150,7 @@ function psLstartSecond(pid: number): number {
   let sec = NaN;
   let stderr = "";
   for (;;) {
-    const r = spawnSync("sh", ["-c", conv, "sh", String(pid)], { encoding: "utf-8", timeout: 5_000 });
+    const r = spawnSync("sh", [shellScript(conv), String(pid)], { encoding: "utf-8", timeout: 5_000 });
     sec = Number((r.stdout ?? "").trim());
     stderr = r.stderr ?? "";
     if (Number.isInteger(sec) && sec > 0) return sec;

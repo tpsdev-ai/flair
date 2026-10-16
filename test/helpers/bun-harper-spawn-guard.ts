@@ -140,21 +140,24 @@ function guardedEntry(args: string[], options: Options): EntryKind | undefined {
 }
 
 function shellWords(source: string): string[] | undefined {
+  // Refuse compound syntax and expansions rather than split ambiguous shell input.
   const words: string[] = [];
   let word = "";
   let quote = "";
   let started = false;
   for (let i = 0; i < source.length; i++) {
     const char = source[i];
+    if (quote !== "'" && /[$`]/.test(char)) return;
     if (char === "\\" && quote !== "'") {
       if (++i === source.length) return;
+      if (source[i] === "\n") return;
       word += source[i]; started = true;
     }
     else if (quote) {
       if (char === quote) quote = "";
       else word += char;
     } else if (char === "'" || char === '"') { quote = char; started = true; }
-    else if (/[;&|<>()\n]/.test(char)) break;
+    else if (/[;&|<>()\n]/.test(char)) return;
     else if (/\s/.test(char)) {
       if (started) words.push(word);
       word = "";

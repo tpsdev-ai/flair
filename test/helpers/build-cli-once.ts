@@ -52,6 +52,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { shellScript } from "./shell-script.ts";
 
 const ROOT = resolve(import.meta.dirname, "..", "..");
 const CLI_JS = join(ROOT, "dist", "cli.js");
@@ -182,7 +183,7 @@ export function ensureCliBuild(opts: { timeoutMs?: number } = {}): void {
   }
 
   const steps: BuildStep[] = stub
-    ? [{ label: "build stub", command: "/bin/sh", args: ["-c", stub] }]
+    ? [{ label: "build stub", command: "/bin/sh", args: [shellScript(stub)] }]
     : BUILD_STEPS;
 
   for (const step of steps) runBoundedStep(step, timeoutMs);

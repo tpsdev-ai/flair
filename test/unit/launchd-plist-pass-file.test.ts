@@ -17,6 +17,7 @@
  * reads a real plist. Fixtures use placeholder credentials only.
  */
 
+import { shellScript } from "../helpers/shell-script.ts";
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import {
   mkdtempSync,
@@ -346,7 +347,7 @@ describe("launcher script — never a second instance on a served data directory
 
   test("CONTROL: hdb.pid names a DEAD process -> the launcher starts Harper as before", () => {
     const f = fixture();
-    const dead = spawnSync("sh", ["-c", "echo $$"], { encoding: "utf-8" }).stdout.trim();
+    const dead = spawnSync("sh", [shellScript("echo $$")], { encoding: "utf-8" }).stdout.trim();
     writeFileSync(join(f.rootPath, "hdb.pid"), dead);
     const r = launch(f);
     expect(r.status).toBe(0);
