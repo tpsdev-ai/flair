@@ -87,22 +87,28 @@ function makeHandlerMock(resource: string, method: string) {
 // "REDACT-ME": `redactedValues` and `stored`, the post-redaction text that
 // write committed (flair#2467). "WITHHELD" models a server that reports the
 // count without `stored`. Any other body gets the response it always had.
+// flair#2561: "SUMMARY-ONLY" models a `stored` that holds a summary and no
+// content; "WITH-SUMMARY" a response that also carries the body's own
+// `summary` beside a `stored` that holds only the content.
 const REDACTED_ROW_ID = "mock-redacted-row";
 function redactedWriteResponse(body: any): Record<string, unknown> {
   const content = typeof body?.content === "string" ? body.content : "";
   if (!content.includes("REDACT-ME")) return {};
-  const stored: Record<string, string> = { content: content.replaceAll("REDACT-ME", "[redacted]") };
+  let stored: Record<string, string> | undefined = { content: content.replaceAll("REDACT-ME", "[redacted]") };
   for (const field of ["summary", "trigger"] as const) {
     const v = body?.[field];
     if (typeof v === "string" && v.includes("REDACT-ME")) stored[field] = v.replaceAll("REDACT-ME", "[redacted]");
   }
+  if (content.includes("WITHHELD")) stored = undefined;
+  else if (content.includes("SUMMARY-ONLY")) stored = { summary: "a stored summary" };
   return {
     // Always this id: Memory.get throws on it, so an echo that read the row after
     // the write would fail (flair#2537).
     id: REDACTED_ROW_ID,
     written: true,
     redactedValues: 1,
-    ...(content.includes("WITHHELD") ? {} : { stored }),
+    ...(content.includes("WITH-SUMMARY") ? { summary: "a summary REDACT-ME" } : {}),
+    ...(stored ? { stored } : {}),
   };
 }
 
@@ -1496,6 +1502,27 @@ describe("flair#2537 — /mcp write replies report the STORED (redacted) content
     expect(echo.content).toBeUndefined();
     expect(echo.contentWithheld).toBe(true);
     expect(echo.redactedValues).toBe(1);
+    expect(body.result.content[0].text).not.toContain("REDACT-ME");
+  });
+
+  it("a `stored` with a summary and no content gives an echo with no text and contentWithheld (flair#2561)", async () => {
+    const body = await parse(await call("memory_store", { content: "a note with REDACT-ME and SUMMARY-ONLY" }));
+    expect(body.error).toBeUndefined();
+    const echo = body.result.structuredContent;
+    expect(echo.written).toBe(true);
+    expect(echo.contentWithheld).toBe(true);
+    expect(echo.redactedValues).toBe(1);
+    for (const field of ["content", "summary", "trigger", "stored"]) expect(field in echo, field).toBe(false);
+    expect(body.result.content[0].text).not.toContain("REDACT-ME");
+  });
+
+  it("a `stored` with only the content gives an echo with that content and no summary or trigger (flair#2561)", async () => {
+    const body = await parse(await call("memory_store", { content: "a note with REDACT-ME and WITH-SUMMARY" }));
+    expect(body.error).toBeUndefined();
+    const echo = body.result.structuredContent;
+    expect(echo.content).toBe("a note with [redacted] and WITH-SUMMARY");
+    expect(echo.contentWithheld).toBeUndefined();
+    expect("summary" in echo || "trigger" in echo).toBe(false);
     expect(body.result.content[0].text).not.toContain("REDACT-ME");
   });
 

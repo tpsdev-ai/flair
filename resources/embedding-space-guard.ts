@@ -492,13 +492,24 @@ export function spaceGuardState(): { state: EmbeddingSpaceGuardState; reason: st
 
 /**
  * Write-maintained trip: a persisted FOREIGN-space stamp closes the gate
- * immediately, no rescan. A normal local write always stamps the current id
- * (`getModelId()`), so it never trips; only a federation/replication write or
- * an explicit-stamp PUT carrying another space's stamp does.
+ * immediately, no rescan.
  */
 export function noteWriteStamp(stamp: string | null | undefined): void {
-  const currentStamp = _modelIdGetter();
-  if (isTrustedRawStamp(stamp, currentStamp)) return; // a trusted current-space stamp
+  let n: string | null;
+  let current: string | null;
+  try {
+    const currentStamp = _modelIdGetter();
+    if (isTrustedRawStamp(stamp, currentStamp)) return; // a trusted current-space stamp
+    n = normalizeStamp(stamp);
+    current = normalizeStamp(currentStamp);
+  } catch (err) {
+    // The stamp could not be read against the current space: fail closed, as
+    // for any other unreadable state, and invalidate an in-flight scan.
+    _uniform = false;
+    _excludedStale = true;
+    _writeEpoch++;
+    throw err;
+  }
   // The write stored a vector without a trusted stamp — an absent/empty stamp,
   // the `hash-512d` marker, or a foreign space. The published count no longer
   // covers it. Advance the epoch so an in-flight scan cannot publish the older
@@ -507,8 +518,7 @@ export function noteWriteStamp(stamp: string | null | undefined): void {
   _writeEpoch++;
   // A space-bearing, non-current stamp additionally trips the uniformity latch
   // now, with no rescan, and is named in the diagnostic.
-  const n = normalizeStamp(stamp);
-  if (n !== null && n !== normalizeStamp(currentStamp)) {
+  if (n !== null && n !== current) {
     if (!_activeStamps.includes(n) && _activeStamps.length < MAX_DIAG_STAMPS) _activeStamps.push(n);
     _uniform = false;
   }
