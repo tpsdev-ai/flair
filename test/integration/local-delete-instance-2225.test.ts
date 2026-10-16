@@ -26,6 +26,7 @@ import { join, resolve } from "node:path";
 import nacl from "tweetnacl";
 import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { ensureCliBuild } from "../helpers/build-cli-once.js";
+import { nodeBin } from "../helpers/node-runtime.js";
 
 const REPO_ROOT = resolve(import.meta.dir, "..", "..");
 const CLI = join(REPO_ROOT, "dist", "cli.js");
@@ -144,7 +145,7 @@ async function runCli(args: string[], home: string): Promise<CliRun> {
   env.FLAIR_ADMIN_USER = harper.admin.username;
   env.FLAIR_ADMIN_PASS = harper.admin.password;
   return await new Promise<CliRun>((resolve, reject) => {
-    const child = spawn(process.execPath, [CLI, ...args], {
+    const child = spawn(nodeBin({ env: env as Record<string, string> }), [CLI, ...args], {
       env: env as Record<string, string>,
       timeout: 90_000,
       killSignal: "SIGKILL",
@@ -168,7 +169,7 @@ function runIntegrityCheck(home: string, port: number): { code: number | null; o
   env.HOME = home;
   env.FLAIR_ADMIN_USER = harper.admin.username;
   env.FLAIR_ADMIN_PASS = harper.admin.password;
-  const r = spawnSync(process.execPath, [CLI, "integrity", "check", "--json", "--ops-port", String(port)], {
+  const r = spawnSync(nodeBin({ env }), [CLI, "integrity", "check", "--json", "--ops-port", String(port)], {
     encoding: "utf-8",
     env: env as Record<string, string>,
     timeout: 90_000,

@@ -31,6 +31,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startHarper, stopHarpers, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
+import { nodeBin } from "../helpers/node-runtime.js";
 
 const CLI = join(process.cwd(), "dist", "cli.js");
 
@@ -48,8 +49,9 @@ function cliHome(): string {
 function runStampHome(extra: string[], homeDir: string = cliHome()): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const args = ["agent", "stamp-home", "--admin-pass", a.admin.password, ...extra];
-    const child = spawn(process.execPath, [CLI, ...args], {
-      env: { ...process.env, HOME: homeDir, FLAIR_URL: "", FLAIR_OPS_PORT: "", FLAIR_TOKEN: "", NO_COLOR: "1" },
+    const env = { ...process.env, HOME: homeDir, FLAIR_URL: "", FLAIR_OPS_PORT: "", FLAIR_TOKEN: "", NO_COLOR: "1" };
+    const child = spawn(nodeBin({ env }), [CLI, ...args], {
+      env,
       timeout: 30_000,
     });
     let stdout = "";
@@ -71,8 +73,9 @@ const opsPort = (h: HarperInstance) => new URL(h.opsURL).port;
 function runPrincipalAdd(id: string, extra: string[], homeDir: string = cliHome()): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const args = ["principal", "add", id, "--admin-pass", a.admin.password, "--keys-dir", join(homeDir, "keys"), ...extra];
-    const child = spawn(process.execPath, [CLI, ...args], {
-      env: { ...process.env, HOME: homeDir, FLAIR_URL: "", FLAIR_OPS_PORT: "", FLAIR_TOKEN: "", NO_COLOR: "1" },
+    const env = { ...process.env, HOME: homeDir, FLAIR_URL: "", FLAIR_OPS_PORT: "", FLAIR_TOKEN: "", NO_COLOR: "1" };
+    const child = spawn(nodeBin({ env }), [CLI, ...args], {
+      env,
       timeout: 30_000,
     });
     let stdout = "";

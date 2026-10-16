@@ -123,24 +123,20 @@ function scriptIndex(args: string[], options: Options): number {
   return -1;
 }
 
-function startsHarper(args: string[], options: Options): EntryKind | undefined {
+/**
+ * The entry a spawn launches, when that entry is one this guard protects: the
+ * installed Harper entry, or the built CLI (`dist/cli.js` / `dist/cli-shim.cjs`).
+ *
+ * A test that starts the built CLI under Bun exercises a different module loader
+ * than the shipped Node entry point, for every subcommand — not only the ones
+ * that start Harper. The guard therefore refuses a protected entry under a
+ * non-Node runtime, without a subcommand exemption.
+ */
+function guardedEntry(args: string[], options: Options): EntryKind | undefined {
   options = { ...options };
   const index = scriptIndex(args, options);
   if (index < 0 || !args[index]) return undefined;
-  const kind = entryKind(args[index], options);
-  if (kind === "harper.js") return kind;
-  if (!kind) return undefined;
-  const cli = args.slice(index + 1);
-  if (cli[0] === "--") cli.shift();
-  const command = cli[0];
-  if (cli.includes("--help") || cli.includes("-h")) return undefined;
-  const hasValue = (flag: string): boolean => cli.some((arg, i) =>
-    arg.startsWith(`${flag}=`) ? arg.length > flag.length + 1 : arg === flag && !!cli[i + 1] && !cli[i + 1].startsWith("-"));
-  if (command === "init") return !cli.includes("--skip-start") && !hasValue("--target") ? kind : undefined;
-  if (command === "upgrade") return !cli.includes("--check") && !hasValue("--target") ? kind : undefined;
-  if (command === "doctor") return cli.includes("--fix") && !cli.includes("--dry-run") ? kind : undefined;
-  if (command === "snapshot") return ["create", "restore"].includes(cli[1]) ? kind : undefined;
-  return ["start", "restart"].includes(command) ? kind : undefined;
+  return entryKind(args[index], options);
 }
 
 function shellWords(source: string): string[] | undefined {
@@ -241,7 +237,7 @@ function check(api: string, command: unknown, args: unknown, options: Options = 
   const launch = invocation(command, args, options);
   if (launch.failure) throw new TestRuntimeIdentityError(api, launch.command!, launch.failure);
   if (!launch.command) return;
-  const entry = startsHarper(launch.args, launch.options);
+  const entry = guardedEntry(launch.args, launch.options);
   if (!entry) return;
   const runtime = runtimeKind(launch.command, launch.options);
   if (runtime === "node" || runtime === "missing") return;

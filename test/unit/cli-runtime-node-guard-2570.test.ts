@@ -271,7 +271,7 @@ describe("Bun Harper spawn preload", () => {
   test("arguments beyond the old scan window are inspected", () => {
     const { cli } = fixture();
     refused(() => spawnSync(process.execPath, [cli, "init", "--data-dir", "x".repeat(2_000)], { timeout: 5_000 }));
-    allowed(cli, ["init", "--data-dir", "x".repeat(2_000), "--skip-start"]);
+    refused(() => spawnSync(process.execPath, [cli, "init", "--data-dir", "x".repeat(2_000), "--skip-start"], { timeout: 5_000 }));
   }, 20_000);
   test("a Bun symlink resolved through the child PATH is refused", () => {
     const { root, cli } = fixture();
@@ -402,8 +402,17 @@ describe("Bun Harper spawn preload", () => {
     ["upgrade", "--check"], ["snapshot", "list"],
     ["upgrade", "--target", "https://example.invalid"],
   ]) {
-    test(`${args.join(" ")} is allowed`, () => allowed(fixture().cli, args), 10_000);
+    test(`a Bun spawn of an argument-printing CLI fixture running ${args.join(" ")} is refused`, () => {
+      refused(() => spawnSync(process.execPath, [fixture().cli, ...args], { timeout: 5_000 }));
+    }, 10_000);
   }
+  test("the narrower CLI rule is the runtime, not the subcommand", () => {
+    const { cli } = fixture();
+    refused(() => spawnSync(process.execPath, [cli, "doctor"], { timeout: 5_000 }));
+    const result = spawnSync(Bun.which("node")!, [cli, "doctor"], { encoding: "utf8", timeout: 5_000 });
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual(["doctor"]);
+  }, 20_000);
   test("an init-only flag does not exempt start", () => {
     refused(() => spawnSync(process.execPath, [fixture().cli, "start", "--skip-start"], { timeout: 5_000 }));
   }, 20_000);
