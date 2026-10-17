@@ -138,22 +138,31 @@ async function waitFor(path: string, timeoutMs: number): Promise<boolean> {
 /**
  * Arm `point`, start `trigger`, run `compete` once the trigger is paused inside
  * that point, release, and await the trigger. Returns the trigger's response
- * and how the pause ended.
+ * and how the pause ended. When `observeCommitted` is supplied, the paused
+ * writer is resumed only after a fresh read observes the competitor's
+ * committed end state.
  */
-async function withPaused<T>(point: string, trigger: () => Promise<Response>, compete: () => Promise<T>) {
+async function withPaused<T>(
+  point: string,
+  trigger: () => Promise<Response>,
+  compete: () => Promise<T>,
+  observeCommitted?: () => Promise<boolean>,
+) {
   for (const marker of ["claimed", "paused", "go", "released"]) rmSync(join(pauseDir, `${marker}.${point}`), { force: true });
   writeFileSync(join(pauseDir, `arm.${point}`), "");
   const pending = trigger();
   const paused = await waitFor(join(pauseDir, `paused.${point}`), 20_000);
   let competed: T | undefined;
+  let observed: boolean | undefined;
   try {
     if (paused) competed = await compete();
+    if (paused && observeCommitted) observed = await observeCommitted();
   } finally {
     writeFileSync(join(pauseDir, `go.${point}`), "");
   }
   const response = await pending;
   const released = paused ? readFileSync(join(pauseDir, `released.${point}`), "utf8") : "never paused";
-  return { response, competed, released, paused };
+  return { response, competed, released, paused, observed };
 }
 
 /** Arm `point` without starting a trigger: for a case that runs two writers,
@@ -168,9 +177,13 @@ function releasePoint(point: string): void {
 }
 /** Wait until a fresh read observes `id` absent — the delete's commit is visible. */
 async function waitForRowGone(id: string, timeoutMs: number): Promise<boolean> {
+  return waitForCommitted(id, (row) => row === null, timeoutMs);
+}
+/** Wait until a fresh read observes `id` in the competitor's committed end state. */
+async function waitForCommitted(id: string, matches: (row: any) => boolean, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if ((await readRow(id)) === null) return true;
+    if (matches(await readRow(id))) return true;
     await new Promise((r) => setTimeout(r, 10));
   }
   return false;
@@ -216,11 +229,10 @@ describe("flair#2441 — the usage-recording count bump confirms the stored row 
   const record = (id: string) => authSend(owner, "POST", "/RecordUsage", { memoryIds: [id] });
 
   // A DELETE whose transaction starts BEFORE the count bump's: the bump then
-  // reads the row before the delete commits and pauses mid-transaction. The
-  // committed-row re-check sees the committed row gone and aborts the bump, so
-  // the row stays deleted. Without that re-check the bump's newer transaction
-  // commits and re-creates the row.
-  it("a DELETE by an earlier transaction, committed while the count bump's newer transaction is paused after reading and before staging its write, leaves the row deleted", async () => {
+  // reads the row and pauses mid-transaction. The bump is resumed only after a
+  // fresh read observes the row gone, and the row must be gone once both
+  // transactions have ended.
+  it("a DELETE by an earlier transaction, with the count bump paused after reading and before staging its write, leaves the row deleted", async () => {
     const id = `csr-usage-del-${Date.now()}`;
     await seed(id, randomUUID());
     armPoint("memory-delete");
@@ -232,23 +244,34 @@ describe("flair#2441 — the usage-recording count bump confirms the stored row 
     releasePoint("memory-delete");
     const del = await delPending;
     expect(del.status, (await del.clone().text()).slice(0, 200)).toBeLessThan(300);
-    // Resume the count bump only once a fresh read has observed the row gone: the
-    // asserted interleaving is the DELETE committed while the bump is paused after
-    // its read and before its write, so the delete's commit must be observable to
-    // another read before the bump's newer transaction resumes.
-    expect(await waitForRowGone(id, 15_000), "the owner DELETE did not become visible to a fresh read").toBe(true);
+    // Resume the count bump only once a fresh read has observed the row gone. If
+    // the delete's commit is stalled behind the paused transaction this bound
+    // expires; the post-release observation below then decides the outcome.
+    const visibleBeforeRelease = await waitForRowGone(id, 15_000);
     releasePoint("usage-count");
     const rec = await recPending;
     expect(rec.status, (await rec.clone().text()).slice(0, 200)).toBe(200);
-    expect(await readRow(id), "the count bump re-created the deleted row").toBeNull();
+    // After the paused transaction ends the row must be gone. A delete whose
+    // commit was stalled behind it lands here; a delete reported successful that
+    // never lands leaves the row.
+    expect(
+      await waitForRowGone(id, 15_000),
+      visibleBeforeRelease
+        ? "the count bump re-created the deleted row"
+        : "the owner DELETE did not become visible after the paused transaction ended",
+    ).toBe(true);
   }, 60_000);
 
   it("a PURGE between the read and the write leaves the row purged", async () => {
     const id = `csr-usage-purge-${Date.now()}`;
     await seed(id, randomUUID());
-    const { paused, released } = await withPaused("usage-count", () => record(id), () => purgeRow(id));
+    const { paused, released, observed } = await withPaused(
+      "usage-count", () => record(id), () => purgeRow(id),
+      () => waitForRowGone(id, 15_000),
+    );
     expect(paused, "the usage count bump was not paused").toBe(true);
     expect(released).toBe("go");
+    expect(observed, "the PURGE did not become visible to a fresh read").toBe(true);
     expect(await readRow(id), "the count bump re-created the purged row").toBeNull();
   }, 60_000);
 
@@ -256,11 +279,12 @@ describe("flair#2441 — the usage-recording count bump confirms the stored row 
     const id = `csr-usage-rep-${Date.now()}`;
     const T2 = randomUUID();
     await seed(id, randomUUID());
-    const { response, paused, released } = await withPaused("usage-count", () => record(id), async () => {
+    const { response, paused, released, observed } = await withPaused("usage-count", () => record(id), async () => {
       await updateRow({ id, instanceToken: T2, content: "replaced" });
-    });
+    }, () => waitForCommitted(id, (row) => row?.instanceToken === T2 && row?.content === "replaced", 15_000));
     expect(paused, "the usage count bump was not paused").toBe(true);
     expect(released).toBe("go");
+    expect(observed, "the REPLACE did not become visible to a fresh read").toBe(true);
     expect(response.status, (await response.clone().text()).slice(0, 200)).toBe(200);
     const row = await readRow(id);
     expect(row?.instanceToken, "the competing incarnation token is overwritten by the stale bump").toBe(T2);
@@ -289,9 +313,13 @@ describe("flair#2441 — the federation Memory merge confirms the stored row (re
   it("a DELETE between the read and the write leaves the row deleted", async () => {
     const id = `csr-fed-del-${Date.now()}`;
     await seed(id, randomUUID(), "federated v1");
-    const { response, released, paused } = await withPaused("federation-merge", () => push(id, "federated v2"), () => deleteRow(id));
+    const { response, released, paused, observed } = await withPaused(
+      "federation-merge", () => push(id, "federated v2"), () => deleteRow(id),
+      () => waitForRowGone(id, 15_000),
+    );
     expect(paused, "the federation merge was not paused").toBe(true);
     expect(released).toBe("go");
+    expect(observed, "the DELETE did not become visible to a fresh read").toBe(true);
     const body = await response.json() as any;
     expect(response.status, JSON.stringify(body).slice(0, 200)).toBe(200);
     expect(body.merged, JSON.stringify(body)).toBe(0);
@@ -302,9 +330,13 @@ describe("flair#2441 — the federation Memory merge confirms the stored row (re
   it("a PURGE between the read and the write leaves the row purged", async () => {
     const id = `csr-fed-purge-${Date.now()}`;
     await seed(id, randomUUID(), "federated v1");
-    const { response, paused, released } = await withPaused("federation-merge", () => push(id, "federated v2"), () => purgeRow(id));
+    const { response, paused, released, observed } = await withPaused(
+      "federation-merge", () => push(id, "federated v2"), () => purgeRow(id),
+      () => waitForRowGone(id, 15_000),
+    );
     expect(paused, "the federation merge was not paused").toBe(true);
     expect(released).toBe("go");
+    expect(observed, "the PURGE did not become visible to a fresh read").toBe(true);
     const body = await response.json() as any;
     expect(body.merged, JSON.stringify(body)).toBe(0);
     expect(await readRow(id), "the merge re-created the purged row").toBeNull();
@@ -314,11 +346,12 @@ describe("flair#2441 — the federation Memory merge confirms the stored row (re
     const id = `csr-fed-rep-${Date.now()}`;
     const T2 = randomUUID();
     await seed(id, randomUUID(), "federated v1");
-    const { response, paused, released } = await withPaused("federation-merge", () => push(id, "federated v2"), async () => {
+    const { response, paused, released, observed } = await withPaused("federation-merge", () => push(id, "federated v2"), async () => {
       await updateRow({ id, instanceToken: T2, content: "replaced" });
-    });
+    }, () => waitForCommitted(id, (row) => row?.instanceToken === T2 && row?.content === "replaced", 15_000));
     expect(paused, "the federation merge was not paused").toBe(true);
     expect(released).toBe("go");
+    expect(observed, "the REPLACE did not become visible to a fresh read").toBe(true);
     const body = await response.json() as any;
     expect(body.merged, JSON.stringify(body)).toBe(0);
     const row = await readRow(id);
@@ -348,9 +381,13 @@ describe("flair#2441 — Memory.put confirms the stored row (real Harper)", () =
   it("a DELETE between the read and the write is refused and the row stays deleted", async () => {
     const id = `csr-put-del-${Date.now()}`;
     await seed(id, randomUUID());
-    const { response, released, paused } = await withPaused("memory-put", () => put(id, "put v2"), () => deleteRow(id));
+    const { response, released, paused, observed } = await withPaused(
+      "memory-put", () => put(id, "put v2"), () => deleteRow(id),
+      () => waitForRowGone(id, 15_000),
+    );
     expect(paused, "Memory.put was not paused").toBe(true);
     expect(released).toBe("go");
+    expect(observed, "the DELETE did not become visible to a fresh read").toBe(true);
     const text = await response.clone().text();
     expect(response.status, text.slice(0, 200)).toBe(409);
     expect(JSON.parse(text).error).toBe("stored_row_changed");
@@ -360,9 +397,13 @@ describe("flair#2441 — Memory.put confirms the stored row (real Harper)", () =
   it("a PURGE between the read and the write is refused and the row stays purged", async () => {
     const id = `csr-put-purge-${Date.now()}`;
     await seed(id, randomUUID());
-    const { response, paused, released } = await withPaused("memory-put", () => put(id, "put v2"), () => purgeRow(id));
+    const { response, paused, released, observed } = await withPaused(
+      "memory-put", () => put(id, "put v2"), () => purgeRow(id),
+      () => waitForRowGone(id, 15_000),
+    );
     expect(paused, "Memory.put was not paused").toBe(true);
     expect(released).toBe("go");
+    expect(observed, "the PURGE did not become visible to a fresh read").toBe(true);
     const text = await response.clone().text();
     expect(response.status, text.slice(0, 200)).toBe(409);
     expect(JSON.parse(text).error).toBe("stored_row_changed");
@@ -373,11 +414,12 @@ describe("flair#2441 — Memory.put confirms the stored row (real Harper)", () =
     const id = `csr-put-rep-${Date.now()}`;
     const T2 = randomUUID();
     await seed(id, randomUUID());
-    const { response, paused, released } = await withPaused("memory-put", () => put(id, "put v2"), async () => {
+    const { response, paused, released, observed } = await withPaused("memory-put", () => put(id, "put v2"), async () => {
       await updateRow({ id, instanceToken: T2, content: "replaced" });
-    });
+    }, () => waitForCommitted(id, (row) => row?.instanceToken === T2 && row?.content === "replaced", 15_000));
     expect(paused, "Memory.put was not paused").toBe(true);
     expect(released).toBe("go");
+    expect(observed, "the REPLACE did not become visible to a fresh read").toBe(true);
     const text = await response.clone().text();
     expect(response.status, text.slice(0, 200)).toBe(409);
     expect(JSON.parse(text).error).toBe("stored_row_changed");
@@ -393,9 +435,13 @@ describe("flair#2441 — Memory.put confirms the stored row (real Harper)", () =
   it("a DELETE between the staged write and its commit is refused and the row stays deleted", async () => {
     const id = `csr-put-staged-del-${Date.now()}`;
     await seed(id, randomUUID());
-    const { response, released, paused } = await withPaused("memory-put-staged", () => put(id, "put v2"), () => deleteRow(id));
+    const { response, released, paused, observed } = await withPaused(
+      "memory-put-staged", () => put(id, "put v2"), () => deleteRow(id),
+      () => waitForRowGone(id, 15_000),
+    );
     expect(paused, "Memory.put was not paused after staging its write").toBe(true);
     expect(released).toBe("go");
+    expect(observed, "the DELETE did not become visible to a fresh read").toBe(true);
     // The competitor's row stands, and the put is refused by name, not answered with success.
     expect(await readRow(id), "Memory.put re-created the deleted row").toBeNull();
     const text = await response.clone().text();
@@ -406,9 +452,13 @@ describe("flair#2441 — Memory.put confirms the stored row (real Harper)", () =
   it("a PURGE between the staged write and its commit is refused and the row stays purged", async () => {
     const id = `csr-put-staged-purge-${Date.now()}`;
     await seed(id, randomUUID());
-    const { response, paused, released } = await withPaused("memory-put-staged", () => put(id, "put v2"), () => purgeRow(id));
+    const { response, paused, released, observed } = await withPaused(
+      "memory-put-staged", () => put(id, "put v2"), () => purgeRow(id),
+      () => waitForRowGone(id, 15_000),
+    );
     expect(paused, "Memory.put was not paused after staging its write").toBe(true);
     expect(released).toBe("go");
+    expect(observed, "the PURGE did not become visible to a fresh read").toBe(true);
     // The competitor's row stands, and the put is refused by name, not answered with success.
     expect(await readRow(id), "Memory.put re-created the purged row").toBeNull();
     const text = await response.clone().text();
@@ -420,11 +470,12 @@ describe("flair#2441 — Memory.put confirms the stored row (real Harper)", () =
     const id = `csr-put-staged-rep-${Date.now()}`;
     const T2 = randomUUID();
     await seed(id, randomUUID());
-    const { response, paused, released } = await withPaused("memory-put-staged", () => put(id, "put v2"), async () => {
+    const { response, paused, released, observed } = await withPaused("memory-put-staged", () => put(id, "put v2"), async () => {
       await updateRow({ id, instanceToken: T2, content: "replaced" });
-    });
+    }, () => waitForCommitted(id, (row) => row?.instanceToken === T2 && row?.content === "replaced", 15_000));
     expect(paused, "Memory.put was not paused after staging its write").toBe(true);
     expect(released).toBe("go");
+    expect(observed, "the REPLACE did not become visible to a fresh read").toBe(true);
     // The competitor's row stands, and the put is refused by name, not answered with success.
     const row = await readRow(id);
     expect(row?.instanceToken, "the competing incarnation token is overwritten by the stale put").toBe(T2);
@@ -441,13 +492,15 @@ describe("flair#2441 — Memory.put confirms the stored row (real Harper)", () =
     const id = `csr-put-staged-ptr-${Date.now()}`;
     await seed(id, randomUUID());
     const pointer = { v: 1, host: "openclaw", kind: "run", id: "run-csr2441" };
-    const { response, paused, released } = await withPaused(
+    const { response, paused, released, observed } = await withPaused(
       "memory-put-staged",
       () => authSend(owner, "PUT", `/Memory/${id}`, { agentId: owner.id, content: "put v2", hostSource: pointer, hostSourceScope: "record" }),
       () => deleteRow(id),
+      () => waitForRowGone(id, 15_000),
     );
     expect(paused, "Memory.put was not paused after staging its write").toBe(true);
     expect(released).toBe("go");
+    expect(observed, "the DELETE did not become visible to a fresh read").toBe(true);
     const text = await response.clone().text();
     expect(response.status, text.slice(0, 200)).toBe(409);
     expect(JSON.parse(text).error).toBe("stored_row_changed");
