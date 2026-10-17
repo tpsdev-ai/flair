@@ -75,6 +75,7 @@
  * nor exempted with a stated reason. A table added later enters that test's
  * scope the moment it declares the column — nobody has to know this file exists.
  */
+import { routedRecordId } from "./request-target.js";
 
 /**
  * Table → the attribute naming the principal that owns a row.
@@ -145,40 +146,38 @@ export function isMutatingMethod(method: string): boolean {
  * Resolve a raw request target to the guarded table and record id it
  * addresses, or null when the target is not one this early check decides.
  *
- * This is the middleware's early check. It reads the raw request target that
- * Harper's REST layer routes (the path before any `?`, with no dot-segment
- * resolution and no merging of slashes), not a normalized URL, and decides only
- * the form `/<Table>/<id>`: exactly two non-empty segments after a single
- * leading slash, and an id with no `.` once decoded (Harper may read a `.`
- * suffix as a content type or attribute and address a different id). For that
- * form, Harper resolves the same table and the same decoded id. Every other
- * target returns null: a dotted id, more segments, an empty segment (a
- * trailing, repeated or extra leading slash) or malformed percent-encoding.
- * Other addressed forms of a table-backed route use the guard on Harper's
- * resolved id. On POST/PUT/PATCH, its body-id check precedes stored ownership.
- * For collection PUT/PATCH/DELETE (including a trailing slash), if reached, the
- * table guard returns the collection refusal; existing DELETE middleware may
- * refuse earlier. A collection POST follows the resource's own rules.
- * The table segment is matched EXACTLY against the owner-scoped table names, so
+ * `pathname` is the RAW request path (the target before its `?`). The id is the
+ * FULL decoded remainder after the table segment, so an id that itself contains
+ * `/`, raw or as `%2F`, resolves to the whole id rather than a shorter prefix.
+ *
+ * Matches `/<Table>/<id>` ONLY. A bare resource path has no record id; a
+ * trailing-slash path is a collection. The table segment is matched EXACTLY so
  * `/SoulFeed/x` can never be read as a `Soul` route.
  */
-export function resolveGuardedRecord(requestTarget: string): { table: string; ownerField: string; id: string } | null {
-  const queryStart = requestTarget.indexOf("?");
-  const path = queryStart === -1 ? requestTarget : requestTarget.slice(0, queryStart);
-  // Empty segments are kept, not filtered: Harper keeps them in the id it resolves.
-  const parts = path.split("/");
-  if (parts.length !== 3 || parts[0] !== "") return null;
-  const [, table, rawId] = parts;
-  if (!Object.prototype.hasOwnProperty.call(OWNER_FIELDS, table) || !rawId) return null;
-  const ownerField = OWNER_FIELDS[table];
-  let id: string;
-  try {
-    id = decodeURIComponent(rawId);
-  } catch {
-    return null; // malformed percent-encoding addresses no record we can resolve
-  }
-  if (!id || id.includes(".")) return null;
-  return { table, ownerField, id };
+export function resolveGuardedRecord(pathname: string): { table: string; ownerField: string; id: string } | null {
+  const routed = routedRecordId(pathname);
+  if (!routed) return null; // no record id, or malformed percent-encoding
+  return resolveGuardedRecordById(routed.resource, routed.id);
+}
+
+/**
+ * The guarded record for a resource and record id already resolved by Harper's
+ * own routing (resources/harper-routing.ts). Null when the resource is not a
+ * guarded table, or there is no record id. This is the form
+ * the middleware uses at request time, where the id has had Harper's
+ * content-type-suffix and property rules applied.
+ */
+export function resolveGuardedRecordById(
+  resource: string,
+  id: string | null | undefined,
+): { table: string; ownerField: string; id: string } | null {
+  if (id == null || id === "") return null;
+  // Own property only: an inherited name (`constructor`, `__proto__`, …) is not
+  // a table with an owner field.
+  if (!Object.prototype.hasOwnProperty.call(OWNER_FIELDS, resource)) return null;
+  const ownerField = OWNER_FIELDS[resource];
+  if (!ownerField) return null;
+  return { table: resource, ownerField, id };
 }
 
 /**

@@ -8,12 +8,23 @@ import { MEMORY_EMBEDDING_INPUT_FIELDS, skillEmbedText } from "./skill-write.js"
 import { isAdmin, isPrincipalDeactivated, FLAIR_AGENT_USERNAME, readCredentialedPrincipal, AGENT_LOOKUP_FAILED } from "./agent-auth.js";
 import { WINDOW_MS, importEd25519Key, b64ToArrayBuffer, parseTpsEd25519Header } from "./ed25519-auth.js";
 import { isKnownAgentReplay, claimAgentNonce } from "./replay-store.js";
-import { isForbiddenOwnerMutation, ownerMutationRefusal, resolveGuardedRecord } from "./record-owner-guard.js";
+import { isForbiddenOwnerMutation, ownerMutationRefusal, resolveGuardedRecord, resolveGuardedRecordById } from "./record-owner-guard.js";
+import { routeWithHarper, type HarperRoute } from "./harper-routing.js";
 import { checkHttpRateLimit } from "./rate-limit.js";
 import { FLAIR_AUTH_MIDDLEWARE_HTTP_NAME } from "./multi-worker-guard.js";
 import { DECLARED_MEMORY_ATTRIBUTES } from "./memory-declared-attributes.js";
 import { idSegmentHasEncodedSlash, decodeMemoryIdSegment, MEMORY_CONTENT_SELECTOR_SUFFIX } from "../src/lib/memory-id-policy.js";
 import { contentSuffixIdDenial } from "./memory-id-guard.js";
+import {
+  isCanonicalRequestTarget,
+  nonCanonicalRequestTargetRefusal,
+  requestPath,
+  lastRawPathSegment,
+  routedRecordId,
+  routedResourceAndRemainder,
+  routedIdAfterPropertyRule,
+  routedResourcePath,
+} from "./request-target.js";
 
 // --- Non-admin Memory read: ignore the caller's selection --------------------
 //
@@ -44,32 +55,26 @@ function isValidPercentEncoding(segment: string): boolean {
 // Drop a caller's `select(...)` and `property` from a Memory read URL, keeping
 // conditions, operator, sort, limit and offset. Returns the input unchanged when
 // the URL carries no selection.
-function stripMemorySelection(rawUrl: string): string {
+//
+// The path rewrite runs ONLY when Harper routed this target to a Memory RECORD
+// (`routedToMemoryRecord`): the raw path alone is not enough, because a target
+// Harper resolved with no record id — e.g. `/Memory.json/<id>.content`, whose
+// suffixed first segment routes to the Memory COLLECTION with an empty remainder
+// — must not be turned into a by-id read of a row the target does not address.
+function stripMemorySelection(rawUrl: string, routedToMemoryRecord: boolean): string {
   const q = rawUrl.indexOf("?");
   let pathPart = q === -1 ? rawUrl : rawUrl.slice(0, q);
   let query = q === -1 ? "" : rawUrl.slice(q + 1);
 
-  // Path form: Harper reads a trailing `.<declared>` on the id as `property`.
-  // Harper decides on the DECODED path — RequestTarget decodes the path
-  // (`this.id = decodeURIComponent(path)`) and Resource.parsePath then splits at
-  // the first dot — so the middleware must decide on the decoded segment too, or
-  // it misses a percent-encoded dot: `%2E` (and `%2e`) IS a dot to Harper. Drop
-  // that suffix so the id addresses the full row; a suffix that is not a
-  // declared Memory attribute stays part of the id, exactly as Harper's own rule
-  // leaves it (a content-type extension such as `json` is not a declared
-  // attribute, so it is left for Harper to read as a content type).
-  const slash = pathPart.lastIndexOf("/");
-  const seg = pathPart.slice(slash + 1);
-  const decodedSeg = decodeMemoryIdSegment(seg);
-  const dot = decodedSeg.indexOf(".");
-  // An encoded `/` in the id segment makes the segment ambiguous: the trailing
-  // `.<declared attribute>` could be part of the id, or a selector on a
-  // slash-containing id.
-  if (!idSegmentHasEncodedSlash(seg) &&
-      dot > -1 && DECLARED_MEMORY_ATTRIBUTE_SET.has(decodedSeg.slice(dot + 1))) {
-    // Rebuild the id from its decoded form. Harper decodes the path it is handed,
-    // so this re-encoded segment addresses the SAME id, without the property.
-    pathPart = `${pathPart.slice(0, slash + 1)}${encodeURIComponent(decodedSeg.slice(0, dot))}`;
+  // Strip a declared-attribute suffix after the first dot in the decoded remainder.
+  const { remainder } = routedResourceAndRemainder(pathPart);
+  const decodedId = decodeMemoryIdSegment(remainder);
+  const stripped = routedIdAfterPropertyRule(decodedId, DECLARED_MEMORY_ATTRIBUTE_SET);
+  // An encoded `/` in the id makes the suffix ambiguous (the caller is refused
+  // upstream in the middleware), so only rewrite when there is no encoded slash
+  // and the first-dot rule actually dropped a declared-attribute suffix.
+  if (routedToMemoryRecord && !idSegmentHasEncodedSlash(remainder) && stripped !== decodedId) {
+    pathPart = `/Memory/${encodeURIComponent(stripped)}`;
   }
 
   // Query form: drop every `select(...)` token and every `property` parameter.
@@ -88,21 +93,17 @@ function stripMemorySelection(rawUrl: string): string {
 }
 
 /**
- * True when a Memory by-id read path names an id segment that carries an encoded
- * `/` (`%2F`/`%2f`) AND would otherwise be given the property-suffix rewrite in
- * stripMemorySelection. Such a segment is ambiguous — the trailing
+ * True when a Memory by-id read path names an id that carries an encoded `/`
+ * (`%2F`/`%2f`) AND would otherwise be given the property-suffix rewrite in
+ * stripMemorySelection. Such an id is ambiguous — the trailing
  * `.<declared attribute>` could be part of the id or a selector on an id that
  * contains a slash (flair#2199).
  */
 function isAmbiguousEncodedSlashSelector(rawUrl: string): boolean {
-  const q = rawUrl.indexOf("?");
-  const pathPart = q === -1 ? rawUrl : rawUrl.slice(0, q);
-  const slash = pathPart.lastIndexOf("/");
-  const seg = pathPart.slice(slash + 1);
-  if (!idSegmentHasEncodedSlash(seg)) return false;
-  const decodedSeg = decodeMemoryIdSegment(seg);
-  const dot = decodedSeg.indexOf(".");
-  return dot > -1 && DECLARED_MEMORY_ATTRIBUTE_SET.has(decodedSeg.slice(dot + 1));
+  const { remainder } = routedResourceAndRemainder(requestPath(rawUrl));
+  if (!idSegmentHasEncodedSlash(remainder)) return false;
+  const decodedId = decodeMemoryIdSegment(remainder);
+  return routedIdAfterPropertyRule(decodedId, DECLARED_MEMORY_ATTRIBUTE_SET) !== decodedId;
 }
 
 // [start, end) ranges of every `select(...)` call in a query string, accounting
@@ -268,6 +269,70 @@ function credentialedLookupRefusal(username: string, error: unknown): Response {
   }), { status: 500, headers: { "content-type": "application/json" } });
 }
 
+/**
+ * A guarded mutation whose stored-owner read FAILED is refused, not allowed
+ * through. The ownership read is the authorization input; a failed read is not
+ * "no owner", so it must fail closed. 503 because a retry can succeed.
+ */
+function ownerReadFailedRefusal(table: string): Response {
+  console.error(
+    "auth-middleware: the stored-owner read failed, so the mutation was refused",
+    { table },
+  );
+  return new Response(JSON.stringify({
+    error: "owner_lookup_failed",
+    message: "the record's owner could not be read, so the write was refused",
+  }), { status: 503, headers: { "content-type": "application/json" } });
+}
+
+/**
+ * A signed non-admin agent's mutation that reaches the owner checks is refused
+ * when Harper's route lookup threw: the owner decisions need Harper's route, and
+ * the pure fallback does not stand in for it. 503 because a retry can succeed. The message is fixed and
+ * names no part of the target.
+ */
+function routeLookupFailedRefusal(): Response {
+  console.error("auth-middleware: the route lookup failed, so the mutation was refused");
+  return new Response(JSON.stringify({
+    error: "route_lookup_failed",
+    message: "the request could not be routed, so the write was refused",
+  }), { status: 503, headers: { "content-type": "application/json" } });
+}
+
+/**
+ * A signed non-admin agent's mutation that reaches the owner checks, whose target
+ * Harper matched but whose record id Harper's request-target parsing or path
+ * parsing could not resolve, is refused before any owner decision: those
+ * decisions need the id. 400: the target cannot be parsed into a record id. The
+ * message is fixed and names no part of the target.
+ */
+function unresolvedTargetRefusal(): Response {
+  return new Response(JSON.stringify({
+    error: "unresolved_request_target",
+    message: "the request target could not be resolved to a record id, so the write was refused",
+  }), { status: 400, headers: { "content-type": "application/json" } });
+}
+
+/**
+ * The id a Memory write COMMITTED, read from the writer's own response result
+ * (its `id` field) — the trustworthy source, since a by-id write can commit a
+ * successor with a different id. Returns null when the result names no id as a
+ * plain string body (a 204, a streamed or compressed body); the caller then
+ * falls back to the routed id for a PUT or PATCH, and otherwise skips. Reads
+ * only the already-serialized string body; never consumes a stream.
+ */
+function committedMemoryIdFromResult(response: any): string | null {
+  const body = response?.body;
+  if (typeof body !== "string" || body.length === 0) return null;
+  try {
+    const parsed = JSON.parse(body);
+    const id = parsed?.id;
+    return typeof id === "string" && id.length > 0 ? id : null;
+  } catch {
+    return null;
+  }
+}
+
 // Flair's clients use exactly these HTTP methods. Harper routes other methods
 // to resource handlers as well; refusing them here, before any other branch of
 // the default REST middleware, keeps the tables it serves to the methods their
@@ -277,11 +342,50 @@ const ALLOWED_HTTP_METHODS: ReadonlySet<string> = new Set([
   "GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE",
 ]);
 
+// The resources the middleware makes a by-NAME decision on: the public-path
+// allowance and the OAuth rate-limit policy.
+const NAME_ROUTED_RESOURCES: ReadonlySet<string> = new Set([
+  "health", "Health", "a2a", "A2AAdapter", "AgentCard",
+  "FederationSync", "FederationPair",
+  "OAuthRegister", "OAuthAuthorize", "OAuthToken", "OAuthRevoke", "OAuthMetadata",
+  "Admin",
+]);
+const RAW_QUERY_RESOURCES: ReadonlySet<string> = new Set(["sql", "graphql"]);
+
 server.http(async (request: any, nextLayer: any) => {
-  // ── HTTP method allowlist, FIRST ───────────────────────────────────────────
-  // Before the public-path passthrough and before any auth branch, so no path
-  // and no caller (anonymous, agent or admin) can reach a handler through any
-  // other method.
+  // ── Canonical request target, FIRST ────────────────────────────────────────
+  // This check reads the RAW request target, the string Harper routes. A target
+  // that is not in canonical form (a `.`/`..` segment, raw or percent-encoded;
+  // repeated slashes; a raw backslash) is answered with the named 400 here,
+  // before any other request processing: no method check, no rate-limit budget,
+  // no credential read, no next layer. See resources/request-target.ts.
+  const rawTarget: string = typeof request.url === "string" ? request.url : String(request.url ?? "");
+  if (!isCanonicalRequestTarget(rawTarget)) {
+    return nonCanonicalRequestTargetRefusal(String(request.method ?? ""));
+  }
+  const targetPath = requestPath(rawTarget);
+
+  // ── Resolve the target through Harper's OWN routing, FIRST ──────────────────
+  // Synchronous and before any await (getMatch mutates its entry in place; see
+  // harper-routing.ts). The helpers in request-target.ts are the fallback when
+  // no route is returned: the live registry or Harper's `RequestTarget` is absent
+  // (a unit test mocking `harper`), the target matches no route, or the matcher
+  // throws. When the matcher throws, a signed non-admin agent's mutation that
+  // reaches the owner checks is refused instead (below), before any owner
+  // decision; the checks that run earlier (e.g. the rate limit and the raw-query
+  // refusal) still answer first.
+  let routed: HarperRoute | null = null;
+  let routeLookupFailed = false;
+  try {
+    routed = routeWithHarper(rawTarget, request.headers);
+  } catch {
+    routeLookupFailed = true;
+  }
+
+  // ── HTTP method allowlist ──────────────────────────────────────────────────
+  // After the canonical check and route resolution: before the public-path passthrough
+  // and before any auth branch, so no path and no caller (anonymous, agent or
+  // admin) can reach a handler through any other method.
   // Exact match: HTTP methods are case-sensitive, and these are the spellings
   // Flair's clients send.
   const httpMethod = String(request.method ?? "");
@@ -295,6 +399,9 @@ server.http(async (request: any, nextLayer: any) => {
     });
   }
 
+  // The parsed URL is read for the signed payload (the client signs the
+  // pathname and search of the URL it built) and for query parameters only.
+  // A path decision is never made on its parsed pathname.
   const url = new URL(request.url, "http://" + (request.headers.get("host") || "localhost"));
 
   // ── Rate limiting, right after the method check ────────────────────────────
@@ -316,7 +423,9 @@ server.http(async (request: any, nextLayer: any) => {
   // Only the OAuth endpoints named in rate-limit.ts's PATH_POLICY are affected.
   // Every other path — /Memory, /Presence, /FederationSync, everything agents
   // actually use — returns null here and is untouched.
-  const limited = checkHttpRateLimit(request, url.pathname);
+  //
+  const routedDecisionPath = routed?.decisionPath ?? routedResourcePath(targetPath, NAME_ROUTED_RESOURCES);
+  const limited = checkHttpRateLimit(request, routedDecisionPath);
   if (limited) return limited;
 
   // ── Malformed `.content` Memory path: the named 400, for every caller ────────
@@ -327,8 +436,8 @@ server.http(async (request: any, nextLayer: any) => {
   // before every auth branch (the public-path passthrough, the Basic-admin and
   // anonymous early returns, the signed-agent path), so the refusal does not
   // depend on the request's credential, and no row is read or written for it.
-  if (isMemoryReadPath(url.pathname)) {
-    const seg = url.pathname.slice(url.pathname.lastIndexOf("/") + 1);
+  if (isMemoryReadPath(targetPath)) {
+    const seg = lastRawPathSegment(targetPath);
     if (seg.endsWith(MEMORY_CONTENT_SELECTOR_SUFFIX) && !isValidPercentEncoding(seg)) {
       return contentSuffixIdDenial(seg);
     }
@@ -347,16 +456,16 @@ server.http(async (request: any, nextLayer: any) => {
   // select the Basic branch below, exactly as "Basic" does. Used for both the
   // /FederationPair public-bypass test and the Basic branch itself.
   const isBasic = /^Basic /i.test(header);
-  const isA2APath = url.pathname === "/a2a" || url.pathname === "/A2AAdapter" || url.pathname.startsWith("/A2AAdapter/");
+  const isA2APath = routedDecisionPath === "/a2a" || routedDecisionPath === "/A2AAdapter" || routedDecisionPath.startsWith("/A2AAdapter/");
   if (!isTpsEd25519 && (
-    url.pathname === "/health" ||
-    url.pathname === "/Health" ||
+    routedDecisionPath === "/health" ||
+    routedDecisionPath === "/Health" ||
     (request.method === "GET" && isA2APath) ||
-    url.pathname === "/AgentCard" ||
-    url.pathname.startsWith("/AgentCard/") ||
+    routedDecisionPath === "/AgentCard" ||
+    routedDecisionPath.startsWith("/AgentCard/") ||
     // FederationSync uses Ed25519 body-signature auth with anti-replay, validated
     // by the resource handler (allowCreate=true, same pattern as FederationPair).
-    url.pathname === "/FederationSync" ||
+    routedDecisionPath === "/FederationSync" ||
     // FederationPair uses one-time PairingToken in the request body, validated
     // by the resource itself (allowCreate=true on the Resource lets anonymous
     // POST through Harper's role gate). Bearer can't be used here because
@@ -369,19 +478,19 @@ server.http(async (request: any, nextLayer: any) => {
     // (PR-4, resources/Federation.ts) could never see a caller and never
     // refused a mismatch. An anonymous pair request (no Authorization header)
     // still passes through.
-    (url.pathname === "/FederationPair" && !isBasic) ||
+    (routedDecisionPath === "/FederationPair" && !isBasic) ||
     // OAuth 2.1 public endpoints (spec requires no pre-auth)
-    url.pathname === "/OAuthRegister" ||
-    url.pathname === "/OAuthAuthorize" ||
-    url.pathname === "/OAuthToken" ||
-    url.pathname === "/OAuthRevoke" ||
+    routedDecisionPath === "/OAuthRegister" ||
+    routedDecisionPath === "/OAuthAuthorize" ||
+    routedDecisionPath === "/OAuthToken" ||
+    routedDecisionPath === "/OAuthRevoke" ||
     // Belt-and-braces since flair#1000: `/.well-known/oauth-authorization-server`
     // is served from its OWN urlPath mount (resources/oauth-wellknown.ts), which
     // gets its own dispatch chain — this middleware never sees a request for it.
     // The entry stays so the path is still public if that mount ever moves back
     // onto the default chain.
-    url.pathname === "/.well-known/oauth-authorization-server" ||
-    url.pathname === "/OAuthMetadata"
+    routedDecisionPath === "/.well-known/oauth-authorization-server" ||
+    routedDecisionPath === "/OAuthMetadata"
   )) return nextLayer(request);
 
   // If Harper has already authorized this request (e.g. Basic admin, or
@@ -481,7 +590,7 @@ server.http(async (request: any, nextLayer: any) => {
       // Path 3: flair_pair_initiator — restricted to /FederationPair only.
       // Bootstrap credentials (pair-bootstrap-<id>) may only be used on this
       // one endpoint. Any other path must fall through to 401.
-      if (url.pathname === "/FederationPair" && user.startsWith("pair-bootstrap-")) {
+      if (routedDecisionPath === "/FederationPair" && user.startsWith("pair-bootstrap-")) {
         let pairUser: any = null;
         try {
           pairUser = await (server as any).getUser(user, pass, request);
@@ -528,7 +637,7 @@ server.http(async (request: any, nextLayer: any) => {
     // the browser shows a native auth dialog instead of a bare 401 page.
     // JSON API endpoints don't get this — they should keep the structured
     // 401 body so the client can parse the error.
-    const isAdminPage = url.pathname === "/Admin" || url.pathname.startsWith("/Admin");
+    const isAdminPage = routedDecisionPath === "/Admin" || routedDecisionPath.startsWith("/Admin");
     if (isAdminPage) {
       return new Response("Authentication required.", {
         status: 401,
@@ -639,10 +748,10 @@ server.http(async (request: any, nextLayer: any) => {
   // SQL and GraphQL endpoints bypass all resource-level scoping — block them
   // for non-admin agents. Admins (bootstrap, consolidation scripts) still pass.
   if (!request.tpsAgentIsAdmin) {
-    const rawPath = url.pathname.toLowerCase();
+    const lowerPath = (routed ? routedDecisionPath : routedResourcePath(targetPath, RAW_QUERY_RESOURCES)).toLowerCase();
     if (
-      rawPath === "/sql" || rawPath.startsWith("/sql/") ||
-      rawPath === "/graphql" || rawPath.startsWith("/graphql/")
+      lowerPath === "/sql" || lowerPath.startsWith("/sql/") ||
+      lowerPath === "/graphql" || lowerPath.startsWith("/graphql/")
     ) {
       return new Response(
         JSON.stringify({ error: "forbidden: raw query endpoints require admin access" }),
@@ -655,6 +764,18 @@ server.http(async (request: any, nextLayer: any) => {
 
   const method = request.method.toUpperCase();
   const isMutation = method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE";
+
+  // A signed non-admin agent's mutation that reaches this point (the earlier
+  // checks, e.g. the rate limit and the raw-query refusal, answer first) is
+  // refused before the owner decisions below when Harper's route lookup threw, or
+  // when Harper matched the target but its request-target parsing or path parsing
+  // could not resolve the record id.
+  if (isMutation && !request.tpsAgentIsAdmin && routeLookupFailed) {
+    return routeLookupFailedRefusal();
+  }
+  if (isMutation && !request.tpsAgentIsAdmin && routed?.recordIdUnresolved) {
+    return unresolvedTargetRefusal();
+  }
 
   // ── THE record-ownership rule, for every table, on every mutating verb ─────
   //
@@ -673,33 +794,39 @@ server.http(async (request: any, nextLayer: any) => {
   // resource's own no-forge attribution. That keeps this incapable of breaking a
   // create, a self-write, or a legitimate cross-agent field like MemoryGrant's
   // granteeId — it can only narrow mutation of another agent's stored row.
-  //
-  // This is an early refusal, made only for the form record-owner-guard.ts's
-  // resolveGuardedRecord decides: `/<Table>/<id>` in the request target
-  // Harper's REST layer routes (request.url, not the normalized URL above),
-  // with two non-empty segments and no `.` in the decoded id. For that form
-  // Harper resolves the same table and decoded id. This owner check precedes
-  // the guard's body-id check. On other addressed forms, the guard checks
-  // string or number body ids on POST/PUT/PATCH before stored ownership. For collection PUT/PATCH/DELETE, if reached, the table guard
-  // returns the collection refusal; existing DELETE middleware may refuse earlier.
-  // Collection POST follows the resource's own rules. The guard (resources/owner-scoped-write-policy.ts)
-  // applies to the resource classes that extend the owner-scoped tables
-  // resources/owner-scoped-writes.ts guards.
-  if (isMutation && !request.tpsAgentIsAdmin) {
-    const guarded = resolveGuardedRecord(String(request.url ?? ""));
+  // A Memory mutation whose raw id ends in the reserved `.content` suffix is a
+  // request the resource layer refuses by SHAPE (flair#2199, 400
+  // memory_id_content_suffix) and commits no row — Harper mutates nothing, so
+  // the ownership guard below must not pre-empt that with a 403 on the base row
+  // the `.content` property parse happens to name. Skip the guard for it and let
+  // the resource's named 400 answer, as it did before the routed-id resolution.
+  const isReservedContentMutation = isMutation &&
+    (routedDecisionPath === "/Memory" || routedDecisionPath.startsWith("/Memory/")) &&
+    decodeMemoryIdSegment(lastRawPathSegment(targetPath)).endsWith(MEMORY_CONTENT_SELECTOR_SUFFIX);
+
+  if (isMutation && !request.tpsAgentIsAdmin && !isReservedContentMutation) {
+    const guarded = routed
+      ? resolveGuardedRecordById(routed.resource, routed.recordId)
+      : resolveGuardedRecord(targetPath);
     if (guarded) {
+      let record: any;
       try {
-        const record = await (databases as any).flair[guarded.table]?.get(guarded.id);
-        if (isForbiddenOwnerMutation(record, guarded.ownerField, agentId)) {
-          return ownerMutationRefusal(guarded.table);
-        }
-      } catch { /* unreadable row → fall through to the resource's own rules */ }
+        record = await (databases as any).flair[guarded.table]?.get(guarded.id);
+      } catch {
+        // The ownership read is the authorization input. A read that FAILED is
+        // not "no owner" and must not fall through to the resource's allow* as
+        // though the check passed — fail closed with a named, retryable refusal.
+        return ownerReadFailedRefusal(guarded.table);
+      }
+      if (isForbiddenOwnerMutation(record, guarded.ownerField, agentId)) {
+        return ownerMutationRefusal(guarded.table);
+      }
     }
   }
 
   if (isMutation) {
     // OrgEvent: authorId must match authenticated agent
-    if ((url.pathname === "/OrgEvent" || url.pathname.startsWith("/OrgEvent/")) &&
+    if ((routedDecisionPath === "/OrgEvent" || routedDecisionPath.startsWith("/OrgEvent/")) &&
         (method === "POST" || method === "PUT" || method === "PATCH")) {
       if (!request.tpsAgentIsAdmin) {
         try {
@@ -720,25 +847,28 @@ server.http(async (request: any, nextLayer: any) => {
     }
 
     // OrgEvent DELETE: ownership check
-    if (url.pathname.startsWith("/OrgEvent/") && method === "DELETE") {
+    if (routedDecisionPath.startsWith("/OrgEvent/") && method === "DELETE") {
       if (!request.tpsAgentIsAdmin) {
-        try {
-          const pathParts = url.pathname.split("/").filter(Boolean);
-          const eventId = pathParts[1] ? decodeURIComponent(pathParts[1]) : null;
-          if (eventId) {
-            const record = await (databases as any).flair.OrgEvent.get(eventId);
-            if (record && record.authorId && record.authorId !== agentId) {
-              return new Response(JSON.stringify({
-                error: "forbidden: cannot delete events authored by another agent"
-              }), { status: 403 });
-            }
+        const eventId = routed ? routed.recordId : (routedRecordId(targetPath)?.id ?? null);
+        if (eventId) {
+          let record: any;
+          try {
+            record = await (databases as any).flair.OrgEvent.get(eventId);
+          } catch {
+            // A failed read is not "no author": refuse, as the shared owner rule does.
+            return ownerReadFailedRefusal("OrgEvent");
           }
-        } catch {}
+          if (record && record.authorId && record.authorId !== agentId) {
+            return new Response(JSON.stringify({
+              error: "forbidden: cannot delete events authored by another agent"
+            }), { status: 403 });
+          }
+        }
       }
     }
 
     // WorkspaceState: agent-scoped mutations (non-admin can only write own records)
-    if ((url.pathname === "/WorkspaceState" || url.pathname.startsWith("/WorkspaceState/")) &&
+    if ((routedDecisionPath === "/WorkspaceState" || routedDecisionPath.startsWith("/WorkspaceState/")) &&
         (method === "POST" || method === "PUT" || method === "PATCH")) {
       if (!request.tpsAgentIsAdmin) {
         try {
@@ -759,20 +889,23 @@ server.http(async (request: any, nextLayer: any) => {
     }
 
     // WorkspaceState DELETE: ownership check
-    if ((url.pathname.startsWith("/WorkspaceState/")) && method === "DELETE") {
+    if ((routedDecisionPath.startsWith("/WorkspaceState/")) && method === "DELETE") {
       if (!request.tpsAgentIsAdmin) {
-        try {
-          const pathParts = url.pathname.split("/").filter(Boolean);
-          const wsId = pathParts[1] ? decodeURIComponent(pathParts[1]) : null;
-          if (wsId) {
-            const record = await (databases as any).flair.WorkspaceState.get(wsId);
-            if (record && record.agentId && record.agentId !== agentId) {
-              return new Response(JSON.stringify({
-                error: "forbidden: cannot delete workspace state for another agent"
-              }), { status: 403 });
-            }
+        const wsId = routed ? routed.recordId : (routedRecordId(targetPath)?.id ?? null);
+        if (wsId) {
+          let record: any;
+          try {
+            record = await (databases as any).flair.WorkspaceState.get(wsId);
+          } catch {
+            // A failed read is not "no owner": refuse, as the shared owner rule does.
+            return ownerReadFailedRefusal("WorkspaceState");
           }
-        } catch {}
+          if (record && record.agentId && record.agentId !== agentId) {
+            return new Response(JSON.stringify({
+              error: "forbidden: cannot delete workspace state for another agent"
+            }), { status: 403 });
+          }
+        }
       }
     }
 
@@ -808,7 +941,7 @@ server.http(async (request: any, nextLayer: any) => {
     // The path test stays `startsWith("/Soul")` so sibling routes keep the
     // body check they already had; the record lookup is scoped to the real
     // `/Soul/<id>` collection so it never resolves an unrelated id.
-    if (url.pathname.startsWith("/Soul") &&
+    if (routedDecisionPath.startsWith("/Soul") &&
         (method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE")) {
       if (!request.tpsAgentIsAdmin) {
         // (a) A PRESENT, mismatched body agentId is a forged attribution.
@@ -844,7 +977,7 @@ server.http(async (request: any, nextLayer: any) => {
 
   // ── WorkspaceState read guard: agent-scoped reads ───────────────────────────
   if (method === "GET" && !request.tpsAgentIsAdmin) {
-    if (url.pathname === "/WorkspaceState" || url.pathname === "/WorkspaceState/") {
+    if (routedDecisionPath === "/WorkspaceState" || routedDecisionPath === "/WorkspaceState/") {
       const queryAgent = url.searchParams.get("agentId");
       if (queryAgent && queryAgent !== agentId) {
         return new Response(JSON.stringify({
@@ -876,7 +1009,7 @@ server.http(async (request: any, nextLayer: any) => {
   // read-scope denial is enforced by the resource layer (memoryByIdReadGate),
   // which returns the same 404 this middleware used to return.
   // (A malformed `.content` segment was refused before any auth branch, above.)
-  if (!request.tpsAgentIsAdmin && (method === "GET" || method === "HEAD") && isMemoryReadPath(url.pathname)) {
+  if (!request.tpsAgentIsAdmin && (method === "GET" || method === "HEAD") && isMemoryReadPath(routedDecisionPath)) {
     // flair#2199: an id segment carrying an encoded `/` before a declared
     // property suffix is ambiguous — the suffix could be part of the id or a
     // selector on a slash-containing id. This branch runs for a signed
@@ -888,23 +1021,28 @@ server.http(async (request: any, nextLayer: any) => {
         message: `a Memory request whose id segment contains an encoded '/' before a "${MEMORY_CONTENT_SELECTOR_SUFFIX}" (or other property) suffix is refused: the suffix cannot be told from part of the id`,
       }), { status: 400, headers: { "content-type": "application/json" } });
     }
-    const stripped = stripMemorySelection(request.url);
+    // The path rewrite inside stripMemorySelection runs only when Harper's own
+    // routing returned a Memory route with a record id. With no route (e.g. no
+    // live registry, no match, or a matcher error) or no record id, the path is
+    // left as sent; the query-selection removal does not depend on this.
+    const routedToMemoryRecord = routed !== null && routed.resource === "Memory" && routed.recordId !== null;
+    const stripped = stripMemorySelection(request.url, routedToMemoryRecord);
     if (stripped !== request.url) request.url = stripped;
   }
 
   // ── Embedding backfill ─────────────────────────────────────────────────────
-
-  const isMemoryWrite = isMutation && (url.pathname === "/Memory" || url.pathname.startsWith("/Memory/"));
-  let memoryId: string | null = null;
-  if (isMemoryWrite) {
-    const pathParts = url.pathname.split("/").filter(Boolean);
-    memoryId = pathParts.length >= 2 ? decodeMemoryIdSegment(pathParts[1]) : (request.headers.get("x-memory-id") ?? null);
-  }
+  const isMemoryWrite = isMutation && method !== "DELETE" &&
+    (routedDecisionPath === "/Memory" || routedDecisionPath.startsWith("/Memory/"));
+  const routedMemoryWrite = routed
+    ? (routed.resource === "Memory" ? routed.recordId : null)
+    : (() => { const r = routedRecordId(targetPath); return r?.resource === "Memory" ? r.id : null; })();
+  const routedCommittedId = (method === "PUT" || method === "PATCH") ? routedMemoryWrite : null;
 
   const response = await nextLayer(request);
 
-  if (isMemoryWrite && memoryId && response.status >= 200 && response.status < 300) {
-    backfillEmbedding(memoryId).catch(() => {});
+  if (isMemoryWrite && response.status >= 200 && response.status < 300) {
+    const committedId = committedMemoryIdFromResult(response) ?? routedCommittedId;
+    if (committedId) backfillEmbedding(committedId).catch(() => {});
   }
 
   return response;
