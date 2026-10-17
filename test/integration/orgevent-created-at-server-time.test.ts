@@ -910,11 +910,7 @@ describe("what each malformed id or body gets", () => {
 });
 
 describe("the body-guard message follows the caller's allowArrayObjects", () => {
-  // OrgEvent refuses an array at POST, PATCH and a single-record PUT
-  // (`allowArrayObjects` unset), and admits an array of records at a collection
-  // PUT (`allowArrayObjects: true`, resources/OrgEvent.ts). The refusal message
-  // says so: the array-admitting path keeps the collection-write wording it has
-  // today, and the refusing paths name a JSON object only.
+  // OrgEvent refuses an array at POST and PATCH (`allowArrayObjects` unset). Its PUT, single-record and collection alike, admits an array of records at the guard (`allowArrayObjects: true`, resources/OrgEvent.ts put()). The refusal message says so: PUT keeps the collection-write wording it has today, and POST and PATCH name a JSON object only.
   const OBJECT_ONLY = "the write body must be a JSON object";
   const COLLECTION = "the write body must be a JSON object, or an array of them for a collection write";
 
