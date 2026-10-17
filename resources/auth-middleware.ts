@@ -54,7 +54,13 @@ function isValidPercentEncoding(segment: string): boolean {
 // Drop a caller's `select(...)` and `property` from a Memory read URL, keeping
 // conditions, operator, sort, limit and offset. Returns the input unchanged when
 // the URL carries no selection.
-function stripMemorySelection(rawUrl: string): string {
+//
+// The path rewrite runs ONLY when Harper routed this target to a Memory RECORD
+// (`routedToMemoryRecord`): the raw path alone is not enough, because a target
+// Harper resolved with no record id — e.g. `/Memory.json/<id>.content`, whose
+// suffixed first segment routes to the Memory COLLECTION with an empty remainder
+// — must not be turned into a by-id read of a row the target does not address.
+function stripMemorySelection(rawUrl: string, routedToMemoryRecord: boolean): string {
   const q = rawUrl.indexOf("?");
   let pathPart = q === -1 ? rawUrl : rawUrl.slice(0, q);
   let query = q === -1 ? "" : rawUrl.slice(q + 1);
@@ -75,7 +81,7 @@ function stripMemorySelection(rawUrl: string): string {
   // An encoded `/` in the id makes the suffix ambiguous (the caller is refused
   // upstream in the middleware), so only rewrite when there is no encoded slash
   // and the first-dot rule actually dropped a declared-attribute suffix.
-  if (!idSegmentHasEncodedSlash(remainder) && stripped !== decodedId) {
+  if (routedToMemoryRecord && !idSegmentHasEncodedSlash(remainder) && stripped !== decodedId) {
     // Rebuild the id from its decoded form. Harper decodes the path it is handed,
     // so this re-encoded id addresses the SAME row, without the property.
     pathPart = `/Memory/${encodeURIComponent(stripped)}`;
@@ -979,7 +985,13 @@ server.http(async (request: any, nextLayer: any) => {
         message: `a Memory request whose id segment contains an encoded '/' before a "${MEMORY_CONTENT_SELECTOR_SUFFIX}" (or other property) suffix is refused: the suffix cannot be told from part of the id`,
       }), { status: 400, headers: { "content-type": "application/json" } });
     }
-    const stripped = stripMemorySelection(request.url);
+    // The Memory record id Harper routed this target to (null for a collection,
+    // a non-Memory resource, or when the live registry is absent and the pure
+    // mirror resolves it), gating the path rewrite inside stripMemorySelection.
+    const routedMemoryReadId = routed
+      ? (routed.resource === "Memory" ? routed.recordId : null)
+      : (() => { const r = routedRecordId(targetPath); return r?.resource === "Memory" ? r.id : null; })();
+    const stripped = stripMemorySelection(request.url, routedMemoryReadId !== null);
     if (stripped !== request.url) request.url = stripped;
   }
 

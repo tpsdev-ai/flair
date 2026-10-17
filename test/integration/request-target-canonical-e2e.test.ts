@@ -207,3 +207,23 @@ describe("ordinary signed traffic on canonical targets is unchanged", () => {
     expect(res.status, `GET /Health → ${res.status}: ${res.body.slice(0, 200)}`).toBe(200);
   }, 30_000);
 });
+
+describe("a canonical Memory read is decided on the record Harper routes, not the raw path", () => {
+  it("a `/Memory.json/<id>.content` target reads no record", async () => {
+    const id = "canonmem-a";
+    const secret = "canon-suffixed-collection-body";
+    // The row is present and readable by its own address.
+    const put = await signed("PUT", `/Memory/${encodeURIComponent(id)}`, { id, agentId: agent.id, content: secret, durability: "standard" });
+    expect(put.status, `PUT → ${put.status}: ${put.body.slice(0, 200)}`).toBeLessThan(300);
+    const own = await signed("GET", `/Memory/${encodeURIComponent(id)}`);
+    expect(own.status).toBe(200);
+    expect(JSON.parse(own.body).content).toBe(secret);
+
+    // The suffixed first segment routes to the Memory collection with no record
+    // id, so this target addresses no record: it must not be rewritten into a
+    // by-id read of the row the dot names.
+    const got = await signed("GET", `/Memory.json/${id}.content`);
+    expect(got.status, `GET /Memory.json/${id}.content → ${got.status}: ${got.body.slice(0, 200)}`).toBe(404);
+    expect(got.body).not.toContain(secret);
+  }, 30_000);
+});
