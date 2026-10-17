@@ -52,6 +52,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
+import { nodeBin } from "../helpers/node-runtime";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 import { componentWithoutMigrationBoot, type ComposedComponent } from "../helpers/component-without-migration-boot";
 import { getModelId } from "../../resources/embeddings-provider.ts";
@@ -212,7 +213,7 @@ function makeHarness(get: () => HarperInstance) {
       delete env.FLAIR_ADMIN_PASS;
       delete env.FLAIR_AGENT_ID;
       const out = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
-        const child = spawn(process.execPath, [CLI, "doctor", "--port", String(new URL(get().httpURL).port)], {
+        const child = spawn(nodeBin({ env }), [CLI, "doctor", "--port", String(new URL(get().httpURL).port)], {
           env, timeout: 90_000,
         });
         let stdout = "";
