@@ -23,10 +23,11 @@ import { guardOwnerFieldImmutable } from "./owner-field-guard.js";
 import { invalidEntitiesResponse } from "./entity-vocab.js";
 import {
   applyServerCreatedAt,
+  collectionElementIdRefusal,
   createdAtCheckUnavailable,
   invalidEventId,
-  isReadableEventId,
   type CreatedAtWriteMode,
+  unreadableEventIdRefusal,
 } from "./org-event-created-at.js";
 import {
   makeAuthGate,
@@ -44,6 +45,30 @@ const orgEventAuthGate = makeAuthGate();
 
 export class OrgEvent extends (databases as any).flair.OrgEvent {
   allowRead() { return orgEventAuthGate.call(this); }
+
+  /**
+   * A collection PUT (an array body) is dispatched by Harper to one element
+   * write per array record, and each element is resolved to its stored row
+   * (Table.getResource -> _loadRecord) before the resource's put() runs. An
+   * element id of an empty array or an object fails there with a bare 500, and a
+   * boolean id with Harper's own 400, so the element write never reaches the
+   * shared id rule the rest of this resource's write paths apply.
+   *
+   * This hook runs the owner-scoped write guard first (super), whose refusal
+   * answers for a non-admin collection write, then applies that shared id rule
+   * to the array's record elements — the same named 400 (invalid_event_id) POST,
+   * single-record PUT and PATCH answer. A non-record element is left to Harper's
+   * own handling. This mirrors the collection-PUT routing Credential uses.
+   */
+  static getResource(target: any, request: any, options?: any): any {
+    const admitted = super.getResource(target, request, options);
+    if (this !== OrgEvent || !options?.isCollection || options.method !== "put") return admitted;
+    return Promise.resolve(admitted).then(async (resource) => {
+      const denial = collectionElementIdRefusal(await (request as any)?.data);
+      if (denial) throw denial;
+      return resource;
+    });
+  }
 
   private _auth() {
     return resolveAgentAuth((this as any).getContext?.());
@@ -67,7 +92,8 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
     for (const record of records) {
       if (record == null || typeof record !== "object" || Array.isArray(record)) return invalidEventId();
       const id = idOf(record);
-      if (!isReadableEventId(id)) return invalidEventId();
+      const idDenial = unreadableEventIdRefusal(id);
+      if (idDenial) return idDenial;
       let stored: Record<string, unknown> | null;
       try {
         stored = ((await (databases as any).flair.OrgEvent.get(id, {})) ?? null) as Record<string, unknown> | null;
@@ -123,10 +149,10 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
     // flair#2333 (H9): avoids deterministic same-millisecond collisions (random UUID).
     if (!addressed && (content.id == null || content.id === "")) content.id = `${content.authorId}-${new Date().toISOString()}-${randomUUID()}`;
     // Binding runs before validation. At the root collection, or an addressed
-    // path whose body id was not bound, a remaining id that is not a non-empty
-    // string or a non-empty array of strings is refused with invalid_event_id
-    // (400) before the ownership lookup.
-    if (!isReadableEventId(content.id)) return invalidEventId();
+    // path whose body id was not bound, a remaining id the shared id rule does
+    // not read is refused with invalid_event_id (400) before the ownership lookup.
+    const idDenial = unreadableEventIdRefusal(content.id);
+    if (idDenial) return idDenial;
     // A trusted in-process call keeps its existing stamp; every verified agent's
     // createdAt is assigned below, once the write passes its other checks.
     if (auth.kind === "internal") content.createdAt = new Date().toISOString();

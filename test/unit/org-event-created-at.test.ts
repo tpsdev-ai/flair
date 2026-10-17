@@ -12,10 +12,12 @@
 import { describe, expect, it } from "bun:test";
 import {
   applyServerCreatedAt,
+  collectionElementIdRefusal,
   CREATED_AT_IMMUTABLE_ERROR,
   INVALID_EVENT_ID_ERROR,
   invalidEventId,
   isReadableEventId,
+  unreadableEventIdRefusal,
 } from "../../resources/org-event-created-at";
 
 const NOW = new Date("2026-10-13T12:00:00.000Z");
@@ -135,5 +137,49 @@ describe("invalidEventId", () => {
     const body = JSON.parse(await res.text());
     expect(body.error).toBe(INVALID_EVENT_ID_ERROR);
     expect(Object.keys(body).sort()).toEqual(["error", "message"]);
+  });
+});
+
+describe("unreadableEventIdRefusal — the id rule POST, PUT and PATCH share", () => {
+  it("reads a non-empty string id and a non-empty array of strings, and refuses every other shape", async () => {
+    for (const id of ["e1", ["x", "y"], ["x", ""]] as unknown[]) {
+      expect(unreadableEventIdRefusal(id), `refused ${JSON.stringify(id)}`).toBeNull();
+    }
+    for (const id of [undefined, null, "", 0, 42, true, false, {}, { a: 1 }, [], ["x", 1]] as unknown[]) {
+      const res = unreadableEventIdRefusal(id);
+      expect(res, `admitted ${JSON.stringify(id)}`).toBeInstanceOf(Response);
+      expect(res!.status).toBe(400);
+      expect((await refusalBody(res!)).error).toBe(INVALID_EVENT_ID_ERROR);
+    }
+  });
+
+  it("is a named 400 that echoes no submitted value", async () => {
+    const res = unreadableEventIdRefusal(["SUBMITTED", 1]);
+    expect(res).toBeInstanceOf(Response);
+    const text = await res!.text();
+    expect(text).not.toContain("SUBMITTED");
+    expect(JSON.parse(text).error).toBe(INVALID_EVENT_ID_ERROR);
+  });
+});
+
+describe("collectionElementIdRefusal — the same rule over a collection PUT array", () => {
+  it("refuses the first record element whose id the rule does not read, in array order", async () => {
+    const res = collectionElementIdRefusal([{ id: "ok" }, { id: [] }, { id: "later" }]);
+    expect(res).toBeInstanceOf(Response);
+    expect(res!.status).toBe(400);
+    expect((await refusalBody(res!)).error).toBe(INVALID_EVENT_ID_ERROR);
+  });
+
+  it("admits an array of records with readable ids, an empty array and a non-array body", () => {
+    expect(collectionElementIdRefusal([{ id: "a" }, { id: ["x", "y"] }])).toBeNull();
+    expect(collectionElementIdRefusal([])).toBeNull();
+    expect(collectionElementIdRefusal({ id: "a" })).toBeNull();
+    expect(collectionElementIdRefusal(undefined)).toBeNull();
+  });
+
+  it("skips a non-record element, which Harper refuses itself", () => {
+    expect(collectionElementIdRefusal(["abc"])).toBeNull();
+    expect(collectionElementIdRefusal([null])).toBeNull();
+    expect(collectionElementIdRefusal([["abc", 1]])).toBeNull();
   });
 });
