@@ -298,7 +298,9 @@ describe("flair#2466 — ordinary PATCH embedding cases", () => {
       seed("mem-null", "the earlier text");
       const body: Record<string, unknown> = { content: "the replacement text", embedding: null };
       if (pairedNulls) body.embeddingModel = null;
-      await memoryFor("mem-null").patch(body);
+      // flair#2573 slice 2: clearing the stamp is a change only an administrator's
+      // PATCH may make; a non-admin's `embeddingModel` is discarded.
+      await (pairedNulls ? adminMemoryFor("mem-null") : memoryFor("mem-null")).patch(body);
 
       const stored = await BaseMemory.get("mem-null");
       expect(stored.content).toBe("the replacement text");
