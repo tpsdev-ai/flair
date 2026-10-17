@@ -29,7 +29,7 @@ export function reservedEventRefusal(): Response {
   return new Response(
     JSON.stringify({
       error: RESERVED_EVENT_ERROR,
-      message: "reserved events are written only by the instruction-version appender; this write is refused",
+      message: "reserved events cannot be written through this API; this write is refused",
     }),
     { status: 403, headers: { "Content-Type": "application/json" } },
   );
