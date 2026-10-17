@@ -51,7 +51,9 @@ const add = (file: string, sites: string[], policy: Policy, reason: string) => {
 };
 
 // ── LATCH: raw put that can land an externally-sourced foreign stamp ──
-add("Federation", ["writer:writeBackCommittedRow#1"], "LATCH",
+add("Federation", ["writer:writeBackCommittedRow#1"], "OTHER_TABLE",
+  "The Presence receipt branch (flair#2578 slice 1): its table is always Presence; it writes no Memory row.");
+add("Federation", ["writer:writeBackCommittedRow#2"], "LATCH",
   "Federation sync-in calls noteFederationMergedMemory on the selected row; it checks the Memory embeddingModel via noteWriteStamp and ignores other tables.");
 
 // ── GATED: Memory.ts's own post()/put()/patch() write path (calls noteWriteStamp) ──

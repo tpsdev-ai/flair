@@ -233,6 +233,8 @@ describe("shared unit lane", () => {
     expect(errors).toContain("exit 5");
     expect(errors).toContain("exit 6");
     expect(errors).toContain("ran 2 steps, 2 failed");
+    // A test failure is not a budget kill (flair#2614).
+    expect(errors).not.toContain("Lane budget kill");
   });
 
   test("keep-going runs later steps after an early failure", () => {
@@ -340,6 +342,9 @@ describe("shared unit lane", () => {
     expect(errors).toContain("ran 1 of 2 steps, 1 failed, 1 not run");
     expect(errors).toContain("  - plants a config, then hangs (timed out: the lane's 2 s time budget ran out; step killed at the limit)");
     expect(errors).toContain("Not run:\n  - never started (the lane's 2 s time budget ran out)");
+    // The budget kill is reported distinctly from a test failure, on one line
+    // naming the killed step and the not-run count (flair#2614).
+    expect(errors).toContain("Lane budget kill (not a test failure): plants a config, then hangs was killed when the lane's time budget ran out; 1 step not run.");
     expect(errors).toContain("Guard failures:\n  - home-isolation guard");
   }, 30_000);
 
@@ -501,9 +506,9 @@ describe("shared unit lane", () => {
     expect(Number(job.match(/^ {4}timeout-minutes: (\d+)$/m)?.[1]) * 60_000).toBe(CI_JOB_LIMIT_MS);
     expect(job).toContain("run: bun run test:unit --keep-going");
     // Measured on CI legs and locally (see the constants in scripts/test-unit.ts):
-    // the slowest lane, its root step, the slowest other step, and the job's own
-    // steps outside the lane.
-    const lane = 510_000, rootStep = 327_000, otherStep = 33_000, outside = 53_000;
+    // the slowest lane shard, its slowest root step, the slowest other step, and
+    // the job's own steps outside the lane.
+    const lane = 781_000, rootStep = 266_000, otherStep = 43_000, outside = 53_000;
     expect(KEEP_GOING_LIMITS).toEqual({ stepTimeoutMs: STEP_TIMEOUT_MS, laneBudgetMs: KEEP_GOING_LANE_BUDGET_MS });
     expect(KEEP_GOING_LANE_BUDGET_MS + CI_OUTSIDE_LANE_MS).toBeLessThanOrEqual(CI_JOB_LIMIT_MS);
     expect(CI_OUTSIDE_LANE_MS).toBeGreaterThan(outside);
