@@ -260,7 +260,7 @@ describe("flair#2455 slice 2 — validated batch keys and indeterminate outcomes
     const reasonById = new Map(body.refused.map((e: any) => [e.id, e.reason]));
     expect(reasonById.get(futureId)).toBe("future_timestamp");
     expect(reasonById.get(noopId)).toBe("no_op_same_hash");
-    expect(reasonById.get(unknownId)).toBe("unknown_table");
+    expect(reasonById.get(unknownId)).toBe("presence_receive_disabled");
     expect(reasonById.has(mergedId), "the merged key was also listed refused").toBe(false);
     // Per-reason counts agree with the tally the receiver already returned.
     const counts: Record<string, number> = {};

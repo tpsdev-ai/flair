@@ -44,6 +44,12 @@ import {
   type FederationSyncTable,
   type SkipReason,
 } from "./federation-classify.js";
+import {
+  mergePresenceReceipt,
+  presenceHomeBindingReason,
+  presenceReceiveEnabled,
+  validatePresenceReceipt,
+} from "./presence-receipt.js";
 export {
   classifyRecord,
   reconstructRecordVerifyBody,
@@ -1160,10 +1166,76 @@ export class FederationSync extends Resource {
       // trust delegation to the originator's send-time check) alongside adding
       // Message to the push list — do not inherit this as a silent gap.
       Message: (databases as any).flair.Message,
+      // flair#2578 slice 1: Presence is REGISTERED so the receive path can carry
+      // it (the receiver writes it through the write-back helper). The sender
+      // ships in a later slice — this is the RECEIVE side only.
+      Presence: (databases as any).flair.Presence,
     };
     const knownTables = new Set(Object.keys(tableMap));
 
     type MergeOutcome = { reason: SkipReason } | { merged: true } | { indeterminate: true };
+
+    /** Read the local Agent row for an id, or null when there is none. A read
+     *  that FAILS throws (it is never read as "no Agent row"); mergeOne's catch
+     *  turns it into merge_error, which is retryable. */
+    const readAgentRow = async (agentId: string): Promise<Record<string, any> | null> => {
+      const row = await (databases as any).flair.Agent.get(agentId);
+      return row ?? null;
+    };
+
+    // ── flair#2578 slice 1: Presence receipt (P1, P4, P5) ──
+    // The batch-verified sender (`sender`) is the home authority. The decision
+    // (the Agent home and the Presence row) is re-verified inside the write-back
+    // transaction against the rows the write lands on, so a home that changed
+    // between the read and the write is seen, not overwritten.
+    const mergePresence = async (
+      record: SyncRecord,
+      sender: string,
+      local: Record<string, any> | null,
+      table: any,
+    ): Promise<MergeOutcome> => {
+      const receivedAt = Date.now();
+      // P5: strip to the declared Presence fields and validate. The wire record
+      // id IS the primary key (agentId).
+      const validated = validatePresenceReceipt(record.id, record.data, receivedAt);
+      if (!validated.ok) return { reason: validated.reason };
+      const agentId = validated.row.agentId as string;
+
+      // P1: the Agent row must be homed on the batch-verified sender.
+      const homeReason = presenceHomeBindingReason(await readAgentRow(agentId), sender);
+      if (homeReason) return { reason: homeReason };
+
+      // P4: Presence-specific merge (heartbeat, then activity stamp).
+      const planned = mergePresenceReceipt(local, validated.row, receivedAt);
+      if (planned.action === "skip") return { reason: planned.reason };
+
+      const outcome = await writeBackCommittedRow(
+        table,
+        record.id,
+        async (row) => {
+          // Re-verify BOTH facts the decision used against the current rows:
+          // the Agent home, and the Presence row this write replaces.
+          const currentHome = presenceHomeBindingReason(await readAgentRow(agentId), sender);
+          if (currentHome) return { skip: true, reason: currentHome };
+          const current = mergePresenceReceipt(row, validated.row, receivedAt);
+          if (current.action === "skip") return { skip: true, reason: current.reason };
+          return { write: current.row };
+        },
+        {
+          label: "FederationSync",
+          expectedRow: local,
+          attempts: 1,
+          wholeRow: true,
+          pausePre: () => txnPausePoint("federation-merge-pre"),
+          pausePoint: () => txnPausePoint("federation-merge"),
+        },
+      );
+      if ("skip" in outcome) {
+        return { reason: (outcome.reason as SkipReason | undefined) ?? "presence_invalid_shape" };
+      }
+      return { merged: true };
+    };
+
     const mergeOne = async (record: SyncRecord): Promise<MergeOutcome> => {
       let writeBackStarted = false;
       try {
@@ -1185,6 +1257,13 @@ export class FederationSync extends Resource {
 
         if (decision.action === "skip") {
           return { reason: decision.reason };
+        }
+
+        // A known Presence record with the receive flag OFF is skipped by its
+        // own name (Kern N5) — never merged, and never mislabelled
+        // unknown_table (which would make an operator grep lie).
+        if (record.table === "Presence" && !presenceReceiveEnabled()) {
+          return { reason: "presence_receive_disabled" };
         }
 
         // ── Per-record signature verification (federation-edge-hardening slice 3b) ──
@@ -1248,6 +1327,11 @@ export class FederationSync extends Resource {
         });
         if (principalSkip) {
           return { reason: principalSkip };
+        }
+
+        // ── flair#2578 slice 1: Presence receipt ──
+        if (record.table === "Presence") {
+          return await mergePresence(record, instanceId, local, table);
         }
 
         const incoming = { ...record.data };

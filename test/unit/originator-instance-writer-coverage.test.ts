@@ -125,7 +125,7 @@ const POLICY: Record<string, PolicyEntry | PolicyEntry[]> = {
   "resources/Memory.ts|Memory|delete": { count: 1, disposition: "resource-internal", note: "Memory.delete raw table delete" },
   "resources/MemoryMaintenance.ts|Memory|delete": { count: 1, disposition: "resource-internal", note: "reap/delete of existing rows" },
   "resources/usage-recording.ts|Memory|write-back": { count: 1, disposition: "update-only", note: "usage counters on an EXISTING row, through the shared write-back helper (flair#2441)" },
-  "resources/Federation.ts|?|write-back": { count: 1, disposition: "federation-merge", note: "FederationSync.post merge: re-writes the row it read through the shared write-back helper, for every synced table (flair#2441, flair#2450)" },
+  "resources/Federation.ts|?|write-back": { count: 2, disposition: "federation-merge", note: "FederationSync.post merge: re-writes the row it read through the shared write-back helper, for every synced table (flair#2441, flair#2450); the Presence receipt branch (flair#2578) is a second such write-back call" },
 };
 
 /** Directory scan (recursive), skipping test files. */

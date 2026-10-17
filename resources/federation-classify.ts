@@ -89,6 +89,25 @@ export type SkipReason =
   | "skill_not_federated" // a skill-tagged Memory is a local, gated artifact
   | "seed_id_not_federated" // a reserved seed id is never merged
   | "content_suffix_id_not_federated" // a Memory id ending in `.content`
+  // ─── flair#2578 slice 1: office-wide Presence, receiver and local guard ──
+  // Presence replication (spoke → hub) is behind ONE default-off receive flag.
+  // With the flag off a known Presence record is skipped by its own name, so an
+  // operator's SyncLog grep is not mislabelled `unknown_table` (Kern N5).
+  | "presence_receive_disabled" // the receive flag is off (non-retryable)
+  // The batch-verified SENDER is the only home authority (never the wire
+  // originatorInstanceId). The local Agent row for data.agentId must be homed on
+  // that sender (Sherlock F1, Kern 2).
+  | "presence_agent_not_replicated" // the Agent row has not reached this receiver yet (retryable)
+  | "presence_agent_homed_elsewhere" // the Agent row's home is another instance, or null (non-retryable)
+  // Presence-specific merge (Sherlock F5, Kern 4): an older heartbeat never
+  // replaces a newer one (non-retryable).
+  | "presence_stale_heartbeat"
+  // Receipt validation (Sherlock F4, Kern 5): a row that does not strip to the
+  // declared Presence fields is never stored (non-retryable).
+  | "presence_invalid_shape"
+  // The inbound heartbeat/activity stamp is later than the receiver's clock plus
+  // the same allowance classifyRecord uses (Sherlock NEW-1; non-retryable).
+  | "presence_future_timestamp"
 ;
 
 /**
@@ -125,6 +144,12 @@ export const SKIP_REASON_CLASS = {
   skill_not_federated: "non_retryable",
   seed_id_not_federated: "non_retryable",
   content_suffix_id_not_federated: "non_retryable",
+  presence_receive_disabled: "non_retryable",
+  presence_agent_not_replicated: "retryable",
+  presence_agent_homed_elsewhere: "non_retryable",
+  presence_stale_heartbeat: "non_retryable",
+  presence_invalid_shape: "non_retryable",
+  presence_future_timestamp: "non_retryable",
 } as const satisfies Record<SkipReason, "retryable" | "non_retryable">;
 
 /**
@@ -176,6 +201,12 @@ export const FEDERATION_TABLE_POLICY = {
   // hardcoded set), but the policy + owner-field land now so S2 is not a schema
   // or policy migration (the design's ship-order, flair#1521 §12).
   Message: { principalOwning: true },
+  // flair#2578 slice 1: Presence replication (spoke → hub, hub-receiver only).
+  // Presence carries `agentId` (the row's primary key), no `principalId`, so it
+  // is not principal-owning; its receive-side authority is P1's home binding to
+  // the batch-verified sender. Registered here so the receive tableMap can carry
+  // it; the sender ships in a later slice.
+  Presence: { principalOwning: false },
 } as const;
 
 export type FederationSyncTable = keyof typeof FEDERATION_TABLE_POLICY;

@@ -42,11 +42,18 @@ import { resolveAgentAuth, isPrincipalDeactivated } from "./agent-auth.js";
 import { agentRecordIsAdmin } from "./agent-admin.js";
 import { WINDOW_MS, importEd25519Key, b64ToArrayBuffer, parseTpsEd25519Header } from "./ed25519-auth.js";
 import { isKnownAgentReplay, claimAgentNonce } from "./replay-store.js";
+import { localInstanceId } from "./instance-identity.js";
+import { applyOriginatorInstanceId, resolveStoredRow } from "./originator-instance.js";
+// The activity vocabulary + currentTask cap have ONE definition (the receipt
+// validator must accept exactly what a local write accepts) — shared from the
+// pure module; aliased to this file's existing names.
+import {
+  PRESENCE_ACTIVITIES as VALID_ACTIVITIES,
+  sanitizePresenceCurrentTask as sanitizeCurrentTask,
+  presenceWriteHomeRefusal,
+} from "./presence-receipt.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
-
-const CURRENT_TASK_MAX_LENGTH = 200;
-const VALID_ACTIVITIES = new Set(["coding", "reviewing", "planning", "debugging", "idle"]);
 
 function idleThresholdMs(): number {
   const env = process.env.PRESENCE_IDLE_THRESHOLD_MS;
@@ -315,19 +322,43 @@ const ROSTER_ALLOWLIST = new Set([
   "harperVersion",
 ]);
 
-function sanitizeCurrentTask(task: unknown): string | null {
-  if (typeof task !== "string") return null;
-  const trimmed = task.trim();
-  if (trimmed.length === 0) return null;
-  return trimmed.slice(0, CURRENT_TASK_MAX_LENGTH);
-}
-
 function pickAllowlisted(record: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const key of Object.keys(record)) {
     if (ROSTER_ALLOWLIST.has(key)) out[key] = record[key];
   }
   return out;
+}
+
+// ─── Federation receipt rules (flair#2578 slice 1) ──────────────────────────
+//
+// Office-wide Presence: a spoke pushes its agents' Presence rows to the hub
+// over the existing hub-and-spoke sync, and the hub derives status locally from
+// the replicated timestamps. The flag, the home binding, the receipt validation
+// and the merge live in resources/presence-receipt.ts (PURE, so they are
+// unit-testable without a live Harper, and so the activity vocabulary and
+// currentTask cap have one definition shared with the receipt validator). Only
+// the DB-touching local-write home guard lives here.
+
+/**
+ * Read the local Agent row for `agentId` and resolve the P2 refusal. A read
+ * FAILURE is a 500, never read as "no home" — treating it as local would let a
+ * foreign-homed agent's write land while the authority is unreadable.
+ */
+async function presenceWriteHomeDenial(agentId: string): Promise<Response | null> {
+  let agentRow: any;
+  try {
+    agentRow = await (databases as any).flair.Agent.get(agentId);
+  } catch (err: any) {
+    console.error("presence: the agent home could not be read, so the write was refused", { agentId, err });
+    return new Response(
+      JSON.stringify({ error: "presence_home_lookup_failed", message: "the agent's home could not be read, so the write was refused" }),
+      { status: 500, headers: { "Content-Type": "application/json" } },
+    );
+  }
+  const refusal = presenceWriteHomeRefusal(agentRow, await localInstanceId());
+  if (!refusal) return null;
+  return new Response(JSON.stringify(refusal), { status: 403, headers: { "Content-Type": "application/json" } });
 }
 
 // ─── Resource ─────────────────────────────────────────────────────────────────
@@ -630,6 +661,13 @@ export class Presence extends (databases as any).flair.Presence {
       );
     }
 
+    // ── P2: refuse a write for an agent homed on another instance ─────────────
+    // A heartbeat writes the row keyed by agentId; a replicated row for the
+    // same agent arrives on that same key. Refusing the local write for a
+    // foreign-homed agent keeps one writer per row. Null home = local (rev 2.1).
+    const homeDenial = await presenceWriteHomeDenial(agentId);
+    if (homeDenial) return homeDenial;
+
     // ── Write presence ───────────────────────────────────────────────────────
     const now = Date.now();
 
@@ -656,12 +694,16 @@ export class Presence extends (databases as any).flair.Presence {
         resolveHarperVersion(),
       );
 
-      if (existing) {
-        const merged = { ...existing, ...record };
-        await (databases as any).flair.Presence.put(merged);
-      } else {
-        await (databases as any).flair.Presence.put(record);
-      }
+      // P3: stamp this instance's own id as the row's author. CREATE stamps
+      // the local id; an UPDATE keeps the stored value — the same contract as
+      // Agent/Memory (resources/originator-instance.ts).
+      await applyOriginatorInstanceId(record, existing);
+
+      const written = existing ? { ...existing, ...record } : record;
+      // receivedAt is a receiver-only stamp; a locally-written row never
+      // carries one, so a stale value on the row it replaces is dropped.
+      delete written.receivedAt;
+      await (databases as any).flair.Presence.put(written);
 
       return {
         ok: true,
@@ -694,6 +736,19 @@ export class Presence extends (databases as any).flair.Presence {
     if (auth.kind === "agent" && !auth.isAdmin && content?.agentId && content.agentId !== auth.agentId) {
       return new Response(JSON.stringify({ error: "forbidden: cannot write presence for another agent" }), { status: 403, headers: { "Content-Type": "application/json" } });
     }
+    // P2: the same home refusal as POST — this is the SECOND local writer
+    // (the direct table put inside post() is the first). A write for an agent
+    // homed on another instance is refused here too.
+    if (typeof content?.agentId === "string" && content.agentId.length > 0) {
+      const homeDenial = await presenceWriteHomeDenial(content.agentId);
+      if (homeDenial) return homeDenial;
+    }
+    // P3: stamp the row's author the same way post() does (CREATE → local id,
+    // UPDATE → stored value); a body value never replaces or clears it.
+    const resolved = await resolveStoredRow(this, "Presence", content, () => super.get());
+    if (resolved.denial) return resolved.denial;
+    await applyOriginatorInstanceId(content, resolved.row);
+    if (content && typeof content === "object") delete content.receivedAt;
     return super.put(content, context);
   }
 
