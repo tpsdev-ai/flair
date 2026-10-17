@@ -179,6 +179,9 @@ export function resolveGuardedRecordById(
   id: string | null | undefined,
 ): { table: string; ownerField: string; id: string } | null {
   if (id == null || id === "") return null;
+  // Own property only: an inherited name (`constructor`, `__proto__`, …) is not
+  // a table with an owner field.
+  if (!Object.prototype.hasOwnProperty.call(OWNER_FIELDS, resource)) return null;
   const ownerField = OWNER_FIELDS[resource];
   if (!ownerField) return null;
   return { table: resource, ownerField, id };

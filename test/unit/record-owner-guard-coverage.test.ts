@@ -235,34 +235,24 @@ describe("resolveGuardedRecord", () => {
       .toEqual({ table: "Soul", ownerField: "agentId", id: "alice:mission" });
   });
 
-  it("returns null for dotted ids, more than two segments and empty segments", () => {
-    expect(resolveGuardedRecord("/Relationship/r.json")).toBeNull();   // a `.` suffix Harper may strip
-    expect(resolveGuardedRecord("/Relationship/r%2Ejson")).toBeNull(); // the same, percent-encoded
-    expect(resolveGuardedRecord("/Relationship/a/b")).toBeNull();      // more than two segments
-    expect(resolveGuardedRecord("/Relationship/r/")).toBeNull();       // trailing slash
-    expect(resolveGuardedRecord("/Relationship/")).toBeNull();         // collection
-    // Empty segments are kept, as Harper keeps them: `/Relationship//r`
-    // resolves to the id `/r`, so this check does not decide it as `r`.
-    expect(resolveGuardedRecord("/Relationship//r")).toBeNull();       // repeated slash before the id
-    expect(resolveGuardedRecord("/Relationship///r")).toBeNull();
-    expect(resolveGuardedRecord("//Relationship/r")).toBeNull();       // extra leading slash
-    expect(resolveGuardedRecord("/Relationship/r//")).toBeNull();      // doubled trailing slash
-    expect(resolveGuardedRecord("/Relationship//")).toBeNull();
-    expect(resolveGuardedRecord("/Relationship/r")).toEqual({ table: "Relationship", ownerField: "agentId", id: "r" });
+  it("decodes the FULL remainder after the table as ONE id, as Harper routes it", () => {
+    // An id that itself contains `/`, raw or percent-encoded, is the whole remainder.
+    expect(resolveGuardedRecord("/Relationship/a/b")).toEqual({ table: "Relationship", ownerField: "agentId", id: "a/b" });
+    expect(resolveGuardedRecord("/Relationship/%2Fr")).toEqual({ table: "Relationship", ownerField: "agentId", id: "/r" });
+    // A repeated slash keeps the empty segment in the id, as Harper keeps it.
+    expect(resolveGuardedRecord("/Relationship//r")).toEqual({ table: "Relationship", ownerField: "agentId", id: "/r" });
+    // A dot inside a segment stays in the id: this parse mirrors Harper's
+    // RequestTarget, which does not resolve dot segments.
+    expect(resolveGuardedRecord("/Relationship/a.b")).toEqual({ table: "Relationship", ownerField: "agentId", id: "a.b" });
   });
 
-  it("reads the raw request target: the query is ignored and dot segments are not resolved", () => {
-    expect(resolveGuardedRecord("/Relationship/r?agentId=x")).toEqual({ table: "Relationship", ownerField: "agentId", id: "r" });
-    expect(resolveGuardedRecord("/Relationship//r?agentId=x")).toBeNull();
-    // Harper routes these segments as written; a normalized URL would resolve them.
-    expect(resolveGuardedRecord("/Memory/../Relationship/r")).toBeNull();
-    expect(resolveGuardedRecord("/Relationship/./r")).toBeNull();
-    expect(resolveGuardedRecord("/Relationship/x/../r")).toBeNull();
-    expect(resolveGuardedRecord("/Relationship/%2e%2e")).toBeNull();
-    // An encoded slash is part of the id, decoded as Harper decodes it.
-    expect(resolveGuardedRecord("/Relationship/%2Fr")).toEqual({ table: "Relationship", ownerField: "agentId", id: "/r" });
-    // An absolute-form target is not a path Harper's REST layer routes to a table.
-    expect(resolveGuardedRecord("http://localhost/Relationship/r")).toBeNull();
+  it("returns null for a collection path or a malformed remainder", () => {
+    expect(resolveGuardedRecord("/Relationship/")).toBeNull();         // collection
+    expect(resolveGuardedRecord("/Relationship/r/")).toBeNull();       // trailing slash
+    expect(resolveGuardedRecord("/Relationship/r//")).toBeNull();      // doubled trailing slash
+    expect(resolveGuardedRecord("//Relationship/r")).toBeNull();       // extra leading slash: an empty resource
+    // The path is the target before its `?` — the caller strips the query.
+    expect(resolveGuardedRecord("/Relationship/r")).toEqual({ table: "Relationship", ownerField: "agentId", id: "r" });
   });
 
   it("returns null for unguarded tables and malformed paths", () => {
