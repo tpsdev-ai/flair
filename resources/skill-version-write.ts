@@ -77,7 +77,7 @@ export async function closedSkillPayloadReadable(
 }
 
 /**
- * Build the successor Memory row for a superseded skill. Declared attributes only.
+ * Build the successor Memory row for a superseded skill. Retains declared and explicitly allowed fields.
  */
 export function buildSkillSuccessorRow(args: {
   auth: AgentAuthVerdict;

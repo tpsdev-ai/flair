@@ -59,7 +59,7 @@ async function authSend(harper: HarperInstance, agent: TestAgent, method: string
   });
 }
 async function seedAgent(harper: HarperInstance, agent: TestAgent): Promise<void> {
-  // These administrator fixtures store a supplied vector for the backfill to replace.
+  // The short-vector skill fixture uses this administrator to store its supplied vector.
   const res = await adminOp(harper, {
     operation: "insert", database: "flair", table: "Agent",
     records: [{ id: agent.id, name: agent.id, role: "admin", publicKey: agent.publicKey, createdAt: new Date().toISOString() }],

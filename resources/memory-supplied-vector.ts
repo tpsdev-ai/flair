@@ -31,7 +31,7 @@ export function keepsSuppliedVector(auth: AgentAuthVerdict): boolean {
  *  place. `suppliedVector` and `suppliedStamp` report what the CALLER's own body
  *  held before any stored row was merged in, so a vector prepareSkillBody carried
  *  from a stored row is left alone. A non-object or array body (no single record)
- *  is left untouched. Returns true when a caller-supplied value was discarded. */
+ *  is left untouched. Returns true when a field was removed. */
 export function discardSuppliedVector(
   content: Record<string, any> | null | undefined,
   auth: AgentAuthVerdict,
@@ -42,12 +42,12 @@ export function discardSuppliedVector(
   const carriedVector = !supplied.vector && hasSuppliedEmbedding(content.embedding);
   let discarded = false;
   if (supplied.vector && hasSuppliedEmbedding(content.embedding)) {
+    discarded = Object.prototype.hasOwnProperty.call(content, "embedding");
     delete content.embedding;
-    discarded = true;
   }
   if ((supplied.vector || supplied.stamp) && !carriedVector) {
+    discarded = Object.prototype.hasOwnProperty.call(content, "embeddingModel") || discarded;
     delete content.embeddingModel;
-    discarded = true;
   }
   return discarded;
 }

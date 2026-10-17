@@ -355,9 +355,7 @@ describe("flair#2573 slice 2 — crafted-vector writes with a failed embedding b
     const post = `s2-nomodel-post-${randomUUID()}`;
     const put = `s2-nomodel-put-${randomUUID()}`;
     const patch = `s2-nomodel-patch-${randomUUID()}`;
-    // Every write below forges BOTH a vector and its stamp, so the no-stamp
-    // assertions detect a discarded-stamp line that lets the caller's stamp
-    // through (blocker 2).
+    // The three crafted-vector writes below forge both fields.
     const FORGED_STAMP = "forged-model-stamp";
     // Seed the PATCH target first: a PATCH to a missing id is refused for a
     // non-admin, so the crafted-vector PATCH must exercise an update.

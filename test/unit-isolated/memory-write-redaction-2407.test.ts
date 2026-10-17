@@ -556,15 +556,32 @@ describe("non-admin supplied embedding values", () => {
     ["vector", [0, 0, 0, 1]],
   ] as const;
 
-  it("keeps null and normalized empty embeddings for the re-embed protocol", async () => {
-    const { hasSuppliedEmbedding, discardSuppliedVector } = await import("../../resources/memory-supplied-vector.ts");
+  it("normalizes an empty embedding and preserves null before the discard helper", async () => {
+    const { hasSuppliedEmbedding, discardSuppliedVector, suppliesEmbeddingModel } = await import("../../resources/memory-supplied-vector.ts");
     const { normalizeEmptyEmbedding } = await import("../../resources/memory-embedding-value.ts");
     for (const embedding of [null, []]) {
       const body = { embedding, embeddingModel: null };
       normalizeEmptyEmbedding(body);
       expect(hasSuppliedEmbedding(body.embedding)).toBe(false);
-      expect(discardSuppliedVector(body, { kind: "agent", agentId: AGENT, isAdmin: false }, { vector: false, stamp: false })).toBe(false);
-      expect(body).toEqual({ embedding: null, embeddingModel: null });
+      expect(discardSuppliedVector(body, { kind: "agent", agentId: AGENT, isAdmin: false }, { vector: false, stamp: suppliesEmbeddingModel(body) })).toBe(true);
+      expect(body.embedding).toBeNull();
+      expect(body).not.toHaveProperty("embeddingModel");
+    }
+  });
+
+  it("returns false when the supplied flags name absent fields", async () => {
+    const { discardSuppliedVector } = await import("../../resources/memory-supplied-vector.ts");
+    const body = {};
+    expect(discardSuppliedVector(body, { kind: "agent", agentId: AGENT, isAdmin: false }, { vector: true, stamp: true })).toBe(false);
+    expect(body).toEqual({});
+  });
+
+  it("returns true when it removes a present field", async () => {
+    const { discardSuppliedVector } = await import("../../resources/memory-supplied-vector.ts");
+    for (const body of [{ embedding: [1] }, { embeddingModel: undefined }]) {
+      expect(discardSuppliedVector(body, { kind: "agent", agentId: AGENT, isAdmin: false }, { vector: true, stamp: true })).toBe(true);
+      expect(body).not.toHaveProperty("embedding");
+      expect(body).not.toHaveProperty("embeddingModel");
     }
   });
 
