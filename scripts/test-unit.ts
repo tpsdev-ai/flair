@@ -52,12 +52,13 @@ export function unitTempBase(platform: NodeJS.Platform, env: NodeJS.ProcessEnv):
 //   - the job's own steps outside the lane (setup before it, the skip-count
 //     check and post steps after it): at most 53 s (2026-09-29);
 //   - the whole lane: each leg runs one shard (flair#2311); the slowest shard
-//     measured 781 s (p90 over the sample 755 s), 740 s locally;
+//     measured at least 781 s (its slowest legs were killed at the old 780 s cap,
+//     so 781 s is a lower bound; p90 over the sample 755 s), 740 s locally;
 //   - `root unit tests`: 96–266 s per root shard, and the two root shards one
 //     lane shard carries together measure 229–526 s;
 //   - the slowest non-root step measured 43 s; in that set the median is 1–2 s.
-// The budget is whole-lane headroom: 1320 − 120 = 1200 s, about 1.54× the
-// slowest measured shard (781 s), still subject to each step's own limit below;
+// The budget is whole-lane headroom: 1320 − 120 = 1200 s, at most about 1.54×
+// the slowest measured shard (at least 781 s), still subject to each step's own limit below;
 // the old 780 s budget sat below that shard and killed whichever late step was
 // running on a busy runner (flair#2614: four node-22 shard runs were killed at
 // `test/unit-isolated/` steps with steps unrun on 2026-10-17).
@@ -74,8 +75,8 @@ export const CI_JOB_LIMIT_MS = 22 * 60_000;
 /** Reserved for the job's own steps outside the lane: 53 s measured, 67 s spare. */
 export const CI_OUTSIDE_LANE_MS = 120_000;
 /**
- * Keep-going's whole-lane budget: 1320 − 120 = 1200 s, about 1.54× the slowest
- * measured shard (781 s). A step still running when it runs out is killed and every later
+ * Keep-going's whole-lane budget: 1320 − 120 = 1200 s, at most about 1.54× the
+ * slowest measured shard (at least 781 s; its slowest legs hit the old cap). A step still running when it runs out is killed and every later
  * step is reported as not run, so the summary and both guards are expected to
  * print before the job limit however many steps hang, provided the job's steps
  * outside the lane stay within the reserve above (an observed margin, not a
@@ -89,8 +90,8 @@ export const KEEP_GOING_LANE_BUDGET_MS = CI_JOB_LIMIT_MS - CI_OUTSIDE_LANE_MS;
  */
 export const STEP_TIMEOUT_MS = 150_000;
 // `root unit tests`' own limit is 450 s, 1.69× its slowest measured root shard
-// (266 s). If it hangs, the slowest lane shard's other steps still fit (272 +
-// 450 = 722 s ≤ 1200 s). It is defined in scripts/ci/lane-shards.mjs, which
+// (266 s). If it hangs, the slowest lane shard's other steps still fit (781 −
+// 266 + 450 = 965 s ≤ 1200 s). It is defined in scripts/ci/lane-shards.mjs, which
 // builds the plan, and re-exported above for this module's tests.
 
 /** The time limits a lane runs under (flair#2030). */
