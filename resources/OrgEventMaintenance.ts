@@ -17,8 +17,10 @@ export class OrgEventMaintenance extends Resource {
   }
 
   async post(_data: any, context?: any) {
-    // Admin-only
-    if (!context?.request?.tpsAgentIsAdmin) {
+    // Admin-only — the same predicate allowCreate uses. An HTTP admin request
+    // reaches this method with the annotations on the context, not on a
+    // `.request` child, so the raw flag read refused every caller.
+    if (!(await allowAdmin(context ?? (this as any).getContext?.()))) {
       return new Response(
         JSON.stringify({ error: "forbidden: admin only" }),
         { status: 403, headers: { "Content-Type": "application/json" } },

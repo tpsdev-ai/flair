@@ -334,8 +334,9 @@ describe("an instruction event survives OrgEventMaintenance", () => {
     await plantEvent(reserved, { kind: "skill.changed" });
     await plantEvent(expired, { kind: "status", expiresAt: "2001-01-01T00:00:00.000Z" });
 
-    const res = await basicSend("POST", "/OrgEventMaintenance/", {});
-    expect(res.status, (await res.text()).slice(0, 300)).toBeLessThan(300);
+    const res = await send(adminAgent, "POST", "/OrgEventMaintenance/", {});
+    const maintText = await res.text();
+    expect(res.status, `maintenance ${res.status}: ${maintText.slice(0, 300)}`).toBeLessThan(300);
 
     expect(await readEvent(reserved)).not.toBeNull();
     expect(await readEvent(expired)).toBeNull();

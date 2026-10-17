@@ -322,7 +322,14 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
     if (gate.kind === "denied") return gate.response;
     // Deleting a reserved event is audit erasure. Checked before the
     // unfiltered branch, so administrators do not reach the table delete.
-    const reservedDenial = await reservedEventStoredRefusal(id, readStoredEvent);
+    // Harper passes a string id on the addressed path; a target object names
+    // its key in `.id`, and an instance delete reads the addressed id.
+    const key = typeof id === "string" || Array.isArray(id)
+      ? id
+      : id && typeof id === "object" && "id" in id
+        ? (id as any).id
+        : (this as any).getId?.();
+    const reservedDenial = await reservedEventStoredRefusal(key, readStoredEvent);
     if (reservedDenial) return reservedDenial;
     if (gate.kind === "unfiltered") return super.delete(id, context);
 
