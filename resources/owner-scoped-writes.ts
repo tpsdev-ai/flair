@@ -36,7 +36,7 @@
  */
 import { databases } from "harper";
 import { OWNER_FIELDS, ownerCheckUnavailable } from "./record-owner-guard.js";
-import { reservedEventStoredRefusal, reservedEventWriteRefusal } from "./org-event-reserved.js";
+import { isReservedEventRecord, reservedEventProposedRefusal, reservedEventRefusal, reservedEventStoredRefusal } from "./org-event-reserved.js";
 import { guardOwnerScopedWrites, ownerScopedWriteGuardGaps } from "./owner-scoped-write-policy.js";
 
 type AgentAuthModule = typeof import("./agent-auth.js");
@@ -67,9 +67,22 @@ const guarded = guardOwnerScopedWrites(registry, OWNER_FIELDS, {
     } catch {
       return null; // the guard's own readBody refusal owns an unreadable body
     }
-    const proposed = await reservedEventWriteRefusal(body, readStored);
+    const proposed = reservedEventProposedRefusal(body);
     if (proposed) return proposed;
-    return reservedEventStoredRefusal(target?.id, readStored);
+    // A stored read that FAILS is left to this guard's owner check and the
+    // resource's own checks, which refuse with their named errors. This
+    // pre-check only adds the reserved refusal when the row is readable.
+    try {
+      const records = Array.isArray(body) ? body : [body];
+      for (const record of records) {
+        const id = record && typeof record === "object" && !Array.isArray(record) ? (record as any).id : undefined;
+        if (typeof id === "string" && id !== "" && isReservedEventRecord(await readStored(id))) return reservedEventRefusal();
+      }
+      if (target && target.id != null && isReservedEventRecord(await readStored(target.id as any))) return reservedEventRefusal();
+    } catch {
+      return null;
+    }
+    return null;
   },
 });
 const gaps = ownerScopedWriteGuardGaps(registry, OWNER_FIELDS, guarded);
