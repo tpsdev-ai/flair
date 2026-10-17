@@ -1,5 +1,6 @@
 /**
  * server-owned-vectors-2573.test.ts — flair#2573 slice 2 (real Harper).
+ * Omit the boot migration trigger so seeded foreign or unstamped vectors are not re-embedded during the test.
  *
  * Non-admin Memory writes discard caller-supplied vectors and model stamps.
  * Embedding is computed when the resulting write needs one.
@@ -42,6 +43,7 @@ import { fileURLToPath } from "node:url";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
 import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
+import { componentWithoutMigrationBoot, type ComposedComponent } from "../helpers/component-without-migration-boot";
 import { getModelId } from "../../resources/embeddings-provider.ts";
 import { ensureFlairAgentRole, ensureFlairAgentUser } from "../../src/cli";
 
@@ -185,6 +187,8 @@ function makeHarness(get: () => HarperInstance) {
 }
 
 function assertOwnInstance(h: HarperInstance): void {
+  expect(h.external).toBe(false);
+  expect(h.ownsInstallDir).toBe(true);
   for (const url of [h.httpURL, h.opsURL]) {
     const u = new URL(url);
     expect(["127.0.0.1", "localhost"], url).toContain(u.hostname);
@@ -194,18 +198,25 @@ function assertOwnInstance(h: HarperInstance): void {
 
 (HAS_MODEL ? describe : describe.skip)("flair#2573 slice 2 — a non-admin write never stores a caller-supplied vector (real Harper)", () => {
   let harper: HarperInstance;
+  let component: ComposedComponent | undefined;
   let h: ReturnType<typeof makeHarness>;
   const TXT = (tag: string) => `a note about scheduling cron jobs across time zones ${tag}`;
 
   beforeAll(async () => {
-    harper = await startHarper({ cwd: ROOT });
+    component = componentWithoutMigrationBoot({ sourceRoot: ROOT });
+    expect(existsSync(component.omittedTriggerPath)).toBe(false);
+    harper = await startHarper({ cwd: component.dir, harperBinDir: component.sourceRoot });
     assertOwnInstance(harper);
     h = makeHarness(() => harper);
     await h.register();
   }, 240_000);
 
   afterAll(async () => {
-    if (harper) await stopHarper(harper);
+    try {
+      if (harper) await stopHarper(harper);
+    } finally {
+      component?.cleanup();
+    }
   }, HARPER_STOP_BUDGET_MS);
 
   test("(a-post) an agent POST of a crafted vector stores the server's vector for the text", async () => {
@@ -311,6 +322,7 @@ function assertOwnInstance(h: HarperInstance): void {
 
 describe("flair#2573 slice 2 — crafted-vector writes with a failed embedding backend (real Harper)", () => {
   let harper: HarperInstance;
+  let component: ComposedComponent | undefined;
   let h: ReturnType<typeof makeHarness>;
   let homeDir = "";
   let absentPath = "";
@@ -322,15 +334,21 @@ describe("flair#2573 slice 2 — crafted-vector writes with a failed embedding b
     // absolute path (its bench-only model-path override); the file does not exist
     // yet, so every embed fails and getEmbedding returns null.
     absentPath = join(homeDir, "absent-model", "nomic-embed-text-absent.gguf");
-    harper = await startHarper({ cwd: ROOT, env: { FLAIR_RECALL_HARNESS_MODEL_PATH: absentPath } });
+    component = componentWithoutMigrationBoot({ sourceRoot: ROOT });
+    expect(existsSync(component.omittedTriggerPath)).toBe(false);
+    harper = await startHarper({ cwd: component.dir, harperBinDir: component.sourceRoot, env: { FLAIR_RECALL_HARNESS_MODEL_PATH: absentPath } });
     assertOwnInstance(harper);
     h = makeHarness(() => harper);
     await h.register();
   }, 240_000);
 
   afterAll(async () => {
-    if (harper) await stopHarper(harper);
-    if (homeDir) rmSync(homeDir, { recursive: true, force: true });
+    try {
+      if (harper) await stopHarper(harper);
+    } finally {
+      component?.cleanup();
+      if (homeDir) rmSync(homeDir, { recursive: true, force: true });
+    }
   }, HARPER_STOP_BUDGET_MS);
 
   for (const method of ["POST", "PUT", "PATCH"] as const) {
@@ -430,11 +448,14 @@ describe("flair#2573 slice 2 — crafted-vector writes with a failed embedding b
 
 describe("flair#2573 slice 2 — a non-admin write cannot relabel a stored vector (real Harper)", () => {
   let harper: HarperInstance;
+  let component: ComposedComponent | undefined;
   let h: ReturnType<typeof makeHarness>;
   const FOREIGN_STAMP = "foreign-model-not-current";
 
   beforeAll(async () => {
-    harper = await startHarper({ cwd: ROOT });
+    component = componentWithoutMigrationBoot({ sourceRoot: ROOT });
+    expect(existsSync(component.omittedTriggerPath)).toBe(false);
+    harper = await startHarper({ cwd: component.dir, harperBinDir: component.sourceRoot });
     assertOwnInstance(harper);
     h = makeHarness(() => harper);
     await h.register();
@@ -443,7 +464,11 @@ describe("flair#2573 slice 2 — a non-admin write cannot relabel a stored vecto
   }, 240_000);
 
   afterAll(async () => {
-    if (harper) await stopHarper(harper);
+    try {
+      if (harper) await stopHarper(harper);
+    } finally {
+      component?.cleanup();
+    }
   }, HARPER_STOP_BUDGET_MS);
 
   /** Seed a foreign or unstamped vector through an administrator PUT using Basic auth. */
