@@ -88,10 +88,10 @@ so a hand-written entry here is lost.
   its `agentId` is homed on the batch-verified sender: a missing `Agent` row is a
   retryable skip, and a row homed elsewhere or with no home is not. Inbound rows
   are stripped to the declared Presence fields and validated (activity
-  vocabulary, a finite heartbeat within a 5-minute future allowance, a version
-  string over 64 characters dropped and stored as null) before storage, and a
-  Presence-specific merge refuses an older heartbeat rather than replacing a
-  newer one. The local writers
+  vocabulary, a finite heartbeat within a 5-minute future allowance, version
+  strings no longer than 64 characters; longer strings are dropped and stored
+  as null) before storage, and a Presence-specific merge refuses an older
+  heartbeat rather than replacing a newer one. The local writers
   (POST, PUT, PATCH) compare the agent's home against this instance's id read
   fresh from the `Instance` table at write time, refusing a write for an agent
   homed on another instance, and none of them can set a client
