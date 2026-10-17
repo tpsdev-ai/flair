@@ -86,6 +86,10 @@ export async function stampMemoryPromotion(
       const row = await table.get(id, stagedContext);
       if (!row) throw new Error(`Promotion memory ${id} was not written`);
       if (isStaleBasis(row, written)) return false;
+      // Test-only: inert unless the fault-injection opt-in is armed. The lock is
+      // held and the caller's transaction is open.
+      const paused = txnPausePoint("promotion-stamp-manual");
+      if (paused) await paused;
       const update = promotionStampUpdate(row, reviewerId, decidedAt);
       await table.update(id, update, stagedContext);
       noteMemoryUpsert({ ...row, ...update });
@@ -95,6 +99,10 @@ export async function stampMemoryPromotion(
     return;
   }
   // Test-only: inert unless the fault-injection opt-in is armed.
+  // Test-only: the promotion's Memory write has committed; the stamp has not
+  // taken the lock yet. Inert unless the fault-injection opt-in is armed.
+  const entry = txnPausePoint("promotion-stamp-entry");
+  if (entry) await entry;
   const outcome = await withMemoryWriteLockOnce(memoryPrimaryStore(), [id], async () => {
     const beforeFirstRead = txnPausePoint("promotion-stamp-select");
     if (beforeFirstRead) await beforeFirstRead;
