@@ -21,9 +21,11 @@
  *     createdAt that is an empty string; an update that omits createdAt keeps
  *     the stored value;
  *   - after POST normalization (an empty root id gets a generated id) and earlier
- *     guards (a non-admin collection PUT gets 403 first), an id outside a
- *     non-empty string or a non-empty array of strings gets `invalid_event_id`
- *     (400) before any write. Trusted server-originated internal PUT/PATCH skip
+ *     guards (a non-admin collection PUT gets 403 first), POST and PUT ids outside
+ *     a non-empty string or a non-empty array of strings get `invalid_event_id`
+ *     (400) before any write. PATCH checks the addressed path id; an `id` supplied
+ *     in a PATCH body follows Harper's own validation, not the named
+ *     `invalid_event_id` rule. Trusted server-originated internal PUT/PATCH skip
  *     the id check in _assignCreatedAt. An administrator's collection PUT is
  *     scanned on the initial call, before Harper's per-element dispatch;
  *   - malformed bodies reaching the POST, PUT and PATCH resource methods are
