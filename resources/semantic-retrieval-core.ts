@@ -64,6 +64,7 @@ import { isAllowedBm25Candidate, type Condition } from "./bm25-filter.js";
 import { indexedBm25Ids } from "./bm25-index-service.js";
 import { byRecencyThenId } from "./sort-comparators.js";
 import { isTrustedVectorStamp, trustedVectorCondition } from "./embedding-space-guard.js";
+import { applyPromotionBinding } from "./promotion-binding.js";
 
 /**
  * Internal ranked retrieval row (flair#1415). `_rank` is required so a
@@ -120,7 +121,7 @@ function distanceToSimilarity(distance: number): number {
 // a permitted reader would never see their pointer.
 export const DEFAULT_SELECT = ["id", "agentId", "content", "contentHash", "visibility", "instanceToken", "tags", "durability",
   "source", "createdAt", "updatedAt", "expiresAt", "retrievalCount", "usageCount", "lastRetrieved",
-  "promotionStatus", "promotedAt", "promotedBy", "archived", "archivedAt", "archivedBy",
+  "promotionStatus", "promotedAt", "promotedBy", "promotionContentHash", "archived", "archivedAt", "archivedBy",
   "parentId", "derivedFrom", "sessionId", "lastReflected", "supersedes", "subject", "summary",
   "validFrom", "validTo", "_safetyFlags"];
 
@@ -738,5 +739,5 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
     bm25: bm25LegIds,
     fused: filteredResults.map((r: any) => r.id),
   });
-  return filteredResults;
+  return filteredResults.map((row) => applyPromotionBinding(row));
 }

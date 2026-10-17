@@ -3,7 +3,7 @@
  * stamps on PUT; omission must not erase a verdict. A content change drops the
  * stamp: the verdict is bound to the reviewed text. No admin/body bypass. */
 export const AUTHORITY_FIELDS = {
-  Memory: ["promotionStatus", "promotedAt", "promotedBy"],
+  Memory: ["promotionStatus", "promotedAt", "promotedBy", "promotionContentHash"],
 } as const;
 
 export async function guardAuthorityFields(

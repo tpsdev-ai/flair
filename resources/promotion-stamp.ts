@@ -4,6 +4,8 @@ import { noteMemoryUpsert } from "./bm25-index-service.js";
 import { writeBackCommittedRow } from "./write-back.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 import { isJoinableTransaction } from "./request-transaction.js";
+import { promotionContentHash } from "./promotion-binding.js";
+import { withMemoryWriteLock, withMemoryWriteLockOnce, type MemoryLockOutcome } from "./memory-write-lock.js";
 
 /** The row a promotion's Memory write produced: its owner, content and
  *  incarnation token. */
@@ -21,9 +23,41 @@ export class PromotedRowChangedError extends Error {
   }
 }
 
+/** The memory id's write lock answered something other than a completed
+ *  callback: nothing was stamped. */
+export class PromotionStampLockError extends Error {
+  constructor(kind: MemoryLockOutcome<unknown>["kind"], id: string) {
+    super(`promotion-stamp: the memory write lock for ${id} answered ${kind}; no stamp written`);
+    this.name = "PromotionStampLockError";
+  }
+}
+
 function isWrittenRow(row: any, written: PromotedRowIdentity | undefined): boolean {
   return written != null && typeof written.instanceToken === "string" && written.instanceToken.length > 0 &&
     row.agentId === written.agentId && row.content === written.content && row.instanceToken === written.instanceToken;
+}
+
+/** The incremental update a stamp writes: the verdict fields plus the hash of
+ *  the EXACT stored, post-redaction content the verdict is bound to. */
+function promotionStampUpdate(stored: any, reviewerId: string, decidedAt: string): Record<string, unknown> {
+  return {
+    promotionStatus: "approved",
+    promotedBy: reviewerId,
+    promotedAt: decidedAt,
+    promotionContentHash: promotionContentHash(stored.content),
+  };
+}
+
+/** Would stamping this row overwrite a decision made for a different row or
+ *  different content? Then the stamp skips: a stale verdict never overwrites. */
+function isStaleBasis(stored: any, written: PromotedRowIdentity | undefined): boolean {
+  if (written != null && !isWrittenRow(stored, written)) return true;
+  const bound = stored?.promotionContentHash;
+  return typeof bound === "string" && bound.length > 0 && bound !== promotionContentHash(stored.content);
+}
+
+function memoryPrimaryStore(): unknown {
+  return (databases as any)?.flair?.Memory?.primaryStore;
 }
 
 // Called only after the promotion workflow has authorized and written a Memory
@@ -33,36 +67,56 @@ function isWrittenRow(row: any, written: PromotedRowIdentity | undefined): boole
 // It also supplies the identity of the row it wrote; the stamp's first read
 // must be that row. Manual promotion passes the context of the open
 // transaction its Memory write used, and the stamp joins it.
+//
+// Slice 2: both stamps run under the promoted id's memory write lock and write
+// an INCREMENTAL update of the verdict fields only (never a full row), so an
+// owner edit that started earlier is not reverted. A stale identity or a
+// verdict already bound to different content skips without writing.
 export async function stampMemoryPromotion(
   id: string, reviewerId: string, decidedAt: string, enumerationContext?: any, stagedContext?: any,
   written?: PromotedRowIdentity,
 ): Promise<void> {
   const table = (databases as any).flair.Memory;
-  const stamp = (stored: any) => {
-    if (!stored) throw new Error(`Promotion memory ${id} was not written`);
-    const row = { ...stored, promotionStatus: "approved", promotedBy: reviewerId, promotedAt: decidedAt };
-    stripUndeclaredMemoryAttributes(row);
-    return row;
-  };
   if (isJoinableTransaction(stagedContext)) {
-    const row = stamp(await table.get(id, stagedContext));
-    await table.put(row, stagedContext);
-    noteMemoryUpsert(row);
+    // Manual promotion: the Memory write and this stamp share the caller's
+    // transaction. The memory lock is taken for the stamp's own read/decision/
+    // write; the enclosing transaction commits after it releases (the composed
+    // limit in resources/memory-write-lock.ts).
+    const outcome = await withMemoryWriteLock(memoryPrimaryStore(), [id], async () => {
+      const row = await table.get(id, stagedContext);
+      if (!row) throw new Error(`Promotion memory ${id} was not written`);
+      if (isStaleBasis(row, written)) return false;
+      const update = promotionStampUpdate(row, reviewerId, decidedAt);
+      await table.update(id, update, stagedContext);
+      noteMemoryUpsert({ ...row, ...update });
+      return true;
+    }, { phase: "promotion-stamp-manual" });
+    if (outcome.kind !== "done") throw new PromotionStampLockError(outcome.kind, id);
     return;
   }
   // Test-only: inert unless the fault-injection opt-in is armed.
-  const beforeFirstRead = txnPausePoint("promotion-stamp-select");
-  if (beforeFirstRead) await beforeFirstRead;
-  const selected = await table.get(id, {});
-  if (!selected) throw new Error(`Promotion memory ${id} was not written`);
-  if (!isWrittenRow(selected, written)) throw new PromotedRowChangedError(id);
-  const outcome = await writeBackCommittedRow(
-    table,
-    id,
-    (stored) => ({ write: stamp(stored) }),
-    { ctx: enumerationContext, label: "promotion-stamp", pausePre: () => txnPausePoint("promotion-stamp-pre"), pausePoint: () => txnPausePoint("promotion-stamp"), matchFields: ["content"], expectedRow: selected },
-  );
-  if ("write" in outcome) noteMemoryUpsert(outcome.write);
+  const outcome = await withMemoryWriteLockOnce(memoryPrimaryStore(), [id], async () => {
+    const beforeFirstRead = txnPausePoint("promotion-stamp-select");
+    if (beforeFirstRead) await beforeFirstRead;
+    const selected = await table.get(id, {});
+    if (!selected) throw new Error(`Promotion memory ${id} was not written`);
+    if (isStaleBasis(selected, written)) return null;
+    const writeBack = await writeBackCommittedRow(
+      table,
+      id,
+      (stored) => {
+        const update = promotionStampUpdate(stored, reviewerId, decidedAt);
+        return { update };
+      },
+      { ctx: enumerationContext, label: "promotion-stamp", pausePre: () => txnPausePoint("promotion-stamp-pre"), pausePoint: () => txnPausePoint("promotion-stamp"), matchFields: ["content"], expectedRow: selected },
+    );
+    // Test-only: the write-back committed and the lock is still held.
+    const committed = txnPausePoint("promotion-stamp-committed");
+    if (committed) await committed;
+    if ("update" in writeBack) noteMemoryUpsert({ ...selected, ...writeBack.update });
+    return writeBack;
+  }, { phase: "promotion-stamp-auto" });
+  if (outcome.kind !== "done") throw new PromotionStampLockError(outcome.kind, id);
 }
 
 /** Stamp after a successful Memory write. Failures must not abort a sweep or

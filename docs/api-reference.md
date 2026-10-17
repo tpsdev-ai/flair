@@ -388,7 +388,7 @@ A peer can therefore show `presenceStatus: "offline"`, `activity: "idle"`, `last
 | `expiresAt` | String | Ephemeral TTL |
 | `retrievalCount` / `lastRetrieved` | | Search-hit counters (weak signal). Incremented on `MemoryHitStat` and overlaid on Memory reads — search no longer rewrites the Memory row. |
 | `usageCount` | Int | Verified-use signal; only `RecordUsage` / citations increment |
-| `promotionStatus` / `promotedAt` / `promotedBy` | | REM promotion |
+| `promotionStatus` / `promotedAt` / `promotedBy` / `promotionContentHash` | | REM promotion; the hash binds the verdict to the stored text |
 | `archived` / `archivedAt` / `archivedBy` | | Basement |
 | `parentId` / `derivedFrom` / `sessionId` / `lastReflected` | | Learning pipeline |
 | `supersedes` | String | Version chain |
