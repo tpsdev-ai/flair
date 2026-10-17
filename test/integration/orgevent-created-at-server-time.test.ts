@@ -20,14 +20,10 @@
  *     row is unchanged, for agents and admin agents alike, including a stored
  *     createdAt that is an empty string; an update that omits createdAt keeps
  *     the stored value;
- *   - after POST normalization (an empty root id gets a generated id) and earlier
- *     guards (a non-admin collection PUT gets 403 first), POST and PUT ids outside
+ *   - after POST normalization and earlier guards, POST and PUT ids outside
  *     a non-empty string or a non-empty array of strings get `invalid_event_id`
- *     (400) before any write. PATCH checks the addressed path id; an `id` supplied
- *     in a PATCH body follows Harper's own validation, not the named
- *     `invalid_event_id` rule. Trusted server-originated internal PUT/PATCH skip
- *     the id check in _assignCreatedAt. An administrator's collection PUT is
- *     scanned on the initial call, before Harper's per-element dispatch;
+ *     (400) before any write. PATCH checks the addressed path id. Trusted
+ *     server-originated internal PUT/PATCH skip the id check in _assignCreatedAt;
  *   - malformed bodies reaching the POST, PUT and PATCH resource methods are
  *     refused with `body_must_be_object` (400), except admitted arrays of records,
  *     before the resource method's authentication, attribution, ownership and
@@ -41,8 +37,8 @@
  *     read receives `invalid_event_id` (400);
  *   - for malformed ids and bodies, the status each caller gets is pinned, with
  *     a refusal's `error` or `code` field, including input answered before the
- *     check (attribution, the owner-scoped write guard, Harper's own
- *     validation);
+ *     check (attribution, the owner-scoped write guard, Flair's body guard
+ *     (`body_must_be_object`), Harper's own validation);
  *   - the catch-up feed delivers events in timestamp and ID order, so events
  *     with one server time are delivered in ID order (checked on a second,
  *     frozen-clock instance with IDs in reverse write order);
@@ -744,18 +740,11 @@ describe("a composite (array of strings) id follows the same createdAt rule", ()
 });
 
 describe("what each malformed id or body gets", () => {
-  // The shared id rule answers after POST normalization and earlier guards.
-  // Trusted server-originated internal PUT/PATCH skip the id check in
-  // _assignCreatedAt. At the root collection, POST generates an id when
-  // the body's id is missing, null or empty, and refuses every other id that is
-  // not a non-empty string or a non-empty array of strings with
-  // invalid_event_id (400) before its ownership lookup; an administrator's
-  // collection PUT scans the body on the initial call, before Harper's
-  // per-element dispatch. A non-admin collection PUT is refused earlier by the
-  // owner-scoped write guard (403) whatever its body; other input is answered
-  // earlier by attribution or Harper's own validation. A refused case asserts
-  // the status plus its `error` field (flair refusals; the collection refusal's
-  // whole body) or `code` field (Harper's problem details); a generated-id POST
+  // Earlier refusals include the owner-scoped write guard (403), attribution,
+  // Flair's body guard (`body_must_be_object`) and Harper's own validation.
+  // A refused case asserts the status plus its `error` field (flair refusals;
+  // the collection refusal's whole body) or `code` field (Harper's problem
+  // details); a generated-id POST
   // case asserts a 2xx and exactly one row with a generated id. Storage is
   // checked for POST id cases by rows found by summary; collection PUT id cases
   // check the table count and, when present, the named row's bytes, as well as
@@ -797,9 +786,7 @@ describe("what each malformed id or body gets", () => {
     true: [INVALID, INVALID], "42": [INVALID, INVALID], "[]": [INVALID, INVALID],
     "{a:1}": [INVALID, INVALID], '["x",1]': [INVALID, INVALID],
   };
-  // Collection PUT, [agent, admin]: a non-admin's is refused by the owner-scoped
-  // write guard; an administrator's element is refused by the shared id rule,
-  // on the initial collection call, before Harper's per-element dispatch.
+  // Collection PUT, [agent, admin].
   const COLLECTION_ID: Record<string, [Expect, Expect]> = {
     missing: [COLLECTION, INVALID], empty: [COLLECTION, INVALID], null: [COLLECTION, INVALID],
     "0": [COLLECTION, INVALID], false: [COLLECTION, INVALID], true: [COLLECTION, INVALID],

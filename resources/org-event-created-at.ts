@@ -111,10 +111,7 @@ export function isReadableEventId(id: unknown): id is string | string[] {
 
 /**
  * Returns invalid_event_id (400) for anything but a non-empty string or a
- * non-empty array of strings, or null. Used after POST normalization (an empty
- * root POST id gets a generated id) and earlier guards (a non-admin collection
- * PUT gets 403 first). Trusted server-originated internal PUT/PATCH skip the id
- * check in _assignCreatedAt. The refusal echoes no submitted value.
+ * non-empty array of strings, or null. The refusal echoes no submitted value.
  */
 export function unreadableEventIdRefusal(id: unknown): Response | null {
   return isReadableEventId(id) ? null : invalidEventId();
@@ -122,8 +119,8 @@ export function unreadableEventIdRefusal(id: unknown): Response | null {
 
 /**
  * The same rule applied to a collection PUT's array body: the refusal for the
- * first record element whose id it does not read, or null. A non-record element
- * is Harper's to refuse, so it is skipped here.
+ * first record element whose id it does not read, or null.
+ * The scan skips non-record elements.
  */
 export function collectionElementIdRefusal(body: unknown): Response | null {
   if (!Array.isArray(body)) return null;

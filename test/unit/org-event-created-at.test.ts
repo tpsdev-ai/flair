@@ -140,7 +140,7 @@ describe("invalidEventId", () => {
   });
 });
 
-describe("unreadableEventIdRefusal — after POST normalization (empty root id generated) and earlier guards (non-admin collection PUT gets 403); trusted server-originated internal PUT/PATCH skip _assignCreatedAt", () => {
+describe("unreadableEventIdRefusal", () => {
   it("reads a non-empty string id and a non-empty array of strings, and refuses every other shape", async () => {
     for (const id of ["e1", ["x", "y"], ["x", ""]] as unknown[]) {
       expect(unreadableEventIdRefusal(id), `refused ${JSON.stringify(id)}`).toBeNull();
@@ -177,7 +177,7 @@ describe("collectionElementIdRefusal — the same rule over a collection PUT arr
     expect(collectionElementIdRefusal(undefined)).toBeNull();
   });
 
-  it("skips a non-record element, which Harper refuses itself", () => {
+  it("the scan skips non-record elements", () => {
     expect(collectionElementIdRefusal(["abc"])).toBeNull();
     expect(collectionElementIdRefusal([null])).toBeNull();
     expect(collectionElementIdRefusal([["abc", 1]])).toBeNull();

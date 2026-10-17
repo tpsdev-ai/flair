@@ -47,21 +47,8 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
   allowRead() { return orgEventAuthGate.call(this); }
 
   /**
-   * A collection PUT (an array body) is dispatched by Harper to one element
-   * write per array record, and each element is resolved to its stored row
-   * (Table.getResource -> _loadRecord) before the resource's put() runs. An
-   * element id of an empty array or an object fails there with a bare 500, and a
-   * boolean id with Harper's own 400, so the element write never reaches the
-   * shared id rule.
-   *
-   * This hook scans the collection body on the initial collection-PUT call,
-   * before Harper's per-element dispatch, after the owner-scoped write guard
-   * (super); a non-admin collection PUT gets 403 first. The shared rule answers
-   * invalid_event_id (400) for ids remaining after POST normalization and
-   * earlier guards; an empty root POST id gets a generated id. Trusted
-   * server-originated internal PUT/PATCH skip the id check in _assignCreatedAt.
-   * A non-record element is left to Harper's own handling. This mirrors the
-   * collection-PUT routing Credential uses.
+   * Scans the collection body on the initial collection-PUT call, before
+   * Harper's per-element dispatch. The scan skips non-record elements.
    */
   static getResource(target: any, request: any, options?: any): any {
     const admitted = super.getResource(target, request, options);
