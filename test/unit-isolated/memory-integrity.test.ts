@@ -286,7 +286,7 @@ mock.module("harper", () => ({
   // bun's mock.module is process-global, so a second file that mocks `harper`
   // in the same process must present a compatible shape or the module cache
   // serves whichever registration won. These exports let a harper-mocking
-  // sibling (test/unit/memory-selection-middleware-1940.test.ts) import
+  // sibling (test/unit-isolated/memory-selection-middleware-1940.test.ts) import
   // auth-middleware whichever mock is in effect (flair#2307 item 6).
   server: {
     getUser: async (_user: string, _pass: string | null, _request: any) => null,

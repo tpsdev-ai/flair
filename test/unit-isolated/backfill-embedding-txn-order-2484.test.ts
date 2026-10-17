@@ -12,7 +12,7 @@
  * `embeddings-provider` mock for its own bun process. `auth-middleware.ts` is a
  * side-effect module that calls `server.http(fn)`; the harper mock captures
  * that callback so this file drives the REAL middleware with a REAL
- * Ed25519-signed request, as test/unit/memory-selection-middleware-1940
+ * Ed25519-signed request, as test/unit-isolated/memory-selection-middleware-1940
  * does, and observes the order in which the model call and the transaction run.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
