@@ -42,6 +42,9 @@ export interface HarperRoute {
   isCollection: boolean;
   /** The routed path (`/<resource><remainder>`), for a by-name classification. */
   decisionPath: string;
+  /** True when Harper's `RequestTarget` threw on the routed remainder: `recordId`
+   *  is then null without meaning a collection. */
+  recordIdUnresolved: boolean;
 }
 
 /**
@@ -82,7 +85,7 @@ export function routeWithHarper(rawTarget: string, headers: unknown): HarperRout
   try {
     target = new (RequestTarget as any)(relativeURL);
   } catch {
-    return { resource, recordId: null, property: null, isCollection: false, decisionPath };
+    return { resource, recordId: null, property: null, isCollection: false, decisionPath, recordIdUnresolved: true };
   }
   const isCollection = target.isCollection === true;
   let recordId: string | null = typeof target.id === "string" ? target.id : (target.id == null ? null : String(target.id));
@@ -107,5 +110,5 @@ export function routeWithHarper(rawTarget: string, headers: unknown): HarperRout
     }
   }
 
-  return { resource, recordId, property, isCollection, decisionPath };
+  return { resource, recordId, property, isCollection, decisionPath, recordIdUnresolved: false };
 }

@@ -477,3 +477,32 @@ describe("a guarded mutation fails closed when its owner row cannot be read", ()
     expect(nextCalls).toBe(0);
   });
 });
+
+describe("a guarded mutation whose routed record id Harper cannot resolve is refused", () => {
+  // This file's `RequestTarget` is Harper's own; it throws on the invalid
+  // percent-encoding in this routed remainder.
+  for (const method of ["PATCH", "PUT"] as const) {
+    it(`a non-admin ${method} gets the named 400 and reaches no owner read and no next layer`, async () => {
+      harperServer.resources = memoryRouteRegistry();
+      try {
+        const url = "/Memory/a%ZZ";
+        const res = await mw(makeRequest(url, method, signedAuthorization(method, url)), next);
+        expect(res.status).toBe(400);
+        const text = await res.text();
+        expect(JSON.parse(text).error).toBe("unresolved_request_target");
+        expect(text).not.toContain("%ZZ");
+        expect(nextCalls).toBe(0);
+        expect(tableGets.Memory!.length).toBe(0);
+
+        // Control: a resolvable id on the same route reaches the owner read and the next layer.
+        const ok = "/Memory/ok-id";
+        const okRes = await mw(makeRequest(ok, method, signedAuthorization(method, ok)), next);
+        expect(okRes.status).toBe(200);
+        expect(nextCalls).toBe(1);
+        expect(tableGets.Memory!.some((c) => c.id === "ok-id")).toBe(true);
+      } finally {
+        delete harperServer.resources;
+      }
+    });
+  }
+});

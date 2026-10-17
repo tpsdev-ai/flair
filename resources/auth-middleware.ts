@@ -299,6 +299,19 @@ function ownerReadFailedRefusal(table: string): Response {
 }
 
 /**
+ * A signed non-admin agent's mutation whose target Harper matched, but whose
+ * record id Harper's `RequestTarget` could not resolve, is refused before any
+ * owner decision: those decisions need the id. 400: the target cannot be parsed into a record id. The
+ * message is fixed and names no part of the target.
+ */
+function unresolvedTargetRefusal(): Response {
+  return new Response(JSON.stringify({
+    error: "unresolved_request_target",
+    message: "the request target could not be resolved to a record id, so the write was refused",
+  }), { status: 400, headers: { "content-type": "application/json" } });
+}
+
+/**
  * The id a Memory write COMMITTED, read from the writer's own response result
  * (its `id` field) — the trustworthy source, since a by-id write can commit a
  * successor with a different id. Returns null when the result names no id as a
@@ -768,6 +781,13 @@ server.http(async (request: any, nextLayer: any) => {
 
   const method = request.method.toUpperCase();
   const isMutation = method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE";
+
+  // A target Harper matched, but whose record id its RequestTarget could not
+  // resolve, is refused for a signed non-admin agent's mutation before the owner
+  // decisions below.
+  if (isMutation && !request.tpsAgentIsAdmin && routed?.recordIdUnresolved) {
+    return unresolvedTargetRefusal();
+  }
 
   // ── THE record-ownership rule, for every table, on every mutating verb ─────
   //
