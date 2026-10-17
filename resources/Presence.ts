@@ -366,8 +366,8 @@ async function presenceWriteHomeDenial(agentId: string, currentId: string | null
 }
 
 /**
- * Prefer the URL-bound target (`getId()`) for by-ID PUT/PATCH; without one,
- * use the body `agentId` (including a collection PUT routed here).
+ * Use the URL-bound id; if absent or getId() throws, use a non-empty string
+ * body `agentId`, else a scalar (string or number) body `id`.
  */
 function presenceWriteTargetId(resource: any, content: any): string | number | null {
   try {
@@ -375,7 +375,7 @@ function presenceWriteTargetId(resource: any, content: any): string | number | n
     const id = typeof getId === "function" ? getId.call(resource) : undefined;
     if (typeof id === "string" || typeof id === "number") return id;
   } catch {
-    /* getId() threw — fall back to the body id below */
+    /* Fall back to the body below. */
   }
   if (content != null && typeof content === "object") {
     if (typeof content.agentId === "string" && content.agentId.length > 0) return content.agentId;
@@ -769,8 +769,8 @@ export class Presence extends (databases as any).flair.Presence {
     if (auth.kind === "anonymous") {
       return new Response(JSON.stringify({ error: "authentication required" }), { status: 401, headers: { "Content-Type": "application/json" } });
     }
-    // By-ID PUT uses the URL-bound id; without one, use the body agentId
-    // (including a collection PUT routed here).
+    // Use the URL-bound id; if absent or getId() throws, use a non-empty string
+    // body agentId, else a scalar (string or number) body id.
     const targetId = presenceWriteTargetId(this, content);
     if (auth.kind === "agent" && !auth.isAdmin && targetId != null && String(targetId) !== auth.agentId) {
       return new Response(JSON.stringify({ error: "forbidden: cannot write presence for another agent" }), { status: 403, headers: { "Content-Type": "application/json" } });
@@ -807,8 +807,9 @@ export class Presence extends (databases as any).flair.Presence {
     if (auth.kind === "agent" && !auth.isAdmin && targetId != null && String(targetId) !== auth.agentId) {
       return new Response(JSON.stringify({ error: "forbidden: cannot write presence for another agent" }), { status: 403, headers: { "Content-Type": "application/json" } });
     }
-    // P2: for by-ID PATCH the URL-bound id decides the home refusal; without
-    // one, use the body agentId. Compare with THIS instance's id read FRESH here.
+    // P2: use the URL-bound id; if absent or getId() throws, use a non-empty string
+    // body agentId, else a scalar (string or number) body id. Compare with THIS
+    // instance's id read FRESH here.
     const currentId = await currentInstanceId();
     if (targetId != null) {
       const homeDenial = await presenceWriteHomeDenial(String(targetId), currentId);

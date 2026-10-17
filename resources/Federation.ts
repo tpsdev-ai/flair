@@ -1184,10 +1184,8 @@ export class FederationSync extends Resource {
     };
 
     // ── flair#2578 slice 1: Presence receipt (P1, P4, P5) ──
-    // The batch-verified sender (`sender`) is the home authority. The decision
-    // (the Agent home and the Presence row) is re-verified inside the write-back
-    // transaction against the rows the write lands on, so a home that changed
-    // between the read and the write is seen, not overwritten.
+    // The batch-verified sender (`sender`) is the home authority. Write-back
+    // rechecks the home fresh and reads the Presence row in its owned transaction.
     const mergePresence = async (
       record: SyncRecord,
       sender: string,
@@ -1220,8 +1218,8 @@ export class FederationSync extends Resource {
           table,
           record.id,
           async (row) => {
-            // Re-verify BOTH facts the decision used against the current rows:
-            // the Agent home, and the Presence row this write replaces.
+            // Fresh home recheck during write-back; `row` is the transaction-scoped
+            // Presence read.
             const currentHome = presenceHomeBindingReason(await readAgentRow(agentId), sender);
             if (currentHome) return { skip: true, reason: currentHome };
             const current = mergePresenceReceipt(row, validated.row, receivedAt);

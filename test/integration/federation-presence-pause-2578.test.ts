@@ -6,7 +6,7 @@
  * Two interleavings at the Presence merge's own pause points
  * (resources/Federation.ts, resources/txn-pause-point.ts):
  *   - a HOME change before the owned transaction opens (presence-merge-pre): the
- *     in-transaction re-check sees it and the record is refused by name;
+ *     fresh home recheck during write-back sees it and the record is refused by name;
  *   - a ROW change inside the transaction (presence-merge): the committed-row
  *     confirmation sees it, the write aborts, and the key is refused as
  *     merge_target_changed — the SAME named conflict the generic merge reports.
