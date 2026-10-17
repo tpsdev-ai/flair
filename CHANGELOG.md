@@ -88,9 +88,10 @@ so a hand-written entry here is lost.
   its `agentId` is homed on the batch-verified sender: a missing `Agent` row is a
   retryable skip, and a row homed elsewhere or with no home is not. Inbound rows
   are stripped to the declared Presence fields and validated (activity
-  vocabulary, a finite heartbeat within a 5-minute future allowance, version
-  strings capped at 64 characters) before storage, and a Presence-specific merge
-  refuses an older heartbeat rather than replacing a newer one. The local writers
+  vocabulary, a finite heartbeat within a 5-minute future allowance, a version
+  string over 64 characters dropped and stored as null) before storage, and a
+  Presence-specific merge refuses an older heartbeat rather than replacing a
+  newer one. The local writers
   (POST, PUT, PATCH) compare the agent's home against this instance's id read
   fresh from the `Instance` table at write time, refusing a write for an agent
   homed on another instance, and none of them can set a client
@@ -100,7 +101,7 @@ so a hand-written entry here is lost.
   value; receipt stores the batch-verified sender) and `receivedAt` (stamped on
   receipt).
   With the flag off, a Presence record eligible for
-  receipt skips as `presence_receive_disabled` rather than `unknown_table`.
+  receipt skips as `presence_receive_disabled` rather than `unknown_table` (#2578).
 
 ### Changed
 
@@ -128,7 +129,7 @@ so a hand-written entry here is lost.
 
 - **Non-admin Memory writes discard caller-supplied vectors and model stamps that differ from the stored row's.** Embedding is
   computed when the resulting write needs one. Non-admin writes cannot relabel
-  a stored vector. Administrator writes, trusted in-process writes, federation-sync records
+  a stored vector. Administrator writes, trusted in-process writes, and federation-sync records
   are unchanged. Empty-vector normalization and the re-embed request protocol are unchanged;
   an ordinary non-admin write strips a supplied stamp even alongside a null or empty embedding (flair#2573).
 
@@ -701,6 +702,8 @@ so a hand-written entry here is lost.
   > **Heads-up:** Non-admin PUT, PATCH and DELETE must address one record.
 
 ## [0.61.0] - 2026-10-12
+
+_0.61.0 was tagged but never published to npm; 0.62.0 supersedes it._
 
 ### Added
 
