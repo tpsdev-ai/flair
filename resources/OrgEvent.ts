@@ -338,8 +338,9 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
     if (target && (target.isCollection === true || target.id == null)) {
       // Refuse the whole collection delete before anything is removed when its
       // selection contains a reserved row. An ordinary-only selection proceeds.
-      const scan = new (target.constructor as any)(target.toString());
-      Object.assign(scan, target);
+      const scan = target instanceof URLSearchParams
+        ? Object.assign(new (target.constructor as any)(target.toString()), target)
+        : target;
       scan.checkPermission = false;
       for await (const row of this.search(scan)) {
         if (isReservedEventRecord(row)) return reservedEventRefusal();
