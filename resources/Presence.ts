@@ -366,11 +366,8 @@ async function presenceWriteHomeDenial(agentId: string, currentId: string | null
 }
 
 /**
- * The id a PUT/PATCH write lands on: the URL-bound target (`getId()`) when there
- * is one, else the body `agentId` (an in-process call, where the body id IS the
- * write key). Harper writes to the URL target and rewrites the row's primary key
- * to it, so a body id is never the row a by-id write changes. A non-scalar or
- * absent target is null.
+ * Prefer the URL-bound target (`getId()`) for by-ID PUT/PATCH; without one,
+ * use the body `agentId` (including a collection PUT routed here).
  */
 function presenceWriteTargetId(resource: any, content: any): string | number | null {
   try {
@@ -772,16 +769,14 @@ export class Presence extends (databases as any).flair.Presence {
     if (auth.kind === "anonymous") {
       return new Response(JSON.stringify({ error: "authentication required" }), { status: 401, headers: { "Content-Type": "application/json" } });
     }
-    // The addressed record is the URL-bound target, never a body id: Harper
-    // writes to the URL target and rewrites the primary key to it, so a body
-    // agentId must not decide who may be written.
+    // By-ID PUT uses the URL-bound id; without one, use the body agentId
+    // (including a collection PUT routed here).
     const targetId = presenceWriteTargetId(this, content);
     if (auth.kind === "agent" && !auth.isAdmin && targetId != null && String(targetId) !== auth.agentId) {
       return new Response(JSON.stringify({ error: "forbidden: cannot write presence for another agent" }), { status: 403, headers: { "Content-Type": "application/json" } });
     }
-    // P2: the same home refusal as POST — this is a local writer too. A write
-    // for an agent homed on another instance is refused, decided on the
-    // URL-bound target and on THIS instance's id read FRESH here.
+    // P2: refuse a foreign-homed agent using that target and THIS instance's
+    // id read FRESH here.
     const currentId = await currentInstanceId();
     if (targetId != null) {
       const homeDenial = await presenceWriteHomeDenial(String(targetId), currentId);
@@ -800,7 +795,7 @@ export class Presence extends (databases as any).flair.Presence {
 
   /**
    * PATCH merges into the stored row (Harper partial update) and repeats put()'s
-   * auth, URL-bound home guard (P2), and author rule (P3).
+   * auth, home guard (P2), and author rule (P3).
    * A client `receivedAt` is never stored.
    */
   async patch(content: any, query?: any) {
@@ -812,8 +807,8 @@ export class Presence extends (databases as any).flair.Presence {
     if (auth.kind === "agent" && !auth.isAdmin && targetId != null && String(targetId) !== auth.agentId) {
       return new Response(JSON.stringify({ error: "forbidden: cannot write presence for another agent" }), { status: 403, headers: { "Content-Type": "application/json" } });
     }
-    // P2: a PATCH is a local writer too — refuse a foreign-homed agent's row,
-    // decided on the URL-bound target and on THIS instance's id read FRESH here.
+    // P2: for by-ID PATCH the URL-bound id decides the home refusal; without
+    // one, use the body agentId. Compare with THIS instance's id read FRESH here.
     const currentId = await currentInstanceId();
     if (targetId != null) {
       const homeDenial = await presenceWriteHomeDenial(String(targetId), currentId);

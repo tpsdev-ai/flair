@@ -9,6 +9,6 @@ type Presence @table(database: "flair") @export {
   activityUpdatedAt: BigInt      # unix ms — when activity/currentTask were last ASSERTED (natural-presence); nullable/additive, absent on records written before this feature (readers fall back to lastHeartbeatAt)
   flairVersion: String           # @tpsdev-ai/flair version serving this heartbeat (flair#639); absent on pre-#639 records
   harperVersion: String          # @harperfast/harper version serving this heartbeat (flair#639); absent on pre-#639 records
-  originatorInstanceId: String   # local creates stamp this instance's id read fresh from the Instance table (null otherwise); updates preserve the stored value. Receipt stores the sender-carried value. Nullable/additive.
+  originatorInstanceId: String   # local creates stamp this instance's id read fresh from the Instance table (null otherwise); updates preserve the stored value. Receipt stores a sender-carried string, or null for any other type. Nullable/additive.
   receivedAt: BigInt             # unix ms — when THIS instance received a replicated row. Stamped only by the federation receive path; a local write (POST/PUT/PATCH) never sets it. Nullable/additive.
 }

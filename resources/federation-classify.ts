@@ -91,8 +91,8 @@ export type SkipReason =
   | "content_suffix_id_not_federated" // a Memory id ending in `.content`
   // ─── flair#2578 slice 1: office-wide Presence, receiver and local guard ──
   // Presence replication (spoke → hub) is behind ONE default-off receive flag.
-  // With the flag off a known Presence record is skipped by its own name, so an
-  // operator's SyncLog grep is not mislabelled `unknown_table` (Kern N5).
+  // With the flag off, an eligible Presence record reaching receipt skips as
+  // presence_receive_disabled; earlier key/classifier refusals answer first.
   | "presence_receive_disabled" // the receive flag is off (non-retryable)
   // The batch-verified SENDER is the only home authority (never the wire
   // originatorInstanceId). The local Agent row for data.agentId must be homed on
@@ -102,8 +102,7 @@ export type SkipReason =
   // Presence-specific merge (Sherlock F5, Kern 4): an older heartbeat never
   // replaces a newer one (non-retryable).
   | "presence_stale_heartbeat"
-  // Receipt validation (Sherlock F4, Kern 5): a row that does not strip to the
-  // declared Presence fields is never stored (non-retryable).
+  // Failed field validation (non-retryable).
   | "presence_invalid_shape"
   // The inbound heartbeat/activity stamp is later than the receiver's clock plus
   // the same allowance classifyRecord uses (Sherlock NEW-1; non-retryable).

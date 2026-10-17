@@ -1275,9 +1275,8 @@ export class FederationSync extends Resource {
           return { reason: decision.reason };
         }
 
-        // A known Presence record with the receive flag OFF is skipped by its
-        // own name (Kern N5) — never merged, and never mislabelled
-        // unknown_table (which would make an operator grep lie).
+        // With the flag OFF, an eligible Presence record reaching receipt skips
+        // as presence_receive_disabled; earlier key/classifier refusals answer first.
         if (record.table === "Presence" && !presenceReceiveEnabled()) {
           return { reason: "presence_receive_disabled" };
         }

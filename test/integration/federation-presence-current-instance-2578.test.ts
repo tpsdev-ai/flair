@@ -12,8 +12,9 @@
  * resource create (an admin `POST /Agent/` stamps through `localInstanceId()`),
  * then change — and separately remove — the `Instance` row WITHOUT restarting
  * Harper, and check the POST, PUT and PATCH home decisions and a create's stamp
- * against the CURRENT id. The flag-off/flag-on receive paths live in
- * federation-presence-receive-2578.test.ts; the pure rules in
+ * against the CURRENT id. The flag-on receive path lives in
+ * federation-presence-receive-2578.test.ts; flag-off coverage lives in
+ * federation-presence-receive-disabled-2578.test.ts; the pure rules in
  * test/unit/presence-federation-2578.test.ts.
  *
  * Build prerequisite: dist/resources/*.js (`bun run build`).
@@ -33,7 +34,7 @@ const sfx = Date.now().toString(36);
 const LOCAL_A = `fp-current-a-${sfx}`;
 const LOCAL_B = `fp-current-b-${sfx}`;
 
-// One agent per (home, verb) so each write is a CREATE and its stamp is visible.
+// POST/PUT create assertions check the new stamp; the seeded PATCH update checks preservation.
 const HOMED_A_POST = mkAgent(`fp-current-homed-a-post-${sfx}`);
 const HOMED_B_POST = mkAgent(`fp-current-homed-b-post-${sfx}`);
 const HOMED_A_PUT = mkAgent(`fp-current-homed-a-put-${sfx}`);

@@ -1,8 +1,8 @@
 /**
  * federation-presence-receive-disabled-2578.test.ts — flair#2578 slice 1: with
- * the receive flag OFF (the default), a known Presence record skips by its own
- * name (`presence_receive_disabled`) rather than `unknown_table`, and the rest
- * of the receive path is unchanged. Real Harper.
+ * the receive flag OFF (the default), an eligible Presence record reaching
+ * receipt skips as `presence_receive_disabled`; earlier key/classifier refusals
+ * answer first. Real Harper.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import nacl from "tweetnacl";
