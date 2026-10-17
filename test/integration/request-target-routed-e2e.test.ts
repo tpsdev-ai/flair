@@ -20,7 +20,10 @@
  *      collection create — never the URL or caller-header id. The instance runs
  *      without the migration trigger, whose re-embed can write a vector to the
  *      seeded Memory row; these cases need the embedding model and are skipped
- *      when its file is absent.
+ *      when its file is absent. They write as an administrator, whose supplied
+ *      short vector is stored as sent and leaves the backfill a vector to
+ *      compute (a non-admin's supplied vector is discarded and the server embeds
+ *      the content inline).
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
@@ -132,6 +135,7 @@ let harper: HarperInstance;
 let component: FailingComponent;
 const owner = mkAgent("rtr-owner");
 const other = mkAgent("rtr-other");
+const admin = mkAgent("rtr-admin");
 const NOW = new Date().toISOString();
 
 /** Arm the injected row-load failure for one exact id / disarm it, via the ROOTPATH sentinel. */
@@ -221,6 +225,7 @@ beforeAll(async () => {
   for (const a of [owner, other]) {
     await seed("Agent", { id: a.id, name: a.id, role: "agent", admin: false, publicKey: a.publicKey, createdAt: NOW });
   }
+  await seed("Agent", { id: admin.id, name: admin.id, role: "admin", admin: true, publicKey: admin.publicKey, createdAt: NOW });
   // (1) Record id: a caller-owned prefix row and an other-owned slash-id row.
   await seed("Asset", { id: "rtr-safe", agentId: owner.id, memoryId: "m0", contentType: "image/png", createdAt: NOW });
   await seed("Asset", { id: "rtr-safe/victim", agentId: other.id, memoryId: "m-victim", contentType: "image/png", createdAt: NOW });
@@ -349,13 +354,14 @@ describe("(2) rate-limit and public decisions use the routed resource name", () 
     expect(before?.agentId).toBe(other.id);
     expect(before?.embedding ?? null, "the seeded header-named row holds a vector").toBeNull();
 
-    // A canonical collection create by `owner`, with a caller header naming the
-    // other-owned row. The create must succeed as the caller's own new row, and
-    // the committed id (what the backfill targets) is that new row — never the
-    // header's id. The body supplies a short vector, so the committed row stays
-    // short unless the middleware's embedding backfill recomputes and writes it.
-    const res = await signed(owner, "POST", "/Memory", {
-      agentId: owner.id, content: "my own new memory", durability: "persistent",
+    // A canonical collection create by the administrator, with a caller header
+    // naming the other-owned row. The create must succeed as the caller's own new
+    // row, and the committed id (what the backfill targets) is that new row —
+    // never the header's id. The body supplies a short vector, which an
+    // administrator's write stores as sent, so the committed row stays short
+    // unless the middleware's embedding backfill recomputes and writes it.
+    const res = await signed(admin, "POST", "/Memory", {
+      agentId: admin.id, content: "my own new memory", durability: "persistent",
       embedding: [0.01, 0.02, 0.03],
     }, { "x-memory-id": "rtr-victim-mem" });
     expect(res.status, `create ${res.status}: ${res.body.slice(0, 200)}`).toBeLessThan(300);
@@ -373,22 +379,23 @@ describe("(2) rate-limit and public decisions use the routed resource name", () 
   it("a by-id POST that commits a SUCCESSOR with a different id backfills the successor, not the URL id", async () => {
     // A skill POST to a URL id, then an identical retry commits a SUCCESSOR with
     // a different id (flair#2263). The committed id the backfill uses comes from
-    // the write RESULT, not the URL id. The body supplies a short vector, so the
-    // successor stays short unless the backfill reads the RETURNED successor id.
+    // the write RESULT, not the URL id. The body supplies a short vector, which an
+    // administrator's write stores as sent, so the successor stays short unless
+    // the backfill reads the RETURNED successor id.
     const skillId = `rtr-skill-${randomUUID()}`;
-    const body = { agentId: owner.id, content: "successor backfill body", trigger: "when the committed id differs from the url", tags: ["skill"], durability: "persistent", embedding: [0.01, 0.02, 0.03] };
+    const body = { agentId: admin.id, content: "successor backfill body", trigger: "when the committed id differs from the url", tags: ["skill"], durability: "persistent", embedding: [0.01, 0.02, 0.03] };
 
-    const first = await signed(owner, "POST", `/Memory/${encodeURIComponent(skillId)}`, body);
+    const first = await signed(admin, "POST", `/Memory/${encodeURIComponent(skillId)}`, body);
     expect(first.status, `first ${first.status}: ${first.body.slice(0, 200)}`).toBeLessThan(300);
     expect(JSON.parse(first.body).id).toBe(skillId);
 
-    const retry = await signed(owner, "POST", `/Memory/${encodeURIComponent(skillId)}`, body);
+    const retry = await signed(admin, "POST", `/Memory/${encodeURIComponent(skillId)}`, body);
     expect(retry.status, `retry ${retry.status}: ${retry.body.slice(0, 200)}`).toBeLessThan(300);
     const successorId = JSON.parse(retry.body).id as string;
     expect(successorId).not.toBe(skillId);
 
     const successor = await readRow("Memory", successorId, ["id", "agentId", "supersedes"]);
-    expect(successor?.agentId).toBe(owner.id);
+    expect(successor?.agentId).toBe(admin.id);
     expect(successor?.supersedes).toBe(skillId);
 
     const len = await awaitBackfillVector(successorId);
