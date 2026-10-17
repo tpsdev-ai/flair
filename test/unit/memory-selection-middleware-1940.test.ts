@@ -17,8 +17,29 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from "bun
 import { generateKeyPairSync, randomUUID, sign as edSign } from "node:crypto";
 import { agentStore, middlewareCapture } from "../helpers/harper-mock.js";
 import { createFakeReplayNonceTable, ensureGlobalHarperTransaction } from "../helpers/fake-replay-store.ts";
+import { HarperRequestTarget, memoryRouteRegistry } from "../helpers/memory-route-registry.ts";
 
 let memoryGetCalls = 0;
+
+// The mocked `server`, shared by every registration of the mock below, so a
+// test can give it a live-route registry (`resources`) for its duration.
+const harperServer: any = {
+  getUser: async (_user: string, _pass: string | null, _request: any) => null,
+  http: (fn: any, _opts?: any) => {
+    middlewareCapture.value = fn;
+  },
+};
+
+/** Run `fn` with Harper's routing present: the path-form rewrite runs only on a
+ *  route to a Memory record. */
+async function withMemoryRoutes(fn: () => Promise<void>): Promise<void> {
+  harperServer.resources = memoryRouteRegistry();
+  try {
+    await fn();
+  } finally {
+    delete harperServer.resources;
+  }
+}
 
 // The factory is registered here and re-asserted in loadMiddleware() below:
 // bun's mock.module is process-global, so when another test file that mocks
@@ -48,14 +69,9 @@ function harperMock() {
         ReplayNonce: createFakeReplayNonceTable(),
       },
     },
-    server: {
-      getUser: async (_user: string, _pass: string | null, _request: any) => null,
-      http: (fn: any, _opts?: any) => {
-        middlewareCapture.value = fn;
-      },
-    },
+    server: harperServer,
     Resource: class {},
-    RequestTarget: class {},
+    RequestTarget: HarperRequestTarget,
   };
 }
 
@@ -132,17 +148,19 @@ describe("flair#1940 round 17 — a non-admin Memory read drops the caller's sel
 
   it("drops a wildcard `select(*)`, a `property` param, and a declared dotted suffix", async () => {
     const mw = await loadMiddleware();
-    for (const [given, want] of [
-      ["/Memory/x?select(*)", "/Memory/x"],
-      ["/Memory/x?property=content", "/Memory/x"],
-      ["/Memory/x?property=content&limit=3", "/Memory/x?limit=3"],
-      ["/Memory/x.content", "/Memory/x"],
-      ["/Memory/x?select(a),select(b)", "/Memory/x"],
-    ] as const) {
-      const req = makeRequest(given);
-      await mw(req, nextLayer);
-      expect(req.url, given).toBe(want); // assertion: the selection was stripped
-    }
+    await withMemoryRoutes(async () => {
+      for (const [given, want] of [
+        ["/Memory/x?select(*)", "/Memory/x"],
+        ["/Memory/x?property=content", "/Memory/x"],
+        ["/Memory/x?property=content&limit=3", "/Memory/x?limit=3"],
+        ["/Memory/x.content", "/Memory/x"],
+        ["/Memory/x?select(a),select(b)", "/Memory/x"],
+      ] as const) {
+        const req = makeRequest(given);
+        await mw(req, nextLayer);
+        expect(req.url, given).toBe(want); // assertion: the selection was stripped
+      }
+    });
   });
 
   it("leaves an UNKNOWN dotted suffix in the id (Harper owns path interpretation)", async () => {
@@ -154,11 +172,13 @@ describe("flair#1940 round 17 — a non-admin Memory read drops the caller's sel
 
   it("drops an ENCODED dotted declared suffix — Harper decides on the DECODED path", async () => {
     const mw = await loadMiddleware();
-    for (const given of ["/Memory/x%2Econtent", "/Memory/x%2econtent", "/Memory/x%2Econtent?limit=5"] as const) {
-      const req = makeRequest(given);
-      await mw(req, nextLayer);
-      expect(req.url, given).toBe(given.includes("?") ? "/Memory/x?limit=5" : "/Memory/x"); // assertion: `%2E` is a dot to Harper too
-    }
+    await withMemoryRoutes(async () => {
+      for (const given of ["/Memory/x%2Econtent", "/Memory/x%2econtent", "/Memory/x%2Econtent?limit=5"] as const) {
+        const req = makeRequest(given);
+        await mw(req, nextLayer);
+        expect(req.url, given).toBe(given.includes("?") ? "/Memory/x?limit=5" : "/Memory/x"); // assertion: `%2E` is a dot to Harper too
+      }
+    });
   });
 
   it("drops the selection on a COLLECTION read too", async () => {

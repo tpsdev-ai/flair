@@ -14,14 +14,15 @@
  * place, so its result is read into locals immediately, with no interleaving
  * request able to overwrite it.
  *
- * `getMatch` is asked for the `rest` match, which is how Harper's REST layer
- * dispatches. A request Harper dispatches through another chain — e.g. an `sse`
- * match for `Accept: text/event-stream` — is not resolved here, and falls back to
- * the pure mirror.
+ * `getMatch` is asked for the `rest` match. Harper's REST dispatcher asks for an
+ * `sse` match for a request with `Accept: text/event-stream`, and the two matches
+ * may differ; such a request is decided on the `rest` match, and on the pure
+ * mirror only when no `rest` match is returned.
  *
- * When the registry is not present (a unit test driving the middleware with a
- * mocked `harper`), the target matches no route, or the matcher throws, it returns
- * null and the caller falls back to the pure mirror in request-target.ts.
+ * When the registry or `RequestTarget` is not present (a unit test driving the
+ * middleware with a mocked `harper`), the target matches no route, or the matcher
+ * throws, it returns null and the caller falls back to the pure mirror in
+ * request-target.ts.
  */
 // Namespace import, not named: a unit test that mocks `harper` may not export
 // `RequestTarget`, and a named import of a missing export fails to LINK (before
@@ -54,6 +55,7 @@ export function routeWithHarper(rawTarget: string, headers: unknown): HarperRout
   const RequestTarget = (harper as any).RequestTarget;
   const resources = (server as { resources?: { getMatch?: Function } } | undefined)?.resources;
   if (!resources || typeof resources.getMatch !== "function") return null;
+  if (typeof RequestTarget !== "function") return null;
 
   // REST dispatches on the target with its single leading slash removed.
   const routeInput = rawTarget.startsWith("/") ? rawTarget.slice(1) : rawTarget;
@@ -76,7 +78,6 @@ export function routeWithHarper(rawTarget: string, headers: unknown): HarperRout
 
   // RequestTarget resolves the id (decodeURIComponent of the whole remainder)
   // and flags a collection, exactly as Harper does for dispatch.
-  if (typeof RequestTarget !== "function") return { resource, recordId: null, property: null, isCollection: false, decisionPath };
   let target: any;
   try {
     target = new (RequestTarget as any)(relativeURL);

@@ -6,9 +6,13 @@
  *    empty segment; a raw backslash) is answered with the named 400
  *    `non_canonical_request_target` before any other request processing: no
  *    header read, no method check, no credential read, no next layer.
- * 2. Every path decision splits the RAW path on `/` first and decodes a segment
- *    only afterwards, so an id containing `/`, sent as `%2F`, is decided as ONE
+ * 2. With no live route registry (this file's `harper` mock has none unless a
+ *    case adds one), the middleware's path decisions use the pure request-target
+ *    helpers, which split the RAW path on `/` first and decode a segment only
+ *    afterwards, so an id containing `/`, sent as `%2F`, is decided as ONE
  *    segment at each place the middleware reads a path.
+ * 3. The non-admin Memory read path rewrite runs only on Harper's route to a
+ *    Memory record id.
  *
  * Isolated: this file owns its `harper` and embeddings-provider mocks and drives
  * the REAL middleware with REAL Ed25519-signed requests, as
@@ -19,6 +23,7 @@ import { generateKeyPairSync, randomUUID, sign as edSign } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createFakeReplayNonceTable, ensureGlobalHarperTransaction } from "../helpers/fake-replay-store.ts";
+import { HarperRequestTarget, memoryRouteRegistry } from "../helpers/memory-route-registry.ts";
 
 process.env.FLAIR_RATE_LIMIT_ENABLED = "false";
 delete (process.env as any).FLAIR_PUBLIC;
@@ -55,6 +60,11 @@ function table(name: string) {
 }
 
 let captured: any = null;
+// The mocked `server`; a case may give it a live-route registry (`resources`).
+const harperServer: any = {
+  getUser: async () => null,
+  http: (fn: any) => { captured = fn; },
+};
 mock.module("harper", () => ({
   databases: {
     flair: {
@@ -73,12 +83,9 @@ mock.module("harper", () => ({
       ReplayNonce: createFakeReplayNonceTable(),
     },
   },
-  server: {
-    getUser: async () => null,
-    http: (fn: any) => { captured = fn; },
-  },
+  server: harperServer,
   Resource: class {},
-  RequestTarget: class {},
+  RequestTarget: HarperRequestTarget,
   logger: { warn: () => {}, error: () => {}, info: () => {} },
 }));
 
@@ -331,6 +338,49 @@ describe("the routed resource name drives the public-path and suffix decisions",
     // Not a public passthrough: anonymous annotation was applied, then passed on.
     expect(res.status).toBe(200);
     expect(req.tpsAnonymous).toBe(true);
+  });
+});
+
+describe("the non-admin Memory read path rewrite runs only on Harper's route to a Memory record id", () => {
+  const given = "/Memory/x.content?select(id)&limit=2";
+  async function readUrl(target: string): Promise<string> {
+    const req = makeRequest(target, "GET", signedAuthorization("GET", target));
+    expect((await mw(req, next)).status).toBe(200);
+    return req.url;
+  }
+  async function withRegistry(registry: { getMatch: (url: string) => any }, fn: () => Promise<void>): Promise<void> {
+    harperServer.resources = registry;
+    try {
+      await fn();
+    } finally {
+      delete harperServer.resources;
+    }
+  }
+
+  for (const [label, registry] of [
+    ["no live registry", null],
+    ["no matching route", { getMatch: () => undefined }],
+    ["a matcher error", { getMatch: () => { throw new Error("simulated matcher failure"); } }],
+  ] as const) {
+    it(`with ${label}, the path is left as sent and the query selection is dropped`, async () => {
+      const run = async () => { expect(await readUrl(given)).toBe("/Memory/x.content?limit=2"); };
+      if (registry) await withRegistry(registry, run);
+      else await run();
+    });
+  }
+
+  it("a Memory route with no record id leaves the path as sent", async () => {
+    // The file-type-suffix fallback routes `/Memory.json/x.content` to the
+    // Memory collection with an empty remainder: no record id.
+    await withRegistry(memoryRouteRegistry(), async () => {
+      expect(await readUrl("/Memory.json/x.content")).toBe("/Memory.json/x.content");
+    });
+  });
+
+  it("a route to Memory record `x` drops the declared `.content` suffix (control)", async () => {
+    await withRegistry(memoryRouteRegistry(), async () => {
+      expect(await readUrl(given)).toBe("/Memory/x?limit=2");
+    });
   });
 });
 

@@ -329,7 +329,8 @@ const ALLOWED_HTTP_METHODS: ReadonlySet<string> = new Set([
 
 // The resources the middleware makes a by-NAME decision on: the public-path
 // allowance and the OAuth rate-limit policy. The pure FALLBACK (`routedResourcePath`,
-// used only when the live registry is unavailable) resolves the first path
+// used when Harper's routing returns no route, e.g. no live registry, no
+// matching route, or a matcher error) resolves the first path
 // segment to a routed resource name here: Harper's file-type-suffix fallback
 // (Resources.getMatch) routes `<name>.<ext>` to `<name>` when `<name>.<ext>` is not
 // itself a resource, so a suffixed form (`OAuthToken.json`) would otherwise miss
@@ -348,20 +349,20 @@ const RAW_QUERY_RESOURCES: ReadonlySet<string> = new Set(["sql", "graphql"]);
 
 server.http(async (request: any, nextLayer: any) => {
   // ── Canonical request target, FIRST ────────────────────────────────────────
-  // Every decision below is made about the RAW request target, which is what
-  // Harper routes. A target that is not in canonical form (a `.`/`..` segment,
-  // raw or percent-encoded; an empty segment; a raw backslash) is answered with
-  // the named 400 here, before any other request processing: no method check,
-  // no rate-limit budget, no credential read, no next layer. See
-  // resources/request-target.ts.
+  // This check reads the RAW request target, the string Harper routes. A target
+  // that is not in canonical form (a `.`/`..` segment, raw or percent-encoded;
+  // an empty segment; a raw backslash) is answered with the named 400 here,
+  // before any other request processing: no method check, no rate-limit budget,
+  // no credential read, no next layer. See resources/request-target.ts.
   const rawTarget: string = typeof request.url === "string" ? request.url : String(request.url ?? "");
   if (!isCanonicalRequestTarget(rawTarget)) {
     return nonCanonicalRequestTargetRefusal(String(request.method ?? ""));
   }
   // The raw path (everything before the first `?`), exactly as Harper's own
-  // Request.pathname reads it. Path decisions split it on `/` FIRST and decode
-  // a segment only afterwards, so an encoded `/` (`%2F`) inside an id segment
-  // stays part of that one segment, as it does for Harper.
+  // Request.pathname reads it. The pure request-target helpers that read it split
+  // it on `/` FIRST and decode a segment only afterwards, so an encoded `/`
+  // (`%2F`) inside an id segment stays part of that one segment, as it does for
+  // Harper.
   const targetPath = requestPath(rawTarget);
 
   // ── Resolve the target through Harper's OWN routing, FIRST ──────────────────
@@ -372,8 +373,9 @@ server.http(async (request: any, nextLayer: any) => {
   // routed to the bare resource, and the first-dot property rule included.
   // Synchronous and before any await (getMatch mutates its entry in place; see
   // harper-routing.ts). The pure mirror in request-target.ts is the fallback when
-  // this returns null: the live registry is absent (a unit test mocking `harper`),
-  // the target matches no route, or the matcher throws.
+  // this returns null: the live registry or Harper's `RequestTarget` is absent (a
+  // unit test mocking `harper`), the target matches no route, or the matcher
+  // throws.
   const routed: HarperRoute | null = routeWithHarper(rawTarget, request.headers);
 
   // ── HTTP method allowlist ──────────────────────────────────────────────────
@@ -1006,13 +1008,12 @@ server.http(async (request: any, nextLayer: any) => {
         message: `a Memory request whose id segment contains an encoded '/' before a "${MEMORY_CONTENT_SELECTOR_SUFFIX}" (or other property) suffix is refused: the suffix cannot be told from part of the id`,
       }), { status: 400, headers: { "content-type": "application/json" } });
     }
-    // The Memory record id Harper routed this target to (null for a collection,
-    // a non-Memory resource, or when the live registry is absent and the pure
-    // mirror resolves it), gating the path rewrite inside stripMemorySelection.
-    const routedMemoryReadId = routed
-      ? (routed.resource === "Memory" ? routed.recordId : null)
-      : (() => { const r = routedRecordId(targetPath); return r?.resource === "Memory" ? r.id : null; })();
-    const stripped = stripMemorySelection(request.url, routedMemoryReadId !== null);
+    // The path rewrite inside stripMemorySelection runs only when Harper's own
+    // routing returned a Memory route with a record id. With no route (e.g. no
+    // live registry, no match, or a matcher error) or no record id, the path is
+    // left as sent; the query-selection removal does not depend on this.
+    const routedToMemoryRecord = routed !== null && routed.resource === "Memory" && routed.recordId !== null;
+    const stripped = stripMemorySelection(request.url, routedToMemoryRecord);
     if (stripped !== request.url) request.url = stripped;
   }
 
