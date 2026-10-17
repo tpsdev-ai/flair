@@ -448,14 +448,28 @@ describe("flair#2478 — post-commit verification on a re-embed PATCH and a lega
   }, 120_000);
 });
 
+// An idless Memory PUT or PATCH is refused for every caller and writes nothing.
+// A non-admin caller is refused first by the owner-scoped write policy (a write
+// to the collection rather than one record, 403); an admin caller reaches the
+// Memory verb, which refuses it 400 memory_id_required before the lock.
+const IDLESS_NON_ADMIN = { status: 403, error: "forbidden: a non-admin write to Memory must address one record by its id" };
+const IDLESS_ADMIN = { status: 400, error: "memory_id_required" };
+
 describe("flair#2478 — a PUT must name its id", () => {
-  it("a PUT with no id in the URL or the body is refused 400 memory_id_required, and writes nothing", async () => {
+  it("a PUT with no id in the URL or the body is refused (non-admin 403, admin 400 memory_id_required), and writes nothing", async () => {
     const marker = `wlk-idless-${randomUUID()}`;
     for (const path of ["/Memory/", "/Memory"]) {
       const res = await putPathAs(owner, path, { agentId: owner.id, content: marker, durability: "standard" });
       const body = await res.json() as any;
-      expect(res.status, `${path}: ${JSON.stringify(body)}`).toBe(400);
-      expect(body.error, path).toBe("memory_id_required");
+      expect({ status: res.status, error: body.error }, `${path} non-admin: ${JSON.stringify(body)}`).toEqual(IDLESS_NON_ADMIN);
+      const adminRes = await fetch(`${harper.httpURL}${path}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", Authorization: authHeader },
+        body: JSON.stringify({ agentId: owner.id, content: marker, durability: "standard" }),
+        signal: AbortSignal.timeout(60_000),
+      });
+      const adminBody = await adminRes.json() as any;
+      expect({ status: adminRes.status, error: adminBody.error }, `${path} admin: ${JSON.stringify(adminBody)}`).toEqual(IDLESS_ADMIN);
     }
     const rows = await opsCall({
       operation: "search_by_value", database: "flair", table: "Memory",
@@ -481,23 +495,28 @@ describe("flair#2478 — a PATCH must name its id", () => {
       clearMarkers(point);
     }
     for (const path of ["/Memory/", "/Memory"]) {
-      arm(point);
-      release(point);
-      try {
-        const res = await fetch(`${harper.httpURL}${path}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json", Authorization: ed25519Header(owner, "PATCH", path) },
-          body: JSON.stringify({ agentId: owner.id, content: "an idless PATCH" }),
-          signal: AbortSignal.timeout(60_000),
-        });
-        expect({
-          status: res.status,
-          error: (await res.json() as any).error,
-          bodyEntered: existsSync(join(pauseDir, `claimed.${point}`)),
-        }, path).toEqual({ status: 400, error: "memory_id_required", bodyEntered: false });
-      } finally {
-        rmSync(join(pauseDir, `arm.${point}`), { force: true });
-        clearMarkers(point);
+      for (const [caller, authorization, expected] of [
+        ["non-admin", ed25519Header(owner, "PATCH", path), IDLESS_NON_ADMIN],
+        ["admin", authHeader, IDLESS_ADMIN],
+      ] as const) {
+        arm(point);
+        release(point);
+        try {
+          const res = await fetch(`${harper.httpURL}${path}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json", Authorization: authorization },
+            body: JSON.stringify({ agentId: owner.id, content: "an idless PATCH" }),
+            signal: AbortSignal.timeout(60_000),
+          });
+          expect({
+            status: res.status,
+            error: (await res.json() as any).error,
+            bodyEntered: existsSync(join(pauseDir, `claimed.${point}`)),
+          }, `${path} ${caller}`).toEqual({ ...expected, bodyEntered: false });
+        } finally {
+          rmSync(join(pauseDir, `arm.${point}`), { force: true });
+          clearMarkers(point);
+        }
       }
     }
   }, 120_000);

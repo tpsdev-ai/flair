@@ -2,7 +2,7 @@
 # Byte-identical gate for src/cli.ts modularization. Do not edit by hand.
 # Refresh: UPDATE_CLI_SURFACE_SNAPSHOT=1 bun test test/unit-isolated/cli-surface-snapshot.test.ts
 # helpWidth=80 (pinned; TTY columns must not affect this file)
-# commands=142 options=647
+# commands=143 options=652
 #
 # TREE is registration order: every command/subcommand + declared options/args.
 # HELP is each command's outputHelp() (--help, including addHelpText).
@@ -1977,7 +1977,7 @@ flair memory
   description: Manage agent memories
   usage: [options] [command]
   options: (none)
-  subcommands: add, write-task-summary, search, basement, restore, list, hygiene, checkpoint, verify
+  subcommands: add, write-task-summary, search, basement, restore, list, hygiene, checkpoint, verify, compare-nodes
 
 flair memory add
   description: Write a new memory row for an agent (content via positional arg or --content)
@@ -2207,6 +2207,27 @@ flair memory verify
     --ops-target <url>
       description: Operations API URL override (env: FLAIR_OPS_TARGET)
       attr: opsTarget
+    --fabric-user <user>
+      description: Admin username (env: FABRIC_USER; inline leaks to ps/shell history)
+      attr: fabricUser
+    --fabric-password <pass>
+      description: Admin password (prefer FABRIC_PASSWORD env or --fabric-password-file)
+      attr: fabricPassword
+    --fabric-password-file <path>
+      description: Read the admin password from a mode-0600 file
+      attr: fabricPasswordFile
+
+flair memory compare-nodes
+  description: Compare observed Memory id sets of two or more explicitly named nodes
+  usage: [options]
+  options:
+    --node <ops-url>
+      description: A node's operations API URL (repeat once per node; at least two)
+      attr: node
+      default: []
+    --json
+      description: Print the comparison as JSON
+      attr: json
     --fabric-user <user>
       description: Admin username (env: FABRIC_USER; inline leaks to ps/shell history)
       attr: fabricUser
@@ -5179,6 +5200,8 @@ Commands:
   verify [options]              Compare this instance's Memory ids with a
                                 checkpoint taken before the operation: integrity
                                 failure, verified, or unknown
+  compare-nodes [options]       Compare observed Memory id sets of two or more
+                                explicitly named nodes
   help [command]                display help for command
 
 ----- flair memory add -----
@@ -5412,6 +5435,53 @@ Exit codes:
   1  absent checkpoint — no verification outcome
   2  integrity failure — a checkpointed Memory id is missing, or a durability tier count dropped
   3  unknown — comparison could not be completed: e.g. unreadable checkpoint, different operations origin, failed read, or count change
+
+
+----- flair memory compare-nodes -----
+Usage: flair memory compare-nodes [options]
+
+Compare observed Memory id sets of two or more explicitly named nodes
+
+Options:
+  --node <ops-url>               A node's operations API URL (repeat once per
+                                 node; at least two) (default: [])
+  --json                         Print the comparison as JSON
+  --fabric-user <user>           Admin username (env: FABRIC_USER; inline leaks
+                                 to ps/shell history)
+  --fabric-password <pass>       Admin password (prefer FABRIC_PASSWORD env or
+                                 --fabric-password-file)
+  --fabric-password-file <path>  Read the admin password from a mode-0600 file
+  -h, --help                     display help for command
+
+Global Options:
+  -v, --version                  output the version number
+
+Each --node explicitly names an HTTP(S) operations API URL; its path, query and
+fragment are removed. Peers are never inferred from Flair federation peers.
+
+The command compares observed id sets. Count checks cannot detect equal-count
+concurrent updates or replacements. An id absent on every named node is invisible
+without a reference set.
+
+Classes use stored timestamps: parseable updatedAt, else createdAt. createdAt can
+be caller-supplied and node clocks can differ; these do not prove write order.
+A missing id uses the maximum timestamp among usable peers holding it.
+
+Per-node classes:
+  in-sync    observed ids equal the union of the other usable readings
+  lagging    missing ids only, each timestamp greater than this node's maximum
+  divergent  an extra id, or a missing id timestamp at or below this node's maximum
+  unknown    failed read, unusable timestamp, no usable peer, or no local timestamp for missing ids
+
+The overall result is healthy only when every node is in-sync;
+any unknown makes the overall result unknown.
+
+Exit codes:
+  0  healthy — every node has the same observed Memory ids
+  1  usage — fewer than two --node values, a duplicate node, or an invalid HTTP(S) URL
+  2  divergent — at least one divergent node and no unknown node
+  3  unknown — at least one node could not be classified
+  4  lagging — at least one node is lagging, with no divergent or unknown nodes
 
 
 ----- flair search -----

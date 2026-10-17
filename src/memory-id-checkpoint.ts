@@ -75,6 +75,10 @@ function asRows(body: unknown): any[] | null {
   return Array.isArray(results) ? results : null;
 }
 
+function asTime(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
 /** The parameters of one keyset page walk over `flair.<table>`. */
 export interface KeysetReadOptions {
   /** Unqualified table name inside the `flair` database. */
@@ -142,15 +146,16 @@ export async function readTableByIdPaged(opsPost: OpsPost, opts: KeysetReadOptio
   return rows;
 }
 
-/** Read id and durability in primary-key order. */
+/** Read id and durability (and, when asked, the stored row timestamps) in primary-key order. */
 export async function readMemoryRowsPaged(
   opsPost: OpsPost,
-  opts: { pageSize?: number; maxPages?: number; expected?: number } = {},
+  opts: { pageSize?: number; maxPages?: number; expected?: number; withWriteTimes?: boolean } = {},
 ): Promise<MemoryRowLite[]> {
+  const withWriteTimes = opts.withWriteTimes ?? false;
   const expected = opts.expected ?? await readMemoryRowCount(opsPost);
   const raw = await readTableByIdPaged(opsPost, {
     table: "Memory",
-    select: "id, durability",
+    select: withWriteTimes ? "id, durability, createdAt, updatedAt" : "id, durability",
     expected,
     pageSize: opts.pageSize,
     maxPages: opts.maxPages,
@@ -160,10 +165,11 @@ export async function readMemoryRowsPaged(
   if (after !== expected) {
     throw new InconsistentReadError("writes during checkpoint");
   }
-  return raw.map((r) => ({
-    id: r.id,
-    durability: typeof r.durability === "string" ? r.durability : "standard",
-  }));
+  return raw.map((r) =>
+    withWriteTimes
+      ? { id: r.id, durability: typeof r.durability === "string" ? r.durability : "standard", createdAt: asTime(r.createdAt), updatedAt: asTime(r.updatedAt) }
+      : { id: r.id, durability: typeof r.durability === "string" ? r.durability : "standard" },
+  );
 }
 
 /** The instance's own exact Memory row count (describe_table, exact_count). */
