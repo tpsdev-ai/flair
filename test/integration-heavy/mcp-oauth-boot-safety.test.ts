@@ -55,18 +55,12 @@
  *      metadata carries the DERIVED `<issuer>/mcp` resource (flair#1180 — no
  *      composite literal). "true" is the ONE value both readers accept:
  *      flair's flag takes 1/true/yes/on but the component deletes anything
- *      but "true"/"false", so e.g. FLAIR_MCP_OAUTH=1 yields a guarded /mcp
- *      with NO authorization server behind it (fail-closed broken-on).
- *   6. BROKEN-ON (flair#1285): FLAIR_MCP_OAUTH=1 with the FULL enablement env
- *      otherwise staged — the exact state a regression re-staging '1' in
- *      buildSecretsBundle would ship. Asserts BOTH halves at boot level:
- *      flair's /mcp handler IS mounted and guarded (401), AND the component's
- *      authorization-server surface is NOT (component-dispatched
- *      /oauth/mcp/authorize answers 404, and the AS well-known — which flair's
- *      discovery handler deliberately falls through when the strict flag is on
- *      — has nobody behind it). The unit coverage in mcp-oauth-flag only
- *      exercises flair's side of the vocabulary table; this is the
- *      discriminating boot test for the divergence itself.
+ *      but "true"/"false". FLAIR_MCP_OAUTH=1 with the shipped env reference
+ *      makes the boot guard refuse to mount /mcp (flair#1322).
+ *   6. LEGACY "1" (flair#1285 / flair#1322): FLAIR_MCP_OAUTH=1 with the shipped
+ *      env reference. The boot guard refuses: the process stays up, /mcp is
+ *      not mounted, and the log names FLAIR_MCP_OAUTH=true. The component's
+ *      authorization server is not mounted either.
  */
 
 import { describe, test, expect, beforeAll, afterEach, afterAll } from "bun:test";
@@ -580,8 +574,8 @@ describe("flair#1152 enabled path: shipped config verbatim + env set", () => {
       // "true", NOT "1": the component's coerceConfigBoolean accepts only
       // "true"/"false" and deletes anything else, while flair's flag takes
       // 1/true/yes/on — so "true" is the one value that enables BOTH sides
-      // (and it is what buildSecretsBundle stages). With "1" this test fails:
-      // /mcp is guarded (flair on) but the AS metadata 404s (component off).
+      // (and it is what buildSecretsBundle stages). With "1" the boot guard
+      // refuses and /mcp is not mounted (flair#1322).
       clearMcpEnv();
       process.env.FLAIR_MCP_OAUTH = "true";
       process.env.FLAIR_MCP_ISSUER = "https://test.example.com";
@@ -637,22 +631,32 @@ describe("flair#1152 enabled path: shipped config verbatim + env set", () => {
   );
 });
 
-// ─── 6. BROKEN-ON (flair#1285): FLAIR_MCP_OAUTH=1 → guarded /mcp, NO AS ──────
+// ─── 6. LEGACY "1" (flair#1285 / flair#1322): boot guard refuses ─────────────
 
-describe("flair#1285 vocabulary-asymmetry broken-on: FLAIR_MCP_OAUTH=1", () => {
+/** Local spawn captures the child log. External mode's getLog is "". */
+function expectLegacyFlagRefusalLog(instance: { external: boolean; getLog?: () => string }): void {
+  if (instance.external) return;
+  const log = instance.getLog?.() ?? "";
+  expect(log).toContain("Set FLAIR_MCP_OAUTH=true.");
+  expect(log).not.toContain("[mcp-oauth] /mcp mounted");
+}
+
+describe("flair#1322 legacy FLAIR_MCP_OAUTH=1: boot guard refuses to mount /mcp", () => {
+  test("local spawn asserts the remedy line; external mode does not read an empty log", () => {
+    expectLegacyFlagRefusalLog({
+      external: false,
+      getLog: () => "Set FLAIR_MCP_OAUTH=true.\n",
+    });
+    expectLegacyFlagRefusalLog({ external: true, getLog: () => "" });
+  });
+
   test(
-    "flair's /mcp is mounted+guarded (401) while the component's authorization server is NOT mounted",
+    "shipped config with FLAIR_MCP_OAUTH=1 stays up, does not mount /mcp, and logs the remedy",
     async () => {
-      // The exact state a regression re-staging '1' in buildSecretsBundle
-      // (src/lib/mcp-enable.ts) would deploy: the FULL enablement env —
-      // issuer, IdP credentials — with the flag spelled "1".
-      // flair's strict reader (resources/mcp-oauth-flag.ts) accepts 1/true/
-      // yes/on; the component's coerceConfigBoolean accepts ONLY "true"/
-      // "false" and DELETES anything else, so its disabled default applies.
-      // Result: broken-on — every /mcp request 401s and there is no
-      // authorization server for the client to satisfy the challenge against.
-      // Fail-closed (no unauthenticated data path), but broken; case 5 pins
-      // the one spelling that works, this pins the divergence itself.
+      // Pre-0.46 enablement staged "1". The component deletes that string, so
+      // its effective mcp.enabled is not true while Flair's reader is on.
+      // The boot guard throws before server.http; the module-load catch logs
+      // the remedy and leaves the process up.
       clearMcpEnv();
       process.env.FLAIR_MCP_OAUTH = "1";
       process.env.FLAIR_MCP_ISSUER = "https://test.example.com";
@@ -660,49 +664,33 @@ describe("flair#1285 vocabulary-asymmetry broken-on: FLAIR_MCP_OAUTH=1", () => {
       process.env.OAUTH_GITHUB_CLIENT_SECRET = "test-client-secret";
       process.env.OAUTH_GITHUB_REDIRECT_URI = "https://test.example.com/oauth";
 
-      const workDir = makeWorkDirWithShippedConfig("flair-broken-on-");
+      const workDir = makeWorkDirWithShippedConfig("flair-legacy-flag-");
       const harper = await startHarper({
         cwd: workDir,
         harperBinDir: REPO_ROOT,
       });
       instances.push(harper);
 
-      // Boot is CLEAN: normalizeBooleanField deleted the "1", so the plugin
-      // never validated its config and never degraded the boot.
       const opsRes = await fetch(harper.opsURL, {
         signal: AbortSignal.timeout(10_000),
       });
       expect(opsRes.status).toBe(200);
 
-      // HALF 1 — flair's side is ON: /mcp is registered and guarded.
-      // 401, not 404 (that would mean flair's reader stopped accepting "1" —
-      // re-derive the whole vocabulary table before shipping that) and not
-      // 500 (degraded boot).
+      // External mode (HARPER_HTTP_URL) captures no child log: getLog() is "".
+      expectLegacyFlagRefusalLog(harper);
+
       const mcpRes = await fetch(`${harper.httpURL}/mcp`, {
         signal: AbortSignal.timeout(10_000),
       });
-      expect(mcpRes.status).toBe(401);
+      expect(mcpRes.status).toBe(404);
 
-      // HALF 2a — the component's AS is NOT mounted. /oauth/mcp/* is
-      // dispatched by the component itself and NEVER shadowed by flair (the
-      // same tripwire case 4 uses): its dispatcher answers 404 whenever
-      // mcp.enabled is falsy, and "1" was deleted. If the component's
-      // vocabulary ever widens to accept "1", this becomes a live authorize
-      // endpoint (non-404) and THIS assertion fires — at which point '1'
-      // would be broken differently, not fixed; re-derive the table.
+      // The component still does not advertise an authorization server.
       const authorizeRes = await fetch(
         `${harper.httpURL}/oauth/mcp/authorize`,
         { signal: AbortSignal.timeout(10_000) },
       );
       expect(authorizeRes.status).toBe(404);
 
-      // HALF 2b — the client-visible symptom: NO AS metadata anywhere. With
-      // the strict flag ON, flair's discovery handler deliberately falls
-      // through to the component's well-known handlers (makeWellKnownHandler
-      // behaviour 2, resources/oauth-discovery.ts) — and the component is not
-      // there to answer. Contrast case 4 (flag off → flair's own document,
-      // 200) and case 5 (component on → component document, 200): here the
-      // 401 challenge from /mcp has no authorization server behind it at all.
       const metaRes = await fetch(
         `${harper.httpURL}/.well-known/oauth-authorization-server`,
         { signal: AbortSignal.timeout(10_000) },

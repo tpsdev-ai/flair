@@ -261,13 +261,25 @@ describe("flair#1021 — boot guard (loud failure when flag on but component abs
     );
   });
 
-  it("POSITIVE CONTROL: flag ON + component present + issuer → mounts without error", async () => {
+  it("canonical true: env reference resolves to true and the route mounts", async () => {
+    clearEnv();
+    process.env.FLAIR_MCP_OAUTH = "true";
+    process.env.FLAIR_MCP_ISSUER = "https://flair.example.com";
+    const deps = makeDeps();
+    delete (deps as any).skipComponentGuard;
+    (deps as any).harper = mockHarper({ mcp: { enabled: "${FLAIR_MCP_OAUTH}" } });
+    const mounted = await registerMcpOAuthRoute(deps);
+    expect(mounted).toBe(true);
+    expect(httpCalls).toHaveLength(1);
+  });
+
+  it("literal mcp.enabled true agrees with a legacy env value, so the route mounts", async () => {
     clearEnv();
     process.env.FLAIR_MCP_OAUTH = "1";
     process.env.FLAIR_MCP_ISSUER = "https://flair.example.com";
     const deps = makeDeps();
     delete (deps as any).skipComponentGuard;
-    (deps as any).harper = mockHarper({ providers: { default: {} } }); // component present
+    (deps as any).harper = mockHarper({ mcp: { enabled: true } });
     const mounted = await registerMcpOAuthRoute(deps);
     expect(mounted).toBe(true);
   });
@@ -304,8 +316,136 @@ describe("flair#1021 — boot guard (loud failure when flag on but component abs
       expect(msg).toContain("config.yaml");
       // Must name the flag the operator set.
       expect(msg).toContain("FLAIR_MCP_OAUTH");
-      // Must name the env var for the issuer.
+      // The example's issuer is ${FLAIR_MCP_ISSUER}. FLAIR_PUBLIC_URL does not fill it.
       expect(msg).toContain("FLAIR_MCP_ISSUER");
+      expect(msg).not.toContain("FLAIR_PUBLIC_URL");
+      // The example is the mcp block, not the old providers block.
+      expect(msg).toContain("mcp:");
+      expect(msg).not.toContain("authorizationEndpoint");
+    }
+  });
+
+  const envRef = { mcp: { enabled: "${FLAIR_MCP_OAUTH}" } };
+
+  it.each(["1", "yes", "on", "YES"])(
+    "legacy truthy %s with the shipped env reference refuses and names true",
+    async (flag) => {
+      clearEnv();
+      process.env.FLAIR_MCP_OAUTH = flag;
+      process.env.FLAIR_MCP_ISSUER = "https://flair.example.com";
+      const errors: string[] = [];
+      const orig = console.error;
+      console.error = (...args: unknown[]) => {
+        errors.push(args.map((part) => String(part)).join(" "));
+      };
+      const component = { mcp: { enabled: "${FLAIR_MCP_OAUTH}" } };
+      const deps = makeDeps();
+      delete (deps as any).skipComponentGuard;
+      (deps as any).harper = mockHarper(component);
+      try {
+        await expect(registerMcpOAuthRoute(deps)).rejects.toThrow(/Set FLAIR_MCP_OAUTH=true/);
+        expect(httpCalls).toHaveLength(0);
+        expect(errors.join("\n")).not.toContain("[mcp-oauth] /mcp mounted");
+        expect(component.mcp.enabled).toBe("${FLAIR_MCP_OAUTH}");
+      } finally {
+        console.error = orig;
+      }
+    },
+  );
+
+  it("disabled flag does not mount and does not throw", async () => {
+    clearEnv();
+    process.env.FLAIR_MCP_OAUTH = "false";
+    const errors: string[] = [];
+    const orig = console.error;
+    console.error = (...args: unknown[]) => {
+      errors.push(args.map((part) => String(part)).join(" "));
+    };
+    const deps = makeDeps();
+    delete (deps as any).skipComponentGuard;
+    (deps as any).harper = mockHarper(envRef);
+    try {
+      const mounted = await registerMcpOAuthRoute(deps);
+      expect(mounted).toBe(false);
+      expect(httpCalls).toHaveLength(0);
+      expect(errors.join("\n")).not.toContain("[mcp-oauth] /mcp mounted");
+    } finally {
+      console.error = orig;
+    }
+  });
+
+  it("missing flag does not mount and does not throw", async () => {
+    clearEnv();
+    const deps = makeDeps();
+    delete (deps as any).skipComponentGuard;
+    (deps as any).harper = mockHarper(envRef);
+    const mounted = await registerMcpOAuthRoute(deps);
+    expect(mounted).toBe(false);
+    expect(httpCalls).toHaveLength(0);
+  });
+
+  it("flag true and mcp.enabled omitted refuses and names mcp.enabled", async () => {
+    clearEnv();
+    process.env.FLAIR_MCP_OAUTH = "true";
+    process.env.FLAIR_MCP_ISSUER = "https://flair.example.com";
+    const deps = makeDeps();
+    delete (deps as any).skipComponentGuard;
+    (deps as any).harper = mockHarper({ providers: { github: {} } });
+    await expect(registerMcpOAuthRoute(deps)).rejects.toThrow(/Set mcp\.enabled to true/);
+    expect(httpCalls).toHaveLength(0);
+  });
+
+  it("unreadable config refuses: nothing mounted, no success text, not treated as absent", async () => {
+    const cases: Array<{ label: string; harper: any }> = [
+      {
+        label: "lookup throws",
+        harper: { app: { config: { get: () => { throw new Error("disk failed"); }, name: "flair" } } },
+      },
+      {
+        label: "empty body",
+        harper: { app: { config: {} } },
+      },
+      {
+        label: "unreadable component",
+        harper: { app: { config: { get: () => "", name: "flair" } } },
+      },
+      {
+        label: "unparseable mcp.enabled",
+        harper: { app: { config: { get: () => ({ mcp: { enabled: { bad: true } } }) } } },
+      },
+    ];
+    for (const c of cases) {
+      clearEnv();
+      process.env.FLAIR_MCP_OAUTH = "true";
+      process.env.FLAIR_MCP_ISSUER = "https://flair.example.com";
+      const errors: string[] = [];
+      const orig = console.error;
+      console.error = (...args: unknown[]) => {
+        errors.push(args.map((part) => String(part)).join(" "));
+      };
+      const deps = makeDeps();
+      delete (deps as any).skipComponentGuard;
+      (deps as any).harper = c.harper;
+      try {
+        let message = "";
+        try {
+          await registerMcpOAuthRoute(deps);
+          throw new Error(`expected refusal for ${c.label}`);
+        } catch (err: any) {
+          if (String(err?.message ?? "").startsWith("expected refusal")) throw err;
+          message = String(err?.message ?? "");
+        }
+        expect(message).toContain("Remedy:");
+        expect(message).not.toMatch(/\bnot declared\b/i);
+        expect(message).not.toMatch(/\babsent\b/i);
+        expect(message).not.toMatch(/\bnot found\b/i);
+        expect(message).not.toMatch(/\bok\b/i);
+        expect(message).not.toContain("[mcp-oauth] /mcp mounted");
+        expect(httpCalls).toHaveLength(0);
+        expect(errors.join("\n")).not.toContain("[mcp-oauth] /mcp mounted");
+      } finally {
+        console.error = orig;
+      }
     }
   });
 });
