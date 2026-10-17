@@ -11,23 +11,26 @@
  *
  * The fix makes the ops-API decision a single shared function
  * (`opsApiBindFinding`, src/lib/ops-api-bind.ts) that both commands call, and
- * folds the finding into status's existing warning verdict. These tests drive
- * the real `status` command as a subprocess (isolated $HOME + local HTTP mock)
- * because an in-process $HOME mutation does not re-read for os.homedir(); see
- * cli-auth-floor.test.ts's header for the same technique.
+ * folds the finding into status's existing warning verdict. The command-level
+ * tests drive the real `status` command as a subprocess (isolated $HOME + local
+ * HTTP mock) because an in-process $HOME mutation does not re-read for
+ * os.homedir(); see cli-auth-floor.test.ts's header for the same technique. The
+ * remote-target cases drive the decision in-process instead.
  *
  * Fails on the old code: the all-interfaces scenario printed
  * "all checks passing". Passes on the fix: it prints a warning instead, while
  * a loopback-bound instance still reports green.
  */
 
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach, beforeAll } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer, IncomingMessage, ServerResponse, Server } from "node:http";
 import nacl from "tweetnacl";
 import { opsApiBindFinding, detectOpsApiAllInterfacesBind } from "../../src/lib/ops-api-bind.ts";
+import { readHarperConfig } from "../../src/cli.ts";
+import { bindCli, localOpsApiWarnings, type StatusCli } from "../../src/commands/status.ts";
 
 function makeTmpDir(prefix: string): string {
   const dir = join(tmpdir(), `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -51,10 +54,7 @@ function startMockFlairServer(healthDetail: Record<string, unknown>): Promise<{ 
       res.writeHead(404, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "not found" }));
     });
-    // Bind all IPv4 interfaces so a target naming a loopback alias the CLI does
-    // not classify as its own install (127.0.0.2) still reaches this mock. The
-    // target address is a literal, so it is never resolved (flair#2617).
-    server.listen(0, "0.0.0.0", () => {
+    server.listen(0, "127.0.0.1", () => {
       const addr = server.address();
       const port = typeof addr === "object" && addr ? addr.port : 0;
       resolve({ server, url: `http://127.0.0.1:${port}` });
@@ -127,6 +127,43 @@ describe("opsApiBindFinding — one decision for both health surfaces (flair#852
     const section = doctorSource.slice(anchor, anchor + 400);
     expect(section).toContain("finding?.allInterfaces");
     expect(section).toContain("issues++");
+  });
+});
+
+// ─── the guard: a non-loopback target is not judged by the LOCAL config ───
+
+describe("localOpsApiWarnings — an all-interfaces local config is not attributed to a remote target (flair#2617)", () => {
+  // localOpsApiWarnings reads Harper's config through the cli-bound helper.
+  // Bind the REAL reader (src/cli.ts) so the case exercises the same read the
+  // command uses; the data dir comes from the test. These cases fetch nothing,
+  // listen on nothing, and resolve no name.
+  beforeAll(() => {
+    bindCli({ readHarperConfig } as unknown as StatusCli);
+  });
+
+  let dataDir: string;
+
+  beforeEach(() => {
+    dataDir = makeTmpDir("flair-2617-cfg");
+    // A local install whose ops API is bound to all interfaces.
+    writeFileSync(
+      join(dataDir, "harper-config.yaml"),
+      ["operationsApi:", "  network:", "    port: 19925", ""].join("\n"),
+    );
+  });
+
+  afterEach(() => {
+    try { rmSync(dataDir, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
+  });
+
+  test("a non-loopback target with an all-interfaces local config returns no warning", () => {
+    expect(localOpsApiWarnings("https://flair.example.invalid:19926", dataDir)).toEqual([]);
+  });
+
+  test("positive control: the same config does warn for a loopback target", () => {
+    const out = localOpsApiWarnings("http://127.0.0.1:19926", dataDir);
+    expect(out).toHaveLength(1);
+    expect(out[0].message).toMatch(/Ops API bound to all interfaces/i);
   });
 });
 
@@ -266,29 +303,4 @@ describe("flair status — ops-API bind agreement with doctor (flair#852)", () =
     expect(stdout).toMatch(/Ops API bound to all interfaces/i);
     expect(exitCode).toBe(0);
   });
-
-  test("a remote target is not judged by the local install's harper config", async () => {
-    // An operator checking a remote instance must not be told the REMOTE
-    // instance is exposed because their own laptop's install is. The local
-    // bind is a local fact, so a non-loopback target skips the check.
-    const port = new URL(serverUrl).port;
-    writeHarperConfig(Number(port) - 1, Number(port));
-
-    // A literal address, so the target is never resolved: 127.0.0.2 is a loopback
-    // alias the CLI does not treat as its own install (isLocalhostUrl matches
-    // only 127.0.0.1/localhost/::1), and the mock above is bound to all IPv4
-    // interfaces, so this reaches it. The remote branch must be driven against
-    // a REACHABLE remote: a verdict for an unreachable target never reads the
-    // local config, so it could not show the guard holding.
-    const { stdout, exitCode } = await runCli(
-      ["status", "--target", `http://127.0.0.2:${port}`],
-      { HOME: tmpHome, ...CLEAR_ENV },
-    );
-
-    // The remote answered and is healthy from its own report …
-    expect(exitCode).toBe(0);
-    expect(stdout).toContain("all checks passing");
-    // … but the local install's all-interfaces ops bind is not attributed to it.
-    expect(stdout).not.toMatch(/Ops API bound to all interfaces/i);
-  }, 10_000);
 });
