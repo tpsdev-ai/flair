@@ -12,11 +12,11 @@
  * property through Harper's OWN routing (resources/harper-routing.ts) for its
  * by-name and by-id decisions, content-type suffixes and suffixed-name fallbacks
  * included. The helpers here are the FALLBACK for those decisions when the live
- * route registry is unavailable (a unit mock), when the target matches no route,
- * or when the matcher throws; they mirror the first-dot DECLARED-ATTRIBUTE rule and
- * the split-then-decode of the remainder, and they do not reproduce the
- * content-type-suffix or suffixed-name dispatch rules — those are left to the live
- * routing. The middleware's non-admin Memory-selection rewrite also calls these
+ * route registry is unavailable (a unit mock) or the target matches no route, and
+ * for the by-name decisions when the matcher throws; they mirror the first-dot
+ * DECLARED-ATTRIBUTE rule and the split-then-decode of the remainder, and they do
+ * not reproduce the content-type-suffix or suffixed-name dispatch rules — those
+ * are left to the live routing. The middleware's non-admin Memory-selection rewrite also calls these
  * helpers on the live request, on the raw path.
  *
  * Before any other request processing, the middleware answers a target that is not in

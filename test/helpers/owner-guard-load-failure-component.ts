@@ -27,7 +27,9 @@ export const LOAD_FAILURE_MARKER = "load-fail-2468";
  * Sentinel file, created under the Harper instance ROOTPATH, that arms the
  * injected failure. The wrapper is installed either way; present → a marker-id
  * load throws; absent → every load is delegated to the original method. Lets
- * the test seed data first, then flip the switch.
+ * the test seed data first, then flip the switch. A file whose content is
+ * `pass:<n>` lets the next n marker-id loads succeed (counting down in the file)
+ * and fails the ones after.
  */
 export const ARM_FILE = "owner-guard-load-fail-armed";
 
@@ -40,14 +42,28 @@ export const LOAD_FAILURE_MODULE_REL = join("dist", "resources", "zz-test-owner-
 export const LOAD_FAILURE_MODULE_SRC = `// Test-only module (composed copy): fail the read of a marker-id stored row at
 // Harper's LOAD point, before any resource method runs.
 import { databases } from "harper";
-import { existsSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const MARKER = ${JSON.stringify(LOAD_FAILURE_MARKER)};
 const ARM_FILE = ${JSON.stringify(ARM_FILE)};
 
+// Called for marker-id loads only, so a \`pass:<n>\` count is spent on them alone.
 function armed() {
-  return existsSync(join(process.env.ROOTPATH ?? "", ARM_FILE));
+  const file = join(process.env.ROOTPATH ?? "", ARM_FILE);
+  let text;
+  try {
+    text = readFileSync(file, "utf8");
+  } catch (e) {
+    if (e && e.code === "ENOENT") return false;
+    throw e;
+  }
+  const m = /^pass:(\\d+)$/.exec(text.trim());
+  if (!m) return true;
+  const left = Number(m[1]);
+  if (left <= 0) return true;
+  writeFileSync(file, "pass:" + (left - 1));
+  return false;
 }
 
 // Patch each table's load path. Read _loadRecord off the prototype chain as a
@@ -76,7 +92,7 @@ function patch(name) {
     writable: true,
     value: function (target, request, options) {
       const id = target && typeof target === "object" ? target.id : target;
-      if (armed() && typeof id === "string" && id.includes(MARKER)) {
+      if (typeof id === "string" && id.includes(MARKER) && armed()) {
         throw new Error(
           "test component: forced stored-row read failure at Harper's load point (" + name + " id=" + id + ")",
         );

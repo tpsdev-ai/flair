@@ -46,6 +46,8 @@ const tableGets: Record<string, Array<{ id: unknown; args: number }>> = {};
 const tableRows: Record<string, Map<string, any>> = {};
 // Ids whose stored-owner read throws, to exercise the fail-closed path.
 const throwOnGet = new Set<string>();
+// Ids whose reads succeed this many times, then throw.
+const throwAfterGets = new Map<string, number>();
 
 function table(name: string) {
   tableGets[name] = [];
@@ -54,6 +56,11 @@ function table(name: string) {
     get: async (...args: unknown[]) => {
       tableGets[name]!.push({ id: args[0], args: args.length });
       if (throwOnGet.has(String(args[0]))) throw new Error("simulated read failure");
+      const left = throwAfterGets.get(String(args[0]));
+      if (left !== undefined) {
+        if (left <= 0) throw new Error("simulated read failure");
+        throwAfterGets.set(String(args[0]), left - 1);
+      }
       return tableRows[name]!.get(String(args[0])) ?? null;
     },
   };
@@ -142,6 +149,7 @@ beforeEach(() => {
     tableRows[name]!.clear();
   }
   throwOnGet.clear();
+  throwAfterGets.clear();
 });
 
 const NON_CANONICAL: Array<[string, string]> = [
@@ -476,6 +484,66 @@ describe("a guarded mutation fails closed when its owner row cannot be read", ()
     expect((await res.json()).error).toBe("owner_lookup_failed");
     expect(nextCalls).toBe(0);
   });
+});
+
+describe("a guarded mutation is refused when Harper's route lookup throws", () => {
+  for (const method of ["PATCH", "DELETE"] as const) {
+    it(`a non-admin ${method} gets the named 503 and reaches no owner read and no next layer`, async () => {
+      harperServer.resources = { getMatch: () => { throw new Error("simulated matcher failure"); } };
+      try {
+        const url = "/Memory/x";
+        const res = await mw(makeRequest(url, method, signedAuthorization(method, url)), next);
+        expect(res.status).toBe(503);
+        const text = await res.text();
+        expect(JSON.parse(text).error).toBe("route_lookup_failed");
+        expect(text).not.toContain("/Memory/x");
+        expect(nextCalls).toBe(0);
+        expect(tableGets.Memory!.length).toBe(0);
+      } finally {
+        delete harperServer.resources;
+      }
+    });
+  }
+
+  it("a route lookup that finds no match keeps the fallback owner read (control)", async () => {
+    harperServer.resources = { getMatch: () => undefined };
+    try {
+      const url = "/Memory/x";
+      const res = await mw(makeRequest(url, "PATCH", signedAuthorization("PATCH", url)), next);
+      expect(res.status).toBe(200);
+      expect(nextCalls).toBe(1);
+      expect(tableGets.Memory!.some((c) => c.id === "x")).toBe(true);
+    } finally {
+      delete harperServer.resources;
+    }
+  });
+});
+
+describe("an OrgEvent or WorkspaceState delete whose stored-row lookup fails is refused", () => {
+  for (const [table, id, row] of [
+    ["OrgEvent", "ev-1", { id: "ev-1", authorId: AGENT }],
+    ["WorkspaceState", "ws-1", { id: "ws-1", agentId: AGENT }],
+  ] as const) {
+    it(`a ${table} delete gets the named 503 when the delete lookup's read fails`, async () => {
+      tableRows[table]!.set(id, row);
+      // The shared owner rule's read succeeds; the delete lookup's read fails.
+      throwAfterGets.set(id, 1);
+      const url = `/${table}/${id}`;
+      const res = await mw(makeRequest(url, "DELETE", signedAuthorization("DELETE", url)), next);
+      expect(res.status).toBe(503);
+      expect((await res.json()).error).toBe("owner_lookup_failed");
+      expect(nextCalls).toBe(0);
+      expect(tableGets[table]!.length).toBe(2);
+    });
+
+    it(`a ${table} delete whose reads succeed reaches the next layer (control)`, async () => {
+      tableRows[table]!.set(id, row);
+      const url = `/${table}/${id}`;
+      const res = await mw(makeRequest(url, "DELETE", signedAuthorization("DELETE", url)), next);
+      expect(res.status).toBe(200);
+      expect(nextCalls).toBe(1);
+    });
+  }
 });
 
 describe("a guarded mutation whose routed record id Harper cannot resolve is refused", () => {

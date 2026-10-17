@@ -20,9 +20,9 @@
  * mirror only when no `rest` match is returned.
  *
  * When the registry or `RequestTarget` is not present (a unit test driving the
- * middleware with a mocked `harper`), the target matches no route, or the matcher
- * throws, it returns null and the caller falls back to the pure mirror in
- * request-target.ts.
+ * middleware with a mocked `harper`) or the target matches no route, it returns
+ * null and the caller falls back to the pure mirror in request-target.ts. When the
+ * matcher throws, the error propagates to the caller.
  */
 // Namespace import, not named: a unit test that mocks `harper` may not export
 // `RequestTarget`, and a named import of a missing export fails to LINK (before
@@ -49,7 +49,8 @@ export interface HarperRoute {
 
 /**
  * Resolve a raw request target through Harper's own matcher and parser, or null
- * when the live registry is unavailable. `headers` enables Harper's
+ * when the live registry is unavailable. Throws when Harper's matcher throws.
+ * `headers` enables Harper's
  * content-type-suffix rule (it only fires when a request context carries
  * headers), so the resolved id matches what Harper addresses.
  */
@@ -62,12 +63,7 @@ export function routeWithHarper(rawTarget: string, headers: unknown): HarperRout
 
   // REST dispatches on the target with its single leading slash removed.
   const routeInput = rawTarget.startsWith("/") ? rawTarget.slice(1) : rawTarget;
-  let entry: any;
-  try {
-    entry = resources.getMatch(routeInput, "rest");
-  } catch {
-    return null;
-  }
+  const entry: any = resources.getMatch(routeInput, "rest");
   if (!entry || typeof entry.path !== "string") return null;
 
   // Read the mutable match result into locals NOW, before any await elsewhere.

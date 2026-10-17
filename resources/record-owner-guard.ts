@@ -153,8 +153,8 @@ export function isMutatingMethod(method: string): boolean {
  * content-type suffix; at request time the middleware resolves the final id
  * through Harper's own routing (resources/harper-routing.ts) and passes it to
  * `resolveGuardedRecordById`, so this path-parsing form is the fallback used
- * when Harper's routing returns no route (e.g. no live registry, no matching
- * route, or a matcher error).
+ * when Harper's routing returns no route (e.g. no live registry or no matching
+ * route).
  *
  * Matches `/<Table>/<id>` ONLY. A collection path (`/<Table>` or `/<Table>/`)
  * addresses no existing record, so there is nothing to own and nothing to

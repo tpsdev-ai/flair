@@ -299,6 +299,20 @@ function ownerReadFailedRefusal(table: string): Response {
 }
 
 /**
+ * A signed non-admin agent's mutation is refused when Harper's route lookup
+ * threw: the owner decisions need Harper's route, and the pure fallback does not
+ * stand in for it. 503 because a retry can succeed. The message is fixed and
+ * names no part of the target.
+ */
+function routeLookupFailedRefusal(): Response {
+  console.error("auth-middleware: the route lookup failed, so the mutation was refused");
+  return new Response(JSON.stringify({
+    error: "route_lookup_failed",
+    message: "the request could not be routed, so the write was refused",
+  }), { status: 503, headers: { "content-type": "application/json" } });
+}
+
+/**
  * A signed non-admin agent's mutation whose target Harper matched, but whose
  * record id Harper's `RequestTarget` could not resolve, is refused before any
  * owner decision: those decisions need the id. 400: the target cannot be parsed into a record id. The
@@ -386,10 +400,17 @@ server.http(async (request: any, nextLayer: any) => {
   // routed to the bare resource, and the first-dot property rule included.
   // Synchronous and before any await (getMatch mutates its entry in place; see
   // harper-routing.ts). The pure mirror in request-target.ts is the fallback when
-  // this returns null: the live registry or Harper's `RequestTarget` is absent (a
-  // unit test mocking `harper`), the target matches no route, or the matcher
-  // throws.
-  const routed: HarperRoute | null = routeWithHarper(rawTarget, request.headers);
+  // no route is returned: the live registry or Harper's `RequestTarget` is absent
+  // (a unit test mocking `harper`), the target matches no route, or the matcher
+  // throws. When the matcher throws, a signed non-admin agent's mutation is
+  // refused instead (below), before any owner decision.
+  let routed: HarperRoute | null = null;
+  let routeLookupFailed = false;
+  try {
+    routed = routeWithHarper(rawTarget, request.headers);
+  } catch {
+    routeLookupFailed = true;
+  }
 
   // ── HTTP method allowlist ──────────────────────────────────────────────────
   // Right after the canonical-target check: before the public-path passthrough
@@ -782,9 +803,12 @@ server.http(async (request: any, nextLayer: any) => {
   const method = request.method.toUpperCase();
   const isMutation = method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE";
 
-  // A target Harper matched, but whose record id its RequestTarget could not
-  // resolve, is refused for a signed non-admin agent's mutation before the owner
-  // decisions below.
+  // A signed non-admin agent's mutation is refused before the owner decisions
+  // below when Harper's route lookup threw, or when Harper matched the target but
+  // its RequestTarget could not resolve the record id.
+  if (isMutation && !request.tpsAgentIsAdmin && routeLookupFailed) {
+    return routeLookupFailedRefusal();
+  }
   if (isMutation && !request.tpsAgentIsAdmin && routed?.recordIdUnresolved) {
     return unresolvedTargetRefusal();
   }
@@ -864,17 +888,21 @@ server.http(async (request: any, nextLayer: any) => {
     // OrgEvent DELETE: ownership check
     if (routedDecisionPath.startsWith("/OrgEvent/") && method === "DELETE") {
       if (!request.tpsAgentIsAdmin) {
-        try {
-          const eventId = routed ? routed.recordId : (routedRecordId(targetPath)?.id ?? null);
-          if (eventId) {
-            const record = await (databases as any).flair.OrgEvent.get(eventId);
-            if (record && record.authorId && record.authorId !== agentId) {
-              return new Response(JSON.stringify({
-                error: "forbidden: cannot delete events authored by another agent"
-              }), { status: 403 });
-            }
+        const eventId = routed ? routed.recordId : (routedRecordId(targetPath)?.id ?? null);
+        if (eventId) {
+          let record: any;
+          try {
+            record = await (databases as any).flair.OrgEvent.get(eventId);
+          } catch {
+            // A failed read is not "no author": refuse, as the shared owner rule does.
+            return ownerReadFailedRefusal("OrgEvent");
           }
-        } catch {}
+          if (record && record.authorId && record.authorId !== agentId) {
+            return new Response(JSON.stringify({
+              error: "forbidden: cannot delete events authored by another agent"
+            }), { status: 403 });
+          }
+        }
       }
     }
 
@@ -902,17 +930,21 @@ server.http(async (request: any, nextLayer: any) => {
     // WorkspaceState DELETE: ownership check
     if ((routedDecisionPath.startsWith("/WorkspaceState/")) && method === "DELETE") {
       if (!request.tpsAgentIsAdmin) {
-        try {
-          const wsId = routed ? routed.recordId : (routedRecordId(targetPath)?.id ?? null);
-          if (wsId) {
-            const record = await (databases as any).flair.WorkspaceState.get(wsId);
-            if (record && record.agentId && record.agentId !== agentId) {
-              return new Response(JSON.stringify({
-                error: "forbidden: cannot delete workspace state for another agent"
-              }), { status: 403 });
-            }
+        const wsId = routed ? routed.recordId : (routedRecordId(targetPath)?.id ?? null);
+        if (wsId) {
+          let record: any;
+          try {
+            record = await (databases as any).flair.WorkspaceState.get(wsId);
+          } catch {
+            // A failed read is not "no owner": refuse, as the shared owner rule does.
+            return ownerReadFailedRefusal("WorkspaceState");
           }
-        } catch {}
+          if (record && record.agentId && record.agentId !== agentId) {
+            return new Response(JSON.stringify({
+              error: "forbidden: cannot delete workspace state for another agent"
+            }), { status: 403 });
+          }
+        }
       }
     }
 

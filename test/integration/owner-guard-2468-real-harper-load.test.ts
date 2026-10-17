@@ -243,3 +243,53 @@ describe("flair#2468 — initial row-load failures on addressed single-record Ha
     expect(await readRow("Credential", id)).toEqual(prior);
   }, 60_000);
 });
+
+describe("OrgEvent and WorkspaceState delete lookups refuse a failed stored-row read", () => {
+  const deletable = () => [
+    { table: "OrgEvent", tag: "orgevent-del", seed: { authorId: owner.id, kind: "note", summary: "s", createdAt: new Date().toISOString() } },
+    { table: "WorkspaceState", tag: "wsstate-del", seed: { agentId: owner.id, ref: "main", provider: "git", timestamp: new Date().toISOString(), createdAt: new Date().toISOString() } },
+  ];
+  async function seedRow(table: string, id: string, seed: Record<string, unknown>): Promise<void> {
+    const res = await adminOp({ operation: "insert", database: "flair", table, records: [{ id, ...seed }] });
+    expect(res.status, `seed ${table} ${id} returned ${res.status}`).toBe(200);
+  }
+
+  for (const table of ["OrgEvent", "WorkspaceState"]) test(`${table}: the owner's DELETE gets the named 503 owner_lookup_failed when the delete lookup's read fails, and the row stays`, async () => {
+    for (const c of deletable().filter((d) => d.table === table)) {
+      const id = markerId(c.tag);
+      await seedRow(c.table, id, c.seed);
+      const prior = await readRow(c.table, id);
+      // The shared owner rule's read is the first marker load and succeeds; the
+      // delete lookup's read is the next one and fails.
+      writeFileSync(join(harper.installDir, ARM_FILE), "pass:1");
+      let res: Response;
+      let text: string;
+      try {
+        res = await authFetch(owner, "DELETE", `/${c.table}/${id}`);
+        text = await res.text();
+      } finally {
+        disarm();
+      }
+      console.log(`[2468] ${c.table}.delete (owner, delete lookup unreadable) -> ${res.status} ${text.slice(0, 240)}`);
+      expect(res.status, `${c.table} DELETE returned ${res.status}: ${text.slice(0, 240)}`).toBe(503);
+      expect(JSON.parse(text).error).toBe("owner_lookup_failed");
+      expect(await readRow(c.table, id), `${c.table} DELETE must leave the row`).toEqual(prior);
+    }
+  }, 60_000);
+
+  test("control: with both reads succeeding, the owner's DELETE removes the row", async () => {
+    disarm();
+    for (const c of deletable()) {
+      const id = markerId(c.tag);
+      await seedRow(c.table, id, c.seed);
+      await readRow(c.table, id);
+      const res = await authFetch(owner, "DELETE", `/${c.table}/${id}`);
+      expect(res.status, `${c.table} DELETE returned ${res.status}`).toBeLessThan(300);
+      const after = await adminOp({
+        operation: "search_by_value", database: "flair", table: c.table,
+        search_attribute: "id", search_type: "equals", search_value: id, get_attributes: ["id"],
+      });
+      expect(await after.json(), `${c.table} DELETE must remove the row`).toEqual([]);
+    }
+  }, 60_000);
+});

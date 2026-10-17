@@ -5,7 +5,8 @@
  * At request time the middleware resolves a target through Harper's OWN routing
  * (resources/harper-routing.ts) for its by-name and by-id decisions, so for those
  * the helpers here are the fallback used when the live registry is absent (a unit
- * mock), when the target matches no route, or when the matcher throws. The
+ * mock) or the target matches no route, and for the by-name decisions when the
+ * matcher throws. The
  * middleware's non-admin Memory-selection rewrite also calls them on the live
  * request. This test fixes the fallback to Harper's parser for the part it covers —
  * the id over the whole remainder (`RequestTarget`) and the first-dot
