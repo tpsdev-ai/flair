@@ -1,4 +1,5 @@
 import { isEmptyEmbedding, normalizeEmptyEmbedding } from "./memory-embedding-value.js";
+import { discardSuppliedVector, hasSuppliedVector } from "./memory-supplied-vector.js";
 import { databases } from "harper";
 import { randomUUID } from "node:crypto";
 import { isOperatorSeedPut, redactMemoryWrite, redactSkillWrite, storedMemoryText, suppliedMemoryTextFields, suppliedStoredTextFields, type StoredMemoryText, type StoredTextField } from "./memory-redaction.js";
@@ -2060,6 +2061,12 @@ export class Memory extends (databases as any).flair.Memory {
     // this a duplicate of something else" situation — bypass the gate for it
     // (this also gives memory_update's preserveHistory mode dedup-bypass for
     // free, without a separate flag). NEVER suppresses the write either way.
+    // flair#2573 slice 2: a non-admin write's supplied vector is discarded here,
+    // after redaction and before the dedup gate and the embed step, so the write
+    // embeds the row's own post-redaction text and stamps the server's model, or
+    // stores no vector when the model is unavailable (the backfill embeds it
+    // later) — exactly as a write that sent none.
+    discardSuppliedVector(content, auth);
     // flair#2573: an empty vector that reaches this point (one carried from a
     // stored skill row; the body's own was removed above) is no vector. It is
     // normalized before the dedup gate and the embed step, which can then
@@ -2278,6 +2285,12 @@ export class Memory extends (databases as any).flair.Memory {
     // is merged into the stored row.
     const redaction = redactMemoryWrite(content);
     const redactedValues = redaction.count;
+    // flair#2573 slice 2: a non-admin write's supplied vector is discarded here,
+    // after redaction (see post()/put()). The PATCH then embeds the row's own
+    // post-redaction text exactly as a PATCH that sent no vector.
+    if (hasSuppliedVector((content as any)?.embedding)) {
+      discardSuppliedVector(content as Record<string, any>, await resolveAgentAuth((this as any).getContext?.()));
+    }
     // flair#2561: the string-valued text fields this request supplies;
     // `stored` reports only these.
     const suppliedText = suppliedMemoryTextFields(content);
@@ -2978,6 +2991,9 @@ export class Memory extends (databases as any).flair.Memory {
         // version-link — neither is an ambiguous "is this a duplicate of
         // something else" write, so both are dedup-bypassed automatically, no
         // separate flag needed. NEVER suppresses the write either way.
+        // flair#2573 slice 2: a non-admin write's supplied vector is discarded here,
+        // after redaction and before the dedup gate and the embed step (see post()).
+        discardSuppliedVector(content, auth);
         // flair#2573: an empty vector that reaches this point is no vector (see post()).
         normalizeEmptyEmbedding(content);
         // flair#2465: did the caller supply a vector? See post().
