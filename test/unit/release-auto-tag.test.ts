@@ -412,7 +412,7 @@ describe("release auto-tag — conditions 5 and 6 (the candidate is read as data
     // and can neither forge this step's output nor touch the workspace.
     const repo = scratchDir();
     const git = (...args: string[]): string => {
-      const r = spawnSync("git", args, { cwd: repo, encoding: "utf8" });
+      const r = spawnSync("git", args, { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise release-auto-tag process fixture arguments" }, cwd: repo, encoding: "utf8" });
       if (r.status !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr?.trim() ?? r.status}`);
       return r.stdout.trim();
     };
@@ -485,7 +485,7 @@ describe("release auto-tag — conditions 5 and 6 (the candidate is read as data
     // (`git archive`) and let the checker walk every file of it.
     const repo = scratchDir();
     const git = (...args: string[]): string => {
-      const r = spawnSync("git", args, { cwd: repo, encoding: "utf8" });
+      const r = spawnSync("git", args, { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise release-auto-tag process fixture arguments" }, cwd: repo, encoding: "utf8" });
       if (r.status !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr?.trim() ?? r.status}`);
       return r.stdout.trim();
     };
@@ -500,7 +500,7 @@ describe("release auto-tag — conditions 5 and 6 (the candidate is read as data
     const realRoot = resolve(import.meta.dir, "../..");
     const realVersion = JSON.parse(readFileSync(join(realRoot, "package.json"), "utf8")).version;
     const realChecker = join(realRoot, "scripts", "check-version-sync.mjs");
-    const listed = spawnSync(process.execPath, [realChecker, "--list"], { cwd: realRoot, encoding: "utf8" });
+    const listed = spawnSync(process.execPath, [realChecker, "--list"], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise release-auto-tag process fixture arguments" }, cwd: realRoot, encoding: "utf8" });
     expect(listed.status, "the real checker lists its inventory").toBe(0);
     const inventory = String(listed.stdout ?? "")
       .split("\n")
@@ -732,7 +732,7 @@ describe("release auto-tag — condition 7b (the release PR stays inside the rel
   test("round 5, item 1: the local diff reports a RENAME with both paths, and an empty commit as empty (real git)", () => {
     const repo = scratchDir();
     const git = (...args: string[]): string => {
-      const r = spawnSync("git", args, { cwd: repo, encoding: "utf8" });
+      const r = spawnSync("git", args, { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise release-auto-tag process fixture arguments" }, cwd: repo, encoding: "utf8" });
       if (r.status !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr?.trim() ?? r.status}`);
       return r.stdout.trim();
     };
@@ -762,7 +762,7 @@ describe("release auto-tag — condition 7b (the release PR stays inside the rel
   test("round 5, item 2: the tracked root lockfile is read FROM the repo (real git)", () => {
     const repo = scratchDir();
     const git = (...args: string[]): string => {
-      const r = spawnSync("git", args, { cwd: repo, encoding: "utf8" });
+      const r = spawnSync("git", args, { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise release-auto-tag process fixture arguments" }, cwd: repo, encoding: "utf8" });
       if (r.status !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr?.trim() ?? r.status}`);
       return r.stdout.trim();
     };
@@ -1477,7 +1477,7 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
     const realRoot = resolve(import.meta.dir, "../..");
     const realChecker = join(realRoot, "scripts", "check-version-sync.mjs");
     const realVersion = JSON.parse(readFileSync(join(realRoot, "package.json"), "utf8")).version;
-    const listed = spawnSync(process.execPath, [realChecker, "--list"], { cwd: realRoot, encoding: "utf8" });
+    const listed = spawnSync(process.execPath, [realChecker, "--list"], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise release-auto-tag process fixture arguments" }, cwd: realRoot, encoding: "utf8" });
     expect(listed.status).toBe(0);
     const inventory = String(listed.stdout ?? "")
       .split("\n")
@@ -1493,7 +1493,7 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
       join(root, "packages/adk-flair/pyproject.toml"),
       `[tool.demo]\nversion = "${realVersion}"\n[project]\nname = "adk-flair"\nversion = "${bumped}"\n`,
     );
-    const r = spawnSync(process.execPath, [realChecker, "--root", root, realVersion], { encoding: "utf8" });
+    const r = spawnSync(process.execPath, [realChecker, "--root", root, realVersion], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise release-auto-tag process fixture arguments" }, encoding: "utf8" });
     const out = `${r.stdout}${r.stderr}`;
     expect(r.status, out).not.toBe(0);
     expect(out).toContain(bumped); // the PROJECT version is reported, not the tool line
@@ -1676,7 +1676,7 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
     const realRoot = resolve(import.meta.dir, "../..");
     const checker = join(realRoot, "scripts", "check-version-sync.mjs");
     const realVersion = JSON.parse(readFileSync(join(realRoot, "package.json"), "utf8")).version;
-    const listed = spawnSync(process.execPath, [checker, "--list"], { cwd: realRoot, encoding: "utf8" });
+    const listed = spawnSync(process.execPath, [checker, "--list"], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise release-auto-tag process fixture arguments" }, cwd: realRoot, encoding: "utf8" });
     expect(listed.status).toBe(0);
     const inventory = String(listed.stdout ?? "").split("\n").map((s) => s.trim()).filter(Boolean);
     for (const path of inventory) {
@@ -1686,7 +1686,7 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
     }
     // A present but UNSUPPORTED [project] version (valid TOML, a non-string value).
     writeFileSync(join(root, "packages/adk-flair/pyproject.toml"), `[project]\nname = "adk-flair"\nversion = 1\n`);
-    const r = spawnSync(process.execPath, [checker, realVersion, "--root", root], { encoding: "utf8" });
+    const r = spawnSync(process.execPath, [checker, realVersion, "--root", root], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise release-auto-tag process fixture arguments" }, encoding: "utf8" });
     const out = `${r.stdout}${r.stderr}`;
     expect(r.status).not.toBe(0); // assertion A
     expect(out).toContain("present but unsupported: project.version is not a string (int)"); // assertion B: the reader's reason
@@ -1749,7 +1749,7 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
     );
     const realRoot = resolve(import.meta.dir, "../..");
     const checker = join(realRoot, "scripts", "check-version-sync.mjs");
-    const r = spawnSync(process.execPath, [checker, "--write", "2.0.0", "--root", root], {
+    const r = spawnSync(process.execPath, [checker, "--write", "2.0.0", "--root", root], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise release-auto-tag process fixture arguments" },
       encoding: "utf8",
     });
     expect(r.status).not.toBe(0); // assertion A: refused
@@ -1906,7 +1906,7 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
     expect(posts).toEqual([]);
   });
 
-  test("(r9e) the tomllib reader runs ISOLATED: a stdlib-named module in the working directory never runs, and the child gets PATH only", () => {
+  test("(r9e) the tomllib reader runs ISOLATED: a stdlib-named module in the working directory never runs, and the child gets PATH and the parser reason", () => {
     const evil = scratchDir();
     const marker = join(evil, "SHADOW-RAN");
     // A planted json.py that would run on import if the cwd were on sys.path.
@@ -1931,10 +1931,11 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
     expect(readFileSync(record + ".argv", "utf8").split("\n")[0]).toBe("-I"); // isolated mode
     const childEnv = readFileSync(record + ".env", "utf8");
     expect(childEnv).not.toContain("sentinel-token-must-not-reach-python");
-    // The child's environment is PATH plus what /bin/sh itself sets; an inherited
+    // The child receives PATH, the parser reason, and shell bookkeeping; an inherited
     // environment would carry HOME, USER, GH_TOKEN and the rest.
+    expect(childEnv).toContain("FLAIR_TEST_ALLOW_BUN_HARPER=parse pyproject data with the Python interpreter");
     const keys = childEnv.split("\n").filter(Boolean).map((l) => l.split("=")[0]);
-    expect(keys.filter((k) => !["PATH", "PWD", "OLDPWD", "SHLVL", "_"].includes(k))).toEqual([]);
+    expect(keys.filter((k) => !["PATH", "FLAIR_TEST_ALLOW_BUN_HARPER", "PWD", "OLDPWD", "SHLVL", "_"].includes(k))).toEqual([]);
   });
 
   test("(r8e) check-version-sync names a DYNAMIC version as a policy refusal, not as a missing declaration", () => {
@@ -1953,12 +1954,12 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
       mkdirSync(dirname(join(root, pj)), { recursive: true });
       writeFileSync(join(root, pj), JSON.stringify({ name: pj, version: "1.0.0" }) + "\n");
     }
-    const verify = spawnSync(process.execPath, [checker, "1.0.0", "--root", root], { encoding: "utf8" });
+    const verify = spawnSync(process.execPath, [checker, "1.0.0", "--root", root], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise release-auto-tag process fixture arguments" }, encoding: "utf8" });
     const out = `${verify.stdout}${verify.stderr}`;
     expect(verify.status).not.toBe(0);
     expect(out).toContain("[project] declares version as dynamic, which this checker refuses");
     expect(out).not.toContain("no [project].version declaration");
-    const write = spawnSync(process.execPath, [checker, "--write", "2.0.0", "--root", root], { encoding: "utf8" });
+    const write = spawnSync(process.execPath, [checker, "--write", "2.0.0", "--root", root], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise release-auto-tag process fixture arguments" }, encoding: "utf8" });
     const wout = `${write.stdout}${write.stderr}`;
     expect(write.status).not.toBe(0);
     expect(wout).toContain("[project] declares version as dynamic, which this checker refuses to rewrite");
@@ -2069,10 +2070,10 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
       mkdirSync(join(root, "packages/adk-flair"), { recursive: true });
       writeFileSync(join(root, "packages/flair-bench/src/version.ts"), 'export const TOOL_VERSION = "1.0.0";\n');
       writeFileSync(join(root, "packages/adk-flair/pyproject.toml"), `[project]\nname = "adk-flair"\nversion = 1\n`);
-      const a = spawnSync(process.execPath, [checker, "1.0.0", "--root", root], { encoding: "utf8" });
+      const a = spawnSync(process.execPath, [checker, "1.0.0", "--root", root], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise release-auto-tag process fixture arguments" }, encoding: "utf8" });
       checkVersionSyncMessages.push(`${a.stdout}${a.stderr}`);
       writeFileSync(join(root, "packages/adk-flair/pyproject.toml"), `[project]\nname = "adk-flair"\ndescription = """\nversion = "0.55.2"\n"""\nversion = "1.0.0"\n`);
-      const b = spawnSync(process.execPath, [checker, "--write", "2.0.0", "--root", root], { encoding: "utf8" });
+      const b = spawnSync(process.execPath, [checker, "--write", "2.0.0", "--root", root], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise release-auto-tag process fixture arguments" }, encoding: "utf8" });
       checkVersionSyncMessages.push(`${b.stdout}${b.stderr}`);
     }
     for (const t of [...emitted, ...checkVersionSyncMessages]) {
@@ -2272,7 +2273,7 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
       `console.log(readProjectVersion('[project]\\nversion = "1.0.0"\\n').kind);`,
     ].join("\n");
     const run = spawnSync(process.execPath, ["-e", code], {
-      env: { ...process.env, PATH: scratchDir() },
+      env: { ...({ ...process.env, PATH: scratchDir() }), FLAIR_TEST_ALLOW_BUN_HARPER: "exercise release-auto-tag process fixture arguments" },
       encoding: "utf8",
     });
     expect(String(run.stdout ?? "").trim()).toBe("unsupported"); // assertion: fail closed
@@ -2368,7 +2369,7 @@ describe("release auto-tag — the adk-flair tag (slice 3 of #1928)", () => {
     const before = { bench: readFileSync(bench, "utf8"), py: readFileSync(py, "utf8") };
     const realRoot = resolve(import.meta.dir, "../..");
     const checker = join(realRoot, "scripts", "check-version-sync.mjs");
-    const r = spawnSync(process.execPath, [checker, "--write", "2.0.0", "--root", root], { encoding: "utf8" });
+    const r = spawnSync(process.execPath, [checker, "--write", "2.0.0", "--root", root], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise release-auto-tag process fixture arguments" }, encoding: "utf8" });
     expect(r.status).not.toBe(0); // assertion: the refusal exits non-zero
     expect(readFileSync(bench, "utf8")).toBe(before.bench); // assertion: flair-bench NOT written
     expect(readFileSync(py, "utf8")).toBe(before.py); // assertion: pyproject NOT written
@@ -2438,7 +2439,7 @@ describe("release auto-tag — the nightly target", () => {
     // the commits that touched it.
     const dir = scratchDir();
     const git = (...args: string[]): string => {
-      const r = spawnSync("git", args, { cwd: dir, encoding: "utf8" });
+      const r = spawnSync("git", args, { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise release-auto-tag process fixture arguments" }, cwd: dir, encoding: "utf8" });
       if (r.status !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr?.trim() ?? r.status}`);
       return r.stdout.trim();
     };
@@ -2478,7 +2479,7 @@ describe("release auto-tag — the nightly target", () => {
     // which condition 7 rejects, so the nightly could not tag the release.
     const dir = scratchDir();
     const git = (...args: string[]): string => {
-      const r = spawnSync("git", args, { cwd: dir, encoding: "utf8" });
+      const r = spawnSync("git", args, { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise release-auto-tag process fixture arguments" }, cwd: dir, encoding: "utf8" });
       if (r.status !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr?.trim() ?? r.status}`);
       return r.stdout.trim();
     };

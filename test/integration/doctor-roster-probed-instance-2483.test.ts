@@ -449,7 +449,7 @@ async function startHeaderCapture(opts: { harperShaped?: boolean } = {}): Promis
     entry = join(dir, "node_modules", "harper", "dist", "bin", "harper.js");
     writeFileSync(entry, script);
   }
-  const child = spawn(process.execPath, entry ? [entry] : ["-e", script], { stdio: ["ignore", "pipe", "inherit"] });
+  const child = spawn(nodeBin(), entry ? [entry] : ["-e", script], { stdio: ["ignore", "pipe", "inherit"] });
   const lines: string[] = [];
   let buffered = "";
   const port = await new Promise<number>((resolve, reject) => {

@@ -39,6 +39,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
+import { shellScript } from "../helpers/shell-script.ts";
 import { buildLaunchdPlist, launchdLabel, launchdPlistPath, LEGACY_LAUNCHD_LABEL } from "../../src/cli.ts";
 import { STUB_HARPER, stubLifetimeEnv } from "../helpers/stub-harper-2040.ts";
 
@@ -384,7 +385,7 @@ async function drive(
 ): Promise<{ result: any; stdout: string; stderr: string; exitCode: number }> {
   const proc = Bun.spawn([process.execPath, join(fx.probe, "drive.ts"), what, JSON.stringify(input)], {
     cwd: fx.probe,
-    env: { ...childEnv(), ...envOverride },
+    env: { ...childEnv(), ...envOverride, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise the Bun launchd driver with JSON argument data" },
     timeout: timeoutMs,
     killSignal: "SIGKILL",
     stdout: "pipe",
@@ -923,7 +924,7 @@ describe("flair#2281 — a stub started through the plist's launcher exits when 
       // The owner stands in for the test runner: a shell blocked reading a pipe
       // this process holds. It exits when that pipe closes, so also when this
       // process does.
-      const owner = Bun.spawn(["sh", "-c", "read -r line"], { stdin: "pipe", stdout: "ignore", stderr: "ignore" });
+      const owner = Bun.spawn(["sh", shellScript("read -r line")], { stdin: "pipe", stdout: "ignore", stderr: "ignore" });
       const stderrPath = join(fx.home, "plist-stub.stderr");
       const stderrFd = openSync(stderrPath, "w");
       try {

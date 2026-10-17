@@ -77,7 +77,7 @@ function runAssertion({
     const r = spawnSync("bash", ["-c", 'source "$LIB"; assert_no_inline_credentials "$TARGET"'], {
       encoding: "utf8",
       timeout: 30_000,
-      env,
+      env: { ...env, FLAIR_TEST_ALLOW_BUN_HARPER: "run redaction scanner fixtures, not CLI or Harper" },
     });
     return { status: r.status, output: `${r.stdout ?? ""}${r.stderr ?? ""}` };
   } finally {
@@ -219,7 +219,10 @@ describe("the real helper drives the real scanner at the crash/finding seam (fla
     const r = spawnSync("bash", ["-c", 'source "$LIB"; assert_no_inline_credentials "$TARGET"'], {
       encoding: "utf8",
       timeout: 60_000,
-      env: { ...process.env, WORKSPACE: workspace, LIB, TARGET: target, ADMIN_PASS: "" },
+      env: {
+        ...process.env, WORKSPACE: workspace, LIB, TARGET: target, ADMIN_PASS: "",
+        FLAIR_TEST_ALLOW_BUN_HARPER: "run redaction scanner fixtures, not CLI or Harper",
+      },
     });
     return { status: r.status, output: `${r.stdout ?? ""}${r.stderr ?? ""}` };
   }
@@ -261,7 +264,10 @@ describe("the real helper drives the real scanner at the crash/finding seam (fla
 
 describe("the fixture script pairs exit status and report (flair#2589)", () => {
   test("the committed fixtures pass and the leaky one is a finding", () => {
-    const r = spawnSync("bash", [FIXTURE_SCRIPT], { encoding: "utf8", timeout: 60_000 });
+    const r = spawnSync("bash", [FIXTURE_SCRIPT], {
+      encoding: "utf8", timeout: 60_000,
+      env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "run redaction scanner fixtures, not CLI or Harper" },
+    });
     expect(r.status).toBe(0);
     expect(r.stdout).toContain("clean fixture: passed");
     expect(r.stdout).toContain("leaky fixture: reported as a finding");
@@ -300,7 +306,10 @@ process.exit(run.status ?? 2);
       const r = spawnSync("bash", [join(ci, "check-redaction-fixtures.sh")], {
         encoding: "utf8",
         timeout: 60_000,
-        env: { ...process.env, ADMIN_PASS: "" },
+        env: {
+          ...process.env, ADMIN_PASS: "",
+          FLAIR_TEST_ALLOW_BUN_HARPER: "run redaction scanner fixtures, not CLI or Harper",
+        },
       });
       const output = `${r.stdout ?? ""}${r.stderr ?? ""}`;
       expect(r.status).toBe(1);
@@ -330,6 +339,7 @@ process.exit(run.status ?? 2);
       const r = spawnSync("bash", [join(ci, "check-redaction-fixtures.sh")], {
         encoding: "utf8",
         timeout: 60_000,
+        env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "run redaction scanner fixtures, not CLI or Harper" },
       });
       expect(r.status).not.toBe(0);
       expect(`${r.stdout ?? ""}${r.stderr ?? ""}`).not.toContain("leaky fixture: reported as a finding");

@@ -15,6 +15,7 @@
  * the invariants: `decide` holds no App credential at all, and every checkout
  * sets `persist-credentials: false`.
  */
+import { shellScript } from "../helpers/shell-script.ts";
 import { afterAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -86,7 +87,7 @@ function reporterBodyBlock(): string {
 /** RENDER the reporter's body by RUNNING its shell block with the given env. */
 function renderReporter(env: Record<string, string>): string {
   const script = `set -euo pipefail\nbody_file=$(mktemp)\n${reporterBodyBlock()}\ncat "$body_file"\n`;
-  const res = spawnSync("bash", ["-c", script], {
+  const res = spawnSync("bash", [shellScript(script)], {
     env: { ...process.env, ...env },
     encoding: "utf8",
   });
@@ -204,7 +205,7 @@ describe("release-auto-tag workflow — triggers and guards", () => {
     expect(assertStep?.run).toContain("%%@*");
 
     const runAssert = (triggerPath: string) =>
-      spawnSync("bash", ["-c", assertStep?.run as string], {
+      spawnSync("bash", [shellScript(assertStep?.run as string)], {
         env: { PATH: process.env.PATH, TRIGGER_NAME: "CI", TRIGGER_PATH: triggerPath },
         encoding: "utf8",
       });
@@ -594,7 +595,7 @@ describe("release-auto-tag workflow — credential isolation and the reporter's 
       );
       const title = "release auto-tag refused v0.57.0: reviews";
       const runReport = (fakeTitle: string, record: string) =>
-        spawnSync("bash", ["-c", script as string], {
+        spawnSync("bash", [shellScript(script as string)], {
           env: {
             PATH: `${bin}:${process.env.PATH}`,
             GH_TOKEN: "test-token",

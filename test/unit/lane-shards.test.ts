@@ -285,7 +285,8 @@ test("directory and literal glob targets agree with Bun discovery", () => {
   }
   for (const targets of [["./targets/"], ["./targets/*.test.ts"], ["targets/*.test.ts"], names.map(name => `./targets/${name}`)]) {
     const step = { name: "fixture", cwd: root, args: ["test", ...targets], files: names.map(name => join(root, "targets", name)) };
-    const result = spawnSync(process.execPath, step.args, { cwd: root, encoding: "utf8", timeout: 20_000 });
+    const result = spawnSync(process.execPath, step.args, { cwd: root, encoding: "utf8", timeout: 20_000,
+      env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise Bun discovery with literal glob arguments" } });
     if (targets.length === 1 && targets[0].includes("*")) {
       expect(result.status).toBe(1);
       expect(() => commandFiles(step)).toThrow();
@@ -304,7 +305,8 @@ test("an unmatched target retains coverage of matched command files", () => {
   const root = fixtureRoot();
   const file = join(root, "test/unit/placeholder.test.ts");
   const step = { name: "fixture", cwd: root, args: ["test", file, "./test/unit/*.test.ts"], files: [file] };
-  const result = spawnSync(process.execPath, step.args, { cwd: root, encoding: "utf8", timeout: 20_000 });
+  const result = spawnSync(process.execPath, step.args, { cwd: root, encoding: "utf8", timeout: 20_000,
+      env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise Bun discovery with literal glob arguments" } });
   expect(result.status).toBe(0);
   const res = laneCoverage([step], [[step]], [file], root);
   expect(res.coveredFiles).toBe(1);

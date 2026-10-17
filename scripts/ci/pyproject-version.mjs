@@ -139,10 +139,9 @@ function runPython(payload, opts = {}) {
   // ISOLATED (round 9): `-I` means no current directory or script directory on
   // sys.path, no PYTHON* variables, no user site-packages, so a module named like
   // a stdlib one in the checkout (json.py, tomllib.py) cannot run in place of it.
-  // The child gets PATH and nothing else: no App token, no other secret, reaches
-  // the interpreter.
+  // Set only PATH and the parser reason.
   const res = spawnSync(opts.pythonBin ?? "python3", ["-I", "-c", PY], {
-    env: { PATH: process.env.PATH ?? "/usr/bin:/bin" },
+    env: { PATH: process.env.PATH ?? "/usr/bin:/bin", FLAIR_TEST_ALLOW_BUN_HARPER: "parse pyproject data with the Python interpreter" },
     input: JSON.stringify(payload),
     encoding: "utf8",
     maxBuffer: 64 * 1024 * 1024,

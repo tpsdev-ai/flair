@@ -733,6 +733,7 @@ describe("flair#1454 — self-heal requires /Health proof, not just a live pid",
       // This is the 'recycled pid' scenario: a live process in hdb.pid that is
       // not the flair daemon.
       const sleeper = Bun.spawn(["bun", "-e", "await new Promise(()=>{})"], {
+        env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise a Bun sleeper as a live non-listener" },
         stdout: "ignore",
         stderr: "ignore",
       });
@@ -953,6 +954,7 @@ describe("flair#1478 — self-heal requires flair /Health identity and pid→por
       // That is the failed-restart shape: something answered 200, but it is
       // not the instance we launched.
       const sleeper = Bun.spawn(["bun", "-e", "await new Promise(()=>{})"], {
+        env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise a Bun sleeper as a live non-listener" },
         stdout: "ignore",
         stderr: "ignore",
       });

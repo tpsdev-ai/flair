@@ -4,9 +4,11 @@ import { spawn } from "node:child_process";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { mem0MemoryBridge } from "../../src/bridges/builtins/mem0.js";
 import type { BridgeContext } from "../../src/bridges/types.js";
 import { ensureCliBuild } from "../helpers/build-cli-once.js";
+import { nodeBin } from "../helpers/node-runtime.js";
 
 const KEY = "mem0-secret-security-2188";
 const CLI_PATH = join(import.meta.dirname, "..", "..", "dist", "cli.js");
@@ -169,9 +171,10 @@ globalThis.fetch = async (_input, init) => {
   function cli(args: string[], env: Record<string, string> = {}): Promise<{ code: number | null; stdout: string; stderr: string; fetches: number }> {
     writeFileSync(marker, "");
     return new Promise((resolve, reject) => {
-      const child = spawn("bun", ["--preload", preload, CLI_PATH, "bridge", "import", ...args], {
+      const childEnv = { ...process.env, HOME: scratch, FLAIR_AGENT_ID: "", MEM0_API_KEY: "", FLAIR_FETCH_TAP: marker, ...env };
+      const child = spawn(nodeBin({ env: childEnv, cwd: scratch }), ["--import", pathToFileURL(preload).href, CLI_PATH, "bridge", "import", ...args], {
         cwd: scratch,
-        env: { ...process.env, HOME: scratch, FLAIR_AGENT_ID: "", MEM0_API_KEY: "", FLAIR_FETCH_TAP: marker, ...env },
+        env: childEnv,
         stdio: ["ignore", "pipe", "pipe"],
         timeout: 20_000,
       });

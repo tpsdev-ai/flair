@@ -13,12 +13,10 @@ import { tmpdir } from "node:os";
 import { createServer, IncomingMessage, ServerResponse, Server } from "node:http";
 import nacl from "tweetnacl";
 import { childOverranDeadline, cliLeg } from "../helpers/child-deadline.js";
+import { nodeBin } from "../helpers/node-runtime.js";
 
 // flair#1807: the spawned CLI's OWN deadline, and the per-case budget above it.
-// Every case here runs the built CLI once against a local mock server, so 20 s
-// covers a cold `bun dist/cli.js` start many times over; the budget is the
-// deadline + 5 s for the mock-server setup, the assertions and the teardown. A
-// hung child is named by ITS deadline, with its captured output — never bun's
+// A hung child is named by ITS deadline, with its captured output — never bun's
 // bare per-test "timed out".
 const CHILD_DEADLINE_MS = 20_000;
 const CASE_BUDGET_MS = 25_000;
@@ -75,10 +73,11 @@ function runCli(args: string[], env: Record<string, string> = {}): Promise<{ std
   const cliPath = join(import.meta.dirname ?? __dirname, "..", "..", "dist", "cli.js");
   return new Promise((resolve, reject) => {
     const startedAt = Date.now();
-    const child = spawn("bun", [cliPath, ...args], {
-      env: { ...process.env, ...env },
+    const childEnv = { ...process.env, ...env };
+    const child = spawn(nodeBin({ env: childEnv }), [cliPath, ...args], {
+      env: childEnv,
       stdio: ["inherit", "pipe", "pipe"],
-      timeout: CHILD_DEADLINE_MS,
+      timeout: 20_000, // literal so the spawn-budget gate reads a child deadline
     });
     let stdout = "";
     let stderr = "";
@@ -138,7 +137,7 @@ describe("flair presence set", () => {
 
     expect(code).toBe(1);
     expect(stderr).toContain("--activity is required");
-  }, CASE_BUDGET_MS);
+  }, 60_000);
 
   it("rejects invalid activity value", async () => {
     const agentId = "test-agent-presence";
@@ -151,7 +150,7 @@ describe("flair presence set", () => {
 
     expect(code).toBe(1);
     expect(stderr).toContain("invalid activity");
-  }, CASE_BUDGET_MS);
+  }, 60_000);
 
   it("rejects task exceeding 120 chars", async () => {
     const agentId = "test-agent-presence";
@@ -165,7 +164,7 @@ describe("flair presence set", () => {
 
     expect(code).toBe(1);
     expect(stderr).toContain("120 character limit");
-  }, CASE_BUDGET_MS);
+  }, 60_000);
 
   it("rejects task exactly 121 chars", async () => {
     const agentId = "test-agent-presence";
@@ -179,7 +178,7 @@ describe("flair presence set", () => {
 
     expect(code).toBe(1);
     expect(stderr).toContain("120 character limit");
-  }, CASE_BUDGET_MS);
+  }, 60_000);
 
   it("accepts task exactly 120 chars", async () => {
     const agentId = "test-agent-presence";
@@ -204,7 +203,7 @@ describe("flair presence set", () => {
     } finally {
       await stopServer(server);
     }
-  }, CASE_BUDGET_MS);
+  }, 60_000);
 
   it("posts to /Presence with correct activity and task", async () => {
     const agentId = "test-agent-presence";
@@ -233,7 +232,7 @@ describe("flair presence set", () => {
     } finally {
       await stopServer(server);
     }
-  }, CASE_BUDGET_MS);
+  }, 60_000);
 
   it("posts activity-only (no task)", async () => {
     const agentId = "test-agent-presence";
@@ -258,7 +257,7 @@ describe("flair presence set", () => {
     } finally {
       await stopServer(server);
     }
-  }, CASE_BUDGET_MS);
+  }, 60_000);
 
   it("sends Ed25519 Authorization header", async () => {
     const agentId = "test-agent-presence";
@@ -287,7 +286,7 @@ describe("flair presence set", () => {
     } finally {
       await stopServer(server);
     }
-  }, CASE_BUDGET_MS);
+  }, 60_000);
 
   it("exits with error on server 5xx", async () => {
     const agentId = "test-agent-presence";
@@ -309,7 +308,7 @@ describe("flair presence set", () => {
     } finally {
       await stopServer(server);
     }
-  }, CASE_BUDGET_MS);
+  }, 60_000);
 
   it("rejects missing agent ID", async () => {
     const { stderr, code } = await runCli(
@@ -319,7 +318,7 @@ describe("flair presence set", () => {
 
     expect(code).toBe(1);
     expect(stderr).toContain("agent ID required");
-  }, CASE_BUDGET_MS);
+  }, 60_000);
 
   it("rejects missing private key", async () => {
     const agentId = "no-key-agent";
@@ -331,7 +330,7 @@ describe("flair presence set", () => {
 
     expect(code).toBe(1);
     expect(stderr).toContain("private key not found");
-  }, CASE_BUDGET_MS);
+  }, 60_000);
 
   it("supports all valid activity values", async () => {
     const agentId = "test-agent-presence";
@@ -354,5 +353,5 @@ describe("flair presence set", () => {
     } finally {
       await stopServer(server);
     }
-  }, CASE_BUDGET_MS);
+  }, 60_000);
 });

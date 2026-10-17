@@ -34,6 +34,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import nacl from "tweetnacl";
 import { startHarper, stopHarpers, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
+import { nodeBin } from "../helpers/node-runtime";
 
 const CLI = join(process.cwd(), "dist", "cli.js");
 const ADMIN_PASS = "test123"; // matches harper-lifecycle's seeded admin pass
@@ -97,7 +98,7 @@ function runDoctor(opts: { args: string[]; opsPort?: string }): Promise<{ code: 
     };
     if (opts.opsPort === undefined) delete env.FLAIR_OPS_PORT;
     else env.FLAIR_OPS_PORT = opts.opsPort;
-    const child = spawn(process.execPath, [CLI, "doctor", ...opts.args], { env, timeout: 60_000 });
+    const child = spawn(nodeBin({ env }), [CLI, "doctor", ...opts.args], { env, timeout: 60_000 });
     let stdout = "";
     let stderr = "";
     child.stdout?.on("data", (d: Buffer) => { stdout += d.toString(); });

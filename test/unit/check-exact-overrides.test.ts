@@ -1,3 +1,4 @@
+import { nodeBin } from "../helpers/node-runtime.ts";
 /** Tests for declared direct override keys matching workspace dependency names. */
 
 import { describe, expect, test } from "bun:test";
@@ -466,7 +467,7 @@ const versionCases: [string, boolean][] = [
 ];
 
 function legacyResults(values: string[], timeout: number) {
-  return spawnSync(process.execPath, ["-e", `
+  return spawnSync(nodeBin(), ["-e", `
     const pattern = new RegExp(process.env.LEGACY_SEMVER_SOURCE);
     const results = JSON.parse(process.env.LEGACY_VALUES).map(value => {
       if (pattern.test(value)) return true;

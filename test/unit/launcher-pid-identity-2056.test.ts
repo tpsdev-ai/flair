@@ -23,6 +23,7 @@
 // timeout. The background processes this file starts are killed in afterEach
 // by the pids it recorded; each also exits by itself within 120 s, or (the
 // `sh` reading a pipe) when this process exits.
+import { shellScript } from "../helpers/shell-script.ts";
 import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -99,14 +100,8 @@ function startHarperEntry(root: string, runtime = "node"): number {
   return startBackground([runtime, script, "run", "."]);
 }
 
-/**
- * A live `sh -c '<cmd>' /tmp/node_modules/harper.js`. `<cmd>` is the builtin
- * `read` on a pipe this process holds open, so the shell itself stays the
- * process (`sh -c 'sleep 60'` would exec `sleep` in its place, dropping the
- * argument) and exits when that pipe closes.
- */
 function startShellWithHarperArg(): number {
-  return startBackground(["sh", "-c", "read -r line", "/tmp/node_modules/harper.js"], "pipe");
+  return startBackground(["sh", shellScript("read -r line"), "/tmp/node_modules/harper.js"], "pipe");
 }
 
 /** A live `node -e` whose arguments include a `harper.js` path that it does not run. */
@@ -149,7 +144,7 @@ function psLstartSecond(pid: number): number {
   let sec = NaN;
   let stderr = "";
   for (;;) {
-    const r = spawnSync("sh", ["-c", conv, "sh", String(pid)], { encoding: "utf-8", timeout: 5_000 });
+    const r = spawnSync("sh", [shellScript(conv), String(pid)], { encoding: "utf-8", timeout: 5_000 });
     sec = Number((r.stdout ?? "").trim());
     stderr = r.stderr ?? "";
     if (Number.isInteger(sec) && sec > 0) return sec;

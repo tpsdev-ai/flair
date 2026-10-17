@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 export function nodeBin({ env = process.env, cwd = process.cwd() }: { env?: NodeJS.ProcessEnv; cwd?: string | URL } = {}): string {
   const executable = env.NODE_BIN?.trim() || (process.versions.bun ? "node" : process.execPath);
   const probe = (command: string, expression: string) => execFileSync(command, ["-p", expression], {
-    env, cwd,
+    env: { ...env, FLAIR_TEST_ALLOW_BUN_HARPER: "probe runtime identity with JavaScript expression data" }, cwd,
     encoding: "utf8",
     timeout: 2_000,
     killSignal: "SIGKILL",

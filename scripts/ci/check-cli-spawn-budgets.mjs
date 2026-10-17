@@ -38,7 +38,7 @@
 // (plus an occurrence ordinal — never `file:line`); keys are unique, so one
 // entry covers exactly one call; the run is DIFFED against the committed
 // baseline, so a PR cannot add an offender together with its own exception; and
-// an entry that no longer offends FAILS, so the list can only shrink. There is
+// an entry that no longer offends FAILS. New exception keys FAIL. There is
 // no skip flag and no whole-file skip.
 //
 // SCOPE — EVERY SPAWN FAMILY THIS REPO USES (flair#1825). The node
@@ -1115,7 +1115,7 @@ const BASELINE_REL = "scripts/ci/cli-spawn-budgets.baseline.json";
 
 /** Resolve a ref to its full 40-char commit sha in `root`; hard-fail if invalid. */
 export function resolveRef(ref, root) {
-  const r = spawnSync("git", ["-C", root, "rev-parse", "--verify", "--quiet", `${ref}^{commit}`], { encoding: "utf8" });
+  const r = spawnSync("git", ["-C", root, "rev-parse", "--verify", "--quiet", `${ref}^{commit}`], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "resolve a trusted git ref with literal revision syntax" }, encoding: "utf8" });
   if (r.status !== 0) {
     throw new Error(
       `invalid base ref '${ref}': cannot resolve it in ${root}` +
@@ -1132,7 +1132,7 @@ export function resolveRef(ref, root) {
  * both shas — never a silent "not an ancestor".
  */
 export function isAncestor(ancestor, descendant, root) {
-  const r = spawnSync("git", ["-C", root, "merge-base", "--is-ancestor", ancestor, descendant], { encoding: "utf8" });
+  const r = spawnSync("git", ["-C", root, "merge-base", "--is-ancestor", ancestor, descendant], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "resolve a trusted git ref with literal revision syntax" }, encoding: "utf8" });
   if (r.status === 0) return true;
   if (r.status === 1) return false;
   throw new Error(
@@ -1148,7 +1148,7 @@ export function isAncestor(ancestor, descendant, root) {
  * EMPTY). Nothing else may be treated as "no baseline". */
 export function loadBaselineAtRef(ref, root) {
   resolveRef(ref, root);
-  const res = spawnSync("git", ["-C", root, "show", `${ref}:${BASELINE_REL}`], { encoding: "utf8" });
+  const res = spawnSync("git", ["-C", root, "show", `${ref}:${BASELINE_REL}`], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "resolve a trusted git ref with literal revision syntax" }, encoding: "utf8" });
   if (res.status === 0) return JSON.parse(res.stdout);
   // A valid ref whose tree has no baseline file → the base baseline is EMPTY.
   if (/does not exist|exists on disk, but not in/i.test(res.stderr ?? "")) return null;
@@ -1162,7 +1162,7 @@ export function readPrBaseline(root) {
   return JSON.parse(readFileSync(join(root, BASELINE_REL), "utf8"));
 }
 
-/** Entries a PR ADDED relative to the trusted base. A PR may only REMOVE. */
+/** Entries with exception keys absent from the trusted base. */
 export function addedExceptions(baseEntries, prEntries) {
   const baseKeys = new Set(baseEntries.map(offenderKey));
   return prEntries.filter((e) => !baseKeys.has(offenderKey(e)));
@@ -1192,7 +1192,7 @@ export function runGate({ root, baseRef = gateBaseRef(), env = process.env, seed
   // The PR copy is the working list: new offenders, multiplicity, and stale
   // entries are measured against it.
   const diff = diffAgainstBaseline(spawnOffenders, caseOffenders, prEntries);
-  // Added exceptions: the PR copy may only REMOVE relative to the base. When the
+  // Added exception keys are rejected relative to the base. When the
   // base has NO baseline file the base baseline is EMPTY, so EVERY PR entry is an
   // addition → fail — UNLESS the base DESCENDS from the seed-introduction anchor
   // (flair#1825). An exact-sha equality can never survive main moving. The anchor
@@ -1290,7 +1290,7 @@ if (isMain) {
     process.stdout.write(`  STALE    ${o.file}  ${o.scope}  ${o.kind}  ${o.fingerprint.slice(0, 50)}\n`);
   }
   for (const o of added) {
-    process.stdout.write(`  ADDED-EX ${o.file}  ${o.scope}  ${o.kind}  ${o.fingerprint.slice(0, 50)}  (a PR may only REMOVE baseline entries)\n`);
+    process.stdout.write(`  ADDED-EX ${o.file}  ${o.scope}  ${o.kind}  ${o.fingerprint.slice(0, 50)}  (new exception key)\n`);
   }
   process.stdout.write(
     `check-cli-spawn-budgets: ${spawnOffenders.length} spawn(s) with no timeout, ${caseOffenders.length} case(s) offending, ` +

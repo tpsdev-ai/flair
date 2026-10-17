@@ -6,7 +6,7 @@ const root = fileURLToPath(new URL("../../", import.meta.url));
 function runCase(title: string): void {
   const result = spawnSync(process.execPath, [
     "test", "test/unit-isolated/memory-reindex-bookkeeping-2139.test.ts", "--test-name-pattern", title,
-  ], { cwd: root, encoding: "utf8", timeout: 30_000 });
+  ], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise memory-reindex-bookkeeping-2139 process fixture arguments" }, cwd: root, encoding: "utf8", timeout: 30_000 });
   expect(result.status, result.stdout + result.stderr).toBe(0);
   expect(result.stderr).toMatch(/1 pass/);
 }

@@ -29,7 +29,7 @@ let savedUmask: number;
 
 function freePort(): number {
   const r = spawnSync(
-    process.execPath,
+    nodeBin(),
     ["-e", "const n=require('net');const s=n.createServer();s.listen(0,'127.0.0.1',()=>{console.log(s.address().port);s.close();});"],
     { encoding: "utf-8", timeout: 5_000 },
   );
