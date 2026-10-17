@@ -7,13 +7,14 @@
  * against the model, so a non-admin write discards it and stores the vector the
  * configured model computes instead. A non-admin POST, PUT or PATCH that carries
  * a non-empty `embedding` therefore discards the
- * vector and its `embeddingModel` stamp before the write, so the write stores the
- * vector the server computes for the row's own post-redaction text, or none when
- * the model is unavailable — exactly as a write that sent no vector. A body-level
- * `embeddingModel` stamp with no `embedding` is discarded as well, so a non-admin
- * write can never relabel a stored vector as current-space. A skill row's stored
- * vector that prepareSkillBody carried into the body keeps the stamp stored
- * beside it; a caller's replacement stamp is never applied to it.
+ * vector and its `embeddingModel` stamp before the write, so the write stores a
+ * vector the server owns — the one it computes for the row's own post-redaction
+ * text, or none when the model is unavailable — exactly as a write that sent no
+ * vector. A body-level `embeddingModel` stamp with no `embedding` is discarded as
+ * well, so a non-admin write can never relabel a stored vector as current-space.
+ * A skill row's stored vector that prepareSkillBody carried into the body is kept
+ * with the stamp stored beside it; a caller's replacement stamp is never applied
+ * to it.
  *
  * Unchanged: `embedding: null` and `[]` (the empty-embedding normalization from
  * #2593), the re-embed request protocol, an administrator's write, a trusted

@@ -2069,10 +2069,11 @@ export class Memory extends (databases as any).flair.Memory {
     // free, without a separate flag). NEVER suppresses the write either way.
     // flair#2573 slice 2: a non-admin write's caller-supplied vector and stamp
     // are discarded here, after redaction and before the dedup gate and the embed
-    // step, so the write stores the vector the server computes for the row's own
-    // post-redaction text, or no vector when the model is unavailable — exactly
-    // as a write that sent none. Only the CALLER's values are discarded; a vector
-    // prepareSkillBody carried from a stored row and the stamp it keeps are not.
+    // step, so the stored vector is one the server owns — the one it computes for
+    // the row's own post-redaction text, or no vector when the model is
+    // unavailable — as a write that sent none. Only the CALLER's values are
+    // discarded; a vector prepareSkillBody carried from a stored row and the stamp
+    // it keeps are not.
     if (postSuppliedVector || postSuppliedStamp) {
       discardSuppliedVector(content, auth, { vector: postSuppliedVector, stamp: postSuppliedStamp });
     }
