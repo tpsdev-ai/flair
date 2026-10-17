@@ -2069,7 +2069,7 @@ export class Memory extends (databases as any).flair.Memory {
     // free, without a separate flag). NEVER suppresses the write either way.
     // Discard the non-admin caller's vector and stamp after redaction, before
     // dedup and embedding. Compute an embedding when the resulting write needs
-    // one; an unchanged skill update retains its stored vector.
+    // one.
     if (postSuppliedVector || postSuppliedStamp) {
       discardSuppliedVector(content, auth, { vector: postSuppliedVector, stamp: postSuppliedStamp });
     }

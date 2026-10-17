@@ -1,5 +1,5 @@
 - **Non-admin Memory writes discard caller-supplied vectors and model stamps.** Embedding is
-  computed when the resulting write needs one. A vector-only PATCH retains its stored vector;
-  an unchanged skill update retains its stored vector. Non-admin writes cannot relabel
-  a stored vector. Administrator writes, trusted in-process writes, federation-sync records,
-  and `embedding: null` / `[]` handling are unchanged (flair#2573).
+  computed when the resulting write needs one. Non-admin writes cannot relabel
+  a stored vector. Administrator writes, trusted in-process writes, federation-sync records
+  are unchanged. Empty-vector normalization and the re-embed request protocol are unchanged;
+  an ordinary non-admin write strips a supplied stamp even alongside a null or empty embedding (flair#2573).

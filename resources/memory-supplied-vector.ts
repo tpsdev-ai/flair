@@ -1,14 +1,13 @@
 /**
  * Non-admin Memory writes discard caller-supplied vectors and model stamps.
- * Embedding is computed when the resulting write needs one. Vector-only PATCHes
- * and unchanged skill updates retain stored vectors. Non-admin skill updates
- * retain their stored stamps. Administrator and trusted in-process writes are
- * unchanged, as are `embedding: null` / `[]` handling and federation-sync records.
+ * Embedding is computed when the resulting write needs one.
+ * Administrator and trusted in-process writes and federation-sync records are unchanged.
+ * Empty-vector normalization and the re-embed request protocol are unchanged;
+ * an ordinary non-admin write strips a supplied stamp even alongside a null or empty embedding.
  */
 import type { AgentAuthVerdict } from "./agent-auth.js";
 
-/** True when `value` is a caller-supplied, non-empty embedding vector (an array,
- *  or a non-empty typed array). */
+/** True for a non-empty array or typed array supplied in the embedding field. */
 export function hasSuppliedVector(value: unknown): boolean {
   if (Array.isArray(value)) return value.length > 0;
   if (ArrayBuffer.isView(value) && !(value instanceof DataView)) return value.byteLength > 0;

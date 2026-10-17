@@ -2,10 +2,10 @@
  * server-owned-vectors-2573.test.ts — flair#2573 slice 2 (real Harper).
  *
  * Non-admin Memory writes discard caller-supplied vectors and model stamps.
- * Embedding is computed when the resulting write needs one. Vector-only PATCHes
- * and unchanged skill updates retain stored vectors. Non-admin skill updates
- * retain their stored stamps. Administrator and trusted in-process writes are
- * unchanged, as are `embedding: null` / `[]` handling.
+ * Embedding is computed when the resulting write needs one.
+ * Administrator and trusted in-process writes are unchanged.
+ * Empty-vector normalization and the re-embed request protocol are unchanged;
+ * an ordinary non-admin write strips a supplied stamp even alongside a null or empty embedding.
  *
  * Cases (one Harper with a working embedding engine):
  *   (a) an agent POST, PUT and PATCH, each carrying a crafted all-ones vector,
