@@ -186,16 +186,11 @@ export function validatePresenceReceipt(
 // ─── P4: Presence-specific merge ─────────────────────────────────────────────
 
 /**
- * Compare `lastHeartbeatAt` first, with `activityUpdatedAt` breaking ties. A
- * record older on that order is skipped by name (`presence_stale_heartbeat`).
- *
- * Null ordering: an ABSENT `activityUpdatedAt` sorts OLDER than any present
- * stamp. So on a heartbeat tie the stored activity fields (`activity`,
- * `currentTask`, `activityUpdatedAt`) stand unless the incoming stamp is
- * STRICTLY newer — an equal or absent incoming stamp can never blank the stored
- * activity/task. An accepted record never LOWERS the stored `activityUpdatedAt`
- * either: the written value is the later of the two (mixed clock skew cannot
- * regress the stamp).
+ * An older `lastHeartbeatAt`, or a tie with both `activityUpdatedAt` stamps
+ * present and the incoming stamp older, skips as `presence_stale_heartbeat`.
+ * On a heartbeat tie, an equal or absent incoming activity stamp merges while
+ * keeping the stored activity fields. An accepted record never lowers the
+ * stored `activityUpdatedAt`.
  */
 export function mergePresenceReceipt(
   local: Record<string, any> | null,
@@ -210,17 +205,15 @@ export function mergePresenceReceipt(
   if (localHb != null) {
     if (incHb < localHb) return { action: "skip", reason: "presence_stale_heartbeat" };
     // A tie whose activity ordering is OLDER (both stamps present) is stale.
-    // An ABSENT incoming stamp is not strictly newer either; rather than
-    // treating it as a merge, keep the stored activity fields below.
+    // A tie with an absent incoming stamp merges, keeping stored activity fields.
     if (incHb === localHb && localAut != null && incAut != null && incAut < localAut) {
       return { action: "skip", reason: "presence_stale_heartbeat" };
     }
   }
 
   // On a heartbeat tie, the incoming activity fields replace the stored ones
-  // only when the incoming stamp is STRICTLY newer. Otherwise (equal, older, or
-  // absent stamp) the stored activity/task/stamp stand, so a null incoming
-  // stamp can never blank them.
+  // only when the incoming stamp is STRICTLY newer. An equal or absent stamp
+  // merges while keeping the stored activity/task/stamp.
   const tied = localHb != null && incHb === localHb;
   const incomingStrictlyNewer = incAut != null && (localAut == null || incAut > localAut);
   const keepStoredActivity = tied && !incomingStrictlyNewer;

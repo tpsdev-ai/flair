@@ -119,7 +119,7 @@ beforeAll(async () => {
   harper = await startHarper({ env: { FLAIR_FEDERATION_PRESENCE_RECEIVE: "1" } });
   assertOwnInstance(harper);
   const now = new Date().toISOString();
-  // The receiver's own identity (so a local write stamps a real author id).
+  // The receiver's own identity.
   await insertRow("Instance", { id: LOCAL_INSTANCE, publicKey: "test-instance-key", role: "spoke", createdAt: now });
   await insertRow("Peer", { id: PEER, publicKey: Buffer.from(peerKeys.publicKey).toString("base64url"), role: "spoke", status: "paired", createdAt: now });
   await insertRow("Peer", { id: HUB, publicKey: Buffer.from(hubKeys.publicKey).toString("base64url"), role: "hub", status: "paired", createdAt: now });
@@ -367,8 +367,6 @@ describe("flair#2578 slice 1 — local-write home guard (P2) and author stamp (P
     expect(res.status).toBe(200);
     const row = await readRow("Presence", LOCAL_NULL.id);
     expect(row).not.toBeNull();
-    // P3: the local write stamps the local instance id, and a local row carries
-    // no receiver stamp.
     expect(row.originatorInstanceId).toBe(LOCAL_INSTANCE);
     expect(row.receivedAt ?? null).toBeNull();
   }, 60_000);

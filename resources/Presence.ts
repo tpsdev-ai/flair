@@ -44,9 +44,8 @@ import { WINDOW_MS, importEd25519Key, b64ToArrayBuffer, parseTpsEd25519Header } 
 import { isKnownAgentReplay, claimAgentNonce } from "./replay-store.js";
 import { localInstanceId } from "./instance-identity.js";
 import { applyOriginatorInstanceId, resolveStoredRow } from "./originator-instance.js";
-// The activity vocabulary + currentTask cap have ONE definition (the receipt
-// validator must accept exactly what a local write accepts) — shared from the
-// pure module; aliased to this file's existing names.
+// The receipt validator shares the POST heartbeat's activity vocabulary and
+// currentTask cap; aliased to this file's existing names.
 import {
   PRESENCE_ACTIVITIES as VALID_ACTIVITIES,
   sanitizePresenceCurrentTask as sanitizeCurrentTask,
@@ -726,14 +725,10 @@ export class Presence extends (databases as any).flair.Presence {
         resolveHarperVersion(),
       );
 
-      // P3: stamp this instance's own id as the row's author. CREATE stamps
-      // the local id; an UPDATE keeps the stored value — the same contract as
-      // Agent/Memory (resources/originator-instance.ts).
+      // P3: CREATE stamps the local instance id; UPDATE keeps the stored value.
       await applyOriginatorInstanceId(record, existing);
 
       const written = existing ? { ...existing, ...record } : record;
-      // receivedAt is a receiver-only stamp; a locally-written row never
-      // carries one, so a stale value on the row it replaces is dropped.
       delete written.receivedAt;
       await (databases as any).flair.Presence.put(written);
 
@@ -792,10 +787,9 @@ export class Presence extends (databases as any).flair.Presence {
   }
 
   /**
-   * PATCH merges into the stored row (Harper partial update); it does not route
-   * through put(), so it repeats put()'s controls verbatim: the same auth gate,
-   * the same URL-bound home refusal (P2), and the same author/receiver stamp
-   * rule (P3) — a body `originatorInstanceId` or `receivedAt` is never written.
+   * PATCH merges into the stored row (Harper partial update) and repeats put()'s
+   * auth, URL-bound home guard (P2), and author rule (P3).
+   * A client `receivedAt` is never stored.
    */
   async patch(content: any, query?: any) {
     const auth = await resolveAgentAuth((this as any).getContext?.());

@@ -11,7 +11,7 @@
   refuses an older heartbeat rather than replacing a newer one. The local writers
   (POST, PUT, PATCH) refuse a write for an agent homed on another instance, and
   none of them can set a client `originatorInstanceId` or `receivedAt`. `Presence`
-  gains nullable `originatorInstanceId` (stamped by a local write with this
-  instance's id when the instance has one) and `receivedAt` (stamped on receipt).
+  gains nullable `originatorInstanceId` (local creates stamp this instance's id,
+  or null; updates preserve the stored value) and `receivedAt` (stamped on receipt).
   With the flag off, a Presence record eligible for
   receipt skips as `presence_receive_disabled` rather than `unknown_table`.
