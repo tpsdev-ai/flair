@@ -30,9 +30,9 @@ export const ROOT_STEP_TIMEOUT_MS = 450_000;
 /**
  * How many shards the shared unit lane is split across (flair#2311). Chosen from
  * the lane budget: with the 1200 s budget (flair#2614) the slowest lane shard
- * measured 781 s across the last ~20 CI legs, so two shards keep the slowest
- * shard inside the budget with the same headroom the root step keeps after
- * flair#2258. The workflow matrix and this constant are pinned together by
+ * measured 781 s across the last 45 runs' completed legs, so two shards keep the
+ * slowest shard inside the budget with the same headroom the root step keeps
+ * after flair#2258. The workflow matrix and this constant are pinned together by
  * lane-shards.test.ts.
  */
 export const LANE_SHARDS = 2;

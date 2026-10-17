@@ -46,14 +46,15 @@ export function unitTempBase(platform: NodeJS.Platform, env: NodeJS.ProcessEnv):
 // CI job's own limit cancels the job mid-step, and neither the later steps, the
 // final summary nor the end-of-lane guards ever run. Every number below is
 // derived from that job: `.github/workflows/test.yml`, job `test-unit`,
-// `timeout-minutes: 22`. Measured on the last ~20 completed `Unit Tests (node
-// N, shard M)` legs (2026-10-17) plus a local run on the same tree:
+// `timeout-minutes: 22`. Measured on 105 completed `Unit Tests (node N, shard
+// M)` legs from the last 45 `test.yml` runs (2026-10-17), plus a local run on
+// the same tree:
 //   - the job's own steps outside the lane (setup before it, the skip-count
 //     check and post steps after it): at most 53 s (2026-09-29);
 //   - the whole lane: each leg runs one shard (flair#2311); the slowest shard
-//     measured 781 s (p90 over the sample 755 s), 456 s locally;
+//     measured 781 s (p90 over the sample 755 s), 740 s locally;
 //   - `root unit tests`: 96–266 s per root shard, and the two root shards one
-//     lane shard carries together measure 279–509 s;
+//     lane shard carries together measure 229–526 s;
 //   - the slowest non-root step measured 43 s; in that set the median is 1–2 s.
 // The budget is whole-lane headroom: 1320 − 120 = 1200 s, about 1.54× the
 // slowest measured shard (781 s), still subject to each step's own limit below;
