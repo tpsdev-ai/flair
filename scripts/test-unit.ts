@@ -72,17 +72,75 @@ export function unitTempBase(platform: NodeJS.Platform, env: NodeJS.ProcessEnv):
 
 /** The CI job limit the lane has to report inside (`timeout-minutes: 22`). */
 export const CI_JOB_LIMIT_MS = 22 * 60_000;
-/** Reserved for the job's own steps outside the lane: 53 s measured, 67 s spare. */
+/**
+ * Reserved after the lane for the job's own steps: the runner's end-of-lane
+ * guards and summary (measured at 4 ms over three runs, 2026-10-17) and the
+ * Darwin skip-count step that follows the lane (`bun
+ * scripts/check-darwin-gated-tests.mjs`, measured 23–25 s over three runs), with
+ * spare — 53 s measured across all the job's outside-lane steps (2026-09-29),
+ * 67 s spare.
+ *
+ * The setup steps no longer need it: `laneBudgetMsFromJobStart` subtracts their
+ * measured time directly when the job records its start (flair#2619).
+ */
 export const CI_OUTSIDE_LANE_MS = 120_000;
 /**
- * Keep-going's whole-lane budget: 1320 − 120 = 1200 s, at most about 1.54× the
- * slowest measured shard (at least 781 s; its slowest legs hit the old cap). A step still running when it runs out is killed and every later
+ * Keep-going's whole-lane budget without a recorded job start: 1320 − 120 = 1200 s,
+ * at most about 1.54× the slowest measured shard (at least 781 s; its slowest legs
+ * hit the old cap). A step still running when it runs out is killed and every later
  * step is reported as not run, so the summary and both guards are expected to
- * print before the job limit however many steps hang, provided the job's steps
- * outside the lane stay within the reserve above (an observed margin, not a
- * bound on workflow setup).
+ * print before the job limit, provided the job's steps outside the lane stay
+ * within the reserve above (an observed margin, not a bound on workflow setup).
+ * In CI the budget instead follows the job's real elapsed time — see
+ * `laneBudgetMsFromJobStart`.
  */
 export const KEEP_GOING_LANE_BUDGET_MS = CI_JOB_LIMIT_MS - CI_OUTSIDE_LANE_MS;
+/**
+ * The job-environment variable the job's first step writes its start (epoch
+ * seconds) into (flair#2619). The first step of `test-unit` sets it, so the lane
+ * follows that job's real elapsed time instead of starting its budget when the
+ * runner does. Absent — a local run, or any caller that sets nothing — the lane
+ * keeps the fixed `KEEP_GOING_LANE_BUDGET_MS`.
+ */
+export const JOB_START_ENV = "FLAIR_UNIT_JOB_START";
+/**
+ * The smallest lane budget the lane starts with (flair#2619): the guards and
+ * summary print in 4 ms (measured over three runs, 2026-10-17), so 30 s leaves
+ * that path ample room. A job already spent below it reports "budget exhausted
+ * before start" and runs no step.
+ */
+export const LANE_MIN_BUDGET_MS = 30_000;
+
+/**
+ * Keep-going's lane budget from the job's recorded start (flair#2619).
+ *
+ * `env[JOB_START_ENV]` is the epoch-second job start the job's first step wrote
+ * (`.github/workflows/test.yml`, job `test-unit`). When it is present and usable
+ * — a finite number, not in the future, and no older than the job limit — the
+ * budget is what the job has left after the elapsed setup and the post-lane
+ * reserve, so a start `N` seconds in the past is `N` seconds smaller than the
+ * fixed budget: `CI_JOB_LIMIT_MS - (now - start) - CI_OUTSIDE_LANE_MS`, never
+ * above `KEEP_GOING_LANE_BUDGET_MS`.
+ *
+ * Returns `KEEP_GOING_LANE_BUDGET_MS` — the fixed budget, for local runs and any
+ * other caller — when the record is absent or unusable, and `undefined` when the
+ * job is already spent past `LANE_MIN_BUDGET_MS`: the lane then reports "budget
+ * exhausted before start" instead of running.
+ */
+export function laneBudgetMsFromJobStart(env: NodeJS.ProcessEnv, nowMs: number): number | undefined {
+  const recorded = env[JOB_START_ENV]?.trim();
+  if (!recorded) return KEEP_GOING_LANE_BUDGET_MS;
+  const jobStartMs = Number(recorded) * 1000;
+  const elapsedMs = nowMs - jobStartMs;
+  if (!Number.isFinite(jobStartMs) || elapsedMs < 0 || elapsedMs > CI_JOB_LIMIT_MS) {
+    return KEEP_GOING_LANE_BUDGET_MS;
+  }
+  const remaining = CI_JOB_LIMIT_MS - elapsedMs - CI_OUTSIDE_LANE_MS;
+  // Never below the floor: a job already spent that far reports no budget.
+  if (remaining < LANE_MIN_BUDGET_MS) return undefined;
+  // Never above today's whole-lane budget: elapsed is what makes the difference.
+  return Math.min(remaining, KEEP_GOING_LANE_BUDGET_MS);
+}
 /**
  * The default per-step limit: 150 s, at least 3× the slowest ordinary step (43 s). One
  * hung step costs at most that, so the rest of the slowest lane still runs
@@ -98,7 +156,12 @@ export const STEP_TIMEOUT_MS = 150_000;
 export interface UnitLaneLimits {
   /** The limit for a step that sets no `timeoutMs` of its own. */
   stepTimeoutMs: number;
-  /** A whole-lane budget. Unset means none. */
+  /**
+   * A whole-lane budget. Unset means none. 0 (or less) is the signal from
+   * `laneBudgetMsFromJobStart` that the job's recorded start left no lane budget
+   * (flair#2619): the lane reports "budget exhausted before start" and runs no
+   * step.
+   */
   laneBudgetMs?: number;
 }
 
@@ -432,8 +495,14 @@ export function runUnitSteps(
   process.env.TMPDIR = laneTempRoot;
   process.env.FLAIR_UNIT_TEMP_ROOT = laneTempRoot;
   const laneBudgetMs = limits?.laneBudgetMs;
-  const deadline = laneBudgetMs === undefined ? Infinity : Date.now() + laneBudgetMs;
-  const budgetRanOut = `the lane's ${seconds(laneBudgetMs ?? 0)} time budget ran out`;
+  // A lane budget of 0 (or less) is `laneBudgetMsFromJobStart`'s signal that the
+  // job's recorded start left no lane budget (flair#2619): nothing runs and every
+  // step is reported under this distinct reason.
+  const exhaustedBeforeStart = laneBudgetMs !== undefined && laneBudgetMs <= 0;
+  const deadline = exhaustedBeforeStart ? 0 : laneBudgetMs === undefined ? Infinity : Date.now() + laneBudgetMs;
+  const budgetRanOut = exhaustedBeforeStart
+    ? "budget exhausted before start"
+    : `the lane's ${seconds(laneBudgetMs ?? 0)} time budget ran out`;
   // The service-manager tripwire (flair#2062). Created BEFORE the temp-dir
   // snapshot below, so its own scratch directory is never mistaken for a leak
   // this lane caused. Every step runs with `tripwire.dir` FIRST on PATH; after
@@ -622,8 +691,19 @@ if (import.meta.main) {
       }
       const node = spawnSync("node", ["--version"], { encoding: "utf8" });
       if (node.error || node.status !== 0) throw new Error("Node.js is required on PATH for builds and subprocess tests (see package.json engines).");
+      // The lane budget follows this job's real elapsed time when its first step
+      // recorded a start; without one, the fixed budget stands (flair#2619).
+      const derivedLaneBudgetMs = invocation.keepGoing
+        ? laneBudgetMsFromJobStart(process.env, Date.now())
+        : undefined;
+      const limits: Readonly<UnitLaneLimits> | undefined = invocation.limits
+        ? { ...invocation.limits, laneBudgetMs: derivedLaneBudgetMs ?? 0 }
+        : undefined;
+      const laneLimit = derivedLaneBudgetMs === undefined
+        ? "no lane budget left (the job is already spent)"
+        : `the lane after ${seconds(derivedLaneBudgetMs)}`;
       const mode = invocation.keepGoing
-        ? `keep-going: every step runs and failures are summed at the end; a step is killed after ${seconds(STEP_TIMEOUT_MS)} (root unit tests: ${seconds(ROOT_STEP_TIMEOUT_MS)}) and the lane after ${seconds(KEEP_GOING_LANE_BUDGET_MS)}`
+        ? `keep-going: every step runs and failures are summed at the end; a step is killed after ${seconds(STEP_TIMEOUT_MS)} (root unit tests: ${seconds(ROOT_STEP_TIMEOUT_MS)}) and ${laneLimit}`
         : "fail-fast: stops at the first failing step; steps are not time-limited";
       const shardNote = invocation.shard
         ? `; shard ${invocation.shard.index}/${invocation.shard.of} of the shared unit lane (the shared setup steps run in every shard; the rest are this shard's test-bearing steps, flair#2311)`
@@ -631,7 +711,7 @@ if (import.meta.main) {
       console.log(`Unit lane: Bun ${Bun.version}; Node ${node.stdout.trim()}; ${steps.length} steps${shardNote}; ${mode}. Ambient FLAIR_/HARPER_/HDB_/FABRIC_ settings are removed from child environments; each step runs under a sandbox HOME and behind a launchctl/systemctl tripwire (a unit test that reaches a host service manager without its own fake fails the lane). A guard fails the lane if a real client config changed. Integration, heavy, Python and Playwright suites are separate.`);
       process.exitCode = runUnitSteps(steps, process.execPath, realHomeDir(), {
         keepGoing: invocation.keepGoing,
-        limits: invocation.limits,
+        limits,
       });
     }
   } catch (error) {
