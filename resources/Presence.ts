@@ -42,8 +42,8 @@ import { resolveAgentAuth, isPrincipalDeactivated } from "./agent-auth.js";
 import { agentRecordIsAdmin } from "./agent-admin.js";
 import { WINDOW_MS, importEd25519Key, b64ToArrayBuffer, parseTpsEd25519Header } from "./ed25519-auth.js";
 import { isKnownAgentReplay, claimAgentNonce } from "./replay-store.js";
-import { localInstanceId } from "./instance-identity.js";
-import { applyOriginatorInstanceId, resolveStoredRow } from "./originator-instance.js";
+import { currentInstanceId } from "./instance-identity.js";
+import { applyOriginatorInstanceIdWith, resolveStoredRow } from "./originator-instance.js";
 // The receipt validator shares the POST heartbeat's activity vocabulary and
 // currentTask cap; aliased to this file's existing names.
 import {
@@ -341,11 +341,15 @@ function pickAllowlisted(record: Record<string, unknown>): Record<string, unknow
 // guard lives here.
 
 /**
- * Read the local Agent row for `agentId` and resolve the P2 refusal. A read
- * FAILURE is a 500, never read as "no home" — treating it as local would let a
- * foreign-homed agent's write land while the authority is unreadable.
+ * Read the local Agent row for `agentId` and resolve the P2 refusal against
+ * `currentId` — this instance's id as the caller read it FRESH from the
+ * `Instance` table (`currentInstanceId`), never the process-cached id: after
+ * that table changes, a write for an agent homed on the new id is local and one
+ * for the old id is refused. A read FAILURE is a 500, never read as "no home" —
+ * treating it as local would let a foreign-homed agent's write land while the
+ * authority is unreadable.
  */
-async function presenceWriteHomeDenial(agentId: string): Promise<Response | null> {
+async function presenceWriteHomeDenial(agentId: string, currentId: string | null): Promise<Response | null> {
   let agentRow: any;
   try {
     agentRow = await (databases as any).flair.Agent.get(agentId);
@@ -356,7 +360,7 @@ async function presenceWriteHomeDenial(agentId: string): Promise<Response | null
       { status: 500, headers: { "Content-Type": "application/json" } },
     );
   }
-  const refusal = presenceWriteHomeRefusal(agentRow, await localInstanceId());
+  const refusal = presenceWriteHomeRefusal(agentRow, currentId);
   if (!refusal) return null;
   return new Response(JSON.stringify(refusal), { status: 403, headers: { "Content-Type": "application/json" } });
 }
@@ -686,8 +690,12 @@ export class Presence extends (databases as any).flair.Presence {
     // ── P2: refuse a write for an agent homed on another instance ─────────────
     // A heartbeat writes the row keyed by agentId; a replicated row for the
     // same agent arrives on that same key. Refusing the local write for a
-    // foreign-homed agent keeps one writer per row. Null home = local (rev 2.1).
-    const homeDenial = await presenceWriteHomeDenial(agentId);
+    // foreign-homed agent keeps one writer per row. The home is compared with
+    // THIS instance's id read FRESH here (`currentInstanceId`), not the
+    // process-cached id, so a change to the Instance table is followed. Null
+    // home = local (rev 2.1).
+    const currentId = await currentInstanceId();
+    const homeDenial = await presenceWriteHomeDenial(agentId, currentId);
     if (homeDenial) return homeDenial;
 
     // ── Write presence ───────────────────────────────────────────────────────
@@ -725,8 +733,10 @@ export class Presence extends (databases as any).flair.Presence {
         resolveHarperVersion(),
       );
 
-      // P3: CREATE stamps the local instance id; UPDATE keeps the stored value.
-      await applyOriginatorInstanceId(record, existing);
+      // P3: CREATE stamps THIS instance's id — the same fresh `currentId` used
+      // for the home guard, never the process-cached id; with no current
+      // instance identity it stamps null. UPDATE keeps the stored value.
+      applyOriginatorInstanceIdWith(record, existing, currentId);
 
       const written = existing ? { ...existing, ...record } : record;
       delete written.receivedAt;
@@ -771,17 +781,19 @@ export class Presence extends (databases as any).flair.Presence {
     }
     // P2: the same home refusal as POST — this is a local writer too. A write
     // for an agent homed on another instance is refused, decided on the
-    // URL-bound target.
+    // URL-bound target and on THIS instance's id read FRESH here.
+    const currentId = await currentInstanceId();
     if (targetId != null) {
-      const homeDenial = await presenceWriteHomeDenial(String(targetId));
+      const homeDenial = await presenceWriteHomeDenial(String(targetId), currentId);
       if (homeDenial) return homeDenial;
     }
-    // P3: stamp the row's author the same way post() does (CREATE → local id,
-    // UPDATE → stored value); a body value never replaces or clears it, and a
-    // body `receivedAt` is never written.
+    // P3: stamp the row's author the same way post() does (CREATE → the fresh
+    // current id, or null with no current instance identity; UPDATE → stored
+    // value); a body value never replaces or clears it, and a body `receivedAt`
+    // is never written.
     const resolved = await resolveStoredRow(this, "Presence", content, () => super.get());
     if (resolved.denial) return resolved.denial;
-    await applyOriginatorInstanceId(content, resolved.row);
+    applyOriginatorInstanceIdWith(content, resolved.row, currentId);
     if (content && typeof content === "object") delete content.receivedAt;
     return super.put(content, context);
   }
@@ -801,15 +813,16 @@ export class Presence extends (databases as any).flair.Presence {
       return new Response(JSON.stringify({ error: "forbidden: cannot write presence for another agent" }), { status: 403, headers: { "Content-Type": "application/json" } });
     }
     // P2: a PATCH is a local writer too — refuse a foreign-homed agent's row,
-    // decided on the URL-bound target.
+    // decided on the URL-bound target and on THIS instance's id read FRESH here.
+    const currentId = await currentInstanceId();
     if (targetId != null) {
-      const homeDenial = await presenceWriteHomeDenial(String(targetId));
+      const homeDenial = await presenceWriteHomeDenial(String(targetId), currentId);
       if (homeDenial) return homeDenial;
     }
-    // P3: the same author stamp rule as put().
+    // P3: the same author stamp rule as put(), with the same fresh current id.
     const resolved = await resolveStoredRow(this, "Presence", content, () => super.get());
     if (resolved.denial) return resolved.denial;
-    await applyOriginatorInstanceId(content, resolved.row);
+    applyOriginatorInstanceIdWith(content, resolved.row, currentId);
     if (content && typeof content === "object") delete content.receivedAt;
     return super.patch(content, query);
   }

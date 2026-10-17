@@ -9,9 +9,12 @@
   vocabulary, a finite heartbeat within a 5-minute future allowance, version
   strings capped at 64 characters) before storage, and a Presence-specific merge
   refuses an older heartbeat rather than replacing a newer one. The local writers
-  (POST, PUT, PATCH) refuse a write for an agent homed on another instance, and
-  none of them can set a client `originatorInstanceId` or `receivedAt`. `Presence`
-  gains nullable `originatorInstanceId` (local creates stamp this instance's id,
-  or null; updates preserve the stored value) and `receivedAt` (stamped on receipt).
+  (POST, PUT, PATCH) compare the agent's home against this instance's id read
+  fresh from the `Instance` table at write time, refusing a write for an agent
+  homed on another instance, and none of them can set a client
+  `originatorInstanceId` or `receivedAt`. `Presence`
+  gains nullable `originatorInstanceId` (local creates stamp this instance's id
+  read fresh from the `Instance` table, or null; updates preserve the stored
+  value) and `receivedAt` (stamped on receipt).
   With the flag off, a Presence record eligible for
   receipt skips as `presence_receive_disabled` rather than `unknown_table`.

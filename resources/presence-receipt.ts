@@ -248,8 +248,10 @@ export function mergePresenceReceipt(
 /**
  * A local write for an agent HOMED ON ANOTHER INSTANCE is refused; a null home
  * is treated as LOCAL (so a legacy Agent row created before the originator
- * contract keeps heartbeating). An instance with no identity of its own
- * (`localInstanceId` null) is the home of no agent that has a non-null home.
+ * contract keeps heartbeating). `localInstanceId` is this instance's canonical
+ * id as the caller read it at write time; with no single canonical `Instance`
+ * row it is null, and such an instance is the home of no agent that has a
+ * non-null home.
  *
  * Returns a named refusal, or null to allow the write.
  */
