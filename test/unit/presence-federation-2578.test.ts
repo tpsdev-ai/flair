@@ -216,6 +216,22 @@ describe("mergePresenceReceipt (P4)", () => {
     expect(mergePresenceReceipt(equal, incoming(), NOW).action).toBe("merge");
   });
 
+  it("a TIED heartbeat with an ABSENT incoming activity stamp keeps the stored activity/task", () => {
+    // The exact blanking input: equal heartbeat, stored activity/task/stamp,
+    // incoming null stamp and null/other task. A null stamp is not STRICTLY
+    // newer, so the stored activity fields stand — the tie cannot blank them.
+    const hb = NOW - 1_000;
+    const local = { agentId: "agent-a", lastHeartbeatAt: hb, activity: "coding", currentTask: "stored task", activityUpdatedAt: NOW - 500 };
+    const inc = { ...incoming(), activity: "idle", currentTask: null, activityUpdatedAt: null } as any;
+    const res = mergePresenceReceipt(local, inc, NOW);
+    expect(res.action).toBe("merge");
+    if (res.action !== "merge") return;
+    expect(res.row.currentTask).toBe("stored task");
+    expect(res.row.activity).toBe("coding");
+    expect(res.row.activityUpdatedAt).toBe(NOW - 500);
+    expect(res.row.lastHeartbeatAt).toBe(hb);
+  });
+
   it("never LOWERS the stored activityUpdatedAt (mixed clock skew)", () => {
     // The inbound heartbeat is newer, but its activity stamp is OLDER than stored.
     const local = { agentId: "agent-a", lastHeartbeatAt: NOW - 5_000, activityUpdatedAt: NOW - 10 };

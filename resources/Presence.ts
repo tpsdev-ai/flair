@@ -332,13 +332,14 @@ function pickAllowlisted(record: Record<string, unknown>): Record<string, unknow
 
 // ─── Federation receipt rules (flair#2578 slice 1) ──────────────────────────
 //
-// Office-wide Presence: a spoke pushes its agents' Presence rows to the hub
-// over the existing hub-and-spoke sync, and the hub derives status locally from
-// the replicated timestamps. The flag, the home binding, the receipt validation
-// and the merge live in resources/presence-receipt.ts (PURE, so they are
-// unit-testable without a live Harper, and so the activity vocabulary and
-// currentTask cap have one definition shared with the receipt validator). Only
-// the DB-touching local-write home guard lives here.
+// Office-wide Presence, receive side only: in a later slice a spoke will push
+// its agents' Presence rows to the hub over the existing hub-and-spoke sync, and
+// the hub will derive status locally from the replicated timestamps. The flag,
+// the home binding, the receipt validation and the merge live in
+// resources/presence-receipt.ts (PURE, so they are unit-testable without a live
+// Harper, and so the activity vocabulary and currentTask cap have one definition
+// shared with the receipt validator). Only the DB-touching local-write home
+// guard lives here.
 
 /**
  * Read the local Agent row for `agentId` and resolve the P2 refusal. A read
@@ -359,6 +360,28 @@ async function presenceWriteHomeDenial(agentId: string): Promise<Response | null
   const refusal = presenceWriteHomeRefusal(agentRow, await localInstanceId());
   if (!refusal) return null;
   return new Response(JSON.stringify(refusal), { status: 403, headers: { "Content-Type": "application/json" } });
+}
+
+/**
+ * The id a PUT/PATCH write lands on: the URL-bound target (`getId()`) when there
+ * is one, else the body `agentId` (an in-process call, where the body id IS the
+ * write key). Harper writes to the URL target and rewrites the row's primary key
+ * to it, so a body id is never the row a by-id write changes. A non-scalar or
+ * absent target is null.
+ */
+function presenceWriteTargetId(resource: any, content: any): string | number | null {
+  try {
+    const getId = resource?.getId;
+    const id = typeof getId === "function" ? getId.call(resource) : undefined;
+    if (typeof id === "string" || typeof id === "number") return id;
+  } catch {
+    /* getId() threw — fall back to the body id below */
+  }
+  if (content != null && typeof content === "object") {
+    if (typeof content.agentId === "string" && content.agentId.length > 0) return content.agentId;
+    if (typeof content.id === "string" || typeof content.id === "number") return content.id;
+  }
+  return null;
 }
 
 // ─── Resource ─────────────────────────────────────────────────────────────────
@@ -672,10 +695,19 @@ export class Presence extends (databases as any).flair.Presence {
     const now = Date.now();
 
     try {
-      let existing: any = null;
+      // A read FAILURE is refused by name — it is never read as "first
+      // heartbeat". Treating a failed read as a miss would let an existing row
+      // be re-stamped (and re-authored) when the read fails but the write lands.
+      let existing: any;
       try {
         existing = await (databases as any).flair.Presence.get(agentId);
-      } catch { /* first heartbeat */ }
+      } catch (err: any) {
+        console.error("presence: the stored row could not be read, so the heartbeat was refused", { agentId, err });
+        return new Response(
+          JSON.stringify({ error: "presence_read_failed", message: "the stored presence row could not be read, so the write was refused" }),
+          { status: 500, headers: { "Content-Type": "application/json" } },
+        );
+      }
 
       // flair#639: stamp THIS server's own running versions on every
       // heartbeat — an upgrade takes effect on the instance's very next
@@ -727,29 +759,65 @@ export class Presence extends (databases as any).flair.Presence {
    * straight to Harper's default handler (the leak this closes). Require a verified
    * non-anonymous principal, scoped to the agent's own record (Presence is keyed
    * by agentId).
+   *
+   * PATCH is the third local writer and shares every one of these controls.
    */
   async put(content: any, context?: any) {
     const auth = await resolveAgentAuth((this as any).getContext?.());
     if (auth.kind === "anonymous") {
       return new Response(JSON.stringify({ error: "authentication required" }), { status: 401, headers: { "Content-Type": "application/json" } });
     }
-    if (auth.kind === "agent" && !auth.isAdmin && content?.agentId && content.agentId !== auth.agentId) {
+    // The addressed record is the URL-bound target, never a body id: Harper
+    // writes to the URL target and rewrites the primary key to it, so a body
+    // agentId must not decide who may be written.
+    const targetId = presenceWriteTargetId(this, content);
+    if (auth.kind === "agent" && !auth.isAdmin && targetId != null && String(targetId) !== auth.agentId) {
       return new Response(JSON.stringify({ error: "forbidden: cannot write presence for another agent" }), { status: 403, headers: { "Content-Type": "application/json" } });
     }
-    // P2: the same home refusal as POST — this is the SECOND local writer
-    // (the direct table put inside post() is the first). A write for an agent
-    // homed on another instance is refused here too.
-    if (typeof content?.agentId === "string" && content.agentId.length > 0) {
-      const homeDenial = await presenceWriteHomeDenial(content.agentId);
+    // P2: the same home refusal as POST — this is a local writer too. A write
+    // for an agent homed on another instance is refused, decided on the
+    // URL-bound target.
+    if (targetId != null) {
+      const homeDenial = await presenceWriteHomeDenial(String(targetId));
       if (homeDenial) return homeDenial;
     }
     // P3: stamp the row's author the same way post() does (CREATE → local id,
-    // UPDATE → stored value); a body value never replaces or clears it.
+    // UPDATE → stored value); a body value never replaces or clears it, and a
+    // body `receivedAt` is never written.
     const resolved = await resolveStoredRow(this, "Presence", content, () => super.get());
     if (resolved.denial) return resolved.denial;
     await applyOriginatorInstanceId(content, resolved.row);
     if (content && typeof content === "object") delete content.receivedAt;
     return super.put(content, context);
+  }
+
+  /**
+   * PATCH merges into the stored row (Harper partial update); it does not route
+   * through put(), so it repeats put()'s controls verbatim: the same auth gate,
+   * the same URL-bound home refusal (P2), and the same author/receiver stamp
+   * rule (P3) — a body `originatorInstanceId` or `receivedAt` is never written.
+   */
+  async patch(content: any, query?: any) {
+    const auth = await resolveAgentAuth((this as any).getContext?.());
+    if (auth.kind === "anonymous") {
+      return new Response(JSON.stringify({ error: "authentication required" }), { status: 401, headers: { "Content-Type": "application/json" } });
+    }
+    const targetId = presenceWriteTargetId(this, content);
+    if (auth.kind === "agent" && !auth.isAdmin && targetId != null && String(targetId) !== auth.agentId) {
+      return new Response(JSON.stringify({ error: "forbidden: cannot write presence for another agent" }), { status: 403, headers: { "Content-Type": "application/json" } });
+    }
+    // P2: a PATCH is a local writer too — refuse a foreign-homed agent's row,
+    // decided on the URL-bound target.
+    if (targetId != null) {
+      const homeDenial = await presenceWriteHomeDenial(String(targetId));
+      if (homeDenial) return homeDenial;
+    }
+    // P3: the same author stamp rule as put().
+    const resolved = await resolveStoredRow(this, "Presence", content, () => super.get());
+    if (resolved.denial) return resolved.denial;
+    await applyOriginatorInstanceId(content, resolved.row);
+    if (content && typeof content === "object") delete content.receivedAt;
+    return super.patch(content, query);
   }
 
   async delete(id: any) {

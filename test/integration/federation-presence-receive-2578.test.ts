@@ -4,10 +4,10 @@
  *
  * The receive path (synthetic signed frames from a paired spoke) covers the
  * home binding (P1), the Presence merge (P4), the receipt validation (P5) and
- * the receiver stamp (P3). The two LOCAL writers (POST /Presence's direct table
- * put and the resource PUT) cover the home refusal (P2) and the local author
- * stamp (P3). The flag-OFF named skip lives in
- * federation-presence-receive-disabled-2578.test.ts.
+ * the receiver stamp (P3). The LOCAL writers (POST /Presence's direct table put,
+ * the resource PUT and the resource PATCH) cover the home refusal (P2); the POST
+ * heartbeat test also asserts the local author stamp (P3). The flag-OFF named
+ * skip lives in federation-presence-receive-disabled-2578.test.ts.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { randomBytes } from "node:crypto";
@@ -37,6 +37,7 @@ const AGENT_ABSENT = "fp-agent-absent";
 // Local-write agents (need a keypair for the Ed25519 heartbeat).
 const LOCAL_NULL = mkAgent("fp-local-null");
 const LOCAL_FOREIGN = mkAgent("fp-local-foreign");
+const LOCAL_FRESH = mkAgent("fp-local-fresh");
 
 let harper: HarperInstance;
 
@@ -129,6 +130,7 @@ beforeAll(async () => {
   // Local-write Agent rows.
   await insertRow("Agent", { id: LOCAL_NULL.id, name: LOCAL_NULL.id, role: "agent", publicKey: LOCAL_NULL.publicKey, createdAt: now });
   await insertRow("Agent", { id: LOCAL_FOREIGN.id, name: LOCAL_FOREIGN.id, role: "agent", publicKey: LOCAL_FOREIGN.publicKey, createdAt: now, originatorInstanceId: "some-other-instance" });
+  await insertRow("Agent", { id: LOCAL_FRESH.id, name: LOCAL_FRESH.id, role: "agent", publicKey: LOCAL_FRESH.publicKey, createdAt: now });
 }, 240_000);
 
 afterAll(async () => {
@@ -232,6 +234,25 @@ describe("flair#2578 slice 1 — Presence receipt (real Harper, receive flag ON)
     expect(row.flairVersion ?? null).toBeNull();
     expect(row.harperVersion).toBe("5.3.1");
   }, 60_000);
+
+  it("P4: a tied heartbeat with an absent incoming activity stamp keeps the stored activity/task", async () => {
+    const tied = "fp-agent-tie";
+    const hb = Date.now() - 2_000;
+    await insertRow("Agent", { id: tied, name: tied, role: "agent", publicKey: "k-tie", createdAt: new Date().toISOString(), originatorInstanceId: PEER });
+    // Land a row that asserts an activity and a task at the heartbeat time.
+    const first = await sendBatch(PEER, peerKeys, [presenceRecord(tied, { lastHeartbeatAt: hb, activity: "coding", currentTask: "stored task", activityUpdatedAt: hb })]);
+    expect((await first.json() as any).merged).toBe(1);
+    // Now the SAME heartbeat with no activity and a null activity stamp: it must
+    // not blank the stored activity/task.
+    const res = await sendBatch(PEER, peerKeys, [presenceRecord(tied, { lastHeartbeatAt: hb, activity: null, currentTask: null, activityUpdatedAt: null })]);
+    const body = await res.json() as any;
+    expect(body.refused, JSON.stringify(body)).toEqual([]);
+    expect(body.merged).toBe(1);
+    const row = await readRow("Presence", tied);
+    expect(row.currentTask).toBe("stored task");
+    expect(row.activity).toBe("coding");
+    expect(Number(row.activityUpdatedAt)).toBe(hb);
+  }, 60_000);
 });
 
 describe("flair#2578 slice 1 — local-write home guard (P2) and author stamp (P3)", () => {
@@ -258,6 +279,82 @@ describe("flair#2578 slice 1 — local-write home guard (P2) and author stamp (P
     expect(res.status).toBe(403);
     expect((await res.json() as any).error).toBe("presence_agent_homed_elsewhere");
     expect(await readRow("Presence", LOCAL_FOREIGN.id)).toBeNull();
+  }, 60_000);
+
+  it("P2: the resource PATCH for a foreign-homed agent is refused by name, and nothing is written", async () => {
+    const path = `/Presence/${LOCAL_FOREIGN.id}`;
+    const auth = ed25519Header(LOCAL_FOREIGN, "PATCH", path);
+    const res = await fetch(`${harper.httpURL}${path}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Authorization: auth },
+      body: JSON.stringify({ activity: "coding" }),
+    });
+    expect(res.status).toBe(403);
+    expect((await res.json() as any).error).toBe("presence_agent_homed_elsewhere");
+    expect(await readRow("Presence", LOCAL_FOREIGN.id)).toBeNull();
+  }, 60_000);
+
+  it("P2: a PUT with the body agentId OMITTED is decided on the URL target", async () => {
+    // The URL names the foreign-homed agent; the body names no agent. A guard
+    // reading the body agentId would let it through.
+    const path = `/Presence/${LOCAL_FOREIGN.id}`;
+    const auth = ed25519Header(LOCAL_FOREIGN, "PUT", path);
+    const res = await fetch(`${harper.httpURL}${path}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Authorization: auth },
+      body: JSON.stringify({ activity: "coding", lastHeartbeatAt: Date.now(), activityUpdatedAt: Date.now() }),
+    });
+    expect(res.status).toBe(403);
+    expect((await res.json() as any).error).toBe("presence_agent_homed_elsewhere");
+    expect(await readRow("Presence", LOCAL_FOREIGN.id)).toBeNull();
+  }, 60_000);
+
+  it("P2: a PUT with a MISMATCHED body agentId is decided on the URL target", async () => {
+    // The body claims a local agent, the URL names the foreign-homed one: the
+    // write lands on the URL target, so the guard must refuse on it.
+    const path = `/Presence/${LOCAL_FOREIGN.id}`;
+    const auth = ed25519Header(LOCAL_FOREIGN, "PUT", path);
+    const res = await fetch(`${harper.httpURL}${path}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Authorization: auth },
+      body: JSON.stringify({ agentId: LOCAL_NULL.id, activity: "coding", lastHeartbeatAt: Date.now(), activityUpdatedAt: Date.now() }),
+    });
+    expect(res.status).toBe(403);
+    expect((await res.json() as any).error).toBe("presence_agent_homed_elsewhere");
+    expect(await readRow("Presence", LOCAL_FOREIGN.id)).toBeNull();
+    expect(await readRow("Presence", LOCAL_NULL.id)).toBeNull();
+  }, 60_000);
+
+  it("P3: a client PUT cannot set originatorInstanceId or receivedAt", async () => {
+    const path = `/Presence/${LOCAL_FRESH.id}`;
+    const auth = ed25519Header(LOCAL_FRESH, "PUT", path);
+    const res = await fetch(`${harper.httpURL}${path}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Authorization: auth },
+      body: JSON.stringify({
+        agentId: LOCAL_FRESH.id, activity: "coding", lastHeartbeatAt: Date.now(), activityUpdatedAt: Date.now(),
+        originatorInstanceId: "forged-home", receivedAt: 9_999_999_999_999,
+      }),
+    });
+    expect([200, 204]).toContain(res.status);
+    const row = await readRow("Presence", LOCAL_FRESH.id);
+    expect(row.originatorInstanceId).toBe(LOCAL_INSTANCE);
+    expect(row.receivedAt ?? null).toBeNull();
+  }, 60_000);
+
+  it("P3: a client PATCH cannot set originatorInstanceId or receivedAt", async () => {
+    const path = `/Presence/${LOCAL_FRESH.id}`;
+    const auth = ed25519Header(LOCAL_FRESH, "PATCH", path);
+    const res = await fetch(`${harper.httpURL}${path}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Authorization: auth },
+      body: JSON.stringify({ originatorInstanceId: "forged-home", receivedAt: 9_999_999_999_999, activity: "idle" }),
+    });
+    expect([200, 204]).toContain(res.status);
+    const row = await readRow("Presence", LOCAL_FRESH.id);
+    expect(row.originatorInstanceId).toBe(LOCAL_INSTANCE);
+    expect(row.receivedAt ?? null).toBeNull();
+    expect(row.activity).toBe("idle");
   }, 60_000);
 
   it("P2+P3: a null-home agent's heartbeat is accepted and its Presence row is stamped with this instance's id", async () => {

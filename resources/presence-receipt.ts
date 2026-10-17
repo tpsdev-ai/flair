@@ -5,23 +5,25 @@
  * PURE: no Harper import, so every rule here is unit-testable without a live
  * Harper. The callers read the local Agent row and the stored Presence row and
  * pass them in; resources/Federation.ts runs the receive path, and
- * resources/Presence.ts runs the two local writers.
+ * resources/Presence.ts runs the local write paths (POST, PUT, PATCH).
  *
  * This module also owns the Presence activity vocabulary and the currentTask
- * cap, because the receipt validator must accept exactly what a local write
- * accepts — one definition, so the two cannot drift.
+ * cap, because the receipt validator accepts the same activity vocabulary and
+ * currentTask cap a POST heartbeat applies — one definition, so the two cannot
+ * drift.
  *
- * Replication is spoke → hub, hub-receiver only: a spoke pushes its agents'
- * Presence rows over the existing hub-and-spoke sync and the hub derives status
- * locally from the replicated timestamps. It ships behind ONE default-off
- * receive flag; with the flag off a Presence record that reaches the receive
- * branch is skipped by its own name (`presence_receive_disabled`), not
- * `unknown_table`.
+ * Replication is spoke → hub, hub-receiver only: in a later slice a spoke will
+ * push its agents' Presence rows over the existing hub-and-spoke sync and the
+ * hub will derive status locally from the replicated timestamps. It ships
+ * behind ONE default-off receive flag; with the flag off a Presence record that
+ * reaches the receive branch is skipped by its own name
+ * (`presence_receive_disabled`), not `unknown_table`.
  *
  * The sender contract (a later slice): a Presence record's wire `id` and its
- * `data.id` are the row's `agentId` (this table's primary key), `data.agentId`
- * carries that same value, the record's `originatorInstanceId` is the sending
- * instance, and only rows whose `originatorInstanceId` is the sender are sent.
+ * `data.id` will be the row's `agentId` (this table's primary key),
+ * `data.agentId` will carry that same value, the record's
+ * `originatorInstanceId` will be the sending instance, and only rows whose
+ * `originatorInstanceId` is the sender will be sent.
  */
 
 import type { SkipReason } from "./federation-classify.js";
@@ -41,7 +43,7 @@ export function presenceReceiveEnabled(env: Record<string, string | undefined> =
 // ─── Vocabulary + caps (shared with resources/Presence.ts) ────────────────────
 
 /** The local activity vocabulary; a replicated row's `activity` must be a
- *  member. Same set a local heartbeat accepts (resources/Presence.ts). */
+ *  member. Same set a POST heartbeat accepts (resources/Presence.ts). */
 export const PRESENCE_ACTIVITIES: ReadonlySet<string> = new Set([
   "coding",
   "reviewing",
@@ -51,11 +53,11 @@ export const PRESENCE_ACTIVITIES: ReadonlySet<string> = new Set([
 ]);
 
 /** The currentTask cap; a replicated `currentTask` goes through the same cap as
- *  a local write. */
+ *  a POST heartbeat. */
 export const PRESENCE_CURRENT_TASK_MAX_LENGTH = 200;
 
-/** Trim + cap a currentTask, or null for absent/empty — the local write's rule,
- *  applied to a replicated row. */
+/** Trim + cap a currentTask, or null for absent/empty — the POST heartbeat's
+ *  rule, applied to a replicated row. */
 export function sanitizePresenceCurrentTask(task: unknown): string | null {
   if (typeof task !== "string") return null;
   const trimmed = task.trim();
@@ -186,8 +188,14 @@ export function validatePresenceReceipt(
 /**
  * Compare `lastHeartbeatAt` first, with `activityUpdatedAt` breaking ties. A
  * record older on that order is skipped by name (`presence_stale_heartbeat`).
- * An accepted record never LOWERS the stored `activityUpdatedAt` — the written
- * value is the later of the two (mixed clock skew cannot regress the stamp).
+ *
+ * Null ordering: an ABSENT `activityUpdatedAt` sorts OLDER than any present
+ * stamp. So on a heartbeat tie the stored activity fields (`activity`,
+ * `currentTask`, `activityUpdatedAt`) stand unless the incoming stamp is
+ * STRICTLY newer — an equal or absent incoming stamp can never blank the stored
+ * activity/task. An accepted record never LOWERS the stored `activityUpdatedAt`
+ * either: the written value is the later of the two (mixed clock skew cannot
+ * regress the stamp).
  */
 export function mergePresenceReceipt(
   local: Record<string, any> | null,
@@ -201,22 +209,38 @@ export function mergePresenceReceipt(
 
   if (localHb != null) {
     if (incHb < localHb) return { action: "skip", reason: "presence_stale_heartbeat" };
+    // A tie whose activity ordering is OLDER (both stamps present) is stale.
+    // An ABSENT incoming stamp is not strictly newer either; rather than
+    // treating it as a merge, keep the stored activity fields below.
     if (incHb === localHb && localAut != null && incAut != null && incAut < localAut) {
       return { action: "skip", reason: "presence_stale_heartbeat" };
     }
   }
 
-  const activityUpdatedAt = incAut == null ? localAut : localAut == null ? incAut : Math.max(incAut, localAut);
-  const activity = (incoming.activity as string | undefined)
-    ?? (typeof local?.activity === "string" ? local.activity : undefined)
-    ?? "idle";
+  // On a heartbeat tie, the incoming activity fields replace the stored ones
+  // only when the incoming stamp is STRICTLY newer. Otherwise (equal, older, or
+  // absent stamp) the stored activity/task/stamp stand, so a null incoming
+  // stamp can never blank them.
+  const tied = localHb != null && incHb === localHb;
+  const incomingStrictlyNewer = incAut != null && (localAut == null || incAut > localAut);
+  const keepStoredActivity = tied && !incomingStrictlyNewer;
+
+  const activityUpdatedAt = keepStoredActivity
+    ? localAut
+    : incAut == null ? localAut : localAut == null ? incAut : Math.max(incAut, localAut);
+  const activity = keepStoredActivity
+    ? (typeof local?.activity === "string" ? local.activity : ((incoming.activity as string | undefined) ?? "idle"))
+    : ((incoming.activity as string | undefined)
+      ?? (typeof local?.activity === "string" ? local.activity : undefined)
+      ?? "idle");
+  const currentTask = keepStoredActivity ? (local?.currentTask ?? null) : (incoming.currentTask ?? null);
 
   return {
     action: "merge",
     row: {
       agentId: incoming.agentId,
       lastHeartbeatAt: incHb,
-      currentTask: incoming.currentTask ?? null,
+      currentTask,
       activity,
       activityUpdatedAt: activityUpdatedAt ?? null,
       flairVersion: incoming.flairVersion ?? null,

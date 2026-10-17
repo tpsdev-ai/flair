@@ -1193,6 +1193,7 @@ export class FederationSync extends Resource {
       sender: string,
       local: Record<string, any> | null,
       table: any,
+      markWriteStarted: () => void,
     ): Promise<MergeOutcome> => {
       const receivedAt = Date.now();
       // P5: strip to the declared Presence fields and validate. The wire record
@@ -1209,27 +1210,42 @@ export class FederationSync extends Resource {
       const planned = mergePresenceReceipt(local, validated.row, receivedAt);
       if (planned.action === "skip") return { reason: planned.reason };
 
-      const outcome = await writeBackCommittedRow(
-        table,
-        record.id,
-        async (row) => {
-          // Re-verify BOTH facts the decision used against the current rows:
-          // the Agent home, and the Presence row this write replaces.
-          const currentHome = presenceHomeBindingReason(await readAgentRow(agentId), sender);
-          if (currentHome) return { skip: true, reason: currentHome };
-          const current = mergePresenceReceipt(row, validated.row, receivedAt);
-          if (current.action === "skip") return { skip: true, reason: current.reason };
-          return { write: current.row };
-        },
-        {
-          label: "FederationSync",
-          expectedRow: local,
-          attempts: 1,
-          wholeRow: true,
-          pausePre: () => txnPausePoint("presence-merge-pre"),
-          pausePoint: () => txnPausePoint("presence-merge"),
-        },
-      );
+      // Same failure path as the generic merge: the started flag is set BEFORE
+      // the write, so a post-write exception is INDETERMINATE (not retryable),
+      // and a changed row is the SAME named conflict the generic merge reports.
+      let outcome: any;
+      markWriteStarted();
+      try {
+        outcome = await writeBackCommittedRow(
+          table,
+          record.id,
+          async (row) => {
+            // Re-verify BOTH facts the decision used against the current rows:
+            // the Agent home, and the Presence row this write replaces.
+            const currentHome = presenceHomeBindingReason(await readAgentRow(agentId), sender);
+            if (currentHome) return { skip: true, reason: currentHome };
+            const current = mergePresenceReceipt(row, validated.row, receivedAt);
+            if (current.action === "skip") return { skip: true, reason: current.reason };
+            return { write: current.row };
+          },
+          {
+            label: "FederationSync",
+            expectedRow: local,
+            attempts: 1,
+            wholeRow: true,
+            pausePre: () => txnPausePoint("presence-merge-pre"),
+            pausePoint: () => txnPausePoint("presence-merge"),
+          },
+        );
+      } catch (err) {
+        // The helper's named refusal for a row that changed: the owned
+        // transaction aborted, so nothing was written — refuse the key, not
+        // indeterminate. Matches the generic merge's handler below.
+        if (err instanceof WriteBackConflictError) {
+          return { reason: "merge_target_changed" };
+        }
+        throw err;
+      }
       if ("skip" in outcome) {
         return { reason: (outcome.reason as SkipReason | undefined) ?? "presence_invalid_shape" };
       }
@@ -1331,7 +1347,7 @@ export class FederationSync extends Resource {
 
         // ── flair#2578 slice 1: Presence receipt ──
         if (record.table === "Presence") {
-          return await mergePresence(record, instanceId, local, table);
+          return await mergePresence(record, instanceId, local, table, () => { writeBackStarted = true; });
         }
 
         const incoming = { ...record.data };

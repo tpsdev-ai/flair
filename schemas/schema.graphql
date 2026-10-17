@@ -9,6 +9,6 @@ type Presence @table(database: "flair") @export {
   activityUpdatedAt: BigInt      # unix ms — when activity/currentTask were last ASSERTED (natural-presence); nullable/additive, absent on records written before this feature (readers fall back to lastHeartbeatAt)
   flairVersion: String           # @tpsdev-ai/flair version serving this heartbeat (flair#639); absent on pre-#639 records
   harperVersion: String          # @harperfast/harper version serving this heartbeat (flair#639); absent on pre-#639 records
-  originatorInstanceId: String   # federation instance that AUTHORED the row — stamped server-side by a local heartbeat write with this instance's id (never a request-body value), and preserved verbatim through a federation merge. Nullable/additive: absent on rows written before this field existed. See schemas/agent.graphql's Agent.originatorInstanceId for the full contract.
-  receivedAt: BigInt             # unix ms — when THIS instance received a replicated row. Stamped by the federation receive path; absent on a locally-written row (only the hub receiver writes it). Nullable/additive.
+  originatorInstanceId: String   # write-time instance identity, stamped server-side on a local write (POST/PUT/PATCH) with this instance's id when it has one — a request-body value is never used, and an instance with no identity of its own stamps none. On receipt the sender-carried value is stored. Nullable/additive: absent on rows written before this field existed. See schemas/agent.graphql's Agent.originatorInstanceId for the contract.
+  receivedAt: BigInt             # unix ms — when THIS instance received a replicated row. Stamped only by the federation receive path; a local write (POST/PUT/PATCH) never sets it. Nullable/additive.
 }
