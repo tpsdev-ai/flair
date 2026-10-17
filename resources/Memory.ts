@@ -1874,6 +1874,10 @@ export class Memory extends (databases as any).flair.Memory {
     // removed before the omission check and prepareSkillBody, so every later
     // step, a skill update's carried vector included, sees a body without it.
     if (isEmptyEmbedding(content?.embedding)) delete content.embedding;
+    // flair#2573 slice 2: did the CALLER supply a non-empty vector? Captured before
+    // prepareSkillBody can merge a stored row's vector into the body, so only a
+    // caller-supplied vector is discarded below (a carried one is not).
+    const postSuppliedVector = hasSuppliedVector(content?.embedding);
     // The visibility the caller named, before any merge or default fills it.
     const requestedVisibility = content?.visibility;
     // flair#2465: a body that omits `embedding` can have the stored row's vector
@@ -2065,8 +2069,10 @@ export class Memory extends (databases as any).flair.Memory {
     // after redaction and before the dedup gate and the embed step, so the write
     // embeds the row's own post-redaction text and stamps the server's model, or
     // stores no vector when the model is unavailable (the backfill embeds it
-    // later) — exactly as a write that sent none.
-    discardSuppliedVector(content, auth);
+    // later) — exactly as a write that sent none. Only a vector the CALLER
+    // supplied is discarded; a vector prepareSkillBody carried from a stored row
+    // is not.
+    if (postSuppliedVector) discardSuppliedVector(content, auth);
     // flair#2573: an empty vector that reaches this point (one carried from a
     // stored skill row; the body's own was removed above) is no vector. It is
     // normalized before the dedup gate and the embed step, which can then
@@ -2827,6 +2833,9 @@ export class Memory extends (databases as any).flair.Memory {
         // flair#2465: as in post(), a body that omits `embedding` can have a stored
         // vector carried in by prepareSkillBody, with the hash it retained for it.
         const putOmitsEmbedding = content?.embedding === undefined;
+        // flair#2573 slice 2: did the CALLER supply a non-empty vector? Captured
+        // before prepareSkillBody can merge a stored row's vector into the body.
+        const putSuppliedVector = hasSuppliedVector(content?.embedding);
         const preparedSkill = await prepareSkillBody(content, preExisting);
         if (preparedSkill instanceof Response) return preparedSkill;
         content = preparedSkill.content;
@@ -2993,7 +3002,8 @@ export class Memory extends (databases as any).flair.Memory {
         // separate flag needed. NEVER suppresses the write either way.
         // flair#2573 slice 2: a non-admin write's supplied vector is discarded here,
         // after redaction and before the dedup gate and the embed step (see post()).
-        discardSuppliedVector(content, auth);
+        // Only a vector the CALLER supplied is discarded; a carried one is not.
+        if (putSuppliedVector) discardSuppliedVector(content, auth);
         // flair#2573: an empty vector that reaches this point is no vector (see post()).
         normalizeEmptyEmbedding(content);
         // flair#2465: did the caller supply a vector? See post().
