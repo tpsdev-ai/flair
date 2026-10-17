@@ -7,7 +7,8 @@
  * verdict is shown only while its hash equals the hash of the row's CURRENT
  * content. A verdict with no hash (one written before this field existed) or
  * with a different hash is suppressed: the verdict fields are returned as
- * `null`, so a client never reads an approval for text it did not review.
+ * `null`, so a reader through these paths does not see an approval for text
+ * the verdict did not review.
  *
  * The accessor rewrites the whole binding — `promotionStatus`, `promotedAt`,
  * `promotedBy` and `promotionContentHash` — matching the write-side clear in
