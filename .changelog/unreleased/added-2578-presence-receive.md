@@ -15,6 +15,7 @@
   `originatorInstanceId` or `receivedAt`. `Presence`
   gains nullable `originatorInstanceId` (local creates stamp this instance's id
   read fresh from the `Instance` table, or null; updates preserve the stored
-  value) and `receivedAt` (stamped on receipt).
+  value; receipt stores the batch-verified sender) and `receivedAt` (stamped on
+  receipt).
   With the flag off, a Presence record eligible for
   receipt skips as `presence_receive_disabled` rather than `unknown_table`.

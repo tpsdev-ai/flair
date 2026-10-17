@@ -132,12 +132,14 @@ export function presenceHomeBindingReason(
  *
  * `recordId` is the wire record's id, which for this table IS the primary key
  * (`agentId`); the inbound `data.agentId` must agree with it, so the row that
- * is validated is the row that is written.
+ * is validated is the row that is written. The stored `originatorInstanceId` is
+ * `senderInstanceId`, whatever the record carries.
  */
 export function validatePresenceReceipt(
   recordId: string,
   data: unknown,
   receivedAt: number,
+  senderInstanceId: string,
 ): { ok: true; row: Record<string, unknown> } | { ok: false; reason: SkipReason } {
   if (!data || typeof data !== "object" || Array.isArray(data)) {
     return { ok: false, reason: "presence_invalid_shape" };
@@ -173,7 +175,7 @@ export function validatePresenceReceipt(
     activityUpdatedAt,
     flairVersion: presenceVersion(d.flairVersion),
     harperVersion: presenceVersion(d.harperVersion),
-    originatorInstanceId: typeof d.originatorInstanceId === "string" ? d.originatorInstanceId : null,
+    originatorInstanceId: senderInstanceId,
     receivedAt,
   };
   // An absent activity is left off so the merge can fall back to the stored

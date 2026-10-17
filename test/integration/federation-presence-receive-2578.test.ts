@@ -151,7 +151,19 @@ describe("flair#2578 slice 1 — Presence receipt (real Harper, receive flag ON)
     expect(row.lastHeartbeatAt).toBe(hb);
     expect(typeof row.receivedAt).toBe("number");
     expect(row.receivedAt).toBeGreaterThan(hb);
-    // the originator's own signed stamp is preserved (not the receiver's).
+    // the stored originator is the batch-verified sender.
+    expect(row.originatorInstanceId).toBe(PEER);
+  }, 60_000);
+
+  it("P3: a record carrying another instance's originatorInstanceId is stored with the verified sender's id", async () => {
+    const forged = "fp-agent-forged-originator";
+    await insertRow("Agent", { id: forged, name: forged, role: "agent", publicKey: "k-forged", createdAt: new Date().toISOString(), originatorInstanceId: PEER });
+    const res = await sendBatch(PEER, peerKeys, [presenceRecord(forged, { originatorInstanceId: HUB })]);
+    const body = await res.json() as any;
+    expect(res.status, JSON.stringify(body)).toBe(200);
+    expect(body.refused, JSON.stringify(body)).toEqual([]);
+    expect(body.merged).toBe(1);
+    const row = await readRow("Presence", forged);
     expect(row.originatorInstanceId).toBe(PEER);
   }, 60_000);
 

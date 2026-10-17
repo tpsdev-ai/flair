@@ -1196,7 +1196,7 @@ export class FederationSync extends Resource {
       const receivedAt = Date.now();
       // P5: strip to the declared Presence fields and validate. The wire record
       // id IS the primary key (agentId).
-      const validated = validatePresenceReceipt(record.id, record.data, receivedAt);
+      const validated = validatePresenceReceipt(record.id, record.data, receivedAt, sender);
       if (!validated.ok) return { reason: validated.reason };
       const agentId = validated.row.agentId as string;
 

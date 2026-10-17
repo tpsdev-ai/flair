@@ -98,7 +98,7 @@ describe("presenceHomeBindingReason (P1)", () => {
 
 describe("validatePresenceReceipt (P5)", () => {
   it("accepts a valid row and strips it to the declared fields", () => {
-    const res = validatePresenceReceipt("agent-a", wireRow({ hostSource: "/nope", extra: 1 }), NOW);
+    const res = validatePresenceReceipt("agent-a", wireRow({ hostSource: "/nope", extra: 1 }), NOW, "spoke-a");
     expect(res.ok).toBe(true);
     if (!res.ok) return;
     expect(res.row).toEqual({
@@ -114,28 +114,37 @@ describe("validatePresenceReceipt (P5)", () => {
     });
   });
 
+  it("stores the sender as originatorInstanceId whether the record carries another id, none, a non-string, or the sender", () => {
+    for (const carried of [{ originatorInstanceId: "spoke-b" }, { originatorInstanceId: undefined }, { originatorInstanceId: 7 }, { originatorInstanceId: "spoke-a" }]) {
+      const res = validatePresenceReceipt("agent-a", wireRow(carried), NOW, "spoke-a");
+      expect(res.ok).toBe(true);
+      if (!res.ok) continue;
+      expect(res.row.originatorInstanceId).toBe("spoke-a");
+    }
+  });
+
   it("rejects a row whose agentId disagrees with the record id, and a missing/absent agentId", () => {
-    expect(validatePresenceReceipt("agent-a", wireRow({}, "agent-b"), NOW)).toEqual({ ok: false, reason: "presence_invalid_shape" });
-    expect(validatePresenceReceipt("agent-a", { id: "agent-a", lastHeartbeatAt: NOW }, NOW)).toEqual({ ok: false, reason: "presence_invalid_shape" });
-    expect(validatePresenceReceipt("agent-a", null, NOW)).toEqual({ ok: false, reason: "presence_invalid_shape" });
+    expect(validatePresenceReceipt("agent-a", wireRow({}, "agent-b"), NOW, "spoke-a")).toEqual({ ok: false, reason: "presence_invalid_shape" });
+    expect(validatePresenceReceipt("agent-a", { id: "agent-a", lastHeartbeatAt: NOW }, NOW, "spoke-a")).toEqual({ ok: false, reason: "presence_invalid_shape" });
+    expect(validatePresenceReceipt("agent-a", null, NOW, "spoke-a")).toEqual({ ok: false, reason: "presence_invalid_shape" });
   });
 
   it("rejects a missing or non-finite lastHeartbeatAt", () => {
-    expect(validatePresenceReceipt("agent-a", wireRow({ lastHeartbeatAt: null }), NOW)).toEqual({ ok: false, reason: "presence_invalid_shape" });
-    expect(validatePresenceReceipt("agent-a", wireRow({ lastHeartbeatAt: "1" }), NOW)).toEqual({ ok: false, reason: "presence_invalid_shape" });
-    expect(validatePresenceReceipt("agent-a", wireRow({ lastHeartbeatAt: Number.NaN }), NOW)).toEqual({ ok: false, reason: "presence_invalid_shape" });
-    expect(validatePresenceReceipt("agent-a", wireRow({ lastHeartbeatAt: Number.POSITIVE_INFINITY }), NOW)).toEqual({ ok: false, reason: "presence_invalid_shape" });
+    expect(validatePresenceReceipt("agent-a", wireRow({ lastHeartbeatAt: null }), NOW, "spoke-a")).toEqual({ ok: false, reason: "presence_invalid_shape" });
+    expect(validatePresenceReceipt("agent-a", wireRow({ lastHeartbeatAt: "1" }), NOW, "spoke-a")).toEqual({ ok: false, reason: "presence_invalid_shape" });
+    expect(validatePresenceReceipt("agent-a", wireRow({ lastHeartbeatAt: Number.NaN }), NOW, "spoke-a")).toEqual({ ok: false, reason: "presence_invalid_shape" });
+    expect(validatePresenceReceipt("agent-a", wireRow({ lastHeartbeatAt: Number.POSITIVE_INFINITY }), NOW, "spoke-a")).toEqual({ ok: false, reason: "presence_invalid_shape" });
   });
 
   it("rejects an activity outside the local vocabulary", () => {
-    expect(validatePresenceReceipt("agent-a", wireRow({ activity: "hacking" }), NOW)).toEqual({ ok: false, reason: "presence_invalid_shape" });
-    expect(validatePresenceReceipt("agent-a", wireRow({ activity: 7 }), NOW)).toEqual({ ok: false, reason: "presence_invalid_shape" });
+    expect(validatePresenceReceipt("agent-a", wireRow({ activity: "hacking" }), NOW, "spoke-a")).toEqual({ ok: false, reason: "presence_invalid_shape" });
+    expect(validatePresenceReceipt("agent-a", wireRow({ activity: 7 }), NOW, "spoke-a")).toEqual({ ok: false, reason: "presence_invalid_shape" });
   });
 
   it("leaves an absent activity off the stripped row (so the merge can keep the stored label)", () => {
     const row = wireRow();
     delete row.activity;
-    const res = validatePresenceReceipt("agent-a", row, NOW);
+    const res = validatePresenceReceipt("agent-a", row, NOW, "spoke-a");
     expect(res.ok).toBe(true);
     if (!res.ok) return;
     expect("activity" in res.row).toBe(false);
@@ -143,11 +152,11 @@ describe("validatePresenceReceipt (P5)", () => {
 
   it("caps currentTask and drops a non-string task", () => {
     const long = "x".repeat(PRESENCE_CURRENT_TASK_MAX_LENGTH + 50);
-    const res = validatePresenceReceipt("agent-a", wireRow({ currentTask: `  ${long}  ` }), NOW);
+    const res = validatePresenceReceipt("agent-a", wireRow({ currentTask: `  ${long}  ` }), NOW, "spoke-a");
     expect(res.ok).toBe(true);
     if (!res.ok) return;
     expect((res.row.currentTask as string).length).toBe(PRESENCE_CURRENT_TASK_MAX_LENGTH);
-    const other = validatePresenceReceipt("agent-a", wireRow({ currentTask: 42 }), NOW);
+    const other = validatePresenceReceipt("agent-a", wireRow({ currentTask: 42 }), NOW, "spoke-a");
     expect(other.ok).toBe(true);
     if (other.ok) expect(other.row.currentTask).toBeNull();
   });
@@ -155,27 +164,27 @@ describe("validatePresenceReceipt (P5)", () => {
   it("drops an over-long or non-string version, keeps a 64-char one", () => {
     const long = "v".repeat(65);
     const ok64 = "v".repeat(64);
-    const res = validatePresenceReceipt("agent-a", wireRow({ flairVersion: long, harperVersion: 5 }), NOW);
+    const res = validatePresenceReceipt("agent-a", wireRow({ flairVersion: long, harperVersion: 5 }), NOW, "spoke-a");
     expect(res.ok).toBe(true);
     if (!res.ok) return;
     expect(res.row.flairVersion).toBeNull();
     expect(res.row.harperVersion).toBeNull();
-    const res2 = validatePresenceReceipt("agent-a", wireRow({ flairVersion: ok64 }), NOW);
+    const res2 = validatePresenceReceipt("agent-a", wireRow({ flairVersion: ok64 }), NOW, "spoke-a");
     expect(res2.ok).toBe(true);
     if (res2.ok) expect(res2.row.flairVersion).toBe(ok64);
   });
 
   it("rejects a non-finite activityUpdatedAt", () => {
-    expect(validatePresenceReceipt("agent-a", wireRow({ activityUpdatedAt: "x" }), NOW)).toEqual({ ok: false, reason: "presence_invalid_shape" });
+    expect(validatePresenceReceipt("agent-a", wireRow({ activityUpdatedAt: "x" }), NOW, "spoke-a")).toEqual({ ok: false, reason: "presence_invalid_shape" });
   });
 
   it("rejects a stamp beyond the receiver's clock plus the 5-minute allowance", () => {
     const future = NOW + 5 * 60 * 1000 + 1;
-    expect(validatePresenceReceipt("agent-a", wireRow({ lastHeartbeatAt: future }), NOW)).toEqual({ ok: false, reason: "presence_future_timestamp" });
-    expect(validatePresenceReceipt("agent-a", wireRow({ activityUpdatedAt: future }), NOW)).toEqual({ ok: false, reason: "presence_future_timestamp" });
+    expect(validatePresenceReceipt("agent-a", wireRow({ lastHeartbeatAt: future }), NOW, "spoke-a")).toEqual({ ok: false, reason: "presence_future_timestamp" });
+    expect(validatePresenceReceipt("agent-a", wireRow({ activityUpdatedAt: future }), NOW, "spoke-a")).toEqual({ ok: false, reason: "presence_future_timestamp" });
     // exactly at the bound is accepted
     const atBound = NOW + 5 * 60 * 1000;
-    expect(validatePresenceReceipt("agent-a", wireRow({ lastHeartbeatAt: atBound }), NOW).ok).toBe(true);
+    expect(validatePresenceReceipt("agent-a", wireRow({ lastHeartbeatAt: atBound }), NOW, "spoke-a").ok).toBe(true);
   });
 });
 
@@ -183,7 +192,7 @@ describe("validatePresenceReceipt (P5)", () => {
 
 describe("mergePresenceReceipt (P4)", () => {
   const incoming = () => {
-    const v = validatePresenceReceipt("agent-a", wireRow(), NOW);
+    const v = validatePresenceReceipt("agent-a", wireRow(), NOW, "spoke-a");
     if (!v.ok) throw new Error("fixture invalid");
     return v.row;
   };
