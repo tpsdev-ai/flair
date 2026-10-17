@@ -314,10 +314,10 @@ function routeLookupFailedRefusal(): Response {
 
 /**
  * A signed non-admin agent's mutation that reaches the owner checks, whose target
- * Harper matched but whose record id Harper's `RequestTarget` could not resolve,
- * is refused before any owner decision: those decisions need the id. 400: the
- * target cannot be parsed into a record id. The message is fixed and names no
- * part of the target.
+ * Harper matched but whose record id Harper's request-target parsing or path
+ * parsing could not resolve, is refused before any owner decision: those
+ * decisions need the id. 400: the target cannot be parsed into a record id. The
+ * message is fixed and names no part of the target.
  */
 function unresolvedTargetRefusal(): Response {
   return new Response(JSON.stringify({
@@ -809,8 +809,8 @@ server.http(async (request: any, nextLayer: any) => {
   // A signed non-admin agent's mutation that reaches this point (the earlier
   // checks, e.g. the rate limit and the raw-query refusal, answer first) is
   // refused before the owner decisions below when Harper's route lookup threw, or
-  // when Harper matched the target but its RequestTarget could not resolve the
-  // record id.
+  // when Harper matched the target but its request-target parsing or path parsing
+  // could not resolve the record id.
   if (isMutation && !request.tpsAgentIsAdmin && routeLookupFailed) {
     return routeLookupFailedRefusal();
   }

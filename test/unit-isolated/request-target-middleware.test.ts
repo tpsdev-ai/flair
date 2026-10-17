@@ -547,6 +547,40 @@ describe("an OrgEvent or WorkspaceState delete whose stored-row lookup fails is 
 });
 
 describe("a guarded mutation whose routed record id Harper cannot resolve is refused", () => {
+  // A Memory route whose resource's path parsing throws.
+  const throwingParsePath = {
+    getMatch: (url: string) => url.startsWith("Memory/")
+      ? { path: "Memory", relativeURL: url.slice("Memory".length), Resource: { parsePath: () => { throw new Error("simulated parse failure"); } } }
+      : undefined,
+  };
+
+  it("a non-admin PATCH whose path parsing throws gets the named 400 and reaches no owner read and no next layer", async () => {
+    harperServer.resources = throwingParsePath;
+    try {
+      const url = "/Memory/x";
+      const res = await mw(makeRequest(url, "PATCH", signedAuthorization("PATCH", url)), next);
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toBe("unresolved_request_target");
+      expect(nextCalls).toBe(0);
+      expect(tableGets.Memory!.length).toBe(0);
+    } finally {
+      delete harperServer.resources;
+    }
+  });
+
+  it("a non-admin read whose path parsing throws keeps its path and reaches the next layer", async () => {
+    harperServer.resources = throwingParsePath;
+    try {
+      const url = "/Memory/x.content?select(id)&limit=2";
+      const req = makeRequest(url, "GET", signedAuthorization("GET", url));
+      expect((await mw(req, next)).status).toBe(200);
+      expect(req.url).toBe("/Memory/x.content?limit=2");
+      expect(nextCalls).toBe(1);
+    } finally {
+      delete harperServer.resources;
+    }
+  });
+
   // This file's `RequestTarget` is Harper's own; it throws on the invalid
   // percent-encoding in this routed remainder.
   for (const method of ["PATCH", "PUT"] as const) {

@@ -43,8 +43,9 @@ export interface HarperRoute {
   isCollection: boolean;
   /** The routed path (`/<resource><remainder>`), for a by-name classification. */
   decisionPath: string;
-  /** True when Harper's `RequestTarget` threw on the routed remainder: `recordId`
-   *  is then null without meaning a collection. */
+  /** True when Harper's request-target parsing (`RequestTarget`) or path parsing
+   *  (`parsePath`) threw on the routed remainder: `recordId` is then null without
+   *  meaning a collection. */
   recordIdUnresolved: boolean;
 }
 
@@ -106,7 +107,8 @@ export function routeWithHarper(rawTarget: string, headers: unknown): HarperRout
         recordId = parsed;
       }
     } catch {
-      /* leave recordId as the decoded remainder */
+      // The id Harper addresses is unknown, so the remainder is not used as one.
+      return { resource, recordId: null, property: null, isCollection: false, decisionPath, recordIdUnresolved: true };
     }
   }
 
