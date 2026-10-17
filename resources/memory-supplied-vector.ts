@@ -1,11 +1,12 @@
 /**
- * flair#2573 slice 2 — an agent's Memory write never stores a vector the caller
+ * flair#2573 slice 2 — a non-admin Memory write never stores a vector the caller
  * supplied.
  *
- * The configured model is the ONLY source of a stored Memory vector's space: a
+ * The space of a Memory vector is defined by the model that computed it. A
  * supplied vector cannot be verified against the text it claims to embed or
- * against the model, so the embedding-space guard can never trust it. A non-admin
- * POST, PUT or PATCH that carries a non-empty `embedding` therefore discards the
+ * against the model, so a non-admin write discards it and stores the vector the
+ * configured model computes instead. A non-admin POST, PUT or PATCH that carries
+ * a non-empty `embedding` therefore discards the
  * vector and its `embeddingModel` stamp before the write, so the write stores the
  * vector the server computes for the row's own post-redaction text, or none when
  * the model is unavailable (the auto-embed backfill embeds it later) — exactly as

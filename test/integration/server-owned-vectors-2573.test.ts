@@ -1,8 +1,8 @@
 /**
  * server-owned-vectors-2573.test.ts — flair#2573 slice 2 (real Harper).
  *
- * An agent's Memory write never stores a vector the caller supplied. A non-admin
- * POST, PUT or PATCH that carries a non-empty `embedding` discards the vector and
+ * A non-admin agent's Memory write never stores a vector the caller supplied. A
+ * non-admin POST, PUT or PATCH that carries a non-empty `embedding` discards the vector and
  * its `embeddingModel` stamp before the write, so the write stores the vector the
  * server computes for the row's own post-redaction text, or none when the model is
  * unavailable — exactly as a write that sent no vector. An administrator keeps the
