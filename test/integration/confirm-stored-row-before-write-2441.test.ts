@@ -32,7 +32,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import nacl from "tweetnacl";
 import { signBodyFresh } from "../../resources/federation-crypto.js";
+import { getModelId } from "../../resources/embeddings-provider.ts";
+import { stripEnginePrefix } from "../../resources/embedding-space-guard.ts";
 import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
+
+/** A bare current stamp: the boot embedding-stamp migration treats a seeded row
+ *  as current-space and never re-embeds it, so a case that does not mean to
+ *  race that background writer keeps it out of the selection. */
+const SEED_MODEL_ID = stripEnginePrefix(getModelId());
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
 function mkAgent(id: string): TestAgent {
@@ -85,7 +92,7 @@ async function readRow(id: string): Promise<any> {
 async function insertRow(row: Record<string, unknown>): Promise<void> {
   await ops({
     operation: "insert", database: "flair", table: "Memory",
-    records: [{ visibility: "shared", archived: false, createdAt: new Date(Date.now() - 60_000).toISOString(), ...row }],
+    records: [{ visibility: "shared", archived: false, embeddingModel: SEED_MODEL_ID, createdAt: new Date(Date.now() - 60_000).toISOString(), ...row }],
   });
 }
 async function updateRow(row: Record<string, unknown>): Promise<void> {
@@ -103,6 +110,32 @@ async function purgeRow(id: string): Promise<void> {
   });
   const text = await res.text();
   expect(res.status, `MemoryPurge: ${text.slice(0, 300)}`).toBe(200);
+}
+
+/** Rows in MemoryDeletionHistory for one memory id. */
+async function historyRows(id: string): Promise<any[]> {
+  const rows = await ops({
+    operation: "search_by_value", database: "flair", table: "MemoryDeletionHistory",
+    search_attribute: "memoryId", search_type: "equals", search_value: id, get_attributes: ["*"],
+  });
+  return Array.isArray(rows) ? rows : [];
+}
+/** Rows in MemoryHostSource for one memory id. */
+async function pointerRows(id: string): Promise<any[]> {
+  const rows = await ops({
+    operation: "search_by_value", database: "flair", table: "MemoryHostSource",
+    search_attribute: "memoryId", search_type: "equals", search_value: id, get_attributes: ["*"],
+  });
+  return Array.isArray(rows) ? rows : [];
+}
+async function insertPointer(id: string, token: string): Promise<void> {
+  await ops({
+    operation: "insert", database: "flair", table: "MemoryHostSource",
+    records: [{
+      memoryId: id, hostSource: JSON.stringify({ v: 1, host: "host-a", kind: "run", id: "run-a" }),
+      scopeAtWrite: null, authorId: owner.id, memoryInstanceToken: token, receivedAt: new Date().toISOString(),
+    }],
+  });
 }
 
 function authSend(agent: TestAgent, method: string, path: string, body?: unknown): Promise<Response> {
@@ -549,5 +582,96 @@ describe("flair#2441 — Memory.put confirms the stored row (real Harper)", () =
     expect(res.status, (await res.clone().text()).slice(0, 200)).toBeLessThan(300);
     const row = await readRow(id);
     expect(row?.content, "the ordinary put did not land").toBe("put v2");
+  }, 60_000);
+});
+
+// ── Memory DELETE: the committed removal ───────────────────────────────────
+//
+// flair#2632 — Harper can resolve a transaction's commit while dropping its
+// queued row delete (the delete loses to a newer write of the same row) and
+// still commit the transaction's other writes. The DELETE answers success only
+// after a fresh read of the committed store finds the row gone; a removal that
+// did not land is undone (history record removed, pointer row restored) and
+// retried from a fresh transaction and read.
+
+describe("flair#2632 — an owner DELETE confirms its committed row removal (real Harper)", () => {
+  const seed = (id: string, token: string) =>
+    insertRow({ id, agentId: owner.id, content: `delete ${id}`, contentHash: id, instanceToken: token, durability: "persistent" });
+  const del = (id: string) => authSend(owner, "DELETE", `/Memory/${id}`);
+
+  it("a newer write committed while the DELETE is paused: 2xx and the row is gone after the retry", async () => {
+    const id = `csr-del-newer-${Date.now()}`;
+    const token = randomUUID();
+    await seed(id, token);
+    const { response, paused, released } = await withPaused(
+      "memory-delete",
+      () => del(id),
+      async () => { await updateRow({ id, content: "a newer write committed while the delete was paused" }); },
+    );
+    expect(paused, "the owner DELETE was not paused").toBe(true);
+    expect(released).toBe("go");
+    const text = await response.clone().text();
+    expect(response.status, text.slice(0, 300)).toBeLessThan(300);
+    expect(await readRow(id), "the DELETE answered success with the row still stored").toBeNull();
+    const history = await historyRows(id);
+    expect(history.length, "the confirmed removal must keep exactly one deletion-history record").toBe(1);
+    expect(history[0]?.memoryInstanceToken, "the kept history record is not this row's").toBe(token);
+  }, 60_000);
+
+  it("a same-id replacement with a new token while the DELETE is paused is refused and not deleted", async () => {
+    const id = `csr-del-replaced-${Date.now()}`;
+    const token = randomUUID();
+    const replacementToken = randomUUID();
+    await seed(id, token);
+    await insertPointer(id, token);
+    const { response, paused, released } = await withPaused(
+      "memory-delete",
+      () => del(id),
+      async () => { await updateRow({ id, instanceToken: replacementToken, content: "a replacement row under the same id" }); },
+    );
+    expect(paused, "the owner DELETE was not paused").toBe(true);
+    expect(released).toBe("go");
+    const text = await response.clone().text();
+    expect(response.status, text.slice(0, 300)).toBe(409);
+    expect(JSON.parse(text).error).toBe("stored_row_changed");
+    const row = await readRow(id);
+    expect(row?.instanceToken, "the replacement row was deleted").toBe(replacementToken);
+    expect(await historyRows(id), "a row that was not deleted kept a deletion-history record").toEqual([]);
+    expect((await pointerRows(id)).length, "the pointer row of a row that was not deleted was not restored").toBe(1);
+  }, 60_000);
+
+  it("an owner change committed while the DELETE is paused is refused and the row survives", async () => {
+    const id = `csr-del-owner-${Date.now()}`;
+    const token = randomUUID();
+    const other = mkAgent("csr-other");
+    await ops({
+      operation: "insert", database: "flair", table: "Agent",
+      records: [{ id: other.id, name: other.id, role: "agent", publicKey: other.publicKey, createdAt: new Date().toISOString() }],
+    });
+    await seed(id, token);
+    const { response, paused, released } = await withPaused(
+      "memory-delete",
+      () => del(id),
+      async () => { await updateRow({ id, agentId: other.id }); },
+    );
+    expect(paused, "the owner DELETE was not paused").toBe(true);
+    expect(released).toBe("go");
+    const text = await response.clone().text();
+    expect(response.status, text.slice(0, 300)).toBe(409);
+    expect(JSON.parse(text).error).toBe("owner_changed");
+    expect((await readRow(id))?.agentId, "the replacement row was deleted").toBe(other.id);
+    expect(await historyRows(id), "a row that was not deleted kept a deletion-history record").toEqual([]);
+  }, 60_000);
+
+  it("CONTROL: with no competitor a DELETE answers 2xx, removes the row and records it", async () => {
+    const id = `csr-del-ok-${Date.now()}`;
+    const token = randomUUID();
+    await seed(id, token);
+    const res = await del(id);
+    expect(res.status, (await res.clone().text()).slice(0, 300)).toBeLessThan(300);
+    expect(await readRow(id), "the row survived an ordinary DELETE").toBeNull();
+    const history = await historyRows(id);
+    expect(history.length, "the ordinary DELETE did not record its removal").toBe(1);
+    expect(history[0]?.memoryInstanceToken).toBe(token);
   }, 60_000);
 });
