@@ -489,6 +489,21 @@ describe("Bun Harper spawn preload", () => {
       }
     }, 20_000);
   }
+  test("a data word matching a protected executable on child PATH runs without a reason", () => {
+    const { root } = fixture();
+    const script = join(root, "argv-fixture.ts");
+    writeFileSync(script, "console.log(JSON.stringify(process.argv.slice(2)))");
+    const shim = join(root, "dist", "cli-shim.cjs");
+    chmodSync(shim, 0o755);
+    symlinkSync(shim, join(root, "flair"));
+    const env = { ...process.env, PATH: `${root}:${process.env.PATH}` };
+    expect(realpathSync(Bun.which("flair", { PATH: env.PATH })!)).toBe(realpathSync(shim));
+    const result = spawnSync("bun", [script, "--object", "flair"], {
+      env, encoding: "utf8", timeout: 5_000,
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual(["--object", "flair"]);
+  }, 20_000);
   test("wrapped non-shell fixtures receive free-text argv without a reason", () => {
     const { root } = fixture();
     const script = join(root, "argv-fixture.ts");
@@ -713,7 +728,7 @@ describe("Bun Harper spawn preload", () => {
     symlinkSync(cli, join(root, "entry"));
     symlinkSync(harperEntry, join(root, "engine"));
     refused(() => spawnSync(process.execPath, [join(root, "entry"), "init"], { timeout: 5_000 }));
-    refused(() => spawnSync(process.execPath, ["--cwd", root, "engine", "run", "."], { timeout: 5_000 }));
+    refused(() => spawnSync(process.execPath, ["--cwd", root, "./engine", "run", "."], { timeout: 5_000 }));
   }, 20_000);
   test("a runtime option value naming the installed Harper entry requires a child-only reason", () => {
     const { root } = fixture();

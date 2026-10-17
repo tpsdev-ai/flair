@@ -126,19 +126,25 @@ function shellCommandIndex(words: string[]): number {
   return -1;
 }
 
-function shellEntry(words: string[], options: Options, uncertainty = { value: false }, shellSource = false): EntryKind | undefined {
+function argvEntry(words: string[], options: Options): EntryKind | undefined {
   let found: EntryKind | undefined;
   for (const word of words) {
-    found ??= entryKind(word, options)
-      ?? entryKind(resolvedExecutable(word, options) ?? word, options)
+    found ??= (word.includes("/") || word.startsWith(".") ? entryKind(word, options) : undefined)
       ?? (word.includes("dist/cli-shim.cjs") ? "dist/cli-shim.cjs"
         : word.includes("dist/cli.js") ? "dist/cli.js"
         : word.includes(harperEntry) || word.split(/[\s'"]/).some(part =>
           part.includes(harper.suffix) && entryKind(part, options) === "harper.js") ? "harper.js" : undefined);
   }
+  return found;
+}
+
+function shellEntry(words: string[], options: Options, uncertainty = { value: false }, shellSource = false): EntryKind | undefined {
+  let found = argvEntry(words, options);
   const chain = [...words];
   if (shellSource) while (/^[A-Za-z_][A-Za-z0-9_]*=/.test(chain[0] ?? "")) chain.shift();
   while (chain.length) {
+    const executable = resolvedExecutable(chain[0], options);
+    if (executable) found ??= entryKind(executable, options);
     const commandIndex = shellCommandIndex(chain);
     if (commandIndex >= 0) {
       const nested = commandWords(chain[commandIndex] ?? "", true);
@@ -201,7 +207,8 @@ function invocation(command: string, args: string[], options: Options) {
   });
   if (!words) return failure("unclassifiable shell string");
   const uncertainty = { value: false };
-  const originalEntry = shellEntry([command, ...args], probeOptions, uncertainty);
+  const originalEntry = options.shell ? argvEntry([command, ...args], probeOptions)
+    : shellEntry([command, ...args], probeOptions, uncertainty);
   const parsedEntry = shellEntry(words, probeOptions, uncertainty, shellString);
   const protectedEntry = originalEntry ?? parsedEntry;
   while (words.length && assignment(words[0])) words.shift();
@@ -261,13 +268,15 @@ export class TestRuntimeIdentityError extends Error {
 // It does not model hostile process environments.
 // Wrapped APIs: child_process spawn, spawnSync, execFile, execFileSync, exec, execSync; Bun.spawn and Bun.spawnSync.
 // Direct executables classified as Node may launch protected entries without a reason; direct Bun launches of protected entries are refused without one.
-// Every other wrapped launch naming a protected entry anywhere in argv, nested shell tokens, or shell: true command strings
-// requires a nonempty, child-only FLAIR_TEST_ALLOW_BUN_HARPER reason, regardless of leading executable.
-// Shell command strings in wrapper chains fail closed; other argv is scanned for protected paths.
+// Other launches with a protected entry path or executable require a nonempty, child-only FLAIR_TEST_ALLOW_BUN_HARPER reason.
+// PATH lookup applies only to command and wrapper executables, including shell command words.
+// Other argv uses protected-entry substrings and cwd-relative path resolution for words containing / or starting with .
+// Shell command strings in wrapper chains fail closed.
 export function checkTestSpawn(api: string, command: unknown, args: unknown, options: Options = {}): void {
   if (typeof command !== "string" || !Array.isArray(args)) return;
   const uncertainty = { value: false };
-  const originalEntry = shellEntry([command, ...args], options, uncertainty);
+  const originalEntry = options.shell ? argvEntry([command, ...args], options)
+    : shellEntry([command, ...args], options, uncertainty);
   const scanOptions = { ...options };
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--cwd" && args[i + 1]) scanOptions.cwd = resolve(cwdPath(scanOptions.cwd), args[++i]);
