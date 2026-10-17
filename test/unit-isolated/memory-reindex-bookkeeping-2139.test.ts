@@ -1,5 +1,6 @@
 import { describe, expect, test, beforeEach, mock } from "bun:test";
 import { DECLARED_MEMORY_ATTRIBUTES } from "../../src/lib/memory-attributes.ts";
+import { memoryLockDouble } from "../helpers/memory-lock-double";
 
 process.env.FLAIR_RATE_LIMIT_ENABLED = "false";
 delete (process.env as any).FLAIR_PUBLIC;
@@ -14,6 +15,9 @@ mock.module("../../resources/embeddings-provider.ts", () => ({
 let memoryStore: Map<string, any>;
 
 class BaseMemory {
+  /** flair#2478: Memory PUT/PATCH refuse a store with no per-id lock; this
+   *  double injects one (test/helpers/memory-lock-double.ts). */
+  static primaryStore = memoryLockDouble();
   getId() { return (this as any).id; }
   async get(target?: any) {
     const id = typeof target === "string" ? target : target?.id ?? (this as any).id;

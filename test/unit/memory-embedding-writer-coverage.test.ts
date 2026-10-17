@@ -58,8 +58,8 @@ add("Federation", ["writer:writeBackCommittedRow#1"], "LATCH",
 // The writes go through the base TABLE (`databases.flair.Memory`) with the
 // shared request context so a direct/internal caller is atomic (A1'' 0a).
 add("Memory", ["writer:cls.create#1", "writer:(databases as any).flair.Memory.post#1"], "GATED", "Memory.post() write — stamps + noteWriteStamp (slice 1).");
-add("Memory", ["writer:(databases as any).flair.Memory.put#3"], "GATED", "Memory.put() main write — stamps + noteWriteStamp (slice 1).");
-add("Memory", ["writer:(databases as any).flair.Memory.put#2"], "GATED", "Memory.put() _reindex re-PUT (flair#2450: through the table, inside the shared write transaction, after the committed-row confirm) — writes supplied embedding fields without regenerating; calls noteWriteStamp on the submitted model.");
+add("Memory", ["writer:(databases as any).flair.Memory.put#4"], "GATED", "Memory.put() main write — stamps + noteWriteStamp (slice 1).");
+add("Memory", ["writer:(databases as any).flair.Memory.put#3"], "GATED", "Memory.put() _reindex re-PUT (flair#2450: through the table, inside the shared write transaction, after the committed-row confirm) — writes supplied embedding fields without regenerating; calls noteWriteStamp on the submitted model.");
 // flair#2425 — an ordinary PATCH merges the body (including a caller-supplied
 // embedding/embeddingModel) into the row; it now calls noteWriteStamp too.
 add("Memory", ["writer:super.patch#1"], "GATED",
@@ -76,6 +76,8 @@ add("MemoryArchive", ["writer:Memory.put#1"], "DELEGATED", "Existing row through
 // ── ECHO: preserves an EXISTING row's stamp ──
 add("Memory", ["writer:(databases as any).flair.Memory.put#1"], "ECHO",
   "closeSupersededRecord: read-modify-write validTo close, re-writes the existing stamp.");
+add("Memory", ["writer:(databases as any).flair.Memory.put#2"], "ECHO",
+  "stageGrantedClose: read-modify-write validTo close staged in the successor's transaction, re-writes the existing stamp.");
 add("MemoryReindex", ["writer:writeBackCommittedRow#1"], "ECHO",
   "Admin reindex re-PUT of an existing local row through the shared write-back helper (flair#2354): echoes the stored embedding and embeddingModel; no re-embed.");
 add("promotion-stamp", ["writer:writeBackCommittedRow#1"], "ECHO",
@@ -216,7 +218,7 @@ function putBranchTrips(source: string, branch: "reindex" | "ordinary"): boolean
   const ast = ts.createSourceFile("f.ts", source, ts.ScriptTarget.Latest, true);
   let trips = false;
   const visit = (node: ts.Node): void => {
-    if (ts.isMethodDeclaration(node) && node.name && ts.isIdentifier(node.name) && node.name.text === "put" && node.body) {
+    if (ts.isMethodDeclaration(node) && node.name && ts.isIdentifier(node.name) && node.name.text === "putLocked" && node.body) {
       const statements = node.body.statements;
       const index = statements.findIndex(statement => {
         if (!ts.isIfStatement(statement)) return false;
@@ -277,8 +279,8 @@ test("an uncalled nested function does not trip the named body's latch", () => {
 // through. Each named body must trip the latch itself.
 const TRIPPING_WRITE_BODIES: ReadonlyArray<readonly [file: string, fn: string]> = [
   ["resources/Memory.ts", "post"],
-  ["resources/Memory.ts", "put"],
-  ["resources/Memory.ts", "patch"],
+  ["resources/Memory.ts", "putLocked"],
+  ["resources/Memory.ts", "patchLocked"],
   ["resources/Federation.ts", "noteFederationMergedMemory"],
 ];
 

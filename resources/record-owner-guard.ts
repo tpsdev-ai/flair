@@ -125,6 +125,13 @@ export const OWNER_GUARD_EXEMPT: Readonly<Record<string, string>> = Object.freez
   MemoryHostSource: "REST writes refused; application writes stamp authorId; direct reads limited to admins and trusted internal callers",
   // Application append-only history; REST writes are refused.
   InstructionVersion: "application append-only; REST writes refused",
+  // flair#2266: the private audit log of key registrations. Its `agentId` names
+  // the row whose key was registered (the AUDIT TARGET), not the caller — the
+  // caller is the admin in `actorId`. Its only application writer is
+  // resources/AgentKeyRegister.ts; the Flair resource route
+  // (resources/AgentKeyRegistration.ts) admits admin reads and refuses every
+  // write. The Harper operations API is a separate raw-table trust root.
+  AgentKeyRegistration: "admin-read-only audit log; Flair resource-route writes refused; the registration operation is its only application writer",
 });
 
 /** The verbs that can mutate a record, and therefore need the rule applied. */
@@ -135,28 +142,42 @@ export function isMutatingMethod(method: string): boolean {
 }
 
 /**
- * Resolve a request path to the guarded table and record id it addresses, or
- * null when the path is not a guarded single-record route.
+ * Resolve a raw request target to the guarded table and record id it
+ * addresses, or null when the target is not one this early check decides.
  *
- * Matches `/<Table>/<id>` ONLY. A collection path (`/<Table>`) addresses no
- * existing record, so there is nothing to own and nothing to check — that is the
- * "creation is untouched" property, expressed as a parse rather than a special
- * case. The table segment is matched EXACTLY so `/SoulFeed/x` can never be read
- * as a `Soul` route.
+ * This is the middleware's early check. It reads the raw request target that
+ * Harper's REST layer routes (the path before any `?`, with no dot-segment
+ * resolution and no merging of slashes), not a normalized URL, and decides only
+ * the form `/<Table>/<id>`: exactly two non-empty segments after a single
+ * leading slash, and an id with no `.` once decoded (Harper may read a `.`
+ * suffix as a content type or attribute and address a different id). For that
+ * form, Harper resolves the same table and the same decoded id. Every other
+ * target returns null: a dotted id, more segments, an empty segment (a
+ * trailing, repeated or extra leading slash) or malformed percent-encoding.
+ * Other addressed forms of a table-backed route use the guard on Harper's
+ * resolved id. On POST/PUT/PATCH, its body-id check precedes stored ownership.
+ * For collection PUT/PATCH/DELETE (including a trailing slash), if reached, the
+ * table guard returns the collection refusal; existing DELETE middleware may
+ * refuse earlier. A collection POST follows the resource's own rules.
+ * The table segment is matched EXACTLY against the owner-scoped table names, so
+ * `/SoulFeed/x` can never be read as a `Soul` route.
  */
-export function resolveGuardedRecord(pathname: string): { table: string; ownerField: string; id: string } | null {
-  const parts = pathname.split("/").filter(Boolean);
-  if (parts.length < 2) return null;
-  const table = parts[0];
+export function resolveGuardedRecord(requestTarget: string): { table: string; ownerField: string; id: string } | null {
+  const queryStart = requestTarget.indexOf("?");
+  const path = queryStart === -1 ? requestTarget : requestTarget.slice(0, queryStart);
+  // Empty segments are kept, not filtered: Harper keeps them in the id it resolves.
+  const parts = path.split("/");
+  if (parts.length !== 3 || parts[0] !== "") return null;
+  const [, table, rawId] = parts;
+  if (!Object.prototype.hasOwnProperty.call(OWNER_FIELDS, table) || !rawId) return null;
   const ownerField = OWNER_FIELDS[table];
-  if (!ownerField) return null;
   let id: string;
   try {
-    id = decodeURIComponent(parts[1]);
+    id = decodeURIComponent(rawId);
   } catch {
     return null; // malformed percent-encoding addresses no record we can resolve
   }
-  if (!id) return null;
+  if (!id || id.includes(".")) return null;
   return { table, ownerField, id };
 }
 
@@ -191,15 +212,54 @@ export function isForbiddenOwnerMutation(
  * principal: 403 with a body that names only the table.
  *
  * One constructor for every place the rule is enforced — the auth middleware
- * for `/<Table>/<id>` routes, and resources/relay-ops.ts for a Message POST to
- * the collection that reuses an existing message id — so a refused caller gets
- * the same response on either route, and it carries nothing from the stored
- * row.
+ * for `/<Table>/<id>` routes, resources/owner-scoped-write-policy.ts for a
+ * non-admin addressed write (POST/PUT/PATCH/DELETE to `/<Table>/<id>`) to an
+ * owner-scoped table, and resources/relay-ops.ts for a Message POST to the
+ * collection that reuses an existing message id. Carries no stored-row content.
  */
 export function ownerMutationRefusal(table: string): Response {
   return new Response(JSON.stringify({
     error: `forbidden: cannot modify ${table} owned by another principal`,
   }), { status: 403, headers: { "Content-Type": "application/json" } });
+}
+
+/**
+ * The refusal for a non-admin PUT, PATCH or DELETE that addresses an
+ * owner-scoped table's collection rather than one record: 403 with a body that
+ * names only the table (resources/owner-scoped-write-policy.ts).
+ */
+export function collectionWriteRefusal(table: string): Response {
+  return new Response(JSON.stringify({
+    error: `forbidden: a non-admin write to ${table} must address one record by its id`,
+  }), { status: 403, headers: { "Content-Type": "application/json" } });
+}
+
+/** The named refusal when a non-admin agent's stored-record read for an owner check fails. */
+export const OWNER_CHECK_UNAVAILABLE_ERROR = "owner_check_unavailable";
+
+/**
+ * Refuse a non-admin agent's write when the stored record its owner check
+ * needs cannot be read (resources/owner-field-guard.ts's guard thunk, and the
+ * owner-scoped write guard's stored-record read). A numeric 4xx `statusCode`
+ * maps to 400; anything else maps to 503. It logs the failure and has no
+ * authentication-module dependency, so the owner-scoped write guard can use it
+ * without importing that module graph; re-exported by
+ * resources/owner-field-guard.ts.
+ */
+export function ownerCheckUnavailable(err: unknown): Response {
+  console.error(
+    "owner-field-guard: the stored record could not be read, so the write was refused",
+    { err },
+  );
+  const code = (err as { statusCode?: unknown } | null | undefined)?.statusCode;
+  const status = typeof code === "number" && code >= 400 && code < 500 ? 400 : 503;
+  return new Response(
+    JSON.stringify({
+      error: OWNER_CHECK_UNAVAILABLE_ERROR,
+      message: "the stored record could not be read; the write was refused",
+    }),
+    { status, headers: { "content-type": "application/json" } },
+  );
 }
 
 /**

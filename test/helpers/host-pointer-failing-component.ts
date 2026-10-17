@@ -216,3 +216,27 @@ Peer.put = function (record, ...rest) {
 export function componentWithFailingRepairPeerWrite(opts: { sourceRoot?: string } = {}): FailingComponent {
   return composeComponent({ [FAILING_REPAIR_PEER_WRITE_MODULE_REL]: FAILING_REPAIR_PEER_WRITE_MODULE_SRC }, opts.sourceRoot ?? repoRoot());
 }
+
+export const FAILING_MEMORY_READ_MODULE_REL = join("dist", "resources", "zz-test-failing-memory-read.js");
+
+export const FAILING_MEMORY_READ_MODULE_SRC = `import { existsSync, unlinkSync } from "node:fs";
+import { join } from "node:path";
+import { databases } from "harper";
+const { Memory } = databases.flair;
+const memoryGet = Memory.get;
+Memory.get = function (id, ...rest) {
+  const dir = process.env.FLAIR_TEST_PAUSE_DIR;
+  if (dir && (typeof id === "string" || typeof id === "number")) {
+    const arm = join(dir, "arm.memory-get-fail." + id);
+    if (existsSync(arm)) {
+      unlinkSync(arm);
+      throw new Error("test component: forced Memory read failure");
+    }
+  }
+  return memoryGet.call(this, id, ...rest);
+};
+`;
+
+export function componentWithFailingMemoryRead(opts: { sourceRoot?: string } = {}): FailingComponent {
+  return composeComponent({ [FAILING_MEMORY_READ_MODULE_REL]: FAILING_MEMORY_READ_MODULE_SRC }, opts.sourceRoot ?? repoRoot());
+}

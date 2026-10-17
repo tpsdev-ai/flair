@@ -346,6 +346,69 @@ describe("step 6: instance-wide dedup-cluster stat (flair-quality Slice 1c)", ()
     expect(r.logRow.errors).toEqual(["dedup: unexpected /MemoryDedupStats response shape"]);
   });
 
+  // "excluded" and "a-future-state" pin the generic rule: any non-uniform state is
+  // a refusal, not just the states that existed when the runner was written.
+  for (const state of ["mixed", "unverified", "scan-failed", "excluded", "a-future-state"]) {
+    it(`records the guard refusal state ${state}`, async () => {
+      const refusal = {
+        clusterCount: null, largestClusterSize: null, totalMemoriesInClusters: null,
+        computedAt: "2026-07-22T03:00:00.000Z",
+        embeddingSpace: { state, reason: state === "scan-failed" ? "scan failed" : null },
+      };
+      const r = await runNightlyCycle(baseOpts({
+        apiCall: makeApi({
+          "GET:/Memory": () => sampleMemories,
+          "GET:/Soul": () => [sampleSoul],
+          "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
+          "POST:/ReflectMemories": () => ({ candidates: [], count: 0, model: "default", gathered: 1, unreflected: 1 }),
+          "POST:/MemoryDedupStats": () => refusal,
+        }),
+      }));
+      expect(r.status).toBe("completed");
+      expect(r.logRow.errors).toEqual([]);
+      expect(r.logRow.dedup).toEqual(refusal);
+    });
+  }
+
+  const refusal = {
+    clusterCount: null, largestClusterSize: null, totalMemoriesInClusters: null,
+    computedAt: "fixture", embeddingSpace: { state: "mixed", reason: null },
+  };
+  for (const [label, body] of Object.entries({
+    "uniform state": { ...refusal, embeddingSpace: { state: "uniform", reason: null } },
+    // An unknown non-empty state is a refusal (the generic rule above); an empty one is not.
+    "empty state": { ...refusal, embeddingSpace: { state: "", reason: null } },
+    "missing state": { ...refusal, embeddingSpace: { reason: null } },
+    "non-string state": { ...refusal, embeddingSpace: { state: 1, reason: null } },
+    "null space": { ...refusal, embeddingSpace: null },
+    "array space": { ...refusal, embeddingSpace: [] },
+    "missing space": { ...refusal, embeddingSpace: undefined },
+    "missing reason": { ...refusal, embeddingSpace: { state: "mixed" } },
+    "non-string reason": { ...refusal, embeddingSpace: { state: "mixed", reason: {} } },
+    "numeric cluster count": { ...refusal, clusterCount: 0 },
+    "numeric largest cluster": { ...refusal, largestClusterSize: 0 },
+    "numeric total": { ...refusal, totalMemoriesInClusters: 0 },
+    "numeric counts with refusal state": { ...refusal, clusterCount: 0, largestClusterSize: 0, totalMemoriesInClusters: 0 },
+    "missing count": { ...refusal, clusterCount: undefined },
+    "missing timestamp": { ...refusal, computedAt: undefined },
+    "non-string timestamp": { ...refusal, computedAt: 1 },
+  })) {
+    it(`rejects a malformed dedup refusal: ${label}`, async () => {
+      const r = await runNightlyCycle(baseOpts({
+        apiCall: makeApi({
+          "GET:/Memory": () => sampleMemories,
+          "GET:/Soul": () => [sampleSoul],
+          "POST:/MemoryMaintenance": () => ({ expired: 0, archived: 0, total: 0, errors: 0 }),
+          "POST:/ReflectMemories": () => ({ candidates: [], count: 0, model: "default", gathered: 1, unreflected: 1 }),
+          "POST:/MemoryDedupStats": () => body,
+        }),
+      }));
+      expect(r.status).toBe("failed");
+      expect(r.logRow.dedup).toBeUndefined();
+      expect(r.logRow.errors).toEqual(["dedup: unexpected /MemoryDedupStats response shape"]);
+    });
+  }
+
   it("dry-run skips the /MemoryDedupStats call entirely — persisting the stat is a side effect", async () => {
     const calls: string[] = [];
     const r = await runNightlyCycle(baseOpts({

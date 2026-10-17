@@ -657,8 +657,20 @@ server.http(async (request: any, nextLayer: any) => {
   // resource's own no-forge attribution. That keeps this incapable of breaking a
   // create, a self-write, or a legitimate cross-agent field like MemoryGrant's
   // granteeId — it can only narrow mutation of another agent's stored row.
+  //
+  // This is an early refusal, made only for the form record-owner-guard.ts's
+  // resolveGuardedRecord decides: `/<Table>/<id>` in the request target
+  // Harper's REST layer routes (request.url, not the normalized URL above),
+  // with two non-empty segments and no `.` in the decoded id. For that form
+  // Harper resolves the same table and decoded id. This owner check precedes
+  // the guard's body-id check. On other addressed forms, the guard checks
+  // string or number body ids on POST/PUT/PATCH before stored ownership. For collection PUT/PATCH/DELETE, if reached, the table guard
+  // returns the collection refusal; existing DELETE middleware may refuse earlier.
+  // Collection POST follows the resource's own rules. The guard (resources/owner-scoped-write-policy.ts)
+  // applies to the resource classes that extend the owner-scoped tables
+  // resources/owner-scoped-writes.ts guards.
   if (isMutation && !request.tpsAgentIsAdmin) {
-    const guarded = resolveGuardedRecord(url.pathname);
+    const guarded = resolveGuardedRecord(String(request.url ?? ""));
     if (guarded) {
       try {
         const record = await (databases as any).flair[guarded.table]?.get(guarded.id);

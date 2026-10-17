@@ -10,8 +10,14 @@
  *
  *   - a record that is not an object, or whose id is not a non-empty string or
  *     a non-empty array of strings, is not read: it is refused with
- *     `invalid_event_id` (400) before any write. (POST generates an id before
- *     the check when the body's id is missing, empty, null, 0 or false.);
+ *     `invalid_event_id` (400) before any write. Before validation, an
+ *     addressed POST binds a missing or null body id to the addressed id, and
+ *     a string or number body id when its text matches the address; any other
+ *     id type is left unchanged by this step. At the root collection, POST
+ *     generates an id when the body's id is missing, null or empty. At the
+ *     root collection, or an addressed path whose body id was not bound, a
+ *     remaining id outside those shapes receives the same 400 before the
+ *     ownership lookup;
  *   - otherwise the check reads the stored row under that id. With no stored
  *     row (a create), createdAt is the server's time, whatever the body says;
  *   - with a stored row, its createdAt is authoritative whatever its value, an
@@ -20,9 +26,12 @@
  *     `created_at_immutable` (409), and nothing is written.
  *
  * resources/OrgEvent.ts runs this check for writes from verified agents and
- * administrators on POST, PUT (single record, collection, and each element of
- * an array body) and PATCH. Trusted in-process writers that supply
- * their own createdAt (the migration ledger, the graph-heal migration) write
+ * administrators on POST, single-record PUT and PATCH, and for administrators
+ * on each element of a collection PUT. A non-admin agent's collection PUT or
+ * PATCH is refused before this check by the owner-scoped write guard
+ * (resources/owner-scoped-write-policy.ts), and a non-admin addressed
+ * array-body PUT that reaches the resource is refused before it by attribution. Trusted in-process
+ * writers that supply their own createdAt (the migration ledger, the graph-heal migration) write
  * through the raw `databases.flair.OrgEvent` table, not the resource's verbs,
  * and an `internal` verdict on the resource passes through unchanged.
  *

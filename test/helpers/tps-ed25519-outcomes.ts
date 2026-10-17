@@ -19,6 +19,8 @@ export const TPS_GET_ROUTE_STATUS: Record<string, number | readonly number[]> = 
   AdminPrincipals: 403,
   Agent: 200,
   AgentCard: 400,
+  AgentKeyRegister: 404,
+  AgentKeyRegistration: 403,
   AgentReadPosition: 400,
   AgentSeed: 404,
   Asset: 200,
