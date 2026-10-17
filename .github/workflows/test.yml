@@ -121,8 +121,8 @@ jobs:
     runs-on: ubuntu-latest
     # No job timeout here either (ops-fumh): this job's `sfw bun install` below
     # hung 16+ min on 2026-07-04, blocking merge on a required check. 22 min
-    # bounds a hung install/runner. The unit lane's slowest shard takes 781 s of
-    # it (measured 2026-10-17). scripts/test-unit.ts derives its keep-going lane
+    # bounds a hung install/runner. The unit lane's slowest shard takes at least 781 s
+    # of it (measured 2026-10-17; a lower bound, its slowest legs hit the old cap). scripts/test-unit.ts derives its keep-going lane
     # budget from this value (CI_JOB_LIMIT_MS minus a 120 s reserve for the
     # job's other steps, flair#2030/#2224/#2614); its per-step limits are fixed values
     # chosen from measured step times. The summary and guards are expected to

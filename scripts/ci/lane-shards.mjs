@@ -32,8 +32,7 @@ export const ROOT_STEP_TIMEOUT_MS = 450_000;
  * the lane budget: with the 1200 s budget (flair#2614) the slowest lane shard
  * measured at least 781 s across the last 45 runs' completed legs (a lower bound:
  * its slowest legs were killed at the old 780 s cap), so two shards keep the
- * slowest shard inside the budget with the same headroom the root step keeps
- * after flair#2258. The workflow matrix and this constant are pinned together by
+ * slowest shard inside the budget (at most about 1.54x headroom). The workflow matrix and this constant are pinned together by
  * lane-shards.test.ts.
  */
 export const LANE_SHARDS = 2;

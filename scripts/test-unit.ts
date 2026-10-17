@@ -55,7 +55,7 @@ export function unitTempBase(platform: NodeJS.Platform, env: NodeJS.ProcessEnv):
 //     measured at least 781 s (its slowest legs were killed at the old 780 s cap,
 //     so 781 s is a lower bound; p90 over the sample 755 s), 740 s locally;
 //   - `root unit tests`: 96–266 s per root shard, and the two root shards one
-//     lane shard carries together measure 229–526 s;
+//     lane shard carries together measure 229–330 s and 392–526 s;
 //   - the slowest non-root step measured 43 s; in that set the median is 1–2 s.
 // The budget is whole-lane headroom: 1320 − 120 = 1200 s, at most about 1.54×
 // the slowest measured shard (at least 781 s), still subject to each step's own limit below;
@@ -84,7 +84,7 @@ export const CI_OUTSIDE_LANE_MS = 120_000;
  */
 export const KEEP_GOING_LANE_BUDGET_MS = CI_JOB_LIMIT_MS - CI_OUTSIDE_LANE_MS;
 /**
- * The default per-step limit: 150 s, 3× the slowest ordinary step (43 s). One
+ * The default per-step limit: 150 s, at least 3× the slowest ordinary step (43 s). One
  * hung step costs at most that, so the rest of the slowest lane still runs
  * inside the budget (781 + 150 = 931 s ≤ 1200 s).
  */
