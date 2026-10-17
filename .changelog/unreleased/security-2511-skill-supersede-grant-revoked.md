@@ -1,1 +1,0 @@
-- **Grant-authorized cross-agent skill closes recheck write grants before commit (#2511).** An observed revocation returns 409 granted_close_revoked and rolls back the close, successor and version row.

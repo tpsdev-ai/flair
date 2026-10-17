@@ -1,1 +1,0 @@
-- **Local test Harper refuses a stale Flair resource build (#2583).** startHarper checks compiled resource membership and source mtimes before local startup.

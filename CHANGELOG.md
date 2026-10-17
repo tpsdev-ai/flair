@@ -18,6 +18,688 @@ node scripts/changelog-fragments.mjs check    # what CI checks
 version cut. **Do not add entries to this section by hand** — the release step replaces its body,
 so a hand-written entry here is lost.
 
+## [0.62.0] - 2026-10-17
+
+### Added
+
+- **Compare the Memory ids of explicitly named nodes.** `flair memory compare-nodes --node <ops-url>`
+  (twice or more) compares observed Memory ids and stored timestamps through the same operations-API
+  read the memory checkpoint uses and classifies each node in-sync, lagging, divergent or unknown;
+  the overall result is healthy only when every node is in-sync, and any unknown makes it unknown,
+  never healthy. Timestamps use parseable `updatedAt`, else possibly caller-supplied `createdAt`;
+  node clocks can differ, so these do not establish write order. `--json` prints the per-node result;
+  exit codes are 0 healthy, 2 divergent, 3 unknown and 4 lagging (flair#2216).
+
+- **Operator-run checkpoint and post-operation check for Memory ids.**
+  `flair memory checkpoint` writes this instance's Memory ids and per-durability-tier counts to a
+  mode-0600 file; `flair memory verify` re-reads the same operations origin and reports verified,
+  integrity failure (a checkpointed id gone, or a tier count dropped), or unknown — the comparison
+  could not be completed (for example, an unreadable checkpoint, a different operations origin,
+  a failed read, or a count change). An absent checkpoint exits 1 without a verification outcome.
+  `flair deploy --memory-checkpoint <path>` adds a
+  Memory id/tier check line to the deploy report; an integrity failure does not fail the deploy
+  (flair#2218).
+
+- **New admin-only `POST /AgentKeyRegister` registers an agent key.** (#2549)
+
+  Accepted credentials: Basic admin or an Ed25519 agent with the admin annotation.
+  A Harper Bearer token is refused. Under Flair's per-agent registration lock,
+  the route reads a fresh local, non-deactivated row with `publicKey: "pending"`
+  and, at the confirmation read, requires the committed row to equal the
+  fresh-read snapshot and still be `pending` before commit in one owned
+  transaction. The lock serializes registrations for that agent within one Harper
+  process; raw operations-API writes and other processes do not take it. A change
+  committed after the confirmation read and before commit is not seen, and a
+  change restored before the confirmation read is not observed; a commit-time
+  pending check is a follow-up. A non-`pending`
+  row is refused with a pointer to key rotation. The response returns the stored
+  key read back after commit. Each
+  committed registration appends an `AgentKeyRegistration` audit row and an
+  `agent_key_registered` OrgEvent. The audit `keyFingerprint` and the event
+  `detail` carry the key's fingerprint, not the key; the audit `agentId` and the
+  event `refId` carry the target agent's id, which the event `summary` also names
+  in text.
+
+- **The federation receiver names refused and indeterminate keys.** (#2579)
+
+  Per-record deadlines return `indeterminate: [{table, id}]`. Confirmed commits
+  count as merged even when post-commit notes fail.
+
+- **Sealed FederationRetry storage and an administrator-only HTTP reader support retry bookkeeping (#2538).**
+
+  The `flair federation status` command includes a retry section.
+
+  The table is shaped for one row per (peer, table, record) a receiver refuses
+  for a reason a later re-offer could clear. No production sender path creates
+  rows yet; sender activation is deferred to a later slice. Rows an admin
+  writes are readable now. Sealed means a write naming a field the schema does
+  not declare is refused. The reader lists a row that breaks the sender's
+  conventions (an id that is not its tuple's key, an unknown state, reason or
+  outcome) as malformed, never as pending. The table is excluded from
+  federation policy and the receive mapping, so an inbound sync naming it is
+  refused. Every emitted skip reason is now typed as the closed `SkipReason`
+  union, with an exhaustive classification a future reason must join.
+
+- **Office-wide Presence, slice 1: a hub can receive a spoke's agent presence,
+  behind a default-off flag.**
+  `FLAIR_FEDERATION_PRESENCE_RECEIVE` (default off) lets a hub accept `Presence`
+  records over the existing hub-and-spoke sync and derive status locally from the
+  replicated timestamps. A record is accepted only when the local `Agent` row for
+  its `agentId` is homed on the batch-verified sender: a missing `Agent` row is a
+  retryable skip, and a row homed elsewhere or with no home is not. Inbound rows
+  are stripped to the declared Presence fields and validated (activity
+  vocabulary, a finite heartbeat within a 5-minute future allowance, version
+  strings capped at 64 characters) before storage, and a Presence-specific merge
+  refuses an older heartbeat rather than replacing a newer one. The local writers
+  (POST, PUT, PATCH) compare the agent's home against this instance's id read
+  fresh from the `Instance` table at write time, refusing a write for an agent
+  homed on another instance, and none of them can set a client
+  `originatorInstanceId` or `receivedAt`. `Presence`
+  gains nullable `originatorInstanceId` (local creates stamp this instance's id
+  read fresh from the `Instance` table, or null; updates preserve the stored
+  value; receipt stores the batch-verified sender) and `receivedAt` (stamped on
+  receipt).
+  With the flag off, a Presence record eligible for
+  receipt skips as `presence_receive_disabled` rather than `unknown_table`.
+
+### Changed
+
+- **Bootstrap's structured containers and the admin bootstrap carry no host-source pointer (#2448).**
+
+  A `memories` or `predicted` entry omits `hostSource`. A visible, bound
+  pointer appears in the bootstrap PROSE only when `includeContext` is true,
+  for an authenticated non-admin caller; the admin bootstrap prose is uncited.
+  A non-admin structured consumer that needs the pointer reads the memory
+  back through the gated Memory read — `memory_get` by id — which renders the
+  pointer that caller may see. An admin `memory_get` takes no pointer join, so
+  it does not render the pointer either.
+
+- **The CI workflow coverage-gate checker refuses a gate whose step, job or workflow overrides the shell.** (#2567)
+
+  A shell override can change execution semantics. A step-level `shell:`, a
+  job-level `defaults.run.shell` and a workflow-level `defaults.run.shell` are
+  each refused. Fixtures under `test/fixtures/workflow-gate/` cover each
+  refusal.
+
+  Gates must cover every PR targeting main: `pull_request` is required,
+  `branches` is absent or exactly `[main]`, path and ignore filters are refused,
+  and explicit `types` must include `opened`, `synchronize` and `reopened`.
+  Every gate job must be directly result-checked by the pinned adapter.
+
+- **Non-admin Memory writes discard caller-supplied vectors and model stamps that differ from the stored row's.** Embedding is
+  computed when the resulting write needs one. Non-admin writes cannot relabel
+  a stored vector. Administrator writes, trusted in-process writes, federation-sync records
+  are unchanged. Empty-vector normalization and the re-embed request protocol are unchanged;
+  an ordinary non-admin write strips a supplied stamp even alongside a null or empty embedding (flair#2573).
+
+- **Local test Harper refuses a stale Flair resource build (#2583).** startHarper checks compiled resource membership and source mtimes before local startup.
+
+- **The CI workflow coverage-gate checker compares the Unit Tests adapter step line by line.** (#2595)
+
+  A script whose `exit 1` is joined onto the preceding `echo` makes it an
+  argument to `echo`, so the branch returns 0 instead of terminating the
+  script, and a failed unit job can be reported as a success. Each adapter
+  command must now be on its own line; indentation and trailing whitespace are
+  still accepted. A fixture under `test/fixtures/workflow-gate/` covers the
+  refusal.
+
+- **Integration test shards are assigned by measured per-file duration (#2554).**
+
+  Per-file weights measured from CI job logs steer the assignment, so the shards
+  carry a similar measured load.
+
+### Fixed
+
+- **Federation sync no longer logs the hub's response text; an unrecoverable non-2xx batch or a non-2xx liveness ping names only its HTTP status.** (#2538)
+
+  A batch of more than one record that gets a retryable status (408, 413, 502,
+  503 or 504) or no response is split and retried in smaller batches, which can
+  succeed; only a batch that does not recover fails the sync. Then a non-2xx
+  status is reported as the status alone, and a transport failure (a timeout or
+  a dropped connection, so no status) as the local error message, as before. A
+  2xx batch response is now checked before its counts are used: a body that is
+  not JSON, or whose `merged` and `skipped` are not whole numbers from zero to
+  the batch size, fails the sync as an invalid response.
+
+- **A server-computed Memory vector stores the hash of the text it was computed from (#2465).**
+
+  When the server computes a Memory vector on a guarded path — an ordinary
+  POST/PUT/PATCH embed, the re-embed PATCH, the stamp migration's
+  `.content`-suffix fallback, or the auto-embed backfill — it stores a newly
+  computed `embeddedContentHash`: the content hash of the exact text embedded
+  (`trigger` for a skill-tagged row with a non-empty trigger, else `content`),
+  or null for a row with an empty owner. A PUT or PATCH that does not compute a
+  vector, and a skill successor that carries the stored vector, retain the
+  stored value, which may describe an earlier server-computed vector. A POST or
+  PUT create that stores a vector accepted from the caller stores null; when
+  redaction changes the text, the supplied vector is discarded and the redacted
+  text is embedded afresh, with a new hash when that yields a vector. An admin PATCH create drops a submitted
+  value and can leave the field absent. The re-embed now confirms, after
+  staging, that the committed row still has the identity and the exact text it
+  embedded, so an edit to either that commits before the confirmation aborts
+  the write. The embedding-stamp migration re-queues a row whose stored hash
+  differs from the expected hash of its current text. An absent hash skips only
+  that comparison, as a matching one passes it; either way the row also needs
+  a current-space model. Its pending count is now a live scan, so it no longer
+  opts into the runner's completion-gate recheck, which could otherwise pass
+  the gate with a row pending only on its stored hash. `POST /FeedMemories`
+  refuses a body `embeddedContentHash` (400 `feed_embedding_not_writable`).
+
+- **Ordinary PATCHes of existing memories refresh or clear embeddings on content changes when embedding is omitted after redaction (#2466).**
+
+  The non-re-embed `PATCH /Memory/<id>` path compares the body's `content` with
+  the stored text when `embedding` is absent after redaction. On a
+  change it computes from the body's text and stamps `embeddingModel` and
+  `updatedAt`; empty/non-string text or no returned vector yields null embedding fields.
+  A fresh committed-row read runs only when the initial comparison selected no
+  embedding, a stored row exists, and the body omits `embedding` and carries `content`.
+  Other paths write without that confirmation.
+
+  Without a refresh, the stored vector survives only if the body omits
+  `embedding` after redaction; an explicit `embedding: null` that survives
+  redaction clears it. Redaction that changes `content` or `trigger` removes both
+  embedding fields when either is non-null, so such a null does not survive.
+  A surviving supplied vector is stored as supplied, without text/vector
+  validation. Skill writes are refused on this ordinary path.
+
+- **After a server-side redaction, Memory write results report the stored text fields, never the caller's input for a field the server changed (#2467).**
+
+  When the server replaces credential-shaped text in a Memory POST, PUT or
+  PATCH, the response now carries `stored` next to `redactedValues`: the
+  post-redaction values of the `content`, `summary` and `trigger` fields
+  present in that write, as it committed them. A field the redaction did not
+  change keeps the caller's value, so a summary-only redaction reports
+  `content` as written; a PATCH reports only the fields in its body; a skill
+  update that versions to a successor row reports that row's id. A write with
+  nothing to redact gets no `stored`. `MemoryApi.write()` and
+  `MemoryApi.update()` take those fields from `stored` and make no read after
+  the write, so a later write to the row cannot change what the result
+  reports. Against a server that reports the count without `stored`, the
+  result has no `content`, `summary` or `trigger` and is marked
+  `contentWithheld: true`. The MCP `memory_store` and `memory_update` replies
+  preview the first 120 characters of the selected text, followed by `...`
+  when truncated. With a count, that text is the stored `content` and the
+  reply reports the count; with the stored text withheld there is no preview,
+  and the reply states the count and that the stored text was not returned,
+  without naming a field. With no count, the text is the result's `content`,
+  else the input.
+
+- **Memory `PUT`/`PATCH` now lock the target id and commit ordinary row writes in owned transactions (#2478).**
+
+  Both verbs take the per-id memory write lock and run their ordinary write in an
+  owned transaction whose FIRST operation is the authoritative stored read, and
+  that transaction commits before the lock releases, so two such owner `PUT`/`PATCH`
+  writes to the same id cannot interleave. A same-id owner writer waits for the lock
+  within its budget, then opens its transaction and reads the row as stored at
+  that moment (a manual promotion's write, or an admin `_reindex` re-PUT, that
+  joins an already-open request transaction reads that transaction's earlier
+  snapshot instead); if an attempt observes an outcome-unknown marker for the id
+  it answers 503 `write_outcome_unknown`; if the lock stays held for the whole
+  budget it answers 503 `memory_busy`, and if the store has no lock the write is refused 503
+  `memory_lock_unavailable` instead of running unserialized. Harper orders a
+  transaction by its first read, so the authoritative row read, the decisions
+  drawn from that row and the commit share one transaction (preflight checks,
+  such as seed authorization, run under the lock before it opens) (re-embed `PATCH` writes in an inner owned transaction) — a
+  background field-only write started later therefore folds around this older full update
+  instead of being overwritten. After a normal storage result, the ordinary
+  owned row write re-reads its id after commit and confirms the committed row
+  still carries the incarnation token this write left
+  and, among the fields the write declared, the same `agentId`, `content`,
+  `visibility` and `durability`. A row deleted and re-created with a different
+  token (even with the same values), or one where a later write changed one of
+  those four, answers 409 `stored_row_changed`; a later write that changed only
+  other fields (not the token) is not refused. Refusals, including storage
+  Responses, return before that read; skill `PUT` has no ordinary-row verification, and composed
+  promotion uses its in-transaction existence check. A successful re-embed
+  `PATCH` checks its token after its inner commit, and a `PATCH` or re-embed of
+  a row written before incarnation tokens gives it one in the same write. A verification read
+  that fails answers 503 `write_outcome_unknown`. PUT/PATCH check the addressed
+  id's marker; DELETE also checks the resolved skill head. Markers clear on
+  restart; POST and background/nested writers do not check them. A `PUT` or
+  `PATCH` that names no id is refused before the lock helper with 400
+  `memory_id_required`. A manual promotion's memory write joins the
+  promotion's own transaction, so its approval stamp commits or rolls back with
+  the row; that commit lands after the lock releases, as does the admin
+  `_reindex` re-PUT's when the request carries an open transaction it joins. The per-process lock is taken by Memory resource `PUT` and `PATCH` calls; ordinary owned writes commit before release, while joined transactions may commit later.
+
+  The critical section contains the write paths' embedding calls — the
+  ordinary `PUT`'s regen and its create-path dedup probe, the re-embed `PATCH`'s
+  compute and its recompute, and the `PATCH` embedding refresh. For a server-computed
+  vector, text/vector parity is protected against writers serialized by this lock; a
+  change after confirmation is not seen. On ordinary PUT/PATCH paths, a caller-supplied
+  vector is not checked against the text. If it survives redaction and the write
+  succeeds, it is stored as supplied; redaction of the embedding source can discard it. A provider call still pending when the timeout callback runs, or one
+  that settles after the bound, refuses that write 503 `memory_provider_timeout`
+  and writes nothing; an in-process timeout cannot preempt a provider that never
+  yields the event loop. An
+  observe-only watchdog logs a hold longer than 5 s (lock keys, phase and elapsed time) when its timer runs, or at settlement if the event
+  loop cannot resume during the hold. It never releases the lock. The global lock order is:
+  a writer takes its sorted Memory id locks first, then the instruction-version
+  lock, then the usage ledger; part 2 converts the writers that take the
+  instruction lock and write Memory to take their Memory id locks before it.
+
+  A `PUT` that supersedes a target does not yet lock the predecessor's id: the
+  grant-authorized close is staged in the successor's transaction, but the
+  ordinary supersede close runs after the commit, best-effort, without the
+  predecessor's lock. The predecessor id joins the lock set in part 2.
+
+  Client contract: a caller that gets `memory_busy` may resend the same write
+  unchanged, within a bounded retry — the refusal wrote nothing. A caller that
+  gets `write_outcome_unknown` must read the affected row first and treat a row
+  that already holds the write as written, never replaying that write blindly.
+
+- **The embedding backfill computes its vector before its write transaction opens.** (#2507)
+
+  Rows without content or with an embedding longer than 100 entries are skipped
+  before content comparison. For eligible rows, content is compared before
+  staging and the committed row is confirmed afterward. Drift observed by
+  either check aborts the attempt; remaining outer attempts re-read and may
+  recompute. Changes after confirmation and before commit are not detected by
+  these checks.
+
+- **The managed-start confirmation probe reads only the response the port it probed returned (#2485).**
+
+  A port that passed the reachability wait and then answered the probe with a
+  redirect was reported as running Flair when the redirect target was a Flair
+  instance. The probe sends `redirect: "manual"`, so a redirect from the probed
+  port is reported as a response that is not a Flair health answer.
+
+  When `flair doctor --fix` adopts a directly started instance into launchd,
+  the probe that waits for the stopped instance's port to free also sends
+  `redirect: "manual"`, so a redirect from that port is likewise reported as a
+  response that is not a Flair health answer.
+
+- **The clean-VM CI gate lists every `flair doctor` finding when it cannot tell which ones doctor counted (#2489).**
+
+  A counted doctor check can print as a `⚠` warning, so when the `✗` findings
+  matched the summary count the gate could show the wrong one. It now lists the
+  `✗` findings only when every finding is a `✗` and their number matches the
+  summary, and otherwise lists every finding with the lines doctor printed under
+  them. The gate still fails on the same condition as before: doctor exiting
+  non-zero.
+
+- **An embedding-space scan that finishes after a newer one no longer overwrites the newer scan's verdict (#2508).**
+
+  Scans can overlap because the boot pre-warm's re-scan path calls `scan()`
+  directly instead of going through the latch that serialises consult-time
+  scans. Each scan now takes a sequence number when it starts. When no
+  foreign-stamp write arrived during it, a scan that finishes after a
+  later-started scan has published refuses its write by name and changes
+  nothing. When one did, the foreign-stamp write epoch of #2481 discards the
+  scan and resets the retry timer, unchanged.
+
+- **`agent_end` capture now counts each session's message occurrences, so a session-keyed scan treats only new occurrences as the ending run's (best effort) (#2513).**
+
+  The previous release rescanned the whole session snapshot on every `agent_end`,
+  storing an earlier run's messages again under the new run's id. Now, in a scan for
+  a callback with a session id, identifiable occurrences beyond the session's recorded
+  count are considered for that run's capture, or skipped when its `agent_end` capture
+  is refused, and a failed write is dropped with no retry scheduled. The main limit is
+  that the host has no message id or committed-message event, so ownership is inferred
+  from snapshot diffs: a rewritten earlier message gets a new identity and may be
+  captured under a later run, equal-field copies reduced by a compaction are not
+  captured, a callback without a session id is not correlated with any other, evicted
+  session state is forgotten, and a session whose scan queue overflows stops its
+  `agent_end` capture.
+
+- **`flair doctor`'s audit-log and instance-identity checks route their ops reads to the endpoint verified for the probed instance (#2520).**
+
+  They resolved their ops endpoint independently of the HTTP port doctor probed,
+  so they could read from a different instance. Both now use the verified target
+  the Agent roster and home checks use: the candidate ops endpoint whose own
+  configuration records the probed HTTP port, bound on loopback or on all
+  interfaces. Diagnostic reads that run use the verified target; pairing
+  refusals report NOT RUN, and existing UNVERIFIED/skipped outcomes remain.
+  After a `doctor --fix` step that may have changed the instance (a launchd
+  repair, which can also write the admin-pass file, or an install-tree
+  restart), the roster and home checks resolve the credential again and, when
+  one is available, verify the target with it and use only that answer.
+  Configured ports are not proof of the live process.
+
+- **The memory-tool contract in openclaw-flair's manifest is now the tool-name string list the OpenClaw host reads.** (#2523)
+
+  The host normalizes each `contracts` family to its string entries; the
+  previous object entries were dropped, and the host refused `memory_search`,
+  `memory_store` and `memory_get` as undeclared.
+
+- **The HTTP/ops pair check now proves from the OS listener table that one process with a Harper command line listens on both ports (#2526).**
+
+  `flair doctor` and the local delete paths (`memory hygiene --apply`, `agent
+  remove`) share one pair check. Besides the ops endpoint's configuration, it
+  reads the OS listener table (`/proc/net/tcp*` and `/proc/<pid>/fd` on Linux,
+  `lsof` elsewhere) and requires one listening process on the ops port and on
+  the configured HTTP port: a recognized Harper command line, one pid, and the
+  same pid and start time when both are read again. A configuration that names
+  a port another process serves is refused, whatever PID file or process id an
+  endpoint reports. The check itself sends nothing to the HTTP port, and
+  `flair doctor` now runs it before any credentialed request to that port and
+  holds those requests until the pair is proven, reporting NOT RUN with the
+  reason. One exception: when doctor has no usable admin credential to check
+  the pair with, and the probed port's own listener is one stable process
+  whose command line matches a Harper pattern, doctor sends that port
+  requests with no Authorization header or an Ed25519 signature. No Basic or
+  Bearer header goes out in that mode, from any source. A reused pid is refused when the recorded start time
+  differs; on macOS the start time has one-second resolution.
+
+  The table shows only the listeners this CLI can see. A listener in another
+  network namespace or container, or owned by a user this CLI may not
+  inspect, is refused, and so is a port held by a forwarder whose command
+  line does not match Harper's (such as docker-proxy or `ssh -L`). The
+  command-line check does not authenticate the program. Each refusal names the
+  reason and a remedy — not run for `flair doctor`, a refusal for the delete
+  paths.
+
+- **The embedding-space guard fails closed: an unknown verdict is treated as not-uniform (#2545).**
+
+  Before the first scan completes, or after a scan error, `isEmbeddingSpaceUniform()`
+  returns false rather than defaulting to true, so semantic search and the
+  write-time dedup leg take their mixed-space path. For guarded vector requests, recall omits the embedding leg and warns about the current `unverified`, `scan-failed`, `mixed` or `excluded` state. bm25-only, which never uses a query
+  embedding, does not consult the guard. The `mixed` state persists when a scan
+  fails, and a scan failure follows the same scan-start order as a verdict. Only a successful scan finding no foreign model stamp and no stored vector without a trusted current-space stamp reopens the gate. `flair
+  doctor` reports the guard state from `/Health`, including from a 503 with
+  `searchReady: false`, which it reports as an issue rather than as nothing
+  responding. Among guard states, `mixed` and `excluded` increment doctor's issue count; readiness has its own issue.
+
+- **After a server-side redaction, the built-in `/mcp`, pi and OpenClaw write replies take the content they show from the stored text (#2537).**
+
+  After a redaction, each of these replies takes the content it shows from the
+  write's own response, the `stored` fields that #2467 added next to
+  `redactedValues`. No reply reads the newly written row back to build that
+  content, and none falls back to the submitted content. The built-in `/mcp`
+  `memory_store` and `memory_update` echo carries the count and the stored
+  `content`, with `summary` and `trigger` when the write carried them; a skill
+  `memory_update` with `preserveHistory` reports the successor row's id and
+  text. The `pi-flair` `memory_store` reply previews the first 120 characters of
+  the stored text, gives its size and states the count. The `openclaw-flair`
+  `memory_store` reply adds a preview of the first 200 characters of the stored
+  text and states the count. When the response returns the count without the
+  stored text, the `/mcp` echo omits the text fields, the pi and OpenClaw
+  replies read `Preview: none.` and state the count, and all three set
+  `contentWithheld: true`. A write the server did not redact gets the same reply
+  as before.
+
+- **The built-in /mcp `skill_store`, `memory_basement` and `memory_restore` replies report the stored, redacted text after a server-side redaction.** (#2558)
+
+  Each reply now takes `content` (and `summary`/`trigger` when the write carried
+  them) from the write's own response `stored`, reports the `redactedValues`
+  count, and makes no read after the write, so a later write to the row cannot
+  change what it reports. The caller's input is never echoed in place of a
+  redacted field. A write the server did not redact returns its response
+  unchanged; a write that reports the count without stored text omits those
+  fields and sets `contentWithheld: true`.
+
+  The `flair-mcp` stdio `skill_store` reply follows the same rule as its
+  `memory_store`: after a redaction, its preview and `Trigger:` line come from
+  the response's stored text (never the input), its structured result carries
+  `redactedValues`, and a count with no stored text gives no preview, no
+  trigger line and `contentWithheld: true`.
+
+- **MemoryBootstrap's task-relevant selection and the `/MemoryDedupStats` sweep now consult the embedding-space guard (#2559).**
+
+  They were the remaining request and maintenance paths covered by #2559 without the guard
+  `SemanticSearch` and the write-time dedup leg already use. On a non-uniform
+  verdict, MemoryBootstrap refuses its task embedding and returns the same
+  state-named warning `SemanticSearch` emits; both use BM25 for guarded
+  vector-only retrieval. When the opening verdict is non-uniform, `/MemoryDedupStats` runs no ANN query. A non-uniform verdict at either check returns no vector-derived counts, names `mixed`, `excluded`, `unverified` or `scan-failed`, and leaves stored stats unchanged. A verified-uniform
+  verdict preserves the prior behaviour.
+
+- **`openclaw-flair` retains snapshot identities while session state and encoded fields stay unchanged, and spends each run's cap from the end (#2560).**
+
+  While the plugin holds a session's state, a session-keyed `agent_end` scan's
+  identity cap never evicts a recorded identity the current snapshot holds, so
+  recorded identities number at most max(4,096 (`sessionMessageCap`), D), D
+  being the distinct identities in the last snapshot accounted for (disabled
+  callbacks do not update it), and a recorded message that stays in the snapshot
+  with unchanged encoded identity fields is not offered again. Deferred
+  identities (below) hold only that snapshot's identities, so at most D.
+  The scan walks the snapshot from its last position,
+  so the run's cap
+  (`autoCaptureMaxPerSession`) is spent on the last eligible positions. In a
+  warm session a message the cap leaves out stays eligible for a later capture
+  scan unless settled, subject to its gates and cap; another cap can leave it unseen.
+  A refused scan settles its occurrences, including identical copies: their
+  origin is ambiguous. Preserving deferred messages while excluding refused-run
+  copies fully needs a stable host-owned message identity; that is a follow-up.
+  Same-run excerpt dedup settles it. A failure before the write, a failed write,
+  or a write whose run is aborted while it is in flight records it as skipped
+  if the scan continues past its stop and disable check. Message identity now encodes
+  the timestamp's type. Timestamp ordering never suppresses a message.
+  A message re-emitted with a different timestamp, as the CLI runner's fresh
+  current-turn timestamp can be, has a new identity and can be offered again,
+  barring digest collisions. Another limit is
+  a session's first scan in the process (a new session, session state evicted
+  past `sessionStateCap`, or a gateway restart): it offers the last eligible
+  positions up to the run's cap and records the rest of the identifiable
+  messages as seen, so a message captured before can be captured again, if it
+  passes the capture rules and its write succeeds, as a second row. The row
+  carries the current run's id only when it passes the `hostSource` grammar;
+  otherwise it lands without that field, with a rate-limited warning.
+  Flair's near-duplicate check can flag that write
+  `deduplicated` and does not suppress it; the plugin logs a counted line at the
+  1st, 2nd, 4th, … flagged capture: none for n = 0, and floor(log2 n) + 1 lines
+  for n ≥ 1. The overflow wording is qualified by the state the plugin retains:
+  a queue-overflow disable lasts while the session's state is held, and "logged
+  once" means one line per retained log key (log keys are a separate set,
+  bounded by `logOnceCap`).
+
+- **Memory stored reports supplied text and skill fields after redaction; FeedMemories uses an allowlist; write responses omit embeddings (#2561).**
+
+  After a counted redaction, `stored` reports request-supplied `content`, `summary` and `trigger` strings and, for skill writes, request-supplied `name`, `description` and `tags`, each as stored. A text field the request did not send as a string is absent from
+  `stored`. This includes a skill write that versions to a successor row: the
+  successor carries over the fields its request omits, and `stored` reports
+  only the ones the request sent. `redactedValues` counts the same values as
+  before.
+
+  The feed reports allowlisted primitive fields: listed response fields and
+  request-supplied fields with non-null request values. Array-valued fields
+  are omitted.
+
+  No embedding field whatever storage returns: successful Memory POST, PUT,
+  PATCH, `_reindex` and feed replies with a body use `buildFromAllowlist`.
+  A missing or
+  wrong-typed required `id` returns `write_response_withheld` (500).
+  Storage-layer Responses of any status return the same refusal.
+  The re-embed PATCH answers `{ id, updatedAt }`. Any other Memory PATCH
+  answers 204 with no body when the server replaced no value, and
+  `{ id, written, redactedValues, stored }` when it did; the admin `_reindex`
+  re-PUT answers 204 with no body.
+
+  `flair reembed` counts a row as re-embedded
+  when the PATCH response names that row and the stored row then carries the
+  current model; it reads the model through the operations API when
+  administrator credentials are set, and with a signed `GET /Memory/<id>` as
+  the agent otherwise, and counts an unsuccessful or mismatched read as an
+  error. A `flair reembed` from an earlier release reads the model from
+  the PATCH response, so against this server it counts each row it
+  re-embedded as an error; use the `flair reembed` of this release.
+
+  The SDK write results and the built-in `/mcp` `memory_store`,
+  `memory_update`, `skill_store`, `memory_basement` and `memory_restore`
+  echoes treat a `stored` with no string `content` as withheld
+  (`contentWithheld: true`) and show no input text in its place.
+
+- **`flair doctor`'s fallback ops candidate is derived from the HTTP port it probed, not the configured one.** (#2585)
+
+  When neither port is named and the probed instance's configuration records no
+  complete HTTP/ops pair, the fallback (`httpPort - 1`) now uses the port doctor
+  actually reached. It previously used the configured HTTP port, so a probe that
+  differed from the configuration produced a wrong candidate and a false NOT
+  RUN. The candidate is still verified by the port-pair check before the roster
+  and home reads.
+
+- **Test-harness Harper before/after hooks pass explicit lifecycle timeouts, and an overrunning `stopHarper` rejects with a named error carrying its pid and phase.** (#2569)
+
+  Hooks that call `startHarper`/`stopHarper` directly and relied on Bun's 5 s
+  default (or a bare `120_000` literal) now pass `HARPER_START_BUDGET_MS`
+  (boot) or `HARPER_STOP_BUDGET_MS` (stop); hooks that already carried their
+  own larger explicit budget keep it unchanged. `stopHarper` bounds the
+  caller's wait, not the work: past its deadline it rejects with
+  `HarperStopTimeoutError`, naming the pid and the phase it stalled in, while
+  the stop work it raced (termination, lock wait, or install-dir removal) can
+  continue in the background; a stop that fails
+  some other way first rejects with that error. `stopHarpers` runs several
+  stops concurrently, and the `HARPER_STOP_BUDGET_MS` hooks that stopped
+  several Harpers in sequence now use it (or, for a replicated pair, a pair
+  `stop()` that stops both nodes concurrently), so their stops settle inside
+  the hook's budget. A hook that propagates the failure then reports the named
+  error; the best-effort teardowns catch stop failures and discard it, as
+  before. The readiness budget is one documented constant
+  (`HARPER_STARTUP_BUDGET_MS`), kept equal to the duration `flair init`'s TCP
+  readiness check polls under. The harness's startup and readiness timeout
+  diagnostics, and its exited-during-readiness diagnostic, name the elapsed
+  time and a phase: the one named by the last captured log line shaped like
+  Harper's startup diagnostic, or the harness's label when no line matches.
+  `flair init`'s credential-gate readiness refusal names its phase, with the
+  time waited only when init spawned the instance. Unit tests fail a hook in
+  `test/` that calls `startHarper`, `stopHarper` or `stopHarpers` directly
+  without a timeout argument, and a `HARPER_STOP_BUDGET_MS` hook that calls
+  `stopHarper`/`stopHarpers` directly at more than one site or in a loop.
+
+- **OrgEvent POST, PUT and PATCH refuse malformed bodies with 400 body_must_be_object; PUT admits arrays of records (#2580).**
+
+  The guard runs before the resource method's authentication, attribution,
+  ownership and createdAt checks. Harper's collection validation, authentication
+  or middleware ownership checks can refuse input before resource dispatch.
+  Arrays of records are admitted when `allowArrayObjects` is enabled (PUT).
+
+- **The embedding-space guard fails closed on scans and notified writes that find an untrusted vector stamp.** (#2593)
+
+  The scan counts arrays and typed arrays, including empty ones, without a trusted
+  current-space stamp. A count above zero makes the verdict non-uniform, so the recall
+  leg refuses the query embedding and the write-time near-duplicate query compares no vectors;
+  the row remains eligible for lexical matching. Guard-notified writes invalidate
+  the count when their stamp is untrusted or they may repair an untrusted vector.
+  `flair doctor` prints the last published count in the `excluded` state. Raw operations-API inserts are uncovered until a rescan.
+  An empty `embedding` sent to the Memory resource's POST, PUT or PATCH stores no empty array
+  (a raw operations-API insert can still store one; the next scan counts it): ordinary POST and PUT treat it exactly as an
+  omitted `embedding` (an unchanged skill update keeps its stored vector and stamp), the admin `_reindex` PUT converts it to `null`, and
+  PATCH converts it to `embedding: null` before credential redaction. The auto-embed backfill stamps
+  the vector it stores with the current model and notifies the guard after it commits.
+
+- **The built-in /mcp `memory_basement` and `memory_restore` tool contracts declare the fields their replies actually carry: `id` and `written` (#2575).**
+
+  Both tools return the Memory write result, so their `requiredFields` are now
+  `id` and `written` (was `id` and `archived`). A contract test drives each tool
+  through the shipped handler and applies its declared contract to the reply.
+
+- **OrgEvent rejects malformed ids that reach its id check with 400 `invalid_event_id`.** (#2609)
+
+  A collection PUT element whose `id` was an empty array or an object
+  answered a bare 500 ("Zero length key is not allowed" /
+  "Unable to serialize object as a key").
+  After POST normalization (an empty root id gets a generated id) and earlier
+  guards, POST and PUT refuse
+  ids outside a non-empty string or a non-empty array of strings with the named
+  400 before any write. PATCH checks the addressed path id.
+  Trusted server-originated internal PUT/PATCH skip the id check in
+  _assignCreatedAt. The refusal echoes no submitted value.
+
+- **The launchd redaction check loads without a build, runs on PRs targeting
+  main, and tells a check that could not run from a finding.** (#2590)
+
+  The credential-key list moves to a dependency-free module. When `--report`
+  is supplied, completed `--check` scans write JSON finding records. The shared
+  helper pairs scanner status with a valid report, returning clean, finding or
+  could-not-run; startup exit `1` without a report is could-not-run. The fixture
+  script requires clean and finding statuses for its respective fixtures.
+  `--check` requires a target path.
+
+- **Boot graph-heal and the dedup sweep consult the embedding-space guard, and the REM runner records its named state (#2596).**
+
+  Graph-heal skips its canary cosine comparison unless the guard snapshot is
+  uniform. Failed re-verification halts the migration without recording success;
+  a later migration cycle can retry. `/MemoryDedupStats` preserves the existing
+  stat file and returns the guard state when its pre-persist recheck refuses.
+  REM records guard
+  refusals with null counts and any nonempty guard state other than `uniform`.
+
+- **The integrity scan reads Memory and its watermark-bounded deletion history by keyset on
+  `id`.** (#2601) A duplicate id across pages, or a read whose size differs from the exact count of the
+  same range, is retried within an attempt bound; if every attempt stays inconsistent the scan
+  reports UNKNOWN without advancing the checkpoint, and a retry that reads consistently returns a
+  normal verdict. Any other read failure reports UNKNOWN at once. A balanced concurrent write (an
+  insert behind the cursor plus a delete of an already-read row) can keep the counts equal, so
+  this read is not a snapshot.
+
+- **The integration shard weights updater writes a fresh table from a missing
+  or malformed one (#2604).**
+
+  Assignment commands validate the table before any assignment. With usable logs
+  and a writable output directory, the updater replaces a missing or malformed
+  table. The regeneration test asserts the complete derived weight map for the
+  log fixture (#2605).
+
+- **Size the CI unit-lane time budget from measured shard durations.** The job's
+  `timeout-minutes` is 22 and the keep-going lane budget is 1200 s (at most
+  about 1.5× the slowest measured lane shard, at least 781 s); the lane summary names a lane-budget
+  kill, with the killed step and the not-run count, distinctly from a test
+  failure (flair#2614).
+
+- **The MCP pin-refresh unit test now rewrites a TEMP copy of package.json.**
+  It used to rewrite the repository's own, bumping its mtime so the
+  dist-freshness gate refused to start Harper in the release integration step
+  (flair#2588).
+
+- **`flair doctor` reads its Agent roster and home checks only from an ops endpoint whose own configuration names the HTTP port it probed.** (#2519)
+
+  It picks the candidate ops endpoint with the port-pair rule `flair agent
+  stamp-home` uses, then asks that endpoint for its configuration, the check
+  `agent remove` and `memory hygiene --apply` use. The configuration must record
+  that ops port, and the HTTP port doctor probed, bound on loopback or on all
+  interfaces. No Instance row is needed, so a fresh install runs both checks.
+  Both checks are reported as not run and counted as an issue, with the reason
+  and a remedy, and no Agent row is read, when the port check fails (the
+  port-pair rule or the configuration check refuses or cannot complete), or when
+  both endpoints report one Instance id each and the ids differ. Configured ports
+  are not proof of the live process: the configuration read reports the ports
+  the instance's configuration records.
+
+- **Verify the CLI runtime in persisted-admin and using-flair seed integration tests (#2570).**
+
+  `init-persisted-admin-harper5`, `using-flair-seed-2141`, and
+  `using-flair-seed-reserved-2141` share a runtime helper that probes for Node.
+  `FLAIR_TEST_ALLOW_BUN_HARPER` requires a nonempty reason set only in the child environment and is logged.
+
+### Security
+
+- **Federation cannot replace a pending agent key (#2549).** Inbound Agent changes that would replace a locally pending key are skipped.
+
+- **OrgEvent POST checks existing ownership and generates collision-resistant ids (#2333).** A non-admin overwrite is refused when the ownership check observes an event owned by another agent.
+
+- **Grant-authorized non-skill supersedes recheck the write grant before commit (#2333).** An observed revocation aborts the successor and close with 409 granted_close_revoked.
+
+- **The handlebars 4.7.10 bake-time exemption is removed: the pin is now past the 7-day window and passes the gate unexempted (flair#2424).**
+  `.github/dep-age-allowlist.json` has no entries. The root `overrides` pin of
+  handlebars 4.7.10, the first release patched for GHSA-8r5x-fm3f-whwj,
+  GHSA-p8wg-vrv2-v86f and GHSA-xw65-4hp5-5hc7, stays, and the gate now
+  age-checks it like any other exact override.
+
+- **Federation Memory merges refuse a changed stored target (#2510).** An observed row change skips the merge as merge_target_changed and writes nothing.
+
+- **MCP and XAA resolve only active Credential mappings with a principal (#2524).** Revoked mappings remain unusable and are not recreated by just-in-time provisioning.
+
+- **Grant-authorized cross-agent skill closes recheck write grants before commit (#2511).** An observed revocation returns 409 granted_close_revoked and rolls back the close, successor and version row.
+
+- **First-time pairing refuses an existing Peer row found during confirmation (#2512).** The response is 409 peer_row_appeared; the stored Peer and pairing token remain unchanged.
+
+- **Skill POST, PUT without `_reindex`, and feed writes validate metadata and redact credential-shaped names, descriptions and tags (#2575).** After counted redaction, Memory POST and PUT replies report supplied skill fields as stored; feed replies report supplied metadata; stdio displays the stored name.
+
+- **Default REST routes reject noncanonical targets before route and authentication handling (#2607).** The response is 400 non_canonical_request_target. Signed non-admin writes fail closed when required route or owner lookup is unavailable. Federation pairing stores a normalized hub URL.
+
+- **Non-admin Credential PUT and PATCH abort when confirmed mapping fields changed (#2551).** The response is 409 stored_row_changed.
+
+- **A Memory write grant cannot change the predecessor's visibility (#2564).** Successors that pass earlier validation preserve that visibility or receive 403 grant_cannot_change_visibility. An observed concurrent visibility change returns 409 predecessor_visibility_changed.
+
+- **Credential reserves IdP mapping creation, identity changes and reactivation for administrators and server code (#2552).** Writes refused by the IdP-mapping guard return 403 idp_mapping_admin_only; owners can still relabel, revoke or delete their own mappings.
+
+- **Agent and admin OrgEvent resource writes use server time when no stored row is observed and preserve observed stored createdAt (#2551).** An observed change returns 409 created_at_immutable without writing.
+
+  > **Heads-up:** Omit createdAt when updating an existing event.
+
+- **Non-admin addressed writes to protected owner-scoped resources verify the addressed record and stored owner (#2551).** Writes refused by this guard leave the target row unchanged.
+
+  > **Heads-up:** Non-admin PUT, PATCH and DELETE must address one record.
+
 ## [0.61.0] - 2026-10-12
 
 ### Added

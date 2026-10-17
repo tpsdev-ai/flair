@@ -1,1 +1,0 @@
-- **First-time pairing refuses an existing Peer row found during confirmation (#2512).** The response is 409 peer_row_appeared; the stored Peer and pairing token remain unchanged.

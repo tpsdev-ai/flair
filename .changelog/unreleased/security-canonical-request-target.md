@@ -1,1 +1,0 @@
-- **Default REST routes reject noncanonical targets before route and authentication handling (#2607).** The response is 400 non_canonical_request_target. Signed non-admin writes fail closed when required route or owner lookup is unavailable. Federation pairing stores a normalized hub URL.

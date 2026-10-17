@@ -1,1 +1,0 @@
-- **Federation Memory merges refuse a changed stored target (#2510).** An observed row change skips the merge as merge_target_changed and writes nothing.

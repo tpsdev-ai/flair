@@ -1,1 +1,0 @@
-- **Grant-authorized non-skill supersedes recheck the write grant before commit (#2333).** An observed revocation aborts the successor and close with 409 granted_close_revoked.

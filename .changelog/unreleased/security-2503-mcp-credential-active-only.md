@@ -1,1 +1,0 @@
-- **MCP and XAA resolve only active Credential mappings with a principal (#2524).** Revoked mappings remain unusable and are not recreated by just-in-time provisioning.

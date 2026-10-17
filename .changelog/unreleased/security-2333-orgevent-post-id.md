@@ -1,1 +1,0 @@
-- **OrgEvent POST checks existing ownership and generates collision-resistant ids (#2333).** A non-admin overwrite is refused when the ownership check observes an event owned by another agent.

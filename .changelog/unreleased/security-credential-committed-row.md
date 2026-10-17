@@ -1,1 +1,0 @@
-- **Non-admin Credential PUT and PATCH abort when confirmed mapping fields changed (#2551).** The response is 409 stored_row_changed.

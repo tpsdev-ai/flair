@@ -1,1 +1,0 @@
-- **Federation cannot replace a pending agent key (#2549).** Inbound Agent changes that would replace a locally pending key are skipped.
