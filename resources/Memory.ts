@@ -2067,11 +2067,10 @@ export class Memory extends (databases as any).flair.Memory {
     // free, without a separate flag). NEVER suppresses the write either way.
     // flair#2573 slice 2: a non-admin write's supplied vector is discarded here,
     // after redaction and before the dedup gate and the embed step, so the write
-    // embeds the row's own post-redaction text and stamps the server's model, or
-    // stores no vector when the model is unavailable (the backfill embeds it
-    // later) — exactly as a write that sent none. Only a vector the CALLER
-    // supplied is discarded; a vector prepareSkillBody carried from a stored row
-    // is not.
+    // stores the vector the server computes for the row's own post-redaction text,
+    // or no vector when the model is unavailable (the backfill embeds it later) —
+    // exactly as a write that sent none. Only a vector the CALLER supplied is
+    // discarded; a vector prepareSkillBody carried from a stored row is not.
     if (postSuppliedVector) discardSuppliedVector(content, auth);
     // flair#2573: an empty vector that reaches this point (one carried from a
     // stored skill row; the body's own was removed above) is no vector. It is
@@ -2292,8 +2291,8 @@ export class Memory extends (databases as any).flair.Memory {
     const redaction = redactMemoryWrite(content);
     const redactedValues = redaction.count;
     // flair#2573 slice 2: a non-admin write's supplied vector is discarded here,
-    // after redaction (see post()/put()). The PATCH then embeds the row's own
-    // post-redaction text exactly as a PATCH that sent no vector.
+    // after redaction (see post()/put()). The PATCH then behaves exactly as one
+    // that sent no vector.
     if (hasSuppliedVector((content as any)?.embedding)) {
       discardSuppliedVector(content as Record<string, any>, await resolveAgentAuth((this as any).getContext?.()));
     }

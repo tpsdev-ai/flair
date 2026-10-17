@@ -328,6 +328,19 @@ describe("flair#2407 — a supplied embedding is replaced when redaction changes
     expect(row?.embedding).toEqual(supplied);
     expect(row?.embeddingModel).toBe("client-model");
   }, 60_000);
+
+  it("an agent's POST /Memory that redaction leaves unchanged discards the supplied vector", async () => {
+    const id = `r2407-vec-clean-agent-${randomUUID()}`;
+    const res = await authFetch("POST", "/Memory", {
+      id, agentId: agent.id, content: "a plain note about the deploy job", visibility: "shared", embedding: supplied, embeddingModel: "client-model",
+    });
+    expect(res.status).toBe(201);
+    expect((await res.json()).redactedValues).toBeUndefined();
+    const row = await readStored(id);
+    expect(row?.embedding).not.toEqual(supplied);
+    expect(row?.embeddingModel).toBe(modelId);
+    expect(Array.isArray(row?.embedding) && (row as any).embedding.length > 0).toBe(true);
+  }, 60_000);
 });
 
 describe("flair#2407 — a deduplicated feed write reports the count in its response only", () => {

@@ -3,10 +3,10 @@
  *
  * An agent's Memory write never stores a vector the caller supplied. A non-admin
  * POST, PUT or PATCH that carries a non-empty `embedding` discards the vector and
- * its `embeddingModel` stamp before the write; the write then embeds the row's
- * own post-redaction text with the configured model, stamped — exactly as a write
- * that sent no vector. An administrator keeps the vector it carries. `embedding:
- * null` and `[]` are unchanged.
+ * its `embeddingModel` stamp before the write, so the write stores the vector the
+ * server computes for the row's own post-redaction text, or none when the model is
+ * unavailable — exactly as a write that sent no vector. An administrator keeps the
+ * vector it carries. `embedding: null` and `[]` are unchanged.
  *
  * Cases (one Harper with a working embedding engine):
  *   (a) an agent POST, PUT and PATCH, each carrying a crafted all-ones vector,

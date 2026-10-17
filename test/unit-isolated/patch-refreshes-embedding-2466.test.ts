@@ -281,6 +281,18 @@ describe("flair#2466 — ordinary PATCH embedding cases", () => {
     expect(embedInputs).toEqual([]);
   });
 
+  it("a non-admin PATCH that supplies a vector discards it and embeds the new text", async () => {
+    seed("mem-3n", "a note whose supplied vector is discarded");
+    const m = memoryFor("mem-3n");
+    await m.patch({ content: "the replacement text", embedding: [0.5, 0.25, 0.125] });
+
+    const stored = await (BaseMemory as any).get("mem-3n");
+    expect(stored.content).toBe("the replacement text");
+    expect(stored.embedding).toEqual(FAKE_EMBEDDING);
+    expect(stored.embeddingModel).toBe("mock-embedding-model");
+    expect(embedInputs).toEqual(["the replacement text"]);
+  });
+
   for (const pairedNulls of [false, true]) {
     it(`a content-changing PATCH with explicit null embedding clears it (null model: ${pairedNulls})`, async () => {
       seed("mem-null", "the earlier text");

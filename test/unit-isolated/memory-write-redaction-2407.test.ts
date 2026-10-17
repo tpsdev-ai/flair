@@ -534,6 +534,16 @@ describe("flair#2407 — a supplied embedding is replaced when redaction changes
     }
     expect(summaryOnly.redactedValues).toBe(1);
   });
+
+  it("a non-admin POST discards the supplied vector even when redaction changes nothing", async () => {
+    const m = makeMemory(agentCtx(AGENT));
+    const res: any = await m.post({ agentId: AGENT, content: "a plain note about the deploy job", embedding: SUPPLIED, embeddingModel: "client-model" });
+
+    const stored = await (BaseMemory as any).get(res.id);
+    expect(stored.embedding).toEqual(FAKE_EMBEDDING);
+    expect(stored.embeddingModel).toBe("mock-embedding-model");
+    expect(stored.embedding).not.toEqual(SUPPLIED);
+  });
 });
 
 describe("flair#2407 — a deduplicated feed write reports the count in its response only", () => {

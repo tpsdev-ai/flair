@@ -6,10 +6,10 @@
  * supplied vector cannot be verified against the text it claims to embed or
  * against the model, so the embedding-space guard can never trust it. A non-admin
  * POST, PUT or PATCH that carries a non-empty `embedding` therefore discards the
- * vector and its `embeddingModel` stamp before the write; the write then embeds
- * the row's own post-redaction text with the current model, stamped, exactly as a
- * write that sent no vector. When the model is unavailable the row stores no
- * vector and the auto-embed backfill embeds it later.
+ * vector and its `embeddingModel` stamp before the write, so the write stores the
+ * vector the server computes for the row's own post-redaction text, or none when
+ * the model is unavailable (the auto-embed backfill embeds it later) — exactly as
+ * a write that sent no vector.
  *
  * Unchanged: `embedding: null` and `[]` (the empty-embedding normalization from
  * #2593), the re-embed request protocol, an administrator's write, a trusted
