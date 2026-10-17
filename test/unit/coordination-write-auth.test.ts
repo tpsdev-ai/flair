@@ -658,3 +658,15 @@ describe("WorkspaceState.search() — boolean-injection guard (authz-hardening s
 // prepend — `query.conditions = [agentIdCondition, ...existing]` — made the
 // test FAIL (observed "ws-theirs" in the result), confirming the guard is
 // not vacuously true.  Reverted before commit.
+
+describe("OrgEvent allow* hooks refuse reserved-record mutations", () => {
+  it("refuses a reserved record and admits an ordinary one for every hook", () => {
+    const oe: any = new (OrgEvent as any)();
+    const reserved = { id: "instruction-change:x", kind: "soul.changed" };
+    const ordinary = { id: "ordinary-1", kind: "status" };
+    for (const hook of ["allowCreate", "allowUpdate", "allowPatch", "allowDelete"] as const) {
+      expect(oe[hook](null, reserved, {}), hook).toBe(false);
+      expect(oe[hook](null, ordinary, {}), hook).toBe(true);
+    }
+  });
+});

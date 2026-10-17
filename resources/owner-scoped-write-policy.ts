@@ -66,6 +66,18 @@ export interface OwnerScopedWriteDeps {
   unreadable: (err: unknown) => Response;
   /** Reads body data from the entry call's context. */
   readBody: (context: unknown) => unknown;
+  /**
+   * An optional table-specific refusal run before this guard's collection and
+   * ownership branches. It lets a table refuse a write shape that this guard
+   * would otherwise refuse for a different reason (for example a reserved
+   * record in a collection write).
+   */
+  refuseReservedWrite?: (
+    table: string,
+    method: string,
+    target: { id?: unknown; isCollection?: unknown },
+    context: unknown,
+  ) => Promise<Response | null>;
 }
 
 /** Marks a table class whose writes have been guarded. */
@@ -158,6 +170,12 @@ export async function admitOwnerScopedWrite(
     throw unverifiedWriteCallerRefusal(table);
   }
   if (caller.kind !== "agent" || caller.isAdmin === true) return;
+
+  // A table-specific refusal comes first: a reserved record is refused with
+  // its own named error on every shape, including a collection write this
+  // guard would otherwise refuse generically.
+  const reserved = await deps.refuseReservedWrite?.(table, method, target, context);
+  if (reserved) throw reserved;
 
   if (addressesNoSingleRecord(target)) {
     if (STORED_RECORD_METHODS.has(method)) throw collectionWriteRefusal(table);

@@ -22,6 +22,14 @@ import { guardObjectBody } from "./object-body-guard.js";
 import { guardOwnerFieldImmutable } from "./owner-field-guard.js";
 import { invalidEntitiesResponse } from "./entity-vocab.js";
 import {
+  isReservedEventRecord,
+  reservedEventProposedRefusal,
+  reservedEventRefusal,
+  reservedEventStoredRefusal,
+  reservedEventWriteRefusal,
+  type StoredEventRead,
+} from "./org-event-reserved.js";
+import {
   applyServerCreatedAt,
   collectionElementIdRefusal,
   createdAtCheckUnavailable,
@@ -43,18 +51,67 @@ import { RECORD_TYPES } from "./record-types.js";
 // relationship-traversal RBAC path reads allowRead off the prototype.
 const orgEventAuthGate = makeAuthGate();
 
+const readStoredEvent: StoredEventRead = (id) => (databases as any).flair.OrgEvent.get(id, {});
+
+/**
+ * The inherited allow* decision, found above OrgEvent's own prototype so the
+ * hook here cannot call itself. A base without the hook keeps the permissive
+ * default it had before this class declared one.
+ */
+function inheritedAllow(name: string, self: any, args: any[]): any {
+  let proto = Object.getPrototypeOf(OrgEvent.prototype);
+  while (proto) {
+    const fn = proto[name];
+    if (typeof fn === "function") return fn.apply(self, args);
+    proto = Object.getPrototypeOf(proto);
+  }
+  return true;
+}
+
 export class OrgEvent extends (databases as any).flair.OrgEvent {
   allowRead() { return orgEventAuthGate.call(this); }
 
+  // The allow* hooks are Harper's route-level decision for relationship and
+  // collection paths that do not run the resource verbs. A reserved record is
+  // refused here; an ordinary record keeps the inherited decision.
+  allowCreate(user?: any, newData?: any, context?: any) {
+    if (isReservedEventRecord(newData)) return false;
+    return inheritedAllow("allowCreate", this, [user, newData, context]);
+  }
+
+  allowUpdate(user?: any, updatedData?: any, context?: any) {
+    if (isReservedEventRecord(updatedData)) return false;
+    return inheritedAllow("allowUpdate", this, [user, updatedData, context]);
+  }
+
+  allowPatch(user?: any, updatedData?: any, context?: any) {
+    if (isReservedEventRecord(updatedData)) return false;
+    return inheritedAllow("allowUpdate", this, [user, updatedData, context]);
+  }
+
+  allowDelete(user?: any, target?: any, context?: any) {
+    if (isReservedEventRecord(target)) return false;
+    return inheritedAllow("allowDelete", this, [user, target, context]);
+  }
+
   /**
    * Scans the collection body on the initial collection-PUT call, before
-   * Harper's per-element dispatch. The scan skips non-record elements.
+   * Harper's per-element dispatch. The scan skips non-record elements. A
+   * reserved element refuses the whole request before any element is written.
    */
   static getResource(target: any, request: any, options?: any): any {
     const admitted = super.getResource(target, request, options);
     if (this !== OrgEvent || !options?.isCollection || options.method !== "put") return admitted;
     return Promise.resolve(admitted).then(async (resource) => {
-      const denial = collectionElementIdRefusal(await (request as any)?.data);
+      const body = await (request as any)?.data;
+      // Anonymous callers keep their existing 401 from the resource verb; the
+      // reserved refusal belongs to a caller the auth layer admitted.
+      const auth = await resolveAgentAuth(request);
+      if (auth.kind !== "anonymous") {
+        const reservedDenial = await reservedEventWriteRefusal(body, readStoredEvent);
+        if (reservedDenial) throw reservedDenial;
+      }
+      const denial = collectionElementIdRefusal(body);
       if (denial) throw denial;
       return resource;
     });
@@ -90,6 +147,7 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
       } catch (err) {
         return createdAtCheckUnavailable(err);
       }
+      if (isReservedEventRecord(stored)) return reservedEventRefusal();
       const denial = applyServerCreatedAt(record, stored, mode);
       if (denial) return denial;
     }
@@ -101,6 +159,11 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
     if (bodyDenial) return bodyDenial;
     const auth = await this._auth();
     if (auth.kind === "anonymous") return UNAUTH();
+
+    // Reserved events belong to the instruction-version appender. Check the
+    // proposed kind before attribution; the stored row is checked under the id
+    // this POST lands on, once the id is bound below.
+    if (isReservedEventRecord(content)) return reservedEventRefusal();
 
     // No-forge attribution — mode/field drawn from RECORD_TYPES.OrgEvent
     // (record-types slice 2, flair#520) rather than hand-typed literals.
@@ -147,6 +210,14 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
     // createdAt is assigned below, once the write passes its other checks.
     if (auth.kind === "internal") content.createdAt = new Date().toISOString();
 
+    // A POST can update an existing row by naming its id. Outside internal
+    // calls the createdAt check reads that row and refuses a reserved one; an
+    // internal call skips that check, so it is read here.
+    if (auth.kind === "internal") {
+      const storedReservedDenial = await reservedEventStoredRefusal(content.id, readStoredEvent);
+      if (storedReservedDenial) return storedReservedDenial;
+    }
+
     // attention-plane vocabulary gate (flair#675): `entities`, if present,
     // must be well-formed vocabulary strings — see resources/entity-vocab.ts.
     // Field is additive/optional; absent entities is not an error.
@@ -181,14 +252,24 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
   async patch(content: any, query?: any) {
     const bodyDenial = guardObjectBody(content);
     if (bodyDenial) return bodyDenial;
+    const auth = await this._auth();
+    if (auth.kind === "anonymous") return UNAUTH();
+    const pathId = (this as any).getId?.();
+    // Reserved events: the proposed fields are checked here. Outside internal
+    // calls the createdAt check reads the stored row at the addressed id and
+    // refuses a reserved one; an internal call is checked here.
+    const proposedReserved = reservedEventProposedRefusal(content);
+    if (proposedReserved) return proposedReserved;
+    if (auth.kind === "internal") {
+      const storedReserved = await reservedEventStoredRefusal(pathId, readStoredEvent);
+      if (storedReserved) return storedReserved;
+    }
     const denial = await guardOwnerFieldImmutable(this, () => super.get(), content, "authorId");
     if (denial) return denial;
     // createdAt: PATCH writes the row its URL names, so the stored value is read
     // there; a URL with no id the check reads (the collection) is refused. An
     // omitted createdAt is left out of the merge and keeps that value.
-    const auth = await this._auth();
     if (auth.kind !== "internal") {
-      const pathId = (this as any).getId?.();
       const createdAtDenial = await this._assignCreatedAt(content, "merge", () => pathId);
       if (createdAtDenial) return createdAtDenial;
     }
@@ -202,6 +283,15 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
     if (__ownerDenial) return __ownerDenial;
     const auth = await this._auth();
     if (auth.kind === "anonymous") return UNAUTH();
+    // Reserved events: a proposed reserved element refuses the whole request
+    // before attribution. Outside internal calls the createdAt check reads each
+    // stored row and refuses a reserved one; an internal call is checked here.
+    const proposedReserved = reservedEventProposedRefusal(content);
+    if (proposedReserved) throw proposedReserved;
+    if (auth.kind === "internal") {
+      const storedReserved = await reservedEventWriteRefusal(content, readStoredEvent);
+      if (storedReserved) throw storedReserved;
+    }
     // No-forge attribution — mode/field drawn from RECORD_TYPES.OrgEvent.
     // "validate-strict" (see record-type-kit.ts's stampAttribution doc):
     // rejects a mismatch INCLUDING when authorId is absent (a bare `!==`
@@ -230,6 +320,10 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
     // three-way branch Memory.ts/Relationship.ts/WorkspaceState.ts use.
     const gate = await resolveAuthGate((this as any).getContext?.(), UNAUTH());
     if (gate.kind === "denied") return gate.response;
+    // Deleting a reserved event is audit erasure. Checked before the
+    // unfiltered branch, so administrators do not reach the table delete.
+    const reservedDenial = await reservedEventStoredRefusal(id, readStoredEvent);
+    if (reservedDenial) return reservedDenial;
     if (gate.kind === "unfiltered") return super.delete(id, context);
 
     const record = await this.get(id);

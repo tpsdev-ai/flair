@@ -36,6 +36,7 @@
  */
 import { databases } from "harper";
 import { OWNER_FIELDS, ownerCheckUnavailable } from "./record-owner-guard.js";
+import { reservedEventStoredRefusal, reservedEventWriteRefusal } from "./org-event-reserved.js";
 import { guardOwnerScopedWrites, ownerScopedWriteGuardGaps } from "./owner-scoped-write-policy.js";
 
 type AgentAuthModule = typeof import("./agent-auth.js");
@@ -56,6 +57,20 @@ const guarded = guardOwnerScopedWrites(registry, OWNER_FIELDS, {
   readStored: (table, id) => registry[table].get(id, {}),
   unreadable: ownerCheckUnavailable,
   readBody: (context: any) => context?.data,
+  refuseReservedWrite: async (table, method, target, context) => {
+    if (table !== "OrgEvent") return null;
+    const readStored = (id: string | string[]) => registry.OrgEvent.get(id, {});
+    if (method === "delete") return reservedEventStoredRefusal(target?.id, readStored);
+    let body: unknown;
+    try {
+      body = await Promise.resolve((context as any)?.data);
+    } catch {
+      return null; // the guard's own readBody refusal owns an unreadable body
+    }
+    const proposed = await reservedEventWriteRefusal(body, readStored);
+    if (proposed) return proposed;
+    return reservedEventStoredRefusal(target?.id, readStored);
+  },
 });
 const gaps = ownerScopedWriteGuardGaps(registry, OWNER_FIELDS, guarded);
 if (gaps.length > 0) {
