@@ -1,1 +1,1 @@
-- **Skill writes validate metadata and redact credential-shaped names, descriptions and tags (#2575).** After redaction, successful write replies report the stored skill fields; stdio displays the stored name.
+- **Skill writes validate metadata and redact credential-shaped names, descriptions and tags (#2575).** After counted redaction, Memory POST and PUT replies report supplied skill fields as stored; feed replies report supplied metadata; stdio displays the stored name.

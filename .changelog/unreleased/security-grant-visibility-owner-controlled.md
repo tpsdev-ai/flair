@@ -1,1 +1,1 @@
-- **A Memory write grant cannot change the predecessor's visibility (#2564).** A grant-authorized successor preserves that visibility or is refused with 403 grant_cannot_change_visibility; an observed concurrent visibility change returns 409 predecessor_visibility_changed.
+- **A Memory write grant cannot change the predecessor's visibility (#2564).** Successors that pass earlier validation preserve that visibility or receive 403 grant_cannot_change_visibility. An observed concurrent visibility change returns 409 predecessor_visibility_changed.

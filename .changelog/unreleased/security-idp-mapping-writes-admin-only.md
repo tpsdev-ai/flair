@@ -1,1 +1,1 @@
-- **Credential reserves IdP mapping creation, identity changes and reactivation for administrators and server code (#2552).** Disallowed non-admin writes return 403 idp_mapping_admin_only; owners can still relabel, revoke or delete their own mappings.
+- **Credential reserves IdP mapping creation, identity changes and reactivation for administrators and server code (#2552).** Writes refused by the IdP-mapping guard return 403 idp_mapping_admin_only; owners can still relabel, revoke or delete their own mappings.
