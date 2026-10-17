@@ -1,3 +1,4 @@
+import { isEmptyEmbedding, normalizeEmptyEmbedding } from "./memory-embedding-value.js";
 import { databases } from "harper";
 import { randomUUID } from "node:crypto";
 import { isOperatorSeedPut, redactMemoryWrite, redactSkillWrite, storedMemoryText, suppliedMemoryTextFields, suppliedStoredTextFields, type StoredMemoryText, type StoredTextField } from "./memory-redaction.js";
@@ -835,6 +836,7 @@ export function buildReindexRow(
       content.visibility = existing.visibility;
     }
   }
+  normalizeEmptyEmbedding(content);
   return { row: content };
 }
 
@@ -889,6 +891,7 @@ async function closeSupersededRecord(ctx: any, oldId: string, patch: Record<stri
         if (pause) await pause;
         const closed = { ...existing, ...patch };
         stripUndeclaredMemoryAttributes(closed);
+        normalizeEmptyEmbedding(closed);
         await (databases as any).flair.Memory.put(closed, c);
         // Test-only: inert unless armed — here the write is staged, so a
         // competing write and the committed-state re-reads below can be exercised
@@ -1371,7 +1374,10 @@ async function writeSkillCreateOrUpdate(
   if (captured.closed) noteMemoryDelete(String(captured.closed.id));
   if (captured.row) {
     noteMemoryUpsert(captured.row);
-    noteWriteStamp(captured.row.embeddingModel);
+    // An in-place update replaces the live head without recording it in
+    // `captured.closed`, so no closed row is passed as unknown (undefined),
+    // never as "replaced no row".
+    noteWriteStamp(captured.row.embeddingModel, captured.closed ?? undefined);
   }
   if (args.staged) args.staged.text = captured.row ? storedMemoryText(captured.row, args.staged.supplied) : null;
   return { id: successorId, written: captured.row !== null, visibility: skillVersionVisibility(captured.row ?? unchangedHead) };
@@ -1598,7 +1604,7 @@ async function reembedStoredRow(
       embedding = recomputed;
       continue;
     }
-    noteWriteStamp(outcome.model);
+    noteWriteStamp(outcome.model, preRead);
     // flair#2561: the response names the row and its new updatedAt, and
     // carries no embedding field; `flair reembed` reads the model stamp from
     // the stored row.
@@ -1863,6 +1869,10 @@ export class Memory extends (databases as any).flair.Memory {
     // same fields.
     const suppliedText = suppliedStoredTextFields(content);
     canonicalizeSupersedes(content);
+    // flair#2573: an empty `embedding` in the body is an omitted one. It is
+    // removed before the omission check and prepareSkillBody, so every later
+    // step, a skill update's carried vector included, sees a body without it.
+    if (isEmptyEmbedding(content?.embedding)) delete content.embedding;
     // The visibility the caller named, before any merge or default fills it.
     const requestedVisibility = content?.visibility;
     // flair#2465: a body that omits `embedding` can have the stored row's vector
@@ -2050,6 +2060,11 @@ export class Memory extends (databases as any).flair.Memory {
     // this a duplicate of something else" situation — bypass the gate for it
     // (this also gives memory_update's preserveHistory mode dedup-bypass for
     // free, without a separate flag). NEVER suppresses the write either way.
+    // flair#2573: an empty vector that reaches this point (one carried from a
+    // stored skill row; the body's own was removed above) is no vector. It is
+    // normalized before the dedup gate and the embed step, which can then
+    // compute and stamp one when embedding succeeds.
+    normalizeEmptyEmbedding(content);
     // flair#2465: did the caller supply a vector that survived redaction? A
     // vector accepted from the caller gets no newly computed hash.
     const embeddingSupplied = Array.isArray(content.embedding) && content.embedding.length > 0;
@@ -2129,6 +2144,7 @@ export class Memory extends (databases as any).flair.Memory {
     // Pinned by test/unit/memory-host-source.test.ts (r20-post) — RED if this
     // call is removed.
     stripUndeclaredMemoryAttributes(content);
+    normalizeEmptyEmbedding(content);
     if (isSkillWrite(content)) {
       const reservedId = [content?.id, (this as any).getId?.()].find((candidate) => isReservedSeedId("Memory", candidate));
       const skillStaged: { supplied: readonly StoredTextField[]; text: StoredMemoryText | null } = { supplied: suppliedText, text: null };
@@ -2186,7 +2202,9 @@ export class Memory extends (databases as any).flair.Memory {
     // a persisted FOREIGN stamp (federation / replication / an explicit-stamp
     // write) trips the gate; a normal local write stamps the current id and
     // never does.
-    noteWriteStamp(content?.embeddingModel as string | null | undefined);
+    // `postStored` is the row this write replaces; a read that found none is
+    // passed as null (no previous row), not as unknown.
+    noteWriteStamp(content?.embeddingModel as string | null | undefined, postStored ?? null);
 
     // ── THEN close the superseded record ────────────────────────────────────
     // Write-new-BEFORE-close-old: the previous order (close-old via a fire-
@@ -2254,6 +2272,8 @@ export class Memory extends (databases as any).flair.Memory {
       if (stale) return stale;
     }
     stripClientVersionPassthrough(content);
+    // flair#2573: an empty embedding becomes `null` here, before redaction.
+    if (content != null && typeof content === "object") normalizeEmptyEmbedding(content);
     // flair#2407: redact credential-shaped text on a PATCH too, before the body
     // is merged into the stored row.
     const redaction = redactMemoryWrite(content);
@@ -2524,6 +2544,19 @@ export class Memory extends (databases as any).flair.Memory {
       const keptToken = storedInstanceToken(existingForSkill);
       if (keptToken === null) content.instanceToken = newInstanceToken();
       const expectedToken = keptToken ?? content.instanceToken;
+      // flair#2573: the guard is notified after the commit (below) when the
+      // staged vector or stamp differs from the row read in this transaction.
+      const embeddingChanged = Object.prototype.hasOwnProperty.call(body, "embedding") &&
+        !isDeepStrictEqual(body.embedding, existingForSkill?.embedding);
+      const stampChanged = Object.prototype.hasOwnProperty.call(body, "embeddingModel") &&
+        !isDeepStrictEqual(body.embeddingModel, existingForSkill?.embeddingModel);
+      const stampNote = embeddingChanged || stampChanged
+        ? {
+          stamp: (Object.prototype.hasOwnProperty.call(body, "embeddingModel")
+            ? body.embeddingModel : existingForSkill?.embeddingModel) as string | null | undefined,
+          previous: existingForSkill ?? null,
+        }
+        : null;
       // flair#2478 slice 1: the ordinary PATCH runs in the transaction this call
       // already owns (opened in patchLocked); super.patch joins it, so the row
       // write commits when this callback returns, before the write lock releases.
@@ -2532,12 +2565,19 @@ export class Memory extends (databases as any).flair.Memory {
       // write_response_withheld refusal.
       const result = storageResult(await super.patch(content, query));
       if (result instanceof Response) return result;
-      return { result, identity: { expectedToken }, rowId: existingForSkill?.id };
+      return { result, identity: { expectedToken }, rowId: existingForSkill?.id, stampNote };
     });
     // flair#2561: a refusal this path built is returned as built; a
     // successful Response is replaced by the write_response_withheld refusal
     // (writeResultResponse).
     if (patched instanceof Response) return writeResultResponse(patched);
+    // flair#2573: the row write has committed (its transaction returned it), so
+    // the embedding-space guard is notified now, before the verification read:
+    // a refused or unknown verification still leaves the guard told about the
+    // vector or stamp this PATCH stored. The re-embed notifies in
+    // reembedStoredRow and stages no note here.
+    const stampNote = (patched as any).stampNote as { stamp: string | null | undefined; previous: Record<string, any> | null } | null | undefined;
+    if (stampNote) noteWriteStamp(stampNote.stamp, stampNote.previous);
     // Verify the ordinary owned PATCH after a normal storage result; refusals
     // and storage Responses return above before this read. A successful re-embed is also
     // checked after its inner owned commit; refusals return above.
@@ -2552,12 +2592,6 @@ export class Memory extends (databases as any).flair.Memory {
     // A verified re-embed answers with its own response (it declares no text
     // fields, so its check is the row's identity).
     if ((patched as any).reembed) return (patched as any).reembed;
-    // embedding-space-guard slice 1 (flair#2425): a PATCH that stores an
-    // embedding stamp must consult the latch the same way post()/put() do, so a
-    // body-supplied foreign stamp closes the gate instead of the row carrying a
-    // model stamp the latch never recorded. A PATCH body with no embedding
-    // fields is unchanged: noteWriteStamp(undefined) is a no-op.
-    noteWriteStamp(content?.embeddingModel as string | null | undefined);
     // As in put(): the verified row gates the answer; the response is the
     // PATCH's own result, never the stored row (see put()).
     return rowWriteResponse((patched as any).result, content?.id ?? (this as any).getId?.() ?? (patched as any).rowId, redactedValues, patchStaged);
@@ -2690,7 +2724,7 @@ export class Memory extends (databases as any).flair.Memory {
       // refusal (writeResultResponse).
       if (reindexed instanceof Response) return writeResultResponse(reindexed);
       noteMemoryUpsert(content);
-      noteWriteStamp(content?.embeddingModel as string | null | undefined); // embedding-space-guard slice 1 (see post())
+      noteWriteStamp(reindexRow?.embeddingModel as string | null | undefined, reindexExisting); // embedding-space-guard slice 1 (see post())
       return rowWriteResponse(reindexed, reindexRow?.id, 0);
     }
     // flair#2441 + flair#2478 slice 1: a test-only pause of this PUT before its
@@ -2767,6 +2801,8 @@ export class Memory extends (databases as any).flair.Memory {
         const suppliedText = suppliedStoredTextFields(content);
 
         canonicalizeSupersedes(content);
+        // flair#2573: an empty `embedding` in the body is an omitted one (see post()).
+        if (isEmptyEmbedding(content?.embedding)) delete content.embedding;
         const requestedPayload = { ...content };
         // The visibility the caller named, before any merge, carry or default fills it.
         const requestedVisibility = content?.visibility;
@@ -2942,6 +2978,8 @@ export class Memory extends (databases as any).flair.Memory {
         // version-link — neither is an ambiguous "is this a duplicate of
         // something else" write, so both are dedup-bypassed automatically, no
         // separate flag needed. NEVER suppresses the write either way.
+        // flair#2573: an empty vector that reaches this point is no vector (see post()).
+        normalizeEmptyEmbedding(content);
         // flair#2465: did the caller supply a vector? See post().
         const embeddingSupplied = Array.isArray(content.embedding) && content.embedding.length > 0;
         let dedupMatch: DedupMatch | null = null;
@@ -3063,6 +3101,7 @@ export class Memory extends (databases as any).flair.Memory {
         // Pinned by test/unit/memory-host-source.test.ts (r20-put) — RED if this
         // call is removed.
         stripUndeclaredMemoryAttributes(content);
+        normalizeEmptyEmbedding(content);
         if (isSkillWrite(content)) {
           const reservedId = [content?.id, (this as any).getId?.()].find((candidate) => isReservedSeedId("Memory", candidate));
           const skillStaged: { supplied: readonly StoredTextField[]; text: StoredMemoryText | null } = { supplied: suppliedText, text: null };
@@ -3121,7 +3160,7 @@ export class Memory extends (databases as any).flair.Memory {
         // transaction this put owns (a throw leaves this callback and aborts it)
         // or, for a composed put, its caller's (aborted explicitly).
         putGrantedClosed = await closeGrantedSupersedeStaged(c, content, supersede.close, composed);
-        return { content, result: r, dedupMatch, redactedValues, usedMemoryIds, close: supersede.close, auth, fallbackId: preExisting?.id };
+        return { content, result: r, dedupMatch, redactedValues, usedMemoryIds, close: supersede.close, auth, fallbackId: preExisting?.id, previous: preExisting ?? null };
       });
     } catch (err) {
       if (err instanceof CommittedRowChanged) return storedRowChangedRefusal("Memory");
@@ -3135,6 +3174,12 @@ export class Memory extends (databases as any).flair.Memory {
     // successful Response is replaced by the write_response_withheld refusal
     // (a storage-layer Response was replaced in the transaction, storageResult).
     if (putResult instanceof Response) return writeResultResponse(putResult);
+    // embedding-space-guard slice 1 (see post()): the ordinary row write has
+    // returned from its transaction, so the guard is notified now, with the
+    // stored stamp and the row this PUT replaced (flair#2573), before the
+    // verification read: a refused or unknown verification still leaves the
+    // guard told about the stored vector.
+    noteWriteStamp(putResult.content?.embeddingModel as string | null | undefined, putResult.previous ?? null);
     // Verify the ordinary owned row PUT after a normal storage result.
     // Refusals, storage Responses and skill PUT return above; composed promotion skips
     // this read and uses its caller's in-transaction existence check.
@@ -3161,7 +3206,6 @@ export class Memory extends (databases as any).flair.Memory {
     const result: any = putResult.result;
     // flair#1357 — read-your-write for the lexical leg (see post()).
     noteMemoryUpsert(putResult.content);
-    noteWriteStamp(putResult.content?.embeddingModel as string | null | undefined); // embedding-space-guard slice 1 (see post())
 
     // ── THEN close the superseded record (see post()) ───────────────────────
     // A grant-authorized close was staged in the successor's transaction

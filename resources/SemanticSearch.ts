@@ -150,26 +150,28 @@ export class SemanticSearch extends Resource {
     }
 
     // ─── Vector-space uniformity guard (embedding-space-guard slice 1) ────────
-    // If the store's model stamps are NOT KNOWN uniform in the current embedding
-    // space — a non-current stamp observed during a re-embed / model change, OR an unknown
-    // verdict (before the first scan completes, or after a scan error) —
-    // cosining the query against stored vectors could cross spaces or produce
-    // an invalid score: Harper zero-pads a mismatched-dimension vector and
-    // returns a bogus score instead of throwing, and a same-dims vector from
-    // another space scores meaninglessly. The guard fails CLOSED:
-    // only a store whose stamps a scan verified uniform serves embeddings
-    // (flair#2530). Take the
-    // SAME path for every non-uniform state — REFUSE the embedding leg and
+    // A non-uniform guard verdict refuses the query embedding. Its scan counts
+    // arrays and typed arrays without trusted stamps, including empty ones.
+    // Take the same path for every non-uniform state — REFUSE the embedding leg and
     // degrade LOUDLY: drop qEmb so retrieveCandidates takes the keyword-only
     // branch (reusing the existing mode:'none' graceful-degrade contract) when
     // the request has query text, return no results when it has none, and
-    // surface a structured warning that NAMES the state (mixed /
-    // not-yet-verified / scan-failed) below. Never cosine a query against a
-    // stored corpus whose `embeddingModel` stamps are not verified to be the
-    // current space, never merely log. (This is stamp-metadata uniformity
-    // only: the scan skips a stored vector with no stamp, and a caller-supplied
-    // `queryEmbedding` carries no space provenance; neither is checked.
-    // Stored-vector provenance is deferred to flair#2573.)
+    // surface a structured warning that NAMES the state (mixed / excluded /
+    // not-yet-verified / scan-failed) below. The query is cosined against the
+    // stored corpus only while the guard reads `uniform`: the last published
+    // scan found no foreign stamp and no stored vector without a trusted
+    // current-space stamp, and no guard-notified write has since marked that
+    // count stale. The writes that notify are Memory POST, PUT and PATCH (a PATCH
+    // when it changes the vector or the stamp), the re-embed PATCH, the reindex
+    // PUT, skill version writes made through Memory, the FederationSync merge and
+    // the auto-embed backfill. Writes that carry over an existing row's
+    // non-empty vector and stamp, such as the supersede close, the skill
+    // predecessor close and a FeedMemories skill successor, do not notify; when
+    // the carried vector is empty they clear it to null, also without notifying
+    // (that can only remove a vector, never add one). A raw
+    // operations-API insert is seen only by the next scan. (This is
+    // stamp metadata only: a caller-supplied `queryEmbedding` carries no space
+    // provenance, so its bytes are not verified either — flair#2573 slice 2.)
     // Consulted through the SAME single chokepoint the write-time dedup leg
     // uses — O(1) on the verified-uniform happy path. The consult, and so the
     // state warning, happens only when a query embedding is available

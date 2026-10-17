@@ -28,6 +28,7 @@ import { randomUUID } from "node:crypto";
 import nacl from "tweetnacl";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 import { TEST_FAULT_INJECTION_ENV, TEST_PAUSE_DIR_ENV } from "../../resources/txn-pause-point.ts";
+import { getModelId } from "../../resources/embeddings-provider.ts";
 
 const POINT = "space-guard-scan";
 const SWEEP_POINT = "dedup-sweep-persist";
@@ -128,11 +129,12 @@ describe("MemoryDedupStats consults the guard against a real Harper (flair#2559)
     }
     expect(h.external).toBe(false);
     expect(h.ownsInstallDir).toBe(true);
-    // One plain row to PATCH later; it carries no embedding stamp, so it does
-    // not affect the stamp scan (a missing stamp is ignored).
+    // One row to PATCH later. Its vector carries the current model stamp (the
+    // spawned instance's, same env), so the scan reads the store as uniform; a
+    // stored vector without a trusted stamp would make it non-uniform (flair#2573).
     await adminOp(h, {
       operation: "insert", database: "flair", table: "Memory", records: [
-        { id: ROW, agentId: AGENT, content: "seeded row", embedding: [1, 0, 0, 0], durability: "standard", visibility: "shared", createdAt: new Date().toISOString() },
+        { id: ROW, agentId: AGENT, content: "seeded row", embedding: [1, 0, 0, 0], embeddingModel: getModelId(), durability: "standard", visibility: "shared", createdAt: new Date().toISOString() },
       ],
     });
   }, 180_000);

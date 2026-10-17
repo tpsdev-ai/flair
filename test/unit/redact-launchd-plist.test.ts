@@ -20,13 +20,14 @@
 
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, copyFileSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { NEVER_GENERATED_SECRET_KEYS } from "../../src/component-env.js";
 import {
   REDACTED_KEYS,
+  REPORT_SCHEMA,
   collectAdminPassSecrets,
   redactPlist,
   unredactedKeyNames,
@@ -66,7 +67,7 @@ describe("redactPlist — inline credential plist", () => {
     const out = redactPlist(INLINE_PLIST);
     // The key stays so the diagnostics still name the shape that leaked…
     for (const key of REDACTED_KEYS) {
-      // …while no credential value survives.
+      // …with REDACTED as the string value.
       expect(out).not.toMatch(new RegExp(`<key>${key}</key>\\s*<string>(?!REDACTED)[^<]`));
     }
     expect(out).toContain("<key>Label</key><string>ai.tpsdev.flair.abcdef</string>");
@@ -120,10 +121,9 @@ describe("redactPlist — inline credential plist", () => {
 });
 
 describe("REDACTED_KEYS — derived, not hand-maintained (flair#1696)", () => {
-  test("covers every key the product says must never carry a generated secret", () => {
-    // The load-bearing drift guard: importing the product export means a key
-    // added to src/component-env.ts fails THIS test until the redactor covers
-    // it. There is deliberately no copy of the list here or in the redactor.
+  test("covers every credential key Flair must not add to component .env files", () => {
+    // Pins that the redactor covers every key the product export names; there
+    // is deliberately no copy of the list here or in the redactor.
     for (const key of NEVER_GENERATED_SECRET_KEYS) {
       expect(REDACTED_KEYS).toContain(key);
     }
@@ -157,7 +157,7 @@ describe("redactPlist — product secret names (flair#1696)", () => {
   });
 });
 
-describe("--check — fails on a surviving credential key, names it not its value", () => {
+describe("--check — flags supported credential key/string pairs with non-REDACTED values", () => {
   test("exits 1 on the FLAIR_ADMIN_PASS fails-first fixture", () => {
     const dir = mkdtempSync(join(tmpdir(), "redact-check-bad-"));
     try {
@@ -183,6 +183,81 @@ describe("--check — fails on a surviving credential key, names it not its valu
   });
 });
 
+describe("a completed --check with --report writes its report (flair#2589)", () => {
+  const fixtures = join(import.meta.dir, "..", "..", "scripts", "ci", "redact-fixtures");
+
+  test("--check without a target exits 2 with a named usage error", () => {
+    const run = spawnSync("node", [SCRIPT, "--check"], { encoding: "utf8" });
+    expect(run.status).toBe(2);
+    expect(run.stderr).toContain("redact-launchd-plist: usage error: --check requires at least one target path");
+  });
+
+  test("--check without a target leaves the report untouched", () => {
+    const dir = mkdtempSync(join(tmpdir(), "redact-report-no-target-"));
+    try {
+      const report = join(dir, "report.json");
+      writeFileSync(report, "SENTINEL");
+      const run = spawnSync("node", [SCRIPT, "--check", "--report", report], { encoding: "utf8" });
+      expect(run.status).toBe(2);
+      expect(run.stderr).toContain("usage error: --check requires at least one target path");
+      expect(readFileSync(report, "utf8")).toBe("SENTINEL");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("--report writes empty findings for a clean scan with exit 0", () => {
+    const dir = mkdtempSync(join(tmpdir(), "redact-report-clean-"));
+    try {
+      const report = join(dir, "report.json");
+      const run = spawnSync(process.execPath, [SCRIPT, "--check", "--report", report, join(fixtures, "clean")], {
+        encoding: "utf8",
+      });
+      expect(run.status).toBe(0);
+      const doc = JSON.parse(readFileSync(report, "utf8"));
+      expect(doc.schema).toBe(REPORT_SCHEMA);
+      expect(doc.findings).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("--report writes finding keys without values", () => {
+    const dir = mkdtempSync(join(tmpdir(), "redact-report-leaky-"));
+    try {
+      const report = join(dir, "report.json");
+      const run = spawnSync(process.execPath, [SCRIPT, "--check", "--report", report, join(fixtures, "leaky")], {
+        encoding: "utf8",
+      });
+      expect(run.status).toBe(1);
+      const doc = JSON.parse(readFileSync(report, "utf8"));
+      expect(doc.findings).toHaveLength(1);
+      expect(doc.findings[0].keys).toEqual(["HDB_ADMIN_PASSWORD"]);
+      expect(readFileSync(report, "utf8")).not.toContain("example-placeholder-not-a-secret");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a target-read failure leaves the report untouched", () => {
+    // The report is written only when the scan finishes. On a target that
+    // cannot be read the scanner exits 2 and writes nothing, so a caller that
+    // finds no finding record there falls back to could-not-run.
+    const dir = mkdtempSync(join(tmpdir(), "redact-report-missing-"));
+    try {
+      const report = join(dir, "report.json");
+      writeFileSync(report, "SENTINEL");
+      const run = spawnSync(process.execPath, [SCRIPT, "--check", "--report", report, join(dir, "no-such-target")], {
+        encoding: "utf8",
+      });
+      expect(run.status).toBe(2);
+      expect(readFileSync(report, "utf8")).toBe("SENTINEL");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("collectAdminPassSecrets", () => {
   test("reads and trims the admin-pass file when present", () => {
     const dir = mkdtempSync(join(tmpdir(), "redact-pass-"));
@@ -197,5 +272,137 @@ describe("collectAdminPassSecrets", () => {
 
   test("returns no secrets when the file is absent (never throws)", () => {
     expect(collectAdminPassSecrets([join(tmpdir(), "does-not-exist-redact-pass")])).toEqual([]);
+  });
+});
+
+// flair#2589 — the check must load in the form the lane has. The lane invokes
+// it with plain `node` (not bun), and src/component-env.ts imports a `.js`
+// specifier that only the compiled dist/ has, so a load of the source tree
+// failed with ERR_MODULE_NOT_FOUND before scanning anything. These spawn
+// `node` explicitly to pin that the check loads and runs without a build.
+const NODE = "node";
+const FIXTURES = join(import.meta.dir, "..", "..", "scripts", "ci", "redact-fixtures");
+
+describe("the fixtures run on every PR targeting main (flair#2589)", () => {
+  test("a clean (redacted) fixture passes under plain node", () => {
+    const run = spawnSync(NODE, [SCRIPT, "--check", join(FIXTURES, "clean")], { encoding: "utf8" });
+    expect(run.status).toBe(0);
+  });
+
+  test("a credential key with a non-REDACTED value is a finding: exit 1, key named, value not printed", () => {
+    const run = spawnSync(NODE, [SCRIPT, "--check", join(FIXTURES, "leaky")], { encoding: "utf8" });
+    expect(run.status).toBe(1);
+    expect(run.stderr).toContain("HDB_ADMIN_PASSWORD");
+    expect(run.stderr).not.toContain("example-placeholder-not-a-secret");
+  });
+});
+
+describe("--check handles key-list import failures (flair#2589)", () => {
+  test("a check that cannot load its key list exits 2 with a named message", () => {
+    // The script's key list is a relative import. A copy with no such sibling
+    // cannot load it — the same shape the lane hit — and that must be exit 2,
+    // not exit 1 (a finding) and never 0.
+    const dir = mkdtempSync(join(tmpdir(), "redact-crash-"));
+    try {
+      const copy = join(dir, "redact-launchd-plist.mjs");
+      copyFileSync(SCRIPT, copy);
+      const run = spawnSync(NODE, [copy, "--check", dir], { encoding: "utf8", timeout: 30_000 });
+      expect(run.status).toBe(2);
+      expect(run.stderr).toContain("redaction check could not run");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("--check on a named target that cannot be read exits 2, never 0 (flair#2589)", () => {
+  test("a named target that does not exist exits 2", () => {
+    const dir = mkdtempSync(join(tmpdir(), "redact-check-missing-"));
+    try {
+      const run = spawnSync(NODE, [SCRIPT, "--check", join(dir, "no-such-target")], { encoding: "utf8" });
+      expect(run.status).toBe(2);
+      expect(run.stderr).toContain("cannot read");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a named target that cannot be read exits 2", () => {
+    // A self-referential symlink cannot be statted for ANY uid, so this fails
+    // for root too. CI's Docker jobs run as root, where a mode-based unreadable
+    // case (chmod 000) is ignored and would prove nothing.
+    const dir = mkdtempSync(join(tmpdir(), "redact-check-unreadable-"));
+    try {
+      const target = join(dir, "loop");
+      symlinkSync("loop", target);
+      const run = spawnSync(NODE, [SCRIPT, "--check", target], { encoding: "utf8" });
+      expect(run.status).toBe(2);
+      expect(run.stderr).toContain("cannot read");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("a missing or malformed key-list export is a crash, not a finding (flair#2589)", () => {
+  // The real scanner, but the dependency-free module it imports exports the
+  // wrong thing. That must be exit 2 (could not run): before the guard, a
+  // missing export threw at module load (Node exits 1, which a caller that
+  // reads exit status alone would take as a finding) and a non-array export
+  // spread silently (wrong keys, exit 0).
+  function runWithExported(source: string) {
+    const dir = mkdtempSync(join(tmpdir(), "redact-export-"));
+    try {
+      const ci = join(dir, "scripts", "ci");
+      const lib = join(dir, "src", "lib");
+      mkdirSync(ci, { recursive: true });
+      mkdirSync(lib, { recursive: true });
+      copyFileSync(SCRIPT, join(ci, "redact-launchd-plist.mjs"));
+      writeFileSync(join(lib, "secret-keys.ts"), source);
+      const run = spawnSync(NODE, [join(ci, "redact-launchd-plist.mjs"), "--check", dir], {
+        encoding: "utf8",
+        timeout: 30_000,
+      });
+      return run;
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  test("a missing export exits 2, not 1", () => {
+    const run = runWithExported("export const SOMETHING_ELSE = 1;\n");
+    expect(run.status).toBe(2);
+    expect(run.stderr).toContain("redaction check could not run");
+  });
+
+  test("a non-array export exits 2, not 0", () => {
+    const run = runWithExported('export const NEVER_GENERATED_SECRET_KEYS = "not-an-array";\n');
+    expect(run.status).toBe(2);
+    expect(run.stderr).toContain("redaction check could not run");
+  });
+
+  test("an array with a non-string or empty element exits 2, not 0", () => {
+    // Array.isArray alone accepts this, and a null element would build a key
+    // pattern that matches nothing.
+    const run = runWithExported(
+      'export const NEVER_GENERATED_SECRET_KEYS = ["HDB_ADMIN_PASSWORD", null, ""];\n',
+    );
+    expect(run.status).toBe(2);
+    expect(run.stderr).toContain("redaction check could not run");
+  });
+
+  test("a key list whose construction throws exits 2, not 0", () => {
+    // A Proxy over an array passes Array.isArray but throws when the list is
+    // spread into REDACTED_KEYS; that construction failure must be a crash.
+    const run = runWithExported(
+      'export const NEVER_GENERATED_SECRET_KEYS = new Proxy(["HDB_ADMIN_PASSWORD"], {\n' +
+        "  get(target, prop, receiver) {\n" +
+        '    if (prop === Symbol.iterator) throw new Error("no iterator");\n' +
+        "    return Reflect.get(target, prop, receiver);\n" +
+        "  },\n" +
+        "});\n",
+    );
+    expect(run.status).toBe(2);
+    expect(run.stderr).toContain("redaction check could not run");
   });
 });
