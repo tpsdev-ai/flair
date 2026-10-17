@@ -12,7 +12,7 @@
  * `embeddings-provider` mock for its own bun process. `auth-middleware.ts` is a
  * side-effect module that calls `server.http(fn)`; the harper mock captures
  * that callback so this file drives the REAL middleware with a REAL
- * Ed25519-signed request, as test/unit/memory-selection-middleware-1940
+ * Ed25519-signed request, as test/unit-isolated/memory-selection-middleware-1940
  * does, and observes the order in which the model call and the transaction run.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
@@ -164,13 +164,14 @@ beforeEach(() => {
   stagedCommits = new Map();
 });
 
-const nextLayer = () => new Response("ok", { status: 200 });
+// This fixture supplies a body id for backfill; PUT/PATCH also support the routed-id fallback.
+const resultLayer = (id: string) => () => ({ status: 200, headers: { get: () => null }, body: JSON.stringify({ id, written: true }) } as any);
 
 async function runBackfill(id: string): Promise<void> {
   const mw = await loadMiddleware();
   // A Memory write reaches the next layer with a 2xx; the middleware then runs
   // backfillEmbedding asynchronously (not awaited by the request).
-  const res: Response = await mw(makeRequest(`/Memory/${id}`, "PUT", "agent-a"), nextLayer);
+  const res: any = await mw(makeRequest(`/Memory/${id}`, "PUT", "agent-a"), resultLayer(id));
   expect(res.status, "the write was passed to the next layer").toBe(200);
   // Wait for the provider call and a stored embedding, each up to its deadline.
   const deadline = Date.now() + 5_000;
@@ -228,7 +229,7 @@ describe("flair#2573 — the backfill stamps its vector and notifies the embeddi
   /** Drive one backfill and wait until its stamp has landed and `settled` holds. */
   async function backfillUntil(id: string, settled: () => boolean): Promise<void> {
     const mw = await loadMiddleware();
-    const res: Response = await mw(makeRequest(`/Memory/${id}`, "PUT", "agent-a"), nextLayer);
+    const res: any = await mw(makeRequest(`/Memory/${id}`, "PUT", "agent-a"), resultLayer(id));
     expect(res.status).toBe(200);
     const deadline = Date.now() + 5_000;
     while (!(memoryRows.get(id)?.embeddingModel === "mock-embedding-model" && settled()) && Date.now() < deadline) {

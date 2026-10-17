@@ -1,7 +1,7 @@
 /**
  * memory-harper-mock-isolation-2307.test.ts — flair#2307 item 6.
  *
- * `test/unit/memory-selection-middleware-1940.test.ts` and
+ * `test/unit-isolated/memory-selection-middleware-1940.test.ts` and
  * `test/unit-isolated/memory-integrity.test.ts` both mock the `harper` module
  * (bun's `mock.module` is process-global, and both read the shared `agentStore`
  * from test/helpers/harper-mock). Their mocks present a compatible surface, and
@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url";
 
 const root = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 const FILES = [
-  "test/unit/memory-selection-middleware-1940.test.ts",
+  "test/unit-isolated/memory-selection-middleware-1940.test.ts",
   "test/unit-isolated/memory-integrity.test.ts",
 ];
 

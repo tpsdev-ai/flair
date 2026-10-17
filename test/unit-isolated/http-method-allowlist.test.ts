@@ -28,7 +28,8 @@ function request(method: string, path: string, headers: Record<string, string> =
   const h = new Headers({ host: "localhost", ...headers });
   return {
     method,
-    url: `http://localhost${path}`,
+    // The raw origin-form target, as Harper's Request.url carries it.
+    url: path,
     headers: h,
     user: undefined as any,
   };
