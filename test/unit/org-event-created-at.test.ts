@@ -140,7 +140,7 @@ describe("invalidEventId", () => {
   });
 });
 
-describe("unreadableEventIdRefusal — the id rule POST, PUT and PATCH share", () => {
+describe("unreadableEventIdRefusal — after POST normalization (empty root id generated) and earlier guards (non-admin collection PUT gets 403); trusted server-originated internal PUT/PATCH skip _assignCreatedAt", () => {
   it("reads a non-empty string id and a non-empty array of strings, and refuses every other shape", async () => {
     for (const id of ["e1", ["x", "y"], ["x", ""]] as unknown[]) {
       expect(unreadableEventIdRefusal(id), `refused ${JSON.stringify(id)}`).toBeNull();

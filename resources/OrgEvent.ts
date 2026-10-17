@@ -52,13 +52,16 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
    * (Table.getResource -> _loadRecord) before the resource's put() runs. An
    * element id of an empty array or an object fails there with a bare 500, and a
    * boolean id with Harper's own 400, so the element write never reaches the
-   * shared id rule the rest of this resource's write paths apply.
+   * shared id rule.
    *
-   * This hook runs the owner-scoped write guard first (super), whose refusal
-   * answers for a non-admin collection write, then applies that shared id rule
-   * to the array's record elements — the same named 400 (invalid_event_id) POST,
-   * single-record PUT and PATCH answer. A non-record element is left to Harper's
-   * own handling. This mirrors the collection-PUT routing Credential uses.
+   * This hook scans the collection body on the initial collection-PUT call,
+   * before Harper's per-element dispatch, after the owner-scoped write guard
+   * (super); a non-admin collection PUT gets 403 first. The shared rule answers
+   * invalid_event_id (400) for ids remaining after POST normalization and
+   * earlier guards; an empty root POST id gets a generated id. Trusted
+   * server-originated internal PUT/PATCH skip the id check in _assignCreatedAt.
+   * A non-record element is left to Harper's own handling. This mirrors the
+   * collection-PUT routing Credential uses.
    */
   static getResource(target: any, request: any, options?: any): any {
     const admitted = super.getResource(target, request, options);

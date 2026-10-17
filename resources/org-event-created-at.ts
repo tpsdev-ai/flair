@@ -110,10 +110,11 @@ export function isReadableEventId(id: unknown): id is string | string[] {
 }
 
 /**
- * The one id rule the OrgEvent write paths share: the refusal
- * (`invalid_event_id`, 400) for an id the check does not read (see
- * isReadableEventId — anything but a non-empty string or a non-empty array of
- * strings), or null when it reads it. The refusal echoes no submitted value.
+ * Returns invalid_event_id (400) for anything but a non-empty string or a
+ * non-empty array of strings, or null. Used after POST normalization (an empty
+ * root POST id gets a generated id) and earlier guards (a non-admin collection
+ * PUT gets 403 first). Trusted server-originated internal PUT/PATCH skip the id
+ * check in _assignCreatedAt. The refusal echoes no submitted value.
  */
 export function unreadableEventIdRefusal(id: unknown): Response | null {
   return isReadableEventId(id) ? null : invalidEventId();
