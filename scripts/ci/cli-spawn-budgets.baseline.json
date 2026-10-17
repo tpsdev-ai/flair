@@ -1680,14 +1680,6 @@
     "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
   },
   {
-    "file": "test/unit/status-ops-bind.test.ts",
-    "scope": "a remote target is not judged by the local install's harper config",
-    "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",
-    "kind": "case-no-budget",
-    "occurrence": 0,
-    "reason": "flair#1825 inventory: case reaches a CLI-entry spawn with no per-case budget; budget in #1921."
-  },
-  {
     "file": "test/unit/upgrade-data-snapshot.test.ts",
     "scope": "snapshot list: empty state reports no snapshots (json and human)",
     "fingerprint": "[\"bun\",cliPath,...args] ; { env: merged,stdout: \"pipe\",stderr: \"pipe\" }",

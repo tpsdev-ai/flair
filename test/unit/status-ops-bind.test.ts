@@ -51,7 +51,10 @@ function startMockFlairServer(healthDetail: Record<string, unknown>): Promise<{ 
       res.writeHead(404, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "not found" }));
     });
-    server.listen(0, "127.0.0.1", () => {
+    // Bind all IPv4 interfaces so a target naming a loopback alias the CLI does
+    // not classify as its own install (127.0.0.2) still reaches this mock. The
+    // target address is a literal, so it is never resolved (flair#2617).
+    server.listen(0, "0.0.0.0", () => {
       const addr = server.address();
       const port = typeof addr === "object" && addr ? addr.port : 0;
       resolve({ server, url: `http://127.0.0.1:${port}` });
@@ -271,13 +274,21 @@ describe("flair status — ops-API bind agreement with doctor (flair#852)", () =
     const port = new URL(serverUrl).port;
     writeHarperConfig(Number(port) - 1, Number(port));
 
-    const { stdout } = await runCli(
-      ["status", "--target", "https://flair.example.invalid:19926"],
+    // A literal address, so the target is never resolved: 127.0.0.2 is a loopback
+    // alias the CLI does not treat as its own install (isLocalhostUrl matches
+    // only 127.0.0.1/localhost/::1), and the mock above is bound to all IPv4
+    // interfaces, so this reaches it. The remote branch must be driven against
+    // a REACHABLE remote: a verdict for an unreachable target never reads the
+    // local config, so it could not show the guard holding.
+    const { stdout, exitCode } = await runCli(
+      ["status", "--target", `http://127.0.0.2:${port}`],
       { HOME: tmpHome, ...CLEAR_ENV },
     );
 
-    // Unreachable remote — either way, it must not claim the remote instance
-    // has an all-interfaces ops bind derived from the local config.
+    // The remote answered and is healthy from its own report …
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("all checks passing");
+    // … but the local install's all-interfaces ops bind is not attributed to it.
     expect(stdout).not.toMatch(/Ops API bound to all interfaces/i);
-  });
+  }, 10_000);
 });
