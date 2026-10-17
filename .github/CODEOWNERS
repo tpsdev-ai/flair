@@ -23,6 +23,16 @@
 /scripts/ci/lockstep-packages.mjs @heskew
 /.github/workflows/canary.yml @heskew
 /.github/workflows/release-promote*.yml @heskew
+# flair#1928 slice 2: the canary's own checks, whose PASS gates the automated
+# promote — install, boot and plugin canary scripts and every helper they run
+# (the canary's script closure; test/unit/release-auto-tag-workflow.test.ts
+# derives it and requires each file here).
+/scripts/check-global-install-lockfile.mjs @heskew
+/scripts/ci/check-instance-boot.sh @heskew
+/scripts/ci/doctor-advisory.sh @heskew
+/scripts/ci/boot-probe.mjs @heskew
+/scripts/ci/check-plugin-canary.mjs @heskew
+/scripts/lib/agent-identity.mjs @heskew
 
 # The shared Renovate preset (#1930). Renovate reads it from the default branch
 # for every repo that extends it (flair, cli, bob), and it holds the controls every

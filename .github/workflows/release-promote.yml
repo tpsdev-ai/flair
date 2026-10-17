@@ -1,0 +1,496 @@
+name: Release promote
+
+# flair#1928 slice 2 — the PRIVILEGED promote. Slice 1 landed the UNPRIVILEGED
+# poll (`release-promote-poll.yml`) and the machine surface
+# (`scripts/ci/canary-verdict.sh --emit bash`). This is the job the poll
+# dispatches ON THE TAG REF once a version is READY.
+#
+# THE TWO-JOB BOUNDARY. The poll runs on a `schedule` (always the default
+# branch's copy of the file) and holds no npm credential, so it can only decide
+# WHETHER to start this job. This job runs `workflow_dispatch` ON the `v*` tag
+# ref — the ref the `release-promote` environment's deployment policy admits —
+# and it takes NOTHING from the poll but "run now on this ref". It re-reads and
+# validates what it acts on: the version from the tag ref, the tag's ancestry,
+# the release-attempt marker from the deployments API (a record that can be
+# changed or deleted, so it is validated, never trusted), and the package-set
+# digest from the registry bytes.
+#
+# THE BOUNDARY IS OUTSIDE THIS FILE. GitHub resolves this workflow and its local
+# reusable canary at the dispatch ref. Nathan audits the creation actors and other
+# actors' rule exceptions before adding NPM_TOKEN (docs/releasing.md, "The promote boundary").
+# The default-branch poll checks both pinned tag rulesets are active, target tags,
+# have no exclusions and carry the expected rule types and patterns: creation on
+# refs/tags/v*; update, non-fast-forward and deletion on refs/tags/v* and refs/tags/adk-flair-v*.
+# It requires current_user_can_bypass=never for its own token on the immutable ruleset.
+# Other actors' rule exceptions are not visible to the poll.
+# It also checks the release-promote environment has exactly the tag deployment
+# pattern v* (required reviewers optional); it does not check for NPM_TOKEN.
+#
+# DEFENCE IN DEPTH, not the boundary. For a tag whose copy of this file is the
+# reviewed one: the promote job first requires both workflow files, and every
+# repository script any job here runs (the canary's install, boot and plugin
+# checks and their helpers included), to be byte-identical to `origin/main`;
+# repository scripts run only from `origin/main` (`prepare` and the canary move
+# their workspace to the commit `prepare` pinned, and a failed move runs none;
+# `promote` runs a separate tree materialised from its own pinned `origin/main`).
+# The canary does run the PUBLISHED Flair and plugin packages it installs: that
+# is its test. `.github/CODEOWNERS` names the release trust root as the reviewer
+# of those files, enforced as far as the repository's rules require code-owner
+# review.
+#
+# THE SHAPE. `prepare` (unprivileged) resolves the version from the tag, pins
+# `origin/main`, reads the certified package-set digest from the marker and
+# hashes the flair tarball. `canary` calls `canary.yml` via `workflow_call` (one
+# definition, which resolves at the tag); the canary's workspace then selects the
+# pinned commit, so the published bytes are installed and booted as a user would
+# before any tag moves. `promote` (privileged, in the `release-promote`
+# environment) runs after the canary PASSES, re-reads and validates everything
+# itself, and runs the promote block emitted by the trusted
+# `canary-verdict.sh --emit bash` under `NPM_TOKEN`.
+#
+# THE CREDENTIAL. `NPM_TOKEN` is referenced in ONE place: the final dist-tag
+# step's `env`. It is never in a job-level `env`, never a command argument, never
+# echoed. npm reads it through a throwaway `.npmrc` indirection
+# (`//registry.npmjs.org/:_authToken=${NPM_TOKEN}`). Until the `release-promote`
+# environment exists (an admin creates it once: a `v*` tag deployment policy and
+# an `NPM_TOKEN` secret with write access to the lockstep packages), the poll
+# dispatches nothing; without the secret, the token step fails closed with a
+# named message and moves nothing.
+#
+# THE DRY RUN. `dry_run` defaults to `true`: the job validates through block
+# generation (guard, re-derivation, the canary, the emitted promote block) and
+# prints the block instead of executing it. It does not test the move: the
+# block's current-`latest` reads, its refusals and its `dist-tag` moves run only
+# under the token. The poll's dispatch sets `dry_run=false`.
+#
+# It is meant to be dispatched on a `v*` tag ref. GitHub also allows a dispatch on
+# a branch; `prepare` refuses it (ref type not tag) and the environment's tag-only
+# policy keeps the token from it. Past that check `github.ref_name` is the tag and
+# `github.sha` is the tagged commit.
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "true (default): validate through block generation and PRINT the promote block (the move is not tested); false: run the block under NPM_TOKEN and move latest."
+        required: false
+        default: true
+        type: boolean
+
+# The poll matches the non-dry-run title.
+run-name: release-promote ${{ github.ref_name }}${{ inputs.dry_run && ' (dry run)' || '' }}
+
+# Default to NOTHING. Each job opts into exactly what it needs.
+permissions: {}
+
+concurrency:
+  # One promote per ref; never cancel a run mid-move (a cancelled run could leave
+  # the lockstep set half-moved).
+  group: release-promote-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Prepare the canary inputs (no credential)
+    runs-on: ubuntu-latest
+    # No `environment`, no secret: this job only reads. Its outputs feed the
+    # canary, never what gets promoted.
+    permissions:
+      contents: read       # checkout + the ancestry fetch
+      deployments: read    # the release-attempt marker
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      expected_sha256: ${{ steps.flair_sha.outputs.expected_sha256 }}
+      package_set_digest: ${{ steps.marker.outputs.package_set_digest }}
+      trusted_sha: ${{ steps.trusted.outputs.trusted_sha }}
+    steps:
+      - name: Check out the tag ref (the dispatch ref)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Resolve the version from the tag ref
+        # The TAG is the only version source; a dispatch on a branch fails here.
+        # The ref must be an exact `v<major>.<minor>.<patch>` — a prerelease is
+        # never promoted, so it never reaches the canary with a promote intent.
+        id: version
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "$REF_TYPE" != "tag" ]; then
+            echo "::error::release-promote must be dispatched ON a vX.Y.Z tag ref (got type '$REF_TYPE'); it cannot promote from a branch or a dispatch on the default branch."
+            exit 1
+          fi
+          if ! [[ "$REF_NAME" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "::error::ref '$REF_NAME' is not an exact v<major>.<minor>.<patch> release tag; prereleases and build metadata are never promoted."
+            exit 1
+          fi
+          echo "version=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+          echo "  resolved version ${BASH_REMATCH[1]} from $REF_NAME"
+
+      - name: Verify the tag is on origin/main, pin origin/main and move the workspace to it
+        # Require the tag commit to be on main, subject to main's review rules.
+        # Pin origin/main and select it before running the tarball hasher.
+        id: trusted
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::commit ${GITHUB_SHA} is not an ancestor of origin/main; tag a merged release commit."
+            exit 1
+          fi
+          MAIN_SHA="$(git rev-parse origin/main)"
+          git checkout --quiet --detach "$MAIN_SHA"
+          if [ "$(git rev-parse HEAD)" != "$MAIN_SHA" ] || [ -n "$(git status --porcelain --untracked-files=all --ignored)" ]; then
+            echo "::error::release-promote: the workspace is not exactly origin/main ${MAIN_SHA}; refusing to run a script from it."
+            exit 1
+          fi
+          echo "trusted_sha=${MAIN_SHA}" >> "$GITHUB_OUTPUT"
+          echo "  ok ${GITHUB_SHA} is on origin/main; the workspace is origin/main ${MAIN_SHA}"
+
+      - name: Read the certified package-set digest from the release-attempt marker
+        # The version and the digest come from the MARKER (written by stage-publish
+        # from the artifact prepared for staging, before the staging requests),
+        # never from main's package.json, which moves on after a release. A missing
+        # or malformed marker is a refusal: this job never promotes a version
+        # nothing certified.
+        id: marker
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          DEPLOYMENTS="$RUNNER_TEMP/release-attempts.json"
+          if ! gh api --paginate "repos/${GITHUB_REPOSITORY}/deployments?environment=release-attempt&per_page=100" > "$DEPLOYMENTS"; then
+            echo "::error::release-promote: could not read the release-attempt markers; refusing to promote on an unverified marker."
+            exit 1
+          fi
+          MARKER="$(jq -sc --arg ref "v${VERSION}" 'add // [] | map(select(.ref == $ref)) | last' "$DEPLOYMENTS")"
+          if [ -z "$MARKER" ] || [ "$MARKER" = "null" ]; then
+            echo "::error::release-promote: no release-attempt marker for v${VERSION}; staging cannot be verified for this version. Refusing to promote."
+            exit 1
+          fi
+          PAYLOAD_VERSION="$(jq -r '.payload.version // ""' <<<"$MARKER")"
+          PSD="$(jq -r '.payload.package_set_digest // ""' <<<"$MARKER")"
+          if [ "$PAYLOAD_VERSION" != "$VERSION" ]; then
+            echo "::error::release-promote: the marker's payload version '$PAYLOAD_VERSION' does not match the ref's '$VERSION'; refusing to promote."
+            exit 1
+          fi
+          if ! [[ "$PSD" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::release-promote: the marker payload has no valid package_set_digest (64-hex); refusing to promote."
+            exit 1
+          fi
+          echo "package_set_digest=${PSD}" >> "$GITHUB_OUTPUT"
+          echo "  marker v${VERSION} certifies package-set digest ${PSD}"
+
+      - name: Compute the flair tarball's published sha256 (canary input, trusted main's hasher)
+        # The canary installs `@tpsdev-ai/flair@<version>` by exact version; its
+        # `expected_sha256` is that published tarball's sha256, which this job
+        # downloads and hashes. An unmeasurable read is a refusal.
+        id: flair_sha
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          if ! SHA="$(node scripts/ci/registry-tarball-sha256.mjs "$VERSION" @tpsdev-ai/flair)"; then
+            echo "::error::release-promote: could not hash @tpsdev-ai/flair@${VERSION} from the public registry"
+            exit 1
+          fi
+          if ! [[ "$SHA" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::release-promote: the flair tarball hasher did not return a 64-hex sha256 (unmeasurable is FAIL)."
+            exit 1
+          fi
+          echo "expected_sha256=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "  flair tarball sha256 ${SHA}"
+
+  canary:
+    name: Post-publish canary (the published bytes)
+    needs: prepare
+    # ONE definition: this calls the SAME canary a maintainer dispatches by hand.
+    # A called workflow can never hold more than its caller grants, so this job
+    # grants exactly what `canary.yml`'s job asks for (checkout) and nothing else.
+    permissions:
+      contents: read
+    uses: ./.github/workflows/canary.yml
+    with:
+      version: ${{ needs.prepare.outputs.version }}
+      expected_sha256: ${{ needs.prepare.outputs.expected_sha256 }}
+      package_set_digest: ${{ needs.prepare.outputs.package_set_digest }}
+      # The origin/main commit `prepare` pinned: the canary moves its workspace to
+      # it before any repository script runs, so no repository script runs from
+      # the tag checkout (canary.yml itself resolves at the tag).
+      trusted_sha: ${{ needs.prepare.outputs.trusted_sha }}
+
+  promote:
+    name: Promote latest under NPM_TOKEN
+    needs: canary
+    runs-on: ubuntu-latest
+    # The `release-promote` environment releases its secret only to `v*` tag refs,
+    # so a scheduled job could never hold the token — that is why the poll and this
+    # job are two.
+    environment: release-promote
+    permissions:
+      contents: read       # checkout + the recency fetch
+      deployments: read    # the release-attempt marker
+    steps:
+      - name: Check out the tag ref (the dispatch ref)
+        # This job executes nothing from this checkout: it is used only for the
+        # ancestry check and the byte comparison against origin/main below.
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Machinery-recency guard — pin origin/main and require the executed files to match
+        # DEFENCE IN DEPTH, not the boundary: it runs from the tag's copy of this
+        # file, so it fires for a tag whose copy is the reviewed one (the tag
+        # rulesets + the environment are the boundary; see the header). The first
+        # act after checkout. `release-publish.yml` uses the same guard for its own
+        # workflow file; here it is widened to EVERY file this workflow executes,
+        # the canary's install, boot and plugin checks and their helpers included,
+        # so a pre-tag-tampered copy of any of them is refused before anything runs
+        # under the token. The list is the canary's script closure plus this job's
+        # own scripts (test/unit/release-promote-workflow.test.ts derives it).
+        id: guard
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          MAIN_SHA="$(git rev-parse origin/main)"
+          echo "main_sha=${MAIN_SHA}" >> "$GITHUB_OUTPUT"
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::commit ${GITHUB_SHA} is not an ancestor of origin/main; tag a merged release commit."
+            exit 1
+          fi
+          for f in \
+            .github/workflows/release-promote.yml \
+            .github/workflows/canary.yml \
+            scripts/ci/canary-verdict.sh \
+            scripts/ci/lockstep-packages.mjs \
+            scripts/ci/registry-tarball-sha256.mjs \
+            scripts/ci/registry-latest-skew.mjs \
+            scripts/ci/package-set-digest.mjs \
+            scripts/check-global-install-lockfile.mjs \
+            scripts/ci/check-instance-boot.sh \
+            scripts/ci/doctor-advisory.sh \
+            scripts/ci/boot-probe.mjs \
+            scripts/ci/check-plugin-canary.mjs \
+            scripts/lib/agent-identity.mjs ; do
+            if [ ! -e "$f" ]; then
+              echo "::error::release-promote: '$f' is absent from the tag's tree; refusing to promote from a tree that predates the release machinery."
+              exit 1
+            fi
+            if ! git diff --quiet origin/main -- "$f"; then
+              echo "::error::release-promote: '$f' at the tag differs from origin/main; refusing to promote with stale or tampered release machinery."
+              exit 1
+            fi
+          done
+          echo "  ok ${GITHUB_SHA} is on origin/main and every executed file matches origin/main"
+
+      - name: Materialise the trusted tree from origin/main at the pinned sha
+        # Every repository script the token-holding step runs, and the emitted
+        # block, comes from HERE, never from the tag's checkout (node and the
+        # pinned npm are the job's toolchain, not repository code). `git archive`
+        # materialises a snapshot of the pinned commit.
+        env:
+          MAIN_SHA: ${{ steps.guard.outputs.main_sha }}
+        run: |
+          set -euo pipefail
+          TRUSTED="$RUNNER_TEMP/trusted"
+          rm -rf "$TRUSTED"
+          mkdir -p "$TRUSTED"
+          git archive "$MAIN_SHA" | tar -x -C "$TRUSTED"
+          if [ ! -f "$TRUSTED/scripts/ci/canary-verdict.sh" ] || [ ! -f "$TRUSTED/scripts/ci/lockstep-packages.mjs" ]; then
+            echo "::error::release-promote: the trusted tree is missing the release machinery; refusing to promote."
+            exit 1
+          fi
+          echo "TRUSTED=${TRUSTED}" >> "$GITHUB_ENV"
+          echo "  trusted tree materialised from origin/main ${MAIN_SHA}"
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+          # NO registry-url: that writes an .npmrc for NODE_AUTH_TOKEN. The token
+          # reaches npm only through the token step's own `.npmrc` below.
+
+      - name: Pin npm to an exact version and verify it (before the registry reads and tag moves that follow)
+        # Every LATER npm call in this job (the hasher's `npm view`, the block's
+        # `dist-tag ls` / `dist-tag add`) runs a KNOWN npm: the canary's exact pin,
+        # the npm its skew check already ran. The install itself runs the runner's
+        # npm, from a job-created directory with an explicit userconfig, so no
+        # checkout's `.npmrc` can redirect the registry; then the version is
+        # verified, and any other is a refusal.
+        id: npm_pin
+        env:
+          NPM_PINNED: "11.19.1"
+        run: |
+          set -euo pipefail
+          PIN_DIR="$RUNNER_TEMP/npm-pin"
+          mkdir -p "$PIN_DIR"
+          printf 'registry=https://registry.npmjs.org/\n' > "$PIN_DIR/npmrc"
+          cd "$PIN_DIR"
+          npm install -g "npm@${NPM_PINNED}" --userconfig "$PIN_DIR/npmrc"
+          GOT="$(npm --version)"
+          if [ "$GOT" != "$NPM_PINNED" ]; then
+            echo "::error::release-promote: npm is '${GOT}', not the pinned ${NPM_PINNED}; refusing to promote with an unverified npm. No tag was moved."
+            exit 1
+          fi
+          echo "  npm ${GOT} (pinned)"
+
+      - name: Re-derive the version, the marker and the certified digest (trusted tree only)
+        # The privileged job re-derives EVERYTHING it acts on; it takes nothing
+        # from the poll or the prepare job. Each check fails closed with a named
+        # message.
+        id: derive
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if ! [[ "${GITHUB_REF_NAME}" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "::error::release-promote: ref '${GITHUB_REF_NAME}' is not an exact v<major>.<minor>.<patch> release tag; refusing."
+            exit 1
+          fi
+          VERSION="${BASH_REMATCH[1]}"
+
+          # The marker must exist for this version, and its payload must carry that
+          # same version and a 64-hex digest.
+          DEPLOYMENTS="$RUNNER_TEMP/release-attempts.json"
+          if ! gh api --paginate "repos/${GITHUB_REPOSITORY}/deployments?environment=release-attempt&per_page=100" > "$DEPLOYMENTS"; then
+            echo "::error::release-promote: could not read the release-attempt markers; refusing to promote on an unverified marker."
+            exit 1
+          fi
+          MARKER="$(jq -sc --arg ref "v${VERSION}" 'add // [] | map(select(.ref == $ref)) | last' "$DEPLOYMENTS")"
+          if [ -z "$MARKER" ] || [ "$MARKER" = "null" ]; then
+            echo "::error::release-promote: no release-attempt marker for v${VERSION}; staging cannot be verified for this version. Refusing to promote."
+            exit 1
+          fi
+          PAYLOAD_VERSION="$(jq -r '.payload.version // ""' <<<"$MARKER")"
+          PSD="$(jq -r '.payload.package_set_digest // ""' <<<"$MARKER")"
+          if [ "$PAYLOAD_VERSION" != "$VERSION" ]; then
+            echo "::error::release-promote: the marker's payload version '$PAYLOAD_VERSION' does not match the ref's '$VERSION'; refusing to promote."
+            exit 1
+          fi
+          if ! [[ "$PSD" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::release-promote: the marker payload has no valid package_set_digest (64-hex); refusing to promote."
+            exit 1
+          fi
+
+          # Re-derive the package-set digest from the PUBLISHED tarballs and require
+          # it to equal the marker's certified digest. The re-derivation runs the
+          # TRUSTED tree's scripts, and the package list is captured with its exit
+          # status separately: an empty or failed derivation is a refusal, never a
+          # silent "ready".
+          cd "$TRUSTED"
+          PKGS="$RUNNER_TEMP/lockstep-packages.txt"
+          if ! node scripts/ci/lockstep-packages.mjs > "$PKGS"; then
+            echo "::error::release-promote: the lockstep package-list derivation failed; refusing to promote an unknown set."
+            exit 1
+          fi
+          if [ ! -s "$PKGS" ]; then
+            echo "::error::release-promote: the lockstep package list is empty; refusing to promote an empty set."
+            exit 1
+          fi
+          CERT="$RUNNER_TEMP/rederived-sha256.txt"
+          : > "$CERT"
+          while IFS= read -r pkg; do
+            [ -n "$pkg" ] || continue
+            set +e
+            sha="$(node scripts/ci/registry-tarball-sha256.mjs "$VERSION" "$pkg")"
+            rc=$?
+            set -e
+            if [ "$rc" -ne 0 ]; then
+              echo "::error::release-promote: could not download ${pkg}@${VERSION} (hasher exited ${rc}); unmeasurable is not a pass. Refusing to promote."
+              exit 1
+            fi
+            if ! [[ "$sha" =~ ^[0-9a-f]{64}$ ]]; then
+              echo "::error::release-promote: ${pkg}@${VERSION} did not hash to a 64-char sha256; unmeasurable is not a pass. Refusing to promote."
+              exit 1
+            fi
+            printf '%s=%s\n' "$pkg" "$sha" >> "$CERT"
+          done < "$PKGS"
+          RE_DERIVED="$(node scripts/ci/package-set-digest.mjs --version "$VERSION" < "$CERT")"
+          if ! [[ "$RE_DERIVED" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::release-promote: could not re-derive the package-set digest (got '$RE_DERIVED'); refusing to promote."
+            exit 1
+          fi
+          if [ "$RE_DERIVED" != "$PSD" ]; then
+            echo "::error::release-promote: the registry package set hashes to ${RE_DERIVED}, the marker certified ${PSD}; refusing to promote a set that is not the certified set."
+            exit 1
+          fi
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "certified_digest=${PSD}" >> "$GITHUB_OUTPUT"
+          echo "  version ${VERSION}; re-derived the certified digest ${PSD} from the published bytes"
+
+      - name: Emit the promote block through the machine surface (trusted tree only)
+        # `--emit bash` prints ONLY the executable block, byte-identical to the text
+        # between the fences a human sees — the promote job never scrapes markdown.
+        id: emit
+        env:
+          VERSION: ${{ steps.derive.outputs.version }}
+          CERTIFIED_DIGEST: ${{ steps.derive.outputs.certified_digest }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          cd "$TRUSTED"
+          BLOCK="$RUNNER_TEMP/promote-block.sh"
+          if ! bash scripts/ci/canary-verdict.sh pass "$VERSION" "$RUN_URL" --package-set-digest "$CERTIFIED_DIGEST" --emit bash > "$BLOCK"; then
+            echo "::error::release-promote: canary-verdict.sh --emit bash produced no promote block; refusing to promote."
+            exit 1
+          fi
+          if [ ! -s "$BLOCK" ]; then
+            echo "::error::release-promote: the emitted promote block is empty; refusing to promote."
+            exit 1
+          fi
+          echo "promote_block=${BLOCK}" >> "$GITHUB_OUTPUT"
+          echo "  emitted the promote block ($(wc -l < "$BLOCK") lines) from the trusted tree"
+
+      - name: Dry run — print the promote block, move no tag
+        # default true. The job has validated through block generation; the token
+        # step (the block's reads, refusals and moves) is skipped, so the move
+        # itself is not tested.
+        if: ${{ inputs.dry_run == true }}
+        env:
+          BLOCK: ${{ steps.emit.outputs.promote_block }}
+        run: |
+          set -euo pipefail
+          echo "DRY RUN: the block below would run under NPM_TOKEN and move latest. No tag was moved."
+          {
+            echo "### Release promote — DRY RUN"
+            echo ""
+            echo "The promote block emitted for this version (it would run under the environment token):"
+            echo '```bash'
+            cat "$BLOCK"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          cat "$BLOCK"
+
+      - name: Promote latest (the ONLY step that can see NPM_TOKEN)
+        # The token is referenced HERE and nowhere else: not a job-`env`, not a
+        # command argument, never echoed (log hygiene). It reaches npm only through
+        # the throwaway `.npmrc` indirection. An empty token — the environment or
+        # its secret not yet created — is a named refusal, not a silent skip.
+        if: ${{ inputs.dry_run == false }}
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_LOGLEVEL: warn
+          VERSION: ${{ steps.derive.outputs.version }}
+          BLOCK: ${{ steps.emit.outputs.promote_block }}
+        run: |
+          set -euo pipefail
+          if [ -z "${NPM_TOKEN:-}" ]; then
+            echo "::error::release-promote: the release-promote environment (or its NPM_TOKEN secret) is not configured. An org admin creates it once — a v* tag deployment policy and an NPM_TOKEN with write access to the lockstep packages — then re-runs this job. No tag was moved."
+            exit 1
+          fi
+          NPMRC="$RUNNER_TEMP/npmrc"
+          # The `.npmrc` contains the literal `${NPM_TOKEN}` reference.
+          # shellcheck disable=SC2016
+          printf '//registry.npmjs.org/:_authToken=${NPM_TOKEN}\n' > "$NPMRC"
+          export NPM_CONFIG_USERCONFIG="$NPMRC"
+          cd "$TRUSTED"
+          # The emitted block's own digest preflight, its sequential tag moves
+          # (flair LAST), and its convergence check all run from the trusted tree.
+          set +x
+          bash "$BLOCK"
+          echo "  the convergence check observed latest at ${VERSION} for every lockstep package"

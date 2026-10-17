@@ -97,7 +97,7 @@ const npmStub = [
    "  base=\"$(cat \"$FIXTURES\")\"; spec=\"$2\"",
    "  printf '%s/%s@%s.tgz\\n' \"$base\" \"${spec%@*}\" \"${spec##*@}\"",
    "fi",
-   "if [ \"${1:-}\" = \"dist-tag\" ] && [ \"${2:-}\" = \"ls\" ]; then echo \"latest: 1.2.2\"; exit 0; fi",
+   "if [ \"${1:-}\" = \"dist-tag\" ] && [ \"${2:-}\" = \"ls\" ]; then echo \"latest: 0.55.0\"; exit 0; fi",
    "if [ \"${1:-}\" = \"dist-tag\" ] && [ \"${2:-}\" = \"add\" ]; then printf 'dist-tag add %s\\n' \"${3:-}\" >> \"${DISTTAG_LOG:-/dev/null}\"; fi",
    "exit 0",
 ].join("\n");
@@ -648,19 +648,19 @@ describe("F4 (registry hasher, A1c of #1671): the emitted preflight refuses a ba
 const CTL_SHIM = join(SCRATCH, "ctl-shim");
 const CTL_LOG_DIR = join(SCRATCH, "ctl-log");
 mkdirSync(CTL_SHIM, { recursive: true });
-// Stub npm: `dist-tag ls <pkg>` answers `latest: 1.2.2` (or FAILS for DISTTAG_LS_FAIL_PKG);
+// Stub npm: `dist-tag ls <pkg>` answers `latest: 0.55.0` (or FAILS for DISTTAG_LS_FAIL_PKG);
 // `dist-tag add` logs the SUCCESSFUL moves and fails from NFAIL_FAIL_ON (default: never).
 const ctlNpmStub = [
   "#!/usr/bin/env bash",
   "if [ \"${1:-}\" = \"dist-tag\" ] && [ \"${2:-}\" = \"ls\" ]; then",
   "  if [ -n \"${DISTTAG_LS_FAIL_PKG:-}\" ] && [ \"${3:-}\" = \"$DISTTAG_LS_FAIL_PKG\" ]; then exit 1; fi",
-  "  if [ -n \"${DISTTAG_LS_PRINTFAIL_PKG:-}\" ] && [ \"${3:-}\" = \"$DISTTAG_LS_PRINTFAIL_PKG\" ]; then echo \"latest: 1.2.2\"; exit 1; fi",
-  "  if [ -n \"${DISTTAG_LS_CR:-}\" ]; then printf 'latest: 1.2.2\\r\\n'; exit 0; fi",
+  "  if [ -n \"${DISTTAG_LS_PRINTFAIL_PKG:-}\" ] && [ \"${3:-}\" = \"$DISTTAG_LS_PRINTFAIL_PKG\" ]; then echo \"latest: 0.55.0\"; exit 1; fi",
+  "  if [ -n \"${DISTTAG_LS_CR:-}\" ]; then printf 'latest: 0.55.0\\r\\n'; exit 0; fi",
   "  if [ -n \"${DISTTAG_LS_GARBAGE:-}\" ]; then echo \"latest: garbage\"; exit 0; fi",
   "  # flair#2140: DISTTAG_LS_CACHED is what npm's local cache would answer; only a",
-  "  # --prefer-online read gets the current value (1.2.2).",
+  "  # --prefer-online read gets the current value (0.55.0).",
   "  if [ -n \"${DISTTAG_LS_CACHED:-}\" ]; then case \" $* \" in *\" --prefer-online \"*) ;; *) echo \"latest: $DISTTAG_LS_CACHED\"; exit 0 ;; esac; fi",
-  "  echo \"latest: 1.2.2\"",
+  "  echo \"latest: 0.55.0\"",
   "  exit 0",
   "fi",
   "if [ \"${1:-}\" = \"dist-tag\" ] && [ \"${2:-}\" = \"add\" ]; then",
@@ -717,9 +717,9 @@ describe("item 1 (A1c of #1671, round 5): a mid-promote failure RESTORES the mov
     expect(moves.length).toBe(2);
     expect(moves[0]).toContain(PACKAGES[0]);
     expect(moves[1]).toContain(PACKAGES[1]);
-    // The RESTORE lines restore each moved package to its PREVIOUS latest (1.2.2).
-    expect(r.stderr).toContain(`npm dist-tag add ${PACKAGES[0]}@1.2.2 latest`);
-    expect(r.stderr).toContain(`npm dist-tag add ${PACKAGES[1]}@1.2.2 latest`);
+    // The RESTORE lines restore each moved package to its PREVIOUS latest (0.55.0).
+    expect(r.stderr).toContain(`npm dist-tag add ${PACKAGES[0]}@0.55.0 latest`);
+    expect(r.stderr).toContain(`npm dist-tag add ${PACKAGES[1]}@0.55.0 latest`);
     // Never a delete, and the not-moved set is named (the failed package included).
     expect(r.stderr).not.toContain("dist-tag rm");
     expect(r.stderr).toContain("ABORTED");
@@ -735,7 +735,7 @@ describe("item 1 (A1c of #1671, round 5): a mid-promote failure RESTORES the mov
     expect(r.status, `stderr:\n${r.stderr}`).not.toBe(0);
     const moves = r.dt.split("\n").filter((l) => l.startsWith("dist-tag add "));
     expect(moves.length).toBe(PACKAGES.length); // every move succeeded before the skew check
-    for (const p of PACKAGES) expect(combined).toContain(`npm dist-tag add ${p}@1.2.2 latest`);
+    for (const p of PACKAGES) expect(combined).toContain(`npm dist-tag add ${p}@0.55.0 latest`);
     // No `rm` among the EXECUTED/printed commands (the introduction mentions
     // `npm dist-tag rm` only as the thing the block never does).
     expect(`${r.stdout}${r.stderr}`).not.toContain("dist-tag rm");
@@ -757,7 +757,7 @@ describe("item 1 (A1c of #1671, round 5): a mid-promote failure RESTORES the mov
     expect(r.stderr).toContain("NOTHING has moved");
   });
 
-  test("(d) npm prints `latest: 1.2.2` but EXITS 1 => no add reached, package named", () => {
+  test("(d) npm prints `latest: 0.55.0` but EXITS 1 => no add reached, package named", () => {
     const r = runPromoteBlock({ DISTTAG_LS_PRINTFAIL_PKG: PACKAGES[1] });
     expect(r.status, `stderr:\n${r.stderr}`).not.toBe(0);
     expect(r.dt).toBe(""); // the failed read stopped the block BEFORE the first move
@@ -765,12 +765,12 @@ describe("item 1 (A1c of #1671, round 5): a mid-promote failure RESTORES the mov
     expect(r.stderr).toContain("unmeasurable is FAIL");
   });
 
-  test("(e) a CRLF `latest: 1.2.2\\r\\n` read yields a CLEAN previous (no CR in the RESTORE line)", () => {
+  test("(e) a CRLF `latest: 0.55.0\\r\\n` read yields a CLEAN previous (no CR in the RESTORE line)", () => {
     const r = runPromoteBlock({ DISTTAG_LS_CR: "1", NFAIL_FAIL_ON: "2" }); // 2nd move fails => RESTORE lines
     expect(r.status, `stderr:\n${r.stderr}`).not.toBe(0);
-    // The recorded previous is exactly 1.2.2, so the restore line is well-formed.
-    expect(r.stderr).toContain(`npm dist-tag add ${PACKAGES[0]}@1.2.2 latest`);
-    expect(r.stderr).not.toContain("1.2.2\r");
+    // The recorded previous is exactly 0.55.0, so the restore line is well-formed.
+    expect(r.stderr).toContain(`npm dist-tag add ${PACKAGES[0]}@0.55.0 latest`);
+    expect(r.stderr).not.toContain("0.55.0\r");
     expect(r.stderr).not.toContain("\r");
   });
 
@@ -790,7 +790,7 @@ describe("item 1 (A1c of #1671, round 5): a mid-promote failure RESTORES the mov
     // The add DID apply (the stub logged it) and then exited non-zero.
     expect(r.dt).toContain(`dist-tag add ${failed}@${VER}`);
     // The attempted package gets its own restore line (state UNKNOWN).
-    expect(r.stderr).toContain(`npm dist-tag add ${failed}@1.2.2 latest`);
+    expect(r.stderr).toContain(`npm dist-tag add ${failed}@0.55.0 latest`);
     expect(r.stderr).toContain("ATTEMPTED");
     expect(r.stderr).toContain("UNKNOWN");
     // The NOT-moved list is only the packages NEVER attempted (after the failed one).
@@ -811,7 +811,7 @@ describe("item 1 (A1c of #1671, round 5): a mid-promote failure RESTORES the mov
     expect(combined).not.toContain("were moved");
     expect(combined).not.toContain("none is still on its previous latest");
     expect(combined).not.toContain("still on their previous latest");
-    for (const p of PACKAGES) expect(combined).toContain(`npm dist-tag add ${p}@1.2.2 latest`);
+    for (const p of PACKAGES) expect(combined).toContain(`npm dist-tag add ${p}@0.55.0 latest`);
     expect(r.status).not.toBe(0);
   });
 });
@@ -851,7 +851,7 @@ describe("flair#2140: the promote block's final check waits instead of reporting
       VER,
       "--await",
       "120",
-      ...PACKAGES.flatMap((p) => ["--previous", `${p}=1.2.2`]),
+      ...PACKAGES.flatMap((p) => ["--previous", `${p}=0.55.0`]),
     ]);
     expect(r.stderr).not.toContain("RESTORE");
     expect(r.stderr).not.toContain("npm dist-tag add");
@@ -864,12 +864,12 @@ describe("flair#2140: the promote block's final check waits instead of reporting
     expect(r.stderr).toContain("this is not a skew verdict");
     const rerunAt = r.stderr.indexOf("RE-RUN the check before restoring anything:");
     expect(rerunAt).toBeGreaterThanOrEqual(0);
-    const rerun = `  node scripts/ci/registry-latest-skew.mjs ${VER} --await 120 ${PACKAGES.map((p) => `--previous ${p}=1.2.2`).join(" ")}`;
+    const rerun = `  node scripts/ci/registry-latest-skew.mjs ${VER} --await 120 ${PACKAGES.map((p) => `--previous ${p}=0.55.0`).join(" ")}`;
     expect(r.stderr).toContain(rerun + "\n");
     const fallbackAt = r.stderr.indexOf("Restore only if the re-run exits 1 (skew) or 2 (DID NOT RUN)");
     expect(fallbackAt).toBeGreaterThan(rerunAt);
     for (const p of PACKAGES) {
-      const at = r.stderr.indexOf(`npm dist-tag add ${p}@1.2.2 latest`);
+      const at = r.stderr.indexOf(`npm dist-tag add ${p}@0.55.0 latest`);
       expect(at, `RESTORE line for ${p}`).toBeGreaterThan(fallbackAt);
     }
     expect(r.stderr).not.toContain("found skew");
@@ -877,14 +877,14 @@ describe("flair#2140: the promote block's final check waits instead of reporting
     expect(r.stderr).not.toContain("dist-tag rm");
   });
 
-  test("step 2 records the CURRENT latest, not npm's cached one: --previous and RESTORE lines carry 1.2.2, never the cached 1.2.1", () => {
+  test("step 2 records the CURRENT latest, not npm's cached one: --previous and RESTORE lines carry 0.55.0, never the cached 0.54.9", () => {
     const argvLog = join(mkdtempSync(join(SCRATCH, "skew-argv-")), "argv.log");
-    const r = runPromoteBlock({ DISTTAG_LS_CACHED: "1.2.1", SKEW_ARGV_LOG: argvLog, SKEW_FAIL: "3" });
+    const r = runPromoteBlock({ DISTTAG_LS_CACHED: "0.54.9", SKEW_ARGV_LOG: argvLog, SKEW_FAIL: "3" });
     expect(r.status, `stderr:\n${r.stderr}`).toBe(3);
     const calls = readFileSync(argvLog, "utf8").split("\n").filter((l) => l.length > 0).map((l) => JSON.parse(l) as string[]);
-    expect(calls[0]!.slice(4)).toEqual(PACKAGES.flatMap((p) => ["--previous", `${p}=1.2.2`]));
-    for (const p of PACKAGES) expect(r.stderr).toContain(`npm dist-tag add ${p}@1.2.2 latest`);
-    expect(r.stderr).not.toContain("1.2.1");
+    expect(calls[0]!.slice(4)).toEqual(PACKAGES.flatMap((p) => ["--previous", `${p}=0.55.0`]));
+    for (const p of PACKAGES) expect(r.stderr).toContain(`npm dist-tag add ${p}@0.55.0 latest`);
+    expect(r.stderr).not.toContain("0.54.9");
   });
 
   test("skew (exit 1) and DID NOT RUN (exit 2) still print the RESTORE lines at once, with no re-run instruction", () => {
@@ -893,7 +893,7 @@ describe("flair#2140: the promote block's final check waits instead of reporting
       expect(r.status, `SKEW_FAIL=${code} stderr:\n${r.stderr}`).toBe(1);
       expect(r.stderr).not.toContain("not a skew verdict");
       expect(r.stderr).not.toContain("RE-RUN the check");
-      for (const p of PACKAGES) expect(r.stderr).toContain(`npm dist-tag add ${p}@1.2.2 latest`);
+      for (const p of PACKAGES) expect(r.stderr).toContain(`npm dist-tag add ${p}@0.55.0 latest`);
     }
   });
 });
@@ -913,7 +913,7 @@ writeFileSync(
     "const args = process.argv.slice(2);",
     "const st = process.env.E2E_STATE;",
     "fs.appendFileSync(path.join(st, 'npm.log'), args.join(' ') + '\\n');",
-    "const PREV = '1.2.2';",
+    "const PREV = '0.55.0';",
     "const movedFile = (pkg) => path.join(st, 'moved-' + encodeURIComponent(pkg));",
     "const movedTo = (pkg) => (fs.existsSync(movedFile(pkg)) ? fs.readFileSync(movedFile(pkg), 'utf8') : null);",
     "if (args[0] === 'dist-tag' && args[1] === 'add') {",

@@ -22,6 +22,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import yaml from "js-yaml";
+import { canaryScriptClosure } from "../helpers/canary-script-closure";
 
 interface Step {
   name?: string;
@@ -458,6 +459,17 @@ describe("release-auto-tag workflow — the trust root is owned by the repo admi
     ]) {
       expect(effectiveOwner(path), `${path} is owned by the repo admin`).toBe("@heskew");
     }
+    // flair#1928 slice 2: EVERY file the canary executes (its install, boot and
+    // plugin checks and their helpers, derived by walking canary.yml) is trust
+    // root too — its PASS gates the automated promote. A helper added to the
+    // canary without an ownership line turns this red.
+    const closure = canaryScriptClosure();
+    const executed = [...closure.shellScripts, ...closure.modules].sort();
+    expect(executed).toContain("scripts/ci/check-instance-boot.sh");
+    expect(executed).toContain("scripts/ci/check-plugin-canary.mjs");
+    for (const path of executed) {
+      expect(effectiveOwner(path), `${path} (canary closure) is owned by the repo admin`).toBe("@heskew");
+    }
     // NEGATIVE CONTROL: a path nobody protected still falls to the catch-all, so
     // the matcher is not trivially returning @heskew for everything.
     expect(effectiveOwner("README.md")).toBe("@tpsdev-ai/reviewers");
@@ -471,7 +483,7 @@ describe("release-auto-tag workflow — the trust root is owned by the repo admi
     expect(matches("/.github/**poll.yml", poll)).toBe(false); // "**" inside a segment stays in it
     expect(matches("/docs/*.md", "docs/nested/file.md")).toBe(false); // "*" never crosses "/"
     expect(matches("/.github/workflows/RELEASE-PROMOTE-POLL.yml", poll)).toBe(false); // case-sensitive
-  });
+  }, 30_000);
 });
 
 describe("CODEOWNERS — the shared Renovate preset is in the trust root (#1930)", () => {
