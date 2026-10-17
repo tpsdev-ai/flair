@@ -5,6 +5,10 @@
  * Raw operations-API inserts remain uncovered until a rescan. Covers signed
  * Memory PUT/PATCH, dedup, recall, /Health, and doctor's last published count
  * in the `excluded` state.
+ *
+ * The signed writes below use the ADMINISTRATOR role: from flair#2573 slice 2 a
+ * non-admin agent write discards a supplied vector, so the untrusted vector a
+ * slice-1 fixture stores comes from an administrator's (or a raw operator) write.
  * A separate instance runs with FLAIR_RETRIEVAL_MODE=vector-only to show
  * that branch falling back and naming the guard state.
  *
@@ -251,7 +255,7 @@ async function spawnWithHarness(env?: Record<string, string>):
   // Register the agent (publicKey) so the ed25519 write/search paths accept it.
   const insert = await h.adminOp({
     operation: "insert", database: "flair", table: "Agent",
-    records: [{ id: AGENT, name: AGENT, role: "agent", publicKey: h.agent.publicKey, createdAt: new Date().toISOString() }],
+    records: [{ id: AGENT, name: AGENT, role: "admin", publicKey: h.agent.publicKey, createdAt: new Date().toISOString() }],
   });
   expect(insert.status).toBe(200);
   return { harper, component, h };

@@ -520,8 +520,8 @@ describe("flair#2407 — a supplied embedding is replaced when redaction changes
     expect(summaryBody.embedding).toEqual(SUPPLIED);
   });
 
-  it("a supplied vector is kept when redaction changes nothing, or changes only `summary`", async () => {
-    const m = makeMemory(agentCtx(AGENT));
+  it("an administrator's supplied vector is kept when redaction changes nothing, or changes only `summary`", async () => {
+    const m = makeMemory(agentCtx(AGENT, true));
     const clean: any = await m.post({ agentId: AGENT, content: "a plain note about the deploy job", embedding: SUPPLIED, embeddingModel: "client-model" });
     const summaryOnly: any = await m.post({
       agentId: AGENT, content: "another plain note about the deploy job", summary: `uses ${SLACK_TOKEN}`, embedding: SUPPLIED, embeddingModel: "client-model",

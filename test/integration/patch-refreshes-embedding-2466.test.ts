@@ -22,7 +22,7 @@
  *   (b) semantic search for the removed text no longer yields the old vector's
  *       high score (the absolute `_score` collapses to the new text's similarity);
  *   (c) a PATCH of a field no embedding is computed from (`summary`) keeps the vector;
- *   (d) a PATCH that SUPPLIES a vector stores that vector, unchanged;
+ *   (d) an administrator's PATCH that SUPPLIES a vector stores that vector, unchanged;
  *   (e) a `trigger`-only PATCH of an ordinary row — plain, or carrying a vector
  *       that redaction removes — keeps the stored vector and its stamps;
  *   (f) an edit of `content` (a PUT) and a `trigger`-only PATCH of the same

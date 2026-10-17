@@ -214,6 +214,12 @@ function memoryFor(id: string) {
   r._targetId = id;
   return r;
 }
+/** The same, acting as an administrator: a supplied vector is kept (flair#2573 slice 2). */
+function adminMemoryFor(id: string) {
+  const r: any = makeMemory(agentCtx(AGENT, true));
+  r._targetId = id;
+  return r;
+}
 const agentCtx = (agentId: string, isAdmin = false) => ({ tpsAgent: agentId, tpsAgentIsAdmin: isAdmin });
 
 beforeEach(() => {
@@ -264,9 +270,9 @@ describe("flair#2466 — ordinary PATCH embedding cases", () => {
     expect(embedInputs).toEqual([]);
   });
 
-  it("a PATCH that supplies a vector stores it and embeds nothing", async () => {
+  it("an administrator's PATCH that supplies a vector stores it and embeds nothing", async () => {
     seed("mem-3", "a note replaced by a supplied vector");
-    const m = memoryFor("mem-3");
+    const m = adminMemoryFor("mem-3");
     await m.patch({ content: "the replacement text", embedding: [0.5, 0.25, 0.125] });
 
     const stored = await (BaseMemory as any).get("mem-3");

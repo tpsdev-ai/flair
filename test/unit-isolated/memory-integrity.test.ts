@@ -2592,7 +2592,7 @@ describe("Memory.patch embedding-space notifications", () => {
     const scan = guard.recomputeLatch();
     await reading;
     try {
-      const m = makeMemory(agentCtx("agent-1"));
+      const m = makeMemory(agentCtx("agent-1", true));
       m._targetId = id;
       await m.patch({ tags: ["metadata-only"] });
       await m.patch({ embedding: [...FAKE_EMBEDDING], embeddingModel: row.embeddingModel });
@@ -2630,7 +2630,7 @@ describe("Memory.patch embedding-space notifications", () => {
       memoryStore.set(id, { id, agentId: "agent-1", content: "unchanged body", createdAt: new Date().toISOString(), embeddingModel: stamp });
       guard._setGuardTableGetterForTests(async () => ({ search: async function* () { yield memoryStore.get(id); } }));
       expect(await guard.recomputeLatch()).toBe(true);
-      const m = makeMemory(agentCtx("agent-1"));
+      const m = makeMemory(agentCtx("agent-1", true));
       m._targetId = id;
       await m.patch({ embedding: FAKE_EMBEDDING });
       expect(memoryStore.get(id).embedding).toEqual(FAKE_EMBEDDING);
@@ -2693,7 +2693,7 @@ it("a trusted PATCH repair invalidates a uniform verdict that did not cover the 
   const id = "raw-untrusted-repair";
   memoryStore.set(id, { id, agentId: "agent-1", content: FINDING_A,
     createdAt: new Date().toISOString(), embedding: FAKE_EMBEDDING, embeddingModel: null });
-  const m: any = makeMemory(agentCtx("agent-1"));
+  const m: any = makeMemory(agentCtx("agent-1", true));
   m._targetId = id;
   await m.patch({ embedding: FAKE_EMBEDDING, embeddingModel: "mock-embedding-model" });
   expect(guard.spaceGuardState().state).toBe("unverified");
