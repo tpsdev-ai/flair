@@ -34,7 +34,8 @@ import * as harper from "harper";
 export interface HarperRoute {
   /** The registered resource Harper dispatches to (its route key). */
   resource: string;
-  /** The final record id, after content-type-suffix and property parsing; null for a collection. */
+  /** The final record id, after content-type-suffix and property parsing. Null for
+   *  a collection route (`isCollection`) and when `recordIdUnresolved`. */
   recordId: string | null;
   /** The property selector Harper parsed from a `.<declared attribute>` suffix, if any. */
   property: string | null;
@@ -84,6 +85,9 @@ export function routeWithHarper(rawTarget: string, headers: unknown): HarperRout
     return { resource, recordId: null, property: null, isCollection: false, decisionPath, recordIdUnresolved: true };
   }
   const isCollection = target.isCollection === true;
+  // A collection route addresses no single record, so it carries no record id,
+  // whatever id RequestTarget reports for the remainder (`x/` reports `x/`).
+  if (isCollection) return { resource, recordId: null, property: null, isCollection, decisionPath, recordIdUnresolved: false };
   let recordId: string | null = typeof target.id === "string" ? target.id : (target.id == null ? null : String(target.id));
   let property: string | null = null;
 

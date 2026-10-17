@@ -41,6 +41,7 @@ import {
   componentWithOwnerGuardLoadFailure,
   LOAD_FAILURE_MARKER,
   ARM_FILE,
+  armFor,
   type FailingComponent,
 } from "../helpers/owner-guard-load-failure-component";
 import { OMITTED_TRIGGER_REL } from "../helpers/component-without-migration-boot";
@@ -134,8 +135,8 @@ const owner = mkAgent("rtr-owner");
 const other = mkAgent("rtr-other");
 const NOW = new Date().toISOString();
 
-/** Arm / disarm the injected marker-id row-load failure via the ROOTPATH sentinel. */
-function arm(): void { writeFileSync(join(harper.installDir, ARM_FILE), "1"); }
+/** Arm the injected row-load failure for one exact id / disarm it, via the ROOTPATH sentinel. */
+function arm(id: string): void { writeFileSync(join(harper.installDir, ARM_FILE), armFor(id)); }
 function disarm(): void { const p = join(harper.installDir, ARM_FILE); if (existsSync(p)) rmSync(p, { force: true }); }
 
 function signed(agent: TestAgent, method: string, target: string, body?: unknown, extra: Record<string, string> = {}): Promise<RawResponse> {
@@ -225,6 +226,8 @@ beforeAll(async () => {
   await seed("Asset", { id: "rtr-safe", agentId: owner.id, memoryId: "m0", contentType: "image/png", createdAt: NOW });
   await seed("Asset", { id: "rtr-safe/victim", agentId: other.id, memoryId: "m-victim", contentType: "image/png", createdAt: NOW });
   await seed("Asset", { id: "rtr-own/slash", agentId: owner.id, memoryId: "m-own", contentType: "image/png", createdAt: NOW });
+  // An other-owned row whose id ends in `/`, the id Harper's RequestTarget reports for a trailing-slash collection target.
+  await seed("Asset", { id: "rtr-coll/", agentId: other.id, memoryId: "m-coll", contentType: "image/png", createdAt: NOW });
   // (3) Backfill: an other-owned Memory row the create's header will name.
   await seed("Memory", { id: "rtr-victim-mem", agentId: other.id, content: "victim content", durability: "persistent", createdAt: NOW, updatedAt: NOW });
 }, HARPER_START_BUDGET_MS);
@@ -256,22 +259,18 @@ describe("(1) the owner guard decides on the full routed record id", () => {
   }, 60_000);
 
   it("a non-owner PATCH of a content-type-SUFFIXED id is decided by the middleware's stored-owner read", async () => {
-    // A non-admin PATCH to a suffixed address whose stored row cannot be read
-    // answers the middleware's own named 503 owner_lookup_failed: the middleware
-    // reads the stored row before the resource owner guard can run, and the
-    // resource guard's refusal is a 403 with a different body. That 503 is
-    // produced only by the middleware's stored-owner read, so this observes the
-    // middleware's decision on the id Harper routes to rather than accepting an
-    // authentication or resource-guard refusal.
-    //
     // `/Asset/<id>.json` routes to Asset id `<id>`: Harper strips the `.json`
-    // content-type suffix.
+    // content-type suffix. The injected load failure is armed for the EXACT id
+    // `<id>` only, and the middleware's named 503 owner_lookup_failed answers only
+    // when the middleware's stored-owner read of `<id>` fails (the resource
+    // layer's own refusals carry different error names). So the named 503 shows
+    // the middleware read the id Harper routes to.
     const id = `${LOAD_FAILURE_MARKER}-suffix-${randomUUID()}`;
     await seed("Asset", { id, agentId: other.id, memoryId: "m-victim", contentType: "image/png", createdAt: NOW });
     const before = await readRow("Asset", id, ["id", "agentId", "memoryId"]);
     expect(before?.agentId, "the other-owned row was not seeded").toBe(other.id);
 
-    arm();
+    arm(id);
     try {
       const res = await signed(owner, "PATCH", `/Asset/${id}.json`, { memoryId: "m-hijacked-suffix" });
       expect(res.status, `/Asset/${id}.json → ${res.status}: ${res.body.slice(0, 200)}`).toBe(503);
@@ -280,6 +279,28 @@ describe("(1) the owner guard decides on the full routed record id", () => {
       disarm();
     }
     expect(await readRow("Asset", id, ["id", "agentId", "memoryId"]), "the suffixed PATCH changed the other-owned row").toEqual(before);
+  }, 60_000);
+
+  it("a non-admin mutation of a trailing-slash collection target is not decided as the row whose id ends in `/`", async () => {
+    // `/Asset/rtr-coll/` is a collection target (Harper's RequestTarget reports
+    // isCollection, with id `rtr-coll/`). It gets the collection answer: the
+    // resource's named 403 for a non-admin write that addresses no single record,
+    // and a create for POST. The stored `rtr-coll/` row is unchanged throughout.
+    const before = await readRow("Asset", "rtr-coll/", ["*"]);
+    expect(before?.agentId).toBe(other.id);
+    for (const [method, body] of [
+      ["PATCH", { memoryId: "m-coll-changed" }],
+      ["PUT", { memoryId: "m-coll-changed", contentType: "image/png" }],
+      ["DELETE", undefined],
+    ] as const) {
+      const res = await signed(owner, method, "/Asset/rtr-coll/", body);
+      expect(res.status, `${method} → ${res.status}: ${res.body.slice(0, 200)}`).toBe(403);
+      expect(JSON.parse(res.body).error, method).toBe("forbidden: a non-admin write to Asset must address one record by its id");
+      expect(await readRow("Asset", "rtr-coll/", ["*"]), `${method} changed the row`).toEqual(before);
+    }
+    const post = await signed(owner, "POST", "/Asset/rtr-coll/", { memoryId: "m-coll-new", contentType: "image/png" });
+    expect(post.status, `POST → ${post.status}: ${post.body.slice(0, 200)}`).toBeLessThan(300);
+    expect(await readRow("Asset", "rtr-coll/", ["*"]), "POST changed the row").toEqual(before);
   }, 60_000);
 });
 

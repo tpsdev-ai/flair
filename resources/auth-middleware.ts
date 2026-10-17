@@ -299,9 +299,9 @@ function ownerReadFailedRefusal(table: string): Response {
 }
 
 /**
- * A signed non-admin agent's mutation is refused when Harper's route lookup
- * threw: the owner decisions need Harper's route, and the pure fallback does not
- * stand in for it. 503 because a retry can succeed. The message is fixed and
+ * A signed non-admin agent's mutation that reaches the owner checks is refused
+ * when Harper's route lookup threw: the owner decisions need Harper's route, and
+ * the pure fallback does not stand in for it. 503 because a retry can succeed. The message is fixed and
  * names no part of the target.
  */
 function routeLookupFailedRefusal(): Response {
@@ -313,10 +313,11 @@ function routeLookupFailedRefusal(): Response {
 }
 
 /**
- * A signed non-admin agent's mutation whose target Harper matched, but whose
- * record id Harper's `RequestTarget` could not resolve, is refused before any
- * owner decision: those decisions need the id. 400: the target cannot be parsed into a record id. The
- * message is fixed and names no part of the target.
+ * A signed non-admin agent's mutation that reaches the owner checks, whose target
+ * Harper matched but whose record id Harper's `RequestTarget` could not resolve,
+ * is refused before any owner decision: those decisions need the id. 400: the
+ * target cannot be parsed into a record id. The message is fixed and names no
+ * part of the target.
  */
 function unresolvedTargetRefusal(): Response {
   return new Response(JSON.stringify({
@@ -402,8 +403,10 @@ server.http(async (request: any, nextLayer: any) => {
   // harper-routing.ts). The pure mirror in request-target.ts is the fallback when
   // no route is returned: the live registry or Harper's `RequestTarget` is absent
   // (a unit test mocking `harper`), the target matches no route, or the matcher
-  // throws. When the matcher throws, a signed non-admin agent's mutation is
-  // refused instead (below), before any owner decision.
+  // throws. When the matcher throws, a signed non-admin agent's mutation that
+  // reaches the owner checks is refused instead (below), before any owner
+  // decision; the checks that run earlier (e.g. the rate limit and the raw-query
+  // refusal) still answer first.
   let routed: HarperRoute | null = null;
   let routeLookupFailed = false;
   try {
@@ -803,9 +806,11 @@ server.http(async (request: any, nextLayer: any) => {
   const method = request.method.toUpperCase();
   const isMutation = method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE";
 
-  // A signed non-admin agent's mutation is refused before the owner decisions
-  // below when Harper's route lookup threw, or when Harper matched the target but
-  // its RequestTarget could not resolve the record id.
+  // A signed non-admin agent's mutation that reaches this point (the earlier
+  // checks, e.g. the rate limit and the raw-query refusal, answer first) is
+  // refused before the owner decisions below when Harper's route lookup threw, or
+  // when Harper matched the target but its RequestTarget could not resolve the
+  // record id.
   if (isMutation && !request.tpsAgentIsAdmin && routeLookupFailed) {
     return routeLookupFailedRefusal();
   }

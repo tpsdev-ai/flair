@@ -32,6 +32,7 @@ import {
   componentWithOwnerGuardLoadFailure,
   LOAD_FAILURE_MARKER,
   ARM_FILE,
+  armFor,
   type FailingComponent,
 } from "../helpers/owner-guard-load-failure-component";
 
@@ -259,9 +260,9 @@ describe("OrgEvent and WorkspaceState delete lookups refuse a failed stored-row 
       const id = markerId(c.tag);
       await seedRow(c.table, id, c.seed);
       const prior = await readRow(c.table, id);
-      // The shared owner rule's read is the first marker load and succeeds; the
+      // The shared owner rule's read is this id's first load and succeeds; the
       // delete lookup's read is the next one and fails.
-      writeFileSync(join(harper.installDir, ARM_FILE), "pass:1");
+      writeFileSync(join(harper.installDir, ARM_FILE), armFor(id, 1));
       let res: Response;
       let text: string;
       try {

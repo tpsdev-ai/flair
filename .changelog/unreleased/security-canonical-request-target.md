@@ -9,8 +9,9 @@
   `%5C`) is handled by the row it routes to. `flair federation pair` strips
   trailing slashes from the hub URL before using or storing it, so a trailing
   slash does not add an empty segment to the appended route. A signed non-admin
-  agent's POST, PUT, PATCH or DELETE is refused with a named
-  `503 route_lookup_failed` when Harper's route lookup fails, before any
-  ownership decision. A signed non-admin agent's OrgEvent or WorkspaceState
+  agent's POST, PUT, PATCH or DELETE that reaches the ownership checks is refused
+  with a named `503 route_lookup_failed` when Harper's route lookup fails, before
+  any ownership decision; earlier checks, such as the rate limit and the
+  raw-query refusal, answer first. A signed non-admin agent's OrgEvent or WorkspaceState
   DELETE is refused with `503 owner_lookup_failed` when a stored-row read it
   depends on fails.

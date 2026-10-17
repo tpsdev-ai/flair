@@ -25,13 +25,19 @@ export const LOAD_FAILURE_MARKER = "load-fail-2468";
 
 /**
  * Sentinel file, created under the Harper instance ROOTPATH, that arms the
- * injected failure. The wrapper is installed either way; present → a marker-id
- * load throws; absent → every load is delegated to the original method. Lets
- * the test seed data first, then flip the switch. A file whose content is
- * `pass:<n>` lets the next n marker-id loads succeed (counting down in the file)
- * and fails the ones after.
+ * injected failure. The wrapper is installed either way; absent → every load is
+ * delegated to the original method. Lets the test seed data first, then flip the
+ * switch. Present with the content `armFor(id, pass)` writes → only loads of that
+ * EXACT id are affected: the next `pass` of them succeed (counted down in the
+ * file) and the ones after throw. Present with any other content → every
+ * marker-id load throws.
  */
 export const ARM_FILE = "owner-guard-load-fail-armed";
+
+/** The sentinel content that arms the failure for one exact id, after `pass` successful loads of it. */
+export function armFor(id: string, pass = 0): string {
+  return JSON.stringify({ id, pass });
+}
 
 /** Where the composed copy writes the patched-load module (a top-level built
  *  resource file, so `config.yaml`'s `jsResource.files: dist/resources/*.js`
@@ -48,8 +54,10 @@ import { join } from "node:path";
 const MARKER = ${JSON.stringify(LOAD_FAILURE_MARKER)};
 const ARM_FILE = ${JSON.stringify(ARM_FILE)};
 
-// Called for marker-id loads only, so a \`pass:<n>\` count is spent on them alone.
-function armed() {
+// Whether this marker-id load fails. A JSON sentinel ({"id", "pass"}) arms one
+// exact id, after "pass" successful loads of it; any other content arms every
+// marker id.
+function failsFor(id) {
   const file = join(process.env.ROOTPATH ?? "", ARM_FILE);
   let text;
   try {
@@ -58,11 +66,12 @@ function armed() {
     if (e && e.code === "ENOENT") return false;
     throw e;
   }
-  const m = /^pass:(\\d+)$/.exec(text.trim());
-  if (!m) return true;
-  const left = Number(m[1]);
+  if (!text.trim().startsWith("{")) return true;
+  const armed = JSON.parse(text);
+  if (armed.id !== id) return false;
+  const left = Number(armed.pass ?? 0);
   if (left <= 0) return true;
-  writeFileSync(file, "pass:" + (left - 1));
+  writeFileSync(file, JSON.stringify({ ...armed, pass: left - 1 }));
   return false;
 }
 
@@ -92,7 +101,7 @@ function patch(name) {
     writable: true,
     value: function (target, request, options) {
       const id = target && typeof target === "object" ? target.id : target;
-      if (typeof id === "string" && id.includes(MARKER) && armed()) {
+      if (typeof id === "string" && id.includes(MARKER) && failsFor(id)) {
         throw new Error(
           "test component: forced stored-row read failure at Harper's load point (" + name + " id=" + id + ")",
         );
