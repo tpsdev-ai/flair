@@ -2,7 +2,7 @@
  * server-owned-vectors-2573.test.ts — flair#2573 slice 2 (real Harper).
  * Omit the boot migration trigger so seeded foreign or unstamped vectors are not re-embedded during the test.
  *
- * Non-admin Memory writes discard caller-supplied vectors and model stamps.
+ * Non-admin Memory writes discard caller-supplied vectors and model stamps that differ from the stored row's.
  * Embedding is computed when the resulting write needs one.
  * Administrator and trusted in-process writes are unchanged.
  * Empty-vector normalization and the re-embed request protocol are unchanged;
@@ -30,7 +30,13 @@
  *   (i) an agent skill PUT that carries a stored vector keeps the vector's stored
  *       stamp, never the caller's;
  *   (j) a signed non-admin array POST is refused and stores no row;
- *   (k) an administrator stamp-only skill PUT keeps the administrator's stamp.
+ *   (k) an administrator stamp-only skill PUT keeps the administrator's stamp;
+ *   (l) archiving a non-admin's own vector-bearing row leaves `embedding` and
+ *       `embeddingModel` unchanged, with the model present and (second Harper)
+ *       with the engine unavailable;
+ *   (m) a non-admin PUT re-sending the stored vector with a different stamp keeps
+ *       the stored stamp;
+ *   (n) a non-admin PUT whose vector differs from the stored one is discarded.
  *
  * Throwaway HOME, ephemeral ports. Each spawned Harper is this test's own
  * instance; see assertOwnInstance.
@@ -151,6 +157,16 @@ function makeHarness(get: () => HarperInstance) {
     const res = await adminOp({ operation: "insert", database: "flair", table: "Memory", records: [record] });
     expect(res.status, `seed ${record.id}: ${(await res.clone().text()).slice(0, 300)}`).toBe(200);
   }
+  /** POST /MemoryArchive as `who`. */
+  async function archive(id: string, action: "basement" | "restore", who: TestAgent = agent): Promise<Response> {
+    const path = "/MemoryArchive";
+    return fetch(`${get().httpURL}${path}`, {
+      signal: AbortSignal.timeout(15_000),
+      method: "POST",
+      headers: { Authorization: ed25519Header(who, "POST", path), "Content-Type": "application/json" },
+      body: JSON.stringify({ id, action }),
+    });
+  }
   /** /Health carries the embedding-space guard's published verdict. */
   async function health(): Promise<any> {
     const res = await fetch(`${get().httpURL}/Health`, { signal: AbortSignal.timeout(15_000) });
@@ -183,7 +199,7 @@ function makeHarness(get: () => HarperInstance) {
     }
     return space;
   }
-  return { agent, adminAgent, adminOp, write, basicWrite, row, serverVectorFor, register, seed, health, semanticSearch, consult, waitGuard };
+  return { agent, adminAgent, adminOp, write, basicWrite, archive, row, serverVectorFor, register, seed, health, semanticSearch, consult, waitGuard };
 }
 
 function assertOwnInstance(h: HarperInstance): void {
@@ -418,6 +434,22 @@ describe("flair#2573 slice 2 — crafted-vector writes with a failed embedding b
     expect(stored.embeddingModel ?? null).toBeNull();
   }, 180_000);
 
+  test("(l) archiving a non-admin's own vector-bearing row leaves embedding and embeddingModel unchanged with the engine unavailable", async () => {
+    const id = `s2-nomodel-archive-${randomUUID()}`;
+    const vector = new Array<number>(DIM).fill(0.25);
+    await h.seed({
+      id, agentId: h.agent.id, content: `archive body ${id}`, visibility: "shared", durability: "standard",
+      createdAt: new Date().toISOString(), instanceToken: randomUUID(),
+      embedding: vector, embeddingModel: "foreign-stamp",
+    });
+    const res = await h.archive(id, "basement");
+    expect(res.status, (await res.clone().text()).slice(0, 300)).toBe(200);
+    const r = await h.row(id);
+    expect(r.archived).toBe(true);
+    expect(r.embedding, "the stored vector survives the archive").toEqual(vector);
+    expect(r.embeddingModel, "the stored stamp survives the archive").toBe("foreign-stamp");
+  }, 60_000);
+
   (HAS_MODEL ? test : test.skip)("(g) the backfill embeds the vectorless row and stamps it once the model is available", async () => {
     const id = `s2-backfill-${randomUUID()}`;
     const post = await h.write("POST", id, { id, agentId: h.agent.id, content: TXT("backfill"), visibility: "shared", embedding: CRAFTED(), embeddingModel: "forged-model-stamp" });
@@ -532,6 +564,45 @@ describe("flair#2573 slice 2 — a non-admin write cannot relabel a stored vecto
     expect(r.embedding, "the carried vector is stored unchanged").toEqual(CRAFTED());
     expect(r.embeddingModel, "a carried vector keeps its stored stamp, never the caller's").toBe(FOREIGN_STAMP);
   }, 180_000);
+
+  test("(l) archiving a non-admin's own vector-bearing row leaves embedding and embeddingModel unchanged", async () => {
+    const id = `s2-archive-${randomUUID()}`;
+    await seedVector(id, FOREIGN_STAMP);
+    const before = await h.row(id);
+    expect(before.embedding).toEqual(CRAFTED());
+    const res = await h.archive(id, "basement");
+    expect(res.status, (await res.clone().text()).slice(0, 300)).toBe(200);
+    const r = await h.row(id);
+    expect(r.archived).toBe(true);
+    expect(r.embedding, "the stored vector survives the archive").toEqual(before.embedding);
+    expect(r.embeddingModel, "the stored stamp survives the archive").toBe(FOREIGN_STAMP);
+  }, 120_000);
+
+  test("(m) a non-admin PUT re-sending the stored vector with a different stamp keeps the stored stamp", async () => {
+    const id = `s2-resend-${randomUUID()}`;
+    await seedVector(id, FOREIGN_STAMP);
+    const res = await h.write("PUT", id, {
+      id, agentId: h.agent.id, content: `stored text for ${id}`, visibility: "shared", durability: "standard",
+      embedding: CRAFTED(), embeddingModel: CURRENT_STAMP,
+    });
+    expect(res.status, (await res.clone().text()).slice(0, 300)).toBeLessThan(300);
+    const r = await h.row(id);
+    expect(r.embedding, "the re-sent stored vector is kept").toEqual(CRAFTED());
+    expect(r.embeddingModel, "the caller's stamp is not stored").toBe(FOREIGN_STAMP);
+  }, 120_000);
+
+  test("(n) a non-admin PUT with a vector that differs from the stored one is discarded", async () => {
+    const id = `s2-differs-${randomUUID()}`;
+    await seedVector(id, FOREIGN_STAMP);
+    const other = new Array<number>(DIM).fill(2);
+    const res = await h.write("PUT", id, {
+      id, agentId: h.agent.id, content: `stored text for ${id}`, visibility: "shared", durability: "standard",
+      embedding: other, embeddingModel: FOREIGN_STAMP,
+    });
+    expect(res.status, (await res.clone().text()).slice(0, 300)).toBeLessThan(300);
+    const r = await h.row(id);
+    expect(r.embedding, "the differing vector is not stored").not.toEqual(other);
+  }, 120_000);
 
   test("(k) an administrator stamp-only skill PUT keeps the administrator's stamp", async () => {
     const id = `s2-admin-skill-${randomUUID()}`;
