@@ -85,7 +85,8 @@ function mockTransaction(ctx: any, cb: (txn: any) => any): any {
   return result;
 }
 
-const { runSkillVersionWrite, resolveSkillHead, closedSkillPayloadReadable, defaultSkillHooks, prepareSkillBody } = await import("../../resources/skill-version-write.ts");
+const { runSkillVersionWrite, resolveSkillHead, closedSkillPayloadReadable, defaultSkillHooks, prepareSkillBody, buildSkillSuccessorRow } = await import("../../resources/skill-version-write.ts");
+const { discardSuppliedVector, hasSuppliedEmbedding, suppliesEmbeddingModel } = await import("../../resources/memory-supplied-vector.ts");
 const { recordDigest, valueDigest } = await import("../../resources/instruction-version-record.ts");
 const { deriveSkillSubjectId } = await import("../../resources/skill-subject.ts");
 
@@ -380,21 +381,54 @@ for (const empty of [[], new Float32Array(0), new Uint8Array(0)]) {
 describe("carried skill vector stamps", () => {
   const stored = { tags: ["skill"], content: "procedure", trigger: "when needed", embedding: [1, 2, 3], embeddingModel: "stored-model" };
 
+  test("a non-admin supplied vector without a stamp discards the inherited skill stamp", async () => {
+    const auth = { kind: "agent" as const, agentId: "agent-a", isAdmin: false };
+    const input = { embedding: [4, 5, 6] };
+    const supplied = { vector: hasSuppliedEmbedding(input.embedding), stamp: suppliesEmbeddingModel(input) };
+    const prepared = await prepareSkillBody(input, stored, auth);
+    if (prepared instanceof Response) throw new Error(await prepared.text());
+    expect(prepared.content.embedding).toEqual(input.embedding);
+    expect(prepared.content.embeddingModel).toBe(stored.embeddingModel);
+    expect(discardSuppliedVector(prepared.content, auth, supplied)).toBe(true);
+    expect(prepared.content).not.toHaveProperty("embedding");
+    expect(prepared.content).not.toHaveProperty("embeddingModel");
+    const successor = buildSkillSuccessorRow({
+      auth, base: prepared.content, predecessorRow: stored, successorId: "successor", subjectId: "skill",
+      supersedes: "skill", now: new Date().toISOString(),
+    });
+    expect(successor).not.toHaveProperty("embedding");
+    expect(successor).not.toHaveProperty("embeddingModel");
+  });
+
   test.each([
     { label: "administrator", auth: { kind: "agent" as const, agentId: "admin", isAdmin: true } },
     { label: "trusted in-process caller", auth: { kind: "internal" as const } },
   ])("$label keeps its replacement stamp", async ({ auth }) => {
     const prepared = await prepareSkillBody({ embeddingModel: "replacement-model" }, stored, auth);
     if (prepared instanceof Response) throw new Error(await prepared.text());
+    expect(discardSuppliedVector(prepared.content, auth, { vector: false, stamp: true })).toBe(false);
     expect(prepared.content.embedding).toEqual(stored.embedding);
     expect(prepared.content.embeddingModel).toBe("replacement-model");
+    const successor = buildSkillSuccessorRow({
+      auth, base: { embeddingModel: "replacement-model" }, predecessorRow: stored, successorId: "successor",
+      subjectId: "skill", supersedes: "skill", now: new Date().toISOString(),
+    });
+    expect(successor.embedding).toEqual(stored.embedding);
+    expect(successor.embeddingModel).toBe("replacement-model");
   });
 
   test.each(["stored-model", undefined])("a non-admin retains the stored stamp %s", async (stamp) => {
     const source = { ...stored, embeddingModel: stamp };
     const prepared = await prepareSkillBody({ embeddingModel: "replacement-model" }, source, { kind: "agent", agentId: "agent-a", isAdmin: false });
     if (prepared instanceof Response) throw new Error(await prepared.text());
+    expect(discardSuppliedVector(prepared.content, { kind: "agent", agentId: "agent-a", isAdmin: false }, { vector: false, stamp: true })).toBe(false);
     expect(prepared.content.embedding).toEqual(stored.embedding);
     expect(prepared.content.embeddingModel).toBe(stamp);
+    const successor = buildSkillSuccessorRow({
+      auth: { kind: "agent", agentId: "agent-a", isAdmin: false }, base: prepared.content, predecessorRow: source,
+      successorId: "successor", subjectId: "skill", supersedes: "skill", now: new Date().toISOString(),
+    });
+    expect(successor.embedding).toEqual(stored.embedding);
+    expect(successor.embeddingModel).toBe(stamp);
   });
 });

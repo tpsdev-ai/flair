@@ -377,6 +377,31 @@ describe("flair#2573 slice 2 — crafted-vector writes with a failed embedding b
     }
   }, 120_000);
 
+  test("a non-admin skill PUT with a supplied vector and no stamp stores neither vector nor inherited stamp when the model is unavailable", async () => {
+    const id = `s2-nomodel-skill-${randomUUID()}`;
+    await h.seed({
+      id, agentId: h.agent.id, content: `skill body ${id}`, trigger: `when skill ${id} runs`,
+      tags: ["skill"], durability: "persistent", visibility: "shared", skillSubjectId: id,
+      createdAt: new Date().toISOString(), instanceToken: randomUUID(),
+      embedding: new Array<number>(DIM).fill(0.5), embeddingModel: "stored-model-stamp",
+    });
+    let res: Response | null = null;
+    let text = "";
+    for (let attempt = 0; attempt < 60; attempt++) {
+      res = await h.write("PUT", id, { content: `updated skill body ${id}`, embedding: CRAFTED() });
+      text = await res.clone().text();
+      if (res.status !== 503 || !text.includes("instruction_version_lock_unavailable")) break;
+      await Bun.sleep(500);
+    }
+    expect(res!.status, text.slice(0, 300)).toBeLessThan(300);
+    const written = JSON.parse(text) as any;
+    const stored = await h.row(typeof written.id === "string" ? written.id : id);
+    expect(stored).not.toBeNull();
+    expect(stored.content).toBe(`updated skill body ${id}`);
+    expect(stored.embedding ?? null).toBeNull();
+    expect(stored.embeddingModel ?? null).toBeNull();
+  }, 180_000);
+
   (HAS_MODEL ? test : test.skip)("(g) the backfill embeds the vectorless row and stamps it once the model is available", async () => {
     const id = `s2-backfill-${randomUUID()}`;
     const post = await h.write("POST", id, { id, agentId: h.agent.id, content: TXT("backfill"), visibility: "shared", embedding: CRAFTED(), embeddingModel: "forged-model-stamp" });

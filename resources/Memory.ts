@@ -1335,6 +1335,7 @@ async function writeSkillCreateOrUpdate(
       if (reembedInPlace) successorId = String(head.id);
       const liveHead = head;
       const successor = buildSkillSuccessorRow({
+        auth,
         base: { ...content, agentId: liveHead?.agentId ?? content.agentId }, predecessorRow: liveHead, successorId, subjectId,
         // An in-place (reserved seed) write keeps the same physical id, so it
         // sets no `supersedes` and closes no row.
@@ -1876,8 +1877,7 @@ export class Memory extends (databases as any).flair.Memory {
     if (isEmptyEmbedding(content?.embedding)) delete content.embedding;
     // flair#2573 slice 2: did the CALLER supply a non-null embedding, and/or an
     // `embeddingModel` stamp? Captured before prepareSkillBody can merge a stored
-    // row's vector into the body, so only the caller's own values are discarded
-    // below (a carried vector and the stamp beside it are not).
+    // row's vector into the body.
     const postSuppliedVector = hasSuppliedEmbedding(content?.embedding);
     const postSuppliedStamp = suppliesEmbeddingModel(content);
     // The visibility the caller named, before any merge or default fills it.
@@ -3007,8 +3007,7 @@ export class Memory extends (databases as any).flair.Memory {
         // separate flag needed. NEVER suppresses the write either way.
         // flair#2573 slice 2: a non-admin write's caller-supplied vector and stamp
         // are discarded here, after redaction and before the dedup gate and the
-        // embed step (see post()). Only the CALLER's values are discarded; a
-        // vector prepareSkillBody carried and the stamp it keeps are not.
+        // embed step (see post()).
         if (putSuppliedVector || putSuppliedStamp) {
           discardSuppliedVector(content, auth, { vector: putSuppliedVector, stamp: putSuppliedStamp });
         }

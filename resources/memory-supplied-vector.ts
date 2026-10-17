@@ -45,7 +45,7 @@ export function discardSuppliedVector(
     delete content.embedding;
     discarded = true;
   }
-  if (supplied.stamp && !carriedVector) {
+  if ((supplied.vector || supplied.stamp) && !carriedVector) {
     delete content.embeddingModel;
     discarded = true;
   }

@@ -77,12 +77,10 @@ export async function closedSkillPayloadReadable(
 }
 
 /**
- * Build the successor Memory row for a superseded skill. It carries the
- * predecessor's fields (a partial body merges over them), a fresh physical id,
- * the carried `skillSubjectId`, `supersedes`, a fresh incarnation token, and no
- * closed-row markers. Declared attributes only.
+ * Build the successor Memory row for a superseded skill. Declared attributes only.
  */
 export function buildSkillSuccessorRow(args: {
+  auth: AgentAuthVerdict;
   base: any;
   predecessorRow: Record<string, any> | null;
   successorId: string;
@@ -90,8 +88,13 @@ export function buildSkillSuccessorRow(args: {
   supersedes: string | null;
   now: string;
 }): Record<string, any> {
-  const { base, predecessorRow, successorId, subjectId, supersedes, now } = args;
+  const { auth, base, predecessorRow, successorId, subjectId, supersedes, now } = args;
   const row: Record<string, any> = predecessorRow ? { ...predecessorRow, ...base } : { ...base };
+  if (!keepsSuppliedVector(auth)) {
+    for (const field of ["embedding", "embeddingModel"]) {
+      if (!Object.prototype.hasOwnProperty.call(base, field)) delete row[field];
+    }
+  }
   row.id = successorId;
   row.skillSubjectId = subjectId;
   if (supersedes) row.supersedes = supersedes;
