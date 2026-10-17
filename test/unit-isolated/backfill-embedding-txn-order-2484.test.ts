@@ -164,9 +164,7 @@ beforeEach(() => {
   stagedCommits = new Map();
 });
 
-// A Harper-shaped write result carrying the committed id: the backfill reads
-// the committed id from the writer's own response body (flair#2263), so the
-// next layer must return it for the backfill to run.
+// This fixture supplies a body id for backfill; PUT/PATCH also support the routed-id fallback.
 const resultLayer = (id: string) => () => ({ status: 200, headers: { get: () => null }, body: JSON.stringify({ id, written: true }) } as any);
 
 async function runBackfill(id: string): Promise<void> {

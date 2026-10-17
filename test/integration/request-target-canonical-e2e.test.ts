@@ -5,9 +5,7 @@
  * ordinary signed writes, reads and deletes on canonical targets — including a
  * record id containing `/`, sent as `%2F` — work exactly as before.
  *
- * Every request here goes over a RAW socket, so the request target reaches
- * Harper byte for byte as written: `fetch` (and Bun's node:http client) would
- * normalize the path first.
+ * Every REST request under test goes over a raw socket.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";

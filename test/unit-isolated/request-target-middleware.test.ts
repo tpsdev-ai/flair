@@ -2,8 +2,8 @@
  * request-target-middleware.test.ts — the auth middleware decides only about a
  * canonical request target, and reads it the way Harper routes it.
  *
- * 1. A non-canonical raw target (a `.`/`..` segment, raw or percent-encoded; an
- *    empty segment; a raw backslash) is answered with the named 400
+ * 1. A non-canonical raw target (a `.`/`..` segment, raw or percent-encoded;
+ *    repeated slashes; a raw backslash) is answered with the named 400
  *    `non_canonical_request_target` before any other request processing: no
  *    header read, no method check, no credential read, no next layer.
  * 2. With no live route registry (this file's `harper` mock has none unless a
@@ -132,8 +132,7 @@ function makeRequest(url: string, method: string, authorization?: string, user?:
 
 let nextCalls = 0;
 const next = () => { nextCalls++; return new Response("ok", { status: 200 }); };
-// A Harper-shaped write result: the backfill reads the committed id from the
-// writer's own response body, so a stub that drives the backfill must carry one.
+// This fixture supplies a body id for backfill; PUT/PATCH also support the routed-id fallback.
 const resultNext = (id: string, status = 200) => () => {
   nextCalls++;
   return { status, headers: { get: () => null }, body: JSON.stringify({ id, written: true }) } as any;

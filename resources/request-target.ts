@@ -25,7 +25,7 @@
  *
  *   - a `.` or `..` segment, raw or percent-encoded as a whole segment
  *     (`%2e`, `%2E%2e`, `.%2e`, …);
- *   - an empty segment: `//` anywhere in the path;
+ *   - repeated slashes (`//`) anywhere in the path;
  *   - a raw backslash.
  *
  * Everything else is canonical, including `%2F` and `%5C` inside a segment, a
@@ -71,7 +71,8 @@ export function nonCanonicalRequestTargetRefusal(method?: string): Response {
 
 /**
  * The raw path's segments, split on `/` FIRST and still percent-encoded.
- * Empty segments are dropped (a canonical path has none but the leading one).
+ * Empty segments are dropped. Canonical paths permit leading and trailing
+ * boundary segments; repeated slashes are refused.
  */
 export function rawPathSegments(path: string): string[] {
   return path.split("/").filter(Boolean);
@@ -132,10 +133,8 @@ export function routedRecordId(path: string): { resource: string; id: string } |
 /**
  * Harper's first-dot property rule (`Resource.parsePath`): when the text after
  * the id's FIRST dot is a declared attribute of the resource, that suffix is a
- * property selector and the row is addressed by the id BEFORE the dot. Returns
- * the id Harper reads, given the resource's declared attribute names. A suffix
- * that is not a declared attribute is left as part of the id, exactly as Harper
- * leaves it.
+ * property selector and the row is addressed by the id BEFORE the dot.
+ * Applies only the declared-attribute rule; content-type extensions remain for Harper.
  */
 export function routedIdAfterPropertyRule(id: string, declaredAttributes: ReadonlySet<string>): string {
   const dot = id.indexOf(".");

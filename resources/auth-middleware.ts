@@ -66,16 +66,8 @@ function stripMemorySelection(rawUrl: string, routedToMemoryRecord: boolean): st
   let pathPart = q === -1 ? rawUrl : rawUrl.slice(0, q);
   let query = q === -1 ? "" : rawUrl.slice(q + 1);
 
-  // Path form: Harper reads a trailing `.<declared>` on the id as `property`.
-  // Decide on the SAME id Harper routes: RequestTarget decodes the WHOLE
-  // remainder after `/Memory` (`this.id = decodeURIComponent(path)`) and
-  // Resource.parsePath splits that full id at its FIRST dot — not the last path
-  // segment. So the middleware decodes the full remainder and applies the same
-  // first-dot rule, or it would rewrite to a DIFFERENT row than Harper reads
-  // (e.g. `/Memory/a.b/x.agentId`, whose first-dot suffix is not a declared
-  // attribute, must be left whole). `%2E`/`%2e` IS a dot to Harper, so deciding
-  // on the decoded id covers a percent-encoded dot. A suffix that is not a
-  // declared attribute stays part of the id, exactly as Harper leaves it.
+  // Apply Harper's first-dot declared-attribute rule to the decoded remainder.
+  // Content-type extensions remain for Harper.
   const { remainder } = routedResourceAndRemainder(pathPart);
   const decodedId = decodeMemoryIdSegment(remainder);
   const stripped = routedIdAfterPropertyRule(decodedId, DECLARED_MEMORY_ATTRIBUTE_SET);
@@ -364,8 +356,8 @@ const ALLOWED_HTTP_METHODS: ReadonlySet<string> = new Set([
 // itself a resource, so a suffixed form (`OAuthToken.json`) would otherwise miss
 // the OAuth budget or the public allowance it routes to. Only names in this set are
 // resolved; any other first segment is left exactly as sent, so no unrelated path is
-// rewritten. The raw-query block resolves `sql`/`graphql` separately, on its
-// lower-cased path. At request time the live route registry resolves the FIRST
+// rewritten. The raw-query fallback resolves `sql`/`graphql` before lowercasing
+// the path. At request time the live route registry resolves the FIRST
 // segment instead (see `routedDecisionPath` below).
 const NAME_ROUTED_RESOURCES: ReadonlySet<string> = new Set([
   "health", "Health", "a2a", "A2AAdapter", "AgentCard",
@@ -379,7 +371,7 @@ server.http(async (request: any, nextLayer: any) => {
   // ── Canonical request target, FIRST ────────────────────────────────────────
   // This check reads the RAW request target, the string Harper routes. A target
   // that is not in canonical form (a `.`/`..` segment, raw or percent-encoded;
-  // an empty segment; a raw backslash) is answered with the named 400 here,
+  // repeated slashes; a raw backslash) is answered with the named 400 here,
   // before any other request processing: no method check, no rate-limit budget,
   // no credential read, no next layer. See resources/request-target.ts.
   const rawTarget: string = typeof request.url === "string" ? request.url : String(request.url ?? "");

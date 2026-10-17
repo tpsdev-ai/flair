@@ -1,7 +1,7 @@
 - **The default REST request middleware answers a request whose target is not in canonical form with a named 400, before any other request processing.**
 
-  A request target with a `.` or `..` path segment (raw or percent-encoded), an
-  empty path segment, or a raw backslash gets
+  A request target with a `.` or `..` path segment (raw or percent-encoded),
+  repeated slashes (`//`), or a raw backslash gets
   `400 {"error":"non_canonical_request_target"}`. For a target that passes and
   matches a default REST route, the request middleware resolves the resource,
   record id and property through Harper's own routing, so a request that

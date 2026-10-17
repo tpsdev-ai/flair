@@ -27,10 +27,9 @@ export const LOAD_FAILURE_MARKER = "load-fail-2468";
  * Sentinel file, created under the Harper instance ROOTPATH, that arms the
  * injected failure. The wrapper is installed either way; absent → every load is
  * delegated to the original method. Lets the test seed data first, then flip the
- * switch. Present with the content `armFor(id, pass)` writes → only loads of that
- * EXACT id are affected: the next `pass` of them succeed (counted down in the
- * file) and the ones after throw. Present with any other content → every
- * marker-id load throws.
+ * switch. A legacy text sentinel (trimmed content not starting with `{`) makes
+ * every marker-id load throw. The JSON sentinel `armFor(id, pass)` affects only
+ * that exact id: the next `pass` loads succeed, then throw. `{}` admits all marker ids.
  */
 export const ARM_FILE = "owner-guard-load-fail-armed";
 
@@ -54,9 +53,9 @@ import { join } from "node:path";
 const MARKER = ${JSON.stringify(LOAD_FAILURE_MARKER)};
 const ARM_FILE = ${JSON.stringify(ARM_FILE)};
 
-// Whether this marker-id load fails. A JSON sentinel ({"id", "pass"}) arms one
-// exact id, after "pass" successful loads of it; any other content arms every
-// marker id.
+// A legacy text sentinel (trimmed content not starting with "{") arms every
+// marker id. A JSON sentinel arms only its exact id after "pass" successful
+// loads; {} admits all marker ids.
 function failsFor(id) {
   const file = join(process.env.ROOTPATH ?? "", ARM_FILE);
   let text;

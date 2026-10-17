@@ -3,10 +3,11 @@
 // PUT/PATCH/DELETE to owner-scoped tables served by table-extending resources.
 //
 // The auth middleware's stored-owner check runs first on an addressed URL and
-// returns the owner refusal. If reached, the guard checks string or number body
+// returns the owner refusal when stored ownership denies the caller.
+// If reached, the guard checks string or number body
 // ids before stored ownership. Whichever check decides, it decides on the id
 // Harper resolves from the canonical request target (an encoded slash is part of
-// the id); a non-canonical target (an empty segment or a dot segment) is refused
+// the id); a non-canonical target (repeated slashes or a dot segment) is refused
 // with the named 400 before any routing. Collection PUT/PATCH/DELETE is refused;
 // collection POST follows the resource.
 //
@@ -592,7 +593,7 @@ describe("owner-scoped writes: non-admin addressed writes and collection PUT/PAT
   // exist: `r` and the resolved id, each owned by a different principal. A caller
   // that owns the resolved row writes it, and only it; a caller that owns `r` but
   // not the resolved row is refused with the owner refusal. Both rows are read
-  // back in every case. A non-canonical target (an empty segment or a dot
+  // back in every case. A non-canonical target (repeated slashes or a dot
   // segment) is refused with the named 400 before any routing, so it never
   // reaches the id resolution or the ownership check.
   describe("an addressed write is decided on the id Harper resolves from the request target", () => {
