@@ -115,7 +115,7 @@ export class FeedMemories extends Resource {
       }
     }
 
-    const preparedSkill = await prepareSkillBody(content, existingRecord);
+    const preparedSkill = await prepareSkillBody(content, existingRecord, auth);
     if (preparedSkill instanceof Response) return preparedSkill;
     content = preparedSkill.content;
     let redactedValues = redactMemoryWrite(content).count;

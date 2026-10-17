@@ -9,6 +9,7 @@ import { SKILL_TAG, enforceSkillDurability, skillEmbedText, skillMetadataHasDupl
 import { stripUndeclaredMemoryAttributes } from "./memory-declared-attributes.js";
 import { skillWriteSource } from "./skill-write-policy.js";
 import type { AgentAuthVerdict } from "./agent-auth.js";
+import { keepsSuppliedVector } from "./memory-supplied-vector.js";
 import { FORBIDDEN } from "./record-type-kit.js";
 import { PRIVATE_VISIBILITY, SHARED_VISIBILITY } from "./memory-visibility.js";
 import { maybeThrowSkillWriteFault } from "./skill-write-fault.js";
@@ -138,7 +139,7 @@ export function skillWriteConflict(error: string): Response {
   return Response.json({ error }, { status: 409 });
 }
 
-export async function prepareSkillBody(content: any, stored: Record<string, any> | null) {
+export async function prepareSkillBody(content: any, stored: Record<string, any> | null, auth: AgentAuthVerdict) {
   let predecessor: any = null;
   if (typeof content.supersedes === "string" && content.supersedes.length > 0) {
     // flair#2307: a failed read of the `supersedes` target refuses the write
@@ -179,11 +180,9 @@ export async function prepareSkillBody(content: any, stored: Record<string, any>
   // is never kept. A Feed successor stores this value; Memory.post()/put() keep
   // it when they store the carried vector, and otherwise set their own.
   const sourceHasVector = Array.isArray(source.embedding) && source.embedding.length > 0;
-  // flair#2573 slice 2: a vector this body carried in from `source` keeps the
-  // stamp stored beside it — a caller's replacement `embeddingModel` is never
-  // applied to a stored vector. A body-supplied vector, by contrast, is
-  // discarded by the Memory write itself (see memory-supplied-vector.ts).
-  if (content.embedding === undefined && sourceHasVector && textUnchanged) {
+  // Non-admin writes keep a carried vector's stored stamp. Administrator and
+  // trusted in-process writes may replace it and may supply their own vector.
+  if (!keepsSuppliedVector(auth) && content.embedding === undefined && sourceHasVector && textUnchanged) {
     if (source.embeddingModel === undefined) delete effective.embeddingModel;
     else effective.embeddingModel = source.embeddingModel;
   }

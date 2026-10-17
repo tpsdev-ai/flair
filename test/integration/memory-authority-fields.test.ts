@@ -5,6 +5,7 @@ import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS, HARPER_START_BUDGET_MS } from "../helpers/harper-lifecycle";
+import { nodeBin } from "../helpers/node-runtime.js";
 
 const agent = (id: string) => ({ id, ...nacl.sign.keyPair() });
 const owner = agent("authority-owner"), other = agent("authority-other");
@@ -157,8 +158,9 @@ describe("Memory authority fields over HTTP", () => {
     try {
       await writeFile(join(home, `${owner.id}.key`), owner.secretKey.slice(0, 32), { mode: 0o600 });
       const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(FLAIR_|HARPER_|HDB_|FABRIC_)/.test(key)));
-      const child = Bun.spawn(["bun", "dist/cli.js", "rem", "promote", "cli-candidate", "--to", "memory", "--rationale", "verified rollback procedure"], {
-        env: { ...env, HOME: home, FLAIR_URL: harper.httpURL, FLAIR_AGENT_ID: owner.id, FLAIR_KEY_DIR: home }, stdout: "pipe", stderr: "pipe",
+      const childEnv = { ...env, HOME: home, FLAIR_URL: harper.httpURL, FLAIR_AGENT_ID: owner.id, FLAIR_KEY_DIR: home };
+      const child = Bun.spawn([nodeBin({ env: childEnv }), "dist/cli.js", "rem", "promote", "cli-candidate", "--to", "memory", "--rationale", "verified rollback procedure"], {
+        env: childEnv, stdout: "pipe", stderr: "pipe", timeout: 20_000,
       });
       const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
       expect(code, stderr).toBe(0);

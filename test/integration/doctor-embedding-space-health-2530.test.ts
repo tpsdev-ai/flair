@@ -35,6 +35,7 @@ import { createServer, type Server } from "node:http";
 import { createServer as createNetServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { nodeBin } from "../helpers/node-runtime";
 
 const CLI = join(process.cwd(), "dist", "cli.js");
 const VERSION = (JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf-8")) as { version: string }).version;
@@ -108,7 +109,7 @@ function runDoctor(port: number): Promise<{ code: number | null; stdout: string 
     };
     delete env.FLAIR_ADMIN_PASS;
     delete env.FLAIR_AGENT_ID;
-    const child = spawn(process.execPath, [CLI, "doctor", "--port", String(port)], { env, timeout: 90_000 });
+    const child = spawn(nodeBin({ env }), [CLI, "doctor", "--port", String(port)], { env, timeout: 90_000 });
     let stdout = "";
     child.stdout?.on("data", (d: Buffer) => { stdout += d.toString(); });
     child.stderr?.on("data", () => {});

@@ -105,7 +105,7 @@ describe("baseline comes from the trusted base ref (flair#1825 item 1)", () => {
     expect(r.ok).toBe(true);
   });
 
-  it("an entry whose offender is gone goes STALE (the list can only shrink)", () => {
+  it("an entry whose offender is gone goes STALE", () => {
     const { dir, baseSha } = mk({
       "scripts/ci/cli-spawn-budgets.baseline.json": JSON.stringify(
         [{ file: "test/base.test.ts", scope: "gone", fingerprint: `["bun","src/cli.ts","status"] ; {}`, kind: "spawn-no-timeout", occurrence: 0, reason: "r" }],

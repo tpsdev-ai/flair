@@ -13,6 +13,10 @@ import {
   type ProbeSignalSender,
 } from "../../src/doctor-client.ts";
 import { classifyHookDelivery } from "../../src/hook-install.ts";
+const reasonedDeliveryRunner = (command: string, timeoutMs: number) => runProbeInOwnGroup(command, timeoutMs, {
+  input: "{}", env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise real hook delivery process groups",
+    FLAIR_HOOK_PROBE: "0", FLAIR_HOOK_DELIVERY_PROBE: "1", FLAIR_HOOK_TIMEOUT_MS: "4000", FLAIR_PRESENCE_TIMEOUT_MS: "1" },
+});
 const RECORD_DIR_ENV = "FLAIR_PROBE_RECORD_DIR";
 const RECORD_PGID = `printf '%s' "$$" > "$FLAIR_PROBE_RECORD_DIR/pgid"`;
 const RECORD_CHILD = `printf '%s' "$!" > "$FLAIR_PROBE_RECORD_DIR/child"`;
@@ -102,7 +106,7 @@ describe("flair#2385 — the hook-status probe's process-group cleanup", () => {
     () => {
       const dir = freshRecordDir();
 
-      const outcome = probeSessionStartHookDelivery(probeCommand(), { timeoutMs: TIMEOUT_DEADLINE_MS });
+      const outcome = probeSessionStartHookDelivery(probeCommand(), { timeoutMs: TIMEOUT_DEADLINE_MS, runner: reasonedDeliveryRunner });
       expect(outcome.timedOut).toBe(true);
       expect(outcome.cleanupError ?? null).toBeNull();
       const pgid = recordedInt(dir, "pgid");
@@ -118,7 +122,7 @@ describe("flair#2385 — the hook-status probe's process-group cleanup", () => {
     () => {
       const dir = freshRecordDir();
 
-      const outcome = probeSessionStartHookDelivery(probeCommandShellExits(), { timeoutMs: 8_000 });
+      const outcome = probeSessionStartHookDelivery(probeCommandShellExits(), { timeoutMs: 8_000, runner: reasonedDeliveryRunner });
       expect(outcome.timedOut).toBe(false);
       expect(outcome.cleanupError ?? null).toBeNull();
       const pgid = recordedInt(dir, "pgid");
@@ -137,7 +141,7 @@ describe("flair#2385 — the hook-status probe's process-group cleanup", () => {
 
       const outcome = runProbeInOwnGroup(`${RECORD_PGID}; printf '{}'`, 8_000, {
         input: "{}",
-        env: process.env,
+        env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise real hook probe process groups" },
         kill: recordingKill(sent),
       });
 
@@ -169,7 +173,7 @@ describe("flair#2385 — the hook-status probe's process-group cleanup", () => {
       const outcome = runProbeInOwnGroup(
         `trap '' TERM; (exec sleep 60) & ${RECORD_PGID}; ${RECORD_CHILD}; printf '%s' '${delivered}'`,
         8_000,
-        { input: "{}", env: process.env, kill: dropKill },
+        { input: "{}", env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise real hook probe process groups" }, kill: dropKill },
       );
 
       const child = recordedInt(dir, "child");
@@ -218,7 +222,7 @@ describe("flair#2385 — the probe's captured output and temp directory", () => 
     `output over ${HOOK_PROBE_MAX_OUTPUT_BYTES} bytes on stdout or stderr is reported as an overflow; exactly that many is not`,
     () => {
       const tmpRoot = freshDir("flair-probe-tmp-");
-      const run = (cmd: string) => runProbeInOwnGroup(cmd, 8_000, { input: "", env: process.env, tmpRoot });
+      const run = (cmd: string) => runProbeInOwnGroup(cmd, 8_000, { input: "", env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise real hook probe process groups" }, tmpRoot });
 
       const exact = run(`head -c ${HOOK_PROBE_MAX_OUTPUT_BYTES} /dev/zero`);
       expect(exact.outputOverflow).toBe(false);
@@ -252,7 +256,7 @@ describe("flair#2385 — the probe's captured output and temp directory", () => 
         return openSync(path, "w+");
       };
 
-      expect(() => runProbeInOwnGroup("printf '{}'", 8_000, { input: "", env: process.env, tmpRoot, openOutput })).toThrow("EMFILE");
+      expect(() => runProbeInOwnGroup("printf '{}'", 8_000, { input: "", env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise real hook probe process groups" }, tmpRoot, openOutput })).toThrow("EMFILE");
       expect(opens).toBe(2);
       expect(readdirSync(tmpRoot)).toEqual([]);
     },

@@ -1,14 +1,11 @@
 /**
  * server-owned-vectors-2573.test.ts — flair#2573 slice 2 (real Harper).
  *
- * A non-admin agent's Memory write never stores a vector the caller supplied. A
- * non-admin POST, PUT or PATCH that carries a non-empty `embedding` discards the vector and
- * its `embeddingModel` stamp before the write, so the write stores the vector the
- * server computes for the row's own post-redaction text, or none when the model is
- * unavailable — exactly as a write that sent no vector. A body-level
- * `embeddingModel` stamp with no `embedding` is discarded too, so a non-admin
- * write can never relabel a stored vector as current-space. An administrator
- * keeps the vector it carries. `embedding: null` and `[]` are unchanged.
+ * Non-admin Memory writes discard caller-supplied vectors and model stamps.
+ * Embedding is computed when the resulting write needs one. Vector-only PATCHes
+ * and unchanged skill updates retain stored vectors. Non-admin skill updates
+ * retain their stored stamps. Administrator and trusted in-process writes are
+ * unchanged, as are `embedding: null` / `[]` handling.
  *
  * Cases (one Harper with a working embedding engine):
  *   (a) an agent POST, PUT and PATCH, each carrying a crafted all-ones vector,
@@ -31,7 +28,8 @@
  *       recall;
  *   (i) an agent skill PUT that carries a stored vector keeps the vector's stored
  *       stamp, never the caller's;
- *   (j) a signed non-admin array POST is refused and stores no row.
+ *   (j) a signed non-admin array POST is refused and stores no row;
+ *   (k) an administrator stamp-only skill PUT keeps the administrator's stamp.
  *
  * Throwaway HOME, ephemeral ports. Each spawned Harper is this test's own
  * instance; see assertOwnInstance.
@@ -63,7 +61,7 @@ function modelFile(): string | null {
 const HAS_MODEL = modelFile() !== null;
 
 const DIM = 768;
-/** A crafted vector: every entry 1. Never the server's vector for any text. */
+/** A crafted vector: every entry is 1. */
 const CRAFTED = () => new Array<number>(DIM).fill(1);
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
@@ -290,7 +288,7 @@ function assertOwnInstance(h: HarperInstance): void {
   }, 60_000);
 });
 
-describe("flair#2573 slice 2 — a crafted vector with no embedding model stores no vector (real Harper)", () => {
+describe("flair#2573 slice 2 — crafted-vector writes with a failed embedding backend (real Harper)", () => {
   let harper: HarperInstance;
   let h: ReturnType<typeof makeHarness>;
   let homeDir = "";
@@ -386,11 +384,7 @@ describe("flair#2573 slice 2 — a non-admin write cannot relabel a stored vecto
     if (harper) await stopHarper(harper);
   }, HARPER_STOP_BUDGET_MS);
 
-  /** Store a vector a non-admin writer would never accept: a signed
-   *  administrator PUT with a crafted vector and a foreign (`stamp`) or absent
-   *  stamp (`null`). The signed write also marks the guard's count stale, so the
-   *  next recall consult rescans and counts the untrusted vector. The non-admin
-   *  write under test must leave that stamp alone. */
+  /** Seed a foreign or unstamped vector through an administrator PUT using Basic auth. */
   async function seedVector(id: string, stamp: string | null): Promise<void> {
     const res = await h.basicWrite("PUT", id, {
       id, agentId: h.agent.id, content: `stored text for ${id}`, visibility: "shared", durability: "standard",
@@ -450,6 +444,30 @@ describe("flair#2573 slice 2 — a non-admin write cannot relabel a stored vecto
     const r = await h.row(target);
     expect(r.embedding, "the carried vector is stored unchanged").toEqual(CRAFTED());
     expect(r.embeddingModel, "a carried vector keeps its stored stamp, never the caller's").toBe(FOREIGN_STAMP);
+  }, 180_000);
+
+  test("(k) an administrator stamp-only skill PUT keeps the administrator's stamp", async () => {
+    const id = `s2-admin-skill-${randomUUID()}`;
+    await h.seed({
+      id, agentId: h.agent.id, content: `skill body ${id}`, trigger: `when skill ${id} runs`,
+      tags: ["skill"], durability: "persistent", visibility: "shared", skillSubjectId: id,
+      createdAt: new Date().toISOString(), instanceToken: randomUUID(),
+      embedding: CRAFTED(), embeddingModel: FOREIGN_STAMP,
+    });
+    const administratorStamp = "administrator-replacement-stamp";
+    let res: Response | null = null;
+    let text = "";
+    for (let attempt = 0; attempt < 60; attempt++) {
+      res = await h.basicWrite("PUT", id, { embeddingModel: administratorStamp });
+      text = await res.clone().text();
+      if (res.status !== 503 || !text.includes("instruction_version_lock_unavailable")) break;
+      await Bun.sleep(500);
+    }
+    expect(res!.status, text.slice(0, 300)).toBeLessThan(300);
+    const written = JSON.parse(text) as any;
+    const r = await h.row(typeof written.id === "string" ? written.id : id);
+    expect(r.embedding).toEqual(CRAFTED());
+    expect(r.embeddingModel).toBe(administratorStamp);
   }, 180_000);
 
   test("(j) a signed non-admin array POST is refused and stores no row", async () => {

@@ -38,7 +38,7 @@ const PACKAGES = lockstepPackages();
 const CERTIFIED_DIGEST = createHash("sha256").update("certified-package-set").digest("hex");
 
 function run(args: string[], env: Record<string, string> = {}) {
-  return spawnSync("bash", [SCRIPT, ...args], { encoding: "utf8", env: { ...process.env, ...env } });
+  return spawnSync("bash", [SCRIPT, ...args], { encoding: "utf8", env: { ...({ ...process.env, ...env }), FLAIR_TEST_ALLOW_BUN_HARPER: "exercise canary-verdict process fixture arguments" } });
 }
 
 const tmpDirs: string[] = [];
@@ -245,7 +245,7 @@ describe("lockstep-packages — the ONE source for the release set", () => {
     return root;
   }
   function runLockstep(root: string) {
-    return spawnSync(process.execPath, [join(root, "scripts", "ci", "lockstep-packages.mjs")], { encoding: "utf8" });
+    return spawnSync(process.execPath, [join(root, "scripts", "ci", "lockstep-packages.mjs")], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise canary-verdict process fixture arguments" }, encoding: "utf8" });
   }
 
   test("an existing-but-malformed manifest is FATAL — no partial list (flair#1781 R2)", () => {

@@ -1,3 +1,4 @@
+import { nodeBin } from "../helpers/node-runtime.ts";
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, lstatSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -22,7 +23,7 @@ function writeSidecarJson(dataDir: string, pid: number): void {
 }
 /** A pid that is CONFIRMED gone: ESRCH only. */
 async function confirmedDeadPid(): Promise<number> {
-  const p = Bun.spawn(["bun", "-e", "process.exit(0)"], { stdout: "ignore", stderr: "ignore" });
+  const p = Bun.spawn([nodeBin(), "-e", "process.exit(0)"], { stdout: "ignore", stderr: "ignore" });
   const pid = (p as unknown as { pid: number }).pid;
   await p.exited;
   for (let i = 0; i < 100; i++) {

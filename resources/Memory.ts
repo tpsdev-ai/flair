@@ -1885,7 +1885,7 @@ export class Memory extends (databases as any).flair.Memory {
     // flair#2465: a body that omits `embedding` can have the stored row's vector
     // carried in by prepareSkillBody, with the hash it retained for that vector.
     const postOmitsEmbedding = content?.embedding === undefined;
-    const preparedSkill = await prepareSkillBody(content, postStored);
+    const preparedSkill = await prepareSkillBody(content, postStored, auth);
     if (preparedSkill instanceof Response) return preparedSkill;
     content = preparedSkill.content;
     let redactedValues = redactMemoryWrite(content).count;
@@ -2067,13 +2067,9 @@ export class Memory extends (databases as any).flair.Memory {
     // this a duplicate of something else" situation — bypass the gate for it
     // (this also gives memory_update's preserveHistory mode dedup-bypass for
     // free, without a separate flag). NEVER suppresses the write either way.
-    // flair#2573 slice 2: a non-admin write's caller-supplied vector and stamp
-    // are discarded here, after redaction and before the dedup gate and the embed
-    // step, so the stored vector is one the server owns — the one it computes for
-    // the row's own post-redaction text, or no vector when the model is
-    // unavailable — as a write that sent none. Only the CALLER's values are
-    // discarded; a vector prepareSkillBody carried from a stored row and the stamp
-    // it keeps are not.
+    // Discard the non-admin caller's vector and stamp after redaction, before
+    // dedup and embedding. Compute an embedding when the resulting write needs
+    // one; an unchanged skill update retains its stored vector.
     if (postSuppliedVector || postSuppliedStamp) {
       discardSuppliedVector(content, auth, { vector: postSuppliedVector, stamp: postSuppliedStamp });
     }
@@ -2297,8 +2293,8 @@ export class Memory extends (databases as any).flair.Memory {
     const redactedValues = redaction.count;
     // flair#2573 slice 2: a non-admin write's caller-supplied vector and stamp
     // are discarded here, after redaction (see post()/put()). A stamp-only body
-    // (no `embedding`) has its stamp discarded too, so a PATCH can never relabel
-    // a stored vector. The PATCH then behaves exactly as one that sent neither.
+    // (no `embedding`) has its stamp discarded too, so a non-admin PATCH cannot
+    // relabel a stored vector. The PATCH then behaves exactly as one that sent neither.
     const patchSuppliedVector = hasSuppliedVector((content as any)?.embedding);
     const patchSuppliedStamp = suppliesEmbeddingModel(content);
     if (!reembedRequest && (patchSuppliedVector || patchSuppliedStamp)) {
@@ -2845,7 +2841,7 @@ export class Memory extends (databases as any).flair.Memory {
         // stored row's vector into the body.
         const putSuppliedVector = hasSuppliedVector(content?.embedding);
         const putSuppliedStamp = suppliesEmbeddingModel(content);
-        const preparedSkill = await prepareSkillBody(content, preExisting);
+        const preparedSkill = await prepareSkillBody(content, preExisting, auth);
         if (preparedSkill instanceof Response) return preparedSkill;
         content = preparedSkill.content;
         const operatorSeed = isOperatorSeedPut(ctx, auth, writeTargetIds(this, content));

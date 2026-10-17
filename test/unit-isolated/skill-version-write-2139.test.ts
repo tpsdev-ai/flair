@@ -85,7 +85,7 @@ function mockTransaction(ctx: any, cb: (txn: any) => any): any {
   return result;
 }
 
-const { runSkillVersionWrite, resolveSkillHead, closedSkillPayloadReadable, defaultSkillHooks } = await import("../../resources/skill-version-write.ts");
+const { runSkillVersionWrite, resolveSkillHead, closedSkillPayloadReadable, defaultSkillHooks, prepareSkillBody } = await import("../../resources/skill-version-write.ts");
 const { recordDigest, valueDigest } = await import("../../resources/instruction-version-record.ts");
 const { deriveSkillSubjectId } = await import("../../resources/skill-subject.ts");
 
@@ -376,3 +376,25 @@ for (const empty of [[], new Float32Array(0), new Uint8Array(0)]) {
     expect(memoryStore.get("root")?.embedding).toBeNull();
   });
 }
+
+describe("carried skill vector stamps", () => {
+  const stored = { tags: ["skill"], content: "procedure", trigger: "when needed", embedding: [1, 2, 3], embeddingModel: "stored-model" };
+
+  test.each([
+    { label: "administrator", auth: { kind: "agent" as const, agentId: "admin", isAdmin: true } },
+    { label: "trusted in-process caller", auth: { kind: "internal" as const } },
+  ])("$label keeps its replacement stamp", async ({ auth }) => {
+    const prepared = await prepareSkillBody({ embeddingModel: "replacement-model" }, stored, auth);
+    if (prepared instanceof Response) throw new Error(await prepared.text());
+    expect(prepared.content.embedding).toEqual(stored.embedding);
+    expect(prepared.content.embeddingModel).toBe("replacement-model");
+  });
+
+  test.each(["stored-model", undefined])("a non-admin retains the stored stamp %s", async (stamp) => {
+    const source = { ...stored, embeddingModel: stamp };
+    const prepared = await prepareSkillBody({ embeddingModel: "replacement-model" }, source, { kind: "agent", agentId: "agent-a", isAdmin: false });
+    if (prepared instanceof Response) throw new Error(await prepared.text());
+    expect(prepared.content.embedding).toEqual(stored.embedding);
+    expect(prepared.content.embeddingModel).toBe(stamp);
+  });
+});

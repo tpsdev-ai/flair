@@ -11,6 +11,7 @@
  * tests pin it against a REAL unreaped child, and pin the fail-safe: an
  * unreadable state stays alive, never a false "exited".
  */
+import { shellScript } from "../helpers/shell-script.ts";
 import { afterAll, describe, expect, test } from "bun:test";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -47,7 +48,7 @@ afterAll(() => {
  */
 function spawnZombieHelper(): Promise<{ zombiePid: number; helper: ChildProcess }> {
   return new Promise((resolve, reject) => {
-    const helper = spawn("sh", ["-c", "sleep 0.1 & echo $!; exec sleep 300"], {
+    const helper = spawn("sh", [shellScript("sleep 0.1 & echo $!; exec sleep 300")], {
       stdio: ["ignore", "pipe", "ignore"],
       timeout: IS_DARWIN ? DARWIN_CASE_TIMEOUT_MS : CASE_TIMEOUT_MS,
       killSignal: "SIGKILL",

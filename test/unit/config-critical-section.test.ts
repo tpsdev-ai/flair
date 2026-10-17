@@ -484,7 +484,7 @@ function functionBody(src: string, name: string): string {
 // ── boundary — the DOCTOR hook sinks write only through the primitive ─────────
 
 describe("import boundary over the migrated DOCTOR sink module", () => {
-  it("src/doctor-client.ts routes each of the four hook-file writers through the primitive; fixClaudeMdBootstrap is the only raw write left", () => {
+  it("src/doctor-client.ts routes hook-file writers through the primitive", () => {
     const src = readFileSync(join(import.meta.dirname, "..", "..", "src", "doctor-client.ts"), "utf-8");
     expect(src).toContain('from "./lib/config-critical-section.js"');
 
@@ -502,10 +502,8 @@ describe("import boundary over the migrated DOCTOR sink module", () => {
       expect(functionBody(src, sink), `${sink} does not route through the primitive`).toContain("withConfigCriticalSection(");
     }
 
-    // fixClaudeMdBootstrap is the ONLY remaining raw writeFileSync in the
-    // module — it writes CLAUDE.md, which is not a hook config file.
     const rawWrites = [...src.matchAll(/writeFileSync\(/g)];
-    expect(rawWrites.length, "expected exactly ONE raw writeFileSync in doctor-client.ts").toBe(1);
+    expect(rawWrites.length, "raw writes are CLAUDE.md and the temporary probe wrapper").toBe(2);
     expect(functionBody(src, "fixClaudeMdBootstrap")).toContain("writeFileSync(");
     for (const sink of sinks) {
       expect(functionBody(src, sink), `${sink} still carries a raw writeFileSync`).not.toContain("writeFileSync(");

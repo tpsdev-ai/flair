@@ -26,6 +26,7 @@ import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { childOverranDeadline, cliLeg } from "../helpers/child-deadline";
+import { nodeBin } from "../helpers/node-runtime";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 
 const CLI = join(process.cwd(), "dist", "cli.js");
@@ -56,16 +57,17 @@ function runDoctor(adminPass: string): Promise<RunResult> {
   return new Promise((resolve, reject) => {
     const args = ["doctor", "--port", new URL(harper.httpURL).port];
     const startedAt = Date.now();
-    const child = spawn(process.execPath, [CLI, ...args], {
-      env: {
-        ...process.env,
-        HOME: cliHome,
-        FLAIR_URL: harper.httpURL,
-        FLAIR_OPS_PORT: new URL(harper.opsURL).port,
-        FLAIR_TOKEN: "",
-        FLAIR_ADMIN_PASS: adminPass,
-        NO_COLOR: "1",
-      },
+    const env = {
+      ...process.env,
+      HOME: cliHome,
+      FLAIR_URL: harper.httpURL,
+      FLAIR_OPS_PORT: new URL(harper.opsURL).port,
+      FLAIR_TOKEN: "",
+      FLAIR_ADMIN_PASS: adminPass,
+      NO_COLOR: "1",
+    };
+    const child = spawn(nodeBin({ env }), [CLI, ...args], {
+      env,
       timeout: 20_000,
     });
     let stdout = "";

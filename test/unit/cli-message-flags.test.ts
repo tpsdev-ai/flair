@@ -50,6 +50,7 @@
 // text, and the one-to-one test fails when an entry matches no finding or more
 // than one, or a finding matches more than one entry. So a second message with an exempted flag is
 // not covered by the first one's entry, and a fixed defect's entry has to go.
+import { shellScript } from "../helpers/shell-script.ts";
 import { describe, expect, test, spyOn } from "bun:test";
 import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
@@ -757,7 +758,7 @@ describe("flair#2116 — flags named in src/ literals are declared by the comman
       const env: Record<string, string> = { ...process.env, HOME: home } as Record<string, string>;
       delete env.FLAIR_ADMIN_PASS;
       delete env.FLAIR_OPS_TARGET;
-      const child = Bun.spawn(["/bin/sh", "-c", shellCommand], {
+      const child = Bun.spawn(["/bin/sh", shellScript(shellCommand)], {
         timeout: 20_000,
         env,
         stdout: "pipe",

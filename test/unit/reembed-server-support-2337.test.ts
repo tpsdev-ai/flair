@@ -20,6 +20,7 @@ import { join, resolve } from "node:path";
 import nacl from "tweetnacl";
 import { tempDir } from "../helpers/temp-dir";
 import { ensureCliBuild } from "../helpers/build-cli-once.js";
+import { nodeBin } from "../helpers/node-runtime.js";
 import { getModelId } from "../../resources/embeddings-provider.ts";
 import {
   MEMORY_REEMBED_PATCH_CAPABILITY,
@@ -106,8 +107,9 @@ function runReembed(port: number, home: string, args: string[] = []): Promise<{ 
   // event loop would leave its requests unanswered. The child still carries its
   // own deadline via the `timeout` option and a per-case budget below.
   return new Promise((resolveRun) => {
-    const child = spawn(process.execPath, [CLI, "reembed", "--agent", "agent-a", "--port", String(port), ...args], {
-      env: { ...env, HOME: home },
+    const childEnv = { ...env, HOME: home };
+    const child = spawn(nodeBin({ env: childEnv }), [CLI, "reembed", "--agent", "agent-a", "--port", String(port), ...args], {
+      env: childEnv,
       timeout: 60_000,
       killSignal: "SIGTERM",
     });

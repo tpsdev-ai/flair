@@ -100,7 +100,7 @@ const sampleSubs: FederationSchedulerSubstitutions = {
 
 function have(cmd: string): boolean {
   try {
-    execFileSync(cmd, ["--version"], { stdio: "pipe" });
+    execFileSync(cmd, ["--version"], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise federation-scheduler process fixture arguments" }, stdio: "pipe" });
     return true;
   } catch (e: any) {
     return e?.code !== "ENOENT";
@@ -131,11 +131,11 @@ function parsePlist(plistText: string): any {
   writeFileSync(path, plistText);
   const seen: any[] = [];
   if (HAS_PLUTIL) {
-    execFileSync("plutil", ["-lint", path], { stdio: "pipe" });
-    seen.push(JSON.parse(execFileSync("plutil", ["-convert", "json", "-o", "-", path], { encoding: "utf-8" })));
+    execFileSync("plutil", ["-lint", path], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise federation-scheduler process fixture arguments" }, stdio: "pipe" });
+    seen.push(JSON.parse(execFileSync("plutil", ["-convert", "json", "-o", "-", path], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise federation-scheduler process fixture arguments" }, encoding: "utf-8" })));
   }
   if (HAS_PYTHON) {
-    seen.push(JSON.parse(execFileSync("python3", ["-c", PY_DUMP, path], { encoding: "utf-8", stdio: "pipe" })));
+    seen.push(JSON.parse(execFileSync("python3", ["-c", PY_DUMP, path], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise federation-scheduler process fixture arguments" }, encoding: "utf-8", stdio: "pipe" })));
   }
   if (seen.length === 0) {
     throw new Error("no plist parser available (need plutil or python3) — refusing to skip a parse check");
@@ -379,7 +379,7 @@ describe("shim", () => {
   it("is syntactically valid /bin/sh", () => {
     enableScheduler(baseOpts({ platformOverride: "linux" }));
     // -n parses without executing. Throws on a syntax error.
-    execFileSync("/bin/sh", ["-n", shimPath], { stdio: "pipe" });
+    execFileSync("/bin/sh", ["-n", shimPath], { env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise federation-scheduler process fixture arguments" }, stdio: "pipe" });
   });
 });
 

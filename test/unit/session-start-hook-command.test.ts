@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { shellScript } from "../helpers/shell-script.ts";
 
 import {
   SESSION_START_HOOK_MARKER,
@@ -44,11 +45,8 @@ interface Run {
   stderr: string;
 }
 
-/** Run a hook command the way Claude Code does: `<shell> -c "<command>"`.
- *  Claude Code itself always uses /bin/sh (it spawns with `shell: true` and
- *  never consults $SHELL), which is why /bin/sh is the mandatory leg below. */
 function runCommand(command: string, shell: string, path: string): Run {
-  const res = spawnSync(shell, ["-c", command], {
+  const res = spawnSync(shell, [shellScript(command)], {
     input: "",
     encoding: "utf-8",
     timeout: 20_000,

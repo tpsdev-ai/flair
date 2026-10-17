@@ -59,9 +59,7 @@ async function authSend(harper: HarperInstance, agent: TestAgent, method: string
   });
 }
 async function seedAgent(harper: HarperInstance, agent: TestAgent): Promise<void> {
-  // The administrator role: the fixtures below store a caller-supplied vector for
-  // the write's backfill to replace, and from flair#2573 slice 2 only an
-  // administrator's (or operator) write keeps a supplied vector.
+  // These administrator fixtures store a supplied vector for the backfill to replace.
   const res = await adminOp(harper, {
     operation: "insert", database: "flair", table: "Agent",
     records: [{ id: agent.id, name: agent.id, role: "admin", publicKey: agent.publicKey, createdAt: new Date().toISOString() }],

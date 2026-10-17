@@ -2613,8 +2613,6 @@ describe("Memory.patch embedding-space notifications", () => {
     memoryStore.set(id, { id, agentId: "agent-1", content: "unchanged body", createdAt: new Date().toISOString(), embedding: FAKE_EMBEDDING, embeddingModel: "mock-embedding-model" });
     guard._setGuardTableGetterForTests(async () => ({ search: async function* () { yield memoryStore.get(id); } }));
     expect(await guard.recomputeLatch()).toBe(true);
-    // flair#2573 slice 2: only an administrator's stamp-only PATCH may change the
-    // stamp; a non-admin stamp is discarded (server-owned-vectors-2573).
     const m = makeMemory(agentCtx("agent-1", true));
     m._targetId = id;
     await m.patch({ embeddingModel: null });

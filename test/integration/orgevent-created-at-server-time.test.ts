@@ -20,10 +20,10 @@
  *     row is unchanged, for agents and admin agents alike, including a stored
  *     createdAt that is an empty string; an update that omits createdAt keeps
  *     the stored value;
- *   - a record that reaches the check with an id it does not read (anything
- *     but a non-empty string or a non-empty array of strings, the empty string
- *     included) is refused with `invalid_event_id` (400) before any write, and
- *     a stored row under such an id is unchanged; a composite id is read;
+ *   - after POST normalization and earlier guards, POST and PUT ids outside
+ *     a non-empty string or a non-empty array of strings get `invalid_event_id`
+ *     (400) before any write. PATCH checks the addressed path id. Trusted
+ *     server-originated internal PUT/PATCH skip the id check in _assignCreatedAt;
  *   - malformed bodies reaching the POST, PUT and PATCH resource methods are
  *     refused with `body_must_be_object` (400), except admitted arrays of records,
  *     before the resource method's authentication, attribution, ownership and
@@ -33,12 +33,12 @@
  *     the address; any other id type is left unchanged by this step. At the
  *     root collection an absent, null or empty body id gets a generated id. At
  *     POST id validation, at the root collection or an addressed path whose
- *     body id was not bound, a remaining id that is not a non-empty string or
- *     a non-empty array of strings receives `invalid_event_id` (400);
+ *     body id was not bound, a remaining id that the shared id rule does not
+ *     read receives `invalid_event_id` (400);
  *   - for malformed ids and bodies, the status each caller gets is pinned, with
  *     a refusal's `error` or `code` field, including input answered before the
- *     check (attribution, the owner-scoped write guard, Harper's own
- *     validation);
+ *     check (attribution, the owner-scoped write guard, Flair's body guard
+ *     (`body_must_be_object`), Harper's own validation);
  *   - the catch-up feed delivers events in timestamp and ID order, so events
  *     with one server time are delivered in ID order (checked on a second,
  *     frozen-clock instance with IDs in reverse write order);
@@ -740,28 +740,22 @@ describe("a composite (array of strings) id follows the same createdAt rule", ()
 });
 
 describe("what each malformed id or body gets", () => {
-  // The createdAt check answers only for input that reaches it. At the root
-  // collection, POST generates an id when the body's id is missing, null or
-  // empty, and refuses every other id that is not a non-empty string or a
-  // non-empty array of strings with invalid_event_id (400) before its
-  // ownership lookup. A non-admin collection PUT is refused by the owner-scoped
-  // write guard (403) whatever its body; other input is answered earlier by
-  // attribution or Harper's own validation. A refused case asserts the status
-  // plus its `error` field (flair refusals; the collection refusal's whole
-  // body) or `code` field (Harper's problem details); a generated-id POST case
-  // asserts a 2xx and exactly one row with a generated id. Storage is checked
-  // for the id cases (a refused one stores no row with its summary, and a
-  // stored row under the id it names is byte-for-byte unchanged), single-record
-  // PUT bodies (no row at the path), PATCH (the row is unchanged) and the
-  // non-admin collection-element cases (the table's row count is unchanged);
-  // the POST-body and admin collection-element cases check only the response.
+  // Earlier refusals include the owner-scoped write guard (403), attribution,
+  // Flair's body guard (`body_must_be_object`) and Harper's own validation.
+  // A refused case asserts the status plus its `error` field (flair refusals;
+  // the collection refusal's whole body) or `code` field (Harper's problem
+  // details); a generated-id POST
+  // case asserts a 2xx and exactly one row with a generated id. Storage is
+  // checked for POST id cases by rows found by summary; collection PUT id cases
+  // check the table count and, when present, the named row's bytes, as well as
+  // rows found by summary. Single-record PUT bodies check no row at the path;
+  // PATCH checks the row is unchanged. The POST-body cases check only the response.
   type Expect = { status: number; error?: string; code?: string; body?: Record<string, unknown> };
   const INVALID: Expect = { status: 400, error: INVALID_ID };
   const COLLECTION: Expect = { status: 403, error: COLLECTION_REFUSAL, body: { error: COLLECTION_REFUSAL } };
   const ATTRIBUTION: Expect = { status: 403, error: "forbidden: authorId must match authenticated agent" };
   const NOT_ADDRESSED: Expect = { status: 403, error: "write_id_not_addressed" };
   const HARPER_400: Expect = { status: 400, code: "ClientError" };
-  const HARPER_500: Expect = { status: 500, code: "Error" };
   const BODY_OBJECT: Expect = { status: 400, error: "body_must_be_object" };
 
   async function expectResponse(res: Response, want: Expect): Promise<void> {
@@ -792,12 +786,11 @@ describe("what each malformed id or body gets", () => {
     true: [INVALID, INVALID], "42": [INVALID, INVALID], "[]": [INVALID, INVALID],
     "{a:1}": [INVALID, INVALID], '["x",1]': [INVALID, INVALID],
   };
-  // Collection PUT, [agent, admin]: a non-admin's is refused by the owner-scoped
-  // write guard; an administrator's element is addressed by its own id.
+  // Collection PUT, [agent, admin].
   const COLLECTION_ID: Record<string, [Expect, Expect]> = {
     missing: [COLLECTION, INVALID], empty: [COLLECTION, INVALID], null: [COLLECTION, INVALID],
-    "0": [COLLECTION, INVALID], false: [COLLECTION, HARPER_400], true: [COLLECTION, HARPER_400],
-    "42": [COLLECTION, INVALID], "[]": [COLLECTION, HARPER_500], "{a:1}": [COLLECTION, HARPER_500],
+    "0": [COLLECTION, INVALID], false: [COLLECTION, INVALID], true: [COLLECTION, INVALID],
+    "42": [COLLECTION, INVALID], "[]": [COLLECTION, INVALID], "{a:1}": [COLLECTION, INVALID],
     '["x",1]': [COLLECTION, INVALID],
   };
 
@@ -823,8 +816,10 @@ describe("what each malformed id or body gets", () => {
       it(`a collection PUT element with a ${label} id as ${role} gets ${putWant.status}${putWant.error ? ` ${putWant.error}` : ""}`, async () => {
         const { body, summary } = withId(who, label, id);
         const named = typeof id === "string" ? await rowBytes(id) : null;
+        const before = await countEvents();
         await expectResponse(await send(who, "PUT", "/OrgEvent/", [body]), putWant);
         expect(await eventsBySummary(summary)).toEqual([]);
+        expect(await countEvents(), "a refused collection PUT created a row").toBe(before);
         if (named !== null) expect(await rowBytes(id as string)).toBe(named);
       }, 30_000);
     }

@@ -1,25 +1,9 @@
 /**
- * flair#2573 slice 2 — a non-admin Memory write never stores a vector the caller
- * supplied.
- *
- * The space of a Memory vector is defined by the model that computed it. A
- * supplied vector cannot be verified against the text it claims to embed or
- * against the model, so a non-admin write discards it and stores the vector the
- * configured model computes instead. A non-admin POST, PUT or PATCH that carries
- * a non-empty `embedding` therefore discards the
- * vector and its `embeddingModel` stamp before the write, so the write stores a
- * vector the server owns — the one it computes for the row's own post-redaction
- * text, or none when the model is unavailable — exactly as a write that sent no
- * vector. A body-level `embeddingModel` stamp with no `embedding` is discarded as
- * well, so a non-admin write can never relabel a stored vector as current-space.
- * A skill row's stored vector that prepareSkillBody carried into the body is kept
- * with the stamp stored beside it; a caller's replacement stamp is never applied
- * to it.
- *
- * Unchanged: `embedding: null` and `[]` (the empty-embedding normalization from
- * #2593), the re-embed request protocol, an administrator's write, a trusted
- * in-process write, and a record arriving by federation sync (those write through
- * the raw table handle, never these methods).
+ * Non-admin Memory writes discard caller-supplied vectors and model stamps.
+ * Embedding is computed when the resulting write needs one. Vector-only PATCHes
+ * and unchanged skill updates retain stored vectors. Non-admin skill updates
+ * retain their stored stamps. Administrator and trusted in-process writes are
+ * unchanged, as are `embedding: null` / `[]` handling and federation-sync records.
  */
 import type { AgentAuthVerdict } from "./agent-auth.js";
 
@@ -50,9 +34,8 @@ export function keepsSuppliedVector(auth: AgentAuthVerdict): boolean {
 /** Discard a non-admin write's caller-supplied vector and/or model stamp, in
  *  place. `suppliedVector` and `suppliedStamp` report what the CALLER's own body
  *  held before any stored row was merged in, so a vector prepareSkillBody carried
- *  from a stored row is left alone and keeps the stamp stored beside it. A
- *  non-object or array body (no single record) is left untouched. Returns true
- *  when a caller-supplied value was discarded. */
+ *  from a stored row is left alone. A non-object or array body (no single record)
+ *  is left untouched. Returns true when a caller-supplied value was discarded. */
 export function discardSuppliedVector(
   content: Record<string, any> | null | undefined,
   auth: AgentAuthVerdict,
