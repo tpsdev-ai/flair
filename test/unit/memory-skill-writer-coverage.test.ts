@@ -102,13 +102,13 @@ add("usage-recording", ["alias-source:(databases as any).flair.Memory#1", "write
   "usageCount increment through the shared write-back helper (flair#2441) — non-skill.");
 add("promotion-stamp", ["writer:writeBackCommittedRow#1"],
   "Promotion status stamp — non-skill, through the shared write-back helper (flair#2354).");
-add("promotion-stamp", ["writer:table.put#1"],
-  "Promotion status stamp in the manual promotion's own write transaction — non-skill.");
+add("promotion-stamp", ["writer:table.update#1"],
+  "Promotion status stamp in the manual promotion's own write transaction — an incremental update of only the verdict fields (flair#2478 slice 2) — non-skill.");
 add("migrations/embedding-stamp", ["writer:table.update#1"],
   "Content-suffix migration embeds skillEmbedText(row) and stages an incremental update of only embedding/embeddingModel/updatedAt (flair#2465); confirmation compares the whole committed row. A change committed after confirmation and before commit is not seen.");
 add("migrations/synthetic-test-migration", ["alias-source:(databases as unknown as { flair: { Memory: MemoryTableLike } }).flair.Memory#1", "writer:writeBackCommittedRow#1"],
   "Migration backfill through the shared write-back helper — non-skill (flair#2354).");
-add("migrations/visibility-backfill", ["alias-source:(databases as unknown as { flair: { Memory: MemoryTableLike } }).flair.Memory#1", "writer:writeBackCommittedRow#1"],
+add("migrations/visibility-backfill", ["alias-source:(databases as unknown as { flair: { Memory: MemoryTableLike } }).flair.Memory#1", "alias-source:(databases as any)?.flair?.Memory#1", "writer:writeBackCommittedRow#1"],
   "Migration backfill through the shared write-back helper — non-skill (flair#2354).");
 
 // ── Other tables (conservative sink enumeration false-positives) ──
@@ -137,8 +137,8 @@ add("MemoryReindex", ["alias-source:(databases as any).flair.Memory#1"],
   "Read-only alias (reindex reads rows to re-embed).");
 add("auth-middleware", ["alias-source:(databases as any).flair.Memory#1"],
   "Read-only alias (auth reads rows).");
-add("promotion-stamp", ["alias-source:(databases as any).flair.Memory#1"],
-  "Read-only alias (promotion reads the row to stamp).");
+add("promotion-stamp", ["alias-source:(databases as any).flair.Memory#1", "alias-source:(databases as any)?.flair?.Memory#1"],
+  "Read-only alias (promotion reads the row to stamp; the primary-store lock handle is read-only too).");
 add("hit-tracking", ["alias-source:(databases as any).flair?.Memory#1"],
   "Read-only seed of Memory.retrievalCount on first HitStat write.");
 add("health", ["alias-source:db.flair?.Memory#1"],

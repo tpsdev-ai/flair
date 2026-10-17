@@ -136,6 +136,18 @@ Memory.put = function (record, ...rest) {
   }
   return memoryPut.call(this, record, ...rest);
 };
+const memoryUpdate = Memory.update;
+Memory.update = async function (id, patch, ...rest) {
+  if (patch?.promotionStatus === "approved") {
+    const row = await Memory.get(id, rest[0]);
+    if (typeof row?.agentId === "string" && row.agentId.includes("stamp-failure")) {
+      const t = rest[0]?.transaction;
+      const open = !!t && t.open === 1 && !t.saveCommits;
+      throw new Error("test component: forced promotion stamp failure (" + (open ? "transaction open" : "no open transaction") + ")");
+    }
+  }
+  return memoryUpdate.call(this, id, patch, ...rest);
+};
 `;
 
 function repoRoot(): string {

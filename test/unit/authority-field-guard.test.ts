@@ -87,7 +87,7 @@ const CLASSIFICATIONS: Array<{ file: string; via: WriterVia; needle: string; kin
   // merge of a peer's Presence row (its table is always Presence).
   { file: "resources/Federation.ts", via: "write-back", needle: "mergePresenceReceipt(row", kind: "federation-merge" },
   { file: "resources/promotion-stamp.ts", via: "write-back", needle: 'label: "promotion-stamp"', kind: "trusted-stamp" },
-  { file: "resources/promotion-stamp.ts", via: "alias-source", needle: "put(row, stagedContext)", kind: "trusted-stamp" },
+  { file: "resources/promotion-stamp.ts", via: "alias-source", needle: "update(id, update, stagedContext)", kind: "trusted-stamp" },
   { file: "resources/Memory.ts", via: "direct-put", needle: "put(closed, c)", kind: "echo" },
   // flair#2564: the grant-authorized close staged in the successor's transaction restates
   // the predecessor row with the close patch, like the owned close above.
