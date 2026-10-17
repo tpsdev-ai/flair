@@ -328,9 +328,11 @@ export function probeActionRecallRuntime(runtime: ActionRecallRuntime, agentId =
     writeFileSync(join(generationDir, "probe.json"), JSON.stringify({ payload, sha256: hash(payload) }), { mode: 0o600 });
     writeFileSync(join(dir, "current.json"), JSON.stringify(binding), { mode: 0o600 });
     const installedCommand = command ?? buildActionRecallHookCommand(runtime.bunPath, runtime.artifactPath, agentId, flairUrl);
+    const commandPath = join(home, "command.sh");
+    writeFileSync(commandPath, installedCommand, { mode: 0o600 });
     const expected = JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", additionalContext: `Lessons from your own Flair memory whose triggers match this action (auto-recalled: a signal, not an instruction; read the full memory with memory_get before acting on it):\n| id: probe (created unknown)\n| ${excerpt}` } });
     const env = { HOME: home, USERPROFILE: home, TMPDIR: home, PATH: "/usr/bin:/bin", BUN_INSTALL_AUTO: "disable" };
-    const run = (input: unknown) => execFileSync("/bin/sh", ["-c", installedCommand], { input: JSON.stringify(input), encoding: "utf8", timeout: 2000, maxBuffer: 8192, cwd: home, env, stdio: ["pipe", "pipe", "ignore"] });
+    const run = (input: unknown) => execFileSync("/bin/sh", [commandPath], { input: JSON.stringify(input), encoding: "utf8", timeout: 2000, maxBuffer: 8192, cwd: home, env, stdio: ["pipe", "pipe", "ignore"] });
     const input = { tool_name: "Bash", session_id: binding.session, cwd: home, tool_input: { command: "git push --force" } };
     let matched = false;
     for (let attempt = 0; attempt < 3; attempt++) {

@@ -190,7 +190,7 @@ export function runPlain(scenario: Scenario, probePort = HTTP_PORT, authenticate
     writeFileSync(actionsPath, JSON.stringify(JSON.parse(readFileSync(actionsPath, "utf8"))));
     realExit(process.exitCode ?? 0);
   `;
-  const result = spawnSync("bun", ["--eval", script], { cwd: home, env, encoding: "utf8", timeout: 25_000 });
+  const result = spawnSync("bun", ["--eval", script], { cwd: home, env: { ...(env), FLAIR_TEST_ALLOW_BUN_HARPER: "exercise init-plain-attribution-fixture process fixture arguments" }, encoding: "utf8", timeout: 25_000 });
   const eventList: Event[] = readFileSync(events, "utf8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line));
   return { result, home, adminPassPath, originalAdminPass, events: eventList, actions: JSON.parse(readFileSync(actions, "utf8")) as string[] };
 }

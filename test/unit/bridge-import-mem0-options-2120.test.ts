@@ -26,6 +26,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { ensureCliBuild } from "../helpers/build-cli-once.js";
 import { childOverranDeadline, cliLeg } from "../helpers/child-deadline.js";
+import { nodeBin } from "../helpers/node-runtime.js";
 
 const CHILD_DEADLINE_MS = 20_000;
 const CLI_PATH = join(import.meta.dirname ?? __dirname, "..", "..", "dist", "cli.js");
@@ -45,9 +46,10 @@ function runCli(
 ): Promise<{ stdout: string; stderr: string; code: number | null }> {
   return new Promise((resolve, reject) => {
     const startedAt = Date.now();
-    const child = spawn("bun", [CLI_PATH, ...args], {
+    const childEnv = { ...process.env, FLAIR_AGENT_ID: "", MEM0_API_KEY: "", ...env };
+    const child = spawn(nodeBin({ env: childEnv, cwd }), [CLI_PATH, ...args], {
       cwd,
-      env: { ...process.env, FLAIR_AGENT_ID: "", MEM0_API_KEY: "", ...env },
+      env: childEnv,
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 20_000, // literal so the spawn-budget gate sees a deadline (flair#1807)
     });

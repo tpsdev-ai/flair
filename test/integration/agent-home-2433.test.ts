@@ -44,6 +44,7 @@ import { join } from "node:path";
 import nacl from "tweetnacl";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 import { childOverranDeadline, cliLeg } from "../helpers/child-deadline";
+import { nodeBin } from "../helpers/node-runtime.js";
 import { signBodyFresh } from "../../resources/federation-crypto.js";
 import { seedAgentWithLocalHome } from "../../src/cli.js";
 import {
@@ -138,16 +139,17 @@ function runDoctor(): Promise<{ code: number | null; stdout: string; stderr: str
   return new Promise((resolve, reject) => {
     const args = ["doctor", "--port", new URL(harper.httpURL).port];
     const startedAt = Date.now();
-    const child = spawn(process.execPath, [CLI, ...args], {
-      env: {
-        ...process.env,
-        HOME: cliHome,
-        FLAIR_URL: harper.httpURL,
-        FLAIR_OPS_PORT: new URL(harper.opsURL).port,
-        FLAIR_TOKEN: "",
-        FLAIR_ADMIN_PASS: ADMIN_PASS,
-        NO_COLOR: "1",
-      },
+    const env = {
+      ...process.env,
+      HOME: cliHome,
+      FLAIR_URL: harper.httpURL,
+      FLAIR_OPS_PORT: new URL(harper.opsURL).port,
+      FLAIR_TOKEN: "",
+      FLAIR_ADMIN_PASS: ADMIN_PASS,
+      NO_COLOR: "1",
+    };
+    const child = spawn(nodeBin({ env }), [CLI, ...args], {
+      env,
       timeout: 30_000,
     });
     let stdout = "";
@@ -170,8 +172,9 @@ function runPrincipalAdd(id: string, opsPortArg: string): Promise<{ code: number
   return new Promise((resolve, reject) => {
     const args = ["principal", "add", id, "--ops-port", opsPortArg, "--port", new URL(harper.httpURL).port, "--keys-dir", join(cliHome, "keys"), "--admin-pass", ADMIN_PASS];
     const startedAt = Date.now();
-    const child = spawn(process.execPath, [CLI, ...args], {
-      env: { ...process.env, HOME: cliHome, FLAIR_TOKEN: "", NO_COLOR: "1" },
+    const env = { ...process.env, HOME: cliHome, FLAIR_TOKEN: "", NO_COLOR: "1" };
+    const child = spawn(nodeBin({ env }), [CLI, ...args], {
+      env,
       timeout: 30_000,
     });
     let stdout = "";

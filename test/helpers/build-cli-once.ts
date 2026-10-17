@@ -52,6 +52,8 @@
 import { spawn, spawnSync, type SpawnOptionsWithoutStdio } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { shellScript } from "./shell-script.ts";
+import { nodeBin } from "./node-runtime.ts";
 
 const ROOT = resolve(import.meta.dirname, "..", "..");
 const TSCONFIG_CLI = join(ROOT, "tsconfig.cli.json");
@@ -130,7 +132,8 @@ export function assertCliBuildFresh(root = ROOT): void {
 
 export function spawnCli(args: string[], options: SpawnOptionsWithoutStdio & { timeout: number }, root = ROOT) {
   assertCliBuildFresh(root);
-  return spawn(process.execPath, [join(root, "dist", "cli.js"), ...args], { ...options, timeout: options.timeout });
+  // Under Node, not the test runner's own runtime (flair#2594): the CLI's tests launch it as users do.
+  return spawn(nodeBin({ env: options.env, cwd: options.cwd }), [join(root, "dist", "cli.js"), ...args], { ...options, timeout: options.timeout });
 }
 
 interface BuildStep {
@@ -188,7 +191,7 @@ export function ensureCliBuild(opts: { timeoutMs?: number } = {}): void {
   }
 
   const steps: BuildStep[] = stub
-    ? [{ label: "build stub", command: "/bin/sh", args: ["-c", stub] }]
+    ? [{ label: "build stub", command: "/bin/sh", args: [shellScript(stub)] }]
     : BUILD_STEPS;
 
   for (const step of steps) runBoundedStep(step, timeoutMs);

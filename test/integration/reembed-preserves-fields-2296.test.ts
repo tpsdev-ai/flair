@@ -21,6 +21,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { ensureCliBuild } from "../helpers/build-cli-once.js";
+import { nodeBin } from "../helpers/node-runtime.js";
 import { MEMORY_ATTRIBUTES } from "../../src/lib/memory-attributes.ts";
 import { getModelId } from "../../resources/embeddings-provider.ts";
 import { computeContentHash } from "../../resources/memory-feed-lib.ts";
@@ -181,13 +182,14 @@ function runReembed(args: string[], opts: { admin?: boolean } = {}): { code: num
   const admin = opts.admin !== false
     ? { FLAIR_OPS_PORT: new URL(harper.opsURL).port, FLAIR_ADMIN_USER: harper.admin.username, FLAIR_ADMIN_PASS: harper.admin.password }
     : {};
-  const r = spawnSync(process.execPath, [CLI, "reembed", "--port", new URL(harper.httpURL).port, ...args], {
+  const childEnv = {
+    ...env,
+    HOME: home,
+    ...admin,
+  };
+  const r = spawnSync(nodeBin({ env: childEnv }), [CLI, "reembed", "--port", new URL(harper.httpURL).port, ...args], {
     encoding: "utf-8",
-    env: {
-      ...env,
-      HOME: home,
-      ...admin,
-    },
+    env: childEnv,
     timeout: 90_000, // flair#1807: the CLI child's own deadline
     killSignal: "SIGTERM",
   });

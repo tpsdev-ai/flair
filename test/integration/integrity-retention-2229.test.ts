@@ -23,6 +23,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { ensureCliBuild } from "../helpers/build-cli-once.js";
+import { nodeBin } from "../helpers/node-runtime.js";
 
 const REPO_ROOT = resolve(import.meta.dir, "..", "..");
 const CLI = join(REPO_ROOT, "dist", "cli.js");
@@ -76,9 +77,10 @@ async function historyIds(): Promise<string[]> {
 interface Run { code: number | null; json: any; out: string }
 
 function runCli(args: string[]): Run {
-  const r = spawnSync(process.execPath, [CLI, ...args], {
+  const env = { ...process.env, HOME: home, FLAIR_ADMIN_PASS: harper.admin.password, FLAIR_ADMIN_USER: harper.admin.username };
+  const r = spawnSync(nodeBin({ env }), [CLI, ...args], {
     encoding: "utf-8",
-    env: { ...process.env, HOME: home, FLAIR_ADMIN_PASS: harper.admin.password, FLAIR_ADMIN_USER: harper.admin.username },
+    env,
     timeout: 90_000,
     killSignal: "SIGTERM",
   });

@@ -201,7 +201,7 @@ describe("readTcpListenerPids — every other platform runs lsof", () => {
     // its start.
     const script = `import { readTcpListenerPids } from ${JSON.stringify(join(import.meta.dir, "..", "..", "src", "lib", "listener-table.ts"))};`
       + "console.log(JSON.stringify(readTcpListenerPids(58448)));";
-    const run = spawnSync(process.execPath, ["-e", script], { env: { PATH: "/nonexistent-2526", HOME: tmpdir() }, encoding: "utf-8", timeout: 30_000 });
+    const run = spawnSync(process.execPath, ["-e", script], { env: { ...({ PATH: "/nonexistent-2526", HOME: tmpdir() }), FLAIR_TEST_ALLOW_BUN_HARPER: "exercise listener-table-2526 process fixture arguments" }, encoding: "utf-8", timeout: 30_000 });
     expect(run.status, run.stderr).toBe(0);
     const read = JSON.parse(run.stdout.trim());
     expect(read.kind).toBe("unavailable");

@@ -2196,7 +2196,7 @@ jobs:
   # the deadline, by name, with its output — never by bun's per-test timer. It
   # sees node `child_process` and `Bun.spawn`/`Bun.spawnSync` (flair#1825). The
   # exceptions live in a reviewed baseline file, not an in-script allow-list; the
-  # baseline can only shrink, and there is no skip flag.
+  # gate rejects newly added exception keys, and there is no skip flag.
   cli-spawn-budgets:
     name: "Doc/Code Lint: CLI spawn budgets"
     runs-on: ubuntu-latest

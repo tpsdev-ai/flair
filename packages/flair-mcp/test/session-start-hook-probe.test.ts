@@ -1,3 +1,4 @@
+import { shellScript } from "../../../test/helpers/shell-script.ts";
 import { describe, test, expect, afterEach } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
@@ -127,7 +128,7 @@ describe("probe mode short-circuits the whole hook (spawned entry point)", () =>
           FLAIR_KEY_PATH: fifo,
         };
 
-        writer = spawn("sh", ["-c", 'printf "ready\\n"; : > "$1" && : > "$2"', "sh", fifo, opened], {
+        writer = spawn("sh", [shellScript('printf "ready\\n"; : > "$1" && : > "$2"'), fifo, opened], {
           stdio: ["ignore", "pipe", "pipe"],
         });
         await new Promise<void>((resolve, reject) => {

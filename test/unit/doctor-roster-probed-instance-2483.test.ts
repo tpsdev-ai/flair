@@ -1,3 +1,4 @@
+import { nodeBin } from "../helpers/node-runtime.ts";
 /**
  * doctor-roster-probed-instance-2483.test.ts — flair#2483, the decisions behind
  * which ops endpoint `flair doctor` reads the Agent roster and home rows from.
@@ -191,7 +192,7 @@ async function startHeaderCapture(): Promise<HeaderCapture> {
     });
     srv.listen(0, "127.0.0.1", () => process.stdout.write(JSON.stringify({ listening: srv.address().port }) + "\\n"));
   `;
-  const child = spawn(process.execPath, ["-e", script], { stdio: ["ignore", "pipe", "inherit"] });
+  const child = spawn(nodeBin(), ["-e", script], { stdio: ["ignore", "pipe", "inherit"] });
   const lines: string[] = [];
   let buffered = "";
   const port = await new Promise<number>((resolve, reject) => {

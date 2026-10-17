@@ -36,6 +36,7 @@ import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } f
 // and its siblings): one bounded build per process, skipped when dist/cli.js is
 // already fresh.
 import { ensureCliBuild } from "../helpers/build-cli-once.js";
+import { nodeBin } from "../helpers/node-runtime.js";
 import { reconcileFederationInstanceViaOpsApi } from "../../src/cli";
 import {
   INSTANCE_ROW_PRUNE_COMMAND,
@@ -63,8 +64,8 @@ const CHILD_DEADLINE_MS = 20_000;
 // One budget for the prune case, not one per leg: it runs TWO CLI legs (dry run,
 // then --apply) plus the live reads around them, so it needs 2 x the deadline
 // plus margin — a shorter budget would kill the CASE before a leg's own deadline
-// could fire and produce the named message.
-const PRUNE_CASE_BUDGET_MS = 2 * CHILD_DEADLINE_MS + 15_000;
+// could fire and produce the named message. The spawn-budget gate reads a
+// LITERAL, so the budget is written inline on the case.
 
 async function ops(body: Record<string, unknown>): Promise<any> {
   const res = await fetch(`${harper.opsURL.replace(/\/$/, "")}/`, {
@@ -74,6 +75,7 @@ async function ops(body: Record<string, unknown>): Promise<any> {
       Authorization: "Basic " + btoa(`${harper.admin.username}:${harper.admin.password}`),
     },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(15_000),
   });
   if (!res.ok) throw new Error(`ops ${String(body.operation)} failed (${res.status}): ${await res.text()}`);
   return await res.json().catch(() => null);
@@ -146,21 +148,23 @@ async function postPair(body: Record<string, unknown>): Promise<Response> {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(15_000),
   });
 }
 
 /** Run the shipped CLI with an isolated HOME; returns stdout+stderr+code. */
 async function runCli(args: string[], home: string): Promise<{ code: number | null; out: string }> {
   return await new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [CLI, ...args], {
-      env: {
-        ...process.env,
-        HOME: home,
-        FLAIR_URL: harper.httpURL,
-        FLAIR_TOKEN: "",
-        FLAIR_ADMIN_PASS: "",
-      },
-      timeout: CHILD_DEADLINE_MS,
+    const env = {
+      ...process.env,
+      HOME: home,
+      FLAIR_URL: harper.httpURL,
+      FLAIR_TOKEN: "",
+      FLAIR_ADMIN_PASS: "",
+    };
+    const child = spawn(nodeBin({ env }), [CLI, ...args], {
+      env,
+      timeout: 20_000, // literal so the spawn-budget gate reads a child deadline
     });
     let out = "";
     child.stdout.on("data", (d) => (out += d.toString()));
@@ -454,6 +458,7 @@ describe("init --remote identity reconcile (live Harper)", () => {
 
     const res = await fetch(`${harper.httpURL.replace(/\/$/, "")}/FederationInstance`, {
       headers: { Authorization: "Basic " + btoa(`${harper.admin.username}:${harper.admin.password}`) },
+      signal: AbortSignal.timeout(15_000),
     });
     expect(res.status).toBe(200);
     const body: any = await res.json();
@@ -490,6 +495,7 @@ describe("init --remote identity reconcile (live Harper)", () => {
 
       const res = await fetch(`${harper.httpURL.replace(/\/$/, "")}/FederationInstance`, {
         headers: { Authorization: "Basic " + btoa(`${harper.admin.username}:${harper.admin.password}`) },
+        signal: AbortSignal.timeout(15_000),
       });
 
       expect(res.status).toBe(409);
@@ -625,5 +631,5 @@ describe("init --remote identity reconcile (live Harper)", () => {
       await rm(home, { recursive: true, force: true });
     }
     await clearInstanceRows();
-  }, PRUNE_CASE_BUDGET_MS);
+  }, 60_000);
 });

@@ -4,14 +4,15 @@ import { basename, dirname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const childProcess = createRequire(import.meta.url)("node:child_process");
-const probe = childProcess.execFileSync;
+const probe = Bun.spawnSync.bind(Bun);
 const which = Bun.which.bind(Bun);
 const ALLOW = "FLAIR_TEST_ALLOW_BUN_HARPER";
 const repositoryRequire = createRequire(new URL("../../package.json", import.meta.url));
-const harperEntry = resolveHarperEntry();
+const harper = resolveHarperEntry();
+const harperEntry = harper.canonical;
 type Options = { cwd?: string | URL; env?: Record<string, string | undefined>; shell?: boolean | string };
 
-function resolveHarperEntry(): string {
+function resolveHarperEntry(): { canonical: string; suffix: string } {
   for (const name of ["harper", "@harperfast/harper"]) {
     let entry: string;
     try { entry = repositoryRequire.resolve(name); } catch { continue; }
@@ -22,7 +23,7 @@ function resolveHarperEntry(): string {
         if (pkg.name === name) {
           const bin = typeof pkg.bin === "string" ? pkg.bin : pkg.bin?.harper;
           if (typeof bin !== "string") throw new Error(`${name} has no Harper bin`);
-          return realpathSync(resolve(dir, bin));
+          return { canonical: realpathSync(resolve(dir, bin)), suffix: `node_modules/${name}/${bin.replace(/^\.\//, "")}` };
         }
       }
       if (dirname(dir) === dir) break;
@@ -44,10 +45,11 @@ function canonicalPath(path: string): string {
 }
 
 function resolvedExecutable(command: string, options: Options): string | undefined {
-  const executable = which(command, {
+  let executable: string | null;
+  try { executable = which(command, {
     cwd: cwdPath(options.cwd),
-    PATH: (options.env ? options.env.PATH : process.env.PATH) ?? "/usr/bin:/bin",
-  });
+    PATH: options.env?.PATH ?? process.env.PATH ?? "/usr/bin:/bin",
+  }); } catch { return; }
   if (executable) return canonicalPath(executable);
 }
 
@@ -55,20 +57,20 @@ function runtimeKind(command: string, options: Options): "bun" | "node" | "unkno
   const executable = resolvedExecutable(command, options);
   if (!executable) return "missing";
   if (executable === canonicalPath(process.execPath)) return process.versions.bun ? "bun" : "node";
+  if (entryKind(executable, options)) return "unknown";
   try {
-    const identity = probe(executable, ["-p", "process.versions.bun ? 'bun' : process.versions.node"], {
-      env: options.env, cwd: cwdPath(options.cwd),
-      encoding: "utf8", timeout: 2_000, killSignal: "SIGKILL", maxBuffer: 1_024,
-      stdio: ["ignore", "pipe", "pipe"],
-    }).trim();
+    const evaluate = (expression: string) => {
+      const result = probe([executable, "-p", expression], {
+        env: options.env, cwd: cwdPath(options.cwd), stdin: "ignore", stdout: "pipe", stderr: "pipe",
+        timeout: 2_000, killSignal: "SIGKILL", maxBuffer: 1_024,
+      });
+      if (result.exitCode !== 0) throw new Error("runtime probe failed");
+      return result.stdout.toString().trim();
+    };
+    const identity = evaluate("process.versions.bun ? 'bun' : process.versions.node");
     if (identity === "bun") return "bun";
     if (!/^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(identity)) return "unknown";
-    const runtime = probe(executable, ["-p", "process.execPath"], {
-      env: options.env, cwd: cwdPath(options.cwd),
-      encoding: "utf8", timeout: 2_000, killSignal: "SIGKILL", maxBuffer: 1_024,
-      stdio: ["ignore", "pipe", "pipe"],
-    }).trim();
-    return realpathSync(runtime) === executable ? "node" : "unknown";
+    return realpathSync(evaluate("process.execPath")) === executable ? "node" : "unknown";
   } catch { return "unknown"; }
 }
 
@@ -83,67 +85,9 @@ function entryKind(arg: string, options: Options): EntryKind | undefined {
   }
 }
 
-function scriptIndex(args: string[], options: Options): number {
-  const valueFlags = new Set([
-    "-r", "--require", "--preload", "--import", "--loader", "--experimental-loader", "--env-file",
-    "-c", "--config", "--conditions", "--port", "--fetch-preconnect", "--max-http-header-size",
-    "--dns-result-order", "--title", "--unhandled-rejections", "--console-depth", "--user-agent",
-    "--elide-lines", "-F", "--filter", "--shell", "--cpu-prof-name", "--cpu-prof-dir",
-    "--cpu-prof-interval", "--heap-prof-name", "--heap-prof-dir", "--install",
-  ]);
-  const booleanFlags = new Set([
-    "--watch", "--hot", "--no-clear-screen", "--smol", "--cpu-prof", "--cpu-prof-md", "--heap-prof",
-    "--heap-prof-md", "--if-present", "--no-install", "-i", "--prefer-offline", "--prefer-latest",
-    "--expose-gc", "--no-deprecation", "--throw-deprecation", "--zero-fill-buffers", "--use-system-ca",
-    "--use-openssl-ca", "--use-bundled-ca", "--redis-preconnect", "--sql-preconnect", "--no-addons",
-    "--silent", "-v", "--version", "--revision", "-b", "--bun", "--workspaces", "--parallel",
-    "--sequential", "--no-exit-on-error", "--no-env-file", "-h", "--help",
-  ]);
-  let uncertain = false;
-  const initialCwd = cwdPath(options.cwd);
-  for (let i = 0; i < args.length; i++) {
-    if (!uncertain && /^(?:--(?:eval|print)(?:=|$)|-[ep])/.test(args[i])) return -1;
-    if (args[i] === "--cwd" && args[i + 1]) {
-      options.cwd = resolve(initialCwd, args[++i]);
-      continue;
-    }
-    if (args[i].startsWith("--cwd=")) {
-      options.cwd = resolve(initialCwd, args[i].slice(6));
-      continue;
-    }
-    if (valueFlags.has(args[i])) { i++; continue; }
-    if (args[i] === "--") return i + 1;
-    if (args[i] === "run") continue;
-    if (args[i].startsWith("-")) {
-      if (!booleanFlags.has(args[i]) && !args[i].includes("=")) uncertain = true;
-      continue;
-    }
-    if (!uncertain || entryKind(args[i], options)) return i;
-  }
-  return -1;
-}
-
-function startsHarper(args: string[], options: Options): EntryKind | undefined {
-  options = { ...options };
-  const index = scriptIndex(args, options);
-  if (index < 0 || !args[index]) return undefined;
-  const kind = entryKind(args[index], options);
-  if (kind === "harper.js") return kind;
-  if (!kind) return undefined;
-  const cli = args.slice(index + 1);
-  if (cli[0] === "--") cli.shift();
-  const command = cli[0];
-  if (cli.includes("--help") || cli.includes("-h")) return undefined;
-  const hasValue = (flag: string): boolean => cli.some((arg, i) =>
-    arg.startsWith(`${flag}=`) ? arg.length > flag.length + 1 : arg === flag && !!cli[i + 1] && !cli[i + 1].startsWith("-"));
-  if (command === "init") return !cli.includes("--skip-start") && !hasValue("--target") ? kind : undefined;
-  if (command === "upgrade") return !cli.includes("--check") && !hasValue("--target") ? kind : undefined;
-  if (command === "doctor") return cli.includes("--fix") && !cli.includes("--dry-run") ? kind : undefined;
-  if (command === "snapshot") return ["create", "restore"].includes(cli[1]) ? kind : undefined;
-  return ["start", "restart"].includes(command) ? kind : undefined;
-}
-
-function shellWords(source: string): string[] | undefined {
+function commandWords(source: string, shell: boolean): string[] | undefined {
+  // Shell expansion characters cannot be classified, including when quoted or escaped.
+  if (shell ? /[*?\[\]$`{}~]/.test(source) : /\$\{/.test(source)) return;
   const words: string[] = [];
   let word = "";
   let quote = "";
@@ -152,13 +96,14 @@ function shellWords(source: string): string[] | undefined {
     const char = source[i];
     if (char === "\\" && quote !== "'") {
       if (++i === source.length) return;
+      if (source[i] === "\n") return;
       word += source[i]; started = true;
     }
     else if (quote) {
       if (char === quote) quote = "";
       else word += char;
     } else if (char === "'" || char === '"') { quote = char; started = true; }
-    else if (/[;&|<>()\n]/.test(char)) break;
+    else if (shell && /[;&|<>()\n]/.test(char)) return;
     else if (/\s/.test(char)) {
       if (started) words.push(word);
       word = "";
@@ -170,11 +115,84 @@ function shellWords(source: string): string[] | undefined {
   return words;
 }
 
+const shells = new Set(["sh", "bash", "zsh", "dash"]);
+
+function shellCommandIndex(words: string[]): number {
+  if (!shells.has(basename(words[0] ?? ""))) return -1;
+  for (let i = 1; /^[+-]/.test(words[i] ?? "") && words[i] !== "--"; i++) {
+    if (/^-[^-]*c/.test(words[i])) return i + 1;
+    if (["-o", "+o", "-O", "+O", "--rcfile", "--init-file", "--emulate"].includes(words[i])) i++;
+  }
+  return -1;
+}
+
+function argvEntry(words: string[], options: Options): EntryKind | undefined {
+  let found: EntryKind | undefined;
+  for (const word of words) {
+    found ??= (word.includes("/") || word.startsWith(".") ? entryKind(word, options) : undefined)
+      ?? (word.includes("dist/cli-shim.cjs") ? "dist/cli-shim.cjs"
+        : word.includes("dist/cli.js") ? "dist/cli.js"
+        : word.includes(harperEntry) || word.split(/[\s'"]/).some(part =>
+          part.includes(harper.suffix) && entryKind(part, options) === "harper.js") ? "harper.js" : undefined);
+  }
+  return found;
+}
+
+function shellEntry(words: string[], options: Options, uncertainty = { value: false }, shellSource = false): EntryKind | undefined {
+  let found = argvEntry(words, options);
+  const chain = [...words];
+  if (shellSource) while (/^[A-Za-z_][A-Za-z0-9_]*=/.test(chain[0] ?? "")) chain.shift();
+  while (chain.length) {
+    const executable = resolvedExecutable(chain[0], options);
+    if (executable) found ??= entryKind(executable, options);
+    const commandIndex = shellCommandIndex(chain);
+    if (commandIndex >= 0) {
+      const nested = commandWords(chain[commandIndex] ?? "", true);
+      if (!nested) uncertainty.value = true;
+      else {
+        const entry = shellEntry(nested, options, uncertainty, true);
+        found ??= entry;
+      }
+      break;
+    }
+    const wrapper = basename(chain.shift()!);
+    if (!["env", "time", "nice", "xargs", "nohup", "timeout", "stdbuf", "setsid", "command", "exec"].includes(wrapper)) break;
+    while (chain.length) {
+      const word = chain[0];
+      if (wrapper === "env" && /^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) { chain.shift(); continue; }
+      if (word === "--") { chain.shift(); break; }
+      if (!word.startsWith("-")) break;
+      chain.shift();
+      if (wrapper === "env" && (word === "-S" || word === "--split-string" || word.startsWith("--split-string=") || word.startsWith("-S"))) {
+        const source = word.startsWith("--split-string=") ? word.slice(15)
+          : word.startsWith("-S") && word !== "-S" ? word.slice(2) : chain.shift();
+        const split = source === undefined ? undefined : commandWords(source, false);
+        if (!split) { uncertainty.value = true; break; }
+        chain.unshift(...split);
+      } else {
+        const operands: Record<string, string[]> = {
+          env: ["-u", "--unset", "-C", "--chdir"],
+          time: ["-f", "--format", "-o", "--output"],
+          nice: ["-n", "--adjustment"],
+          xargs: ["-E", "-I", "-J", "-L", "-n", "-P", "-s", "--eof", "--replace", "--max-lines", "--max-args", "--max-procs", "--max-chars"],
+          timeout: ["-s", "--signal", "-k", "--kill-after"],
+          stdbuf: ["-i", "-o", "-e", "--input", "--output", "--error"],
+        };
+        if (operands[wrapper]?.includes(word)) chain.shift();
+      }
+    }
+    if (wrapper === "timeout") chain.shift();
+  }
+  return found;
+}
+
 function invocation(command: string, args: string[], options: Options) {
   let words: string[] | undefined = [command, ...args];
-  if (options.shell) words = shellWords(words.join(" "));
-  else if (["sh", "bash"].includes(basename(command)) && args.includes("-c")) {
-    words = shellWords(args[args.indexOf("-c") + 1] ?? "");
+  const commandIndex = shellCommandIndex(words);
+  const shellString = !!options.shell || commandIndex >= 0;
+  if (options.shell) words = commandWords(words.join(" "), true);
+  else if (commandIndex >= 0) {
+    words = commandWords(words[commandIndex] ?? "", true);
   }
   const probeOptions = { ...options, env: { ...(options.env ?? process.env) } };
   const assignment = (word: string): boolean => {
@@ -185,9 +203,14 @@ function invocation(command: string, args: string[], options: Options) {
   };
   const failure = (reason: string) => ({
     command: options.shell ? typeof options.shell === "string" ? options.shell : "sh" : command,
-    args: [], options: probeOptions, failure: reason,
+    args: [], options: probeOptions, shellString, entry: undefined, failure: reason,
   });
   if (!words) return failure("unclassifiable shell string");
+  const uncertainty = { value: false };
+  const originalEntry = options.shell ? argvEntry([command, ...args], probeOptions)
+    : shellEntry([command, ...args], probeOptions, uncertainty);
+  const parsedEntry = shellEntry(words, probeOptions, uncertainty, shellString);
+  const protectedEntry = originalEntry ?? parsedEntry;
   while (words.length && assignment(words[0])) words.shift();
   if (basename(words[0] ?? "") === "env") {
     words.shift();
@@ -202,7 +225,7 @@ function invocation(command: string, args: string[], options: Options) {
         const source = word.startsWith("--split-string=") ? word.slice(15)
           : word.startsWith("-S") && word !== "-S" ? word.slice(2) : words.shift();
         if (source === undefined) return failure("missing env split string");
-        const split = shellWords(source);
+        const split = commandWords(source, false);
         if (!split?.length) return failure("unclassifiable env split string");
         words.unshift(...split);
       } else if (["-i", "--ignore-environment", "-"].includes(word)) probeOptions.env = {};
@@ -216,10 +239,15 @@ function invocation(command: string, args: string[], options: Options) {
       else return failure("unsupported env option");
     }
     if (!words[0]) return failure("missing env executable");
-    if (["env", "sh", "bash"].includes(basename(words[0]))) return failure("unsupported nested env wrapper");
+    if (!protectedEntry && ["env", ...shells].includes(basename(words[0]))) return failure("unsupported nested env wrapper");
     if (!resolvedExecutable(words[0], probeOptions)) return failure("unresolved env executable");
   }
-  return { command: words[0], args: words.slice(1), options: probeOptions, failure: undefined };
+  if (shellString && (!words[0] || !resolvedExecutable(words[0], probeOptions))) {
+    return failure("unresolved shell executable");
+  }
+  return { command: words[0], args: words.slice(1), options: probeOptions, shellString,
+    entry: protectedEntry ?? shellEntry(words, probeOptions),
+    failure: uncertainty.value ? "unclassifiable shell string" : undefined };
 }
 
 export class BunHarperSpawnError extends Error {
@@ -236,23 +264,43 @@ export class TestRuntimeIdentityError extends Error {
   }
 }
 
-function check(api: string, command: unknown, args: unknown, options: Options = {}): void {
+// Test-harness guard against accidental Bun launches, not a security boundary.
+// It does not model hostile process environments.
+// Wrapped APIs: child_process spawn, spawnSync, execFile, execFileSync, exec, execSync; Bun.spawn and Bun.spawnSync.
+// Direct executables classified as Node may launch protected entries without a reason; direct Bun launches of protected entries are refused without one.
+// Other launches with a protected entry path or executable require a nonempty, child-only FLAIR_TEST_ALLOW_BUN_HARPER reason.
+// PATH lookup applies only to command and wrapper executables, including shell command words.
+// Other argv uses protected-entry substrings and cwd-relative path resolution for words containing / or starting with .
+// Shell command strings in wrapper chains fail closed.
+export function checkTestSpawn(api: string, command: unknown, args: unknown, options: Options = {}): void {
   if (typeof command !== "string" || !Array.isArray(args)) return;
-  const launch = invocation(command, args, options);
-  if (launch.failure) throw new TestRuntimeIdentityError(api, launch.command!, launch.failure);
-  if (!launch.command) return;
-  const entry = startsHarper(launch.args, launch.options);
-  if (!entry) return;
-  const runtime = runtimeKind(launch.command, launch.options);
-  if (runtime === "node" || runtime === "missing") return;
-  const error = runtime === "bun" ? new BunHarperSpawnError(api, launch.command, entry)
-    : new TestRuntimeIdentityError(api, launch.command, `unverified runtime launching ${entry}`);
+  const uncertainty = { value: false };
+  const originalEntry = options.shell ? argvEntry([command, ...args], options)
+    : shellEntry([command, ...args], options, uncertainty);
+  const scanOptions = { ...options };
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--cwd" && args[i + 1]) scanOptions.cwd = resolve(cwdPath(scanOptions.cwd), args[++i]);
+    else if (args[i].startsWith("--cwd=")) scanOptions.cwd = resolve(cwdPath(scanOptions.cwd), args[i].slice(6));
+  }
+  const launch = invocation(command, args, scanOptions);
+  launch.entry ??= originalEntry;
+  launch.failure ??= uncertainty.value ? "unclassifiable shell string" : undefined;
+  if (!launch.failure && !launch.entry) return;
   const reason = !Object.hasOwn(process.env, ALLOW) && options.env && Object.hasOwn(options.env, ALLOW)
     ? options.env[ALLOW]?.trim() : undefined;
+  const displayCommand = options.shell ? typeof options.shell === "string" ? options.shell : "sh" : command;
   if (reason) {
+    const error = new TestRuntimeIdentityError(api, displayCommand, launch.failure ?? `launching ${launch.entry}`);
     console.warn(`${error.stack}\n${ALLOW}: ${reason}`);
     return;
   }
+  const runtime = options.shell ? "unknown" : runtimeKind(command, options);
+  if (runtime === "node") return;
+  const diagnosticRuntime = launch.shellString || launch.failure ? "unknown"
+    : launch.command === command ? runtime : runtimeKind(launch.command!, launch.options);
+  const error = launch.failure ? new TestRuntimeIdentityError(api, displayCommand, launch.failure)
+    : diagnosticRuntime === "bun" ? new BunHarperSpawnError(api, displayCommand, launch.entry!)
+    : new TestRuntimeIdentityError(api, displayCommand, `${launch.shellString ? "shell string" : "unverified runtime"} launching ${launch.entry}`);
   throw error;
 }
 
@@ -264,11 +312,12 @@ function wrap(target: Record<string, unknown>, key: string, api: string, bun: bo
       const first = args[0] as { cmd?: string[] } | string[];
       const cmd = Array.isArray(first) ? first : first?.cmd;
       const options = (Array.isArray(first) ? args[1] : first) as Options | undefined;
-      if (cmd) check(api, cmd[0], cmd.slice(1), options);
+      if (cmd) checkTestSpawn(api, cmd[0], cmd.slice(1), options);
     } else {
       const argv = Array.isArray(args[1]) ? args[1] : [];
       const options = (Array.isArray(args[1]) ? args[2] : args[1]) as Options | undefined;
-      check(api, args[0], argv, options && typeof options === "object" ? options : {});
+      const childOptions = options && typeof options === "object" ? options : {};
+      checkTestSpawn(api, args[0], argv, key === "exec" || key === "execSync" ? { ...childOptions, shell: true } : childOptions);
     }
   };
   const guarded = function(this: unknown, ...args: unknown[]) {
@@ -292,10 +341,10 @@ function wrap(target: Record<string, unknown>, key: string, api: string, bun: bo
   if (target[key] !== guarded) throw new Error(`Cannot wrap ${api}: assignment did not replace the function`);
 }
 
-for (const api of ["spawn", "spawnSync", "execFile", "execFileSync"]) wrap(childProcess, api, `child_process.${api}`, false);
+for (const api of ["spawn", "spawnSync", "execFile", "execFileSync", "exec", "execSync"]) wrap(childProcess, api, `child_process.${api}`, false);
 syncBuiltinESMExports();
 const named = await import("node:child_process");
-for (const api of ["spawn", "spawnSync", "execFile", "execFileSync"] as const) {
+for (const api of ["spawn", "spawnSync", "execFile", "execFileSync", "exec", "execSync"] as const) {
   if (named[api] !== childProcess[api]) throw new Error(`Cannot wrap child_process.${api}: named export did not update`);
 }
 for (const api of ["spawn", "spawnSync"]) wrap(Bun as unknown as Record<string, unknown>, api, `Bun.${api}`, true);

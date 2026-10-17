@@ -1,3 +1,4 @@
+import { nodeBin } from "../helpers/node-runtime.ts";
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -13,12 +14,19 @@ import {
   STEP_TIMEOUT_MS,
   ciRequestsKeepGoing,
   parseUnitLaneArgs,
-  runUnitSteps,
+  runUnitSteps as runUnitStepsWithRuntime,
   unitEnvironment,
   unitPlan,
   unitTempBase,
 } from "../../scripts/test-unit.ts";
 import { SHARDS } from "../../scripts/ci/unit-shards.mjs";
+
+function runUnitSteps(
+  steps: Parameters<typeof runUnitStepsWithRuntime>[0], executable = nodeBin(),
+  guardHome?: Parameters<typeof runUnitStepsWithRuntime>[2], options?: Parameters<typeof runUnitStepsWithRuntime>[3],
+) {
+  return runUnitStepsWithRuntime(steps, executable, guardHome, options);
+}
 
 const root = join(import.meta.dir, "../..");
 const fixtures: string[] = [];
@@ -187,7 +195,7 @@ describe("shared unit lane", () => {
     try {
       code = runUnitSteps(
         [{ name: "succeeds but writes a real config", cwd: home, args: ["-e", script], files: [] }],
-        process.execPath,
+        nodeBin(),
         home,
       );
     } finally {
@@ -216,7 +224,7 @@ describe("shared unit lane", () => {
     const { result: code, errors } = captureErrors(() => runUnitSteps([
       { name: "first failing step", cwd: dir, args: ["-e", 'require("node:fs").writeFileSync("ran-1", "x"); process.exit(5)'], files: [] },
       { name: "second failing step", cwd: dir, args: ["-e", 'require("node:fs").writeFileSync("ran-2", "x"); process.exit(6)'], files: [] },
-    ], process.execPath, dir, { keepGoing: true }));
+    ], nodeBin(), dir, { keepGoing: true }));
     expect(code).toBe(1);
     expect(readFileSync(join(dir, "ran-1"), "utf8")).toBe("x");
     expect(readFileSync(join(dir, "ran-2"), "utf8")).toBe("x");
@@ -234,7 +242,7 @@ describe("shared unit lane", () => {
       { name: "fails early", cwd: dir, args: ["-e", "process.exit(3)"], files: [] },
       { name: "later one", cwd: dir, args: ["-e", 'require("node:fs").writeFileSync("later-1", "x")'], files: [] },
       { name: "later two", cwd: dir, args: ["-e", 'require("node:fs").writeFileSync("later-2", "x")'], files: [] },
-    ], process.execPath, dir, { keepGoing: true });
+    ], nodeBin(), dir, { keepGoing: true });
     expect(code).toBe(1);
     expect(readFileSync(join(dir, "later-1"), "utf8")).toBe("x");
     expect(readFileSync(join(dir, "later-2"), "utf8")).toBe("x");
@@ -252,7 +260,7 @@ describe("shared unit lane", () => {
     ].join("");
     const { result: code, errors } = captureErrors(() => runUnitSteps(
       [{ name: "succeeds but writes a real config", cwd: home, args: ["-e", script], files: [] }],
-      process.execPath,
+      nodeBin(),
       home,
       { keepGoing: true },
     ));
@@ -269,7 +277,7 @@ describe("shared unit lane", () => {
     const code = runUnitSteps([
       { name: "fails", cwd: dir, args: ["-e", 'require("node:fs").writeFileSync("first", "x"); process.exit(9)'], files: [] },
       { name: "must not run", cwd: dir, args: ["-e", 'require("node:fs").writeFileSync("second", "x")'], files: [] },
-    ], process.execPath, dir); // no keepGoing argument
+    ], nodeBin(), dir); // no keepGoing argument
     expect(code).toBe(1);
     expect(readFileSync(join(dir, "first"), "utf8")).toBe("x");
     expect(() => readFileSync(join(dir, "second"))).toThrow();
@@ -292,7 +300,7 @@ describe("shared unit lane", () => {
       { name: "hangs past its own limit", cwd: dir, args: ["-e", HANG_8S], files: [], timeoutMs: 2000 },
       { name: "hangs past the default limit", cwd: dir, args: ["-e", HANG_8S], files: [] },
       { name: "fails after the hangs", cwd: dir, args: ["-e", `require("node:fs").writeFileSync("ran-3", "x"); ${plantConfig(dir)} process.exit(4)`], files: [] },
-    ], process.execPath, dir, { keepGoing: true, limits: { stepTimeoutMs: 1000 } }));
+    ], nodeBin(), dir, { keepGoing: true, limits: { stepTimeoutMs: 1000 } }));
     // Both hangs were cut short: neither reached its own 8 s end.
     expect(Date.now() - started).toBeLessThan(8000);
     expect(code).toBe(1);
@@ -311,7 +319,7 @@ describe("shared unit lane", () => {
     const { result: code, errors } = captureErrors(() => runUnitSteps([
       { name: "hangs", cwd: dir, args: ["-e", `${plantConfig(dir)} ${HANG_8S}`], files: [], timeoutMs: 1000 },
       { name: "must not run", cwd: dir, args: ["-e", 'require("node:fs").writeFileSync("later", "x")'], files: [] },
-    ], process.execPath, dir, { limits: { stepTimeoutMs: 60_000 } }));
+    ], nodeBin(), dir, { limits: { stepTimeoutMs: 60_000 } }));
     expect(Date.now() - started).toBeLessThan(8000);
     expect(code).toBe(1);
     expect(existsSync(join(dir, "later"))).toBe(false);
@@ -325,7 +333,7 @@ describe("shared unit lane", () => {
     const { result: code, errors } = captureErrors(() => runUnitSteps([
       { name: "plants a config, then hangs", cwd: dir, args: ["-e", `${plantConfig(dir)} ${HANG_8S}`], files: [] },
       { name: "never started", cwd: dir, args: ["-e", 'require("node:fs").writeFileSync("later", "x")'], files: [] },
-    ], process.execPath, dir, { keepGoing: true, limits: { stepTimeoutMs: 60_000, laneBudgetMs: 1500 } }));
+    ], nodeBin(), dir, { keepGoing: true, limits: { stepTimeoutMs: 60_000, laneBudgetMs: 1500 } }));
     expect(Date.now() - started).toBeLessThan(8000);
     expect(code).toBe(1);
     expect(existsSync(join(dir, "later"))).toBe(false);
@@ -342,7 +350,7 @@ describe("shared unit lane", () => {
     const started = Date.now();
     const code = runUnitSteps([
       { name: "slow but fine", cwd: dir, args: ["-e", "setTimeout(() => {}, 1500)"], files: [], timeoutMs: 500 },
-    ], process.execPath, dir);
+    ], nodeBin(), dir);
     expect(code).toBe(0);
     expect(Date.now() - started).toBeGreaterThanOrEqual(1400);
   }, 30_000);
@@ -361,7 +369,7 @@ describe("shared unit lane", () => {
       const { result: code, errors } = captureErrors(() => runUnitSteps([
         { name: "has no sandbox", cwd: dir, args: ["-e", 'require("node:fs").writeFileSync("ran-1", "x")'], files: [] },
         { name: "fails later", cwd: dir, args: ["-e", 'require("node:fs").writeFileSync("ran-2", "x"); process.exit(4)'], files: [] },
-      ], process.execPath, dir, { keepGoing, createSandbox }));
+      ], nodeBin(), dir, { keepGoing, createSandbox }));
       expect(code).toBe(1);
       // A step is never run without its sandbox: its HOME would be the real one.
       expect(existsSync(join(dir, "ran-1"))).toBe(false);
@@ -388,7 +396,7 @@ describe("shared unit lane", () => {
       fixtures.push(join(process.env.TMPDIR ?? tmpdir(), leakName)); // removed when a nested lane reused the caller's root
       const { result: code, errors } = captureErrors(() => runUnitSteps(
         [{ name: "succeeds but leaves a flair-* temp dir", cwd: home, args: ["-e", `require("node:fs").mkdirSync(require("node:path").join(process.env.TMPDIR, ${JSON.stringify(leakName)}))`], files: [] }],
-        process.execPath,
+        nodeBin(),
         home,
         { keepGoing },
       ));
@@ -411,7 +419,7 @@ describe("shared unit lane", () => {
       const script = `require("node:fs").mkdirSync(require("node:path").join(process.env.TMPDIR, ${JSON.stringify(leakName)})); ${HANG_8S}`;
       const { result: code, errors } = captureErrors(() => runUnitSteps(
         [{ name: "hangs and leaks", cwd: dir, args: ["-e", script], files: [] }],
-        process.execPath,
+        nodeBin(),
         dir,
         { keepGoing, limits: { stepTimeoutMs: 1000 } },
       ));
@@ -434,7 +442,7 @@ describe("shared unit lane", () => {
       const ordinary = { name: "ordinary leak", cwd: dir, args: ["-e", plant(ordinaryName)], files: [] };
       const killed = { name: "killed leak", cwd: dir, args: ["-e", plant(killedName) + HANG_8S], files: [] };
       const { result: code, errors } = captureErrors(() => runUnitSteps(
-        leakBefore ? [ordinary, killed] : [killed, ordinary], process.execPath, dir,
+        leakBefore ? [ordinary, killed] : [killed, ordinary], nodeBin(), dir,
         { keepGoing: true, limits: { stepTimeoutMs: 1000 } },
       ));
       expect(code).toBe(1);
@@ -454,7 +462,7 @@ describe("shared unit lane", () => {
     fixtures.push(join(process.env.TMPDIR ?? tmpdir(), leakName));
     const { result: code, errors } = captureErrors(() => runUnitSteps(
       [{ name: "leaks but passes", cwd: home, args: ["-e", `require("node:fs").mkdirSync(require("node:path").join(process.env.TMPDIR, ${JSON.stringify(leakName)}))`], files: [] }],
-      process.execPath,
+      nodeBin(),
       home,
     ));
     expect(code).toBe(1);
@@ -521,7 +529,7 @@ describe("shared unit lane", () => {
     const dir = fixture();
     const { result: code, logs } = captureLogs(() => runUnitSteps(
       [{ name: "quick step", cwd: dir, args: ["-e", "process.exit(0)"], files: [] }],
-      process.execPath,
+      nodeBin(),
       dir,
       { keepGoing: true },
     ));
@@ -555,7 +563,7 @@ describe("shared unit lane", () => {
       try {
         return captureErrors(() => runUnitSteps(
           [{ name: "leaks into its TMPDIR", cwd: base, args: ["-e", script], files: [] }],
-          process.execPath,
+          nodeBin(),
           home,
         ));
       } finally {
@@ -586,7 +594,7 @@ describe("shared unit lane", () => {
     try {
       const { result: code, errors } = captureErrors(() => runUnitSteps(
         [{ name: "leaks after env replacement", cwd: base, args: ["-e", script], files: [] }],
-        process.execPath,
+        nodeBin(),
         home,
       ));
       expect(code).toBe(1);
@@ -606,7 +614,7 @@ describe("shared unit lane", () => {
       try {
         return runUnitSteps(
           [{ name: "clean step", cwd: base, args: ["-e", "process.exit(0)"], files: [] }],
-          process.execPath,
+          nodeBin(),
           home,
         );
       } finally {
@@ -641,7 +649,13 @@ describe("shared unit lane", () => {
         const code = runUnitSteps([{ name: "nested leak", cwd: root, files: [], args: ["-e", 'require("node:fs").mkdirSync(require("node:path").join(process.env.TMPDIR, "flair-nested-leak"))'] }], process.execPath, root);
         writeFileSync(${JSON.stringify(seen)}, JSON.stringify({ code, root, after: tmpdir(), exists: existsSync(root + "/flair-nested-leak") }));
       `;
-      expect(runUnitSteps([{ name: "nested runner", cwd: root, files: [], args: ["-e", script] }], process.execPath, base)).toBe(1);
+      expect(runUnitSteps([{ name: "nested runner", cwd: root, files: [], args: ["-e", script] }], process.execPath, base, {
+        createSandbox: () => {
+          const sandbox = createSandboxHome();
+          sandbox.env.FLAIR_TEST_ALLOW_BUN_HARPER = "exercise the nested Bun unit runner";
+          return sandbox;
+        },
+      })).toBe(1);
       const result = JSON.parse(readFileSync(seen, "utf8"));
       expect(result.code).toBe(1);
       expect(result.after).toBe(result.root);

@@ -65,7 +65,11 @@ function runCli(runtime: string, args: string[], env: Record<string, string>, cw
     const startedAt = Date.now();
     const child = spawn(runtime, [CLI_PATH, ...args], {
       cwd,
-      env: { ...process.env, FLAIR_AGENT_ID: "", ...env, USERPROFILE: env.HOME },
+      env: {
+        ...process.env, FLAIR_AGENT_ID: "", ...env, USERPROFILE: env.HOME,
+        // The Bun case exercises the bridge's option records under Bun on purpose.
+        ...(runtime === "node" ? {} : { FLAIR_TEST_ALLOW_BUN_HARPER: "the bridge option-record case runs the CLI under Bun on purpose" }),
+      },
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 20_000, // literal so the spawn-budget gate sees a deadline (flair#1807)
     });

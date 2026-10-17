@@ -18,6 +18,7 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { spawn } from "node:child_process";
 import { childOverranDeadline, cliLeg } from "../helpers/child-deadline";
+import { nodeBin } from "../helpers/node-runtime.js";
 import { mkdtemp, rm, mkdir, writeFile, unlink } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -34,11 +35,9 @@ const CLI = join(process.cwd(), "dist", "cli.js");
 // way of the deadline's named overrun.
 const CHILD_DEADLINE_MS = 20_000;
 // A case's budget must exceed the SUM of every wait that can run serially in it,
-// plus a margin (flair#1807 round 2). Three CLI runs need 3 x 20 s, not 25 s; a
-// bounded ops fetch plus one CLI run needs 15 s + 20 s.
-const CASE_BUDGET_MS = 25_000;            // one CLI run
-const THREE_CLI_CASE_BUDGET_MS = 75_000;  // three CLI runs (3 x CHILD_DEADLINE_MS + 15 s margin)
-const FETCH_PLUS_CLI_CASE_BUDGET_MS = 45_000; // HARPER_OP_TIMEOUT_MS + CHILD_DEADLINE_MS + 10 s margin
+// plus a margin (flair#1807 round 2): three CLI runs need 3 x 20 s, and a bounded
+// ops fetch plus one CLI run needs 15 s + 20 s. The spawn-budget gate reads a
+// LITERAL, so each case carries its budget inline.
 /** The ops-API fetch deadline — the one stage that had NO bound at all. */
 const HARPER_OP_TIMEOUT_MS = 15_000;
 const ADMIN_PASS = "test123"; // matches harper-lifecycle's seeded admin pass
@@ -58,17 +57,18 @@ function runCli(args: string[], extraEnv: Record<string, string> = {}): Promise<
   const opsPort = new URL(harper.opsURL).port;
   return new Promise((resolve, reject) => {
     const startedAt = Date.now();
-    const child = spawn(process.execPath, [CLI, ...args], {
-      env: {
-        ...process.env,
-        HOME: cliHome,
-        FLAIR_URL: harper.httpURL,
-        FLAIR_OPS_PORT: opsPort,
-        FLAIR_TOKEN: "",
-        FLAIR_ADMIN_PASS: "",
-        ...extraEnv,
-      },
-      timeout: CHILD_DEADLINE_MS,
+    const env = {
+      ...process.env,
+      HOME: cliHome,
+      FLAIR_URL: harper.httpURL,
+      FLAIR_OPS_PORT: opsPort,
+      FLAIR_TOKEN: "",
+      FLAIR_ADMIN_PASS: "",
+      ...extraEnv,
+    };
+    const child = spawn(nodeBin({ env }), [CLI, ...args], {
+      env,
+      timeout: 20_000, // literal so the spawn-budget gate reads a child deadline
     });
     let stdout = "";
     let stderr = "";
@@ -104,7 +104,7 @@ const opsPort = () => new URL(harper.opsURL).port;
 /** A bounded, NAMED ops fetch — a hang here is reported by the deadline. */
 async function fetchOpsWithDeadline(url: string, init: RequestInit): Promise<Response> {
   try {
-    return await fetch(url, { ...init, signal: AbortSignal.timeout(HARPER_OP_TIMEOUT_MS) });
+    return await fetch(url, { ...init, signal: AbortSignal.timeout(15_000) });
   } catch (err) {
     throw new Error(
       `ops request to ${url} did not answer within ${HARPER_OP_TIMEOUT_MS} ms: ${err instanceof Error ? err.message : String(err)}`,
@@ -150,7 +150,7 @@ describe("flair doctor — fleet presence (flair#639, real CLI + real spawned Ha
     expect(out).not.toContain("stale");
     // We passed --agent with a real key → versions must NOT be hidden.
     expect(out).not.toContain("hidden");
-  }, THREE_CLI_CASE_BUDGET_MS);
+  }, 75_000);
 
   test("doctor without --agent: auto-iterates the local key (flair#722) — versions are NOT hidden", async () => {
     // cliHome already has AGENT_A's key on disk from the "agent add" call
@@ -166,7 +166,7 @@ describe("flair doctor — fleet presence (flair#639, real CLI + real spawned Ha
     expect(out).toContain(`v${REAL_FLAIR_VERSION}`);
     expect(out).not.toContain("hidden");
     expect(out).not.toContain("Pass --agent");
-  }, CASE_BUDGET_MS);
+  }, 25_000);
 
   test("doctor without --agent, zero local keys: roster read is refused (verified-reader default) and NAMED, not silently blank", async () => {
     // A totally separate, empty HOME (no `agent add` ever ran here) —
@@ -190,7 +190,7 @@ describe("flair doctor — fleet presence (flair#639, real CLI + real spawned Ha
     } finally {
       await rm(emptyHome, { recursive: true, force: true, maxRetries: 4 });
     }
-  }, CASE_BUDGET_MS);
+  }, 25_000);
 
   test("failure isolation (flair#722): an unregistered local key reports its own finding without hiding the registered agent's subsection", async () => {
     // Plant a second, bogus key directly in cliHome/.flair/keys — same shape
@@ -222,7 +222,7 @@ describe("flair doctor — fleet presence (flair#639, real CLI + real spawned Ha
     } finally {
       await unlink(join(keysDir, `${BOGUS_ID}.key`)).catch(() => {});
     }
-  }, CASE_BUDGET_MS);
+  }, 25_000);
 
   test("an older-version instance is flagged stale and sorted ahead of the current one", async () => {
     // Seed a second, artificially OLD presence row directly via the ops API
@@ -265,7 +265,7 @@ describe("flair doctor — fleet presence (flair#639, real CLI + real spawned Ha
     expect(oldIdx).toBeGreaterThan(-1);
     expect(currentIdx).toBeGreaterThan(-1);
     expect(oldIdx).toBeLessThan(currentIdx);
-  }, FETCH_PLUS_CLI_CASE_BUDGET_MS);
+  }, 45_000);
 
   test("natural-presence: a stale-activity instance renders 'offline' with its last-known activity, not a live label", async () => {
     // Seed a row with a CURRENT version (not version-stale) but a long-stale
@@ -302,5 +302,5 @@ describe("flair doctor — fleet presence (flair#639, real CLI + real spawned Ha
     expect(line).toContain("offline");
     // Last-known activity is shown as "(was: debugging)", never a live label.
     expect(line).toContain("was: debugging");
-  }, FETCH_PLUS_CLI_CASE_BUDGET_MS);
+  }, 45_000);
 });

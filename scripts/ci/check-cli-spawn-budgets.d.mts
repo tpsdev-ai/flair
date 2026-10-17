@@ -80,7 +80,7 @@ export function gateBaseRef(env?: Record<string, string | undefined>): string;
 export function loadBaselineAtRef(ref: string, root: string): BaselineEntry[] | null;
 /** The PR tree's copy of the baseline. */
 export function readPrBaseline(root: string): BaselineEntry[];
-/** Entries a PR added relative to the trusted base (a PR may only remove). */
+/** Entries with exception keys absent from the trusted base. */
 export function addedExceptions(baseEntries: BaselineEntry[], prEntries: BaselineEntry[]): BaselineEntry[];
 
 /** End-to-end check used by main() and the gate-level tests. */

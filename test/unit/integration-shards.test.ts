@@ -45,6 +45,7 @@ const REAL_LOG = join(ROOT, "test", "fixtures", "integration-shard-log.txt");
 function findFiles(): string[] {
   const r = spawnSync("find", ["test/integration", "-name", "*.test.ts"], {
     cwd: ROOT,
+    env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "pass a literal find glob as argument data" },
     encoding: "utf8",
     timeout: 15_000,
   });

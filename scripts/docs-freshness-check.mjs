@@ -358,7 +358,7 @@ defineCheck("changelog-unreleased", null, () => {
   let commitsSinceTag = null;
   try {
     const tag = execFileSync("git", ["describe", "--tags", "--abbrev=0", "--match", "v*"],
-      { cwd: ROOT, stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
+      { cwd: ROOT, env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "pass the literal release-tag glob to git describe" }, stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
     // `git describe --match v*` exits non-zero when nothing matches, so an empty
     // string here means git succeeded and told us nothing. Treated as unmet, not
     // as "zero commits since the tag" — the difference is a dark check.
