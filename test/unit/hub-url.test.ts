@@ -1,10 +1,7 @@
-// hub-url.test.ts — the federation hub URL is stored and used without trailing
-// slashes, so a trailing slash does not introduce an empty path segment into
-// `<hub>/FederationPair` or `<hub>/FederationSync`. (An empty segment already in
-// the hub's own path is left alone; `normalizeHubUrl` normalises the trailing
-// slash only.) The pair and sync call sites are driven through the CLI with a
-// mocked `fetch` (hub and instance API responses are fakes) in
-// federation-pair-cli.test.ts and federation-liveness-ping.test.ts.
+// hub-url.test.ts — new pairings store the normalized hub URL; sync normalizes
+// previously stored endpoints when sending. The pair and sync call sites are
+// driven through the CLI with mocked `fetch` (hub and instance API responses
+// are fakes) in federation-pair-cli.test.ts and federation-liveness-ping.test.ts.
 import { describe, expect, test } from "bun:test";
 import { normalizeHubUrl } from "../../src/lib/hub-url.ts";
 import { isCanonicalRequestTarget } from "../../resources/request-target.ts";

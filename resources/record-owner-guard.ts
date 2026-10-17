@@ -156,22 +156,20 @@ export function isMutatingMethod(method: string): boolean {
  * when Harper's routing returns no route (e.g. no live registry or no matching
  * route).
  *
- * Matches `/<Table>/<id>` ONLY. A collection path (`/<Table>` or `/<Table>/`)
- * addresses no existing record, so there is nothing to own and nothing to
- * check — that is the "creation is untouched" property, expressed as a parse
- * rather than a special case. The table segment is matched EXACTLY so
+ * Matches `/<Table>/<id>` ONLY. A bare resource path has no record id; a
+ * trailing-slash path is a collection. The table segment is matched EXACTLY so
  * `/SoulFeed/x` can never be read as a `Soul` route.
  */
 export function resolveGuardedRecord(pathname: string): { table: string; ownerField: string; id: string } | null {
   const routed = routedRecordId(pathname);
-  if (!routed) return null; // collection, or malformed percent-encoding
+  if (!routed) return null; // no record id, or malformed percent-encoding
   return resolveGuardedRecordById(routed.resource, routed.id);
 }
 
 /**
  * The guarded record for a resource and record id already resolved by Harper's
  * own routing (resources/harper-routing.ts). Null when the resource is not a
- * guarded table, or there is no single record (a collection). This is the form
+ * guarded table, or there is no record id. This is the form
  * the middleware uses at request time, where the id has had Harper's
  * content-type-suffix and property rules applied.
  */

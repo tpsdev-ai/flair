@@ -94,8 +94,8 @@ export function decodePathSegment(segment: string): string | null {
 /**
  * The resource name and still-encoded remainder Harper's routing hands a
  * RequestTarget: the first path segment, and everything after it with the one
- * leading slash removed. A collection path (`/<resource>` or `/<resource>/`)
- * has an empty or trailing-slash remainder. Mirrors `Resources.getMatch`'s
+ * leading slash removed. A bare resource path has no record id; a trailing-slash
+ * path is a collection. Mirrors `Resources.getMatch`'s
  * `relativeURL` for a one-level resource and `RequestTarget`'s leading-slash
  * removal.
  */
@@ -113,7 +113,7 @@ export function routedResourceAndRemainder(path: string): { resource: string; re
  * that itself contains `/` (sent raw or as `%2F`) resolves to the whole id, the
  * same row Harper operates on.
  *
- * Null for a collection path (empty or trailing-slash remainder) and for a
+ * Null for an empty or trailing-slash remainder and for a
  * remainder that is not valid percent-encoding (Harper answers that itself).
  */
 export function routedRecordId(path: string): { resource: string; id: string } | null {

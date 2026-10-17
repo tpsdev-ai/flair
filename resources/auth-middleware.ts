@@ -416,7 +416,7 @@ server.http(async (request: any, nextLayer: any) => {
   }
 
   // ── HTTP method allowlist ──────────────────────────────────────────────────
-  // Right after the canonical-target check: before the public-path passthrough
+  // After the canonical check and route resolution: before the public-path passthrough
   // and before any auth branch, so no path and no caller (anonymous, agent or
   // admin) can reach a handler through any other method.
   // Exact match: HTTP methods are case-sensitive, and these are the spellings

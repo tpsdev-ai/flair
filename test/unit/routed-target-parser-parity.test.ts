@@ -71,12 +71,11 @@ describe("routedRecordId matches Harper's RequestTarget id (no property rule)", 
     });
   }
 
-  test("a collection path and a trailing-slash remainder resolve to no single record", () => {
+  test("a bare resource path has no record id; a trailing-slash path is a collection", () => {
     expect(routedRecordId("/Fixture")).toBeNull();
     expect(routedRecordId("/Fixture/")).toBeNull();
-    // Harper flags an empty remainder as a collection with a null id. A
-    // trailing-slash remainder that keeps text (`x/`) is also a collection
-    // (isCollection true) but carries a non-null id (`x/`).
+    // A bare resource path has no record id. A trailing-slash remainder `x/`
+    // is a collection but carries the id `x/`.
     expect(new RequestTarget("").id ?? null).toBeNull();
     expect(new RequestTarget("x/").isCollection).toBe(true);
     expect(new RequestTarget("x/").id).toBe("x/");
