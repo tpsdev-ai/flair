@@ -2,16 +2,22 @@
  * orgevent-reserved-events-2139.test.ts — real Harper, over HTTP.
  *
  * flair#2139 slice 3a: reserved-event protection, no emission.
- *   - POST, single-id PUT/PATCH/DELETE and collection PUT refuse a proposed or
- *     stored reserved record (`soul.changed`/`skill.changed` kind, or an
- *     `instruction-change:` id prefix) with 403 `reserved_event` for agents,
- *     admin agents and the credentialed Basic admin;
+ *   - POST, single-id PUT/PATCH/DELETE and collection PUT/DELETE refuse a
+ *     proposed or stored reserved record (`soul.changed`/`skill.changed` kind,
+ *     or an `instruction-change:` id prefix) for agents, admin agents and the
+ *     credentialed Basic admin;
+ *   - a POST to a reserved addressed id with an ordinary body, and a PATCH
+ *     that would create a row at a reserved addressed id, are refused;
  *   - a reserved element refuses a collection PUT as a whole: no element is
  *     written;
+ *   - a collection DELETE that selects a reserved row is refused before
+ *     anything is deleted; an ordinary-only selection deletes;
  *   - anonymous callers keep their existing 401;
- *   - `flair doctor` names a planted impostor and passes on a clean store;
- *   - an instruction event with no expiresAt survives an OrgEventMaintenance
- *     run, while an expired ordinary event is deleted.
+ *   - `flair doctor` names a planted impostor and passes on a clean store; it
+ *     lists every impostor id, and a real matching InstructionVersion passes;
+ *   - a reserved event survives an OrgEventMaintenance run, including one
+ *     carrying an expired expiresAt, while an expired ordinary event is deleted;
+ *     non-admin and anonymous callers are denied on OrgEventMaintenance.
  *
  * Impostor rows are planted through the raw operations API, the documented
  * exception to the resource guard.
@@ -128,6 +134,24 @@ async function plantEvent(id: string, overrides: Record<string, unknown> = {}): 
 async function deleteEvent(id: string): Promise<void> {
   await adminOp({ operation: "delete", table: "OrgEvent", hash_values: [id] });
 }
+async function countEvents(): Promise<number> {
+  const rows = await adminOp({ operation: "sql", sql: "SELECT id FROM flair.OrgEvent" });
+  const list = Array.isArray(rows) ? rows : rows?.results;
+  if (!Array.isArray(list)) throw new Error(`sql read returned no row array: ${JSON.stringify(rows).slice(0, 200)}`);
+  return list.length;
+}
+async function plantVersion(id: string, subjectType: string): Promise<void> {
+  await adminOp({
+    operation: "insert", table: "InstructionVersion",
+    records: [{
+      id, subjectType, subjectId: `soul:${agent.id}:key`, agentId: agent.id, key: "key",
+      version: 1, kind: "create", rowId: `soul:${agent.id}:key`, valueHash: "hash",
+      previousVersionHash: null, recordHash: "hash", soulSnapshot: null, memoryId: null,
+      visibility: null, actorKind: "internal", actorId: null, sourceClass: "internal",
+      createdAt: new Date().toISOString(), guarded: false, expectedVersion: null,
+    }],
+  });
+}
 
 function expectReserved(status: number, text: string): void {
   expect(status, text.slice(0, 300)).toBe(403);
@@ -191,6 +215,36 @@ describe("flair doctor names stored reserved-event impostors", () => {
     const cleanAgain = await runDoctor();
     expect(cleanAgain.stdout).toContain("No stored OrgEvent carries a reserved kind or id without a matching InstructionVersion.");
   }, 90_000);
+
+  it("lists every impostor id when more than ten are stored", async () => {
+    const ids = Array.from({ length: 12 }, () => `${PREFIX}many-${randomUUID()}`);
+    for (const id of ids) await plantEvent(id);
+    const reported = await runDoctor();
+    for (const id of ids) expect(reported.stdout, id).toContain(id);
+    expect(reported.stdout).toContain("12 stored OrgEvent rows carry");
+    for (const id of ids) await deleteEvent(id);
+  }, 120_000);
+
+  it("passes a real matching InstructionVersion and names a mismatched one", async () => {
+    const versionId = `version-${randomUUID()}`;
+    const matched = `${PREFIX}${versionId}`;
+    await plantVersion(versionId, "soul");
+    await plantEvent(matched, { kind: "soul.changed", refId: versionId });
+    const passed = await runDoctor();
+    expect(passed.stdout).not.toContain(matched);
+    expect(passed.stdout).toContain("No stored OrgEvent carries a reserved kind or id without a matching InstructionVersion.");
+
+    // A subject-type mismatch fails the reader rule.
+    await adminOp({
+      operation: "update", table: "InstructionVersion",
+      records: [{ id: versionId, subjectType: "skill" }],
+    });
+    const mismatched = await runDoctor();
+    expect(mismatched.stdout).toContain(matched);
+
+    await deleteEvent(matched);
+    await adminOp({ operation: "delete", table: "InstructionVersion", hash_values: [versionId] });
+  }, 120_000);
 });
 
 describe("a proposed reserved record is refused on every write shape", () => {
@@ -290,6 +344,54 @@ describe("a stored reserved record is refused on every write shape", () => {
   }, 30_000);
 });
 
+describe("a reserved addressed id is refused without a proposed marker", () => {
+  const principals: Array<{ name: string; send: (m: string, p: string, b?: unknown) => Promise<Response> }> = [
+    { name: "agent", send: (m, p, b) => send(agent, m, p, b) },
+    { name: "Basic admin", send: (m, p, b) => basicSend(m, p, b) },
+  ];
+
+  for (const p of principals) {
+    it(`${p.name} POST to a reserved addressed id with an ordinary body stores nothing`, async () => {
+      const id = `${PREFIX}addressed-${randomUUID()}`;
+      const res = await p.send("POST", `/OrgEvent/${id}`, { kind: "status", summary: "no body id" });
+      expectReserved(res.status, await res.text());
+      expect(await readEvent(id)).toBeNull();
+    }, 30_000);
+
+    it(`${p.name} PATCH that would create a row at a reserved addressed id is refused`, async () => {
+      const id = `${PREFIX}patch-create-${randomUUID()}`;
+      const res = await p.send("PATCH", `/OrgEvent/${id}`, { kind: "status", summary: "create via patch" });
+      expectReserved(res.status, await res.text());
+      expect(await readEvent(id)).toBeNull();
+    }, 30_000);
+  }
+});
+
+describe("a collection DELETE selecting a reserved row is refused before it deletes", () => {
+  it("refuses a mixed selection untouched, then deletes an ordinary-only selection", async () => {
+    const kind = `ordinary-bulk-${randomUUID()}`;
+    const ordinaryIds = [`${kind}-a`, `${kind}-b`];
+    const reservedId = `${PREFIX}bulk-${randomUUID()}`;
+    for (const id of ordinaryIds) {
+      await adminOp({ operation: "insert", table: "OrgEvent", records: [{ id, authorId: agent.id, kind, summary: "ordinary", createdAt: new Date().toISOString() }] });
+    }
+    await plantEvent(reservedId);
+    const before = await countEvents();
+
+    const refused = await basicSend("DELETE", "/OrgEvent/");
+    expectReserved(refused.status, await refused.text());
+    expect(await countEvents()).toBe(before);
+    for (const id of [...ordinaryIds, reservedId]) expect(await readEvent(id)).not.toBeNull();
+
+    const deleted = await basicSend("DELETE", `/OrgEvent/?kind=${encodeURIComponent(kind)}`);
+    expect(deleted.status, (await deleted.text()).slice(0, 300)).toBeLessThan(300);
+    for (const id of ordinaryIds) expect(await readEvent(id)).toBeNull();
+    expect(await readEvent(reservedId)).not.toBeNull();
+
+    await deleteEvent(reservedId);
+  }, 60_000);
+});
+
 describe("anonymous callers keep their existing 401", () => {
   it("POST, PUT, PATCH, DELETE and collection PUT on a reserved record are unauthenticated", async () => {
     const id = `stored-reserved-anon-${randomUUID()}`;
@@ -328,10 +430,12 @@ describe("ordinary events are unchanged", () => {
 });
 
 describe("an instruction event survives OrgEventMaintenance", () => {
-  it("deletes the expired ordinary event and keeps the reserved event with no expiresAt", async () => {
+  it("deletes the expired ordinary event and keeps reserved events, including an expired one", async () => {
     const reserved = `${PREFIX}maintenance-${randomUUID()}`;
+    const expiredReserved = `${PREFIX}maintenance-expired-${randomUUID()}`;
     const expired = `expired-maintenance-${randomUUID()}`;
     await plantEvent(reserved, { kind: "skill.changed" });
+    await plantEvent(expiredReserved, { kind: "skill.changed", expiresAt: "2001-01-01T00:00:00.000Z" });
     await plantEvent(expired, { kind: "status", expiresAt: "2001-01-01T00:00:00.000Z" });
 
     const res = await send(adminAgent, "POST", "/OrgEventMaintenance/", {});
@@ -339,6 +443,26 @@ describe("an instruction event survives OrgEventMaintenance", () => {
     expect(res.status, `maintenance ${res.status}: ${maintText.slice(0, 300)}`).toBeLessThan(300);
 
     expect(await readEvent(reserved)).not.toBeNull();
+    expect(await readEvent(expiredReserved)).not.toBeNull();
     expect(await readEvent(expired)).toBeNull();
+
+    await deleteEvent(reserved);
+    await deleteEvent(expiredReserved);
+  }, 30_000);
+
+  it("refuses a reserved create that carries expiresAt", async () => {
+    const id = `${PREFIX}create-expiry-${randomUUID()}`;
+    const res = await send(agent, "POST", "/OrgEvent", {
+      id, kind: "skill.changed", summary: "x", expiresAt: "2001-01-01T00:00:00.000Z",
+    });
+    expectReserved(res.status, await res.text());
+    expect(await readEvent(id)).toBeNull();
+  }, 30_000);
+
+  it("denies a non-admin agent and an anonymous caller", async () => {
+    const nonAdmin = await send(agent, "POST", "/OrgEventMaintenance/", {});
+    expect([401, 403], `non-admin ${nonAdmin.status}`).toContain(nonAdmin.status);
+    const anonymous = await anonSend("POST", "/OrgEventMaintenance/", {});
+    expect([401, 403], `anonymous ${anonymous.status}`).toContain(anonymous.status);
   }, 30_000);
 });

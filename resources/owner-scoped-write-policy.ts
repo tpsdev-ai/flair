@@ -171,9 +171,12 @@ export async function admitOwnerScopedWrite(
   }
   if (caller.kind !== "agent" || caller.isAdmin === true) return;
 
-  // A table-specific refusal comes first: a reserved record is refused with
-  // its own named error on every shape, including a collection write this
-  // guard would otherwise refuse generically.
+  // A table-specific refusal runs before this guard's collection and ownership
+  // branches. When this pre-check can identify a reserved record (a proposed
+  // body marker, a stored row at the addressed id, or a reserved addressed id),
+  // its named refusal replaces this guard's generic one. A collection delete
+  // this pre-check cannot resolve is still refused by the collection branch
+  // below, and the resource's delete() scans the selection for reserved rows.
   const reserved = await deps.refuseReservedWrite?.(table, method, target, context);
   if (reserved) throw reserved;
 

@@ -660,13 +660,18 @@ describe("WorkspaceState.search() — boolean-injection guard (authz-hardening s
 // not vacuously true.  Reverted before commit.
 
 describe("OrgEvent allow* hooks refuse reserved-record mutations", () => {
-  it("refuses a reserved record and admits an ordinary one for every hook", () => {
+  it("refuses a reserved record and admits an ordinary one for the dispatch hooks Harper calls", () => {
     const oe: any = new (OrgEvent as any)();
     const reserved = { id: "instruction-change:x", kind: "soul.changed" };
     const ordinary = { id: "ordinary-1", kind: "status" };
-    for (const hook of ["allowCreate", "allowUpdate", "allowPatch", "allowDelete"] as const) {
+    // Harper 5.3.1 calls allowCreate/allowUpdate/allowDelete; there is no allowPatch hook.
+    for (const hook of ["allowCreate", "allowUpdate"] as const) {
       expect(oe[hook](null, reserved, {}), hook).toBe(false);
-      expect(oe[hook](null, ordinary, {}), hook).toBe(true);
+      expect(oe[hook](null, [ordinary], {}), hook).toBe(true);
+      expect(oe[hook](null, [ordinary, reserved], {}), hook).toBe(false);
     }
+    // allowDelete receives the request target, not a stored row.
+    expect(oe.allowDelete(null, { id: "instruction-change:x" }, {}), "allowDelete reserved id").toBe(false);
+    expect(oe.allowDelete(null, { id: "ordinary-1" }, {}), "allowDelete ordinary id").toBe(true);
   });
 });

@@ -53,6 +53,12 @@ const orgEventAuthGate = makeAuthGate();
 
 const readStoredEvent: StoredEventRead = (id) => (databases as any).flair.OrgEvent.get(id, {});
 
+/** Whether any proposed record (a record or an array of them) carries a reserved marker. */
+function reservedProposed(content: unknown): boolean {
+  const records = Array.isArray(content) ? content : [content];
+  return records.some((record) => isReservedEventRecord(record));
+}
+
 /**
  * The inherited allow* decision, found above OrgEvent's own prototype so the
  * hook here cannot call itself. A base without the hook keeps the permissive
@@ -71,26 +77,24 @@ function inheritedAllow(name: string, self: any, args: any[]): any {
 export class OrgEvent extends (databases as any).flair.OrgEvent {
   allowRead() { return orgEventAuthGate.call(this); }
 
-  // The allow* hooks are Harper's route-level decision for relationship and
-  // collection paths that do not run the resource verbs. A reserved record is
-  // refused here; an ordinary record keeps the inherited decision.
+  // Defence in depth: Harper 5.3.1 calls allowCreate/allowUpdate/allowDelete
+  // on a permission-marked dispatch; it does not call allowPatch. The enforcing
+  // paths are post(), patch(), put(), delete() and the collection-PUT pre-scan
+  // in getResource() below. These hooks see Harper's real arguments: records for
+  // create/update and the request target (not a stored row) for delete.
   allowCreate(user?: any, newData?: any, context?: any) {
-    if (isReservedEventRecord(newData)) return false;
+    if (reservedProposed(newData)) return false;
     return inheritedAllow("allowCreate", this, [user, newData, context]);
   }
 
   allowUpdate(user?: any, updatedData?: any, context?: any) {
-    if (isReservedEventRecord(updatedData)) return false;
-    return inheritedAllow("allowUpdate", this, [user, updatedData, context]);
-  }
-
-  allowPatch(user?: any, updatedData?: any, context?: any) {
-    if (isReservedEventRecord(updatedData)) return false;
+    if (reservedProposed(updatedData)) return false;
     return inheritedAllow("allowUpdate", this, [user, updatedData, context]);
   }
 
   allowDelete(user?: any, target?: any, context?: any) {
-    if (isReservedEventRecord(target)) return false;
+    const id = target != null && typeof target === "object" ? (target as any).id : target;
+    if (isReservedEventRecord({ id })) return false;
     return inheritedAllow("allowDelete", this, [user, target, context]);
   }
 
@@ -201,6 +205,9 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
     }
     // flair#2333 (H9): avoids deterministic same-millisecond collisions (random UUID).
     if (!addressed && (content.id == null || content.id === "")) content.id = `${content.authorId}-${new Date().toISOString()}-${randomUUID()}`;
+    // The effective id after binding is the id this write lands on. A reserved
+    // address is refused even when the body omits `id` or carries an ordinary kind.
+    if (isReservedEventRecord({ id: content.id })) return reservedEventRefusal();
     // Binding runs before validation. At the root collection, or an addressed
     // path whose body id was not bound, a remaining id the shared id rule does
     // not read is refused with invalid_event_id (400) before the ownership lookup.
@@ -255,11 +262,13 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
     const auth = await this._auth();
     if (auth.kind === "anonymous") return UNAUTH();
     const pathId = (this as any).getId?.();
-    // Reserved events: the proposed fields are checked here. Outside internal
-    // calls the createdAt check reads the stored row at the addressed id and
-    // refuses a reserved one; an internal call is checked here.
+    // Reserved events: the proposed fields are checked here, and the effective
+    // id is checked because a PATCH can create the row its URL names. Outside
+    // internal calls the createdAt check reads the stored row at the addressed
+    // id and refuses a reserved one; an internal call is checked here.
     const proposedReserved = reservedEventProposedRefusal(content);
     if (proposedReserved) return proposedReserved;
+    if (isReservedEventRecord({ id: pathId })) return reservedEventRefusal();
     if (auth.kind === "internal") {
       const storedReserved = await reservedEventStoredRefusal(pathId, readStoredEvent);
       if (storedReserved) return storedReserved;
@@ -322,15 +331,23 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
     if (gate.kind === "denied") return gate.response;
     // Deleting a reserved event is audit erasure. Checked before the
     // unfiltered branch, so administrators do not reach the table delete.
-    // Harper passes a string id on the addressed path; a target object names
-    // its key in `.id`, and an instance delete reads the addressed id.
-    const key = typeof id === "string" || Array.isArray(id)
-      ? id
-      : id && typeof id === "object" && "id" in id
-        ? (id as any).id
-        : (this as any).getId?.();
-    const reservedDenial = await reservedEventStoredRefusal(key, readStoredEvent);
-    if (reservedDenial) return reservedDenial;
+    // Harper passes the request target here: a single-id delete carries `.id`;
+    // a collection delete carries no single key and is scanned below.
+    const target = id != null && typeof id === "object" && !Array.isArray(id) ? id as any : null;
+    const addressedKey = target ? target.id : (typeof id === "string" || Array.isArray(id) ? id : (this as any).getId?.());
+    if (target && (target.isCollection === true || target.id == null)) {
+      // Refuse the whole collection delete before anything is removed when its
+      // selection contains a reserved row. An ordinary-only selection proceeds.
+      const scan = new (target.constructor as any)(target.toString());
+      Object.assign(scan, target);
+      scan.checkPermission = false;
+      for await (const row of this.search(scan)) {
+        if (isReservedEventRecord(row)) return reservedEventRefusal();
+      }
+    } else {
+      const reservedDenial = await reservedEventStoredRefusal(addressedKey, readStoredEvent);
+      if (reservedDenial) return reservedDenial;
+    }
     if (gate.kind === "unfiltered") return super.delete(id, context);
 
     const record = await this.get(id);

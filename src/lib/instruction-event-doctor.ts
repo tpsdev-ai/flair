@@ -73,10 +73,7 @@ export function describeInstructionEventImpostors(
 ): string | null {
   const impostors = findInstructionEventImpostors(events, versions);
   if (impostors.length === 0) return null;
-  const list = impostors.length <= 10
-    ? impostors.join(", ")
-    : `${impostors.slice(0, 10).join(", ")}, and ${impostors.length - 10} more`;
-  return `${impostors.length} stored OrgEvent ${impostors.length === 1 ? "row carries" : "rows carry"} a reserved kind or id without a matching InstructionVersion: ${list}`;
+  return `${impostors.length} stored OrgEvent ${impostors.length === 1 ? "row carries" : "rows carry"} a reserved kind or id without a matching InstructionVersion: ${impostors.join(", ")}`;
 }
 
 /** Read both tables through the ops API; null when either read fails. */

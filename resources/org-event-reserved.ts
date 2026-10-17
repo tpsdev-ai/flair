@@ -3,10 +3,11 @@
  * (flair#2139 slice 3a).
  *
  * Two event kinds and one id prefix belong to the instruction-version
- * appender. The resource refuses every client mutation of a record that
- * carries either marker, proposed or already stored, under every principal and
- * every write shape. The Harper operations API (raw upsert/delete under admin
- * auth) is the documented exception.
+ * appender. The resource refuses a client mutation of a record that carries
+ * either marker, proposed or already stored, on every write shape (POST,
+ * addressed PUT/PATCH/DELETE, and collection PUT/DELETE). Anonymous callers
+ * get their existing 401. The Harper operations API (raw upsert/delete under
+ * admin auth) is the documented exception.
  *
  * The predicate is pure so both the resource guards and the doctor check share
  * one definition. A record is reserved when its `kind` is `soul.changed` or

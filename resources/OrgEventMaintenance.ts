@@ -7,6 +7,7 @@
 
 import { Resource, databases } from "harper";
 import { allowAdmin } from "./agent-auth.js";
+import { isReservedEventRecord } from "./org-event-reserved.js";
 
 export class OrgEventMaintenance extends Resource {
   // Admin-only: permit verified ADMIN agents (Basic-admin is super_user and
@@ -31,6 +32,9 @@ export class OrgEventMaintenance extends Resource {
     const toDelete: string[] = [];
 
     for await (const event of (databases as any).flair.OrgEvent.search()) {
+      // A reserved row belongs to the instruction-version audit trail; expiry
+      // never erases it.
+      if (isReservedEventRecord(event)) continue;
       if (event.expiresAt && event.expiresAt < now) {
         toDelete.push(event.id);
       }
