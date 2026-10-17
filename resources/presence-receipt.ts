@@ -14,8 +14,9 @@
  * Replication is spoke → hub, hub-receiver only: a spoke pushes its agents'
  * Presence rows over the existing hub-and-spoke sync and the hub derives status
  * locally from the replicated timestamps. It ships behind ONE default-off
- * receive flag; with the flag off a known Presence record is skipped by its own
- * name (`presence_receive_disabled`), never mislabelled `unknown_table`.
+ * receive flag; with the flag off a Presence record that reaches the receive
+ * branch is skipped by its own name (`presence_receive_disabled`), not
+ * `unknown_table`.
  *
  * The sender contract (a later slice): a Presence record's wire `id` and its
  * `data.id` are the row's `agentId` (this table's primary key), `data.agentId`

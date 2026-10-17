@@ -11,5 +11,5 @@
   refuses an older heartbeat rather than replacing a newer one. The two local
   writers refuse a write for an agent homed on another instance. `Presence` gains
   nullable `originatorInstanceId` (stamped by a local write) and `receivedAt`
-  (stamped on receipt). With the flag off, an inbound Presence record skips as
-  `presence_receive_disabled`.
+  (stamped on receipt). With the flag off, a Presence record eligible for
+  receipt skips as `presence_receive_disabled` rather than `unknown_table`.
