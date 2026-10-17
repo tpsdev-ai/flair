@@ -271,7 +271,7 @@ export class TestRuntimeIdentityError extends Error {
 // Other launches with a protected entry path or executable require a nonempty, child-only FLAIR_TEST_ALLOW_BUN_HARPER reason.
 // PATH lookup applies only to command and wrapper executables, including shell command words.
 // Other argv uses protected-entry substrings and cwd-relative path resolution for words containing / or starting with .
-// A shell command string in a wrapper chain fails closed when it cannot be classified or reaches a protected entry.
+// A shell command string in a wrapper chain fails closed when it is unclassifiable or reaches a protected entry.
 export function checkTestSpawn(api: string, command: unknown, args: unknown, options: Options = {}): void {
   if (typeof command !== "string" || !Array.isArray(args)) return;
   const uncertainty = { value: false };
