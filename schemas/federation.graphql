@@ -33,6 +33,7 @@ type Peer @table(database: "flair") @export {
   lastSyncAt: String               # last contact with this peer (liveness signal)
   lastMergeAt: String              # last sync where merged > 0 (data-progress signal)
   lastSyncCursor: String           # Lamport clock or ISO timestamp for incremental sync
+  presenceLastSyncAt: String       # sender-side per-table watermark: the own cursor of the newest Presence row pushed to this peer (flair#2578). Presence has no updatedAt, so it cannot ride the lastSyncAt cursor.
   relayOnly: Boolean               # true for spoke-to-spoke peers announced by hub
   pairedAt: String
   createdAt: String! @indexed

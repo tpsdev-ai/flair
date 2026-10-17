@@ -118,7 +118,7 @@ lands in shell history and the process list.
 
 ### What a push sends
 
-Each sync pushes rows changed since the cursor from four tables: `Memory`, `Soul`, `Agent`, and `Relationship`. `Presence` is not in that set.
+Each sync pushes rows changed since the cursor from four tables: `Memory`, `Soul`, `Agent`, and `Relationship`. With `FLAIR_FEDERATION_PRESENCE_SEND` set (default off), a fifth table, `Presence`, is pushed after those four — but only for the agents homed on this instance, and only for rows whose `lastHeartbeatAt`/`activityUpdatedAt` cursor advanced past a per-table watermark. `Presence` has no `updatedAt`, so it cannot ride the shared cursor. A hub stores a pushed `Presence` row only with `FLAIR_FEDERATION_PRESENCE_RECEIVE` set; both flags default off.
 
 **Memory rows with `visibility` exactly `"private"` are left behind.** Durability is not the filter. `"shared"` and any other present value are included. Soul, Agent, and Relationship have no `visibility` field, so this rule does not apply to them.
 
