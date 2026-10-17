@@ -46,7 +46,7 @@ add("AgentSeed", ["writer:(databases as any).flair.Memory.put#1"],
   "Skill-writer: REJECTS skill-tagged starter memories (400 skill_write_path) — admin-only seed bypasses the gate (flair#1542).");
 
 // ── SKIPPING skill-writer sinks (skill_not_federated) ──
-add("Federation", ["writer:writeBackCommittedRow#1"],
+add("Federation", ["writer:writeBackCommittedRow#2"],
   "Skill-writer: SKIPS skill-tagged rows (skill_not_federated) — skills are local, never synced (flair#1542); every synced table's merge is the write-back above.");
 
 // ── Existing-row writes preserving content and tags ──
@@ -117,6 +117,8 @@ add("AgentSeed", ["writer:(databases as any).flair.Agent.put#1", "writer:(databa
   "Other tables in the provisioning module, included by conservative sink enumeration.");
 add("Federation", ["writer:(databases as any).flair.Instance.put#1", "writer:(databases as any).flair.PairingToken.put#1", "writer:(databases as any).flair.Peer.put#1", "writer:(databases as any).flair.Peer.put#2", "writer:(databases as any).flair.Peer.put#3", "writer:(databases as any).flair.SyncLog.put#1"],
   "Other tables in the federation module, included by conservative sink enumeration.");
+add("Federation", ["writer:writeBackCommittedRow#1"],
+  "Other table (Presence) — the Presence receipt branch (flair#2578 slice 1) hands the shared write-back helper the Presence table, so it never writes a Memory row.");
 add("MemoryReflect", ["writer:(databases as any).flair.MemoryCandidate.put#1"],
   "Other table (MemoryCandidate), included by conservative sink enumeration.");
 add("usage-recording", ["writer:(databases as any).flair.MemoryUsage.put#1"],

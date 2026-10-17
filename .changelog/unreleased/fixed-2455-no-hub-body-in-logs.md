@@ -1,4 +1,4 @@
-- **Federation sync no longer logs the hub's response text; an unrecoverable non-2xx batch or a non-2xx liveness ping names only its HTTP status.**
+- **Federation sync no longer logs the hub's response text; an unrecoverable non-2xx batch or a non-2xx liveness ping names only its HTTP status.** (#2538)
 
   A batch of more than one record that gets a retryable status (408, 413, 502,
   503 or 504) or no response is split and retried in smaller batches, which can

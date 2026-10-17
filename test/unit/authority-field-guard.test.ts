@@ -83,6 +83,9 @@ const CLASSIFICATIONS: Array<{ file: string; via: WriterVia; needle: string; kin
   { file: "resources/MemoryFeed.ts", via: "direct-update", needle: "update(id, { expiresAt", kind: "echo" },
   // flair#2450: every synced table's merge runs through the write-back helper.
   { file: "resources/Federation.ts", via: "write-back", needle: "mergedData", kind: "federation-merge" },
+  // flair#2578 slice 1: the Presence receipt branch's write-back — a federation
+  // merge of a peer's Presence row (its table is always Presence).
+  { file: "resources/Federation.ts", via: "write-back", needle: "mergePresenceReceipt(row", kind: "federation-merge" },
   { file: "resources/promotion-stamp.ts", via: "write-back", needle: 'label: "promotion-stamp"', kind: "trusted-stamp" },
   { file: "resources/promotion-stamp.ts", via: "alias-source", needle: "put(row, stagedContext)", kind: "trusted-stamp" },
   { file: "resources/Memory.ts", via: "direct-put", needle: "put(closed, c)", kind: "echo" },

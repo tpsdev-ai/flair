@@ -1,4 +1,4 @@
-- **OrgEvent resource methods refuse malformed bodies with `body_must_be_object` (400), except admitted arrays of records.**
+- **OrgEvent POST, PUT and PATCH refuse malformed bodies with 400 body_must_be_object; PUT admits arrays of records (#2580).**
 
   The guard runs before the resource method's authentication, attribution,
   ownership and createdAt checks. Harper's collection validation, authentication

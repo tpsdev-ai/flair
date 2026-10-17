@@ -34,9 +34,7 @@
   `memory_id_required`. A manual promotion's memory write joins the
   promotion's own transaction, so its approval stamp commits or rolls back with
   the row; that commit lands after the lock releases, as does the admin
-  `_reindex` re-PUT's when the request carries an open transaction it joins. The
-  lock is per process, and it serializes only owner `PUT`/`PATCH` writes that
-  commit under it, within one instance.
+  `_reindex` re-PUT's when the request carries an open transaction it joins. The per-process lock is taken by Memory resource `PUT` and `PATCH` calls; ordinary owned writes commit before release, while joined transactions may commit later.
 
   The critical section contains the write paths' embedding calls — the
   ordinary `PUT`'s regen and its create-path dedup probe, the re-embed `PATCH`'s

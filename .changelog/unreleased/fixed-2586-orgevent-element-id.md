@@ -1,4 +1,4 @@
-- **OrgEvent rejects malformed ids that reach its id check with 400 `invalid_event_id`.**
+- **OrgEvent rejects malformed ids that reach its id check with 400 `invalid_event_id`.** (#2609)
 
   A collection PUT element whose `id` was an empty array or an object
   answered a bare 500 ("Zero length key is not allowed" /

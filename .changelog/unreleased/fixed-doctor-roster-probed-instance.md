@@ -1,4 +1,4 @@
-- **`flair doctor` reads its Agent roster and home checks only from an ops endpoint whose own configuration names the HTTP port it probed.**
+- **`flair doctor` reads its Agent roster and home checks only from an ops endpoint whose own configuration names the HTTP port it probed.** (#2519)
 
   It picks the candidate ops endpoint with the port-pair rule `flair agent
   stamp-home` uses, then asks that endpoint for its configuration, the check
