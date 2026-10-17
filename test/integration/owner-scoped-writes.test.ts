@@ -2,11 +2,13 @@
 // Harper: a verified non-admin agent's addressed writes and collection
 // PUT/PATCH/DELETE to owner-scoped tables served by table-extending resources.
 //
-// Middleware can return the owner refusal first on a plain addressed URL.
-// If reached, the guard checks string or number body ids before stored ownership.
-// Whichever check decides, it decides on the id Harper resolves from the
-// request target (repeated or encoded slashes and dot segments included).
-// Collection PUT/PATCH/DELETE is refused; collection POST follows the resource.
+// The auth middleware's stored-owner check runs first on an addressed URL and
+// returns the owner refusal. If reached, the guard checks string or number body
+// ids before stored ownership. Whichever check decides, it decides on the id
+// Harper resolves from the canonical request target (an encoded slash is part of
+// the id); a non-canonical target (an empty segment or a dot segment) is refused
+// with the named 400 before any routing. Collection PUT/PATCH/DELETE is refused;
+// collection POST follows the resource.
 //
 // Each owner or collection refusal in the matrix asserts three things: the status is 403, the body is
 // exactly the named refusal (it carries nothing from the stored row), and the
@@ -333,7 +335,10 @@ describe("owner-scoped writes: non-admin addressed writes and collection PUT/PAT
   }
 
   for (const suffix of ["", ".json"]) {
-    test(`Relationship: overlapping checks at a ${suffix ? "suffixed" : "plain"} address return the first refusal and preserve both rows`, async () => {
+    // The middleware's stored-owner check runs first on either address form, so a
+    // non-admin PATCH that addresses another principal's row is refused with the
+    // owner refusal; the resource guard's write_id_not_addressed never answers.
+    test(`Relationship: a non-admin PATCH at a ${suffix ? "suffixed" : "plain"} address is refused with the owner refusal and preserves both rows`, async () => {
       const s = SPECS.find((spec) => spec.table === "Relationship")!;
       const f = await fixture(s);
       const addressedBefore = await storedRow(s.table, s.pk, f.otherId);
@@ -344,9 +349,7 @@ describe("owner-scoped writes: non-admin addressed writes and collection PUT/PAT
         id: f.mineId, object: "changed",
       });
       expect(res.status).toBe(403);
-      expect(await res.json()).toEqual(suffix
-        ? { error: "write_id_not_addressed", message: "a write may name only the record it addresses" }
-        : RECORD_REFUSAL(s.table));
+      expect(await res.json()).toEqual(RECORD_REFUSAL(s.table));
       expect(await storedRow(s.table, s.pk, f.otherId)).toEqual(addressedBefore);
       expect(await storedRow(s.table, s.pk, f.mineId)).toEqual(bodyBefore);
     }, 30_000);
@@ -584,17 +587,21 @@ describe("owner-scoped writes: non-admin addressed writes and collection PUT/PAT
   });
 
   // ── The decision follows the id Harper resolves from the request target ───
-  // Each request target below is sent byte for byte. Harper resolves it to a
-  // record id (`resolved`) that differs from the plain id `r`. Two rows exist:
-  // `r` and the resolved id, each owned by a different principal. A caller that
-  // owns the resolved row writes it, and only it; a caller that owns `r` but
+  // Each canonical request target below is sent byte for byte. Harper resolves it
+  // to a record id (`resolved`) that differs from the plain id `r`. Two rows
+  // exist: `r` and the resolved id, each owned by a different principal. A caller
+  // that owns the resolved row writes it, and only it; a caller that owns `r` but
   // not the resolved row is refused with the owner refusal. Both rows are read
-  // back in every case.
+  // back in every case. A non-canonical target (an empty segment or a dot
+  // segment) is refused with the named 400 before any routing, so it never
+  // reaches the id resolution or the ownership check.
   describe("an addressed write is decided on the id Harper resolves from the request target", () => {
     const FORMS = [
-      { label: "a repeated slash before the id", target: (r: string) => `/Relationship//${r}`, resolved: (r: string) => `/${r}` },
       { label: "a percent-encoded slash before the id", target: (r: string) => `/Relationship/%2F${r}`, resolved: (r: string) => `/${r}` },
-      { label: "a dot segment in the path", target: (r: string) => `/Relationship/${r}-x/../${r}`, resolved: (r: string) => `${r}-x/../${r}` },
+    ];
+    const NON_CANONICAL_FORMS = [
+      { label: "a repeated slash before the id", target: (r: string) => `/Relationship//${r}` },
+      { label: "a dot segment in the path", target: (r: string) => `/Relationship/${r}-x/../${r}` },
     ];
     const rel = (id: string, agentId: string) => ({ id, agentId, subject: "s", predicate: "p", object: "orig", createdAt: NOW });
 
@@ -637,6 +644,24 @@ describe("owner-scoped writes: non-admin addressed writes and collection PUT/PAT
         expect(await storedRow("Relationship", "id", resolved), "another principal's resolved row changed").toEqual(otherBefore);
         expect(await storedRow("Relationship", "id", r), "the caller's row r changed").toEqual(mineBefore);
       }, 30_000);
+    }
+
+    // A non-canonical target never reaches Harper's routing: it is answered with
+    // the named 400 before any ownership check, and nothing is written.
+    for (const form of NON_CANONICAL_FORMS) {
+      for (const verb of ["PATCH", "PUT"] as const) {
+        test(`Relationship: the caller's ${verb} through ${form.label} is refused with the named 400 and writes nothing`, async () => {
+          const r = `osw-rel-tgt-${randomUUID().slice(0, 8)}`;
+          await seed("Relationship", rel(r, owner.id));
+          const before = await storedRow("Relationship", "id", r);
+          const object = `via-${verb.toLowerCase()}-${randomUUID().slice(0, 6)}`;
+          const body = verb === "PATCH" ? { object } : { id: r, agentId: caller.id, subject: "s", predicate: "p", object };
+          const res = await sendRawTarget(caller, verb, form.target(r), body);
+          expect(res.status, `${verb} ${form.target(r)} returned ${res.status}: ${res.text.slice(0, 200)}`).toBe(400);
+          expect(JSON.parse(res.text).error).toBe("non_canonical_request_target");
+          expect(await storedRow("Relationship", "id", r), "a refused non-canonical write changed the row").toEqual(before);
+        }, 30_000);
+      }
     }
   });
 
