@@ -12,9 +12,8 @@
  * currentTask cap a POST heartbeat applies — one definition, so the two cannot
  * drift.
  *
- * Replication is spoke → hub, hub-receiver only: in a later slice a spoke will
- * push its agents' Presence rows over the existing hub-and-spoke sync and the
- * hub will derive status locally from the replicated timestamps. It ships
+ * Receive-side support for planned spoke-to-hub Presence replication; the sender
+ * follows in a later slice. It ships
  * behind ONE default-off receive flag; with the flag off a Presence record that
  * reaches the receive branch is skipped by its own name
  * (`presence_receive_disabled`), not `unknown_table`.

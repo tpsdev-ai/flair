@@ -201,7 +201,8 @@ export const FEDERATION_TABLE_POLICY = {
   // hardcoded set), but the policy + owner-field land now so S2 is not a schema
   // or policy migration (the design's ship-order, flair#1521 §12).
   Message: { principalOwning: true },
-  // flair#2578 slice 1: Presence replication (spoke → hub, hub-receiver only).
+  // flair#2578 slice 1: Receive-side support for planned spoke-to-hub Presence
+  // replication; the sender follows in a later slice.
   // Presence carries `agentId` (the row's primary key), no `principalId`, so it
   // is not principal-owning; its receive-side authority is P1's home binding to
   // the batch-verified sender. Registered here so the receive tableMap can carry

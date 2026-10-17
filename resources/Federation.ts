@@ -1175,9 +1175,9 @@ export class FederationSync extends Resource {
 
     type MergeOutcome = { reason: SkipReason } | { merged: true } | { indeterminate: true };
 
-    /** Read the local Agent row for an id, or null when there is none. A read
-     *  that FAILS throws (it is never read as "no Agent row"); mergeOne's catch
-     *  turns it into merge_error, which is retryable. */
+    /** Read the local Agent row for an id, or null when there is none.
+     *  Read failures throw: before write-back starts they become retryable
+     *  `merge_error`; after it starts they are indeterminate. */
     const readAgentRow = async (agentId: string): Promise<Record<string, any> | null> => {
       const row = await (databases as any).flair.Agent.get(agentId);
       return row ?? null;
