@@ -2272,6 +2272,8 @@ export class Memory extends (databases as any).flair.Memory {
       if (stale) return stale;
     }
     stripClientVersionPassthrough(content);
+    // flair#2573: an empty embedding becomes `null` here, before redaction.
+    if (content != null && typeof content === "object") normalizeEmptyEmbedding(content);
     // flair#2407: redact credential-shaped text on a PATCH too, before the body
     // is merged into the stored row.
     const redaction = redactMemoryWrite(content);
@@ -2542,10 +2544,8 @@ export class Memory extends (databases as any).flair.Memory {
       const keptToken = storedInstanceToken(existingForSkill);
       if (keptToken === null) content.instanceToken = newInstanceToken();
       const expectedToken = keptToken ?? content.instanceToken;
-      // flair#2573: an empty embedding is stored as no vector. The guard is
-      // notified after the commit (below) when the staged vector or stamp
-      // differs from the row read in this transaction.
-      normalizeEmptyEmbedding(body);
+      // flair#2573: the guard is notified after the commit (below) when the
+      // staged vector or stamp differs from the row read in this transaction.
       const embeddingChanged = Object.prototype.hasOwnProperty.call(body, "embedding") &&
         !isDeepStrictEqual(body.embedding, existingForSkill?.embedding);
       const stampChanged = Object.prototype.hasOwnProperty.call(body, "embeddingModel") &&

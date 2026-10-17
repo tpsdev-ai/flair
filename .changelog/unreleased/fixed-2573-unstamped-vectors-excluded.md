@@ -9,5 +9,5 @@
   An empty `embedding` sent to the Memory resource's POST, PUT or PATCH stores no empty array
   (a raw operations-API insert can still store one; the next scan counts it): ordinary POST and PUT treat it exactly as an
   omitted `embedding` (an unchanged skill update keeps its stored vector and stamp), the admin `_reindex` PUT converts it to `null`, and
-  PATCH clears the stored vector as `embedding: null` does. The auto-embed backfill stamps
+  PATCH converts it to `embedding: null` before credential redaction. The auto-embed backfill stamps
   the vector it stores with the current model and notifies the guard after it commits.

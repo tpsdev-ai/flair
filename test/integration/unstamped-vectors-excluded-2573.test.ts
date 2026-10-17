@@ -40,7 +40,9 @@
  *    noteWriteStamp call — after release, /Health never reads `unverified`
  *    without a consult, and the untrusted-vector backfill case goes red;
  *  - drop `embeddingModel` from the backfill's update — the vectorless backfill
- *    case never sees the current stamp.
+ *    case never sees the current stamp;
+ *  - in patch(), turn an empty embedding into `null` after redaction instead of
+ *    before — the redacted `embedding: []` PATCH case goes red.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import nacl from "tweetnacl";
@@ -139,7 +141,7 @@ function makeHarness(get: () => HarperInstance) {
     expect(rows.length).toBe(1);
     return rows[0];
   }
-  async function patchMemory(id: string, body: Record<string, unknown>): Promise<void> {
+  async function patchMemory(id: string, body: Record<string, unknown>): Promise<any> {
     const path = `/Memory/${id}`;
     const res = await fetch(`${get().httpURL}${path}`, {
       signal: AbortSignal.timeout(15_000),
@@ -149,6 +151,7 @@ function makeHarness(get: () => HarperInstance) {
     });
     const text = await res.text();
     expect(res.status, `PATCH ${path}: ${text.slice(0, 300)}`).toBeLessThan(300);
+    return text ? JSON.parse(text) : undefined;
   }
   async function semanticSearch(body: Record<string, unknown>): Promise<any> {
     const res = await fetch(`${get().httpURL}/SemanticSearch`, {
@@ -382,9 +385,9 @@ describe("flair#2573 slice 1 — PATCH guard notifications (real Harper)", () =>
     const exactMatches = async () =>
       (await h.semanticSearch({ queryEmbedding: UNTRUSTED_VEC, limit: 20, minScore: EXACT_MATCH })).results.map((r: any) => r.id);
     expect(await exactMatches()).toContain(id);
-    // PATCH `embedding: []` is `embedding: null`: the stored vector is cleared,
-    // never kept. With a model, the auto-embed backfill then recomputes one from
-    // the row's text; the PATCH leaves the stamp as it was (current).
+    // This PATCH (no `embeddingModel`, no other field) clears the stored vector
+    // and keeps the stamp (current). With a model, the auto-embed backfill then
+    // recomputes a vector from the row's text.
     await h.patchMemory(id, { embedding: [] });
     const row = await h.memoryRow(id);
     expectNoVectorOrServerComputed(row);
@@ -607,6 +610,80 @@ describe("flair#2573 slice 1 — PATCH guard notifications (real Harper)", () =>
       expect(afterEmpty.embeddedContentHash ?? null).toEqual(afterOmitted.embeddedContentHash ?? null);
     }
   }, 120_000);
+});
+
+// PATCH turns `embedding: []` into `embedding: null` before credential redaction.
+// The backfill each PATCH starts is armed to hold at `backfill-embedding-pre`, so
+// the row is read as the PATCH committed it.
+describe("flair#2573 slice 1 — PATCH `embedding: []` with redacted content (real Harper)", () => {
+  let harper: HarperInstance | undefined;
+  let component: ComposedComponent | undefined;
+  let h: ReturnType<typeof makeHarness>;
+  let pauseDir = "";
+  const POINT = "backfill-embedding-pre";
+  const CREDENTIAL_TEXT = `the deploy job reads token=ghp_${"a".repeat(24)} from the vault`;
+
+  beforeAll(async () => {
+    pauseDir = mkdtempSync(join(tmpdir(), "flair-2573-patch-redact-pause-"));
+    const spawned = await spawnWithHarness({ [TEST_FAULT_INJECTION_ENV]: "1", [TEST_PAUSE_DIR_ENV]: pauseDir });
+    harper = spawned.harper;
+    component = spawned.component;
+    h = spawned.h;
+  }, 180_000);
+
+  afterAll(async () => {
+    if (pauseDir) writeFileSync(join(pauseDir, `go.${POINT}`), ""); // never leave a backfill parked
+    await stopAndClean(harper, component);
+    if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
+  }, 60_000);
+
+  /** PATCH a stamped row with credential-shaped content and `embedding`; the row as committed. */
+  async function patchRedacted(id: string, vec: number[], embedding: unknown[] | null): Promise<{ before: any; after: any; held: boolean }> {
+    await h.putMemory(id, { content: `the row ${id} before its credential-bearing patch`, embedding: vec, embeddingModel: CURRENT_STAMP });
+    const before = await h.memoryRow(id);
+    expect(before.embedding).toEqual(vec);
+    expect(before.embeddingModel).toBe(CURRENT_STAMP);
+    for (const marker of ["claimed", "paused", "released", "go"]) rmSync(join(pauseDir, `${marker}.${POINT}`), { force: true });
+    writeFileSync(join(pauseDir, `arm.${POINT}`), "");
+    const res = await h.patchMemory(id, { content: CREDENTIAL_TEXT, embedding });
+    expect(res?.redactedValues).toBe(1);
+    // The backfill is held before it writes, so this read sees the PATCH's commit.
+    const after = await h.memoryRow(id);
+    let held = false;
+    if (HAS_MODEL) {
+      const deadline = Date.now() + 30_000;
+      while (!existsSync(join(pauseDir, `paused.${POINT}`)) && Date.now() < deadline) await delay(20);
+      held = existsSync(join(pauseDir, `paused.${POINT}`));
+    }
+    writeFileSync(join(pauseDir, `go.${POINT}`), "");
+    if (held) {
+      const releaseBy = Date.now() + 30_000;
+      while (readFileSync(join(pauseDir, `released.${POINT}`), "utf8") !== "go" && Date.now() < releaseBy) await delay(20);
+      expect(readFileSync(join(pauseDir, `released.${POINT}`), "utf8")).toBe("go");
+    }
+    return { before, after, held };
+  }
+
+  test("credential-shaped content with `embedding: []` commits what `embedding: null` commits: no vector, the stamp and hash kept", async () => {
+    const empty = await patchRedacted("mem-2573-patch-redacted-empty", basis(10), []);
+    const nulled = await patchRedacted("mem-2573-patch-redacted-null", basis(11), null);
+    const committed = ({ after }: { after: any }) => ({
+      content: after.content, embedding: after.embedding ?? null,
+      embeddingModel: after.embeddingModel ?? null, embeddedContentHash: after.embeddedContentHash ?? null,
+    });
+    for (const { before, after, held } of [empty, nulled]) {
+      expect(after.content).not.toContain("ghp_");
+      // A PATCH refresh would store a computed vector (with a model) or a null
+      // stamp (without one); neither ran.
+      expect(after.embedding ?? null).toBeNull();
+      expect(after.embeddingModel).toBe(CURRENT_STAMP);
+      expect(after.embeddedContentHash ?? null).toEqual(before.embeddedContentHash ?? null);
+      // The backfill reaches the pause only for a row with no vector or one of at
+      // most 100 entries, so a PATCH that computed its own vector leaves none to hold.
+      if (HAS_MODEL) expect(held, "no backfill reached the pause").toBe(true);
+    }
+    expect(committed(empty)).toEqual(committed(nulled));
+  }, 180_000);
 });
 
 // The auto-embed backfill (resources/auth-middleware.ts) computes a vector only
