@@ -384,6 +384,22 @@ function presenceWriteTargetId(resource: any, content: any): string | number | n
   return null;
 }
 
+/**
+ * flair#2624: a Presence write must name the agent it is for. With no URL-bound
+ * id and no usable body `agentId`/`id`, `presenceWriteTargetId` returns null;
+ * the owner (403) and home checks are skipped and the caller still reached
+ * `super.put`/`super.patch`. Refuse that by name before those checks and before
+ * any read-modify-write, the administrator as much as any caller that reaches
+ * the verb, so every stored row is bound to an agent they have seen.
+ */
+function presenceTargetRequiredRefusal(targetId: string | number | null): Response | null {
+  if (targetId != null) return null;
+  return new Response(
+    JSON.stringify({ error: "presence_target_required", message: "a presence write must name the target agent (URL id, or a body agentId or id)" }),
+    { status: 400, headers: { "Content-Type": "application/json" } },
+  );
+}
+
 // ─── Resource ─────────────────────────────────────────────────────────────────
 
 /**
@@ -772,6 +788,8 @@ export class Presence extends (databases as any).flair.Presence {
     // Use the URL-bound id; if absent or getId() throws, use a non-empty string
     // body agentId, else a scalar (string or number) body id.
     const targetId = presenceWriteTargetId(this, content);
+    const keylessDenial = presenceTargetRequiredRefusal(targetId);
+    if (keylessDenial) return keylessDenial;
     if (auth.kind === "agent" && !auth.isAdmin && targetId != null && String(targetId) !== auth.agentId) {
       return new Response(JSON.stringify({ error: "forbidden: cannot write presence for another agent" }), { status: 403, headers: { "Content-Type": "application/json" } });
     }
@@ -804,6 +822,8 @@ export class Presence extends (databases as any).flair.Presence {
       return new Response(JSON.stringify({ error: "authentication required" }), { status: 401, headers: { "Content-Type": "application/json" } });
     }
     const targetId = presenceWriteTargetId(this, content);
+    const keylessDenial = presenceTargetRequiredRefusal(targetId);
+    if (keylessDenial) return keylessDenial;
     if (auth.kind === "agent" && !auth.isAdmin && targetId != null && String(targetId) !== auth.agentId) {
       return new Response(JSON.stringify({ error: "forbidden: cannot write presence for another agent" }), { status: 403, headers: { "Content-Type": "application/json" } });
     }
