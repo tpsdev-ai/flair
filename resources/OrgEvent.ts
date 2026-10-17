@@ -99,8 +99,31 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
     // completeness only.
     stampAttribution(auth, content, RECORD_TYPES.OrgEvent.ownerField, RECORD_TYPES.OrgEvent.attribution.post, "forbidden: unreachable for stamp-default");
 
+    // An addressed POST binds a missing or null body id, and a string or number
+    // body id whose text matches the address, to getId(); any other id type is
+    // left unchanged by this step.
+    // At /OrgEvent/, an absent, null or empty body id generates an id.
+    // At /OrgEvent/<prefix>/, a missing body id takes the target id (<prefix>/).
+    const addressedId = (this as any).getId?.();
+    const addressed = typeof addressedId === "string" || typeof addressedId === "number";
+    // A missing or null body id binds to the address; a string or number body id
+    // binds when its text matches the address. Any other id type is left
+    // unchanged by this binding step. Later checks apply to it where the write reaches
+    // them: isReadableEventId first (an invalid id is refused there), then the
+    // ownership check and, outside internal calls, the createdAt check.
+    if (content && typeof content === "object" && addressed &&
+      (content.id == null ||
+        ((typeof content.id === "string" || typeof content.id === "number") &&
+          String(content.id) === String(addressedId)))) {
+      content.id = addressedId;
+    }
     // flair#2333 (H9): avoids deterministic same-millisecond collisions (random UUID).
-    if (!content.id) content.id = `${content.authorId}-${new Date().toISOString()}-${randomUUID()}`;
+    if (!addressed && (content.id == null || content.id === "")) content.id = `${content.authorId}-${new Date().toISOString()}-${randomUUID()}`;
+    // Binding runs before validation. At the root collection, or an addressed
+    // path whose body id was not bound, a remaining id that is not a non-empty
+    // string or a non-empty array of strings is refused with invalid_event_id
+    // (400) before the ownership lookup.
+    if (!isReadableEventId(content.id)) return invalidEventId();
     // A trusted in-process call keeps its existing stamp; every verified agent's
     // createdAt is assigned below, once the write passes its other checks.
     if (auth.kind === "internal") content.createdAt = new Date().toISOString();
@@ -123,8 +146,8 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
     if (ownerDenial) return ownerDenial;
 
     // createdAt: server time with no stored row; the stored value with one; a
-    // record whose id the check does not read is refused. (The id generated
-    // above means a missing, empty, null, 0 or false id never reaches it.)
+    // record whose id the check does not read is refused. (The id rule above
+    // means only a non-empty string or a non-empty array of strings reaches it.)
     if (auth.kind !== "internal") {
       const createdAtDenial = await this._assignCreatedAt(content, "replace", (record) => record.id);
       if (createdAtDenial) return createdAtDenial;

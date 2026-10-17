@@ -2,6 +2,7 @@ import { beforeEach, expect, test } from "bun:test";
 import {
   databasesMock, harnessState, installMemoryHarperMock, resetHarnessState,
 } from "../helpers/memory-search-harness";
+import { nonSerializingLockDouble } from "../helpers/memory-lock-double";
 
 const versions = new Map<string, any>();
 const locks = new Set<string>();
@@ -23,6 +24,12 @@ let failAppend = false;
   },
 };
 const { Memory, _resetLocalInstanceIdCacheForTests } = await installMemoryHarperMock();
+// flair#2478: the concurrent same-id seed PUT cases below exercise the
+// skill-version write's own stale-target refusal (skill_target_changed), which
+// sits beneath the per-id Memory write lock. Reaching it takes two same-id PUTs
+// at once, so this file swaps in a lock that does not serialize. The skill
+// branch under the real lock is reviewed in part 2 of flair#2478.
+(databasesMock.flair.Memory as any).primaryStore = nonSerializingLockDouble();
 const { FeedMemories } = await import("../../resources/MemoryFeed.ts");
 const { createEmbeddingStampMigration } = await import("../../resources/migrations/embedding-stamp.ts");
 const { resolveSkillManifest, resolvableSkillRows, SKILL_ROW_SELECT } = await import("../../resources/skill-manifest.ts");
@@ -475,4 +482,28 @@ test("closing an unenrolled successor enrolls its retained row for stale-id dele
   expect(deleted.status).toBe(200);
   expect((await deleted.json()).id).toBe(next.id);
   expect(harnessState.memoryStore.get(next.id)?.validTo).toBeString();
+});
+
+
+test("a stale-id DELETE refuses an outcome-unknown live head without changing rows or versions", async () => {
+  const { markMemoryWriteOutcomeUnknown, resetMemoryWriteOutcomeUnknownForTest } = await import("../../resources/memory-write-lock.ts");
+  const old = { ...skill("fence-old"), skillSubjectId: "fence-subject", validTo: "closed" };
+  const head = { ...skill("fence-head"), skillSubjectId: "fence-subject" };
+  harnessState.memoryStore.set(old.id, old);
+  harnessState.memoryStore.set(head.id, head);
+  const caller = () => writer(old.id, { request: { tpsAgent: "owner", tpsAgentIsAdmin: false, headers: new Headers() } });
+  markMemoryWriteOutcomeUnknown(head.id);
+  try {
+    const result = await caller().delete(old.id);
+    expect(result.status).toBe(503);
+    expect((await result.json()).error).toBe("write_outcome_unknown");
+    expect([...harnessState.memoryStore.values()]).toEqual([old, head]);
+    expect(versions.size).toBe(0);
+  } finally {
+    resetMemoryWriteOutcomeUnknownForTest(head.id);
+  }
+  const result = await caller().delete(old.id);
+  expect(result.status).toBe(200);
+  expect(harnessState.memoryStore.get(head.id)?.validTo).toBeString();
+  expect(versions.size).toBe(1);
 });

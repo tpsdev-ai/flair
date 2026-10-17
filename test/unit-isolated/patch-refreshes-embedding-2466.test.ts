@@ -16,6 +16,7 @@
 import { describe, it, expect, beforeEach, mock } from "bun:test";
 import { agentStore, middlewareCapture } from "../helpers/harper-mock.js";
 import { createFakeReplayNonceTable } from "../helpers/fake-replay-store.ts";
+import { memoryLockDouble } from "../helpers/memory-lock-double";
 
 process.env.FLAIR_RATE_LIMIT_ENABLED = "false";
 delete (process.env as any).FLAIR_PUBLIC;
@@ -64,6 +65,9 @@ function memorySearchGen(query: any) {
 }
 
 class BaseMemory {
+  /** flair#2478: Memory PUT/PATCH refuse a store with no per-id lock; this
+   *  double injects one (test/helpers/memory-lock-double.ts). */
+  static primaryStore = memoryLockDouble();
   async post(content: any) {
     const id = content.id ?? `mock-${++idCounter}`;
     content.id = id;
@@ -294,11 +298,15 @@ describe("flair#2466 — ordinary PATCH embedding cases", () => {
     BaseMemory.get = async (id: any) => {
       tableReads++;
       const stored = await get(id);
-      return tableReads === 1 ? stored : { ...stored, content: "a concurrent edit" };
+      // Reads 1 and 2 belong to the patch itself: the pre-write resolve (1) and
+      // the post-commit verification read (2, flair#2478). A THIRD read would be
+      // the conditional committed-row embedding check this case skips; hand it
+      // the concurrent edit so the case stays discriminating.
+      return tableReads <= 2 ? stored : { ...stored, content: "a concurrent edit" };
     };
     try {
       await memoryFor("mem-null-reread").patch({ content: "the unchanged text", embedding: null });
-      expect(tableReads).toBe(1);
+      expect(tableReads).toBe(2);
       const stored = await get("mem-null-reread");
       expect(stored.content).toBe("the unchanged text");
       expect(stored.embedding).toBeNull();

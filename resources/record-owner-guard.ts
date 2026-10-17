@@ -143,8 +143,8 @@ export function isMutatingMethod(method: string): boolean {
 }
 
 /**
- * Resolve a request path to the guarded table and record id it addresses, or
- * null when the path is not a guarded single-record route.
+ * Resolve a raw request target to the guarded table and record id it
+ * addresses, or null when the target is not one this early check decides.
  *
  * `pathname` is the RAW request path (the target before its `?`). The id is the
  * FULL decoded remainder after the table segment, so an id that itself contains
@@ -215,15 +215,54 @@ export function isForbiddenOwnerMutation(
  * principal: 403 with a body that names only the table.
  *
  * One constructor for every place the rule is enforced — the auth middleware
- * for `/<Table>/<id>` routes, and resources/relay-ops.ts for a Message POST to
- * the collection that reuses an existing message id — so a refused caller gets
- * the same response on either route, and it carries nothing from the stored
- * row.
+ * for `/<Table>/<id>` routes, resources/owner-scoped-write-policy.ts for a
+ * non-admin addressed write (POST/PUT/PATCH/DELETE to `/<Table>/<id>`) to an
+ * owner-scoped table, and resources/relay-ops.ts for a Message POST to the
+ * collection that reuses an existing message id. Carries no stored-row content.
  */
 export function ownerMutationRefusal(table: string): Response {
   return new Response(JSON.stringify({
     error: `forbidden: cannot modify ${table} owned by another principal`,
   }), { status: 403, headers: { "Content-Type": "application/json" } });
+}
+
+/**
+ * The refusal for a non-admin PUT, PATCH or DELETE that addresses an
+ * owner-scoped table's collection rather than one record: 403 with a body that
+ * names only the table (resources/owner-scoped-write-policy.ts).
+ */
+export function collectionWriteRefusal(table: string): Response {
+  return new Response(JSON.stringify({
+    error: `forbidden: a non-admin write to ${table} must address one record by its id`,
+  }), { status: 403, headers: { "Content-Type": "application/json" } });
+}
+
+/** The named refusal when a non-admin agent's stored-record read for an owner check fails. */
+export const OWNER_CHECK_UNAVAILABLE_ERROR = "owner_check_unavailable";
+
+/**
+ * Refuse a non-admin agent's write when the stored record its owner check
+ * needs cannot be read (resources/owner-field-guard.ts's guard thunk, and the
+ * owner-scoped write guard's stored-record read). A numeric 4xx `statusCode`
+ * maps to 400; anything else maps to 503. It logs the failure and has no
+ * authentication-module dependency, so the owner-scoped write guard can use it
+ * without importing that module graph; re-exported by
+ * resources/owner-field-guard.ts.
+ */
+export function ownerCheckUnavailable(err: unknown): Response {
+  console.error(
+    "owner-field-guard: the stored record could not be read, so the write was refused",
+    { err },
+  );
+  const code = (err as { statusCode?: unknown } | null | undefined)?.statusCode;
+  const status = typeof code === "number" && code >= 400 && code < 500 ? 400 : 503;
+  return new Response(
+    JSON.stringify({
+      error: OWNER_CHECK_UNAVAILABLE_ERROR,
+      message: "the stored record could not be read; the write was refused",
+    }),
+    { status, headers: { "content-type": "application/json" } },
+  );
 }
 
 /**

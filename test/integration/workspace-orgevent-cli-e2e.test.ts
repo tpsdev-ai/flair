@@ -42,7 +42,7 @@
  */
 
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
-import { spawn } from "node:child_process";
+import { spawnCli } from "../helpers/build-cli-once.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -53,7 +53,6 @@ import { childOverranDeadline, cliLeg } from "../helpers/child-deadline.js";
 // flair#1807: the CLI child's OWN deadline, and the per-case budget above it.
 const CHILD_DEADLINE_MS = 20_000;
 
-const CLI = join(process.cwd(), "dist", "cli.js");
 const AGENT_ID = "flair679-e2e-agent";
 const ADMIN_PASS = "test123"; // matches harper-lifecycle's seeded admin pass
 
@@ -74,7 +73,7 @@ function runCli(args: string[], extraEnv: Record<string, string> = {}): Promise<
   const opsPort = new URL(harper.opsURL).port;
   return new Promise((resolve, reject) => {
     const startedAt = Date.now();
-    const child = spawn(process.execPath, [CLI, ...args], {
+    const child = spawnCli(args, {
       env: {
         ...process.env,
         HOME: cliHome,

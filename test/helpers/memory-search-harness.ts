@@ -13,6 +13,7 @@
  * and memory-host-source tests can run in the same process without racing.
  */
 import { mock } from "bun:test";
+import { memoryLockDouble } from "./memory-lock-double";
 
 /** The shared, mutable state both files read and write. */
 export const harnessState = {
@@ -105,6 +106,9 @@ function stageOrRun(ctx: any, apply: () => void): void {
 }
 
 export class BaseMemory {
+  /** flair#2478: Memory PUT/PATCH refuse a store with no per-id lock; this
+   *  double injects one (test/helpers/memory-lock-double.ts). */
+  static primaryStore = memoryLockDouble();
   /** Real Harper binds the resource to the URL target (`getId()`); a PUT writes
    *  to THAT id. `_targetId` models the URL-bound target; unset for a direct
    *  in-process call, where the body id IS the write key. See
