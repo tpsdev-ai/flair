@@ -9,13 +9,15 @@
  * id containing a reserved character addresses its record.
  *
  * At request time the auth middleware resolves the resource, record id and
- * property through Harper's OWN routing (resources/harper-routing.ts), so it
- * decides about exactly what Harper dispatches, content-type suffixes and
- * suffixed-name fallbacks included. The helpers here mirror the first-dot
- * DECLARED-ATTRIBUTE rule and the split-then-decode of the remainder; they are
- * the FALLBACK used only when the live route registry is unavailable (a unit
- * mock), and they do not reproduce the content-type-suffix or suffixed-name
- * dispatch rules — those are left to the live routing.
+ * property through Harper's OWN routing (resources/harper-routing.ts) for its
+ * by-name and by-id decisions, content-type suffixes and suffixed-name fallbacks
+ * included. The helpers here are the FALLBACK for those decisions when the live
+ * route registry is unavailable (a unit mock), when the target matches no route,
+ * or when the matcher throws; they mirror the first-dot DECLARED-ATTRIBUTE rule and
+ * the split-then-decode of the remainder, and they do not reproduce the
+ * content-type-suffix or suffixed-name dispatch rules — those are left to the live
+ * routing. The middleware's non-admin Memory-selection rewrite also calls these
+ * helpers on the live request, on the raw path.
  *
  * Before any other request processing, the middleware answers a target that is not in
  * canonical form with a named 400 (`non_canonical_request_target`). A raw

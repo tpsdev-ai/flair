@@ -312,14 +312,16 @@ const ALLOWED_HTTP_METHODS: ReadonlySet<string> = new Set([
 ]);
 
 // The resources the middleware makes a by-NAME decision on: the public-path
-// allowance and the OAuth rate-limit policy. Harper's file-type-suffix fallback
-// (Resources.getMatch) routes `<name>.<ext>` to `<name>` when `<name>.<ext>` is
-// not itself a resource, so the first path segment is resolved to the routed
-// resource before these decisions — otherwise a suffixed form (`OAuthToken.json`)
-// would miss the OAuth budget or the public allowance it routes to. Only names in
-// this set are resolved; any other first segment is left exactly as sent, so no
-// unrelated path is rewritten. The raw-query block resolves `sql`/`graphql`
-// separately, on its lower-cased path.
+// allowance and the OAuth rate-limit policy. The pure FALLBACK (`routedResourcePath`,
+// used only when the live registry is unavailable) resolves the first path
+// segment to a routed resource name here: Harper's file-type-suffix fallback
+// (Resources.getMatch) routes `<name>.<ext>` to `<name>` when `<name>.<ext>` is not
+// itself a resource, so a suffixed form (`OAuthToken.json`) would otherwise miss
+// the OAuth budget or the public allowance it routes to. Only names in this set are
+// resolved; any other first segment is left exactly as sent, so no unrelated path is
+// rewritten. The raw-query block resolves `sql`/`graphql` separately, on its
+// lower-cased path. At request time the live route registry resolves the FIRST
+// segment instead (see `routedDecisionPath` below).
 const NAME_ROUTED_RESOURCES: ReadonlySet<string> = new Set([
   "health", "Health", "a2a", "A2AAdapter", "AgentCard",
   "FederationSync", "FederationPair",
@@ -347,12 +349,15 @@ server.http(async (request: any, nextLayer: any) => {
   const targetPath = requestPath(rawTarget);
 
   // ── Resolve the target through Harper's OWN routing, FIRST ──────────────────
-  // So the middleware decides about exactly the resource, record id and property
-  // Harper dispatches — content-type suffixes, a suffixed resource name routed to
-  // the bare resource, and the first-dot property rule included. Synchronous and
-  // before any await (getMatch mutates its entry in place; see harper-routing.ts).
-  // Returns null only when the live registry is absent (a unit test mocking
-  // `harper`), where the pure mirror in request-target.ts is the fallback.
+  // For a decision below that names a resource, record id or property — the
+  // stored-owner guard, the OrgEvent and WorkspaceState delete lookups, the OAuth
+  // rate-limit and public-path classifications — the middleware decides on what
+  // Harper's REST matcher routes: content-type suffixes, a suffixed resource name
+  // routed to the bare resource, and the first-dot property rule included.
+  // Synchronous and before any await (getMatch mutates its entry in place; see
+  // harper-routing.ts). The pure mirror in request-target.ts is the fallback when
+  // this returns null: the live registry is absent (a unit test mocking `harper`),
+  // the target matches no route, or the matcher throws.
   const routed: HarperRoute | null = routeWithHarper(rawTarget, request.headers);
 
   // ── HTTP method allowlist ──────────────────────────────────────────────────
@@ -374,7 +379,7 @@ server.http(async (request: any, nextLayer: any) => {
 
   // The parsed URL is read for the signed payload (the client signs the
   // pathname and search of the URL it built) and for query parameters only.
-  // Every PATH decision reads `targetPath` above, never the parsed pathname.
+  // A path decision is never made on its parsed pathname.
   const url = new URL(request.url, "http://" + (request.headers.get("host") || "localhost"));
 
   // ── Rate limiting, right after the method check ────────────────────────────

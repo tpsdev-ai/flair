@@ -3,15 +3,18 @@
  * request-target helpers against Harper's installed parser, over a corpus.
  *
  * At request time the middleware resolves a target through Harper's OWN routing
- * (resources/harper-routing.ts), so the helpers here are only the fallback used
- * when the live registry is absent (a unit mock). This test fixes the fallback
- * to Harper's parser for the part it covers — the id over the whole remainder
- * (`RequestTarget`) and the first-dot DECLARED-ATTRIBUTE property rule
- * (`Resource.parsePath` with no request context). Harper's content-type-suffix
- * rule fires only with a request context; the final group below checks that
- * behaviour directly against Harper (it is what harper-routing relies on), and
- * the pure fallback deliberately does not reproduce it (a content-type suffix
- * addresses the same row either way).
+ * (resources/harper-routing.ts) for its by-name and by-id decisions, so for those
+ * the helpers here are the fallback used when the live registry is absent (a unit
+ * mock), when the target matches no route, or when the matcher throws. The
+ * middleware's non-admin Memory-selection rewrite also calls them on the live
+ * request. This test fixes the fallback to Harper's parser for the part it covers —
+ * the id over the whole remainder (`RequestTarget`) and the first-dot
+ * DECLARED-ATTRIBUTE property rule (`Resource.parsePath` with no request context).
+ * Harper's content-type-suffix rule fires only with a request context; the final
+ * group below checks that behaviour directly against Harper (it is what
+ * harper-routing relies on), and the pure fallback deliberately does not reproduce
+ * it, so a content-type suffix (`x.json`) is stripped by the live routing and left
+ * whole by the fallback.
  */
 import { describe, expect, test } from "bun:test";
 import { createRequire } from "node:module";
@@ -70,8 +73,12 @@ describe("routedRecordId matches Harper's RequestTarget id (no property rule)", 
   test("a collection path and a trailing-slash remainder resolve to no single record", () => {
     expect(routedRecordId("/Fixture")).toBeNull();
     expect(routedRecordId("/Fixture/")).toBeNull();
-    // Harper flags these as collections (id null / isCollection true).
+    // Harper flags an empty remainder as a collection with a null id. A
+    // trailing-slash remainder that keeps text (`x/`) is also a collection
+    // (isCollection true) but carries a non-null id (`x/`).
     expect(new RequestTarget("").id ?? null).toBeNull();
+    expect(new RequestTarget("x/").isCollection).toBe(true);
+    expect(new RequestTarget("x/").id).toBe("x/");
   });
 
   test("a remainder that is not valid percent-encoding resolves to null", () => {

@@ -1,7 +1,7 @@
 /**
  * harper-routing.ts — ask Harper's OWN routing code what a request target
- * resolves to, so the middleware decides about exactly the resource, record id
- * and property that Harper will dispatch.
+ * resolves to, so the middleware's by-name and by-id decisions use the resource,
+ * record id and property the REST dispatcher will.
  *
  * The middleware runs inside Harper, so the live route registry
  * (`server.resources`) and Harper's `RequestTarget` / `Resource.parsePath` are
@@ -14,9 +14,14 @@
  * place, so its result is read into locals immediately, with no interleaving
  * request able to overwrite it.
  *
+ * `getMatch` is asked for the `rest` match, which is how Harper's REST layer
+ * dispatches. A request Harper dispatches through another chain — e.g. an `sse`
+ * match for `Accept: text/event-stream` — is not resolved here, and falls back to
+ * the pure mirror.
+ *
  * When the registry is not present (a unit test driving the middleware with a
- * mocked `harper`), it returns null and the caller falls back to the pure
- * mirror in request-target.ts.
+ * mocked `harper`), the target matches no route, or the matcher throws, it returns
+ * null and the caller falls back to the pure mirror in request-target.ts.
  */
 // Namespace import, not named: a unit test that mocks `harper` may not export
 // `RequestTarget`, and a named import of a missing export fails to LINK (before

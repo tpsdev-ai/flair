@@ -191,7 +191,7 @@ describe("a non-canonical target gets the named 400 before any other processing"
   });
 });
 
-describe("canonical targets go on exactly as before", () => {
+describe("a canonical target passes the refusal and the later checks decide", () => {
   it("the public /health passthrough", async () => {
     const res = await mw(makeRequest("/health", "GET"), next);
     expect(res.status).toBe(200);

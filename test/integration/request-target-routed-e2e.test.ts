@@ -1,25 +1,31 @@
 /**
- * request-target-routed-e2e.test.ts — on real Harper, every middleware decision
- * is made on the record and resource Harper actually routes to.
+ * request-target-routed-e2e.test.ts — on real Harper, the middleware's by-name
+ * and by-id decisions are made on the record and resource Harper's REST matcher
+ * routes to.
  *
- * Three guarantees, each exercised over a RAW socket where routing matters (so
- * the request target reaches Harper byte for byte, not normalized by fetch):
+ * Each guarantee is exercised over a RAW socket where routing matters (so the
+ * request target reaches Harper byte for byte, not normalized by fetch):
  *
  *   1. Record id. The shared owner guard decides on the FULL routed id (the
  *      whole decoded remainder after the table), so a non-owner mutation of an
  *      id that contains `/` is refused and the row is unchanged, while an
- *      owner's mutation of a slash-containing id succeeds.
+ *      owner's mutation of a slash-containing id succeeds; a non-owner PATCH of a
+ *      content-type-suffixed id answers the middleware's own named 503 when its
+ *      stored-owner read fails.
  *   2. Routed resource name. The OAuth rate-limit policy and the public-path
  *      allowance decide on the resource Harper routes to, including its
  *      file-type-suffix fallback: a suffixed form of a rate-limited route is
  *      counted, and a suffixed form of a public route is served.
- *   3. Backfill target. A successful create whose caller-supplied header names a
- *      different, other-owned row leaves that other row untouched.
+ *   3. Backfill target. The middleware's embedding backfill writes its vector to
+ *      the row the write COMMITTED — the returned id for a successor and for a
+ *      collection create — never the URL or caller-header id.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
+import { existsSync, writeFileSync, rmSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import nacl from "tweetnacl";
 import {
   HarperInstance,
@@ -28,6 +34,12 @@ import {
   HARPER_START_BUDGET_MS,
   HARPER_STOP_BUDGET_MS,
 } from "../helpers/harper-lifecycle";
+import {
+  componentWithOwnerGuardLoadFailure,
+  LOAD_FAILURE_MARKER,
+  ARM_FILE,
+  type FailingComponent,
+} from "../helpers/owner-guard-load-failure-component";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
 function mkAgent(id: string): TestAgent {
@@ -113,9 +125,14 @@ function rawRequest(
 }
 
 let harper: HarperInstance;
+let component: FailingComponent;
 const owner = mkAgent("rtr-owner");
 const other = mkAgent("rtr-other");
 const NOW = new Date().toISOString();
+
+/** Arm / disarm the injected marker-id row-load failure via the ROOTPATH sentinel. */
+function arm(): void { writeFileSync(join(harper.installDir, ARM_FILE), "1"); }
+function disarm(): void { const p = join(harper.installDir, ARM_FILE); if (existsSync(p)) rmSync(p, { force: true }); }
 
 function signed(agent: TestAgent, method: string, target: string, body?: unknown, extra: Record<string, string> = {}): Promise<RawResponse> {
   const headers: Record<string, string> = { Authorization: ed25519Header(agent, method, target), ...extra };
@@ -140,6 +157,25 @@ async function readRow(table: string, id: string, attrs: string[]): Promise<any>
   return Array.isArray(rows) ? rows[0] : null;
 }
 
+/**
+ * The vector length stored on a Memory row, polled until it exceeds 100 (the
+ * backfill's own vector) or the deadline passes. A create that stores a short
+ * caller-supplied vector leaves the row short until the middleware's embedding
+ * backfill recomputes and writes it — so this is a backfill-specific write
+ * against exactly this id.
+ */
+async function awaitBackfillVector(id: string, deadlineMs = 20_000): Promise<number> {
+  const deadline = Date.now() + deadlineMs;
+  let len = 0;
+  while (Date.now() < deadline) {
+    const row = await readRow("Memory", id, ["id", "embedding"]);
+    len = Array.isArray(row?.embedding) ? row.embedding.length : 0;
+    if (len > 100) return len;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  return len;
+}
+
 // A rate-limit budget small enough to spend in a few requests.
 const OAUTH_LIMIT = 5;
 const savedEnv: Record<string, string | undefined> = {};
@@ -150,7 +186,8 @@ beforeAll(async () => {
   delete process.env.FLAIR_RATE_LIMIT;
   delete process.env.FLAIR_TRUSTED_PROXY;
 
-  harper = await startHarper();
+  component = componentWithOwnerGuardLoadFailure();
+  harper = await startHarper({ cwd: component.dir });
   assertOwnInstance(harper);
   for (const a of [owner, other]) {
     await seed("Agent", { id: a.id, name: a.id, role: "agent", admin: false, publicKey: a.publicKey, createdAt: NOW });
@@ -164,7 +201,8 @@ beforeAll(async () => {
 }, HARPER_START_BUDGET_MS);
 
 afterAll(async () => {
-  if (harper) await stopHarper(harper);
+  if (harper) { disarm(); await stopHarper(harper); }
+  if (component) component.cleanup();
   for (const [k, v] of Object.entries(savedEnv)) {
     if (v === undefined) delete process.env[k]; else process.env[k] = v;
   }
@@ -188,15 +226,31 @@ describe("(1) the owner guard decides on the full routed record id", () => {
     expect(row?.memoryId).toBe("m-own-changed");
   }, 60_000);
 
-  it("a non-owner PATCH of a content-type-SUFFIXED id is decided on Harper's parsed id", async () => {
-    // `/Asset/rtr-safe%2Fvictim.json` routes to Asset id `rtr-safe/victim`
-    // (Harper strips the `.json` content-type suffix). The guard must resolve
-    // the same id and refuse, leaving the other-owned row unchanged.
-    const res = await signed(owner, "PATCH", "/Asset/rtr-safe%2Fvictim.json", { memoryId: "m-hijacked-suffix" });
-    expect([401, 403]).toContain(res.status);
-    const row = await readRow("Asset", "rtr-safe/victim", ["id", "agentId", "memoryId"]);
-    expect(row?.agentId).toBe(other.id);
-    expect(row?.memoryId).toBe("m-victim");
+  it("a non-owner PATCH of a content-type-SUFFIXED id is decided by the middleware's stored-owner read", async () => {
+    // A non-admin PATCH to a suffixed address whose stored row cannot be read
+    // answers the middleware's own named 503 owner_lookup_failed: the middleware
+    // reads the stored row before the resource owner guard can run, and the
+    // resource guard's refusal is a 403 with a different body. That 503 is
+    // produced only by the middleware's stored-owner read, so this observes the
+    // middleware's decision on the id Harper routes to rather than accepting an
+    // authentication or resource-guard refusal.
+    //
+    // `/Asset/<id>.json` routes to Asset id `<id>`: Harper strips the `.json`
+    // content-type suffix.
+    const id = `${LOAD_FAILURE_MARKER}-suffix-${randomUUID()}`;
+    await seed("Asset", { id, agentId: other.id, memoryId: "m-victim", contentType: "image/png", createdAt: NOW });
+    const before = await readRow("Asset", id, ["id", "agentId", "memoryId"]);
+    expect(before?.agentId, "the other-owned row was not seeded").toBe(other.id);
+
+    arm();
+    try {
+      const res = await signed(owner, "PATCH", `/Asset/${id}.json`, { memoryId: "m-hijacked-suffix" });
+      expect(res.status, `/Asset/${id}.json → ${res.status}: ${res.body.slice(0, 200)}`).toBe(503);
+      expect(JSON.parse(res.body).error, "must answer with the middleware's named refusal").toBe("owner_lookup_failed");
+    } finally {
+      disarm();
+    }
+    expect(await readRow("Asset", id, ["id", "agentId", "memoryId"]), "the suffixed PATCH changed the other-owned row").toEqual(before);
   }, 60_000);
 });
 
@@ -239,40 +293,42 @@ describe("(2) rate-limit and public decisions use the routed resource name", () 
 });
 
 describe("(3) the embedding backfill targets only the committed record", () => {
-  it("a successful create whose header names another owner's row commits the caller's own new row", async () => {
-    const before = await readRow("Memory", "rtr-victim-mem", ["id", "agentId", "content"]);
+  it("a successful create whose header names another owner's row backfills the committed row, not the header's", async () => {
+    const before = await readRow("Memory", "rtr-victim-mem", ["id", "agentId", "content", "embedding"]);
     expect(before?.agentId).toBe(other.id);
+    expect(Array.isArray(before?.embedding) && before.embedding.length > 0, "the header-named row must start without a vector").toBe(false);
 
     // A canonical collection create by `owner`, with a caller header naming the
     // other-owned row. The create must succeed as the caller's own new row, and
     // the committed id (what the backfill targets) is that new row — never the
-    // header's id.
+    // header's id. The body supplies a short vector, so the committed row stays
+    // short unless the middleware's embedding backfill recomputes and writes it.
     const res = await signed(owner, "POST", "/Memory", {
       agentId: owner.id, content: "my own new memory", durability: "persistent",
+      embedding: [0.01, 0.02, 0.03],
     }, { "x-memory-id": "rtr-victim-mem" });
     expect(res.status, `create ${res.status}: ${res.body.slice(0, 200)}`).toBeLessThan(300);
     const committedId = JSON.parse(res.body).id as string;
     expect(committedId).not.toBe("rtr-victim-mem");
 
-    // The other-owned row keeps its owner and content — no caller data crossed
-    // into it. (Its embedding is the system's own derivation of its OWN content
-    // and may be filled by the background embedder, so it is not asserted here.)
-    await new Promise((r) => setTimeout(r, 750));
-    const after = await readRow("Memory", "rtr-victim-mem", ["id", "agentId", "content"]);
+    const len = await awaitBackfillVector(committedId);
+    expect(len, "the backfill wrote no vector to the committed row").toBeGreaterThan(100);
+
+    // The other-owned row keeps its owner, content and absence of a vector — the
+    // backfill did not target the header's id.
+    const after = await readRow("Memory", "rtr-victim-mem", ["id", "agentId", "content", "embedding"]);
     expect(after?.agentId).toBe(other.id);
     expect(after?.content).toBe("victim content");
+    expect(Array.isArray(after?.embedding) && after.embedding.length > 0, "the header-named row received a vector").toBe(false);
   }, 60_000);
 
-  it("a by-id POST that commits a SUCCESSOR with a different id is handled end to end", async () => {
+  it("a by-id POST that commits a SUCCESSOR with a different id backfills the successor, not the URL id", async () => {
     // A skill POST to a URL id, then an identical retry commits a SUCCESSOR with
     // a different id (flair#2263). The committed id the backfill uses comes from
-    // the write RESULT, not the URL id — the discriminating observation of that
-    // (which id the backfill reads) is in the unit test; here we confirm the
-    // successor path works end to end over real Harper and both rows are the
-    // caller's own. The embedding itself is written by Memory's own write path,
-    // so it is not the signal asserted here.
+    // the write RESULT, not the URL id. The body supplies a short vector, so the
+    // successor stays short unless the backfill reads the RETURNED successor id.
     const skillId = `rtr-skill-${randomUUID()}`;
-    const body = { agentId: owner.id, content: "successor backfill body", trigger: "when the committed id differs from the url", tags: ["skill"], durability: "persistent" };
+    const body = { agentId: owner.id, content: "successor backfill body", trigger: "when the committed id differs from the url", tags: ["skill"], durability: "persistent", embedding: [0.01, 0.02, 0.03] };
 
     const first = await signed(owner, "POST", `/Memory/${encodeURIComponent(skillId)}`, body);
     expect(first.status, `first ${first.status}: ${first.body.slice(0, 200)}`).toBeLessThan(300);
@@ -286,5 +342,8 @@ describe("(3) the embedding backfill targets only the committed record", () => {
     const successor = await readRow("Memory", successorId, ["id", "agentId", "supersedes"]);
     expect(successor?.agentId).toBe(owner.id);
     expect(successor?.supersedes).toBe(skillId);
+
+    const len = await awaitBackfillVector(successorId);
+    expect(len, "the backfill wrote no vector to the successor row").toBeGreaterThan(100);
   }, 120_000);
 });

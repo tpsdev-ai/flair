@@ -1,4 +1,4 @@
-- **The server answers a request whose target is not in canonical form with a named 400, before any other request processing.**
+- **The default REST request middleware answers a request whose target is not in canonical form with a named 400, before any other request processing.**
 
   A request target with a `.` or `..` path segment (raw or percent-encoded), an
   empty path segment, or a raw backslash gets
