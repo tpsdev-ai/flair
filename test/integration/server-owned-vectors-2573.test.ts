@@ -5,8 +5,10 @@
  * non-admin POST, PUT or PATCH that carries a non-empty `embedding` discards the vector and
  * its `embeddingModel` stamp before the write, so the write stores the vector the
  * server computes for the row's own post-redaction text, or none when the model is
- * unavailable — exactly as a write that sent no vector. An administrator keeps the
- * vector it carries. `embedding: null` and `[]` are unchanged.
+ * unavailable — exactly as a write that sent no vector. A body-level
+ * `embeddingModel` stamp with no `embedding` is discarded too, so a non-admin
+ * write can never relabel a stored vector as current-space. An administrator
+ * keeps the vector it carries. `embedding: null` and `[]` are unchanged.
  *
  * Cases (one Harper with a working embedding engine):
  *   (a) an agent POST, PUT and PATCH, each carrying a crafted all-ones vector,
@@ -14,12 +16,22 @@
  *       `embeddingModel` — never the crafted one;
  *   (b) an administrator's POST keeps the supplied vector unchanged;
  *   (c) an agent POST of `embedding: []` stores no empty array;
- *   (d) an agent PATCH of `embedding: null` clears the stored vector.
+ *   (d) an agent PATCH of `embedding: null` clears the stored vector;
+ *   (e) an agent vector-only PATCH discards the supplied vector and retains the
+ *       stored one (the PATCH changes no text, so it computes no vector).
  * On a second Harper whose embedding backend fails (its model file is absent, so
  * getEmbedding returns null):
- *   (e) an agent POST/PUT/PATCH of a crafted vector stores NO vector and no stamp;
- * then copying the real model file to the path the instance registered, the
- *   (f) auto-embed backfill embeds the vectorless row and stamps it.
+ *   (f) an agent POST/PUT/PATCH of a crafted vector and a forged stamp stores NO
+ *       vector and no stamp;
+ *   (g) then copying the real model file to the path the instance registered, the
+ *       auto-embed backfill embeds the vectorless row and stamps it.
+ * A third Harper shows the vector-space control itself:
+ *   (h) an agent stamp-only PATCH leaves a foreign-stamped (and an unstamped)
+ *       stored vector's stamp unchanged, so the row stays excluded from vector
+ *       recall;
+ *   (i) an agent skill PUT that carries a stored vector keeps the vector's stored
+ *       stamp, never the caller's;
+ *   (j) a signed non-admin array POST is refused and stores no row.
  *
  * Throwaway HOME, ephemeral ports. Each spawned Harper is this test's own
  * instance; see assertOwnInstance.
@@ -33,6 +45,7 @@ import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
 import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { getModelId } from "../../resources/embeddings-provider.ts";
+import { ensureFlairAgentRole, ensureFlairAgentUser } from "../../src/cli";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 /** The stamp the spawned instance writes when it embeds. Same env, same value. */
@@ -131,7 +144,42 @@ function makeHarness(get: () => HarperInstance) {
     });
     expect(insert.status).toBe(200);
   }
-  return { agent, adminAgent, adminOp, write, basicWrite, row, serverVectorFor, register };
+  /** Seed a Memory row directly, as a raw operator insert would: it bypasses the
+   *  resource writers, so it can plant a stored vector with a foreign or absent
+   *  stamp that no writer accepts from a non-admin. */
+  async function seed(record: Record<string, unknown>): Promise<void> {
+    const res = await adminOp({ operation: "insert", database: "flair", table: "Memory", records: [record] });
+    expect(res.status, `seed ${record.id}: ${(await res.clone().text()).slice(0, 300)}`).toBe(200);
+  }
+  /** /Health carries the embedding-space guard's published verdict. */
+  async function health(): Promise<any> {
+    const res = await fetch(`${get().httpURL}/Health`, { signal: AbortSignal.timeout(15_000) });
+    expect([200, 503]).toContain(res.status);
+    return res.json();
+  }
+  /** A recall consult makes the guard rescan a stale or unknown count. */
+  async function consult(): Promise<void> {
+    const res = await fetch(`${get().httpURL}/SemanticSearch`, {
+      signal: AbortSignal.timeout(15_000),
+      method: "POST",
+      headers: { Authorization: ed25519Header(agent, "POST", "/SemanticSearch"), "Content-Type": "application/json" },
+      body: JSON.stringify({ agentId: agent.id, queryEmbedding: CRAFTED(), limit: 1 }),
+    });
+    expect(res.status, (await res.clone().text()).slice(0, 300)).toBe(200);
+  }
+  /** Poll /Health, consulting the guard each round, until `want` holds or time is up. */
+  async function waitGuard(want: (space: any) => boolean, timeoutMs: number): Promise<any> {
+    const deadline = Date.now() + timeoutMs;
+    let space: any;
+    while (Date.now() < deadline) {
+      space = (await health()).embeddingSpace;
+      if (space && want(space)) return space;
+      await consult();
+      await Bun.sleep(150);
+    }
+    return space;
+  }
+  return { agent, adminAgent, adminOp, write, basicWrite, row, serverVectorFor, register, seed, health, consult, waitGuard };
 }
 
 function assertOwnInstance(h: HarperInstance): void {
@@ -222,6 +270,20 @@ function assertOwnInstance(h: HarperInstance): void {
     const r = await h.row(id);
     expect(r.embedding ?? null, "`embedding: null` clears the stored vector").toBeNull();
   }, 60_000);
+
+  test("(e) an agent vector-only PATCH discards the supplied vector and retains the stored one", async () => {
+    const id = `s2-vectoronly-${randomUUID()}`;
+    const created = await h.write("POST", id, { id, agentId: h.agent.id, content: TXT("vector only"), visibility: "shared" });
+    expect(created.status, await created.clone().text()).toBe(201);
+    const seeded = await h.row(id);
+    expect(Array.isArray(seeded.embedding) && seeded.embedding.length > 100, "the seed row carries a server vector").toBe(true);
+    const res = await h.write("PATCH", id, { embedding: CRAFTED() });
+    expect(res.status, await res.clone().text()).toBeLessThan(300);
+    const r = await h.row(id);
+    expect(r.content, "the vector-only PATCH changed no text").toBe(TXT("vector only"));
+    expect(r.embedding, "the stored vector is retained, not the caller's").toEqual(seeded.embedding);
+    expect(r.embeddingModel).toBe(CURRENT_STAMP);
+  }, 60_000);
 });
 
 describe("flair#2573 slice 2 — a crafted vector with no embedding model stores no vector (real Harper)", () => {
@@ -248,33 +310,38 @@ describe("flair#2573 slice 2 — a crafted vector with no embedding model stores
     if (homeDir) rmSync(homeDir, { recursive: true, force: true });
   }, HARPER_STOP_BUDGET_MS);
 
-  test("(e) agent POST, PUT and PATCH of a crafted vector each store no vector", async () => {
+  test("(f) agent POST, PUT and PATCH of a crafted vector and a forged stamp each store no vector and no stamp", async () => {
     const post = `s2-nomodel-post-${randomUUID()}`;
     const put = `s2-nomodel-put-${randomUUID()}`;
     const patch = `s2-nomodel-patch-${randomUUID()}`;
+    // Every write below forges BOTH a vector and its stamp, so the no-stamp
+    // assertions detect a discarded-stamp line that lets the caller's stamp
+    // through (blocker 2).
+    const FORGED_STAMP = "forged-model-stamp";
     // Seed the PATCH target first: a PATCH to a missing id is refused for a
     // non-admin, so the crafted-vector PATCH must exercise an update.
     const seed = await h.write("POST", patch, { id: patch, agentId: h.agent.id, content: TXT("patch seed"), visibility: "shared" });
     expect(seed.status, await seed.clone().text()).toBe(201);
-    const postRes = await h.write("POST", post, { id: post, agentId: h.agent.id, content: TXT("post"), visibility: "shared", embedding: CRAFTED() });
+    const postRes = await h.write("POST", post, { id: post, agentId: h.agent.id, content: TXT("post"), visibility: "shared", embedding: CRAFTED(), embeddingModel: FORGED_STAMP });
     expect(postRes.status, await postRes.clone().text()).toBe(201);
-    const putRes = await h.write("PUT", put, { id: put, agentId: h.agent.id, content: TXT("put"), visibility: "shared", embedding: CRAFTED() });
+    const putRes = await h.write("PUT", put, { id: put, agentId: h.agent.id, content: TXT("put"), visibility: "shared", embedding: CRAFTED(), embeddingModel: FORGED_STAMP });
     expect(putRes.status, await putRes.clone().text()).toBeLessThan(300);
-    const patchRes = await h.write("PATCH", patch, { content: TXT("patch"), embedding: CRAFTED() });
+    const patchRes = await h.write("PATCH", patch, { content: TXT("patch"), embedding: CRAFTED(), embeddingModel: FORGED_STAMP });
     expect(patchRes.status, await patchRes.clone().text()).toBeLessThan(300);
     for (const id of [post, put, patch]) {
       const r = await h.row(id);
       expect(r, `${id} was not stored`).not.toBeNull();
       expect(r.embedding ?? null, `${id}: no vector is stored when the model is unavailable`).toBeNull();
-      expect(r.embeddingModel ?? null, `${id}: no model stamp is stored`).toBeNull();
+      expect(r.embeddingModel ?? null, `${id}: the caller's stamp is not stored`).toBeNull();
     }
   }, 120_000);
 
-  (HAS_MODEL ? test : test.skip)("(f) the backfill embeds the vectorless row and stamps it once the model is available", async () => {
+  (HAS_MODEL ? test : test.skip)("(g) the backfill embeds the vectorless row and stamps it once the model is available", async () => {
     const id = `s2-backfill-${randomUUID()}`;
-    const post = await h.write("POST", id, { id, agentId: h.agent.id, content: TXT("backfill"), visibility: "shared", embedding: CRAFTED() });
+    const post = await h.write("POST", id, { id, agentId: h.agent.id, content: TXT("backfill"), visibility: "shared", embedding: CRAFTED(), embeddingModel: "forged-model-stamp" });
     expect(post.status, await post.clone().text()).toBe(201);
     expect((await h.row(id)).embedding ?? null).toBeNull();
+    expect((await h.row(id)).embeddingModel ?? null).toBeNull();
 
     // Make the registered model path resolvable now: copy the real model file to
     // exactly where this instance resolves it, so its next load attempt succeeds.
@@ -295,4 +362,104 @@ describe("flair#2573 slice 2 — a crafted vector with no embedding model stores
     expect(r.embeddingModel).toBe(CURRENT_STAMP);
     expect(r.embedding).not.toEqual(CRAFTED());
   }, 180_000);
+});
+
+describe("flair#2573 slice 2 — a non-admin write cannot relabel a stored vector (real Harper)", () => {
+  let harper: HarperInstance;
+  let h: ReturnType<typeof makeHarness>;
+  const FOREIGN_STAMP = "foreign-model-not-current";
+
+  beforeAll(async () => {
+    harper = await startHarper({ cwd: ROOT });
+    assertOwnInstance(harper);
+    h = makeHarness(() => harper);
+    await h.register();
+    await ensureFlairAgentRole(harper.opsURL, harper.admin.username, harper.admin.password);
+    await ensureFlairAgentUser(harper.opsURL, harper.admin.username, harper.admin.password);
+  }, 240_000);
+
+  afterAll(async () => {
+    if (harper) await stopHarper(harper);
+  }, HARPER_STOP_BUDGET_MS);
+
+  /** Seed a stored vector no writer accepts from a non-admin: a raw operator
+   *  insert with a crafted vector and a foreign (`stamp`) or absent stamp
+   *  (`null`). The non-admin write under test must leave that stamp alone. */
+  async function seedVector(id: string, stamp: string | null): Promise<void> {
+    await h.seed({
+      id, agentId: h.agent.id, content: `stored text for ${id}`, visibility: "shared", durability: "standard",
+      createdAt: new Date().toISOString(), instanceToken: randomUUID(), tags: [], embedding: CRAFTED(),
+      ...(stamp === null ? {} : { embeddingModel: stamp }),
+    });
+  }
+
+  test("(h) an agent stamp-only PATCH leaves a foreign-stamped stored vector's stamp unchanged and the row excluded", async () => {
+    const id = `s2-relabel-foreign-${randomUUID()}`;
+    await seedVector(id, FOREIGN_STAMP);
+    const before = await h.waitGuard((s) => s.state === "excluded", 60_000);
+    expect(before?.excluded, "the foreign-stamped vector makes the verdict non-uniform").toBeGreaterThanOrEqual(1);
+    const res = await h.write("PATCH", id, { embeddingModel: CURRENT_STAMP });
+    expect(res.status, await res.clone().text()).toBeLessThan(300);
+    const r = await h.row(id);
+    expect(r.embedding, "the stored vector is unchanged").toEqual(CRAFTED());
+    expect(r.embeddingModel, "the caller's stamp never relabels a stored vector").toBe(FOREIGN_STAMP);
+    const after = await h.waitGuard((s) => s.excluded === before?.excluded, 60_000);
+    expect(after?.excluded, "the row stays excluded from vector recall").toBe(before?.excluded);
+  }, 120_000);
+
+  test("(h) an agent stamp-only PATCH leaves an unstamped stored vector's stamp absent and the row excluded", async () => {
+    const id = `s2-relabel-unstamped-${randomUUID()}`;
+    await seedVector(id, null);
+    const before = await h.waitGuard((s) => s.state === "excluded", 60_000);
+    expect(before?.excluded, "the untrusted vectors make the verdict non-uniform").toBeGreaterThanOrEqual(1);
+    const res = await h.write("PATCH", id, { embeddingModel: CURRENT_STAMP });
+    expect(res.status, await res.clone().text()).toBeLessThan(300);
+    const r = await h.row(id);
+    expect(r.embedding, "the stored vector is unchanged").toEqual(CRAFTED());
+    expect(r.embeddingModel ?? null, "the caller's stamp is not stored").toBeNull();
+    const after = await h.waitGuard((s) => s.excluded === before?.excluded, 60_000);
+    expect(after?.excluded, "the row stays excluded from vector recall").toBe(before?.excluded);
+  }, 120_000);
+
+  test("(i) an agent skill PUT that carries a stored vector keeps the vector's stored stamp", async () => {
+    const id = `s2-relabel-skill-${randomUUID()}`;
+    const trigger = `when the stored skill ${id} runs`;
+    await h.seed({
+      id, agentId: h.agent.id, content: `skill body ${id}`, trigger, tags: ["skill"], durability: "persistent",
+      visibility: "shared", skillSubjectId: id, createdAt: new Date().toISOString(), instanceToken: randomUUID(),
+      embedding: CRAFTED(), embeddingModel: FOREIGN_STAMP,
+    });
+    const body = { id, agentId: h.agent.id, content: `skill body ${id}`, trigger, tags: ["skill"], durability: "persistent", embeddingModel: CURRENT_STAMP };
+    // Right after boot the InstructionVersion per-key lock can answer 503; retry
+    // that one status, bounded.
+    let res: Response | null = null;
+    let text = "";
+    for (let attempt = 0; attempt < 60; attempt++) {
+      res = await h.write("PUT", id, body);
+      text = await res.clone().text();
+      if (res.status !== 503 || !text.includes("instruction_version_lock_unavailable")) break;
+      await Bun.sleep(500);
+    }
+    expect(res!.status, text.slice(0, 300)).toBeLessThan(300);
+    const written = JSON.parse(text) as any;
+    const target = typeof written.id === "string" ? written.id : id;
+    const r = await h.row(target);
+    expect(r.embedding, "the carried vector is stored unchanged").toEqual(CRAFTED());
+    expect(r.embeddingModel, "a carried vector keeps its stored stamp, never the caller's").toBe(FOREIGN_STAMP);
+  }, 180_000);
+
+  test("(j) a signed non-admin array POST is refused and stores no row", async () => {
+    const id = `s2-array-${randomUUID()}`;
+    const path = "/Memory";
+    const res = await fetch(`${harper.httpURL}${path}`, {
+      signal: AbortSignal.timeout(15_000),
+      method: "POST",
+      headers: { Authorization: ed25519Header(h.agent, "POST", path), "Content-Type": "application/json" },
+      body: JSON.stringify([{ id, agentId: h.agent.id, content: "array body", visibility: "shared" }]),
+    });
+    expect(res.status, `array POST returned ${res.status}: ${(await res.clone().text()).slice(0, 300)}`).toBeGreaterThanOrEqual(400);
+    const rows = await h.adminOp({ operation: "search_by_value", database: "flair", table: "Memory", search_attribute: "id", search_value: id, get_attributes: ["id"] });
+    expect(rows.status).toBe(200);
+    expect(await rows.json(), "the array POST stored nothing").toEqual([]);
+  }, 60_000);
 });

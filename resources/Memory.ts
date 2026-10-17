@@ -1,5 +1,5 @@
 import { isEmptyEmbedding, normalizeEmptyEmbedding } from "./memory-embedding-value.js";
-import { discardSuppliedVector, hasSuppliedVector } from "./memory-supplied-vector.js";
+import { discardSuppliedVector, hasSuppliedVector, suppliesEmbeddingModel } from "./memory-supplied-vector.js";
 import { databases } from "harper";
 import { randomUUID } from "node:crypto";
 import { isOperatorSeedPut, redactMemoryWrite, redactSkillWrite, storedMemoryText, suppliedMemoryTextFields, suppliedStoredTextFields, type StoredMemoryText, type StoredTextField } from "./memory-redaction.js";
@@ -1874,10 +1874,12 @@ export class Memory extends (databases as any).flair.Memory {
     // removed before the omission check and prepareSkillBody, so every later
     // step, a skill update's carried vector included, sees a body without it.
     if (isEmptyEmbedding(content?.embedding)) delete content.embedding;
-    // flair#2573 slice 2: did the CALLER supply a non-empty vector? Captured before
-    // prepareSkillBody can merge a stored row's vector into the body, so only a
-    // caller-supplied vector is discarded below (a carried one is not).
+    // flair#2573 slice 2: did the CALLER supply a non-empty vector, and/or an
+    // `embeddingModel` stamp? Captured before prepareSkillBody can merge a stored
+    // row's vector into the body, so only the caller's own values are discarded
+    // below (a carried vector and the stamp beside it are not).
     const postSuppliedVector = hasSuppliedVector(content?.embedding);
+    const postSuppliedStamp = suppliesEmbeddingModel(content);
     // The visibility the caller named, before any merge or default fills it.
     const requestedVisibility = content?.visibility;
     // flair#2465: a body that omits `embedding` can have the stored row's vector
@@ -2065,13 +2067,15 @@ export class Memory extends (databases as any).flair.Memory {
     // this a duplicate of something else" situation — bypass the gate for it
     // (this also gives memory_update's preserveHistory mode dedup-bypass for
     // free, without a separate flag). NEVER suppresses the write either way.
-    // flair#2573 slice 2: a non-admin write's supplied vector is discarded here,
-    // after redaction and before the dedup gate and the embed step, so the write
-    // stores the vector the server computes for the row's own post-redaction text,
-    // or no vector when the model is unavailable (the backfill embeds it later) —
-    // exactly as a write that sent none. Only a vector the CALLER supplied is
-    // discarded; a vector prepareSkillBody carried from a stored row is not.
-    if (postSuppliedVector) discardSuppliedVector(content, auth);
+    // flair#2573 slice 2: a non-admin write's caller-supplied vector and stamp
+    // are discarded here, after redaction and before the dedup gate and the embed
+    // step, so the write stores the vector the server computes for the row's own
+    // post-redaction text, or no vector when the model is unavailable — exactly
+    // as a write that sent none. Only the CALLER's values are discarded; a vector
+    // prepareSkillBody carried from a stored row and the stamp it keeps are not.
+    if (postSuppliedVector || postSuppliedStamp) {
+      discardSuppliedVector(content, auth, { vector: postSuppliedVector, stamp: postSuppliedStamp });
+    }
     // flair#2573: an empty vector that reaches this point (one carried from a
     // stored skill row; the body's own was removed above) is no vector. It is
     // normalized before the dedup gate and the embed step, which can then
@@ -2290,11 +2294,14 @@ export class Memory extends (databases as any).flair.Memory {
     // is merged into the stored row.
     const redaction = redactMemoryWrite(content);
     const redactedValues = redaction.count;
-    // flair#2573 slice 2: a non-admin write's supplied vector is discarded here,
-    // after redaction (see post()/put()). The PATCH then behaves exactly as one
-    // that sent no vector.
-    if (hasSuppliedVector((content as any)?.embedding)) {
-      discardSuppliedVector(content as Record<string, any>, await resolveAgentAuth((this as any).getContext?.()));
+    // flair#2573 slice 2: a non-admin write's caller-supplied vector and stamp
+    // are discarded here, after redaction (see post()/put()). A stamp-only body
+    // (no `embedding`) has its stamp discarded too, so a PATCH can never relabel
+    // a stored vector. The PATCH then behaves exactly as one that sent neither.
+    const patchSuppliedVector = hasSuppliedVector((content as any)?.embedding);
+    const patchSuppliedStamp = suppliesEmbeddingModel(content);
+    if (!reembedRequest && (patchSuppliedVector || patchSuppliedStamp)) {
+      discardSuppliedVector(content as Record<string, any>, await resolveAgentAuth((this as any).getContext?.()), { vector: patchSuppliedVector, stamp: patchSuppliedStamp });
     }
     // flair#2561: the string-valued text fields this request supplies;
     // `stored` reports only these.
@@ -2832,9 +2839,11 @@ export class Memory extends (databases as any).flair.Memory {
         // flair#2465: as in post(), a body that omits `embedding` can have a stored
         // vector carried in by prepareSkillBody, with the hash it retained for it.
         const putOmitsEmbedding = content?.embedding === undefined;
-        // flair#2573 slice 2: did the CALLER supply a non-empty vector? Captured
-        // before prepareSkillBody can merge a stored row's vector into the body.
+        // flair#2573 slice 2: did the CALLER supply a non-empty vector, and/or an
+        // `embeddingModel` stamp? Captured before prepareSkillBody can merge a
+        // stored row's vector into the body.
         const putSuppliedVector = hasSuppliedVector(content?.embedding);
+        const putSuppliedStamp = suppliesEmbeddingModel(content);
         const preparedSkill = await prepareSkillBody(content, preExisting);
         if (preparedSkill instanceof Response) return preparedSkill;
         content = preparedSkill.content;
@@ -2999,10 +3008,13 @@ export class Memory extends (databases as any).flair.Memory {
         // version-link — neither is an ambiguous "is this a duplicate of
         // something else" write, so both are dedup-bypassed automatically, no
         // separate flag needed. NEVER suppresses the write either way.
-        // flair#2573 slice 2: a non-admin write's supplied vector is discarded here,
-        // after redaction and before the dedup gate and the embed step (see post()).
-        // Only a vector the CALLER supplied is discarded; a carried one is not.
-        if (putSuppliedVector) discardSuppliedVector(content, auth);
+        // flair#2573 slice 2: a non-admin write's caller-supplied vector and stamp
+        // are discarded here, after redaction and before the dedup gate and the
+        // embed step (see post()). Only the CALLER's values are discarded; a
+        // vector prepareSkillBody carried and the stamp it keeps are not.
+        if (putSuppliedVector || putSuppliedStamp) {
+          discardSuppliedVector(content, auth, { vector: putSuppliedVector, stamp: putSuppliedStamp });
+        }
         // flair#2573: an empty vector that reaches this point is no vector (see post()).
         normalizeEmptyEmbedding(content);
         // flair#2465: did the caller supply a vector? See post().

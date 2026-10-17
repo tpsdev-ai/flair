@@ -179,6 +179,14 @@ export async function prepareSkillBody(content: any, stored: Record<string, any>
   // is never kept. A Feed successor stores this value; Memory.post()/put() keep
   // it when they store the carried vector, and otherwise set their own.
   const sourceHasVector = Array.isArray(source.embedding) && source.embedding.length > 0;
+  // flair#2573 slice 2: a vector this body carried in from `source` keeps the
+  // stamp stored beside it — a caller's replacement `embeddingModel` is never
+  // applied to a stored vector. A body-supplied vector, by contrast, is
+  // discarded by the Memory write itself (see memory-supplied-vector.ts).
+  if (content.embedding === undefined && sourceHasVector && textUnchanged) {
+    if (source.embeddingModel === undefined) delete effective.embeddingModel;
+    else effective.embeddingModel = source.embeddingModel;
+  }
   effective.embeddedContentHash = sourceHasVector && content.embedding === undefined && textUnchanged
     ? (source.embeddedContentHash ?? null)
     : null;
