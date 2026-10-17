@@ -5,11 +5,13 @@
  * Addressed single-record PUT/PATCH loads the row at `Table.getResource` →
  * `resource._loadRecord` before the resource method; a no-argument `super.get()`
  * returns the cached row. With an injected initial load failure, a non-admin
- * agent's write is refused by the owner-scoped write guard
- * (resources/owner-scoped-write-policy.ts), which reads the stored row before
- * Harper loads it, with the named `owner_check_unavailable`; an administrator's
- * write reaches Harper's load and gets Harper's own 500. This test does not
- * cover collection paths.
+ * agent's write is refused by the auth middleware's early stored-owner check
+ * (resources/auth-middleware.ts), which reads the stored row before Harper
+ * loads it, with the named 503 `owner_lookup_failed`; the resource owner guard
+ * (resources/owner-scoped-write-policy.ts) does not answer, because the
+ * middleware's read fails first. An administrator's write is not decided by
+ * that check and reaches Harper's load, which answers Harper's own 500. This
+ * test does not cover collection paths.
  *
  * How the failure is injected: test/helpers/owner-guard-load-failure-component.ts
  * composes a private copy of the built component whose `_loadRecord` throws for
@@ -108,7 +110,7 @@ afterAll(async () => {
 }, HARPER_STOP_BUDGET_MS);
 
 describe("flair#2468 — initial row-load failures on addressed single-record Harper requests", () => {
-  test("addressed single-record PUT/PATCH: an unreadable stored row is refused with owner_check_unavailable, and an administrator gets Harper's 500", async () => {
+  test("addressed single-record PUT/PATCH: an unreadable stored row is refused with the named 503 owner_lookup_failed, and an administrator gets Harper's 500", async () => {
     const seeded: Array<{ table: string; id: string; seed: Record<string, any>; put: Record<string, any>; patch: Record<string, any> }> = [
       {
         table: "Asset", id: markerId("asset"),
@@ -194,7 +196,11 @@ describe("flair#2468 — initial row-load failures on addressed single-record Ha
         console.log(`[2468] ${c.table}.${verb} (owner, unreadable row) -> ${res.status} ${text.slice(0, 240)}`);
 
         expect(res.status, `${c.table}.${verb} returned ${res.status}: ${text.slice(0, 240)}`).toBe(503);
-        expect(parsed.error, `${c.table}.${verb} must answer with the named refusal`).toBe("owner_check_unavailable");
+        expect(parsed.error, `${c.table}.${verb} must answer with the middleware's named refusal`).toBe("owner_lookup_failed");
+        // The resource guard's named refusal must NOT be what answers: the
+        // middleware's stored-owner read fails first, one layer up, so the
+        // resource never runs.
+        expect(parsed.error, `${c.table}.${verb} answered with the resource guard's named refusal`).not.toBe("owner_check_unavailable");
         expect(await readRow(c.table, c.id), `${c.table}.${verb} must leave the full row unchanged`).toEqual(prior);
 
         // An administrator's write is not decided by that guard: Harper's own
