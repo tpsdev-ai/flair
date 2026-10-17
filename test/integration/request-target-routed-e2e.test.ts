@@ -18,7 +18,10 @@
  *      counted, and a suffixed form of a public route is served.
  *   3. Backfill target. The middleware's embedding backfill writes its vector to
  *      the row the write COMMITTED — the returned id for a successor and for a
- *      collection create — never the URL or caller-header id.
+ *      collection create — never the URL or caller-header id. The instance runs
+ *      without the migration trigger, whose re-embed can write a vector to the
+ *      seeded Memory row; these cases need the embedding model and are skipped
+ *      when its file is absent.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
@@ -40,6 +43,7 @@ import {
   ARM_FILE,
   type FailingComponent,
 } from "../helpers/owner-guard-load-failure-component";
+import { OMITTED_TRIGGER_REL } from "../helpers/component-without-migration-boot";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
 function mkAgent(id: string): TestAgent {
@@ -192,6 +196,10 @@ async function awaitAutoEmbedLog(id: string, deadlineMs = 20_000): Promise<boole
   return false;
 }
 
+/** The model file in the directory the spawned instance reads (harper-lifecycle's FLAIR_MODELS_DIR default). */
+const MODEL_FILE = "nomic-embed-text-v1.5.Q4_K_M.gguf";
+const HAS_MODEL = existsSync(join(process.env.FLAIR_MODELS_DIR ?? join(process.cwd(), "models"), MODEL_FILE));
+
 // A rate-limit budget small enough to spend in a few requests.
 const OAUTH_LIMIT = 5;
 const savedEnv: Record<string, string | undefined> = {};
@@ -203,6 +211,11 @@ beforeAll(async () => {
   delete process.env.FLAIR_TRUSTED_PROXY;
 
   component = componentWithOwnerGuardLoadFailure();
+  // Omit the migration trigger from this private copy: its re-embed can give
+  // the seeded Memory row (3) a vector the backfill did not write.
+  const trigger = join(component.dir, OMITTED_TRIGGER_REL);
+  rmSync(trigger, { force: true });
+  if (existsSync(trigger)) throw new Error(`could not omit ${trigger}`);
   harper = await startHarper({ cwd: component.dir });
   assertOwnInstance(harper);
   for (const a of [owner, other]) {
@@ -308,11 +321,13 @@ describe("(2) rate-limit and public decisions use the routed resource name", () 
   }, 30_000);
 });
 
-describe("(3) the embedding backfill targets only the committed record", () => {
+(HAS_MODEL ? describe : describe.skip)("(3) the embedding backfill targets only the committed record", () => {
   it("a successful create whose header names another owner's row backfills the committed row, not the header's", async () => {
-    const before = await readRow("Memory", "rtr-victim-mem", ["id", "agentId", "content", "embedding"]);
+    // The header-named row's stored state, every attribute. It holds no vector,
+    // so a backfill that targeted it would write one.
+    const before = await readRow("Memory", "rtr-victim-mem", ["*"]);
     expect(before?.agentId).toBe(other.id);
-    expect(Array.isArray(before?.embedding) && before.embedding.length > 0, "the header-named row must start without a vector").toBe(false);
+    expect(before?.embedding ?? null, "the seeded header-named row holds a vector").toBeNull();
 
     // A canonical collection create by `owner`, with a caller header naming the
     // other-owned row. The create must succeed as the caller's own new row, and
@@ -329,13 +344,10 @@ describe("(3) the embedding backfill targets only the committed record", () => {
 
     const len = await awaitBackfillVector(committedId);
     expect(len, "the backfill wrote no vector to the committed row").toBeGreaterThan(100);
+    expect(await awaitAutoEmbedLog(committedId), "the backfill logged no write for the committed id").toBe(true);
 
-    // The other-owned row keeps its owner, content and absence of a vector — the
-    // backfill did not target the header's id.
-    const after = await readRow("Memory", "rtr-victim-mem", ["id", "agentId", "content", "embedding"]);
-    expect(after?.agentId).toBe(other.id);
-    expect(after?.content).toBe("victim content");
-    expect(Array.isArray(after?.embedding) && after.embedding.length > 0, "the header-named row received a vector").toBe(false);
+    // After the backfill's write, the header-named row is unchanged.
+    expect(await readRow("Memory", "rtr-victim-mem", ["*"]), "the header-named row changed").toEqual(before);
   }, 60_000);
 
   it("a by-id POST that commits a SUCCESSOR with a different id backfills the successor, not the URL id", async () => {
