@@ -190,6 +190,15 @@ function expectRefused(res: { status: number; text: string }, what: string, sub?
   if (sub) expect(res.text.includes(sub), `${what}: the refusal must not echo the subject`).toBe(false);
 }
 
+// A non-admin collection write to an owner-scoped table is refused before the
+// Credential resource runs: it must address one record by its id.
+const ADDRESSED_WRITE_REFUSAL = "a non-admin write to Credential must address one record by its id";
+function expectAddressedWriteRefusal(res: { status: number; text: string }, what: string, sub?: string): void {
+  expect(res.status, `${what} returned ${res.status}: ${res.text.slice(0, 300)}`).toBe(403);
+  expect(res.text, `${what}: the refusal names the rule`).toContain(ADDRESSED_WRITE_REFUSAL);
+  if (sub) expect(res.text.includes(sub), `${what}: the refusal must not echo the subject`).toBe(false);
+}
+
 function expect4xx(res: { status: number; text: string }, what: string): void {
   expect(res.status >= 400 && res.status < 500, `${what} returned ${res.status}: ${res.text.slice(0, 300)}`).toBe(true);
 }
@@ -373,11 +382,11 @@ describe("only an administrator or the server creates an IdP mapping", () => {
     expect(await mcpActsAs(sub)).toBeNull();
   }, 60_000);
 
-  test("a non-admin multi-record PUT that creates an idp mapping is refused (idp_mapping_admin_only)", async () => {
+  test("a non-admin multi-record PUT that creates an idp mapping is refused by the addressed-write rule", async () => {
     const sub = `idpw-bulk-${sfx}`;
     const id = `idpw-bulk-${randomUUID()}`;
     const res = await signed(W, "PUT", "/Credential/", [{ id, kind: "idp", idpProvider: "mcp-oauth", idpSubject: sub }]);
-    expectRefused(res, "multi-record PUT kind:idp", sub);
+    expectAddressedWriteRefusal(res, "multi-record PUT kind:idp", sub);
     expect(await readCredential(id)).toBeNull();
     expect(await mcpActsAs(sub)).toBeNull();
   }, 60_000);
@@ -529,25 +538,23 @@ describe("a non-admin write that changes an idp mapping is refused", () => {
 });
 
 describe("a non-admin agent writes and deletes only credentials it owns", () => {
-  test("a non-admin PUT to an idp credential it does not own is refused", async () => {
+  test("a non-admin collection PUT to an idp credential it does not own is refused by the addressed-write rule", async () => {
     const linked = `idpw-other-bulk-${sfx}`;
     const id = await link(V.id, linked);
     const before = await readCredential(id);
     // The element names no principalId.
     const res = await signed(W, "PUT", "/Credential/", [{ id, kind: "idp", idpProvider: before.idpProvider, idpSubject: linked, status: "active" }]);
-    expect(res.status, `PUT returned ${res.status}: ${res.text.slice(0, 300)}`).toBe(403);
-    expect(res.text).toContain("owned by another principal");
+    expectAddressedWriteRefusal(res, "collection PUT to another principal's idp credential", linked);
     await expectUnchanged(id, before);
     expect(await mcpActsAs(linked)).toBe(V.id);
   }, 60_000);
 
-  test("a non-admin PUT to a bearer-token credential it does not own is refused", async () => {
+  test("a non-admin collection PUT to a bearer-token credential it does not own is refused by the addressed-write rule", async () => {
     const id = `idpw-other-bearer-${randomUUID()}`;
     await seedCredential({ id, principalId: V.id, kind: "bearer-token", label: "theirs" });
     const before = await snapshot(id);
     const res = await signed(W, "PUT", "/Credential/", [{ id, kind: "bearer-token", label: "mine now" }]);
-    expect(res.status, `PUT returned ${res.status}: ${res.text.slice(0, 300)}`).toBe(403);
-    expect(res.text).toContain("owned by another principal");
+    expectAddressedWriteRefusal(res, "collection PUT to another principal's bearer-token credential");
     await expectUnchanged(id, before);
   }, 60_000);
 
@@ -699,29 +706,23 @@ describe("owner Credential writes confirm mapping fields", () => {
 
 
 describe("Credential transaction boundaries", () => {
-  test("an owner array PUT commits no owner updates when a mapping confirmation differs", async () => {
+  // An owner's array (collection) PUT never reaches the Credential resource: the
+  // owner-scoped write rule refuses a non-admin collection write first, so the
+  // resource's batch-wide confirmation (covered directly by
+  // test/unit-isolated/credential-committed-row.test.ts) is not reachable over HTTP
+  // for a non-admin owner.
+  test("an owner array PUT is refused by the addressed-write rule and writes nothing", async () => {
     const rows = [0, 1].map((index) => ({
       id: `idpw-batch-${index}-${randomUUID()}`, principalId: W.id, kind: "idp", status: "active",
       idpProvider: "mcp-oauth", idpSubject: `idpw-batch-${randomUUID()}`, label: "mapping",
       createdAt: new Date().toISOString(),
     }));
     for (const row of rows) await seedCredential(row);
-    const sibling = await snapshot(rows[0].id);
-    let changed: Record<string, unknown> | undefined;
-    const result = await withPausedCredentialWrite(
-      () => signed(W, "PUT", "/Credential/", rows.map((row) => ({ ...row, label: "owner label" }))),
-      async () => {
-        await ops({ operation: "update", database: "flair", table: "Credential", records: [{ ...rows[1], status: "revoked" }] });
-        changed = await snapshot(rows[1].id);
-        expect(changed.status).toBe("revoked");
-      },
-      "credential-batch-row-write",
-    );
-    expect(result.status, result.text).toBe(409);
-    expect(JSON.parse(result.text).error).toBe("stored_row_changed");
-    expect(await readCredential(rows[0].id)).toEqual(sibling);
-    expect(await readCredential(rows[1].id)).toEqual(changed);
-    expect(await mcpActsAs(rows[1].idpSubject)).toBeNull();
+    const before = await Promise.all(rows.map((row) => snapshot(row.id)));
+    const result = await signed(W, "PUT", "/Credential/", rows.map((row) => ({ ...row, label: "owner label" })));
+    expectAddressedWriteRefusal(result, "owner array PUT", rows[1].idpSubject);
+    for (const [i, row] of rows.entries()) await expectUnchanged(row.id, before[i]);
+    expect(await mcpActsAs(rows[0].idpSubject)).toBe(W.id);
   }, 60_000);
 
   for (const method of ["PUT", "PATCH"] as const) {

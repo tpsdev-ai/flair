@@ -127,8 +127,8 @@ add("hit-tracking", [
   "writer:table.put#1",
   "writer:table.delete#1",
 ], "OTHER_TABLE", "MemoryHitStat ledger and in-memory maps — not a Memory writer.");
-add("auth-middleware", ["writer:writeBackCommittedRow#1"], "ECHO",
-  "Embedding backfill: writes only a locally computed embedding vector; embeddingModel is untouched (flair#2470).");
+add("auth-middleware", ["writer:writeBackCommittedRow#1"], "LOCAL",
+  "Embedding backfill: an incremental update of embedding, embeddingModel and embeddedContentHash for a locally computed vector and getModelId() (flair#2470, flair#2573); noteWriteStamp after the commit.");
 
 // ── OTHER_TABLE: conservative sink-enumeration false-positives ──
 add("migrations/graph-heal", ["writer:table.put#1"], "OTHER_TABLE", "Graph-heal OrgEvent ledger.");
@@ -218,7 +218,7 @@ function putBranchTrips(source: string, branch: "reindex" | "ordinary"): boolean
   const ast = ts.createSourceFile("f.ts", source, ts.ScriptTarget.Latest, true);
   let trips = false;
   const visit = (node: ts.Node): void => {
-    if (ts.isMethodDeclaration(node) && node.name && ts.isIdentifier(node.name) && node.name.text === "put" && node.body) {
+    if (ts.isMethodDeclaration(node) && node.name && ts.isIdentifier(node.name) && node.name.text === "putLocked" && node.body) {
       const statements = node.body.statements;
       const index = statements.findIndex(statement => {
         if (!ts.isIfStatement(statement)) return false;
@@ -253,6 +253,12 @@ for (const branch of ["reindex", "ordinary"] as const) {
   });
 }
 
+test("the embedding backfill notifies the guard from its own body (flair#2573)", () => {
+  expect(namedBodyTrips(readFileSync("resources/auth-middleware.ts", "utf8"), "backfillEmbedding"),
+    "resources/auth-middleware.ts#backfillEmbedding has no noteWriteStamp() call",
+  ).toBe(true);
+});
+
 test("a parameter-default call does not trip the named body's latch", () => {
   for (const source of [
     "function patch(model = noteWriteStamp('foreign')) {}",
@@ -279,8 +285,8 @@ test("an uncalled nested function does not trip the named body's latch", () => {
 // through. Each named body must trip the latch itself.
 const TRIPPING_WRITE_BODIES: ReadonlyArray<readonly [file: string, fn: string]> = [
   ["resources/Memory.ts", "post"],
-  ["resources/Memory.ts", "put"],
-  ["resources/Memory.ts", "patch"],
+  ["resources/Memory.ts", "putLocked"],
+  ["resources/Memory.ts", "patchLocked"],
   ["resources/Federation.ts", "noteFederationMergedMemory"],
 ];
 

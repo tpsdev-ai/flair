@@ -124,9 +124,12 @@ export class Health extends Resource {
     }));
     // flair#2530 — the query-time embedding-space guard's state, for `flair
     // doctor`. Sync, no scan, no vector read. `state` is one of
-    // uniform | mixed | unverified | scan-failed; `reason` is the bounded error
+    // uniform | mixed | unverified | scan-failed | excluded; `reason` is the
+    // bounded error
     // of the last failed scan (on scan-failed, or on mixed when a scan failed
-    // before or after the foreign stamp was seen). Calls that consult a
+    // before or after the foreign stamp was seen); `excluded` is the last
+    // published count of arrays or typed arrays, empty included, without a trusted
+    // current-space stamp (null until a scan publishes one). Calls that consult a
     // non-uniform verdict skip vector comparisons against the stored corpus
     // (flair#2559). The field is on the 503 body too; doctor reads it there.
     body.embeddingSpace = spaceGuardState();

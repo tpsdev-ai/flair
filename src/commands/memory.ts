@@ -35,6 +35,12 @@ import {
   renderVerifyHuman,
   VERIFY_EXIT_CODES,
 } from "../memory-id-checkpoint.js";
+import {
+  classifyNodeSets,
+  readNode,
+  renderCompareNodesHuman,
+  COMPARE_EXIT_CODES,
+} from "../memory-node-compare.js";
 
 export type MemoryCli = {
   api: (...args: any[]) => Promise<any>;
@@ -587,12 +593,13 @@ export function register(program: Command): void {
     });
 
   // ── flair memory checkpoint / verify (flair#2218) ─────────────────────────
-  const credentialOptions = (cmd: Command): Command =>
-    cmd
-      .option("--ops-target <url>", "Operations API URL override (env: FLAIR_OPS_TARGET)")
+  const credentialOptions = (cmd: Command, withOpsTarget = true): Command => {
+    if (withOpsTarget) cmd.option("--ops-target <url>", "Operations API URL override (env: FLAIR_OPS_TARGET)");
+    return cmd
       .option("--fabric-user <user>", "Admin username (env: FABRIC_USER; inline leaks to ps/shell history)")
       .option("--fabric-password <pass>", "Admin password (prefer FABRIC_PASSWORD env or --fabric-password-file)")
       .option("--fabric-password-file <path>", "Read the admin password from a mode-0600 file");
+  };
 
   const requireCredentials = (opts: any, command: string): { user: string; pass: string } => {
     const { fabricUser, fabricPassword, warnings } = resolveFabricCredentials(opts);
@@ -671,5 +678,69 @@ Exit codes:
       : await verifyCheckpoint({ checkpoint: read.checkpoint, target: origin, opsTarget: cli.resolveEffectiveOpsUrl({ ...opts, target: origin }), user, password: pass });
     console.log(renderVerifyHuman(result, path));
     process.exit(VERIFY_EXIT_CODES[result.outcome]);
+  });
+
+  // ── flair memory compare-nodes (flair#2216, slice 2 of #971) ──────────────
+  credentialOptions(
+    memory
+      .command("compare-nodes")
+      .description("Compare observed Memory id sets of two or more explicitly named nodes")
+      .option("--node <ops-url>", "A node's operations API URL (repeat once per node; at least two)", (value: string, seen: string[]) => [...seen, value], [] as string[])
+      .option("--json", "Print the comparison as JSON")
+      .addHelpText("after", `
+Each --node explicitly names an HTTP(S) operations API URL; its path, query and
+fragment are removed. Peers are never inferred from Flair federation peers.
+
+The command compares observed id sets. Count checks cannot detect equal-count
+concurrent updates or replacements. An id absent on every named node is invisible
+without a reference set.
+
+Classes use stored timestamps: parseable updatedAt, else createdAt. createdAt can
+be caller-supplied and node clocks can differ; these do not prove write order.
+A missing id uses the maximum timestamp among usable peers holding it.
+
+Per-node classes:
+  in-sync    observed ids equal the union of the other usable readings
+  lagging    missing ids only, each timestamp greater than this node's maximum
+  divergent  an extra id, or a missing id timestamp at or below this node's maximum
+  unknown    failed read, unusable timestamp, no usable peer, or no local timestamp for missing ids
+
+The overall result is healthy only when every node is in-sync;
+any unknown makes the overall result unknown.
+
+Exit codes:
+  0  healthy — every node has the same observed Memory ids
+  1  usage — fewer than two --node values, a duplicate node, or an invalid HTTP(S) URL
+  2  divergent — at least one divergent node and no unknown node
+  3  unknown — at least one node could not be classified
+  4  lagging — at least one node is lagging, with no divergent or unknown nodes
+`),
+    false,
+  ).action(async (opts: any) => {
+    const provided: string[] = opts.node ?? [];
+    if (provided.length < 2) {
+      console.error(render.wrap(render.c.red, `${render.icons.error} flair memory compare-nodes: at least two --node values are required`));
+      process.exit(1);
+    }
+    const nodes: string[] = [];
+    for (const raw of provided) {
+      let origin: string;
+      try {
+        origin = normalizeOrigin(raw);
+      } catch {
+        console.error(render.wrap(render.c.red, `${render.icons.error} --node must be an HTTP(S) operations API origin without credentials`));
+        process.exit(1);
+      }
+      if (nodes.includes(origin)) {
+        console.error(render.wrap(render.c.red, `${render.icons.error} --node ${origin} was given more than once`));
+        process.exit(1);
+      }
+      nodes.push(origin);
+    }
+    const { user, pass } = requireCredentials(opts, "flair memory compare-nodes");
+    const readings = await Promise.all(nodes.map((node) => readNode(node, { user, password: pass })));
+    const result = classifyNodeSets(readings);
+    console.log(opts.json ? JSON.stringify(result, null, 2) : renderCompareNodesHuman(result));
+    process.exit(COMPARE_EXIT_CODES[result.verdict]);
   });
 }

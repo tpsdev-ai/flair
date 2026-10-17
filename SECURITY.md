@@ -79,6 +79,42 @@ so a write naming neither is stamped `private` and is owner-only. An explicit
 `visibility` on the write always overrides the rule, and the response to a
 create names the value the record actually landed on.
 
+### Record Ownership on Writes
+
+For a verified non-admin agent's HTTP write to an owner-scoped table served by
+a resource that extends that table (Memory, Relationship, Soul, Credential,
+Integration, Asset, MemoryCandidate, MemoryGrant, MemoryUsage, Message,
+OrgEvent, WorkspaceState, Presence):
+
+- The middleware can return
+  `403 forbidden: cannot modify <Table> owned by another principal` before the
+  table guard runs on a request target of exactly `/<Table>/<id>` (two
+  non-empty path segments, no `.` in the decoded id), for which Harper resolves
+  the same record id. Other addressed forms are left to the guard, which uses
+  Harper's resolved id.
+- If reached, the guard checks a differing string or number body `id` on POST/PUT/PATCH
+  first (`403 write_id_not_addressed`), then stored ownership (the same owner
+  refusal), using Harper's resolved record id. An absent or matching body `id`
+  passes the body-id check. OrgEvent and Memory bind an addressed POST's
+  missing body `id` to the addressed id.
+- For a collection PUT, PATCH or DELETE, if reached, the table guard returns
+  `403 forbidden: a non-admin write to <Table> must address one record by its id`;
+  existing DELETE middleware may refuse earlier.
+
+A refusal by this guard leaves its target row unchanged and carries no record
+content. A POST to a collection is delegated to each resource's own
+POST handling — its create and attribution rules (for example, an OrgEvent
+collection POST that names an existing event owned by another agent reaches
+OrgEvent's ownership check and is refused, one that names the caller's own
+existing event can update it when OrgEvent's other checks pass (a changed
+`createdAt` is refused with 409), and a
+Presence heartbeat writes the caller's own row). Routes served
+by a custom resource rather than a table-backed one are outside this table
+guard and apply their own rules; `/AgentReadPosition`, for example, enforces
+its own ownership rule.
+The guard exempts administrator and in-process calls. OrgEvent POST id
+selection also applies to administrator and in-process calls.
+
 ### Cross-Agent Access (within an org)
 
 Within an org, an agent reads every non-private memory directly — no grant

@@ -10,7 +10,7 @@ whether it is loaded. Check the loader configuration when extracting code.
 | Soul authorship | `Soul.ts`, `soul-write-policy.ts` | Operator/internal source allowlist; generic learned-content backstop; dated `adk:` bridge in `soul-adk-guard.ts`; raw writer inventory in `test/unit/soul-writer-coverage.test.ts` |
 | Memory writes/lifecycle | `Memory.ts` | `memory-durability.ts`, `memory-visibility.ts`, `provenance.ts` |
 | Read access | `memory-read-scope.ts` | `resolveReadScope()` supplies both query condition and row predicate |
-| Authentication/ownership | `agent-auth.ts`, `auth-middleware.ts` | `record-owner-guard.ts`, `owner-field-guard.ts`, `record-types.ts` |
+| Authentication/ownership | `agent-auth.ts`, `auth-middleware.ts` | `record-owner-guard.ts`, `owner-scoped-write-policy.ts`, `owner-field-guard.ts`, `record-types.ts` |
 | Search | `SemanticSearch.ts` | `semantic-retrieval-core.ts`; lexical index in `bm25-index-service.ts` |
 | Session context | `MemoryBootstrap.ts` | shared retrieval core; budget/connector checks in `test/helpers/mcp-conformance.ts` |
 | MCP / embedded API | `mcp-tools.ts`, `mcp-handler.ts`, `in-process-api.ts` | compare the separately packaged stdio adapter and client too |
@@ -18,6 +18,7 @@ whether it is loaded. Check the loader configuration when extracting code.
 
 Preserve these boundaries:
 
+- For non-admin addressed writes, middleware can return the owner refusal before the table guard runs. The table guard checks a string or number body `id` on POST/PUT/PATCH before stored ownership, using Harper's resolved record id (`owner-scoped-write-policy.ts`). For collection PUT/PATCH/DELETE, if reached, the table guard returns the collection refusal; existing DELETE middleware may refuse earlier. Collection POST follows the resource's rules. A custom resource that extends `Resource` applies its own rule. Memory and OrgEvent bind an addressed POST's missing `id` to the addressed id.
 - Resolve identity from the resource context. Keep authenticated HTTP and deliberate internal calls distinct.
 - Compose caller filters inside the authoritative read scope; preserve the row re-check after retrieval.
 - Audit each exposed mutation verb. A `put()` guard does not automatically cover `patch()` or `post()`.

@@ -3,7 +3,7 @@
  * query-time embedding-space guard's verdict (flair#2530).
  *
  * The guard reports `embeddingSpace: { state, reason }` on /Health; this drives
- * the pure decision for the four states and the doctor rendering/issue weight
+ * the pure decision for the five states and the doctor rendering/issue weight
  * the action uses (the same extraction convention as embed-gpu-doctor.test.ts).
  */
 import { describe, expect, test } from "bun:test";
@@ -21,6 +21,28 @@ describe("describeEmbeddingSpaceDoctorFinding (flair#2530)", () => {
       icon: "ok",
       message: "embedding model stamps verified uniform",
     });
+  });
+
+  test("excluded: a blocking finding naming the last published count (flair#2573)", () => {
+    const f = describeEmbeddingSpaceDoctorFinding({ state: "excluded", reason: null, excluded: 3 });
+    expect(f?.isIssue).toBe(true);
+    expect(f?.icon).toBe("error");
+    expect(String(f?.message)).toContain("the last scan found a stored vector with no trusted current-space stamp");
+    expect(String(f?.message)).toContain("excluded from the vector leg: 3 row(s) with no trusted model stamp");
+  });
+
+  test("excluded: an absent or malformed count is never invented as zero", () => {
+    const base = "the last scan found a stored vector with no trusted current-space stamp — the embedding leg is refused";
+    expect(describeEmbeddingSpaceDoctorFinding({ state: "excluded", reason: null, excluded: null })?.message).toBe(base);
+    expect(describeEmbeddingSpaceDoctorFinding({ state: "excluded", reason: null, excluded: -1 })?.message).toBe(base);
+    expect(describeEmbeddingSpaceDoctorFinding({ state: "excluded", reason: null, excluded: "3" })?.message).toBe(base);
+  });
+
+  test("only excluded renders the last published count", () => {
+    for (const state of ["uniform", "mixed", "unverified", "scan-failed"]) {
+      const f = describeEmbeddingSpaceDoctorFinding({ state, reason: null, excluded: 3 });
+      expect(f?.message).not.toContain("3 row(s)");
+    }
   });
 
   test("mixed: a blocking finding carrying the reembed remedy", () => {
@@ -67,10 +89,14 @@ describe("describeEmbeddingSpaceDoctorFinding (flair#2530)", () => {
 });
 
 describe("renderEmbeddingSpaceDoctorFinding (flair#2530)", () => {
-  test("only the mixed state adds a guard issue", () => {
-    const mixed: string[] = [];
-    expect(renderEmbeddingSpaceDoctorFinding({ state: "mixed" }, (l) => mixed.push(l)).issueDelta).toBe(1);
-    expect(mixed.some((l) => l.includes("Fix:"))).toBe(true);
+  test("the mixed and excluded states add a guard issue; the advisories do not", () => {
+    const blocked: string[] = [];
+    expect(renderEmbeddingSpaceDoctorFinding({ state: "mixed" }, (l) => blocked.push(l)).issueDelta).toBe(1);
+    expect(blocked.some((l) => l.includes("Fix:"))).toBe(true);
+
+    const excluded: string[] = [];
+    expect(renderEmbeddingSpaceDoctorFinding({ state: "excluded", excluded: 1 }, (l) => excluded.push(l)).issueDelta).toBe(1);
+    expect(excluded.some((l) => l.includes("Fix:"))).toBe(true);
 
     for (const state of ["uniform", "unverified", "scan-failed"]) {
       const lines: string[] = [];

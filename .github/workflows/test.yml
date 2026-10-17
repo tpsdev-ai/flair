@@ -90,6 +90,27 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # flair#2589 — the macOS launchd lane only runs the diagnostics redaction
+  # check when the lane itself fails, so a scanner that cannot load (or a
+  # regression the existing unit tests do not catch) stays invisible across a
+  # long green stretch. This runs `--check` on committed fixtures on every PR
+  # targeting main: a redacted plist must pass, and a credential key with a
+  # non-REDACTED value must be reported as a finding.
+  redaction-fixtures:
+    name: "Launchd diagnostics redaction: fixture check"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+      - uses: socketdev/action@ba6de6cc0565af1f42295590380973573297e31f # v1.3.2
+        with:
+          mode: firewall-free
+      - name: Run the redaction check on fixtures (flair#2589)
+        run: bash scripts/ci/check-redaction-fixtures.sh
+
   test-unit:
     # Matrixed name (#672): GitHub Actions always suffixes a
     # matrixed job's display name/check context with the matrix values (e.g.
