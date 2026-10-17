@@ -8,10 +8,11 @@ const probe = Bun.spawnSync.bind(Bun);
 const which = Bun.which.bind(Bun);
 const ALLOW = "FLAIR_TEST_ALLOW_BUN_HARPER";
 const repositoryRequire = createRequire(new URL("../../package.json", import.meta.url));
-const harperEntry = resolveHarperEntry();
+const harper = resolveHarperEntry();
+const harperEntry = harper.canonical;
 type Options = { cwd?: string | URL; env?: Record<string, string | undefined>; shell?: boolean | string };
 
-function resolveHarperEntry(): string {
+function resolveHarperEntry(): { canonical: string; suffix: string } {
   for (const name of ["harper", "@harperfast/harper"]) {
     let entry: string;
     try { entry = repositoryRequire.resolve(name); } catch { continue; }
@@ -22,7 +23,7 @@ function resolveHarperEntry(): string {
         if (pkg.name === name) {
           const bin = typeof pkg.bin === "string" ? pkg.bin : pkg.bin?.harper;
           if (typeof bin !== "string") throw new Error(`${name} has no Harper bin`);
-          return realpathSync(resolve(dir, bin));
+          return { canonical: realpathSync(resolve(dir, bin)), suffix: `node_modules/${name}/${bin.replace(/^\.\//, "")}` };
         }
       }
       if (dirname(dir) === dir) break;
@@ -84,9 +85,9 @@ function entryKind(arg: string, options: Options): EntryKind | undefined {
   }
 }
 
-function shellWords(source: string): string[] | undefined {
-  // Expansion characters cannot be classified, including when quoted or escaped.
-  if (/[*?\[\]$`{}~]/.test(source)) return;
+function commandWords(source: string, shell: boolean): string[] | undefined {
+  // Shell expansion characters cannot be classified, including when quoted or escaped.
+  if (shell ? /[*?\[\]$`{}~]/.test(source) : /\$\{/.test(source)) return;
   const words: string[] = [];
   let word = "";
   let quote = "";
@@ -102,7 +103,7 @@ function shellWords(source: string): string[] | undefined {
       if (char === quote) quote = "";
       else word += char;
     } else if (char === "'" || char === '"') { quote = char; started = true; }
-    else if (/[;&|<>()\n]/.test(char)) return;
+    else if (shell && /[;&|<>()\n]/.test(char)) return;
     else if (/\s/.test(char)) {
       if (started) words.push(word);
       word = "";
@@ -111,41 +112,81 @@ function shellWords(source: string): string[] | undefined {
   }
   if (quote) return;
   if (started) words.push(word);
-  for (let i = 0; i < words.length; i++) {
-    if (!["sh", "bash"].includes(basename(words[i]))) continue;
-    for (let j = i + 1; words[j]?.startsWith("-"); j++) {
-      if (!/^-[^-]*c/.test(words[j])) continue;
-      const nested = shellWords(words[j + 1] ?? "");
-      if (!nested) return;
-      words.splice(j + 1, 1, ...nested);
-      break;
-    }
-  }
   return words;
 }
 
-function shellEntry(words: string[], options: Options, uncertainty = { value: false }): EntryKind | undefined {
-  for (const word of words) {
-    const entry = entryKind(word, options)
-      ?? entryKind(resolvedExecutable(word, options) ?? word, options);
-    if (entry) return entry;
-    const nested = shellWords(word);
-    if (!nested) uncertainty.value = true;
-    if (nested && (nested.length > 1 || nested[0] !== word)) {
-      const entry = shellEntry(nested, options, uncertainty);
-      if (entry) return entry;
-    }
+const shells = new Set(["sh", "bash", "zsh", "dash"]);
+
+function shellCommandIndex(words: string[]): number {
+  if (!shells.has(basename(words[0] ?? ""))) return -1;
+  for (let i = 1; /^[+-]/.test(words[i] ?? "") && words[i] !== "--"; i++) {
+    if (/^-[^-]*c/.test(words[i])) return i + 1;
+    if (["-o", "+o", "-O", "+O", "--rcfile", "--init-file", "--emulate"].includes(words[i])) i++;
   }
+  return -1;
+}
+
+function shellEntry(words: string[], options: Options, uncertainty = { value: false }, shellSource = false): EntryKind | undefined {
+  let found: EntryKind | undefined;
+  for (const word of words) {
+    found ??= entryKind(word, options)
+      ?? entryKind(resolvedExecutable(word, options) ?? word, options)
+      ?? (word.includes("dist/cli-shim.cjs") ? "dist/cli-shim.cjs"
+        : word.includes("dist/cli.js") ? "dist/cli.js"
+        : word.includes(harperEntry) || word.split(/[\s'"]/).some(part =>
+          part.includes(harper.suffix) && entryKind(part, options) === "harper.js") ? "harper.js" : undefined);
+  }
+  const chain = [...words];
+  if (shellSource) while (/^[A-Za-z_][A-Za-z0-9_]*=/.test(chain[0] ?? "")) chain.shift();
+  while (chain.length) {
+    const commandIndex = shellCommandIndex(chain);
+    if (commandIndex >= 0) {
+      const nested = commandWords(chain[commandIndex] ?? "", true);
+      if (!nested) uncertainty.value = true;
+      else {
+        const entry = shellEntry(nested, options, uncertainty, true);
+        found ??= entry;
+      }
+      break;
+    }
+    const wrapper = basename(chain.shift()!);
+    if (!["env", "time", "nice", "xargs", "nohup", "timeout", "stdbuf", "setsid", "command", "exec"].includes(wrapper)) break;
+    while (chain.length) {
+      const word = chain[0];
+      if (wrapper === "env" && /^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) { chain.shift(); continue; }
+      if (word === "--") { chain.shift(); break; }
+      if (!word.startsWith("-")) break;
+      chain.shift();
+      if (wrapper === "env" && (word === "-S" || word === "--split-string" || word.startsWith("--split-string=") || word.startsWith("-S"))) {
+        const source = word.startsWith("--split-string=") ? word.slice(15)
+          : word.startsWith("-S") && word !== "-S" ? word.slice(2) : chain.shift();
+        const split = source === undefined ? undefined : commandWords(source, false);
+        if (!split) { uncertainty.value = true; break; }
+        chain.unshift(...split);
+      } else {
+        const operands: Record<string, string[]> = {
+          env: ["-u", "--unset", "-C", "--chdir"],
+          time: ["-f", "--format", "-o", "--output"],
+          nice: ["-n", "--adjustment"],
+          xargs: ["-E", "-I", "-J", "-L", "-n", "-P", "-s", "--eof", "--replace", "--max-lines", "--max-args", "--max-procs", "--max-chars"],
+          timeout: ["-s", "--signal", "-k", "--kill-after"],
+          stdbuf: ["-i", "-o", "-e", "--input", "--output", "--error"],
+        };
+        if (operands[wrapper]?.includes(word)) chain.shift();
+      }
+    }
+    if (wrapper === "timeout") chain.shift();
+  }
+  return found;
 }
 
 function invocation(command: string, args: string[], options: Options) {
   let words: string[] | undefined = [command, ...args];
-  const commandFlag = ["sh", "bash"].includes(basename(command))
-    ? args.findIndex(arg => /^-[^-]*c/.test(arg)) : -1;
-  const shellString = !!options.shell || commandFlag >= 0;
-  if (options.shell) words = shellWords(words.join(" "));
-  else if (commandFlag >= 0) {
-    words = shellWords(args[commandFlag + 1] ?? "");
+  const commandIndex = shellCommandIndex(words);
+  const shellString = !!options.shell || commandIndex >= 0;
+  if (options.shell) words = commandWords(words.join(" "), true);
+  else if (commandIndex >= 0) {
+    words = commandWords(words[commandIndex] ?? "", true);
   }
   const probeOptions = { ...options, env: { ...(options.env ?? process.env) } };
   const assignment = (word: string): boolean => {
@@ -159,15 +200,10 @@ function invocation(command: string, args: string[], options: Options) {
     args: [], options: probeOptions, shellString, entry: undefined, failure: reason,
   });
   if (!words) return failure("unclassifiable shell string");
-  const protectedEntry = shellEntry([command, ...args, ...words], probeOptions);
-  for (let i = 0; i < words.length; i++) {
-    if (!["sh", "bash"].includes(basename(words[i]))) continue;
-    for (let j = i + 1; words[j]?.startsWith("-"); j++) {
-      if (!/^-[^-]*c/.test(words[j])) continue;
-      if (!shellWords(words[j + 1] ?? "")) return failure("unclassifiable shell string");
-      break;
-    }
-  }
+  const uncertainty = { value: false };
+  const originalEntry = shellEntry([command, ...args], probeOptions, uncertainty);
+  const parsedEntry = shellEntry(words, probeOptions, uncertainty, shellString);
+  const protectedEntry = originalEntry ?? parsedEntry;
   while (words.length && assignment(words[0])) words.shift();
   if (basename(words[0] ?? "") === "env") {
     words.shift();
@@ -182,7 +218,7 @@ function invocation(command: string, args: string[], options: Options) {
         const source = word.startsWith("--split-string=") ? word.slice(15)
           : word.startsWith("-S") && word !== "-S" ? word.slice(2) : words.shift();
         if (source === undefined) return failure("missing env split string");
-        const split = shellWords(source);
+        const split = commandWords(source, false);
         if (!split?.length) return failure("unclassifiable env split string");
         words.unshift(...split);
       } else if (["-i", "--ignore-environment", "-"].includes(word)) probeOptions.env = {};
@@ -196,14 +232,15 @@ function invocation(command: string, args: string[], options: Options) {
       else return failure("unsupported env option");
     }
     if (!words[0]) return failure("missing env executable");
-    if (!protectedEntry && ["env", "sh", "bash"].includes(basename(words[0]))) return failure("unsupported nested env wrapper");
+    if (!protectedEntry && ["env", ...shells].includes(basename(words[0]))) return failure("unsupported nested env wrapper");
     if (!resolvedExecutable(words[0], probeOptions)) return failure("unresolved env executable");
   }
   if (shellString && (!words[0] || !resolvedExecutable(words[0], probeOptions))) {
     return failure("unresolved shell executable");
   }
   return { command: words[0], args: words.slice(1), options: probeOptions, shellString,
-    entry: protectedEntry ?? shellEntry(words, probeOptions), failure: undefined };
+    entry: protectedEntry ?? shellEntry(words, probeOptions),
+    failure: uncertainty.value ? "unclassifiable shell string" : undefined };
 }
 
 export class BunHarperSpawnError extends Error {
@@ -223,9 +260,10 @@ export class TestRuntimeIdentityError extends Error {
 // Test-harness guard against accidental Bun launches, not a security boundary.
 // It does not model hostile process environments.
 // Wrapped APIs: child_process spawn, spawnSync, execFile, execFileSync, exec, execSync; Bun.spawn and Bun.spawnSync.
-// Direct executables classified as Node may launch protected entries without a reason; direct Bun launches are refused without one.
+// Direct executables classified as Node may launch protected entries without a reason; direct Bun launches of protected entries are refused without one.
 // Every other wrapped launch naming a protected entry anywhere in argv, nested shell tokens, or shell: true command strings
-// requires a nonempty, child-only FLAIR_TEST_ALLOW_BUN_HARPER reason, regardless of leading executable. Other launches with unclassifiable tokens require it too.
+// requires a nonempty, child-only FLAIR_TEST_ALLOW_BUN_HARPER reason, regardless of leading executable.
+// Shell command strings in wrapper chains fail closed; other argv is scanned for protected paths.
 export function checkTestSpawn(api: string, command: unknown, args: unknown, options: Options = {}): void {
   if (typeof command !== "string" || !Array.isArray(args)) return;
   const uncertainty = { value: false };
@@ -237,7 +275,7 @@ export function checkTestSpawn(api: string, command: unknown, args: unknown, opt
   }
   const launch = invocation(command, args, scanOptions);
   launch.entry ??= originalEntry;
-  launch.failure ??= uncertainty.value ? "unclassifiable command tokens" : undefined;
+  launch.failure ??= uncertainty.value ? "unclassifiable shell string" : undefined;
   if (!launch.failure && !launch.entry) return;
   const reason = !Object.hasOwn(process.env, ALLOW) && options.env && Object.hasOwn(options.env, ALLOW)
     ? options.env[ALLOW]?.trim() : undefined;

@@ -2,7 +2,7 @@ import { describe, expect, spyOn, test } from "bun:test";
 import childProcess, { exec, execSync, execFile, execFileSync, spawn, spawnSync } from "node:child_process";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import { nodeBin } from "../helpers/node-runtime.ts";
 import { ensureCliBuild } from "../helpers/build-cli-once.js";
@@ -75,7 +75,7 @@ describe("Bun Harper spawn preload", () => {
     test(`${flag} receives a CLI entry argument as data with a child-only reason`, () => {
       const { cli } = fixture();
       refused(() => spawnSync(process.execPath, [flag, source, cli, "init"], { timeout: 5_000 }),
-        "child_process.spawnSync", flag === "--eval" ? "TestRuntimeIdentityError" : "BunHarperSpawnError");
+        "child_process.spawnSync", "BunHarperSpawnError");
       const result = spawnSync(process.execPath, [flag, source, cli, "init"], {
         encoding: "utf8", timeout: 5_000,
         env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise protected entry as eval data" },
@@ -434,7 +434,7 @@ describe("Bun Harper spawn preload", () => {
       } finally { log.mockRestore(); }
     }, 20_000);
   }
-  test("an unknown wrapper's unclassifiable command operand requires a child-only reason", () => {
+  test("an unknown wrapper's operand naming a protected entry requires a child-only reason", () => {
     const { root, cli } = fixture();
     const wrapper = join(root, "wrapper");
     writeFileSync(wrapper, '#!/bin/sh\nexec sh -c "$1"\n', { mode: 0o755 });
@@ -465,6 +465,88 @@ describe("Bun Harper spawn preload", () => {
       expect(log).toHaveBeenCalled();
     } finally { log.mockRestore(); }
   }, 20_000);
+  for (const api of ["spawn", "spawnSync"] as const) {
+    test(`Bun.${api} passes free-text argv to a non-shell fixture without a reason`, async () => {
+      const { root } = fixture();
+      const script = join(root, "argv-fixture.ts");
+      writeFileSync(script, "console.log(JSON.stringify(process.argv.slice(2)))");
+      const text = "free text with (parens) and spaces; quotes ' \"";
+      for (const args of [[text, "start"], ["sh", "-c", text], ["time", "sh", "-c", text]]) {
+        if (api === "spawn") {
+          const child = Bun.spawn([process.execPath, script, ...args], { stdout: "pipe", stderr: "pipe", timeout: 5_000 });
+          const output = await new Response(child.stdout).text();
+          expect(await child.exited).toBe(0);
+          expect(JSON.parse(output)).toEqual(args);
+        } else {
+          const child = Bun.spawnSync([process.execPath, script, ...args], { stdout: "pipe", stderr: "pipe", timeout: 5_000 });
+          expect(child.exitCode).toBe(0);
+          expect(JSON.parse(child.stdout.toString())).toEqual(args);
+        }
+      }
+      for (const entry of ["./dist/cli.js", "./dist/cli-shim.cjs", harperEntry, join("node_modules/harper", relative(harperRoot, harperEntry))]) {
+        const args = [process.execPath, script, `${text} mentions ${entry}`, "start"];
+        refused(() => Reflect.apply(Bun[api], Bun, [args, { timeout: 5_000 }]), `Bun.${api}`);
+      }
+    }, 20_000);
+  }
+  test("wrapped non-shell fixtures receive free-text argv without a reason", () => {
+    const { root } = fixture();
+    const script = join(root, "argv-fixture.ts");
+    writeFileSync(script, "console.log(JSON.stringify(process.argv.slice(2)))");
+    const text = "free text with (parens) and spaces; quotes ' \"";
+    for (const prefix of [["/usr/bin/time"], ["env", "nice"], ["xargs", "-n", "1"]]) {
+      const result = spawnSync(prefix[0], [...prefix.slice(1), process.execPath, script, text], {
+        encoding: "utf8", input: "tail\n", timeout: 5_000,
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(JSON.parse(result.stdout)).toEqual(prefix[0] === "xargs" ? [text, "tail"] : [text]);
+    }
+  }, 20_000);
+  test("env -S passes quoted free text to a non-shell fixture without a reason", () => {
+    const { root } = fixture();
+    const script = join(root, "argv-fixture.ts");
+    writeFileSync(script, "console.log(JSON.stringify(process.argv.slice(2)))");
+    const text = "free text with (parens) and spaces;";
+    const source = `'${process.execPath}' '${script}' '${text}'`;
+    for (const prefix of [["/usr/bin/env"], ["/usr/bin/time", "/usr/bin/env"]]) {
+      const result = spawnSync(prefix[0], [...prefix.slice(1), "-S", source], { encoding: "utf8", timeout: 5_000 });
+      expect(result.status, result.stderr).toBe(0);
+      expect(JSON.parse(result.stdout)).toEqual([text]);
+    }
+  }, 20_000);
+  test("assignment-prefixed nested shell command strings fail closed", () => {
+    for (const source of ["VALUE=ordinary sh -c \"'unterminated\"", "VALUE=ordinary env nice sh -c \"'unterminated\""]) {
+      const error = refused(() => spawnSync(source, { shell: true, timeout: 5_000 }),
+        "child_process.spawnSync", "TestRuntimeIdentityError");
+      expect(error.message).toContain("unclassifiable shell string");
+    }
+  }, 20_000);
+  test("a shell's positional argv remains free text", () => {
+    const text = "free text with (parens) and spaces; quotes ' \"";
+    const ordinary = spawnSync("/bin/sh", ["-c", "printf ordinary", text], { encoding: "utf8", timeout: 5_000 });
+    expect(ordinary.status).toBe(0);
+    expect(ordinary.stdout).toBe("ordinary");
+  }, 20_000);
+  for (const shell of ["sh", "bash", "zsh", "dash"]) {
+    test.skipIf(!Bun.which(shell))(`${shell} command strings in wrapper chains fail closed`, () => {
+      const executable = Bun.which(shell)!;
+      const log = spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        for (const prefix of [["/usr/bin/time", "env", "nice"], ["xargs", "-n", "1"]]) {
+          const flags = shell === "bash" ? ["--rcfile", "/dev/null", "+o", "errexit", "-c"] : ["-c"];
+          const args = [...prefix.slice(1), executable, ...flags, "printf ordinary; true"];
+          const options = { encoding: "utf8" as const, input: "tail\n", timeout: 5_000 };
+          const error = refused(() => spawnSync(prefix[0], args, options), "child_process.spawnSync", "TestRuntimeIdentityError");
+          expect(error.message).toContain("unclassifiable shell string");
+          const result = spawnSync(prefix[0], args, { ...options,
+            env: { ...process.env, FLAIR_TEST_ALLOW_BUN_HARPER: "exercise a wrapped shell command string" },
+          });
+          expect(result.status, result.stderr).toBe(0);
+          expect(result.stdout).toBe("ordinary");
+        }
+      } finally { log.mockRestore(); }
+    }, 20_000);
+  }
   test("direct Node may receive unclassifiable shell text as CLI data without a reason", () => {
     const { cli } = fixture();
     const args = ["sh", "-c", "$UNCLASSIFIED"];
@@ -761,7 +843,12 @@ describe("Bun Harper spawn preload", () => {
     } finally { log.mockRestore(); }
   }, 20_000);
   test("a temporary harper.js stub is allowed under Bun", () => {
-    allowed(join(fixture().root, "harper.js"), ["run", "."]);
+    const { root } = fixture();
+    allowed(join(root, "harper.js"), ["run", "."]);
+    const entry = join(root, "node_modules/harper/dist/bin/harper.js");
+    mkdirSync(dirname(entry), { recursive: true });
+    writeFileSync(entry, "console.log(JSON.stringify(process.argv.slice(2)))");
+    allowed(entry, ["run", "."]);
   }, 20_000);
   test("the installed Harper entry is refused under Bun", () => {
     refused(() => spawnSync(process.execPath, [harperEntry, "run", "."], { timeout: 5_000 }));
