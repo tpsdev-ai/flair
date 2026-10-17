@@ -22,10 +22,9 @@ export function suppliesEmbeddingModel(content: unknown): boolean {
     Object.prototype.hasOwnProperty.call(content, "embeddingModel");
 }
 
-/** True for a write that keeps the vector it carries: an administrator's write,
- *  or a trusted in-process write (no HTTP request) — operator reindex and import.
- *  For every other actor the vector is discarded, while the write itself may
- *  still succeed (an anonymous request never reaches a write). */
+/** True for actors exempt from discarding caller-supplied vectors:
+ *  administrators and trusted in-process callers. A stored vector carried by
+ *  a non-admin skill update can remain. */
 export function keepsSuppliedVector(auth: AgentAuthVerdict): boolean {
   return auth.kind === "internal" || (auth.kind === "agent" && auth.isAdmin);
 }
