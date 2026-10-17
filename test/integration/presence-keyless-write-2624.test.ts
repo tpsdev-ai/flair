@@ -1,12 +1,9 @@
 /**
  * presence-keyless-write-2624.test.ts — flair#2624.
  *
- * A Presence PUT or PATCH whose target cannot be resolved (no URL id, and no
- * usable `agentId`/`id` in the body) is refused with a named 400
- * (`presence_target_required`) before the owner (403) and home checks and before
- * any read-modify-write. For a non-admin agent the install-wide owner-scoped
- * write guard refuses the keyless collection write one layer earlier, so the
- * agent cases below assert that refusal and that no row lands. A normal
+ * An authenticated administrator's keyless PUT/PATCH gets 400
+ * presence_target_required; a non-admin agent's collection PUT/PATCH gets the
+ * owner guard's named 403; an anonymous request gets 401. A normal
  * self-addressed PUT/PATCH still stores.
  *
  * Real Harper, real spawn, real Ed25519 signatures (mirrors
@@ -99,13 +96,10 @@ describe("Presence keyless write refusal (flair#2624)", () => {
 
   // A non-admin agent's keyless collection PUT/PATCH is intercepted BEFORE the
   // resource by the install-wide owner-scoped write guard
-  // (resources/owner-scoped-write-policy.ts), which answers its own named 403
-  // ("a non-admin write to ... must address one record by its id"). The new
-  // presence_target_required refusal lives in put()/patch(), which a non-admin
-  // agent therefore never reaches for a keyless write; the point asserted here
-  // is that no row lands. The administrator (not short-circuited by that guard)
-  // IS the caller the new refusal answers, covered in the tests below.
-  test("keyless PUT from a verified agent → refused on a 4xx, no row", async () => {
+  // (resources/owner-scoped-write-policy.ts), which answers its own named 403.
+  // The presence_target_required refusal in put()/patch() is the administrator's
+  // branch; an anonymous request gets 401 from the auth check ahead of both.
+  test("keyless PUT from a verified agent → owner guard's 403, no row", async () => {
     const before = await presenceCount();
     const res = await fetch(`${harper.httpURL}/Presence`, {
       method: "PUT",
@@ -114,12 +108,12 @@ describe("Presence keyless write refusal (flair#2624)", () => {
       signal: AbortSignal.timeout(20_000),
     });
     const text = await res.text();
-    expect([400, 403], `keyless agent PUT: ${text.slice(0, 200)}`).toContain(res.status);
-    expect(typeof JSON.parse(text).error).toBe("string");
+    expect(res.status, `keyless agent PUT: ${text.slice(0, 200)}`).toBe(403);
+    expect(JSON.parse(text).error).toBe("forbidden: a non-admin write to Presence must address one record by its id");
     expect(await presenceCount()).toBe(before);
   }, 30_000);
 
-  test("keyless PATCH from a verified agent → refused on a 4xx, no row", async () => {
+  test("keyless PATCH from a verified agent → owner guard's 403, no row", async () => {
     const before = await presenceCount();
     const res = await fetch(`${harper.httpURL}/Presence`, {
       method: "PATCH",
@@ -128,8 +122,8 @@ describe("Presence keyless write refusal (flair#2624)", () => {
       signal: AbortSignal.timeout(20_000),
     });
     const text = await res.text();
-    expect([400, 403], `keyless agent PATCH: ${text.slice(0, 200)}`).toContain(res.status);
-    expect(typeof JSON.parse(text).error).toBe("string");
+    expect(res.status, `keyless agent PATCH: ${text.slice(0, 200)}`).toBe(403);
+    expect(JSON.parse(text).error).toBe("forbidden: a non-admin write to Presence must address one record by its id");
     expect(await presenceCount()).toBe(before);
   }, 30_000);
 
