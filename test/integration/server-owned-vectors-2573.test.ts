@@ -158,14 +158,18 @@ function makeHarness(get: () => HarperInstance) {
     return res.json();
   }
   /** A recall consult makes the guard rescan a stale or unknown count. */
-  async function consult(): Promise<void> {
+  async function semanticSearch(body: Record<string, unknown>): Promise<any> {
     const res = await fetch(`${get().httpURL}/SemanticSearch`, {
       signal: AbortSignal.timeout(15_000),
       method: "POST",
       headers: { Authorization: ed25519Header(agent, "POST", "/SemanticSearch"), "Content-Type": "application/json" },
-      body: JSON.stringify({ agentId: agent.id, queryEmbedding: CRAFTED(), limit: 1 }),
+      body: JSON.stringify({ agentId: agent.id, ...body }),
     });
     expect(res.status, (await res.clone().text()).slice(0, 300)).toBe(200);
+    return res.json();
+  }
+  async function consult(): Promise<void> {
+    await semanticSearch({ queryEmbedding: CRAFTED(), limit: 1 });
   }
   /** Poll /Health, consulting the guard each round, until `want` holds or time is up. */
   async function waitGuard(want: (space: any) => boolean, timeoutMs: number): Promise<any> {
@@ -179,7 +183,7 @@ function makeHarness(get: () => HarperInstance) {
     }
     return space;
   }
-  return { agent, adminAgent, adminOp, write, basicWrite, row, serverVectorFor, register, seed, health, consult, waitGuard };
+  return { agent, adminAgent, adminOp, write, basicWrite, row, serverVectorFor, register, seed, health, semanticSearch, consult, waitGuard };
 }
 
 function assertOwnInstance(h: HarperInstance): void {
@@ -382,43 +386,43 @@ describe("flair#2573 slice 2 — a non-admin write cannot relabel a stored vecto
     if (harper) await stopHarper(harper);
   }, HARPER_STOP_BUDGET_MS);
 
-  /** Seed a stored vector no writer accepts from a non-admin: a raw operator
-   *  insert with a crafted vector and a foreign (`stamp`) or absent stamp
-   *  (`null`). The non-admin write under test must leave that stamp alone. */
+  /** Store a vector a non-admin writer would never accept: a signed
+   *  administrator PUT with a crafted vector and a foreign (`stamp`) or absent
+   *  stamp (`null`). The signed write also marks the guard's count stale, so the
+   *  next recall consult rescans and counts the untrusted vector. The non-admin
+   *  write under test must leave that stamp alone. */
   async function seedVector(id: string, stamp: string | null): Promise<void> {
-    await h.seed({
+    const res = await h.basicWrite("PUT", id, {
       id, agentId: h.agent.id, content: `stored text for ${id}`, visibility: "shared", durability: "standard",
-      createdAt: new Date().toISOString(), instanceToken: randomUUID(), tags: [], embedding: CRAFTED(),
-      ...(stamp === null ? {} : { embeddingModel: stamp }),
+      embedding: CRAFTED(), ...(stamp === null ? {} : { embeddingModel: stamp }),
     });
+    expect(res.status, `seed ${id}: ${(await res.clone().text()).slice(0, 300)}`).toBeLessThan(300);
   }
 
   test("(h) an agent stamp-only PATCH leaves a foreign-stamped stored vector's stamp unchanged and the row excluded", async () => {
     const id = `s2-relabel-foreign-${randomUUID()}`;
     await seedVector(id, FOREIGN_STAMP);
-    const before = await h.waitGuard((s) => s.state === "excluded", 60_000);
-    expect(before?.excluded, "the foreign-stamped vector makes the verdict non-uniform").toBeGreaterThanOrEqual(1);
+    const ids = (r: any) => (r.results ?? []).map((x: any) => x.id);
+    expect(ids(await h.semanticSearch({ queryEmbedding: CRAFTED(), limit: 50 })), "the seeded foreign vector is not recalled").not.toContain(id);
     const res = await h.write("PATCH", id, { embeddingModel: CURRENT_STAMP });
     expect(res.status, await res.clone().text()).toBeLessThan(300);
     const r = await h.row(id);
     expect(r.embedding, "the stored vector is unchanged").toEqual(CRAFTED());
     expect(r.embeddingModel, "the caller's stamp never relabels a stored vector").toBe(FOREIGN_STAMP);
-    const after = await h.waitGuard((s) => s.excluded === before?.excluded, 60_000);
-    expect(after?.excluded, "the row stays excluded from vector recall").toBe(before?.excluded);
+    expect(ids(await h.semanticSearch({ queryEmbedding: CRAFTED(), limit: 50 })), "the row stays excluded from vector recall").not.toContain(id);
   }, 120_000);
 
   test("(h) an agent stamp-only PATCH leaves an unstamped stored vector's stamp absent and the row excluded", async () => {
     const id = `s2-relabel-unstamped-${randomUUID()}`;
     await seedVector(id, null);
-    const before = await h.waitGuard((s) => s.state === "excluded", 60_000);
-    expect(before?.excluded, "the untrusted vectors make the verdict non-uniform").toBeGreaterThanOrEqual(1);
+    const ids = (r: any) => (r.results ?? []).map((x: any) => x.id);
+    expect(ids(await h.semanticSearch({ queryEmbedding: CRAFTED(), limit: 50 })), "the seeded unstamped vector is not recalled").not.toContain(id);
     const res = await h.write("PATCH", id, { embeddingModel: CURRENT_STAMP });
     expect(res.status, await res.clone().text()).toBeLessThan(300);
     const r = await h.row(id);
     expect(r.embedding, "the stored vector is unchanged").toEqual(CRAFTED());
     expect(r.embeddingModel ?? null, "the caller's stamp is not stored").toBeNull();
-    const after = await h.waitGuard((s) => s.excluded === before?.excluded, 60_000);
-    expect(after?.excluded, "the row stays excluded from vector recall").toBe(before?.excluded);
+    expect(ids(await h.semanticSearch({ queryEmbedding: CRAFTED(), limit: 50 })), "the row stays excluded from vector recall").not.toContain(id);
   }, 120_000);
 
   test("(i) an agent skill PUT that carries a stored vector keeps the vector's stored stamp", async () => {
