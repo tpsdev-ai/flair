@@ -24,6 +24,10 @@
  *     but a non-empty string or a non-empty array of strings, the empty string
  *     included) is refused with `invalid_event_id` (400) before any write, and
  *     a stored row under such an id is unchanged; a composite id is read;
+ *   - malformed bodies reaching the POST, PUT and PATCH resource methods are
+ *     refused with `body_must_be_object` (400), except admitted arrays of records,
+ *     before the resource method's authentication, attribution, ownership and
+ *     createdAt checks. Harper's collection validation can refuse input earlier;
  *   - before validation, an addressed POST binds a missing or null body id to
  *     the addressed id, and a string or number body id when its text matches
  *     the address; any other id type is left unchanged by this step. At the
@@ -438,7 +442,9 @@ describe("refusals that write nothing", () => {
   it("a POST with an array body is refused and stores nothing", async () => {
     const summary = `oect-post-array-${randomUUID()}`;
     const res = await send(agent, "POST", "/OrgEvent", [{ id: summary, authorId: agent.id, kind: "status", summary, createdAt: PAST }]);
-    expect(res.status, (await res.text()).slice(0, 300)).toBe(400);
+    const text = await res.text();
+    expect(res.status, text.slice(0, 300)).toBe(400);
+    expect(JSON.parse(text).error).toBe("body_must_be_object");
     expect(await readEvent(summary)).toBeNull();
     expect(await eventsBySummary(summary)).toEqual([]);
   }, 30_000);
@@ -756,7 +762,7 @@ describe("what each malformed id or body gets", () => {
   const NOT_ADDRESSED: Expect = { status: 403, error: "write_id_not_addressed" };
   const HARPER_400: Expect = { status: 400, code: "ClientError" };
   const HARPER_500: Expect = { status: 500, code: "Error" };
-  const TYPE_ERROR: Expect = { status: 500, code: "TypeError" };
+  const BODY_OBJECT: Expect = { status: 400, error: "body_must_be_object" };
 
   async function expectResponse(res: Response, want: Expect): Promise<void> {
     const text = await res.text();
@@ -859,19 +865,19 @@ describe("what each malformed id or body gets", () => {
   }
 
   const BODIES: Array<[string, string]> = [["a string", '"abc"'], ["a number", "42"], ["null", "null"], ["true", "true"], ["an array of primitives", '["abc",1]']];
-  // [agent, admin] per verb.
+  // [agent, admin] for POST and addressed PUT/PATCH.
   const BODY_WANT: Record<string, Record<string, [Expect, Expect]>> = {
     POST: {
-      "a string": [TYPE_ERROR, TYPE_ERROR], "a number": [TYPE_ERROR, TYPE_ERROR], null: [TYPE_ERROR, TYPE_ERROR],
-      true: [TYPE_ERROR, TYPE_ERROR], "an array of primitives": [INVALID, INVALID],
+      "a string": [BODY_OBJECT, BODY_OBJECT], "a number": [BODY_OBJECT, BODY_OBJECT], null: [BODY_OBJECT, BODY_OBJECT],
+      true: [BODY_OBJECT, BODY_OBJECT], "an array of primitives": [BODY_OBJECT, BODY_OBJECT],
     },
     PUT: {
-      "a string": [ATTRIBUTION, INVALID], "a number": [ATTRIBUTION, INVALID], null: [TYPE_ERROR, TYPE_ERROR],
-      true: [ATTRIBUTION, INVALID], "an array of primitives": [ATTRIBUTION, INVALID],
+      "a string": [BODY_OBJECT, BODY_OBJECT], "a number": [BODY_OBJECT, BODY_OBJECT], null: [BODY_OBJECT, BODY_OBJECT],
+      true: [BODY_OBJECT, BODY_OBJECT], "an array of primitives": [BODY_OBJECT, BODY_OBJECT],
     },
     PATCH: {
-      "a string": [INVALID, INVALID], "a number": [INVALID, INVALID], null: [INVALID, INVALID],
-      true: [INVALID, INVALID], "an array of primitives": [INVALID, INVALID],
+      "a string": [BODY_OBJECT, BODY_OBJECT], "a number": [BODY_OBJECT, BODY_OBJECT], null: [BODY_OBJECT, BODY_OBJECT],
+      true: [BODY_OBJECT, BODY_OBJECT], "an array of primitives": [BODY_OBJECT, BODY_OBJECT],
     },
   };
 
@@ -898,7 +904,7 @@ describe("what each malformed id or body gets", () => {
 
       const elementWant: Expect = who !== admin
         ? COLLECTION
-        : label === "an array of primitives" ? INVALID : HARPER_400;
+        : label === "an array of primitives" ? BODY_OBJECT : HARPER_400;
       it(`a collection PUT whose element is ${label}, as ${role}, gets ${elementWant.status} ${elementWant.error ?? elementWant.code}${who !== admin ? " and creates no row" : ""}`, async () => {
         const before = who !== admin ? await countEvents() : 0;
         await expectResponse(await sendRaw(who, "PUT", "/OrgEvent/", `[${raw}]`), elementWant);

@@ -18,6 +18,7 @@
 import { randomUUID } from "node:crypto";
 import { databases } from "harper";
 import { resolveAgentAuth } from "./agent-auth.js";
+import { guardObjectBody } from "./object-body-guard.js";
 import { guardOwnerFieldImmutable } from "./owner-field-guard.js";
 import { invalidEntitiesResponse } from "./entity-vocab.js";
 import {
@@ -80,6 +81,8 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
   }
 
   async post(content: any) {
+    const bodyDenial = guardObjectBody(content);
+    if (bodyDenial) return bodyDenial;
     const auth = await this._auth();
     if (auth.kind === "anonymous") return UNAUTH();
 
@@ -160,6 +163,8 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
   // PATCH routes past put(), so authorId immutability is enforced on both verbs
   // via the one shared delegate.
   async patch(content: any, query?: any) {
+    const bodyDenial = guardObjectBody(content);
+    if (bodyDenial) return bodyDenial;
     const denial = await guardOwnerFieldImmutable(this, () => super.get(), content, "authorId");
     if (denial) return denial;
     // createdAt: PATCH writes the row its URL names, so the stored value is read
@@ -175,6 +180,8 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
   }
 
   async put(content: any) {
+    const bodyDenial = guardObjectBody(content, { allowArrayObjects: true });
+    if (bodyDenial) throw bodyDenial;
     const __ownerDenial = await guardOwnerFieldImmutable(this, () => super.get(), content, "authorId");
     if (__ownerDenial) return __ownerDenial;
     const auth = await this._auth();
