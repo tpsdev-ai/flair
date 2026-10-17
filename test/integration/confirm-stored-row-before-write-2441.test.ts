@@ -166,6 +166,15 @@ function armPoint(point: string): void {
 function releasePoint(point: string): void {
   writeFileSync(join(pauseDir, `go.${point}`), "");
 }
+/** Wait until a fresh read observes `id` absent — the delete's commit is visible. */
+async function waitForRowGone(id: string, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if ((await readRow(id)) === null) return true;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  return false;
+}
 
 beforeAll(async () => {
   pauseDir = mkdtempSync(join(tmpdir(), "flair-2441-pause-"));
@@ -223,6 +232,11 @@ describe("flair#2441 — the usage-recording count bump confirms the stored row 
     releasePoint("memory-delete");
     const del = await delPending;
     expect(del.status, (await del.clone().text()).slice(0, 200)).toBeLessThan(300);
+    // Resume the count bump only once a fresh read has observed the row gone: the
+    // asserted interleaving is the DELETE committed while the bump is paused after
+    // its read and before its write, so the delete's commit must be observable to
+    // another read before the bump's newer transaction resumes.
+    expect(await waitForRowGone(id, 15_000), "the owner DELETE did not become visible to a fresh read").toBe(true);
     releasePoint("usage-count");
     const rec = await recPending;
     expect(rec.status, (await rec.clone().text()).slice(0, 200)).toBe(200);
