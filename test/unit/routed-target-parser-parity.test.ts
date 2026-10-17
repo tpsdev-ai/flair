@@ -2,20 +2,6 @@
  * routed-target-parser-parity.test.ts — a differential check of the pure
  * request-target helpers against Harper's installed parser, over a corpus.
  *
- * At request time the middleware resolves a target through Harper's OWN routing
- * (resources/harper-routing.ts) for its by-name and by-id decisions, so for those
- * the helpers here are the fallback used when the live registry is absent (a unit
- * mock) or the target matches no route, and for the by-name decisions when the
- * matcher throws. The
- * middleware's non-admin Memory-selection rewrite also calls them on the live
- * request. This test fixes the fallback to Harper's parser for the part it covers —
- * the id over the whole remainder (`RequestTarget`) and the first-dot
- * DECLARED-ATTRIBUTE property rule (`Resource.parsePath` with no request context).
- * Harper's content-type-suffix rule fires only with a request context; the final
- * group below checks that behaviour directly against Harper (it is what
- * harper-routing relies on), and the pure fallback deliberately does not reproduce
- * it, so a content-type suffix (`x.json`) is stripped by the live routing and left
- * whole by the fallback.
  */
 import { describe, expect, test } from "bun:test";
 import { createRequire } from "node:module";
@@ -38,8 +24,7 @@ const DECLARED = ["content", "agentId", "tags", "trigger"];
 const DECLARED_SET = new Set(DECLARED);
 const fixtureResource = { attributes: DECLARED.map((name) => ({ name })) };
 
-/** The id Harper resolves for `/<resource>/<remainder>`: RequestTarget over the
- *  remainder, then its first-dot property rule via Resource.parsePath. */
+/** Return the installed RequestTarget id after Resource.parsePath without a context. */
 function harperId(remainder: string): { id: unknown; property?: unknown } {
   const target = new RequestTarget(remainder);
   const parsed = Resource.parsePath.call(fixtureResource, target.id, undefined, undefined);
@@ -47,7 +32,7 @@ function harperId(remainder: string): { id: unknown; property?: unknown } {
   return { id: parsed };
 }
 
-describe("routedRecordId matches Harper's RequestTarget id (no property rule)", () => {
+describe("routedRecordId matches the initial RequestTarget id for the listed remainders", () => {
   const remainders = [
     "plain",
     "safe/victim", // multi-segment remainder is ONE id
@@ -86,7 +71,7 @@ describe("routedRecordId matches Harper's RequestTarget id (no property rule)", 
   });
 });
 
-describe("routedIdAfterPropertyRule matches Harper's Resource.parsePath", () => {
+describe("routedIdAfterPropertyRule matches Resource.parsePath without a context for the listed ids", () => {
   const ids = [
     "x.content", // declared suffix → stripped
     "x.agentId",
@@ -107,7 +92,7 @@ describe("routedIdAfterPropertyRule matches Harper's Resource.parsePath", () => 
   }
 });
 
-describe("routedResourceAndRemainder splits where Harper routes", () => {
+describe("routedResourceAndRemainder splits plain one-level resource paths", () => {
   test("first segment is the resource, the rest is the remainder", () => {
     expect(routedResourceAndRemainder("/Asset/safe/victim")).toEqual({ resource: "Asset", remainder: "safe/victim" });
     expect(routedResourceAndRemainder("/Memory/a%2Fb")).toEqual({ resource: "Memory", remainder: "a%2Fb" });
@@ -116,10 +101,7 @@ describe("routedResourceAndRemainder splits where Harper routes", () => {
   });
 });
 
-describe("Harper's content-type-suffix rule (what harper-routing relies on)", () => {
-  // With a request context, Harper STRIPS a recognised content-type extension
-  // and returns the bare id; the middleware's live path (harper-routing.ts)
-  // calls parsePath with the request headers, so the resolved id is the row.
+describe("Resource.parsePath content-type suffixes with and without a request context", () => {
   const withCtx = (id: string) => Resource.parsePath.call(fixtureResource, id, { headers: {} }, undefined);
   for (const ext of ["json", "cbor", "msgpack", "csv"]) {
     test(`\`x.${ext}\` strips to \`x\` with a request context`, () => {

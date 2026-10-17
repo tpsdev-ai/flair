@@ -1,13 +1,5 @@
 /**
- * harper-routing.ts — ask Harper's OWN routing code what a request target
- * resolves to, so the middleware's by-name and by-id decisions use the resource,
- * record id and property the REST dispatcher will.
- *
- * The middleware runs inside Harper, so the live route registry
- * (`server.resources`) and Harper's `RequestTarget` / `Resource.parsePath` are
- * reachable at runtime. Re-implementing those rules in the middleware drifts
- * from the matcher (content-type suffixes, a suffixed resource name dispatching
- * to the bare resource, the first-dot property rule); calling them does not.
+ * harper-routing.ts — read Harper's `rest` match and parse its remainder.
  *
  * `routeWithHarper` is SYNCHRONOUS and must be called before the middleware
  * awaits anything: `getMatch` mutates the matched entry's `relativeURL` in
@@ -16,23 +8,23 @@
  *
  * `getMatch` is asked for the `rest` match. Harper's REST dispatcher asks for an
  * `sse` match for a request with `Accept: text/event-stream`, and the two matches
- * may differ; such a request is decided on the `rest` match, and on the pure
- * mirror only when no `rest` match is returned.
+ * may differ; such a request is decided on the `rest` match, and on the helpers
+ * only when no `rest` match is returned.
  *
  * When the registry or `RequestTarget` is not present (a unit test driving the
  * middleware with a mocked `harper`) or the target matches no route, it returns
- * null and the caller falls back to the pure mirror in request-target.ts. When the
+ * null and the caller falls back to the helpers in request-target.ts. When the
  * matcher throws, the error propagates to the caller.
  */
 // Namespace import, not named: a unit test that mocks `harper` may not export
 // `RequestTarget`, and a named import of a missing export fails to LINK (before
 // any code runs). The namespace binds whatever the module exports; a missing
 // member is simply undefined, and routeWithHarper returns null in that case
-// (the registry is absent too), so the pure fallback is used.
+// so the fallback is used.
 import * as harper from "harper";
 
 export interface HarperRoute {
-  /** The registered resource Harper dispatches to (its route key). */
+  /** The matched entry's route key. */
   resource: string;
   /** The final record id, after content-type-suffix and property parsing. Null for
    *  a collection route (`isCollection`) and when `recordIdUnresolved`. */
@@ -52,9 +44,6 @@ export interface HarperRoute {
 /**
  * Resolve a raw request target through Harper's own matcher and parser, or null
  * when the live registry is unavailable. Throws when Harper's matcher throws.
- * `headers` enables Harper's
- * content-type-suffix rule (it only fires when a request context carries
- * headers), so the resolved id matches what Harper addresses.
  */
 export function routeWithHarper(rawTarget: string, headers: unknown): HarperRoute | null {
   const server = (harper as any).server;
@@ -77,8 +66,6 @@ export function routeWithHarper(rawTarget: string, headers: unknown): HarperRout
   const relPath = relativeURL.includes("?") ? relativeURL.slice(0, relativeURL.indexOf("?")) : relativeURL;
   const decisionPath = `/${resource}${relPath}`;
 
-  // RequestTarget resolves the id (decodeURIComponent of the whole remainder)
-  // and flags a collection, exactly as Harper does for dispatch.
   let target: any;
   try {
     target = new (RequestTarget as any)(relativeURL);
@@ -92,9 +79,7 @@ export function routeWithHarper(rawTarget: string, headers: unknown): HarperRout
   let recordId: string | null = typeof target.id === "string" ? target.id : (target.id == null ? null : String(target.id));
   let property: string | null = null;
 
-  // Apply the SAME first-dot property / content-type-suffix rule Harper applies
-  // (Resource.parsePath), using the request's headers so a content-type suffix
-  // is recognised. A throwaway context keeps the real request unmutated.
+  // Parse with the request headers in a throwaway context.
   if (recordId !== null && typeof ResourceClass?.parsePath === "function") {
     try {
       const parsed = ResourceClass.parsePath(recordId, { headers }, undefined);

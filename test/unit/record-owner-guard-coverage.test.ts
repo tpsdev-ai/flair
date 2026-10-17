@@ -235,14 +235,11 @@ describe("resolveGuardedRecord", () => {
       .toEqual({ table: "Soul", ownerField: "agentId", id: "alice:mission" });
   });
 
-  it("decodes the FULL remainder after the table as ONE id, as Harper routes it", () => {
+  it("returns the fully decoded remainder after the table as one id", () => {
     // An id that itself contains `/`, raw or percent-encoded, is the whole remainder.
     expect(resolveGuardedRecord("/Relationship/a/b")).toEqual({ table: "Relationship", ownerField: "agentId", id: "a/b" });
     expect(resolveGuardedRecord("/Relationship/%2Fr")).toEqual({ table: "Relationship", ownerField: "agentId", id: "/r" });
-    // A repeated slash keeps the empty segment in the id, as Harper keeps it.
     expect(resolveGuardedRecord("/Relationship//r")).toEqual({ table: "Relationship", ownerField: "agentId", id: "/r" });
-    // A dot inside a segment stays in the id: this parse mirrors Harper's
-    // RequestTarget, which does not resolve dot segments.
     expect(resolveGuardedRecord("/Relationship/a.b")).toEqual({ table: "Relationship", ownerField: "agentId", id: "a.b" });
   });
 

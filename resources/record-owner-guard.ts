@@ -149,12 +149,6 @@ export function isMutatingMethod(method: string): boolean {
  * `pathname` is the RAW request path (the target before its `?`). The id is the
  * FULL decoded remainder after the table segment, so an id that itself contains
  * `/`, raw or as `%2F`, resolves to the whole id rather than a shorter prefix.
- * This mirrors Harper's `RequestTarget` for a path with no first-dot property or
- * content-type suffix; at request time the middleware resolves the final id
- * through Harper's own routing (resources/harper-routing.ts) and passes it to
- * `resolveGuardedRecordById`, so this path-parsing form is the fallback used
- * when Harper's routing returns no route (e.g. no live registry or no matching
- * route).
  *
  * Matches `/<Table>/<id>` ONLY. A bare resource path has no record id; a
  * trailing-slash path is a collection. The table segment is matched EXACTLY so

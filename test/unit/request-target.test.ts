@@ -1,7 +1,7 @@
 /**
  * request-target.test.ts — the canonical request-target rule the auth
  * middleware applies before any other request processing, and the raw-path
- * helpers its path decisions use (split on `/` first, then decode a segment).
+ * helpers its path decisions use.
  *
  * Pure: no Harper, no middleware. The middleware-driven checks live in
  * test/unit-isolated/request-target-middleware.test.ts; the real-Harper checks
@@ -64,7 +64,7 @@ describe("isCanonicalRequestTarget — refused forms", () => {
     });
   }
   for (const target of emptySegments) {
-    test(`an empty segment: ${JSON.stringify(target)}`, () => {
+    test(`repeated slashes: ${JSON.stringify(target)}`, () => {
       expect(isCanonicalRequestTarget(target)).toBe(false);
     });
   }
@@ -144,7 +144,7 @@ describe("a record id built by Flair's own clients is a canonical target", () =>
       expect(isCanonicalRequestTarget(`/Memory/${cliEncodeRecordId(id)}`)).toBe(true);
       expect(isCanonicalRequestTarget(memoryPutPath(id))).toBe(true);
       expect(isCanonicalRequestTarget(`/Memory/${mcpEncodeRecordId(id)}?limit=1`)).toBe(true);
-      // ...and the id is decided as ONE segment that decodes back to it.
+      // Both helpers return the decoded id.
       expect(routedRecordId(recordIdPath("Memory", id))?.id).toBe(id);
       expect(resolveGuardedRecord(recordIdPath("Memory", id))?.id).toBe(id);
     });
@@ -192,7 +192,7 @@ describe("raw-path helpers: split on `/` first, then decode one segment", () => 
     expect(decodePathSegment("a%E0%A4")).toBeNull();
   });
 
-  test("routedRecordId decodes the FULL remainder after the table, as Harper routes it", () => {
+  test("routedRecordId returns the fully decoded remainder as the initial RequestTarget id", () => {
     expect(routedRecordId("/OrgEvent/a%2Fb")).toEqual({ resource: "OrgEvent", id: "a/b" });
     expect(routedRecordId("/WorkspaceState/ws%2F1")).toEqual({ resource: "WorkspaceState", id: "ws/1" });
     expect(routedRecordId("/OrgEvent/a%2F..%2Fb")).toEqual({ resource: "OrgEvent", id: "a/../b" });

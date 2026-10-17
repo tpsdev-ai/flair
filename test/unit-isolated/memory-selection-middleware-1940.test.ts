@@ -30,8 +30,7 @@ const harperServer: any = {
   },
 };
 
-/** Run `fn` with Harper's routing present: the path-form rewrite runs only on a
- *  route to a Memory record. */
+/** Run `fn` with the Memory registry stand-in. */
 async function withMemoryRoutes(fn: () => Promise<void>): Promise<void> {
   harperServer.resources = memoryRouteRegistry();
   try {

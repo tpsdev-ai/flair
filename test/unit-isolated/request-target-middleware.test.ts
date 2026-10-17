@@ -1,6 +1,6 @@
 /**
  * request-target-middleware.test.ts — the auth middleware decides only about a
- * canonical request target, and reads it the way Harper routes it.
+ * canonical request target.
  *
  * 1. A non-canonical raw target (a `.`/`..` segment, raw or percent-encoded;
  *    repeated slashes; a raw backslash) is answered with the named 400
@@ -8,9 +8,7 @@
  *    header read, no method check, no credential read, no next layer.
  * 2. With no live route registry (this file's `harper` mock has none unless a
  *    case adds one), the middleware's path decisions use the pure request-target
- *    helpers, which split the RAW path on `/` first and decode a segment only
- *    afterwards, so an id containing `/`, sent as `%2F`, is decided as ONE
- *    segment at each place the middleware reads a path.
+ *    helpers.
  * 3. The non-admin Memory read path rewrite runs only on Harper's route to a
  *    Memory record id.
  *
@@ -244,8 +242,7 @@ describe("an id containing `/`, sent as `%2F`, is decided as ONE segment at ever
     expect(tableGets.Memory!.some((c) => c.args === 2)).toBe(true);
   });
 
-  it("a RAW multi-segment id resolves to the FULL routed id, not the first sub-segment", async () => {
-    // `/Memory/a/b` routes to id `a/b`; the owner guard must read `a/b`, never `a`.
+  it("with no registry, the owner guard reads `a/b` for `/Memory/a/b`", async () => {
     const url = "/Memory/a/b";
     const req = makeRequest(url, "PATCH", signedAuthorization("PATCH", url));
     const res = await mw(req, next);
@@ -327,8 +324,8 @@ describe("no path decision reads the URL-normalized pathname", () => {
   });
 });
 
-describe("the routed resource name drives the public-path and suffix decisions", () => {
-  it("a file-type-suffix form of a public route is allowed (routes to the public resource)", async () => {
+describe("fallback helpers drive the public-path decisions", () => {
+  it("the fallback allows /health.json, /Health.cbor and /AgentCard.json as public paths", async () => {
     for (const path of ["/health.json", "/Health.cbor", "/AgentCard.json"]) {
       const before = nextCalls;
       const res = await mw(makeRequest(path, "GET"), next);
@@ -337,9 +334,7 @@ describe("the routed resource name drives the public-path and suffix decisions",
     }
   });
 
-  it("a suffix that does not resolve to a known resource is left exactly as sent", async () => {
-    // `/Memoryx` is not a known decision-resource, so it is not rewritten to
-    // `/Memory`; an anonymous read of it is not treated as public.
+  it("the fallback treats /Nonsense.json as anonymous", async () => {
     const req = makeRequest("/Nonsense.json", "GET");
     const res = await mw(req, next);
     // Not a public passthrough: anonymous annotation was applied, then passed on.

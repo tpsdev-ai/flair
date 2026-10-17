@@ -6,8 +6,7 @@
  * Each guarantee is exercised over a RAW socket where routing matters (so the
  * request target reaches Harper byte for byte, not normalized by fetch):
  *
- *   1. Record id. The shared owner guard decides on the FULL routed id (the
- *      whole decoded remainder after the table), so a non-owner mutation of an
+ *   1. Record id. A non-owner mutation of an
  *      id that contains `/` is refused and the row is unchanged, while an
  *      owner's mutation of a slash-containing id succeeds; a non-owner PATCH of a
  *      content-type-suffixed id answers the middleware's own named 503 when its

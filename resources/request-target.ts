@@ -1,24 +1,6 @@
 /**
  * request-target.ts — the raw request target the auth middleware decides on.
  *
- * Harper routes on the request target exactly as the client sent it: its
- * Request.url is the raw target, Request.pathname is everything before the
- * first `?`, and resource matching splits that raw path on `/`. A record id is
- * decoded only after the path has been split, so a percent-encoded `/` (`%2F`)
- * or `\` (`%5C`) inside a segment is part of that one segment — which is how an
- * id containing a reserved character addresses its record.
- *
- * At request time the auth middleware resolves the resource, record id and
- * property through Harper's OWN routing (resources/harper-routing.ts) for its
- * by-name and by-id decisions, content-type suffixes and suffixed-name fallbacks
- * included. The helpers here are the FALLBACK for those decisions when the live
- * route registry is unavailable (a unit mock) or the target matches no route, and
- * for the by-name decisions when the matcher throws; they mirror the first-dot
- * DECLARED-ATTRIBUTE rule and the split-then-decode of the remainder, and they do
- * not reproduce the content-type-suffix or suffixed-name dispatch rules — those
- * are left to the live routing. The middleware's non-admin Memory-selection rewrite also calls these
- * helpers on the live request, on the raw path.
- *
  * Before any other request processing, the middleware answers a target that is not in
  * canonical form with a named 400 (`non_canonical_request_target`). A raw
  * target is canonical unless its path (the part before the first `?`) has:
@@ -41,8 +23,7 @@ export const NON_CANONICAL_REQUEST_TARGET_ERROR = "non_canonical_request_target"
 const DOT_SEGMENT = /^(?:\.|%2e){1,2}$/i;
 
 /**
- * The path part of a raw request target: everything before the first `?`,
- * exactly as Harper's own Request.pathname reads it.
+ * The path part of a raw request target: everything before the first `?`.
  */
 export function requestPath(rawTarget: string): string {
   const q = rawTarget.indexOf("?");
@@ -61,7 +42,7 @@ export function isCanonicalRequestTarget(rawTarget: string): boolean {
 export function nonCanonicalRequestTargetRefusal(method?: string): Response {
   const body = JSON.stringify({
     error: NON_CANONICAL_REQUEST_TARGET_ERROR,
-    message: "the request target must be in canonical form: no '.' or '..' path segment, no empty path segment, and no backslash",
+    message: "the request target must be in canonical form: no '.' or '..' path segment, no repeated slashes (`//`), and no backslash",
   });
   return new Response(method === "HEAD" ? null : body, {
     status: 400,
@@ -71,8 +52,7 @@ export function nonCanonicalRequestTargetRefusal(method?: string): Response {
 
 /**
  * The raw path's segments, split on `/` FIRST and still percent-encoded.
- * Empty segments are dropped. Canonical paths permit leading and trailing
- * boundary segments; repeated slashes are refused.
+ * Empty segments are dropped.
  */
 export function rawPathSegments(path: string): string[] {
   return path.split("/").filter(Boolean);
@@ -93,12 +73,8 @@ export function decodePathSegment(segment: string): string | null {
 }
 
 /**
- * The resource name and still-encoded remainder Harper's routing hands a
- * RequestTarget: the first path segment, and everything after it with the one
- * leading slash removed. A bare resource path has no record id; a trailing-slash
- * path is a collection. Mirrors `Resources.getMatch`'s
- * `relativeURL` for a one-level resource and `RequestTarget`'s leading-slash
- * removal.
+ * For a plain one-level resource path, return the first segment and the
+ * still-encoded remainder after it, removing one leading slash.
  */
 export function routedResourceAndRemainder(path: string): { resource: string; remainder: string } {
   const p = path.startsWith("/") ? path.slice(1) : path;
@@ -108,14 +84,9 @@ export function routedResourceAndRemainder(path: string): { resource: string; re
 }
 
 /**
- * The record id Harper routes a `/<resource>/<remainder>` path to: the FULL
- * decoded remainder, exactly as `RequestTarget` sets
- * `id = decodeURIComponent(path)` — NOT just the first sub-segment. So an id
- * that itself contains `/` (sent raw or as `%2F`) resolves to the whole id, the
- * same row Harper operates on.
- *
- * Null for an empty or trailing-slash remainder and for a
- * remainder that is not valid percent-encoding (Harper answers that itself).
+ * Return the resource segment and fully decoded remainder (the initial
+ * RequestTarget id for a plain one-level resource path). `parsePath` can change
+ * the final row id. Null for an empty, trailing-slash or malformed remainder.
  */
 export function routedRecordId(path: string): { resource: string; id: string } | null {
   const { resource, remainder } = routedResourceAndRemainder(path);
@@ -131,10 +102,8 @@ export function routedRecordId(path: string): { resource: string; id: string } |
 }
 
 /**
- * Harper's first-dot property rule (`Resource.parsePath`): when the text after
- * the id's FIRST dot is a declared attribute of the resource, that suffix is a
- * property selector and the row is addressed by the id BEFORE the dot.
- * Applies only the declared-attribute rule; content-type extensions remain for Harper.
+ * Return the prefix before the first dot when its suffix is in
+ * `declaredAttributes`; otherwise return the id unchanged.
  */
 export function routedIdAfterPropertyRule(id: string, declaredAttributes: ReadonlySet<string>): string {
   const dot = id.indexOf(".");
@@ -143,13 +112,8 @@ export function routedIdAfterPropertyRule(id: string, declaredAttributes: Readon
 }
 
 /**
- * The resource name Harper routes the path's FIRST segment to, honoring the
- * file-type-suffix fallback in `Resources.getMatch`: when the whole first
- * segment is not a known resource but its text before the first `.` is, the
- * request routes to that shorter name (e.g. `OAuthToken.json` → `OAuthToken`).
- * `isKnown` answers whether a name is one of the resources the calling decision
- * distinguishes; an unknown first segment is returned unchanged, so no
- * unrelated path is rewritten.
+ * Return the first nonempty segment if `isKnown` accepts it, otherwise its
+ * prefix before the first dot if accepted, otherwise the segment unchanged.
  */
 export function routedFirstResourceName(path: string, isKnown: (name: string) => boolean): string {
   const seg = rawPathSegments(path)[0] ?? "";
@@ -160,11 +124,8 @@ export function routedFirstResourceName(path: string, isKnown: (name: string) =>
 }
 
 /**
- * `path` with its first segment replaced by the resource Harper routes it to
- * (see `routedFirstResourceName`), so a decision that compares the first
- * segment against `known` sees the routed resource for a suffix form. The rest
- * of the path is preserved. Unchanged when the first segment is already a known
- * resource or resolves to none.
+ * For a path with one leading slash, return it with the first segment replaced
+ * by `routedFirstResourceName`; unchanged when that name does not change.
  */
 export function routedResourcePath(path: string, known: ReadonlySet<string>): string {
   const segs = rawPathSegments(path);

@@ -66,8 +66,7 @@ function stripMemorySelection(rawUrl: string, routedToMemoryRecord: boolean): st
   let pathPart = q === -1 ? rawUrl : rawUrl.slice(0, q);
   let query = q === -1 ? "" : rawUrl.slice(q + 1);
 
-  // Apply Harper's first-dot declared-attribute rule to the decoded remainder.
-  // Content-type extensions remain for Harper.
+  // Strip a declared-attribute suffix after the first dot in the decoded remainder.
   const { remainder } = routedResourceAndRemainder(pathPart);
   const decodedId = decodeMemoryIdSegment(remainder);
   const stripped = routedIdAfterPropertyRule(decodedId, DECLARED_MEMORY_ATTRIBUTE_SET);
@@ -75,8 +74,6 @@ function stripMemorySelection(rawUrl: string, routedToMemoryRecord: boolean): st
   // upstream in the middleware), so only rewrite when there is no encoded slash
   // and the first-dot rule actually dropped a declared-attribute suffix.
   if (routedToMemoryRecord && !idSegmentHasEncodedSlash(remainder) && stripped !== decodedId) {
-    // Rebuild the id from its decoded form. Harper decodes the path it is handed,
-    // so this re-encoded id addresses the SAME row, without the property.
     pathPart = `/Memory/${encodeURIComponent(stripped)}`;
   }
 
@@ -100,9 +97,7 @@ function stripMemorySelection(rawUrl: string, routedToMemoryRecord: boolean): st
  * (`%2F`/`%2f`) AND would otherwise be given the property-suffix rewrite in
  * stripMemorySelection. Such an id is ambiguous — the trailing
  * `.<declared attribute>` could be part of the id or a selector on an id that
- * contains a slash (flair#2199). Decided on the FULL decoded remainder after
- * `/Memory`, the same id Harper routes to, with its first dot (not the last
- * path segment's).
+ * contains a slash (flair#2199).
  */
 function isAmbiguousEncodedSlashSelector(rawUrl: string): boolean {
   const { remainder } = routedResourceAndRemainder(requestPath(rawUrl));
@@ -348,17 +343,7 @@ const ALLOWED_HTTP_METHODS: ReadonlySet<string> = new Set([
 ]);
 
 // The resources the middleware makes a by-NAME decision on: the public-path
-// allowance and the OAuth rate-limit policy. The pure FALLBACK (`routedResourcePath`,
-// used when Harper's routing returns no route, e.g. no live registry, no
-// matching route, or a matcher error) resolves the first path
-// segment to a routed resource name here: Harper's file-type-suffix fallback
-// (Resources.getMatch) routes `<name>.<ext>` to `<name>` when `<name>.<ext>` is not
-// itself a resource, so a suffixed form (`OAuthToken.json`) would otherwise miss
-// the OAuth budget or the public allowance it routes to. Only names in this set are
-// resolved; any other first segment is left exactly as sent, so no unrelated path is
-// rewritten. The raw-query fallback resolves `sql`/`graphql` before lowercasing
-// the path. At request time the live route registry resolves the FIRST
-// segment instead (see `routedDecisionPath` below).
+// allowance and the OAuth rate-limit policy.
 const NAME_ROUTED_RESOURCES: ReadonlySet<string> = new Set([
   "health", "Health", "a2a", "A2AAdapter", "AgentCard",
   "FederationSync", "FederationPair",
@@ -378,21 +363,11 @@ server.http(async (request: any, nextLayer: any) => {
   if (!isCanonicalRequestTarget(rawTarget)) {
     return nonCanonicalRequestTargetRefusal(String(request.method ?? ""));
   }
-  // The raw path (everything before the first `?`), exactly as Harper's own
-  // Request.pathname reads it. The pure request-target helpers that read it split
-  // it on `/` FIRST and decode a segment only afterwards, so an encoded `/`
-  // (`%2F`) inside an id segment stays part of that one segment, as it does for
-  // Harper.
   const targetPath = requestPath(rawTarget);
 
   // ── Resolve the target through Harper's OWN routing, FIRST ──────────────────
-  // For a decision below that names a resource, record id or property — the
-  // stored-owner guard, the OrgEvent and WorkspaceState delete lookups, the OAuth
-  // rate-limit and public-path classifications — the middleware decides on what
-  // Harper's REST matcher routes: content-type suffixes, a suffixed resource name
-  // routed to the bare resource, and the first-dot property rule included.
   // Synchronous and before any await (getMatch mutates its entry in place; see
-  // harper-routing.ts). The pure mirror in request-target.ts is the fallback when
+  // harper-routing.ts). The helpers in request-target.ts are the fallback when
   // no route is returned: the live registry or Harper's `RequestTarget` is absent
   // (a unit test mocking `harper`), the target matches no route, or the matcher
   // throws. When the matcher throws, a signed non-admin agent's mutation that
@@ -449,12 +424,6 @@ server.http(async (request: any, nextLayer: any) => {
   // Every other path — /Memory, /Presence, /FederationSync, everything agents
   // actually use — returns null here and is untouched.
   //
-  // The decision is made on the resource Harper ROUTES to, including its
-  // file-type-suffix fallback (`OAuthToken.json` routes to `OAuthToken`) and a
-  // suffixed name followed by a remainder, so a suffixed form receives the same
-  // budget and the same public allowance as the bare route rather than slipping
-  // past an exact-string match. `routed.decisionPath` is Harper's own match;
-  // the pure mirror is the fallback when the registry is absent.
   const routedDecisionPath = routed?.decisionPath ?? routedResourcePath(targetPath, NAME_ROUTED_RESOURCES);
   const limited = checkHttpRateLimit(request, routedDecisionPath);
   if (limited) return limited;
@@ -778,8 +747,6 @@ server.http(async (request: any, nextLayer: any) => {
   // ── Raw query endpoint block (non-admins) ─────────────────────────────────
   // SQL and GraphQL endpoints bypass all resource-level scoping — block them
   // for non-admin agents. Admins (bootstrap, consolidation scripts) still pass.
-  // Decided on the resource Harper routes to, including the file-type-suffix
-  // fallback (`/sql.json` → `sql`), so a suffixed form cannot slip past.
   if (!request.tpsAgentIsAdmin) {
     const lowerPath = (routed ? routedDecisionPath : routedResourcePath(targetPath, RAW_QUERY_RESOURCES)).toLowerCase();
     if (
@@ -838,9 +805,6 @@ server.http(async (request: any, nextLayer: any) => {
     decodeMemoryIdSegment(lastRawPathSegment(targetPath)).endsWith(MEMORY_CONTENT_SELECTOR_SUFFIX);
 
   if (isMutation && !request.tpsAgentIsAdmin && !isReservedContentMutation) {
-    // The guarded record is resolved from Harper's own routing (resource + final
-    // id) when the registry is present, so the guard checks the row Harper
-    // mutates, not a differently-parsed one; the pure mirror is the fallback.
     const guarded = routed
       ? resolveGuardedRecordById(routed.resource, routed.recordId)
       : resolveGuardedRecord(targetPath);
@@ -1067,21 +1031,8 @@ server.http(async (request: any, nextLayer: any) => {
   }
 
   // ── Embedding backfill ─────────────────────────────────────────────────────
-  // The backfill runs ONLY for the record the write COMMITTED, never for an id a
-  // caller names in a header:
-  //   1. The Memory writer's own result body, when it names an id. A POST —
-  //      including a by-id POST that commits a SUCCESSOR with a different id
-  //      (skill versioning, flair#2263) — reports the committed id there.
-  //   2. Otherwise, for a PUT or PATCH to `/Memory/<id>`, the record id Harper
-  //      ROUTED: those verbs commit to the routed row (a PUT whose body names a
-  //      different id is refused, id_target_mismatch), and a PATCH answers 204
-  //      with no body, so the routed id is its committed id.
-  // A POST whose result names no id, a collection write with no reported id, and
-  // a DELETE (which commits no row) schedule no backfill.
   const isMemoryWrite = isMutation && method !== "DELETE" &&
     (routedDecisionPath === "/Memory" || routedDecisionPath.startsWith("/Memory/"));
-  // The routed id, captured before the next layer runs: Harper's own routing
-  // when the registry is present, the pure mirror otherwise.
   const routedMemoryWrite = routed
     ? (routed.resource === "Memory" ? routed.recordId : null)
     : (() => { const r = routedRecordId(targetPath); return r?.resource === "Memory" ? r.id : null; })();

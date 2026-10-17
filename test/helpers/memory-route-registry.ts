@@ -1,10 +1,7 @@
 /**
  * memory-route-registry.ts — a stand-in for Harper's live route registry
  * (`server.resources`) for unit tests that mock `harper` and need the
- * middleware's Harper-routed path. `getMatch` answers for one registered
- * `Memory` resource the way Harper's `Resources.getMatch` does: a `Memory`
- * prefix followed by `/`, `?` or the end, then the file-type-suffix fallback
- * (`Memory.<ext>...` routes to `Memory` with only the query left). The entry's
+ * middleware's Harper-routed path. The entry's
  * resource uses Harper's own `Resource.parsePath` over the declared Memory
  * attributes, and `HarperRequestTarget` is Harper's own `RequestTarget`, both
  * loaded from the installed package.
