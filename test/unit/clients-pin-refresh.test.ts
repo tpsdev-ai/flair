@@ -277,19 +277,35 @@ describe("flair#1135 — tomlSnippet still pins (regression guard)", () => {
 // ── flair#1167 — clearFlairCliVersionCache prevents stale-cache no-op ─────
 
 describe("flair#1167 — clearFlairCliVersionCache prevents stale-cache no-op", () => {
-  const PKG_PATH = join(import.meta.dirname, "..", "..", "package.json");
+  // The test simulates an in-process `npm install -g` by rewriting the
+  // package.json version, so it works on a TEMP copy: rewriting the
+  // repository's own package.json bumps its mtime, which the dist-freshness
+  // gate watches and refuses to start Harper against (flair#2588).
   let originalPkg: string;
   let realVersion: string;
+  let versionRoot: string;
+  let pkgPath: string;
+  let prevVersionRoot: string | undefined;
 
   beforeAll(() => {
-    originalPkg = readFileSync(PKG_PATH, "utf-8");
+    originalPkg = readFileSync(join(import.meta.dirname, "..", "..", "package.json"), "utf-8");
     realVersion = JSON.parse(originalPkg).version;
   });
 
-  afterEach(() => {
-    // Restore the real package.json after every test that might mutate it.
-    if (originalPkg) writeFileSync(PKG_PATH, originalPkg);
+  beforeEach(() => {
+    versionRoot = mkdtempSync(join(tmpdir(), "flair-pin-version-"));
+    pkgPath = join(versionRoot, "package.json");
+    writeFileSync(pkgPath, originalPkg);
+    prevVersionRoot = process.env.FLAIR_TEST_VERSION_ROOT;
+    process.env.FLAIR_TEST_VERSION_ROOT = versionRoot;
     clearFlairCliVersionCache();
+  });
+
+  afterEach(() => {
+    if (prevVersionRoot !== undefined) process.env.FLAIR_TEST_VERSION_ROOT = prevVersionRoot;
+    else delete process.env.FLAIR_TEST_VERSION_ROOT;
+    clearFlairCliVersionCache();
+    rmSync(versionRoot, { recursive: true, force: true });
   });
 
   it("stale cache → no-op without clear; refresh with clear", () => {
@@ -298,10 +314,10 @@ describe("flair#1167 — clearFlairCliVersionCache prevents stale-cache no-op", 
     // Prime the cache with the real version (simulating module-load before upgrade).
     expect(flairCliVersion()).toBe(realVersion);
 
-    // Simulate an in-process upgrade: bump package.json to a fake newer version.
+    // Simulate an in-process upgrade: bump the TEMP package.json to a fake newer version.
     const fakePkg = JSON.parse(originalPkg);
     fakePkg.version = FAKE_VERSION;
-    writeFileSync(PKG_PATH, JSON.stringify(fakePkg, null, 2) + "\n");
+    writeFileSync(pkgPath, JSON.stringify(fakePkg, null, 2) + "\n");
 
     // Write a config with the OLD (real) version as the pin — this is what a
     // pre-upgrade wired config looks like.

@@ -59,6 +59,23 @@ export function resolveFlairCliVersion(startDir: string): string {
 let cachedVersion: string | undefined;
 
 /**
+ * The directory {@link flairCliVersion} walks up from. Normally the module's
+ * own directory. A test that simulates an in-process `npm install -g` (which
+ * rewrites package.json) points `FLAIR_TEST_VERSION_ROOT` at a TEMP copy
+ * instead — rewriting the repository's own package.json changes its mtime,
+ * and the dist-freshness gate watches that file (flair#2588).
+ *
+ * Inert unless the variable is set. TRUSTED-ENV ASSUMPTION: this seam is only
+ * as privileged as the environment it is set in. Anyone who can set
+ * `FLAIR_TEST_VERSION_ROOT` for a flair process can already set HOME / the
+ * `FLAIR_*` variables, so it grants no capability that was not already
+ * available to them.
+ */
+function versionResolutionRoot(): string {
+  return process.env.FLAIR_TEST_VERSION_ROOT || import.meta.dirname || __dirname;
+}
+
+/**
  * This CLI's own version — the single source for `--version`, the CLI↔server
  * handshake, `upgrade --check`, and the MCP pin. Cached: the answer normally
  * cannot change within a process, and several commands ask repeatedly.
@@ -71,7 +88,7 @@ let cachedVersion: string | undefined;
  */
 export function flairCliVersion(): string {
   if (cachedVersion === undefined) {
-    cachedVersion = resolveFlairCliVersion(import.meta.dirname ?? __dirname);
+    cachedVersion = resolveFlairCliVersion(versionResolutionRoot());
   }
   return cachedVersion;
 }
