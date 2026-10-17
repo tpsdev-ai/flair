@@ -176,6 +176,22 @@ async function awaitBackfillVector(id: string, deadlineMs = 20_000): Promise<num
   return len;
 }
 
+/**
+ * Whether Harper's log carries the backfill's own completion line for `id`
+ * (`[auto-embed] <id>: <n>d`, written only by the middleware's embedding
+ * backfill), polled to a deadline. This names the id the backfill wrote, so it
+ * does not depend on what a row may have inherited from another row.
+ */
+async function awaitAutoEmbedLog(id: string, deadlineMs = 20_000): Promise<boolean> {
+  const needle = `[auto-embed] ${id}:`;
+  const deadline = Date.now() + deadlineMs;
+  while (Date.now() < deadline) {
+    if ((harper.getLog?.() ?? "").includes(needle)) return true;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  return false;
+}
+
 // A rate-limit budget small enough to spend in a few requests.
 const OAUTH_LIMIT = 5;
 const savedEnv: Record<string, string | undefined> = {};
@@ -345,5 +361,8 @@ describe("(3) the embedding backfill targets only the committed record", () => {
 
     const len = await awaitBackfillVector(successorId);
     expect(len, "the backfill wrote no vector to the successor row").toBeGreaterThan(100);
+    // The backfill's own log line names the id it wrote; it must be the successor,
+    // never the URL id.
+    expect(await awaitAutoEmbedLog(successorId), "the backfill logged no write for the successor id").toBe(true);
   }, 120_000);
 });
