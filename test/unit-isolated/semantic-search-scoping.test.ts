@@ -290,11 +290,11 @@ describe("SemanticSearch.post() — centralized read-scoping", () => {
       // Orthogonal to qEmb — the pre-fix `?? 1` fallback and the fixed
       // point-lookup cosine computation would BOTH read as "not similar" here,
       // so this record is a control: it must never be mistaken for a match.
-      memoryStore.set("m-orthogonal", { id: "m-orthogonal", agentId: "agent-1", content: "unrelated", visibility: "private", embedding: [0, 1, 0] });
+      memoryStore.set("m-orthogonal", { id: "m-orthogonal", agentId: "agent-1", content: "unrelated", visibility: "private", embedding: [0, 1, 0], embeddingModel: "mock-embedding-model" });
       // Identical to qEmb — cosineSimilarity == 1 exactly. Pre-fix this record
       // would score 0 (distanceToSimilarity(undefined ?? 1) === 0); post-fix it
       // must score a real positive similarity via the embedding point-lookup.
-      memoryStore.set("m-identical", { id: "m-identical", agentId: "agent-1", content: "matches the query", visibility: "private", embedding: [1, 0, 0] });
+      memoryStore.set("m-identical", { id: "m-identical", agentId: "agent-1", content: "matches the query", visibility: "private", embedding: [1, 0, 0], embeddingModel: "mock-embedding-model" });
 
       const s = makeSearch(agentCtx("agent-1"));
       const res: any = await s.post({ queryEmbedding: qEmb, scoring: "raw", limit: 10 });

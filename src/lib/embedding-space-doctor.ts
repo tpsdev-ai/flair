@@ -3,29 +3,35 @@
  * embedding-space guard's verdict (flair#2530).
  *
  * resources/embedding-space-guard.ts runs inside the Harper worker and reports
- * its verdict on the public /Health body as `embeddingSpace: { state, reason }`.
+ * its verdict on the public /Health body as
+ * `embeddingSpace: { state, reason, excluded }`.
  * The guard fails closed: only `state: "uniform"` serves the embedding leg; a
- * `mixed` state, an `unverified` verdict (before the first scan completes) and a
+ * `mixed` state, an `excluded` state (a scan found an array or typed array, empty
+ * included, without a trusted current-space stamp), an `unverified` verdict
+ * (before the first scan completes, or after a guard-notified write that may
+ * have changed the published count) and a
  * `scan-failed` verdict (the last published scan threw, no foreign stamp known)
  * all make the recall leg refuse a query embedding. This module is the single
  * decision: given that field, what doctor prints and whether it weighs on the
  * exit code.
  *
- * Only `mixed` is a blocking finding: a non-current model stamp was observed,
- * possibly stale until a successful rescan, which warrants investigation
- * (`flair reembed --stale-only` reconciles a real one). `unverified` and
+ * `mixed` and `excluded` are blocking findings: a non-current model stamp was
+ * observed, or the scan counted an array or typed array without a trusted stamp.
+ * `unverified` and
  * `scan-failed` are advisories, and `uniform` is an OK line. A rescan starts
  * only on a later guard consult (a recall with a query embedding outside
  * bm25-only mode, or a write-time dedup check; /Health does not consult): at
- * once while no verdict is known, otherwise once RECHECK_MS has passed since
- * the last published verdict. The state becomes `uniform` only when such a scan
- * succeeds and finds the stamps uniform; with no consults, nothing retries.
- * `uniform` means stamp-metadata uniformity: a stored vector without a
- * space-bearing `embeddingModel` stamp is not checked (flair#2573). An absent or
+ * once while the verdict is unknown or the count is stale, otherwise after
+ * RECHECK_MS while the verdict is non-uniform. A successful scan with no excluded
+ * arrays or typed arrays and no foreign space-bearing stamps permits `uniform`;
+ * with no consults, nothing retries.
+ * `uniform` means stamp-metadata uniformity (flair#2573 slice 1). The `excluded`
+ * line names the count when a valid published count is present; the other lines
+ * do not name a count (it may be stale after a write). An absent or
  * unrecognized field prints nothing: an older or foreign server's verdict is
  * not one to claim.
  */
-export type EmbeddingSpaceGuardState = "uniform" | "mixed" | "unverified" | "scan-failed";
+export type EmbeddingSpaceGuardState = "uniform" | "mixed" | "unverified" | "scan-failed" | "excluded";
 
 export interface EmbeddingSpaceDoctorFinding {
   /** true → contributes to doctor's issue count / non-zero exit. */
@@ -49,16 +55,32 @@ export function boundedScanFailureReason(reason: unknown): string {
 }
 
 /**
- * Doctor finding, or null when there is nothing to say. The four states map to
- * a distinct line: `uniform` an OK line; `mixed` a blocking finding with the
- * reembed remedy; `unverified` and `scan-failed` advisories naming the state.
+ * The guard's `excluded` count as a printable whole number, or null when it is
+ * absent or malformed (an older or foreign server, or no scan has published a
+ * count). Never rendered as zero on unknown evidence.
+ */
+function excludedCount(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
+}
+
+/** The clause naming the excluded count, or "" when it is unknown. */
+function excludedClause(value: unknown): string {
+  const n = excludedCount(value);
+  if (n === null) return "";
+  return `; excluded from the vector leg: ${n} row(s) with no trusted model stamp`;
+}
+
+/**
+ * Doctor finding, or null when there is nothing to say. The five states map to
+ * a distinct line: `uniform` an OK line; `mixed` and `excluded` blocking
+ * findings with a remedy; `unverified` and `scan-failed` advisories naming the
+ * state.
  */
 export function describeEmbeddingSpaceDoctorFinding(field: unknown): EmbeddingSpaceDoctorFinding | null {
   if (field == null || typeof field !== "object" || Array.isArray(field)) return null;
-  const rec = field as { state?: unknown; reason?: unknown };
+  const rec = field as { state?: unknown; reason?: unknown; excluded?: unknown };
   switch (rec.state) {
     case "uniform":
-      // Stamp metadata only; an unstamped stored vector is not checked (flair#2573).
       return { isIssue: false, icon: "ok", message: "embedding model stamps verified uniform" };
     case "mixed":
       return {
@@ -69,6 +91,15 @@ export function describeEmbeddingSpaceDoctorFinding(field: unknown): EmbeddingSp
           // A known foreign stamp outranks a scan error; name the error too.
           (rec.reason == null ? "" : `; last scan failed (${boundedScanFailureReason(rec.reason)})`),
         fixHint: "Reconcile to one space with: flair reembed --stale-only",
+      };
+    case "excluded":
+      return {
+        isIssue: true,
+        icon: "error",
+        message:
+          "the last scan found a stored vector with no trusted current-space stamp — the embedding leg is refused" +
+          excludedClause(rec.excluded),
+        fixHint: "Re-embed or remove the stored vector; a later embedding query must trigger and complete a rescan before flair doctor can confirm the repair",
       };
     case "unverified":
       return {

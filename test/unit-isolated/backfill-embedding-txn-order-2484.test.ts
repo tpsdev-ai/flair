@@ -217,7 +217,58 @@ describe("flair#2494 — the backfill's plan shape is pinned", () => {
     const id = "bfx-plan-shape";
     memoryRows.set(id, { id, agentId: "agent-a", content: "text to embed", contentHash: id, instanceToken: "tok" });
     await runBackfill(id);
-    // flair#2465: the write also records the hash of the text it embedded.
-    expect(writeCalls).toEqual([{ method: "update", id, fields: ["embeddedContentHash", "embedding"] }]);
+    // flair#2465: the write also records the hash of the text it embedded;
+    // flair#2573: and stamps the vector with the current model id.
+    expect(writeCalls).toEqual([{ method: "update", id, fields: ["embeddedContentHash", "embedding", "embeddingModel"] }]);
+    expect(memoryRows.get(id)?.embeddingModel).toBe("mock-embedding-model");
+  });
+});
+
+describe("flair#2573 — the backfill stamps its vector and notifies the embedding-space guard", () => {
+  /** Drive one backfill and wait until its stamp has landed and `settled` holds. */
+  async function backfillUntil(id: string, settled: () => boolean): Promise<void> {
+    const mw = await loadMiddleware();
+    const res: Response = await mw(makeRequest(`/Memory/${id}`, "PUT", "agent-a"), nextLayer);
+    expect(res.status).toBe(200);
+    const deadline = Date.now() + 5_000;
+    while (!(memoryRows.get(id)?.embeddingModel === "mock-embedding-model" && settled()) && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+  }
+
+  it("a vectorless row is stamped and the verdict stays uniform; replacing an untrusted vector marks the count stale", async () => {
+    const guard = await import("../../resources/embedding-space-guard.ts");
+    guard._resetGuardForTests();
+    guard._setGuardModelIdForTests(() => "mock-embedding-model");
+    guard._setGuardTableGetterForTests(async () => ({
+      search: async function* () { for (const row of memoryRows.values()) yield row; },
+    }));
+    try {
+      const plain = "bfx-guard-vectorless";
+      memoryRows.set(plain, { id: plain, agentId: "agent-a", content: "text to embed", contentHash: plain, instanceToken: "tok" });
+      expect(await guard.recomputeLatch()).toBe(true);
+      await backfillUntil(plain, () => true);
+      expect(memoryRows.get(plain)?.embedding).toEqual([0.11, 0.12, 0.13, 0.14]);
+      expect(memoryRows.get(plain)?.embeddingModel).toBe("mock-embedding-model");
+      // The stamped vector cannot change the count: the published verdict stands,
+      // and a fresh scan agrees with it.
+      expect(guard.spaceGuardState()).toEqual({ state: "uniform", reason: null, excluded: 0 });
+      expect(await guard.recomputeLatch()).toBe(true);
+
+      const untrusted = "bfx-guard-untrusted";
+      memoryRows.set(untrusted, { id: untrusted, agentId: "agent-a", content: "other text", contentHash: untrusted,
+        instanceToken: "tok", embedding: [1, 0], embeddingModel: null });
+      expect(await guard.recomputeLatch()).toBe(false);
+      expect(guard.spaceGuardState()).toEqual({ state: "excluded", reason: null, excluded: 1 });
+      await backfillUntil(untrusted, () => guard.spaceGuardState().state !== "excluded");
+      // The replaced row stored an untrusted vector: the notification marks the
+      // published count stale, and a fresh scan finds none.
+      expect(memoryRows.get(untrusted)?.embeddingModel).toBe("mock-embedding-model");
+      expect(guard.spaceGuardState()).toEqual({ state: "unverified", reason: null, excluded: 1 });
+      expect(await guard.recomputeLatch()).toBe(true);
+      expect(guard.spaceGuardState()).toEqual({ state: "uniform", reason: null, excluded: 0 });
+    } finally {
+      guard._resetGuardForTests();
+    }
   });
 });

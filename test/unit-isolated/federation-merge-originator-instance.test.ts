@@ -361,3 +361,13 @@ for (const field of ["table", "id"] as const) {
     expect(syncLogStore.size).toBe(0);
   });
 }
+
+it("normalizes an empty embedding in the Memory federation merge", async () => {
+  const { secretKey, publicKey } = keypair();
+  peerStore.set(PEER_ID, { id: PEER_ID, publicKey, createdAt: OLD, role: "hub", status: "connected" });
+  const data: Record<string, any> = { ...ROWS.Memory.data(ORIGIN), embedding: [] };
+  const record = pushedRecord("Memory", data.id, data, NEW, secretKey);
+  const result: any = await postSync({ instanceId: PEER_ID, records: [record], lamportClock: 1 }, secretKey);
+  expect(result.merged).toBe(1);
+  expect(stores.Memory.get(data.id).embedding).toBeNull();
+});

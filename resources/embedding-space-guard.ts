@@ -2,24 +2,12 @@
  * embedding-space-guard.ts — the QUERY-TIME vector-space uniformity gate
  * (embedding-provider-seam design §3, slice 1; K&S-final).
  *
- * ─── The bug this closes ────────────────────────────────────────────────────
- * There is NO query-time embedding-space guard today. Search cosines a query
- * against every stored vector regardless of its `embeddingModel` stamp;
- * Harper's `cosineDistance` silently zero-pads a mismatched-dimension vector
- * and returns a garbage score instead of throwing (same-dims/different-space
- * is silent garbage too), and `health.ts` only *warns*. So a mixed-space
- * corpus — the transient state during ANY re-embed / model change — serves
- * silently-wrong recall. This module makes a mismatched-space cosine
- * impossible by construction on BOTH runtime cosine legs (recall + write-time
- * dedup), the load-bearing safety piece Kern made a condition of sign-off.
- *
  * ─── Shape ──────────────────────────────────────────────────────────────────
  * A PURE core (`normalizeStamp` / `currentSpaceRawForms` / `isUniformStampSet`
  * — Harper-free, unit-testable directly, same discipline as dedup.ts / bm25.ts)
  * plus a boot-computed + write-maintained "corpus uniform in the current space"
  * LATCH so the gate costs ~nothing per query:
- *   - boot pre-warm scans the DISTINCT active stamps once (module side effect,
- *     same convention as embeddings-boot.ts / migration-boot.ts);
+ *   - boot pre-warm scans the corpus;
  *   - a write persisting a FOREIGN stamp (federation / replication / an
  *     explicit-stamp PUT) trips the latch immediately, no rescan;
  *   - while tripped, a consult re-verifies at most once per RECHECK_MS, so a
@@ -34,15 +22,17 @@
  * ─── Unknown verdict = FAIL CLOSED (flair#2530) ──────────────────────────────
  * A scan can be pending (before the first scan completes) or fail (a boot race,
  * a transient read error). The verdict is then UNKNOWN, and "unknown" is NOT
- * "known uniform": only a scan that verified every space-bearing
- * `embeddingModel` stamp to be the current space opens the gate
- * (`isEmbeddingSpaceUniform()` returns true). That is STAMP-METADATA
- * uniformity: the scan ignores a missing stamp and the hash-fallback marker
- * `hash-512d`, so the verdict says nothing about the space of a stored vector
- * without a space-bearing stamp, including a hash-fallback vector
- * (stored-vector provenance is deferred to flair#2573). Every other state — pending
- * (`unverified`), a failed scan (`scan-failed`), or a non-current stamp observed
- * by a scan or a foreign write (`mixed`) — makes a consumer take its
+ * "known uniform". The scan counts rows with any array or typed array, empty
+ * included, whose `embeddingModel` is not a trusted current-space stamp — an
+ * absent stamp, the hash-fallback marker `hash-512d`, or a foreign model — using
+ * the vector query's raw stamp comparison,
+ * and a count above zero makes the verdict non-uniform (flair#2573 slice 1).
+ * Raw operations-API inserts are uncovered until a rescan; the latch observes
+ * only writes that call `noteWriteStamp`. Caller-supplied vector bytes remain
+ * unverified (slice 2). Every non-uniform state — pending
+ * (`unverified`), a failed scan (`scan-failed`), a non-current stamp observed
+ * by a scan or a foreign write (`mixed`), or an excluded array or typed array
+ * (`excluded`) — makes a consumer take its
  * MIXED-space path: when a query embedding is available outside bm25-only
  * mode, the recall leg drops it and
  * serves keyword-only results (none, for a request with no query text; for
@@ -72,14 +62,7 @@ import { TEST_FAULT_INJECTION_ENV, txnPausePoint } from "./txn-pause-point.js";
 
 // ─── Pure core (Harper-free) ────────────────────────────────────────────────
 
-/**
- * Stamps that denote "no real vector space" and so never contribute to the
- * uniformity set: an absent/empty stamp, and the legacy `hash-512d`
- * hash-fallback marker (a row with no genuine model embedding). A missing or
- * empty stored embedding cosines to a safe 0 (retrieval-core / dedup both
- * guard `Array.isArray(embedding) ? … : []`), never a cross-space garbage
- * score, so excluding these mirrors health.ts's own `realModels` filter.
- */
+/** Stamps omitted from the space-bearing stamp set. */
 const NON_SPACE_STAMPS: ReadonlySet<string> = new Set(["hash-512d"]);
 
 /**
@@ -129,11 +112,19 @@ export function isCurrentSpaceStamp(stamp: string | null | undefined, currentMod
   return n !== null && n === normalizeStamp(currentModelId);
 }
 
-/**
- * Pure: is every active (real-vector) stamp in the set the current space? An
- * empty set (fresh store) is uniform. No-vector stamps (null / `hash-512d`)
- * are ignored — they carry no cross-space cosine hazard.
- */
+/** Pure: is the stored value an array or typed array, including an empty one? */
+export function hasStoredVector(value: unknown): boolean {
+  return Array.isArray(value) || (ArrayBuffer.isView(value) && !(value instanceof DataView));
+}
+
+/** Pure: is `stamp` EXACTLY one of the current space's raw forms? The vector
+ *  query's stamp condition matches raw strings (Harper `equals`), so this is the
+ *  comparison the admission rule makes — no trimming. */
+export function isTrustedRawStamp(stamp: string | null | undefined, currentModelId: string): boolean {
+  return typeof stamp === "string" && currentSpaceRawForms(currentModelId).includes(stamp);
+}
+
+/** Pure: are all space-bearing stamps current? An empty set is uniform. */
 export function isUniformStampSet(
   distinctStamps: Iterable<string | null | undefined>,
   currentModelId: string,
@@ -164,6 +155,12 @@ let _modelIdGetter: () => string = getModelId;
 // than caching a verdict we could not compute.
 let _uniform: boolean | undefined = undefined;
 let _activeStamps: string[] = []; // normalized, capped — for the degrade diagnostic only
+// Rows with an array or typed array (empty included) and no trusted stamp in
+// the last published scan. Null means no count has published.
+let _excluded: number | null = null;
+// Guard-notified writes that may change the count invalidate in-flight scans.
+// A scan publishing a fresh count clears this flag.
+let _excludedStale = false;
 let _lastScanAt = 0;
 let _scanning: Promise<void> | undefined;
 // flair#2481 — foreign-space write notes invalidate an in-flight scan's verdict.
@@ -203,21 +200,39 @@ async function scan(): Promise<void> {
   // a real boot window exposes.
   const parked = txnPausePoint("space-guard-scan");
   if (parked) await parked;
-  const current = normalizeStamp(_modelIdGetter());
+  const currentStamp = _modelIdGetter();
+  const currentNorm = normalizeStamp(currentStamp);
+  // The raw forms that denote the current space, compared EXACTLY as the vector
+  // query's stamp condition compares them (Harper `equals` applies no whitespace
+  // or prefix normalisation). The query's stamp condition filters a row whose raw
+  // stamp is not one of these from the returned set; HNSW can still compute that
+  // row's distance during traversal, so the protection at traversal level is this
+  // scan's verdict, not the condition.
+  const trustedRaw = new Set(currentSpaceRawForms(currentStamp));
   const seen = new Set<string>();
   let uniform = true;
+  // Count every array or typed array without a trusted stamp, including empty ones.
+  let excluded = 0;
   // Which half of the scan threw, for the bounded failure reason below.
   let phase: "table" | "read" = "table";
   try {
     const table = await _tableGetter();
     phase = "read";
-    // Project ONLY the stamp — never the vector — so the boot scan is far
-    // cheaper than health.ts's existing full-record corpus read.
-    for await (const row of table.search({ select: ["embeddingModel"] })) {
-      const n = normalizeStamp((row as { embeddingModel?: unknown }).embeddingModel as string | null | undefined);
-      if (n === null) continue;
-      if (seen.size < MAX_DIAG_STAMPS) seen.add(n);
-      if (n !== current) uniform = false;
+    // Project the stamp and the vector attribute. Two rules, kept separate:
+    //  - uniformity (flair#2481, unchanged): any space-bearing stamp that is not
+    //    the current space makes the corpus `mixed`, whether or not the row
+    //    stores a vector;
+    //  - the excluded count (flair#2573): any array or typed array, empty included,
+    //    without a trusted current-space stamp.
+    for await (const row of table.search({ select: ["embeddingModel", "embedding"] })) {
+      const rec = row as { embeddingModel?: unknown; embedding?: unknown };
+      const raw = typeof rec.embeddingModel === "string" ? rec.embeddingModel : null;
+      const n = normalizeStamp(raw);
+      if (n !== null) {
+        if (seen.size < MAX_DIAG_STAMPS) seen.add(n);
+        if (n !== currentNorm) uniform = false;
+      }
+      if (hasStoredVector(rec.embedding) && !(raw !== null && trustedRaw.has(raw))) excluded++;
     }
     // Test-only: inert unless the fault-injection opt-in is set and this point
     // is armed (flair#2508). It holds this scan after its read, so a scan that
@@ -239,6 +254,8 @@ async function scan(): Promise<void> {
     }
     _activeStamps = [...seen];
     _uniform = uniform;
+    _excluded = excluded;
+    _excludedStale = false;
     _publishedScanSeq = scanSeq;
     _lastScanAt = Date.now();
     // A published verdict clears any earlier failed-scan state.
@@ -275,15 +292,18 @@ function runScan(): Promise<void> {
   return _scanning;
 }
 
-// ─── Verdict state (flair#2530) ──────────────────────────────────────────────
-// The latch's verdict has FOUR operator-visible states. Only `uniform` — a scan
-// that verified the corpus's model stamps — opens the gate. The other three are NOT "known
-// uniform" and fail closed: `unverified` (no scan has reached a verdict yet),
-// `scan-failed` (the last scan to publish an outcome threw, and no foreign
-// stamp is known), and `mixed` (a scan or a foreign write observed a
-// non-current stamp). `mixed` outranks `scan-failed`: a known foreign stamp
+// ─── Verdict state (flair#2530, flair#2573) ──────────────────────────────────
+// The latch's verdict has FIVE operator-visible states. Only `uniform` — a scan
+// with no excluded arrays or typed arrays and no foreign stamps — opens the gate.
+// The other four fail closed: `unverified` (no scan has reached a verdict yet, or
+// a write may since have changed the count), `scan-failed` (the last scan to
+// publish an outcome threw, and no foreign
+// stamp is known), `mixed` (a scan or a foreign write observed a
+// non-current stamp), and `excluded` (no foreign space-bearing stamp was found,
+// but the scan found an array or typed array with no trusted current-space stamp). `mixed`
+// outranks `scan-failed`: a known foreign stamp
 // decides the state whether a failed scan came before or after it.
-export type EmbeddingSpaceGuardState = "uniform" | "mixed" | "unverified" | "scan-failed";
+export type EmbeddingSpaceGuardState = "uniform" | "mixed" | "unverified" | "scan-failed" | "excluded";
 
 export interface EmbeddingSpaceVerdict {
   /** true ONLY when a scan verified the stamps uniform. False ⇒ take the mixed path. */
@@ -300,11 +320,14 @@ export interface EmbeddingSpaceVerdict {
    *  later foreign writes, for the diagnostic. An observation can be stale (a
    *  foreign row since deleted) until a successful rescan. */
   found: string[];
+  /** Rows with any array or typed array (empty included) without a trusted stamp
+   *  in the last published scan. Null until a count publishes. */
+  excluded: number | null;
 }
 
 /** The state-named warning a guard-degraded consumer surfaces when it refuses
  *  its embedding leg (flair#2530, flair#2559). The verdict is never `uniform`
- *  here (that state is never degraded), so the three cases are exactly the
+ *  here (that state is never degraded), so the four cases are exactly the
  *  non-uniform states. Each names itself; the non-current-stamp wording is used
  *  ONLY for the `mixed` state. `response` says what the caller gets back:
  *  keyword-only results (the request has query text), no results (it has none),
@@ -321,6 +344,12 @@ export function spaceGuardWarning(v: EmbeddingSpaceVerdict, response: "keyword" 
   }
   if (v.state === "unverified") {
     return `semantic search unavailable — embedding space not yet verified; ${outcome}.`;
+  }
+  if (v.state === "excluded") {
+    return (
+      `semantic search unavailable — the last scan found a stored vector with no trusted current-space stamp ` +
+      `(${v.excluded ?? "unknown"} row(s)); ${outcome}. Re-embed or remove the row`
+    );
   }
   return (
     `semantic search unavailable — a non-current embedding model stamp was observed ` +
@@ -353,40 +382,82 @@ function noteScanFailure(reason: string): void {
 function guardSnapshot(): EmbeddingSpaceVerdict {
   const current = normalizeStamp(_modelIdGetter()) ?? _modelIdGetter();
   const found = [..._activeStamps];
+  const excluded = _excluded;
   // A known foreign stamp comes first, so no failed scan, earlier or later,
   // turns the `mixed` state into an advisory `scan-failed`; the error rides in `reason`.
-  if (_uniform === false) return { uniform: false, state: "mixed", reason: _lastScanError, current, found };
+  if (_uniform === false) return { uniform: false, state: "mixed", reason: _lastScanError, current, found, excluded };
   if (_lastScanError !== null) {
-    return { uniform: false, state: "scan-failed", reason: _lastScanError, current, found };
+    return { uniform: false, state: "scan-failed", reason: _lastScanError, current, found, excluded };
   }
-  if (_uniform === true) return { uniform: true, state: "uniform", reason: null, current, found };
-  return { uniform: false, state: "unverified", reason: null, current, found };
+  // flair#2573 — a guard-notified write may have changed the count since
+  // publication. An unknown count fails closed until a scan republishes.
+  if (_excludedStale) return { uniform: false, state: "unverified", reason: null, current, found, excluded };
+  if (_uniform === true) {
+    if (excluded !== null && excluded > 0) {
+      // The scan found an array or typed array without a trusted stamp and no foreign space-bearing stamp.
+      return { uniform: false, state: "excluded", reason: null, current, found, excluded };
+    }
+    return { uniform: true, state: "uniform", reason: null, current, found, excluded };
+  }
+  return { uniform: false, state: "unverified", reason: null, current, found, excluded };
 }
 
 /** The consult decision. Fails closed and never awaits an in-flight scan: an
- *  unknown verdict must be reported NOW (the caller takes its mixed-space path)
- *  rather than block until a scan finishes. A pending or stale verdict kicks off
- *  a (re)scan; if it succeeds and finds the stamps uniform, later consults pass.
+ *  unknown verdict must be reported NOW (the caller takes its mixed-space path).
+ *  Non-uniform verdicts trigger rescans immediately when unknown or stale,
+ *  otherwise after RECHECK_MS.
  *  The snapshot is taken synchronously, so the state cannot drift from the
  *  decision. */
 function consultGuard(): EmbeddingSpaceVerdict {
-  if (_uniform === true && _lastScanError === null) return guardSnapshot();
-  if (_uniform === undefined || Date.now() - _lastScanAt >= RECHECK_MS) {
+  if (guardSnapshot().uniform) return guardSnapshot();
+  if (_uniform === undefined || _excludedStale || Date.now() - _lastScanAt >= RECHECK_MS) {
     void runScan();
   }
   return guardSnapshot();
 }
 
-/** THE single chokepoint. Returns true when a scan verified every
- *  space-bearing `embeddingModel` stamp to be the current space (stamp metadata
- *  only; a stored vector without such a stamp is not checked, flair#2573), false
- *  otherwise — including the UNKNOWN verdict (pending first scan, or a failed
- *  scan), which fails closed (the caller must take its mixed-space path). O(1)
- *  on the happy path: once verified-uniform, no scan; a pending or tripped
- *  verdict kicks off a (re)scan the caller does NOT wait for, so the unknown
- *  verdict is reported now, not after the scan. */
+/** Returns the guard verdict: only a successful scan with no excluded arrays or
+ *  typed arrays and no foreign space-bearing stamps permits the embedding leg. */
 export function isEmbeddingSpaceUniform(): Promise<boolean> {
   return Promise.resolve(consultGuard().uniform);
+}
+
+/**
+ * flair#2573 slice 1 — is `stamp` a trusted current-space model stamp for the
+ * configured model? True only for a space-bearing stamp that denotes the current
+ * space (the engine-qualified id or its bare-name equivalent), compared exactly
+ * as the vector query's stamp condition compares it. An absent stamp, the
+ * `hash-512d` marker and a foreign model are all untrusted. Reads the injectable
+ * model-id getter so tests can pin the space. Metadata compare only (never a
+ * vector-byte comparison).
+ */
+export function isTrustedVectorStamp(stamp: string | null | undefined): boolean {
+  return isTrustedRawStamp(stamp, _modelIdGetter());
+}
+
+/**
+ * flair#2573 slice 1 — the Harper condition matching rows whose `embeddingModel`
+ * is one of the current space's raw forms. This is DEFENCE IN DEPTH: the guard's
+ * verdict is the load-bearing exclusion (a non-uniform verdict makes every
+ * consumer refuse the embedding leg), and a query `conditions` entry cannot keep
+ * a vector out of Harper's HNSW traversal — its distance is computed before an
+ * admission condition is applied. Used as an ADDITIONAL condition on a vector
+ * (HNSW) query ONLY — never folded into the caller's `conditions`, which also
+ * drive the lexical leg (a row with an untrusted stamp remains eligible for
+ * lexical matching).
+ */
+export function trustedVectorCondition(): {
+  operator: "or";
+  conditions: { attribute: string; comparator: "equals"; value: string }[];
+} {
+  return {
+    operator: "or",
+    conditions: currentSpaceRawForms(_modelIdGetter()).map((value) => ({
+      attribute: "embeddingModel",
+      comparator: "equals" as const,
+      value,
+    })),
+  };
 }
 
 /** The full verdict for a consumer that must NAME the state it degraded on
@@ -399,31 +470,52 @@ export function embeddingSpaceVerdict(): Promise<EmbeddingSpaceVerdict> {
 
 /** The guard state for an operator surface (`flair doctor` via /Health), without
  *  running a scan. Never blocks, never reads a vector. */
-export function spaceGuardState(): { state: EmbeddingSpaceGuardState; reason: string | null } {
+export function spaceGuardState(): { state: EmbeddingSpaceGuardState; reason: string | null; excluded: number | null } {
   const v = guardSnapshot();
-  return { state: v.state, reason: v.reason };
+  return { state: v.state, reason: v.reason, excluded: v.excluded };
 }
 
 /**
- * Write-maintained trip: a persisted FOREIGN-space stamp closes the gate
- * immediately, no rescan.
+ * Call after persisting a vector or embeddingModel write, passing the resulting
+ * stamp (possibly absent) and the row the write replaced: `null` when there was
+ * none, omitted when the caller did not read it. Metadata-only PATCHes must not
+ * call this hook. A write invalidates the count when its stamp is untrusted or it
+ * may repair an untrusted vector: the replaced row stored one, or the replaced
+ * row is unknown while the verdict is non-uniform. A trusted write over a known
+ * row with no untrusted vector leaves the published count, and so the state,
+ * as it was. A foreign space also closes the latch.
  */
-export function noteWriteStamp(stamp: string | null | undefined): void {
+export function noteWriteStamp(
+  stamp: string | null | undefined,
+  previous?: { embedding?: unknown; embeddingModel?: unknown } | null,
+): void {
   let n: string | null;
   let current: string | null;
   try {
+    const currentStamp = _modelIdGetter();
+    const replacesUntrusted = hasStoredVector(previous?.embedding) &&
+      !isTrustedRawStamp(typeof previous?.embeddingModel === "string" ? previous.embeddingModel : null, currentStamp);
+    if (isTrustedRawStamp(stamp, currentStamp) && !replacesUntrusted &&
+      (previous !== undefined || guardSnapshot().uniform)) return;
     n = normalizeStamp(stamp);
-    if (n === null) return;
-    current = normalizeStamp(_modelIdGetter());
+    current = normalizeStamp(currentStamp);
   } catch (err) {
+    // The stamp could not be read against the current space: fail closed, as
+    // for any other unreadable state, and invalidate an in-flight scan.
     _uniform = false;
+    _excludedStale = true;
     _writeEpoch++;
     throw err;
   }
-  if (n !== current) {
+  // This notified write may change the excluded count. Invalidate an in-flight
+  // scan; the next published scan clears the stale flag.
+  _excludedStale = true;
+  _writeEpoch++;
+  // A space-bearing, non-current stamp additionally trips the uniformity latch
+  // now, with no rescan, and is named in the diagnostic.
+  if (n !== null && n !== current) {
     if (!_activeStamps.includes(n) && _activeStamps.length < MAX_DIAG_STAMPS) _activeStamps.push(n);
     _uniform = false;
-    _writeEpoch++;
   }
 }
 
@@ -438,7 +530,8 @@ export function noteWriteStamp(stamp: string | null | undefined): void {
 export async function recomputeLatch(): Promise<boolean> {
   _lastScanAt = 0; // bypass the throttle
   await scan();
-  return _uniform === true && _lastScanError === null;
+  // Any excluded array or typed array makes the verdict non-uniform.
+  return _uniform === true && _lastScanError === null && !_excludedStale && (_excluded === null || _excluded === 0);
 }
 
 /**
@@ -491,6 +584,8 @@ export function _resetGuardForTests(): void {
   _modelIdGetter = getModelId;
   _uniform = undefined;
   _activeStamps = [];
+  _excluded = null;
+  _excludedStale = false;
   _lastScanAt = 0;
   _scanning = undefined;
   _writeEpoch = 0;

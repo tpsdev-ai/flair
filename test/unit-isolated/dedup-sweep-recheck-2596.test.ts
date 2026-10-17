@@ -56,7 +56,10 @@ let sweepSearchCalls = 0;
 let tripAfterFirstScanRow: (() => void) | undefined;
 
 function memorySearchGen(query: any) {
-  if (query?.select?.includes("embedding")) sweepSearchCalls++;
+  // The sweep's ANN pass projects `id` and `embedding`. The guard's scan also
+  // projects `embedding` (beside `embeddingModel`, flair#2573) and is not the
+  // sweep, so only the sweep's projection is counted.
+  if (query?.select?.includes("embedding") && query.select.includes("id")) sweepSearchCalls++;
   const conditions = Array.isArray(query) ? query : Array.isArray(query?.conditions) ? query.conditions : [];
   let records = Array.from(memoryStore.values());
   for (const cond of conditions) records = records.filter((r) => matchesCondition(r, cond));
@@ -200,6 +203,8 @@ describe("MemoryDedupStats re-checks the verdict before persisting (flair#2596)"
     expect(typeof res.clusterCount).toBe("number");
     expect(res.embeddingSpace).toBeUndefined();
     expect(JSON.parse(readFileSync(statsPath, "utf8")).clusterCount).toBe(res.clusterCount);
+    // The sweep-search counter the pending-scan case relies on does count a sweep.
+    expect(sweepSearchCalls).toBeGreaterThan(0);
   });
 
   it("a guard trip while awaiting the final verdict leaves the stat file unchanged", async () => {
