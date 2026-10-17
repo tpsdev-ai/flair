@@ -20,19 +20,20 @@ import { SHARDS, assignShards, listUnitFiles } from "./unit-shards.mjs";
 export const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
 /**
- * `root unit tests`' own per-step limit (flair#2030): 450 s, 1.37x its slowest
- * measured run (327 s). It is set on each root unit shard step here because the
- * plan is built here; scripts/test-unit.ts re-exports it so the runner and its
- * tests keep one source of truth.
+ * `root unit tests`' own per-step limit (flair#2030): 450 s, 1.69x its slowest
+ * measured root shard (266 s). It is set on each root unit shard step here
+ * because the plan is built here; scripts/test-unit.ts re-exports it so the
+ * runner and its tests keep one source of truth.
  */
 export const ROOT_STEP_TIMEOUT_MS = 450_000;
 
 /**
  * How many shards the shared unit lane is split across (flair#2311). Chosen from
- * the lane budget: the 780 s lane takes 533-741 s on green runs, so two shards
- * put the slowest shard near half the budget with the same headroom the root
- * step keeps after flair#2258. The workflow matrix and this constant are pinned
- * together by lane-shards.test.ts.
+ * the lane budget: with the 1200 s budget (flair#2614) the slowest lane shard
+ * measured 781 s across the last ~20 CI legs, so two shards keep the slowest
+ * shard inside the budget with the same headroom the root step keeps after
+ * flair#2258. The workflow matrix and this constant are pinned together by
+ * lane-shards.test.ts.
  */
 export const LANE_SHARDS = 2;
 

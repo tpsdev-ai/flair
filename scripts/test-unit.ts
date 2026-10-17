@@ -40,24 +40,26 @@ export function unitTempBase(platform: NodeJS.Platform, env: NodeJS.ProcessEnv):
 }
 
 
-// ── Time bounds (flair#2030, resized flair#2224) ───────────────────────────
+// ── Time bounds (flair#2030, resized flair#2224 and flair#2614) ────────────
 //
 // A hung step must not take the rest of the lane with it. Without a bound, the
 // CI job's own limit cancels the job mid-step, and neither the later steps, the
 // final summary nor the end-of-lane guards ever run. Every number below is
 // derived from that job: `.github/workflows/test.yml`, job `test-unit`,
-// `timeout-minutes: 15`. Measured on 22 recent `Unit Tests (node N)` legs
-// (2026-10-02) plus a local run on the same tree:
+// `timeout-minutes: 22`. Measured on the last ~20 completed `Unit Tests (node
+// N, shard M)` legs (2026-10-17) plus a local run on the same tree:
 //   - the job's own steps outside the lane (setup before it, the skip-count
 //     check and post steps after it): at most 53 s (2026-09-29);
-//   - the whole lane: 401–510 s, and 456 s locally;
-//   - `root unit tests`, the one long step: 252–327 s (280 s locally);
-//   - every other step at most 33 s; in that
-//     set the median is 1–2 s.
-// The budget is whole-lane headroom: about 1.53× the slowest measured lane
-// (510 s), still subject to each step's own limit below; the old 510 s
-// budget sat at that worst lane's length and killed whichever late step was running
-// on a busy runner (flair#2224: `flair-mcp` on #2220, `adk-flair-js` on main).
+//   - the whole lane: each leg runs one shard (flair#2311); the slowest shard
+//     measured 781 s (p90 over the sample 755 s), 456 s locally;
+//   - `root unit tests`: 96–266 s per root shard, and the two root shards one
+//     lane shard carries together measure 279–509 s;
+//   - the slowest non-root step measured 43 s; in that set the median is 1–2 s.
+// The budget is whole-lane headroom: 1320 − 120 = 1200 s, about 1.54× the
+// slowest measured shard (781 s), still subject to each step's own limit below;
+// the old 780 s budget sat below that shard and killed whichever late step was
+// running on a busy runner (flair#2614: four node-22 shard runs were killed at
+// `test/unit-isolated/` steps with steps unrun on 2026-10-17).
 // unit-runner.test.ts pins the job limit and re-checks the arithmetic, so a
 // change to either side fails there first.
 //
@@ -66,13 +68,13 @@ export function unitTempBase(platform: NodeJS.Platform, env: NodeJS.ProcessEnv):
 // time-limited: these numbers describe a CI runner, and a slower machine must
 // not turn a slow step into a failure.
 
-/** The CI job limit the lane has to report inside (`timeout-minutes: 15`). */
-export const CI_JOB_LIMIT_MS = 15 * 60_000;
+/** The CI job limit the lane has to report inside (`timeout-minutes: 22`). */
+export const CI_JOB_LIMIT_MS = 22 * 60_000;
 /** Reserved for the job's own steps outside the lane: 53 s measured, 67 s spare. */
 export const CI_OUTSIDE_LANE_MS = 120_000;
 /**
- * Keep-going's whole-lane budget: 900 − 120 = 780 s, about 1.53× the slowest
- * measured lane (510 s). A step still running when it runs out is killed and every later
+ * Keep-going's whole-lane budget: 1320 − 120 = 1200 s, about 1.54× the slowest
+ * measured shard (781 s). A step still running when it runs out is killed and every later
  * step is reported as not run, so the summary and both guards are expected to
  * print before the job limit however many steps hang, provided the job's steps
  * outside the lane stay within the reserve above (an observed margin, not a
@@ -80,15 +82,15 @@ export const CI_OUTSIDE_LANE_MS = 120_000;
  */
 export const KEEP_GOING_LANE_BUDGET_MS = CI_JOB_LIMIT_MS - CI_OUTSIDE_LANE_MS;
 /**
- * The default per-step limit: 100 s, 3× the slowest ordinary step (33 s). One
+ * The default per-step limit: 150 s, 3× the slowest ordinary step (43 s). One
  * hung step costs at most that, so the rest of the slowest lane still runs
- * inside the budget (510 + 100 = 610 s ≤ 780 s).
+ * inside the budget (781 + 150 = 931 s ≤ 1200 s).
  */
-export const STEP_TIMEOUT_MS = 100_000;
-// `root unit tests`' own limit is 450 s, 1.37× its slowest measured run (327 s).
-// If it hangs, the other ~183 s of the lane still fits (183 + 450 = 633 s ≤
-// 780 s). It is defined in scripts/ci/lane-shards.mjs, which builds the plan,
-// and re-exported above for this module's tests.
+export const STEP_TIMEOUT_MS = 150_000;
+// `root unit tests`' own limit is 450 s, 1.69× its slowest measured root shard
+// (266 s). If it hangs, the slowest lane shard's other steps still fit (272 +
+// 450 = 722 s ≤ 1200 s). It is defined in scripts/ci/lane-shards.mjs, which
+// builds the plan, and re-exported above for this module's tests.
 
 /** The time limits a lane runs under (flair#2030). */
 export interface UnitLaneLimits {
@@ -175,6 +177,8 @@ export interface UnitLaneFailure {
   kind: "step" | "not-run" | "guard";
   name: string;
   detail: string;
+  /** The running step was killed when the LANE budget ran out, not by a test failure (flair#2614). */
+  budgetKill?: boolean;
 }
 
 /**
@@ -278,6 +282,17 @@ export function summarizeUnitLane(failures: readonly UnitLaneFailure[], totalSte
     ? `ran ${totalSteps - notRun.length} of ${totalSteps} steps, ${stepFailures.length} failed, ${notRun.length} not run`
     : `ran ${totalSteps} step${totalSteps === 1 ? "" : "s"}, ${stepFailures.length} failed`;
   const lines = [`Unit lane FAILED (keep-going): ${counts}.`];
+  const budgetKills = stepFailures.filter(failure => failure.budgetKill);
+  if (budgetKills.length) {
+    // The kill is the LANE budget running out, not a test defect: one clear line,
+    // before the per-step lists, naming the killed step and the not-run count, so
+    // a budget kill reads as its own outcome, not a test failure (flair#2614).
+    lines.push(
+      `Lane budget kill (not a test failure): ${budgetKills.map(failure => failure.name).join(", ")} ` +
+        `${budgetKills.length === 1 ? "was" : "were"} killed when the lane's time budget ran out; ` +
+        `${notRun.length} step${notRun.length === 1 ? "" : "s"} not run.`,
+    );
+  }
   const section = (title: string, list: UnitLaneFailure[], line: (failure: UnitLaneFailure) => string): void => {
     if (!list.length) return;
     lines.push(title);
@@ -310,6 +325,8 @@ const errorMessage = (error: unknown): string => (error instanceof Error ? error
 interface StepOutcome {
   detail?: string;
   killedAtLimit: boolean;
+  /** The kill was the LANE budget, not the step's own limit (flair#2614). */
+  killedByBudget: boolean;
 }
 
 /**
@@ -325,7 +342,7 @@ interface StepOutcome {
 function runStep(
   step: UnitStep,
   executable: string,
-  timeout: { ms: number; reason: string } | undefined,
+  timeout: { ms: number; reason: string; budget?: boolean } | undefined,
   createSandbox: () => SandboxHome,
   tripwireDir: string,
 ): StepOutcome {
@@ -338,7 +355,7 @@ function runStep(
     sandbox = createSandbox();
   } catch (error) {
     // Never run a step without its sandbox: its HOME would be the real one.
-    return { detail: `not started: its sandbox HOME could not be created (${errorMessage(error)})`, killedAtLimit: false };
+    return { detail: `not started: its sandbox HOME could not be created (${errorMessage(error)})`, killedAtLimit: false, killedByBudget: false };
   }
   let result: ReturnType<typeof spawnSync>;
   try {
@@ -352,18 +369,18 @@ function runStep(
       killSignal: "SIGKILL",
     });
   } catch (error) {
-    return { detail: `not started (${errorMessage(error)})`, killedAtLimit: false };
+    return { detail: `not started (${errorMessage(error)})`, killedAtLimit: false, killedByBudget: false };
   } finally {
     sandbox.cleanup();
   }
   if (timeout && (result.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT") {
     console.error(`${step.name}: ${timeout.reason}; step killed at the limit.`);
-    return { detail: `${timeout.reason}; step killed at the limit`, killedAtLimit: true };
+    return { detail: `${timeout.reason}; step killed at the limit`, killedAtLimit: true, killedByBudget: timeout.budget === true };
   }
   if (result.error || result.status !== 0) {
-    return { detail: result.error?.message ?? result.signal ?? `exit ${result.status}`, killedAtLimit: false };
+    return { detail: result.error?.message ?? result.signal ?? `exit ${result.status}`, killedAtLimit: false, killedByBudget: false };
   }
-  return { killedAtLimit: false };
+  return { killedAtLimit: false, killedByBudget: false };
 }
 
 /**
@@ -529,7 +546,7 @@ export function runUnitSteps(
     const timeout = limit === undefined
       ? undefined
       : remaining < limit
-        ? { ms: remaining, reason: `timed out: ${budgetRanOut}` }
+        ? { ms: remaining, reason: `timed out: ${budgetRanOut}`, budget: true }
         : { ms: limit, reason: `timed out after ${seconds(limit)}` };
     const stepTempBefore = flairTempNames(guardTempDir);
     const outcome = runStep(step, executable, timeout, createSandbox, tripwire.dir);
@@ -557,7 +574,7 @@ export function runUnitSteps(
         return finish(1);
       }
       // Keep-going (the CI default): record the failure and run every later step.
-      stepFailures.push({ kind: "step", name: step.name, detail: reason });
+      stepFailures.push({ kind: "step", name: step.name, detail: reason, ...(outcome.killedByBudget ? { budgetKill: true } : {}) });
       continue;
     }
     completed++;
