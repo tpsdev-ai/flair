@@ -51,9 +51,9 @@ add("MemoryFeed", ["writer:table.put#1"],
 add("MemoryFeed", ["writer:(databases as any).flair.Memory.update#1"],
   "GUARDED: the dedup expiry repair (flair#2358) calls the decision on the id it writes before the incremental update (flair#2470).");
 add("Federation", ["writer:writeBackCommittedRow#1"],
-  "GUARDED: the merge of every synced table skips a reserved id (seed_id_not_federated) before the write-back through the shared helper (flair#2450).");
-add("Federation", ["writer:writeBackCommittedRow#2"],
   "SERVER: another table — the Presence receipt branch (flair#2578 slice 1) writes a Presence row only; the reserved-seed decision is about Memory ids.");
+add("Federation", ["writer:writeBackCommittedRow#2"],
+  "GUARDED: the merge of every synced table skips a reserved id (seed_id_not_federated) before the write-back through the shared helper (flair#2450).");
 add("skill-version-write", ["writer:(databases as any).flair.Memory.put#1", "writer:(databases as any).flair.Memory.put#2"],
   "GUARDED: the transactional skill writer (flair#2139 S2) is reached only after Memory.post/put/delete or FeedMemories ran the reserved-id decision on the write's ids; the successor upsert and predecessor close ride the same transaction.");
 add("skill-version-write", ["alias-source:(databases as any).flair?.Memory#1"],

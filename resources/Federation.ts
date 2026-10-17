@@ -1226,8 +1226,8 @@ export class FederationSync extends Resource {
           expectedRow: local,
           attempts: 1,
           wholeRow: true,
-          pausePre: () => txnPausePoint("federation-merge-pre"),
-          pausePoint: () => txnPausePoint("federation-merge"),
+          pausePre: () => txnPausePoint("presence-merge-pre"),
+          pausePoint: () => txnPausePoint("presence-merge"),
         },
       );
       if ("skip" in outcome) {
