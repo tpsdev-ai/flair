@@ -1,4 +1,4 @@
-- **Test-harness Harper before/after hooks pass explicit lifecycle timeouts, and an overrunning `stopHarper` rejects with a named error carrying its pid and phase.**
+- **Test-harness Harper before/after hooks pass explicit lifecycle timeouts, and an overrunning `stopHarper` rejects with a named error carrying its pid and phase.** (#2569)
 
   Hooks that call `startHarper`/`stopHarper` directly and relied on Bun's 5 s
   default (or a bare `120_000` literal) now pass `HARPER_START_BUDGET_MS`

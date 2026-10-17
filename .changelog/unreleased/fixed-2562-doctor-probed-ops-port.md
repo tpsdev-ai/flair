@@ -1,4 +1,4 @@
-- **`flair doctor`'s fallback ops candidate is derived from the HTTP port it probed, not the configured one.**
+- **`flair doctor`'s fallback ops candidate is derived from the HTTP port it probed, not the configured one.** (#2585)
 
   When neither port is named and the probed instance's configuration records no
   complete HTTP/ops pair, the fallback (`httpPort - 1`) now uses the port doctor

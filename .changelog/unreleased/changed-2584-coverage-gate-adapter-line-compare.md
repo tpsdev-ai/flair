@@ -1,4 +1,4 @@
-- **The CI workflow coverage-gate checker compares the Unit Tests adapter step line by line.**
+- **The CI workflow coverage-gate checker compares the Unit Tests adapter step line by line.** (#2595)
 
   A script whose `exit 1` is joined onto the preceding `echo` makes it an
   argument to `echo`, so the branch returns 0 instead of terminating the

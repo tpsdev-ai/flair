@@ -1,4 +1,4 @@
-- **The embedding-space guard fails closed on scans and notified writes that find an untrusted vector stamp.**
+- **The embedding-space guard fails closed on scans and notified writes that find an untrusted vector stamp.** (#2593)
 
   The scan counts arrays and typed arrays, including empty ones, without a trusted
   current-space stamp. A count above zero makes the verdict non-uniform, so the recall

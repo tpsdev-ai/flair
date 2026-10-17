@@ -4,7 +4,5 @@
   `SemanticSearch` and the write-time dedup leg already use. On a non-uniform
   verdict, MemoryBootstrap refuses its task embedding and returns the same
   state-named warning `SemanticSearch` emits; both use BM25 for guarded
-  vector-only retrieval. `/MemoryDedupStats` runs no ANN query and returns no
-  vector-derived counts, naming the guard state (`mixed`, `unverified` or `scan-failed`) in
-  place of the cluster numbers, and persists nothing. A verified-uniform
+  vector-only retrieval. When the opening verdict is non-uniform, `/MemoryDedupStats` runs no ANN query. A non-uniform verdict at either check returns no vector-derived counts, names `mixed`, `excluded`, `unverified` or `scan-failed`, and leaves stored stats unchanged. A verified-uniform
   verdict preserves the prior behaviour.

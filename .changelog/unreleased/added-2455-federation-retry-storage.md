@@ -1,4 +1,6 @@
-- **A sealed, admin-only `FederationRetry` table for federation retry bookkeeping, with an admin-only reader and a retry section in `flair federation status`.**
+- **Sealed FederationRetry storage and an administrator-only HTTP reader support retry bookkeeping (#2538).**
+
+  The `flair federation status` command includes a retry section.
 
   The table is shaped for one row per (peer, table, record) a receiver refuses
   for a reason a later re-offer could clear. No production sender path creates

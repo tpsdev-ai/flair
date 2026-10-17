@@ -1,5 +1,5 @@
 - **The launchd redaction check loads without a build, runs on PRs targeting
-  main, and tells a check that could not run from a finding.**
+  main, and tells a check that could not run from a finding.** (#2590)
 
   The credential-key list moves to a dependency-free module. When `--report`
   is supplied, completed `--check` scans write JSON finding records. The shared

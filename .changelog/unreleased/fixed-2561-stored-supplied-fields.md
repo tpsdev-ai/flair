@@ -1,9 +1,6 @@
-- **Memory `stored` holds only request-supplied text fields; `POST /FeedMemories` returns allowlisted primitive fields plus listed response fields; no write response carries embedding fields (#2561).**
+- **Memory stored reports supplied text and skill fields after redaction; FeedMemories uses an allowlist; write responses omit embeddings (#2561).**
 
-  `stored`, which a Memory POST, PUT or PATCH returns next to `redactedValues`
-  (#2467), holds the string-valued text fields (`content`, `summary`,
-  `trigger`) of that write's own request body, each with its stored (redacted)
-  value. A text field the request did not send as a string is absent from
+  After a counted redaction, `stored` reports request-supplied `content`, `summary` and `trigger` strings and, for skill writes, request-supplied `name`, `description` and `tags`, each as stored. A text field the request did not send as a string is absent from
   `stored`. This includes a skill write that versions to a successor row: the
   successor carries over the fields its request omits, and `stored` reports
   only the ones the request sent. `redactedValues` counts the same values as
@@ -15,7 +12,7 @@
 
   No embedding field whatever storage returns: successful Memory POST, PUT,
   PATCH, `_reindex` and feed replies with a body use `buildFromAllowlist`.
-  `stored` is built from its named text fields. A missing or
+  A missing or
   wrong-typed required `id` returns `write_response_withheld` (500).
   Storage-layer Responses of any status return the same refusal.
   The re-embed PATCH answers `{ id, updatedAt }`. Any other Memory PATCH

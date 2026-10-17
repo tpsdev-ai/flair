@@ -1,4 +1,4 @@
-- **The embedding backfill computes its vector before its write transaction opens.**
+- **The embedding backfill computes its vector before its write transaction opens.** (#2507)
 
   Rows without content or with an embedding longer than 100 entries are skipped
   before content comparison. For eligible rows, content is compared before

@@ -13,5 +13,4 @@
   redaction clears it. Redaction that changes `content` or `trigger` removes both
   embedding fields when either is non-null, so such a null does not survive.
   A surviving supplied vector is stored as supplied, without text/vector
-  validation. Skill writes are refused on this ordinary path; the separate
-  re-embed PATCH is unchanged.
+  validation. Skill writes are refused on this ordinary path.
