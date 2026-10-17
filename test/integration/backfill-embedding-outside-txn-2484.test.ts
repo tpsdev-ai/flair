@@ -59,9 +59,12 @@ async function authSend(harper: HarperInstance, agent: TestAgent, method: string
   });
 }
 async function seedAgent(harper: HarperInstance, agent: TestAgent): Promise<void> {
+  // The administrator role: the fixtures below store a caller-supplied vector for
+  // the write's backfill to replace, and from flair#2573 slice 2 only an
+  // administrator's (or operator) write keeps a supplied vector.
   const res = await adminOp(harper, {
     operation: "insert", database: "flair", table: "Agent",
-    records: [{ id: agent.id, name: agent.id, role: "agent", publicKey: agent.publicKey, createdAt: new Date().toISOString() }],
+    records: [{ id: agent.id, name: agent.id, role: "admin", publicKey: agent.publicKey, createdAt: new Date().toISOString() }],
   });
   expect(res.status, `seed agent returned ${res.status}`).toBe(200);
 }
@@ -256,7 +259,8 @@ describe("flair#2465 — the embedding backfill embeds a skill's trigger and bin
   const NEW_TRIGGER = "when a satellite telemetry window closes before the downlink completes";
 
   /** PUT-create a skill whose supplied vector has fewer than 100 entries, so the
-   *  write's backfill embeds it. */
+   *  write's backfill embeds it. The writer is the administrator (seedAgent): from
+   *  flair#2573 slice 2 a non-admin write discards a supplied vector. */
   function putShortVectorSkill(id: string): Promise<Response> {
     return authSend(harper, agent, "PUT", `/Memory/${id}`, {
       id, agentId: agent.id, tags: ["skill"], trigger: TRIGGER, content: PROCEDURE,

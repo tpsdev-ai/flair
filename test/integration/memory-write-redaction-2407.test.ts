@@ -317,11 +317,11 @@ describe("flair#2407 — a supplied embedding is replaced when redaction changes
     expect(await readStored(id)).toBeFalsy();
   }, 60_000);
 
-  it("a POST /Memory that redaction leaves unchanged keeps its supplied vector", async () => {
+  it("an administrator's POST /Memory that redaction leaves unchanged keeps its supplied vector", async () => {
     const id = `r2407-vec-clean-${randomUUID()}`;
     const res = await authFetch("POST", "/Memory", {
       id, agentId: agent.id, content: "a plain note about the deploy job", visibility: "shared", embedding: supplied, embeddingModel: "client-model",
-    });
+    }, adminAgent);
     expect(res.status).toBe(201);
     expect((await res.json()).redactedValues).toBeUndefined();
     const row = await readStored(id);
