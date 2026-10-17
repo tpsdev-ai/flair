@@ -1,5 +1,5 @@
 import { isEmptyEmbedding, normalizeEmptyEmbedding } from "./memory-embedding-value.js";
-import { discardSuppliedVector, hasSuppliedVector, suppliesEmbeddingModel } from "./memory-supplied-vector.js";
+import { discardSuppliedVector, hasSuppliedEmbedding, suppliesEmbeddingModel } from "./memory-supplied-vector.js";
 import { databases } from "harper";
 import { randomUUID } from "node:crypto";
 import { isOperatorSeedPut, redactMemoryWrite, redactSkillWrite, storedMemoryText, suppliedMemoryTextFields, suppliedStoredTextFields, type StoredMemoryText, type StoredTextField } from "./memory-redaction.js";
@@ -1874,11 +1874,11 @@ export class Memory extends (databases as any).flair.Memory {
     // removed before the omission check and prepareSkillBody, so every later
     // step, a skill update's carried vector included, sees a body without it.
     if (isEmptyEmbedding(content?.embedding)) delete content.embedding;
-    // flair#2573 slice 2: did the CALLER supply a non-empty vector, and/or an
+    // flair#2573 slice 2: did the CALLER supply a non-null embedding, and/or an
     // `embeddingModel` stamp? Captured before prepareSkillBody can merge a stored
     // row's vector into the body, so only the caller's own values are discarded
     // below (a carried vector and the stamp beside it are not).
-    const postSuppliedVector = hasSuppliedVector(content?.embedding);
+    const postSuppliedVector = hasSuppliedEmbedding(content?.embedding);
     const postSuppliedStamp = suppliesEmbeddingModel(content);
     // The visibility the caller named, before any merge or default fills it.
     const requestedVisibility = content?.visibility;
@@ -2295,7 +2295,7 @@ export class Memory extends (databases as any).flair.Memory {
     // are discarded here, after redaction (see post()/put()). A stamp-only body
     // (no `embedding`) has its stamp discarded too, so a non-admin PATCH cannot
     // relabel a stored vector. The PATCH then behaves exactly as one that sent neither.
-    const patchSuppliedVector = hasSuppliedVector((content as any)?.embedding);
+    const patchSuppliedVector = hasSuppliedEmbedding((content as any)?.embedding);
     const patchSuppliedStamp = suppliesEmbeddingModel(content);
     if (!reembedRequest && (patchSuppliedVector || patchSuppliedStamp)) {
       discardSuppliedVector(content as Record<string, any>, await resolveAgentAuth((this as any).getContext?.()), { vector: patchSuppliedVector, stamp: patchSuppliedStamp });
@@ -2836,10 +2836,10 @@ export class Memory extends (databases as any).flair.Memory {
         // flair#2465: as in post(), a body that omits `embedding` can have a stored
         // vector carried in by prepareSkillBody, with the hash it retained for it.
         const putOmitsEmbedding = content?.embedding === undefined;
-        // flair#2573 slice 2: did the CALLER supply a non-empty vector, and/or an
+        // flair#2573 slice 2: did the CALLER supply a non-null embedding, and/or an
         // `embeddingModel` stamp? Captured before prepareSkillBody can merge a
         // stored row's vector into the body.
-        const putSuppliedVector = hasSuppliedVector(content?.embedding);
+        const putSuppliedVector = hasSuppliedEmbedding(content?.embedding);
         const putSuppliedStamp = suppliesEmbeddingModel(content);
         const preparedSkill = await prepareSkillBody(content, preExisting, auth);
         if (preparedSkill instanceof Response) return preparedSkill;

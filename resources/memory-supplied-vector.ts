@@ -7,11 +7,9 @@
  */
 import type { AgentAuthVerdict } from "./agent-auth.js";
 
-/** True for a non-empty array or typed array supplied in the embedding field. */
-export function hasSuppliedVector(value: unknown): boolean {
-  if (Array.isArray(value)) return value.length > 0;
-  if (ArrayBuffer.isView(value) && !(value instanceof DataView)) return value.byteLength > 0;
-  return false;
+/** Presence check after empty-embedding normalization, not vector validation. */
+export function hasSuppliedEmbedding(value: unknown): boolean {
+  return value !== null && value !== undefined;
 }
 
 /** True when the caller's object body supplies an `embeddingModel` stamp (any
@@ -41,9 +39,9 @@ export function discardSuppliedVector(
 ): boolean {
   if (!content || typeof content !== "object" || Array.isArray(content)) return false;
   if (keepsSuppliedVector(auth)) return false;
-  const carriedVector = !supplied.vector && hasSuppliedVector(content.embedding);
+  const carriedVector = !supplied.vector && hasSuppliedEmbedding(content.embedding);
   let discarded = false;
-  if (supplied.vector && hasSuppliedVector(content.embedding)) {
+  if (supplied.vector && hasSuppliedEmbedding(content.embedding)) {
     delete content.embedding;
     discarded = true;
   }

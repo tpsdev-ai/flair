@@ -245,6 +245,27 @@ function assertOwnInstance(h: HarperInstance): void {
     expect(cosine(r.embedding, expected)).toBeGreaterThan(0.9999);
   }, 60_000);
 
+  for (const method of ["POST", "PUT", "PATCH"] as const) {
+    for (const [label, embedding] of [["string", "x"], ["object", { "0": 1 }]] as const) {
+      test(`${method} discards a non-admin ${label} embedding and stores the server vector`, async () => {
+        const id = `s2-value-${randomUUID()}`;
+        const text = TXT(`${method} ${label}`);
+        if (method === "PATCH") {
+          const created = await h.write("POST", id, { id, agentId: h.agent.id, content: TXT("before value patch"), visibility: "shared" });
+          expect(created.status, await created.clone().text()).toBe(201);
+        }
+        const res = await h.write(method, id, { id, agentId: h.agent.id, content: text, visibility: "shared", embedding });
+        expect(res.status, await res.clone().text()).toBeLessThan(300);
+        const stored = await h.row(id);
+        expect(stored.content).toBe(text);
+        expect(stored.embedding).not.toEqual(embedding);
+        expect(Array.isArray(stored.embedding)).toBe(true);
+        expect(stored.embeddingModel).toBe(CURRENT_STAMP);
+        expect(cosine(stored.embedding, await h.serverVectorFor(text))).toBeGreaterThan(0.9999);
+      }, 60_000);
+    }
+  }
+
   test("(b) an administrator's write keeps the vector it carries", async () => {
     const crafted = CRAFTED();
     const id = `s2-admin-${randomUUID()}`;
@@ -311,6 +332,24 @@ describe("flair#2573 slice 2 — crafted-vector writes with a failed embedding b
     if (harper) await stopHarper(harper);
     if (homeDir) rmSync(homeDir, { recursive: true, force: true });
   }, HARPER_STOP_BUDGET_MS);
+
+  for (const method of ["POST", "PUT", "PATCH"] as const) {
+    for (const [label, embedding] of [["string", "x"], ["object", { "0": 1 }]] as const) {
+      test(`${method} discards a non-admin ${label} embedding with a failed backend`, async () => {
+        const id = `s2-no-model-value-${randomUUID()}`;
+        if (method === "PATCH") {
+          const created = await h.write("POST", id, { id, agentId: h.agent.id, content: TXT("before value patch") });
+          expect(created.status, await created.clone().text()).toBe(201);
+        }
+        const res = await h.write(method, id, { id, agentId: h.agent.id, content: TXT(`${method} ${label}`), embedding });
+        expect(res.status, await res.clone().text()).toBeLessThan(300);
+        const stored = await h.row(id);
+        expect(stored).not.toBeNull();
+        expect(stored.embedding ?? null).toBeNull();
+        expect(stored.embeddingModel ?? null).toBeNull();
+      }, 60_000);
+    }
+  }
 
   test("(f) agent POST, PUT and PATCH of a crafted vector and a forged stamp each store no vector and no stamp", async () => {
     const post = `s2-nomodel-post-${randomUUID()}`;

@@ -546,6 +546,58 @@ describe("flair#2407 — a supplied embedding is replaced when redaction changes
   });
 });
 
+describe("non-admin supplied embedding values", () => {
+  const cases = [
+    ["string", "x"],
+    ["object", { "0": 1 }],
+    ["null element", [null]],
+    ["empty array", []],
+    ["null", null],
+    ["vector", [0, 0, 0, 1]],
+  ] as const;
+
+  it("keeps null and normalized empty embeddings for the re-embed protocol", async () => {
+    const { hasSuppliedEmbedding, discardSuppliedVector } = await import("../../resources/memory-supplied-vector.ts");
+    const { normalizeEmptyEmbedding } = await import("../../resources/memory-embedding-value.ts");
+    for (const embedding of [null, []]) {
+      const body = { embedding, embeddingModel: null };
+      normalizeEmptyEmbedding(body);
+      expect(hasSuppliedEmbedding(body.embedding)).toBe(false);
+      expect(discardSuppliedVector(body, { kind: "agent", agentId: AGENT, isAdmin: false }, { vector: false, stamp: false })).toBe(false);
+      expect(body).toEqual({ embedding: null, embeddingModel: null });
+    }
+  });
+
+  for (const method of ["post", "put", "patch"] as const) {
+    for (const [label, embedding] of cases) {
+      it(`${method} handles ${label} embedding from a non-admin caller`, async () => {
+        const id = "supplied-embedding";
+        const m = makeMemory(agentCtx(AGENT));
+        const text = "new scheduling note";
+        if (method === "patch") {
+          memoryStore.set(id, {
+            id, agentId: AGENT, content: "old scheduling note", createdAt: new Date().toISOString(),
+            embedding: FAKE_EMBEDDING, embeddingModel: "mock-embedding-model",
+          });
+          m._targetId = id;
+        }
+        const result = await m[method]({ id, agentId: AGENT, content: text, embedding: structuredClone(embedding) });
+        expect(result instanceof Response && result.status >= 400).toBe(false);
+        const stored = memoryStore.get(id);
+        expect(stored.content).toBe(text);
+        if (method === "patch" && (embedding === null || (Array.isArray(embedding) && embedding.length === 0))) {
+          expect(stored.embedding).toBeNull();
+          expect(embedInputs).toEqual([]);
+        } else {
+          expect(stored.embedding).toEqual(FAKE_EMBEDDING);
+          expect(stored.embeddingModel).toBe("mock-embedding-model");
+          expect(embedInputs).toContain(text);
+        }
+      });
+    }
+  }
+});
+
 describe("flair#2407 — a deduplicated feed write reports the count in its response only", () => {
   it("the second identical feed write returns the stored row plus the count; the stored row has no count", async () => {
     const f: any = new (FeedMemories as any)();
