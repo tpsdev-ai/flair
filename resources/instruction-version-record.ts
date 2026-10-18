@@ -49,6 +49,51 @@ export interface RecordVersionInput {
   previousRowId?: string | null;
 }
 
+/**
+ * flair#2645 — remove the version record this request appended, when it is
+ * still the subject's head. A close that a newer write made Harper skip can
+ * commit its version row while leaving the row open; undoing that write must
+ * not leave a gap in the chain, so a record followed by a later version is left
+ * in place and reported as `superseded`.
+ */
+export async function removeAppendedVersion(
+  ctx: any,
+  subjectType: InstructionSubjectType,
+  subjectId: string,
+  versionRecordId: string,
+): Promise<"removed" | "superseded" | "busy" | "unavailable"> {
+  const store = (databases as any).flair?.InstructionVersion?.primaryStore;
+  let removed = false;
+  const outcome = await withKeyLock(store, [LOCK_NAMESPACE, subjectType], () =>
+    withOwnedTransaction(ctx, async (shared) => {
+      const head = await readHead(subjectType, subjectId, shared);
+      if (!head) return "removed" as const;
+      if (String(head.id) !== versionRecordId) return "superseded" as const;
+      const table = (databases as any).flair.InstructionVersion;
+      // The resource class overrides `delete` and `get` for REST authority; the
+      // append helper's own table is its base prototype, which exposes the raw
+      // writer this in-process undo needs.
+      const raw = Object.getPrototypeOf(table);
+      if (typeof raw?.delete !== "function" || typeof raw?.get !== "function") return "unavailable" as const;
+      await raw.delete.call(table, versionRecordId, shared);
+      removed = true;
+      return "deleted" as const;
+    }),
+  LOCK_ATTEMPTS,
+  LOCK_WAIT_MS);
+  if (outcome.kind === "busy") return "busy";
+  if (outcome.kind === "unavailable") return "unavailable";
+  if (!removed) return outcome.value === "deleted" ? "unavailable" : outcome.value;
+  // The delete above commits with the owned transaction; a fresh read after it
+  // commits is what confirms the row is gone (a contextless read inside the
+  // transaction sees its old snapshot).
+  const table = (databases as any).flair.InstructionVersion;
+  const raw = Object.getPrototypeOf(table);
+  if (typeof raw?.get !== "function") return "unavailable";
+  const left = await raw.get.call(table, versionRecordId, {});
+  return left == null ? "removed" : "superseded";
+}
+
 export interface RecordVersionSuccess { ok: true; result: any; version: string }
 export interface RecordVersionFailure { ok: false; response: Response }
 export type RecordVersionOutcome = RecordVersionSuccess | RecordVersionFailure;

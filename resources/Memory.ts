@@ -1362,6 +1362,7 @@ async function writeSkillCreateOrUpdate(
     },
     hooks: {
       ...defaultSkillHooks,
+      authorizeClose: (row, shared) => authorizeSkillOwners(ctx, auth, [row], shared),
       pointer: async (shared) => {
         if (captured.closed) {
           const denial = await deletePointerRow(String(captured.closed.id), shared);
@@ -1435,7 +1436,7 @@ async function writeSkillDelete(args: { ctx: any; auth: AgentAuthVerdict; record
       // re-checks that grant after the close is staged.
       return { kind: "delete", predecessor: liveHead, closePatch: { skillSubjectId: subjectId, validTo: now, updatedAt: now }, value: null, visibility: skillVersionVisibility(liveHead), grantedClose: grantedSkillClose(liveHead, ctx, auth) };
     },
-    hooks: { ...defaultSkillHooks, pointer: async (shared) => deletePointerRow(closedId, shared) },
+    hooks: { ...defaultSkillHooks, authorizeClose: (row, shared) => authorizeSkillOwners(ctx, auth, [row], shared), pointer: async (shared) => deletePointerRow(closedId, shared) },
   });
   if (!outcome.ok) return outcome.response;
   noteMemoryDelete(closedId);

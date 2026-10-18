@@ -58,6 +58,8 @@ add("skill-version-write", ["writer:(databases as any).flair.Memory.put#1", "wri
   "GUARDED: the transactional skill writer (flair#2139 S2) is reached only after Memory.post/put/delete or FeedMemories ran the reserved-id decision on the write's ids; the successor upsert and predecessor close ride the same transaction.");
 add("skill-version-write", ["alias-source:(databases as any).flair?.Memory#1"],
   "SERVER: a table handle (resolveSkillHead searches the live skill head).");
+add("skill-version-write", ["writer:table.put#1", "writer:table.delete#1", "alias-source:(databases as any).flair?.Memory#2", "alias-source:(databases as any).flair?.Memory#3"],
+  "GUARDED: the successor id and predecessor id were both run through the reserved-id decision before the write; the rollback and re-apply touch those same ids.");
 
 // ── OPERATOR ──
 add("AgentSeed", ["writer:(databases as any).flair.Memory.put#1"],
