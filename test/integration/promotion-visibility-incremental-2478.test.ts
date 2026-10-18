@@ -63,6 +63,7 @@ const V1_OWNER = "owner PUT committed before the backfill";
 const V2_OWNER = "owner edit kept after the backfill released its lock";
 const V3_OWNER = "owner patch kept after the backfill committed";
 const AUTO_CLAIM = "Auto promotion claim about release verification for slice two.";
+const MANUAL_STALE_CLAIM = "Manual promotion with an injected stale binding.";
 const MANUAL_CLAIM = "Manual promotion claim about deploy verification for slice two.";
 const AUTO_TAG = "adk:app:alice";
 
@@ -337,6 +338,24 @@ beforeAll(async () => {
   writeFileSync(lockPath,
     'import { traceMemoryWriter } from "./zz-memory-write-trace-2478.js";\n' +
     lockSource.replace(invocation, "value: await traceMemoryWriter(options.phase, () => fn(scope))"));
+  writeFileSync(join(component.dir, "dist", "resources", "zz-test-manual-stale-binding.js"), `
+import { databases } from "harper";
+import { Memory } from "./Memory.js";
+import { isJoinableTransaction } from "./request-transaction.js";
+const put = Memory.put;
+Memory.put = async function (record, ctx) {
+  const result = await put.call(this, record, ctx);
+  if (record.content === ${JSON.stringify(MANUAL_STALE_CLAIM)}) {
+    if (!isJoinableTransaction(ctx)) throw new Error("stale-binding fixture requires a joined transaction");
+    if (result instanceof Response && !result.ok) throw new Error("stale-binding fixture Memory write failed");
+    const table = databases.flair.Memory;
+    await table.update(record.id, { promotionContentHash: "mismatched-existing-hash" }, ctx);
+    const row = await table.get(record.id, ctx);
+    if (row.promotionContentHash !== "mismatched-existing-hash") throw new Error("stale-binding fixture did not land");
+  }
+  return result;
+};
+`);
   await bootFirst();
 }, 240_000);
 
@@ -541,6 +560,28 @@ describe("promotion stamps are locked, incremental and bound (real Harper)", () 
     expect(edited.promotionStatus ?? null).toBeNull();
     expect(edited.promotionContentHash ?? null).toBeNull();
   }, 180_000);
+
+  it("a mismatched hash in the joined manual transaction refuses promotion and leaves the candidate pending", async () => {
+    const candidateId = "pvi-manual-stale-binding";
+    await seedCandidate(candidateId, MANUAL_STALE_CLAIM, AUTO_TAG);
+    try {
+      const res = await promote(candidateId);
+      const body = await res.json() as any;
+      expect(res.status, JSON.stringify(body)).toBe(409);
+      expect(body.error).toBe("promotion_stamp_stale_row");
+      const candidate = await readRow(candidateId, "MemoryCandidate");
+      expect(candidate.status).toBe("pending");
+      expect(candidate.decidedAt ?? null).toBeNull();
+      expect(candidate.reviewerId ?? null).toBeNull();
+      const rows = await opsCall({
+        operation: "search_by_value", database: "flair", table: "Memory",
+        search_attribute: "agentId", search_value: owner.id, get_attributes: ["*"],
+      });
+      expect(rows.filter((row: any) => row.content === MANUAL_STALE_CLAIM || row.derivedFrom?.includes(candidateId))).toEqual([]);
+    } finally {
+      await deleteCandidate(candidateId);
+    }
+  }, 60_000);
 
   it("the manual stamp binds its verdict; Memory GET/search, feeds, SemanticSearch and AdminMemory suppress a mismatch", async () => {
     await seedCandidate("pvi-manual-cand", MANUAL_CLAIM);

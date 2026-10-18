@@ -28,7 +28,7 @@ mock.module("../../resources/txn-pause-point.ts", () => ({
   },
 }));
 
-const { stampMemoryPromotion, stampMemoryPromotionIsolated } = await import("../../resources/promotion-stamp.ts");
+const { PromotionStampStaleRowError, stampMemoryPromotion, stampMemoryPromotionIsolated } = await import("../../resources/promotion-stamp.ts");
 const { promotionContentHash } = await import("../../resources/promotion-binding.ts");
 const { WriteBackConflictError } = await import("../../resources/write-back.ts");
 
@@ -71,5 +71,15 @@ it.each(["content", "promotionContentHash"])("a first-read %s change reports aut
   expect(await stampMemoryPromotionIsolated(row.id, "reviewer", "decision-time", undefined, written as any)).toBe(false);
   expect(row.promotionStatus).toBeUndefined();
   expect(row[field]).toBe(field === "content" ? "replacement content" : changedHash);
+  expect(updates).toBe(0);
+});
+
+it("a mismatched hash in a joined transaction throws the manual stale-row error without stamping", async () => {
+  row.promotionContentHash = changedHash;
+  const ctx = { transaction: { open: 1, saveCommits: false } };
+  await expect(stampMemoryPromotion(row.id, "reviewer", "decision-time", undefined, ctx))
+    .rejects.toBeInstanceOf(PromotionStampStaleRowError);
+  expect(row.promotionStatus).toBeUndefined();
+  expect(row.promotionContentHash).toBe(changedHash);
   expect(updates).toBe(0);
 });

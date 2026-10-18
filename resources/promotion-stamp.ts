@@ -23,6 +23,13 @@ export class PromotedRowChangedError extends Error {
   }
 }
 
+export class PromotionStampStaleRowError extends Error {
+  constructor(id: string) {
+    super(`promotion-stamp: row ${id} has a stale content binding; no stamp written`);
+    this.name = "PromotionStampStaleRowError";
+  }
+}
+
 /** The memory id's write lock answered something other than a completed
  *  callback: nothing was stamped. */
 export class PromotionStampLockError extends Error {
@@ -94,6 +101,7 @@ export async function stampMemoryPromotion(
       return true;
     }, { phase: "promotion-stamp-manual" });
     if (outcome.kind !== "done") throw new PromotionStampLockError(outcome.kind, id);
+    if (outcome.value === false) throw new PromotionStampStaleRowError(id);
     return;
   }
   // Test-only: the promotion's Memory write has committed; the stamp has not
