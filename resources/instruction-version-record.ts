@@ -9,6 +9,7 @@ import { withKeyLock } from "./key-lock.js";
 import { withOwnedTransaction } from "./request-transaction.js";
 import { maybeThrowSkillWriteFault } from "./skill-write-fault.js";
 import { PRIVATE_VISIBILITY, SHARED_VISIBILITY } from "./memory-visibility.js";
+import { txnPausePoint } from "./txn-pause-point.js";
 
 export const INSTRUCTION_VERSION_TABLE = "InstructionVersion";
 
@@ -47,6 +48,39 @@ export interface RecordVersionInput {
   /** The closed subject's own agentId; the tombstone is about the OLD subject. */
   previousAgentId?: string | null;
   previousRowId?: string | null;
+}
+
+/**
+ * flair#2642 — remove the version record this request appended, when it is
+ * still the subject's head. A close that a newer write made Harper skip can
+ * commit its tombstone while leaving the row open; undoing that tombstone must
+ * not leave a gap in the chain, so a record followed by a later version is left
+ * in place and reported as `superseded`.
+ */
+export async function removeAppendedVersion(
+  ctx: any,
+  subjectType: InstructionSubjectType,
+  subjectId: string,
+  versionRecordId: string,
+): Promise<"removed" | "superseded" | "busy" | "unavailable"> {
+  const store = (databases as any).flair?.InstructionVersion?.primaryStore;
+  const outcome = await withKeyLock(store, [LOCK_NAMESPACE, subjectType], async () => {
+    const staged = await withOwnedTransaction(ctx, async (shared) => {
+      const head = await readHead(subjectType, subjectId, shared);
+      if (!head) return "removed" as const;
+      if (String(head.id) !== versionRecordId) return "superseded" as const;
+      await (databases as any).flair.InstructionVersion.delete(versionRecordId, shared);
+      return "deleted" as const;
+    });
+    if (staged !== "deleted") return staged;
+    const left = await (databases as any).flair.InstructionVersion.get(versionRecordId, {});
+    return left == null ? ("removed" as const) : ("superseded" as const);
+  },
+  LOCK_ATTEMPTS,
+  LOCK_WAIT_MS);
+  if (outcome.kind === "busy") return "busy";
+  if (outcome.kind === "unavailable") return "unavailable";
+  return outcome.value;
 }
 
 export interface RecordVersionSuccess { ok: true; result: any; version: string }
@@ -365,6 +399,9 @@ export async function recordVersion(
           expectedVersion: expected,
         };
         record.recordHash = recordDigest(record);
+        // Test-only pause after the append id is computed, inside the locked
+        // transaction (flair#2645 audit). Inert unless fault injection is armed.
+        await txnPausePoint("instruction-version-append");
         // flair#2139 S2 — test-only per-step fault injection (see
         // skill-write-fault.ts). Fires after the Memory-side successor/close
         // writes rode this same transaction, so the append failure aborts them

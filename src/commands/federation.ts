@@ -41,6 +41,16 @@ import {
 import { DEFAULT_INTERVAL_SECONDS as FEDERATION_SYNC_DEFAULT_INTERVAL } from "../federation/scheduler.js";
 import { FEDERATION_MEMORY_SELECT } from "../lib/federation-memory-attributes.js";
 import {
+  presenceCursorMs,
+  presenceSendEnabled,
+  presenceWatermarkMs,
+  presenceWireRecord,
+  PRESENCE_SEND_FUTURE_ALLOWANCE_MS,
+  PRESENCE_SEND_OVERLAP_MS,
+  PRESENCE_SEND_RETRYABLE_SKIP_REASONS,
+  selectPresenceRowsToSend,
+} from "../federation/presence-send.js";
+import {
   decideInstancePrune,
   formatInstanceRow,
   INSTANCE_ROW_PRUNE_REMEDY,
@@ -469,6 +479,54 @@ export async function persistLocalPeerLastSyncAt(args: {
 }
 
 /**
+ * Attempt the Presence watermark update after contact. Presence has no `updatedAt`, so
+ * the row cursor over `lastHeartbeatAt` / `activityUpdatedAt` is compared against
+ * this field instead of `lastSyncAt`.
+ *
+ * Same shape and same result contract as {@link persistLocalPeerLastSyncAt}: a
+ * field-only `update` carrying `{id, presenceLastSyncAt, updatedAt}`, so it
+ * cannot revert `publicKey`/`status` or re-create a deleted row, and HTTP 200 is
+ * not success — the id must appear in `update_hashes`; otherwise the update is
+ * unconfirmed (a committed update with an unreadable response also reads as
+ * unconfirmed), unless Harper explicitly reports a miss.
+ * Callers invoke it only after contact — a confirmed batch, or a successful
+ * liveness ping on a no-change pass.
+ */
+export async function persistLocalPeerPresenceSyncAt(args: {
+  opsEndpoint: string;
+  auth: string;
+  peerId: string;
+  presenceLastSyncAt: string;
+}): Promise<{ ok: boolean; status: number; error?: string }> {
+  const headers = { "Content-Type": "application/json", Authorization: args.auth };
+  const updateRes = await fetch(`${args.opsEndpoint}/`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      operation: "update",
+      database: "flair",
+      table: "Peer",
+      records: [{ id: args.peerId, presenceLastSyncAt: args.presenceLastSyncAt, updatedAt: args.presenceLastSyncAt }],
+    }),
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!updateRes.ok) {
+    const txt = await updateRes.text().catch(() => "");
+    return { ok: false, status: updateRes.status, error: txt.slice(0, 200) };
+  }
+  const parsed = (await updateRes.json().catch(() => null)) as { update_hashes?: unknown } | null;
+  const matched = !!parsed && Array.isArray(parsed.update_hashes) && parsed.update_hashes.includes(args.peerId);
+  if (!matched) {
+    return {
+      ok: false,
+      status: updateRes.status,
+      error: `Presence watermark update for Peer ${args.peerId} was not confirmed.`,
+    };
+  }
+  return { ok: true, status: updateRes.status };
+}
+
+/**
  * The most recent CONTACT with any peer (max of peer.lastSyncAt), or null.
  *
  * Contact, not merge: a sync that reaches the peer and legitimately has
@@ -673,6 +731,39 @@ export function parseSyncBatchCounts(body: unknown, batchSize: number): { merged
   return { merged, skipped };
 }
 
+/** One receiver-authored refusal from a FederationSync batch: which record the
+ *  receiver refused and under which name. Only well-formed entries are kept; a
+ *  refused field that is absent or not an array of {table,id,reason} strings is
+ *  ignored (the sender acts on a retryable name, never on a shape it invented). */
+export function parseSyncBatchRefused(body: unknown): Array<{ table: string; id: string; reason: string }> {
+  if (body === null || typeof body !== "object" || Array.isArray(body)) return [];
+  const refused = (body as { refused?: unknown }).refused;
+  if (!Array.isArray(refused)) return [];
+  const out: Array<{ table: string; id: string; reason: string }> = [];
+  for (const entry of refused) {
+    if (entry === null || typeof entry !== "object") continue;
+    const { table, id, reason } = entry as { table?: unknown; id?: unknown; reason?: unknown };
+    if (typeof table !== "string" || typeof id !== "string" || typeof reason !== "string") continue;
+    out.push({ table, id, reason });
+  }
+  return out;
+}
+
+/** Keep well-formed indeterminate entries from a FederationSync batch. */
+export function parseSyncBatchIndeterminate(body: unknown): Array<{ table: string; id: string }> {
+  if (body === null || typeof body !== "object" || Array.isArray(body)) return [];
+  const indeterminate = (body as { indeterminate?: unknown }).indeterminate;
+  if (!Array.isArray(indeterminate)) return [];
+  const out: Array<{ table: string; id: string }> = [];
+  for (const entry of indeterminate) {
+    if (entry === null || typeof entry !== "object") continue;
+    const { table, id } = entry as { table?: unknown; id?: unknown };
+    if (typeof table !== "string" || typeof id !== "string") continue;
+    out.push({ table, id });
+  }
+  return out;
+}
+
 export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number; skipped: number; error?: Error }> {
   const target = resolveTarget(opts);
   const baseUrl = target ? target.replace(/\/$/, "") : undefined;
@@ -739,7 +830,7 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
     // a healthy 50-record batch merges in <2s — so a trip means a real stall,
     // and we split-and-retry rather than wait it out.
     const BATCH_TIMEOUT_MS = 45_000;
-    async function sendBatch(batch: any[]): Promise<{ merged: number; skipped: number }> {
+    async function sendBatch(batch: any[], validatePresence = false): Promise<{ merged: number; skipped: number; refused: Array<{ table: string; id: string; reason: string }>; indeterminate: Array<{ table: string; id: string }> }> {
       if (!secretKey) secretKey = await loadInstanceSecretKey(instance.id, opts);
       const syncBody: Record<string, any> = { instanceId: instance.id, records: batch, lamportClock: Date.now() };
       const signedSyncBody = signBodyFresh(syncBody, secretKey);
@@ -751,9 +842,14 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
         batch.length > 1 && (status === null || TIMEOUT_STATUSES.has(status));
       const split = async () => {
         const mid = Math.floor(batch.length / 2);
-        const left = await sendBatch(batch.slice(0, mid));
-        const right = await sendBatch(batch.slice(mid));
-        return { merged: left.merged + right.merged, skipped: left.skipped + right.skipped };
+        const left = await sendBatch(batch.slice(0, mid), validatePresence);
+        const right = await sendBatch(batch.slice(mid), validatePresence);
+        return {
+          merged: left.merged + right.merged,
+          skipped: left.skipped + right.skipped,
+          refused: [...left.refused, ...right.refused],
+          indeterminate: [...left.indeterminate, ...right.indeterminate],
+        };
       };
 
       let syncRes: Response;
@@ -790,7 +886,29 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
           `Sync batch failed: invalid response (HTTP ${syncRes.status}, merged/skipped are not counts from 0 to ${batch.length})`,
         );
       }
-      return counts;
+      const refused = parseSyncBatchRefused(body);
+      const indeterminate = parseSyncBatchIndeterminate(body);
+      if (validatePresence) {
+        const outcomeBody = body as { refused?: unknown; indeterminate?: unknown };
+        const validList = (raw: unknown, parsed: readonly unknown[]) =>
+          raw === undefined || (Array.isArray(raw) && raw.length === parsed.length);
+        const key = (row: { table: string; id: string }) => JSON.stringify([row.table, row.id]);
+        const offered = new Set(batch.map(key));
+        const unresolved = [...refused, ...indeterminate].map(key);
+        if (
+          !validList(outcomeBody.refused, refused) ||
+          !validList(outcomeBody.indeterminate, indeterminate) ||
+          unresolved.some((entry) => !offered.has(entry)) ||
+          new Set(unresolved).size !== unresolved.length ||
+          counts.skipped !== refused.length ||
+          counts.merged + refused.length + indeterminate.length !== batch.length
+        ) {
+          throw new Error(
+            `Sync batch failed: invalid response (HTTP ${syncRes.status}, outcomes do not account for ${batch.length} offered records)`,
+          );
+        }
+      }
+      return { ...counts, refused, indeterminate };
     }
 
     let totalBatches = 0;
@@ -939,6 +1057,122 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
       }
     };
 
+    const genericBatches = totalBatches;
+    const failPresence = async (err: unknown) => {
+      if (genericBatches > 0) await stampLocalContact();
+      return { pushed: totalMerged, skipped: totalSkipped, error: err instanceof Error ? err : new Error(String(err)) };
+    };
+
+    // ── flair#2578 slice 2: Presence push (P6) ──────────────────────────────
+    // Presence has no updatedAt/createdAt, so the generic cursor above cannot
+    // select it. Home rows travel by their OWN per-table watermark on
+    // lastHeartbeatAt / activityUpdatedAt, sent AFTER the generic tables so the
+    // receiver can bind Presence to an accepted Agent row.
+    // A scan, send or response failure returns before watermark persistence.
+    let presenceAdvanceMs: number | null = null;
+    let presenceCapMs = Number.POSITIVE_INFINITY;
+    try {
+      if (presenceSendEnabled()) {
+        const presenceScanAtMs = Date.now();
+        const presenceRes = await fetch(`${opsEndpoint}/`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: auth },
+          body: JSON.stringify({ operation: "sql", sql: "SELECT * FROM flair.Presence" }),
+          signal: AbortSignal.timeout(15_000),
+        });
+        if (!presenceRes.ok) {
+          const text = await presenceRes.text().catch(() => "");
+          throw new Error(`Presence scan failed (${presenceRes.status}): ${text.slice(0, 200)}`);
+        }
+        const parsed = await presenceRes.json() as any;
+        const list = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.results) ? parsed.results : null;
+        if (!list) {
+          throw new Error("Presence scan failed: body is not a row list");
+        }
+        const presenceRows = list;
+        const watermarkMs = presenceWatermarkMs(hub.presenceLastSyncAt);
+        // Clamp selection to scan time.
+        const effectiveWatermarkMs = Math.min(watermarkMs, presenceScanAtMs);
+        // Re-scan from the effective watermark minus the overlap.
+        const scanFloorMs = Math.max(0, effectiveWatermarkMs - PRESENCE_SEND_OVERLAP_MS);
+        const toSend = selectPresenceRowsToSend(presenceRows, instance.id, scanFloorMs);
+        if (toSend.length === 0 && watermarkMs > effectiveWatermarkMs) {
+          presenceAdvanceMs = effectiveWatermarkMs;
+        }
+        if (toSend.length > 0) {
+          if (!secretKey) secretKey = await loadInstanceSecretKey(instance.id, opts);
+          let presenceBatch: any[] = [];
+          let presenceBatchBytes = 0;
+          // Overlap resends retain the effective watermark unless capped below.
+          let advanceMs = effectiveWatermarkMs;
+          const flushPresence = async () => {
+            const result = await sendBatch(presenceBatch, true);
+            totalMerged += result.merged;
+            totalSkipped += result.skipped;
+            totalBatches++;
+            // Cap the candidate below retryable refusals.
+            for (const refusal of result.refused) {
+              if (refusal.table !== "Presence") continue;
+              if (!PRESENCE_SEND_RETRYABLE_SKIP_REASONS.has(refusal.reason)) continue;
+              const sent = presenceBatch.find((r) => r.id === refusal.id);
+              if (!sent) continue;
+              const refusedCursor = Date.parse(sent.updatedAt);
+              if (Number.isFinite(refusedCursor)) presenceCapMs = Math.min(presenceCapMs, refusedCursor - 1);
+            }
+            // Apply the same cap to indeterminate outcomes.
+            for (const undecided of result.indeterminate) {
+              if (undecided.table !== "Presence") continue;
+              const sent = presenceBatch.find((r) => r.id === undecided.id);
+              if (!sent) continue;
+              const undecidedCursor = Date.parse(sent.updatedAt);
+              if (Number.isFinite(undecidedCursor)) presenceCapMs = Math.min(presenceCapMs, undecidedCursor - 1);
+            }
+            presenceBatch = [];
+            presenceBatchBytes = 0;
+          };
+          for (const row of toSend) {
+            const cursor = presenceCursorMs(row);
+            // A row dated more than the receiver's future allowance past this
+            // scan is left out of the batch: the receiver may refuse it, and
+            // its cursor must not count toward the watermark.
+            if (cursor != null && cursor > presenceScanAtMs + PRESENCE_SEND_FUTURE_ALLOWANCE_MS) continue;
+            const payload = presenceWireRecord(row, instance.id);
+            if (!payload) continue;
+            const sr = { ...payload, signature: signBody(payload, secretKey) };
+            const srBytes = JSON.stringify(sr).length;
+            if (presenceBatch.length >= BUDGET_RECORDS || (presenceBatch.length > 0 && presenceBatchBytes + srBytes > BUDGET_BYTES)) {
+              await flushPresence();
+            }
+            presenceBatch.push(sr);
+            presenceBatchBytes += srBytes;
+            // Clamp the candidate to scan time.
+            if (cursor != null && Math.min(cursor, presenceScanAtMs) > advanceMs) advanceMs = Math.min(cursor, presenceScanAtMs);
+          }
+          if (presenceBatch.length > 0) await flushPresence();
+          presenceAdvanceMs = Math.min(advanceMs, presenceCapMs);
+        }
+      }
+    } catch (err) {
+      return await failPresence(err);
+    }
+
+    // Attempt the watermark update after contact.
+    const persistPresence = async (presenceMs: number) => {
+      try {
+        const advanced = await persistLocalPeerPresenceSyncAt({
+          opsEndpoint,
+          auth,
+          peerId: hub.id,
+          presenceLastSyncAt: new Date(presenceMs).toISOString(),
+        });
+        if (!advanced.ok) {
+          console.warn(`⚠️  Local hub.presenceLastSyncAt advance failed (${advanced.status}): ${advanced.error ?? ""}.`);
+        }
+      } catch (advErr: any) {
+        console.warn(`⚠️  Local hub.presenceLastSyncAt advance error: ${advErr?.message ?? advErr}.`);
+      }
+    };
+
     if (totalBatches === 0) {
       // No-change syncs must still ping the hub so it updates the
       // spoke's lastSyncAt (liveness). Without this, idle-but-alive spokes
@@ -967,6 +1201,7 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
         console.warn(`⚠️  Liveness ping error: ${pingErr?.message ?? pingErr}. Hub won't update spoke liveness.`);
       }
       if (pingOk) await stampLocalContact();
+      if (pingOk && presenceAdvanceMs != null) await persistPresence(presenceAdvanceMs);
 
       // flair#1232: "No changes" is true only when nothing was found since
       // the cursor. If rows were found and every one was withheld as private,
@@ -981,6 +1216,7 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
     }
 
     await stampLocalContact();
+    if (presenceAdvanceMs != null) await persistPresence(presenceAdvanceMs);
     console.log(`✅ Synced ${totalMerged} records (${totalSkipped} skipped) across ${totalBatches} batches`);
     return { pushed: totalMerged, skipped: totalSkipped };
   } catch (err: any) {

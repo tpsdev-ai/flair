@@ -55,6 +55,7 @@ export function txnPausePoint(
   point: string,
   env: NodeJS.ProcessEnv = process.env,
   limitMs: number = PAUSE_LIMIT_MS,
+  snapshot?: unknown,
 ): Promise<void> | undefined {
   if (!PAUSE_POINT_PATTERN.test(point)) throw new InvalidPausePointError(point);
   if (env[TEST_FAULT_INJECTION_ENV] !== "1") return undefined;
@@ -82,7 +83,7 @@ export function txnPausePoint(
     closeSync(claimedFd);
     pausedFd = openSync(join(dir, `paused.${point}`), flags, 0o600);
     releasedFd = openSync(join(dir, `released.${point}`), flags, 0o600);
-    writeFileSync(pausedFd, String(Date.now()));
+    writeFileSync(pausedFd, snapshot === undefined ? String(Date.now()) : JSON.stringify(snapshot));
     unlinkSync(armPath);
   } catch {
     if (pausedFd !== undefined) closeSync(pausedFd);
