@@ -1524,7 +1524,7 @@ async function compensateUnlandedSkillClose(args: {
   closedId: string;
   closeVersionId: string;
   pointerBefore: any;
-}): Promise<Response | null> {
+}): Promise<Response | "restored" | "left_in_place" | "not_needed"> {
   const { ctx, subjectId, closedId, closeVersionId, pointerBefore } = args;
   try {
     const removal = await removeAppendedVersion(ctx, SKILL_SUBJECT_TYPE, subjectId, closeVersionId);
@@ -1532,18 +1532,36 @@ async function compensateUnlandedSkillClose(args: {
       return skillDeleteCompensationFailure("removal of the close version record could not be confirmed");
     }
     if (pointerBefore) {
-      const current = await loadStoredPointer(closedId, {});
-      if (!current) {
-        await withOwnedTransaction(ctx, async (c) => {
-          await putPointerRow(pointerBefore, c);
-        });
-        const restored = await loadStoredPointer(closedId, {});
-        if (!restored) {
-          return skillDeleteCompensationFailure("restoring the host-pointer row could not be confirmed");
+      let expected = await loadStoredPointer(closedId, {});
+      let pointerOutcome: "restored" | "left_in_place" = "left_in_place";
+      if (!expected) {
+        const pause = txnPausePoint("skill-delete-pointer-restore");
+        if (pause) await pause;
+        try {
+          await withOwnedTransaction(ctx, async (c) => {
+            expected = await loadStoredPointer(closedId, c);
+            if (!expected) {
+              await restorePointerRowIfAbsent(pointerBefore, c);
+              const staged = txnPausePoint("skill-delete-pointer-restore-staged");
+              if (staged) await staged;
+              expected = pointerBefore;
+              pointerOutcome = "restored";
+            }
+          });
+        } catch (err) {
+          if (!(err instanceof PointerAlreadyStoredError)) throw err;
+          expected = err.pointer;
+          pointerOutcome = "left_in_place";
         }
       }
+      const resulting = await loadStoredPointer(closedId, {});
+      const fields = ["memoryId", "hostSource", "scopeAtWrite", "authorId", "memoryInstanceToken", "receivedAt"] as const;
+      if (!resulting || fields.some((field) => resulting[field] !== expected?.[field])) {
+        return skillDeleteCompensationFailure("the restored or preserved host-pointer identity could not be confirmed");
+      }
+      return pointerOutcome;
     }
-    return null;
+    return "not_needed";
   } catch (err) {
     console.error("Memory.delete: undoing an unapplied skill close failed", err);
     return skillDeleteCompensationFailure("compensation for the unapplied skill close could not be confirmed");
@@ -1571,7 +1589,11 @@ async function confirmSkillDelete(args: {
 }): Promise<Response | null> {
   const { ctx, auth, subjectId, closedId, closedRow, closeVersionId, pointerBefore, now } = args;
   const table = (databases as any).flair.Memory;
-  const undo = () => compensateUnlandedSkillClose({ ctx, subjectId, closedId, closeVersionId, pointerBefore });
+  const undo = async (refusal: Response): Promise<Response> => {
+    const compensation = await compensateUnlandedSkillClose({ ctx, subjectId, closedId, closeVersionId, pointerBefore });
+    if (compensation instanceof Response) return compensation;
+    return Response.json({ ...await refusal.json(), pointerCompensation: compensation }, { status: refusal.status });
+  };
   for (let attempt = 1; ; attempt++) {
     let committed: any;
     try {
@@ -1582,7 +1604,7 @@ async function confirmSkillDelete(args: {
     if (!committed) return null;
     if (!sameStoredRow(committed, closedRow)) {
       // Replaced between the reads: not the row the caller meant.
-      return (await undo()) ?? storedRowChangedRefusal("Memory");
+      return undo(storedRowChangedRefusal("Memory"));
     }
     if (typeof committed.validTo === "string" && committed.validTo.length > 0) return null;
     if (attempt > SKILL_DELETE_CLOSE_ATTEMPTS) break;
@@ -1610,9 +1632,9 @@ async function confirmSkillDelete(args: {
       if (err instanceof Response) applied = err;
       else return skillDeleteUnconfirmedFailure();
     }
-    if (applied instanceof Response) return (await undo()) ?? applied;
+    if (applied instanceof Response) return undo(applied);
   }
-  return (await undo()) ?? skillDeleteNotClosedRefusal(SKILL_DELETE_CLOSE_ATTEMPTS);
+  return undo(skillDeleteNotClosedRefusal(SKILL_DELETE_CLOSE_ATTEMPTS));
 }
 
 /** Close the live head and delete its pointer in the version transaction. */

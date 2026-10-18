@@ -276,11 +276,42 @@ describe("flair#2642 — a skill DELETE confirms the version close before succes
     const text = await response.text();
     expect(response.status, text).toBe(409);
     expect(JSON.parse(text).error).toBe("skill_delete_not_closed");
+    expect(JSON.parse(text).pointerCompensation).toBe("restored");
     expect((await memoryRow(id))?.validTo ?? null).toBeNull();
     expect((await memoryRow(id))?.content).toBe("competitor-3");
     expect((await versionsOf(id)).map((v) => v.kind)).toEqual(["create"]);
     expect(await pointerRow(id)).toEqual(pointer);
   }, 120_000);
+
+  for (const point of ["skill-delete-pointer-restore", "skill-delete-pointer-restore-staged"]) {
+    it(`a competing pointer is left in place at ${point}`, async () => {
+      const id = nextId("pointer-race");
+      const created = await call(A, "PUT", memPath(id), skillBody(id, "v1"));
+      expect(created.status, await created.text()).toBeLessThan(300);
+      const pointer = await seedPointer(id);
+      const competing = {
+        ...pointer,
+        hostSource: JSON.stringify({ v: 1, host: "openclaw", kind: "run", id: "competing-run-2642" }),
+        receivedAt: now(),
+      };
+      const response = await withPausedCloses([...closePoints, point], () => call(A, "DELETE", memPath(id)), async (index) => {
+        if (index < closePoints.length) {
+          await commitNewerSkillWrite(id, `competitor-${index}`);
+        } else {
+          expect(await pointerRow(id)).toBeNull();
+          await ops({ operation: "insert", database: "flair", table: "MemoryHostSource", records: [competing] });
+          expect(await pointerRow(id)).toEqual(competing);
+        }
+      });
+      const text = await response.text();
+      expect(await pointerRow(id), text).toEqual(competing);
+      expect(response.status, text).toBe(409);
+      expect(JSON.parse(text).error).toBe("skill_delete_not_closed");
+      expect(JSON.parse(text).pointerCompensation).toBe("left_in_place");
+      expect((await memoryRow(id))?.validTo ?? null).toBeNull();
+      expect((await versionsOf(id)).map((v) => v.kind)).toEqual(["create"]);
+    }, 120_000);
+  }
 
   it("a newer append retains the tombstone and returns unconfirmed compensation", async () => {
     const id = nextId("superseded");
