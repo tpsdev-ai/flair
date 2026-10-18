@@ -1,5 +1,4 @@
-- **A Memory DELETE that answers success has removed the row.**
+- **An ordinary, non-skill Memory DELETE confirms row removal before answering success.**
 
-  A delete confirms the committed store after its transaction and retries a
-  removal Harper dropped; a removal that cannot be applied is refused by name
-  (`409 delete_not_applied`) (#2632).
+  It retries a removal that did not land and refuses exhausted attempts as
+  `409 delete_not_applied` (#2632). The skill path closes the live head instead.

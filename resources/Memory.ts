@@ -27,7 +27,7 @@ import {
   loadStoredPointer,
   projectRowsThroughPointers,
 } from "./memory-host-source.js";
-import { putPointerRow, deletePointerRowViaTable } from "./host-pointer-adapter.js";
+import { putPointerRow, deletePointerRowViaTable, restorePointerRowIfAbsent, PointerAlreadyStoredError } from "./host-pointer-adapter.js";
 import { DECLARED_MEMORY_ATTRIBUTES, stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./memory-declared-attributes.js";
 import { composesCallerWrite, isJoinableTransaction, withOwnedTransaction, withSharedWriteTransaction } from "./request-transaction.js";
 import { PredecessorVisibilityChanged, applyGrantedVisibility, committedVisibilityDiffers, predecessorVisibilityChangedRefusal } from "./grant-visibility.js";
@@ -340,13 +340,12 @@ async function verifyCommittedWrite(
   return {};
 }
 
-/** Attempts of a Memory DELETE whose committed row removal did not land. */
+/** Attempts of an ordinary, non-skill Memory DELETE whose removal did not land. */
 const DELETE_APPLY_ATTEMPTS = 3;
 
 /**
- * flair#2632 — the named 409 for a DELETE whose row removal did not land in the
- * committed store after every attempt. The caller may retry; the answer is
- * never a 2xx for a row that is still stored.
+ * flair#2632 — 409 when an ordinary, non-skill Memory DELETE exhausts its
+ * removal attempts. The skill path closes the live head instead of removing it.
  */
 function deleteNotAppliedRefusal(tableName: string, attempts: number): Response {
   return new Response(
@@ -358,8 +357,8 @@ function deleteNotAppliedRefusal(tableName: string, attempts: number): Response 
   );
 }
 
-/** The named 500 for a DELETE whose partial writes (deletion history, pointer
- *  removal) could not be undone after its row removal did not land. */
+/** 500 when ordinary DELETE compensation cannot confirm history removal or
+ *  the restored/preserved pointer's identity. */
 function deleteCompensationFailure(message: string): Response {
   return new Response(
     JSON.stringify({ error: "delete_compensation_failed", message }),
@@ -381,11 +380,8 @@ function sameDeleteTarget(
 }
 
 /**
- * flair#2632 — undo the writes that committed with an attempt whose row removal
- * was dropped: remove the deletion-history record that attempt wrote and
- * restore the pointer row it deleted. The pointer is restored only when no
- * pointer row is stored now, so a replacement's pointer is never clobbered. A
- * cleanup that cannot be confirmed answers a named 500; it never reads as done.
+ * flair#2632 — remove failed history; for a captured pointer, preserve an
+ * existing pointer or restore it if absent, then verify identity.
  */
 async function compensateDroppedRemoval(
   memoryId: string,
@@ -401,15 +397,29 @@ async function compensateDroppedRemoval(
       }
     }
     if (pointerBefore) {
-      const current = await loadStoredPointer(memoryId, {});
-      if (!current) {
-        await withOwnedTransaction(ctx, async (c) => {
-          await putPointerRow(pointerBefore, c);
-        });
-        const restored = await loadStoredPointer(memoryId, {});
-        if (!restored) {
-          return deleteCompensationFailure("the host-pointer row of a row that was not deleted could not be restored");
+      let expected = await loadStoredPointer(memoryId, {});
+      if (!expected) {
+        const pause = txnPausePoint("memory-delete-pointer-restore");
+        if (pause) await pause;
+        try {
+          await withOwnedTransaction(ctx, async (c) => {
+            expected = await loadStoredPointer(memoryId, c);
+            if (!expected) {
+              await restorePointerRowIfAbsent(pointerBefore, c);
+              const staged = txnPausePoint("memory-delete-pointer-restore-staged");
+              if (staged) await staged;
+              expected = pointerBefore;
+            }
+          });
+        } catch (err) {
+          if (!(err instanceof PointerAlreadyStoredError)) throw err;
+          expected = err.pointer;
         }
+      }
+      const resulting = await loadStoredPointer(memoryId, {});
+      const fields = ["memoryId", "hostSource", "scopeAtWrite", "authorId", "memoryInstanceToken", "receivedAt"] as const;
+      if (!resulting || fields.some((field) => resulting[field] !== expected?.[field])) {
+        return deleteCompensationFailure("the restored or preserved host-pointer identity could not be confirmed");
       }
     }
     return null;
@@ -3405,15 +3415,8 @@ export class Memory extends (databases as any).flair.Memory {
       | { kind: "absent" }
       | { kind: "response"; response: Response }
       | { kind: "staged" };
-    // flair#2632: Harper can resolve a transaction's commit while dropping its
-    // queued row delete (the delete loses to a newer write of the same row) and
-    // still commit the transaction's other writes. A 2xx therefore requires a
-    // read of the COMMITTED store showing the row gone; a removal that did not
-    // land is retried from a fresh transaction and a fresh read, and refused by
-    // name when it still cannot be applied. The row the delete first read is
-    // re-checked on every retry (id, current owner, incarnation token): a row
-    // replaced between attempts is not the one the caller meant and is not
-    // deleted.
+    // flair#2632: ordinary, non-skill DELETE confirms committed row absence.
+    // Retry dropped removals with fresh reads; refuse a changed id/owner/token.
     const targetIdProbe = typeof id === "string" ? id : record?.id;
     let target: { id: string; owner: unknown; token: unknown } | null = null;
     let applied = false;

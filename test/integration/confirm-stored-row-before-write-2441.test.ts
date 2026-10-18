@@ -587,14 +587,10 @@ describe("flair#2441 — Memory.put confirms the stored row (real Harper)", () =
 
 // ── Memory DELETE: the committed removal ───────────────────────────────────
 //
-// flair#2632 — Harper can resolve a transaction's commit while dropping its
-// queued row delete (the delete loses to a newer write of the same row) and
-// still commit the transaction's other writes. The DELETE answers success only
-// after a fresh read of the committed store finds the row gone; a removal that
-// did not land is undone (history record removed, pointer row restored) and
-// retried from a fresh transaction and read.
+// flair#2632 — ordinary, non-skill DELETE confirms removal after commit and
+// compensates dropped attempts before retrying. The skill path closes the live head.
 
-describe("flair#2632 — an owner DELETE confirms its committed row removal (real Harper)", () => {
+describe("flair#2632 — an ordinary, non-skill owner DELETE confirms row removal (real Harper)", () => {
   const seed = (id: string, token: string) =>
     insertRow({ id, agentId: owner.id, content: `delete ${id}`, contentHash: id, instanceToken: token, durability: "persistent" });
   const del = (id: string) => authSend(owner, "DELETE", `/Memory/${id}`);
@@ -624,6 +620,7 @@ describe("flair#2632 — an owner DELETE confirms its committed row removal (rea
     const replacementToken = randomUUID();
     await seed(id, token);
     await insertPointer(id, token);
+    const originalPointer = (await pointerRows(id))[0];
     const { response, paused, released } = await withPaused(
       "memory-delete",
       () => del(id),
@@ -637,8 +634,50 @@ describe("flair#2632 — an owner DELETE confirms its committed row removal (rea
     const row = await readRow(id);
     expect(row?.instanceToken, "the replacement row was deleted").toBe(replacementToken);
     expect(await historyRows(id), "a row that was not deleted kept a deletion-history record").toEqual([]);
-    expect((await pointerRows(id)).length, "the pointer row of a row that was not deleted was not restored").toBe(1);
+    const restored = await pointerRows(id);
+    expect(restored.length).toBe(1);
+    for (const field of ["memoryId", "hostSource", "scopeAtWrite", "authorId", "memoryInstanceToken", "receivedAt"]) {
+      expect(restored[0]?.[field], `the old pointer's ${field} was not restored`).toEqual(originalPointer?.[field]);
+    }
   }, 60_000);
+
+  for (const point of ["memory-delete-pointer-restore", "memory-delete-pointer-restore-staged"]) {
+    it(`preserves a replacement pointer committed at ${point}`, async () => {
+      const id = `csr-del-pointer-replaced-${Date.now()}`;
+      const token = randomUUID();
+      const replacementToken = randomUUID();
+      await seed(id, token);
+      await insertPointer(id, token);
+      armPoint("memory-delete");
+      let replacement: any;
+      const { response, paused, released } = await withPaused(
+        point,
+        async () => {
+          const pending = del(id);
+          try {
+            expect(await waitFor(join(pauseDir, "paused.memory-delete"), 15_000)).toBe(true);
+            await updateRow({ id, instanceToken: replacementToken, content: "replacement for pointer compensation" });
+          } finally {
+            releasePoint("memory-delete");
+          }
+          return await pending;
+        },
+        async () => {
+          expect(await pointerRows(id), "the failed attempt's pointer delete did not commit").toEqual([]);
+          await insertPointer(id, replacementToken);
+          replacement = (await pointerRows(id))[0];
+          expect(replacement?.memoryInstanceToken).toBe(replacementToken);
+        },
+      );
+      expect(paused, `compensation did not pause at ${point}`).toBe(true);
+      expect(released).toBe("go");
+      expect(response.status, (await response.clone().text()).slice(0, 300)).toBe(409);
+      expect((await response.json()).error).toBe("stored_row_changed");
+      expect((await readRow(id))?.instanceToken).toBe(replacementToken);
+      expect(await historyRows(id)).toEqual([]);
+      expect(await pointerRows(id), "compensation overwrote the replacement pointer").toEqual([replacement]);
+    }, 60_000);
+  }
 
   it("an owner change committed while the DELETE is paused is refused and the row survives", async () => {
     const id = `csr-del-owner-${Date.now()}`;
