@@ -4,10 +4,14 @@
  * The embedding-stamp migration's `.content`-suffix re-embed writes only the
  * embedding fields in an owned transaction, confirms the committed row before
  * the commit, and (flair#2656) verifies after the commit that a fresh committed
- * read shows those staged fields. This case holds the re-embed after that final
- * confirmation and before its commit while a newer content write commits, so
- * the commit can resolve with the re-embed's effect discarded: the row must not
- * be counted as processed. A later cycle re-reads the newer row and converges.
+ * read shows those staged fields and the embedding text they were computed
+ * for. This case holds the re-embed after that final confirmation and before
+ * its commit while a newer content write commits, so the commit can resolve
+ * with the re-embed's effect discarded: the first attempt's vector is not
+ * counted. The migration re-reads the newer row in the same run and counts the
+ * row once its vector is bound to that text, which this test observes through
+ * the run log and the stored hash. A later cycle re-reads the newer row and
+ * converges.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -18,7 +22,9 @@ import { getModelId } from "../../resources/embeddings-provider.ts";
 import { computeContentHash } from "../../resources/memory-feed-lib.ts";
 
 const POINT = "embedding-stamp-content-suffix-commit";
+const VERIFY_POINT = "embedding-stamp-content-suffix-verify";
 const LEGACY_ID = "esc-gap-legacy.content";
+const VERIFY_ID = "esc-verify-legacy.content";
 const STALE_MODEL = "some-ancient-model-v0";
 const STALE_EMBEDDING = [0.1, 0.1, 0.1];
 const ORIGINAL = "the legacy text the migration read and embedded";
@@ -61,6 +67,29 @@ async function readWhenPresent(path: string, timeoutMs: number): Promise<string 
       if (text) return text;
     } catch {}
     await new Promise((r) => setTimeout(r, 50));
+  }
+  return null;
+}
+
+/** Every run result the migration logged (test-only instrumentation). */
+function migrationRuns(): { processed: number; touchedIds: string[] }[] {
+  try {
+    return readFileSync(join(pauseDir, "embedding-stamp-runs.jsonl"), "utf8")
+      .split("\n")
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line));
+  } catch {
+    return [];
+  }
+}
+
+/** Wait until the migration logged a run whose touchedIds include `id`. */
+async function waitForRunTouching(id: string, timeoutMs: number) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const run = migrationRuns().find((r) => Array.isArray(r.touchedIds) && r.touchedIds.includes(id));
+    if (run) return run;
+    await new Promise((r) => setTimeout(r, 100));
   }
   return null;
 }
@@ -124,5 +153,43 @@ describe("flair#2656 — the `.content`-suffix re-embed under a write committed 
     expect(row?.embeddingModel, "the retried re-embed did not stamp the current model").toBe(CURRENT_MODEL_ID);
     expect(row?.embeddedContentHash, "the stored vector is not bound to the newer text").toBe(computeContentHash("esc-gap-agent", EDITED));
     expect(Array.isArray(row?.embedding) && row.embedding.length > 3, "the retried re-embed stored no usable vector").toBe(true);
+    const run = await waitForRunTouching(LEGACY_ID, 10_000);
+    expect(run, "the migration logged no run touching the row").not.toBeNull();
+    expect(run, "the row was not counted exactly once by the run that landed its vector").toEqual({ processed: 1, touchedIds: [LEGACY_ID] });
+  }, 260_000);
+
+  it("a text edit committed after the vector's commit and before its read-back is not counted as that vector's", async () => {
+    const EDITED_AFTER = "a text edit committed after the vector's commit, before its read-back";
+    await opsCall({
+      operation: "insert", database: "flair", table: "Memory",
+      records: [{
+        id: VERIFY_ID, agentId: "esc-verify-agent", content: ORIGINAL,
+        embedding: STALE_EMBEDDING, embeddingModel: STALE_MODEL, createdAt: new Date().toISOString(),
+      }],
+    });
+    writeFileSync(join(pauseDir, `arm.${VERIFY_POINT}`), "");
+    expect(await waitFor(join(pauseDir, `paused.${VERIFY_POINT}`), 150_000), "no migration cycle paused after the re-embed's commit").toBe(true);
+    try {
+      await opsCall({
+        operation: "update", database: "flair", table: "Memory", records: [{ id: VERIFY_ID, content: EDITED_AFTER }],
+      });
+    } finally {
+      writeFileSync(join(pauseDir, `go.${VERIFY_POINT}`), "");
+    }
+    expect(await readWhenPresent(join(pauseDir, `released.${VERIFY_POINT}`), 30_000), "the pause ended by timeout, not by this test").toBe("go");
+
+    const deadline = Date.now() + 10_000;
+    let row = await readRow(VERIFY_ID);
+    while (Date.now() < deadline) {
+      if (row?.embeddingModel === CURRENT_MODEL_ID && row?.embeddedContentHash === computeContentHash("esc-verify-agent", EDITED_AFTER)) break;
+      await new Promise((r) => setTimeout(r, 250));
+      row = await readRow(VERIFY_ID);
+    }
+    expect(row?.content, "the later text edit was reverted").toBe(EDITED_AFTER);
+    expect(row?.embeddedContentHash, "the staged vector was reported applied for text it was not computed for").toBe(computeContentHash("esc-verify-agent", EDITED_AFTER));
+    expect(Array.isArray(row?.embedding) && row.embedding.length > 3, "the retried re-embed stored no usable vector").toBe(true);
+    const run = await waitForRunTouching(VERIFY_ID, 10_000);
+    expect(run, "the migration logged no run touching the row").not.toBeNull();
+    expect(run, "the row was not counted exactly once by the run that landed its vector").toEqual({ processed: 1, touchedIds: [VERIFY_ID] });
   }, 260_000);
 });

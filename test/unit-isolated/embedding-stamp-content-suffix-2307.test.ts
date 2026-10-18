@@ -18,6 +18,7 @@
  * Harper, is test/integration/embedding-stamp-contention-2307.test.ts.
  */
 import { beforeEach, describe, expect, it, mock } from "bun:test";
+import { hashEmbeddedText } from "../../resources/memory-embed-hash.ts";
 
 const CURRENT = "current-model";
 let embedImpl: (text: string) => Promise<unknown> = async () => [0.5, 0.25, 0.125];
@@ -49,6 +50,7 @@ mock.module("../../resources/embeddings-provider.ts", () => ({
     }
     commitPatch(id, patch);
   }
+  afterCommit?.();
   return result;
 };
 
@@ -67,6 +69,8 @@ let puts: Row[];
 let writeCalls: { method: "put" | "update"; id: string; fields: string[] }[];
 /** Runs after an update is staged in a transaction, before that transaction commits. */
 let afterStage: (() => void) | null = null;
+/** Runs after the transaction commits, before the migration reads the row back. */
+let afterCommit: (() => void) | null = null;
 
 function commitPatch(id: string, patch: Row): void {
   const merged = { ...(store.get(id) ?? {}), ...structuredClone(patch), id };
@@ -134,6 +138,7 @@ beforeEach(() => {
   embedded = [];
   embedImpl = async () => [0.5, 0.25, 0.125];
   afterStage = null;
+  afterCommit = null;
 });
 
 describe("flair#2307 — the content-suffix re-embed validates the vector and committed re-read", () => {
@@ -218,6 +223,34 @@ describe("flair#2307 — the content-suffix re-embed validates the vector and co
       }
     });
   }
+
+  it("a content edit committed after the update and before its read-back is not counted as that vector's", async () => {
+    afterCommit = () => {
+      afterCommit = null;
+      store.set(LEGACY_ID, { ...store.get(LEGACY_ID)!, content: "edited after the commit" });
+    };
+    const result = await migration().run(10);
+    // The text check rejects the first staged vector, and the retry computes a
+    // vector for the edited text; only that one is counted.
+    expect(result).toEqual({ processed: 1, touchedIds: [LEGACY_ID] });
+    expect(store.get(LEGACY_ID)).toMatchObject({ content: "edited after the commit", embeddingModel: CURRENT });
+    expect(store.get(LEGACY_ID)!.embeddedContentHash).toBe(hashEmbeddedText("a", "edited after the commit"));
+  });
+
+  it("a row another writer made current after the commit is not counted", async () => {
+    afterCommit = () => {
+      afterCommit = null;
+      store.set(LEGACY_ID, {
+        ...store.get(LEGACY_ID)!,
+        embedding: [0.9, 0.8, 0.7],
+        embeddingModel: CURRENT,
+        embeddedContentHash: hashEmbeddedText("a", "edited by another writer"),
+        content: "edited by another writer",
+      });
+    };
+    const result = await migration().run(10);
+    expect(result).toEqual({ processed: 0, touchedIds: [] });
+  });
 
   it("a row re-created under the same id by another owner after staging is not patched", async () => {
     afterStage = () => {

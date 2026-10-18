@@ -160,6 +160,8 @@
  * comparison instead.
  */
 import { databases } from "harper";
+import { appendFileSync } from "node:fs";
+import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { confirmCommittedRow, verifyCommittedFields } from "../write-back.js";
 import { getEmbedding, getModelId } from "../embeddings-provider.js";
@@ -193,6 +195,18 @@ function defaultMemoryTable(): MemoryTableLike {
 const REGEN_HTTP_TIMEOUT_MS = 20_000; // a real embedding compute can be slow on constrained hardware
 /** Attempts of a `.content`-suffix re-embed before its row stays pending. */
 const CONTENT_SUFFIX_REGEN_ATTEMPTS = 3;
+
+/** Test-only: record each run's result when fault injection is armed. */
+function noteTestMigrationRun(result: RunBatchResult): void {
+  if (process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION !== "1") return;
+  const dir = process.env.FLAIR_TEST_PAUSE_DIR;
+  if (!dir) return;
+  try {
+    appendFileSync(join(dir, "embedding-stamp-runs.jsonl"), `${JSON.stringify(result)}\n`);
+  } catch {
+    // Append errors are ignored.
+  }
+}
 
 /** Same admin-password resolution as resources/auth-middleware.ts's getAdminPass(). */
 function resolveAdminAuthHeader(): string | null {
@@ -307,11 +321,12 @@ const defaultContentSuffixRegenDeps: ContentSuffixRegenDeps = {
  * Then it CONFIRMS the committed row (an explicit fresh context) is still the
  * row this transaction read and embedded; a row gone or distinguishably changed
  * at confirmation aborts the owned transaction and returns false. On success it
- * returns the row and the staged fields, and the caller verifies the committed
- * row after the commit (retrying from a fresh read).
+ * returns the row, the text basis and the staged fields, and the caller verifies
+ * the committed row after the commit (retrying from a fresh read).
  *
- * A change committed after confirmation and before commit is caught by that
- * post-commit read. The confirmation compares the WHOLE committed row
+ * A change to the fields and identity the post-commit read compares, committed
+ * after confirmation and before commit, is caught by that read. The confirmation
+ * compares the WHOLE committed row
  * with the row read (the supersede-close pattern), which is stronger than the
  * identity list alone: a content-only change to a row that lacks a stored
  * incarnation token (a legacy row may lack one) still fails it. The vector is computed for text unchanged through confirmation.
@@ -326,7 +341,7 @@ async function regenContentSuffixRow(
   existing: Record<string, unknown>,
   current: string,
   deps: ContentSuffixRegenDeps,
-): Promise<{ identity: Record<string, unknown>; fields: Record<string, unknown> } | false> {
+): Promise<{ identity: Record<string, unknown>; fields: Record<string, unknown>; text: string } | false> {
   try {
     const text = skillEmbedText(existing);
     if (typeof text !== "string" || text.length === 0) return false;
@@ -349,14 +364,15 @@ async function regenContentSuffixRow(
       // transaction read and embedded; gone or distinguishably changed at
       // confirmation aborts (the staged write is discarded). A change committed
       // after this re-read and before the commit is caught by the caller's
-      // post-commit verification, which retries from a fresh read.
+      // post-commit verification, which retries from a fresh read when the
+      // committed fields, identity or embedding text differ.
       await confirmCommittedRow(table, id, (committed) => isDeepStrictEqual(committed, fresh));
       // Test-only: inert unless the fault-injection env opt-in is set and armed.
       // Holds the regen after its final pre-commit confirmation and before its
       // owned transaction commits (flair#2656).
       const commitPause = txnPausePoint("embedding-stamp-content-suffix-commit");
       if (commitPause) await commitPause;
-      return { identity: fresh, fields: update };
+      return { identity: fresh, fields: update, text };
     });
     return staged;
   } catch {
@@ -495,15 +511,25 @@ export function createEmbeddingStampMigration(
           for (let attempt = 1; attempt <= CONTENT_SUFFIX_REGEN_ATTEMPTS; attempt++) {
             const rowNow = attempt === 1 ? existing : await table.get(id);
             if (!rowNow) break;
-            if (attempt > 1 && rowEmbeddingCurrent(rowNow as Record<string, unknown>, current)) {
-              ok = true;
-              break;
-            }
+            // A row another writer already made current is not this migration's
+            // write. Leave it uncounted; a later scan decides whether anything
+            // still needs re-embedding.
+            if (attempt > 1 && rowEmbeddingCurrent(rowNow as Record<string, unknown>, current)) break;
             const staged = await regenContentSuffixRow(table, id, rowNow as Record<string, unknown>, current, contentSuffixRegen);
             if (!staged) break;
+            // Test-only: inert unless the fault-injection env opt-in is set and
+            // armed. After this attempt's transaction commits and before its
+            // committed-row read-back.
+            const verifyPause = txnPausePoint("embedding-stamp-content-suffix-verify");
+            if (verifyPause) await verifyPause;
             // IDEMPOTENT: the same text yields the same vector and hash, so a
-            // post-commit mismatch retries from a fresh read.
-            const verdict = await verifyCommittedFields(table, id, staged.identity, staged.fields);
+            // post-commit mismatch retries from a fresh read. The staged vector
+            // counts only when the committed row still carries the exact text
+            // the vector was computed for.
+            const verdict = await verifyCommittedFields(
+              table, id, staged.identity, staged.fields,
+              (committed) => skillEmbedText(committed) === staged.text,
+            );
             if (verdict === "shown") {
               ok = true;
               break;
@@ -512,7 +538,7 @@ export function createEmbeddingStampMigration(
             if (verdict === "unreadable") break;
           }
           if (!ok && unconfirmed) {
-            console.warn(`[embedding-stamp] ${id}: the content-suffix re-embed did not confirm its committed row; outcome: unconfirmed, the row stays pending`);
+            console.warn(`[embedding-stamp] ${id}: the content-suffix re-embed did not confirm its committed row; outcome: unconfirmed, the row is uncounted and a later scan decides pending state`);
           }
         } else {
           // Test-only: inert unless the fault-injection env opt-in is set and armed.
@@ -528,6 +554,7 @@ export function createEmbeddingStampMigration(
         // transaction is known to write nothing.
       }
 
+      noteTestMigrationRun({ processed: touchedIds.length, touchedIds });
       return { processed: touchedIds.length, touchedIds };
     },
   };

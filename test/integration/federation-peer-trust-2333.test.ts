@@ -9,6 +9,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import nacl from "tweetnacl";
 import { signBodyFresh } from "../../resources/federation-crypto.js";
 import { ensureFlairPairInitiatorRole } from "../../src/cli";
@@ -1048,5 +1049,84 @@ describe("flair#2656 — a first-time pair confirms the committed row after its 
     expect(body.outcome).toBe("unconfirmed");
     expect(body.paired, "this request did not store its row, so it does not report paired").toBeUndefined();
     expect((await readPeer(peer))?.publicKey, "the committed row is the competitor's").toBe(b64url(b.publicKey));
+  }, 60_000);
+
+  it("two attempts at one consumedAt: the attempt whose marker is not committed does not report success", async () => {
+    // A frozen child clock makes both attempts' `consumedAt` the same instant.
+    const clockPreload = fileURLToPath(new URL("../helpers/harper-freeze-clock.cjs", import.meta.url));
+    const frozenAt = Date.now();
+    const frozenISO = new Date(frozenAt).toISOString();
+    const outer = harper;
+    let frozen: HarperInstance | undefined;
+    try {
+      frozen = await startHarper({
+        cwd: component.dir,
+        env: {
+          FLAIR_ENABLE_TEST_FAULT_INJECTION: "1",
+          FLAIR_TEST_PAUSE_DIR: pauseDir,
+          FLAIR_TEST_FROZEN_NOW: String(frozenAt),
+          NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --require=${clockPreload}`.trim(),
+        },
+      });
+      assertOwnInstance(frozen);
+      harper = frozen;
+
+      const token = `pt-2656-same-ms-${sfx}`;
+      const a = nacl.sign.keyPair();
+      const peer = `f2656-same-ms-${sfx}`;
+      const publicKey = b64url(a.publicKey);
+      await seedToken(token);
+      const { response, released, paused } = await withPaused(
+        "federation-pair-first-commit",
+        () => pairRequest(pairBody(peer, publicKey, a.secretKey, token)),
+        async () => {
+          // A competing attempt at the SAME frozen instant writes value-equal
+          // Peer and token rows with its own marker. This attempt's write is
+          // the one the commit drops.
+          await ops({
+            operation: "insert", database: "flair", table: "Peer",
+            records: [{
+              id: peer, publicKey, role: "spoke", endpoint: null, status: "paired",
+              relayOnly: false, pairedAt: frozenISO, createdAt: frozenISO, updatedAt: frozenISO,
+              pairAttemptWriteId: "competitor-marker",
+            }],
+          });
+          await ops({
+            operation: "update", database: "flair", table: "PairingToken",
+            records: [{ id: token, consumedBy: peer, consumedAt: frozenISO, pairAttemptWriteId: "competitor-marker" }],
+          });
+        },
+      );
+      expect(paused, "the first pair was not paused at its commit gap").toBe(true);
+      expect(released, "the first pair was not released by this test").toBe("go");
+      const body = await response.json() as any;
+      expect(response.status, JSON.stringify(body)).toBe(409);
+      expect(body.error).toBe("peer_pair_unconfirmed");
+      expect(body.outcome).toBe("unconfirmed");
+      expect(body.paired, "this request's own marker did not commit, so it does not report paired").toBeUndefined();
+      expect((await readPeer(peer))?.publicKey, "the committed Peer row carries this attempt's staged values").toBe(publicKey);
+      const tokenRow = await readToken(token);
+      expect(tokenRow?.consumedBy, "the committed consume names this attempt's instance").toBe(peer);
+      expect(tokenRow?.consumedAt, "the committed consume shares this attempt's consumedAt").toBe(frozenISO);
+    } finally {
+      harper = outer;
+      if (frozen) await stopHarper(frozen);
+    }
+  }, 300_000);
+
+  it("the ordinary success path confirms this attempt's marker on both committed rows", async () => {
+    const token = `pt-2656-ok-marker-${sfx}`;
+    const k = nacl.sign.keyPair();
+    const peer = `f2656-ok-marker-${sfx}`;
+    await seedToken(token);
+    const res = await pairRequest(pairBody(peer, b64url(k.publicKey), k.secretKey, token));
+    const body = await res.json() as any;
+    expect(res.status, JSON.stringify(body)).toBe(200);
+    expect(body.paired).toBe(true);
+    const row = await readPeer(peer);
+    const tokenRow = await readToken(token);
+    expect(row?.publicKey).toBe(b64url(k.publicKey));
+    expect(row?.pairAttemptWriteId, "the committed Peer row carries this attempt's marker").toBeTruthy();
+    expect(tokenRow?.pairAttemptWriteId, "the committed token consume carries the same marker").toBe(row?.pairAttemptWriteId);
   }, 60_000);
 });

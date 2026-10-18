@@ -363,8 +363,8 @@ async function resolveOrCreatePrincipalLocked(
     return principalId;
   });
   // flair#2656: the commit is not proof the touch landed. Answer the grant only
-  // when a fresh committed read is the touched row with every staged field at
-  // its staged value; otherwise the grant is refused.
+  // when a fresh committed read shows the staged values on the same row
+  // identity; otherwise the grant is refused.
   if (touchedCredential) {
     const verdict = await verifyCommittedFields(
       (databases as any).flair.Credential,
@@ -376,7 +376,7 @@ async function resolveOrCreatePrincipalLocked(
       throw new Error("the matched IdP credential could not be read back after the touch (outcome: unconfirmed); the jwt-bearer grant is refused");
     }
     if (verdict !== "shown") {
-      throw new Error("the matched IdP credential's committed state is not this grant's touched row (outcome: unconfirmed); the jwt-bearer grant is refused");
+      throw new Error("the matched IdP credential's committed state does not show this grant's staged values (outcome: unconfirmed); the jwt-bearer grant is refused");
     }
   }
   return principalId;

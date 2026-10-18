@@ -1899,10 +1899,10 @@ async function reembedStoredRow(
     }
     noteWriteStamp(outcome.model, preRead);
     // flair#2656: the commit is not proof the re-embed landed. Re-read the
-    // committed row in a fresh context and answer success only when it is the
-    // row this attempt wrote with every staged field at its staged value. A
-    // mismatch retries from the next attempt's fresh read (which re-checks the
-    // text, the owner and the identity); an unreadable read is unknown.
+    // committed row in a fresh context and answer success only when it shows
+    // the staged values on the same row identity. A mismatch retries from the
+    // next attempt's fresh read (which re-checks the text, the owner and the
+    // identity); an unreadable read is unknown.
     const verdict = await verifyCommittedFields(
       (databases as any).flair.Memory,
       id,
