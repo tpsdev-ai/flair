@@ -102,8 +102,8 @@ export function agentRecordIsAdmin(record: unknown): boolean {
  * environment half through this, and the federation merge reads the same set
  * (flair#2665).
  */
-export function configuredAdminAgentIds(env: Record<string, string | undefined> = process.env): Set<string> {
-  return new Set((env.FLAIR_ADMIN_AGENTS ?? "").split(",").map((s) => s.trim()).filter(Boolean));
+export function configuredAdminAgentIds(raw: string | undefined = process.env.FLAIR_ADMIN_AGENTS): Set<string> {
+  return new Set((raw ?? "").split(",").map((s) => s.trim()).filter(Boolean));
 }
 
 /**

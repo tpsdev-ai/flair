@@ -96,11 +96,11 @@ describe("flair#2665 keepReceiverAgentAuthority", () => {
 });
 
 describe("flair#2665 agentAdminIdCreateRefusal", () => {
-  const configured = configuredAdminAgentIds({ FLAIR_ADMIN_AGENTS: " agent-a , ,agent-b" });
+  const configured = configuredAdminAgentIds(" agent-a , ,agent-b");
 
   test("the configured set is the comma-separated, trimmed, non-empty ids", () => {
     expect([...configured].sort()).toEqual(["agent-a", "agent-b"]);
-    expect(configuredAdminAgentIds({}).size).toBe(0);
+    expect(configuredAdminAgentIds("").size).toBe(0);
   });
 
   test("creating a row for a configured id is refused; an existing row and other ids are not", () => {
