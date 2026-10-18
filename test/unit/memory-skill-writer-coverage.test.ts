@@ -39,7 +39,7 @@ add("Memory", ["writer:cls.create#1", "writer:(databases as any).flair.Memory.po
 add("skill-version-write", ["writer:(databases as any).flair.Memory.put#1"],
   "Memory post/put and FeedMemories scan the merged successor body before calling this writer.");
 add("skill-version-write", ["writer:table.put#1"],
-  "Re-applies a version close from a fresh committed read when the queued close did not land; it stamps only validTo/updatedAt on the row it re-read — not a new skill write (flair#2645).");
+  "Re-applies a version close from a fresh committed read when the queued close did not land (flair#2645).");
 add("skill-version-write", ["writer:table.delete#1"],
   "Rolls back this request's successor when its close could not land; a removal, not a skill write (flair#2645).");
 

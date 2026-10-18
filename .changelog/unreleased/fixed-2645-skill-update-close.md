@@ -4,5 +4,4 @@
   while the successor and version committed, leaving two live heads after a
   200. The close is now confirmed in a fresh committed read, re-applied from
   that read with the row identity and caller authority re-checked, and refused
-  with 409 `skill_update_not_closed` (or a named 500 when the successor cannot
-  be rolled back) when it still does not land (#2645).
+  when the close cannot be confirmed (#2645).

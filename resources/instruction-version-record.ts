@@ -7,6 +7,7 @@ import { authorizeSoulWrite } from "./soul-write-policy.js";
 import { authorizeSkillVersionWrite } from "./skill-write-policy.js";
 import { withKeyLock } from "./key-lock.js";
 import { withOwnedTransaction } from "./request-transaction.js";
+import { txnPausePoint } from "./txn-pause-point.js";
 import { maybeThrowSkillWriteFault } from "./skill-write-fault.js";
 import { PRIVATE_VISIBILITY, SHARED_VISIBILITY } from "./memory-visibility.js";
 
@@ -63,9 +64,8 @@ export async function removeAppendedVersion(
   versionRecordId: string,
 ): Promise<"removed" | "superseded" | "busy" | "unavailable"> {
   const store = (databases as any).flair?.InstructionVersion?.primaryStore;
-  let removed = false;
-  const outcome = await withKeyLock(store, [LOCK_NAMESPACE, subjectType], () =>
-    withOwnedTransaction(ctx, async (shared) => {
+  const outcome = await withKeyLock(store, [LOCK_NAMESPACE, subjectType], async () => {
+    const staged = await withOwnedTransaction(ctx, async (shared) => {
       const head = await readHead(subjectType, subjectId, shared);
       if (!head) return "removed" as const;
       if (String(head.id) !== versionRecordId) return "superseded" as const;
@@ -76,22 +76,24 @@ export async function removeAppendedVersion(
       const raw = Object.getPrototypeOf(table);
       if (typeof raw?.delete !== "function" || typeof raw?.get !== "function") return "unavailable" as const;
       await raw.delete.call(table, versionRecordId, shared);
-      removed = true;
+      const pause = txnPausePoint("skill-version-rollback-staged");
+      if (pause) await pause;
       return "deleted" as const;
-    }),
+    });
+    if (staged !== "deleted") return staged;
+    const table = (databases as any).flair.InstructionVersion;
+    const raw = Object.getPrototypeOf(table);
+    if (typeof raw?.get !== "function") return "unavailable" as const;
+    const pause = txnPausePoint("skill-version-rollback-committed");
+    if (pause) await pause;
+    const left = await raw.get.call(table, versionRecordId, {});
+    return left == null ? "removed" as const : "unavailable" as const;
+  },
   LOCK_ATTEMPTS,
   LOCK_WAIT_MS);
   if (outcome.kind === "busy") return "busy";
   if (outcome.kind === "unavailable") return "unavailable";
-  if (!removed) return outcome.value === "deleted" ? "unavailable" : outcome.value;
-  // The delete above commits with the owned transaction; a fresh read after it
-  // commits is what confirms the row is gone (a contextless read inside the
-  // transaction sees its old snapshot).
-  const table = (databases as any).flair.InstructionVersion;
-  const raw = Object.getPrototypeOf(table);
-  if (typeof raw?.get !== "function") return "unavailable";
-  const left = await raw.get.call(table, versionRecordId, {});
-  return left == null ? "removed" : "superseded";
+  return outcome.value;
 }
 
 export interface RecordVersionSuccess { ok: true; result: any; version: string }

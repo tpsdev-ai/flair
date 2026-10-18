@@ -381,7 +381,7 @@ export interface RunSkillVersionWriteArgs {
  * whole write rolls back the same way. As with the grant, a change committed
  * after this re-read and before the transaction commits is not seen by it.
  */
-async function afterCloseStaged(
+export async function afterCloseStaged(
   granted: GrantedClose | null | undefined,
   supersede?: { predecessorId: string; successor: Record<string, any> },
 ): Promise<Response | null> {
@@ -452,7 +452,6 @@ async function compensateUnlandedSkillUpdate(args: {
   try {
     const removal = await removeAppendedVersion(ctx, SKILL_SUBJECT_TYPE, subjectId, versionId);
     if (removal !== "removed") {
-      if (removal === "superseded") return null;
       return skillUpdateCompensationFailure("the version record of a close that did not land could not be removed");
     }
     const successorId = String(successor.id);
@@ -492,10 +491,11 @@ export interface ConfirmSkillCloseArgs {
   closePatch: Record<string, unknown>;
   /** Re-check the caller's authority on the current committed row. */
   authorize: (row: Record<string, any>, shared: any) => Promise<Response | null>;
-  /** Undo everything else this request committed when the close cannot land. */
+  afterStaged?: (row: Record<string, any>, attempt: number) => Promise<Response | null>;
   compensate: () => Promise<Response | null>;
   /** Check the committed effect beyond the close (a successor's live head). */
   confirmEffect?: () => Promise<Response | null>;
+  missing?: () => Response;
   /** The named refusal when the close never lands. */
   refusal: () => Response;
   /** The named 500 when a confirmation read fails. */
@@ -520,7 +520,7 @@ export interface ConfirmSkillCloseArgs {
  * re-apply and compensation hand-off.
  */
 export async function confirmSkillClose(args: ConfirmSkillCloseArgs): Promise<Response | null> {
-  const { ctx, table, expected, closePatch, authorize, compensate, confirmEffect, refusal, unconfirmed } = args;
+  const { ctx, table, expected, closePatch, authorize, afterStaged, compensate, confirmEffect, refusal, unconfirmed } = args;
   const attempts = args.attempts ?? SKILL_UPDATE_CLOSE_ATTEMPTS;
   const id = String(expected.id);
   for (let attempt = 1; ; attempt++) {
@@ -531,7 +531,7 @@ export async function confirmSkillClose(args: ConfirmSkillCloseArgs): Promise<Re
       return unconfirmed();
     }
     if (!committed) {
-      const denied = confirmEffect ? await confirmEffect() : null;
+      const denied = args.missing?.() ?? (confirmEffect ? await confirmEffect() : null);
       return denied ? (await compensate()) ?? denied : null;
     }
     if (!sameStoredRow(committed, expected)) {
@@ -554,10 +554,14 @@ export async function confirmSkillClose(args: ConfirmSkillCloseArgs): Promise<Re
         const closed = { ...stored, ...closePatch };
         normalizeEmptyEmbedding(closed);
         const result = storageResult(await table.put(closed, c));
-        return result instanceof Response ? result : "staged";
+        if (result instanceof Response) throw result;
+        const revoked = await afterStaged?.(stored, attempt);
+        if (revoked) throw revoked;
+        return "staged";
       });
-    } catch {
-      return unconfirmed();
+    } catch (err) {
+      if (err instanceof Response) applied = err;
+      else return unconfirmed();
     }
     if (applied instanceof Response) return (await compensate()) ?? applied;
   }
@@ -575,9 +579,10 @@ async function confirmSkillUpdate(args: {
   closePatch: Record<string, unknown>;
   successor: Record<string, any>;
   versionId: string;
+  grantedClose: GrantedClose | null;
   authorize: (row: Record<string, any>, shared: any) => Promise<Response | null>;
 }): Promise<Response | null> {
-  const { ctx, subjectId, predecessor, closePatch, successor, versionId, authorize } = args;
+  const { ctx, subjectId, predecessor, closePatch, successor, versionId, grantedClose, authorize } = args;
   const table = (databases as any).flair?.Memory;
   if (!table || typeof table.get !== "function" || typeof table.put !== "function") {
     return skillUpdateUnconfirmedFailure();
@@ -611,8 +616,16 @@ async function confirmSkillUpdate(args: {
     expected: predecessor,
     closePatch,
     authorize,
+    afterStaged: async (_row, attempt) => {
+      const pause = attempt === 1 ? txnPausePoint("skill-update-retry-first")
+        : attempt === 2 ? txnPausePoint("skill-update-retry-second")
+          : txnPausePoint("skill-update-retry-third");
+      if (pause) await pause;
+      return afterCloseStaged(grantedClose, { predecessorId: String(predecessor.id), successor });
+    },
     compensate: () => compensateUnlandedSkillUpdate({ ctx, subjectId, successor, versionId }),
     confirmEffect: confirmsSingleHead,
+    missing: () => storedRowChangedRefusal("Memory"),
     refusal: () => skillUpdateNotClosedRefusal(SKILL_UPDATE_CLOSE_ATTEMPTS),
     unconfirmed: skillUpdateUnconfirmedFailure,
   });
@@ -719,8 +732,7 @@ async function runSkillVersionWriteInner(args: RunSkillVersionWriteArgs): Promis
   if (!outcome.ok || plan === null) return outcome;
   const writePlan = plan as SkillWritePlan;
   if (writePlan.kind !== "update" || !writePlan.predecessor) return outcome;
-  const authorize = args.hooks.authorizeClose;
-  if (!authorize) return { ok: false, response: skillUpdateUnconfirmedFailure() };
+  const authorize = args.hooks.authorizeClose ?? (async () => skillUpdateUnconfirmedFailure());
   // flair#2645: the owned transaction has committed, but its success is not
   // proof that the queued close was applied. Confirm against the committed
   // store before answering success.
@@ -731,6 +743,7 @@ async function runSkillVersionWriteInner(args: RunSkillVersionWriteArgs): Promis
     closePatch: writePlan.closePatch,
     successor: writePlan.successor,
     versionId: outcome.version,
+    grantedClose: writePlan.grantedClose,
     authorize,
   });
   if (confirmation) return { ok: false, response: confirmation };
