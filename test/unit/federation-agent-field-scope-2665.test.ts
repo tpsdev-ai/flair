@@ -69,14 +69,14 @@ describe("flair#2665 agentIdentityRefusal", () => {
 });
 
 describe("flair#2665 keepReceiverAgentAuthority", () => {
-  test("a new row is written without the admin fields", () => {
+  test("a new row is written without admin state", () => {
     const merged = keepReceiverAgentAuthority({ id: "agent-a", role: "admin", admin: true }, null);
     expect("role" in merged).toBe(false);
     expect(merged.admin).toBe(false);
     expect(keepReceiverAgentAuthority({ id: "agent-a", role: "researcher" }, null).role).toBe("researcher");
   });
 
-  test("an existing row keeps its stored admin fields in both directions", () => {
+  test("an existing row keeps its stored admin state in both directions", () => {
     const up = keepReceiverAgentAuthority({ ...stored(), role: "admin", admin: true }, stored());
     expect(up.role).toBe("agent");
     expect(up.admin).toBe(false);
