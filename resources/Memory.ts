@@ -48,7 +48,7 @@ import {
 import { assertValidDurability, stampEphemeralExpiry } from "./memory-durability.js";
 import { embedTextField, enforceSkillDurability, isSkillWrite, type MemoryEmbeddingInputField, rejectSkillWritePath, refuseSkillWriteSource, skillEmbedText, skillScanGate, skillMetadataHasDuplicateKey } from "./skill-write.js";
 import { embeddedTextHash, hashEmbeddedText } from "./memory-embed-hash.js";
-import { buildSkillSuccessorRow, closedSkillPayloadReadable, defaultSkillHooks, grantedSkillClose, resolveSkillHead, rowIsSkill, runSkillVersionWrite, skillVersionVisibility, skillPayloadUnchanged, prepareSkillBody, validateSkillSnapshots, authorizeSkillOwners, skillWriteConflict } from "./skill-version-write.js";
+import { afterCloseStaged, buildSkillSuccessorRow, closedSkillPayloadReadable, defaultSkillHooks, grantedSkillClose, resolveSkillHead, rowIsSkill, runSkillVersionWrite, skillVersionVisibility, skillPayloadUnchanged, prepareSkillBody, validateSkillSnapshots, authorizeSkillOwners, skillWriteConflict } from "./skill-version-write.js";
 import { SKILL_SUBJECT_TYPE, removeAppendedVersion } from "./instruction-version-record.js";
 import { deriveSkillSubjectId } from "./skill-subject.js";
 import {
@@ -1411,12 +1411,7 @@ function skillDeleteNotClosedRefusal(attempts: number): Response {
   }, { status: 409 });
 }
 
-/**
- * flair#2642 — undo the writes that committed with a close attempt whose close
- * did not land: the version record that attempt appended and the pointer row it
- * deleted. A cleanup that cannot be confirmed answers a named 500; it never
- * reads as done.
- */
+/** Compensate an unlanded close. */
 async function compensateUnlandedSkillClose(args: {
   ctx: any;
   subjectId: string;
@@ -1455,8 +1450,7 @@ async function compensateUnlandedSkillClose(args: {
  * the queued full put (it loses to a newer write of the same row) and still
  * commit the tombstone and pointer writes. A close that did not land is
  * re-applied from a fresh read, re-checking the row's identity and the caller's
- * authority. Exhausted retries answer 409 after compensation, or 500 if
- * compensation cannot be confirmed.
+ * authority. Unconfirmed compensation answers 500.
  * Returns null only when the close is confirmed (or the row is gone).
  */
 async function confirmSkillDelete(args: {
@@ -1497,10 +1491,18 @@ async function confirmSkillDelete(args: {
         const closed = { ...stored, validTo: now, updatedAt: now };
         normalizeEmptyEmbedding(closed);
         const result = storageResult(await table.put(closed, c));
-        return result instanceof Response ? result : "staged";
+        if (result instanceof Response) throw result;
+        const pause = attempt === 1 ? txnPausePoint("skill-delete-retry-first")
+          : attempt === 2 ? txnPausePoint("skill-delete-retry-second")
+            : txnPausePoint("skill-delete-retry-third");
+        if (pause) await pause;
+        const revoked = await afterCloseStaged(grantedSkillClose(stored, ctx, auth));
+        if (revoked) throw revoked;
+        return "staged";
       });
-    } catch {
-      return skillDeleteUnconfirmedFailure();
+    } catch (err) {
+      if (err instanceof Response) applied = err;
+      else return skillDeleteUnconfirmedFailure();
     }
     if (applied instanceof Response) return (await undo()) ?? applied;
   }

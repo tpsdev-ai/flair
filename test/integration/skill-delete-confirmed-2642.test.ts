@@ -12,11 +12,10 @@
  * test writer commits a newer row, then releases it and reads back the
  * committed state.
  *
- * Real Harper, ephemeral instance; every URL is asserted to be this test's own
- * instance before the first call.
+ * Real Harper; checks loopback URLs, excluded ports and a spawned PID.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -32,6 +31,7 @@ const mkAgent = (id: string): TestAgent => {
 
 const sfx = Date.now().toString(36);
 const A = mkAgent(`sdc-owner-${sfx}`);
+const B = mkAgent(`sdc-other-${sfx}`);
 const now = () => new Date().toISOString();
 
 let harper: HarperInstance;
@@ -98,10 +98,10 @@ function skillBody(id: string, content: string) {
 let seq = 0;
 const nextId = (label: string) => `sdc-${label}-${sfx}-${++seq}`;
 
-async function waitFor(path: string, timeoutMs: number): Promise<boolean> {
+async function waitFor(path: string, timeoutMs: number, value?: string): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (existsSync(path)) return true;
+    if (existsSync(path) && (value === undefined || readFileSync(path, "utf8") === value)) return true;
     await new Promise((r) => setTimeout(r, 25));
   }
   return false;
@@ -134,6 +134,70 @@ async function commitNewerSkillWrite(id: string, content: string): Promise<void>
   expect((await memoryRow(id))?.content, "the competing write is not visible while the DELETE is paused").toBe(content);
 }
 
+const closePoints = ["skill-close-staged", "skill-delete-retry-first", "skill-delete-retry-second", "skill-delete-retry-third"];
+
+async function withPausedCloses(points: string[], trigger: () => Promise<Response>, compete: (index: number) => Promise<void>) {
+  for (const point of points) {
+    for (const marker of ["claimed", "paused", "go", "released"]) rmSync(join(pauseDir, `${marker}.${point}`), { force: true });
+    writeFileSync(join(pauseDir, `arm.${point}`), "");
+  }
+  const pending = trigger();
+  try {
+    for (const [index, point] of points.entries()) {
+      expect(await waitFor(join(pauseDir, `paused.${point}`), 20_000), point).toBe(true);
+      await compete(index);
+      writeFileSync(join(pauseDir, `go.${point}`), "");
+      expect(await waitFor(join(pauseDir, `released.${point}`), 5_000, "go"), point).toBe(true);
+      expect(readFileSync(join(pauseDir, `released.${point}`), "utf8"), point).toBe("go");
+    }
+    return await pending;
+  } finally {
+    for (const point of points) {
+      writeFileSync(join(pauseDir, `go.${point}`), "");
+      rmSync(join(pauseDir, `arm.${point}`), { force: true });
+    }
+    await pending;
+  }
+}
+
+async function pointerRow(id: string): Promise<any | null> {
+  const rows = await ops({
+    operation: "search_by_id", database: "flair", table: "MemoryHostSource", ids: [id],
+    get_attributes: ["memoryId", "hostSource", "authorId", "receivedAt", "memoryInstanceToken", "scopeAtWrite"],
+  });
+  return rows[0] ?? null;
+}
+
+async function seedPointer(id: string): Promise<any> {
+  const row = await memoryRow(id);
+  const pointer = {
+    memoryId: id, hostSource: JSON.stringify({ v: 1, host: "openclaw", kind: "run", id: "run-2642" }),
+    authorId: A.id, receivedAt: now(), memoryInstanceToken: row.instanceToken, scopeAtWrite: null,
+  };
+  await ops({ operation: "insert", database: "flair", table: "MemoryHostSource", records: [pointer] });
+  expect(await pointerRow(id)).toEqual(pointer);
+  return pointer;
+}
+
+async function appendNewerVersion(id: string): Promise<any> {
+  const head = (await versionsOf(id)).at(-1);
+  expect(head?.kind).toBe("delete");
+  const record = {
+    ...head, id: `skill:${id}:${Number(head.version) + 1}`, version: String(Number(head.version) + 1),
+    kind: "update", previousVersionHash: head.recordHash, createdAt: now(),
+    memoryId: id, valueHash: createHash("sha256").update(String((await memoryRow(id)).content)).digest("hex"),
+  };
+  const fields = [
+    "id", "subjectType", "subjectId", "agentId", "key", "version", "kind", "rowId", "valueHash",
+    "previousVersionHash", "soulSnapshot", "memoryId", "visibility", "actorKind", "actorId",
+    "sourceClass", "createdAt", "guarded", "expectedVersion",
+  ];
+  record.recordHash = createHash("sha256").update(JSON.stringify(fields.map((field) => [field, record[field] ?? null]))).digest("hex");
+  await ops({ operation: "insert", database: "flair", table: "InstructionVersion", records: [record] });
+  expect((await versionsOf(id)).at(-1)?.id).toBe(record.id);
+  return record;
+}
+
 beforeAll(async () => {
   if (process.env.HARPER_HTTP_URL) throw new Error("requires an isolated Harper; unset HARPER_HTTP_URL");
   pauseDir = mkdtempSync(join(tmpdir(), "flair-2642-pause-"));
@@ -154,7 +218,7 @@ beforeAll(async () => {
   assertOwnInstance(harper);
   await ops({
     operation: "upsert", database: "flair", table: "Agent",
-    records: [{ id: A.id, name: A.id, role: "agent", publicKey: A.publicKey, createdAt: now() }],
+    records: [A, B].map((agent) => ({ id: agent.id, name: agent.id, role: "agent", publicKey: agent.publicKey, createdAt: now() })),
   });
   await ensureFlairAgentRole(harper.opsURL, harper.admin.username, harper.admin.password);
   await ensureFlairAgentUser(harper.opsURL, harper.admin.username, harper.admin.password);
@@ -186,14 +250,82 @@ describe("flair#2642 — a skill DELETE confirms the version close before succes
     const row = await memoryRow(id);
     const versions = await versionsOf(id);
     const head = versions.at(-1);
-    // The guarantee: a 200 means the version close is visible in the committed
-    // store — the head carries a closing `validTo`, the tombstone is the head,
-    // and the close and the tombstone agree on which row they closed.
+    // A 200 confirms the row is closed.
     expect(typeof row?.validTo, `200 with the skill head still open: ${JSON.stringify({ row, response: text, head })}`).toBe("string");
     expect(row?.content, "the close did not keep the row the newer write left").toBe("v2-committed-during-delete");
     expect(head?.kind, JSON.stringify(versions)).toBe("delete");
     expect(head?.rowId, JSON.stringify(versions)).toBe(id);
     expect(versions.map((v) => v.kind), JSON.stringify(versions)).toEqual(["create", "delete"]);
+  }, 120_000);
+
+  it("exhausted retries with the tombstone still head remove it and restore the pointer", async () => {
+    const id = nextId("exhausted");
+    const created = await call(A, "PUT", memPath(id), skillBody(id, "v1"));
+    expect(created.status, await created.text()).toBeLessThan(300);
+    const pointer = await seedPointer(id);
+    const response = await withPausedCloses(closePoints, () => call(A, "DELETE", memPath(id)),
+      (index) => commitNewerSkillWrite(id, `competitor-${index}`));
+    const text = await response.text();
+    expect(response.status, text).toBe(409);
+    expect(JSON.parse(text).error).toBe("skill_delete_not_closed");
+    expect((await memoryRow(id))?.validTo ?? null).toBeNull();
+    expect((await memoryRow(id))?.content).toBe("competitor-3");
+    expect((await versionsOf(id)).map((v) => v.kind)).toEqual(["create"]);
+    expect(await pointerRow(id)).toEqual(pointer);
+  }, 120_000);
+
+  it("a newer append retains the tombstone and returns unconfirmed compensation", async () => {
+    const id = nextId("superseded");
+    const created = await call(A, "PUT", memPath(id), skillBody(id, "v1"));
+    expect(created.status, await created.text()).toBeLessThan(300);
+    await seedPointer(id);
+    let appended: any;
+    const response = await withPausedCloses(closePoints, () => call(A, "DELETE", memPath(id)), async (index) => {
+      await commitNewerSkillWrite(id, `competitor-${index}`);
+      if (index === closePoints.length - 1) appended = await appendNewerVersion(id);
+    });
+    const text = await response.text();
+    expect(response.status, text).toBe(500);
+    expect(JSON.parse(text).error).toBe("skill_delete_compensation_failed");
+    expect((await memoryRow(id))?.validTo ?? null).toBeNull();
+    const versions = await versionsOf(id);
+    expect(versions.map((v) => v.kind)).toEqual(["create", "delete", "update"]);
+    expect(versions.at(-1)?.id).toBe(appended.id);
+    expect(versions.at(-1)?.previousVersionHash).toBe(versions[1].recordHash);
+    expect(await pointerRow(id)).toBeNull();
+  }, 120_000);
+
+  it("a grant revoked after the retry stages its close refuses by name and leaves the row open", async () => {
+    const staleId = nextId("retry-revoked");
+    for (const content of ["v1", "v2"]) {
+      const written = await call(A, "PUT", memPath(staleId), skillBody(staleId, content));
+      expect(written.status, await written.text()).toBeLessThan(300);
+    }
+    const headId = String((await versionsOf(staleId)).at(-1)?.rowId);
+    expect(headId).not.toBe(staleId);
+    const head = await memoryRow(headId);
+    await ops({ operation: "put", database: "flair", table: "Memory", records: [{ ...head, agentId: B.id }] });
+    const grantId = `${B.id}:${A.id}:write`;
+    await ops({ operation: "insert", database: "flair", table: "MemoryGrant", records: [{
+      id: grantId, ownerId: B.id, granteeId: A.id, scope: "write", createdAt: now(),
+    }] });
+    const response = await withPausedCloses(closePoints.slice(0, 2), () => call(A, "DELETE", memPath(staleId)), async (index) => {
+      if (index === 0) await commitNewerSkillWrite(headId, "retry keeps this content");
+      else {
+        await ops({ operation: "delete", database: "flair", table: "MemoryGrant", ids: [grantId] });
+        const grants = await ops({ operation: "search_by_id", database: "flair", table: "MemoryGrant", ids: [grantId], get_attributes: ["*"] });
+        expect(grants).toEqual([]);
+      }
+    });
+    const text = await response.text();
+    expect(response.status, text).toBe(409);
+    expect(JSON.parse(text).error).toBe("granted_close_revoked");
+    const row = await memoryRow(headId);
+    expect(row).not.toBeNull();
+    expect(row?.agentId).toBe(B.id);
+    expect(row?.validTo ?? null).toBeNull();
+    expect(row?.content).toBe("retry keeps this content");
+    expect((await versionsOf(staleId)).map((v) => v.kind)).toEqual(["create", "update"]);
   }, 120_000);
 
   it("CONTROL: with no competitor the DELETE closes the head and appends the tombstone", async () => {
