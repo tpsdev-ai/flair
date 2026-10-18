@@ -132,7 +132,7 @@ describe("enableScheduler (darwin)", () => {
     // npm-pack tarball extraction stripping the exec bit), with the node
     // binary resolved to an ABSOLUTE path at enable time (no run-time PATH
     // lookup). This replaces the old direct-exec pin.
-    expect(shim).toContain(`exec "/usr/local/bin/node" "/usr/local/bin/flair" rem nightly run-once`);
+    expect(shim).toContain(`exec '/usr/local/bin/node' '/usr/local/bin/flair' rem nightly run-once`);
     expect(shim).not.toContain("exec /usr/local/bin/flair");
     expect(shim).not.toMatch(/exec\s+node\b/);
     expect(shim).toContain("#!/bin/sh");
@@ -165,22 +165,34 @@ describe("enableScheduler (darwin)", () => {
     enableScheduler(baseOpts({ platformOverride: "darwin", adminPassFile: passPath }));
 
     const shim = readFileSync(shimPath, "utf-8");
-    expect(shim).toContain('rem nightly run-once --admin-pass-file "' + passPath + '"');
+    expect(shim).toContain("rem nightly run-once --admin-pass-file '" + passPath + "'");
     expect(shim).not.toContain(secretValue);
+  });
+
+  it("single-quotes an admin-pass path that contains an embedded single quote", () => {
+    const secretDir = join(testRoot, "secrets");
+    mkdirSync(secretDir, { recursive: true });
+    const passPath = join(secretDir, "o'brien admin-pass");
+    writeFileSync(passPath, "fixture-admin-pass-value-809", { mode: 0o600 });
+
+    enableScheduler(baseOpts({ platformOverride: "darwin", adminPassFile: passPath }));
+
+    const shim = readFileSync(shimPath, "utf-8");
+    expect(shim).toContain("--admin-pass-file '" + passPath.replace(/'/g, "'\\''") + "'");
   });
 
   it("resolves a relative admin-pass path to an absolute one at enable time", () => {
     enableScheduler(baseOpts({ platformOverride: "darwin", adminPassFile: "relative/admin-pass" }));
 
     const shim = readFileSync(shimPath, "utf-8");
-    expect(shim).toContain('rem nightly run-once --admin-pass-file "' + resolve("relative/admin-pass") + '"');
+    expect(shim).toContain("rem nightly run-once --admin-pass-file '" + resolve("relative/admin-pass") + "'");
   });
 
   it("defaults the baked admin-pass path under HOME/.flair/admin-pass", () => {
     enableScheduler(baseOpts({ platformOverride: "linux" }));
 
     const shim = readFileSync(shimPath, "utf-8");
-    expect(shim).toContain('--admin-pass-file "' + join(home, ".flair", "admin-pass") + '"');
+    expect(shim).toContain("--admin-pass-file '" + join(home, ".flair", "admin-pass") + "'");
   });
 });
 
@@ -670,7 +682,7 @@ describe("enableScheduler — FLAIR_BIN capture (flair#1279)", () => {
     expect(r.flairBin).toBe("/usr/local/bin/flair");
     expect(r.flairBinCanonical).toBe(true);
     const shim = readFileSync(shimPath, "utf-8");
-    expect(shim).toContain(`exec "/usr/local/bin/node" "/usr/local/bin/flair" rem nightly run-once`);
+    expect(shim).toContain(`exec '/usr/local/bin/node' '/usr/local/bin/flair' rem nightly run-once`);
     expect(shim).not.toMatch(/exec\s+node\b/);
   });
 
@@ -680,7 +692,7 @@ describe("enableScheduler — FLAIR_BIN capture (flair#1279)", () => {
     expect(r.flairBin).toBe(tree);
     expect(r.flairBinCanonical).toBe(false);
     const shim = readFileSync(shimPath, "utf-8");
-    expect(shim).toContain(`exec "/usr/local/bin/node" "${tree}" rem nightly run-once`);
+    expect(shim).toContain(`exec '/usr/local/bin/node' '${tree}' rem nightly run-once`);
     expect(shim).not.toMatch(/command -v flair/);
   });
 });

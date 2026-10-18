@@ -900,11 +900,10 @@ export function register(program: Command): void {
       // admin credentials are available, inject ops-API and admin-authed REST
       // helpers so the pending-candidate count and the admin-gated dedup step
       // can run. A file named with --admin-pass-file is read through the ONE
-      // shared resolver; when it is unavailable the dedup step is reported as
-      // NOT RUN with that named error instead of issuing an agent-authed call
+      // shared resolver before any cycle work; when it is unavailable the run
+      // fails at startup with NOT RUN rather than issuing an agent-authed call
       // that an agent key cannot authorize.
       let adminPass = "";
-      let dedupNotRunReason: string | undefined;
       try {
         adminPass = resolveAdminPassFromSources({
           adminPassFile: opts.adminPassFile,
@@ -912,12 +911,22 @@ export function register(program: Command): void {
           envPass: process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD,
         });
       } catch (err: any) {
-        if (!opts.adminPassFile || err instanceof AdminPassSourceError) {
-          console.error(`Error: ${err.message}`);
-          process.exit(1);
+        console.error(`Error: ${err.message}`);
+        if (opts.adminPassFile) {
+          const remedy = err instanceof AdminPassSourceError
+            ? ""
+            : ` Provide an owner-only (chmod 600), non-empty admin password file at ${opts.adminPassFile}, then re-run \`flair rem nightly run-once\`.`;
+          console.error(`Dedup:      NOT RUN — ${err.message}${remedy}`);
         }
-        dedupNotRunReason = `${err.message} Provide an owner-only (chmod 600), non-empty admin password file at ${opts.adminPassFile}, then re-run \`flair rem nightly run-once\`.`;
+        process.exit(1);
       }
+      // Every agent-scoped call is signed by the selected agent and nothing
+      // else: the identity is pinned here (never FLAIR_AGENT_ID), and
+      // signedOnly refuses FLAIR_TOKEN / FLAIR_ADMIN_PASS / the local
+      // admin-pass file. A selected agent with no key is refused, not
+      // silently replaced by an ambient credential.
+      const agentApiCall = (method: string, path: string, body?: unknown) =>
+        api(method, path, body, { agentId, agentIdSource: "flag", signedOnly: true });
       const adminApiCall = adminPass
         ? (method: string, path: string, body?: unknown) =>
             api(method, path, body, { explicitAdminPass: adminPass, adminUser: opts.adminUser, agentId: null })
@@ -930,10 +939,9 @@ export function register(program: Command): void {
         const result = await runNightlyCycle({
           agentId,
           flairVersion: __pkgVersion,
-          apiCall: api,
+          apiCall: agentApiCall,
           adminApiCall,
           opsSearch,
-          dedupNotRunReason,
           dryRun: !!opts.dryRun,
           healthProbe: async (timeoutMs) => {
             const t = Date.now();
@@ -983,9 +991,7 @@ export function register(program: Command): void {
         }
         // A guard refusal carries null counts and the guard's named state.
         const dedupRow = row.dedup;
-        if (row.dedupNotRun) {
-          console.log(`Dedup:      NOT RUN — ${row.dedupNotRun}`);
-        } else if (dedupRow) {
+        if (dedupRow) {
           if ("embeddingSpace" in dedupRow) {
             console.log(`Dedup:      not computed — embedding space ${dedupRow.embeddingSpace.state} (no new counts were written)`);
           } else {

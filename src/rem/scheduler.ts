@@ -249,6 +249,15 @@ function validateSchedule(hour: number, minute: number): void {
   }
 }
 
+/**
+ * Quote a value as ONE POSIX shell word. Embedded single quotes are closed,
+ * escaped, and reopened, so the shell reads the value literally and never
+ * interprets `$()`, backticks, or quotes inside it.
+ */
+export function quoteShimArg(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
 function buildSubstitutions(opts: EnableOpts, shimPath: string, flairBin: string, nodeBin: string): SchedulerSubstitutions {
   validateSchedule(opts.hour, opts.minute);
   if (!/^[a-zA-Z0-9_-]+$/.test(opts.agentId)) {
@@ -544,8 +553,15 @@ export function enableScheduler(opts: EnableOpts): EnableResult {
   }
   const stderrLogPath = resolve(logsDir, "rem-nightly.stderr.log");
 
-  // 1. Deploy the shim (always — both platforms invoke it).
-  const shimContents = renderTemplate(readTemplate(templateRoot, "bin/flair-rem-nightly.sh.tmpl"), subs);
+  // 1. Deploy the shim (always — both platforms invoke it). Every path the
+  // template interpolates is one POSIX single-quoted argument; none is
+  // double-quoted, so shell syntax inside a path stays literal.
+  const shimContents = renderTemplate(readTemplate(templateRoot, "bin/flair-rem-nightly.sh.tmpl"), {
+    ...subs,
+    NODE_BIN: quoteShimArg(subs.NODE_BIN),
+    FLAIR_BIN: quoteShimArg(subs.FLAIR_BIN),
+    ADMIN_PASS_FILE: quoteShimArg(subs.ADMIN_PASS_FILE),
+  });
   writeFileWithDir(shimPath, shimContents, 0o700);
   chmodSync(shimPath, 0o700);
 

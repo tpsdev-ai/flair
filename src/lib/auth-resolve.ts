@@ -196,7 +196,7 @@ export function defaultAdminPassPath(): string {
 // every sibling command uses.
 export const ADMIN_PASS_FILE_FLAG = "--admin-pass-file <path>";
 export const ADMIN_PASS_FILE_HELP =
-  "Read the admin password from an owner-only file (mode 0600 enforced), keeping it out of shell history and the process list. " +
+  "Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. " +
   "An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.";
 export const ADMIN_PASS_FLAG = "--admin-pass <pass>";
 export const ADMIN_PASS_HELP =
