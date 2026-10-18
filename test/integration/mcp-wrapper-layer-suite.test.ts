@@ -34,7 +34,7 @@
 // so the enumeration is complete.
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { mkdtemp, rm, mkdir, cp, symlink } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
@@ -265,18 +265,53 @@ describe("/mcp TOOLS wrapper layer — every tool driven through its real .impl"
   }, 120_000);
 
   test("versioning a promoted memory keeps its predecessor's verdict without approving new content", async () => {
-    const id = `${AGENT}-promoted-version`;
-    await seedInsert("Memory", { id, agentId: AGENT, content: "Reviewed predecessor for authority versioning.", durability: "persistent", createdAt: new Date().toISOString(), promotionStatus: "approved", promotedBy: "reviewer", promotedAt: new Date().toISOString() });
+    const claim = "Reviewed predecessor for authority versioning.";
+    const candidateId = `${AGENT}-promoted-version-candidate`;
+    await seedInsert("MemoryCandidate", {
+      id: candidateId, agentId: AGENT, claim, status: "pending",
+      generatedAt: new Date().toISOString(), createdAt: new Date().toISOString(),
+      sourceMemoryIds: [],
+    });
+    // Promote through the real workflow, which binds the verdict to the stored
+    // text (a hand-seeded verdict carries no binding and is suppressed).
+    const promoted = await fetch(`${harper.httpURL}/PromoteMemoryCandidate`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Basic " + btoa(`${harper.admin.username}:${harper.admin.password}`),
+      },
+      body: JSON.stringify({ candidateId, rationale: "reviewed the claim" }),
+    });
+    expect(promoted.status, await promoted.clone().text()).toBe(200);
+    const { memoryId: id } = await promoted.json() as { memoryId: string };
+
+    const bound = await tool("memory_get", { id });
+    expect(bound.promotionStatus).toBe("approved");
+    expect(bound.promotionContentHash).toBe(createHash("sha256").update(claim, "utf8").digest("hex"));
+
     const successor = await tool("memory_update", { id, content: "New unreviewed successor for authority versioning.", preserveHistory: true });
     expect(successor.error).toBeUndefined();
     expect(successor.id).toBeDefined();
     expect(successor.id).not.toBe(id);
     const updated = await tool("memory_get", { id: successor.id });
     expect(updated.supersedes).toBe(id);
-    for (const field of ["promotionStatus", "promotedAt", "promotedBy"]) expect(updated[field] ?? null).toBeNull();
+    for (const field of ["promotionStatus", "promotedAt", "promotedBy", "promotionContentHash"]) expect(updated[field] ?? null).toBeNull();
     const predecessor = await tool("memory_get", { id });
     expect(predecessor.promotionStatus).toBe("approved");
-    expect(predecessor.promotedBy).toBe("reviewer");
+    expect(predecessor.promotedBy).toBe("admin");
+    expect(predecessor.promotionContentHash).toBe(createHash("sha256").update(claim, "utf8").digest("hex"));
+  }, 120_000);
+
+  test("an unbound legacy promotion verdict reads unverified", async () => {
+    const id = `${AGENT}-legacy-verdict`;
+    const now = new Date().toISOString();
+    await seedInsert("Memory", {
+      id, agentId: AGENT, content: "Legacy verdict without a binding.", durability: "persistent",
+      createdAt: now, promotionStatus: "approved", promotedBy: "reviewer", promotedAt: now,
+    });
+    const row = await tool("memory_get", { id });
+    expect(row.content).toBe("Legacy verdict without a binding.");
+    for (const field of ["promotionStatus", "promotedAt", "promotedBy", "promotionContentHash"]) expect(row[field] ?? null).toBeNull();
   }, 120_000);
 
   // ── memory_delete (delete + guard) ──
