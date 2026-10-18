@@ -659,7 +659,7 @@ describe("WorkspaceState.search() — boolean-injection guard (authz-hardening s
 // test FAIL (observed "ws-theirs" in the result), confirming the guard is
 // not vacuously true.  Reverted before commit.
 
-describe("OrgEvent allow* hooks refuse reserved-record mutations", () => {
+describe("OrgEvent allow* hooks refuse reserved markers visible in their arguments", () => {
   it("refuses a reserved record and admits an ordinary one for the dispatch hooks Harper calls", () => {
     const oe: any = new (OrgEvent as any)();
     const reserved = { id: "instruction-change:x", kind: "soul.changed" };

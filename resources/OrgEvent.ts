@@ -80,8 +80,9 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
   // Defence in depth: Harper 5.3.1 calls allowCreate/allowUpdate/allowDelete
   // on a permission-marked dispatch; it does not call allowPatch. The enforcing
   // paths are post(), patch(), put(), delete() and the collection-PUT pre-scan
-  // in getResource() below. These hooks see Harper's real arguments: records for
-  // create/update and the request target (not a stored row) for delete.
+  // in getResource() below. These hooks check only the markers visible in their
+  // own arguments: proposed records for create/update, and the target id prefix
+  // for delete — not a stored kind at an ordinary id.
   allowCreate(user?: any, newData?: any, context?: any) {
     if (reservedProposed(newData)) return false;
     return inheritedAllow("allowCreate", this, [user, newData, context]);
@@ -108,13 +109,12 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
     if (this !== OrgEvent || !options?.isCollection || options.method !== "put") return admitted;
     return Promise.resolve(admitted).then(async (resource) => {
       const body = await (request as any)?.data;
-      // Anonymous callers keep their existing 401 from the resource verb; the
-      // reserved refusal belongs to a caller the auth layer admitted.
+      // An anonymous batch PUT is refused here: each element's put() returns
+      // its 401 as a value, which Harper's batch path reports as a success.
       const auth = await resolveAgentAuth(request);
-      if (auth.kind !== "anonymous") {
-        const reservedDenial = await reservedEventWriteRefusal(body, readStoredEvent);
-        if (reservedDenial) throw reservedDenial;
-      }
+      if (auth.kind === "anonymous") throw UNAUTH();
+      const reservedDenial = await reservedEventWriteRefusal(body, readStoredEvent);
+      if (reservedDenial) throw reservedDenial;
       const denial = collectionElementIdRefusal(body);
       if (denial) throw denial;
       return resource;
@@ -338,9 +338,20 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
     if (target && (target.isCollection === true || target.id == null)) {
       // Refuse the whole collection delete before anything is removed when its
       // selection contains a reserved row. An ordinary-only selection proceeds.
+      // The scan reads id and kind even when the caller's projection omits
+      // them; Harper's own collection delete would project to `$id` only.
       const scan = target instanceof URLSearchParams
         ? Object.assign(new (target.constructor as any)(target.toString()), target)
-        : target;
+        : { ...target };
+      if (scan instanceof URLSearchParams) {
+        scan.delete("select");
+        delete (scan as any).select;
+        scan.delete("property");
+        delete (scan as any).property;
+      } else {
+        delete scan.select;
+        delete scan.property;
+      }
       scan.checkPermission = false;
       for await (const row of this.search(scan)) {
         if (isReservedEventRecord(row)) return reservedEventRefusal();

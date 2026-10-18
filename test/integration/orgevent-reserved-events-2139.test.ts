@@ -390,20 +390,38 @@ describe("a collection DELETE selecting a reserved row is refused before it dele
 
     await deleteEvent(reservedId);
   }, 60_000);
+
+  it("refuses a projected collection DELETE that selects a reserved row and deletes nothing", async () => {
+    const kind = `ordinary-projected-${randomUUID()}`;
+    const ordinaryIds = [`${kind}-a`, `${kind}-b`];
+    const reservedId = `${PREFIX}projected-${randomUUID()}`;
+    for (const id of ordinaryIds) {
+      await adminOp({ operation: "insert", table: "OrgEvent", records: [{ id, authorId: agent.id, kind, summary: "ordinary", createdAt: new Date().toISOString() }] });
+    }
+    await plantEvent(reservedId);
+    const before = await countEvents();
+
+    const refused = await basicSend("DELETE", "/OrgEvent/?select(summary)");
+    expectReserved(refused.status, await refused.text());
+    expect(await countEvents()).toBe(before);
+    for (const id of [...ordinaryIds, reservedId]) expect(await readEvent(id)).not.toBeNull();
+
+    for (const id of ordinaryIds) await deleteEvent(id);
+    await deleteEvent(reservedId);
+  }, 60_000);
 });
 
 describe("anonymous callers keep their existing 401", () => {
   it("POST, PUT, PATCH, DELETE and collection PUT on a reserved record are unauthenticated", async () => {
     const id = `stored-reserved-anon-${randomUUID()}`;
     await plantEvent(id);
-    for (const [method, body] of [
-      ["POST", { id: `${PREFIX}anon-${randomUUID()}`, kind: "status", summary: "x" }],
-      ["PUT", { id, authorId: agent.id, kind: "status", summary: "x" }],
-      ["PATCH", { summary: "x" }],
-      ["DELETE", undefined],
-      ["PUT", [{ id: `${PREFIX}anon-batch-${randomUUID()}`, authorId: agent.id, kind: "status", summary: "x" }]],
+    for (const [method, path, body] of [
+      ["POST", "/OrgEvent", { id: `${PREFIX}anon-${randomUUID()}`, kind: "status", summary: "x" }],
+      ["PUT", `/OrgEvent/${id}`, { id, authorId: agent.id, kind: "status", summary: "x" }],
+      ["PATCH", `/OrgEvent/${id}`, { summary: "x" }],
+      ["DELETE", `/OrgEvent/${id}`, undefined],
+      ["PUT", "/OrgEvent/", [{ id: `${PREFIX}anon-batch-${randomUUID()}`, authorId: agent.id, kind: "status", summary: "x" }]],
     ] as const) {
-      const path = method === "POST" ? "/OrgEvent" : `/OrgEvent/${id}`;
       const res = await anonSend(method, path, body);
       expect(res.status, `${method} ${path}: ${(await res.text()).slice(0, 200)}`).toBe(401);
     }

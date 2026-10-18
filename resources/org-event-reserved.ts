@@ -3,12 +3,16 @@
  * (flair#2139 slice 3a).
  *
  * Two event kinds and one id prefix belong to the instruction-version
- * appender. The resource refuses a client mutation that carries either marker,
- * proposed or already stored: on POST (collection or addressed, including a
- * body with no id), on PUT/PATCH whose body proposes a marker, on a PATCH that
- * would create a row at a reserved addressed id, on addressed DELETE, and on
- * collection PUT/DELETE (any reserved element or selected row refuses the
- * request). Anonymous callers get their existing 401. The Harper operations API
+ * appender. The resource's verb guards refuse a client mutation that carries
+ * either marker, proposed or already stored: on POST (collection or addressed,
+ * including a body with no id), on PUT/PATCH whose body proposes a marker, on a
+ * PATCH that would create a row at a reserved addressed id, on addressed
+ * DELETE, and on collection PUT/DELETE (any reserved element or selected row
+ * refuses the request; the DELETE pre-scan reads id and kind whatever
+ * projection the caller asked for). The allow hooks refuse a marker visible in
+ * their own arguments: allowCreate/allowUpdate see the proposed records and
+ * allowDelete sees the target id prefix, not a stored kind at an ordinary id.
+ * Anonymous callers get their existing 401. The Harper operations API
  * (raw upsert/delete under admin auth) is the documented exception.
  *
  * The predicate is pure so both the resource guards and the doctor check share

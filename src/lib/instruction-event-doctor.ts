@@ -1,6 +1,6 @@
 /**
  * instruction-event-doctor.ts — the `flair doctor` check for stored OrgEvents
- * that look reserved but are not genuine instruction-change events
+ * that carry a reserved marker but fail the reader rule
  * (flair#2139 slice 3a).
  *
  * Main never refused reserved kinds or the `instruction-change:` id prefix, so
