@@ -59,6 +59,9 @@ const InstructionVersionTable = {
     rows.set(record.id, { ...record });
   },
 };
+// Harper's table class exposes raw get/delete on its base prototype; the append
+// undo reads and deletes through it (the resource class overrides both).
+Object.setPrototypeOf(InstructionVersionTable, { get: InstructionVersionTable.get, delete: InstructionVersionTable.delete });
 
 const OrgEventTable = {
   async *search() {},

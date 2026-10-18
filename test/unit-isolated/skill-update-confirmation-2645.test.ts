@@ -5,6 +5,7 @@ type Row = Record<string, any>;
 const versions = new Map<string, Row>();
 const memories = new Map<string, Row>();
 const pointers = new Map<string, Row>();
+const events = new Map<string, Row>(); // OrgEvent rows (flair#2139 S3b)
 let capturedDeletedPointer: any = null;
 let successorPointer: Row | undefined;
 let laterSuccessorPointer: Row | undefined;
@@ -136,13 +137,23 @@ const pointerTable = {
 Object.setPrototypeOf(memoryTable, { get: memoryTable.get, put: memoryTable.put, delete: memoryTable.delete });
 Object.setPrototypeOf(pointerTable, { get: pointerTable.get, put: pointerTable.put, delete: pointerTable.delete });
 (rawVersions as any).put = async (row: Row, ctx: any) => { ctx.transaction.versions.set(row.id, row); };
+const eventTable = {
+  primaryStore: { getEntry(id: string) { return events.has(id) ? { value: events.get(id), version: 1 } : null; } },
+  async *search() {},
+  async create(row: Row, ctx: any) { ctx.transaction.events.set(row.id, { ...row }); },
+};
+Object.setPrototypeOf(eventTable, {
+  async get(id: string, ctx?: any) { return (ctx?.transaction?.events ?? events).get(id) ?? null; },
+  async put(row: Row, ctx: any) { ctx.transaction.events.set(row.id, row); },
+  async delete(id: string, ctx: any) { return ctx.transaction.events.delete(id); },
+});
 const grantTable = {
   async *search() { if (grantHeld) yield { ownerId: "owner", granteeId: "writer", scope: "write" }; },
 };
 mock.module("harper", () => ({
   Resource: class {}, server: { http() {}, getUser: async () => null },
   databases: { flair: {
-    Memory: memoryTable, MemoryHostSource: pointerTable, InstructionVersion: versionTable, MemoryGrant: grantTable,
+    Memory: memoryTable, MemoryHostSource: pointerTable, InstructionVersion: versionTable, MemoryGrant: grantTable, OrgEvent: eventTable,
     Agent: { get: async () => null },
   } },
 }));
@@ -157,7 +168,7 @@ beforeEach(() => {
   successorPointer = undefined; laterSuccessorPointer = undefined;
   pointers.clear(); capturedDeletedPointer = null; dropPointerRestore = false; pointerConfirmationRead = false;
   failPointerConfirmation = false; replacementPointer = undefined; replaceAtRestore = false;
-  versions.clear(); memories.clear(); locked = false; grantHeld = true;
+  versions.clear(); memories.clear(); events.clear(); locked = false; grantHeld = true;
   dropCloses = false; revokeOnRetry = false; closeWrites = 0; confirmationRead = false; failDeleteCommit = false;
   activeTransaction = undefined; losePredecessor = false; closeSuccessorOnRead = undefined;
   failSuccessorConfirmation = false; failRetryWrite = false; failVersionConfirmation = false;
@@ -168,6 +179,7 @@ beforeEach(() => {
     txn.versions = journalMap(versions, primaryStore, txn);
     txn.memories = journalMap(memories, memoryTable.primaryStore, txn);
     txn.pointers = journalMap(pointers, pointerTable.primaryStore, txn);
+    txn.events = journalMap(events, eventTable.primaryStore, txn);
     ctx.transaction = txn;
     activeTransaction = txn;
     try {
@@ -183,6 +195,7 @@ beforeEach(() => {
       if (!failDeleteCommit) { versions.clear(); for (const [id, row] of txn.versions) versions.set(id, row); }
       if (txn.dropPredecessorClose) Map.prototype.set.call(txn.memories, "predecessor", memories.get("predecessor"));
       memories.clear(); for (const [id, row] of txn.memories) memories.set(id, row);
+      events.clear(); for (const [id, row] of txn.events) events.set(id, row);
       if (losePredecessor) memories.delete("predecessor");
       if (replaceSuccessorVersion && !confirmationRead) successorVersion = 2;
       if (laterSuccessorPointer && !confirmationRead) pointers.set("successor", laterSuccessorPointer);
