@@ -23,7 +23,7 @@ import { rawTableWriteSites } from "../helpers/raw-table-writers";
  * can carry a skill-tagged row is declared GATED (SkillScan + forced
  * durability), REJECTING (400 skill_write_path), or SKIPPING
  * (skill_not_federated), or preserves existing content and tags; other sinks
- * write non-skill rows, a different table, or are read-only aliases. A new
+ * write non-skill rows, a different table, or perform no Memory row write through the alias. A new
  * unclassified writer fails the build — the "unscanned skill-writer" tripwire.
  */
 
@@ -62,13 +62,13 @@ add("Memory", ["writer:(databases as any).flair.Memory.put#1"],
   "closeSupersededRecord: read-modify-write close of an existing record (stamps validTo), preserves existing content/tags — not a new skill write.");
 add("Memory", ["writer:(databases as any).flair.Memory.put#2"],
   "stageGrantedClose: read-modify-write close of an existing record (stamps validTo), staged in the successor's transaction; preserves existing content/tags — not a new skill write.");
-// ── Bookkeeping, removal and read-only aliases inside Memory.ts ──
+// ── Bookkeeping, removal and table aliases inside Memory.ts ──
 add("Memory", ["writer:patchRecord#1"],
   "derivedFrom/lastReflected bookkeeping patch — never writes skill content.");
 add("Memory", ["writer:(databases as any).flair.Memory.delete#1"],
   "Memory.delete(): removal, not a write.");
 add("Memory", ["alias-source:(databases as any).flair.Memory#1", "alias-source:(databases as any).flair.Memory#2", "alias-source:(databases as any).flair.Memory#3", "alias-source:(databases as any).flair.Memory#4", "alias-source:(databases as any).flair.Memory#5", "alias-source:(databases as any).flair.Memory#6", "alias-source:(databases as any).flair.Memory#7", "alias-source:(databases as any)?.flair?.Memory#1"],
-  "Table handles: #1 is the table handed to patchRecord (that write is classified above as writer:patchRecord#1); #3 is the class heritage; the optional handle is the write-lock store read (flair#2478); the rest are read-only committed-row reads — #2 the re-embed's confirm (flair#2465), #4 the ordinary PATCH's post-commit verification (flair#2478), #5 the _reindex re-PUT's confirm (flair#2450), #6 Memory.put's confirm (flair#2441) and #7 Memory.put's post-commit verification (flair#2478). All take only `get`.");
+  "Table handles: #1 is the table handed to patchRecord (that write is classified above as writer:patchRecord#1); #3 is the class heritage; the optional handle is the write-lock store read (flair#2478); the rest are read-only committed-row reads — #2 the re-embed's confirm (flair#2465), #4 the ordinary PATCH's post-commit verification (flair#2478), #5 the _reindex re-PUT's confirm (flair#2450), #6 Memory.put's confirm (flair#2441) and #7 Memory.put's post-commit verification (flair#2478).");
 
 // ── Non-skill writers in other modules ──
 add("MemoryFeed", ["alias-source:(databases as any).flair.Memory#1", "writer:writeBackCommittedRow#1", "writer:table.put#1"],
@@ -124,7 +124,7 @@ add("MemoryReflect", ["writer:(databases as any).flair.MemoryCandidate.put#1"],
 add("usage-recording", ["writer:(databases as any).flair.MemoryUsage.put#1"],
   "Other table (MemoryUsage), included by conservative sink enumeration.");
 
-// ── Read-only aliases (no write through these handles) ──
+// ── Table aliases ──
 add("skill-version-write", ["alias-source:(databases as any).flair?.Memory#1"],
   "Read-only alias (resolveSkillHead searches the live skill head).");
 add("AdminMemory", ["alias-source:(databases as any).flair.Memory#1"],
@@ -138,7 +138,7 @@ add("MemoryReindex", ["alias-source:(databases as any).flair.Memory#1"],
 add("auth-middleware", ["alias-source:(databases as any).flair.Memory#1"],
   "Read-only alias (auth reads rows).");
 add("promotion-stamp", ["alias-source:(databases as any).flair.Memory#1", "alias-source:(databases as any)?.flair?.Memory#1"],
-  "Read-only alias (promotion reads the row to stamp; the primary-store lock handle is read-only too).");
+  "The primary-store lock handle performs no Memory row write.");
 add("hit-tracking", ["alias-source:(databases as any).flair?.Memory#1"],
   "Read-only seed of Memory.retrievalCount on first HitStat write.");
 add("health", ["alias-source:db.flair?.Memory#1"],

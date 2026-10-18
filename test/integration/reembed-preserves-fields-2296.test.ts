@@ -230,7 +230,7 @@ async function expectOnlyEmbeddingChanged(before: any): Promise<void> {
   }
   expect(changed).toEqual({});
   // flair#2478 slice 2: a re-embed neither drops nor recomputes a promotion
-  // binding; the verdict stays bound to the text it reviewed.
+  // binding for the stored, post-redaction content at stamping time.
   expect(after.promotionContentHash).toBe(before.promotionContentHash);
   expect(after.promotionStatus).toBe(before.promotionStatus);
   expect(after.embeddingModel).toBe(CURRENT_MODEL_ID);

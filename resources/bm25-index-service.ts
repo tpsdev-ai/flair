@@ -53,10 +53,8 @@
 //
 //   2. SYNCHRONOUS HOOKS at flair's own write surface (`noteMemoryUpsert` /
 //      `noteMemoryDelete`) give READ-YOUR-WRITE after owned transactions commit.
-//      A request-owned Memory delete cannot use this hook before its request
-//      commits, so it reaches the index through the committed feed. The feed is
-//      asynchronous; other hooked writes avoid that delay. Both mechanisms are
-//      idempotent by id, so seeing a committed write twice is a no-op.
+//      Both mechanisms are idempotent by id, so seeing a committed write twice
+//      is a no-op.
 //
 // If the feed cannot be established, or delivers an event shape we do not
 // understand (Harper emits a bare `reload` marker when a base copy / resync is

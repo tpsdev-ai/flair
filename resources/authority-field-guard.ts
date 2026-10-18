@@ -1,7 +1,7 @@
 /** Workflow verdicts can only be stamped by their trusted raw-table paths.
  * Keep unchanged echoes compatible with full-row clients, and preserve omitted
  * stamps on PUT; omission must not erase a verdict. A content change drops the
- * stamp: the verdict is bound to the reviewed text. No admin/body bypass. */
+ * stamp. No admin/body bypass. */
 export const AUTHORITY_FIELDS = {
   Memory: ["promotionStatus", "promotedAt", "promotedBy", "promotionContentHash"],
 } as const;

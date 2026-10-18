@@ -28,7 +28,7 @@ mock.module("../../resources/txn-pause-point.ts", () => ({
   },
 }));
 
-const { stampMemoryPromotion } = await import("../../resources/promotion-stamp.ts");
+const { stampMemoryPromotion, stampMemoryPromotionIsolated } = await import("../../resources/promotion-stamp.ts");
 const { promotionContentHash } = await import("../../resources/promotion-binding.ts");
 const { WriteBackConflictError } = await import("../../resources/write-back.ts");
 
@@ -63,4 +63,13 @@ it("a binding-only change after the transaction read aborts its staged stamp", a
   expect(row.promotionStatus).toBeUndefined();
   expect(row.promotionContentHash).toBe(changedHash);
   expect(updates).toBe(1);
+});
+
+it.each(["content", "promotionContentHash"])("a first-read %s change reports automatic stamp refusal", async (field) => {
+  const written = { ...row };
+  row[field] = field === "content" ? "replacement content" : changedHash;
+  expect(await stampMemoryPromotionIsolated(row.id, "reviewer", "decision-time", undefined, written as any)).toBe(false);
+  expect(row.promotionStatus).toBeUndefined();
+  expect(row[field]).toBe(field === "content" ? "replacement content" : changedHash);
+  expect(updates).toBe(0);
 });

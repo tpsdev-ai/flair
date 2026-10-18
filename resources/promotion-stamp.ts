@@ -106,7 +106,7 @@ export async function stampMemoryPromotion(
     if (beforeFirstRead) await beforeFirstRead;
     const selected = await table.get(id, {});
     if (!selected) throw new Error(`Promotion memory ${id} was not written`);
-    if (isStaleBasis(selected, written)) return null;
+    if (isStaleBasis(selected, written)) throw new PromotedRowChangedError(id);
     const writeBack = await writeBackCommittedRow(
       table,
       id,
@@ -125,8 +125,7 @@ export async function stampMemoryPromotion(
   if (outcome.kind !== "done") throw new PromotionStampLockError(outcome.kind, id);
 }
 
-/** Stamp after a successful Memory write. Failures must not abort a sweep or
- * leave a candidate pending (that re-writes the same claim next cycle).
+/** Stamp after a successful Memory write. Report failures without aborting the sweep.
  * Auto-promotion uses this non-fatal wrapper; manual promotion calls
  * stampMemoryPromotion directly, so a stamp failure fails that request. */
 export async function stampMemoryPromotionIsolated(

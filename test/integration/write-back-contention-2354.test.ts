@@ -126,6 +126,15 @@ async function seedCandidate(harper: HarperInstance, agentId: string, row: Recor
   expect(res.status, `seed candidate ${String(row.id)} returned ${res.status}: ${(await res.text()).slice(0, 200)}`).toBe(200);
 }
 
+async function readCandidate(harper: HarperInstance, id: string): Promise<any> {
+  const res = await adminOp(harper, {
+    operation: "search_by_hash", database: "flair", table: "MemoryCandidate", hash_values: [id], get_attributes: ["*"],
+  });
+  const text = await res.text();
+  expect(res.status, `candidate search returned ${res.status}: ${text.slice(0, 200)}`).toBe(200);
+  return (JSON.parse(text) as any[])[0] ?? null;
+}
+
 let harper: HarperInstance;
 let pauseDir: string;
 // The deterministic generative backend ReflectMemories' execute mode calls
@@ -434,6 +443,8 @@ describe("flair#2354 — the promotion stamp write-back under a concurrent chang
     const row = await findPromotedRow(harper, agentId, claim);
     expect(row?.promotionStatus, "the verdict landed on the written row").toBe("approved");
     expect(row?.promotedBy).toBeTruthy();
+    const cand = await readCandidate(harper, "wbc-stamp-cand-clean");
+    expect(cand?.status, "a landed verdict marks the candidate promoted").toBe("promoted");
   }, 60_000);
 
   // promotion-stamp-select: between the Memory write and the stamp's first
@@ -467,6 +478,8 @@ describe("flair#2354 — the promotion stamp write-back under a concurrent chang
       expect(row?.promotedBy).toBeFalsy();
       expect(row?.content, "the competing content edit is kept, not reverted by the stamp").toBe(COMPETED);
       expect(row?.instanceToken, "the competing incarnation token is kept, not reverted").toBe(TOKEN2);
+      const cand = await readCandidate(harper, `wbc-stamp-cand-${point}`);
+      expect(cand?.status, "a refused stamp leaves the candidate unpromoted").toBe("pending");
     }, 60_000);
   }
 });

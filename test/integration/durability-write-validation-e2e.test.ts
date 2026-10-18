@@ -46,6 +46,28 @@ async function adminOp(harper: HarperInstance, op: Record<string, any>): Promise
   });
 }
 
+/**
+ * Fields a background embedder may write to a row after this test seeds it: the
+ * stamp migration's re-embed (a loopback Memory PATCH) updates `embedding`,
+ * `embeddingModel`, `embeddedContentHash`, `updatedAt` and, for a legacy row,
+ * `instanceToken` (resources/Memory.ts reembedStoredRow). flair#2635: a
+ * whole-row "unchanged" comparison must leave those fields out, or it races a
+ * writer this test does not control.
+ */
+const EMBEDDER_OWNED_FIELDS = ["embedding", "embeddingModel", "embeddedContentHash", "updatedAt", "instanceToken"] as const;
+
+function withoutEmbedderOwned(row: unknown): unknown {
+  if (!row || typeof row !== "object" || Array.isArray(row)) return row;
+  const copy = { ...(row as Record<string, unknown>) };
+  for (const field of EMBEDDER_OWNED_FIELDS) delete copy[field];
+  return copy;
+}
+
+/** Drop the embedder-owned fields from one row or a search_by_id result array. */
+function writeVisible(value: unknown): unknown {
+  return Array.isArray(value) ? value.map(withoutEmbedderOwned) : withoutEmbedderOwned(value);
+}
+
 async function seedAgent(harper: HarperInstance, agent: TestAgent): Promise<void> {
   const res = await adminOp(harper, {
     operation: "insert", database: "flair", table: "Agent",
@@ -82,7 +104,7 @@ describe("durability enum validation — write-side rejection (flair#1238)", () 
     const res = await authFetch(harper, agent, "PATCH", `/Memory/${id}`, { durability: "not-a-tier" });
     expect(res.status).toBe(400);
     expect((await res.json()).error).toBe("invalid_durability");
-    expect(await readStored()).toEqual(before);
+    expect(writeVisible(await readStored())).toEqual(writeVisible(before));
   }, 30_000);
   test("positive control: a present-but-unknown durability is refused with 400", async () => {
     const res = await authFetch(harper, agent, "POST", "/Memory", {

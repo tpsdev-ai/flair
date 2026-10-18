@@ -20,6 +20,21 @@
                          "@harperfast/oauth"
                    ],
                    "minimumReleaseAge": "0 days"
+             },
+             {
+                   "matchPackageNames": [
+                         "bun",
+                         "bun-types"
+                   ],
+                   "groupName": "bun toolchain"
+             },
+             {
+                   "matchPackageNames": [
+                         "harper",
+                         "harper-fabric-embeddings",
+                         "@harperfast/oauth"
+                   ],
+                   "groupName": "harper"
              }
        ]
 }

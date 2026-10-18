@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-/** The field carrying SHA-256 of the reviewed stored content. Server-only. */
+/** Server-only SHA-256 of the stored, post-redaction content at stamping time. */
 export const PROMOTION_CONTENT_HASH_FIELD = "promotionContentHash";
 
 /** The verdict fields the accessor suppresses together. */

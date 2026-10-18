@@ -1,8 +1,8 @@
 /**
- * stampMemoryPromotion failure after a successful Memory write must not abort
- * the auto-promote sweep or leave the candidate pending (Bugbot Medium on
- * #1534); on the manual path it fails the request (flair#2354). Isolated: owns
- * the harper + Memory mocks.
+ * A stamp failure after a successful Memory write does not abort the
+ * auto-promote sweep, and the candidate it could not stamp stays pending
+ * (Bugbot Medium on #1534, flair#2645); on the manual path it fails the
+ * request (flair#2354). Isolated: owns the harper + Memory mocks.
  */
 import { describe, expect, test, beforeEach, afterAll, mock } from "bun:test";
 import { installFakeHarperTransaction } from "../helpers/fake-harper-txn";
@@ -90,16 +90,15 @@ describe("stampMemoryPromotionIsolated", () => {
 });
 
 describe("AutoPromoteCandidates stamp isolation", () => {
-  test("a stamp failure after a Memory write does not stop the sweep or leave candidates pending", async () => {
+  test("a stamp failure after a Memory write does not stop the sweep, and leaves the candidate unpromoted", async () => {
     const r: any = new (AutoPromoteCandidates as any)();
     r.getContext = () => ({ request: { tpsAgent: "alice", tpsAgentIsAdmin: false } });
     const result = await r.post({ agentId: "alice" });
-    expect(result.promoted).toHaveLength(2);
-    expect(result.count).toBe(2);
+    expect(result.promoted).toHaveLength(0);
+    expect(result.count).toBe(0);
     expect(memoryPuts).toHaveLength(2);
-    expect(candidatePuts).toHaveLength(2);
-    expect(candidatePuts.every((c) => c.status === "promoted")).toBe(true);
-    expect(candidatePuts.map((c) => c.id).sort()).toEqual(["cand-1", "cand-2"]);
+    expect(candidatePuts).toHaveLength(0);
+    expect(result.skipped.map((s: any) => s.reason)).toEqual(["stamp_refused", "stamp_refused"]);
   });
 });
 
