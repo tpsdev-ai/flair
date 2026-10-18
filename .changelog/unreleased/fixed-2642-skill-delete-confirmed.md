@@ -1,1 +1,1 @@
-- **A skill-tagged Memory DELETE now confirms its version close before answering success.** (#2642)
+- **A versioned skill DELETE (a skill-tagged Memory DELETE of any row except a reserved seed row) now confirms its version close before answering success.** (#2642)

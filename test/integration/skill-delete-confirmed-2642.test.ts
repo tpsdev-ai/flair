@@ -1,9 +1,10 @@
 /**
- * skill-delete-confirmed-2642.test.ts — a skill-tagged Memory DELETE confirms
+ * skill-delete-confirmed-2642.test.ts — a versioned skill DELETE (a
+ * skill-tagged Memory DELETE of any row except a reserved seed row) confirms
  * the version close in the committed store before answering success
  * (flair#2642).
  *
- * A skill DELETE does not remove the row: it closes the live head (a full
+ * A versioned skill DELETE does not remove the row: it closes the live head (a full
  * `put` carrying `validTo`) and appends a tombstone. Harper can resolve a
  * transaction's commit while dropping that full put — it loses to a newer
  * write of the same row — and still commit the transaction's other writes, so
