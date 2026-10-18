@@ -137,7 +137,7 @@ describe("flair#2218 — paged admin read", () => {
   }, 5_000);
 });
 
-describe("flair#2670 — a full final page at the cap", () => {
+describe("flair#2670 — parity between capped and uncapped walks under a balanced behind-cursor write (shared no-snapshot limit, #2679)", () => {
   function store(count: number, mutate?: (live: Map<string, { id: string; durability: string }>, page: number) => void) {
     const initial = Array.from({ length: count }, (_, i) => ({ id: `mem-${String(i).padStart(4, "0")}`, durability: "standard" }));
     const live = new Map(initial.map(row => [row.id, row]));
@@ -157,7 +157,7 @@ describe("flair#2670 — a full final page at the cap", () => {
     return { initial, live, queries, opsPost };
   }
 
-  test("a full final page at the cap completes after an empty cursor read and a matching count", async () => {
+  test("a full final page at the cap is accepted when a read after its last id returns no row and the rows read equal the count, the same evidence an uncapped walk ends on", async () => {
     const { initial, queries, opsPost } = store(MAX_MEMORY_PAGES * 2);
     const out = await readMemoryRowsPaged(opsPost, { pageSize: 2 });
     expect(out.map(row => row.id)).toEqual(initial.map(row => row.id));
@@ -165,7 +165,7 @@ describe("flair#2670 — a full final page at the cap", () => {
     expect(queries.at(-1)).toBe("SELECT id FROM flair.Memory WHERE id > 'mem-0199' ORDER BY id LIMIT 1");
   }, 5_000);
 
-  test("balanced behind-cursor writes have the same verification result at the cap and on a short-page walk", async () => {
+  test("pins parity between capped and uncapped walks under a balanced behind-cursor write (shared no-snapshot limit, #2679)", async () => {
     async function walk(pageSize: number) {
       const { initial, live, queries, opsPost } = store(MAX_MEMORY_PAGES * 2, (live, page) => {
         if (page !== 1) return;

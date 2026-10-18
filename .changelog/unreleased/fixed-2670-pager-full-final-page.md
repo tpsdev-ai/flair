@@ -1,1 +1,1 @@
-- **At the Memory page cap, a full page completes when reading after its last id returns no row and rows read equal the expected count** (#2670).
+- **A full final Memory page at the cap is accepted on the same evidence as an uncapped walk**: an empty read after its last id and rows read equal to the count (#2670).

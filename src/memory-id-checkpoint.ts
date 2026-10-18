@@ -101,8 +101,9 @@ export interface KeysetReadOptions {
  * Walk `flair.<table>` by primary key: `SELECT <select> ... [WHERE <filter> AND] id > cursor
  * ORDER BY id LIMIT <pageSize>`, resuming strictly after the last id read. A duplicate id
  * across pages, or a read that differs in size from `expected`, refuses. A full final page at
- * the cap completes only when a read after its last id returns no row and the rows read equal
- * `expected`. The page allowance is `ceil(expected / pageSize) + 1`, capped by `maxPages`
+ * the cap is accepted when a read after its last id returns no row and the rows read equal
+ * `expected`, the same evidence an uncapped walk ends on. The page allowance is
+ * `ceil(expected / pageSize) + 1`, capped by `maxPages`
  * (default MAX_MEMORY_PAGES). Duplicates raise InconsistentReadError; size
  * mismatches do too by default, but `mismatch` can return any Error. Errors from `opsPost`
  * propagate unchanged.
@@ -391,6 +392,9 @@ export interface VerifyOptions {
 /**
  * Read the live instance and compare it against the checkpoint. Any read
  * failure (unreachable instance, a page, or a short read) is UNKNOWN.
+ * The walk shares the reader's no-snapshot limit (see integrityReader in
+ * src/commands/integrity.ts), so a balanced concurrent write can leave a `verified`
+ * result that no single instant matched; #2679 tracks a consistent read.
  */
 export async function verifyCheckpoint(opts: VerifyOptions): Promise<VerifyResult> {
   try {
