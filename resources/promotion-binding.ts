@@ -12,8 +12,8 @@
  *
  * The accessor rewrites the whole binding — `promotionStatus`, `promotedAt`,
  * `promotedBy` and `promotionContentHash` — matching the write-side clear in
- * resources/authority-field-guard.ts. A row with no verdict is returned
- * unchanged (no fields added).
+ * resources/authority-field-guard.ts. A row with none of the four binding
+ * fields is returned unchanged.
  *
  * Legacy verdicts without a hash read as unverified; later promotions stamp
  * newly created memories.
@@ -50,8 +50,8 @@ export function promotionBindingMatches(row: unknown): boolean {
 
 /**
  * Return `row` with an absent or mismatched promotion binding suppressed. The
- * input is not mutated; a matching binding, and a row with no verdict at all,
- * are returned as-is.
+ * input is not mutated; a matching binding and a row with none of the four
+ * binding fields are returned as-is.
  */
 export function applyPromotionBinding<T>(row: T): T {
   if (row == null || typeof row !== "object" || Array.isArray(row)) return row;

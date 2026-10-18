@@ -510,15 +510,21 @@ describe("promotion stamps are locked, incremental and bound (real Harper)", () 
     expect(stored.promotionContentHash ?? null).toBeNull();
   }, 120_000);
 
-  it("a client cannot set the hash on PUT, PATCH or feed ingest", async () => {
+  it("a client cannot set the hash on PUT", async () => {
     const fresh = "pvi-client-set";
     const put = await memoryWrite(owner, "PUT", fresh, {
-      agentId: owner.id, content: "client content", promotionStatus: "approved",
+      agentId: owner.id, content: "client content",
       promotionContentHash: sha256("client content"),
     });
     expect(put.status, await put.clone().text()).toBe(403);
+  }, 60_000);
+
+  it("a client cannot set the hash on PATCH", async () => {
     const patch = await memoryWrite(owner, "PATCH", V1, { agentId: owner.id, promotionContentHash: "a".repeat(64) });
     expect(patch.status, await patch.clone().text()).toBe(403);
+  }, 60_000);
+
+  it("a client cannot set the hash on feed ingest", async () => {
     const path = "/FeedMemories";
     const feedId = "pvi-feed-client-set";
     const feed = await fetch(`${harper.httpURL}${path}`, {
