@@ -11,21 +11,22 @@
  * "convergence" test (test/integration/deploy-replication-convergence.test.ts)
  * boots HTTP StUBS, not two Harpers, and every other integration test that
  * calls `startHarper` runs a single node. This is therefore the smallest
- * harness that boots TWO real, ephemeral, isolated Harpers and configures a
- * replication route between them.
+ * harness that boots TWO real, ephemeral, isolated Harpers and forms a
+ * replication cluster between them.
  *
- * ── Scope and honesty ─────────────────────────────────────────────────────
+ * ── Scope ─────────────────────────────────────────────────────────────────
  * Multi-node replication is a Harper PRO feature (node_modules/harper/README.md:
  * "Harper Pro ... extends the core with enterprise features including
  * multi-node replication"). The open-source `harper` core that flair depends on
  * does not ship the replication transport: `server.replication.replicateOperation`
- * is a stub that rejects with `Replication not implemented.` (dist/server/Server.js),
- * and `replication_routes` is declared but consumed nowhere. `probeReplicationSupport`
- * measures exactly that, on the real build, so a test can GATE explicitly rather
- * than pass silently. The replicated path has not run on any build available
- * here. Only node B carries a `replication:` block, routed to node A's ops port;
- * the route config is best-effort, and that port and the one-sided config are
- * unverified.
+ * is a stub that rejects with `Replication not implemented.` (dist/server/Server.js).
+ * `probeReplicationSupport` measures that on a real installed build.
+ *
+ * `startReplicatedPair` therefore boots Harper Pro from
+ * `FLAIR_TEST_HARPER_PRO_DIR`: two ephemeral nodes with distinct loopback
+ * identities, replication listeners on one OS-allocated port, and an `add_node`
+ * handshake. The callers that need the replicated path skip when the variable
+ * is absent.
  *
  * ── Safety ────────────────────────────────────────────────────────────────
  * Everything is HOME-isolated and ephemeral, via test/helpers/harper-lifecycle:
@@ -38,7 +39,9 @@
  * Fixtures use neutral names (node-a/node-b, host-a/host-b) — never a real
  * fleet host or agent.
  */
-import { mkdtempSync, rmSync, symlinkSync, readFileSync, writeFileSync, copyFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readdirSync, rmSync, symlinkSync, readFileSync, writeFileSync, copyFileSync } from "node:fs";
+import { createServer } from "node:net";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { startHarper, stopHarper, type HarperInstance } from "./harper-lifecycle.js";
@@ -46,34 +49,39 @@ import { startHarper, stopHarper, type HarperInstance } from "./harper-lifecycle
 export const REPO_ROOT = resolve(import.meta.dir, "..", "..");
 const SHIPPED_CONFIG = join(REPO_ROOT, "config.yaml");
 
+/**
+ * Install root of a Harper Pro build, for the two-node test. Harper's
+ * open-source core ships no replication transport (see `probeReplicationSupport`),
+ * so the replicated path requires Pro. Absent means the caller skips the test.
+ */
+export const PRO_INSTALL_DIR = process.env.FLAIR_TEST_HARPER_PRO_DIR;
+
 export const DEFAULT_PROBE_TIMEOUT_MS = 15_000;
 export const DEFAULT_CONVERGENCE_TIMEOUT_MS = 60_000;
 export const DEFAULT_POLL_INTERVAL_MS = 250;
 
 /** Create a temp app dir carrying the shipped config (or a mutated copy) plus
  *  node_modules/dist symlinks, so Harper boots THIS worktree's flair. */
-export function makeNodeWorkDir(prefix: string, mutate?: (shipped: string) => string): string {
+export function makeNodeWorkDir(
+  prefix: string,
+  mutate?: (shipped: string) => string,
+  opts: { realNodeModules?: boolean } = {},
+): string {
   const dir = mkdtempSync(join(tmpdir(), prefix));
-  symlinkSync(join(REPO_ROOT, "node_modules"), join(dir, "node_modules"));
+  if (opts.realNodeModules) {
+    // A real directory of per-entry symlinks: a single symlink to the worktree
+    // would let an installer write reach the shared checkout.
+    mkdirSync(join(dir, "node_modules"));
+    for (const name of readdirSync(join(REPO_ROOT, "node_modules"))) {
+      symlinkSync(join(REPO_ROOT, "node_modules", name), join(dir, "node_modules", name));
+    }
+  } else {
+    symlinkSync(join(REPO_ROOT, "node_modules"), join(dir, "node_modules"));
+  }
   symlinkSync(join(REPO_ROOT, "dist"), join(dir, "dist"));
   if (mutate) writeFileSync(join(dir, "config.yaml"), mutate(readFileSync(SHIPPED_CONFIG, "utf-8")), "utf-8");
   else copyFileSync(SHIPPED_CONFIG, join(dir, "config.yaml"));
   return dir;
-}
-
-/** A `replication:` top-level block that makes `peer` a replication route of
- *  this node and replicates every database (`"*"`). Best-effort for a
- *  replication-capable build; on the OSS core it is accepted by config
- *  validation but no transport is started (see the module header). */
-export function replicationRouteConfigYaml(selfHostname: string, peerHostname: string, peerPort: number | string): string {
-  return [
-    "replication:",
-    `  hostname: ${selfHostname}`,
-    '  databases: "*"',
-    "  routes:",
-    `    - hostname: ${peerHostname}`,
-    `      port: ${peerPort}`,
-  ].join("\n");
 }
 
 function basicHeader(h: HarperInstance): string {
@@ -112,7 +120,7 @@ export async function probeReplicationSupport(opts: { timeoutMs?: number } = {})
   try {
     inst = await startHarper({ cwd: workDir, harperBinDir: REPO_ROOT, multiWorkerUnsafe: false });
     assertOwnedInstance(inst, "probe");
-    const res = await ops(inst, { operation: "set_configuration", replicated: true, logging: { level: "info" } }, opts.timeoutMs);
+    const res = await ops(inst, { operation: "set_configuration", replicated: true }, opts.timeoutMs);
     if (res.status === 200 && !/not implemented/i.test(res.body)) {
       return { supported: true, error: null };
     }
@@ -129,37 +137,91 @@ export async function probeReplicationSupport(opts: { timeoutMs?: number } = {})
 export interface ReplicatedPair {
   a: HarperInstance;
   b: HarperInstance;
+  /** Form the cluster (add_node) and wait for both database sockets. */
+  connect(): Promise<void>;
   /** Stop both nodes and remove both temp dirs. Kills only these PIDs. */
   stop(): Promise<void>;
 }
 
+/** A random 127.0.0.0/8 address, so parallel runs do not share a replication
+ *  listener. The whole /8 is loopback on Linux. */
+function randomLoopbackHost(): string {
+  const b = () => 1 + Math.floor(Math.random() * 254);
+  return `127.${b()}.${b()}.${b()}`;
+}
+
+/** Ask the OS for a free port on `host` (loopback addresses included). */
+async function getFreePortOn(host: string): Promise<number> {
+  const srv = createServer();
+  await new Promise<void>((resolveListen, reject) => {
+    srv.once("error", reject);
+    srv.listen(0, host, () => resolveListen());
+  });
+  const port = (srv.address() as AddressInfo).port;
+  await new Promise<void>((r) => srv.close(() => r()));
+  return port;
+}
+
 /**
- * Boot two ephemeral Harpers; node B gets a best-effort replication route to node A.
+ * Boot two ephemeral Harper Pro nodes with distinct node identities and a
+ * replication listener on the same port on different loopback addresses.
  *
- * Node A boots first (plain), then node B boots with a `replication:` block
- * whose route points at A's ops port. Both carry this worktree's flair and
- * inherit the caller's FLAIR_MCP_* environment (so both can run MCP on with no
- * pinned key). Callers MUST call `stop()`.
+ * Both nodes carry this worktree's flair (via makeNodeWorkDir) and inherit the
+ * caller's FLAIR_MCP_* environment, so both can run MCP on with no pinned key.
+ * `connect()` performs the cluster handshake. Callers MUST call `stop()`.
  */
 export async function startReplicatedPair(opts: { mutateConfig?: (shipped: string) => string } = {}): Promise<ReplicatedPair> {
-  const workDirA = makeNodeWorkDir("flair-test-2208-a-", opts.mutateConfig);
-  const workDirB = makeNodeWorkDir("flair-test-2208-b-", opts.mutateConfig);
-  const a = await startHarper({ cwd: workDirA, harperBinDir: REPO_ROOT, multiWorkerUnsafe: false });
+  if (!PRO_INSTALL_DIR) {
+    throw new Error("FLAIR_TEST_HARPER_PRO_DIR is not set; a replicated pair needs a Harper Pro install root");
+  }
+  const hostA = randomLoopbackHost();
+  let hostB = randomLoopbackHost();
+  while (hostB === hostA) hostB = randomLoopbackHost();
+  const replicationPort = await getFreePortOn(hostA);
+  const workDirA = makeNodeWorkDir("flair-test-2208-a-", opts.mutateConfig, { realNodeModules: true });
+  const workDirB = makeNodeWorkDir("flair-test-2208-b-", opts.mutateConfig, { realNodeModules: true });
+  let a: HarperInstance | undefined;
   let b: HarperInstance | undefined;
   try {
-    const aPeerPort = new URL(a.opsURL).port;
+    a = await startHarper({
+      cwd: workDirA,
+      harperBinDir: PRO_INSTALL_DIR,
+      multiWorkerUnsafe: false,
+      nodeHostname: hostA,
+      env: { REPLICATION_SECUREPORT: `${hostA}:${replicationPort}` },
+    });
     b = await startHarper({
       cwd: workDirB,
       multiWorkerUnsafe: false,
-      harperBinDir: REPO_ROOT,
-      appendRootConfigYaml: replicationRouteConfigYaml("node-b", "node-a", aPeerPort),
+      harperBinDir: PRO_INSTALL_DIR,
+      nodeHostname: hostB,
+      env: { REPLICATION_SECUREPORT: `${hostB}:${replicationPort}` },
     });
   } catch (err) {
-    try { await stopHarper(a); } catch { /* best effort */ }
+    if (b) { try { await stopHarper(b); } catch { /* best effort */ } }
+    if (a) { try { await stopHarper(a); } catch { /* best effort */ } }
     try { rmSync(workDirA, { recursive: true, force: true }); } catch { /* best effort */ }
     try { rmSync(workDirB, { recursive: true, force: true }); } catch { /* best effort */ }
     throw err;
   }
+  const connect = async () => {
+    assertOwnedInstance(a!, "node-a");
+    assertOwnedInstance(b!, "node-b");
+    const tokenRes = await ops(a!, { operation: "create_authentication_tokens" });
+    if (tokenRes.status !== 200) throw new Error(`create_authentication_tokens on node-a → HTTP ${tokenRes.status} ${tokenRes.body.slice(0, 200)}`);
+    const token = (JSON.parse(tokenRes.body) as { operation_token?: string }).operation_token;
+    if (!token) throw new Error("create_authentication_tokens on node-a returned no operation_token");
+    const add = await ops(b!, { operation: "add_node", rejectUnauthorized: false, hostname: hostA, authorization: `Bearer ${token}` });
+    if (add.status !== 200) throw new Error(`add_node on node-b → HTTP ${add.status} ${add.body.slice(0, 300)}`);
+    await waitUntil(async () => {
+      const statuses = await Promise.all([a!, b!].map((h) => ops(h, { operation: "cluster_status" })));
+      return statuses.every(({ status, body }) => {
+        if (status !== 200) return false;
+        const connections = (JSON.parse(body) as { connections?: Array<{ database_sockets?: Array<{ connected?: boolean }> }> }).connections ?? [];
+        return connections.length === 1 && connections[0]!.database_sockets?.every((s) => s.connected === true) === true;
+      });
+    }, { timeoutMs: DEFAULT_CONVERGENCE_TIMEOUT_MS, what: "replicated cluster connection" });
+  };
   const stop = async () => {
     // flair#2568: both nodes at once, so the two stops settle within one stop
     // deadline rather than two; the work-dir removals below follow them. Best
@@ -167,11 +229,11 @@ export async function startReplicatedPair(opts: { mutateConfig?: (shipped: strin
     // included — is discarded. allSettled over `stopHarper` rather than
     // `stopHarpers`, which module mocks of harper-lifecycle
     // (replicated-nodes-probe) do not provide.
-    await Promise.allSettled([b!, a].map((inst) => stopHarper(inst)));
+    await Promise.allSettled([b!, a!].map((inst) => stopHarper(inst)));
     try { rmSync(workDirA, { recursive: true, force: true }); } catch { /* best effort */ }
     try { rmSync(workDirB, { recursive: true, force: true }); } catch { /* best effort */ }
   };
-  return { a, b, stop };
+  return { a: a!, b: b!, connect, stop };
 }
 
 /**

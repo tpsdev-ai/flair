@@ -51,7 +51,7 @@ test("owned probe sends the replicated configuration operation", async () => {
   const [url, init] = request.mock.calls[0]!;
   expect(url).toBe(instance.opsURL);
   expect(JSON.parse(init!.body as string)).toEqual({
-    operation: "set_configuration", replicated: true, logging: { level: "info" },
+    operation: "set_configuration", replicated: true,
   });
   expect(stop).toHaveBeenCalledWith(instance);
 });
