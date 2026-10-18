@@ -1499,7 +1499,7 @@ async function writeSkillCreateOrUpdate(
     visibility: skillVersionVisibility(captured.row ?? unchangedHead),
     // Internal confirmation identity for the caller's committed-row check
     // (flair#2656); the HTTP answer's allowlist drops it.
-    instanceToken: captured.row?.instanceToken ?? unchangedHead?.instanceToken ?? null,
+    instanceToken: captured.row?.instanceToken ?? (unchangedHead as Record<string, any> | null)?.instanceToken ?? null,
   };
 }
 
@@ -2296,7 +2296,7 @@ export class Memory extends (databases as any).flair.Memory {
       // (incarnation token) and carries the text fields it staged; a same-id
       // replace answers 409, an unreadable row 503 — never success.
       // Test-only: holds the POST after its commit, before the read.
-      const skillVerifyPause = txnPausePoint("memory-post-verify");
+      const skillVerifyPause = txnPausePoint("memory-post-skill-verify");
       if (skillVerifyPause) await skillVerifyPause;
       const skillVerified = await verifyCommittedWrite(
         (databases as any).flair.Memory,
@@ -2321,9 +2321,8 @@ export class Memory extends (databases as any).flair.Memory {
     // if the owned-transaction branch is bypassed.
     // flair#2467: the post-redaction text fields this write stages, for the response.
     let postStaged: StoredMemoryText = {};
-    // Read before the write: inside withSharedWriteTransaction an owned
-    // transaction is joinable too.
-    const postJoinsRequestTxn = isJoinableTransaction(ctx);
+    // The POST owns its transaction (flair#2656), so a staged close's throw
+    // aborts that transaction rather than needing an explicit request abort.
     let postResult: Response | null;
     let postRowId: string | undefined;
     let grantedClosed: Record<string, any> | null = null;
@@ -2343,7 +2342,7 @@ export class Memory extends (databases as any).flair.Memory {
         const stagedPause = txnPausePoint("memory-post-staged");
         if (stagedPause) await stagedPause;
         // Stage a grant-authorized close in the successor's transaction.
-        grantedClosed = await closeGrantedSupersedeStaged(c, content, supersede.close, postJoinsRequestTxn);
+        grantedClosed = await closeGrantedSupersedeStaged(c, content, supersede.close, false);
         return null;
       });
     } catch (err) {

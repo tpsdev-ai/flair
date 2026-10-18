@@ -282,7 +282,7 @@ describe("flair#2656 — a Memory POST's caller-supplied target id", () => {
   it("a competitor that commits after the POST's commit makes even an otherwise successful POST refuse", async () => {
     for (const [label, body, point] of [
       ["ordinary", (id: string, own: string) => ({ id, agentId: A.id, content: own }), "memory-post-verify"],
-      ["skill", (id: string, own: string) => ({ id, agentId: A.id, content: own, trigger: "when", tags: ["skill"] }), "memory-post-verify"],
+      ["skill", (id: string, own: string) => ({ id, agentId: A.id, content: own, trigger: "when", tags: ["skill"] }), "memory-post-skill-verify"],
     ] as const) {
       const id = nextId(`postcommit-${label}`);
       const own = `postcommit-own-${label}`;

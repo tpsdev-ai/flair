@@ -430,6 +430,22 @@ describe("dedup co-gate — pure math (resources/dedup.ts)", () => {
 
 // ─── #526 replay + never-silent-loss ─────────────────────────────────────────
 describe("Memory.post — server-side dedup gate never suppresses a write", () => {
+  it("a POST whose committed confirmation read fails answers 503 write_outcome_unknown", async () => {
+    const original = BaseMemory.get;
+    const { resetMemoryWriteOutcomeUnknownForTest } = await import("../../resources/memory-write-lock.ts");
+    const body: any = { agentId: "agent-1", content: "a post whose committed read is unreadable" };
+    (BaseMemory as any).get = async () => { throw new Error("committed read failed"); };
+    try {
+      const res: any = await makeMemory(agentCtx("agent-1")).post(body);
+      expect(res.status).toBe(503);
+      expect((await res.json()).error).toBe("write_outcome_unknown");
+    } finally {
+      (BaseMemory as any).get = original;
+      // The fake id counter restarts every test, so clear the marker it set.
+      resetMemoryWriteOutcomeUnknownForTest(body.id);
+    }
+  });
+
   it("#526 replay: two topically-close but DISTINCT findings are BOTH written (not merged)", async () => {
     const m1 = makeMemory(agentCtx("agent-1"));
     const r1 = await m1.post({ agentId: "agent-1", content: FINDING_A });
