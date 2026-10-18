@@ -1,0 +1,1 @@
+- `soul.changed` and `skill.changed` OrgEvents are appended in the same transaction as each instruction version, with an allowlisted `detail` and no hashes for private skills.
