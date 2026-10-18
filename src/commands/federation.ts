@@ -47,6 +47,7 @@ import {
   presenceWireRecord,
   PRESENCE_SEND_FUTURE_ALLOWANCE_MS,
   PRESENCE_SEND_OVERLAP_MS,
+  PRESENCE_SEND_RECEIVE_DISABLED_SKIP_REASON,
   PRESENCE_SEND_RETRYABLE_SKIP_REASONS,
   selectPresenceRowsToSend,
 } from "../federation/presence-send.js";
@@ -1110,10 +1111,13 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
             totalMerged += result.merged;
             totalSkipped += result.skipped;
             totalBatches++;
-            // Cap the candidate below retryable refusals.
+            // Cap the candidate below retryable refusals, and below a row
+            // refused because the hub's Presence receipt is off: enabling it
+            // later must not need a new heartbeat to re-offer that row.
             for (const refusal of result.refused) {
               if (refusal.table !== "Presence") continue;
-              if (!PRESENCE_SEND_RETRYABLE_SKIP_REASONS.has(refusal.reason)) continue;
+              if (!PRESENCE_SEND_RETRYABLE_SKIP_REASONS.has(refusal.reason) &&
+                  refusal.reason !== PRESENCE_SEND_RECEIVE_DISABLED_SKIP_REASON) continue;
               const sent = presenceBatch.find((r) => r.id === refusal.id);
               if (!sent) continue;
               const refusedCursor = Date.parse(sent.updatedAt);

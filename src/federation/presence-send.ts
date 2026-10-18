@@ -51,6 +51,14 @@ export const PRESENCE_SEND_RETRYABLE_SKIP_REASONS: ReadonlySet<string> = new Set
   "presence_agent_not_replicated",
 ]);
 
+/** The receiver skip reason for a Presence record that arrives while the hub's
+ *  receive flag is off. The receiver classes it non_retryable, but the hub can
+ *  enable receipt after this batch, so the sender caps its watermark at a row
+ *  refused for it and offers that row again on a later sync. Mirrors the reason
+ *  name in resources/federation-classify.ts, which src/ cannot import; a unit
+ *  test asserts the receiver knows it as a non_retryable reason. */
+export const PRESENCE_SEND_RECEIVE_DISABLED_SKIP_REASON = "presence_receive_disabled";
+
 /** Truthy: `1` / `true` / `yes` / `on`. Anything else — unset, empty, `false`,
  *  `0`, garbage — is OFF, so the default sends no Presence records. Same
  *  vocabulary as the receive flag (resources/presence-receipt). */

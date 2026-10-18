@@ -11,6 +11,7 @@ import { describe, expect, it } from "bun:test";
 import {
   PRESENCE_SEND_FLAG_ENV,
   PRESENCE_SEND_FUTURE_ALLOWANCE_MS,
+  PRESENCE_SEND_RECEIVE_DISABLED_SKIP_REASON,
   PRESENCE_SEND_RETRYABLE_SKIP_REASONS,
   presenceCursorMs,
   presenceSendEnabled,
@@ -172,5 +173,10 @@ describe("presence-send — sender mirrors of receiver rules", () => {
       .map(([reason]) => reason)
       .sort();
     expect([...PRESENCE_SEND_RETRYABLE_SKIP_REASONS].sort()).toEqual(receiverRetryable);
+  });
+
+  it("the receive-disabled skip reason is the receiver's non_retryable reason of that name", () => {
+    expect(SKIP_REASON_CLASS[PRESENCE_SEND_RECEIVE_DISABLED_SKIP_REASON as keyof typeof SKIP_REASON_CLASS]).toBe("non_retryable");
+    expect(PRESENCE_SEND_RETRYABLE_SKIP_REASONS.has(PRESENCE_SEND_RECEIVE_DISABLED_SKIP_REASON)).toBe(false);
   });
 });
