@@ -198,6 +198,7 @@ async function sendAs(agent: WriterAgent, method: string, path: string, body?: u
       Authorization: `TPS-Ed25519 ${agent.id}:${ts}:${nonce}:${Buffer.from(signature).toString("base64")}`,
     },
     body: body === undefined ? undefined : JSON.stringify(body),
+    signal: AbortSignal.timeout(15_000),
   });
 }
 
