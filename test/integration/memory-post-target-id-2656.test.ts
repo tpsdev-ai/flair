@@ -310,7 +310,7 @@ describe("flair#2656 — a Memory POST's caller-supplied target id", () => {
       );
       expect(paused, `the ${label} POST was not paused after its commit, before its confirmation read`).toBe(true);
       const observation = await observe(response, id, own);
-      expect(refusedTruthfully(observation), `${label}: ${JSON.stringify(observation)}`).toBe(true);
+      expect(refusedTruthfully(observation, label === "skill" ? "skill_target_changed" : "stored_row_changed"), `${label}: ${JSON.stringify(observation)}`).toBe(true);
     }
   }, 300_000);
 
