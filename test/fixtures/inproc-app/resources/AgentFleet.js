@@ -429,6 +429,8 @@ export class AgentFleet extends Resource {
         return run(() => recallByIdTrust(body.agentId, body.id));
       case "deleteById":
         return run(() => deleteById(body.agentId, body.id));
+      case "deletePresenceById":
+        return run(() => flair("Presence").delete(body.id, agentContext(body.agentId)));
       case "updateById":
         return run(() => updateById(body.agentId, body.id, body.content));
       case "semanticRecall":

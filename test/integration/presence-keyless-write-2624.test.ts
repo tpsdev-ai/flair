@@ -1,11 +1,6 @@
 /**
  * presence-keyless-write-2624.test.ts — flair#2624.
  *
- * An authenticated administrator's keyless PUT/PATCH gets 400
- * presence_target_required; a non-admin agent's collection PUT/PATCH gets the
- * owner guard's named 403; an anonymous request gets 401. A normal
- * self-addressed PUT/PATCH still stores.
- *
  * Real Harper, real spawn, real Ed25519 signatures (mirrors
  * test/integration/presence-api.test.ts's harness conventions). Build
  * prerequisite: dist/resources/*.js (`bun run build`).
@@ -13,6 +8,9 @@
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
+import { cp, mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import nacl from "tweetnacl";
 import { startHarper, stopHarper, HARPER_STOP_BUDGET_MS, type HarperInstance } from "../helpers/harper-lifecycle";
 
@@ -33,8 +31,10 @@ function ed25519Header(a: TestAgent, method: string, path: string): string {
 
 const sfx = Date.now().toString(36);
 const AGENT = mkAgent(`keyless-agent-a-${sfx}`);
+const OTHER = mkAgent(`keyless-agent-b-${sfx}`);
 
 let harper: HarperInstance;
+let appDir: string;
 
 /** Refuse to talk to anything but this test's own ephemeral instance. */
 function assertOwnInstance(h: HarperInstance): void {
@@ -83,15 +83,41 @@ async function readPresenceRow(id: string): Promise<any> {
   return Array.isArray(rows) ? (rows[0] ?? null) : null;
 }
 
+async function seedPresence(a: TestAgent, currentTask: string): Promise<any> {
+  const path = `/Presence/${a.id}`;
+  const now = Date.now();
+  const res = await fetch(`${harper.httpURL}${path}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", Authorization: ed25519Header(a, "PUT", path) },
+    body: JSON.stringify({ agentId: a.id, currentTask, activity: "coding", lastHeartbeatAt: now, activityUpdatedAt: now }),
+    signal: AbortSignal.timeout(20_000),
+  });
+  expect([200, 204], `setup PUT: ${await res.text()}`).toContain(res.status);
+  const row = await readPresenceRow(a.id);
+  expect(row).not.toBeNull();
+  expect(row.currentTask).toBe(currentTask);
+  return row;
+}
+
 describe("Presence keyless write refusal (flair#2624)", () => {
   beforeAll(async () => {
-    harper = await startHarper();
+    const root = process.cwd();
+    appDir = await mkdtemp(join(tmpdir(), "flair-presence-target-"));
+    await cp(join(root, "test/fixtures/inproc-app"), appDir, { recursive: true });
+    await mkdir(join(appDir, "node_modules/@tpsdev-ai"), { recursive: true });
+    await symlink(root, join(appDir, "node_modules/@tpsdev-ai/flair"), "dir");
+    harper = await startHarper({ cwd: appDir, harperBinDir: root });
     assertOwnInstance(harper);
     await seedAgent(AGENT);
+    await seedAgent(OTHER);
   }, 180_000);
 
   afterAll(async () => {
-    if (harper) await stopHarper(harper);
+    try {
+      if (harper) await stopHarper(harper);
+    } finally {
+      if (appDir) await rm(appDir, { recursive: true, force: true });
+    }
   }, HARPER_STOP_BUDGET_MS);
 
   // A non-admin agent's keyless collection PUT/PATCH is intercepted BEFORE the
@@ -181,7 +207,7 @@ describe("Presence keyless write refusal (flair#2624)", () => {
     expect(await presenceCount()).toBe(before);
   }, 30_000);
 
-  test("admin PUT with an empty-string body id → 400 presence_target_required, no row", async () => {
+  test("admin keyless PUT with an empty-string body id → 400 presence_target_required, no row", async () => {
     const before = await presenceCount();
     const res = await fetch(`${harper.httpURL}/Presence`, {
       method: "PUT",
@@ -195,7 +221,7 @@ describe("Presence keyless write refusal (flair#2624)", () => {
     expect(await presenceCount()).toBe(before);
   }, 30_000);
 
-  test("admin PATCH with an empty-string body id → 400 presence_target_required, no row", async () => {
+  test("admin keyless PATCH with an empty-string body id → 400 presence_target_required, no row", async () => {
     const before = await presenceCount();
     const res = await fetch(`${harper.httpURL}/Presence`, {
       method: "PATCH",
@@ -209,45 +235,57 @@ describe("Presence keyless write refusal (flair#2624)", () => {
     expect(await presenceCount()).toBe(before);
   }, 30_000);
 
-  test("keyless DELETE from the Basic administrator → 400 presence_target_required, no row lost", async () => {
-    const now = Date.now();
-    await fetch(`${harper.httpURL}/Presence/${AGENT.id}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json", Authorization: ed25519Header(AGENT, "PUT", `/Presence/${AGENT.id}`) },
-      body: JSON.stringify({ agentId: AGENT.id, currentTask: "row kept before keyless delete", activity: "coding", lastHeartbeatAt: now, activityUpdatedAt: now }),
-      signal: AbortSignal.timeout(20_000),
-    });
-    const before = await presenceCount();
-    const res = await fetch(`${harper.httpURL}/Presence`, {
-      method: "DELETE",
-      headers: { Authorization: adminBasic() },
-      signal: AbortSignal.timeout(20_000),
-    });
-    const text = await res.text();
-    expect(res.status, `keyless admin DELETE: ${text.slice(0, 200)}`).toBe(400);
-    expect(JSON.parse(text).error).toBe("presence_target_required");
-    expect(await presenceCount()).toBe(before);
-  }, 30_000);
+  for (const [caller, status, error] of [
+    ["administrator", 400, "presence_target_required"],
+    ["anonymous", 401, "authentication required"],
+    ["agent", 403, "forbidden: a non-admin write to Presence must address one record by its id"],
+  ] as const) {
+    test(`keyless DELETE from ${caller} → ${status} ${error}, seeded row survives`, async () => {
+      const seeded = await seedPresence(AGENT, "row kept before keyless delete");
+      const before = await presenceCount();
+      const headers: Record<string, string> = caller === "anonymous" ? {} : {
+        Authorization: caller === "administrator" ? adminBasic() : ed25519Header(AGENT, "DELETE", "/Presence"),
+      };
+      const res = await fetch(`${harper.httpURL}/Presence`, {
+        method: "DELETE",
+        headers,
+        signal: AbortSignal.timeout(20_000),
+      });
+      const text = await res.text();
+      expect(res.status, `keyless ${caller} DELETE: ${text.slice(0, 200)}`).toBe(status);
+      expect(JSON.parse(text).error).toBe(error);
+      expect(await readPresenceRow(AGENT.id)).toEqual(seeded);
+      expect(await presenceCount()).toBe(before);
+    }, 30_000);
+  }
 
-  test("an addressed DELETE from the Basic administrator still deletes", async () => {
-    const now = Date.now();
-    await fetch(`${harper.httpURL}/Presence/${AGENT.id}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json", Authorization: ed25519Header(AGENT, "PUT", `/Presence/${AGENT.id}`) },
-      body: JSON.stringify({ agentId: AGENT.id, currentTask: "row removed by addressed delete", activity: "coding", lastHeartbeatAt: now, activityUpdatedAt: now }),
-      signal: AbortSignal.timeout(20_000),
-    });
-    const before = await presenceCount();
-    const res = await fetch(`${harper.httpURL}/Presence/${AGENT.id}`, {
-      method: "DELETE",
-      headers: { Authorization: adminBasic() },
-      signal: AbortSignal.timeout(20_000),
-    });
-    const text = await res.text();
-    expect([200, 204], `addressed admin DELETE: ${text.slice(0, 200)}`).toContain(res.status);
-    expect(await readPresenceRow(AGENT.id)).toBeNull();
-    expect(await presenceCount()).toBe(before - 1);
-  }, 30_000);
+  for (const caller of ["Basic administrator", "self-addressed agent", "in-process scalar id", "in-process target object"] as const) {
+    test(`addressed DELETE from ${caller} removes only the addressed row`, async () => {
+      await seedPresence(AGENT, "row removed by addressed delete");
+      const other = await seedPresence(OTHER, "row kept beside addressed delete");
+      const before = await presenceCount();
+      const inProcess = caller.startsWith("in-process");
+      const path = inProcess ? "/AgentFleet/" : `/Presence/${AGENT.id}`;
+      const res = await fetch(`${harper.httpURL}${path}`, {
+        method: inProcess ? "POST" : "DELETE",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: caller === "self-addressed agent" ? ed25519Header(AGENT, "DELETE", path) : adminBasic(),
+        },
+        ...(inProcess ? { body: JSON.stringify({
+          op: "deletePresenceById", agentId: AGENT.id,
+          id: caller === "in-process scalar id" ? AGENT.id : { id: AGENT.id },
+        }) } : {}),
+        signal: AbortSignal.timeout(20_000),
+      });
+      const text = await res.text();
+      expect([200, 204], `addressed ${caller} DELETE: ${text.slice(0, 200)}`).toContain(res.status);
+      if (inProcess) expect(JSON.parse(text).ok).toBe(true);
+      expect(await readPresenceRow(AGENT.id)).toBeNull();
+      expect(await readPresenceRow(OTHER.id)).toEqual(other);
+      expect(await presenceCount()).toBe(before - 1);
+    }, 30_000);
+  }
 
   test("a normal self-addressed PUT still stores; a normal self-addressed PATCH still stores", async () => {
     const before = await presenceCount();

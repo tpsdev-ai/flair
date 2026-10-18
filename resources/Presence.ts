@@ -366,9 +366,8 @@ async function presenceWriteHomeDenial(agentId: string, currentId: string | null
 }
 
 /**
- * Use the URL-bound id; if absent or getId() throws, use a non-empty string
+ * Use the URL-bound id; if absent, empty-string, or getId() throws, use a non-empty string
  * body `agentId`, else a non-empty scalar (string or number) body `id`.
- * An empty string names no target.
  */
 function presenceWriteTargetId(resource: any, content: any): string | number | null {
   try {
@@ -788,8 +787,6 @@ export class Presence extends (databases as any).flair.Presence {
     if (auth.kind === "anonymous") {
       return new Response(JSON.stringify({ error: "authentication required" }), { status: 401, headers: { "Content-Type": "application/json" } });
     }
-    // Use the URL-bound id; if absent or getId() throws, use a non-empty string
-    // body agentId, else a non-empty scalar (string or number) body id.
     const targetId = presenceWriteTargetId(this, content);
     const keylessDenial = presenceTargetRequiredRefusal(targetId);
     if (keylessDenial) return keylessDenial;
@@ -830,9 +827,6 @@ export class Presence extends (databases as any).flair.Presence {
     if (auth.kind === "agent" && !auth.isAdmin && targetId != null && String(targetId) !== auth.agentId) {
       return new Response(JSON.stringify({ error: "forbidden: cannot write presence for another agent" }), { status: 403, headers: { "Content-Type": "application/json" } });
     }
-    // P2: use the URL-bound id; if absent or getId() throws, use a non-empty string
-    // body agentId, else a non-empty scalar (string or number) body id. Compare with THIS
-    // instance's id read FRESH here.
     const currentId = await currentInstanceId();
     if (targetId != null) {
       const homeDenial = await presenceWriteHomeDenial(String(targetId), currentId);
