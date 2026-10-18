@@ -57,14 +57,14 @@ const DEFAULT_MEMORIES = (agentId: string, now: string) => [
   },
 ];
 
+// A Harper read returns a record object whose fields can be prototype
+// accessors, so the check reads each field rather than requiring a plain
+// object with own properties. An array, a value without the requested id, or
+// a row missing a required string field is not a stored row.
 function isStoredRow(value: unknown, id: string, fields: string[]): value is Record<string, any> {
-  if (!value || typeof value !== "object") return false;
-  const proto = Object.getPrototypeOf(value);
-  if (proto !== Object.prototype && proto !== null) return false;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const row = value as Record<string, unknown>;
-  return Object.hasOwn(row, "id") && row.id === id && fields.every(
-    (field) => Object.hasOwn(row, field) && typeof row[field] === "string",
-  );
+  return row.id === id && fields.every((field) => typeof row[field] === "string");
 }
 
 function sameSeededAgent(stored: Record<string, any>, seeded: Record<string, any>): boolean {

@@ -186,7 +186,6 @@ describe("AgentSeed post-commit readback", () => {
     ["undefined", () => undefined],
     ["thrown error", () => { throw new Error("readback failed"); }],
     ["Response", () => new Response("refused", { status: 403 })],
-    ["non-plain object", (row) => Object.assign(new Date(), row)],
   ];
   for (const table of ["Agent", "Soul"]) {
     const required = table === "Agent" ? ["name", "publicKey", "createdAt"] : ["agentId", "key", "value", "createdAt"];
@@ -202,6 +201,20 @@ describe("AgentSeed post-commit readback", () => {
     if (table === "Soul") {
       for (const field of ["agentId", "key"]) cases.push([`wrong ${field}`, (row) => ({ ...row, [field]: "another" })]);
     }
+    // A Harper read returns a record object whose fields are prototype
+    // accessors; that is a stored row, not a malformed one.
+    test(`${table}: a record object with accessor fields is a stored row`, async () => {
+      readbackTable = table;
+      readback = (row) => {
+        const proto: Record<string, unknown> = {};
+        for (const [field, value] of Object.entries(row)) {
+          Object.defineProperty(proto, field, { get: () => value, enumerable: true });
+        }
+        return Object.create(proto);
+      };
+      const result = await seed().post({ agentId: "readback" });
+      expect(result).not.toBeInstanceOf(Response);
+    });
     for (const [label, transform] of cases) {
       test(`${table}: ${label} returns agent_seed_unconfirmed`, async () => {
         readbackTable = table;
