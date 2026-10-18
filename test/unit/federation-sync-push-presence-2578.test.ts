@@ -329,7 +329,7 @@ describe("federation sync push — Presence sender (flair#2578 slice 2)", () => 
   it("flag ON: a stored watermark ahead of the scan is clamped down to the scan time (B5)", async () => {
     process.env[PRESENCE_SEND_FLAG_ENV] = "1";
     const now = Date.now();
-    // A watermark an hour ahead would suppress every current row if the scan
+    // A watermark an hour ahead would suppress the current row if the scan
     // floor used it unchanged.
     const futureWatermark = now + 3_600_000;
     const rowCursor = now - 1_000;

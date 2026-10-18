@@ -753,8 +753,7 @@ export function parseSyncBatchRefused(body: unknown): Array<{ table: string; id:
 
 /** One record the receiver left indeterminate in a FederationSync batch: it ran
  *  out of its merge deadline, so the merge may or may not have committed. Only
- *  well-formed entries are kept; a malformed entry makes the batch counts fail
- *  the per-batch accounting check, so the caller resolves nothing. */
+ *  well-formed entries are kept. */
 export function parseSyncBatchIndeterminate(body: unknown): Array<{ table: string; id: string }> {
   if (body === null || typeof body !== "object" || Array.isArray(body)) return [];
   const indeterminate = (body as { indeterminate?: unknown }).indeterminate;
@@ -1072,9 +1071,10 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
         return { pushed: totalMerged, skipped: totalSkipped, error: err instanceof Error ? err : new Error(String(err)) };
       }
       const watermarkMs = presenceWatermarkMs(hub.presenceLastSyncAt);
-      // A stored watermark ahead of the clock cannot be left in place: it would
-      // suppress every row until the clock caught up. Use the scan time as the
-      // effective value for both the re-scan floor and the saved value (B5).
+      // A stored watermark ahead of the clock is not left in place: it would
+      // otherwise suppress current rows until the clock caught up. Use the
+      // scan time as the effective value for both the re-scan floor and the
+      // saved value (B5).
       const effectiveWatermarkMs = Math.min(watermarkMs, presenceScanAtMs);
       // Re-scan from the watermark minus a small overlap: a heartbeat stamped
       // within that window before this pass's scan time but committed after its

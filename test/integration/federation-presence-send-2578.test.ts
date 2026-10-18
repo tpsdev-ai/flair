@@ -7,8 +7,8 @@
  *   - the SENDER (spoke), holding a home agent and its Presence row.
  * The sender is the real push path (runFederationSyncOnce), driven in-process
  * with the send flag on, pointed at the sender's own instance for reads and at
- * the receiver for the sync. This is the seam a fake cannot exercise: the real
- * sender's scan/sign/batch against the real receiver's verify/bind/merge.
+ * the receiver for the sync. This is the seam under test: the real sender's
+ * scan/sign/batch against the real receiver's verify/bind/merge.
  *
  * Guarantees: a home agent's Presence lands on the hub with the sender as its
  * originator (and the Agent lands too — ordering), a non-home row is never sent,
