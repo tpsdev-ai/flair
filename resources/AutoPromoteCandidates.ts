@@ -1,4 +1,4 @@
-import { stampMemoryPromotionIsolated } from "./promotion-stamp.js";
+import { stampMemoryPromotionIsolated, type PromotedRowIdentity } from "./promotion-stamp.js";
 /**
  * POST /AutoPromoteCandidates  (#1205b-2 — the UNATTENDED promotion path)
  *
@@ -50,6 +50,31 @@ import {
   decidePromotedVisibility,
   DEFAULT_MAX_AUTO_PROMOTE_PER_CYCLE,
 } from "./auto-promote-lib.js";
+
+/**
+ * flair#2645 — the Memory row an earlier sweep wrote for this candidate, when
+ * it is still this candidate's claim and carries no verdict. A retry must
+ * stamp that row instead of writing a second promoted row: Memory's dedup gate
+ * only reports a near-duplicate and always proceeds with the write.
+ */
+async function findReusablePromotedRow(agentId: string, candidate: any): Promise<any | null> {
+  const query = {
+    operator: "and",
+    conditions: [
+      { attribute: "agentId", comparator: "equals", value: agentId },
+      { attribute: "tags", comparator: "equals", value: `from:${candidate.id}` },
+    ],
+  };
+  for await (const row of (databases as any).flair.Memory.search(query)) {
+    if (!row || row.agentId !== agentId) continue;
+    if (!Array.isArray(row.tags) || !row.tags.includes(`from:${candidate.id}`)) continue;
+    if (row.content !== candidate.claim) continue;
+    if (row.archived === true) continue;
+    if (row.promotionStatus != null) continue;
+    return row;
+  }
+  return null;
+}
 
 interface SkipRecord {
   id: string;
@@ -143,66 +168,87 @@ export class AutoPromoteCandidates extends Resource {
       }
 
       const decidedAt = new Date().toISOString();
-      const memId = `${agentId}-promoted-${Date.now()}-${promoted.length}`;
-      const memRow = {
-        id: memId,
-        agentId,
-        content: c.claim,
-        durability: "persistent",
-        // ── visibility: DEFAULT-PRIVATE-UNLESS, explicit (Sherlock) ───────────
-        // MUST be set. Memory.put() defaults an unset visibility from durability
-        // (Memory.ts) and "persistent" defaults to "shared" — and "shared" is
-        // ORG-OPEN (memory-read-scope.ts): readable by EVERY verified agent on
-        // the instance. The sources are the most sensitive tiers (a user's
-        // PRIVATE session episodes, or an agent's ephemeral+private continuity
-        // journal), so promotion is a visibility ESCALATION and the default —
-        // including every uncertainty fallback — is "private".
-        //
-        // decidePromotedVisibility (auto-promote-lib.ts) returns "shared" ONLY
-        // for a CONTINUITY-scoped candidate carrying an AFFIRMATIVE distiller
-        // ruling with a recorded team-relevance justification (flair#1257
-        // slice 3 — a shared row always traces to a justification on its
-        // candidate, never to a default). ADK per-user candidates remain
-        // ALWAYS private regardless of any ruling: their per-user boundary is
-        // adk-flair's CLIENT-SIDE tag re-verification, which OTHER agents do
-        // NOT run — a shared ADK promotion would leak a user's distilled
-        // private data to every agent on the box, unattended. That is the
-        // entire #1205 safety argument, unchanged.
-        visibility: decidePromotedVisibility(c),
-        // scopeTag FIRST — the per-user access-control boundary (Req 2).
-        tags: buildAutoPromotedTags(c.id, decision.scopeTag),
-        derivedFrom: Array.isArray(c.sourceMemoryIds) ? c.sourceMemoryIds : [],
-        createdAt: decidedAt,
-      };
 
-      // ── The write — MEMORY ONLY ────────────────────────────────────────────
-      // Static Cls.put(row, context) routes THROUGH Memory.put()'s override
-      // (Req 3 content-safety scan on the write + embedding + provenance +
-      // per-agent ownership), acting as the agent itself (agentContext). There
-      // is deliberately no Soul equivalent here (Req 1). decideAutoPromote has
-      // already refused any content-flagged claim strict, so a normal claim
-      // sails through; a Memory.put refusal (e.g. instance-wide strict mode) is
-      // treated as a skip and the candidate is left pending — never a lost claim.
-      let writeRes: any;
-      try {
-        writeRes = await MemoryCls.put(memRow, agentContext(agentId));
-      } catch (err: any) {
-        logger.warn?.(`AutoPromoteCandidates: Memory write threw for candidate ${c.id}: ${err?.message ?? err}`);
-        skipped.push({ id: c.id, reason: "memory_write_error" });
-        continue;
-      }
-      if (writeRes instanceof Response && !writeRes.ok) {
-        skipped.push({ id: c.id, reason: `memory_write_rejected:${writeRes.status}` });
-        continue;
+      // ── Reuse this candidate's earlier row on a retry ─────────────────────
+      // A sweep that wrote the row but whose stamp was refused leaves the
+      // candidate pending and the row unstamped. If that row is still this
+      // candidate's claim, stamp it here instead of writing a second promoted
+      // row; Memory's dedup gate only reports a near-duplicate and never
+      // suppresses the write.
+      const reusable = await findReusablePromotedRow(agentId, c);
+      let memId: string;
+      let writtenRow: PromotedRowIdentity;
+      if (reusable) {
+        memId = String(reusable.id);
+        writtenRow = {
+          agentId: reusable.agentId,
+          content: reusable.content,
+          instanceToken: reusable.instanceToken,
+        };
+      } else {
+        memId = `${agentId}-promoted-${Date.now()}-${promoted.length}`;
+        const memRow = {
+          id: memId,
+          agentId,
+          content: c.claim,
+          durability: "persistent",
+          // ── visibility: DEFAULT-PRIVATE-UNLESS, explicit (Sherlock) ───────────
+          // MUST be set. Memory.put() defaults an unset visibility from durability
+          // (Memory.ts) and "persistent" defaults to "shared" — and "shared" is
+          // ORG-OPEN (memory-read-scope.ts): readable by EVERY verified agent on
+          // the instance. The sources are the most sensitive tiers (a user's
+          // PRIVATE session episodes, or an agent's ephemeral+private continuity
+          // journal), so promotion is a visibility ESCALATION and the default —
+          // including every uncertainty fallback — is "private".
+          //
+          // decidePromotedVisibility (auto-promote-lib.ts) returns "shared" ONLY
+          // for a CONTINUITY-scoped candidate carrying an AFFIRMATIVE distiller
+          // ruling with a recorded team-relevance justification (flair#1257
+          // slice 3 — a shared row always traces to a justification on its
+          // candidate, never to a default). ADK per-user candidates remain
+          // ALWAYS private regardless of any ruling: their per-user boundary is
+          // adk-flair's CLIENT-SIDE tag re-verification, which OTHER agents do
+          // NOT run — a shared ADK promotion would leak a user's distilled
+          // private data to every agent on the box, unattended. That is the
+          // entire #1205 safety argument, unchanged.
+          visibility: decidePromotedVisibility(c),
+          // scopeTag FIRST — the per-user access-control boundary (Req 2).
+          tags: buildAutoPromotedTags(c.id, decision.scopeTag),
+          derivedFrom: Array.isArray(c.sourceMemoryIds) ? c.sourceMemoryIds : [],
+          createdAt: decidedAt,
+        };
+
+        // ── The write — MEMORY ONLY ────────────────────────────────────────────
+        // Static Cls.put(row, context) routes THROUGH Memory.put()'s override
+        // (Req 3 content-safety scan on the write + embedding + provenance +
+        // per-agent ownership), acting as the agent itself (agentContext). There
+        // is deliberately no Soul equivalent here (Req 1). decideAutoPromote has
+        // already refused any content-flagged claim strict, so a normal claim
+        // sails through; a Memory.put refusal (e.g. instance-wide strict mode) is
+        // treated as a skip and the candidate is left pending — never a lost claim.
+        let writeRes: any;
+        try {
+          writeRes = await MemoryCls.put(memRow, agentContext(agentId));
+        } catch (err: any) {
+          logger.warn?.(`AutoPromoteCandidates: Memory write threw for candidate ${c.id}: ${err?.message ?? err}`);
+          skipped.push({ id: c.id, reason: "memory_write_error" });
+          continue;
+        }
+        if (writeRes instanceof Response && !writeRes.ok) {
+          skipped.push({ id: c.id, reason: `memory_write_rejected:${writeRes.status}` });
+          continue;
+        }
+
+        // Harper hands memRow itself to Memory.put(), which stamps the written
+        // row's incarnation token onto it, so memRow names the row this write
+        // produced. The stamp is bound to that row: a different row at its first
+        // read is refused with nothing stamped.
+        writtenRow = {
+          agentId: memRow.agentId, content: memRow.content, instanceToken: (memRow as any).instanceToken,
+        };
       }
 
-      // Harper hands memRow itself to Memory.put(), which stamps the written
-      // row's incarnation token onto it, so memRow names the row this write
-      // produced. The stamp is bound to that row: a different row at its first
-      // read is refused with nothing stamped.
-      const stamped = await stampMemoryPromotionIsolated(memId, decision.reviewerId, decidedAt, ctx, {
-        agentId: memRow.agentId, content: memRow.content, instanceToken: (memRow as any).instanceToken,
-      });
+      const stamped = await stampMemoryPromotionIsolated(memId, decision.reviewerId, decidedAt, ctx, writtenRow);
 
       // ── A refused stamp leaves its candidate pending ───────────────────────
       // The stamp refuses when the row its first read returns is no longer the
@@ -215,10 +261,11 @@ export class AutoPromoteCandidates extends Resource {
       }
 
       // ── Mark the candidate promoted (commit point) ─────────────────────────
-      // Ordered AFTER the Memory write, matching the human promote path: the
-      // safe failure state is a promoted Memory whose candidate is still pending
-      // (re-swept next cycle; the Memory dedup gate absorbs the duplicate),
-      // never a candidate marked promoted with no Memory behind it.
+      // Ordered AFTER the Memory write and its verdict, matching the human
+      // promote path: the safe failure state is a promoted Memory whose
+      // candidate is still pending, never a candidate marked promoted with no
+      // Memory behind it. A later sweep reuses that unstamped row instead of
+      // writing a duplicate.
       try {
         await (databases as any).flair.MemoryCandidate.put({
           ...c,

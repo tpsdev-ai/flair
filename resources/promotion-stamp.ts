@@ -65,10 +65,11 @@ export async function stampMemoryPromotion(
   if ("write" in outcome) noteMemoryUpsert(outcome.write);
 }
 
-/** Stamp after a successful Memory write. Failures must not abort a sweep or
- * leave a candidate pending (that re-writes the same claim next cycle).
- * Auto-promotion uses this non-fatal wrapper; manual promotion calls
- * stampMemoryPromotion directly, so a stamp failure fails that request. */
+/** Stamp after a successful Memory write. A failure must not abort a sweep.
+ * Auto-promotion uses this non-fatal wrapper and leaves its candidate pending
+ * with `stamp_refused` (flair#2651), so the next sweep retries it; manual
+ * promotion calls stampMemoryPromotion directly, so a stamp failure fails that
+ * request. */
 export async function stampMemoryPromotionIsolated(
   id: string, reviewerId: string, decidedAt: string, enumerationContext?: any, written?: PromotedRowIdentity,
 ): Promise<boolean> {

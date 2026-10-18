@@ -1,0 +1,1 @@
+- **A retried auto-promote reuses the earlier unstamped Memory row when it still carries the candidate's claim.** The next sweep stamps that row instead of writing a second one (#2645).
