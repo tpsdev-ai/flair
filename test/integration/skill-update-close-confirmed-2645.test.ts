@@ -349,6 +349,56 @@ describe("flair#2645 — a skill UPDATE confirms the predecessor close before su
     expect(await liveHeads(id), "the lineage does not have exactly one live head").toEqual([laterId]);
   }, 120_000);
 
+  it("a completed delete of the successor confirms the earlier superseding POST as closed in order", async () => {
+    const id = nextId("deleted-in-order");
+    const successorId = nextId("deleted-successor");
+    const contents = ["DELETE-IN-ORDER-CONTENT-ONE", "DELETE-IN-ORDER-CONTENT-TWO"];
+    const created = await call(A, "PUT", memPath(id), skillBody(id, contents[0]));
+    expect(created.status, await created.text()).toBeLessThan(300);
+
+    // Request 1 is paused after its commit and before its confirmation. A
+    // delete of its successor runs to completion, closing the successor and
+    // appending the next version.
+    let deleteStatus = 0;
+    let deleteText = "";
+    const { response, paused, released } = await withPaused(
+      "skill-update-confirm",
+      () => call(A, "POST", "/Memory", skillBody(successorId, contents[1], { supersedes: id })),
+      async () => {
+        const deleted = await call(A, "DELETE", memPath(successorId));
+        deleteStatus = deleted.status;
+        deleteText = await deleted.text();
+      },
+    );
+    expect(paused, "the skill POST did not pause before confirmation").toBe(true);
+    expect(released).toBe("go");
+    expect(deleteStatus, deleteText.slice(0, 300)).toBeLessThan(300);
+
+    const text = await response.text();
+    expect(response.status, text.slice(0, 300)).toBe(200);
+    expect(JSON.parse(text).id).toBe(successorId);
+
+    const versions = await versionsOf(id);
+    expect(versions.map((v) => [Number(v.version), v.kind]), JSON.stringify(versions)).toEqual([[1, "create"], [2, "update"], [3, "delete"]]);
+    expect(versions[1].memoryId, "this request's version does not name its successor").toBe(successorId);
+    expect(versions[1].previousVersionHash).toBe(versions[0].recordHash);
+    expect(versions[2].rowId, "the delete version does not name the successor").toBe(successorId);
+    expect(versions[2].memoryId ?? null).toBeNull();
+    expect(versions[2].previousVersionHash, "the delete version does not follow this request's version").toBe(versions[1].recordHash);
+    expect(typeof (await memoryRow(id))?.validTo, "the predecessor is not closed").toBe("string");
+    expect(typeof (await memoryRow(successorId))?.validTo, "the successor is not closed").toBe("string");
+    expect(await liveHeads(id), "the deleted lineage still has a live head").toEqual([]);
+
+    const events = await skillEventsOf(id);
+    expect(events.map((e) => e.refId).sort(), JSON.stringify(events)).toEqual(versions.map((v) => v.id).sort());
+    for (const event of events) {
+      const version = versions.find((v) => v.id === event.refId);
+      expect(event.id).toBe(`instruction-change:${event.refId}`);
+      expect(JSON.parse(event.detail).changeKind).toBe(version?.kind);
+      for (const content of contents) expect(JSON.stringify(event)).not.toContain(content);
+    }
+  }, 120_000);
+
   it("a same-id replacement while the update is paused is refused and the successor rolled back", async () => {
     const predecessorId = nextId("replaced");
     const created = await call(A, "PUT", memPath(predecessorId), skillBody(predecessorId, "v1"));

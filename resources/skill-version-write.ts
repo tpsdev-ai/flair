@@ -419,7 +419,7 @@ function skillUpdateNotClosedRefusal(attempts: number): Response {
 function skillUpdateNotConfirmedRefusal(): Response {
   return Response.json({
     error: "skill_update_not_confirmed",
-    message: "the committed store confirms neither this update's successor as the only live head nor its closure with this request's version record present, the record with the next sequence number linked to it by hash, and that later version's row naming the successor as superseded",
+    message: "the committed store confirms neither this update's successor as the only live head nor its closure with this request's version record present, the record with the next sequence number linked to it by hash, and that later version deleting the successor or its row naming the successor as superseded",
   }, { status: 409 });
 }
 
@@ -454,7 +454,8 @@ async function compensateUnlandedSkillUpdate(args: {
 /**
  * flair#2645 — confirm a closed successor only when this request's update
  * record is present, the record with the next sequence number links to it by
- * hash, and that later version's row names this successor as superseded.
+ * hash, and that later version either deletes this successor (its `rowId`) or
+ * has a row that names this successor as superseded.
  */
 async function confirmSupersededInOrder(args: {
   subjectId: string;
@@ -476,8 +477,11 @@ async function confirmSupersededInOrder(args: {
   if (!appended || appended.kind !== "update" || String(appended.memoryId) !== String(args.successor.id)) {
     return skillUpdateNotConfirmedRefusal();
   }
-  if (!following || following.kind !== "update") return skillUpdateNotConfirmedRefusal();
-  if (following.previousVersionHash !== appended.recordHash) return skillUpdateNotConfirmedRefusal();
+  if (!following || following.previousVersionHash !== appended.recordHash) return skillUpdateNotConfirmedRefusal();
+  if (following.kind === "delete") {
+    return String(following.rowId ?? "") === String(args.successor.id) ? null : skillUpdateNotConfirmedRefusal();
+  }
+  if (following.kind !== "update") return skillUpdateNotConfirmedRefusal();
   const followingId = typeof following.memoryId === "string" ? following.memoryId : null;
   if (!followingId) return skillUpdateNotConfirmedRefusal();
   let followingRow: Record<string, any> | null;
