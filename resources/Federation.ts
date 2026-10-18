@@ -653,11 +653,13 @@ export class FederationPair extends Resource {
         if (tokenRepairPause) await tokenRepairPause;
         let refusal: Response | undefined;
         let stagedFirstPeer: StagedFirstPeer | undefined;
+        let stagedToken: StagedPairingToken | undefined;
         try {
           refusal = await withPairingTokenClaim(pairingToken, () =>
             withOwnedTransaction(ctx, async (owned) => {
               const claim = await consumePairingToken(pairingToken, instanceId, owned);
               if (claim.kind !== "consumed") return claim;
+              stagedToken = claim;
               // The Peer re-read sees a change committed before the owned
               // transaction's first read (its token read); a change committed
               // after that read is not covered by this re-read. A pinned key that
@@ -710,7 +712,8 @@ export class FederationPair extends Resource {
         }
         if (refusal) return refusal;
         if (stagedFirstPeer) {
-          const unconfirmed = await confirmFirstPairAfterCommit(pairingToken, stagedFirstPeer);
+          if (!stagedToken) return firstPairReadBackUnconfirmedRefusal();
+          const unconfirmed = await confirmFirstPairAfterCommit(pairingToken, stagedFirstPeer, stagedToken);
           if (unconfirmed) return unconfirmed;
           await dropPairBootstrapUser(pairingToken, ctx);
         }
@@ -775,11 +778,13 @@ export class FederationPair extends Resource {
       if (firstPairPause) await firstPairPause;
       let refusal: Response | undefined;
       let stagedFirstPeer: StagedFirstPeer | undefined;
+      let stagedToken: StagedPairingToken | undefined;
       try {
         refusal = await withPairingTokenClaim(pairingToken, () =>
           withOwnedTransaction(ctx, async (owned) => {
             const claim = await consumePairingToken(pairingToken, instanceId, owned);
             if (claim.kind !== "consumed") return claim;
+            stagedToken = claim;
             stagedFirstPeer = { ...firstPairPeerRow(instanceId, publicKey, role, endpoint), pairAttemptWriteId: claim.pairAttemptWriteId };
             await (databases as any).flair.Peer.put(stagedFirstPeer, owned);
             await confirmFirstPairBeforeCommit(instanceId);
@@ -791,8 +796,8 @@ export class FederationPair extends Resource {
         throw err;
       }
       if (refusal) return refusal;
-      if (!stagedFirstPeer) return firstPairReadBackUnconfirmedRefusal();
-      const unconfirmed = await confirmFirstPairAfterCommit(pairingToken, stagedFirstPeer);
+      if (!stagedFirstPeer || !stagedToken) return firstPairReadBackUnconfirmedRefusal();
+      const unconfirmed = await confirmFirstPairAfterCommit(pairingToken, stagedFirstPeer, stagedToken);
       if (unconfirmed) return unconfirmed;
 
       // Test-only: inert unless the fault-injection env opt-in is set and armed.
@@ -826,7 +831,7 @@ export class FederationPair extends Resource {
 
 /** One pairing's one-time token claim: the check-then-consume of a token (FederationPair.post runs it under the token's lock). */
 type PairingTokenClaim =
-  | { kind: "consumed"; pairAttemptWriteId: string }
+  | ({ kind: "consumed" } & StagedPairingToken)
   | { kind: "refused" }
   | { kind: "bootstrap_mismatch" };
 
@@ -870,6 +875,8 @@ function firstPairPeerRow(instanceId: string, publicKey: string, role: unknown, 
   };
 }
 
+type StagedPairingToken = { consumedBy: string; consumedAt: string; pairAttemptWriteId: string };
+
 type StagedFirstPeer = ReturnType<typeof firstPairPeerRow> & { pairAttemptWriteId: string };
 
 async function confirmFirstPairBeforeCommit(instanceId: string): Promise<void> {
@@ -878,7 +885,9 @@ async function confirmFirstPairBeforeCommit(instanceId: string): Promise<void> {
   if (commitPause) await commitPause;
 }
 
-async function confirmFirstPairAfterCommit(pairingToken: string, stagedPeer: StagedFirstPeer): Promise<Response | undefined> {
+async function confirmFirstPairAfterCommit(pairingToken: string, stagedPeer: StagedFirstPeer, stagedToken: StagedPairingToken): Promise<Response | undefined> {
+  const readBackPause = txnPausePoint("federation-pair-first-read-back");
+  if (readBackPause) await readBackPause;
   const peerVerdict = await verifyCommittedFields((databases as any).flair.Peer, stagedPeer.id, stagedPeer, stagedPeer);
   let tokenRow: any;
   try {
@@ -887,7 +896,8 @@ async function confirmFirstPairAfterCommit(pairingToken: string, stagedPeer: Sta
     return firstPairReadBackUnconfirmedRefusal();
   }
   if (peerVerdict === "unreadable") return firstPairReadBackUnconfirmedRefusal();
-  if (peerVerdict !== "shown" || tokenRow?.pairAttemptWriteId !== stagedPeer.pairAttemptWriteId) return firstPairCommitUnconfirmedRefusal();
+  if (peerVerdict !== "shown" || tokenRow?.pairAttemptWriteId !== stagedToken.pairAttemptWriteId ||
+    tokenRow?.consumedBy !== stagedToken.consumedBy || tokenRow?.consumedAt !== stagedToken.consumedAt) return firstPairCommitUnconfirmedRefusal();
   return undefined;
 }
 
@@ -1109,7 +1119,7 @@ async function consumePairingToken(
     consumedAt,
     pairAttemptWriteId,
   }, ctx);
-  return { kind: "consumed", pairAttemptWriteId };
+  return { kind: "consumed", consumedBy: consumerInstanceId, consumedAt, pairAttemptWriteId };
 }
 
 const RECORD_MERGE_DEADLINE_MS = 5_000;

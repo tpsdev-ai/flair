@@ -1122,6 +1122,57 @@ describe("flair#2656 — a first-time pair confirms the committed row after its 
     expect((await readPeer(peer))?.publicKey, "the committed row is the competitor's").toBe(b64url(b.publicKey));
   }, 60_000);
 
+  for (const converted of [false, true]) {
+    it(`a ${converted ? "converted" : "plain"} first pair with consumedBy cleared after commit does not report paired`, async () => {
+      const token = `pt-2656-cleared-${converted}-${sfx}`;
+      const k = nacl.sign.keyPair();
+      const peer = `f2656-cleared-${converted}-${sfx}`;
+      const pub = b64url(k.publicKey);
+      await seedToken(token);
+      if (converted) await seedPeer(peer, pub);
+      const { response, competed, released, paused } = await withPaused(
+        "federation-pair-first-read-back",
+        async () => {
+          if (!converted) return pairRequest(pairBody(peer, pub, k.secretKey, token));
+          const repair = await withPaused(
+            "federation-pair-repair-token-pre",
+            () => pairRequest(pairBody(peer, pub, k.secretKey, token)),
+            () => deletePeer(peer),
+          );
+          expect(repair.paused).toBe(true);
+          expect(repair.released).toBe("go");
+          expect(repair.competed?.status).toBe(200);
+          expect(repair.competed?.row).toBeNull();
+          return repair.response;
+        },
+        async () => {
+          const before = await readToken(token);
+          expect(before?.consumedBy).toBe(peer);
+          expect(before?.consumedAt).toBeTruthy();
+          expect(before?.pairAttemptWriteId).toBeTruthy();
+          expect((await readPeer(peer))?.pairAttemptWriteId).toBe(before.pairAttemptWriteId);
+          await ops({
+            operation: "update", database: "flair", table: "PairingToken",
+            records: [{ id: token, expiresAt: before.expiresAt, createdAt: before.createdAt, consumedBy: null }],
+          });
+          const after = await readToken(token);
+          expect(after?.consumedBy).toBeNull();
+          expect(after?.consumedAt).toBe(before.consumedAt);
+          expect(after?.pairAttemptWriteId).toBe(before.pairAttemptWriteId);
+          return after;
+        },
+      );
+      expect(paused).toBe(true);
+      expect(released).toBe("go");
+      const body = await response.json() as any;
+      expect(response.status, JSON.stringify(body)).toBe(409);
+      expect(body.error).toBe("peer_pair_unconfirmed");
+      expect(body.outcome).toBe("unconfirmed");
+      expect(body.paired).toBeUndefined();
+      expect(await readToken(token)).toEqual(competed);
+    }, 90_000);
+  }
+
   it("a competing direct write at the same consumedAt: an uncommitted marker does not report success", async () => {
     // A frozen child clock gives the pair and competing direct write the same `consumedAt`.
     const clockPreload = fileURLToPath(new URL("../helpers/harper-freeze-clock.cjs", import.meta.url));
