@@ -8,6 +8,7 @@ import {
   compareCheckpoint,
   readCheckpointFile,
   readMemoryRowsPaged,
+  readTableByIdPaged,
   unknownVerify,
   verifyCheckpoint,
   writeCheckpointFile,
@@ -137,18 +138,108 @@ describe("flair#2218 — paged admin read", () => {
 });
 
 describe("flair#2670 — a full final page at the cap", () => {
-  test("a full final page is complete when the rows read match the expected count", async () => {
-    // pageSize 2 x maxPages 4 = the hard cap; expected 8 fills every allowed page.
-    const ids = Array.from({ length: 8 }, (_, i) => `mem-${i}`);
-    const pages = [ids.slice(0, 2), ids.slice(2, 4), ids.slice(4, 6), ids.slice(6, 8)]
-      .map((page) => page.map((id) => ({ id, durability: "standard" })));
-    let page = 0;
-    const opsPost = async (body: Record<string, unknown>) =>
-      body.operation === "describe_table" ? { record_count: 8 } : pages[page++] ?? [];
+  function store(count: number, mutate?: (live: Map<string, { id: string; durability: string }>, page: number) => void) {
+    const initial = Array.from({ length: count }, (_, i) => ({ id: `mem-${String(i).padStart(4, "0")}`, durability: "standard" }));
+    const live = new Map(initial.map(row => [row.id, row]));
+    const queries: string[] = [];
+    const opsPost = async (body: Record<string, unknown>) => {
+      if (body.operation === "describe_table") return { record_count: live.size };
+      const sql = String(body.sql);
+      const match = /^SELECT (?:id|id, durability) FROM flair\.Memory(?: WHERE id > '((?:[^']|'')*)')? ORDER BY id LIMIT (\d+)$/.exec(sql);
+      if (!match) throw new Error(`unexpected SQL: ${sql}`);
+      const cursor = match[1]?.replace(/''/g, "'");
+      const batch = [...live.values()].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
+        .filter(row => cursor === undefined || row.id > cursor).slice(0, Number(match[2]));
+      queries.push(sql);
+      mutate?.(live, queries.length);
+      return batch;
+    };
+    return { initial, live, queries, opsPost };
+  }
 
-    const out = await readMemoryRowsPaged(opsPost, { pageSize: 2, maxPages: 4 });
-    expect(out.map((r) => r.id)).toEqual(ids);
+  test("a full final page at the cap completes after an empty cursor read and a matching count", async () => {
+    const { initial, queries, opsPost } = store(MAX_MEMORY_PAGES * 2);
+    const out = await readMemoryRowsPaged(opsPost, { pageSize: 2 });
+    expect(out.map(row => row.id)).toEqual(initial.map(row => row.id));
+    expect(queries).toHaveLength(MAX_MEMORY_PAGES + 1);
+    expect(queries.at(-1)).toBe("SELECT id FROM flair.Memory WHERE id > 'mem-0199' ORDER BY id LIMIT 1");
   }, 5_000);
+
+  test("balanced behind-cursor writes have the same verification result at the cap and on a short-page walk", async () => {
+    async function walk(pageSize: number) {
+      const { initial, live, queries, opsPost } = store(MAX_MEMORY_PAGES * 2, (live, page) => {
+        if (page !== 1) return;
+        live.delete("mem-0000");
+        live.set("a-replacement", { id: "a-replacement", durability: "standard" });
+      });
+      const result = await verifyCheckpoint({
+        checkpoint: buildCheckpoint({ node: NODE_A, at: "2026-10-15T00:00:00.000Z", rows: initial }),
+        target: NODE_A, pageSize, opsPost,
+      });
+      expect(live.has("mem-0000")).toBe(false);
+      expect(live.size).toBe(initial.length);
+      return { result, queries };
+    }
+    const capped = await walk(2);
+    const uncapped = await walk(3);
+    expect(capped.result.outcome).toBe(uncapped.result.outcome);
+    expect(uncapped.result.outcome).toBe("verified");
+    expect(capped.queries).toHaveLength(MAX_MEMORY_PAGES + 1);
+    expect(uncapped.queries).toHaveLength(Math.ceil(MAX_MEMORY_PAGES * 2 / 3));
+  }, 5_000);
+
+  test("a balanced insert ahead of the final full page is UNKNOWN when the probe sees it", async () => {
+    const { initial, live, queries, opsPost } = store(MAX_MEMORY_PAGES * 2, (live, page) => {
+      if (page !== MAX_MEMORY_PAGES) return;
+      live.delete("mem-0000");
+      live.set("z-replacement", { id: "z-replacement", durability: "standard" });
+    });
+    const result = await verifyCheckpoint({
+      checkpoint: buildCheckpoint({ node: NODE_A, at: "2026-10-15T00:00:00.000Z", rows: initial }),
+      target: NODE_A, pageSize: 2, opsPost,
+    });
+    expect(live.size).toBe(initial.length);
+    expect(result.outcome).toBe("unknown");
+    expect(result.reason).toMatch(/page cap/);
+    expect(queries).toHaveLength(MAX_MEMORY_PAGES + 1);
+    expect(queries.at(-1)).toBe("SELECT id FROM flair.Memory WHERE id > 'mem-0199' ORDER BY id LIMIT 1");
+  }, 5_000);
+
+  test.each([{}, { results: null }])("a malformed cap probe refuses with the cap error: %j", async probe => {
+    let reads = 0;
+    const opsPost = async () => ++reads === 1 ? [{ id: "a" }] : probe;
+    await expect(readTableByIdPaged(opsPost, { table: "Memory", select: "id", expected: 1, pageSize: 1, maxPages: 1 }))
+      .rejects.toThrow(/page cap/);
+    expect(reads).toBe(2);
+  });
+
+  test("an empty cap probe with a count mismatch refuses with the cap error", async () => {
+    let reads = 0;
+    await expect(readTableByIdPaged(async () => ++reads === 1 ? [{ id: "a" }] : [], {
+      table: "Memory", select: "id", expected: 2, pageSize: 1, maxPages: 1,
+    })).rejects.toThrow(/page cap/);
+    expect(reads).toBe(2);
+  });
+
+  test("the cap probe preserves the filter and quotes its cursor", async () => {
+    const calls: Record<string, unknown>[] = [];
+    await readTableByIdPaged(async body => {
+      calls.push(body);
+      return calls.length === 1 ? [{ id: "b'quoted" }] : [];
+    }, { table: "MemoryDeletionHistory", select: "id, at", filter: "at >= '2026-09-01'", expected: 1, pageSize: 1, maxPages: 1 });
+    expect(calls).toEqual([
+      { operation: "sql", sql: "SELECT id, at FROM flair.MemoryDeletionHistory WHERE (at >= '2026-09-01') ORDER BY id LIMIT 1" },
+      { operation: "sql", sql: "SELECT id FROM flair.MemoryDeletionHistory WHERE (at >= '2026-09-01') AND id > 'b''quoted' ORDER BY id LIMIT 1" },
+    ]);
+  });
+
+  test("a backslash cursor at the cap is refused before the probe", async () => {
+    let reads = 0;
+    await expect(readTableByIdPaged(async () => { reads++; return [{ id: "a\\b" }]; }, {
+      table: "Memory", select: "id", expected: 1, pageSize: 1, maxPages: 1,
+    })).rejects.toThrow("unsupported backslash");
+    expect(reads).toBe(1);
+  });
 
   test("one row beyond the cap is UNKNOWN", async () => {
     // At pageSize 2 the hard MAX_MEMORY_PAGES bound covers 200 rows; 201 needs

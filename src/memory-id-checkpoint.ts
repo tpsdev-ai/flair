@@ -11,7 +11,7 @@ export const CHECKPOINT_FILENAME = "memory-id-checkpoint.json";
 
 /** Rows requested per operations-API page. */
 export const MEMORY_PAGE_SIZE = 10_000;
-/** Hard page-walk bound; a read whose derived allowance exceeds it is UNKNOWN. */
+/** Hard page-walk bound. */
 export const MAX_MEMORY_PAGES = 100;
 /** Per-request timeout for the admin read. Every operation is bounded. */
 export const OPS_READ_TIMEOUT_MS = 30_000;
@@ -100,11 +100,10 @@ export interface KeysetReadOptions {
 /**
  * Walk `flair.<table>` by primary key: `SELECT <select> ... [WHERE <filter> AND] id > cursor
  * ORDER BY id LIMIT <pageSize>`, resuming strictly after the last id read. A duplicate id
- * across pages, or a read that differs in size from `expected`, refuses. On the last allowed
- * page, a walk whose rows read equal `expected` is complete even when that page is full. The
- * page allowance is `ceil(expected / pageSize) + 1`, capped by `maxPages` (default
- * MAX_MEMORY_PAGES), so the hard cap does not depend on server output; a read that needs
- * more pages than the cap is UNKNOWN. Duplicates raise InconsistentReadError; size
+ * across pages, or a read that differs in size from `expected`, refuses. A full final page at
+ * the cap completes only when a read after its last id returns no row and the rows read equal
+ * `expected`. The page allowance is `ceil(expected / pageSize) + 1`, capped by `maxPages`
+ * (default MAX_MEMORY_PAGES). Duplicates raise InconsistentReadError; size
  * mismatches do too by default, but `mismatch` can return any Error. Errors from `opsPost`
  * propagate unchanged.
  */
@@ -146,8 +145,13 @@ export async function readTableByIdPaged(opsPost: OpsPost, opts: KeysetReadOptio
     }
     if (batch.length < pageSize) break;
     if (page === pageAllowance - 1) {
-      // A full final allowed page is complete when the rows read match the count.
-      if (rows.length === opts.expected) break;
+      if (lastId?.includes("\\")) throw new Error(`${opts.table} cursor contains an unsupported backslash`);
+      const probeWhere = opts.filter ? `(${opts.filter}) AND ` : "";
+      const probe = asRows(await opsPost({
+        operation: "sql",
+        sql: `SELECT id FROM flair.${opts.table} WHERE ${probeWhere}id > '${lastId!.replace(/'/g, "''")}' ORDER BY id LIMIT 1`,
+      }));
+      if (probe?.length === 0 && rows.length === opts.expected) break;
       throw new Error(`${opts.table} read reached the ${pageAllowance}-page cap`);
     }
   }
