@@ -1,9 +1,9 @@
 /**
- * skill-update-close-confirmed-2645.test.ts — a skill UPDATE confirms that its
- * predecessor close landed in the committed store before answering success
+ * skill-update-close-confirmed-2645.test.ts — a skill UPDATE that supersedes a
+ * version confirms that its predecessor close landed in the committed store before answering success
  * (flair#2645).
  *
- * A skill update writes a successor row and closes the predecessor with a full
+ * A superseding skill update writes a successor row and closes the predecessor with a full
  * `put` in the same transaction that appends the version. Harper can resolve
  * that transaction's commit while dropping the queued full put — it loses to a
  * newer write of the same row — and still commit the successor and version

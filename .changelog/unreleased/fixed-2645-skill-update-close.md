@@ -1,4 +1,4 @@
-- **A skill update confirms the predecessor close before answering success.**
+- **A skill update that supersedes a version confirms the predecessor close before answering success.**
 
   A newer write to the same skill row could make Harper skip the queued close
   while the successor and version committed, leaving two live heads after a

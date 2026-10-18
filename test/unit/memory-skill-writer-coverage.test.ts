@@ -43,6 +43,8 @@ add("skill-version-write", ["writer:(databases as any).flair.Memory.put#1"],
   "Memory post/put and FeedMemories scan the merged successor body before calling this writer.");
 add("skill-version-write", ["writer:table.put#1"],
   "Re-applies a version close from a fresh committed read when the queued close did not land (flair#2645).");
+add("skill-version-write", ["alias-source:(databases as any).flair?.Memory#2"],
+  "Post-commit close confirmation handle: reads the committed predecessor and successor, and the close retry's `table.put` (above) writes through it (flair#2645).");
 
 // ── REJECTING skill-writer sinks (400 skill_write_path) ──
 add("Memory", ["writer:super.patch#1"],
@@ -134,8 +136,6 @@ add("usage-recording", ["writer:(databases as any).flair.MemoryUsage.put#1"],
 // ── Read-only aliases (no write through these handles) ──
 add("skill-version-write", ["alias-source:(databases as any).flair?.Memory#1"],
   "Read-only alias (resolveSkillHead searches the live skill head).");
-add("skill-version-write", ["alias-source:(databases as any).flair?.Memory#2"],
-  "Post-commit close confirmation and retry table.");
 add("AdminMemory", ["alias-source:(databases as any).flair.Memory#1"],
   "Read-only admin alias.");
 add("Federation", ["alias-source:(databases as any).flair.Memory#1"],
