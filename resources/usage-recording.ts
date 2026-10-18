@@ -119,10 +119,9 @@ export class UsageLedgerReadError extends Error {
  * and the committed row is re-read before commit. The plan skips an absent
  * row or one outside the agent's read scope before any identity comparison.
  * For a row the plan does not skip, an identity change the in-transaction read
- * already sees throws WriteBackConflictError at once (no retry). Only a change to the committed
- * row found by the re-read after the bump is staged retries, from a fresh
- * read, at most WRITE_BACK_ATTEMPTS attempts in all (then
- * WriteBackConflictError). recordUsageBatch / recordCitations log either
+ * already sees throws WriteBackConflictError at once (no retry). Only a
+ * pre-commit conflict retries. A post-commit mismatch is terminal and
+ * unconfirmed. recordUsageBatch / recordCitations log either
  * refusal with the reason `stored_row_changed`. The earlier read only decides
  * the read-scope gate above; it never authorizes the count write on its own.
  *
@@ -246,7 +245,7 @@ async function recordUsageContributionLocked(
       if (!row || !canRead(row)) return { skip: true };
       // Only `usageCount`: an incremental update, never a
       // full-row put of the row read above (flair#2470).
-      return { update: { usageCount: (row.usageCount ?? 0) + 1 } };
+      return { idempotent: false, update: { usageCount: (row.usageCount ?? 0) + 1 } };
     },
     {
       ctx,
@@ -257,6 +256,7 @@ async function recordUsageContributionLocked(
       expectedRow: prepared,
       pausePre: () => txnPausePoint("usage-count-pre"),
       pausePoint: () => txnPausePoint("usage-count"),
+      pauseBeforeVerify: () => txnPausePoint("usage-count-verify"),
     },
   );
 }
@@ -366,21 +366,17 @@ export async function recordCitations(
       if (!record || !scope.isAllowed(record)) continue;
       await recordFn(ctx, auth.agentId, id, undefined, now, scope.isAllowed);
     } catch (err) {
-      // Never let one bad id stop the batch — same no-op-on-error discipline
-      // as RecordUsage.post()'s loop, log server-side only.
+      // Log per-id failures without stopping the batch.
       if (err instanceof WriteBackConflictError) {
-        // flair#2441: the stored row is no longer the one read (a same-id
-        // replace, or a change found on every attempt); the count bump was
-        // refused. The ledger row was already written and committed before the
-        // bump, so it stays, and the count is not bumped.
-        console.error("recordCitations: not credited, stored_row_changed (no-op)", { memoryId: id, reason: "stored_row_changed", err });
+        // The ledger committed before the bump; the count outcome is unconfirmed.
+        console.error("recordCitations: usage count unconfirmed, stored_row_changed", { memoryId: id, reason: "stored_row_changed", outcome: err.outcome, err });
       } else if (err instanceof UsageLedgerReadError) {
         // flair#2333: the ledger read that decides whether this pair already
         // has a row failed — not "no row". This contribution is aborted (no
         // ledger write, no count bump); the other ids stand.
         console.error("recordCitations: not credited, ledger read failed (no-op)", { memoryId: id, ledgerId: err.ledgerId, reason: "ledger_read_failed", err });
       } else {
-        console.error("recordCitations: failed to credit (no-op)", { memoryId: id, err });
+        console.error("recordCitations: failed to credit", { memoryId: id, err });
       }
     }
   }
@@ -428,22 +424,16 @@ export async function recordUsageBatch(
     try {
       await recordFn(ctx, agentId, memoryId, attribution, now, scope.isAllowed);
     } catch (err) {
-      // Never let one bad id fail the whole batch, and never let an internal
-      // error leak existence information either — log server-side, collapse
-      // to the same no-op the response already returns for every other
-      // outcome.
+      // Log per-id failures without changing the response.
       if (err instanceof WriteBackConflictError) {
-        // flair#2441: the stored row is no longer the one read (a same-id
-        // replace, or a change found on every attempt); the count bump was
-        // refused. The ledger row was already written and committed before the
-        // bump, so it stays, and the count is not bumped.
-        console.error("RecordUsage.post: not recorded, stored_row_changed (treated as no-op)", { memoryId, reason: "stored_row_changed", err });
+        // The ledger committed before the bump; the count outcome is unconfirmed.
+        console.error("RecordUsage.post: usage count unconfirmed, stored_row_changed", { memoryId, reason: "stored_row_changed", outcome: err.outcome, err });
       } else if (err instanceof UsageLedgerReadError) {
         // flair#2333: the ledger read failed — not "no row". This contribution
         // is aborted (no ledger write, no count bump); the other ids stand.
         console.error("RecordUsage.post: not recorded, ledger read failed (treated as no-op)", { memoryId, ledgerId: err.ledgerId, reason: "ledger_read_failed", err });
       } else {
-        console.error("RecordUsage.post: failed to record usage (treated as no-op)", { memoryId, err });
+        console.error("RecordUsage.post: failed to record usage", { memoryId, err });
       }
     }
   }

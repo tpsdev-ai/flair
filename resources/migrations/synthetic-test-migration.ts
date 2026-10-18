@@ -108,7 +108,7 @@ export function createSyntheticTestMigration(
 
             // Only `source`: an incremental update, never a
             // full-row put of the row read above (flair#2470).
-            return { update: { source: SYNTHETIC_TARGET_MARKER } };
+            return { idempotent: true, update: { source: SYNTHETIC_TARGET_MARKER } };
           },
           { label: "synthetic-test-migration", pausePre: () => txnPausePoint("synthetic-test-pre"), pausePoint: () => txnPausePoint("synthetic-test"), expectedRow: row },
         );

@@ -59,7 +59,7 @@ export async function stampMemoryPromotion(
   const outcome = await writeBackCommittedRow(
     table,
     id,
-    (stored) => ({ write: stamp(stored) }),
+    (stored) => ({ idempotent: true, write: stamp(stored) }),
     { ctx: enumerationContext, label: "promotion-stamp", pausePre: () => txnPausePoint("promotion-stamp-pre"), pausePoint: () => txnPausePoint("promotion-stamp"), pauseBeforeCommit: () => txnPausePoint("promotion-stamp-commit"), matchFields: ["content"], expectedRow: selected },
   );
   if ("write" in outcome) noteMemoryUpsert(outcome.write);

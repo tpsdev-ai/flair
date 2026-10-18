@@ -1224,7 +1224,7 @@ export class FederationSync extends Resource {
             if (currentHome) return { skip: true, reason: currentHome };
             const current = mergePresenceReceipt(row, validated.row, receivedAt);
             if (current.action === "skip") return { skip: true, reason: current.reason };
-            return { write: current.row };
+            return { idempotent: true, write: current.row };
           },
           {
             label: "FederationSync",
@@ -1236,9 +1236,7 @@ export class FederationSync extends Resource {
           },
         );
       } catch (err) {
-        // The helper's named refusal for a row that changed: the owned
-        // transaction aborted, so nothing was written — refuse the key, not
-        // indeterminate. Matches the generic merge's handler below.
+        // Unconfirmed staged values: refuse the key as merge_target_changed.
         if (err instanceof WriteBackConflictError) {
           return { reason: "merge_target_changed" };
         }
@@ -1440,8 +1438,6 @@ export class FederationSync extends Resource {
         // merge read and built from): a change to any field committed between that
         // read and the helper's in-transaction read skips the record as
         // merge_target_changed. The committed row is checked again before commit.
-        // A change committed after that final read is not seen: Harper has no
-        // compare-and-set (write-back.ts).
         //
         // flair#2450 set `wholeRow` for Soul, Agent, Relationship and Message;
         // flair#2475 extends it to Memory: Memory's identity fields
@@ -1489,7 +1485,7 @@ export class FederationSync extends Resource {
                 }
               }
               if (record.table === "Memory") normalizeEmptyEmbedding(mergedData);
-              return { write: mergedData };
+              return { idempotent: true, write: mergedData };
             },
             {
               label: "FederationSync",
@@ -1506,12 +1502,7 @@ export class FederationSync extends Resource {
             },
           );
         } catch (err) {
-          // A merge refusal returned by the write path itself: the helper
-          // names a changed row with WriteBackConflictError only after its
-          // owned transaction aborted, whether the change was seen at the
-          // in-transaction comparison or at the committed-row confirmation
-          // after staging. Nothing was written, so the key is refused, not
-          // indeterminate.
+          // Unconfirmed staged values: refuse the key as merge_target_changed.
           if (err instanceof WriteBackConflictError) {
             return { reason: "merge_target_changed" };
           }

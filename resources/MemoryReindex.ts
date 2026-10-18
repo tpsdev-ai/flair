@@ -23,13 +23,11 @@
  * existing index, older records live in the primary store but never make it
  * into the secondary index. Scoped search() via RequestTarget.conditions —
  * which uses the agentId index — then returns empty for those agents.
- *
- * This endpoint is idempotent: running it again finds zero drift.
  */
 
 import { Resource, databases } from "harper";
 import { isAdmin, allowAdmin } from "./agent-auth.js";
-import { writeBackCommittedRow, writeBackIdentity } from "./write-back.js";
+import { WriteBackConflictError, writeBackCommittedRow, writeBackIdentity } from "./write-back.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 import { buildReindexRow } from "./Memory.js";
 
@@ -138,14 +136,14 @@ export class MemoryReindex extends Resource {
 
     // Pass 3: re-PUT every primary-store record through buildReindexRow, retaining
     // declared/named fields and stored provenance, stripping other undeclared
-    // fields and generating an absent token. The re-PUT forces Harper to re-insert
-    // into all secondary indices. Cheaper-than-sound variants (only re-PUT records
-    // that appear missing) would miss rows the primary scan sees fine but that
+    // fields and generating an absent token. Variants that only re-PUT records
+    // that appear missing would miss rows the primary scan sees fine but that
     // Harper's read path can't locate via any index path.
     for (let i = 0; i < recordsToReindex.length; i += batchSize) {
       const chunk = recordsToReindex.slice(i, i + batchSize);
       for (const id of chunk) {
         try {
+          let commitPauses = 0;
           const outcome = await writeBackCommittedRow(
             Memory,
             id,
@@ -155,11 +153,30 @@ export class MemoryReindex extends Resource {
               // from this transaction's read.
               const built = buildReindexRow({ ...record, _reindex: true }, record);
               if (!("row" in built)) throw new Error(`${built.error}: ${built.message}`);
-              return { write: built.row };
+              return { idempotent: true, write: built.row };
             },
-            { ctx, label: "MemoryReindex", pausePre: () => txnPausePoint("reindex-put-pre"), pausePoint: () => txnPausePoint("reindex-put"), expectedRow: selectedRows.get(id) },
+            {
+              ctx, label: "MemoryReindex", expectedRow: selectedRows.get(id),
+              pausePre: () => txnPausePoint("reindex-put-pre"),
+              pausePoint: () => txnPausePoint("reindex-put"),
+              pauseBeforeCommit: () => {
+                switch (commitPauses++) {
+                  case 0: return txnPausePoint("reindex-put-commit");
+                  case 1: return txnPausePoint("reindex-put-commit-retry");
+                  default: return txnPausePoint("reindex-put-commit-retry-retry");
+                }
+              },
+            },
           );
           if ("skip" in outcome) { stats.errors++; continue; }
+          if (!("write" in outcome)) throw new Error("MemoryReindex: expected a full-row plan");
+          let indexed = false;
+          for await (const row of Memory.search({
+            conditions: [{ attribute: "agentId", comparator: "equals", value: outcome.write.agentId }],
+          }, {})) {
+            if (String(row.id) === id) { indexed = true; break; }
+          }
+          if (!indexed) throw new WriteBackConflictError("MemoryReindex agentId index", id, 1);
           stats.reindexed++;
         } catch (err: any) {
           stats.errors++;
@@ -171,7 +188,7 @@ export class MemoryReindex extends Resource {
     }
 
     return {
-      message: `reindex complete: ${stats.reindexed} re-indexed, ${stats.errors} errors, ${stats.totalMissing} pre-existing index gap${stats.totalMissing === 1 ? "" : "s"} healed`,
+      message: `reindex complete: ${stats.reindexed} re-indexed, ${stats.errors} errors, ${stats.totalMissing} pre-existing index gap${stats.totalMissing === 1 ? "" : "s"}`,
       stats,
     };
   }

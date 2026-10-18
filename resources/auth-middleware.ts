@@ -222,7 +222,7 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
             // update, never a full-row put of the row read above (flair#2470,
             // flair#2465). The newly computed hash is of `text`, the text this
             // vector was computed from (null for an empty owner).
-            return { update: { embedding, embeddingModel: model, embeddedContentHash: hashEmbeddedText(row.agentId, text) ?? null } };
+            return { idempotent: true, update: { embedding, embeddingModel: model, embeddedContentHash: hashEmbeddedText(row.agentId, text) ?? null } };
           },
           {
             label: "backfillEmbedding",
@@ -235,8 +235,6 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
           },
         );
         if ("update" in outcome) {
-          // After the commit: the stamp the update stored (an absent one reads as
-          // untrusted and closes the guard) and the row it replaced.
           noteWriteStamp(outcome.update.embeddingModel as string | null | undefined, replaced);
           console.log(`[auto-embed] ${memoryId}: ${(outcome.update.embedding as number[]).length}d`);
         }

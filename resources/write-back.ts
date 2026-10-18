@@ -16,10 +16,12 @@ export type WriteBackPause = () => Promise<void> | undefined;
 /** What the `plan` callback decides for the row it was handed.
  *
  * A `write` plan must supply a complete row for Harper `put`.
- * `update` writes only the named fields through Harper `update`. */
+ * `update` writes only the named fields through Harper `update`.
+ * `idempotent` means re-planning from a fresh read after applying this plan
+ * yields the same committed effect. Only those plans may retry after commit. */
 export type WriteBackPlan =
-  | { write: Record<string, unknown> }
-  | { update: Record<string, unknown> }
+  | { write: Record<string, unknown>; idempotent: boolean }
+  | { update: Record<string, unknown>; idempotent: boolean }
   // A plan may name WHY it skipped, so a caller that maps a skip to an operator-
   // visible reason (FederationSync's skip log) can tell two skip causes apart
   // instead of labeling every skip with one hardcoded name (flair#2266). The
@@ -61,6 +63,8 @@ export interface WriteBackOptions {
    *  Harper can drop this write's effect (flair#2653). Named at the call site,
    *  like `pausePoint`. */
   pauseBeforeCommit?: WriteBackPause;
+  /** Test-only pause after commit, before reading the staged values. */
+  pauseBeforeVerify?: WriteBackPause;
 }
 
 /** The fields of `expectedRow` (or of the helper's own first read) it compares
@@ -112,18 +116,10 @@ export function writeBackIdentity(row: Record<string, any>): Record<string, unkn
 /** Attempts of a write-back before it gives up on a row that keeps changing. */
 export const WRITE_BACK_ATTEMPTS = 3;
 
-/**
- * The helper's named refusal: the row changed and this write's effect is not
- * the committed state. The in-transaction comparison and the committed-row
- * confirmation before the commit both abort the transaction, so their staged
- * write is discarded; a newer write that supersedes this one can also leave
- * its effect absent after the commit. Whichever check fails, the caller is
- * never told the write succeeded.
- */
 export class WriteBackConflictError extends Error {
   readonly id: string;
-  constructor(label: string, id: string, attempts: number) {
-    super(`${label}: row ${id} changed; write not applied (${attempts} attempts)`);
+  constructor(label: string, id: string, attempts: number, readonly outcome: "conflict" | "unconfirmed" = "conflict") {
+    super(`${label}: row ${id}; staged values unconfirmed (${attempts} attempts)`);
     this.name = "WriteBackConflictError";
     this.id = id;
   }
@@ -323,8 +319,19 @@ export async function writeBackCommittedRow(
     // A newer write committing in the window above can make Harper resolve the
     // commit while discarding this write. Re-read the committed store in a
     // fresh context; an unreadable read is a failure, never a pass.
-    const committed = await table.get(id, {});
+    if (opts.pauseBeforeVerify) {
+      const pause = opts.pauseBeforeVerify();
+      if (pause) await pause;
+    }
+    let committed: any;
+    try {
+      committed = await table.get(id, {});
+    } catch (err) {
+      if (!decision.idempotent) throw new WriteBackConflictError(opts.label, id, attempt, "unconfirmed");
+      throw err;
+    }
     if (!committedShowsWrite(committed, basis, decision)) {
+      if (!decision.idempotent) throw new WriteBackConflictError(opts.label, id, attempt, "unconfirmed");
       if (attempt >= attempts) throw new WriteBackConflictError(opts.label, id, attempts);
       continue;
     }
@@ -332,13 +339,10 @@ export async function writeBackCommittedRow(
   }
 }
 
-/**
- * Does the committed row show this attempt's write? Its identity is the row
- * this attempt wrote (an update keeps the basis's identity); each field the
- * plan wrote holds its staged value. A newer write that changed anything the
- * plan wrote fails the check, while a concurrent field-only write to a field
- * the plan left alone does not (flair#2653).
- */
+// Harper assigns these timestamps; they are not staged application fields.
+const HARPER_MANAGED_FIELDS = ["__createdtime__", "__updatedtime__"] as const;
+
+/** Compare staged values; full-row plans also require omitted fields absent. */
 function committedShowsWrite(committed: any, basis: any, decision: WriteBackPlan): boolean {
   if ("skip" in decision) return true;
   if ("update" in decision) {
@@ -346,5 +350,7 @@ function committedShowsWrite(committed: any, basis: any, decision: WriteBackPlan
     return Object.entries(decision.update).every(([field, value]) => isDeepStrictEqual(committed?.[field], value));
   }
   if (!sameStoredRow(committed, decision.write)) return false;
-  return Object.entries(decision.write).every(([field, value]) => isDeepStrictEqual(committed?.[field], value));
+  const managed = new Set<string>(HARPER_MANAGED_FIELDS);
+  return Object.entries(decision.write).every(([field, value]) => managed.has(field) || isDeepStrictEqual(committed?.[field], value)) &&
+    Object.keys(committed).every((field) => managed.has(field) || Object.hasOwn(decision.write, field));
 }
