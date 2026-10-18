@@ -228,6 +228,33 @@ describe("flair#2645 — a skill UPDATE confirms the predecessor close before su
     expect(await liveHeads(predecessorId), "the lineage does not have exactly one live head").toEqual([successorId]);
   }, 120_000);
 
+  it("a superseding POST in its request transaction: a newer write committed while it is paused still leaves one live head", async () => {
+    const predecessorId = nextId("post-race");
+    const created = await call(A, "PUT", memPath(predecessorId), skillBody(predecessorId, "v1"));
+    expect(created.status, (await created.text()).slice(0, 300)).toBeLessThan(300);
+    const successorId = nextId("post-race-successor");
+    const { response, paused, released } = await withPaused(
+      "skill-close-staged",
+      () => call(A, "POST", "/Memory", skillBody(successorId, "v2", { supersedes: predecessorId })),
+      () => commitNewerSkillWrite(predecessorId, "v2-committed-during-post"),
+    );
+    expect(paused, "the skill POST was not paused").toBe(true);
+    expect(released).toBe("go");
+    const text = await response.text();
+    expect(response.status, text.slice(0, 300)).toBe(200);
+    expect(JSON.parse(text).id).toBe(successorId);
+
+    const predecessor = await memoryRow(predecessorId);
+    const successor = await memoryRow(successorId);
+    const versions = await versionsOf(predecessorId);
+    expect(typeof predecessor?.validTo, `200 with the predecessor still open: ${JSON.stringify({ predecessor, response: text })}`).toBe("string");
+    expect(predecessor?.content, "the close did not keep the row the newer write left").toBe("v2-committed-during-post");
+    expect(successor?.supersedes, JSON.stringify(successor)).toBe(predecessorId);
+    expect(versions.map((v) => v.kind), JSON.stringify(versions)).toEqual(["create", "update"]);
+    expect(versions.at(-1)?.memoryId, "the version head does not name the successor").toBe(successorId);
+    expect(await liveHeads(predecessorId), "the lineage does not have exactly one live head").toEqual([successorId]);
+  }, 120_000);
+
   it("a completed later update of the same skill confirms the earlier update as superseded in order", async () => {
     const id = nextId("superseded-in-order");
     const successorId = nextId("superseded-first");

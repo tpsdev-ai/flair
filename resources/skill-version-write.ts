@@ -17,7 +17,7 @@ import { PRIVATE_VISIBILITY, SHARED_VISIBILITY } from "./memory-visibility.js";
 import { maybeThrowSkillWriteFault } from "./skill-write-fault.js";
 import { supersedesTargetUnreadable } from "./memory-id-guard.js";
 import { grantedCloseRevokedRefusal, sameStoredRow, storedRowChangedRefusal, writeGrantHeld } from "./write-back.js";
-import { withOwnedTransaction } from "./request-transaction.js";
+import { isJoinableTransaction, withOwnedTransaction } from "./request-transaction.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 import { committedVisibilityDiffers, grantedSuccessorVisibilityDenial, predecessorVisibilityChangedRefusal } from "./grant-visibility.js";
 
@@ -349,6 +349,8 @@ export const defaultSkillHooks: SkillWriteHooks = {
 
 export interface RunSkillVersionWriteArgs {
   ctx: any;
+  /** Join the caller's open transaction. A plan that supersedes a predecessor
+   *  instead runs in a transaction this write owns (flair#2645). */
   joinCallerTransaction?: boolean;
   /** The stable logical subject id. */
   subjectId: string;
@@ -359,8 +361,9 @@ export interface RunSkillVersionWriteArgs {
   /**
    * Build the write plan from the live head resolved under the lock. Returning
    * a Response refuses the write (and rolls back: nothing is written).
+   * `attempt.joined` is true when this attempt stages into the caller's transaction.
    */
-  plan: (head: Record<string, any> | null, shared: any) => SkillWritePlan | Response | null | Promise<SkillWritePlan | Response | null>;
+  plan: (head: Record<string, any> | null, shared: any, attempt: { joined: boolean }) => SkillWritePlan | Response | null | Promise<SkillWritePlan | Response | null>;
   /** Resolve the live head under the lock. */
   head: (shared: any) => Promise<Record<string, any> | null>;
   hooks: SkillWriteHooks;
@@ -708,18 +711,43 @@ export function captureCreatedFlag(ctx: any): () => void {
   };
 }
 
+/** A plan whose success {@link confirmSkillUpdate} checks after the commit. */
+function supersedesPredecessor(plan: SkillWritePlan): plan is SkillSuccessorPlan & { kind: "update"; predecessor: Record<string, any> } {
+  return plan.kind === "update" && !!plan.predecessor;
+}
+
+/** A joined attempt's signal that its plan needs a commit this write owns. */
+const OWNED_COMMIT_REQUIRED = Symbol("skill-version-write.owned-commit-required");
+
 async function runSkillVersionWriteInner(args: RunSkillVersionWriteArgs): Promise<RecordVersionOutcome> {
+  const joined = args.joinCallerTransaction === true && isJoinableTransaction(args.ctx);
+  const first = await runSkillVersionAttempt(args, joined);
+  if (first !== OWNED_COMMIT_REQUIRED) return first;
+  // flair#2645: the update is confirmed against the committed store after its
+  // commit, which a joined write leaves to the caller. The joined attempt
+  // stopped before staging a write; plan again from a fresh head, owned.
+  const owned = await runSkillVersionAttempt(args, false);
+  if (owned === OWNED_COMMIT_REQUIRED) throw new Error("skill-version-write: an owned attempt cannot require an owned commit");
+  return owned;
+}
+
+async function runSkillVersionAttempt(args: RunSkillVersionWriteArgs, joined: boolean): Promise<RecordVersionOutcome | typeof OWNED_COMMIT_REQUIRED> {
   let plan: SkillWritePlan | null = null;
   let owner = "";
+  let ownedCommitRequired = false;
   const outcome = await recordVersion(
     args.ctx,
     {
       subjectType: "skill",
       prepare: async (shared: any) => {
         const head = await args.head(shared);
-        const built = await args.plan(head, shared);
+        const built = await args.plan(head, shared, { joined });
         if (built === null) return null;
         if (built instanceof Response) return built;
+        if (joined && supersedesPredecessor(built)) {
+          ownedCommitRequired = true;
+          return skillUpdateUnconfirmedFailure();
+        }
         // A write grant does not include changing a record's visibility;
         // visibility is set by the owner or an admin (grant-visibility.ts). The
         // plan is checked here and again on committed state once the close is
@@ -774,11 +802,12 @@ async function runSkillVersionWriteInner(args: RunSkillVersionWriteArgs): Promis
       if (pointerDenial) return pointerDenial;
       return okResponse();
     },
-    args.joinCallerTransaction,
+    joined,
   );
+  if (ownedCommitRequired) return OWNED_COMMIT_REQUIRED;
   if (!outcome.ok || plan === null) return outcome;
   const writePlan = plan as SkillWritePlan;
-  if (writePlan.kind !== "update" || !writePlan.predecessor) return outcome;
+  if (!supersedesPredecessor(writePlan)) return outcome;
   // Test-only: inert unless armed. Pauses between the committed write and the
   // confirmation read, so a later update of the same subject can complete.
   const confirmPause = txnPausePoint("skill-update-confirm");
