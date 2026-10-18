@@ -66,7 +66,7 @@ mock.module("harper", () => ({
 }));
 
 const { removeAppendedVersion, recordDigest } = await import("../../resources/instruction-version-record.ts");
-const { runSkillVersionWrite, defaultSkillHooks, authorizeSkillOwners } = await import("../../resources/skill-version-write.ts");
+const { confirmSkillClose, runSkillVersionWrite, defaultSkillHooks, authorizeSkillOwners } = await import("../../resources/skill-version-write.ts");
 
 beforeEach(() => {
   versions.clear(); memories.clear(); locked = false; grantHeld = true;
@@ -99,6 +99,23 @@ function seedVersion(): void {
   row.recordHash = recordDigest(row);
   versions.set(row.id, row);
 }
+
+test("a missing predecessor without caller handling refuses and compensates", async () => {
+  const compensate = mock(async () => null);
+  const authorize = mock(async () => null);
+  const result = await confirmSkillClose({
+    ctx: {}, table: memoryTable, expected: { id: "predecessor" },
+    closePatch: { validTo: "closed" }, authorize, compensate,
+    refusal: () => Response.json({ error: "close_not_confirmed" }, { status: 409 }),
+    unconfirmed: () => Response.json({ error: "confirmation_unavailable" }, { status: 500 }),
+  });
+  expect(result).toBeInstanceOf(Response);
+  if (!result) throw new Error("expected refusal");
+  expect(result.status).toBe(409);
+  expect((await result.json()).error).toBe("stored_row_changed");
+  expect(compensate).toHaveBeenCalledTimes(1);
+  expect(authorize).not.toHaveBeenCalled();
+});
 
 test("version rollback confirms absence after commit with the version lock held", async () => {
   seedVersion();

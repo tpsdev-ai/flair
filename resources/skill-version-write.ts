@@ -531,7 +531,7 @@ export async function confirmSkillClose(args: ConfirmSkillCloseArgs): Promise<Re
       return unconfirmed();
     }
     if (!committed) {
-      const denied = args.missing?.() ?? (confirmEffect ? await confirmEffect() : null);
+      const denied = args.missing?.() ?? (confirmEffect ? await confirmEffect() : storedRowChangedRefusal("Memory"));
       return denied ? (await compensate()) ?? denied : null;
     }
     if (!sameStoredRow(committed, expected)) {
