@@ -95,8 +95,9 @@ OrgEvent, WorkspaceState, Presence):
 - If reached, the guard checks the body `id` on POST/PUT/PATCH first, then
   stored ownership (the same owner refusal), using Harper's resolved record id.
   An absent, null or matching body `id` passes the body-id check; a differing
-  string or number `id` gets `403 write_id_not_addressed`, and an `id` of any
-  other type that is not the addressed key gets `400 id_target_mismatch`. Each
+  string or number `id` gets `403 write_id_not_addressed`, and a present,
+  non-null `id` of any other type that is not the addressed key gets
+  `400 id_target_mismatch`. Each
   object element of an array body is checked the same way. OrgEvent and Memory
   bind an addressed POST's missing body `id` to the addressed id.
 - For a collection PUT, PATCH or DELETE, if reached, the table guard returns

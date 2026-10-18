@@ -191,7 +191,7 @@ describe("the owner-scoped guard checks a non-admin addressed write's body id fo
   // A table with no spec is reported by the coverage check below.
   for (const table of Object.keys(OWNER_FIELDS).filter((t) => t in SPECS)) {
     const s = SPECS[table];
-    // A table keyed by its owner field has no address the caller may write other than its own record.
+    // A table keyed by its owner field runs only the caller's own address; the fresh-address cases cover the other tables.
     const addresses = ownerIsKey(table) ? (["mine"] as const) : (["mine", "fresh"] as const);
     const shapes = SHAPES.filter((shape) => !shape.needsCompositeRecord || !ownerIsKey(table));
     describe(table, () => {

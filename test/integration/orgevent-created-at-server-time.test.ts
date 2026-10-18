@@ -830,8 +830,8 @@ describe("what each malformed id or body gets", () => {
   // id takes the path's id (test/integration/owner-scoped-writes.test.ts); an
   // empty or non-string id does not generate one. At an addressed path the
   // owner-scoped write guard refuses a non-admin's differing body id first:
-  // write_id_not_addressed for a string or number, id_target_mismatch for any
-  // other type. Every other case here is refused with invalid_event_id.
+  // write_id_not_addressed for a string or number, id_target_mismatch for a
+  // present, non-null id of any other type. Every other case here is refused with invalid_event_id.
   const ELSEWHERE_ID: Array<[string, unknown]> = [["empty", ""], ["0", 0], ["false", false], ["[]", []], ["object", { toString: null }]];
   const ELSEWHERE_WANT: Record<string, Record<string, [Expect, Expect]>> = {
     addressed: {

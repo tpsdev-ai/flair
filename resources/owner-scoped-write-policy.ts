@@ -8,8 +8,8 @@
  *   - addressed to one record (POST/PUT/PATCH/DELETE to `/<Table>/<id>`) is
  *     checked on POST/PUT/PATCH for a body `id` that names a record other than
  *     the addressed one (`bodyIdRefusal`: `writeIdNotAddressedRefusal`, 403,
- *     for a string or number id; `idTargetMismatchRefusal`, 400, for an id of
- *     any other type), then for a stored owner other than
+ *     for a string or number id; `idTargetMismatchRefusal`, 400, for a present,
+ *     non-null id of any other type; an absent or null id passes), then for a stored owner other than
  *     the caller (`ownerMutationRefusal`, 403), if reached. The middleware can
  *     return the owner refusal first on a plain addressed URL;
  *   - addressed to no single record (the table's collection, with or without a
@@ -133,8 +133,8 @@ export function writeIdNotAddressedRefusal(): Response {
 }
 
 /**
- * The named refusal for an addressed write whose body `id` is not a string or
- * number and is not the addressed key. It answers the error and status of
+ * The named refusal for an addressed write whose body `id` is present, not
+ * null, not a string or number, and not the addressed key. It answers the error and status of
  * resources/originator-instance.ts's body-id check and echoes no submitted value.
  */
 export function idTargetMismatchRefusal(): Response {
