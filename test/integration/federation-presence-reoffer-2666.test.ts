@@ -5,8 +5,8 @@
  * offered again after the hub enables receipt, without a new heartbeat.
  *
  * Boots TWO real, ephemeral Harpers: the SENDER (spoke), with a home agent and
- * its Presence row, and the RECEIVER (hub), first WITHOUT
- * FLAIR_FEDERATION_PRESENCE_RECEIVE. After the first sync refuses both home
+ * its Presence row, and the RECEIVER (hub), first with
+ * FLAIR_FEDERATION_PRESENCE_RECEIVE=0. After the first sync refuses both home
  * rows, the hub is stopped (its data directory kept) and booted again with the
  * flag on; the sender is pointed at the new endpoint and syncs again. No
  * heartbeat is written between the syncs.
