@@ -370,7 +370,8 @@ describe("flair#2354 — the admin reindex re-PUT write-back under a concurrent 
     expect(body.stats.totalMissing).toBe(1);
     expect(body.stats.reindexed).toBe(0);
     expect(body.stats.errors).toBe(1);
-    expect(body.stats.errorSamples[0].message).toContain("MemoryReindex agentId index");
+    expect(body.stats.errorSamples[0].message).toBe(`MemoryReindex: row ${id} is stored as staged, but the agentId index does not list it (index unconfirmed)`);
+    expect(body.stats.errorSamples[0].outcome).toBe("unconfirmed");
     expect((await readRow(harper, id))?.content).toBe("index gap");
   }, 60_000);
 

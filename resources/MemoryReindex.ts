@@ -28,6 +28,16 @@
 import { Resource, databases } from "harper";
 import { isAdmin, allowAdmin } from "./agent-auth.js";
 import { WriteBackConflictError, writeBackCommittedRow, writeBackIdentity } from "./write-back.js";
+
+/** The re-PUT's row is confirmed as staged, but a fresh agentId-index read
+ *  does not list it: the row values are confirmed, the index is not. */
+class ReindexIndexUnconfirmed extends Error {
+  readonly outcome = "unconfirmed" as const;
+  constructor(id: string) {
+    super(`MemoryReindex: row ${id} is stored as staged, but the agentId index does not list it (index unconfirmed)`);
+    this.name = "ReindexIndexUnconfirmed";
+  }
+}
 import { txnPausePoint } from "./txn-pause-point.js";
 import { buildReindexRow } from "./Memory.js";
 
@@ -176,12 +186,12 @@ export class MemoryReindex extends Resource {
           }, {})) {
             if (String(row.id) === id) { indexed = true; break; }
           }
-          if (!indexed) throw new WriteBackConflictError("MemoryReindex agentId index", id, 1, "unconfirmed");
+          if (!indexed) throw new ReindexIndexUnconfirmed(id);
           stats.reindexed++;
         } catch (err: any) {
           stats.errors++;
           if (stats.errorSamples.length < 5) {
-            stats.errorSamples.push({ id, message: err?.message ?? String(err), ...(err instanceof WriteBackConflictError ? { outcome: err.outcome } : {}) });
+            stats.errorSamples.push({ id, message: err?.message ?? String(err), ...(err instanceof WriteBackConflictError || err instanceof ReindexIndexUnconfirmed ? { outcome: err.outcome } : {}) });
           }
         }
       }
