@@ -13,12 +13,19 @@ function isObjectRecord(value: unknown): boolean {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-/** 400 for a write body that is neither a JSON object nor an allowed array of them. Echoes nothing. */
-export function bodyMustBeObject(): Response {
+/**
+ * 400 for a write body that is neither a JSON object nor an allowed array of
+ * them. Echoes nothing. The message follows `allowArrayObjects`: an
+ * array-admitting caller is told arrays are allowed, a caller that refuses
+ * them is not.
+ */
+export function bodyMustBeObject(allowArrayObjects = false): Response {
   return new Response(
     JSON.stringify({
       error: BODY_MUST_BE_OBJECT_ERROR,
-      message: "the write body must be a JSON object, or an array of them for a collection write",
+      message: allowArrayObjects
+        ? "the write body must be a JSON object, or an array of them for a collection write"
+        : "the write body must be a JSON object",
     }),
     { status: 400, headers: { "Content-Type": "application/json" } },
   );
@@ -28,11 +35,11 @@ export function bodyMustBeObject(): Response {
  * Refuse a write body that is neither an object nor an allowed array of records.
  *
  * @param content the parsed request body
- * @param opts    `allowArrayObjects: true` admits arrays of records
+ * @param opts    `allowArrayObjects: true` admits arrays of records and says so in the message
  * @returns the 400 `Response` to send, or null to proceed
  */
 export function guardObjectBody(content: unknown, opts: { allowArrayObjects?: boolean } = {}): Response | null {
   if (isObjectRecord(content)) return null;
   if (opts.allowArrayObjects && Array.isArray(content) && content.every(isObjectRecord)) return null;
-  return bodyMustBeObject();
+  return bodyMustBeObject(opts.allowArrayObjects === true);
 }

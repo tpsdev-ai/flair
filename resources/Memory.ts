@@ -82,6 +82,7 @@ import type { PointerRow } from "./host-source-visibility.js";
 import { refuseStaleClientWrite, stripClientVersionPassthrough } from "./client-version-gate.js";
 import { refuseReservedSeedWrite, reservedSeedWriteDenial, reservedSeedSubjectDenial, isReservedSeedId, writeTargetIds } from "./seed-reservation.js";
 import { refuseContentSuffixId, resolveMemoryReferenceId, supersedesTargetMissing, supersedesTargetUnreadable } from "./memory-id-guard.js";
+import { guardObjectBody } from "./object-body-guard.js";
 
 /** flair#1940 A1' — a named 400 for an invalid host pointer (reject, never
  *  truncate). Same shape the pre-A1' inline checks returned. */
@@ -1810,6 +1811,14 @@ export class Memory extends (databases as any).flair.Memory {
   }
 
   async post(content: any, context?: any) {
+    // flair#2612: a POST body that is not a single JSON object — an array, null,
+    // a string or a number — is refused here with a named 400 before any write
+    // path runs. Without it, an array reaches Harper's collection create, which
+    // answers an unnamed 500 ("Can not create a record without an object"); null,
+    // a string or a number throws a TypeError inside post() itself, also an
+    // unnamed 500.
+    const bodyDenial = guardObjectBody(content);
+    if (bodyDenial) return bodyDenial;
     // flair#2141 S2: check the seed's fixed id against the operator-source
     // reservation (resources/seed-reservation.ts).
     const seedDenial = await refuseReservedSeedWrite("Memory", writeTargetIds(this, content), (this as any).getContext?.());

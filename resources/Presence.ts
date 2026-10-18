@@ -384,6 +384,24 @@ function presenceWriteTargetId(resource: any, content: any): string | number | n
   return null;
 }
 
+/**
+ * flair#2624: a Presence write must name the agent it is for. With no URL-bound
+ * id and no usable body `agentId`/`id`, `presenceWriteTargetId` returns null;
+ * for an authenticated administrator the owner (403) and home checks were
+ * skipped and the keyless write still reached `super.put`/`super.patch`.
+ * Refuse that by name before those checks and before any read-modify-write: an
+ * authenticated administrator's keyless PUT/PATCH gets 400
+ * presence_target_required; a non-admin agent's collection PUT/PATCH gets the
+ * owner guard's named 403; an anonymous request gets 401.
+ */
+function presenceTargetRequiredRefusal(targetId: string | number | null): Response | null {
+  if (targetId != null) return null;
+  return new Response(
+    JSON.stringify({ error: "presence_target_required", message: "a presence write must name the target agent (URL id, or a body agentId or id)" }),
+    { status: 400, headers: { "Content-Type": "application/json" } },
+  );
+}
+
 // ─── Resource ─────────────────────────────────────────────────────────────────
 
 /**
@@ -772,6 +790,8 @@ export class Presence extends (databases as any).flair.Presence {
     // Use the URL-bound id; if absent or getId() throws, use a non-empty string
     // body agentId, else a scalar (string or number) body id.
     const targetId = presenceWriteTargetId(this, content);
+    const keylessDenial = presenceTargetRequiredRefusal(targetId);
+    if (keylessDenial) return keylessDenial;
     if (auth.kind === "agent" && !auth.isAdmin && targetId != null && String(targetId) !== auth.agentId) {
       return new Response(JSON.stringify({ error: "forbidden: cannot write presence for another agent" }), { status: 403, headers: { "Content-Type": "application/json" } });
     }
@@ -804,6 +824,8 @@ export class Presence extends (databases as any).flair.Presence {
       return new Response(JSON.stringify({ error: "authentication required" }), { status: 401, headers: { "Content-Type": "application/json" } });
     }
     const targetId = presenceWriteTargetId(this, content);
+    const keylessDenial = presenceTargetRequiredRefusal(targetId);
+    if (keylessDenial) return keylessDenial;
     if (auth.kind === "agent" && !auth.isAdmin && targetId != null && String(targetId) !== auth.agentId) {
       return new Response(JSON.stringify({ error: "forbidden: cannot write presence for another agent" }), { status: 403, headers: { "Content-Type": "application/json" } });
     }
