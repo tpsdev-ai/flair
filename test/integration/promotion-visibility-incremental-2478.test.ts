@@ -456,12 +456,14 @@ describe("promotion stamps are locked, incremental and bound (real Harper)", () 
     expect(listedRow, "the row was not listed").toBeTruthy();
     expect(listedRow.promotionStatus ?? null).toBeNull();
 
-    const adminCollection = await fetch(`${harper.httpURL}/Memory`, {
+    const adminCollection = await fetch(`${harper.httpURL}/Memory/?id=${encodeURIComponent(memoryId)}`, {
       headers: { Authorization: authHeader }, signal: AbortSignal.timeout(30_000),
     });
     expect(adminCollection.status, await adminCollection.clone().text()).toBe(200);
     const adminListed: any = await adminCollection.json();
-    expectSuppressed((Array.isArray(adminListed) ? adminListed : adminListed.results ?? []).find((r: any) => r.id === memoryId));
+    expect(Array.isArray(adminListed)).toBe(true);
+    expect(adminListed).toHaveLength(1);
+    expectSuppressed(adminListed.find((r: any) => r.id === memoryId));
 
     const feedPath = `/FeedMemories/${encodeURIComponent(memoryId)}`;
     expectSuppressed(await feedRow(memoryId, ed25519Header(owner, "GET", feedPath)));
