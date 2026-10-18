@@ -1,4 +1,4 @@
-- **The shared write-back helper confirms its write after the transaction commits.**
+- **Write-back checks staged values after commit, including omitted fields for full-row plans.**
 
-  A write a newer commit dropped is retried from a fresh read and refused by
-  name if no attempt lands; it is not reported as applied (#2653).
+  Post-commit mismatches retry only idempotent plans; non-idempotent plans end
+  with an unconfirmed outcome (#2653).

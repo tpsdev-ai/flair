@@ -60,6 +60,8 @@ add("Memory", ["writer:(databases as any).flair.Memory.put#3"],
   "Admin-only _reindex re-PUT (reindex_admin_only gate) — preserves existing content and tags.");
 add("Memory", ["writer:(databases as any).flair.Memory.put#1"],
   "closeSupersededRecord: read-modify-write close of an existing record (stamps validTo), preserves existing content/tags — not a new skill write.");
+add("Memory", ["writer:table.put#1"],
+  "confirmSkillDelete: closes the freshly read skill row without changing its content or tags (flair#2642).");
 add("Memory", ["writer:(databases as any).flair.Memory.put#2"],
   "stageGrantedClose: read-modify-write close of an existing record (stamps validTo), staged in the successor's transaction; preserves existing content/tags — not a new skill write.");
 // ── Bookkeeping, removal and read-only aliases inside Memory.ts ──
@@ -67,8 +69,8 @@ add("Memory", ["writer:patchRecord#1"],
   "derivedFrom/lastReflected bookkeeping patch — never writes skill content.");
 add("Memory", ["writer:(databases as any).flair.Memory.delete#1"],
   "Memory.delete(): removal, not a write.");
-add("Memory", ["alias-source:(databases as any).flair.Memory#1", "alias-source:(databases as any).flair.Memory#2", "alias-source:(databases as any).flair.Memory#3", "alias-source:(databases as any).flair.Memory#4", "alias-source:(databases as any).flair.Memory#5", "alias-source:(databases as any).flair.Memory#6", "alias-source:(databases as any).flair.Memory#7", "alias-source:(databases as any).flair.Memory#8", "alias-source:(databases as any)?.flair?.Memory#1"],
-  "Table handles: #1 is the table handed to patchRecord (that write is classified above as writer:patchRecord#1); #3 is the class heritage; the optional handle is the write-lock store read (flair#2478); the rest are read-only committed-row reads — #2 the re-embed's confirm (flair#2465), #4 the ordinary PATCH's post-commit verification (flair#2478), #5 the _reindex re-PUT's confirm (flair#2450), #6 Memory.put's confirm (flair#2441), #7 Memory.put's post-commit verification (flair#2478) and #8 the re-embed's post-commit verification (flair#2656). All take only `get`.");
+add("Memory", ["alias-source:(databases as any).flair.Memory#1", "alias-source:(databases as any).flair.Memory#2", "alias-source:(databases as any).flair.Memory#3", "alias-source:(databases as any).flair.Memory#4", "alias-source:(databases as any).flair.Memory#5", "alias-source:(databases as any).flair.Memory#6", "alias-source:(databases as any).flair.Memory#7", "alias-source:(databases as any).flair.Memory#8", "alias-source:(databases as any).flair.Memory#9", "alias-source:(databases as any)?.flair?.Memory#1"],
+  "Table handles: #1 is the table handed to patchRecord (that write is classified above as writer:patchRecord#1); #2 supplies confirmSkillDelete's reads and close retry; #3 is the re-embed's confirm (flair#2465) and #4 its post-commit verification (flair#2656); #5 is the class heritage; #6 the ordinary PATCH's post-commit verification (flair#2478), #7 the _reindex re-PUT's confirm (flair#2450), #8 Memory.put's confirm (flair#2441) and #9 Memory.put's post-commit verification (flair#2478); the optional handle is the write-lock store read (flair#2478). The read-only handles take only `get`.");
 
 // ── Non-skill writers in other modules ──
 add("MemoryFeed", ["alias-source:(databases as any).flair.Memory#1", "writer:writeBackCommittedRow#1", "writer:table.put#1"],
@@ -99,7 +101,7 @@ add("hit-tracking", [
 add("auth-middleware", ["writer:writeBackCommittedRow#1"],
   "Auth bookkeeping (embedding backfill) — non-skill, through the shared write-back helper (flair#2354).");
 add("usage-recording", ["alias-source:(databases as any).flair.Memory#1", "writer:writeBackCommittedRow#1"],
-  "usageCount increment through the shared write-back helper (flair#2441) — non-skill.");
+  "usageCount increment and commit marker through the shared write-back helper (flair#2441) — non-skill.");
 add("promotion-stamp", ["writer:writeBackCommittedRow#1"],
   "Promotion status stamp — non-skill, through the shared write-back helper (flair#2354).");
 add("promotion-stamp", ["writer:table.put#1"],

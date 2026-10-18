@@ -17,8 +17,7 @@ import { rawTableWriteSites } from "../helpers/raw-table-writers";
  *   GUARDED     — the decision runs on the ids this write can land on;
  *   OPERATOR    — the route already requires the operator source;
  *   BOOKKEEPING — lastReflected and embedding backfill update selected fields;
- *                 usage recording intends to change only usageCount but
- *                 re-PUTs the stored row and can take an agent-supplied id;
+ *                 usage recording can take an agent-supplied id;
  *   SERVER      — the server selects the rows (a sweep, a migration, a row it
  *                 just wrote under a generated id), or another table, or a
  *                 read-only alias.
@@ -33,6 +32,8 @@ const add = (file: string, sites: string[], reason: string) => {
 };
 
 // ── GUARDED ──
+add("Memory", ["writer:table.put#1"],
+  "GUARDED: reached through Memory.delete's reserved-id and writeSkillDelete's reserved-subject decisions; the retry re-checks the stored row identity and caller authority.");
 add("MemoryArchive", ["writer:Memory.put#1"], "GUARDED: Memory.put().");
 add("Memory", [
   "writer:cls.create#1", "writer:(databases as any).flair.Memory.post#1",
@@ -69,7 +70,7 @@ add("MemoryPurge", ["writer:memory.delete#1"],
 add("Memory", ["writer:patchRecord#1"],
   "BOOKKEEPING: lastReflected on each derivedFrom source of a new row.");
 add("usage-recording", ["alias-source:(databases as any).flair.Memory#1", "writer:writeBackCommittedRow#1"],
-  "BOOKKEEPING: usageCount + 1 on a row the caller can read, through the shared write-back helper (flair#2441); the rest of the row is the stored row.");
+  "BOOKKEEPING: usageCount + 1 and commit marker on a row the caller can read, through the shared write-back helper (flair#2441); the rest of the row is the stored row.");
 add("auth-middleware", ["writer:writeBackCommittedRow#1"],
   "BOOKKEEPING: the embedding backfill for the id of a Memory write that already succeeded (and so passed the decision), through the shared helper (flair#2354).");
 add("MemoryReflect", ["writer:patchRecordSilent#1"],
@@ -110,20 +111,23 @@ add("Federation", [
 ], "SERVER: other tables.");
 add("MemoryReflect", ["writer:(databases as any).flair.MemoryCandidate.put#1"], "SERVER: another table.");
 add("usage-recording", ["writer:(databases as any).flair.MemoryUsage.put#1"], "SERVER: another table.");
+add("Memory", ["alias-source:(databases as any).flair.Memory#2"],
+  "SERVER: confirmSkillDelete reads the committed row and supplies the guarded close retry's table handle; its put is classified above.");
 for (const [file, alias] of [
   ["Memory", "alias-source:(databases as any).flair.Memory#1"],
-  ["Memory", "alias-source:(databases as any).flair.Memory#2"],
   ["Memory", "alias-source:(databases as any).flair.Memory#3"],
-  // The committed-row confirms and post-commit verification reads: #4 the
-  // ordinary PATCH's post-commit verification (flair#2478), #5 the _reindex
-  // re-PUT's confirm (flair#2450), #6 Memory.put's confirm (flair#2441), #7
-  // Memory.put's post-commit verification (flair#2478) and #8 the re-embed's
-  // post-commit verification (flair#2656).
+  // The committed-row confirms and post-commit verification reads: #3 the
+  // re-embed's confirm (flair#2465) and #4 its post-commit verification
+  // (flair#2656), #5 the class heritage, #6 the ordinary PATCH's post-commit
+  // verification (flair#2478), #7 the _reindex re-PUT's confirm (flair#2450),
+  // #8 Memory.put's confirm (flair#2441) and #9 Memory.put's post-commit
+  // verification (flair#2478).
   ["Memory", "alias-source:(databases as any).flair.Memory#4"],
   ["Memory", "alias-source:(databases as any).flair.Memory#5"],
   ["Memory", "alias-source:(databases as any).flair.Memory#6"],
   ["Memory", "alias-source:(databases as any).flair.Memory#7"],
   ["Memory", "alias-source:(databases as any).flair.Memory#8"],
+  ["Memory", "alias-source:(databases as any).flair.Memory#9"],
   // The write-lock store handle (flair#2478) — a read of primaryStore, never a write.
   ["Memory", "alias-source:(databases as any)?.flair?.Memory#1"],
   ["AdminMemory", "alias-source:(databases as any).flair.Memory#1"],

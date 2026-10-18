@@ -1,10 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import nacl from "tweetnacl";
 import { HarperInstance, startHarper, stopHarper, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
+import { WRITE_BACK_ATTEMPTS } from "../../resources/write-back.ts";
 import { getModelId } from "../../resources/embeddings-provider.ts";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
@@ -103,6 +104,9 @@ async function withPaused<T>(point: string, trigger: () => Promise<Response>, co
     writeFileSync(join(pauseDir, `go.${point}`), "");
   }
   const response = await pending;
+  if (!paused) {
+    console.error(`pause ${point} not reached: ${response.status} ${await response.clone().text()}\n${harper.getLog?.() ?? ""}`);
+  }
   const released = paused ? readFileSync(join(pauseDir, `released.${point}`), "utf8") : "never paused";
   return { response, competed, released, paused };
 }
@@ -130,11 +134,21 @@ async function seedCandidate(harper: HarperInstance, agentId: string, row: Recor
   expect(res.status, `seed candidate ${String(row.id)} returned ${res.status}: ${(await res.text()).slice(0, 200)}`).toBe(200);
 }
 
+async function readCandidate(harper: HarperInstance, id: string): Promise<any> {
+  const res = await adminOp(harper, {
+    operation: "search_by_hash", database: "flair", table: "MemoryCandidate", hash_values: [id], get_attributes: ["*"],
+  });
+  const text = await res.text();
+  expect(res.status, `candidate search returned ${res.status}: ${text.slice(0, 200)}`).toBe(200);
+  return (JSON.parse(text) as any[])[0] ?? null;
+}
+
 let harper: HarperInstance;
 let pauseDir: string;
 // The deterministic generative backend ReflectMemories' execute mode calls
 // (test/fixtures/stub-generative-backend.mjs): it returns this file's content.
 let stubDir: string;
+let appDir: string;
 const feedAgent = mkAgent("wbc-feed");
 const reflectAgent = mkAgent("wbc-reflect");
 const admin = mkAgent("wbc-admin");
@@ -150,7 +164,15 @@ beforeAll(async () => {
   try {
     stubDir = mkdtempSync(join(tmpdir(), "flair-wbc-stub-"));
     writeFileSync(join(stubDir, "generate-response.json"), JSON.stringify({ candidates: [] }));
+    appDir = mkdtempSync(join(tmpdir(), "flair-wbc-app-"));
+    for (const name of ["dist", "schemas", "config.yaml"]) cpSync(resolve(name), join(appDir, name), { recursive: true });
+    for (const name of ["WriteBackIndexProbe.js", "WriteBackTrace.js"]) {
+      cpSync(resolve(`test/fixtures/write-back-app/${name}`), join(appDir, `dist/resources/${name}`));
+    }
+    symlinkSync(resolve("node_modules"), join(appDir, "node_modules"), "dir");
     harper = await startHarper({
+      cwd: appDir,
+      harperBinDir: process.cwd(),
       appendRootConfigYaml: [
         "models:",
         "  generative:",
@@ -175,6 +197,7 @@ afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
   if (stubDir) rmSync(stubDir, { recursive: true, force: true });
+  if (appDir) rmSync(appDir, { recursive: true, force: true });
 }, HARPER_STOP_BUDGET_MS);
 
 describe("flair#2653 — a newer write in the final-confirmation-to-commit window (real Harper)", () => {
@@ -300,6 +323,58 @@ describe("flair#2354 — the admin reindex re-PUT write-back under a concurrent 
     }, 60_000);
   }
 
+  it("does not count a re-PUT dropped while a newer write retains an omitted field", async () => {
+    const id = "wbc-reindex-commit-gap";
+    const agentId = "wbc-reindex-commit-agent";
+    await insertRow(harper, { id, agentId, content: "reindex gap", contentHash: id, instanceToken: randomUUID(), undeclaredReindexProbe: "keep" });
+    const points = Array.from({ length: WRITE_BACK_ATTEMPTS }, (_, n) => `reindex-put-commit${"-retry".repeat(n)}`);
+    for (const point of points) writeFileSync(join(pauseDir, `arm.${point}`), "");
+    const pending = authSend(harper, admin, "POST", "/MemoryReindex", { agentId });
+    try {
+      for (const point of points) {
+        expect(await waitFor(join(pauseDir, `paused.${point}`), 20_000), point).toBe(true);
+        const current = await readRow(harper, id);
+        expect(current?.undeclaredReindexProbe).toBe("keep");
+        expect(await putRow(harper, current)).toBe(200);
+        writeFileSync(join(pauseDir, `go.${point}`), "");
+      }
+    } finally {
+      for (const point of points) writeFileSync(join(pauseDir, `go.${point}`), "");
+    }
+    const response = await pending;
+    expect(response.status).toBe(200);
+    const body = await response.json() as any;
+    expect(body.stats.reindexed).toBe(0);
+    expect(body.stats.errors).toBe(1);
+    expect(body.stats.errorSamples[0].message).toContain("staged values unconfirmed");
+    expect((await readRow(harper, id))?.undeclaredReindexProbe).toBe("keep");
+  }, 90_000);
+
+  it("does not count a row still missing from the agentId index after a newer same-values write", async () => {
+    const id = "wbc-reindex-index-gap";
+    const agentId = "wbc-reindex-index-agent";
+    await insertRow(harper, { id, agentId, content: "index gap", contentHash: id, instanceToken: randomUUID() });
+    const probe = await fetch(`${harper.httpURL}/WriteBackIndexProbe`, {
+      method: "POST", headers: { "Content-Type": "application/json", Authorization: "Basic " + btoa(`${harper.admin.username}:${harper.admin.password}`) },
+      body: JSON.stringify({ id, agentId }),
+    });
+    expect(probe.status, await probe.clone().text()).toBe(200);
+    expect((await probe.json() as any).indexed).toBe(false);
+    const { response, paused, released } = await withPaused("reindex-put-commit",
+      () => authSend(harper, admin, "POST", "/MemoryReindex", { agentId }),
+      async () => expect(await putRow(harper, await readRow(harper, id))).toBe(200));
+    expect(paused).toBe(true);
+    expect(released).toBe("go");
+    const body = await response.json() as any;
+    expect(response.status).toBe(200);
+    expect(body.stats.totalMissing).toBe(1);
+    expect(body.stats.reindexed).toBe(0);
+    expect(body.stats.errors).toBe(1);
+    expect(body.stats.errorSamples[0].message).toBe(`MemoryReindex: row ${id} was confirmed after commit but is now absent from the agentId index query (index unconfirmed)`);
+    expect(body.stats.errorSamples[0].outcome).toBe("unconfirmed");
+    expect((await readRow(harper, id))?.content).toBe("index gap");
+  }, 60_000);
+
 }
 );
 
@@ -360,6 +435,103 @@ describe("flair#2354 — the embedding backfill after a Memory write (real Harpe
     expect(row?.content, "the newer write's content is kept").toBe("backfill gap v1");
     expect(row?.subject, "the newer write's field is kept").toBe(COMPETED);
   }, 180_000);
+});
+
+describe("flair#2653 — usage contributions across agents (real Harper)", () => {
+  it("logs conflict when a contribution count write aborts before commit", async () => {
+    const id = "wbc-usage-conflict";
+    await insertRow(harper, { id, agentId: reflectAgent.id, content: "usage conflict", contentHash: id, instanceToken: randomUUID(), usageCount: 0 });
+    const replacement = randomUUID();
+    const { response, paused, released } = await withPaused("usage-count-pre",
+      () => authSend(harper, reflectAgent, "POST", "/RecordUsage", { memoryIds: [id] }),
+      async () => expect(await updateRow(harper, { id, instanceToken: replacement })).toBe(200));
+    expect(paused).toBe(true);
+    expect(released).toBe("go");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ recorded: true });
+    expect(await readRow(harper, id)).toMatchObject({ usageCount: 0, instanceToken: replacement });
+    const ledger = await adminOp(harper, { operation: "search_by_hash", database: "flair", table: "MemoryUsage", hash_values: [`${reflectAgent.id}:${id}`], get_attributes: ["*"] });
+    expect(ledger.status).toBe(200);
+    expect(await ledger.json()).toMatchObject([{ agentId: reflectAgent.id, memoryId: id }]);
+    let log = harper.getLog?.() ?? "";
+    for (const until = Date.now() + 5_000; !log.includes("contribution count write aborted, stored_row_changed") && Date.now() < until;) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      log = harper.getLog?.() ?? "";
+    }
+    expect(log).toContain("contribution count write aborted, stored_row_changed");
+    expect(log).toMatch(/outcome:\s*['"]conflict['"]/);
+    expect(log).toContain("no write committed by this attempt");
+  }, 60_000);
+
+  it("reports a dropped increment unconfirmed when another agent commits the same count in the commit gap", async () => {
+    const id = "wbc-usage-same-value";
+    await insertRow(harper, { id, agentId: reflectAgent.id, content: "same-value usage", contentHash: id, instanceToken: randomUUID(), usageCount: 5 });
+    const attemptLog = join(pauseDir, "attempts.write-back");
+    const { response, competed, paused, released } = await withPaused("usage-count-commit",
+      () => authSend(harper, reflectAgent, "POST", "/RecordUsage", { memoryIds: [id] }),
+      async () => {
+        expect((await readRow(harper, id))?.usageCount).toBe(5);
+        const second = await authSend(harper, feedAgent, "POST", "/RecordUsage", { memoryIds: [id] });
+        expect(second.status, await second.clone().text()).toBe(200);
+        expect(await second.json()).toEqual({ recorded: true });
+        const row = await readRow(harper, id);
+        expect(row.usageCount).toBe(6);
+        expect(row.writeBackWriteId).toBeString();
+        return row.writeBackWriteId as string;
+      });
+    expect(paused).toBe(true);
+    expect(released).toBe("go");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ recorded: true });
+    const row = await readRow(harper, id);
+    expect(row.usageCount).toBe(6);
+    expect(row.writeBackWriteId).toBe(competed);
+    const settled = readFileSync(attemptLog, "utf8").split("\n")
+      .filter((line) => line.startsWith(`usage-recording\t${id}\t`) && line.split("\t").length === 4);
+    expect(settled).toEqual([
+      `usage-recording\t${id}\t1\tapplied`,
+      `usage-recording\t${id}\t1\tunconfirmed`,
+    ]);
+    for (const agent of [reflectAgent, feedAgent]) {
+      const ledger = await adminOp(harper, { operation: "search_by_hash", database: "flair", table: "MemoryUsage", hash_values: [`${agent.id}:${id}`], get_attributes: ["*"] });
+      expect(ledger.status).toBe(200);
+      expect(await ledger.json()).toMatchObject([{ agentId: agent.id, memoryId: id }]);
+    }
+  }, 60_000);
+
+  it("does not repeat an agent's committed increment after another agent increments", async () => {
+    const id = "wbc-usage-verify";
+    await insertRow(harper, { id, agentId: reflectAgent.id, content: "shared usage", contentHash: id, instanceToken: randomUUID(), usageCount: 0 });
+    const { response, paused, released } = await withPaused("usage-count-verify",
+      () => authSend(harper, reflectAgent, "POST", "/RecordUsage", { memoryIds: [id] }),
+      async () => {
+        expect((await readRow(harper, id))?.usageCount).toBe(1);
+        const second = await authSend(harper, feedAgent, "POST", "/RecordUsage", { memoryIds: [id] });
+        expect(second.status, await second.clone().text()).toBe(200);
+        expect((await readRow(harper, id))?.usageCount).toBe(2);
+      });
+    expect(paused).toBe(true);
+    expect(released).toBe("go");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ recorded: true });
+    expect((await readRow(harper, id))?.usageCount).toBe(2);
+    let log = harper.getLog?.() ?? "";
+    for (const until = Date.now() + 5_000; !log.includes("usage count unconfirmed, write_unconfirmed") && Date.now() < until;) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      log = harper.getLog?.() ?? "";
+    }
+    expect(log).toContain("usage count unconfirmed, write_unconfirmed");
+    expect(log).toMatch(/outcome:\s*['"]unconfirmed['"]/);
+    expect(log).toContain("staged values unconfirmed after commit");
+    for (const agent of [reflectAgent, feedAgent]) {
+      const ledger = await adminOp(harper, { operation: "search_by_hash", database: "flair", table: "MemoryUsage", hash_values: [`${agent.id}:${id}`], get_attributes: ["*"] });
+      expect(ledger.status).toBe(200);
+      expect(await ledger.json()).toMatchObject([{ agentId: agent.id, memoryId: id }]);
+      const repeat = await authSend(harper, agent, "POST", "/RecordUsage", { memoryIds: [id] });
+      expect(repeat.status).toBe(200);
+    }
+    expect((await readRow(harper, id))?.usageCount).toBe(2);
+  }, 60_000);
 });
 
 describe("flair#2354 — a self-referential derivedFrom (real Harper)", () => {
@@ -493,6 +665,8 @@ describe("flair#2354 — the promotion stamp write-back under a concurrent chang
     const row = await findPromotedRow(harper, agentId, claim);
     expect(row?.promotionStatus, "the verdict landed on the written row").toBe("approved");
     expect(row?.promotedBy).toBeTruthy();
+    const cand = await readCandidate(harper, "wbc-stamp-cand-clean");
+    expect(cand?.status, "a landed verdict marks the candidate promoted").toBe("promoted");
   }, 60_000);
 
   // promotion-stamp-select: between the Memory write and the stamp's first
@@ -526,6 +700,8 @@ describe("flair#2354 — the promotion stamp write-back under a concurrent chang
       expect(row?.promotedBy).toBeFalsy();
       expect(row?.content, "the competing content edit is kept, not reverted by the stamp").toBe(COMPETED);
       expect(row?.instanceToken, "the competing incarnation token is kept, not reverted").toBe(TOKEN2);
+      const cand = await readCandidate(harper, `wbc-stamp-cand-${point}`);
+      expect(cand?.status, "a refused stamp leaves the candidate unpromoted").toBe("pending");
     }, 60_000);
   }
 });

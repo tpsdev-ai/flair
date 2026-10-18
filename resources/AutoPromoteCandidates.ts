@@ -200,9 +200,19 @@ export class AutoPromoteCandidates extends Resource {
       // row's incarnation token onto it, so memRow names the row this write
       // produced. The stamp is bound to that row: a different row at its first
       // read is refused with nothing stamped.
-      await stampMemoryPromotionIsolated(memId, decision.reviewerId, decidedAt, ctx, {
+      const stamped = await stampMemoryPromotionIsolated(memId, decision.reviewerId, decidedAt, ctx, {
         agentId: memRow.agentId, content: memRow.content, instanceToken: (memRow as any).instanceToken,
       });
+
+      // ── A refused stamp leaves its candidate pending ───────────────────────
+      // The stamp refuses when the row its first read returns is no longer the
+      // one this sweep wrote (a concurrent replace). Marking the candidate
+      // promoted then would record a promotion whose verdict never landed, so
+      // leave it pending for the next sweep — the safe failure state above.
+      if (!stamped) {
+        skipped.push({ id: c.id, reason: "stamp_refused" });
+        continue;
+      }
 
       // ── Mark the candidate promoted (commit point) ─────────────────────────
       // Ordered AFTER the Memory write, matching the human promote path: the

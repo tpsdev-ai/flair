@@ -29,8 +29,7 @@
  * FeedMemories check caller-chosen ids before writing; federation skips a
  * reserved id (`seed_id_not_federated`). Server bookkeeping is also allowed:
  * lastReflected and embedding backfill update their selected fields. Usage
- * recording intends to change only usageCount, but re-PUTs the stored row and
- * can receive an agent-supplied id. The coverage test classifies raw Memory
+ * recording can receive an agent-supplied id. The coverage test classifies raw Memory
  * write sites detected by its supported source patterns; it does not prove
  * that every possible write path is classified.
  */
