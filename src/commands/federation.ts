@@ -486,7 +486,9 @@ export async function persistLocalPeerLastSyncAt(args: {
  * Same shape and same result contract as {@link persistLocalPeerLastSyncAt}: a
  * field-only `update` carrying `{id, presenceLastSyncAt, updatedAt}`, so it
  * cannot revert `publicKey`/`status` or re-create a deleted row, and HTTP 200 is
- * not success — the id must appear in `update_hashes` or the update is a refusal.
+ * not success — the id must appear in `update_hashes`; otherwise the update is
+ * unconfirmed (a committed update with an unreadable response also reads as
+ * unconfirmed), unless Harper explicitly reports a miss.
  * Callers invoke it only after contact — a confirmed batch, or a successful
  * liveness ping on a no-change pass.
  */
