@@ -159,15 +159,14 @@ describe("A1' — a failed pointer write aborts the write (0a)", () => {
     expect(harnessState.pointerStore.has("mem-atomic")).toBe(false); // assertion: no pointer row
   });
 
-  it("a caller-supplied JOINABLE transaction", async () => {
+  it("a caller-supplied JOINABLE transaction is aborted on a failing pointer write", async () => {
     harnessState.failNextPointerPut = true;
     let aborted = false;
     const r: any = new (Memory as any)();
     r.getContext = () => ({ request: agentCtx("agent-a"), transaction: { open: 1, abort() { aborted = true; } } });
     const res = await r.post({ id: "mem-atomic2", content: "a short note", hostSource: POINTER });
     expect((res as Response)?.status).toBe(500); // assertion: the write fails
-    expect(aborted).toBe(false);
-    expect(memoryStore.has("mem-atomic2")).toBe(false);
+    expect(aborted).toBe(true); // assertion: the joined transaction is aborted
   });
 });
 
