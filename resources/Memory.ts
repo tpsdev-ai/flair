@@ -291,37 +291,65 @@ function memoryIdRequiredResponse(): Response {
 }
 
 /**
- * The durable fields a post-commit read must still find at the value this write
- * declared (flair#2478). A field the write did not declare is not compared — the
- * stored value stands for it. `archived` is not compared: the maintenance sweep
- * flips it as a newer field-only write, which folds around this older full
+ * The durable fields a PUT's post-commit read must still find at the value the
+ * write declared (flair#2478). A field the write did not declare is not compared
+ * — the stored value stands for it. `archived` is not compared: the maintenance
+ * sweep flips it as a newer field-only write, which folds around this older full
  * update instead of replacing it (flair#2470), so a differing `archived` is not
- * evidence that this write did not land.
+ * evidence that this write did not land. A PATCH has its own declared-field
+ * snapshot (see patchDeclaredFields).
  */
 const POSTCOMMIT_VERIFY_FIELDS = ["agentId", "content", "visibility", "durability"] as const;
 
+/** Fields a PATCH body may carry but the server owns (it strips, restores or
+ *  stamps them, so the request does not declare their application). */
+const PATCH_SERVER_OWNED_FIELDS = new Set<string>([
+  "id",
+  "instanceToken",
+  "provenance",
+  "skillSubjectId",
+  "originatorInstanceId",
+  "embeddedContentHash",
+  "promotionStatus",
+  "promotedAt",
+  "promotedBy",
+]);
+
+/**
+ * The fields a PATCH request declares, captured AFTER the server's own
+ * normalisation and redaction (pointer inputs, undeclared attributes, server
+ * stamps and `embeddedContentHash` are gone) and BEFORE it adds or overwrites
+ * any field of its own. The ordinary PATCH's post-commit read compares the
+ * declared fields that remain in the normalised body, not a fixed list
+ * (flair#2645).
+ */
+function patchDeclaredFields(content: any): string[] {
+  if (!content || typeof content !== "object" || Array.isArray(content)) return [];
+  return Object.keys(content).filter((field) => !PATCH_SERVER_OWNED_FIELDS.has(field));
+}
+
 function sameDeclaredField(stored: unknown, declared: unknown): boolean {
-  if (stored === declared) return true;
-  if (stored == null || declared == null) return stored === declared;
-  if (typeof stored === "object" || typeof declared === "object") {
-    return JSON.stringify(stored) === JSON.stringify(declared);
-  }
-  return false;
+  return isDeepStrictEqual(stored, declared);
 }
 
 /**
- * Compare the token and declared POSTCOMMIT_VERIFY_FIELDS after an ordinary
- * owned row write with a normal storage result, or a successful re-embed's
- * inner commit, under the lock. Refusals, storage Responses and skill PUT return before
- * this read; composed promotion uses its caller's in-transaction existence check.
- * Return a verdict, never the stored row: mismatch yields 409; a failed read or
- * missing id yields an unknown outcome (503).
+ * Compare the token and the declared fields after an ordinary owned row write
+ * with a normal storage result, or a successful re-embed's inner commit, under
+ * the lock. `fields` defaults to a PUT's POSTCOMMIT_VERIFY_FIELDS; an ordinary
+ * PATCH passes the snapshot of everything its body declared (a re-embed passes an
+ * empty set: its body declares only the server-owned vector refresh). Refusals,
+ * storage Responses and
+ * skill PUT return before this read; composed promotion uses its caller's
+ * in-transaction existence check. Return a verdict, never the stored row:
+ * mismatch yields 409; a failed read or missing id yields an unknown outcome
+ * (503).
  */
 async function verifyCommittedWrite(
   table: { get(id: any, ctx?: any): Promise<any> },
   declared: any,
   fallbackId: any,
   identity: { expectedToken: unknown },
+  fields: readonly string[] = POSTCOMMIT_VERIFY_FIELDS,
 ): Promise<{ mismatch?: boolean; unknown?: boolean }> {
   const id = declared?.id ?? fallbackId;
   if (id === undefined || id === null) return { unknown: true };
@@ -333,7 +361,7 @@ async function verifyCommittedWrite(
   }
   if (!row) return { mismatch: true };
   if ((row.instanceToken ?? null) !== (identity.expectedToken ?? null)) return { mismatch: true };
-  for (const field of POSTCOMMIT_VERIFY_FIELDS) {
+  for (const field of fields) {
     if (!Object.prototype.hasOwnProperty.call(declared, field)) continue;
     if (!sameDeclaredField(row[field], declared[field])) return { mismatch: true };
   }
@@ -2332,6 +2360,11 @@ export class Memory extends (databases as any).flair.Memory {
     // engine returns no vector), or the re-embed writes one with its vector. A
     // PATCH that supplies its own vector retains the stored hash beside it.
     delete content.embeddedContentHash;
+    // flair#2645: the fields this request declares, after normalisation and
+    // redaction and before the server adds any of its own. The ordinary
+    // PATCH's post-commit read compares them; a re-embed declares only the
+    // server-owned vector refresh and is checked by identity.
+    const declaredFields = patchDeclaredFields(content);
     // flair#2478 slice 1 — the ordinary PATCH runs in ONE owned transaction whose
     // FIRST operation is the authoritative stored read; the read, the decision
     // and the COMMIT all happen before the write lock releases. Harper orders a
@@ -2614,12 +2647,15 @@ export class Memory extends (databases as any).flair.Memory {
     // Verify the ordinary owned PATCH after a normal storage result; refusals
     // and storage Responses return above before this read. A successful re-embed is also
     // checked after its inner owned commit; refusals return above.
-    // Compare the token and declared agentId/content/visibility/durability;
-    // other field changes pass. A failed read is an unknown outcome (503).
+    // Compare the token and (for an ordinary PATCH) every declared field that
+    // survives normalisation; a declared field that a newer write discarded
+    // refuses 409. A
+    // re-embed declares only the vector refresh the server owns, so its check is
+    // the row's identity. A failed read is an unknown outcome (503).
     // Test-only: holds the PATCH after its commit, before the verification read.
     const verifyPause = txnPausePoint("memory-patch-verify");
     if (verifyPause) await verifyPause;
-    const verified = await verifyCommittedWrite((databases as any).flair.Memory, content, (this as any).getId?.(), patched.identity);
+    const verified = await verifyCommittedWrite((databases as any).flair.Memory, content, (this as any).getId?.(), patched.identity, reembedRequest ? [] : declaredFields);
     if (verified.unknown) return writeOutcomeUnknownFor(content?.id ?? (this as any).getId?.());
     if (verified.mismatch) return storedRowChangedRefusal("Memory");
     // A verified re-embed answers with its own response (it declares no text

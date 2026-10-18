@@ -1,0 +1,1 @@
+- **A Memory owner `PATCH` now confirms the fields its body declared after it commits.** A declared field that a newer write discarded answers the named 409 `stored_row_changed` instead of a 2xx; a metadata-only or mixed PATCH is verified field by field (#2645).
