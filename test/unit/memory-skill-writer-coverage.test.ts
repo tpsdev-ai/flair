@@ -35,7 +35,7 @@ const add = (file: string, sites: string[], reason: string) => {
 // ── GATED skill-writer sinks (run SkillScan + forced durability) ──
 add("MemoryArchive", ["writer:Memory.put#1"], "Guarded by Memory.put().");
 add("AutoPromoteCandidates", ["writer:MemoryCls.put#1"], "Guarded by Memory.put() (static Cls.put routes through its override).");
-add("AutoPromoteCandidates", ["writer:(databases as any).flair.MemoryCandidate.put#1"], "MemoryCandidate status write — not a Memory row.");
+add("AutoPromoteCandidates", ["writer:(databases as any).flair.MemoryCandidate.put#1", "writer:(databases as any).flair.MemoryCandidate.put#2"], "MemoryCandidate writes (the recorded promoted-row identity and the status update) — not a Memory row.");
 add("Memory", ["writer:cls.create#1", "writer:(databases as any).flair.Memory.post#1", "writer:(databases as any).flair.Memory.put#4"],
   "Skill-writer: routes through the SkillScan gate + forced durability in Memory.post()/put() (flair#1542).");
 add("skill-version-write", ["writer:(databases as any).flair.Memory.put#1"],

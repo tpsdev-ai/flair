@@ -4,6 +4,7 @@
  * stamp: the verdict is bound to the reviewed text. No admin/body bypass. */
 export const AUTHORITY_FIELDS = {
   Memory: ["promotionStatus", "promotedAt", "promotedBy"],
+  MemoryCandidate: ["promotedRowId", "promotedRowInstanceToken"],
 } as const;
 
 export async function guardAuthorityFields(

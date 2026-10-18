@@ -392,6 +392,10 @@ type MemoryCandidate @table(database: "flair") @export {
   visibilityRationale: String      # flair#1257 slice 3: the team-relevance justification paired with
                                    # visibilityRuling — the auditable "why shared" recorded on the candidate.
                                    # Nullable/additive, same clean-upgrade contract as scopeTag above.
+  promotedRowId: String            # flair#2645: id of the Memory row the auto-promote sweep wrote for this
+                                   # candidate. Server-written; a later sweep reuses only the row this names.
+  promotedRowInstanceToken: String # flair#2645: that row's server-stamped incarnation token, recorded with the
+                                   # id. Nullable/additive — candidates written before this read null.
 }
 
 # Asset — binary blobs (screenshots, images) stored out-of-record via Harper's

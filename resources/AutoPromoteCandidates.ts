@@ -53,27 +53,39 @@ import {
 
 /**
  * flair#2645 — the Memory row an earlier sweep wrote for this candidate, when
- * it is still this candidate's claim and carries no verdict. A retry must
- * stamp that row instead of writing a second promoted row: Memory's dedup gate
- * only reports a near-duplicate and always proceeds with the write.
+ * it is still that row and carries no verdict. A retry must stamp that row
+ * instead of writing a second promoted row: Memory's dedup gate only reports a
+ * near-duplicate and always proceeds with the write.
+ *
+ * The row is addressed by the id and incarnation token the sweep recorded on
+ * the candidate, not by an owner, tag or content match: those fields are not
+ * proof that the sweep wrote the row. Only a row the sweep recorded, unchanged
+ * since, is reused; anything else falls through to a fresh write.
  */
-async function findReusablePromotedRow(agentId: string, candidate: any): Promise<any | null> {
-  const query = {
-    operator: "and",
-    conditions: [
-      { attribute: "agentId", comparator: "equals", value: agentId },
-      { attribute: "tags", comparator: "equals", value: `from:${candidate.id}` },
-    ],
-  };
-  for await (const row of (databases as any).flair.Memory.search(query)) {
-    if (!row || row.agentId !== agentId) continue;
-    if (!Array.isArray(row.tags) || !row.tags.includes(`from:${candidate.id}`)) continue;
-    if (row.content !== candidate.claim) continue;
-    if (row.archived === true) continue;
-    if (row.promotionStatus != null) continue;
-    return row;
-  }
-  return null;
+async function findReusablePromotedRow(
+  agentId: string,
+  candidate: any,
+  requiredTags: string[],
+  visibility: string,
+  durability: string,
+): Promise<any | null> {
+  const recordedId = candidate.promotedRowId;
+  const recordedToken = candidate.promotedRowInstanceToken;
+  if (typeof recordedId !== "string" || recordedId.length === 0) return null;
+  if (typeof recordedToken !== "string" || recordedToken.length === 0) return null;
+  // A failed read propagates: "unknown" must not be read as "no earlier row".
+  const row = await (databases as any).flair.Memory.get(recordedId, {});
+  if (!row || typeof row !== "object") return null;
+  if (String(row.id) !== recordedId) return null;
+  if (row.agentId !== agentId) return null;
+  if (row.instanceToken !== recordedToken) return null;
+  if (row.promotionStatus != null) return null;
+  if (row.archived === true) return null;
+  if (row.content !== candidate.claim) return null;
+  if (row.visibility !== visibility) return null;
+  if (row.durability !== durability) return null;
+  if (!Array.isArray(row.tags) || !requiredTags.every((tag) => row.tags.includes(tag))) return null;
+  return row;
 }
 
 interface SkipRecord {
@@ -168,22 +180,37 @@ export class AutoPromoteCandidates extends Resource {
       }
 
       const decidedAt = new Date().toISOString();
+      const promotedTags = buildAutoPromotedTags(c.id, decision.scopeTag);
+      const promotedVisibility = decidePromotedVisibility(c);
+      const promotedDurability = "persistent";
 
       // ── Reuse this candidate's earlier row on a retry ─────────────────────
-      // A sweep that wrote the row but whose stamp was refused leaves the
-      // candidate pending and the row unstamped. If that row is still this
-      // candidate's claim, stamp it here instead of writing a second promoted
-      // row; Memory's dedup gate only reports a near-duplicate and never
-      // suppresses the write.
-      const reusable = await findReusablePromotedRow(agentId, c);
+      // A sweep whose stamp was refused leaves the candidate pending and the
+      // row it wrote unstamped. That sweep recorded the row's id and
+      // incarnation token on the candidate; when the recorded row is still
+      // that incarnation, unstamped, and carries the fields this sweep writes,
+      // stamp it here instead of writing a second promoted row. Memory's dedup
+      // gate only reports a near-duplicate and never suppresses the write.
+      const reusable = await findReusablePromotedRow(
+        agentId, c, promotedTags, promotedVisibility, promotedDurability,
+      );
       let memId: string;
       let writtenRow: PromotedRowIdentity;
+      // The candidate row Harper hands the sweep is frozen; the recorded
+      // identity is kept in locals and submitted with the next candidate write.
+      let recordedRowId: unknown = c.promotedRowId;
+      let recordedRowToken: unknown = c.promotedRowInstanceToken;
       if (reusable) {
         memId = String(reusable.id);
         writtenRow = {
           agentId: reusable.agentId,
           content: reusable.content,
           instanceToken: reusable.instanceToken,
+          // Re-checked at the stamp's first read, not only here.
+          tags: promotedTags,
+          visibility: promotedVisibility,
+          durability: promotedDurability,
+          unstamped: true,
         };
       } else {
         memId = `${agentId}-promoted-${Date.now()}-${promoted.length}`;
@@ -191,7 +218,7 @@ export class AutoPromoteCandidates extends Resource {
           id: memId,
           agentId,
           content: c.claim,
-          durability: "persistent",
+          durability: promotedDurability,
           // ── visibility: DEFAULT-PRIVATE-UNLESS, explicit (Sherlock) ───────────
           // MUST be set. Memory.put() defaults an unset visibility from durability
           // (Memory.ts) and "persistent" defaults to "shared" — and "shared" is
@@ -211,9 +238,9 @@ export class AutoPromoteCandidates extends Resource {
           // NOT run — a shared ADK promotion would leak a user's distilled
           // private data to every agent on the box, unattended. That is the
           // entire #1205 safety argument, unchanged.
-          visibility: decidePromotedVisibility(c),
+          visibility: promotedVisibility,
           // scopeTag FIRST — the per-user access-control boundary (Req 2).
-          tags: buildAutoPromotedTags(c.id, decision.scopeTag),
+          tags: promotedTags,
           derivedFrom: Array.isArray(c.sourceMemoryIds) ? c.sourceMemoryIds : [],
           createdAt: decidedAt,
         };
@@ -246,6 +273,23 @@ export class AutoPromoteCandidates extends Resource {
         writtenRow = {
           agentId: memRow.agentId, content: memRow.content, instanceToken: (memRow as any).instanceToken,
         };
+
+        // Record the row this sweep wrote on the candidate before its stamp.
+        // A refused stamp then leaves the identity behind for the next sweep;
+        // the status write below carries the same fields on success. A failed
+        // recording does not abort the promotion: the row is written and the
+        // stamp still runs, so the safe state is kept.
+        if (typeof writtenRow.instanceToken === "string" && writtenRow.instanceToken.length > 0) {
+          recordedRowId = memId;
+          recordedRowToken = writtenRow.instanceToken;
+          try {
+            await (databases as any).flair.MemoryCandidate.put({
+              ...c, promotedRowId: recordedRowId, promotedRowInstanceToken: recordedRowToken,
+            });
+          } catch (err: any) {
+            logger.warn?.(`AutoPromoteCandidates: could not record the promoted row on candidate ${c.id}: ${err?.message ?? err}`);
+          }
+        }
       }
 
       const stamped = await stampMemoryPromotionIsolated(memId, decision.reviewerId, decidedAt, ctx, writtenRow);
@@ -264,8 +308,8 @@ export class AutoPromoteCandidates extends Resource {
       // Ordered AFTER the Memory write and its verdict, matching the human
       // promote path: the safe failure state is a promoted Memory whose
       // candidate is still pending, never a candidate marked promoted with no
-      // Memory behind it. A later sweep reuses that unstamped row instead of
-      // writing a duplicate.
+      // Memory behind it. In the refused-stamp case above the candidate stays
+      // pending with the row it recorded, so a later sweep can stamp that row.
       try {
         await (databases as any).flair.MemoryCandidate.put({
           ...c,
@@ -274,6 +318,8 @@ export class AutoPromoteCandidates extends Resource {
           reviewerId: decision.reviewerId,
           reviewRationale: decision.rationale,
           decidedAt,
+          promotedRowId: recordedRowId,
+          promotedRowInstanceToken: recordedRowToken,
         });
       } catch (err: any) {
         logger.warn?.(`AutoPromoteCandidates: candidate row update failed for ${c.id} (Memory ${memId} written): ${err?.message ?? err}`);

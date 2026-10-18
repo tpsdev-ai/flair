@@ -6,11 +6,16 @@ import { txnPausePoint } from "./txn-pause-point.js";
 import { isJoinableTransaction } from "./request-transaction.js";
 
 /** The row a promotion's Memory write produced: its owner, content and
- *  incarnation token. */
+ *  incarnation token. A row an earlier sweep recorded adds the fields that
+ *  sweep wrote, re-checked at the stamp's first read. */
 export interface PromotedRowIdentity {
   agentId: unknown;
   content: unknown;
   instanceToken: unknown;
+  tags?: string[];
+  visibility?: string;
+  durability?: string;
+  unstamped?: boolean;
 }
 
 /** The stamp's first read is not the row the promotion wrote: nothing stamped. */
@@ -22,8 +27,15 @@ export class PromotedRowChangedError extends Error {
 }
 
 function isWrittenRow(row: any, written: PromotedRowIdentity | undefined): boolean {
-  return written != null && typeof written.instanceToken === "string" && written.instanceToken.length > 0 &&
-    row.agentId === written.agentId && row.content === written.content && row.instanceToken === written.instanceToken;
+  if (written == null || typeof written.instanceToken !== "string" || written.instanceToken.length === 0) return false;
+  if (row.agentId !== written.agentId || row.content !== written.content ||
+    row.instanceToken !== written.instanceToken) return false;
+  if (written.unstamped && row.promotionStatus != null) return false;
+  if (written.visibility !== undefined && row.visibility !== written.visibility) return false;
+  if (written.durability !== undefined && row.durability !== written.durability) return false;
+  if (written.tags !== undefined &&
+    (!Array.isArray(row.tags) || !written.tags.every((tag) => row.tags.includes(tag)))) return false;
+  return true;
 }
 
 // Called only after the promotion workflow has authorized and written a Memory

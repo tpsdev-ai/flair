@@ -75,7 +75,7 @@ add("migrations/embedding-stamp", ["writer:table.update#1"], "LOCAL",
 // ── DELEGATED: embedding handling occurs in the resource write path ──
 add("MemoryArchive", ["writer:Memory.put#1"], "DELEGATED", "Existing row through Memory.put().");
 add("AutoPromoteCandidates", ["writer:MemoryCls.put#1"], "DELEGATED", "The promoted row is written through Memory.put() (static Cls.put routes through its override).");
-add("AutoPromoteCandidates", ["writer:(databases as any).flair.MemoryCandidate.put#1"], "OTHER_TABLE", "MemoryCandidate status write — not a Memory row.");
+add("AutoPromoteCandidates", ["writer:(databases as any).flair.MemoryCandidate.put#1", "writer:(databases as any).flair.MemoryCandidate.put#2"], "OTHER_TABLE", "MemoryCandidate writes (the recorded promoted-row identity and the status update) — not a Memory row.");
 
 // ── ECHO: preserves an EXISTING row's stamp ──
 add("Memory", ["writer:table.put#1"], "ECHO",

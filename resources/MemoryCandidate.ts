@@ -1,6 +1,7 @@
 import { databases } from "harper";
 import { resolveAgentAuth } from "./agent-auth.js";
 import { guardOwnerFieldImmutable } from "./owner-field-guard.js";
+import { guardAuthorityFields } from "./authority-field-guard.js";
 import { deleteOwnedRow } from "./owner-delete-recheck.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 import {
@@ -128,6 +129,10 @@ export class MemoryCandidate extends (databases as any).flair.MemoryCandidate {
     const auth = await resolveAgentAuth(ctx);
     if (auth.kind === "anonymous") return UNAUTH();
 
+    // flair#2645: the promoted-row identity is server-written.
+    const authorityDenial = await guardAuthorityFields(() => undefined, content, "MemoryCandidate");
+    if (authorityDenial) return authorityDenial;
+
     const attr = stampAttribution(auth, content, RECORD_TYPES.MemoryCandidate.ownerField, RECORD_TYPES.MemoryCandidate.attribution.post, "forbidden: cannot stage a memory candidate for another agent");
     if (attr.denied) return attr.denied;
 
@@ -148,12 +153,16 @@ export class MemoryCandidate extends (databases as any).flair.MemoryCandidate {
   async patch(content: any, query?: any) {
     const denial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
     if (denial) return denial;
+    const authorityDenial = await guardAuthorityFields(() => super.get(), content, "MemoryCandidate");
+    if (authorityDenial) return authorityDenial;
     return super.patch(content, query);
   }
 
   async put(content: any) {
     const __ownerDenial = await guardOwnerFieldImmutable(this, () => super.get(), content, "agentId");
     if (__ownerDenial) return __ownerDenial;
+    const __authorityDenial = await guardAuthorityFields(() => super.get(), content, "MemoryCandidate");
+    if (__authorityDenial) return __authorityDenial;
     const ctx = (this as any).getContext?.();
     const auth = await resolveAgentAuth(ctx);
     if (auth.kind === "anonymous") return UNAUTH();

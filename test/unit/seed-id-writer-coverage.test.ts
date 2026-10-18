@@ -37,7 +37,7 @@ add("Memory", ["writer:table.put#1"],
   "GUARDED: reached through Memory.delete's reserved-id and writeSkillDelete's reserved-subject decisions; the retry re-checks the stored row identity and caller authority.");
 add("MemoryArchive", ["writer:Memory.put#1"], "GUARDED: Memory.put().");
 add("AutoPromoteCandidates", ["writer:MemoryCls.put#1"], "GUARDED: Memory.put() (static Cls.put routes through its override).");
-add("AutoPromoteCandidates", ["writer:(databases as any).flair.MemoryCandidate.put#1"], "OTHER TABLE: MemoryCandidate status write, not a Memory row.");
+add("AutoPromoteCandidates", ["writer:(databases as any).flair.MemoryCandidate.put#1", "writer:(databases as any).flair.MemoryCandidate.put#2"], "OTHER TABLE: MemoryCandidate writes (the recorded promoted-row identity and the status update), not Memory rows.");
 add("Memory", [
   "writer:cls.create#1", "writer:(databases as any).flair.Memory.post#1",
   "writer:(databases as any).flair.Memory.put#3",
