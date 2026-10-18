@@ -144,7 +144,8 @@ describe("flair#2666 — a receive-disabled refusal does not pass the Presence w
       env: { FLAIR_FEDERATION_PRESENCE_RECEIVE: "1" },
     });
     assertOwnInstance(receiver, "restarted receiver");
-    // The hub's port changed across the restart; point the sender at it.
+    // Point the sender's Peer endpoint at the restarted hub's URL (the port may
+    // or may not be reused across the restart).
     await ops(sender, { operation: "update", table: "Peer", records: [{ id: HUB_ID, endpoint: receiver.httpURL }] });
 
     // No heartbeat is written between the syncs: only the sender's watermark
