@@ -245,19 +245,20 @@ describe("flair#2645 — a skill UPDATE confirms the predecessor close before su
     expect((await versionsOf(predecessorId)).map((v) => v.kind), "the refused update left a version row").toEqual(["create"]);
   }, 120_000);
 
-  it("exhausted retries confirm rollback after commit while holding the version lock", async () => {
+  it("exhausted retries confirm both removals after commit under the version lock", async () => {
     const id = nextId("exhausted");
     const successorId = nextId("exhausted-successor");
     const created = await call(A, "PUT", memPath(id), skillBody(id, "v1"));
     expect(created.status, await created.text()).toBeLessThan(300);
-    const points = [...closePoints, "skill-version-rollback-staged", "skill-version-rollback-committed"];
+    const points = [...closePoints, "skill-version-rollback-staged", "skill-version-rollback-committed", "skill-update-successor-rollback-committed"];
     const response = await withPausedCloses(points,
       () => call(A, "PUT", memPath(successorId), skillBody(successorId, "v2", { supersedes: id })),
       async (index) => {
         if (index < closePoints.length) await commitNewerSkillWrite(id, `competitor-${index}`);
         else {
           expect((await versionsOf(id)).map((v) => v.kind)).toEqual(index === closePoints.length ? ["create", "update"] : ["create"]);
-          expect(await memoryRow(successorId)).not.toBeNull();
+          if (index === closePoints.length + 2) expect(await memoryRow(successorId)).toBeNull();
+          else expect(await memoryRow(successorId)).not.toBeNull();
           const competingId = nextId("locked");
           const competing = await call(A, "PUT", memPath(competingId), skillBody(competingId, "other"));
           expect(competing.status, await competing.clone().text()).toBe(409);
@@ -272,6 +273,58 @@ describe("flair#2645 — a skill UPDATE confirms the predecessor close before su
     expect(await memoryRow(successorId)).toBeNull();
     expect((await versionsOf(id)).map((v) => v.kind)).toEqual(["create"]);
     expect(await liveHeads(id)).toEqual([id]);
+  }, 120_000);
+
+  it("a later update of the same skill is busy between committed version removal and confirmed successor removal", async () => {
+    const id = nextId("cleanup-race");
+    const successorId = nextId("cleanup-successor");
+    const laterId = nextId("cleanup-later");
+    const created = await call(A, "PUT", memPath(id), skillBody(id, "v1"));
+    expect(created.status, await created.text()).toBe(200);
+    const response = await withPausedCloses(["skill-close-staged", "skill-update-successor-rollback-start"],
+      () => call(A, "PUT", memPath(successorId), skillBody(successorId, "v2", { supersedes: id })),
+      async (index) => {
+        if (index === 0) await commitNewerSkillWrite(id, "replacement", { instanceToken: randomUUID(), validTo: now() });
+        else {
+          const before = await memoryRow(successorId);
+          expect(before).not.toBeNull();
+          expect((await versionsOf(id)).map((v) => v.kind)).toEqual(["create"]);
+          const later = await call(A, "PUT", memPath(laterId), skillBody(laterId, "v3", { supersedes: successorId }));
+          expect(later.status, await later.clone().text()).toBe(409);
+          expect((await later.json()).error).toBe("instruction_version_busy");
+          expect(await memoryRow(successorId)).toEqual(before);
+          expect(await memoryRow(laterId)).toBeNull();
+          expect((await versionsOf(id)).map((v) => v.kind)).toEqual(["create"]);
+        }
+      });
+    expect(response.status, await response.clone().text()).toBe(409);
+    expect((await response.json()).error).toBe("stored_row_changed");
+    expect(await memoryRow(successorId)).toBeNull();
+    await commitNewerSkillWrite(id, "replacement", { validTo: null });
+    const later = await call(A, "PUT", memPath(laterId), skillBody(laterId, "v3", { supersedes: id }));
+    expect(later.status, await later.clone().text()).toBe(200);
+    expect((await memoryRow(laterId))?.content).toBe("v3");
+    expect((await versionsOf(id)).at(-1)?.memoryId).toBe(laterId);
+  }, 120_000);
+
+  it("compensation preserves a successor closed after committed version removal", async () => {
+    const id = nextId("cleanup-closed");
+    const successorId = nextId("cleanup-closed-successor");
+    const created = await call(A, "PUT", memPath(id), skillBody(id, "v1"));
+    expect(created.status, await created.text()).toBe(200);
+    let closed: any;
+    const response = await withPausedCloses(["skill-close-staged", "skill-version-rollback-committed"],
+      () => call(A, "PUT", memPath(successorId), skillBody(successorId, "v2", { supersedes: id })),
+      async (index) => {
+        if (index === 0) await commitNewerSkillWrite(id, "replacement", { instanceToken: randomUUID(), validTo: now() });
+        else {
+          await commitNewerSkillWrite(successorId, "v2", { validTo: now() });
+          closed = await memoryRow(successorId);
+        }
+      });
+    expect(response.status, await response.clone().text()).toBe(500);
+    expect((await response.json()).error).toBe("skill_update_compensation_failed");
+    expect(await memoryRow(successorId)).toEqual(closed);
   }, 120_000);
 
   it("a grant revoked after a retry stages its close refuses and rolls back the successor", async () => {

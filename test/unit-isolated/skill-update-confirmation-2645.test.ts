@@ -11,6 +11,10 @@ let closeWrites = 0;
 let confirmationRead = false;
 let failDeleteCommit = false;
 let losePredecessor = false;
+let closeSuccessorOnRead: "committed" | "transaction" | undefined;
+let failSuccessorConfirmation = false;
+let failRetryWrite = false;
+let failVersionConfirmation = false;
 let activeTransaction: any;
 const primaryStore = {
   tryLock: () => { if (locked) return false; locked = true; return true; },
@@ -23,6 +27,7 @@ const rawVersions = {
     expect(locked).toBe(true);
     expect(activeTransaction).toBeUndefined();
     expect(ctx.transaction).toBeUndefined();
+    if (failVersionConfirmation) throw new Error("version confirmation unavailable");
     confirmationRead = true;
     return versions.get(id) ?? null;
   },
@@ -37,17 +42,30 @@ const versionTable = Object.assign(Object.create(rawVersions), {
   async create(row: Row, ctx: any) { ctx.transaction.versions.set(row.id, { ...row }); },
 });
 const memoryTable = {
-  async get(id: string, ctx?: any) { return (ctx?.transaction?.memories ?? memories).get(id) ?? null; },
+  async get(id: string, ctx?: any) {
+    const rows = ctx?.transaction?.memories ?? memories;
+    if (id === "successor" && confirmationRead) {
+      expect(locked).toBe(true);
+      if (closeSuccessorOnRead === (ctx?.transaction ? "transaction" : "committed")) {
+        rows.set(id, { ...rows.get(id), validTo: "later-close" });
+        memories.set(id, { ...memories.get(id), validTo: "later-close" });
+        closeSuccessorOnRead = undefined;
+      }
+      if (failSuccessorConfirmation && !ctx?.transaction && !rows.has(id)) throw new Error("successor confirmation unavailable");
+    }
+    return rows.get(id) ?? null;
+  },
   async put(row: Row, ctx: any) {
     if (row.id === "predecessor" && row.validTo) {
       closeWrites++;
+      if (failRetryWrite && closeWrites > 1) throw new Error("retry write failed");
       if (revokeOnRetry && closeWrites === 2) grantHeld = false;
       ctx.transaction.dropPredecessorClose = dropCloses && (closeWrites === 1 || !revokeOnRetry);
     }
     ctx.transaction.memories.set(row.id, { ...row });
     return true;
   },
-  async delete(id: string, ctx: any) { return ctx.transaction.memories.delete(id); },
+  async delete(id: string, ctx: any) { expect(locked).toBe(true); return ctx.transaction.memories.delete(id); },
   async *search(query: any, ctx?: any) {
     for (const row of (ctx?.transaction?.memories ?? memories).values()) {
       if (query.conditions.every((c: any) => row[c.attribute] === c.value)) yield { ...row };
@@ -71,7 +89,8 @@ const { confirmSkillClose, runSkillVersionWrite, defaultSkillHooks, authorizeSki
 beforeEach(() => {
   versions.clear(); memories.clear(); locked = false; grantHeld = true;
   dropCloses = false; revokeOnRetry = false; closeWrites = 0; confirmationRead = false; failDeleteCommit = false;
-  activeTransaction = undefined; losePredecessor = false;
+  activeTransaction = undefined; losePredecessor = false; closeSuccessorOnRead = undefined;
+  failSuccessorConfirmation = false; failRetryWrite = false; failVersionConfirmation = false;
   (globalThis as any).transaction = async (ctx: any, cb: (txn: any) => Promise<any>) => {
     const txn: any = { open: 1, saveCommits: false, versions: new Map(versions), memories: new Map(memories) };
     ctx.transaction = txn;
@@ -191,3 +210,61 @@ test("a predecessor removed before confirmation refuses and rolls back the succe
   expect(memories.has("successor")).toBe(false);
   expect(versions.size).toBe(0);
 });
+
+async function unlandedUpdate() {
+  const predecessor = { id: "predecessor", agentId: "writer", content: "v1", tags: ["skill"], visibility: "shared", durability: "persistent", skillSubjectId: "subject", createdAt: "2020-01-01T00:00:00.000Z" };
+  const successor = { ...predecessor, id: "successor", content: "v2", instanceToken: "successor-token" };
+  memories.set(predecessor.id, predecessor);
+  dropCloses = true;
+  return runSkillVersionWrite({
+    ctx: { request: { tpsAgent: "writer", tpsAgentIsAdmin: false, headers: new Headers({ authorization: "TPS-Ed25519 a1:1:n:s" }) } },
+    subjectId: "subject", agentId: "writer", head: async () => predecessor,
+    plan: () => ({ kind: "update", predecessor, successor, closePatch: { validTo: "closed" }, value: "v2", visibility: "shared", grantedClose: null }),
+    hooks: { ...defaultSkillHooks, authorizeClose: async () => null },
+  });
+}
+
+for (const read of ["committed", "transaction"] as const) {
+  test(`compensation preserves a successor closed before its ${read} identity check`, async () => {
+    closeSuccessorOnRead = read;
+    const result = await unlandedUpdate();
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected refusal");
+    expect(result.response.status).toBe(500);
+    expect((await result.response.json()).error).toBe("skill_update_compensation_failed");
+    expect(memories.has("successor")).toBe(true);
+    expect(memories.get("successor")?.validTo).toBe("later-close");
+  });
+}
+
+test("compensation confirms successor absence after commit under the version lock", async () => {
+  const result = await unlandedUpdate();
+  expect(result.ok).toBe(false);
+  if (result.ok) throw new Error("expected refusal");
+  expect(result.response.status).toBe(409);
+  expect((await result.response.json()).error).toBe("skill_update_not_closed");
+  expect(memories.has("successor")).toBe(false);
+  expect(versions.size).toBe(0);
+  expect(locked).toBe(false);
+});
+
+test("a failed retry write reports uncertain confirmation", async () => {
+  failRetryWrite = true;
+  const result = await unlandedUpdate();
+  expect(result.ok).toBe(false);
+  if (result.ok) throw new Error("expected refusal");
+  expect(result.response.status).toBe(500);
+  expect(await result.response.json()).toEqual({ error: "skill_update_unconfirmed", message: "the skill update could not be confirmed" });
+});
+
+for (const failure of ["version", "successor"] as const) {
+  test(`a failed ${failure} confirmation read reports unconfirmed undo`, async () => {
+    failVersionConfirmation = failure === "version";
+    failSuccessorConfirmation = failure === "successor";
+    const result = await unlandedUpdate();
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected refusal");
+    expect(result.response.status).toBe(500);
+    expect(await result.response.json()).toEqual({ error: "skill_update_compensation_failed", message: "the undo of a close that did not land could not be confirmed" });
+  });
+}

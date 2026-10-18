@@ -197,7 +197,7 @@ export async function prepareSkillBody(content: any, stored: Record<string, any>
   return { content: effective, predecessor };
 }
 
-/** Select exactly one open row; ambiguity refuses. */
+/** Select exactly one live head; ambiguity refuses. */
 export async function resolveSkillHead(
   subjectId: string | null,
   addressedId: string | null,
@@ -402,11 +402,11 @@ export async function afterCloseStaged(
 /** Attempts at re-applying a skill update's close whose committed write did not land (flair#2645). */
 const SKILL_UPDATE_CLOSE_ATTEMPTS = 3;
 
-/** The named 500 for a confirmation read that failed: the close is unverified, never success. */
+/** The named 500 when the skill update cannot be confirmed. */
 function skillUpdateUnconfirmedFailure(): Response {
   return Response.json({
     error: "skill_update_unconfirmed",
-    message: "the committed skill row could not be read; the update is unverified",
+    message: "the skill update could not be confirmed",
   }, { status: 500 });
 }
 
@@ -426,17 +426,15 @@ function skillUpdateNotConfirmedRefusal(): Response {
   }, { status: 409 });
 }
 
-/** The named 500 when the writes of a close that did not land cannot be undone. */
+/** The named 500 when compensation cannot be confirmed. */
 function skillUpdateCompensationFailure(message: string): Response {
   return Response.json({ error: "skill_update_compensation_failed", message }, { status: 500 });
 }
 
 /**
- * flair#2645 — undo the writes that committed with an update whose close did
- * not land: the version record that attempt appended and the successor Memory
- * row, while that version is still the chain head. A later version owns the
- * chain: its rows are left in place. A cleanup that cannot be confirmed
- * answers a named 500; it never reads as done.
+ * flair#2645 — hold the version lock through version removal, successor
+ * deletion and committed-state confirmation of both. Delete only this
+ * request's still-open successor; otherwise refuse compensation.
  */
 async function compensateUnlandedSkillUpdate(args: {
   ctx: any;
@@ -447,31 +445,32 @@ async function compensateUnlandedSkillUpdate(args: {
   const { ctx, subjectId, successor, versionId } = args;
   const table = (databases as any).flair?.Memory;
   if (!table || typeof table.get !== "function" || typeof table.delete !== "function") {
-    return skillUpdateCompensationFailure("the Memory table is unavailable; the update's successor could not be rolled back");
+    return skillUpdateCompensationFailure("the Memory table is unavailable; the update's successor removal could not be confirmed");
   }
   try {
-    const removal = await removeAppendedVersion(ctx, SKILL_SUBJECT_TYPE, subjectId, versionId);
-    if (removal !== "removed") {
-      return skillUpdateCompensationFailure("the version record of a close that did not land could not be removed");
-    }
-    const successorId = String(successor.id);
-    const committed = await table.get(successorId, {});
-    if (committed == null) return null;
-    if (!sameStoredRow(committed, successor)) {
-      return skillUpdateCompensationFailure("the successor row changed before a close that did not land could be rolled back");
-    }
-    await withOwnedTransaction(ctx, async (c) => {
-      const stored = await table.get(successorId, c);
-      if (!stored) return;
-      if (!sameStoredRow(stored, successor)) throw new Error("successor changed");
-      const removed = await table.delete(successorId, c);
-      if (removed !== true) throw new Error("successor delete was not confirmed");
+    const removal = await removeAppendedVersion(ctx, SKILL_SUBJECT_TYPE, subjectId, versionId, async () => {
+      const beforeDelete = txnPausePoint("skill-update-successor-rollback-start");
+      if (beforeDelete) await beforeDelete;
+      const successorId = String(successor.id);
+      const committed = await table.get(successorId, {});
+      if (committed == null) return true;
+      if (!sameStoredRow(committed, successor) || !isOpenLiveRow(committed)) return false;
+      await withOwnedTransaction(ctx, async (c) => {
+        const stored = await table.get(successorId, c);
+        if (!stored) return;
+        if (!sameStoredRow(stored, successor) || !isOpenLiveRow(stored)) throw new Error("successor changed");
+        const removed = await table.delete(successorId, c);
+        if (removed !== true) throw new Error("successor delete was not confirmed");
+      });
+      const pause = txnPausePoint("skill-update-successor-rollback-committed");
+      if (pause) await pause;
+      return await table.get(successorId, {}) == null;
     });
-    const left = await table.get(successorId, {});
-    return left == null ? null : skillUpdateCompensationFailure("the successor row of a close that did not land could not be removed");
+    return removal === "removed" ? null
+      : skillUpdateCompensationFailure("the update's version and successor removal could not be confirmed");
   } catch (err) {
-    console.error("skill-version-write: undoing an unapplied update close failed", err);
-    return skillUpdateCompensationFailure("the writes of a close that did not land could not be undone");
+    console.error("skill-version-write: update undo could not be confirmed", err);
+    return skillUpdateCompensationFailure("the undo of a close that did not land could not be confirmed");
   }
 }
 
@@ -498,7 +497,7 @@ export interface ConfirmSkillCloseArgs {
   missing?: () => Response;
   /** The named refusal when the close never lands. */
   refusal: () => Response;
-  /** The named 500 when a confirmation read fails. */
+  /** The named 500 when the close cannot be confirmed. */
   unconfirmed: () => Response;
   /** Attempts at re-applying the close. Default 3. */
   attempts?: number;
