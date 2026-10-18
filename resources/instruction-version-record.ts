@@ -9,6 +9,7 @@ import { withKeyLock } from "./key-lock.js";
 import { withOwnedTransaction } from "./request-transaction.js";
 import { maybeThrowSkillWriteFault } from "./skill-write-fault.js";
 import { PRIVATE_VISIBILITY, SHARED_VISIBILITY } from "./memory-visibility.js";
+import { txnPausePoint } from "./txn-pause-point.js";
 
 export const INSTRUCTION_VERSION_TABLE = "InstructionVersion";
 
@@ -365,6 +366,9 @@ export async function recordVersion(
           expectedVersion: expected,
         };
         record.recordHash = recordDigest(record);
+        // Test-only pause after the append id is computed, inside the locked
+        // transaction (flair#2645 audit). Inert unless fault injection is armed.
+        await txnPausePoint("instruction-version-append");
         // flair#2139 S2 — test-only per-step fault injection (see
         // skill-write-fault.ts). Fires after the Memory-side successor/close
         // writes rode this same transaction, so the append failure aborts them
