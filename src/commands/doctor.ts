@@ -20,6 +20,7 @@ import { proveLocalHarperListener, type LocalInstancePairProof } from "../lib/lo
 import { AGENT_ID_RULE } from "../lib/agent-id-rule.js";
 import { agentHomeEndpoint, readAgentHomeRows, resolveTargetInstanceIdentity } from "../lib/agent-home.js";
 import { readAgentRoster } from "../lib/agent-roster.js";
+import { describeLiveSkillTombstones, readSkillTombstoneTables } from "../lib/skill-tombstone-doctor.js";
 import { flairConfigYamlCandidates, readPortFromYamlFile, resolveFlairConfigYaml } from "../lib/doctor-config-path.js";
 import { collectFederationEnv, describeFederationDriverFinding, federationPeersConfigured, loadYamlDoc } from "../lib/doctor-federation-driver.js";
 import { plistCarriesInlineAdminPassword } from "../lib/launchd-management.js";
@@ -2420,6 +2421,43 @@ program
             console.log(`  ${homeFinding.severity === "info" ? render.icons.info : render.icons.warn} ${homeFinding.message}`);
             if (homeFinding.fixHint) console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${homeFinding.fixHint}`);
             if (homeFinding.isIssue) issues++;
+          }
+        }
+      }
+
+      // 8d. Skill tombstones (flair#2662) — for each skill subject whose
+      // newest InstructionVersion is a `delete` tombstone, report the subject
+      // when its Memory row is still live. Read-only: nothing is rewritten.
+      // A check that cannot read the tables is NOT RUN and counted.
+      console.log(`\n  ${render.wrap(render.c.bold, "Skill tombstones")}`);
+      if (rosterNotRun) {
+        issues++;
+        console.log(`  ${render.icons.warn} Skill tombstones: NOT RUN — ${rosterNotRun.reason}`);
+        console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${rosterNotRun.remedy}`);
+      } else if (!rosterAdminPass || rosterOpsPort === null) {
+        issues++;
+        const reason = rosterProbe.credIssue
+          ? `the admin credential could not be resolved (${rosterProbe.credIssue})`
+          : rosterAdminPass ? "the ops endpoint was not verified" : "no admin credentials to read the stored tables";
+        console.log(`  ${render.icons.warn} Skill tombstones: NOT RUN — ${reason}.`);
+      } else {
+        const tombstoneAuth = `Basic ${Buffer.from(`${resolveAdminUser()}:${rosterAdminPass}`).toString("base64")}`;
+        const tables = await readSkillTombstoneTables({
+          opsUrl: `http://127.0.0.1:${rosterOpsPort}/`,
+          authHeader: tombstoneAuth,
+          timeoutMs: 5000,
+        });
+        if (tables === null) {
+          issues++;
+          console.log(`  ${render.icons.warn} Could not read the stored InstructionVersion and Memory tables, so the skill-tombstone check did not run.`);
+        } else {
+          const finding = describeLiveSkillTombstones(tables.versions, tables.memories);
+          if (!finding) {
+            console.log(`  ${render.icons.ok} No delete tombstone is the newest version of a skill with a live Memory row.`);
+          } else {
+            issues++;
+            console.log(`  ${render.icons.warn} ${finding}`);
+            console.log(`     ${render.wrap(render.c.dim, "Report only:")} this check does not modify the store.`);
           }
         }
       }
