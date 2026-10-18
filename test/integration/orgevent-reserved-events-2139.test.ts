@@ -32,6 +32,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import nacl from "tweetnacl";
 import { childOverranDeadline, cliLeg } from "../helpers/child-deadline";
+import { componentWithReplayProbe, type ProbeComponent } from "../helpers/component-with-replay-probe";
 import { nodeBin } from "../helpers/node-runtime";
 import { HARPER_STOP_BUDGET_MS, HarperInstance, startHarper, stopHarper } from "../helpers/harper-lifecycle";
 
@@ -67,6 +68,7 @@ function assertOwnInstance(h: HarperInstance): void {
 }
 
 let harper: HarperInstance;
+let component: ProbeComponent;
 let cliHome: string;
 let pauseDir: string;
 const agent = mkAgent("agent-a");
@@ -192,7 +194,11 @@ function runDoctor(): Promise<{ code: number | null; stdout: string; stderr: str
 
 beforeAll(async () => {
   pauseDir = await mkdtemp(join(tmpdir(), "flair-2139-expiry-pause-"));
-  harper = await startHarper({ env: {
+  component = componentWithReplayProbe({ probe: {
+    source: "test/fixtures/orgevent-hook-2139/probe.js",
+    target: "dist/resources/zz-orgevent-hook-2139.js", out: "orgevent-hook-2139",
+  } });
+  harper = await startHarper({ cwd: component.dir, harperBinDir: component.sourceRoot, env: {
     FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_TEST_PAUSE_DIR: pauseDir,
   } });
   assertOwnInstance(harper);
@@ -203,9 +209,36 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (harper) await stopHarper(harper);
+  component?.cleanup();
   if (cliHome) await rm(cliHome, { recursive: true, force: true, maxRetries: 4 });
   if (pauseDir) await rm(pauseDir, { recursive: true, force: true });
 }, HARPER_STOP_BUDGET_MS);
+
+describe("Harper promised-body allow hooks without the OrgEvent verb guards", () => {
+  for (const method of ["POST", "PUT"]) {
+    it(`${method}: the hook refuses reserved promised bodies before the probe verb`, async () => {
+      const id = `hook-${randomUUID()}`;
+      await plantEvent(id, { kind: "status" });
+      const before = await readEvent(id);
+      try {
+        const ordinary = await basicSend(method, `/OrgEventHookProbe/${id}`, {
+          id, authorId: agent.id, kind: "status", summary: "ordinary",
+        });
+        expect(ordinary.status).toBe(200);
+        expect(await ordinary.json()).toEqual({ verbReached: true, promised: true });
+        for (const marker of [{ kind: "soul.changed" }, { kind: "skill.changed" }, { id: `${PREFIX}${randomUUID()}` }]) {
+          const refused = await basicSend(method, `/OrgEventHookProbe/${id}`, {
+            id, authorId: agent.id, kind: "status", summary: "reserved", ...marker,
+          });
+          expect(refused.status, await refused.text()).toBe(403);
+        }
+        expect(await readEvent(id)).toEqual(before);
+      } finally {
+        await deleteEvent(id);
+      }
+    }, 30_000);
+  }
+});
 
 describe("flair doctor names stored reserved-event impostors", () => {
   it("passes on a clean store, names a planted impostor, and passes again after it is removed", async () => {
@@ -528,12 +561,12 @@ describe("OrgEventMaintenance expiry", () => {
   }, 30_000);
 });
 
-async function pausedSweep(point: string, compete: () => Promise<void>): Promise<any> {
+async function pausedRequest(point: string, request: () => Promise<Response>, compete: () => Promise<void>): Promise<Response> {
   for (const marker of ["arm", "claimed", "paused", "released", "go"]) {
     await rm(join(pauseDir, `${marker}.${point}`), { force: true });
   }
   writeFileSync(join(pauseDir, `arm.${point}`), "");
-  const pending = send(adminAgent, "POST", "/OrgEventMaintenance/", {});
+  const pending = request();
   let paused = false;
   let response: Response;
   try {
@@ -541,13 +574,18 @@ async function pausedSweep(point: string, compete: () => Promise<void>): Promise
     while (!(paused = existsSync(join(pauseDir, `paused.${point}`))) && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
-    expect(paused, `sweep did not reach ${point}`).toBe(true);
+    expect(paused, `request did not reach ${point}`).toBe(true);
     await compete();
   } finally {
     writeFileSync(join(pauseDir, `go.${point}`), "");
     response = await pending;
   }
   expect(readFileSync(join(pauseDir, `released.${point}`), "utf8")).toBe("go");
+  return response;
+}
+
+async function pausedSweep(point: string, compete: () => Promise<void>): Promise<any> {
+  const response = await pausedRequest(point, () => send(adminAgent, "POST", "/OrgEventMaintenance/", {}), compete);
   expect(response.status).toBe(200);
   return response.json();
 }
@@ -592,6 +630,62 @@ describe("OrgEventMaintenance interleavings", () => {
       expect(await readEvent(id)).toEqual(newer);
       expect(newer.summary).toBe("newer ordinary");
       expect(result).toEqual({ deleted: 0, skipped: 1, failed: 0 });
+    } finally {
+      await deleteEvent(id);
+    }
+  }, 45_000);
+});
+
+describe("OrgEvent write interleavings with the operations API", () => {
+  for (const verb of ["collection POST", "addressed PUT", "PATCH create", "addressed DELETE", "collection PUT", "collection DELETE"]) {
+    it(`${verb}: a reserved row committed after the transactional check survives and the request is refused`, async () => {
+      const id = `event-race-${randomUUID()}`;
+      const otherId = `event-other-${randomUUID()}`;
+      const kind = `ordinary-race-${randomUUID()}`;
+      const deleting = verb.includes("DELETE");
+      const collection = verb.startsWith("collection");
+      const method = verb.includes("POST") ? "POST" : verb.includes("PATCH") ? "PATCH" : deleting ? "DELETE" : "PUT";
+      const point = deleting ? "org-event-delete-read" : `org-event-${method.toLowerCase()}-read`;
+      if (deleting) await plantEvent(id, { kind });
+      const body = { id, authorId: agent.id, kind, summary: "attempted write" };
+      const payload = deleting ? undefined : verb === "collection PUT"
+        ? [{ ...body, id: otherId }, body] : body;
+      const path = collection ? `/OrgEvent/${deleting ? `?kind=${encodeURIComponent(kind)}` : ""}` : `/OrgEvent/${id}`;
+      let newer: any;
+      try {
+        const response = await pausedRequest(point, () => send(adminAgent, method, path, payload), async () => {
+          const before = await readEvent(id);
+          const row = {
+            id, authorId: agent.id, kind: "soul.changed", summary: "reserved operations row",
+            createdAt: before?.createdAt ?? new Date().toISOString(),
+          };
+          await adminOp({ operation: before ? "update" : "insert", table: "OrgEvent", records: [row] });
+          newer = await readEvent(id);
+        });
+        expectReserved(response.status, await response.text());
+        expect(newer.kind).toBe("soul.changed");
+        expect(await readEvent(id)).toEqual(newer);
+        expect(await readEvent(otherId)).toBeNull();
+      } finally {
+        await deleteEvent(id);
+        await deleteEvent(otherId);
+      }
+    }, 45_000);
+  }
+
+  it("POST refuses a write lost at commit to a newer ordinary operations row", async () => {
+    const id = `event-commit-${randomUUID()}`;
+    let newer: any;
+    try {
+      const response = await pausedRequest("org-event-write-commit", () => send(agent, "POST", "/OrgEvent/", {
+        id, kind: "status", summary: "attempted write",
+      }), async () => {
+        await plantEvent(id, { kind: "status", summary: "newer operations write" });
+        newer = await readEvent(id);
+      });
+      expect(response.status, await response.clone().text()).toBe(409);
+      expect((await response.json()).error).toBe("stored_row_changed");
+      expect(await readEvent(id)).toEqual(newer);
     } finally {
       await deleteEvent(id);
     }

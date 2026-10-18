@@ -41,6 +41,8 @@ const READ_FAILS_MARKER = "read-fails";
 const DELETE_FAILS_MARKER = "delete-fails";
 const DELETE_DROPPED_MARKER = "delete-dropped";
 let afterEventSelection: (() => void) | undefined;
+let beforeEventWrite: ((ctx: any) => void) | undefined;
+let afterEventCommit: (() => void) | undefined;
 
 // In-memory OrgEvent store, keyed by id — backs OrgEvent.post()'s ownership read
 // (`databases.flair.OrgEvent.get`) and static put().
@@ -126,9 +128,9 @@ class BaseOrgEvent {
   // OrgEvent.post() and the createdAt check read the stored row through the
   // static table call (`databases.flair.OrgEvent.get(id, {})`), which Harper
   // exposes. An id carrying READ_FAILS_MARKER makes that read reject.
-  static get(id: any) {
+  static get(id: any, ctx?: any) {
     if (typeof id === "string" && id.includes(READ_FAILS_MARKER)) return Promise.reject(new Error("injected stored-row read failure"));
-    return orgEventStore.get(id) ?? null;
+    return ctx?.transaction?.writes?.get(id) ?? orgEventStore.get(id) ?? null;
   }
   static delete(id: any, ctx?: any) {
     if (typeof id === "string" && id.includes(DELETE_FAILS_MARKER)) return Promise.reject(new Error("injected delete failure"));
@@ -146,7 +148,19 @@ const databasesMock = {
     OrgEvent: Object.assign(BaseOrgEvent, {
       // OrgEvent.post() calls `databases.flair.OrgEvent.put(content)` directly
       // (Harper-5 upsert), so the static put must capture AND persist too.
-      put: async (content: any) => { orgEventPut = content; orgEventStore.set(content.id, { ...content }); return { ok: true, ...content }; },
+      put: async (content: any, ctx?: any) => {
+        orgEventPut = content;
+        beforeEventWrite?.(ctx);
+        for (const row of Array.isArray(content) ? content : [content]) {
+          (ctx?.transaction?.writes ?? orgEventStore).set(row.id, { ...row });
+        }
+        return { ok: true, ...content };
+      },
+      patch: async (id: any, content: any, ctx?: any) => {
+        orgEventPatch = { id, content: { ...content } };
+        beforeEventWrite?.(ctx);
+        (ctx?.transaction?.writes ?? orgEventStore).set(id, { ...(orgEventStore.get(id) ?? { id }), ...content });
+      },
       search: async function* () { yield* orgEventStore.values(); afterEventSelection?.(); },
     }),
     Agent: { get: async () => null, search: async () => [] },
@@ -161,10 +175,13 @@ mock.module("harper", () => ({ server: { http: () => {}, getUser: async () => nu
 (globalThis as any).transaction = async (ctx: any, cb: () => any) => {
   const previous = ctx.transaction;
   const deletes: string[] = [];
-  ctx.transaction = { open: 1, deletes };
+  const writes = new Map();
+  ctx.transaction = { open: 1, deletes, writes };
   try {
     const result = await cb();
+    for (const [id, row] of writes) orgEventStore.set(id, row);
     for (const id of deletes) orgEventStore.delete(id);
+    afterEventCommit?.();
     return result;
   } finally {
     ctx.transaction = previous;
@@ -196,6 +213,8 @@ beforeEach(() => {
   orgEventPut = null;
   orgEventPatch = null;
   afterEventSelection = undefined;
+  beforeEventWrite = undefined;
+  afterEventCommit = undefined;
   workspaceStore = new Map();
   orgEventStore = new Map();
 });
@@ -708,20 +727,75 @@ describe("OrgEvent projected collection DELETE", () => {
 });
 
 describe("OrgEvent allow* hooks refuse reserved markers visible in their arguments", () => {
-  it("refuses a reserved record and admits an ordinary one for the dispatch hooks Harper calls", () => {
+  it("refuses a reserved record and admits an ordinary one for the dispatch hooks Harper calls", async () => {
     const oe: any = new (OrgEvent as any)();
     const reserved = { id: "instruction-change:x", kind: "soul.changed" };
     const ordinary = { id: "ordinary-1", kind: "status" };
     // Harper 5.3.1 calls allowCreate/allowUpdate/allowDelete; there is no allowPatch hook.
     for (const hook of ["allowCreate", "allowUpdate"] as const) {
-      expect(oe[hook](null, reserved, {}), hook).toBe(false);
-      expect(oe[hook](null, [ordinary], {}), hook).toBe(true);
-      expect(oe[hook](null, [ordinary, reserved], {}), hook).toBe(false);
+      expect(await oe[hook](null, reserved, {}), hook).toBe(false);
+      expect(await oe[hook](null, [ordinary], {}), hook).toBe(true);
+      expect(await oe[hook](null, [ordinary, reserved], {}), hook).toBe(false);
     }
     // allowDelete receives the request target, not a stored row.
     expect(oe.allowDelete(null, { id: "instruction-change:x" }, {}), "allowDelete reserved id").toBe(false);
     expect(oe.allowDelete(null, { id: "ordinary-1" }, {}), "allowDelete ordinary id").toBe(true);
   });
+});
+
+describe("OrgEvent promised hook arguments", () => {
+  it("resolves promised reserved and ordinary records", async () => {
+    const oe: any = new (OrgEvent as any)();
+    for (const hook of ["allowCreate", "allowUpdate"]) {
+      expect(await oe[hook](null, Promise.resolve({ id: "ordinary", kind: "soul.changed" }), {})).toBe(false);
+      expect(await oe[hook](null, Promise.resolve({ id: "instruction-change:x", kind: "status" }), {})).toBe(false);
+      expect(await oe[hook](null, Promise.resolve({ id: "ordinary", kind: "status" }), {})).toBe(true);
+    }
+  });
+});
+
+describe("OrgEvent transaction and outcome checks", () => {
+  const settle = async (p: Promise<any>) => { try { return await p; } catch (err) { return err; } };
+  const errorOf = async (response: Response) => (await response.clone().json()).error;
+  for (const method of ["post", "put", "patch"]) {
+    it(`${method}: a reserved row committed after the transaction read is kept`, async () => {
+      const id = "event-race";
+      const reserved = { id, authorId: "agent-alpha", kind: "soul.changed", summary: "reserved", createdAt: "2026-01-01T00:00:00.000Z" };
+      beforeEventWrite = (ctx) => {
+        expect(ctx.transaction.open).toBe(1);
+        orgEventStore.set(id, reserved);
+      };
+      const result = await settle(makeOrgEvent(agentCtx("agent-alpha"), id)[method]({
+        id, authorId: "agent-alpha", kind: "status", summary: "attempted",
+      }));
+      expect(result.status).toBe(403);
+      expect(await errorOf(result)).toBe("reserved_event");
+      expect(orgEventStore.get(id)).toEqual(reserved);
+    });
+
+    it(`${method}: a lost committed outcome is refused by name`, async () => {
+      const id = "event-lost";
+      const newer = { id, authorId: "agent-alpha", kind: "status", summary: "newer", createdAt: "2026-01-01T00:00:00.000Z" };
+      afterEventCommit = () => orgEventStore.set(id, newer);
+      const result = await settle(makeOrgEvent(agentCtx("agent-alpha"), id)[method]({
+        id, authorId: "agent-alpha", kind: "status", summary: "attempted",
+      }));
+      expect(result.status).toBe(409);
+      expect(await errorOf(result)).toBe("stored_row_changed");
+      expect(orgEventStore.get(id)).toEqual(newer);
+    });
+
+    it(`${method}: an extra field from another committed write prevents success`, async () => {
+      const id = "event-extra";
+      afterEventCommit = () => orgEventStore.set(id, { ...orgEventStore.get(id), detail: "newer" });
+      const result = await settle(makeOrgEvent(agentCtx("agent-alpha"), id)[method]({
+        id, authorId: "agent-alpha", kind: "status", summary: "attempted",
+      }));
+      expect(result.status).toBe(409);
+      expect(await errorOf(result)).toBe("stored_row_changed");
+      expect(orgEventStore.get(id).detail).toBe("newer");
+    });
+  }
 });
 
 describe("OrgEventMaintenance.post() authorizes from getContext()", () => {

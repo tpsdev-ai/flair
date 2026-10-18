@@ -2,19 +2,10 @@
  * org-event-reserved.ts — the reserved-event contract for OrgEvent writes
  * (flair#2139 slice 3a).
  *
- * Two event kinds and one id prefix belong to the instruction-version
- * appender. The resource's verb guards refuse a client mutation that carries
- * either marker, proposed or already stored: on POST (collection or addressed,
- * including a body with no id), on PUT/PATCH whose body proposes a marker, on a
- * PATCH that would create a row at a reserved addressed id, on addressed
- * DELETE, and on collection PUT/DELETE (any reserved element or selected row
- * refuses the request; the DELETE pre-scan reads id and kind whatever
- * projection the caller asked for). A non-admin agent's collection DELETE is
- * refused by the owner entry guard first. The allow hooks refuse a marker visible in
- * their own arguments: allowCreate/allowUpdate see the proposed records and
- * allowDelete sees the target id prefix, not a stored kind at an ordinary id.
- * The Harper operations API (raw upsert/delete under admin auth) is the
- * documented exception.
+ * Resource writes check proposed and stored reserved markers. Stored checks
+ * and writes share an owned transaction; fresh reads confirm the outcome.
+ * Create/update allow hooks resolve their body argument before checking markers;
+ * allowDelete checks the target id prefix. Operations writes bypass this resource.
  *
  * The predicate is pure so both the resource guards and the doctor check share
  * one definition. A record is reserved when its `kind` is `soul.changed` or

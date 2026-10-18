@@ -16,6 +16,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { databases } from "harper";
 import { resolveAgentAuth } from "./agent-auth.js";
 import { guardObjectBody } from "./object-body-guard.js";
@@ -27,6 +28,7 @@ import {
   reservedEventRefusal,
   reservedEventStoredRefusal,
   reservedEventWriteRefusal,
+  reservedEventCheckUnavailable,
   type StoredEventRead,
 } from "./org-event-reserved.js";
 import {
@@ -45,6 +47,8 @@ import {
   UNAUTH,
 } from "./record-type-kit.js";
 import { RECORD_TYPES } from "./record-types.js";
+import { withOwnedTransaction } from "./request-transaction.js";
+import { txnPausePoint } from "./txn-pause-point.js";
 
 // See makeAuthGate's doc (record-type-kit.ts): must be wired as a genuine
 // prototype method below, never a class-field assignment — Harper's
@@ -74,22 +78,31 @@ function inheritedAllow(name: string, self: any, args: any[]): any {
   return true;
 }
 
+async function readEventForMutation(id: any, context: any): Promise<any> {
+  try {
+    return await (databases as any).flair.OrgEvent.get(id, context);
+  } catch (err) {
+    throw reservedEventCheckUnavailable(err);
+  }
+}
+
+function eventOutcomeRefusal(): Response {
+  return new Response(JSON.stringify({
+    error: "stored_row_changed", message: "the OrgEvent write outcome could not be confirmed",
+  }), { status: 409, headers: { "Content-Type": "application/json" } });
+}
+
 export class OrgEvent extends (databases as any).flair.OrgEvent {
   allowRead() { return orgEventAuthGate.call(this); }
 
-  // Defence in depth: Harper 5.3.1 calls allowCreate/allowUpdate/allowDelete
-  // on a permission-marked dispatch; it does not call allowPatch. The enforcing
-  // paths are post(), patch(), put(), delete() and the collection-PUT pre-scan
-  // in getResource() below. These hooks check only the markers visible in their
-  // own arguments: proposed records for create/update, and the target id prefix
-  // for delete — not a stored kind at an ordinary id.
-  allowCreate(user?: any, newData?: any, context?: any) {
-    if (reservedProposed(newData)) return false;
+  // Create/update hooks resolve Harper's deserialized body promise.
+  async allowCreate(user?: any, newData?: any, context?: any) {
+    if (reservedProposed(await newData)) return false;
     return inheritedAllow("allowCreate", this, [user, newData, context]);
   }
 
-  allowUpdate(user?: any, updatedData?: any, context?: any) {
-    if (reservedProposed(updatedData)) return false;
+  async allowUpdate(user?: any, updatedData?: any, context?: any) {
+    if (reservedProposed(await updatedData)) return false;
     return inheritedAllow("allowUpdate", this, [user, updatedData, context]);
   }
 
@@ -99,26 +112,41 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
     return inheritedAllow("allowDelete", this, [user, target, context]);
   }
 
-  /**
-   * Scans the collection body on the initial collection-PUT call, before
-   * Harper's per-element dispatch. The scan skips non-record elements. A
-   * reserved element refuses the whole request before any element is written.
-   */
   static getResource(target: any, request: any, options?: any): any {
     const admitted = super.getResource(target, request, options);
-    if (this !== OrgEvent || !options?.isCollection || options.method !== "put") return admitted;
+    if (this !== OrgEvent || !["post", "put", "patch", "delete"].includes(options?.method)) return admitted;
     return Promise.resolve(admitted).then(async (resource) => {
-      const body = await (request as any)?.data;
-      // An anonymous batch PUT is refused here: each element's put() returns
-      // its 401 as a value, which Harper's batch path reports as a success.
+      const body = await request?.data;
+      if (options.method !== "delete") {
+        const bodyDenial = guardObjectBody(body, { allowArrayObjects: options.method === "put" });
+        if (bodyDenial) throw bodyDenial;
+      }
       const auth = await resolveAgentAuth(request);
       if (auth.kind === "anonymous") throw UNAUTH();
-      const reservedDenial = await reservedEventWriteRefusal(body, readStoredEvent);
-      if (reservedDenial) throw reservedDenial;
-      const denial = collectionElementIdRefusal(body);
-      if (denial) throw denial;
+      // Preserve the named refusal before Harper converts a denied hook to its generic 403.
+      const proposed = reservedEventProposedRefusal(body);
+      if (proposed) throw proposed;
+      if (isReservedEventRecord({ id: target?.id })) throw reservedEventRefusal();
+      if (options.isCollection && options.method === "put") {
+        const reservedDenial = await reservedEventWriteRefusal(body, readStoredEvent);
+        if (reservedDenial) throw reservedDenial;
+        const denial = collectionElementIdRefusal(body);
+        if (denial) throw denial;
+      }
       return resource;
     });
+  }
+
+  // Keep a collection batch in one write scope instead of Harper's per-element dispatch.
+  static async put(target: any, data?: any, context?: any) {
+    if (this === OrgEvent && context && target?.isCollection) {
+      const body = await data;
+      if (Array.isArray(body)) {
+        const resource = await this.getResource(target, context, { isCollection: true, method: "put" });
+        return resource.put(body);
+      }
+    }
+    return super.put(target, data, context);
   }
 
   private _auth() {
@@ -156,6 +184,58 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
       if (denial) return denial;
     }
     return null;
+  }
+
+  private async _store(content: any, mode: CreatedAtWriteMode, pausePoint: () => Promise<void> | undefined, addressedId?: any) {
+    const table = (databases as any).flair.OrgEvent;
+    const records = Array.isArray(content) ? content : [content];
+    const auth = await this._auth();
+    const plans: { id: any; row: any; basis: any }[] = [];
+    let result: any;
+    try {
+      await withOwnedTransaction((this as any).getContext?.(), async (c) => {
+        for (const record of records) {
+          const id = mode === "merge" ? addressedId : record.id;
+          const idDenial = unreadableEventIdRefusal(id);
+          if (idDenial) throw idDenial;
+          const basis = await readEventForMutation(id, c);
+          if (isReservedEventRecord(basis) || isReservedEventRecord({ id })) throw reservedEventRefusal();
+          const owner = await guardOwnerFieldImmutable(this, () => basis, record, "authorId");
+          if (owner) throw owner;
+          if (auth.kind !== "internal") {
+            const denial = applyServerCreatedAt(record, basis, mode);
+            if (denial) throw denial;
+          }
+          plans.push({ id, basis, row: mode === "merge" ? { ...basis, ...record, id } : record });
+        }
+        const pause = pausePoint();
+        if (pause) await pause;
+        result = mode === "merge"
+          ? await table.patch(addressedId, content, c)
+          : await table.put(content, c);
+        for (const plan of plans) {
+          const committed = await readEventForMutation(plan.id, {});
+          if (isReservedEventRecord(committed)) throw reservedEventRefusal();
+          if (!isDeepStrictEqual(committed == null ? null : { ...committed }, plan.basis == null ? null : { ...plan.basis })) {
+            throw eventOutcomeRefusal();
+          }
+        }
+        const commit = txnPausePoint("org-event-write-commit");
+        if (commit) await commit;
+      });
+      for (const plan of plans) {
+        const committed = await readEventForMutation(plan.id, {});
+        if (isReservedEventRecord(committed)) return reservedEventRefusal();
+        const expected = mode === "merge" ? { ...plan.row, ...content, id: plan.id } : plan.row;
+        if (!committed || !isDeepStrictEqual({ ...committed }, expected)) {
+          return eventOutcomeRefusal();
+        }
+      }
+      return result;
+    } catch (err) {
+      if (err instanceof Response) return err;
+      throw err;
+    }
   }
 
   async post(content: any) {
@@ -231,9 +311,6 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
     const entitiesError = invalidEntitiesResponse(content.entities);
     if (entitiesError) return entitiesError;
 
-    // flair#2333 (N2): refuses a non-admin POST naming a row observed at the
-    // guard's lookup as owned by another agent. This read-then-write check is
-    // not atomic; a row appearing after the lookup is not covered.
     const ownerDenial = await guardOwnerFieldImmutable(
       this,
       () => (databases as any).flair.OrgEvent.get(content.id, {}),
@@ -250,13 +327,12 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
       if (createdAtDenial) return createdAtDenial;
     }
 
-    // Harper 5: table resources use put() for create/upsert (post() removed).
-    return (databases as any).flair.OrgEvent.put(content);
+    return this._store(content, "replace", () => txnPausePoint("org-event-post-read"));
   }
 
   // PATCH routes past put(), so authorId immutability is enforced on both verbs
   // via the one shared delegate.
-  async patch(content: any, query?: any) {
+  async patch(content: any, _query?: any) {
     const bodyDenial = guardObjectBody(content);
     if (bodyDenial) return bodyDenial;
     const auth = await this._auth();
@@ -282,7 +358,7 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
       const createdAtDenial = await this._assignCreatedAt(content, "merge", () => pathId);
       if (createdAtDenial) return createdAtDenial;
     }
-    return super.patch(content, query);
+    return this._store(content, "merge", () => txnPausePoint("org-event-patch-read"), pathId);
   }
 
   async put(content: any) {
@@ -321,52 +397,67 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
       if (createdAtDenial) throw createdAtDenial;
     }
 
-    return (databases as any).flair.OrgEvent.put(content);
+    const result = await this._store(content, "replace", () => txnPausePoint("org-event-put-read"));
+    if (result instanceof Response) throw result;
+    return result;
   }
 
-  async delete(id: any, context?: any) {
-    // Dispatch shape shared via record-type-kit.ts's resolveAuthGate — same
-    // three-way branch Memory.ts/Relationship.ts/WorkspaceState.ts use.
+  async delete(id: any, _context?: any) {
     const gate = await resolveAuthGate((this as any).getContext?.(), UNAUTH());
     if (gate.kind === "denied") return gate.response;
-    // Deleting a reserved event is audit erasure. Checked before the
-    // unfiltered branch, so administrators do not reach the table delete.
-    // Harper passes the request target here: a single-id delete carries `.id`;
-    // a collection delete carries no single key and is scanned below.
     const target = id != null && typeof id === "object" && !Array.isArray(id) ? id as any : null;
     const addressedKey = target ? target.id : (typeof id === "string" || Array.isArray(id) ? id : (this as any).getId?.());
-    if (target && (target.isCollection === true || target.id == null)) {
-      // Refuse the whole collection delete before anything is removed when its
-      // selection contains a reserved row. An ordinary-only selection proceeds.
-      // The scan reads id and kind even when the caller's projection omits
-      // them; Harper's own collection delete would project to `$id` only.
-      const scan = target instanceof URLSearchParams
-        ? Object.assign(new (target.constructor as any)(target.toString()), target)
-        : { ...target };
-      if (scan instanceof URLSearchParams) {
-        scan.delete("select");
-        delete (scan as any).select;
-        scan.delete("property");
-        delete (scan as any).property;
-      } else {
-        delete scan.select;
-        delete scan.property;
+    const table = (databases as any).flair.OrgEvent;
+    const selected: { id: any; basis: any }[] = [];
+    try {
+      await withOwnedTransaction((this as any).getContext?.(), async (c) => {
+        if (target && (target.isCollection === true || target.id == null)) {
+          const scan = target instanceof URLSearchParams
+            ? Object.assign(new (target.constructor as any)(target.toString()), target)
+            : { ...target };
+          if (scan instanceof URLSearchParams) {
+            scan.delete("select");
+            scan.delete("property");
+          }
+          delete scan.select;
+          delete scan.property;
+          scan.checkPermission = false;
+          for await (const row of this.search(scan)) {
+            if (isReservedEventRecord(row)) throw reservedEventRefusal();
+            selected.push({ id: row.id, basis: row });
+          }
+        } else {
+          if (isReservedEventRecord({ id: addressedKey })) throw reservedEventRefusal();
+          selected.push({ id: addressedKey, basis: await readEventForMutation(addressedKey, c) });
+        }
+        for (const { basis } of selected) {
+          if (isReservedEventRecord(basis)) throw reservedEventRefusal();
+          if (basis && gate.kind === "scoped" && basis.authorId !== gate.agentId) {
+            throw FORBIDDEN("forbidden: cannot delete events authored by another agent");
+          }
+        }
+        const pause = txnPausePoint("org-event-delete-read");
+        if (pause) await pause;
+        for (const entry of selected) {
+          const stored = await readEventForMutation(entry.id, c);
+          if (isReservedEventRecord(stored)) throw reservedEventRefusal();
+          await table.delete(entry.id, c);
+          const committed = await readEventForMutation(entry.id, {});
+          if (isReservedEventRecord(committed)) throw reservedEventRefusal();
+          if (!isDeepStrictEqual(committed == null ? null : { ...committed }, entry.basis == null ? null : { ...entry.basis })) {
+            throw eventOutcomeRefusal();
+          }
+        }
+      });
+      for (const entry of selected) {
+        const committed = await readEventForMutation(entry.id, {});
+        if (isReservedEventRecord(committed)) return reservedEventRefusal();
+        if (committed) return eventOutcomeRefusal();
       }
-      scan.checkPermission = false;
-      for await (const row of this.search(scan)) {
-        if (isReservedEventRecord(row)) return reservedEventRefusal();
-      }
-    } else {
-      const reservedDenial = await reservedEventStoredRefusal(addressedKey, readStoredEvent);
-      if (reservedDenial) return reservedDenial;
+      return true;
+    } catch (err) {
+      if (err instanceof Response) return err;
+      throw err;
     }
-    if (gate.kind === "unfiltered") return super.delete(id, context);
-
-    const record = await this.get(id);
-    if (!record) return super.delete(id, context);
-    if (record.authorId !== gate.agentId) {
-      return FORBIDDEN("forbidden: cannot delete events authored by another agent");
-    }
-    return super.delete(id, context);
   }
 }
