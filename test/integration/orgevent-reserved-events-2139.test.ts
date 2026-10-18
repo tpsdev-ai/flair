@@ -407,17 +407,27 @@ describe("a collection DELETE selecting a reserved row is refused before it dele
     const kind = `ordinary-projected-${randomUUID()}`;
     const ordinaryIds = [`${kind}-a`, `${kind}-b`];
     const reservedId = `${PREFIX}projected-${randomUUID()}`;
+    const summary = `reserved-projection-${randomUUID()}`;
     for (const id of ordinaryIds) {
       await adminOp({ operation: "insert", table: "OrgEvent", records: [{ id, authorId: agent.id, kind, summary: "ordinary", createdAt: new Date().toISOString() }] });
     }
-    await plantEvent(reservedId);
+    await plantEvent(reservedId, { summary });
+    const reservedBefore = await readEvent(reservedId);
     const before = await countEvents();
 
-    for (const projection of ["select(summary)", "property(summary)"]) {
+    for (const [projection, projectedReserved] of [
+      ["select(summary)", summary],
+      ["select(summary,)", { summary }],
+      ["select([summary])", [summary]],
+    ] as const) {
+      const selected = await basicSend("GET", `/OrgEvent/?${projection}`);
+      expect(selected.status).toBe(200);
+      expect(await selected.json()).toContainEqual(projectedReserved);
       const refused = await basicSend("DELETE", `/OrgEvent/?${projection}`);
       expectReserved(refused.status, await refused.text());
       expect(await countEvents()).toBe(before);
       for (const id of [...ordinaryIds, reservedId]) expect(await readEvent(id)).not.toBeNull();
+      expect(await readEvent(reservedId)).toEqual(reservedBefore);
     }
 
     for (const id of ordinaryIds) await deleteEvent(id);

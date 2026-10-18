@@ -666,6 +666,30 @@ describe("WorkspaceState.search() — boolean-injection guard (authz-hardening s
 // test FAIL (observed "ws-theirs" in the result), confirming the guard is
 // not vacuously true.  Reverted before commit.
 
+describe("OrgEvent projected collection DELETE", () => {
+  for (const urlParams of [false, true]) {
+    for (const select of ["summary", ["summary"], Object.assign(["summary"], { asArray: true })]) {
+      it(`refuses a reserved selection with ${urlParams ? "URLSearchParams" : "object"} target and ${typeof select === "string" ? "scalar" : (select as any).asArray ? "array" : "object"} projection`, async () => {
+        const row = { id: "ordinary-id", kind: "soul.changed", summary: "reserved", authorId: "agent-alpha", createdAt: "2026-01-01T00:00:00.000Z" };
+        orgEventStore.set(row.id, row);
+        const oe = makeOrgEvent(agentCtx("admin", true));
+        oe.search = async function* (query: any) {
+          for (const stored of orgEventStore.values()) {
+            yield query.select ? { summary: stored.summary } : stored;
+          }
+        };
+        const target = Object.assign(urlParams ? new URLSearchParams() : {}, { isCollection: true, select });
+        const res = await oe.delete(target);
+        expect(res).toBeInstanceOf(Response);
+        expect(res.status).toBe(403);
+        expect(await res.json()).toMatchObject({ error: "reserved_event" });
+        expect(orgEventStore.get(row.id)).toEqual(row);
+        expect(target.select).toEqual(select);
+      });
+    }
+  }
+});
+
 describe("OrgEvent allow* hooks refuse reserved markers visible in their arguments", () => {
   it("refuses a reserved record and admits an ordinary one for the dispatch hooks Harper calls", () => {
     const oe: any = new (OrgEvent as any)();
