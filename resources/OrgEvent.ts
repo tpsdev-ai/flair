@@ -118,6 +118,12 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
     return Promise.resolve(admitted).then(async (resource) => {
       const body = await request?.data;
       if (options.method !== "delete") {
+        if (options.isCollection && options.method === "put" && Array.isArray(body) &&
+          body.some((record) => record === null || typeof record !== "object")) {
+          throw Object.assign(new Error("each OrgEvent must be an object"), {
+            statusCode: 400, code: "ClientError",
+          });
+        }
         const bodyDenial = guardObjectBody(body, { allowArrayObjects: options.method === "put" });
         if (bodyDenial) throw bodyDenial;
       }
@@ -206,7 +212,7 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
             const denial = applyServerCreatedAt(record, basis, mode);
             if (denial) throw denial;
           }
-          plans.push({ id, basis, row: mode === "merge" ? { ...basis, ...record, id } : record });
+          plans.push({ id, basis, row: structuredClone(mode === "merge" ? { ...basis, ...record, id } : record) });
         }
         const pause = pausePoint();
         if (pause) await pause;
@@ -226,8 +232,7 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
       for (const plan of plans) {
         const committed = await readEventForMutation(plan.id, {});
         if (isReservedEventRecord(committed)) return reservedEventRefusal();
-        const expected = mode === "merge" ? { ...plan.row, ...content, id: plan.id } : plan.row;
-        if (!committed || !isDeepStrictEqual({ ...committed }, expected)) {
+        if (!committed || !isDeepStrictEqual({ ...committed }, plan.row)) {
           return eventOutcomeRefusal();
         }
       }

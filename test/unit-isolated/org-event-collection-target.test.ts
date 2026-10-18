@@ -53,3 +53,17 @@ test("OrgEvent POST without a body id takes the prefixed collection target id", 
   expect(result instanceof Response).toBe(false);
   expect(written.id).toBe("prefix/");
 });
+
+test.each(["text", 42, null, true])("collection PUT refuses a %p element before writing", async (element) => {
+  const target = new RequestTarget("/");
+  const body = [element];
+  const before = written;
+  const error = await OrgEvent.put(target, body, {
+    data: Promise.resolve(body),
+    request: { tpsAgent: "collection-admin", tpsAgentIsAdmin: true },
+  }).catch((error: any) => error);
+  expect(error).toBeInstanceOf(Error);
+  expect(error.statusCode).toBe(400);
+  expect(error.code).toBe("ClientError");
+  expect(written).toBe(before);
+});

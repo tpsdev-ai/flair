@@ -758,6 +758,26 @@ describe("OrgEvent transaction and outcome checks", () => {
   const settle = async (p: Promise<any>) => { try { return await p; } catch (err) { return err; } };
   const errorOf = async (response: Response) => (await response.clone().json()).error;
   for (const method of ["post", "put", "patch"]) {
+    it(`${method}: confirmation uses the prepared row after the request object changes`, async () => {
+      const id = "event-prepared";
+      const content = {
+        id, authorId: "agent-alpha", kind: "status", summary: "prepared",
+        createdAt: "2999-01-01T00:00:00.000Z", expiresAt: "2999-02-01T00:00:00.000Z",
+      };
+      afterEventCommit = () => {
+        content.id = "changed-request-id";
+        content.authorId = "changed-request-author";
+        content.createdAt = "2999-01-01T00:00:00.000Z";
+        content.expiresAt = "2999-03-01T00:00:00.000Z";
+      };
+      const result = await settle(makeOrgEvent(agentCtx("agent-alpha", true), id)[method](content));
+      expect(result instanceof Response).toBe(false);
+      expect(orgEventStore.get(id)).toMatchObject({
+        id, authorId: "agent-alpha", expiresAt: "2999-02-01T00:00:00.000Z",
+      });
+      expect(orgEventStore.get(id).createdAt).not.toBe(content.createdAt);
+    });
+
     it(`${method}: a reserved row committed after the transaction read is kept`, async () => {
       const id = "event-race";
       const reserved = { id, authorId: "agent-alpha", kind: "soul.changed", summary: "reserved", createdAt: "2026-01-01T00:00:00.000Z" };
