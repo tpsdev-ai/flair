@@ -10,12 +10,6 @@
  * the receiver for the sync. This is the seam under test: the real sender's
  * scan/sign/batch against the real receiver's verify/bind/merge.
  *
- * Guarantees: a home agent's Presence lands on the hub with the sender as its
- * originator (and the Agent lands too — ordering), a non-home row is never sent,
- * a row inside the re-scan overlap is re-offered and re-merged without changing
- * the presence data, and the sender's per-table watermark is saved.
- * The flag-off and per-branch cases live in the unit/flag files.
- *
  * Fixtures are neutral (agent-, host- names) and both Harpers are loopback,
  * ephemeral, HOME-isolated.
  */
@@ -144,7 +138,6 @@ describe("flair#2578 slice 2 — Presence sender end to end (real Harper, both f
     expect(presence.activity).toBe("coding");
     expect(Number(presence.receivedAt)).toBeGreaterThan(0);
 
-    // The non-home row never left the sender.
     expect(await readRow(receiver, "Presence", AGENT_ELSEWHERE)).toBeNull();
 
     // The sender advanced its per-table watermark on the confirmed batch.
@@ -159,16 +152,11 @@ describe("flair#2578 slice 2 — Presence sender end to end (real Harper, both f
     expect(listed.presenceLastSyncAt).toBe(hubPeer.presenceLastSyncAt);
   });
 
-  it("a re-sent unchanged row is re-merged: the presence data stands and receivedAt does not go back", async () => {
+  it("an unchanged overlap resend preserves presence fields", async () => {
     const before = await readRow(receiver, "Presence", AGENT_HOME);
     const result = await sync();
     expect(result.error).toBeUndefined();
     const after = await readRow(receiver, "Presence", AGENT_HOME);
-    // The 30 s re-scan overlap re-offers a row whose cursor is at the watermark,
-    // so this pass re-sends the unchanged row. The receiver refuses an older
-    // heartbeat, or a heartbeat tie whose activity stamp is older; an equal
-    // heartbeat with an equal or absent activity stamp re-merges, so the
-    // presence data is unchanged and receivedAt does not go backward.
     expect(after.lastHeartbeatAt).toBe(before.lastHeartbeatAt);
     expect(after.activity).toBe(before.activity);
     expect(Number(after.receivedAt)).toBeGreaterThanOrEqual(Number(before.receivedAt));

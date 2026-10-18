@@ -3,25 +3,6 @@
  * SENDER driven through the real push path (runFederationSyncOnce) with the
  * network mocked.
  *
- * Proves, against the real push code:
- *   - with the flag OFF the sender is unchanged: no Presence scan, no Presence
- *     record, no watermark write;
- *   - with the flag ON a HOME row (originatorInstanceId is this instance) is
- *     pushed as a signed v:2 Presence record keyed on agentId;
- *   - a non-home row is never pushed;
- *   - a row more than the re-scan overlap below the watermark is not re-sent;
- *   - a row just BELOW the watermark but inside the re-scan overlap IS re-offered
- *     (the committed-after-the-scan case, F2);
- *   - a row the hub refuses for a RETRYABLE reason holds the watermark below it
- *     and is re-offered next pass (F1);
- *   - an indeterminate row holds the watermark below it and is re-offered next
- *     pass (B1), and a response whose counts do not add up saves nothing;
- *   - a far-future row is not sent and cannot advance the watermark past the
- *     scan time; a stored watermark already ahead of the scan is clamped down
- *     to the scan time (B5);
- *   - a confirmed batch saves the watermark (the local Peer row's
- *     presenceLastSyncAt), and a failed batch does not.
- *
  * The real end-to-end case (a real sender against a real Harper receiver) is in
  * test/integration/federation-presence-send-2578.test.ts.
  */
@@ -60,6 +41,8 @@ describe("federation sync push — Presence sender (flair#2578 slice 2)", () => 
   let syncRefused: Array<{ table: string; id: string; reason: string }> = [];
   let syncIndeterminate: Array<{ table: string; id: string }> = [];
   let syncMergedDelta = 0;
+  let syncResponse: Record<string, unknown> | undefined;
+  let genericRows: any[] = [];
 
   beforeAll(() => keystore.setPrivateKeySeed(INSTANCE_ID, testKp.secretKey.slice(0, 32)));
   afterAll(() => {
@@ -78,6 +61,8 @@ describe("federation sync push — Presence sender (flair#2578 slice 2)", () => 
     syncRefused = [];
     syncIndeterminate = [];
     syncMergedDelta = 0;
+    syncResponse = undefined;
+    genericRows = [];
     globalThis.fetch = mock(async (urlInput: string | URL | Request, init?: RequestInit) => {
       const url = typeof urlInput === "string" ? urlInput : urlInput.toString();
       const method = init?.method ?? "GET";
@@ -92,7 +77,9 @@ describe("federation sync push — Presence sender (flair#2578 slice 2)", () => 
       if (method === "GET" && url.includes("/FederationInstance")) {
         return res(true, 200, { id: INSTANCE_ID, publicKey: publicKeyB64url, role: "spoke" });
       }
-      if (body?.operation === "search_by_conditions") return res(true, 200, []);
+      if (body?.operation === "search_by_conditions") {
+        return res(true, 200, body.conditions[0].search_type === "greater_than" ? genericRows : []);
+      }
       if (body?.operation === "sql") return res(true, 200, presenceRows);
       if (body?.operation === "search_by_value") return res(true, 200, []);
       if (body?.operation === "update" || body?.operation === "upsert") {
@@ -101,7 +88,7 @@ describe("federation sync push — Presence sender (flair#2578 slice 2)", () => 
       if (method === "POST" && url.includes("/FederationSync")) {
         if (syncStatus !== 200) return res(false, syncStatus, { error: "refused" });
         const records = body?.records ?? [];
-        return res(true, 200, {
+        return res(true, 200, syncResponse ?? {
           merged: records.length - syncRefused.length - syncIndeterminate.length + syncMergedDelta,
           skipped: syncRefused.length,
           refused: syncRefused,
@@ -144,6 +131,28 @@ describe("federation sync push — Presence sender (flair#2578 slice 2)", () => 
     expect(captured.some((c) => c.body?.operation === "sql")).toBe(false);
     expect(presenceUpdates()).toEqual([]);
   });
+
+  for (const table of ["Memory", "Soul", "Agent", "Relationship"]) {
+    it(`flag OFF: accepts legacy merged/skipped counts without refusal lists for ${table}`, async () => {
+      installMock();
+      genericRows = [{ id: "legacy-a", updatedAt: new Date().toISOString() }];
+      syncResponse = { merged: 0, skipped: 1 };
+      // Offer a row only for this table.
+      const fetchMock = globalThis.fetch;
+      globalThis.fetch = mock(async (url: any, init?: RequestInit) => {
+        const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+        if (body?.operation === "search_by_conditions" && body.table !== table) return res(true, 200, []);
+        return fetchMock(url, init);
+      }) as any;
+      const result = await run();
+      expect(result.error).toBeUndefined();
+      expect(result.pushed).toBe(0);
+      expect(result.skipped).toBe(1);
+      expect(pushed().map((record) => record.table)).toEqual([table]);
+      expect(presenceUpdates()).toEqual([]);
+      expect(captured.some((call) => call.body?.operation === "sql")).toBe(false);
+    });
+  }
 
   it("flag ON: a home row is pushed as a signed v:2 Presence record keyed on agentId", async () => {
     process.env[PRESENCE_SEND_FLAG_ENV] = "1";
@@ -230,7 +239,7 @@ describe("federation sync push — Presence sender (flair#2578 slice 2)", () => 
     expect(presenceRecords().map((r) => r.id)).toEqual(["agent-a"]);
   });
 
-  it("flag ON: a confirmed batch saves the watermark as the newest sent cursor", async () => {
+  it("flag ON: newer confirmed cursors advance the watermark", async () => {
     process.env[PRESENCE_SEND_FLAG_ENV] = "1";
     const oldest = Date.now() - 5_000;
     const newest = Date.now();
@@ -316,6 +325,39 @@ describe("federation sync push — Presence sender (flair#2578 slice 2)", () => 
     expect(presenceRecords().map((r) => r.id)).toEqual(["agent-a"]);
   });
 
+  it("flag ON: an indeterminate key outside the offered batch leaves the watermark unchanged", async () => {
+    process.env[PRESENCE_SEND_FLAG_ENV] = "1";
+    installMock({ presenceLastSyncAt: SINCE });
+    presenceRows = [homeRow()];
+    syncResponse = { merged: 0, skipped: 0, indeterminate: [{ table: "Presence", id: "other" }] };
+    const result = await run();
+    expect(presenceRecords().map((record) => record.id)).toEqual(["agent-a"]);
+    expect(presenceUpdates()).toEqual([]);
+    expect(result.error).toBeDefined();
+  });
+
+  for (const [name, response] of [
+    ["wrong refusal id", { merged: 1, skipped: 1, refused: [{ table: "Presence", id: "other", reason: "merge_error" }] }],
+    ["wrong table", { merged: 1, skipped: 0, indeterminate: [{ table: "Agent", id: "agent-a" }] }],
+    ["duplicate refusals", { merged: 0, skipped: 2, refused: [{ table: "Presence", id: "agent-a", reason: "merge_error" }, { table: "Presence", id: "agent-a", reason: "merge_error" }] }],
+    ["duplicate indeterminate keys", { merged: 0, skipped: 0, indeterminate: [{ table: "Presence", id: "agent-a" }, { table: "Presence", id: "agent-a" }] }],
+    ["key in both outcome lists", { merged: 0, skipped: 1, refused: [{ table: "Presence", id: "agent-a", reason: "merge_error" }], indeterminate: [{ table: "Presence", id: "agent-a" }] }],
+    ["skipped/refused mismatch", { merged: 1, skipped: 0, refused: [{ table: "Presence", id: "agent-a", reason: "merge_error" }] }],
+    ["malformed entry", { merged: 2, skipped: 0, indeterminate: [{ table: "Presence" }] }],
+  ] as const) {
+    it(`flag ON: ${name} resolves nothing in the Presence batch`, async () => {
+      process.env[PRESENCE_SEND_FLAG_ENV] = "1";
+      installMock({ presenceLastSyncAt: SINCE });
+      presenceRows = [homeRow(), homeRow({ agentId: "agent-b" })];
+      syncResponse = response;
+      const result = await run();
+      expect(result.error).toBeDefined();
+      expect(result.pushed).toBe(0);
+      expect(result.skipped).toBe(0);
+      expect(presenceUpdates()).toEqual([]);
+    });
+  }
+
   it("flag ON: a response that does not account for every record saves no watermark (B1)", async () => {
     process.env[PRESENCE_SEND_FLAG_ENV] = "1";
     installMock({ presenceLastSyncAt: SINCE });
@@ -326,7 +368,7 @@ describe("federation sync push — Presence sender (flair#2578 slice 2)", () => 
     expect(presenceUpdates()).toEqual([]);
   });
 
-  it("flag ON: a stored watermark ahead of the scan is clamped down to the scan time (B5)", async () => {
+  it("flag ON: confirmed contact clamps a stored future watermark to scan time (B5)", async () => {
     process.env[PRESENCE_SEND_FLAG_ENV] = "1";
     const now = Date.now();
     // A watermark an hour ahead would suppress the current row if the scan
@@ -349,7 +391,7 @@ describe("federation sync push — Presence sender (flair#2578 slice 2)", () => 
     expect(saved).toBeLessThan(futureWatermark);
   });
 
-  it("flag ON: a stored watermark ahead of the scan is lowered even when no row is sent (B5)", async () => {
+  it("flag ON: a successful ping saves the future watermark clamp with no rows sent (B5)", async () => {
     process.env[PRESENCE_SEND_FLAG_ENV] = "1";
     const now = Date.now();
     const futureWatermark = now + 3_600_000;

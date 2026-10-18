@@ -59,7 +59,7 @@ describe("presence-send — cursor", () => {
 });
 
 describe("presence-send — watermark", () => {
-  it("parses an ISO stamp to ms, and treats absent/unparseable as 0 (send everything)", () => {
+  it("parses an ISO stamp to ms, and treats absent/unparseable as 0 (select eligible rows with positive cursors)", () => {
     const iso = "2026-01-02T03:04:05.000Z";
     expect(presenceWatermarkMs(iso)).toBe(Date.parse(iso));
     expect(presenceWatermarkMs(undefined)).toBe(0);

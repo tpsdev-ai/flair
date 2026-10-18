@@ -479,8 +479,8 @@ export async function persistLocalPeerLastSyncAt(args: {
 }
 
 /**
- * Persist the Presence per-table watermark on the local Peer row after a
- * successful Presence push (flair#2578 slice 2). Presence has no `updatedAt`, so
+ * Persist the Presence per-table watermark on the local Peer row after
+ * confirmed contact (flair#2578 slice 2). Presence has no `updatedAt`, so
  * the row cursor over `lastHeartbeatAt` / `activityUpdatedAt` is compared against
  * this field instead of `lastSyncAt`.
  *
@@ -834,7 +834,7 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
     // a healthy 50-record batch merges in <2s — so a trip means a real stall,
     // and we split-and-retry rather than wait it out.
     const BATCH_TIMEOUT_MS = 45_000;
-    async function sendBatch(batch: any[]): Promise<{ merged: number; skipped: number; refused: Array<{ table: string; id: string; reason: string }>; indeterminate: Array<{ table: string; id: string }> }> {
+    async function sendBatch(batch: any[], validatePresence = false): Promise<{ merged: number; skipped: number; refused: Array<{ table: string; id: string; reason: string }>; indeterminate: Array<{ table: string; id: string }> }> {
       if (!secretKey) secretKey = await loadInstanceSecretKey(instance.id, opts);
       const syncBody: Record<string, any> = { instanceId: instance.id, records: batch, lamportClock: Date.now() };
       const signedSyncBody = signBodyFresh(syncBody, secretKey);
@@ -846,8 +846,8 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
         batch.length > 1 && (status === null || TIMEOUT_STATUSES.has(status));
       const split = async () => {
         const mid = Math.floor(batch.length / 2);
-        const left = await sendBatch(batch.slice(0, mid));
-        const right = await sendBatch(batch.slice(mid));
+        const left = await sendBatch(batch.slice(0, mid), validatePresence);
+        const right = await sendBatch(batch.slice(mid), validatePresence);
         return {
           merged: left.merged + right.merged,
           skipped: left.skipped + right.skipped,
@@ -892,16 +892,25 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
       }
       const refused = parseSyncBatchRefused(body);
       const indeterminate = parseSyncBatchIndeterminate(body);
-      // The counts must add up to the batch: merged plus the refused and
-      // indeterminate lists. A row the receiver left indeterminate is neither
-      // merged nor refused, but it is still listed; without this check its
-      // cursor would silently advance the Presence watermark. On a mismatch,
-      // resolve nothing: throw before the caller can use any part of the
-      // response.
-      if (counts.merged + refused.length + indeterminate.length !== batch.length) {
-        throw new Error(
-          `Sync batch failed: invalid response (HTTP ${syncRes.status}, merged/refused/indeterminate do not account for ${batch.length} records)`,
-        );
+      if (validatePresence) {
+        const outcomeBody = body as { refused?: unknown; indeterminate?: unknown };
+        const validList = (raw: unknown, parsed: readonly unknown[]) =>
+          raw === undefined || (Array.isArray(raw) && raw.length === parsed.length);
+        const key = (row: { table: string; id: string }) => JSON.stringify([row.table, row.id]);
+        const offered = new Set(batch.map(key));
+        const unresolved = [...refused, ...indeterminate].map(key);
+        if (
+          !validList(outcomeBody.refused, refused) ||
+          !validList(outcomeBody.indeterminate, indeterminate) ||
+          unresolved.some((entry) => !offered.has(entry)) ||
+          new Set(unresolved).size !== unresolved.length ||
+          counts.skipped !== refused.length ||
+          counts.merged + refused.length + indeterminate.length !== batch.length
+        ) {
+          throw new Error(
+            `Sync batch failed: invalid response (HTTP ${syncRes.status}, outcomes do not account for ${batch.length} offered records)`,
+          );
+        }
       }
       return { ...counts, refused, indeterminate };
     }
@@ -1036,13 +1045,11 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
     // Presence has no updatedAt/createdAt, so the generic cursor above cannot
     // select it. Home rows travel by their OWN per-table watermark on
     // lastHeartbeatAt / activityUpdatedAt, sent AFTER the generic tables so the
-    // receiver's home binding (which reads the local Agent row) finds the agent.
-    // A scan, send or response failure returns before the watermark is
-    // persisted, so the rows re-offer. A confirmed batch saves the newest sent
-    // cursor clamped to this pass's scan time; a stored value already ahead of
-    // the clock is lowered to the scan time (B5). A retryable refusal or an
-    // indeterminate outcome saves a value below that row's cursor (F1), which
-    // the next pass's overlap re-offers.
+    // receiver can bind Presence to an accepted Agent row.
+    // A scan, send or response failure returns before watermark persistence.
+    // After confirmed contact, save the greater of the effective watermark and
+    // sent cursors, clamped to scan time and capped below retryable refusals
+    // and indeterminate rows.
     let presenceAdvanceMs: number | null = null;
     // The highest cursor the watermark may reach; lowered below any row the
     // receiver refused for a retryable reason or left indeterminate (F1).
@@ -1071,22 +1078,12 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
         return { pushed: totalMerged, skipped: totalSkipped, error: err instanceof Error ? err : new Error(String(err)) };
       }
       const watermarkMs = presenceWatermarkMs(hub.presenceLastSyncAt);
-      // A stored watermark ahead of the clock is not left in place: it would
-      // otherwise suppress current rows until the clock caught up. Use the
-      // scan time as the effective value for both the re-scan floor and the
-      // saved value (B5).
+      // Clamp selection to scan time; persist only after confirmed contact.
       const effectiveWatermarkMs = Math.min(watermarkMs, presenceScanAtMs);
-      // Re-scan from the watermark minus a small overlap: a heartbeat stamped
-      // within that window before this pass's scan time but committed after its
-      // SQL read is invisible to the pass that saves the watermark, so the next
-      // pass re-offers it. A stamp older than the window that commits late is
-      // not re-offered. A re-sent row is safe: the receiver refuses a STRICTLY
-      // older heartbeat as presence_stale_heartbeat, and an equal heartbeat
-      // re-merges (its receivedAt advances, the presence fields stand).
+      // Re-scan from the effective watermark minus the overlap.
       const scanFloorMs = Math.max(0, effectiveWatermarkMs - PRESENCE_SEND_OVERLAP_MS);
       const toSend = selectPresenceRowsToSend(presenceRows, instance.id, scanFloorMs);
-      // A value already ahead of the scan is lowered even when no row needs a
-      // batch; otherwise it would stay ahead until the clock caught up.
+      // A no-row pass saves the clamp after a successful ping.
       if (toSend.length === 0 && watermarkMs > effectiveWatermarkMs) {
         presenceAdvanceMs = effectiveWatermarkMs;
       }
@@ -1094,11 +1091,10 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
         if (!secretKey) secretKey = await loadInstanceSecretKey(instance.id, opts);
         let presenceBatch: any[] = [];
         let presenceBatchBytes = 0;
-        // Start from the effective watermark: already clamped to this pass's
-        // scan time, so a stored value ahead of the clock cannot survive.
+        // Overlap resends retain the effective watermark unless capped below.
         let advanceMs = effectiveWatermarkMs;
         const flushPresence = async () => {
-          const result = await sendBatch(presenceBatch);
+          const result = await sendBatch(presenceBatch, true);
           totalMerged += result.merged;
           totalSkipped += result.skipped;
           totalBatches++;
@@ -1129,7 +1125,7 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
         for (const row of toSend) {
           const cursor = presenceCursorMs(row);
           // A row dated more than the receiver's future allowance past this
-          // scan is left out of the batch: the receiver would refuse it, and
+          // scan is left out of the batch: the receiver may refuse it, and
           // its cursor must not count toward the watermark.
           if (cursor != null && cursor > presenceScanAtMs + PRESENCE_SEND_FUTURE_ALLOWANCE_MS) continue;
           const payload = presenceWireRecord(row, instance.id);
@@ -1182,10 +1178,10 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
           presenceLastSyncAt: new Date(presenceMs).toISOString(),
         });
         if (!advanced.ok) {
-          console.warn(`⚠️  Local hub.presenceLastSyncAt advance failed (${advanced.status}): ${advanced.error ?? ""}. Next poll will re-send presence.`);
+          console.warn(`⚠️  Local hub.presenceLastSyncAt advance failed (${advanced.status}): ${advanced.error ?? ""}.`);
         }
       } catch (advErr: any) {
-        console.warn(`⚠️  Local hub.presenceLastSyncAt advance error: ${advErr?.message ?? advErr}. Next poll will re-send presence.`);
+        console.warn(`⚠️  Local hub.presenceLastSyncAt advance error: ${advErr?.message ?? advErr}.`);
       }
     };
 

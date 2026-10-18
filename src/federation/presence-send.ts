@@ -7,7 +7,7 @@
  * passes the rows here. The Presence table has no `updatedAt`/`createdAt`, so the
  * generic sync cursor cannot select it: a row is selected by its OWN cursor —
  * the later of `lastHeartbeatAt` and `activityUpdatedAt` — compared against a
- * per-table watermark the sender stores, less a 30 s re-scan overlap. Only rows
+ * per-table effective watermark, less a 30 s re-scan overlap. Only rows
  * stamped with this instance as their originator are sent.
  *
  * Sender-side support for spoke-to-hub Presence replication, behind its own
@@ -35,11 +35,7 @@ export const PRESENCE_SEND_FLAG_ENV = "FLAIR_FEDERATION_PRESENCE_SEND";
  *  which src/ cannot import. */
 export const PRESENCE_SEND_FUTURE_ALLOWANCE_MS = 5 * 60 * 1000;
 
-/** How far behind the stored watermark a pass re-scans. A heartbeat stamped
- *  within this window before the pass's scan time but committed after the SQL
- *  read is invisible to the pass that saves the watermark; re-scanning from this
- *  overlap re-offers it on the next pass. A stamp older than this window that
- *  commits late is not re-offered. */
+/** Re-scan overlap behind the effective watermark. */
 export const PRESENCE_SEND_OVERLAP_MS = 30 * 1000;
 
 /** The receiver skip reasons a later re-offer of the same row can clear, so the
@@ -104,8 +100,8 @@ export function presenceWatermarkMs(value: unknown): number {
 /**
  * The rows this instance may send: HOME rows (originatorInstanceId is this
  * instance — slice 1 stamps it on a local create) whose own cursor is past the
- * supplied floor. The caller passes the stored watermark less the re-scan
- * overlap, so a row just below the watermark is re-offered. A replicated row, a
+ * supplied floor. The caller passes the effective watermark less the re-scan
+ * overlap, floored at zero. A replicated row, a
  * row with no stamp, a row with no cursor, and a row at or below the floor are
  * all excluded.
  */
