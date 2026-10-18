@@ -234,7 +234,7 @@ The remedy is `flair upgrade` (the adapter), not a server upgrade alone.
 
 #### Instruction-change events (Soul and skill)
 
-Each Soul and skill version append also creates an OrgEvent: kind `soul.changed` or `skill.changed`, id `instruction-change:<version id>`, `refId` the version id, `authorId` `flair:internal`, `createdAt` copied from the version, and `detail` built from these fields only: `subjectType`, `subjectId`, `key` (the Soul key; null for skills), `changeKind`, `actorKind`, `actorId`, `sourceClass`, `valueHash`, `previousVersionHash`, `recordHash`. A private skill's event omits the three hashes, including on the tombstone, whose stored visibility is the closed head's last state. `detail.actorKind` names the actor class (operator, agent or internal).
+Each Soul and skill version append also creates an OrgEvent: kind `soul.changed` or `skill.changed`, id `instruction-change:<version id>`, `refId` the version id, `authorId` `flair:internal`, `createdAt` copied from the version, and `detail` built from these fields only: `subjectType`, `subjectId`, `key` (the Soul key; null for skills), `changeKind`, `actorKind`, `actorId`, `sourceClass`, `valueHash`, `previousVersionHash`, `recordHash`. A private skill's event omits the three hashes, including on the tombstone, whose stored visibility is the closed head's last state. `authorId` is `flair:internal`; `detail.actorKind` disambiguates the actor.
 
 Instruction events are readable by any verified agent. Three things a reader should not infer:
 
