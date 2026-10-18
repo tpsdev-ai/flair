@@ -1650,6 +1650,7 @@ export class FederationPeers extends Resource {
           endpoint: p.endpoint,
           lastSyncAt: p.lastSyncAt,
           lastMergeAt: p.lastMergeAt,
+          presenceLastSyncAt: p.presenceLastSyncAt,
           relayOnly: p.relayOnly,
           pairedAt: p.pairedAt,
         });

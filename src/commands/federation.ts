@@ -41,6 +41,16 @@ import {
 import { DEFAULT_INTERVAL_SECONDS as FEDERATION_SYNC_DEFAULT_INTERVAL } from "../federation/scheduler.js";
 import { FEDERATION_MEMORY_SELECT } from "../lib/federation-memory-attributes.js";
 import {
+  presenceCursorMs,
+  presenceSendEnabled,
+  presenceWatermarkMs,
+  presenceWireRecord,
+  PRESENCE_SEND_FUTURE_ALLOWANCE_MS,
+  PRESENCE_SEND_OVERLAP_MS,
+  PRESENCE_SEND_RETRYABLE_SKIP_REASONS,
+  selectPresenceRowsToSend,
+} from "../federation/presence-send.js";
+import {
   decideInstancePrune,
   formatInstanceRow,
   INSTANCE_ROW_PRUNE_REMEDY,
@@ -469,6 +479,55 @@ export async function persistLocalPeerLastSyncAt(args: {
 }
 
 /**
+ * Persist the Presence per-table watermark on the local Peer row after a
+ * successful Presence push (flair#2578 slice 2). Presence has no `updatedAt`, so
+ * the row cursor over `lastHeartbeatAt` / `activityUpdatedAt` is compared against
+ * this field instead of `lastSyncAt`.
+ *
+ * Same shape and same result contract as {@link persistLocalPeerLastSyncAt}: a
+ * field-only `update` carrying `{id, presenceLastSyncAt, updatedAt}`, so it
+ * cannot revert `publicKey`/`status` or re-create a deleted row, and HTTP 200 is
+ * not success — the id must appear in `update_hashes` or the update is a refusal.
+ * Callers invoke it only after a confirmed batch, so a failed batch leaves the
+ * watermark frozen and the rows re-offer.
+ */
+export async function persistLocalPeerPresenceSyncAt(args: {
+  opsEndpoint: string;
+  auth: string;
+  peerId: string;
+  presenceLastSyncAt: string;
+}): Promise<{ ok: boolean; status: number; error?: string }> {
+  const headers = { "Content-Type": "application/json", Authorization: args.auth };
+  const updateRes = await fetch(`${args.opsEndpoint}/`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      operation: "update",
+      database: "flair",
+      table: "Peer",
+      records: [{ id: args.peerId, presenceLastSyncAt: args.presenceLastSyncAt, updatedAt: args.presenceLastSyncAt }],
+    }),
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!updateRes.ok) {
+    const txt = await updateRes.text().catch(() => "");
+    return { ok: false, status: updateRes.status, error: txt.slice(0, 200) };
+  }
+  const parsed = (await updateRes.json().catch(() => null)) as { update_hashes?: unknown } | null;
+  const matched = !!parsed && Array.isArray(parsed.update_hashes) && parsed.update_hashes.includes(args.peerId);
+  if (!matched) {
+    return {
+      ok: false,
+      status: updateRes.status,
+      error:
+        `Peer row ${args.peerId} was not matched by the presence-cursor update (deleted or missing) — ` +
+        `the presence watermark stays frozen; re-pair the hub. Not inserting a Peer row.`,
+    };
+  }
+  return { ok: true, status: updateRes.status };
+}
+
+/**
  * The most recent CONTACT with any peer (max of peer.lastSyncAt), or null.
  *
  * Contact, not merge: a sync that reaches the peer and legitimately has
@@ -673,6 +732,24 @@ export function parseSyncBatchCounts(body: unknown, batchSize: number): { merged
   return { merged, skipped };
 }
 
+/** One receiver-authored refusal from a FederationSync batch: which record the
+ *  receiver refused and under which name. Only well-formed entries are kept; a
+ *  refused field that is absent or not an array of {table,id,reason} strings is
+ *  ignored (the sender acts on a retryable name, never on a shape it invented). */
+export function parseSyncBatchRefused(body: unknown): Array<{ table: string; id: string; reason: string }> {
+  if (body === null || typeof body !== "object" || Array.isArray(body)) return [];
+  const refused = (body as { refused?: unknown }).refused;
+  if (!Array.isArray(refused)) return [];
+  const out: Array<{ table: string; id: string; reason: string }> = [];
+  for (const entry of refused) {
+    if (entry === null || typeof entry !== "object") continue;
+    const { table, id, reason } = entry as { table?: unknown; id?: unknown; reason?: unknown };
+    if (typeof table !== "string" || typeof id !== "string" || typeof reason !== "string") continue;
+    out.push({ table, id, reason });
+  }
+  return out;
+}
+
 export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number; skipped: number; error?: Error }> {
   const target = resolveTarget(opts);
   const baseUrl = target ? target.replace(/\/$/, "") : undefined;
@@ -739,7 +816,7 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
     // a healthy 50-record batch merges in <2s — so a trip means a real stall,
     // and we split-and-retry rather than wait it out.
     const BATCH_TIMEOUT_MS = 45_000;
-    async function sendBatch(batch: any[]): Promise<{ merged: number; skipped: number }> {
+    async function sendBatch(batch: any[]): Promise<{ merged: number; skipped: number; refused: Array<{ table: string; id: string; reason: string }> }> {
       if (!secretKey) secretKey = await loadInstanceSecretKey(instance.id, opts);
       const syncBody: Record<string, any> = { instanceId: instance.id, records: batch, lamportClock: Date.now() };
       const signedSyncBody = signBodyFresh(syncBody, secretKey);
@@ -753,7 +830,7 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
         const mid = Math.floor(batch.length / 2);
         const left = await sendBatch(batch.slice(0, mid));
         const right = await sendBatch(batch.slice(mid));
-        return { merged: left.merged + right.merged, skipped: left.skipped + right.skipped };
+        return { merged: left.merged + right.merged, skipped: left.skipped + right.skipped, refused: [...left.refused, ...right.refused] };
       };
 
       let syncRes: Response;
@@ -790,7 +867,7 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
           `Sync batch failed: invalid response (HTTP ${syncRes.status}, merged/skipped are not counts from 0 to ${batch.length})`,
         );
       }
-      return counts;
+      return { ...counts, refused: parseSyncBatchRefused(body) };
     }
 
     let totalBatches = 0;
@@ -919,6 +996,98 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
       }
     }
 
+    // ── flair#2578 slice 2: Presence push (P6) ──────────────────────────────
+    // Presence has no updatedAt/createdAt, so the generic cursor above cannot
+    // select it. Home rows travel by their OWN per-table watermark on
+    // lastHeartbeatAt / activityUpdatedAt, sent AFTER the generic tables so the
+    // receiver's home binding (which reads the local Agent row) finds the agent.
+    // Only a successful batch advances the watermark: a scan, send or response
+    // failure returns before the watermark is persisted, so the rows re-offer;
+    // a retryable refusal caps how far it advances (F1).
+    let presenceAdvanceMs: number | null = null;
+    // The highest cursor the watermark may reach; lowered below any row the
+    // receiver refused for a retryable reason (F1).
+    let presenceCapMs = Number.POSITIVE_INFINITY;
+    if (presenceSendEnabled()) {
+      const presenceScanAtMs = Date.now();
+      let presenceRows: any[];
+      try {
+        const presenceRes = await fetch(`${opsEndpoint}/`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: auth },
+          body: JSON.stringify({ operation: "sql", sql: "SELECT * FROM flair.Presence" }),
+          signal: AbortSignal.timeout(15_000),
+        });
+        if (!presenceRes.ok) {
+          const text = await presenceRes.text().catch(() => "");
+          return { pushed: totalMerged, skipped: totalSkipped, error: new Error(`Presence scan failed (${presenceRes.status}): ${text.slice(0, 200)}`) };
+        }
+        const parsed = await presenceRes.json() as any;
+        const list = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.results) ? parsed.results : null;
+        if (!list) {
+          return { pushed: totalMerged, skipped: totalSkipped, error: new Error("Presence scan failed: body is not a row list") };
+        }
+        presenceRows = list;
+      } catch (err: any) {
+        return { pushed: totalMerged, skipped: totalSkipped, error: err instanceof Error ? err : new Error(String(err)) };
+      }
+      const watermarkMs = presenceWatermarkMs(hub.presenceLastSyncAt);
+      // Re-scan from the watermark minus a small overlap: a heartbeat stamped
+      // before this pass's scan time but committed after its SQL read is
+      // invisible to the pass that saves the watermark, so the overlap re-offers
+      // it next pass. A re-sent row is safe: the receiver refuses a STRICTLY
+      // older heartbeat as presence_stale_heartbeat, and an equal heartbeat
+      // re-merges (its receivedAt advances, the presence fields stand).
+      const scanFloorMs = Math.max(0, watermarkMs - PRESENCE_SEND_OVERLAP_MS);
+      const toSend = selectPresenceRowsToSend(presenceRows, instance.id, scanFloorMs);
+      if (toSend.length > 0) {
+        if (!secretKey) secretKey = await loadInstanceSecretKey(instance.id, opts);
+        let presenceBatch: any[] = [];
+        let presenceBatchBytes = 0;
+        let advanceMs = watermarkMs;
+        const flushPresence = async () => {
+          const result = await sendBatch(presenceBatch);
+          totalMerged += result.merged;
+          totalSkipped += result.skipped;
+          totalBatches++;
+          // F1: a row the receiver refused for a reason a later re-offer can
+          // clear must stay above the watermark, so the next pass offers it
+          // again. Cap the watermark just below the oldest such row.
+          for (const refusal of result.refused) {
+            if (refusal.table !== "Presence") continue;
+            if (!PRESENCE_SEND_RETRYABLE_SKIP_REASONS.has(refusal.reason)) continue;
+            const sent = presenceBatch.find((r) => r.id === refusal.id);
+            if (!sent) continue;
+            const refusedCursor = Date.parse(sent.updatedAt);
+            if (Number.isFinite(refusedCursor)) presenceCapMs = Math.min(presenceCapMs, refusedCursor - 1);
+          }
+          presenceBatch = [];
+          presenceBatchBytes = 0;
+        };
+        for (const row of toSend) {
+          const cursor = presenceCursorMs(row);
+          // A row dated more than the receiver's future allowance past this
+          // scan is left out of the batch: the receiver would refuse it, and
+          // its cursor must not count toward the watermark.
+          if (cursor != null && cursor > presenceScanAtMs + PRESENCE_SEND_FUTURE_ALLOWANCE_MS) continue;
+          const payload = presenceWireRecord(row, instance.id);
+          if (!payload) continue;
+          const sr = { ...payload, signature: signBody(payload, secretKey) };
+          const srBytes = JSON.stringify(sr).length;
+          if (presenceBatch.length >= BUDGET_RECORDS || (presenceBatch.length > 0 && presenceBatchBytes + srBytes > BUDGET_BYTES)) {
+            await flushPresence();
+          }
+          presenceBatch.push(sr);
+          presenceBatchBytes += srBytes;
+          // The watermark never passes the scan time: a row sent with a cursor
+          // ahead of the scan advances it only to the scan time.
+          if (cursor != null && Math.min(cursor, presenceScanAtMs) > advanceMs) advanceMs = Math.min(cursor, presenceScanAtMs);
+        }
+        if (presenceBatch.length > 0) await flushPresence();
+        presenceAdvanceMs = Math.min(advanceMs, presenceCapMs);
+      }
+    }
+
     // lastSyncAt is contact, not "the driver ran" (flair#1146). Persist only
     // after a successful FederationSync response — sendBatch already threw on non-ok or invalid JSON, so
     // totalBatches > 0 means the hub answered. The no-change path must ping
@@ -981,6 +1150,21 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
     }
 
     await stampLocalContact();
+    if (presenceAdvanceMs != null) {
+      try {
+        const advanced = await persistLocalPeerPresenceSyncAt({
+          opsEndpoint,
+          auth,
+          peerId: hub.id,
+          presenceLastSyncAt: new Date(presenceAdvanceMs).toISOString(),
+        });
+        if (!advanced.ok) {
+          console.warn(`⚠️  Local hub.presenceLastSyncAt advance failed (${advanced.status}): ${advanced.error ?? ""}. Next poll will re-send presence.`);
+        }
+      } catch (advErr: any) {
+        console.warn(`⚠️  Local hub.presenceLastSyncAt advance error: ${advErr?.message ?? advErr}. Next poll will re-send presence.`);
+      }
+    }
     console.log(`✅ Synced ${totalMerged} records (${totalSkipped} skipped) across ${totalBatches} batches`);
     return { pushed: totalMerged, skipped: totalSkipped };
   } catch (err: any) {
