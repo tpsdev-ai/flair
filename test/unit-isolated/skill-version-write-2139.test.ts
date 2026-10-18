@@ -120,6 +120,72 @@ function liveSkill(id: string, subjectId: string | null, content: string, visibi
   return { id, agentId: "agent-a", tags: ["skill"], trigger: "t", content, visibility, durability: "persistent", createdAt: "2020-01-01T00:00:00.000Z", ...(subjectId ? { skillSubjectId: subjectId } : {}) };
 }
 
+describe("skill POST version writes in a caller transaction", () => {
+  test("a pointer refusal can release the caller context before rollback", async () => {
+    const ctx = agentCtx() as any;
+    const successor = liveSkill("joined", "joined", "joined content");
+    const transaction = {
+      open: 1, saveCommits: false, memories: new Map(), versions: new Map(),
+      abort() {
+        this.open = 0;
+        this.memories.clear();
+        this.versions.clear();
+        delete ctx.transaction;
+      },
+    };
+    ctx.transaction = transaction;
+    const result = await runSkillVersionWrite({
+      ctx, joinCallerTransaction: true, subjectId: "joined", agentId: "agent-a",
+      head: (shared) => resolveSkillHead("joined", null, shared),
+      plan: () => ({ kind: "create", predecessor: null, successor, closePatch: {}, value: successor.content, visibility: "shared", grantedClose: null }),
+      hooks: {
+        createSuccessor, closePredecessor,
+        pointer: async () => {
+          transaction.abort();
+          return Response.json({ error: "pointer_write_failed" }, { status: 500 });
+        },
+      },
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("pointer refusal answered success");
+    expect(result.response.status).toBe(500);
+    expect(await result.response.json()).toEqual({ error: "pointer_write_failed" });
+    expect(ctx.transaction).toBeUndefined();
+    expect(transaction.memories.size).toBe(0);
+    expect(transaction.versions.size).toBe(0);
+    expect(memoryStore.size).toBe(0);
+    expect(store.size).toBe(0);
+  });
+
+  for (const abort of [true, false]) {
+    test(`the successor and version follow the caller's ${abort ? "abort" : "commit"}`, async () => {
+      const ctx = agentCtx();
+      const successor = liveSkill("joined", "joined", "joined content");
+      const write = mockTransaction(ctx, async () => {
+        const transaction = (ctx as any).transaction;
+        const result = await runSkillVersionWrite({
+          ctx, joinCallerTransaction: true, subjectId: "joined", agentId: "agent-a",
+          head: (shared) => resolveSkillHead("joined", null, shared),
+          plan: () => ({ kind: "create", predecessor: null, successor, closePatch: {}, value: successor.content, visibility: "shared", grantedClose: null }),
+          hooks: { createSuccessor, closePredecessor },
+        });
+        expect(result.ok).toBe(true);
+        expect((ctx as any).transaction).toBe(transaction);
+        expect(transaction.open).toBe(1);
+        expect(memoryStore.has("joined")).toBe(false);
+        expect(store.has("skill:joined:1")).toBe(false);
+        expect(transaction.memories.get("joined")).toEqual(successor);
+        expect(transaction.versions.get("skill:joined:1").memoryId).toBe("joined");
+        if (abort) throw new Error("caller abort");
+      });
+      if (abort) await expect(write).rejects.toThrow("caller abort");
+      else await write;
+      expect(memoryStore.has("joined")).toBe(!abort);
+      expect(store.has("skill:joined:1")).toBe(!abort);
+    });
+  }
+});
+
 describe("flair#2139 S2 — skill version write: create", () => {
   test("a first create appends a create version referencing the successor", async () => {
     const successor = liveSkill("m1", null, "c1");

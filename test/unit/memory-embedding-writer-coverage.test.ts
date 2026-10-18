@@ -103,7 +103,7 @@ add("skill-version-write", ["writer:table.put#1"], "ECHO",
 // The feed refuses a body embedding or embeddingModel (flair#2354), so its
 // ingest is NON_EMBED and its skill successor ECHO.
 add("usage-recording", ["writer:writeBackCommittedRow#1"], "NON_EMBED",
-  "Usage-count bump: writes only usageCount (flair#2470).");
+  "Usage-count bump and commit marker (flair#2653).");
 add("migrations/synthetic-test-migration", ["writer:writeBackCommittedRow#1"], "NON_EMBED",
   "Test-only migration: writes only source (flair#2470).");
 add("MemoryFeed", ["writer:(databases as any).flair.Memory.update#1"], "NON_EMBED",

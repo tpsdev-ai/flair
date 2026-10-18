@@ -376,14 +376,17 @@ export class FeedMemories extends Resource {
             refusal = Response.json({ error: "invalid_expiry", message: expiryError }, { status: 400 });
             return { skip: true };
           }
-          return { write: written };
+          return { idempotent: false, commitMarkerField: "writeBackWriteId", write: written };
         },
         { ctx, label: "MemoryFeed.ingest", pausePre: () => txnPausePoint("feed-ingest-pre"), pausePoint: () => txnPausePoint("feed-ingest"), expectedRow: existingRecord },
       );
     } catch (err) {
       if (refusal) return refusal;
-      // The target row was replaced, or kept changing: nothing was written.
-      if (err instanceof WriteBackConflictError) return feedTargetChanged(record.id);
+      if (err instanceof WriteBackConflictError) {
+        return err.outcome === "conflict" ? feedTargetChanged(record.id) : Response.json({
+          error: "feed_write_unconfirmed", outcome: err.outcome, message: err.message,
+        }, { status: 409 });
+      }
       throw err;
     }
     if (refusal) return refusal;
@@ -588,12 +591,11 @@ const FEED_DEDUP_REPAIR_ATTEMPTS = 3;
 
 export const FEED_TARGET_CHANGED_ERROR = "feed_target_changed";
 
-/** A retryable 409: the row a feed write targets changed during the request,
- *  so nothing was written. */
 function feedTargetChanged(id: string): Response {
   return Response.json({
     error: FEED_TARGET_CHANGED_ERROR,
-    message: `the stored row ${JSON.stringify(id)} this write targets changed during the request; retry the write`,
+    outcome: "conflict",
+    message: `the stored row ${JSON.stringify(id)} this write targets changed during the request; write not applied; retry the write`,
   }, { status: 409 });
 }
 

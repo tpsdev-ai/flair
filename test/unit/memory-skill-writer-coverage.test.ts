@@ -76,8 +76,8 @@ add("Memory", ["writer:patchRecord#1"],
   "derivedFrom/lastReflected bookkeeping patch — never writes skill content.");
 add("Memory", ["writer:(databases as any).flair.Memory.delete#1"],
   "Memory.delete(): removal, not a write.");
-add("Memory", ["alias-source:(databases as any).flair.Memory#1", "alias-source:(databases as any).flair.Memory#2", "alias-source:(databases as any).flair.Memory#3", "alias-source:(databases as any).flair.Memory#4", "alias-source:(databases as any).flair.Memory#5", "alias-source:(databases as any).flair.Memory#6", "alias-source:(databases as any).flair.Memory#7", "alias-source:(databases as any).flair.Memory#8", "alias-source:(databases as any)?.flair?.Memory#1"],
-  "Table handles: #1 is handed to patchRecord; #2 supplies confirmSkillDelete's reads and close retry (writer:table.put#1 above); #4 is the class heritage; the optional handle reads the write-lock store; #3/#5/#6/#7/#8 read committed rows.");
+add("Memory", ["alias-source:(databases as any).flair.Memory#1", "alias-source:(databases as any).flair.Memory#2", "alias-source:(databases as any).flair.Memory#3", "alias-source:(databases as any).flair.Memory#4", "alias-source:(databases as any).flair.Memory#5", "alias-source:(databases as any).flair.Memory#6", "alias-source:(databases as any).flair.Memory#7", "alias-source:(databases as any).flair.Memory#8", "alias-source:(databases as any).flair.Memory#9", "alias-source:(databases as any).flair.Memory#10", "alias-source:(databases as any).flair.Memory#11", "alias-source:(databases as any)?.flair?.Memory#1"],
+  "Table handles: #1 is handed to patchRecord; #2 supplies confirmSkillDelete's reads and close retry (writer:table.put#1 above); #4 is the class heritage; the optional handle reads the write-lock store; #3/#5/#6/#7/#8 read committed rows. #9 and #10 hand the reindex re-PUT and the composed ordinary PUT to confirmCommittedRow, and #11 hands the post-commit verifyWrittenRow its read: all three only read committed rows.");
 
 // ── Non-skill writers in other modules ──
 add("MemoryFeed", ["alias-source:(databases as any).flair.Memory#1", "writer:writeBackCommittedRow#1", "writer:table.put#1"],
@@ -108,7 +108,7 @@ add("hit-tracking", [
 add("auth-middleware", ["writer:writeBackCommittedRow#1"],
   "Auth bookkeeping (embedding backfill) — non-skill, through the shared write-back helper (flair#2354).");
 add("usage-recording", ["alias-source:(databases as any).flair.Memory#1", "writer:writeBackCommittedRow#1"],
-  "usageCount increment through the shared write-back helper (flair#2441) — non-skill.");
+  "usageCount increment and commit marker through the shared write-back helper (flair#2441) — non-skill.");
 add("promotion-stamp", ["writer:writeBackCommittedRow#1"],
   "Promotion status stamp — non-skill, through the shared write-back helper (flair#2354).");
 add("promotion-stamp", ["writer:table.put#1"],

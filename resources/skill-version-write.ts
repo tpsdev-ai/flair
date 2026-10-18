@@ -349,6 +349,7 @@ export const defaultSkillHooks: SkillWriteHooks = {
 
 export interface RunSkillVersionWriteArgs {
   ctx: any;
+  joinCallerTransaction?: boolean;
   /** The stable logical subject id. */
   subjectId: string;
   /** The subject owner's agent id (the skill's `agentId`). */
@@ -670,7 +671,7 @@ async function confirmSkillUpdate(args: {
 
 /**
  * Run one skill version write atomically. The append helper owns the lock, the
- * transaction and the version row; this function performs the Memory-side
+ * version row; this function performs the Memory-side
  * successor/close/pointer writes inside that same transaction.
  */
 export async function runSkillVersionWrite(args: RunSkillVersionWriteArgs): Promise<RecordVersionOutcome> {
@@ -773,6 +774,7 @@ async function runSkillVersionWriteInner(args: RunSkillVersionWriteArgs): Promis
       if (pointerDenial) return pointerDenial;
       return okResponse();
     },
+    args.joinCallerTransaction,
   );
   if (!outcome.ok || plan === null) return outcome;
   const writePlan = plan as SkillWritePlan;
