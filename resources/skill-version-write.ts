@@ -476,16 +476,97 @@ async function compensateUnlandedSkillUpdate(args: {
   }
 }
 
+/** The table surface a confirmed skill close reads and re-applies through. */
+export interface SkillCloseTable {
+  get(id: string, ctx?: any): Promise<any>;
+  put(row: any, ctx?: any): Promise<any>;
+  search?(query: any, ctx?: any): AsyncIterable<any>;
+}
+
+export interface ConfirmSkillCloseArgs {
+  ctx: any;
+  table: SkillCloseTable;
+  /** The row as read and planned in the write's transaction. */
+  expected: Record<string, any>;
+  /** The fields the close stamps on the row it re-reads. */
+  closePatch: Record<string, unknown>;
+  /** Re-check the caller's authority on the current committed row. */
+  authorize: (row: Record<string, any>, shared: any) => Promise<Response | null>;
+  /** Undo everything else this request committed when the close cannot land. */
+  compensate: () => Promise<Response | null>;
+  /** Check the committed effect beyond the close (a successor's live head). */
+  confirmEffect?: () => Promise<Response | null>;
+  /** The named refusal when the close never lands. */
+  refusal: () => Response;
+  /** The named 500 when a confirmation read fails. */
+  unconfirmed: () => Response;
+  /** Attempts at re-applying the close. Default 3. */
+  attempts?: number;
+}
+
 /**
- * flair#2645 — a skill UPDATE confirms the close in a fresh committed read
- * before answering success. Harper can resolve the close's commit while skipping
- * the queued full put (it loses to a newer write of the same row) and still
- * commit the successor and version writes. A close that did not land is
- * re-applied from a fresh read, re-checking the row's identity and the caller's
- * authority; when it still does not land the request's successor is rolled back
- * and the answer is a named 409 (a named 500 when the rollback cannot be
- * confirmed). Returns null only when the close and the single live head are
- * confirmed.
+ * flair#2645 — confirm a skill close in a fresh committed read, then answer
+ * success only when the committed store shows it. Harper can resolve the
+ * close's commit while skipping the queued full put (it loses to a newer write
+ * of the same row) and still commit the request's other writes. A close that
+ * did not land is re-applied from a fresh read, re-checking the row's identity
+ * and the caller's authority; when it still does not land the caller's
+ * compensation runs and the answer is a named refusal (a named 500 when the
+ * compensation cannot be confirmed). Returns null only when the close (and any
+ * caller-supplied effect check) is confirmed.
+ *
+ * This is the shared shape a skill DELETE can pass to `confirmSkillDelete`
+ * (flair#2642): the same committed read, identity comparison, bounded
+ * re-apply and compensation hand-off.
+ */
+export async function confirmSkillClose(args: ConfirmSkillCloseArgs): Promise<Response | null> {
+  const { ctx, table, expected, closePatch, authorize, compensate, confirmEffect, refusal, unconfirmed } = args;
+  const attempts = args.attempts ?? SKILL_UPDATE_CLOSE_ATTEMPTS;
+  const id = String(expected.id);
+  for (let attempt = 1; ; attempt++) {
+    let committed: any;
+    try {
+      committed = await table.get(id, {});
+    } catch {
+      return unconfirmed();
+    }
+    if (!committed) {
+      const denied = confirmEffect ? await confirmEffect() : null;
+      return denied ? (await compensate()) ?? denied : null;
+    }
+    if (!sameStoredRow(committed, expected)) {
+      // Replaced between the reads: not the row the caller meant.
+      return (await compensate()) ?? storedRowChangedRefusal("Memory");
+    }
+    if (typeof committed.validTo === "string" && committed.validTo.length > 0) {
+      const denied = confirmEffect ? await confirmEffect() : null;
+      return denied ? (await compensate()) ?? denied : null;
+    }
+    if (attempt > attempts) break;
+    let applied: "staged" | Response;
+    try {
+      applied = await withOwnedTransaction(ctx, async (c) => {
+        const stored = await table.get(id, c);
+        if (!stored) return "staged";
+        if (!sameStoredRow(stored, expected)) return storedRowChangedRefusal("Memory");
+        const denied = await authorize(stored, c);
+        if (denied) return denied;
+        const closed = { ...stored, ...closePatch };
+        normalizeEmptyEmbedding(closed);
+        const result = storageResult(await table.put(closed, c));
+        return result instanceof Response ? result : "staged";
+      });
+    } catch {
+      return unconfirmed();
+    }
+    if (applied instanceof Response) return (await compensate()) ?? applied;
+  }
+  return (await compensate()) ?? refusal();
+}
+
+/**
+ * flair#2645 — a skill UPDATE's confirmation: the predecessor close plus the
+ * rule that the request's successor is the only live head of the subject.
  */
 async function confirmSkillUpdate(args: {
   ctx: any;
@@ -501,8 +582,6 @@ async function confirmSkillUpdate(args: {
   if (!table || typeof table.get !== "function" || typeof table.put !== "function") {
     return skillUpdateUnconfirmedFailure();
   }
-  const predecessorId = String(predecessor.id);
-  const undo = () => compensateUnlandedSkillUpdate({ ctx, subjectId, successor, versionId });
   const confirmsSingleHead = async (): Promise<Response | null> => {
     let successorCommitted: any;
     try {
@@ -513,6 +592,7 @@ async function confirmSkillUpdate(args: {
     if (!successorCommitted || !sameStoredRow(successorCommitted, successor) || !isOpenLiveRow(successorCommitted)) {
       return skillUpdateNotConfirmedRefusal();
     }
+    if (typeof table.search !== "function") return skillUpdateUnconfirmedFailure();
     const live: string[] = [];
     try {
       for await (const row of table.search({ conditions: [
@@ -525,45 +605,17 @@ async function confirmSkillUpdate(args: {
     }
     return live.length === 1 && live[0] === String(successor.id) ? null : skillUpdateNotConfirmedRefusal();
   };
-  for (let attempt = 1; ; attempt++) {
-    let committed: any;
-    try {
-      committed = await table.get(predecessorId, {});
-    } catch {
-      return skillUpdateUnconfirmedFailure();
-    }
-    if (!committed) {
-      const denied = await confirmsSingleHead();
-      return denied ? (await undo()) ?? denied : null;
-    }
-    if (!sameStoredRow(committed, predecessor)) {
-      // Replaced between the reads: not the row the caller meant.
-      return (await undo()) ?? storedRowChangedRefusal("Memory");
-    }
-    if (typeof committed.validTo === "string" && committed.validTo.length > 0) {
-      const denied = await confirmsSingleHead();
-      return denied ? (await undo()) ?? denied : null;
-    }
-    if (attempt > SKILL_UPDATE_CLOSE_ATTEMPTS) break;
-    let applied: "staged" | Response;
-    try {
-      applied = await withOwnedTransaction(ctx, async (c) => {
-        const stored = await table.get(predecessorId, c);
-        if (!stored) return "staged";
-        if (!sameStoredRow(stored, predecessor)) return storedRowChangedRefusal("Memory");
-        const denied = await authorize(stored, c);
-        if (denied) return denied;
-        const closed = { ...stored, ...closePatch };
-        normalizeEmptyEmbedding(closed);
-        const result = storageResult(await table.put(closed, c));
-        return result instanceof Response ? result : "staged";
-      });
-    } catch {
-      return skillUpdateUnconfirmedFailure();
-    }
-    if (applied instanceof Response) return (await undo()) ?? applied;
-  }
-  return (await undo()) ?? skillUpdateNotClosedRefusal(SKILL_UPDATE_CLOSE_ATTEMPTS);
+  return confirmSkillClose({
+    ctx,
+    table,
+    expected: predecessor,
+    closePatch,
+    authorize,
+    compensate: () => compensateUnlandedSkillUpdate({ ctx, subjectId, successor, versionId }),
+    confirmEffect: confirmsSingleHead,
+    refusal: () => skillUpdateNotClosedRefusal(SKILL_UPDATE_CLOSE_ATTEMPTS),
+    unconfirmed: skillUpdateUnconfirmedFailure,
+  });
 }
 
 /**
