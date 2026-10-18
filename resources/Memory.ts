@@ -1488,7 +1488,7 @@ async function confirmSkillDelete(args: {
         if (!sameStoredRow(stored, closedRow)) return storedRowChangedRefusal("Memory");
         const denied = await authorizeSkillOwners(ctx, auth, [stored], c);
         if (denied) return denied;
-        const closed = { ...stored, validTo: now, updatedAt: now };
+        const closed = { ...stored, skillSubjectId: subjectId, validTo: now, updatedAt: now };
         normalizeEmptyEmbedding(closed);
         const result = storageResult(await table.put(closed, c));
         if (result instanceof Response) throw result;

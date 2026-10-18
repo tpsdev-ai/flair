@@ -125,12 +125,16 @@ async function withPaused(point: string, trigger: () => Promise<Response>, compe
 }
 
 /** Commit a newer full record to the skill row, outside the version write lock. */
-async function commitNewerSkillWrite(id: string, content: string): Promise<void> {
+async function commitNewerSkillWrite(
+  id: string,
+  content: string,
+  shape: (row: Record<string, any>) => Record<string, any> = (row) => row,
+): Promise<void> {
   const current = await memoryRow(id);
   expect(current, "the skill row is missing before the competing write").not.toBeNull();
   await ops({
     operation: "put", database: "flair", table: "Memory",
-    records: [{ ...current, content, updatedAt: now() }],
+    records: [shape({ ...current, content, updatedAt: now() })],
   });
   expect((await memoryRow(id))?.content, "the competing write is not visible while the DELETE is paused").toBe(content);
 }
@@ -241,7 +245,9 @@ describe("flair#2642 — a skill DELETE confirms the version close before succes
     const { response, paused, released } = await withPaused(
       "skill-close-staged",
       () => call(A, "DELETE", memPath(id)),
-      () => commitNewerSkillWrite(id, "v2-committed-during-delete"),
+      // The competing full write carries no subject link, so the retried
+      // close (not the dropped first close) is what stamps it.
+      () => commitNewerSkillWrite(id, "v2-committed-during-delete", ({ skillSubjectId: _drop, ...rest }) => rest),
     );
     expect(paused, "the skill DELETE was not paused").toBe(true);
     expect(released).toBe("go");
@@ -254,6 +260,7 @@ describe("flair#2642 — a skill DELETE confirms the version close before succes
     // A 200 confirms the row is closed.
     expect(typeof row?.validTo, `200 with the skill head still open: ${JSON.stringify({ row, response: text, head })}`).toBe("string");
     expect(row?.content, "the close did not keep the row the newer write left").toBe("v2-committed-during-delete");
+    expect(row?.skillSubjectId, "the retried close did not keep the subject link").toBe(id);
     expect(head?.kind, JSON.stringify(versions)).toBe("delete");
     expect(head?.rowId, JSON.stringify(versions)).toBe(id);
     expect(versions.map((v) => v.kind), JSON.stringify(versions)).toEqual(["create", "delete"]);
