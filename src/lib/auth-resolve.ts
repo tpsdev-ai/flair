@@ -147,6 +147,10 @@ export function readAdminPassFileSecure(path: string): string {
 /** Thrown by `resolveAdminPassFromSources` when two credential sources are given at once. */
 export class AdminPassSourceError extends Error {}
 
+export class AdminPassEmptyError extends Error {
+  override name = "AdminPassEmptyError";
+}
+
 /**
  * Resolve an admin password from the credential sources a command exposes, in
  * the precedence its usage text states: an explicit option — `--admin-pass-file`
@@ -160,9 +164,7 @@ export class AdminPassSourceError extends Error {}
  * with a message naming the path and its mode.
  *
  * Returns "" when no source is set, so the caller owns its own "credential
- * required" message; throws `AdminPassSourceError` on a conflict, or
- * `readAdminPassFileSecure`'s error when the file is missing, empty or too
- * open. Neither message carries the password value.
+ * required" message.
  */
 export function resolveAdminPassFromSources(input: {
   adminPassFile?: string;
@@ -170,14 +172,20 @@ export function resolveAdminPassFromSources(input: {
   envPass?: string;
 }): string {
   const { adminPassFile, adminPass, envPass } = input;
-  if (adminPassFile && adminPass) {
+  if (adminPassFile !== undefined && adminPass !== undefined) {
     throw new AdminPassSourceError(
       "--admin-pass and --admin-pass-file cannot be combined; pass exactly one. " +
         "Prefer --admin-pass-file: it keeps the password out of shell history and the process list.",
     );
   }
-  if (adminPassFile) return readAdminPassFileSecure(adminPassFile);
-  if (adminPass) return adminPass;
+  if (adminPassFile !== undefined) {
+    if (adminPassFile === "") throw new AdminPassEmptyError("--admin-pass-file must not be empty");
+    return readAdminPassFileSecure(adminPassFile);
+  }
+  if (adminPass !== undefined) {
+    if (adminPass === "") throw new AdminPassEmptyError("--admin-pass must not be empty");
+    return adminPass;
+  }
   return envPass ?? "";
 }
 

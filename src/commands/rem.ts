@@ -807,6 +807,10 @@ export function register(program: Command): void {
     .option("--flair-url <url>", "Flair HTTP URL the runner will hit (default http://127.0.0.1:<port>)")
     .option(ADMIN_PASS_FILE_FLAG, "Absolute path of the owner-only admin-password file the shim passes to run-once (default: ~/.flair/admin-pass)")
     .action(async (opts: any) => {
+      if (opts.adminPassFile === "") {
+        console.error("Error: --admin-pass-file must not be empty");
+        process.exit(1);
+      }
       const agentId = opts.agent || process.env.FLAIR_AGENT_ID;
       if (!agentId) {
         console.error("Error: --agent or FLAIR_AGENT_ID env required");
@@ -912,10 +916,10 @@ export function register(program: Command): void {
         });
       } catch (err: any) {
         console.error(`Error: ${err.message}`);
-        if (opts.adminPassFile) {
+        if (opts.adminPassFile !== undefined) {
           const remedy = err instanceof AdminPassSourceError
             ? ""
-            : ` Provide an owner-only (chmod 600), non-empty admin password file at ${opts.adminPassFile}, then re-run \`flair rem nightly run-once\`.`;
+            : ` Provide an owner-only (chmod 600), non-empty admin password file${opts.adminPassFile === "" ? " via --admin-pass-file <path>" : ` at ${opts.adminPassFile}`}, then re-run \`flair rem nightly run-once\`.`;
           console.error(`Dedup:      NOT RUN — ${err.message}${remedy}`);
         }
         process.exit(1);
