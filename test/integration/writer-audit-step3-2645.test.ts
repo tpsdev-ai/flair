@@ -137,23 +137,24 @@ async function withPausedBackground(point: string, trigger: () => Promise<Respon
   return { ...result, released };
 }
 
-/** Read the write-back attempts recorded for one row, waiting until two land. */
+/** Wait for attempt 2's settled skip, then return the recorded attempt starts. */
 async function attemptsFor(id: string, ms: number): Promise<number[]> {
   const path = join(pauseDir, "attempts.write-back");
   const deadline = Date.now() + ms;
   let mine: number[] = [];
   while (Date.now() < deadline) {
     try {
-      mine = readFileSync(path, "utf8").split("\n").filter(Boolean)
-        .filter((line) => line.split("\t")[1] === id)
-        .map((line) => Number(line.split("\t")[2]));
+      const records = readFileSync(path, "utf8").split("\n").filter(Boolean)
+        .map((line) => line.split("\t"))
+        .filter((fields) => fields[1] === id);
+      mine = records.filter((fields) => fields[3] === undefined).map((fields) => Number(fields[2]));
+      if (records.some((fields) => fields[2] === "2" && fields[3] === "skipped")) return mine;
     } catch {
       mine = [];
     }
-    if (mine.length >= 2) return mine;
     await new Promise((r) => setTimeout(r, 25));
   }
-  return mine;
+  throw new Error(`Timed out waiting for write-back attempt 2's terminal skipped outcome for ${id}; starts: ${mine}`);
 }
 
 beforeAll(async () => {
@@ -260,9 +261,7 @@ describe("flair#2645 — MemoryReflect source stamp retry", () => {
     expect(released).toBe("go");
     const text = await response.text();
     expect(response.status, text.slice(0, 300)).toBe(200);
-    // The attempt log is the retry-sensitive marker: attempt 1's write is
-    // aborted by the committed-row confirmation, and attempt 2 re-reads the
-    // changed row and skips it because `content` is a gathered field.
+    // Wait for attempt 2's terminal skipped outcome before reading the row.
     const attempts = await attemptsFor(id, 10_000);
     expect(attempts, "the stamp did not run a second attempt").toEqual([1, 2]);
     const row = await rowById("Memory", id);
