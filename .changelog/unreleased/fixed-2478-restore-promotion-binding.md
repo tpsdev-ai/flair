@@ -1,0 +1,1 @@
+- Restore verification compares the promotion content binding, so a restore that drops it fails instead of verifying clean.

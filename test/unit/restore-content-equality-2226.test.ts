@@ -106,6 +106,19 @@ describe("restore verifies preserved content (#2226)", () => {
     refused(await run(archive, [{ method: "GET", path: "/Memory/m1", body: stale }]), "m1", "flint", "tags");
   });
 
+  test("a restore that drops the promotion content binding fails, naming the field", async () => {
+    const archiveAgent = { id: "agent-a" };
+    const archived = {
+      id: "m1", agentId: "agent-a", content: "same",
+      promotionStatus: "approved", promotedAt: "2020-01-01T00:00:00.000Z", promotedBy: "agent-b",
+      promotionContentHash: "a".repeat(64),
+    };
+    const restored = { ...archived, promotionContentHash: null };
+    expect(comparePreservedFields("Memory", archived, restored)).toEqual(["promotionContentHash"]);
+    const archive = { version: 1, agents: [archiveAgent], souls: [], memories: [archived] };
+    refused(await run(archive, [{ method: "GET", path: "/Memory/m1", body: restored }]), "m1", "promotionContentHash");
+  });
+
   test("a stale Soul value fails, naming the field", async () => {
     const archive = {
       version: 1, agents: [agent], memories: [],
