@@ -96,6 +96,14 @@ async function call(auth: TestAgent, method: string, path: string, body?: unknow
 
 const memPath = (id: string) => `/Memory/${encodeURIComponent(id)}`;
 
+async function skillEventsOf(subjectId: string): Promise<any[]> {
+  const rows = await ops({
+    operation: "search_by_value", database: "flair", table: "OrgEvent",
+    search_attribute: "kind", search_value: "skill.changed", get_attributes: ["*"],
+  });
+  return (rows as any[]).filter((event) => JSON.parse(event.detail).subjectId === subjectId);
+}
+
 function skillBody(id: string, content: string, extra: Record<string, unknown> = {}) {
   return { id, agentId: A.id, content, trigger: `when to ${content}`, tags: ["skill"], durability: "persistent", ...extra };
 }
@@ -277,6 +285,30 @@ describe("flair#2645 — a skill UPDATE confirms the predecessor close before su
     expect(seen.committed, "the successor was not committed before the post-commit check").toBe("v2");
   }, 120_000);
 
+  it("a superseding POST over REST appends exactly one skill.changed event, for the version it commits", async () => {
+    const predecessorId = nextId("post-event");
+    const created = await call(A, "PUT", memPath(predecessorId), skillBody(predecessorId, "v1"));
+    expect(created.status, (await created.text()).slice(0, 300)).toBeLessThan(300);
+    const before = await skillEventsOf(predecessorId);
+    expect(before.map((event) => event.refId), "the create did not append one event").toEqual([(await versionsOf(predecessorId))[0]?.id]);
+    const successorId = nextId("post-event-successor");
+    const response = await call(A, "POST", "/Memory", skillBody(successorId, "v2", { supersedes: predecessorId }));
+    const text = await response.text();
+    expect(response.status, text.slice(0, 300)).toBe(200);
+    expect(JSON.parse(text).id).toBe(successorId);
+
+    const versions = await versionsOf(predecessorId);
+    expect(versions.map((v) => v.kind), JSON.stringify(versions)).toEqual(["create", "update"]);
+    expect(versions[1].memoryId).toBe(successorId);
+    const after = await skillEventsOf(predecessorId);
+    const added = after.filter((event) => !before.some((prior) => prior.id === event.id));
+    expect(added.map((event) => event.refId), JSON.stringify(after)).toEqual([versions[1].id]);
+    expect(added[0].id).toBe(`instruction-change:${versions[1].id}`);
+    expect(added[0].scope).toBe(A.id);
+    expect(JSON.parse(added[0].detail).changeKind).toBe("update");
+    expect(after).toHaveLength(2);
+  }, 120_000);
+
   it("a completed later update of the same skill confirms the earlier update as superseded in order", async () => {
     const id = nextId("superseded-in-order");
     const successorId = nextId("superseded-first");
@@ -370,6 +402,7 @@ describe("flair#2645 — a skill UPDATE confirms the predecessor close before su
     expect((await memoryRow(id))?.content).toBe("competitor-3");
     expect(await memoryRow(successorId)).toBeNull();
     expect((await versionsOf(id)).map((v) => v.kind)).toEqual(["create"]);
+    expect((await skillEventsOf(id)).map((e) => e.refId), "the compensation left the update's event").toEqual((await versionsOf(id)).map((v) => v.id));
     expect(await pointerRow(id), "refused update lost or changed the predecessor pointer").toEqual(pointerBefore);
     expect(await liveHeads(id)).toEqual([id]);
   }, 120_000);
@@ -542,6 +575,7 @@ describe("flair#2645 — a skill UPDATE confirms the predecessor close before su
     expect(row?.content).toBe("retry keeps this content");
     expect(await memoryRow(successorId)).toBeNull();
     expect((await versionsOf(headId)).map((v) => v.kind)).toEqual(["create"]);
+    expect((await skillEventsOf(headId)).map((e) => e.refId), "the compensation left the update's event").toEqual((await versionsOf(headId)).map((v) => v.id));
     expect(await liveHeads(headId)).toEqual([headId]);
   }, 120_000);
 
