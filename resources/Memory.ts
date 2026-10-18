@@ -2329,7 +2329,7 @@ export class Memory extends (databases as any).flair.Memory {
           const persistDenial = await persistPointerRow(pointer.row, c);
           if (persistDenial) return persistDenial;
         }
-        // Test-only: holds the POST after its row and pointer are staged, before
+        // Test-only: holds the POST after its row and any pointer are staged, before
         // the transaction commits (flair#2656).
         const stagedPause = txnPausePoint("memory-post-staged");
         if (stagedPause) await stagedPause;
