@@ -6,11 +6,12 @@
  * Each case holds the writer at a test-only pause point, commits a competing
  * row through the lock-bypassing operations API, releases the writer, and
  * reads the committed state back. The source-stamp case also reads the attempt
- * log the write-back helper appends when fault injection is armed, so the
- * retry itself is asserted rather than inferred from the final row.
+ * log the write-back helper appends with fault injection armed and a pause
+ * directory configured, so the retry is asserted from the attempt log.
  *
- * Real Harper, ephemeral instance; every URL is asserted to be this test's own
- * instance before the first call.
+ * Before this test's own HTTP requests, the shared guard checks a live spawned
+ * process, an owned temporary install directory, and distinct 127.0.0.1 ports
+ * outside the denylist. startHarper probes readiness before that check.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
@@ -21,6 +22,7 @@ import nacl from "tweetnacl";
 import { getModelId } from "../../resources/embeddings-provider.ts";
 import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { ensureFlairAgentRole, ensureFlairAgentUser } from "../../src/cli";
+import { assertOwnInstance } from "../helpers/own-harper-instance";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array }
 const mkAgent = (id: string): TestAgent => {
@@ -38,15 +40,6 @@ let pauseDir = "";
 let stubDir = "";
 let seq = 0;
 const nextId = (label: string) => `wa3-${label}-${sfx}-${++seq}`;
-
-function assertOwnInstance(h: HarperInstance): void {
-  for (const url of [h.httpURL, h.opsURL]) {
-    const u = new URL(url);
-    expect(["127.0.0.1", "localhost"], url).toContain(u.hostname);
-    expect(["9925", "9926"], `${url} must be this test's own Harper`).not.toContain(u.port);
-  }
-  expect(h.process?.pid).toBeGreaterThan(0);
-}
 
 const basicAuth = () => "Basic " + btoa(`${harper.admin.username}:${harper.admin.password}`);
 
@@ -236,7 +229,7 @@ describe("flair#2645 — InstructionVersion append after its id is computed", ()
     expect(released).toBe("go");
     const text = await response.text();
     // SAFE: the colliding append fails the transaction and rolls the Soul write back.
-    expect(response.status, text.slice(0, 300)).toBeGreaterThanOrEqual(300);
+    expect(response.status, text.slice(0, 300)).toBe(500);
     expect(JSON.parse(text).error, text.slice(0, 300)).toBe("instruction_version_append_failed");
     const version = await rowById("InstructionVersion", versionRowId);
     expect(version?.actorId, "the append overwrote the row at its computed id").toBe("audit-competitor");

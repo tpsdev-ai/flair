@@ -111,8 +111,7 @@ export const WRITE_BACK_ATTEMPTS = 3;
 
 /**
  * Test-only: append the attempt number of a write-back before each attempt
- * when fault injection is armed. Inert otherwise. Used by the write-back retry
- * test to read the attempt numbers (flair#2645 audit).
+ * when fault injection is armed and a pause directory is configured.
  */
 function noteTestAttempt(label: string, id: string, attempt: number): void {
   if (process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION !== "1") return;
@@ -121,7 +120,7 @@ function noteTestAttempt(label: string, id: string, attempt: number): void {
   try {
     appendFileSync(join(dir, "attempts.write-back"), `${label}\t${id}\t${attempt}\n`);
   } catch {
-    // Test-only instrumentation never changes a write's outcome.
+    // Append errors are ignored.
   }
 }
 
