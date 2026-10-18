@@ -318,9 +318,10 @@ no home: such a row takes no key change from a peer and cannot acquire a
 non-empty home through a sync.
 
 A sync does not set or change `role: "admin"` or `admin: true`: a new row is
-stored without them, and an existing row keeps its stored `role` and `admin`
-when the record's would change its admin state. A `role` label follows the
-merge when the stored and incoming roles are both non-admin. A record that would
+stored without them, and an existing row keeps its stored admin state (whether
+`role` is `"admin"` and whether `admin` is `true`) when the record's would change
+it. A `role` label follows the merge when the stored and incoming roles are both
+non-admin. A record that would
 create a row whose id the receiving instance's `FLAIR_ADMIN_AGENTS` names is
 skipped as `agent_admin_id_not_federated`.
 
