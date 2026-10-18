@@ -430,6 +430,28 @@ describe("dedup co-gate — pure math (resources/dedup.ts)", () => {
 
 // ─── #526 replay + never-silent-loss ─────────────────────────────────────────
 describe("Memory.post — server-side dedup gate never suppresses a write", () => {
+  it("a joined POST leaves its row staged until its owner commits", async () => {
+    const ctx: any = { request: agentCtx("agent-1") };
+    const memory: any = new (Memory as any)();
+    memory.getContext = () => ctx;
+    const stagedPost = spyOn(BaseMemory, "post").mockImplementation(async (content: any, shared: any) => {
+      shared.transaction.staged.push(structuredClone(content));
+      return { id: content.id };
+    });
+    try {
+      await (globalThis as any).transaction(ctx, async () => {
+        const result = await memory.post({ id: "joined-post", agentId: "agent-1", content: "joined post text" });
+        expect(result instanceof Response).toBe(false);
+        expect(result.id).toBe("joined-post");
+        expect(ctx.transaction.open).toBe(1);
+        expect(memoryStore.has("joined-post")).toBe(false);
+      });
+    } finally {
+      stagedPost.mockRestore();
+    }
+    expect(memoryStore.get("joined-post")?.content).toBe("joined post text");
+  });
+
   it("a POST whose committed confirmation read fails answers 503 write_outcome_unknown", async () => {
     const original = BaseMemory.get;
     const { resetMemoryWriteOutcomeUnknownForTest } = await import("../../resources/memory-write-lock.ts");

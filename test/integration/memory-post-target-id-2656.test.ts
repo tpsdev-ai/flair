@@ -312,4 +312,27 @@ describe("flair#2656 — a Memory POST's caller-supplied target id", () => {
       expect(refusedTruthfully(observation), `${label}: ${JSON.stringify(observation)}`).toBe(true);
     }
   }, 300_000);
+
+  it("an uncontended owned POST confirms its ordinary or skill row", async () => {
+    for (const skill of [false, true]) {
+      const id = nextId(skill ? "owned-skill" : "owned-ordinary");
+      const response = await callInProcess({
+        id, agentId: A.id, content: `owned content ${id}`,
+        ...(skill ? { trigger: "when owned", tags: ["skill"], metadata: JSON.stringify({ name: id }) } : {}),
+      });
+      const text = await response.text();
+      expect(response.status, text.slice(0, 300)).toBeLessThan(300);
+      expect(JSON.parse(text).id).toBe(id);
+      const row = await memoryRow(id);
+      expect(row?.id).toBe(id);
+      expect(row?.content).toBe(`owned content ${id}`);
+      expect(typeof row?.instanceToken).toBe("string");
+      expect(row?.instanceToken.length).toBeGreaterThan(0);
+      if (skill) {
+        expect(row?.trigger).toBe("when owned");
+        expect(row?.metadata).toBe(JSON.stringify({ name: id }));
+        expect(row?.tags).toContain("skill");
+      }
+    }
+  }, 120_000);
 });

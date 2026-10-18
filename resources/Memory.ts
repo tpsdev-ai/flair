@@ -335,13 +335,12 @@ async function verifyWrittenRow(
   fallbackId: any,
   identity: { expectedToken: unknown },
   fields: readonly string[] = POSTCOMMIT_VERIFY_FIELDS,
-  readContext: any = {},
 ): Promise<{ mismatch?: boolean; unknown?: boolean }> {
   const id = declared?.id ?? fallbackId;
   if (id === undefined || id === null) return { unknown: true };
   let row: any;
   try {
-    row = await table.get(id, readContext);
+    row = await table.get(id, {});
   } catch {
     return { unknown: true };
   }
@@ -2298,18 +2297,16 @@ export class Memory extends (databases as any).flair.Memory {
       if (skillResult instanceof Response) return skillWriteResponse(skillResult, redactedValues, skillStaged.text);
       if (!postJoinsRequestTxn) {
         await pausePostVerification(true);
-      }
-      const skillVerified = await verifyWrittenRow(
-        (databases as any).flair.Memory,
-        skillStaged.row,
-        skillResult.id,
-        { expectedToken: skillStaged.row?.instanceToken },
-        [...POSTCOMMIT_VERIFY_FIELDS, "summary", "trigger", "metadata", "tags"],
-        postJoinsRequestTxn ? ctx : {},
-      );
-      if (skillVerified.unknown || skillVerified.mismatch) {
-        if (postJoinsRequestTxn) abortRequestTransaction(ctx);
-        return skillVerified.unknown ? writeOutcomeUnknownFor(skillResult.id) : storedRowChangedRefusal("Memory");
+        const skillVerified = await verifyWrittenRow(
+          (databases as any).flair.Memory,
+          skillStaged.row,
+          skillResult.id,
+          { expectedToken: skillStaged.row?.instanceToken },
+          [...POSTCOMMIT_VERIFY_FIELDS, "summary", "trigger", "metadata", "tags"],
+        );
+        if (skillVerified.unknown || skillVerified.mismatch) {
+          return skillVerified.unknown ? writeOutcomeUnknownFor(skillResult.id) : storedRowChangedRefusal("Memory");
+        }
       }
       await markDerivedSourcesReflected(content);
       return skillWriteResponse(skillResult, redactedValues, skillStaged.text);
@@ -2358,14 +2355,11 @@ export class Memory extends (databases as any).flair.Memory {
     if (postResult instanceof Response) return writeResultResponse(postResult);
     if (!postJoinsRequestTxn) {
       await pausePostVerification(false);
-    }
-    {
       const verified = await verifyWrittenRow(
         (databases as any).flair.Memory, stagedRow, postRowId, { expectedToken: stagedRow.instanceToken },
-        POSTCOMMIT_VERIFY_FIELDS, postJoinsRequestTxn ? ctx : {},
+        POSTCOMMIT_VERIFY_FIELDS,
       );
       if (verified.unknown || verified.mismatch) {
-        if (postJoinsRequestTxn) abortRequestTransaction(ctx);
         return verified.unknown ? writeOutcomeUnknownFor(content.id ?? postRowId) : storedRowChangedRefusal("Memory");
       }
     }
