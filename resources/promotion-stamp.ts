@@ -60,7 +60,7 @@ export async function stampMemoryPromotion(
     table,
     id,
     (stored) => ({ write: stamp(stored) }),
-    { ctx: enumerationContext, label: "promotion-stamp", pausePre: () => txnPausePoint("promotion-stamp-pre"), pausePoint: () => txnPausePoint("promotion-stamp"), matchFields: ["content"], expectedRow: selected },
+    { ctx: enumerationContext, label: "promotion-stamp", pausePre: () => txnPausePoint("promotion-stamp-pre"), pausePoint: () => txnPausePoint("promotion-stamp"), pauseBeforeCommit: () => txnPausePoint("promotion-stamp-commit"), matchFields: ["content"], expectedRow: selected },
   );
   if ("write" in outcome) noteMemoryUpsert(outcome.write);
 }

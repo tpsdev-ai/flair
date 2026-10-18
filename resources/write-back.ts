@@ -56,6 +56,11 @@ export interface WriteBackOptions {
    *  the interleaving where this write's transaction opens first. Named at
    *  the call site, like `pausePre`. */
   pausePoint?: WriteBackPause;
+  /** Test-only pause between the final pre-commit confirmation and the owned
+   *  transaction's commit — the window where a newer write can commit and
+   *  Harper can drop this write's effect (flair#2653). Named at the call site,
+   *  like `pausePoint`. */
+  pauseBeforeCommit?: WriteBackPause;
 }
 
 /** The fields of `expectedRow` (or of the helper's own first read) it compares
@@ -108,12 +113,12 @@ export function writeBackIdentity(row: Record<string, any>): Record<string, unkn
 export const WRITE_BACK_ATTEMPTS = 3;
 
 /**
- * The helper's named refusal: the row changed and nothing was written. Both
- * checks that lead to it (the in-transaction comparison, and the committed-row
- * confirmation after the write is staged) run inside the owned transaction
- * before any commit is submitted, and their throw aborts that transaction, so
- * its staged write is discarded. Whichever check fails, the outcome is known:
- * not written.
+ * The helper's named refusal: the row changed and this write's effect is not
+ * the committed state. The in-transaction comparison and the committed-row
+ * confirmation before the commit both abort the transaction, so their staged
+ * write is discarded; a newer write that supersedes this one can also leave
+ * its effect absent after the commit. Whichever check fails, the caller is
+ * never told the write succeeded.
  */
 export class WriteBackConflictError extends Error {
   readonly id: string;
@@ -284,8 +289,9 @@ export async function writeBackCommittedRow(
     if (pre) await pre;
   }
   for (let attempt = 1; ; attempt++) {
+    let decision: WriteBackPlan;
     try {
-      return await withOwnedTransaction(opts.ctx, async (c) => {
+      decision = await withOwnedTransaction(opts.ctx, async (c) => {
         const row = await table.get(id, c);
         if (opts.matches && !opts.matches(row)) return { skip: true };
         const decision = await plan(row);
@@ -299,11 +305,46 @@ export async function writeBackCommittedRow(
         if ("update" in decision) await applyFieldUpdate(table, id, decision.update, c);
         else await table.put(decision.write, c);
         await confirmCommittedRow(table, id, (committed) => isDeepStrictEqual(committed, row));
+        // Test-only: holds this write after its last pre-commit confirmation,
+        // before the transaction commits (flair#2653).
+        if (opts.pauseBeforeCommit) {
+          const pause = opts.pauseBeforeCommit();
+          if (pause) await pause;
+        }
         return decision;
       });
     } catch (err) {
       if (!(err instanceof CommittedRowChanged)) throw err;
       if (attempt >= attempts) throw new WriteBackConflictError(opts.label, id, attempts);
+      continue;
     }
+    if ("skip" in decision) return decision;
+    // flair#2653: the transaction's commit is not proof that the write landed.
+    // A newer write committing in the window above can make Harper resolve the
+    // commit while discarding this write. Re-read the committed store in a
+    // fresh context; an unreadable read is a failure, never a pass.
+    const committed = await table.get(id, {});
+    if (!committedShowsWrite(committed, basis, decision)) {
+      if (attempt >= attempts) throw new WriteBackConflictError(opts.label, id, attempts);
+      continue;
+    }
+    return decision;
   }
+}
+
+/**
+ * Does the committed row show this attempt's write? Its identity is the row
+ * this attempt wrote (an update keeps the basis's identity); each field the
+ * plan wrote holds its staged value. A newer write that changed anything the
+ * plan wrote fails the check, while a concurrent field-only write to a field
+ * the plan left alone does not (flair#2653).
+ */
+function committedShowsWrite(committed: any, basis: any, decision: WriteBackPlan): boolean {
+  if ("skip" in decision) return true;
+  if ("update" in decision) {
+    if (!sameStoredRow(committed, basis)) return false;
+    return Object.entries(decision.update).every(([field, value]) => isDeepStrictEqual(committed?.[field], value));
+  }
+  if (!sameStoredRow(committed, decision.write)) return false;
+  return Object.entries(decision.write).every(([field, value]) => isDeepStrictEqual(committed?.[field], value));
 }

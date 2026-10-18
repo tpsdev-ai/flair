@@ -25,6 +25,9 @@ type Row = { id: string } & Record<string, unknown>;
  * A fake Memory table with the helper's staged-write / committed-read model.
  * `competing` (if set) runs just after a write is staged and before the
  * committed re-read, modelling a competing writer committing in that window.
+ * `afterCommit` (if set) runs after the staged write lands, modelling a newer
+ * write that commits in the window between the final pre-commit confirmation
+ * and the transaction's commit (flair#2653).
  */
 function stagedTable(seed: Row[]) {
   const store = new Map<string, Row>(seed.map((r) => [r.id, { ...r }]));
@@ -32,10 +35,12 @@ function stagedTable(seed: Row[]) {
   let read: Row | null = null;
   const commits: Row[] = [];
   let competing: (() => void) | undefined;
+  let afterCommit: (() => void) | undefined;
   let puts = 0;
   const writes: { method: "put" | "update"; id: string; fields: string[] }[] = [];
   const table = {
     setCompeting(fn: (() => void) | undefined) { competing = fn; },
+    setAfterCommit(fn: (() => void) | undefined) { afterCommit = fn; },
     async get(id: string, _ctx?: unknown): Promise<Row | null> {
       if (staged !== null) {
         const row = store.get(id);
@@ -43,6 +48,7 @@ function stagedTable(seed: Row[]) {
         if (committed !== null && read !== null && isDeepStrictEqual(committed, read)) {
           store.set(id, { ...staged });
           commits.push({ ...staged });
+          afterCommit?.();
         }
         staged = null;
         read = null;
@@ -136,6 +142,61 @@ describe("writeBackCommittedRow — abort and retry from the committed row", () 
     expect(store.get("m1")?.content).toBe(`competing-${n - 1}`); // the last competing value, never our write
     expect(WRITE_BACK_ATTEMPTS).toBe(3);
     expect(n).toBe(WRITE_BACK_ATTEMPTS); // one attempt per bounded try
+  });
+});
+
+describe("writeBackCommittedRow — the post-commit verification (flair#2653)", () => {
+  test("a write a newer commit supersedes is retried and the retried plan lands", async () => {
+    const { table, store, commits } = stagedTable([{ id: "m1", content: "a", usageCount: 0 }]);
+    let losses = 0;
+    table.setAfterCommit(() => {
+      if (losses++ > 0) return;
+      // A newer write committed in the confirmation-to-commit window: this
+      // attempt's write is discarded, the newer content stands.
+      store.set("m1", { id: "m1", content: "competing", usageCount: 0 });
+    });
+    const outcome = await writeBackCommittedRow(
+      table,
+      "m1",
+      (row: Row) => ({ update: { usageCount: Number(row.usageCount ?? 0) + 1 } }),
+      opts("post-commit"),
+    );
+    expect(outcome).toEqual({ update: { usageCount: 1 } });
+    // The retry read the newer row and folded its write around it.
+    expect(store.get("m1")).toEqual({ id: "m1", content: "competing", usageCount: 1 });
+    expect(commits).toHaveLength(2);
+  });
+
+  test("a write the committed read never shows is refused, never reported as success", async () => {
+    const { table, store, commits } = stagedTable([{ id: "m1", content: "a" }]);
+    table.setAfterCommit(() => {
+      // Every attempt's commit is superseded by a newer write of the same field.
+      store.set("m1", { id: "m1", content: "competing" });
+    });
+    await expect(
+      writeBackCommittedRow(table, "m1", (row: Row) => ({ write: { ...row, content: "written" } }), opts("post-commit-refuse")),
+    ).rejects.toThrow(WriteBackConflictError);
+    expect(store.get("m1")?.content).toBe("competing");
+    expect(commits).toHaveLength(WRITE_BACK_ATTEMPTS);
+  });
+
+  test("an unreadable post-commit confirmation is a failure, not success", async () => {
+    const row = { id: "m1", content: "a" };
+    let calls = 0;
+    const table = {
+      async get(_id: string, _ctx?: unknown): Promise<Row | null> {
+        calls++;
+        // call 1: the in-transaction read; call 2: the pre-commit confirmation;
+        // call 3: the post-commit verification read.
+        if (calls >= 3) throw new Error("committed read unavailable");
+        return { ...row };
+      },
+      async put(row: Row): Promise<Row> { return row; },
+    };
+    await expect(
+      writeBackCommittedRow(table, "m1", (stored: Row) => ({ write: { ...stored, content: "written" } }),
+        { label: "post-commit-read", expectedRow: { ...row } }),
+    ).rejects.toThrow("committed read unavailable");
   });
 });
 

@@ -231,6 +231,7 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
             matchFields: [...MEMORY_EMBEDDING_INPUT_FIELDS, "tags"],
             pausePre: () => txnPausePoint("backfill-embedding-pre"),
             pausePoint: () => txnPausePoint("backfill-embedding"),
+            pauseBeforeCommit: () => txnPausePoint("backfill-embedding-commit"),
           },
         );
         if ("update" in outcome) {

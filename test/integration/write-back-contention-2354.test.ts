@@ -73,6 +73,10 @@ async function updateRow(harper: HarperInstance, row: Record<string, unknown>): 
   const res = await adminOp(harper, { operation: "update", database: "flair", table: "Memory", records: [row] });
   return res.status;
 }
+async function putRow(harper: HarperInstance, row: Record<string, unknown>): Promise<number> {
+  const res = await adminOp(harper, { operation: "put", database: "flair", table: "Memory", records: [row] });
+  return res.status;
+}
 async function waitFor(path: string, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -172,6 +176,38 @@ afterAll(async () => {
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
   if (stubDir) rmSync(stubDir, { recursive: true, force: true });
 }, HARPER_STOP_BUDGET_MS);
+
+describe("flair#2653 — a newer write in the final-confirmation-to-commit window (real Harper)", () => {
+  it("retries a promotion stamp the commit gap dropped, and the stamp lands on the newer row", async () => {
+    const agentId = "wbc-stamp-commit-agent";
+    const stampAgent = mkAgent(agentId);
+    await seedAgent(harper, stampAgent);
+    const claim = "promotion stamp claim for the commit gap";
+    await seedCandidate(harper, agentId, { id: "wbc-stamp-cand-commit", claim, scopeTag: `adk:app:${agentId}`, sourceMemoryIds: [] });
+    const COMPETED = "competing subject for the commit gap";
+    const { response, released, paused } = await withPaused(
+      "promotion-stamp-commit",
+      () => authSend(harper, stampAgent, "POST", "/AutoPromoteCandidates", { agentId }),
+      async () => {
+        const row = await findPromotedRow(harper, agentId, claim);
+        if (!row) throw new Error(`no promoted row for ${agentId} at the commit gap`);
+        const current = await readRow(harper, row.id);
+        // A newer full write to a field the stamp does not compare. It commits
+        // in the window between the stamp's final confirmation and its commit.
+        expect(await putRow(harper, { ...current, subject: COMPETED }), "the competing full write").toBe(200);
+        return row.id as string;
+      },
+    );
+    expect(paused, "the promotion stamp was not paused at its commit gap").toBe(true);
+    expect(released, "the promotion stamp was not paused and released by this test").toBe("go");
+    expect(response.status, (await response.clone().text()).slice(0, 300)).toBeLessThan(300);
+    const row = await readRow(harper, String((await response.clone().json() as any).promoted[0]));
+    // The retry re-read the newer row and stamped it: the effect is present.
+    expect(row?.promotionStatus, "the verdict landed on the newer committed row").toBe("approved");
+    expect(row?.promotedBy).toBeTruthy();
+    expect(row?.subject, "the newer write's field is kept").toBe(COMPETED);
+  }, 120_000);
+});
 
 describe("flair#2354 — the feed ingest write-back under a concurrent change (real Harper)", () => {
   for (const point of ["feed-ingest-pre", "feed-ingest"]) {
@@ -301,6 +337,29 @@ describe("flair#2354 — the embedding backfill after a Memory write (real Harpe
       expect(row?.subject, "the PATCH that triggered the backfill is kept").toBe("backfill-subject");
     }, 180_000);
   }
+
+  it("retries the backfill when a newer full write drops its commit", async () => {
+    const id = "wbc-backfill-commit-gap";
+    await insertRow(harper, { id, agentId: reflectAgent.id, content: "backfill gap v1", contentHash: id, instanceToken: randomUUID() });
+    const COMPETED = "backfill gap subject from the newer write";
+    const { released, paused } = await withPaused(
+      "backfill-embedding-commit",
+      () => authSend(harper, reflectAgent, "PATCH", `/Memory/${id}`, { subject: "backfill gap subject" }),
+      async () => {
+        const current = await readRow(harper, id);
+        // The newer full write commits between the backfill's confirmation and
+        // its commit; the backfill's update is dropped.
+        expect(await putRow(harper, { ...current, subject: COMPETED }), "the competing full write").toBe(200);
+      },
+    );
+    expect(paused, "the backfill was not paused at its commit gap").toBe(true);
+    expect(await releaseMarker("backfill-embedding-commit", released), "the backfill was not paused and released by this test").toBe("go");
+    const row = await readUntil(id, (r) => Array.isArray(r?.embedding) && r.embedding.length > 100, 120_000);
+    console.log(`backfill commit-gap row:`, JSON.stringify({ content: row?.content, subject: row?.subject, dims: row?.embedding?.length }));
+    expect(row?.embedding?.length, "the retried backfill wrote a computed embedding").toBeGreaterThan(100);
+    expect(row?.content, "the newer write's content is kept").toBe("backfill gap v1");
+    expect(row?.subject, "the newer write's field is kept").toBe(COMPETED);
+  }, 180_000);
 });
 
 describe("flair#2354 — a self-referential derivedFrom (real Harper)", () => {
