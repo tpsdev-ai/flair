@@ -1,4 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
+import { appendFileSync } from "node:fs";
+import { join } from "node:path";
 import { withOwnedTransaction } from "./request-transaction.js";
 
 /** The narrow surface the helper needs of a Harper table: a primary-key read
@@ -106,6 +108,22 @@ export function writeBackIdentity(row: Record<string, any>): Record<string, unkn
 
 /** Attempts of a write-back before it gives up on a row that keeps changing. */
 export const WRITE_BACK_ATTEMPTS = 3;
+
+/**
+ * Test-only: append the attempt number of a write-back before each attempt
+ * when fault injection is armed. Inert otherwise. Used by the write-back retry
+ * test to read the attempt numbers (flair#2645 audit).
+ */
+function noteTestAttempt(label: string, id: string, attempt: number): void {
+  if (process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION !== "1") return;
+  const dir = process.env.FLAIR_TEST_PAUSE_DIR;
+  if (!dir) return;
+  try {
+    appendFileSync(join(dir, "attempts.write-back"), `${label}\t${id}\t${attempt}\n`);
+  } catch {
+    // Test-only instrumentation never changes a write's outcome.
+  }
+}
 
 /**
  * The helper's named refusal: the row changed and nothing was written. Both
@@ -284,6 +302,7 @@ export async function writeBackCommittedRow(
     if (pre) await pre;
   }
   for (let attempt = 1; ; attempt++) {
+    noteTestAttempt(opts.label, id, attempt);
     try {
       return await withOwnedTransaction(opts.ctx, async (c) => {
         const row = await table.get(id, c);
