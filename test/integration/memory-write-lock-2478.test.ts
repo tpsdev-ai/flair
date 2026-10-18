@@ -10,11 +10,6 @@
  * acquires the lock or answers 503 memory_busy without writing, unless an attempt
  * observes an outcome-unknown marker (503 write_outcome_unknown; the fence test).
  *
- * After a normal storage result, the ordinary owned row write verifies its
- * token and declared agentId/content/visibility/durability after commit; a
- * successful re-embed checks its token after its inner commit. Refusals and
- * storage Responses return before the read. Skill PUT has no ordinary-row verification;
- * composed promotion uses its caller's in-transaction existence check.
  * PUT and PATCH require an id before entering the lock helper.
  *
  * DETERMINISTIC ORDERING via the `memory-put-committed` / `memory-patch-committed`
@@ -448,13 +443,43 @@ describe("flair#2478 — post-commit verification on a re-embed PATCH and a lega
   }, 120_000);
 });
 
-// flair#2645: an ordinary owner PATCH verifies every declared field that
-// survives normalisation against the committed row. The old fixed list (agentId/content/
-// visibility/durability) let a tags-only PATCH answer 2xx while a newer
-// lock-bypassing full write discarded the tags. The pause holds the PATCH after
-// its commit and before its verification read; the ops API writes outside the
-// per-id lock, preserving the incarnation token so the token check passes.
-describe("flair#2645 — an ordinary owner PATCH confirms the fields it declares", () => {
+describe("flair#2645 — an ordinary owner PATCH verifies retained request fields", () => {
+  for (const replaced of [false, true]) {
+    it(`a redacted-content PATCH answers ${replaced ? "409 when a newer write replaces it" : "success when retained"}`, async () => {
+      const id = `wlk-redacted-${replaced}-${Date.now()}`;
+      await seedMemory(id, "the original text");
+      const point = "memory-patch-verify";
+      arm(point);
+      const held = patchBodyAs(owner, id, {
+        agentId: owner.id, content: `rotate ghp_${"A".repeat(36)}`,
+      });
+      try {
+        expect(await waitFor(join(pauseDir, `paused.${point}`), 30_000)).toBe(true);
+        const committed = await readRow(id);
+        expect(committed?.content).toBe("rotate [redacted]");
+        if (replaced) {
+          await opsCall({
+            operation: "update", database: "flair", table: "Memory",
+            records: [{ id, agentId: owner.id, content: "the newer content", createdAt: committed.createdAt }],
+          });
+        }
+      } finally {
+        release(point);
+      }
+      const res = await held;
+      await assertReleased(point);
+      const body = await res.json() as any;
+      if (replaced) {
+        expect(res.status, JSON.stringify(body)).toBe(409);
+        expect(body.error).toBe("stored_row_changed");
+      } else {
+        expect(res.status, JSON.stringify(body)).toBeLessThan(300);
+        expect(body.stored).toEqual({ content: "rotate [redacted]" });
+      }
+      expect((await readRow(id))?.content).toBe(replaced ? "the newer content" : "rotate [redacted]");
+    }, 120_000);
+  }
+
   it("a tags-only PATCH whose tags a newer full write discarded answers 409 stored_row_changed", async () => {
     const id = `wlk-declared-tags-${Date.now()}`;
     await seedMemory(id, "the original text", { tags: ["original-tag"] });

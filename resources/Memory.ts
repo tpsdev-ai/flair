@@ -296,8 +296,7 @@ function memoryIdRequiredResponse(): Response {
  * — the stored value stands for it. `archived` is not compared: the maintenance
  * sweep flips it as a newer field-only write, which folds around this older full
  * update instead of replacing it (flair#2470), so a differing `archived` is not
- * evidence that this write did not land. A PATCH has its own declared-field
- * snapshot (see patchDeclaredFields).
+ * evidence that this write did not land.
  */
 const POSTCOMMIT_VERIFY_FIELDS = ["agentId", "content", "visibility", "durability"] as const;
 
@@ -315,14 +314,7 @@ const PATCH_SERVER_OWNED_FIELDS = new Set<string>([
   "promotedBy",
 ]);
 
-/**
- * The fields a PATCH request declares, captured AFTER the server's own
- * normalisation and redaction (pointer inputs, undeclared attributes, server
- * stamps and `embeddedContentHash` are gone) and BEFORE it adds or overwrites
- * any field of its own. The ordinary PATCH's post-commit read compares the
- * declared fields that remain in the normalised body, not a fixed list
- * (flair#2645).
- */
+/** Request field names retained before server additions; values come from the staged write. */
 function patchDeclaredFields(content: any): string[] {
   if (!content || typeof content !== "object" || Array.isArray(content)) return [];
   return Object.keys(content).filter((field) => !PATCH_SERVER_OWNED_FIELDS.has(field));
@@ -336,8 +328,8 @@ function sameDeclaredField(stored: unknown, declared: unknown): boolean {
  * Compare the token and the declared fields after an ordinary owned row write
  * with a normal storage result, or a successful re-embed's inner commit, under
  * the lock. `fields` defaults to a PUT's POSTCOMMIT_VERIFY_FIELDS; an ordinary
- * PATCH passes the snapshot of everything its body declared (a re-embed passes an
- * empty set: its body declares only the server-owned vector refresh). Refusals,
+ * PATCH passes retained request field names and staged values (a re-embed passes
+ * an empty set). Refusals,
  * storage Responses and
  * skill PUT return before this read; composed promotion uses its caller's
  * in-transaction existence check. Return a verdict, never the stored row:
@@ -2360,10 +2352,6 @@ export class Memory extends (databases as any).flair.Memory {
     // engine returns no vector), or the re-embed writes one with its vector. A
     // PATCH that supplies its own vector retains the stored hash beside it.
     delete content.embeddedContentHash;
-    // flair#2645: the fields this request declares, after normalisation and
-    // redaction and before the server adds any of its own. The ordinary
-    // PATCH's post-commit read compares them; a re-embed declares only the
-    // server-owned vector refresh and is checked by identity.
     const declaredFields = patchDeclaredFields(content);
     // flair#2478 slice 1 — the ordinary PATCH runs in ONE owned transaction whose
     // FIRST operation is the authoritative stored read; the read, the decision
@@ -2372,8 +2360,6 @@ export class Memory extends (databases as any).flair.Memory {
     // it share this commit. (A re-embed PATCH writes in its own inner owned
     // transaction instead, which also commits before the lock releases.)
     const ctx = (this as any).getContext?.();
-    // flair#2467: the post-redaction text fields this PATCH stages, for the response.
-    let patchStaged: StoredMemoryText = {};
     const patched = await withOwnedTransaction(ctx, async (c) => {
       // The FIRST operation inside the owned transaction: the authoritative
       // stored read, by the URL-BOUND target id (a body id that disagrees with
@@ -2600,9 +2586,6 @@ export class Memory extends (databases as any).flair.Memory {
           if (denied) return denied;
         }
       }
-      // flair#2467: a PATCH commits only the fields in its body; these are the
-      // post-redaction text fields among them, for the response.
-      patchStaged = storedMemoryText(content, suppliedText);
       // flair#2478: a stored row that has a token keeps it (the
       // body's own was stripped above); a legacy row without one, or a row this
       // PATCH creates (an admin or internal caller only), is given a fresh one
@@ -2629,9 +2612,10 @@ export class Memory extends (databases as any).flair.Memory {
       // flair#2561: a Response from the storage layer is not reported
       // (storageResult); it is returned from this transaction as the
       // write_response_withheld refusal.
-      const result = storageResult(await super.patch(content, query));
+      const staged = structuredClone(content);
+      const result = storageResult(await super.patch(staged, query));
       if (result instanceof Response) return result;
-      return { result, identity: { expectedToken }, rowId: existingForSkill?.id, stampNote };
+      return { result, staged, identity: { expectedToken }, rowId: existingForSkill?.id, stampNote };
     });
     // flair#2561: a refusal this path built is returned as built; a
     // successful Response is replaced by the write_response_withheld refusal
@@ -2647,15 +2631,12 @@ export class Memory extends (databases as any).flair.Memory {
     // Verify the ordinary owned PATCH after a normal storage result; refusals
     // and storage Responses return above before this read. A successful re-embed is also
     // checked after its inner owned commit; refusals return above.
-    // Compare the token and (for an ordinary PATCH) every declared field that
-    // survives normalisation; a declared field that a newer write discarded
-    // refuses 409. A
-    // re-embed declares only the vector refresh the server owns, so its check is
-    // the row's identity. A failed read is an unknown outcome (503).
+    // Compare ordinary PATCH fields against the staged write, including storage coercion.
     // Test-only: holds the PATCH after its commit, before the verification read.
     const verifyPause = txnPausePoint("memory-patch-verify");
     if (verifyPause) await verifyPause;
-    const verified = await verifyCommittedWrite((databases as any).flair.Memory, content, (this as any).getId?.(), patched.identity, reembedRequest ? [] : declaredFields);
+    const staged = "staged" in patched ? patched.staged : content;
+    const verified = await verifyCommittedWrite((databases as any).flair.Memory, staged, (this as any).getId?.(), patched.identity, reembedRequest ? [] : declaredFields);
     if (verified.unknown) return writeOutcomeUnknownFor(content?.id ?? (this as any).getId?.());
     if (verified.mismatch) return storedRowChangedRefusal("Memory");
     // A verified re-embed answers with its own response (it declares no text
@@ -2663,7 +2644,7 @@ export class Memory extends (databases as any).flair.Memory {
     if ((patched as any).reembed) return (patched as any).reembed;
     // As in put(): the verified row gates the answer; the response is the
     // PATCH's own result, never the stored row (see put()).
-    return rowWriteResponse((patched as any).result, content?.id ?? (this as any).getId?.() ?? (patched as any).rowId, redactedValues, patchStaged);
+    return rowWriteResponse((patched as any).result, content?.id ?? (this as any).getId?.() ?? (patched as any).rowId, redactedValues, storedMemoryText(staged, suppliedText));
   }
 
   /**
