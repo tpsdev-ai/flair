@@ -811,7 +811,11 @@ describe("flair#2561 — `stored` reports only the string-valued text fields the
       await oldPut.call(BaseMemory, content, ctx);
       return result();
     };
-    BaseMemory.prototype.patch = async () => result();
+    BaseMemory.prototype.patch = async function (content: any) {
+      const patched = result();
+      if (!(patched instanceof Response)) await oldPatch.call(this, content);
+      return patched;
+    };
     try {
       for (const adapter of ["post", "create"]) {
         if (adapter === "create") (Memory as any).create = async () => result();

@@ -85,6 +85,9 @@ export function mockTransaction(ctx: any, cb: (txn: any) => any): any {
     staged,
     addWrite(write: any) { staged.push(() => write.commit(1, null)); return write; },
     aborted: false,
+    addWrite(write: any) {
+      staged.push(() => write.commit(0, write.store.getEntry(write.key)));
+    },
     abort() { this.open = 0; this.aborted = true; staged.length = 0; },
     commit() { this.open = 0; for (const f of staged) f(); staged.length = 0; },
   };
@@ -234,20 +237,20 @@ function mhsGet(target?: any) {
   const id = typeof target === "string" ? target : (target?.memoryId ?? target?.id);
   return Promise.resolve(harnessState.pointerStore.get(id) ?? null);
 }
-function mhsPut(row: any) {
+function mhsPut(row: any, ctx?: any) {
   if (harnessState.failNextPointerPut) {
     harnessState.failNextPointerPut = false;
     return Promise.reject(new Error("boom: pointer store down"));
   }
-  harnessState.pointerStore.set(row.memoryId, { ...row });
+  stageOrRun(ctx, () => harnessState.pointerStore.set(row.memoryId, { ...row }));
   return Promise.resolve({ ...row });
 }
-function mhsDelete(id: any) {
+function mhsDelete(id: any, ctx?: any) {
   if (harnessState.failNextPointerDelete) {
     harnessState.failNextPointerDelete = false;
     return Promise.reject(new Error("boom: pointer delete down"));
   }
-  harnessState.pointerStore.delete(typeof id === "string" ? id : id?.memoryId);
+  stageOrRun(ctx, () => harnessState.pointerStore.delete(typeof id === "string" ? id : id?.memoryId));
   return Promise.resolve({ ok: true });
 }
 function mhsSearch(query?: any) {
@@ -275,6 +278,12 @@ function mhsSearch(query?: any) {
   })();
 }
 export class BaseMemoryHostSource {
+  static primaryStore = {
+    getEntry(id: string) {
+      const value = harnessState.pointerStore.get(id);
+      return value ? { value } : undefined;
+    },
+  };
   get(t?: any) {
     return mhsGet(t);
   }
@@ -300,8 +309,8 @@ export class BaseMemoryHostSource {
   static get(t?: any) {
     return mhsGet(t);
   }
-  static put(r: any) {
-    return mhsPut(r);
+  static put(r: any, ctx?: any) {
+    return mhsPut(r, ctx);
   }
   static post(r: any) {
     return mhsPut(r);
@@ -309,8 +318,8 @@ export class BaseMemoryHostSource {
   static patch(r: any) {
     return mhsPut(r);
   }
-  static delete(id: any) {
-    return mhsDelete(id);
+  static delete(id: any, ctx?: any) {
+    return mhsDelete(id, ctx);
   }
   static search(q?: any) {
     return mhsSearch(q);
