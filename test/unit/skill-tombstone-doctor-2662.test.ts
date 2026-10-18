@@ -121,7 +121,51 @@ describe("readSkillTombstoneTables", () => {
     const tables = await readSkillTombstoneTables({ opsUrl: "http://127.0.0.1:1/", authHeader: "Basic x", fetchImpl });
     expect(tables?.versions).toHaveLength(1);
     expect(tables?.memories).toHaveLength(1);
-    expect(bodies).toHaveLength(2);
+    expect(bodies.map((body) => JSON.parse(body))).toEqual([
+      { operation: "sql", sql: "SELECT id, subjectType, subjectId, version, kind, rowId FROM flair.InstructionVersion WHERE subjectType = 'skill'" },
+      { operation: "sql", sql: "SELECT id, skillSubjectId, validTo, archived, expiresAt FROM flair.Memory" },
+    ]);
+  });
+
+  it("decides several delete heads from one Memory read and checks each row once", async () => {
+    const versions = ["g", "f", "e", "d", "c", "b", "a"].map((suffix) => ({
+      ...deleteVersion, id: `delete-${suffix}`, subjectId: `skill-${suffix}`, rowId: `row-${suffix}`,
+    }));
+    const rows = [
+      { id: "z-a", skillSubjectId: "skill-a" },
+      { id: "a-a", skillSubjectId: "skill-a" },
+      { id: "row-a" },
+      { id: "row-b", skillSubjectId: "another-skill" },
+      { id: "row-c", skillSubjectId: "skill-c", validTo: "2026-01-01T00:00:00.000Z" },
+      { id: "row-d", skillSubjectId: "skill-d", archived: true },
+      { id: "row-e", skillSubjectId: "skill-e", expiresAt: "2020-01-01T00:00:00.000Z" },
+      { id: "z-g", skillSubjectId: "skill-g" },
+      { id: "row-g", validTo: "2026-01-01T00:00:00.000Z" },
+      { id: "row-g" },
+    ];
+    const checks = rows.map(() => 0);
+    const memories = rows.map((row, index) => ({
+      ...row,
+      get archived() { checks[index]++; return row.archived; },
+    }));
+    const queries: string[] = [];
+    const fetchImpl = (async (_url: string, init: RequestInit) => {
+      const { sql } = JSON.parse(String(init.body));
+      queries.push(sql);
+      return table(sql.includes("InstructionVersion") ? versions : memories);
+    }) as unknown as typeof fetch;
+    const tables = await readSkillTombstoneTables({ opsUrl: "http://127.0.0.1:1/", authHeader: "Basic x", fetchImpl });
+    expect(tables).not.toBeNull();
+    expect(findLiveSkillTombstones(tables!.versions, tables!.memories)).toEqual([
+      { subjectId: "skill-a", tombstoneId: "delete-a", liveRowId: "a-a" },
+      { subjectId: "skill-b", tombstoneId: "delete-b", liveRowId: "row-b" },
+      { subjectId: "skill-g", tombstoneId: "delete-g", liveRowId: "row-g" },
+    ]);
+    expect(checks).toEqual(rows.map(() => 1));
+    expect(queries).toEqual([
+      "SELECT id, subjectType, subjectId, version, kind, rowId FROM flair.InstructionVersion WHERE subjectType = 'skill'",
+      "SELECT id, skillSubjectId, validTo, archived, expiresAt FROM flair.Memory",
+    ]);
   });
 
   it("returns null when either read is not ok, not a row array, or throws", async () => {

@@ -22,7 +22,7 @@
 import { isOpenLiveRow } from "./open-live-row.js";
 
 export const SKILL_TOMBSTONE_VERSION_ROWS_SQL =
-  "SELECT id, subjectType, subjectId, version, kind, rowId FROM flair.InstructionVersion";
+  "SELECT id, subjectType, subjectId, version, kind, rowId FROM flair.InstructionVersion WHERE subjectType = 'skill'";
 export const SKILL_TOMBSTONE_MEMORY_ROWS_SQL =
   "SELECT id, skillSubjectId, validTo, archived, expiresAt FROM flair.Memory";
 
@@ -84,26 +84,30 @@ export function findLiveSkillTombstones(
     if (!current || version > current.version) heads.set(row.subjectId, { version, row });
   }
 
+  const liveRowIdBySubject = new Map<string, string>();
+  const liveRowsById = new Map<string, SkillMemoryRow>();
+  for (const memory of memories) {
+    if (!memory || typeof memory !== "object" || !memoryRowIsOpenLive(memory)) continue;
+    const id = rowIdOf(memory);
+    if (id === null) continue;
+    liveRowsById.set(id, memory);
+    if (typeof memory.skillSubjectId !== "string") continue;
+    const current = liveRowIdBySubject.get(memory.skillSubjectId);
+    if (current === undefined || id < current) liveRowIdBySubject.set(memory.skillSubjectId, id);
+  }
+
   const findings: LiveSkillTombstone[] = [];
   for (const [subjectId, { row }] of heads) {
     if (row.kind !== "delete") continue;
     const tombstoneRowId = typeof row.rowId === "string" && row.rowId.length > 0 ? row.rowId : null;
-    const live = memories
-      .filter((memory) => {
-        if (!memory || typeof memory !== "object") return false;
-        if (!memoryRowIsOpenLive(memory)) return false;
-        const id = rowIdOf(memory);
-        if (id === null) return false;
-        return memory.skillSubjectId === subjectId || (tombstoneRowId !== null && id === tombstoneRowId);
-      })
-      .map(rowIdOf)
-      .filter((id): id is string => id !== null)
-      .sort();
-    if (live.length === 0) continue;
+    let liveRowId = liveRowIdBySubject.get(subjectId);
+    if (tombstoneRowId !== null && liveRowsById.has(tombstoneRowId) &&
+        (liveRowId === undefined || tombstoneRowId < liveRowId)) liveRowId = tombstoneRowId;
+    if (liveRowId === undefined) continue;
     findings.push({
       subjectId,
       tombstoneId: rowIdOf(row) ?? "(no id)",
-      liveRowId: live[0],
+      liveRowId,
     });
   }
   return findings.sort((a, b) => (a.subjectId < b.subjectId ? -1 : a.subjectId > b.subjectId ? 1 : 0));
