@@ -2,19 +2,13 @@
  * memory-post-target-id-2656.test.ts — real-Harper classification of a Memory
  * POST whose target id is caller-supplied (flair#2656).
  *
- * The open item: Memory.post() joins the request transaction and has no
- * post-commit verification. This file proves the POST target id is caller-
- * supplied on every path that reaches it, then holds the POST after it stages
- * its write, commits a competing write to the same id through the lock-
- * bypassing operations API, releases it, and records the answer and the
- * committed row. Ten runs per path.
- *
  * Real Harper, ephemeral instance; every URL is asserted to be this test's own
  * instance before the first call.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cp, mkdir, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import nacl from "tweetnacl";
@@ -33,6 +27,7 @@ const now = () => new Date().toISOString();
 
 let harper: HarperInstance;
 let pauseDir = "";
+let appDir = "";
 let seq = 0;
 const nextId = (label: string) => `mpost-${label}-${sfx}-${++seq}`;
 
@@ -81,6 +76,18 @@ async function call(method: string, path: string, body?: unknown): Promise<Respo
 }
 
 const memPath = (id: string) => `/Memory/${encodeURIComponent(id)}`;
+
+async function callInProcess(record: unknown): Promise<Response> {
+  const response = await fetch(`${harper.httpURL}/AgentFleet/`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: basicAuth() },
+    body: JSON.stringify({ op: "postMemory", agentId: A.id, record }),
+    signal: AbortSignal.timeout(60_000),
+  });
+  expect(response.status).toBe(200);
+  const result = await response.json() as any;
+  return result.ok ? Response.json(result.value) : new Response(result.body, { status: result.status });
+}
 
 async function seedRow(id: string, content: string, extra: Record<string, unknown> = {}): Promise<void> {
   await ops({
@@ -158,6 +165,10 @@ async function expectAllRefused(observations: Observation[], label: string): Pro
 beforeAll(async () => {
   if (process.env.HARPER_HTTP_URL) throw new Error("requires an isolated Harper; unset HARPER_HTTP_URL");
   pauseDir = mkdtempSync(join(tmpdir(), "flair-2656p-pause-"));
+  appDir = mkdtempSync(join(tmpdir(), "flair-2656p-app-"));
+  await cp(join(process.cwd(), "test/fixtures/inproc-app"), appDir, { recursive: true });
+  await mkdir(join(appDir, "node_modules/@tpsdev-ai"), { recursive: true });
+  await symlink(process.cwd(), join(appDir, "node_modules/@tpsdev-ai/flair"), "dir");
   const saved = {
     FLAIR_ENABLE_TEST_FAULT_INJECTION: process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION,
     FLAIR_TEST_PAUSE_DIR: process.env.FLAIR_TEST_PAUSE_DIR,
@@ -165,7 +176,7 @@ beforeAll(async () => {
   process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION = "1";
   process.env.FLAIR_TEST_PAUSE_DIR = pauseDir;
   try {
-    harper = await startHarper();
+    harper = await startHarper({ cwd: appDir, harperBinDir: process.cwd() });
   } finally {
     for (const [key, value] of Object.entries(saved)) {
       if (value === undefined) delete process.env[key];
@@ -184,6 +195,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
+  if (appDir) rmSync(appDir, { recursive: true, force: true });
 }, HARPER_STOP_BUDGET_MS);
 
 const RUNS = 10;
@@ -289,8 +301,11 @@ describe("flair#2656 — a Memory POST's caller-supplied target id", () => {
       const competitor = `postcommit-competitor-${label}`;
       const { response, paused } = await withPaused(
         point,
-        () => call("POST", "/Memory", body(id, own)),
-        () => commitCompetingWrite(id, competitor),
+        () => callInProcess(body(id, own)),
+        async () => {
+          expect((await memoryRow(id))?.content, "the POST must have committed before the competitor writes").toBe(own);
+          await commitCompetingWrite(id, competitor);
+        },
       );
       expect(paused, `the ${label} POST was not paused after its commit, before its confirmation read`).toBe(true);
       const observation = await observe(response, id, own);

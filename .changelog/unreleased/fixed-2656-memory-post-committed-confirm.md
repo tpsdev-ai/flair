@@ -1,1 +1,1 @@
-- **A Memory `POST` confirms the row it committed carries its own write.** A caller-supplied target id whose row a newer write replaced answers the named 409 `stored_row_changed`; an unreadable row answers 503 `write_outcome_unknown` (#2656).
+- **A Memory `POST` that owns its transaction verifies its committed row.** A replaced row answers 409 `stored_row_changed`; an unreadable row answers 503 `write_outcome_unknown`. A POST joins an open caller transaction; its owner handles post-commit verification (#2656 slice B).

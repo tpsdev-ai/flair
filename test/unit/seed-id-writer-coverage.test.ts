@@ -114,18 +114,13 @@ for (const [file, alias] of [
   ["Memory", "alias-source:(databases as any).flair.Memory#1"],
   ["Memory", "alias-source:(databases as any).flair.Memory#2"],
   ["Memory", "alias-source:(databases as any).flair.Memory#3"],
-  // The committed-row confirms and post-commit verification reads: #4 the
-  // ordinary POST's committed-row verification (flair#2656), #5 the skill
-  // POST's committed-row verification (flair#2656), #6 the ordinary PATCH's
-  // post-commit verification (flair#2478), #7 the _reindex re-PUT's confirm
-  // (flair#2450), #8 Memory.put's confirm (flair#2441), #9 Memory.put's
-  // post-commit verification (flair#2478).
   ["Memory", "alias-source:(databases as any).flair.Memory#4"],
   ["Memory", "alias-source:(databases as any).flair.Memory#5"],
   ["Memory", "alias-source:(databases as any).flair.Memory#6"],
   ["Memory", "alias-source:(databases as any).flair.Memory#7"],
   ["Memory", "alias-source:(databases as any).flair.Memory#8"],
   ["Memory", "alias-source:(databases as any).flair.Memory#9"],
+  ["Memory", "alias-source:(databases as any).flair.Memory#10"],
   // The write-lock store handle (flair#2478) — a read of primaryStore, never a write.
   ["Memory", "alias-source:(databases as any)?.flair?.Memory#1"],
   ["AdminMemory", "alias-source:(databases as any).flair.Memory#1"],
