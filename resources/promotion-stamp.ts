@@ -75,7 +75,7 @@ export async function stampMemoryPromotionIsolated(
     await stampMemoryPromotion(id, reviewerId, decidedAt, enumerationContext, undefined, written);
     return true;
   } catch (err: any) {
-    console.warn(`stampMemoryPromotion failed for ${id}: ${err?.message ?? err}`, ...(err instanceof WriteBackConflictError ? [{ outcome: err.outcome }] : []));
+    console.warn("stampMemoryPromotion failed for %s: %s", id, err?.message ?? err, ...(err instanceof WriteBackConflictError ? [{ outcome: err.outcome }] : []));
     return false;
   }
 }
