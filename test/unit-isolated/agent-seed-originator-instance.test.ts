@@ -21,6 +21,9 @@ let instanceRow: any = null;
 // test can prove the seed is refused rather than overwriting the row as a
 // create. Reset in beforeEach.
 let agentGetThrows = false;
+let committed = false;
+let readbackTable = "";
+let readback: ((row: any) => any) | undefined;
 
 function gen(values: () => Iterable<any>) {
   return async function* () {
@@ -36,12 +39,16 @@ mock.module("harper", () => ({
       Agent: {
         get: async (id: string) => {
           if (agentGetThrows) throw new Error("simulated agent read failure");
-          return agentStore.get(id) ?? null;
+          const row = agentStore.get(id) ?? null;
+          return committed && readbackTable === "Agent" && readback ? readback(row) : row;
         },
         put: async (r: any) => { agentStore.set(r.id, { ...r }); return r; },
       },
       Soul: {
-        get: async (id: string) => soulStore.get(id) ?? null,
+        get: async (id: string) => {
+          const row = soulStore.get(id) ?? null;
+          return committed && readbackTable === "Soul" && readback ? readback(row) : row;
+        },
         put: async (r: any) => { soulStore.set(r.id, { ...r }); return r; },
       },
       Memory: {
@@ -75,7 +82,11 @@ mock.module("../../resources/skill-write.ts", () => ({ rejectSkillWritePath: () 
 // request-transaction.ts needs Harper's global transaction() for the transaction
 // the seed owns (flair#2645): the stub runs the callback in the context it is
 // handed, and the mocked tables write/read their stores immediately.
-(globalThis as any).transaction = (_ctx: any, cb: (txn: any) => any) => cb(_ctx ?? {});
+(globalThis as any).transaction = async (_ctx: any, cb: (txn: any) => any) => {
+  const result = await cb(_ctx ?? {});
+  committed = true;
+  return result;
+};
 
 const { AgentSeed } = await import("../../resources/AgentSeed.ts");
 const { _resetLocalInstanceIdCacheForTests } = await import("../../resources/instance-identity.ts");
@@ -92,6 +103,9 @@ beforeEach(() => {
   memStore = new Map();
   instanceRow = null;
   agentGetThrows = false;
+  committed = false;
+  readbackTable = "";
+  readback = undefined;
   _resetLocalInstanceIdCacheForTests();
 });
 
@@ -125,7 +139,7 @@ describe("flair#1965 r3 — AgentSeed fails closed on a failed existing-Agent lo
   test("a FAILED existing-Agent read refuses the seed (500) and never overwrites the existing row as a create", async () => {
     instanceRow = { id: LOCAL_ID };
     // An existing Agent row that a failed read must NOT be allowed to clobber.
-    agentStore.set("existing", { id: "existing", name: "Existing", role: "agent", publicKey: "stable-key", originatorInstanceId: "instance-B" });
+    agentStore.set("existing", { id: "existing", name: "Existing", role: "agent", publicKey: "stable-key", createdAt: "2026-01-01T00:00:00.000Z", originatorInstanceId: "instance-B" });
     agentGetThrows = true;
 
     const res: any = await seed().post({ agentId: "existing", displayName: "Existing" });
@@ -160,4 +174,43 @@ describe("AgentSeed ephemeral expiry", () => {
       else process.env.FLAIR_EPHEMERAL_TTL_HOURS = prior;
     }
   });
+});
+
+describe("AgentSeed post-commit readback", () => {
+  const malformed: Array<[string, (row: any) => any]> = [
+    ["array", () => []],
+    ["array with row fields", (row) => Object.assign([], row)],
+    ["empty object", () => ({})],
+    ["wrong id", (row) => ({ ...row, id: "another-id" })],
+    ["missing row", () => null],
+    ["undefined", () => undefined],
+    ["thrown error", () => { throw new Error("readback failed"); }],
+    ["Response", () => new Response("refused", { status: 403 })],
+    ["non-plain object", (row) => Object.assign(new Date(), row)],
+  ];
+  for (const table of ["Agent", "Soul"]) {
+    const required = table === "Agent" ? ["name", "publicKey", "createdAt"] : ["agentId", "key", "value", "createdAt"];
+    const cases = [...malformed];
+    for (const field of required) {
+      cases.push([`missing ${field}`, (row) => {
+        const result = { ...row };
+        delete result[field];
+        return result;
+      }]);
+      cases.push([`non-string ${field}`, (row) => ({ ...row, [field]: 42 })]);
+    }
+    if (table === "Soul") {
+      for (const field of ["agentId", "key"]) cases.push([`wrong ${field}`, (row) => ({ ...row, [field]: "another" })]);
+    }
+    for (const [label, transform] of cases) {
+      test(`${table}: ${label} returns agent_seed_unconfirmed`, async () => {
+        readbackTable = table;
+        readback = transform;
+        const result = await seed().post({ agentId: "readback" });
+        expect(result).toBeInstanceOf(Response);
+        expect((result as Response).status).toBe(500);
+        expect(await (result as Response).json()).toMatchObject({ error: "agent_seed_unconfirmed" });
+      });
+    }
+  }
 });

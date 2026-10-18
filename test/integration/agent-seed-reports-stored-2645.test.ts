@@ -2,18 +2,11 @@
  * agent-seed-reports-stored-2645.test.ts — real-Harper interleavings for
  * POST /AgentSeed (flair#2645).
  *
- * Harper can resolve a seed transaction's commit while dropping a create that
- * lost to a newer write of the same predictable id, and still answer 200. The
- * seed holds its Agent create (or a Soul create) at a test-only pause point,
- * a competing create of the same id commits through the lock-bypassing
- * operations API, and the released seed reports the row that is actually
- * stored: `created: false` / `alreadyExisted: true` for the Agent, and the key
- * in `soulAlreadyExisted` for a Soul entry. The uncontended seed still reports
- * `created: true`.
- *
  * Real Harper, ephemeral instance; every URL is asserted to be this test's own
  * instance before the first call.
  */
+import nacl from "tweetnacl";
+import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -52,6 +45,11 @@ async function ops(operation: Record<string, unknown>): Promise<any> {
 async function rowIn(table: string, id: string): Promise<any | null> {
   const rows = await ops({ operation: "search_by_id", table, ids: [id], get_attributes: ["*"] });
   return Array.isArray(rows) ? rows[0] ?? null : null;
+}
+
+async function expectStoredResponse(body: any): Promise<void> {
+  expect(body.agent).toEqual(await rowIn("Agent", body.agent.id));
+  for (const entry of body.soulEntries) expect(entry).toEqual(await rowIn("Soul", entry.id));
 }
 
 function seed(body: Record<string, unknown>): Promise<Response> {
@@ -138,12 +136,12 @@ describe("flair#2645 — an AgentSeed response reports the stored rows", () => {
     const text = await response.text();
     expect(response.status, text.slice(0, 300)).toBe(200);
     const body = JSON.parse(text);
+    await expectStoredResponse(body);
     const stored = await rowIn("Agent", agentId);
     expect(stored?.publicKey, "the competing row was overwritten").toBe(competing.publicKey);
     expect(body.created, JSON.stringify(body)).toBe(false);
     expect(body.alreadyExisted, JSON.stringify(body)).toBe(true);
-    expect(body.agent.name, "the response is not the stored row").toBe(stored?.name);
-    expect(body.agent.publicKey, "the response is not the stored row").toBe(stored?.publicKey);
+    expect(body.agent).toEqual(stored);
   }, 120_000);
 
   it("Soul key: a competing create of the same predictable id keeps its row and the seed reports the stored value", async () => {
@@ -172,14 +170,87 @@ describe("flair#2645 — an AgentSeed response reports the stored rows", () => {
     const text = await response.text();
     expect(response.status, text.slice(0, 300)).toBe(200);
     const body = JSON.parse(text);
+    await expectStoredResponse(body);
     const stored = await rowIn("Soul", soulId);
     expect(stored?.value, "the competing Soul row was overwritten").toBe(competing.value);
     expect(body.soulAlreadyExisted, JSON.stringify(body)).toContain("name");
     expect(body.soulCreated, JSON.stringify(body)).not.toContain("name");
     const reported = body.soulEntries.find((entry: any) => entry.key === "name");
-    expect(reported?.value, "the response is not the stored Soul row").toBe(stored?.value);
-    expect(reported?.createdAt, "the response is not the stored Soul row").toBe(stored?.createdAt);
+    expect(reported).toEqual(stored);
   }, 120_000);
+
+  it("admin cache: a pre-commit refill is invalidated after the seed commits", async () => {
+    const agentId = nextId("admin");
+    const readerId = nextId("reader");
+    const keys = nacl.sign.keyPair();
+    const publicKey = Buffer.from(keys.publicKey).toString("base64");
+    const now = new Date().toISOString();
+    await ops({ operation: "insert", table: "Agent", records: [{
+      id: readerId, name: readerId, role: "agent", admin: false, publicKey, createdAt: now,
+    }] });
+    const probe = async (id: string) => {
+      const path = "/FederationInstance";
+      const ts = Date.now().toString();
+      const nonce = randomUUID();
+      const signature = nacl.sign.detached(new TextEncoder().encode(`${id}:${ts}:${nonce}:GET:${path}`), keys.secretKey);
+      return fetch(`${harper.httpURL}${path}`, {
+        headers: { Authorization: `TPS-Ed25519 ${id}:${ts}:${nonce}:${Buffer.from(signature).toString("base64")}` },
+        signal: AbortSignal.timeout(30_000),
+      });
+    };
+    expect((await probe(readerId)).status).toBe(403);
+    const { response, paused, released } = await withPaused(
+      "agentseed-before-commit",
+      () => seed({ agentId, role: "admin" }),
+      async () => {
+        expect((await probe(readerId)).status).toBe(403);
+        await ops({ operation: "insert", table: "Agent", records: [{
+          id: agentId, name: agentId, role: "admin", admin: true, publicKey,
+          createdAt: new Date(Date.now() + 1_000).toISOString(),
+        }] });
+      },
+    );
+    expect(paused).toBe(true);
+    expect(released).toBe("go");
+    const text = await response.text();
+    expect(response.status, text.slice(0, 300)).toBe(200);
+    await expectStoredResponse(JSON.parse(text));
+    expect((await probe(agentId)).status).toBe(200);
+  }, 120_000);
+
+  for (const table of ["Agent", "Soul"]) {
+    it(`${table}: an identical concurrent create reports the stored row as created`, async () => {
+      const agentId = nextId(`identical-${table.toLowerCase()}`);
+      const point = table === "Agent" ? "agentseed-agent-write" : "agentseed-soul-write";
+      let competing: any;
+      const { response, paused, released } = await withPaused(
+        point,
+        () => seed({ agentId, displayName: "identical-name" }),
+        async () => {
+          competing = JSON.parse(readFileSync(join(pauseDir, `paused.${point}`), "utf8"));
+          await ops({ operation: "insert", table, records: [competing] });
+          expect(await rowIn(table, competing.id)).toMatchObject(competing);
+        },
+      );
+      expect(paused).toBe(true);
+      expect(released).toBe("go");
+      const text = await response.text();
+      expect(response.status, text.slice(0, 300)).toBe(200);
+      const body = JSON.parse(text);
+      await expectStoredResponse(body);
+      const stored = await rowIn(table, competing.id);
+      expect(stored).toMatchObject(competing);
+      if (table === "Agent") {
+        expect(body.agent).toEqual(stored);
+        expect(body.created).toBe(true);
+        expect(body.alreadyExisted).toBe(false);
+      } else {
+        expect(body.soulEntries.find((entry: any) => entry.key === competing.key)).toEqual(stored);
+        expect(body.soulCreated).toContain(competing.key);
+        expect(body.soulAlreadyExisted).not.toContain(competing.key);
+      }
+    }, 120_000);
+  }
 
   it("uncontended seed: the response still reports the created Agent and every seeded Soul key as created", async () => {
     const agentId = nextId("fresh");
@@ -187,6 +258,7 @@ describe("flair#2645 — an AgentSeed response reports the stored rows", () => {
     const text = await res.text();
     expect(res.status, text.slice(0, 300)).toBe(200);
     const body = JSON.parse(text);
+    await expectStoredResponse(body);
     expect(body.created, JSON.stringify(body)).toBe(true);
     expect(body.alreadyExisted, JSON.stringify(body)).toBe(false);
     expect(body.soulAlreadyExisted, JSON.stringify(body)).toEqual([]);

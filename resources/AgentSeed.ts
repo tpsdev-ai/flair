@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
  * POST /AgentSeed
  *
  * Auto-seeds a new agent with soul entries and starter memories.
- * Called by `tps agent create` after local key generation.
+ * The CLI provisions Agents through the operations API, not this endpoint.
  *
  * Request:
  *   agentId          string   — agent identifier
@@ -17,10 +17,11 @@ import { randomUUID } from "node:crypto";
  *   { agent, soulEntries, memories, created, alreadyExisted, soulCreated, soulAlreadyExisted }
  *
  * `agent` and every `soulEntries` element are read back from the committed
- * store. `created` says this seed's Agent write is the stored row;
- * `alreadyExisted` says it is not (a row was already there, or a concurrent
- * create's row is). `soulCreated` / `soulAlreadyExisted` carry the same answer
- * per seeded Soul key.
+ * store. For attempted creates, `created` / `soulCreated` mean the stored
+ * fields match this seed's request; `alreadyExisted` / `soulAlreadyExisted`
+ * report a different stored row or an entry found before staging a create.
+ * An identical concurrent create is indistinguishable and reports as created:
+ * the stored state is what the caller asked for.
  *
  * Auth: operator (verified Harper administrator Basic) or deliberate
  * `internalContext()`. Admin-agent Ed25519 keys are refused — role is not
@@ -55,23 +56,24 @@ const DEFAULT_MEMORIES = (agentId: string, now: string) => [
   },
 ];
 
-/** A stored row: a plain object, never a Response a resource read refused with. */
-function isStoredRow(value: unknown): value is Record<string, any> {
-  return !!value && typeof value === "object" && !(value instanceof Response);
+function isStoredRow(value: unknown, id: string, fields: string[]): value is Record<string, any> {
+  if (!value || typeof value !== "object") return false;
+  const proto = Object.getPrototypeOf(value);
+  if (proto !== Object.prototype && proto !== null) return false;
+  const row = value as Record<string, unknown>;
+  return Object.hasOwn(row, "id") && row.id === id && fields.every(
+    (field) => Object.hasOwn(row, field) && typeof row[field] === "string",
+  );
 }
 
-/** The fields this seed wrote to the Agent row; a stored row matching them is
- *  the row this seed wrote. */
 function sameSeededAgent(stored: Record<string, any>, seeded: Record<string, any>): boolean {
-  return ["id", "name", "role", "admin", "publicKey", "createdAt"].every(
+  return Object.keys(seeded).every(
     (field) => stored[field] === seeded[field],
   );
 }
 
-/** The fields this seed wrote to a Soul row; a stored row matching them is the
- *  row this seed wrote. */
 function sameSeededSoul(stored: Record<string, any>, seeded: Record<string, any>): boolean {
-  return ["id", "agentId", "key", "value", "createdAt", "originatorInstanceId"].every(
+  return Object.keys(seeded).every(
     (field) => stored[field] === seeded[field],
   );
 }
@@ -125,6 +127,7 @@ export class AgentSeed extends Resource {
 
     // The seed's writes run in a transaction this call owns, so it can read the
     // committed store after that transaction commits (flair#2645, AgentSeed).
+    let agentWritten = false;
     const outcome = await withOwnedTransaction(ctx, async (c: unknown) => {
       // ── Agent record ────────────────────────────────────────────────────────
       // flair#1965 r3: a FAILED existing-Agent lookup must refuse the whole seed.
@@ -149,7 +152,6 @@ export class AgentSeed extends Resource {
         }), { status: 500, headers: { "content-type": "application/json" } });
       }
       let agent = existingAgent;
-      let agentWritten = false;
       if (!existingAgent) {
         // flair#941 — this writes the RAW table, so resources/Agent.ts's post()
         // never runs and its field reconciliation does not apply here. Seeding
@@ -167,9 +169,8 @@ export class AgentSeed extends Resource {
         // Test-only: holds the staged create so a competing create of the same
         // predictable id can commit first. Inert unless the fault-injection env
         // opt-in is set and armed.
-        const pause = txnPausePoint("agentseed-agent-write");
+        const pause = txnPausePoint("agentseed-agent-write", undefined, undefined, agent);
         if (pause) await pause;
-        invalidateAdminCache();
         agentWritten = true;
       }
 
@@ -191,7 +192,7 @@ export class AgentSeed extends Resource {
         await (databases as any).flair.Soul.put(entry, c);
         // Test-only: holds the staged Soul create so a competing create of the
         // same key can commit first.
-        const pause = txnPausePoint("agentseed-soul-write");
+        const pause = txnPausePoint("agentseed-soul-write", undefined, undefined, entry);
         if (pause) await pause;
         soulEntries.push(entry);
         soulAttempts.push({ key, written: entry });
@@ -256,11 +257,14 @@ export class AgentSeed extends Resource {
         }
       } // end !hasOnboardingMemory
 
-      return { agent, agentWritten, soulAttempts, memories };
+      const pause = txnPausePoint("agentseed-before-commit");
+      if (pause) await pause;
+      return { agent, soulAttempts, memories };
     });
 
+    if (agentWritten) invalidateAdminCache();
     if (outcome instanceof Response) return outcome;
-    const { agent: seededAgent, agentWritten, soulAttempts, memories } = outcome;
+    const { agent: seededAgent, soulAttempts, memories } = outcome;
 
     // The seed's transaction has committed. Report what is STORED, not what
     // this call staged: Harper can drop a staged create that lost to a newer
@@ -278,7 +282,7 @@ export class AgentSeed extends Resource {
       console.error("AgentSeed: the post-commit Agent read failed", { agentId, err });
       return unconfirmed("agent record");
     }
-    if (!isStoredRow(storedAgent)) return unconfirmed("agent record");
+    if (!isStoredRow(storedAgent, agentId, ["name", "publicKey", "createdAt"])) return unconfirmed("agent record");
 
     const soulEntries: any[] = [];
     const soulCreated: string[] = [];
@@ -292,7 +296,7 @@ export class AgentSeed extends Resource {
         console.error("AgentSeed: the post-commit Soul read failed", { agentId, key: attempt.key, err });
         return unconfirmed(`Soul entry for key ${attempt.key}`);
       }
-      if (!isStoredRow(stored)) return unconfirmed(`Soul entry for key ${attempt.key}`);
+      if (!isStoredRow(stored, id, ["agentId", "key", "value", "createdAt"]) || stored.agentId !== agentId || stored.key !== attempt.key) return unconfirmed(`Soul entry for key ${attempt.key}`);
       soulEntries.push(stored);
       if (attempt.written && sameSeededSoul(stored, attempt.written)) soulCreated.push(attempt.key);
       else soulAlreadyExisted.push(attempt.key);
