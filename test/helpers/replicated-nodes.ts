@@ -7,13 +7,6 @@
  * REPLICATED Harper nodes — a token minted on node A verifying on node B — and
  * how long convergence takes.
  *
- * There is no other two-node replication harness in the tree: the flair#878
- * "convergence" test (test/integration/deploy-replication-convergence.test.ts)
- * boots HTTP StUBS, not two Harpers, and every other integration test that
- * calls `startHarper` runs a single node. This is therefore the smallest
- * harness that boots TWO real, ephemeral, isolated Harpers and forms a
- * replication cluster between them.
- *
  * ── Scope ─────────────────────────────────────────────────────────────────
  * Multi-node replication is a Harper PRO feature (node_modules/harper/README.md:
  * "Harper Pro ... extends the core with enterprise features including
@@ -137,10 +130,25 @@ export async function probeReplicationSupport(opts: { timeoutMs?: number } = {})
 export interface ReplicatedPair {
   a: HarperInstance;
   b: HarperInstance;
-  /** Form the cluster (add_node) and wait for both database sockets. */
+  /** Form the cluster (add_node). */
   connect(): Promise<void>;
   /** Stop both nodes and remove both temp dirs. Kills only these PIDs. */
   stop(): Promise<void>;
+}
+
+export function isReplicatedPairReady(
+  statuses: Array<{ status: number; body: string }>,
+  expectedPeers: readonly [string, string],
+): boolean {
+  return statuses.length === 2 && statuses.every(({ status, body }, index) => {
+    if (status !== 200) return false;
+    const connections = (JSON.parse(body) as {
+      connections?: Array<{ name?: string; database_sockets?: Array<{ connected?: boolean }> }>;
+    }).connections ?? [];
+    if (connections.length !== 1 || connections[0]!.name !== expectedPeers[index]) return false;
+    const sockets = connections[0]!.database_sockets;
+    return Array.isArray(sockets) && sockets.length > 0 && sockets.every((socket) => socket.connected === true);
+  });
 }
 
 /** A random 127.0.0.0/8 address, so parallel runs do not share a replication
@@ -215,11 +223,7 @@ export async function startReplicatedPair(opts: { mutateConfig?: (shipped: strin
     if (add.status !== 200) throw new Error(`add_node on node-b → HTTP ${add.status} ${add.body.slice(0, 300)}`);
     await waitUntil(async () => {
       const statuses = await Promise.all([a!, b!].map((h) => ops(h, { operation: "cluster_status" })));
-      return statuses.every(({ status, body }) => {
-        if (status !== 200) return false;
-        const connections = (JSON.parse(body) as { connections?: Array<{ database_sockets?: Array<{ connected?: boolean }> }> }).connections ?? [];
-        return connections.length === 1 && connections[0]!.database_sockets?.every((s) => s.connected === true) === true;
-      });
+      return isReplicatedPairReady(statuses, [hostB, hostA]);
     }, { timeoutMs: DEFAULT_CONVERGENCE_TIMEOUT_MS, what: "replicated cluster connection" });
   };
   const stop = async () => {
