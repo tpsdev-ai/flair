@@ -61,7 +61,7 @@ const LEGACY_ID = "legacy-row.content";
 const STALE = { embedding: [0.1, 0.1, 0.1], embeddingModel: "ancient-model" };
 
 let store: Map<string, Row>;
-/** Rows whose next staged write is dropped by the commit (a newer write won). */
+/** Rows whose next staged write is dropped by the commit. */
 let dropOnCommit: Set<string>;
 /** Rows committed to the store by an update (a staged update counts once its transaction commits). */
 let puts: Row[];

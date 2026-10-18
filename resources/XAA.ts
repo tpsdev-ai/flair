@@ -277,9 +277,8 @@ async function resolveOrCreatePrincipalLocked(
       // being overwritten by the touch: re-read the COMMITTED row and abort
       // the touch unless it is still this matched, active credential
       // (resources/write-back.ts, confirmCommittedRow — the same confirmation
-      // the write-back helper runs once its write is staged). A change
-      // committed after this read and before the commit is caught by the
-      // post-commit verification below, which refuses the grant.
+      // the write-back helper runs once its write is staged). Post-commit
+      // verification refuses surviving differences in compared fields or identity.
       try {
         await confirmCommittedRow(
           (databases as any).flair.Credential,

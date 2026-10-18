@@ -10,8 +10,7 @@
  * with the re-embed's effect discarded: the first attempt's vector is not
  * counted. The migration re-reads the newer row in the same run and counts the
  * row once its vector is bound to that text, which this test observes through
- * the run log and the stored hash. A later cycle re-reads the newer row and
- * converges.
+ * the run log and the stored hash.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";

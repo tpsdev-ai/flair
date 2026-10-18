@@ -193,7 +193,7 @@ function defaultMemoryTable(): MemoryTableLike {
 }
 
 const REGEN_HTTP_TIMEOUT_MS = 20_000; // a real embedding compute can be slow on constrained hardware
-/** Attempts of a `.content`-suffix re-embed before its row stays pending. */
+/** Attempt bound for a `.content`-suffix re-embed. */
 const CONTENT_SUFFIX_REGEN_ATTEMPTS = 3;
 
 /** Test-only: record each run's result when fault injection is armed. */
@@ -324,9 +324,8 @@ const defaultContentSuffixRegenDeps: ContentSuffixRegenDeps = {
  * returns the row, the text basis and the staged fields, and the caller verifies
  * the committed row after the commit (retrying from a fresh read).
  *
- * A change to the fields and identity the post-commit read compares, committed
- * after confirmation and before commit, is caught by that read. The confirmation
- * compares the WHOLE committed row
+ * The post-commit read detects surviving differences in compared fields,
+ * identity or embedding text. The confirmation compares the WHOLE committed row
  * with the row read (the supersede-close pattern), which is stronger than the
  * identity list alone: a content-only change to a row that lacks a stored
  * incarnation token (a legacy row may lack one) still fails it. The vector is computed for text unchanged through confirmation.
@@ -362,10 +361,9 @@ async function regenContentSuffixRow(
       if (pause) await pause;
       // Stage first, then confirm the COMMITTED row is still the row this
       // transaction read and embedded; gone or distinguishably changed at
-      // confirmation aborts (the staged write is discarded). A change committed
-      // after this re-read and before the commit is caught by the caller's
-      // post-commit verification, which retries from a fresh read when the
-      // committed fields, identity or embedding text differ.
+      // confirmation aborts (the staged write is discarded). Post-commit
+      // verification retries surviving differences in compared fields, identity
+      // or embedding text from a fresh read.
       await confirmCommittedRow(table, id, (committed) => isDeepStrictEqual(committed, fresh));
       // Test-only: inert unless the fault-injection env opt-in is set and armed.
       // Holds the regen after its final pre-commit confirmation and before its

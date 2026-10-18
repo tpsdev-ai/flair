@@ -22,9 +22,8 @@
  * (resources/write-back.ts) before the commit, and the stored key is read back
  * AFTER the commit. The lock serializes registrations for that agent within one
  * Harper process; raw operations-API writes and other processes do not take it.
- * A change to the fields and identity the post-commit read-back compares,
- * committed after confirmation and before commit, is caught by that read-back;
- * a commit-time pending check is a follow-up.
+ * The post-commit read-back detects surviving differences in compared fields
+ * or identity; a commit-time pending check is a follow-up.
  * The response is returned only when the read-back is equal.
  *
  * Accepted credentials: Basic admin or a verified Ed25519 agent with the admin

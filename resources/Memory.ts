@@ -1781,9 +1781,8 @@ function storedInstanceToken(row: any): string | null {
  * as text. A row gone or changed in either at confirmation aborts the owned
  * transaction (the staged write is discarded) and the caller answers
  * stored_row_changed (409). A same-id replacement with the same identity and
- * text passes. Harper has no compare-and-set: a change committed after that
- * confirm and before the commit is caught by the post-commit verification,
- * which retries from a fresh read within the attempt bound.
+ * text passes. Post-commit verification retries surviving differences in
+ * compared fields, identity or text from a fresh read within the attempt bound.
  *
  * The staged update also records `embeddedContentHash`, the newly computed hash
  * of the text the vector was computed from (null for an empty owner), so the
@@ -1847,9 +1846,8 @@ async function reembedStoredRow(
         // at confirmation aborts this owned transaction, discarding the staged
         // write; the caller answers stored_row_changed (409). Only a text change
         // is logged. Neither the staged vector, its hash, nor a staged legacy
-        // token is written. A change committed after this confirm and before the
-        // commit is caught by the post-commit verification below, which retries
-        // from a fresh read.
+        // token is written. Post-commit verification retries surviving
+        // differences in compared fields, identity or text from a fresh read.
         await confirmCommittedRow((databases as any).flair.Memory, id, (committed) => {
           if (!sameStoredRow(committed, stored)) return false;
           if (skillEmbedText(committed) !== textToEmbed) {
@@ -2763,10 +2761,9 @@ export class Memory extends (databases as any).flair.Memory {
       // plus instanceToken for a legacy row that has none, flair#2478), then
       // confirms the committed row has the identity and embedding text it read
       // (flair#2465). A row gone or changed in either at confirmation aborts with
-      // 409 stored_row_changed. The vector is computed for the re-read text; a
-      // change committed after confirmation and before commit is caught by the
-      // post-commit verification, which retries from a fresh read within the
-      // attempt bound.
+      // 409 stored_row_changed. Post-commit verification retries surviving
+      // differences in compared fields, identity or text from a fresh read
+      // within the attempt bound.
       // After a normal storage result and inner commit, PATCH
       // compares the token; a storage Response returns before that read.
       if (reembedRequest) {

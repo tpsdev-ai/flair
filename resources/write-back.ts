@@ -431,10 +431,7 @@ export async function verifyCommittedFields(
  * Does the committed row show this attempt's write? Its identity is the row
  * this attempt wrote (an update keeps the basis's identity); each field the
  * plan wrote holds its staged value, and a non-idempotent plan is confirmed by
- * this attempt's commit marker (`writeId`), not by value equality. A newer
- * write that changed anything the plan wrote fails the check, while a
- * concurrent field-only write to a field the plan left alone does not
- * (flair#2653).
+ * this attempt's commit marker (`writeId`), not by value equality.
  */
 // Harper assigns these timestamps; they are not staged application fields.
 const HARPER_MANAGED_FIELDS = ["__createdtime__", "__updatedtime__"] as const;

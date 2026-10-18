@@ -652,7 +652,7 @@ export class FederationPair extends Resource {
         const tokenRepairPause = txnPausePoint("federation-pair-repair-token-pre");
         if (tokenRepairPause) await tokenRepairPause;
         let refusal: Response | undefined;
-        let pairedAsFirst = false;
+        let stagedFirstPeer: StagedFirstPeer | undefined;
         try {
           refusal = await withPairingTokenClaim(pairingToken, () =>
             withOwnedTransaction(ctx, async (owned) => {
@@ -671,19 +671,21 @@ export class FederationPair extends Resource {
               // the valid token just consumed makes it a first-time pair. Write the
               // row the first-pair path writes, built from the verified request —
               // no field of the deleted row survives.
-              pairedAsFirst = !current;
+              if (!current) stagedFirstPeer = { ...firstPairPeerRow(instanceId, publicKey, role, endpoint), pairAttemptWriteId: claim.pairAttemptWriteId };
               try {
-                await writePeerRow(owned, current ? rePairedRow(current) : { ...firstPairPeerRow(instanceId, publicKey, role, endpoint), pairAttemptWriteId: claim.pairAttemptWriteId });
+                await writePeerRow(owned, current ? rePairedRow(current) : stagedFirstPeer);
               } catch (err) {
                 // Rethrow so the owned transaction ABORTS: the consume rolls back
                 // with the peer write (both commit or neither does). Tagged so the
                 // caller answers a named refusal, not a bare 500.
                 throw new PeerWriteFailedError(err);
               }
+              if (stagedFirstPeer) await confirmFirstPairBeforeCommit(instanceId);
               return claim;
             }),
           );
         } catch (err) {
+          if (err instanceof CommittedRowChanged) return firstPairRowAppearedRefusal();
           if (err instanceof PeerWriteFailedError) {
             const cause: any = err.cause;
             console.error(
@@ -707,8 +709,11 @@ export class FederationPair extends Resource {
           throw err;
         }
         if (refusal) return refusal;
-        // Paired as a first-time pair: attempt bootstrap-user cleanup.
-        if (pairedAsFirst) await dropPairBootstrapUser(pairingToken, ctx);
+        if (stagedFirstPeer) {
+          const unconfirmed = await confirmFirstPairAfterCommit(pairingToken, stagedFirstPeer);
+          if (unconfirmed) return unconfirmed;
+          await dropPairBootstrapUser(pairingToken, ctx);
+        }
       }
 
       // The NO-token re-pair's peer write: the token path wrote the row inside the
@@ -769,7 +774,7 @@ export class FederationPair extends Resource {
       const firstPairPause = txnPausePoint("federation-pair-first-pre");
       if (firstPairPause) await firstPairPause;
       let refusal: Response | undefined;
-      let stagedFirstPeer: (ReturnType<typeof firstPairPeerRow> & { pairAttemptWriteId: string }) | undefined;
+      let stagedFirstPeer: StagedFirstPeer | undefined;
       try {
         refusal = await withPairingTokenClaim(pairingToken, () =>
           withOwnedTransaction(ctx, async (owned) => {
@@ -777,28 +782,7 @@ export class FederationPair extends Resource {
             if (claim.kind !== "consumed") return claim;
             stagedFirstPeer = { ...firstPairPeerRow(instanceId, publicKey, role, endpoint), pairAttemptWriteId: claim.pairAttemptWriteId };
             await (databases as any).flair.Peer.put(stagedFirstPeer, owned);
-            // The pre-transaction read above returned no Peer row, and this first
-            // pair has now staged one. Confirm against COMMITTED state that the row
-            // is still absent (confirmCommittedRow, resources/write-back.ts): its
-            // read is an explicit fresh context, so it sees the Peer row present in
-            // committed state when it runs, including one committed after this
-            // transaction's token read (which pins this transaction's own read
-            // snapshot). It reports presence, not when the row was committed, and a
-            // row deleted again before it runs is not seen. A row there is not the
-            // one this request staged, so the request must not answer `paired` for
-            // it: the throw aborts the owned transaction, the staged consume and
-            // Peer write are discarded, and the caller answers a named refusal with
-            // the token left unconsumed. A change committed after this confirm read
-            // and before the commit is caught by the post-commit verification
-            // below: the request answers `paired` only when that read is the row
-            // it staged.
-            await confirmCommittedRow((databases as any).flair.Peer, instanceId, (committed) => committed == null);
-            // Test-only: inert unless the fault-injection env opt-in is set and
-            // armed. Holds the first pair after its final pre-commit
-            // confirmation and before its owned transaction commits, the window
-            // where a newer write can discard this write's effect (flair#2656).
-            const commitPause = txnPausePoint("federation-pair-first-commit");
-            if (commitPause) await commitPause;
+            await confirmFirstPairBeforeCommit(instanceId);
             return claim;
           }),
         );
@@ -807,31 +791,9 @@ export class FederationPair extends Resource {
         throw err;
       }
       if (refusal) return refusal;
-      // flair#2656: the commit is not proof that this pairing's Peer row is the
-      // committed one. A newer write committing after the confirm read can make
-      // the commit resolve while discarding this write; answer `paired` only when
-      // a fresh committed read shows the marker this attempt wrote and every
-      // staged Peer field at its staged value.
-      //
-      // The pair is NON-IDEMPOTENT: it consumes a one-time token and creates the
-      // Peer row, so a retry cannot re-plan from a fresh read and a post-commit
-      // mismatch is terminal. Its commit is confirmed by commit-specific
-      // evidence — the fresh random marker this attempt wrote to BOTH the
-      // PairingToken row and the staged Peer row in the same transaction. A
-      // `consumedAt` timestamp is not commit-specific (two attempts can share
-      // one), and equal staged Peer values do not name the writer.
       if (!stagedFirstPeer) return firstPairReadBackUnconfirmedRefusal();
-      const peerVerdict = await verifyCommittedFields((databases as any).flair.Peer, instanceId, stagedFirstPeer, stagedFirstPeer);
-      let tokenRow: any;
-      let tokenReadable = true;
-      try {
-        tokenRow = await (databases as any).flair.PairingToken.get(pairingToken, {});
-      } catch {
-        tokenReadable = false;
-      }
-      if (peerVerdict === "unreadable" || !tokenReadable) return firstPairReadBackUnconfirmedRefusal();
-      const tokenShowsConsume = tokenRow != null && tokenRow.pairAttemptWriteId === stagedFirstPeer.pairAttemptWriteId;
-      if (peerVerdict !== "shown" || !tokenShowsConsume) return firstPairCommitUnconfirmedRefusal();
+      const unconfirmed = await confirmFirstPairAfterCommit(pairingToken, stagedFirstPeer);
+      if (unconfirmed) return unconfirmed;
 
       // Test-only: inert unless the fault-injection env opt-in is set and armed.
       // Pause AFTER the token lock released (and the consume is committed) but
@@ -908,6 +870,27 @@ function firstPairPeerRow(instanceId: string, publicKey: string, role: unknown, 
   };
 }
 
+type StagedFirstPeer = ReturnType<typeof firstPairPeerRow> & { pairAttemptWriteId: string };
+
+async function confirmFirstPairBeforeCommit(instanceId: string): Promise<void> {
+  await confirmCommittedRow((databases as any).flair.Peer, instanceId, (committed) => committed == null);
+  const commitPause = txnPausePoint("federation-pair-first-commit");
+  if (commitPause) await commitPause;
+}
+
+async function confirmFirstPairAfterCommit(pairingToken: string, stagedPeer: StagedFirstPeer): Promise<Response | undefined> {
+  const peerVerdict = await verifyCommittedFields((databases as any).flair.Peer, stagedPeer.id, stagedPeer, stagedPeer);
+  let tokenRow: any;
+  try {
+    tokenRow = await (databases as any).flair.PairingToken.get(pairingToken, {});
+  } catch {
+    return firstPairReadBackUnconfirmedRefusal();
+  }
+  if (peerVerdict === "unreadable") return firstPairReadBackUnconfirmedRefusal();
+  if (peerVerdict !== "shown" || tokenRow?.pairAttemptWriteId !== stagedPeer.pairAttemptWriteId) return firstPairCommitUnconfirmedRefusal();
+  return undefined;
+}
+
 /**
  * Drop the bootstrap user that was created alongside this pairing token, after a
  * first-time pair consumed it. Failure here is logged and non-fatal.
@@ -935,7 +918,7 @@ function peerRevokedRefusal(): Response {
 
 /**
  * 409 for a first-time pair whose committed-state confirm found a Peer row for
- * the instance although its pre-transaction read returned none. The owned
+ * the instance although its earlier read returned none. The owned
  * transaction aborted: this request wrote no Peer row and did not consume the
  * pairing token.
  * Signature verification recorded the request's replay nonce before pairing
@@ -1115,8 +1098,8 @@ async function consumePairingToken(
   }
 
   // Consume the token. A fresh random `pairAttemptWriteId` is written here in
-  // the same transaction as the first-pair Peer write; after the commit the
-  // first-pair path confirms BOTH committed rows by that marker, so an attempt
+  // the same transaction as the first-pair Peer write; after the commit,
+  // both first-pair routes confirm BOTH committed rows by that marker, so an attempt
   // that merely shares `consumedAt` or staged Peer values cannot pass.
   const consumedAt = new Date().toISOString();
   const pairAttemptWriteId = randomUUID();
