@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 /** Server-only SHA-256 of the stored, post-redaction content at stamping time. */
 export const PROMOTION_CONTENT_HASH_FIELD = "promotionContentHash";
 
-/** The verdict fields the accessor suppresses together. */
+/** The binding fields (the three verdict fields and the content hash) the accessor suppresses together. */
 export const PROMOTION_BINDING_FIELDS = [
   "promotionStatus",
   "promotedAt",
