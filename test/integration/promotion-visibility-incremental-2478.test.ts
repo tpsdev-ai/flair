@@ -72,6 +72,7 @@ let installDir: string;
 let home: string;
 let pauseDir: string;
 let authHeader: string;
+let faultInjectionBooted = false;
 const tempDirs: string[] = [];
 
 function tempDir(prefix: string): string {
@@ -90,9 +91,20 @@ async function opsCall(body: Record<string, unknown>): Promise<any> {
   if (!res.ok) throw new Error(`ops call failed: HTTP ${res.status} — ${await res.text()}`);
   return res.json();
 }
-async function readRow(id: string): Promise<any> {
-  const rows = await opsCall({ operation: "search_by_id", database: "flair", table: "Memory", ids: [id], get_attributes: ["*"] });
+async function readRow(id: string, table = "Memory"): Promise<any> {
+  const rows = await opsCall({ operation: "search_by_id", database: "flair", table, ids: [id], get_attributes: ["*"] });
   return Array.isArray(rows) ? rows[0] ?? null : rows;
+}
+async function pendingCandidateIds(): Promise<string[]> {
+  const rows = await opsCall({
+    operation: "search_by_value", database: "flair", table: "MemoryCandidate",
+    search_attribute: "agentId", search_value: owner.id, get_attributes: ["*"],
+  });
+  return rows.filter((row: any) => row.status === "pending").map((row: any) => row.id).sort();
+}
+async function deleteCandidate(id: string): Promise<void> {
+  await opsCall({ operation: "delete", database: "flair", table: "MemoryCandidate", ids: [id] });
+  expect(await readRow(id, "MemoryCandidate")).toBeNull();
 }
 async function seedMemory(row: Record<string, unknown>): Promise<void> {
   await opsCall({
@@ -263,9 +275,8 @@ async function bootFirst(): Promise<void> {
   await stopHarper(harper, { keepInstallDir: true });
 }
 
-async function bootWithFaultInjection(point: string): Promise<void> {
-  clearMarkers(point);
-  arm(point);
+async function bootWithFaultInjection(point?: string): Promise<void> {
+  if (point) arm(point);
   const saved = {
     FLAIR_ENABLE_TEST_FAULT_INJECTION: process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION,
     FLAIR_TEST_PAUSE_DIR: process.env.FLAIR_TEST_PAUSE_DIR,
@@ -282,6 +293,7 @@ async function bootWithFaultInjection(point: string): Promise<void> {
   }
   authHeader = "Basic " + Buffer.from(`${harper.admin.username}:${harper.admin.password}`).toString("base64");
   assertOwnInstance();
+  faultInjectionBooted = true;
 }
 
 beforeAll(async () => {
@@ -360,6 +372,10 @@ describe("visibility backfill is incremental and locked (real Harper)", () => {
 });
 
 describe("promotion stamps are locked, incremental and bound (real Harper)", () => {
+  beforeAll(async () => {
+    if (!faultInjectionBooted) await bootWithFaultInjection();
+  }, 240_000);
+
   it.each(["matching", "mismatched", "legacy"])("admin selections check a %s promotion binding", async (binding) => {
     const id = `pvi-selected-${binding}`;
     const content = "selected promotion content";
@@ -488,8 +504,8 @@ describe("promotion stamps are locked, incremental and bound (real Harper)", () 
     await seedCandidate("pvi-auto-binding-stale", claim, AUTO_TAG);
     arm("promotion-stamp-pre");
     const sweep = autoPromote();
-    await assertPaused("promotion-stamp-pre");
     try {
+      await assertPaused("promotion-stamp-pre");
       const rows = await opsCall({
         operation: "search_by_value", database: "flair", table: "Memory",
         search_attribute: "agentId", search_value: owner.id, get_attributes: ["*"],
@@ -508,6 +524,8 @@ describe("promotion stamps are locked, incremental and bound (real Harper)", () 
       await release("promotion-stamp-pre");
       const res = await sweep;
       expect(res.status, (await res.clone().text()).slice(0, 300)).toBe(200);
+      expect((await res.json() as any).skipped).toContainEqual({ id: "pvi-auto-binding-stale", reason: "stamp_refused" });
+      expect((await readRow("pvi-auto-binding-stale", "MemoryCandidate"))?.status).toBe("pending");
       const stored = await readRow(pending.id);
       expect(stored.promotionStatus ?? null).toBeNull();
       expect(stored.promotedAt ?? null).toBeNull();
@@ -515,32 +533,50 @@ describe("promotion stamps are locked, incremental and bound (real Harper)", () 
       expect(stored.promotionContentHash).toBe(changedHash);
     } finally {
       writeFileSync(join(pauseDir, "go.promotion-stamp-pre"), "");
-      await sweep;
+      try {
+        await sweep;
+      } finally {
+        await deleteCandidate("pvi-auto-binding-stale");
+      }
     }
   }, 120_000);
 
   it("a verdict is not stamped when the text changed while the stamp held the lock", async () => {
+    expect(await pendingCandidateIds()).toEqual([]);
     await seedCandidate("pvi-auto-stale", "A claim whose text changes during the stamp.", AUTO_TAG);
+    expect(await pendingCandidateIds()).toEqual(["pvi-auto-stale"]);
     arm("promotion-stamp");
     const sweep = autoPromote();
-    await assertPaused("promotion-stamp");
-    const rows = await opsCall({
-      operation: "search_by_value", database: "flair", table: "Memory",
-      search_attribute: "agentId", search_value: owner.id, get_attributes: ["*"],
-    });
-    const pending = (rows as any[]).find((r) => r.content === "A claim whose text changes during the stamp.");
-    expect(pending, "the promoted row was not committed before the stamp").toBeTruthy();
-    await opsCall({
-      operation: "upsert", database: "flair", table: "Memory",
-      records: [{ ...pending, content: "the text changed while the stamp held the lock" }],
-    });
-    await release("promotion-stamp");
-    const res = await sweep;
-    expect(res.status, (await res.clone().text()).slice(0, 300)).toBe(200);
-    const stored = await readRow(pending.id);
-    expect(stored.content).toBe("the text changed while the stamp held the lock");
-    expect(stored.promotionStatus ?? null).toBeNull();
-    expect(stored.promotionContentHash ?? null).toBeNull();
+    try {
+      await assertPaused("promotion-stamp");
+      const rows = await opsCall({
+        operation: "search_by_value", database: "flair", table: "Memory",
+        search_attribute: "agentId", search_value: owner.id, get_attributes: ["*"],
+      });
+      const pending = (rows as any[]).find((r) => r.content === "A claim whose text changes during the stamp.");
+      expect(pending, "the promoted row was not committed before the stamp").toBeTruthy();
+      expect(pending.tags).toContain("from:pvi-auto-stale");
+      await opsCall({
+        operation: "upsert", database: "flair", table: "Memory",
+        records: [{ ...pending, content: "the text changed while the stamp held the lock" }],
+      });
+      await release("promotion-stamp");
+      const res = await sweep;
+      expect(res.status, (await res.clone().text()).slice(0, 300)).toBe(200);
+      expect((await res.json() as any).skipped).toContainEqual({ id: "pvi-auto-stale", reason: "stamp_refused" });
+      expect((await readRow("pvi-auto-stale", "MemoryCandidate"))?.status).toBe("pending");
+      const stored = await readRow(pending.id);
+      expect(stored.content).toBe("the text changed while the stamp held the lock");
+      expect(stored.promotionStatus ?? null).toBeNull();
+      expect(stored.promotionContentHash ?? null).toBeNull();
+    } finally {
+      writeFileSync(join(pauseDir, "go.promotion-stamp"), "");
+      try {
+        await sweep;
+      } finally {
+        await deleteCandidate("pvi-auto-stale");
+      }
+    }
   }, 120_000);
 
   it("a client cannot set the hash on PUT", async () => {
