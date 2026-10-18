@@ -4,14 +4,14 @@
  * A home Presence row the hub refused because its receive flag was off must be
  * offered again after the hub enables receipt, without a new heartbeat.
  *
- * Boots TWO real, ephemeral Harpers: the SENDER (spoke), with a home agent and
- * its Presence row, and the RECEIVER (hub), first with
+ * Boots TWO real, ephemeral Harpers: the SENDER (spoke), with two home agents
+ * and their Presence rows, and the RECEIVER (hub), first with
  * FLAIR_FEDERATION_PRESENCE_RECEIVE=0. After the first sync refuses both home
  * rows, the hub is stopped (its data directory kept) and booted again with the
  * flag on; the sender is pointed at the new endpoint and syncs again. No
  * heartbeat is written between the syncs.
  *
- * Fixtures are neutral (agent-, host- names) and both Harpers are loopback,
+ * Fixtures are neutral (agent-home-*, flair_spoke_a, flair_hub_a) and both Harpers are loopback,
  * ephemeral, HOME-isolated.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
