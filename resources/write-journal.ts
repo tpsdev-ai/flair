@@ -3,6 +3,7 @@ export { currentWriteJournal } from "./write-journal-context.js";
 import { isDeepStrictEqual } from "node:util";
 import { databases } from "harper";
 import { isMemoryHostSourceStore, loadStoredPointer, storedPointerIds } from "./memory-host-source.js";
+import { restorePointerRowIfAbsent } from "./host-pointer-adapter.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 
 type Entry = { operation: any; transaction: any; before?: any; after?: any; applied: boolean; version?: number };
@@ -185,6 +186,7 @@ export class WriteJournal {
             shared.transaction.addWrite(guard);
             if (guard.entry === undefined) guard.entry = null;
             if (entry.before === undefined) await raw.delete.call(table, operation.key, shared);
+            else if (restore) await restorePointerRowIfAbsent(copy(entry.before), shared);
             else await raw.put.call(table, copy(entry.before), shared);
             if (version) await pause(txnPausePoint("skill-journal-version-rollback-staged"));
             if (restore) await pause(txnPausePoint("skill-update-pointer-restore-staged"));

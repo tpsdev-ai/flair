@@ -546,13 +546,13 @@ test("journal snapshots and undo read records from Harper's encoder", async () =
   const script = `
     import assert from "node:assert/strict";
     import { createRequire, registerHooks } from "node:module";
-    import { existsSync } from "node:fs";
+    import { existsSync, readFileSync } from "node:fs";
     import { fileURLToPath, pathToFileURL } from "node:url";
     const require = createRequire(process.cwd() + "/journal-fixture.cjs");
     const { RecordEncoder } = require("./node_modules/harper/dist/resources/RecordEncoder.js");
     const encoder = new RecordEncoder({ useVersions: false, randomAccessStructure: true,
       structures: [], saveStructures: () => true, getStructures: () => [] });
-    const encode = (row) => encoder.decode(encoder.encode(row));
+    const encode = (row) => encoder.decode(encoder.encode(row), { lazy: true });
     const before = { id: "overwritten", agentId: "writer", content: "before", createdAt: "2020-01-01T00:00:00.000Z" };
     const stored = encode(before);
     assert.deepEqual(Object.keys(stored), []);
@@ -574,6 +574,14 @@ test("journal snapshots and undo read records from Harper's encoder", async () =
         if (existsSync(fileURLToPath(url))) return { url: url.href, shortCircuit: true };
       }
       return next(specifier, context);
+    }, load(url, context, next) {
+      if (url.endsWith(".ts")) return {
+        format: "module", shortCircuit: true,
+        source: require("typescript").transpileModule(readFileSync(fileURLToPath(url), "utf8"), {
+          compilerOptions: { target: "ES2022", module: "ESNext" },
+        }).outputText,
+      };
+      return next(url, context);
     } });
     const { WriteJournal } = await import(pathToFileURL(process.cwd() + "/resources/write-journal.ts"));
     const journal = new WriteJournal();
