@@ -2,7 +2,9 @@
 // (resources/federation-classify.ts). The real-Harper end to end is
 // test/integration/federation-agent-field-scope-2665.test.ts.
 import { describe, expect, test } from "bun:test";
+import { configuredAdminAgentIds } from "../../resources/agent-admin.ts";
 import {
+  agentAdminIdCreateRefusal,
   agentIdentityRefusal,
   inboundChangesAgentIdentity,
   keepReceiverAgentAuthority,
@@ -49,7 +51,7 @@ describe("flair#2665 agentIdentityRefusal", () => {
     expect(agentIdentityRefusal(rec({ originatorInstanceId: OTHER }), stored(), HOME)).toBeNull();
   });
 
-  test("a row with no recorded home takes a key or home change from no sender", () => {
+  test("a row with no recorded home takes a key change, or a non-empty home, from no sender", () => {
     for (const home of [null, undefined, ""]) {
       const row = stored({ originatorInstanceId: home });
       expect(agentIdentityRefusal(rec({ publicKey: "key-2" }), row, OTHER)).toBe("agent_identity_not_from_home");
@@ -57,7 +59,7 @@ describe("flair#2665 agentIdentityRefusal", () => {
     }
   });
 
-  test("unchanged identity fields, a new row and other tables are not refused", () => {
+  test("unchanged identity fields (missing, null and empty homes compare equal), a new row and other tables are not refused", () => {
     expect(agentIdentityRefusal(rec({ publicKey: "key-1", originatorInstanceId: HOME, name: "x" }), stored(), OTHER)).toBeNull();
     expect(agentIdentityRefusal(rec({ name: "x" }), stored(), OTHER)).toBeNull();
     expect(agentIdentityRefusal(rec({ originatorInstanceId: "" }), stored({ originatorInstanceId: null }), OTHER)).toBeNull();
@@ -67,14 +69,14 @@ describe("flair#2665 agentIdentityRefusal", () => {
 });
 
 describe("flair#2665 keepReceiverAgentAuthority", () => {
-  test("a new row is written without admin authority", () => {
+  test("a new row is written without the admin fields", () => {
     const merged = keepReceiverAgentAuthority({ id: "agent-a", role: "admin", admin: true }, null);
     expect("role" in merged).toBe(false);
     expect(merged.admin).toBe(false);
     expect(keepReceiverAgentAuthority({ id: "agent-a", role: "researcher" }, null).role).toBe("researcher");
   });
 
-  test("an existing row keeps its stored authority in both directions", () => {
+  test("an existing row keeps its stored admin fields in both directions", () => {
     const up = keepReceiverAgentAuthority({ ...stored(), role: "admin", admin: true }, stored());
     expect(up.role).toBe("agent");
     expect(up.admin).toBe(false);
@@ -88,7 +90,23 @@ describe("flair#2665 keepReceiverAgentAuthority", () => {
     expect("admin" in absent).toBe(false);
   });
 
-  test("a non-admin role label follows the merge", () => {
+  test("a role label follows the merge when the stored and incoming roles are both non-admin", () => {
     expect(keepReceiverAgentAuthority({ ...stored(), role: "researcher" }, stored()).role).toBe("researcher");
+  });
+});
+
+describe("flair#2665 agentAdminIdCreateRefusal", () => {
+  const configured = configuredAdminAgentIds({ FLAIR_ADMIN_AGENTS: " agent-a , ,agent-b" });
+
+  test("the configured set is the comma-separated, trimmed, non-empty ids", () => {
+    expect([...configured].sort()).toEqual(["agent-a", "agent-b"]);
+    expect(configuredAdminAgentIds({}).size).toBe(0);
+  });
+
+  test("creating a row for a configured id is refused; an existing row and other ids are not", () => {
+    expect(agentAdminIdCreateRefusal(rec({ name: "x" }), null, configured)).toBe("agent_admin_id_not_federated");
+    expect(agentAdminIdCreateRefusal(rec({ name: "x" }), stored(), configured)).toBeNull();
+    expect(agentAdminIdCreateRefusal({ ...rec({}), id: "agent-c", data: { id: "agent-c" } }, null, configured)).toBeNull();
+    expect(agentAdminIdCreateRefusal(rec({}, "Soul"), null, configured)).toBeNull();
   });
 });

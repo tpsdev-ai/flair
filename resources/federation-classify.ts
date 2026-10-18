@@ -74,6 +74,9 @@ export type SkipReason =
   // publicKey or home (originatorInstanceId) when the batch-verified sender is
   // not the row's stored home (non-retryable).
   | "agent_identity_not_from_home"
+  // flair#2665: an inbound Agent record that would create a row whose id the
+  // receiver's FLAIR_ADMIN_AGENTS names (non-retryable).
+  | "agent_admin_id_not_federated"
   // Emitted by FederationSync.post before the row is read: the payload's id is
   // missing or is not the envelope's id, so the record is not applied.
   | "id_mismatch"
@@ -141,6 +144,7 @@ export const SKIP_REASON_CLASS = {
   agent_status_not_federated: "non_retryable",
   agent_pending_key_not_federated: "non_retryable",
   agent_identity_not_from_home: "non_retryable",
+  agent_admin_id_not_federated: "non_retryable",
   id_mismatch: "non_retryable",
   invalid_expiry: "non_retryable",
   merge_target_changed: "retryable",
@@ -470,15 +474,31 @@ export function agentIdentityRefusal(
 }
 
 /**
- * flair#2665: admin authority is local to the receiving instance. Applied to the
- * row a federation merge is about to write for an Agent record (mutates and
- * returns `merged`):
- *   - a NEW row (`stored` is null) is written without it: a `role` equal to
+ * flair#2665: the refusal for an inbound Agent record that would create a row
+ * (`local` is null) whose id is in `configuredAdminIds`, else null. The caller
+ * passes resources/agent-admin.ts's configuredAdminAgentIds(), the set
+ * isAdmin() grants by id.
+ */
+export function agentAdminIdCreateRefusal(
+  record: SyncRecord,
+  local: Record<string, any> | null,
+  configuredAdminIds: ReadonlySet<string>,
+): SkipReason | null {
+  if (record.table !== "Agent" || local != null) return null;
+  return configuredAdminIds.has(record.id) ? "agent_admin_id_not_federated" : null;
+}
+
+/**
+ * flair#2665: the admin fields (`role` equal to ADMIN_ROLE, the `admin` mirror)
+ * are the receiving instance's own. Applied to the row a federation merge is
+ * about to write for an Agent record (mutates and returns `merged`):
+ *   - a NEW row (`stored` is null) is written without them: a `role` equal to
  *     ADMIN_ROLE is removed and an `admin: true` mirror becomes false;
  *   - an EXISTING row keeps its stored `role` when the merged one would change
  *     whether the row is an administrator, and keeps its stored `admin` mirror
- *     when the merged one differs from it.
- * A non-admin `role` label still follows the merge.
+ *     when the merged one's `admin: true` state differs from the stored one's.
+ * A `role` label follows the merge when the stored and incoming roles are both
+ * non-admin.
  */
 export function keepReceiverAgentAuthority(
   merged: Record<string, any>,

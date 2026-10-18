@@ -3,6 +3,7 @@ import { Resource, databases, server } from "harper";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import nacl from "tweetnacl";
 import { allowAdmin } from "./agent-auth.js";
+import { configuredAdminAgentIds } from "./agent-admin.js";
 import {
   canonicalize,
   signBody,
@@ -41,6 +42,7 @@ import {
   checkPrincipalEntitlement,
   inboundChangesExistingPrincipalStatus,
   inboundChangesExistingPendingKey,
+  agentAdminIdCreateRefusal,
   agentIdentityRefusal,
   keepReceiverAgentAuthority,
   type FederationSyncTable,
@@ -1467,14 +1469,18 @@ export class FederationSync extends Resource {
               if (record.table === "Agent" && inboundChangesExistingPendingKey(record, row)) {
                 return { skip: true, reason: "agent_pending_key_not_federated" };
               }
-              // flair#2665: an existing row's publicKey and home change only
-              // through a record whose batch-verified sender (`instanceId`) is
-              // the row's stored home; a record from another sender that would
-              // change either is skipped whole. Admin authority is the
-              // receiver's own: the merge does not set or change it.
+              // flair#2665: a new row whose id the receiver's FLAIR_ADMIN_AGENTS
+              // names is not created. An existing row's publicKey and home
+              // change only through a record whose batch-verified sender
+              // (`instanceId`) is the row's stored home; a record from another
+              // sender that would change either is skipped whole. The merge
+              // does not set or change the `role: "admin"` / `admin: true`
+              // fields.
               if (record.table === "Agent") {
-                const identityRefusal = agentIdentityRefusal(record, row, instanceId);
-                if (identityRefusal) return { skip: true, reason: identityRefusal };
+                const agentRefusal =
+                  agentAdminIdCreateRefusal(record, row, configuredAdminAgentIds()) ??
+                  agentIdentityRefusal(record, row, instanceId);
+                if (agentRefusal) return { skip: true, reason: agentRefusal };
                 keepReceiverAgentAuthority(mergedData, row);
               }
               // Absorbing-state guard for the Message table (flair#1521 §12

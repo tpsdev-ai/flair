@@ -2,7 +2,8 @@
  * federation-agent-field-scope-2665.test.ts — flair#2665, real Harper.
  *
  * Boots TWO ephemeral Harpers (test/helpers/harper-lifecycle):
- *   - the RECEIVER, which holds a local agent and pins three peers;
+ *   - the RECEIVER, which holds local agents, pins three peers and names two
+ *     agent ids in FLAIR_ADMIN_AGENTS (one with a local row, one without);
  *   - the SENDER, a paired spoke whose agents are homed on it. Its pushes go
  *     through the real push path (runFederationSyncOnce).
  * Two more pinned peers, a spoke and a hub, sign their batches in-process;
@@ -13,10 +14,15 @@
  *   - the home's push creates its agents, and a key rotation on the home reaches
  *     the receiver;
  *   - a record from a peer that is not the row's home is refused as
- *     agent_identity_not_from_home and leaves the key, home and admin authority
- *     as stored;
- *   - a federation merge stores a new Agent row without admin authority and
- *     keeps an existing row's stored authority.
+ *     agent_identity_not_from_home and leaves the key, home and admin fields as
+ *     stored;
+ *   - a record whose verified sender is not the row's home is refused even when
+ *     its originatorInstanceId field names that home;
+ *   - a federation merge stores a new Agent row without the admin fields and
+ *     keeps an existing row's stored admin fields;
+ *   - a new row whose id the receiver's FLAIR_ADMIN_AGENTS names is refused as
+ *     agent_admin_id_not_federated, and that configuration's existing local row
+ *     keeps its owner's key.
  *
  * Fixtures are neutral; both Harpers are loopback, ephemeral and HOME-isolated.
  */
@@ -38,6 +44,9 @@ const LOCAL_ADMIN = `agent-local-admin-${sfx}`;
 const HOMED_AGENT = `agent-homed-${sfx}`;
 const SPOKE_ADMIN = `agent-spoke-admin-${sfx}`;
 const PEER_NEW = `agent-peer-new-${sfx}`;
+const CONFIGURED_ABSENT = `agent-configured-absent-${sfx}`; // in FLAIR_ADMIN_AGENTS, no local row
+const CONFIGURED_LOCAL = `agent-configured-local-${sfx}`; // in FLAIR_ADMIN_AGENTS, local row
+const CONTROL_NEW = `agent-control-new-${sfx}`; // not in FLAIR_ADMIN_AGENTS
 
 const b64url = (b: Uint8Array) => Buffer.from(b).toString("base64url");
 const iso = (offsetMs = 0) => new Date(Date.now() + offsetMs).toISOString();
@@ -55,6 +64,8 @@ const homedKp2 = nacl.sign.keyPair(); // HOMED_AGENT after rotation
 const spokeAdminKp = nacl.sign.keyPair();
 const peerNewKp = nacl.sign.keyPair();
 const foreignKp = nacl.sign.keyPair(); // the key the non-home peers push
+const configuredOwnerKp = nacl.sign.keyPair(); // CONFIGURED_LOCAL's key on the receiver
+const controlKp = nacl.sign.keyPair();
 
 let receiver: HarperInstance;
 let sender: HarperInstance;
@@ -122,7 +133,7 @@ async function pushFromSender(): Promise<{ pushed: number; skipped: number; erro
 async function peerBatch(
   peerId: string,
   secretKey: Uint8Array,
-  records: Array<{ id: string; data: Record<string, unknown> }>,
+  records: Array<{ id: string; data: Record<string, unknown>; originator?: string }>,
 ): Promise<any> {
   const body = signBodyFresh(
     {
@@ -131,7 +142,7 @@ async function peerBatch(
         table: "Agent",
         id: r.id,
         updatedAt: iso(),
-        originatorInstanceId: peerId,
+        originatorInstanceId: r.originator ?? peerId,
         data: { id: r.id, ...r.data },
       })),
       lamportClock: Date.now(),
@@ -154,7 +165,7 @@ beforeAll(async () => {
   // in an ephemeral store.
   keystore.setPrivateKeySeed(SENDER_ID, senderSeed);
 
-  receiver = await startHarper();
+  receiver = await startHarper({ env: { FLAIR_ADMIN_AGENTS: `${CONFIGURED_ABSENT},${CONFIGURED_LOCAL}` } });
   sender = await startHarper();
   assertOwnInstance(receiver, "receiver");
   assertOwnInstance(sender, "sender");
@@ -176,6 +187,7 @@ beforeAll(async () => {
     records: [
       { id: LOCAL_AGENT, name: LOCAL_AGENT, role: "agent", admin: false, status: "active", publicKey: b64url(ownerKp.publicKey), originatorInstanceId: RECEIVER_ID, createdAt: earlier, updatedAt: earlier },
       { id: LOCAL_ADMIN, name: LOCAL_ADMIN, role: "admin", admin: true, status: "active", publicKey: b64url(localAdminKp.publicKey), originatorInstanceId: RECEIVER_ID, createdAt: earlier, updatedAt: earlier },
+      { id: CONFIGURED_LOCAL, name: CONFIGURED_LOCAL, role: "agent", admin: false, status: "active", publicKey: b64url(configuredOwnerKp.publicKey), originatorInstanceId: RECEIVER_ID, createdAt: earlier, updatedAt: earlier },
     ],
   });
 
@@ -196,7 +208,7 @@ afterAll(async () => {
 }, HARPER_STOP_BUDGET_MS * 2 + 30_000);
 
 describe("flair#2665 — which Agent fields an inbound federation record may change", () => {
-  it("the home instance's push creates its agents; a row that arrives with admin authority is stored without it", async () => {
+  it("the home instance's push creates its agents; a row that arrives with the admin fields is stored without them", async () => {
     expect(await authAs(LOCAL_AGENT, ownerKp.secretKey), "harness: the local owner key authenticates").toBe(200);
 
     const result = await pushFromSender();
@@ -231,7 +243,7 @@ describe("flair#2665 — which Agent fields an inbound federation record may cha
     ["a spoke", OTHER_SPOKE_ID, otherSpokeKp.secretKey],
     ["a hub", OTHER_HUB_ID, otherHubKp.secretKey],
   ] as const) {
-    it(`a key change from ${label} that is not the row's home is refused and the stored key, home and authority are unchanged`, async () => {
+    it(`a key change from ${label} that is not the row's home is refused and the stored key, home and admin fields are unchanged`, async () => {
       const out = await peerBatch(peerId, peerSecret, [
         { id: LOCAL_AGENT, data: { publicKey: b64url(foreignKp.publicKey), role: "admin", admin: true } },
         { id: HOMED_AGENT, data: { publicKey: b64url(foreignKp.publicKey), role: "admin", admin: true } },
@@ -278,7 +290,48 @@ describe("flair#2665 — which Agent fields an inbound federation record may cha
     expect((await readAgent(receiver, LOCAL_AGENT)).publicKey).toBe(b64url(ownerKp.publicKey));
   }, 60_000);
 
-  it("a federation merge does not set admin authority from a non-home peer, from the home, or on a new row", async () => {
+  it("a record from a hub peer whose originatorInstanceId names the row's home is refused: the decision uses the verified sender", async () => {
+    const out = await peerBatch(OTHER_HUB_ID, otherHubKp.secretKey, [
+      { id: HOMED_AGENT, originator: SENDER_ID, data: { publicKey: b64url(foreignKp.publicKey), originatorInstanceId: SENDER_ID } },
+    ]);
+    expect(out.refused, JSON.stringify(out)).toEqual([
+      { table: "Agent", id: HOMED_AGENT, reason: "agent_identity_not_from_home" },
+    ]);
+    expect((await readAgent(receiver, HOMED_AGENT)).publicKey).toBe(b64url(homedKp2.publicKey));
+    expect(await authAs(HOMED_AGENT, foreignKp.secretKey)).toBeGreaterThanOrEqual(400);
+  }, 60_000);
+
+  it("a new row whose id the receiver's FLAIR_ADMIN_AGENTS names is refused; a control id is created without the admin fields", async () => {
+    expect(await adminReadAs(CONFIGURED_LOCAL, configuredOwnerKp.secretKey), "harness: the configured local agent passes the admin gate").toBe(200);
+
+    const out = await peerBatch(OTHER_SPOKE_ID, otherSpokeKp.secretKey, [
+      { id: CONFIGURED_ABSENT, data: { name: CONFIGURED_ABSENT, role: "agent", status: "active", publicKey: b64url(foreignKp.publicKey), originatorInstanceId: OTHER_SPOKE_ID, createdAt: iso() } },
+      { id: CONTROL_NEW, data: { name: CONTROL_NEW, role: "agent", status: "active", publicKey: b64url(controlKp.publicKey), originatorInstanceId: OTHER_SPOKE_ID, createdAt: iso() } },
+      { id: CONFIGURED_LOCAL, data: { publicKey: b64url(foreignKp.publicKey) } },
+    ]);
+    expect(out.merged, JSON.stringify(out)).toBe(1);
+    expect(out.skipped).toBe(2);
+    expect(out.skippedReasons?.agent_admin_id_not_federated).toBe(1);
+    expect(out.refused).toEqual(expect.arrayContaining([
+      { table: "Agent", id: CONFIGURED_ABSENT, reason: "agent_admin_id_not_federated" },
+      { table: "Agent", id: CONFIGURED_LOCAL, reason: "agent_identity_not_from_home" },
+    ]));
+
+    expect(await readAgent(receiver, CONFIGURED_ABSENT), "no row exists for the configured id").toBeNull();
+    expect(await adminReadAs(CONFIGURED_ABSENT, foreignKp.secretKey)).toBeGreaterThanOrEqual(400);
+
+    expect((await readAgent(receiver, CONFIGURED_LOCAL)).publicKey).toBe(b64url(configuredOwnerKp.publicKey));
+    expect(await adminReadAs(CONFIGURED_LOCAL, configuredOwnerKp.secretKey), "the owner's admin-only read is unaffected").toBe(200);
+    expect(await adminReadAs(CONFIGURED_LOCAL, foreignKp.secretKey)).toBeGreaterThanOrEqual(400);
+
+    const control = await readAgent(receiver, CONTROL_NEW);
+    expect(control?.publicKey).toBe(b64url(controlKp.publicKey));
+    expect(control.role).not.toBe("admin");
+    expect(control.admin).not.toBe(true);
+    expect(await adminReadAs(CONTROL_NEW, controlKp.secretKey)).toBeGreaterThanOrEqual(400);
+  }, 60_000);
+
+  it("a federation merge does not set the admin fields from a non-home peer, from the home, or on a new row", async () => {
     // An existing local row, from a peer that is not its home (no key change).
     const fromPeer = await peerBatch(OTHER_SPOKE_ID, otherSpokeKp.secretKey, [
       { id: LOCAL_AGENT, data: { role: "admin", admin: true } },
