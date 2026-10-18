@@ -553,9 +553,9 @@ export function enableScheduler(opts: EnableOpts): EnableResult {
   }
   const stderrLogPath = resolve(logsDir, "rem-nightly.stderr.log");
 
-  // 1. Deploy the shim (always — both platforms invoke it). Every path the
-  // template interpolates is one POSIX single-quoted argument; none is
-  // double-quoted, so shell syntax inside a path stays literal.
+  // 1. Deploy the shim (always — both platforms invoke it). Every path passed
+  // to the command is one POSIX single-quoted argument; none is double-quoted,
+  // so shell syntax inside a path stays literal.
   const shimContents = renderTemplate(readTemplate(templateRoot, "bin/flair-rem-nightly.sh.tmpl"), {
     ...subs,
     NODE_BIN: quoteShimArg(subs.NODE_BIN),
