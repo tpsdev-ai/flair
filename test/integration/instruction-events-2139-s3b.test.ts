@@ -232,9 +232,11 @@ describe("flair#2139 S3b — skill events and the private-skill hash gate", () =
   test("repeated private skill updates reach default bootstrap once per version ref without content", async () => {
     const id = nextId("bootstrap");
     const contents = ["INSTRUCTION-EVENT-CONTENT-A", "INSTRUCTION-EVENT-CONTENT-B", "INSTRUCTION-EVENT-CONTENT-C"];
+    let headId = id;
     for (const content of contents) {
-      const res = await call(A, "PUT", memPath(id), skillBody(id, content, { visibility: "private" }));
+      const res = await call(A, "PUT", memPath(headId), skillBody(headId, content, { visibility: "private" }));
       expect(res.status, res.text.slice(0, 300)).toBeLessThan(300);
+      headId = JSON.parse(res.text).id;
     }
     const versions = await versionsOf(id);
     expect(versions.map((version) => version.kind)).toEqual(["create", "update", "update"]);
