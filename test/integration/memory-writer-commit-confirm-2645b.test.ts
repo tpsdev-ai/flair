@@ -8,8 +8,8 @@
  * transaction. Each case holds a writer at an existing test-only pause point
  * (resources/txn-pause-point.ts), commits a newer full record to the same row
  * through the lock-bypassing operations API, releases the writer, and reads the
- * committed state back. The newer record is a copy of the stored row with a new
- * content, so identity fields do not move.
+ * committed state back. The newer record is a copy of the stored row with a
+ * changed field, so identity fields do not move.
  *
  * Real Harper, ephemeral instance; every URL is asserted to be this test's own
  * instance before the first call.
