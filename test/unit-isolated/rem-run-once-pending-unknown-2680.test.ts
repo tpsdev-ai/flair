@@ -93,7 +93,7 @@ test("flair rem nightly run-once prints a failed pending-candidate count as unkn
   }
 });
 
-test("flair rem nightly run-once without an admin credential prints the count as unknown, not 0", async () => {
+test("a healthy flair rem nightly run-once dry run without an admin credential prints the count as unknown, not 0", async () => {
   const output: string[] = [];
   const log = spyOn(console, "log").mockImplementation((...args: unknown[]) => { output.push(args.map(String).join(" ")); });
   const exit = spyOn(process, "exit").mockImplementation((() => {}) as never);

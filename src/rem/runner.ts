@@ -227,8 +227,8 @@ export type ApiCall = (method: string, path: string, body?: unknown) => Promise<
 /**
  * Ops-API `search_by_conditions` helper (admin-authed). The runner is
  * agent-authed and cannot reach the ops port itself, so the CLI injects this
- * when admin credentials are available. When absent, the pending-candidate
- * count is unknown.
+ * when admin credentials are available. When absent and the cycle reaches the
+ * candidate-count step, the pending-candidate count is unknown.
  */
 export type OpsSearch = (table: string, conditions: any[], getAttributes: string[]) => Promise<any[]>;
 
@@ -732,7 +732,8 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
     const soulForSnapshot = souls.length === 1 ? souls[0] : souls.length > 1 ? souls : null;
 
     // flair#2680: a failed count is a failed check (an `errors` entry), not 0.
-    // With no admin credential no query runs; the count is reported unknown.
+    // With no admin credential no query runs; when the cycle reaches this step
+    // the count is reported unknown.
     if (opts.opsSearch) {
       pendingCandidates = await fetchPendingCandidateCount(opts.opsSearch, opts.agentId);
       if (typeof pendingCandidates !== "number") errors.push(`pending-count: ${pendingCandidates.reason}`);
