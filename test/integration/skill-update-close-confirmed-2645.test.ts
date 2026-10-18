@@ -255,6 +255,28 @@ describe("flair#2645 — a skill UPDATE confirms the predecessor close before su
     expect(await liveHeads(predecessorId), "the lineage does not have exactly one live head").toEqual([successorId]);
   }, 120_000);
 
+  it("a superseding POST in its request transaction checks its committed successor after its commit", async () => {
+    const predecessorId = nextId("post-verify");
+    const created = await call(A, "PUT", memPath(predecessorId), skillBody(predecessorId, "v1"));
+    expect(created.status, (await created.text()).slice(0, 300)).toBeLessThan(300);
+    const successorId = nextId("post-verify-successor");
+    const seen: { committed: string | null } = { committed: null };
+    const { response, paused, released } = await withPaused(
+      "memory-post-skill-verify",
+      () => call(A, "POST", "/Memory", skillBody(successorId, "v2", { supersedes: predecessorId })),
+      async () => {
+        seen.committed = (await memoryRow(successorId))?.content ?? null;
+        await commitNewerSkillWrite(successorId, "v2-replaced-after-commit");
+      },
+    );
+    const text = await response.text();
+    expect(response.status, `${text.slice(0, 300)} (paused: ${paused})`).toBe(409);
+    expect(JSON.parse(text).error).toBe("skill_target_changed");
+    expect(paused, "the skill POST was not paused before its post-commit check").toBe(true);
+    expect(released).toBe("go");
+    expect(seen.committed, "the successor was not committed before the post-commit check").toBe("v2");
+  }, 120_000);
+
   it("a completed later update of the same skill confirms the earlier update as superseded in order", async () => {
     const id = nextId("superseded-in-order");
     const successorId = nextId("superseded-first");

@@ -1422,7 +1422,17 @@ async function writeSkillCreateOrUpdate(
     agentId: String(content.agentId),
     head: (shared) => resolveSkillHead(subjectId, addressedId, shared),
     plan: async (head, shared, attempt) => {
+      // A superseding plan from a joined attempt is planned again, owned
+      // (flair#2645); no state from the earlier attempt carries over.
       joinsCaller = attempt.joined;
+      captured.row = null;
+      captured.closed = null;
+      unchangedHead = null;
+      successorBasis = null;
+      if (args.staged) {
+        delete args.staged.row;
+        delete args.staged.joined;
+      }
       const stale = await validateSkillSnapshots(storedRow, explicitPredecessor, content.id ?? null, shared);
       const denied = await authorizeSkillOwners(ctx, auth, [storedRow, explicitPredecessor, head ?? content], shared);
       if (denied) return denied;
