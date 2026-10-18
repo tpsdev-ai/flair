@@ -11,9 +11,6 @@
  * in-transaction pause point while a lock-bypassing test writer commits a newer
  * full record to the predecessor, then releases it and reads back the committed
  * state.
- *
- * Real Harper, ephemeral instance; every URL is asserted to be this test's own
- * instance before the first call.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
@@ -23,6 +20,7 @@ import { join } from "node:path";
 import nacl from "tweetnacl";
 import { ensureFlairAgentRole, ensureFlairAgentUser } from "../../src/cli";
 import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
+import { assertOwnInstance } from "../helpers/own-harper-instance";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array }
 const mkAgent = (id: string): TestAgent => {
@@ -37,15 +35,6 @@ const now = () => new Date().toISOString();
 
 let harper: HarperInstance;
 let pauseDir = "";
-
-function assertOwnInstance(h: HarperInstance): void {
-  for (const url of [h.httpURL, h.opsURL]) {
-    const u = new URL(url);
-    expect(["127.0.0.1", "localhost"], url).toContain(u.hostname);
-    expect(["9925", "9926"], `${url} must be this test's own Harper`).not.toContain(u.port);
-  }
-  expect(h.process?.pid).toBeGreaterThan(0);
-}
 
 const basicAuth = () => "Basic " + btoa(`${harper.admin.username}:${harper.admin.password}`);
 
@@ -189,6 +178,9 @@ beforeAll(async () => {
       else process.env[key] = value;
     }
   }
+  // Before the first test request, reject external instances and check the live
+  // spawned process, owned temporary install directory, and distinct 127.0.0.1
+  // ports outside the helper's denylist.
   assertOwnInstance(harper);
   await ops({
     operation: "upsert", database: "flair", table: "Agent",

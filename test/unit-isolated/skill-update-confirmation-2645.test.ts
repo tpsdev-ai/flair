@@ -117,6 +117,23 @@ test("a missing predecessor without caller handling refuses and compensates", as
   expect(authorize).not.toHaveBeenCalled();
 });
 
+test("a missing predecessor without a missing decision refuses when confirmEffect would return null and runs compensation", async () => {
+  const compensate = mock(async () => null);
+  const confirmEffect = mock(async () => null);
+  const result = await confirmSkillClose({
+    ctx: {}, table: memoryTable, expected: { id: "predecessor" },
+    closePatch: { validTo: "closed" }, authorize: async () => null, compensate, confirmEffect,
+    refusal: () => Response.json({ error: "close_not_confirmed" }, { status: 409 }),
+    unconfirmed: () => Response.json({ error: "confirmation_unavailable" }, { status: 500 }),
+  });
+  expect(result).toBeInstanceOf(Response);
+  if (!result) throw new Error("expected refusal");
+  expect(result.status).toBe(409);
+  expect((await result.json()).error).toBe("stored_row_changed");
+  expect(compensate).toHaveBeenCalledTimes(1);
+  expect(confirmEffect).not.toHaveBeenCalled();
+});
+
 test("version rollback confirms absence after commit with the version lock held", async () => {
   seedVersion();
   expect(await removeAppendedVersion({}, "skill", "subject", "v1")).toBe("removed");
