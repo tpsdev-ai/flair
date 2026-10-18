@@ -1,7 +1,7 @@
 // ─── flair#2139 S3b — instruction-change events against a real Harper ────────
 //
-// Every version append inside the owned transaction also appends one reserved
-// OrgEvent by raw create (no upsert): soul.changed / skill.changed, id
+// The application writers append an OrgEvent by raw create (no upsert):
+// soul.changed / skill.changed, id
 // `instruction-change:<version id>`, refId = version id, createdAt copied from
 // the version, detail built from the ten allowlisted fields only. A private
 // skill's event omits the three value-derived hashes (D1), including on the
@@ -127,7 +127,7 @@ afterAll(async () => {
   if (installDir) await rm(installDir, { recursive: true, force: true, maxRetries: 4 });
 }, HARPER_STOP_BUDGET_MS);
 
-describe("flair#2139 S3b — one allowlisted event per appended soul version", () => {
+describe("flair#2139 S3b — Soul application-writer events", () => {
   test("create, update and delete each append exactly one event with the ten fields", async () => {
     const key = `ie-soul-${sfx}`;
     const id = `${A.id}:${key}`;
@@ -139,8 +139,18 @@ describe("flair#2139 S3b — one allowlisted event per appended soul version", (
     const versions = await versionsOf(subjectId);
     expect(versions.map((v) => v.kind)).toEqual(["create", "update", "delete"]);
     const events = await eventsOf(versions.map((v) => v.id));
+    const subjectEvents = await ops({
+      operation: "search_by_value", database: "flair", table: "OrgEvent",
+      search_attribute: "kind", search_value: "soul.changed", get_attributes: ["*"],
+    });
+    expect(subjectEvents.filter((event: any) => JSON.parse(event.detail).subjectId === subjectId)).toHaveLength(versions.length);
 
     for (const version of versions) {
+      const matching = await ops({
+        operation: "search_by_value", database: "flair", table: "OrgEvent",
+        search_attribute: "refId", search_value: version.id, get_attributes: ["*"],
+      });
+      expect(matching).toHaveLength(1);
       const event = events[version.id];
       expect(event, `no event for version ${version.id}`).toBeTruthy();
       expect(event.id).toBe(`instruction-change:${version.id}`);
@@ -219,26 +229,26 @@ describe("flair#2139 S3b — one allowlisted event per appended soul version", (
 });
 
 describe("flair#2139 S3b — skill events and the private-skill hash gate", () => {
-  test("two skill writes reach default bootstrap with distinct version refs and scoped content-free metadata", async () => {
-    const ids = [nextId("bootstrap-a"), nextId("bootstrap-b")];
-    const contents = ["INSTRUCTION-EVENT-CONTENT-A", "INSTRUCTION-EVENT-CONTENT-B"];
-    for (let i = 0; i < ids.length; i++) {
-      const res = await call(A, "PUT", memPath(ids[i]), skillBody(ids[i], contents[i], { visibility: "private" }));
+  test("repeated private skill updates reach default bootstrap once per version ref without content", async () => {
+    const id = nextId("bootstrap");
+    const contents = ["INSTRUCTION-EVENT-CONTENT-A", "INSTRUCTION-EVENT-CONTENT-B", "INSTRUCTION-EVENT-CONTENT-C"];
+    for (const content of contents) {
+      const res = await call(A, "PUT", memPath(id), skillBody(id, content, { visibility: "private" }));
       expect(res.status, res.text.slice(0, 300)).toBeLessThan(300);
     }
-    const versions = (await Promise.all(ids.map(versionsOf))).flat();
-    expect(versions).toHaveLength(2);
+    const versions = await versionsOf(id);
+    expect(versions.map((version) => version.kind)).toEqual(["create", "update", "update"]);
     const storedEvents = await ops({
       operation: "search_by_value", database: "flair", table: "OrgEvent",
       search_attribute: "kind", search_value: "skill.changed", get_attributes: ["*"],
     });
-    const relevant = storedEvents.filter((event: any) => ids.includes(JSON.parse(event.detail).subjectId));
-    expect(relevant).toHaveLength(2);
+    const relevant = storedEvents.filter((event: any) => JSON.parse(event.detail).subjectId === id);
+    expect(relevant).toHaveLength(3);
     const res = await call(A, "POST", "/BootstrapMemories", { agentId: A.id, includeContext: false, maxTokens: 16000 });
     expect(res.status, res.text.slice(0, 300)).toBe(200);
     const events = JSON.parse(res.text).events.filter((event: any) => relevant.some((stored: any) => stored.id === event.id));
-    expect(events).toHaveLength(2);
-    expect(new Set(events.map((event: any) => event.refId)).size).toBe(2);
+    expect(events).toHaveLength(3);
+    expect(new Set(events.map((event: any) => event.refId)).size).toBe(3);
     expect(events.map((event: any) => event.refId).sort()).toEqual(versions.map((version) => version.id).sort());
     for (const event of events) {
       expect(event.scope).toBe(A.id);

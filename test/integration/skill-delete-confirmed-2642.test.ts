@@ -74,6 +74,13 @@ async function versionsOf(subjectId: string): Promise<any[]> {
   return (rows as any[]).sort((a, b) => Number(a.version) - Number(b.version));
 }
 
+async function eventsForVersion(refId: string): Promise<any[]> {
+  return ops({
+    operation: "search_by_value", database: "flair", table: "OrgEvent",
+    search_attribute: "refId", search_value: refId, get_attributes: ["*"],
+  });
+}
+
 function ed25519(who: TestAgent, method: string, path: string): string {
   const ts = String(Date.now());
   const nonce = randomUUID();
@@ -271,8 +278,15 @@ describe("flair#2642 — a skill DELETE confirms the version close before succes
     const created = await call(A, "PUT", memPath(id), skillBody(id, "v1"));
     expect(created.status, await created.text()).toBeLessThan(300);
     const pointer = await seedPointer(id);
-    const response = await withPausedCloses(closePoints, () => call(A, "DELETE", memPath(id)),
-      (index) => commitNewerSkillWrite(id, `competitor-${index}`));
+    let compensated: any;
+    const response = await withPausedCloses(closePoints, () => call(A, "DELETE", memPath(id)), async (index) => {
+      if (index === closePoints.length - 1) {
+        compensated = (await versionsOf(id)).at(-1);
+        expect(compensated?.kind).toBe("delete");
+        expect(await eventsForVersion(compensated.id)).toHaveLength(1);
+      }
+      await commitNewerSkillWrite(id, `competitor-${index}`);
+    });
     const text = await response.text();
     expect(response.status, text).toBe(409);
     expect(JSON.parse(text).error).toBe("skill_delete_not_closed");
@@ -281,6 +295,7 @@ describe("flair#2642 — a skill DELETE confirms the version close before succes
     expect((await memoryRow(id))?.content).toBe("competitor-3");
     expect((await versionsOf(id)).map((v) => v.kind)).toEqual(["create"]);
     expect(await pointerRow(id)).toEqual(pointer);
+    expect(await eventsForVersion(compensated.id)).toHaveLength(0);
   }, 120_000);
 
   for (const point of ["skill-delete-pointer-restore", "skill-delete-pointer-restore-staged"]) {
@@ -319,9 +334,17 @@ describe("flair#2642 — a skill DELETE confirms the version close before succes
     expect(created.status, await created.text()).toBeLessThan(300);
     await seedPointer(id);
     let appended: any;
+    let supersededEvent: any;
     const response = await withPausedCloses(closePoints, () => call(A, "DELETE", memPath(id)), async (index) => {
       await commitNewerSkillWrite(id, `competitor-${index}`);
-      if (index === closePoints.length - 1) appended = await appendNewerVersion(id);
+      if (index === closePoints.length - 1) {
+        const tombstone = (await versionsOf(id)).at(-1);
+        expect(tombstone?.kind).toBe("delete");
+        const events = await eventsForVersion(tombstone.id);
+        expect(events).toHaveLength(1);
+        supersededEvent = events[0];
+        appended = await appendNewerVersion(id);
+      }
     });
     const text = await response.text();
     expect(response.status, text).toBe(500);
@@ -331,6 +354,7 @@ describe("flair#2642 — a skill DELETE confirms the version close before succes
     expect(versions.map((v) => v.kind)).toEqual(["create", "delete", "update"]);
     expect(versions.at(-1)?.id).toBe(appended.id);
     expect(versions.at(-1)?.previousVersionHash).toBe(versions[1].recordHash);
+    expect(await eventsForVersion(versions[1].id)).toEqual([supersededEvent]);
     expect(await pointerRow(id)).toBeNull();
   }, 120_000);
 

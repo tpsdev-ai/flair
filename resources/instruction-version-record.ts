@@ -40,7 +40,7 @@ const PRIVATE_SKILL_EVENT_OMITTED = ["valueHash", "previousVersionHash", "record
 
 /**
  * flair#2139 S3b — the event for one appended version, built by explicit field
- * enumeration so no row, request or value field reaches the stream. The three
+ * enumeration of selected row fields. The three
  * value-derived hashes are absent for a private skill (D1), gated on the
  * version's stored visibility (which a tombstone carries as the closed head's
  * last state).
@@ -134,9 +134,7 @@ export async function removeAppendedVersion(
       if (!head) return "removed" as const;
       if (String(head.id) !== versionRecordId) return "superseded" as const;
       await (databases as any).flair.InstructionVersion.delete(versionRecordId, shared);
-      // No version means no event: the event appended with this record is
-      // removed in the same transaction, so the stream never names a version
-      // the compensation took away.
+      // Remove this record's event in the same transaction.
       const events = (databases as any).flair?.OrgEvent;
       if (!isTableLike(events)) throw new Error("flair: the OrgEvent table is unavailable");
       await events.delete(`${INSTRUCTION_EVENT_ID_PREFIX}${versionRecordId}`, shared);

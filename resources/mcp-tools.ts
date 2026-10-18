@@ -1457,8 +1457,7 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
           { path: "events", type: "array" }, { path: "sections", type: "object" },
           { path: "skills", type: "array" }, { path: "skillDiagnostics", type: "array" }, // #2141
         ],
-        // #1200 — dedup by the SEMANTIC content key (excludes id/createdAt, which
-        // vary across physical duplicate rows). See ToolInvariants.dedupSignature.
+        // #1200 — content dedup; instruction events use refId in the checker.
         dedupSignature: { container: "events", signatureFields: ["kind", "summary", "detail", "targetIds"] },
         // #1199 — tokenEstimate via the wrapper's own estimator over the delivered
         // payload (minus the two fields added after it was measured).

@@ -35,6 +35,12 @@ function stage(ctx: any, apply: () => void): void {
 
 const InstructionVersionTable = {
   primaryStore,
+  async get(id: string, ctx?: any): Promise<Row | null> {
+    return (ctx?.transaction?.versions ?? store).get(id) ?? null;
+  },
+  async delete(id: string, ctx: any): Promise<void> {
+    (ctx?.transaction?.versions ?? store).delete(id);
+  },
   async *search(query: any, ctx?: any): AsyncGenerator<Row> {
     if (hideHead) return;
     const conds: any[] = query?.conditions ?? [];
@@ -140,7 +146,7 @@ function mockTransaction(ctx: any, cb: (txn: any) => any): any {
   return result;
 }
 
-const { recordVersion, recordDigest, valueDigest, versionId, soulSubjectId, subjectTypeReadable, RECORD_HASH_FIELDS } =
+const { recordVersion, removeAppendedVersion, recordDigest, valueDigest, versionId, soulSubjectId, subjectTypeReadable, RECORD_HASH_FIELDS } =
   await import("../../resources/instruction-version-record.ts");
 
 const NOW = "2020-01-01T00:00:00.000Z";
@@ -185,6 +191,25 @@ beforeEach(() => {
 });
 
 const okRow = () => new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "Content-Type": "application/json" } });
+
+test("compensating the head removes its event; a superseded version retains its event", async () => {
+  const request = input();
+  const first = await recordVersion(context(), request, async () => okRow());
+  expect(first.ok).toBe(true);
+  const firstId = versionId("soul", request.subjectId, 1n);
+  const firstEvent = eventStore.get(`instruction-change:${firstId}`);
+  expect(firstEvent).toBeDefined();
+  const second = await recordVersion(context(), input({ kind: "update" }), async () => okRow());
+  expect(second.ok).toBe(true);
+  const secondId = versionId("soul", request.subjectId, 2n);
+  expect(eventStore.has(`instruction-change:${secondId}`)).toBe(true);
+  expect(await removeAppendedVersion(context(), "soul", request.subjectId, firstId)).toBe("superseded");
+  expect(eventStore.get(`instruction-change:${firstId}`)).toEqual(firstEvent);
+  expect(await removeAppendedVersion(context(), "soul", request.subjectId, secondId)).toBe("removed");
+  expect(store.has(secondId)).toBe(false);
+  expect(eventStore.has(`instruction-change:${secondId}`)).toBe(false);
+  expect(eventStore.get(`instruction-change:${firstId}`)).toEqual(firstEvent);
+});
 
 describe("instruction version — pure helpers", () => {
   test("version ids encode the subject and sequence, never a content hash", () => {

@@ -1520,18 +1520,11 @@ export class BootstrapMemories extends Resource {
         eventResults.push(event);
       }
 
-      // flair#1200 — collapse byte-identical duplicate events before rendering.
-      // The same logical event can land in the table more than once (a producer
-      // that double-fires, or the same broadcast emitted from two paths); each
-      // physical row has a distinct id/createdAt (OrgEvent.post keys the id off
-      // a millisecond timestamp), so they aren't caught by primary-key upsert
-      // and render as exact dupes. Org-event slots are scarce, so dedup BEFORE
-      // admission — otherwise ~half the slots are wasted on duplicates. Keyed on
-      // the CONTENT (kind + summary + detail + targets), keeping the most-recent
-      // occurrence per signature.
+      // flair#1200 — dedup before admission, keeping the most recent occurrence.
+      // Instruction events use version refs; other events use content.
       const eventBySignature = new Map<string, any>();
       for (const evt of eventResults) {
-        const sig = JSON.stringify([
+        const sig = JSON.stringify(RESERVED_EVENT_KINDS.includes(evt.kind) ? ["instruction", evt.refId] : [
           evt.kind ?? "",
           evt.summary ?? "",
           evt.detail ?? "",
