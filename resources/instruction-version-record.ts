@@ -10,7 +10,6 @@ import { withOwnedTransaction } from "./request-transaction.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 import { maybeThrowSkillWriteFault } from "./skill-write-fault.js";
 import { PRIVATE_VISIBILITY, SHARED_VISIBILITY } from "./memory-visibility.js";
-import { txnPausePoint } from "./txn-pause-point.js";
 
 export const INSTRUCTION_VERSION_TABLE = "InstructionVersion";
 
