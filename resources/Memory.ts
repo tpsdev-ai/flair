@@ -31,7 +31,7 @@ import { putPointerRow, deletePointerRowViaTable, restorePointerRowIfAbsent, Poi
 import { DECLARED_MEMORY_ATTRIBUTES, stripUndeclaredMemoryAttributes, stripServerStampedFields } from "./memory-declared-attributes.js";
 import { composesCallerWrite, isJoinableTransaction, withOwnedTransaction, withSharedWriteTransaction } from "./request-transaction.js";
 import { PredecessorVisibilityChanged, applyGrantedVisibility, committedVisibilityDiffers, predecessorVisibilityChangedRefusal } from "./grant-visibility.js";
-import { CommittedRowChanged, GrantedCloseRevoked, confirmCommittedRow, grantedCloseRevokedRefusal, sameStoredRow, storedRowChangedRefusal, writeGrantHeld } from "./write-back.js";
+import { CommittedRowChanged, GrantedCloseRevoked, confirmCommittedRow, grantedCloseRevokedRefusal, sameStoredRow, storedRowChangedRefusal, verifyCommittedFields, writeGrantHeld } from "./write-back.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 import {
   markMemoryWriteOutcomeUnknown,
@@ -1553,7 +1553,7 @@ type ReembedOutcome =
   | { kind: "forbidden" }
   | { kind: "no_text" }
   | { kind: "recompute"; text: string }
-  | { kind: "written"; model: string; updatedAt: string; token: string };
+  | { kind: "written"; model: string; updatedAt: string; token: string; identity: Record<string, any>; fields: Record<string, unknown> };
 
 /** A re-embed's answer, with a token only for a written row. */
 type ReembedResult = { response: Response; token?: string };
@@ -1589,7 +1589,8 @@ function storedInstanceToken(row: any): string | null {
  * transaction (the staged write is discarded) and the caller answers
  * stored_row_changed (409). A same-id replacement with the same identity and
  * text passes. Harper has no compare-and-set: a change committed after that
- * confirm and before the commit is not seen by it.
+ * confirm and before the commit is caught by the post-commit verification,
+ * which retries from a fresh read within the attempt bound.
  *
  * The staged update also records `embeddedContentHash`, the newly computed hash
  * of the text the vector was computed from (null for an empty owner), so the
@@ -1637,7 +1638,8 @@ async function reembedStoredRow(
         // this same update; a row that has one keeps it.
         const legacyToken: Record<string, unknown> = storedInstanceToken(stored) ? {} : { instanceToken: token };
         // flair#2561: a Response from the storage layer is not reported (storageResult).
-        const result = storageResult(await (databases as any).flair.Memory.update(id, { ...legacyToken, embedding, embeddingModel: model, updatedAt, embeddedContentHash: hashEmbeddedText(stored.agentId, textToEmbed) ?? null }, owned));
+        const reembedUpdate = { ...legacyToken, embedding, embeddingModel: model, updatedAt, embeddedContentHash: hashEmbeddedText(stored.agentId, textToEmbed) ?? null };
+        const result = storageResult(await (databases as any).flair.Memory.update(id, reembedUpdate, owned));
         if (result instanceof Response) return { kind: "withheld" as const, response: result };
         // Test-only: inert unless the fault-injection env opt-in is set and armed.
         const stagedPause = txnPausePoint("memory-reembed-staged");
@@ -1653,7 +1655,8 @@ async function reembedStoredRow(
         // write; the caller answers stored_row_changed (409). Only a text change
         // is logged. Neither the staged vector, its hash, nor a staged legacy
         // token is written. A change committed after this confirm and before the
-        // commit is not seen (no compare-and-set).
+        // commit is caught by the post-commit verification below, which retries
+        // from a fresh read.
         await confirmCommittedRow((databases as any).flair.Memory, id, (committed) => {
           if (!sameStoredRow(committed, stored)) return false;
           if (skillEmbedText(committed) !== textToEmbed) {
@@ -1662,7 +1665,15 @@ async function reembedStoredRow(
           }
           return true;
         });
-        return { kind: "written" as const, model, updatedAt, token };
+        // Test-only: inert unless the fault-injection env opt-in is set and
+        // armed. Holds the re-embed after its final pre-commit confirmation and
+        // before its owned transaction commits, the window where a newer write
+        // can discard this write's effect (flair#2656).
+        const commitPause = txnPausePoint("memory-reembed-commit");
+        if (commitPause) await commitPause;
+        // The identity is the row this update writes: a legacy row gains the
+        // token this attempt stages.
+        return { kind: "written" as const, model, updatedAt, token, identity: { ...stored, instanceToken: token }, fields: reembedUpdate };
       });
     } catch (err) {
       // The owned transaction was aborted by the throw; nothing was written.
@@ -1694,6 +1705,23 @@ async function reembedStoredRow(
       continue;
     }
     noteWriteStamp(outcome.model, preRead);
+    // flair#2656: the commit is not proof the re-embed landed. Re-read the
+    // committed row in a fresh context and answer success only when it is the
+    // row this attempt wrote with every staged field at its staged value. A
+    // mismatch retries from the next attempt's fresh read (which re-checks the
+    // text, the owner and the identity); an unreadable read is unknown.
+    const verdict = await verifyCommittedFields(
+      (databases as any).flair.Memory,
+      id,
+      outcome.identity,
+      outcome.fields,
+      (committed) => skillEmbedText(committed) === textToEmbed,
+    );
+    if (verdict === "unreadable") return { response: writeOutcomeUnknownResponse() };
+    if (verdict !== "shown") {
+      if (attempt === REEMBED_WRITE_ATTEMPTS) return { response: storedRowChangedRefusal("Memory") };
+      continue;
+    }
     // flair#2561: the response names the row and its new updatedAt, and
     // carries no embedding field; `flair reembed` reads the model stamp from
     // the stored row.
@@ -2512,8 +2540,10 @@ export class Memory extends (databases as any).flair.Memory {
       // confirms the committed row has the identity and embedding text it read
       // (flair#2465). A row gone or changed in either at confirmation aborts with
       // 409 stored_row_changed. The vector is computed for the re-read text; a
-      // change committed after confirmation and before commit is not seen by that
-      // confirmation. After a normal storage result and inner commit, PATCH
+      // change committed after confirmation and before commit is caught by the
+      // post-commit verification, which retries from a fresh read within the
+      // attempt bound.
+      // After a normal storage result and inner commit, PATCH
       // compares the token; a storage Response returns before that read.
       if (reembedRequest) {
         if (!existingForSkill) return NOT_FOUND();

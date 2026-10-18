@@ -9,7 +9,7 @@ import { invalidAgentIdMessage, isValidAgentId } from "../src/lib/agent-id-rule.
 import { credentialMapsPrincipal, credentialPrincipalId, isUsableCredential } from "../src/lib/credential-status-rule.js";
 import { withKeyLock } from "./key-lock.js";
 import { withOwnedTransaction } from "./request-transaction.js";
-import { CommittedRowChanged, confirmCommittedRow, sameStoredRow } from "./write-back.js";
+import { CommittedRowChanged, confirmCommittedRow, sameStoredRow, verifyCommittedFields } from "./write-back.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 import { claimIdJagJti, idJagReplayDeps, ReplayStoreUnavailable, reportReplayStoreGapsAtBoot, type ReplayStoreBootStore } from "./replay-store.js";
 
@@ -233,7 +233,8 @@ async function resolveOrCreatePrincipalLocked(
 
   // Within one Harper process, the credential lookup and any JIT create run
   // in an owned transaction that commits before the subject lock releases.
-  return withOwnedTransaction(ctx, async (owned) => {
+  let touchedCredential: { id: string; identity: any; fields: Record<string, unknown> } | undefined;
+  const principalId = await withOwnedTransaction(ctx, async (owned) => {
     // Look for existing credential with this IdP subject
     for await (const cred of (databases as any).flair.Credential.search({
       conditions: [
@@ -264,19 +265,19 @@ async function resolveOrCreatePrincipalLocked(
       const pause = txnPausePoint("xaa-credential-touch");
       if (pause) await pause;
       // Update last used
-      await (databases as any).flair.Credential.put({
+      const touchedRow = {
         ...cred,
         lastUsedAt: nowISO(),
-      }, owned);
+      };
+      await (databases as any).flair.Credential.put(touchedRow, owned);
       // A revoke or a delete committed while this touch was in flight (the
       // read above through the write above) refuses the grant rather than
       // being overwritten by the touch: re-read the COMMITTED row and abort
       // the touch unless it is still this matched, active credential
       // (resources/write-back.ts, confirmCommittedRow — the same confirmation
       // the write-back helper runs once its write is staged). A change
-      // committed after this read and before the commit is not seen by it:
-      // Harper has no compare-and-set on a table write, so that sliver is
-      // outside what this grant can guarantee.
+      // committed after this read and before the commit is caught by the
+      // post-commit verification below, which refuses the grant.
       try {
         await confirmCommittedRow(
           (databases as any).flair.Credential,
@@ -296,6 +297,12 @@ async function resolveOrCreatePrincipalLocked(
         }
         throw err;
       }
+      // Test-only: inert unless fault injection is enabled and armed. Holds the
+      // touch after its final pre-commit confirmation and before its owned
+      // transaction commits (flair#2656).
+      const commitPause = txnPausePoint("xaa-credential-touch-commit");
+      if (commitPause) await commitPause;
+      touchedCredential = { id: String(cred.id), identity: touchedRow, fields: touchedRow };
       return credentialPrincipalId(cred)!;
     }
 
@@ -349,6 +356,21 @@ async function resolveOrCreatePrincipalLocked(
 
     return principalId;
   });
+  // flair#2656: the commit is not proof the touch landed. Answer the grant only
+  // when a fresh committed read is the touched row with every staged field at
+  // its staged value; otherwise the grant is refused.
+  if (touchedCredential) {
+    const verdict = await verifyCommittedFields(
+      (databases as any).flair.Credential,
+      touchedCredential.id,
+      touchedCredential.identity,
+      touchedCredential.fields,
+    );
+    if (verdict !== "shown") {
+      throw new Error("the matched IdP credential's committed state could not be confirmed as this grant's touched row; the jwt-bearer grant is refused");
+    }
+  }
+  return principalId;
 }
 
 /**

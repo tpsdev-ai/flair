@@ -551,4 +551,31 @@ describe("flair#2333 slice 2 — credential lifecycle writes preserve committed 
     const row = await readRow("Credential", credentialId);
     expect(row, "the stored row is not the committed delete").toBeNull();
   }, 60_000);
+
+  it("a revoke committed in the touch's confirmation-to-commit gap refuses the grant", async () => {
+    const subject = `user-gap-${randomUUID()}`;
+    const principalId = `agent-2333-gap-${randomUUID().slice(0, 8)}`;
+    const credentialId = `cred_idp_gap_${randomUUID().slice(0, 8)}`;
+    const lastUsedAt = "2020-01-02T03:04:05.000Z";
+    await ops({
+      operation: "insert", database: "flair", table: "Credential",
+      records: [{ id: credentialId, principalId, kind: "idp", label: "gap", status: "active", idpProvider: IDP_ID, idpSubject: subject, createdAt: new Date().toISOString(), lastUsedAt }],
+    });
+    const assertion = await jwtBearerAssertion(subject);
+    const { response, competed, released } = await withPaused(
+      "xaa-credential-touch-commit",
+      () => grantJwtBearer(assertion),
+      () => ops({ operation: "update", database: "flair", table: "Credential", records: [{ id: credentialId, status: "revoked" }] }).then(() => 200),
+    );
+    expect(released, "the credential touch was not paused and released by this test").toBe("go");
+    expect(competed, "the competing revoke did not return 200").toBe(200);
+    const text = await response.text();
+    expect(response.status, `grant returned ${response.status}: ${text.slice(0, 300)}`).toBe(400);
+    const body = JSON.parse(text);
+    expect(body.error).toBe("invalid_grant");
+    expect(body.access_token).toBeUndefined();
+    expect(await readTokensForPrincipal(principalId), "the refused grant issued a token").toEqual([]);
+    const row = await readRow("Credential", credentialId);
+    expect(row?.status, "the stored credential is not the committed revoke").toBe("revoked");
+  }, 60_000);
 });

@@ -42,7 +42,13 @@ mock.module("../../resources/embeddings-provider.ts", () => ({
   const staged: { id: string; patch: Row }[] = [];
   ctx.transaction = { staged };
   const result = await cb(ctx);
-  for (const { id, patch } of staged) commitPatch(id, patch);
+  for (const { id, patch } of staged) {
+    if (dropOnCommit.has(id)) {
+      dropOnCommit.delete(id);
+      continue;
+    }
+    commitPatch(id, patch);
+  }
   return result;
 };
 
@@ -53,6 +59,8 @@ const LEGACY_ID = "legacy-row.content";
 const STALE = { embedding: [0.1, 0.1, 0.1], embeddingModel: "ancient-model" };
 
 let store: Map<string, Row>;
+/** Rows whose next staged write is dropped by the commit (a newer write won). */
+let dropOnCommit: Set<string>;
 /** Rows committed to the store by an update (a staged update counts once its transaction commits). */
 let puts: Row[];
 /** The method and the field names of every write the migration issued (flair#2494). */
@@ -120,6 +128,7 @@ function migration() {
 
 beforeEach(() => {
   store = new Map([[LEGACY_ID, { id: LEGACY_ID, agentId: "a", content: "legacy body", ...STALE }]]);
+  dropOnCommit = new Set();
   puts = [];
   writeCalls = [];
   embedded = [];
@@ -139,6 +148,16 @@ describe("flair#2307 — the content-suffix re-embed validates the vector and co
     // updatedAt; no full-row put (flair#2494). A whole-row update would name extra
     // fields and fail this assertion; a full-row put would fail the method check.
     expect(writeCalls).toEqual([{ method: "update", id: LEGACY_ID, fields: ["embeddedContentHash", "embedding", "embeddingModel", "updatedAt"] }]);
+    expect(await migration().countPending()).toBe(0);
+  });
+
+  it("a write the commit drops after confirmation is retried and lands, not reported success while missing", async () => {
+    dropOnCommit.add(LEGACY_ID);
+    const result = await migration().run(10);
+    expect(result).toEqual({ processed: 1, touchedIds: [LEGACY_ID] });
+    expect(store.get(LEGACY_ID)).toMatchObject({
+      id: LEGACY_ID, agentId: "a", content: "legacy body", embedding: [0.5, 0.25, 0.125], embeddingModel: CURRENT,
+    });
     expect(await migration().countPending()).toBe(0);
   });
 

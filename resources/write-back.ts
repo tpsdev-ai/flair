@@ -332,6 +332,47 @@ export async function writeBackCommittedRow(
   }
 }
 
+/** The committed store's answer to a post-commit verification. */
+export type CommittedWriteVerdict = "shown" | "mismatch" | "unreadable";
+
+/**
+ * Does `committed` show the write `identity` describes with every `fields`
+ * entry at its staged value? The identity check is {@link sameStoredRow}.
+ */
+export function committedShowsFields(committed: any, identity: any, fields: Record<string, unknown>): boolean {
+  return sameStoredRow(committed, identity) &&
+    Object.entries(fields).every(([field, value]) => isDeepStrictEqual(committed?.[field], value));
+}
+
+/**
+ * Read `id` in a fresh committed context (never contextless) and report whether
+ * it shows the write: the row is still `identity`'s row and every named field
+ * holds its staged value. A failed read is `unreadable`, never `shown`.
+ *
+ * The post-commit shape a writer outside {@link writeBackCommittedRow} uses:
+ * after its owned transaction resolves, a newer write that committed in the
+ * final-confirmation-to-commit window may have discarded this write's effect
+ * while the commit still resolved (flair#2653, flair#2656).
+ *
+ * `also` re-checks a fact the decision depended on that is not one of the
+ * written fields — a re-embed's text basis, for instance.
+ */
+export async function verifyCommittedFields(
+  table: Pick<WriteBackTable, "get">,
+  id: string,
+  identity: any,
+  fields: Record<string, unknown>,
+  also?: (committed: any) => boolean,
+): Promise<CommittedWriteVerdict> {
+  let committed: any;
+  try {
+    committed = await table.get(id, {});
+  } catch {
+    return "unreadable";
+  }
+  return (also === undefined || also(committed)) && committedShowsFields(committed, identity, fields) ? "shown" : "mismatch";
+}
+
 /**
  * Does the committed row show this attempt's write? Its identity is the row
  * this attempt wrote (an update keeps the basis's identity); each field the
@@ -341,10 +382,6 @@ export async function writeBackCommittedRow(
  */
 function committedShowsWrite(committed: any, basis: any, decision: WriteBackPlan): boolean {
   if ("skip" in decision) return true;
-  if ("update" in decision) {
-    if (!sameStoredRow(committed, basis)) return false;
-    return Object.entries(decision.update).every(([field, value]) => isDeepStrictEqual(committed?.[field], value));
-  }
-  if (!sameStoredRow(committed, decision.write)) return false;
-  return Object.entries(decision.write).every(([field, value]) => isDeepStrictEqual(committed?.[field], value));
+  if ("update" in decision) return committedShowsFields(committed, basis, decision.update);
+  return committedShowsFields(committed, decision.write, decision.write);
 }

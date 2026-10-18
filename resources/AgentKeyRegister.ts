@@ -34,7 +34,7 @@ import { isDeepStrictEqual } from "node:util";
 import { resolveAgentAuth } from "./agent-auth.js";
 import { withKeyLock } from "./key-lock.js";
 import { withOwnedTransaction } from "./request-transaction.js";
-import { CommittedRowChanged, confirmCommittedRow } from "./write-back.js";
+import { CommittedRowChanged, confirmCommittedRow, verifyCommittedFields } from "./write-back.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 import { isPrincipalDeactivated } from "../src/lib/principal-status.js";
 import { isForeignAgentHome, isSyncOriginatedAgentRow } from "../src/lib/agent-home-fields.js";
@@ -186,7 +186,13 @@ export class AgentKeyRegister extends Resource {
               const row = asRow(committed);
               return row !== null && isDeepStrictEqual({ ...row }, basis);
             });
-            return { kind: "registered" as const, registrationId, updatedAt: now };
+            // Test-only: inert unless the fault-injection env opt-in is set and
+            // armed. Holds the registration after its final pre-commit
+            // confirmation and before its owned transaction commits, the window
+            // where a newer write can discard this write's effect (flair#2656).
+            const commitPause = txnPausePoint("agent-key-register-commit");
+            if (commitPause) await commitPause;
+            return { kind: "registered" as const, registrationId, updatedAt: now, basis };
           }),
         LOCK_ATTEMPTS,
         LOCK_WAIT_MS,
@@ -232,18 +238,15 @@ export class AgentKeyRegister extends Resource {
     const readBackPause = txnPausePoint("agent-key-register-read-back");
     if (readBackPause) await readBackPause;
 
-    let readBack: Record<string, any> | null;
-    try {
-      readBack = asRow(await table.get(agentId, {}));
-    } catch (err) {
-      console.error("[agent-key-register] the read-back of the committed key failed", { agentId, err });
+    const readBackVerdict = await verifyCommittedFields(table, agentId, value.basis, { publicKey: registered, updatedAt: value.updatedAt });
+    if (readBackVerdict === "unreadable") {
       return jsonRefusal(503, REGISTRATION_UNAVAILABLE, "the committed key could not be read back; the stored state is unconfirmed");
     }
-    if (readBack === null || readBack.publicKey !== registered || readBack.updatedAt !== value.updatedAt) {
+    if (readBackVerdict !== "shown") {
       return jsonRefusal(503, REGISTRATION_UNAVAILABLE, "the committed key could not be read back equal to the registered key; the stored state is unconfirmed");
     }
     return new Response(
-      JSON.stringify({ agentId, publicKey: readBack.publicKey, updatedAt: readBack.updatedAt, registrationId: value.registrationId }),
+      JSON.stringify({ agentId, publicKey: registered, updatedAt: value.updatedAt, registrationId: value.registrationId }),
       { status: 200, headers: { "content-type": "application/json" } },
     );
   }

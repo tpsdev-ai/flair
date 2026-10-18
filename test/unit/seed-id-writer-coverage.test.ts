@@ -117,11 +117,13 @@ for (const [file, alias] of [
   // The committed-row confirms and post-commit verification reads: #4 the
   // ordinary PATCH's post-commit verification (flair#2478), #5 the _reindex
   // re-PUT's confirm (flair#2450), #6 Memory.put's confirm (flair#2441), #7
-  // Memory.put's post-commit verification (flair#2478).
+  // Memory.put's post-commit verification (flair#2478) and #8 the re-embed's
+  // post-commit verification (flair#2656).
   ["Memory", "alias-source:(databases as any).flair.Memory#4"],
   ["Memory", "alias-source:(databases as any).flair.Memory#5"],
   ["Memory", "alias-source:(databases as any).flair.Memory#6"],
   ["Memory", "alias-source:(databases as any).flair.Memory#7"],
+  ["Memory", "alias-source:(databases as any).flair.Memory#8"],
   // The write-lock store handle (flair#2478) — a read of primaryStore, never a write.
   ["Memory", "alias-source:(databases as any)?.flair?.Memory#1"],
   ["AdminMemory", "alias-source:(databases as any).flair.Memory#1"],

@@ -30,7 +30,7 @@ import { stripInboundMemoryRow, stripServerStampedFields } from "./memory-declar
 import { noteWriteStamp } from "./embedding-space-guard.js";
 import { initFederationCleanup } from "./federation-cleanup.js";
 import { verifyFederationRequestBody } from "./replay-store.js";
-import { CommittedRowChanged, confirmCommittedRow, writeBackCommittedRow, WriteBackConflictError } from "./write-back.js";
+import { CommittedRowChanged, confirmCommittedRow, verifyCommittedFields, writeBackCommittedRow, WriteBackConflictError } from "./write-back.js";
 import { withKeyLock } from "./key-lock.js";
 import { withOwnedTransaction } from "./request-transaction.js";
 import { txnPausePoint } from "./txn-pause-point.js";
@@ -769,12 +769,14 @@ export class FederationPair extends Resource {
       const firstPairPause = txnPausePoint("federation-pair-first-pre");
       if (firstPairPause) await firstPairPause;
       let refusal: Response | undefined;
+      let stagedFirstPeer: ReturnType<typeof firstPairPeerRow> | undefined;
       try {
         refusal = await withPairingTokenClaim(pairingToken, () =>
           withOwnedTransaction(ctx, async (owned) => {
             const claim = await consumePairingToken(pairingToken, instanceId, owned);
             if (claim.kind !== "consumed") return claim;
-            await (databases as any).flair.Peer.put(firstPairPeerRow(instanceId, publicKey, role, endpoint), owned);
+            stagedFirstPeer = firstPairPeerRow(instanceId, publicKey, role, endpoint);
+            await (databases as any).flair.Peer.put(stagedFirstPeer, owned);
             // The pre-transaction read above returned no Peer row, and this first
             // pair has now staged one. Confirm against COMMITTED state that the row
             // is still absent (confirmCommittedRow, resources/write-back.ts): its
@@ -787,9 +789,16 @@ export class FederationPair extends Resource {
             // it: the throw aborts the owned transaction, the staged consume and
             // Peer write are discarded, and the caller answers a named refusal with
             // the token left unconsumed. A change committed after this confirm read
-            // and before the commit is not seen by it: Harper has no compare-and-set
-            // on a table write.
+            // and before the commit is caught by the post-commit verification
+            // below: the request answers `paired` only when that read is the row
+            // it staged.
             await confirmCommittedRow((databases as any).flair.Peer, instanceId, (committed) => committed == null);
+            // Test-only: inert unless the fault-injection env opt-in is set and
+            // armed. Holds the first pair after its final pre-commit
+            // confirmation and before its owned transaction commits, the window
+            // where a newer write can discard this write's effect (flair#2656).
+            const commitPause = txnPausePoint("federation-pair-first-commit");
+            if (commitPause) await commitPause;
             return claim;
           }),
         );
@@ -798,6 +807,14 @@ export class FederationPair extends Resource {
         throw err;
       }
       if (refusal) return refusal;
+      // flair#2656: the commit is not proof that this pairing's Peer row is the
+      // committed one. A newer write committing after the confirm read can make
+      // the commit resolve while discarding this write; answer `paired` only when
+      // a fresh committed read is the row this request staged.
+      if (!stagedFirstPeer) return firstPairReadBackUnconfirmedRefusal();
+      const peerVerdict = await verifyCommittedFields((databases as any).flair.Peer, instanceId, stagedFirstPeer, stagedFirstPeer);
+      if (peerVerdict === "unreadable") return firstPairReadBackUnconfirmedRefusal();
+      if (peerVerdict !== "shown") return firstPairRowAppearedRefusal();
 
       // Test-only: inert unless the fault-injection env opt-in is set and armed.
       // Pause AFTER the token lock released (and the consume is committed) but
@@ -910,8 +927,17 @@ function peerRevokedRefusal(): Response {
 function firstPairRowAppearedRefusal(): Response {
   return new Response(JSON.stringify({
     error: "peer_row_appeared",
-    message: "a Peer row for this instance is present in committed state although this pairing's earlier read found none; this request wrote no Peer row and did not consume the pairing token",
+    message: "a Peer row for this instance is in committed state although this pairing's earlier read found none; this request's Peer row is not the stored one",
   }), { status: 409, headers: { "content-type": "application/json" } });
+}
+
+/** 503 for a first-time pair whose committed Peer row could not be read back;
+ *  the stored state is unconfirmed and the request did not answer `paired`. */
+function firstPairReadBackUnconfirmedRefusal(): Response {
+  return new Response(JSON.stringify({
+    error: "peer_read_back_unconfirmed",
+    message: "the committed Peer row could not be read back; this pairing's stored state is unconfirmed",
+  }), { status: 503, headers: { "content-type": "application/json" } });
 }
 
 /**

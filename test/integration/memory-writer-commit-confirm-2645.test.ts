@@ -280,6 +280,25 @@ describe("flair#2645 — Memory writers under a newer full write", () => {
     expect((await memoryRow(id))?.content, "the newer committed write was overwritten").toBe(NEWER);
   }, 120_000);
 
+  it("re-embed PATCH: a newer full write committed in the confirmation-to-commit gap is retried and the vector lands on it", async () => {
+    const id = nextId("reembed-gap");
+    await seedRow(id, "reembed gap v1");
+    const NEWER = "reembed gap v2-committed-by-the-competitor";
+    const { response, paused, released } = await withPaused(
+      "memory-reembed-commit",
+      () => call(A, "PATCH", memPath(id), { id, embedding: null, embeddingModel: null }),
+      () => commitNewerFullWrite(id, NEWER),
+    );
+    expect(paused, `the re-embed PATCH was not paused at its commit gap (status ${response.status}: ${(await response.clone().text()).slice(0, 200)})`).toBe(true);
+    expect(released).toBe("go");
+    const text = await response.text();
+    expect(response.status, text.slice(0, 300)).toBeLessThan(300);
+    const row = await memoryRow(id);
+    expect(row?.content, "the newer committed write was reverted").toBe(NEWER);
+    expect(row?.embeddingModel, "the retried re-embed did not stamp the current model").toBe(getModelId());
+    expect(Array.isArray(row?.embedding) && row.embedding.length > 3, "the retried re-embed stored no usable vector").toBe(true);
+  }, 120_000);
+
   it("federation merge: a newer full write committed after its read is refused as merge_target_changed", async () => {
     const id = nextId("federation");
     await seedRow(id, "federation v1");

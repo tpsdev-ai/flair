@@ -1021,3 +1021,31 @@ describe("flair#2512 — a first-time pair confirms its Peer row is still absent
     expect((await readToken(token))?.consumedBy, "the first pair consumed the token").toBe(peer);
   }, 60_000);
 });
+
+describe("flair#2656 — a first-time pair confirms the committed row after its commit (real Harper)", () => {
+  it("a pair committed in the confirmation-to-commit gap is refused, and the committed row is the competitor's", async () => {
+    const token = `pt-2656-gap-${sfx}`;
+    const a = nacl.sign.keyPair();
+    const b = nacl.sign.keyPair();
+    const peer = `f2656-peer-${sfx}`;
+    await seedToken(token);
+    const { response, competed, released, paused } = await withPaused(
+      "federation-pair-first-commit",
+      () => pairRequest(pairBody(peer, b64url(a.publicKey), a.secretKey, token)),
+      async () => {
+        // The first pair has staged its row but not committed. A competing pair
+        // for the same instance commits in the gap.
+        await seedPeer(peer, b64url(b.publicKey));
+        return readPeer(peer);
+      },
+    );
+    expect(paused, "the first pair was not paused at its commit gap").toBe(true);
+    expect(released, "the first pair was not released by this test").toBe("go");
+    expect(competed?.publicKey, "the competing pair committed its own key").toBe(b64url(b.publicKey));
+    const body = await response.json() as any;
+    expect(response.status, JSON.stringify(body)).toBe(409);
+    expect(body.error).toBe("peer_row_appeared");
+    expect(body.paired, "this request did not store its row, so it does not report paired").toBeUndefined();
+    expect((await readPeer(peer))?.publicKey, "the committed row is the competitor's").toBe(b64url(b.publicKey));
+  }, 60_000);
+});

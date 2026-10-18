@@ -141,8 +141,9 @@
  * flair#2465 part 2 — the stored text hash. A re-embed can still store the
  * vector for the text it read when a text edit commits after that read and
  * before the commit (Harper has no compare-and-set; the field-only write and the
- * committed-row confirm narrow — not close — that window). To catch the rows
- * such an edit leaves behind, the server stores a newly computed
+ * committed-row confirm are checked again by the post-commit verification, which
+ * retries from a fresh read). To catch the rows an earlier edit leaves behind,
+ * the server stores a newly computed
  * `embeddedContentHash` (resources/memory-embed-hash.ts) when it computes a
  * vector on a guarded path for a row with a non-empty owner, and this migration
  * re-queues a row whose stored hash differs from the expected hash of its
@@ -160,7 +161,7 @@
  */
 import { databases } from "harper";
 import { isDeepStrictEqual } from "node:util";
-import { confirmCommittedRow } from "../write-back.js";
+import { confirmCommittedRow, verifyCommittedFields } from "../write-back.js";
 import { getEmbedding, getModelId } from "../embeddings-provider.js";
 import { withOwnedTransaction } from "../request-transaction.js";
 import { txnPausePoint } from "../txn-pause-point.js";
@@ -190,6 +191,8 @@ function defaultMemoryTable(): MemoryTableLike {
 }
 
 const REGEN_HTTP_TIMEOUT_MS = 20_000; // a real embedding compute can be slow on constrained hardware
+/** Attempts of a `.content`-suffix re-embed before its row stays pending. */
+const CONTENT_SUFFIX_REGEN_ATTEMPTS = 3;
 
 /** Same admin-password resolution as resources/auth-middleware.ts's getAdminPass(). */
 function resolveAdminAuthHeader(): string | null {
@@ -303,18 +306,19 @@ const defaultContentSuffixRegenDeps: ContentSuffixRegenDeps = {
  * of the committed row.
  * Then it CONFIRMS the committed row (an explicit fresh context) is still the
  * row this transaction read and embedded; a row gone or distinguishably changed
- * at confirmation aborts the owned transaction and returns false.
+ * at confirmation aborts the owned transaction and returns false. On success it
+ * returns the row and the staged fields, and the caller verifies the committed
+ * row after the commit (retrying from a fresh read).
  *
- * Harper has no compare-and-set: a change committed after confirmation and
- * before commit is not seen. The confirmation compares the WHOLE committed row
+ * A change committed after confirmation and before commit is caught by that
+ * post-commit read. The confirmation compares the WHOLE committed row
  * with the row read (the supersede-close pattern), which is stronger than the
  * identity list alone: a content-only change to a row that lacks a stored
  * incarnation token (a legacy row may lack one) still fails it. The vector is computed for text unchanged through confirmation.
  *
- * Returns true when the update is staged, confirmation passes and the owned
- * transaction completes; otherwise false.
- * A row that still exists with a stale stamp stays pending for the next batch
- * or cycle.
+ * Returns the staged row and fields when the update is staged and confirmation
+ * passes; otherwise false. A row that still exists with a stale stamp stays pending for
+ * the next batch or cycle.
  */
 async function regenContentSuffixRow(
   table: MemoryTableLike,
@@ -322,20 +326,21 @@ async function regenContentSuffixRow(
   existing: Record<string, unknown>,
   current: string,
   deps: ContentSuffixRegenDeps,
-): Promise<boolean> {
+): Promise<{ identity: Record<string, unknown>; fields: Record<string, unknown> } | false> {
   try {
     const text = skillEmbedText(existing);
     if (typeof text !== "string" || text.length === 0) return false;
     const embedding = await deps.embed(text);
     if (!isUsableEmbedding(embedding)) return false;
-    return await deps.inTransaction(async (txn) => {
+    const staged = await deps.inTransaction(async (txn) => {
       const fresh = await table.get(id, txn);
       if (!fresh || !isDeepStrictEqual(fresh, existing)) return false;
       // flair#2465: an incremental update of ONLY the embedding fields, not a
       // full-row put. A full-row put carries this transaction's re-read row and
       // can revert a field an owner edit committed meanwhile; this write touches
       // only embedding/embeddingModel/updatedAt and the embedded-text hash.
-      await table.update(id, { embedding, embeddingModel: current, updatedAt: new Date().toISOString(), embeddedContentHash: embeddedTextHash(existing) ?? null }, txn);
+      const update = { embedding, embeddingModel: current, updatedAt: new Date().toISOString(), embeddedContentHash: embeddedTextHash(existing) ?? null };
+      await table.update(id, update, txn);
       // Test-only: inert unless the fault-injection env opt-in is set and armed.
       // After the write is STAGED and before the transaction commits.
       const pause = txnPausePoint("embedding-stamp-content-suffix");
@@ -343,10 +348,17 @@ async function regenContentSuffixRow(
       // Stage first, then confirm the COMMITTED row is still the row this
       // transaction read and embedded; gone or distinguishably changed at
       // confirmation aborts (the staged write is discarded). A change committed
-      // after this re-read and before the commit is not seen.
+      // after this re-read and before the commit is caught by the caller's
+      // post-commit verification, which retries from a fresh read.
       await confirmCommittedRow(table, id, (committed) => isDeepStrictEqual(committed, fresh));
-      return true;
+      // Test-only: inert unless the fault-injection env opt-in is set and armed.
+      // Holds the regen after its final pre-commit confirmation and before its
+      // owned transaction commits (flair#2656).
+      const commitPause = txnPausePoint("embedding-stamp-content-suffix-commit");
+      if (commitPause) await commitPause;
+      return { identity: fresh, fields: update };
     });
+    return staged;
   } catch {
     // Includes CommittedRowChanged: the transaction was aborted, nothing written.
     return false;
@@ -473,7 +485,34 @@ export function createEmbeddingStampMigration(
 
         let ok: boolean;
         if (endsWithContentSelectorSuffix(id)) {
-          ok = await regenContentSuffixRow(table, id, existing, current, contentSuffixRegen);
+          // flair#2656: the commit is not proof the update landed. A newer write
+          // committing after the confirm read can make the commit resolve while
+          // discarding this update. Re-read from committed state within this
+          // bound; count the row touched only when the committed row shows the
+          // staged fields and the text the vector was computed for.
+          ok = false;
+          for (let attempt = 1; attempt <= CONTENT_SUFFIX_REGEN_ATTEMPTS; attempt++) {
+            const rowNow = attempt === 1 ? existing : await table.get(id);
+            if (!rowNow) break;
+            if (attempt > 1 && rowEmbeddingCurrent(rowNow as Record<string, unknown>, current)) {
+              ok = true;
+              break;
+            }
+            const staged = await regenContentSuffixRow(table, id, rowNow as Record<string, unknown>, current, contentSuffixRegen);
+            if (!staged) break;
+            const verdict = await verifyCommittedFields(
+              table,
+              id,
+              staged.identity,
+              staged.fields,
+              (committed) => isDeepStrictEqual(committed, { ...staged.identity, ...staged.fields }),
+            );
+            if (verdict === "shown") {
+              ok = true;
+              break;
+            }
+            if (verdict === "unreadable") break;
+          }
         } else {
           // Test-only: inert unless the fault-injection env opt-in is set and armed.
           const pause = txnPausePoint("embedding-stamp-regen-pre");

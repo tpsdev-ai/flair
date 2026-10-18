@@ -511,6 +511,31 @@ describe("flair#2266 — admin key registration on a pending Agent row", () => {
     expect((await rowIn("Agent", readBackId))?.publicKey).toBe(keyB.pub);
   }, 60_000);
 
+  test("a newer key write committed in the confirmation-to-commit gap refuses registration 503, never a success", async () => {
+    const id = `akr-commitgap-${sfx}`;
+    const keyA = mkKey();
+    const keyB = mkKey();
+    await seedAgent({ id, status: "active", publicKey: "pending" });
+    const { result, paused } = await withPausedPoint(
+      "agent-key-register-commit",
+      () => registerAsAdmin(id, keyA.pub),
+      async () => {
+        // The registration has staged its key but not committed. A newer full
+        // write of the same row commits in the gap and can discard the staged
+        // registration's effect.
+        const committed = await rowIn("Agent", id);
+        expect(committed?.publicKey, "the registration had already committed at the gap").toBe("pending");
+        await ops({ operation: "put", table: "Agent", records: [{ ...committed, publicKey: keyB.pub }] });
+      },
+    );
+    expect(paused, "the commit-gap pause point did not fire").toBe(true);
+    expect(result.status, JSON.stringify(result.body)).toBe(503);
+    expect(result.body.error).toBe("registration_unavailable");
+    expect(result.body.publicKey, "a refused read-back must not report a key").toBeUndefined();
+    expect(result.body.registrationId, "a refused read-back must not report a registration").toBeUndefined();
+    expect((await rowIn("Agent", id))?.publicKey, "the newer key write is the committed one").toBe(keyB.pub);
+  }, 60_000);
+
   for (const [label, id] of [["_syncedFrom with no home", () => syncedFromId], ["_originatorInstanceId with the local home", () => syncedOriginId]] as const) {
     test(`a sync-provenance row (${label}) is refused agent_not_local with no Agent, audit or OrgEvent change`, async () => {
       const agentId = id();
