@@ -62,8 +62,6 @@ export async function removeAppendedVersion(
   subjectType: InstructionSubjectType,
   subjectId: string,
   versionRecordId: string,
-  /** Remove related writes and confirm their absence under the same lock. */
-  removeRelated?: () => Promise<boolean>,
 ): Promise<"removed" | "superseded" | "busy" | "unavailable"> {
   const store = (databases as any).flair?.InstructionVersion?.primaryStore;
   const outcome = await withKeyLock(store, [LOCK_NAMESPACE, subjectType], async () => {
@@ -90,7 +88,6 @@ export async function removeAppendedVersion(
     if (pause) await pause;
     const left = await raw.get.call(table, versionRecordId, {});
     if (left != null) return "unavailable" as const;
-    if (removeRelated && !await removeRelated()) return "unavailable" as const;
     return await raw.get.call(table, versionRecordId, {}) == null ? "removed" as const : "unavailable" as const;
   },
   LOCK_ATTEMPTS,

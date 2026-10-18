@@ -33,6 +33,9 @@ const add = (file: string, sites: string[], reason: string) => {
 };
 
 // ── GATED skill-writer sinks (run SkillScan + forced durability) ──
+add("write-journal", ["alias-source:(databases as any).flair.Memory#1"], "Identifies successor undo pause points.");
+add("write-journal", ["writer:this.transactions.delete#1", "writer:this.staged.delete#1"], "In-memory journal bookkeeping.");
+
 add("MemoryArchive", ["writer:Memory.put#1"], "Guarded by Memory.put().");
 add("Memory", ["writer:cls.create#1", "writer:(databases as any).flair.Memory.post#1", "writer:(databases as any).flair.Memory.put#4"],
   "Skill-writer: routes through the SkillScan gate + forced durability in Memory.post()/put() (flair#1542).");
@@ -40,8 +43,6 @@ add("skill-version-write", ["writer:(databases as any).flair.Memory.put#1"],
   "Memory post/put and FeedMemories scan the merged successor body before calling this writer.");
 add("skill-version-write", ["writer:table.put#1"],
   "Re-applies a version close from a fresh committed read when the queued close did not land (flair#2645).");
-add("skill-version-write", ["writer:table.delete#1"],
-  "Rolls back this request's successor when its close could not land; a removal, not a skill write (flair#2645).");
 
 // ── REJECTING skill-writer sinks (400 skill_write_path) ──
 add("Memory", ["writer:super.patch#1"],
@@ -131,8 +132,8 @@ add("usage-recording", ["writer:(databases as any).flair.MemoryUsage.put#1"],
 // ── Read-only aliases (no write through these handles) ──
 add("skill-version-write", ["alias-source:(databases as any).flair?.Memory#1"],
   "Read-only alias (resolveSkillHead searches the live skill head).");
-add("skill-version-write", ["alias-source:(databases as any).flair?.Memory#2", "alias-source:(databases as any).flair?.Memory#3"],
-  "Tables for the post-commit close confirmation: #2 the rollback read/delete and #3 the confirmation and re-apply reads/writes classified above (flair#2645).");
+add("skill-version-write", ["alias-source:(databases as any).flair?.Memory#2"],
+  "Post-commit close confirmation and retry table.");
 add("AdminMemory", ["alias-source:(databases as any).flair.Memory#1"],
   "Read-only admin alias.");
 add("Federation", ["alias-source:(databases as any).flair.Memory#1"],

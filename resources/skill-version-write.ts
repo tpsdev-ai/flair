@@ -1,13 +1,12 @@
-import { loadStoredPointer, storedPointerIds } from "./memory-host-source.js";
-import type { PointerRow } from "./host-source-visibility.js";
-import { restorePointerRowIfAbsent, PointerAlreadyStoredError } from "./host-pointer-adapter.js";
+import { WriteJournal, currentWriteJournal } from "./write-journal.js";
+import { withKeyLock } from "./key-lock.js";
 import { normalizeEmptyEmbedding } from "./memory-embedding-value.js";
 /** Skill writes share the ["flair-instruction-version", "skill"] lock. */
 import { databases } from "harper";
 import { storageResult } from "./memory-write-response.js";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { recordVersion, readHead, removeAppendedVersion, skillRefReadable, SKILL_SUBJECT_TYPE, type RecordVersionOutcome } from "./instruction-version-record.js";
+import { recordVersion, readHead, skillRefReadable, SKILL_SUBJECT_TYPE, type RecordVersionOutcome } from "./instruction-version-record.js";
 import { SKILL_TAG, enforceSkillDurability, skillEmbedText, skillMetadataHasDuplicateKey } from "./skill-write.js";
 import { stripUndeclaredMemoryAttributes } from "./memory-declared-attributes.js";
 import { skillWriteSource } from "./skill-write-policy.js";
@@ -323,7 +322,6 @@ export interface SkillWriteHooks {
   closePredecessor?: (predecessor: Record<string, any>, patch: Record<string, unknown>, shared: any) => Promise<void | Response>;
   /** Pointer writes through the shared transaction; a Response denies and aborts. */
   pointer?: (shared: any) => Promise<Response | null>;
-  removedPointer?: () => PointerRow | null;
   /** Re-check the caller's authority over the current committed predecessor
    *  before a close that did not land is re-applied from a fresh read. */
   authorizeClose?: (row: Record<string, any>, shared: any) => Promise<Response | null>;
@@ -435,74 +433,27 @@ function skillUpdateCompensationFailure(message: string): Response {
   return Response.json({ error: "skill_update_compensation_failed", message }, { status: 500 });
 }
 
-/**
- * flair#2645 — hold the version lock through version removal, successor
- * deletion and committed-state confirmation of both. Delete only this
- * request's still-open successor; otherwise refuse compensation.
- */
 async function compensateUnlandedSkillUpdate(args: {
   ctx: any;
-  subjectId: string;
-  successor: Record<string, any>;
-  versionId: string;
-  removedPointer: PointerRow | null;
+  journal: WriteJournal;
 }): Promise<Response | null> {
-  const { ctx, subjectId, successor, versionId, removedPointer } = args;
-  let pointerPreserved = false;
-  const table = (databases as any).flair?.Memory;
-  if (!table || typeof table.get !== "function" || typeof table.delete !== "function") {
-    return skillUpdateCompensationFailure("the Memory table is unavailable; the update's successor removal could not be confirmed");
-  }
+  args.journal.compensationAttempted = true;
   try {
-    const removal = await removeAppendedVersion(ctx, SKILL_SUBJECT_TYPE, subjectId, versionId, async () => {
-      const beforeDelete = txnPausePoint("skill-update-successor-rollback-start");
-      if (beforeDelete) await beforeDelete;
-      const successorId = String(successor.id);
-      const committed = await table.get(successorId, {});
-      if (committed != null && (!sameStoredRow(committed, successor) || !isOpenLiveRow(committed))) return false;
-      await withOwnedTransaction(ctx, async (c) => {
-        const stored = await table.get(successorId, c);
-        if (!stored) return;
-        if (!sameStoredRow(stored, successor) || !isOpenLiveRow(stored)) throw new Error("successor changed");
-        const removed = await table.delete(successorId, c);
-        if (removed !== true) throw new Error("successor delete was not confirmed");
-      });
-      const pause = txnPausePoint("skill-update-successor-rollback-committed");
-      if (pause) await pause;
-      if (await table.get(successorId, {}) != null) return false;
-      if (removedPointer) {
-        const id = String(removedPointer.memoryId);
-        await storedPointerIds([id], {});
-        const current = await loadStoredPointer(id, {});
-        if (!current) {
-          try {
-            await withOwnedTransaction(ctx, async (c) => {
-              await restorePointerRowIfAbsent(removedPointer, c);
-              const staged = txnPausePoint("skill-update-pointer-restore-staged");
-              if (staged) await staged;
-            });
-          } catch (err) {
-            if (!(err instanceof PointerAlreadyStoredError)) throw err;
-          }
-        }
-        await storedPointerIds([id], {});
-        const restored = await loadStoredPointer(id, {});
-        if (restored && !isDeepStrictEqual(restored, removedPointer)) {
-          pointerPreserved = true;
-          return false;
-        }
-        if (!restored) return false;
+    const table = (databases as any).flair?.InstructionVersion;
+    const result = await withKeyLock(table?.primaryStore, ["flair-instruction-version", "skill"], async () => {
+      const appended = [...args.journal.entries].reverse().find((entry) => entry.after?.subjectType === "skill");
+      if (appended) {
+        const head = await readHead(SKILL_SUBJECT_TYPE, appended.after.subjectId, {});
+        if (head && String(head.id) !== String(appended.after.id)) return false;
       }
-      return true;
-    });
-    return removal === "removed" ? null
-      : skillUpdateCompensationFailure(pointerPreserved
-        ? "the undo of a close that did not land could not be confirmed; a different host-pointer row was left in place"
-        : "the undo of a close that did not land could not be confirmed");
+      return args.journal.undo(args.ctx, withOwnedTransaction);
+    }, 200, 10);
+    if (result.kind === "done" && result.value) return null;
   } catch (err) {
     console.error("skill-version-write: update undo could not be confirmed", err);
-    return skillUpdateCompensationFailure("the undo of a close that did not land could not be confirmed");
   }
+  return skillUpdateCompensationFailure("the undo of a close that did not land could not be confirmed" +
+    (args.journal.pointerChanged ? "; a different host-pointer row was left in place" : ""));
 }
 
 /** The table surface a confirmed skill close reads and re-applies through. */
@@ -522,7 +473,6 @@ export interface ConfirmSkillCloseArgs {
   /** Re-check the caller's authority on the current committed row. */
   authorize: (row: Record<string, any>, shared: any) => Promise<Response | null>;
   afterStaged?: (row: Record<string, any>, attempt: number) => Promise<Response | null>;
-  compensate: () => Promise<Response | null>;
   /** Check the committed effect beyond the close (a successor's live head). */
   confirmEffect?: () => Promise<Response | null>;
   missing?: () => Response;
@@ -541,16 +491,23 @@ export interface ConfirmSkillCloseArgs {
  * of the same row) and still commit the request's other writes. A close that
  * did not land is re-applied from a fresh read, re-checking the row's identity
  * and the caller's authority. Exhausted retries run compensation before the
- * named refusal; unconfirmed compensation returns a named 500. Unexpected
- * predecessor-read or retry-write errors return unconfirmed without guaranteed compensation.
+ * named refusal; unconfirmed compensation returns a named 500.
  * Returns null only when the close and any caller-supplied effect are confirmed.
- *
- * This is the shared shape a skill DELETE can pass to `confirmSkillDelete`
- * (flair#2642): the same committed read, identity comparison, bounded
- * re-apply and compensation hand-off.
  */
 export async function confirmSkillClose(args: ConfirmSkillCloseArgs): Promise<Response | null> {
-  const { ctx, table, expected, closePatch, authorize, afterStaged, compensate, confirmEffect, refusal, unconfirmed } = args;
+  const journal = currentWriteJournal() ?? new WriteJournal();
+  return journal.run(async () => {
+    const result = await confirmSkillCloseInner(args, journal);
+    if (result && !journal.compensationAttempted && journal.entries.some((entry) => entry.applied)) {
+      return (await compensateUnlandedSkillUpdate({ ctx: args.ctx, journal })) ?? result;
+    }
+    return result;
+  });
+}
+
+async function confirmSkillCloseInner(args: ConfirmSkillCloseArgs, journal: WriteJournal): Promise<Response | null> {
+  const { ctx, table, expected, closePatch, authorize, afterStaged, confirmEffect, refusal, unconfirmed } = args;
+  const compensate = () => compensateUnlandedSkillUpdate({ ctx, journal });
   const attempts = args.attempts ?? SKILL_UPDATE_CLOSE_ATTEMPTS;
   const id = String(expected.id);
   for (let attempt = 1; ; attempt++) {
@@ -608,12 +565,10 @@ async function confirmSkillUpdate(args: {
   predecessor: Record<string, any>;
   closePatch: Record<string, unknown>;
   successor: Record<string, any>;
-  versionId: string;
-  removedPointer: PointerRow | null;
   grantedClose: GrantedClose | null;
   authorize: (row: Record<string, any>, shared: any) => Promise<Response | null>;
 }): Promise<Response | null> {
-  const { ctx, subjectId, predecessor, closePatch, successor, versionId, removedPointer, grantedClose, authorize } = args;
+  const { ctx, subjectId, predecessor, closePatch, successor, grantedClose, authorize } = args;
   const table = (databases as any).flair?.Memory;
   if (!table || typeof table.get !== "function" || typeof table.put !== "function") {
     return skillUpdateUnconfirmedFailure();
@@ -654,7 +609,6 @@ async function confirmSkillUpdate(args: {
       if (pause) await pause;
       return afterCloseStaged(grantedClose, { predecessorId: String(predecessor.id), successor });
     },
-    compensate: () => compensateUnlandedSkillUpdate({ ctx, subjectId, successor, versionId, removedPointer }),
     confirmEffect: confirmsSingleHead,
     missing: () => storedRowChangedRefusal("Memory"),
     refusal: () => skillUpdateNotClosedRefusal(SKILL_UPDATE_CLOSE_ATTEMPTS),
@@ -674,7 +628,15 @@ export async function runSkillVersionWrite(args: RunSkillVersionWriteArgs): Prom
   // replaces returned 200, so restore the flag's prior value on the way out.
   const restoreCreated = captureCreatedFlag(args.ctx);
   try {
-    return await runSkillVersionWriteInner(args);
+    const journal = new WriteJournal();
+    return await journal.run(async () => {
+      const result = await runSkillVersionWriteInner(args);
+      if (!result.ok && !journal.compensationAttempted && journal.entries.some((entry) => entry.applied)) {
+        const failure = await compensateUnlandedSkillUpdate({ ctx: args.ctx, journal });
+        if (failure) return { ok: false, response: failure };
+      }
+      return result;
+    });
   } finally {
     restoreCreated();
   }
@@ -773,8 +735,6 @@ async function runSkillVersionWriteInner(args: RunSkillVersionWriteArgs): Promis
     predecessor: writePlan.predecessor,
     closePatch: writePlan.closePatch,
     successor: writePlan.successor,
-    versionId: outcome.version,
-    removedPointer: args.hooks.removedPointer?.() ?? null,
     grantedClose: writePlan.grantedClose,
     authorize,
   });

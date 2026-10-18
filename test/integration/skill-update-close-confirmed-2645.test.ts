@@ -259,7 +259,7 @@ describe("flair#2645 — a skill UPDATE confirms the predecessor close before su
     expect(created.status, await created.text()).toBeLessThan(300);
     const pointerBefore = await pointerRow(id);
     expect(pointerBefore).not.toBeNull();
-    const points = [...closePoints, "skill-version-rollback-staged", "skill-version-rollback-committed", "skill-update-successor-rollback-committed"];
+    const points = [...closePoints, "skill-journal-version-rollback-staged", "skill-journal-version-rollback-committed", "skill-update-successor-rollback-committed"];
     const response = await withPausedCloses(points,
       () => call(A, "PUT", memPath(successorId), skillBody(successorId, "v2", { supersedes: id })),
       async (index) => {
@@ -285,6 +285,67 @@ describe("flair#2645 — a skill UPDATE confirms the predecessor close before su
     expect(await liveHeads(id)).toEqual([id]);
   }, 120_000);
 
+  for (const surface of ["Memory", "FeedMemories"] as const) {
+    it(`${surface}: refused update restores the predecessor and successor pointer keys`, async () => {
+      const id = nextId("journal-predecessor");
+      const successorId = nextId("journal-successor");
+      const created = await call(A, "PUT", memPath(id), skillBody(id, "v1", {
+        hostSource: { v: 1, host: "openclaw", kind: "run", id: "journal-predecessor" }, hostSourceScope: "record",
+      }));
+      expect(created.status, await created.text()).toBeLessThan(300);
+      const predecessorBefore = await pointerRow(id);
+      expect(predecessorBefore).not.toBeNull();
+      const successorBefore = { ...predecessorBefore, memoryId: successorId,
+        hostSource: JSON.stringify({ v: 1, host: "openclaw", kind: "run", id: "journal-existing-successor" }),
+        authorId: A.id, receivedAt: now(),
+      };
+      await ops({ operation: "insert", database: "flair", table: "MemoryHostSource", records: [successorBefore] });
+      const successorPointerBefore = await pointerRow(successorId);
+      const response = await withPausedCloses(closePoints,
+        () => call(A, surface === "Memory" ? "PUT" : "POST", surface === "Memory" ? memPath(successorId) : "/FeedMemories",
+          skillBody(successorId, "v2", { supersedes: id,
+            ...(surface === "Memory" ? { hostSource: { v: 1, host: "openclaw", kind: "run", id: "journal-new-successor" }, hostSourceScope: "record" } : {}),
+          })),
+        async (index) => { await commitNewerSkillWrite(id, `competitor-${index}`); });
+      expect(response.status, await response.clone().text()).toBe(409);
+      expect((await response.json()).error).toBe("skill_update_not_closed");
+      expect(await pointerRow(id)).toEqual(predecessorBefore);
+      expect(await pointerRow(successorId)).toEqual(successorPointerBefore);
+      expect(await memoryRow(successorId)).toBeNull();
+      expect((await memoryRow(id))?.validTo ?? null).toBeNull();
+      expect((await versionsOf(id)).map((row) => row.kind)).toEqual(["create"]);
+    }, 120_000);
+  }
+
+  for (const later of [false, true]) {
+    it(`Memory: refused update ${later ? "preserves a later successor pointer" : "removes its created successor pointer"}`, async () => {
+      const id = nextId("journal-created-pointer");
+      const successorId = nextId("journal-created-pointer-successor");
+      const created = await call(A, "PUT", memPath(id), skillBody(id, "v1"));
+      expect(created.status, await created.text()).toBeLessThan(300);
+      let replacement: any;
+      const response = await withPausedCloses(closePoints,
+        () => call(A, "PUT", memPath(successorId), skillBody(successorId, "v2", { supersedes: id,
+          hostSource: { v: 1, host: "openclaw", kind: "run", id: "journal-created" }, hostSourceScope: "record",
+        })),
+        async (index) => {
+          await commitNewerSkillWrite(id, `competitor-${index}`);
+          if (later && index === 1) {
+            const stored = await pointerRow(successorId);
+            expect(stored).not.toBeNull();
+            replacement = { ...stored, hostSource: JSON.stringify({ v: 1, host: "openclaw", kind: "run", id: "later" }),
+              authorId: A.id, receivedAt: now() };
+            await ops({ operation: "put", database: "flair", table: "MemoryHostSource", records: [replacement] });
+          }
+        });
+      expect(response.status, await response.clone().text()).toBe(later ? 500 : 409);
+      expect((await response.json()).error).toBe(later ? "skill_update_compensation_failed" : "skill_update_not_closed");
+      expect(await pointerRow(successorId)).toEqual(later ? replacement : null);
+      expect(await memoryRow(successorId)).toBeNull();
+      expect((await versionsOf(id)).map((row) => row.kind)).toEqual(["create"]);
+    }, 120_000);
+  }
+
   for (const timing of ["before", "during"] as const) {
     it(`compensation preserves a later pointer set ${timing} restoration`, async () => {
       const id = nextId("pointer-race");
@@ -296,7 +357,7 @@ describe("flair#2645 — a skill UPDATE confirms the predecessor close before su
       const pointerBefore = await pointerRow(id);
       expect(pointerBefore).not.toBeNull();
       const laterPointer = { ...pointerBefore, hostSource: JSON.stringify({ v: 1, host: "openclaw", kind: "run", id: "later-pointer" }), receivedAt: now() };
-      const points = [...closePoints, timing === "before" ? "skill-update-successor-rollback-committed" : "skill-update-pointer-restore-staged"];
+      const points = [...closePoints, timing === "before" ? "skill-update-pointer-restore-start" : "skill-update-pointer-restore-staged"];
       const response = await withPausedCloses(points,
         () => call(A, "PUT", memPath(successorId), skillBody(successorId, "v2", { supersedes: id })),
         async (index) => {
@@ -351,7 +412,7 @@ describe("flair#2645 — a skill UPDATE confirms the predecessor close before su
     const created = await call(A, "PUT", memPath(id), skillBody(id, "v1"));
     expect(created.status, await created.text()).toBe(200);
     let closed: any;
-    const response = await withPausedCloses(["skill-close-staged", "skill-version-rollback-committed"],
+    const response = await withPausedCloses(["skill-close-staged", "skill-journal-version-rollback-committed"],
       () => call(A, "PUT", memPath(successorId), skillBody(successorId, "v2", { supersedes: id })),
       async (index) => {
         if (index === 0) await commitNewerSkillWrite(id, "replacement", { instanceToken: randomUUID(), validTo: now() });

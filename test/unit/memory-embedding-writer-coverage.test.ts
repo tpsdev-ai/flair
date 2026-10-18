@@ -51,6 +51,8 @@ const add = (file: string, sites: string[], policy: Policy, reason: string) => {
 };
 
 // ── LATCH: raw put that can land an externally-sourced foreign stamp ──
+add("write-journal", ["writer:this.transactions.delete#1", "writer:this.staged.delete#1"], "OTHER_TABLE", "In-memory journal bookkeeping.");
+
 add("Federation", ["writer:writeBackCommittedRow#1"], "OTHER_TABLE",
   "The Presence receipt branch (flair#2578 slice 1): its table is always Presence; it writes no Memory row.");
 add("Federation", ["writer:writeBackCommittedRow#2"], "LATCH",
@@ -94,8 +96,6 @@ add("skill-version-write", ["writer:(databases as any).flair.Memory.put#2"], "EC
   "flair#2139 S2 skill predecessor close: read-modify-write re-writes the existing row's own stamp.");
 add("skill-version-write", ["writer:table.put#1"], "ECHO",
   "flair#2645 re-apply of a close that did not land: read-modify-write of the committed row's own stamp.");
-add("skill-version-write", ["writer:table.delete#1"], "NON_EMBED",
-  "flair#2645 rollback of this request's successor row; a removal.");
 
 // ── NON_EMBED: writes no stamp, or a partial update/patch/delete ──
 // The feed refuses a body embedding or embeddingModel (flair#2354), so its

@@ -26,6 +26,13 @@ const classified = new Map<string, string>([
   ["resources/instruction-version-record.ts:writer:createHash(\"sha256\").update#1", "Hashing, not a table write; listed by the conservative sink scan."],
   ["resources/instruction-version-record.ts:writer:createHash(\"sha256\").update#2", "Hashing, not a table write; listed by the conservative sink scan."],
   ["resources/InstructionVersion.ts:alias-source:(databases as any).flair.InstructionVersion#1", "The resource class extends the table."],
+  ["resources/skill-version-write.ts:alias-source:(databases as any).flair?.InstructionVersion#1", "Journal compensation lock."],
+  ["resources/skill-version-write.ts:writer:(databases as any).flair.Memory.put#1", "Successor write; Memory table."],
+  ["resources/skill-version-write.ts:writer:(databases as any).flair.Memory.put#2", "Predecessor close; Memory table."],
+  ["resources/skill-version-write.ts:writer:table.put#1", "Close retry; Memory table."],
+  ["resources/write-journal.ts:alias-source:(databases as any).flair.InstructionVersion#1", "Identifies version undo pause points."],
+  ["resources/write-journal.ts:writer:this.transactions.delete#1", "In-memory journal bookkeeping."],
+  ["resources/write-journal.ts:writer:this.staged.delete#1", "In-memory journal bookkeeping."],
 ]);
 
 test("raw InstructionVersion handles and mutation sinks in resources/**/*.ts have explicit classifications", () => {

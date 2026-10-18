@@ -15,5 +15,3 @@ export function putPointerRow(row: any, ctx: any): Promise<void> {
 export function deletePointerRowViaTable(memoryId: string, ctx: any): Promise<void> {
   return currentHostPointerAdapter().deletePointerRow(memoryId, ctx);
 }
-
-export { restorePointerRowIfAbsent, PointerAlreadyStoredError } from "./host-pointer/registry.js";

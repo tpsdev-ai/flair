@@ -66,6 +66,7 @@ function mockTransaction(ctx: any, cb: (txn: any) => any): any {
   if (context.transaction && context.transaction.open === 1) return cb(context.transaction);
   const txn: any = {
     open: 1, saveCommits: false, aborted: false,
+    addWrite(write: any) { write.commit(1, null); return write; },
     versions: new Map(store), memories: new Map(memoryStore), pointers: new Map(pointers),
     abort() { this.open = 0; this.aborted = true; },
     commit() {
