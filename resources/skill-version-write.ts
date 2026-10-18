@@ -199,7 +199,7 @@ export async function prepareSkillBody(content: any, stored: Record<string, any>
   return { content: effective, predecessor };
 }
 
-/** Select exactly one live head; ambiguity refuses. */
+/** Return the sole live head, or null if none; refuse ambiguity. */
 export async function resolveSkillHead(
   subjectId: string | null,
   addressedId: string | null,
