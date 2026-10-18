@@ -121,13 +121,16 @@ jobs:
     runs-on: ubuntu-latest
     # No job timeout here either (ops-fumh): this job's `sfw bun install` below
     # hung 16+ min on 2026-07-04, blocking merge on a required check. 22 min
-    # bounds a hung install/runner. The unit lane's slowest shard takes at least 781 s
-    # of it (measured 2026-10-17; a lower bound, its slowest legs hit the old cap). scripts/test-unit.ts derives its keep-going lane
-    # budget from this value (CI_JOB_LIMIT_MS minus a 120 s reserve for the
-    # job's other steps, flair#2030/#2224/#2614); its per-step limits are fixed values
-    # chosen from measured step times. The summary and guards are expected to
-    # print before the job is cancelled while the other steps stay in the reserve.
-    # Change the two together; unit-runner.test.ts fails if they disagree.
+    # bounds a hung runner, and the install step carries its own 5 min
+    # `timeout-minutes` so a hung install fails there instead. The unit lane's
+    # slowest shard takes at least 781 s of it (measured 2026-10-17; a lower
+    # bound, its slowest legs hit the old cap). The job's first step records its
+    # start, and scripts/test-unit.ts derives the keep-going lane budget from this
+    # value (CI_JOB_LIMIT_MS minus the elapsed setup and a 120 s post-lane reserve,
+    # flair#2030/#2224/#2614/#2619), so the summary and guards still print inside
+    # the 22 min when setup runs long; its per-step limits are fixed values chosen
+    # from measured step times. Change them together; unit-runner.test.ts fails if
+    # they disagree.
     timeout-minutes: 22
     strategy:
       # fail-fast: false — a failure on one Node major must not cancel the
@@ -156,6 +159,12 @@ jobs:
         # "Unit Tests" gate (test-unit-gate) below.
         shard: [1, 2]
     steps:
+      # flair#2619: record this job's own start (epoch seconds) into the job
+      # environment, so the lane's keep-going budget follows the job's real
+      # elapsed time instead of starting when the runner does. Must stay the
+      # job's first step.
+      - name: "Record job start"
+        run: echo "FLAIR_UNIT_JOB_START=$(date +%s)" >> "$GITHUB_ENV"
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
       - name: "Check for local file: deps"
         run: |
@@ -223,7 +232,13 @@ jobs:
           key: bun-cache-${{ runner.os }}-${{ hashFiles('bun.lock') }}
           restore-keys: |
             bun-cache-${{ runner.os }}-
-      - run: sfw bun install --frozen-lockfile
+      # A hung install must fail as a named step, not eat the job (flair#2619):
+      # bound it below the job's own limit. 5 min, the per-attempt bound smoke.yml's
+      # golden-path job puts on the same install (smoke.yml retries up to 3 times;
+      # this step does not); the local cold install this tree measured 8 s.
+      - name: "Install dependencies"
+        timeout-minutes: 5
+        run: sfw bun install --frozen-lockfile
       - name: "Check workspace peer deps resolve within their declared ranges"
         # `bun install --frozen-lockfile` refuses only a manifest/lockfile
         # mismatch; it does NOT check that a RESOLVED peer satisfies the range a
