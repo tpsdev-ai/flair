@@ -219,6 +219,41 @@ describe("flair#2139 S3b — one allowlisted event per appended soul version", (
 });
 
 describe("flair#2139 S3b — skill events and the private-skill hash gate", () => {
+  test("two skill writes reach default bootstrap with distinct version refs and scoped content-free metadata", async () => {
+    const ids = [nextId("bootstrap-a"), nextId("bootstrap-b")];
+    const contents = ["INSTRUCTION-EVENT-CONTENT-A", "INSTRUCTION-EVENT-CONTENT-B"];
+    for (let i = 0; i < ids.length; i++) {
+      const res = await call(A, "PUT", memPath(ids[i]), skillBody(ids[i], contents[i], { visibility: "private" }));
+      expect(res.status, res.text.slice(0, 300)).toBeLessThan(300);
+    }
+    const versions = (await Promise.all(ids.map(versionsOf))).flat();
+    expect(versions).toHaveLength(2);
+    const storedEvents = await ops({
+      operation: "search_by_value", database: "flair", table: "OrgEvent",
+      search_attribute: "kind", search_value: "skill.changed", get_attributes: ["*"],
+    });
+    const relevant = storedEvents.filter((event: any) => ids.includes(JSON.parse(event.detail).subjectId));
+    expect(relevant).toHaveLength(2);
+    const res = await call(A, "POST", "/BootstrapMemories", { agentId: A.id, includeContext: false, maxTokens: 16000 });
+    expect(res.status, res.text.slice(0, 300)).toBe(200);
+    const events = JSON.parse(res.text).events.filter((event: any) => relevant.some((stored: any) => stored.id === event.id));
+    expect(events).toHaveLength(2);
+    expect(new Set(events.map((event: any) => event.refId)).size).toBe(2);
+    expect(events.map((event: any) => event.refId).sort()).toEqual(versions.map((version) => version.id).sort());
+    for (const event of events) {
+      expect(event.scope).toBe(A.id);
+      expect(event.id).toBe(`instruction-change:${event.refId}`);
+      const detail = JSON.parse(event.detail);
+      expect(Object.keys(detail).sort()).toEqual(TEN_FIELDS.filter((field) => !["valueHash", "previousVersionHash", "recordHash"].includes(field)));
+      expect(detail.actorKind).toBe("agent");
+      expect(detail.actorId).toBe(A.id);
+      expect(detail.sourceClass).toBe("agent");
+      expect(detail.key).toBeNull();
+      expect(detail).not.toHaveProperty("content");
+      for (const content of contents) expect(JSON.stringify(event)).not.toContain(content);
+    }
+  }, 180_000);
+
   test("a shared skill carries the hashes and a null key; a private one omits them, tombstone included", async () => {
     const sharedId = nextId("shared");
     expect((await call(A, "PUT", memPath(sharedId), skillBody(sharedId, "s1"))).status).toBeLessThan(300);

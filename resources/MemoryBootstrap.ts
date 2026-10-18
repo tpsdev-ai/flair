@@ -44,6 +44,7 @@ import {
   type SkillManifestEntry,
 } from "./skill-manifest.js";
 import { localInstanceId } from "./instance-identity.js";
+import { RESERVED_EVENT_KINDS } from "./org-event-reserved.js";
 
 /**
  * POST /MemoryBootstrap
@@ -336,11 +337,8 @@ export class BootstrapMemories extends Resource {
       includeTrust = false,  // flair#744 slice 1 — opt-in per-memory trust block
       abstain = false,       // flair#744 slice 2 — opt-in task-relevance abstention
       // flair#1199 — org-event knobs. `maxEvents` caps how many events ship
-      // (default MAX_ORG_EVENTS); `includeEventDetail` gates the verbose per-event
-      // `detail` JSON (default OFF — mirrors the includeContext opt-in). By
-      // default bootstrap ships LEAN events (id/kind/summary/createdAt/targetIds/
-      // scope); `detail` restates the summary + migration internals and is pure
-      // bloat for a connector, so it is opt-in. Both are also counted against the
+      // (default MAX_ORG_EVENTS); `includeEventDetail` gates ordinary event
+      // `detail` JSON (default OFF). Events are counted against the
       // shared tokenBudget below (before #1199 the events array was assembled but
       // NEVER charged, so a maxTokens=4000 request serialized well past budget).
       maxEvents,
@@ -1507,7 +1505,7 @@ export class BootstrapMemories extends Resource {
         ...(seekTs
           ? { conditions: [{ attribute: "createdAt", comparator: "greater_than_equal", value: seekTs }] }
           : {}),
-        select: ["id", "kind", "summary", "detail", "targetIds", "createdAt", "expiresAt", "scope"],
+        select: ["id", "kind", "summary", "detail", "targetIds", "createdAt", "expiresAt", "scope", "refId"],
       }));
       for await (const event of recentEvents as AsyncIterable<any>) {
         if (!isCatchupEligible(event, { participantId: agentId, after: eventWatermark, since: sinceFloor })) continue;
@@ -1548,7 +1546,7 @@ export class BootstrapMemories extends Resource {
       // NEVER charged: a maxTokens=4000 request serialized at 6286 (+57%), the
       // bulk being 10 events each shipping a `detail` JSON. Now each event's
       // REAL serialized cost (the structured object that actually ships — lean by
-      // default, `detail` only under includeEventDetail) is charged against the
+      // default, ordinary `detail` under includeEventDetail) is charged against the
       // remaining budget, so events respect maxTokens the same way every other
       // content section does. An event that doesn't fit is skipped, not silently
       // over-budget; smaller later events may still fit (hence continue, not
@@ -1563,18 +1561,17 @@ export class BootstrapMemories extends Resource {
           eventsRemaining++;
           continue;
         }
-        // The structured object a connector actually reads (flair#1206). Lean by
-        // default; `detail` (the verbose migration-internals/summary-restating
-        // JSON) only when explicitly requested. Optional fields are omitted when
-        // absent so the object stays compact.
+        // The structured object a connector actually reads (flair#1206).
+        const instructionEvent = RESERVED_EVENT_KINDS.includes(evt.kind);
         const structured: Record<string, unknown> = {
           id: evt.id,
           kind: evt.kind,
           summary: evt.summary,
-          ...(includeEventDetail && evt.detail != null ? { detail: evt.detail } : {}),
+          ...((includeEventDetail || instructionEvent) && evt.detail != null ? { detail: evt.detail } : {}),
           ...(Array.isArray(evt.targetIds) && evt.targetIds.length > 0 ? { targetIds: evt.targetIds } : {}),
           createdAt: evt.createdAt ?? null,
           ...(evt.scope != null ? { scope: evt.scope } : {}),
+          ...(instructionEvent && evt.refId != null ? { refId: evt.refId } : {}),
         };
         // Charge the REAL serialized cost of what ships (structured object on the
         // /mcp path; the prose line is a subset of it). This is the #1199 fix:

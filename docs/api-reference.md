@@ -240,7 +240,7 @@ Instruction events are readable by any verified agent. Three things a reader sho
 
 - The stream begins with the release that ships this event; versions appended earlier have no event, and `InstructionVersion` remains the complete history. A missing event before the cutover does not mean nothing changed.
 - An event does not grant read access to its version record, which keeps stored-and-current authority.
-- Hashes emitted while a skill was shared stay readable in the append-only stream after the skill is tightened to private; their exposure is bounded by the content being readable when they were emitted.
+- Hashes emitted while a skill was shared stay readable in the append-only stream after the skill is tightened to private.
 
 ### Federation
 

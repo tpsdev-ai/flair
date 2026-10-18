@@ -750,10 +750,8 @@ async function bootstrap(agent: ResolvedAgent, args: any) {
   // flair#744 slice 2 — opt-in task-relevance abstention verdict. Forwarded
   // ONLY when requested so a plain bootstrap delegates a byte-identical body.
   if (args?.abstain === true) body.abstain = true;
-  // flair#1199 — org-event knobs. `includeEventDetail` opts the verbose per-event
-  // `detail` JSON back in (default OFF: a connector reads lean events); `maxEvents`
-  // overrides the default cap. Both forwarded ONLY when set, so a plain bootstrap
-  // delegates a byte-identical body.
+  // flair#1199 — `includeEventDetail` opts ordinary event detail in;
+  // `maxEvents` overrides the default cap.
   if (args?.includeEventDetail === true) body.includeEventDetail = true;
   if (args?.maxEvents !== undefined) body.maxEvents = args.maxEvents;
   // flair#831 — attach the running Flair version to the RESPONSE (not the
