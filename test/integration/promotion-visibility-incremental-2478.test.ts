@@ -9,7 +9,7 @@
  *   after its commit while still locked); an owner PUT/PATCH to that id is
  *   refused `503 memory_busy`, then succeeds after release, and the owner's
  *   content and visibility are stored.
- * - An owner write that commits first is left untouched: the backfill only
+ * - An owner PUT that commits first is left untouched: the backfill only
  *   fills a missing visibility.
  * - Both promotion stamps write a `promotionContentHash` bound to the stored
  *   text; an owner PUT/PATCH racing the automatic stamp is refused while the
@@ -57,7 +57,7 @@ const SEED_MODEL_ID = stripEnginePrefix(getModelId());
 const V1 = "pvi-v1";
 const V2 = "pvi-v2";
 const V3 = "pvi-v3";
-const V1_OWNER = "owner first edit that the backfill must never revert";
+const V1_OWNER = "owner PUT committed before the backfill";
 const V2_OWNER = "owner edit kept after the backfill released its lock";
 const V3_OWNER = "owner patch kept after the backfill committed";
 const AUTO_CLAIM = "Auto promotion claim about release verification for slice two.";
@@ -147,6 +147,42 @@ function semanticSearch(body: Record<string, unknown>): Promise<Response> {
     body: JSON.stringify({ agentId: owner.id, limit: 100, ...body }),
     signal: AbortSignal.timeout(60_000),
   });
+}
+async function feedRow(id: string, authorization: string): Promise<any> {
+  const ctrl = new AbortController();
+  try {
+    const res = await fetch(`${harper.httpURL}/FeedMemories/${encodeURIComponent(id)}`, {
+      headers: { Accept: "text/event-stream", Authorization: authorization },
+      signal: AbortSignal.any([ctrl.signal, AbortSignal.timeout(30_000)]),
+    });
+    expect(res.status).toBe(200);
+    if (!res.body) throw new Error("feed response has no body");
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let raw = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) throw new Error(`feed ended before row ${id}`);
+      raw += decoder.decode(value, { stream: true });
+      let cut: number;
+      while ((cut = raw.indexOf("\n\n")) >= 0) {
+        const frame = raw.slice(0, cut);
+        raw = raw.slice(cut + 2);
+        const data = frame.split("\n").filter((line) => line.startsWith("data: ")).map((line) => line.slice(6)).join("\n");
+        if (!data) continue;
+        const event = JSON.parse(data);
+        if (String(event.id) === id && event.value) return event.value;
+      }
+    }
+  } finally {
+    ctrl.abort();
+  }
+}
+function expectSuppressed(row: any): void {
+  expect(row).toBeTruthy();
+  for (const field of ["promotionStatus", "promotedAt", "promotedBy", "promotionContentHash"]) {
+    expect(row[field], field).toBeNull();
+  }
 }
 async function waitFor(path: string, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
@@ -342,7 +378,7 @@ describe("promotion stamps are locked, incremental and bound (real Harper)", () 
     expect(stored.promotedBy).toBe("machine:adk-auto-promote");
     expect(stored.promotionContentHash).toBe(sha256(AUTO_CLAIM));
 
-    // The owner's later edit is kept; the content change clears the verdict.
+    // The later owner PUT clears the verdict when content changes.
     const put = await memoryWrite(owner, "PUT", promoted.id, { agentId: owner.id, content: "owner edit after the verdict", visibility: "private" });
     expect(put.status, await put.clone().text()).toBe(200);
     const edited = await readRow(promoted.id);
@@ -351,7 +387,7 @@ describe("promotion stamps are locked, incremental and bound (real Harper)", () 
     expect(edited.promotionContentHash ?? null).toBeNull();
   }, 180_000);
 
-  it("the manual stamp writes the bound verdict and every reader suppresses a mismatched binding", async () => {
+  it("the manual stamp binds its verdict; Memory GET/search, feeds, SemanticSearch and AdminMemory suppress a mismatch", async () => {
     await seedCandidate("pvi-manual-cand", MANUAL_CLAIM);
     const res = await promote("pvi-manual-cand");
     expect(res.status, (await res.clone().text()).slice(0, 300)).toBe(200);
@@ -362,7 +398,7 @@ describe("promotion stamps are locked, incremental and bound (real Harper)", () 
     expect(stored.promotionContentHash).toBe(sha256(MANUAL_CLAIM));
 
     // A raw writer bypasses the authority guard and changes the text while the
-    // old hash stays: every named reader must suppress the verdict.
+    // old hash stays.
     await opsCall({
       operation: "upsert", database: "flair", table: "Memory",
       records: [{ ...stored, content: "raw replacement after the verdict" }],
@@ -388,6 +424,17 @@ describe("promotion stamps are locked, incremental and bound (real Harper)", () 
     expect(listedRow, "the row was not listed").toBeTruthy();
     expect(listedRow.promotionStatus ?? null).toBeNull();
 
+    const adminCollection = await fetch(`${harper.httpURL}/Memory`, {
+      headers: { Authorization: authHeader }, signal: AbortSignal.timeout(30_000),
+    });
+    expect(adminCollection.status, await adminCollection.clone().text()).toBe(200);
+    const adminListed: any = await adminCollection.json();
+    expectSuppressed((Array.isArray(adminListed) ? adminListed : adminListed.results ?? []).find((r: any) => r.id === memoryId));
+
+    const feedPath = `/FeedMemories/${encodeURIComponent(memoryId)}`;
+    expectSuppressed(await feedRow(memoryId, ed25519Header(owner, "GET", feedPath)));
+    expectSuppressed(await feedRow(memoryId, authHeader));
+
     const search = await semanticSearch({});
     expect(search.status, (await search.clone().text()).slice(0, 300)).toBe(200);
     const searchBody: any = await search.json();
@@ -401,6 +448,42 @@ describe("promotion stamps are locked, incremental and bound (real Harper)", () 
     expect(admin.status, await admin.clone().text()).toBe(200);
     expect(await admin.text()).toContain("not promoted");
   }, 180_000);
+
+  it("the automatic stamp skips a binding-only change before its transaction opens", async () => {
+    const claim = "A claim whose binding changes before the stamp transaction.";
+    await seedCandidate("pvi-auto-binding-stale", claim, AUTO_TAG);
+    arm("promotion-stamp-pre");
+    const sweep = autoPromote();
+    await assertPaused("promotion-stamp-pre");
+    try {
+      const rows = await opsCall({
+        operation: "search_by_value", database: "flair", table: "Memory",
+        search_attribute: "agentId", search_value: owner.id, get_attributes: ["*"],
+      });
+      const pending = (rows as any[]).find((r) => r.content === claim);
+      expect(pending, "the promoted row was not committed before the stamp").toBeTruthy();
+      const changedHash = sha256("different reviewed content");
+      await opsCall({
+        operation: "upsert", database: "flair", table: "Memory",
+        records: [{ ...pending, promotionContentHash: changedHash }],
+      });
+      expect(await readRow(pending.id)).toMatchObject({
+        id: pending.id, agentId: pending.agentId, content: pending.content,
+        instanceToken: pending.instanceToken, promotionContentHash: changedHash,
+      });
+      await release("promotion-stamp-pre");
+      const res = await sweep;
+      expect(res.status, (await res.clone().text()).slice(0, 300)).toBe(200);
+      const stored = await readRow(pending.id);
+      expect(stored.promotionStatus ?? null).toBeNull();
+      expect(stored.promotedAt ?? null).toBeNull();
+      expect(stored.promotedBy ?? null).toBeNull();
+      expect(stored.promotionContentHash).toBe(changedHash);
+    } finally {
+      writeFileSync(join(pauseDir, "go.promotion-stamp-pre"), "");
+      await sweep;
+    }
+  }, 120_000);
 
   it("a verdict is not stamped when the text changed while the stamp held the lock", async () => {
     await seedCandidate("pvi-auto-stale", "A claim whose text changes during the stamp.", AUTO_TAG);
@@ -426,7 +509,7 @@ describe("promotion stamps are locked, incremental and bound (real Harper)", () 
     expect(stored.promotionContentHash ?? null).toBeNull();
   }, 120_000);
 
-  it("a client cannot set the hash on PUT or PATCH", async () => {
+  it("a client cannot set the hash on PUT, PATCH or feed ingest", async () => {
     const fresh = "pvi-client-set";
     const put = await memoryWrite(owner, "PUT", fresh, {
       agentId: owner.id, content: "client content", promotionStatus: "approved",
@@ -435,5 +518,15 @@ describe("promotion stamps are locked, incremental and bound (real Harper)", () 
     expect(put.status, await put.clone().text()).toBe(403);
     const patch = await memoryWrite(owner, "PATCH", V1, { agentId: owner.id, promotionContentHash: "a".repeat(64) });
     expect(patch.status, await patch.clone().text()).toBe(403);
+    const path = "/FeedMemories";
+    const feedId = "pvi-feed-client-set";
+    const feed = await fetch(`${harper.httpURL}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: ed25519Header(owner, "POST", path) },
+      body: JSON.stringify({ id: feedId, agentId: owner.id, content: "feed client content", promotionContentHash: sha256("feed client content") }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    expect(feed.status, await feed.clone().text()).toBe(403);
+    expect(await readRow(feedId)).toBeNull();
   }, 60_000);
 });

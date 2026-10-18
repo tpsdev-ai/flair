@@ -1,1 +1,1 @@
-- Background visibility and promotion writes now update only their own fields under the per-memory-id write lock, so an owner's concurrent content or visibility edit is not reverted.
+- Visibility backfill and promotion stamps update only their own fields under the per-id Memory lock shared with owner PUT/PATCH.

@@ -48,8 +48,7 @@ function promotionStampUpdate(stored: any, reviewerId: string, decidedAt: string
   };
 }
 
-/** Would stamping this row overwrite a decision made for a different row or
- *  different content? Then the stamp skips: a stale verdict never overwrites. */
+/** Skip a row whose identity or content binding is already stale. */
 function isStaleBasis(stored: any, written: PromotedRowIdentity | undefined): boolean {
   if (written != null && !isWrittenRow(stored, written)) return true;
   const bound = stored?.promotionContentHash;
@@ -68,10 +67,8 @@ function memoryPrimaryStore(): unknown {
 // must be that row. Manual promotion passes the context of the open
 // transaction its Memory write used, and the stamp joins it.
 //
-// Slice 2: both stamps run under the promoted id's memory write lock and write
-// an INCREMENTAL update of the verdict fields only (never a full row), so an
-// owner edit that started earlier is not reverted. A stale identity or a
-// verdict already bound to different content skips without writing.
+// Both stamps share the per-id Memory lock with owner PUT/PATCH and update
+// only verdict fields. The automatic write confirms identity, content and hash.
 export async function stampMemoryPromotion(
   id: string, reviewerId: string, decidedAt: string, enumerationContext?: any, stagedContext?: any,
   written?: PromotedRowIdentity,
@@ -116,7 +113,7 @@ export async function stampMemoryPromotion(
         const update = promotionStampUpdate(stored, reviewerId, decidedAt);
         return { update };
       },
-      { ctx: enumerationContext, label: "promotion-stamp", pausePre: () => txnPausePoint("promotion-stamp-pre"), pausePoint: () => txnPausePoint("promotion-stamp"), matchFields: ["content"], expectedRow: selected },
+      { ctx: enumerationContext, label: "promotion-stamp", pausePre: () => txnPausePoint("promotion-stamp-pre"), pausePoint: () => txnPausePoint("promotion-stamp"), matchFields: ["content", "promotionContentHash"], expectedRow: selected },
     );
     // Test-only: the write-back committed and the lock is still held.
     const committed = txnPausePoint("promotion-stamp-committed");

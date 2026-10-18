@@ -4,8 +4,7 @@
  * which never stamped `visibility` at all. riskClass 'derived-only':
  * `visibility` here is a derived stamp recomputable at any time from
  * `durability` (which remains on the row, untouched, forever) — never the
- * only copy of anything (invariant I) — and this migration only ever writes
- * into a field that is CURRENTLY EMPTY, so the cheapest posture applies:
+ * only copy of anything (invariant I). The plan requires an empty visibility:
  * metadata-only snapshot, no content-hash gate (row-count + stamp
  * convergence only, same as `embedding-stamp`/`graph-heal`).
  *
@@ -45,13 +44,8 @@
  * definition is the safer contract than a shared import with a landmine
  * behind it. If this rule ever changes, both copies must change together.
  *
- * NEVER OVERWRITES an existing `visibility` value — that is an explicit
- * author decision (their own call, even if it disagrees with what this
- * migration would have derived). Only rows where `visibility` is
- * null/undefined are eligible, and `run()` below re-verifies that on a
- * freshly-read record immediately before writing (the actual enforcement
- * of "never overwrite" — see the write-gate comment there), independent of
- * how precisely the candidate-selection query below narrowed things.
+ * The per-id Memory lock shared with owner PUT/PATCH protects the missing-
+ * visibility decision and write. Writers outside that lock are not serialized.
  *
  * THE CANDIDATE QUERY — why it looks different from `embedding-stamp`'s:
  * `visibility` is declared in `schemas/memory.graphql` but NOT `@indexed`
@@ -238,10 +232,8 @@ export function createVisibilityBackfillMigration(
             (existing: any) => {
               if (!existing) return { skip: true } as const; // deleted since the search above — nothing to fix
 
-              // The write-gate: this is what actually enforces "never overwrite an
-              // existing visibility value", independent of how precisely the
-              // candidate query above narrowed things (see module doc — a
-              // garbage third value would still be pulled in as a candidate).
+              // Under the per-id Memory lock shared with owner PUT/PATCH,
+              // fill only an absent visibility.
               if (existing.visibility !== undefined && existing.visibility !== null) return { skip: true } as const;
 
               const derived = deriveVisibilityFromDurability(existing.durability);
@@ -258,8 +250,6 @@ export function createVisibilityBackfillMigration(
                 );
               }
 
-              // Incremental: only the missing visibility field, so an owner's
-              // concurrent content/visibility edit is not reverted.
               return { update: { visibility: derived } } as const;
             },
             { label: "visibility-backfill", pausePre: () => txnPausePoint("visibility-backfill-pre"), pausePoint: () => txnPausePoint("visibility-backfill"), expectedRow: row },

@@ -15,8 +15,8 @@
  * resources/authority-field-guard.ts. A row with no verdict is returned
  * unchanged (no fields added).
  *
- * Legacy rows carry a verdict and no hash: their verdicts stay unverified
- * until reviewed again (a new stamp writes the hash).
+ * Legacy verdicts without a hash read as unverified; later promotions stamp
+ * newly created memories.
  */
 import { createHash } from "node:crypto";
 
