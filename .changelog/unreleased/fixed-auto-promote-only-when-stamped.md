@@ -1,1 +1,1 @@
-- **A refused auto-promotion stamp no longer marks the candidate promoted.** When the Memory row a sweep wrote is replaced before its verdict stamp lands, the candidate stays pending for a later sweep instead of being recorded as promoted without a verdict.
+- **A refused auto-promotion stamp no longer marks the candidate promoted.** When the isolated stamp reports failure, the sweep records `stamp_refused` and leaves the candidate pending.

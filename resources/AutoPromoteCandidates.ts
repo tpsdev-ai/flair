@@ -204,7 +204,7 @@ export class AutoPromoteCandidates extends Resource {
         agentId: memRow.agentId, content: memRow.content, instanceToken: (memRow as any).instanceToken,
       });
 
-      // ── A verdict that did not land is not a promotion ─────────────────────
+      // ── A refused stamp leaves its candidate pending ───────────────────────
       // The stamp refuses when the row its first read returns is no longer the
       // one this sweep wrote (a concurrent replace). Marking the candidate
       // promoted then would record a promotion whose verdict never landed, so
