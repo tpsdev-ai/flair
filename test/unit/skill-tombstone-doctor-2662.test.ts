@@ -1,5 +1,5 @@
 /**
- * skill-tombstone-doctor-2662.test.ts — the pure decision and read-failure
+ * skill-tombstone-doctor-2662.test.ts — the decision and read-failure
  * paths of the `flair doctor` skill-tombstone check (flair#2662).
  */
 import { describe, expect, it } from "bun:test";

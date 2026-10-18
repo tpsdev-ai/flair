@@ -12,7 +12,7 @@
  * archived, not expired, and no `validTo`. An archived or expired row under a
  * tombstone is not reported.
  *
- * The decision is pure. The reads use the operations API and return null on a
+ * The decision reads only the row fields and the current time. The reads use the operations API and return null on a
  * failed read (never an empty list), so a doctor that cannot read the tables
  * reports the check as unrun rather than passed when this section runs. When
  * Harper is not responding, the enclosing gate skips the section and doctor
