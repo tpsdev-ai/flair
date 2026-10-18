@@ -2,6 +2,7 @@ import { nodeBin } from "../helpers/node-runtime.ts";
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { spawnSync } from "node:child_process";
 import { basename, dirname, join } from "node:path";
 import { createSandboxHome } from "../helpers/sandbox-home.ts";
 import {
@@ -531,7 +532,7 @@ describe("shared unit lane", () => {
     }
   });
 
-  test("the lane budget follows the job's recorded start: N s of setup costs N s of budget, and the run still prints its summary (flair#2619)", () => {
+  test("a usable first-step timestamp reduces the lane budget above the floor (flair#2619)", () => {
     const now = Date.UTC(2026, 9, 17, 15, 0, 0);
     const n = 300;
     const recorded = { [JOB_START_ENV]: String(now / 1000 - n) };
@@ -560,9 +561,8 @@ describe("shared unit lane", () => {
     expect(laneBudgetMsFromJobStart({ [JOB_START_ENV]: String(now / 1000 - CI_JOB_LIMIT_MS / 1000 - 1) }, now)).toBe(KEEP_GOING_LANE_BUDGET_MS);
   });
 
-  test("a job already spent past the floor reports budget exhausted before start (flair#2619)", () => {
+  test("less than the minimum lane budget reports exhaustion before start (flair#2619)", () => {
     const now = Date.UTC(2026, 9, 17, 15, 0, 0);
-    // Setup has used all but the floor of the fixed budget: the lane has none.
     const elapsedMs = KEEP_GOING_LANE_BUDGET_MS - LANE_MIN_BUDGET_MS + 1000;
     expect(laneBudgetMsFromJobStart({ [JOB_START_ENV]: String((now - elapsedMs) / 1000) }, now)).toBeUndefined();
     const dir = fixture();
@@ -604,7 +604,7 @@ describe("shared unit lane", () => {
     expect(failFastRun.result.logs).not.toContain("Unit lane passed");
   });
 
-  test("the entrypoint applies the derived lane budget and names it in the banner (flair#2619)", () => {
+  test("laneRunSetup supplies the derived budget and banner (flair#2619)", () => {
     const now = Date.UTC(2026, 9, 17, 15, 0, 0);
     const invocation = parseUnitLaneArgs(["--keep-going"], {});
 
@@ -647,23 +647,52 @@ describe("shared unit lane", () => {
     expect(errors).toContain("budget exhausted before start");
   });
 
-  test("the test-unit job records its start first and bounds its install step (flair#2619)", () => {
+  test("the real entrypoint exits before running a step when the recorded budget is exhausted (flair#2619)", () => {
+    const dir = fixture();
+    const marker = join(dir, "ran");
+    const preload = join(dir, "plan.ts");
+    const planner = join(root, "scripts/ci/lane-shards.mjs");
+    const step = {
+      name: "entrypoint sentinel", cwd: dir, files: [],
+      args: ["-e", `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "ran")`],
+    };
+    writeFileSync(preload, `
+      import { mock } from "bun:test";
+      import * as planner from ${JSON.stringify(planner)};
+      mock.module(${JSON.stringify(planner)}, () => ({ ...planner, unitPlan: () => [${JSON.stringify(step)}] }));
+    `);
+    const result = spawnSync(process.execPath, ["--preload", preload, "scripts/test-unit.ts", "--keep-going"], {
+      cwd: root, encoding: "utf8", timeout: 10_000, killSignal: "SIGKILL",
+      env: {
+        ...unitEnvironment(process.env),
+        [JOB_START_ENV]: String(Math.floor(Date.now() / 1000) - KEEP_GOING_LANE_BUDGET_MS / 1000),
+        FLAIR_UNIT_TEMP_BASE: dir,
+      },
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.signal).toBeNull();
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain("1 steps; keep-going: attempts later steps while budget remains;");
+    expect(result.stdout).toContain("no lane budget left");
+    expect(result.stderr).toContain("budget exhausted before start");
+    expect(result.stderr).toContain("ran 0 of 1 steps, 0 failed, 1 not run");
+    expect(result.stdout).not.toContain("entrypoint sentinel");
+    expect(existsSync(marker)).toBe(false);
+  }, 15_000);
+
+  test("the test-unit job records a timestamp first and bounds its install step (flair#2619)", () => {
     const workflow = readFileSync(join(root, ".github", "workflows", "test.yml"), "utf8");
     const start = workflow.indexOf("\n  test-unit:\n");
     const end = workflow.indexOf("\n  test-unit-gate:\n");
     const job = workflow.slice(start, end);
-    // The job's first step records its start; the lane reads it to size its budget
-    // (`laneBudgetMsFromJobStart`).
     const stepsAt = job.indexOf("    steps:\n");
-    const recordAt = job.indexOf('- name: "Record job start"');
+    const recordAt = job.indexOf('- name: "Record lane timing reference"');
     const checkoutAt = job.indexOf("- uses: actions/checkout@");
     expect(stepsAt).toBeGreaterThan(-1);
     expect(recordAt).toBeGreaterThan(stepsAt);
     expect(checkoutAt).toBeGreaterThan(recordAt);
     expect(job.slice(stepsAt, recordAt)).not.toMatch(/\n\s+- /);
     expect(job).toContain('run: echo "FLAIR_UNIT_JOB_START=$(date +%s)" >> "$GITHUB_ENV"');
-    // The install step carries its own limit, below the job's, so a hung install
-    // fails there rather than eating the job.
     const install = job.match(/- name: "Install dependencies"\n\s+timeout-minutes: (\d+)\n\s+run: sfw bun install --frozen-lockfile/);
     expect(install).not.toBeNull();
     expect(Number(install?.[1]) * 60_000).toBeLessThan(CI_JOB_LIMIT_MS);
