@@ -10,11 +10,6 @@
  * acquires the lock or answers 503 memory_busy without writing, unless an attempt
  * observes an outcome-unknown marker (503 write_outcome_unknown; the fence test).
  *
- * After a normal storage result, the ordinary owned row write verifies its
- * token and declared agentId/content/visibility/durability after commit; a
- * successful re-embed checks its token after its inner commit. Refusals and
- * storage Responses return before the read. Skill PUT has no ordinary-row verification;
- * composed promotion uses its caller's in-transaction existence check.
  * PUT and PATCH require an id before entering the lock helper.
  *
  * DETERMINISTIC ORDERING via the `memory-put-committed` / `memory-patch-committed`
@@ -135,13 +130,13 @@ function arm(point: string): void {
 function release(point: string): void {
   writeFileSync(join(pauseDir, `go.${point}`), "");
 }
-async function seedMemory(id: string, content: string): Promise<void> {
+async function seedMemory(id: string, content: string, extra: Record<string, unknown> = {}): Promise<void> {
   await opsCall({
     operation: "insert", database: "flair", table: "Memory",
     records: [{
       id, agentId: owner.id, content, durability: "standard", visibility: "shared",
       embedding: [0.1, 0.2, 0.3], instanceToken: randomUUID(),
-      usageCount: 0, createdAt: new Date().toISOString(),
+      usageCount: 0, createdAt: new Date().toISOString(), ...extra,
     }],
   });
 }
@@ -445,6 +440,92 @@ describe("flair#2478 — post-commit verification on a re-embed PATCH and a lega
     const body = await res.json() as any;
     expect(res.status, JSON.stringify(body)).toBe(409);
     expect(body.error).toBe("stored_row_changed");
+  }, 120_000);
+});
+
+describe("flair#2645 — an ordinary owner PATCH verifies retained request fields", () => {
+  for (const replaced of [false, true]) {
+    it(`a redacted-content PATCH answers ${replaced ? "409 when a newer write replaces it" : "success when retained"}`, async () => {
+      const id = `wlk-redacted-${replaced}-${Date.now()}`;
+      await seedMemory(id, "the original text");
+      const point = "memory-patch-verify";
+      arm(point);
+      const held = patchBodyAs(owner, id, {
+        agentId: owner.id, content: `rotate ghp_${"A".repeat(36)}`,
+      });
+      try {
+        expect(await waitFor(join(pauseDir, `paused.${point}`), 30_000)).toBe(true);
+        const committed = await readRow(id);
+        expect(committed?.content).toBe("rotate [redacted]");
+        if (replaced) {
+          await opsCall({
+            operation: "update", database: "flair", table: "Memory",
+            records: [{ id, agentId: owner.id, content: "the newer content", createdAt: committed.createdAt }],
+          });
+        }
+      } finally {
+        release(point);
+      }
+      const res = await held;
+      await assertReleased(point);
+      const body = await res.json() as any;
+      if (replaced) {
+        expect(res.status, JSON.stringify(body)).toBe(409);
+        expect(body.error).toBe("stored_row_changed");
+      } else {
+        expect(res.status, JSON.stringify(body)).toBeLessThan(300);
+        expect(body.stored).toEqual({ content: "rotate [redacted]" });
+      }
+      expect((await readRow(id))?.content).toBe(replaced ? "the newer content" : "rotate [redacted]");
+    }, 120_000);
+  }
+
+  it("a tags-only PATCH whose tags a newer full write discarded answers 409 stored_row_changed", async () => {
+    const id = `wlk-declared-tags-${Date.now()}`;
+    await seedMemory(id, "the original text", { tags: ["original-tag"] });
+    const point = "memory-patch-verify";
+    arm(point);
+    const held = patchBodyAs(owner, id, { agentId: owner.id, tags: ["declared-tag"] });
+    expect(await waitFor(join(pauseDir, `paused.${point}`), 30_000), "the PATCH never reached its pre-verification pause").toBe(true);
+
+    const committed = await readRow(id);
+    expect(committed?.tags, "the PATCH did not commit its tags before the pause").toEqual(["declared-tag"]);
+    // A newer FULL write from a lock-bypassing writer: same id, same incarnation
+    // token, newer content, and NO tags. The PATCH's declared tags are discarded.
+    await opsCall({ operation: "delete", database: "flair", table: "Memory", ids: [id] });
+    const copy: Record<string, unknown> = { ...committed, content: "the newer content" };
+    delete copy.tags;
+    for (const key of ["__createdtime__", "__updatedtime__"]) delete copy[key];
+    await opsCall({ operation: "insert", database: "flair", table: "Memory", records: [copy] });
+
+    release(point);
+    const res = await held;
+    await assertReleased(point);
+    const body = await res.json() as any;
+    expect(res.status, JSON.stringify(body)).toBe(409);
+    expect(body.error).toBe("stored_row_changed");
+    expect((await readRow(id))?.tags ?? null, "the answered PATCH's tags are missing from the stored row").toBeNull();
+  }, 120_000);
+
+  it("a metadata-only PATCH answers success with the metadata present", async () => {
+    const id = `wlk-declared-metadata-${Date.now()}`;
+    await seedMemory(id, "the original text");
+    const res = await patchBodyAs(owner, id, { agentId: owner.id, metadata: "kept" });
+    expect(res.status, await res.clone().text()).toBeLessThan(300);
+    expect((await readRow(id))?.metadata, "the metadata-only PATCH did not land").toBe("kept");
+  }, 120_000);
+
+  it("a mixed PATCH answers success with every declared field present", async () => {
+    const id = `wlk-declared-mixed-${Date.now()}`;
+    await seedMemory(id, "the original text", { tags: ["original-tag"] });
+    const res = await patchBodyAs(owner, id, {
+      agentId: owner.id, content: "the mixed text", tags: ["mixed-tag"], metadata: "mixed",
+    });
+    expect(res.status, await res.clone().text()).toBeLessThan(300);
+    const row = await readRow(id);
+    expect(row?.content, "the mixed PATCH content did not land").toBe("the mixed text");
+    expect(row?.tags, "the mixed PATCH tags did not land").toEqual(["mixed-tag"]);
+    expect(row?.metadata, "the mixed PATCH metadata did not land").toBe("mixed");
   }, 120_000);
 });
 

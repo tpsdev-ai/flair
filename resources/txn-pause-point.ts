@@ -26,9 +26,8 @@ const POLL_MS = 20;
  * (after the pre-existing ownership read, before the delete's transactional
  * re-read or staging) and an in-transaction point (between that transaction's
  * ownership re-read and its delete), so both interleavings of a concurrent
- * owner change can be exercised. The write transaction is one the delete
- * owns, except Memory's ordinary delete: withSharedWriteTransaction JOINS a
- * request-owned transaction when one exists and creates one otherwise.
+ * owner change can be exercised. The write transaction is one the delete owns
+ * (Memory's ordinary delete included, since flair#2632).
  */
 export const PAUSE_POINT_PATTERN = /^[a-z]+(?:-[a-z]+)*$/;
 

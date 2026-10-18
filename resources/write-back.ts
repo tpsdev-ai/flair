@@ -1,4 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
+import { appendFileSync } from "node:fs";
+import { join } from "node:path";
 import { withOwnedTransaction } from "./request-transaction.js";
 
 /** The narrow surface the helper needs of a Harper table: a primary-key read
@@ -106,6 +108,21 @@ export function writeBackIdentity(row: Record<string, any>): Record<string, unkn
 
 /** Attempts of a write-back before it gives up on a row that keeps changing. */
 export const WRITE_BACK_ATTEMPTS = 3;
+
+/**
+ * Test-only: record attempt starts and settled outcomes when fault injection
+ * is armed and a pause directory is configured.
+ */
+function noteTestAttempt(label: string, id: string, attempt: number, outcome?: "applied" | "skipped" | "refused"): void {
+  if (process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION !== "1") return;
+  const dir = process.env.FLAIR_TEST_PAUSE_DIR;
+  if (!dir) return;
+  try {
+    appendFileSync(join(dir, "attempts.write-back"), `${label}\t${id}\t${attempt}${outcome ? `\t${outcome}` : ""}\n`);
+  } catch {
+    // Append errors are ignored.
+  }
+}
 
 /**
  * The helper's named refusal: the row changed and nothing was written. Both
@@ -284,8 +301,9 @@ export async function writeBackCommittedRow(
     if (pre) await pre;
   }
   for (let attempt = 1; ; attempt++) {
+    noteTestAttempt(opts.label, id, attempt);
     try {
-      return await withOwnedTransaction(opts.ctx, async (c) => {
+      const decision = await withOwnedTransaction<WriteBackPlan>(opts.ctx, async (c) => {
         const row = await table.get(id, c);
         if (opts.matches && !opts.matches(row)) return { skip: true };
         const decision = await plan(row);
@@ -301,7 +319,10 @@ export async function writeBackCommittedRow(
         await confirmCommittedRow(table, id, (committed) => isDeepStrictEqual(committed, row));
         return decision;
       });
+      noteTestAttempt(opts.label, id, attempt, "skip" in decision ? "skipped" : "applied");
+      return decision;
     } catch (err) {
+      noteTestAttempt(opts.label, id, attempt, "refused");
       if (!(err instanceof CommittedRowChanged)) throw err;
       if (attempt >= attempts) throw new WriteBackConflictError(opts.label, id, attempts);
     }

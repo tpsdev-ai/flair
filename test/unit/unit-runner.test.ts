@@ -2,17 +2,22 @@ import { nodeBin } from "../helpers/node-runtime.ts";
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { spawnSync } from "node:child_process";
 import { basename, dirname, join } from "node:path";
 import { createSandboxHome } from "../helpers/sandbox-home.ts";
 import {
   CI_JOB_LIMIT_MS,
   CI_OUTSIDE_LANE_MS,
   DARWIN_TEMP_BASE,
+  JOB_START_ENV,
   KEEP_GOING_LANE_BUDGET_MS,
   KEEP_GOING_LIMITS,
+  LANE_MIN_BUDGET_MS,
   ROOT_STEP_TIMEOUT_MS,
   STEP_TIMEOUT_MS,
   ciRequestsKeepGoing,
+  laneBudgetMsFromJobStart,
+  laneRunSetup,
   parseUnitLaneArgs,
   runUnitSteps as runUnitStepsWithRuntime,
   unitEnvironment,
@@ -525,6 +530,171 @@ describe("shared unit lane", () => {
       expect(step.timeoutMs).toBe(ROOT_STEP_TIMEOUT_MS);
       expect(step.name).toMatch(/^root unit tests \(shard \d+\/\d+\)$/);
     }
+  });
+
+  test("a usable first-step timestamp reduces the lane budget above the floor (flair#2619)", () => {
+    const now = Date.UTC(2026, 9, 17, 15, 0, 0);
+    const n = 300;
+    const recorded = { [JOB_START_ENV]: String(now / 1000 - n) };
+    const budget = laneBudgetMsFromJobStart(recorded, now);
+    expect(budget).toBe(KEEP_GOING_LANE_BUDGET_MS - n * 1000);
+    // The lane runs under that derived budget and still prints its summary.
+    const dir = fixture();
+    const { result: code, logs } = captureLogs(() => runUnitSteps(
+      [{ name: "quick step", cwd: dir, args: ["-e", "process.exit(0)"], files: [] }],
+      nodeBin(),
+      dir,
+      { keepGoing: true, limits: { stepTimeoutMs: STEP_TIMEOUT_MS, laneBudgetMs: budget } },
+    ));
+    expect(code).toBe(0);
+    expect(logs).toContain("Unit lane passed: 1 steps, 0 test files");
+  });
+
+  test("an absent or unusable recorded start keeps the fixed lane budget (flair#2619)", () => {
+    const now = Date.UTC(2026, 9, 17, 15, 0, 0);
+    for (const recorded of [undefined, "", "  ", "not a number", "Infinity", "NaN"]) {
+      const env = recorded === undefined ? {} : { [JOB_START_ENV]: recorded };
+      expect(laneBudgetMsFromJobStart(env, now)).toBe(KEEP_GOING_LANE_BUDGET_MS);
+    }
+    // A start in the future, and one older than the job limit, are unusable too.
+    expect(laneBudgetMsFromJobStart({ [JOB_START_ENV]: String(now / 1000 + 60) }, now)).toBe(KEEP_GOING_LANE_BUDGET_MS);
+    expect(laneBudgetMsFromJobStart({ [JOB_START_ENV]: String(now / 1000 - CI_JOB_LIMIT_MS / 1000 - 1) }, now)).toBe(KEEP_GOING_LANE_BUDGET_MS);
+  });
+
+  test("less than the minimum lane budget reports exhaustion before start (flair#2619)", () => {
+    const now = Date.UTC(2026, 9, 17, 15, 0, 0);
+    const elapsedMs = KEEP_GOING_LANE_BUDGET_MS - LANE_MIN_BUDGET_MS + 1000;
+    expect(laneBudgetMsFromJobStart({ [JOB_START_ENV]: String((now - elapsedMs) / 1000) }, now)).toBeUndefined();
+    const dir = fixture();
+    const marker = join(dir, "ran");
+    const { result: code, errors } = captureErrors(() => runUnitSteps(
+      [
+        { name: "must not run", cwd: dir, args: ["-e", `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "x")`], files: [] },
+        { name: "must not run either", cwd: dir, args: ["-e", "process.exit(0)"], files: [] },
+      ],
+      nodeBin(),
+      dir,
+      { keepGoing: true, limits: { stepTimeoutMs: STEP_TIMEOUT_MS, laneBudgetMs: 0 } },
+    ));
+    expect(code).toBe(1);
+    expect(existsSync(marker)).toBe(false);
+    expect(errors).toContain("budget exhausted before start");
+    expect(errors).toContain("ran 0 of 2 steps, 0 failed, 2 not run");
+  });
+
+  test("an exhausted lane runs no step even when the plan holds only empty shards (flair#2619)", () => {
+    const dir = fixture();
+    const empty = [1, 2].map(index => ({
+      name: `empty shard ${index}/2`,
+      cwd: dir,
+      args: [],
+      files: [],
+      shard: { index, of: 2 },
+    }));
+    const limits = { stepTimeoutMs: STEP_TIMEOUT_MS, laneBudgetMs: 0 };
+    const keepGoingRun = captureErrors(() => captureLogs(() => runUnitSteps(empty, nodeBin(), dir, { keepGoing: true, limits })));
+    expect(keepGoingRun.result.result).toBe(1);
+    expect(keepGoingRun.errors).toContain("budget exhausted before start");
+    expect(keepGoingRun.errors).toContain("ran 0 of 2 steps, 0 failed, 2 not run");
+    expect(keepGoingRun.result.logs).not.toContain("empty shard; skipped");
+    expect(keepGoingRun.result.logs).not.toContain("Unit lane passed");
+    const failFastRun = captureErrors(() => captureLogs(() => runUnitSteps(empty, nodeBin(), dir, { limits })));
+    expect(failFastRun.result.result).toBe(1);
+    expect(failFastRun.errors).toContain("Unit lane failed: budget exhausted before start. 0/2 steps completed.");
+    expect(failFastRun.result.logs).not.toContain("Unit lane passed");
+  });
+
+  test("laneRunSetup supplies the derived budget and banner (flair#2619)", () => {
+    const now = Date.UTC(2026, 9, 17, 15, 0, 0);
+    const invocation = parseUnitLaneArgs(["--keep-going"], {});
+
+    // A start 300 s ago: the banner names the derived budget and the lane runs
+    // under it.
+    const started = laneRunSetup(invocation, { [JOB_START_ENV]: String(now / 1000 - 300) }, now);
+    expect(started.limits?.laneBudgetMs).toBe(KEEP_GOING_LANE_BUDGET_MS - 300_000);
+    expect(started.mode).toContain("per-step caps: 150 s (root unit tests: 450 s), pre-empted by an earlier lane deadline; lane deadline: 900 s");
+    const startedDir = fixture();
+    const startedMarker = join(startedDir, "ran");
+    const { result: startedCode } = captureErrors(() => runUnitSteps(
+      [{ name: "quick step", cwd: startedDir, args: ["-e", `require("node:fs").writeFileSync(${JSON.stringify(startedMarker)}, "x")`], files: [] }],
+      nodeBin(),
+      startedDir,
+      { keepGoing: true, limits: started.limits },
+    ));
+    expect(startedCode).toBe(0);
+    expect(existsSync(startedMarker)).toBe(true);
+
+    // No record: the fixed budget stands, and the banner names it.
+    const absent = laneRunSetup(invocation, {}, now);
+    expect(absent.limits?.laneBudgetMs).toBe(KEEP_GOING_LANE_BUDGET_MS);
+    expect(absent.mode).toContain("lane deadline: 1200 s");
+
+    // The remaining lane budget is below the start floor.
+    const spent = now - (KEEP_GOING_LANE_BUDGET_MS - LANE_MIN_BUDGET_MS + 1000);
+    const exhausted = laneRunSetup(invocation, { [JOB_START_ENV]: String(spent / 1000) }, now);
+    expect(exhausted.limits?.laneBudgetMs).toBe(0);
+    const spentDir = fixture();
+    const spentMarker = join(spentDir, "ran");
+    const { result: spentCode, errors } = captureErrors(() => runUnitSteps(
+      [{ name: "must not run", cwd: spentDir, args: ["-e", `require("node:fs").writeFileSync(${JSON.stringify(spentMarker)}, "x")`], files: [] }],
+      nodeBin(),
+      spentDir,
+      { keepGoing: true, limits: exhausted.limits },
+    ));
+    expect(spentCode).toBe(1);
+    expect(existsSync(spentMarker)).toBe(false);
+    expect(errors).toContain("budget exhausted before start");
+  });
+
+  test("the real entrypoint exits before running a step when the recorded budget is exhausted (flair#2619)", () => {
+    const dir = fixture();
+    const marker = join(dir, "ran");
+    const preload = join(dir, "plan.ts");
+    const planner = join(root, "scripts/ci/lane-shards.mjs");
+    const step = {
+      name: "entrypoint sentinel", cwd: dir, files: [],
+      args: ["-e", `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "ran")`],
+    };
+    writeFileSync(preload, `
+      import { mock } from "bun:test";
+      import * as planner from ${JSON.stringify(planner)};
+      mock.module(${JSON.stringify(planner)}, () => ({ ...planner, unitPlan: () => [${JSON.stringify(step)}] }));
+    `);
+    const result = spawnSync(process.execPath, ["--preload", preload, "scripts/test-unit.ts", "--keep-going"], {
+      cwd: root, encoding: "utf8", timeout: 10_000, killSignal: "SIGKILL",
+      env: {
+        ...unitEnvironment(process.env),
+        [JOB_START_ENV]: String(Math.floor(Date.now() / 1000) - KEEP_GOING_LANE_BUDGET_MS / 1000),
+        FLAIR_UNIT_TEMP_BASE: dir,
+      },
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.signal).toBeNull();
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain("1 steps; keep-going: attempts later steps while budget remains;");
+    expect(result.stdout).toContain("remaining lane budget below the start floor");
+    expect(result.stderr).toContain("budget exhausted before start");
+    expect(result.stderr).toContain("ran 0 of 1 steps, 0 failed, 1 not run");
+    expect(result.stdout).not.toContain("entrypoint sentinel");
+    expect(existsSync(marker)).toBe(false);
+  }, 15_000);
+
+  test("the test-unit job records a timestamp first and bounds its install step (flair#2619)", () => {
+    const workflow = readFileSync(join(root, ".github", "workflows", "test.yml"), "utf8");
+    const start = workflow.indexOf("\n  test-unit:\n");
+    const end = workflow.indexOf("\n  test-unit-gate:\n");
+    const job = workflow.slice(start, end);
+    const stepsAt = job.indexOf("    steps:\n");
+    const recordAt = job.indexOf('- name: "Record lane timing reference"');
+    const checkoutAt = job.indexOf("- uses: actions/checkout@");
+    expect(stepsAt).toBeGreaterThan(-1);
+    expect(recordAt).toBeGreaterThan(stepsAt);
+    expect(checkoutAt).toBeGreaterThan(recordAt);
+    expect(job.slice(stepsAt, recordAt)).not.toMatch(/\n\s+- /);
+    expect(job).toContain('run: echo "FLAIR_UNIT_JOB_START=$(date +%s)" >> "$GITHUB_ENV"');
+    const install = job.match(/- name: "Install dependencies"\n\s+timeout-minutes: (\d+)\n\s+run: sfw bun install --frozen-lockfile/);
+    expect(install).not.toBeNull();
+    expect(Number(install?.[1]) * 60_000).toBeLessThan(CI_JOB_LIMIT_MS);
   });
 
   test("every step that runs reports its own duration (flair#2224)", () => {
