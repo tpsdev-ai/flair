@@ -55,6 +55,8 @@ describe("federation sync push — Presence sender (flair#2578 slice 2)", () => 
   let presenceRows: any[] = [];
   let syncStatus = 200;
   let syncRefused: Array<{ table: string; id: string; reason: string }> = [];
+  let syncIndeterminate: Array<{ table: string; id: string }> = [];
+  let syncMergedDelta = 0;
 
   beforeAll(() => keystore.setPrivateKeySeed(INSTANCE_ID, testKp.secretKey.slice(0, 32)));
   afterAll(() => {
@@ -71,6 +73,8 @@ describe("federation sync push — Presence sender (flair#2578 slice 2)", () => 
     presenceRows = [];
     syncStatus = 200;
     syncRefused = [];
+    syncIndeterminate = [];
+    syncMergedDelta = 0;
     globalThis.fetch = mock(async (urlInput: string | URL | Request, init?: RequestInit) => {
       const url = typeof urlInput === "string" ? urlInput : urlInput.toString();
       const method = init?.method ?? "GET";
@@ -94,10 +98,13 @@ describe("federation sync push — Presence sender (flair#2578 slice 2)", () => 
       if (method === "POST" && url.includes("/FederationSync")) {
         if (syncStatus !== 200) return res(false, syncStatus, { error: "refused" });
         const records = body?.records ?? [];
-        if (syncRefused.length > 0) {
-          return res(true, 200, { merged: records.length - syncRefused.length, skipped: syncRefused.length, refused: syncRefused });
-        }
-        return res(true, 200, { merged: records.length, skipped: 0 });
+        return res(true, 200, {
+          merged: records.length - syncRefused.length - syncIndeterminate.length + syncMergedDelta,
+          skipped: syncRefused.length,
+          refused: syncRefused,
+          indeterminate: syncIndeterminate,
+          total: records.length,
+        });
       }
       throw new Error(`Unexpected fetch call: ${method} ${url} body=${JSON.stringify(body)}`);
     }) as any;
@@ -279,6 +286,84 @@ describe("federation sync push — Presence sender (flair#2578 slice 2)", () => 
     expect(Number.isFinite(saved2)).toBe(true);
     expect(saved2).toBeLessThanOrEqual(scanAfter2);
     expect(saved2).toBeLessThan(movedForward);
+  });
+
+  it("flag ON: an indeterminate row holds the watermark below it and is re-offered (B1)", async () => {
+    process.env[PRESENCE_SEND_FLAG_ENV] = "1";
+    const hb = Date.now();
+    installMock({ presenceLastSyncAt: SINCE });
+    syncIndeterminate = [{ table: "Presence", id: "agent-a" }];
+    presenceRows = [homeRow({ agentId: "agent-a", lastHeartbeatAt: hb })];
+    const r1 = await run();
+    expect(r1.error).toBeUndefined();
+    expect(presenceRecords().map((r) => r.id)).toEqual(["agent-a"]);
+    // The un-decided row is treated as a retryable refusal: the saved
+    // watermark stays strictly below its cursor.
+    const updates1 = presenceUpdates();
+    expect(updates1.length).toBe(1);
+    const saved = Date.parse(updates1[0].body.records[0].presenceLastSyncAt);
+    expect(Number.isFinite(saved)).toBe(true);
+    expect(saved).toBeLessThan(hb);
+
+    // Next pass: the overlap selects the row again and it is re-offered.
+    installMock({ presenceLastSyncAt: updates1[0].body.records[0].presenceLastSyncAt });
+    presenceRows = [homeRow({ agentId: "agent-a", lastHeartbeatAt: hb })];
+    const r2 = await run();
+    expect(r2.error).toBeUndefined();
+    expect(presenceRecords().map((r) => r.id)).toEqual(["agent-a"]);
+  });
+
+  it("flag ON: a response that does not account for every record saves no watermark (B1)", async () => {
+    process.env[PRESENCE_SEND_FLAG_ENV] = "1";
+    installMock({ presenceLastSyncAt: SINCE });
+    syncMergedDelta = -1;
+    presenceRows = [homeRow({ lastHeartbeatAt: Date.now() })];
+    const result = await run();
+    expect(result.error).toBeDefined();
+    expect(presenceUpdates()).toEqual([]);
+  });
+
+  it("flag ON: a stored watermark ahead of the scan is clamped down to the scan time (B5)", async () => {
+    process.env[PRESENCE_SEND_FLAG_ENV] = "1";
+    const now = Date.now();
+    // A watermark an hour ahead would suppress every current row if the scan
+    // floor used it unchanged.
+    const futureWatermark = now + 3_600_000;
+    const rowCursor = now - 1_000;
+    installMock({ presenceLastSyncAt: new Date(futureWatermark).toISOString() });
+    presenceRows = [homeRow({ lastHeartbeatAt: rowCursor })];
+    const result = await run();
+    const scanAfter = Date.now();
+    expect(result.error).toBeUndefined();
+    // The clamp is applied before selection: the current row is still offered.
+    expect(presenceRecords().map((r) => r.id)).toEqual(["agent-a"]);
+
+    const updates = presenceUpdates();
+    expect(updates.length).toBe(1);
+    const saved = Date.parse(updates[0].body.records[0].presenceLastSyncAt);
+    expect(Number.isFinite(saved)).toBe(true);
+    expect(saved).toBeLessThanOrEqual(scanAfter);
+    expect(saved).toBeLessThan(futureWatermark);
+  });
+
+  it("flag ON: a stored watermark ahead of the scan is lowered even when no row is sent (B5)", async () => {
+    process.env[PRESENCE_SEND_FLAG_ENV] = "1";
+    const now = Date.now();
+    const futureWatermark = now + 3_600_000;
+    installMock({ presenceLastSyncAt: new Date(futureWatermark).toISOString() });
+    // Older than the 30 s overlap, so this pass sends no Presence row.
+    presenceRows = [homeRow({ lastHeartbeatAt: now - 120_000 })];
+    const result = await run();
+    const scanAfter = Date.now();
+    expect(result.error).toBeUndefined();
+    expect(presenceRecords()).toEqual([]);
+
+    const updates = presenceUpdates();
+    expect(updates.length).toBe(1);
+    const saved = Date.parse(updates[0].body.records[0].presenceLastSyncAt);
+    expect(Number.isFinite(saved)).toBe(true);
+    expect(saved).toBeLessThanOrEqual(scanAfter);
+    expect(saved).toBeLessThan(futureWatermark);
   });
 
   it("flag ON: a failed batch does not advance the watermark", async () => {

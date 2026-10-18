@@ -70,6 +70,18 @@ async function readRow(h: HarperInstance, table: string, id: string): Promise<an
   return Array.isArray(rows) ? (rows[0] ?? null) : null;
 }
 
+/** The admin GET /FederationPeers response, i.e. what the sender's push path
+ *  reads its presenceLastSyncAt from (not the raw Peer row). */
+async function getPeers(h: HarperInstance): Promise<any> {
+  const res = await fetch(`${h.httpURL}/FederationPeers`, {
+    headers: { Authorization: basic(h) },
+    signal: AbortSignal.timeout(20_000),
+  });
+  const text = await res.text();
+  expect(res.status, `GET /FederationPeers on ${h.httpURL}: ${text.slice(0, 300)}`).toBe(200);
+  return JSON.parse(text);
+}
+
 async function sync(): Promise<{ pushed: number; skipped: number; error?: Error }> {
   const { runFederationSyncOnce } = await import("../../src/cli");
   return runFederationSyncOnce({
@@ -139,6 +151,12 @@ describe("flair#2578 slice 2 — Presence sender end to end (real Harper, both f
     const hubPeer = await readRow(sender, "Peer", HUB_ID);
     expect(typeof hubPeer.presenceLastSyncAt).toBe("string");
     expect(Number.isFinite(Date.parse(hubPeer.presenceLastSyncAt))).toBe(true);
+
+    // The push path reads that value through GET /FederationPeers, so the
+    // response itself must carry it.
+    const listed = (await getPeers(sender)).peers.find((p: any) => p.id === HUB_ID);
+    expect(listed).toBeDefined();
+    expect(listed.presenceLastSyncAt).toBe(hubPeer.presenceLastSyncAt);
   });
 
   it("a re-sent unchanged row is re-merged: the presence data stands and receivedAt does not go back", async () => {

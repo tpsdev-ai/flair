@@ -6,9 +6,11 @@
   the `Memory`, `Soul`, `Agent` and `Relationship` tables. `Presence` has no
   `updatedAt`, so its rows are selected by their own `lastHeartbeatAt` /
   `activityUpdatedAt` cursor against a per-table watermark (less a 30 s re-scan
-  overlap) kept on the local `Peer` row (`presenceLastSyncAt`); only a confirmed
-  batch advances the watermark, which never passes the time of the scan — a row dated
-  more than 5 minutes ahead is not sent. An
+  overlap, so a row inside the overlap is re-sent even though it is below the
+  watermark) kept on the local `Peer` row (`presenceLastSyncAt`); a confirmed
+  batch saves the newest sent cursor, clamped to that pass's scan time, and a
+  retryable refusal or an indeterminate outcome saves a value below that row's
+  cursor (a row dated more than 5 minutes ahead is not sent). An
   admin `put()` that changes a declared field without advancing either
   timestamp waits for the agent's next heartbeat. With the flag off the sender
-  behaves exactly as before.
+  sends no Presence records.
