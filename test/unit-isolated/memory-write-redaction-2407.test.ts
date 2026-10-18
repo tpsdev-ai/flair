@@ -804,7 +804,10 @@ describe("flair#2561 — `stored` reports only the string-valued text fields the
     const oldCreate = (Memory as any).create;
     const body = redacted ? `rotate ${GITHUB_TOKEN}` : "a changed note";
     const answers: Array<[string, any]> = [];
-    BaseMemory.post = async () => result();
+    BaseMemory.post = async (content: any) => {
+      memoryStore.set(content.id, { ...content });
+      return result();
+    };
     // Stage the row for ordinary owned PUT verification after a normal result.
     // Refusals, storage Responses and skill PUT return before that read; composed
     // promotion uses its caller's in-transaction existence check.
@@ -819,7 +822,10 @@ describe("flair#2561 — `stored` reports only the string-valued text fields the
     };
     try {
       for (const adapter of ["post", "create"]) {
-        if (adapter === "create") (Memory as any).create = async () => result();
+        if (adapter === "create") (Memory as any).create = async (_id: any, content: any) => {
+          memoryStore.set(content.id, { ...content });
+          return result();
+        };
         memoryStore.clear();
         answers.push([`POST ${adapter}`, await makeMemory(agentCtx(AGENT)).post({ id: row.id, agentId: AGENT, content: body, visibility: "shared" })]);
       }
