@@ -165,7 +165,8 @@ interface TableSpec {
 
 const SPECS: TableSpec[] = [
   { table: "Memory", pk: "id", mut: "content", ownerPatchable: true, idFor: (n) => `osw-mem-${n}`,
-    row: (id, o) => ({ id, agentId: o, content: "orig", durability: "persistent", createdAt: NOW, updatedAt: NOW }) },
+    // migrations/visibility-backfill.ts skips explicit visibility; keep the full-row comparisons below.
+    row: (id, o) => ({ id, agentId: o, content: "orig", durability: "persistent", visibility: "shared", createdAt: NOW, updatedAt: NOW }) },
   { table: "Relationship", pk: "id", mut: "object", ownerPatchable: true, idFor: (n) => `osw-rel-${n}`,
     row: (id, o) => ({ id, agentId: o, subject: "s", predicate: "p", object: "orig", createdAt: NOW }) },
   { table: "Soul", pk: "id", mut: "value", ownerPatchable: false, idFor: (n, o) => `${o}:osw-k${n}`,

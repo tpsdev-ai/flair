@@ -21,11 +21,7 @@
  *
  * ─── No static auth import; agent-auth.js loads on the first guarded write ──
  * Harper links a component's resource modules concurrently while it starts.
- * This module's static imports are `harper` and two modules with no
- * authentication-module dependency (record-owner-guard.ts, which also supplies
- * the `owner_check_unavailable` refusal, and owner-scoped-write-policy.ts), so
- * loading it adds no link of the authentication module graph to that startup
- * phase; a static import of agent-auth.js from here stopped Harper from
+ * A static import of agent-auth.js from here stopped Harper from
  * starting under Bun (test/integration/init-persisted-admin-harper5.test.ts).
  *
  * agent-auth.js is imported once, when the first guarded write needs its
@@ -36,6 +32,7 @@
  */
 import { databases } from "harper";
 import { OWNER_FIELDS, ownerCheckUnavailable } from "./record-owner-guard.js";
+import { isReservedEventRecord, reservedEventProposedRefusal, reservedEventRefusal, reservedEventStoredRefusal } from "./org-event-reserved.js";
 import { guardOwnerScopedWrites, ownerScopedWriteGuardGaps } from "./owner-scoped-write-policy.js";
 
 type AgentAuthModule = typeof import("./agent-auth.js");
@@ -56,6 +53,33 @@ const guarded = guardOwnerScopedWrites(registry, OWNER_FIELDS, {
   readStored: (table, id) => registry[table].get(id, {}),
   unreadable: ownerCheckUnavailable,
   readBody: (context: any) => context?.data,
+  refuseReservedWrite: async (table, method, target, context) => {
+    if (table !== "OrgEvent") return null;
+    const readStored = (id: string | string[]) => registry.OrgEvent.get(id, {});
+    if (method === "delete") return reservedEventStoredRefusal(target?.id, readStored);
+    let body: unknown;
+    try {
+      body = await Promise.resolve((context as any)?.data);
+    } catch {
+      return null; // the guard's own readBody refusal owns an unreadable body
+    }
+    const proposed = reservedEventProposedRefusal(body);
+    if (proposed) return proposed;
+    // A stored read that FAILS is left to this guard's owner check and the
+    // resource's own checks, which refuse with their named errors. This
+    // pre-check only adds the reserved refusal when the row is readable.
+    try {
+      const records = Array.isArray(body) ? body : [body];
+      for (const record of records) {
+        const id = record && typeof record === "object" && !Array.isArray(record) ? (record as any).id : undefined;
+        if (typeof id === "string" && id !== "" && isReservedEventRecord(await readStored(id))) return reservedEventRefusal();
+      }
+      if (target && target.id != null && isReservedEventRecord(await readStored(target.id as any))) return reservedEventRefusal();
+    } catch {
+      return null;
+    }
+    return null;
+  },
 });
 const gaps = ownerScopedWriteGuardGaps(registry, OWNER_FIELDS, guarded);
 if (gaps.length > 0) {

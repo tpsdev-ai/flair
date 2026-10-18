@@ -675,7 +675,7 @@ describe("flair#2573 — a vector or stamp counts as caller-supplied only when i
 });
 
 describe("flair#2407 — a deduplicated feed write reports the count in its response only", () => {
-  it("the second identical feed write returns the stored row plus the count; the stored row has no count", async () => {
+  it("the duplicate response reports redaction without the unsupplied hash or commit marker", async () => {
     const f: any = new (FeedMemories as any)();
     f.getContext = () => ({ request: agentCtx(AGENT) });
     const original = `feed memory carrying ${GITHUB_TOKEN} twice`;
@@ -684,9 +684,10 @@ describe("flair#2407 — a deduplicated feed write reports the count in its resp
 
     const { redactedValues, ...rest } = second;
     expect(redactedValues).toBe(1);
-    // flair#2561: the stored row less contentHash, which the request did not supply.
-    const { contentHash, ...reported } = memoryStore.get(first.id);
+    const { contentHash, writeBackWriteId, ...reported } = memoryStore.get(first.id);
     expect(typeof contentHash).toBe("string");
+    expect(writeBackWriteId).toBeString();
+    expect(rest).not.toHaveProperty("writeBackWriteId");
     expect(rest).toEqual(reported);
     expect(memoryStore.size).toBe(1);
     expect("redactedValues" in memoryStore.get(first.id)).toBe(false);
@@ -803,7 +804,10 @@ describe("flair#2561 — `stored` reports only the string-valued text fields the
     const oldCreate = (Memory as any).create;
     const body = redacted ? `rotate ${GITHUB_TOKEN}` : "a changed note";
     const answers: Array<[string, any]> = [];
-    BaseMemory.post = async () => result();
+    BaseMemory.post = async (content: any) => {
+      memoryStore.set(content.id, { ...content });
+      return result();
+    };
     // Stage the row for ordinary owned PUT verification after a normal result.
     // Refusals, storage Responses and skill PUT return before that read; composed
     // promotion uses its caller's in-transaction existence check.
@@ -818,7 +822,10 @@ describe("flair#2561 — `stored` reports only the string-valued text fields the
     };
     try {
       for (const adapter of ["post", "create"]) {
-        if (adapter === "create") (Memory as any).create = async () => result();
+        if (adapter === "create") (Memory as any).create = async (_id: any, content: any) => {
+          memoryStore.set(content.id, { ...content });
+          return result();
+        };
         memoryStore.clear();
         answers.push([`POST ${adapter}`, await makeMemory(agentCtx(AGENT)).post({ id: row.id, agentId: AGENT, content: body, visibility: "shared" })]);
       }
