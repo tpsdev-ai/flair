@@ -54,6 +54,8 @@ mock.module("harper", () => ({
       // Stamp reads the raw table. Returning null makes stampMemoryPromotion
       // throw — the Isolated wrapper must catch that.
       Memory: {
+        // No earlier promoted row for any candidate: the sweep's reuse lookup finds none.
+        search: () => (async function* () {})(),
         get: async (_id: string, ctx?: any) => { stampReadContexts.push(ctx); return null; },
         put: async () => { throw new Error("stamp put should not run when get misses"); },
       },
