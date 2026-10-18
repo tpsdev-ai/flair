@@ -1913,9 +1913,10 @@ async function reembedStoredRow(
     if (verdict === "unreadable") return { response: writeOutcomeUnknownResponse() };
     if (verdict !== "shown") {
       // Idempotent: the plan recomputes the same vector for the same text, so a
-      // post-commit mismatch retries from a fresh read. Exhaustion is an
-      // unconfirmed outcome, never a conflict: the commit resolved, so nothing
-      // here proves no write landed.
+      // post-commit mismatch retries from a fresh read. A post-commit mismatch on
+      // the final attempt is an unconfirmed outcome (the commit resolved, so
+      // nothing here proves no write landed); text changes that exhaust the
+      // attempts through recomputation can still answer 409 reembed_row_changed.
       if (attempt === REEMBED_WRITE_ATTEMPTS) {
         console.warn(`[reembed] ${id}: the committed vector was not confirmed after ${REEMBED_WRITE_ATTEMPTS} attempts; outcome: unconfirmed`);
         return { response: writeOutcomeUnknownResponse() };
