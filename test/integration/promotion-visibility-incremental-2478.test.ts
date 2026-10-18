@@ -349,7 +349,11 @@ Memory.put = async function (record, ctx) {
     if (!isJoinableTransaction(ctx)) throw new Error("stale-binding fixture requires a joined transaction");
     if (result instanceof Response && !result.ok) throw new Error("stale-binding fixture Memory write failed");
     const table = databases.flair.Memory;
-    await table.update(record.id, { promotionContentHash: "mismatched-existing-hash" }, ctx);
+    // patch, not update: Harper's update() only stages a deferred write that is
+    // applied at commit, so a later read in this transaction does not see it;
+    // patch() saves the write into the transaction, where the stamp's
+    // table.get(id, stagedContext) reads it.
+    await table.patch(record.id, { promotionContentHash: "mismatched-existing-hash" }, ctx);
     const row = await table.get(record.id, ctx);
     if (row.promotionContentHash !== "mismatched-existing-hash") throw new Error("stale-binding fixture did not land");
   }
