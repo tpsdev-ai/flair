@@ -97,10 +97,14 @@ async function readRow(id: string, table = "Memory"): Promise<any> {
   const rows = await opsCall({ operation: "search_by_id", database: "flair", table, ids: [id], get_attributes: ["*"] });
   return Array.isArray(rows) ? rows[0] ?? null : rows;
 }
-interface MemoryWriteTrace { method: string; id: string; fields: string[]; promotionStatus?: string; }
-function memoryWrites(id: string): MemoryWriteTrace[] {
+type TracedWriter = "visibility-backfill" | "promotion-stamp-auto" | "promotion-stamp-manual";
+interface MemoryWriteTrace { writer: string; method: string; id: string; fields: string[]; promotionStatus?: string; }
+function memoryWriteTrace(id: string): MemoryWriteTrace[] {
   return readFileSync(join(installDir, "memory-write-trace-2478.jsonl"), "utf8")
     .split("\n").filter(Boolean).map((line) => JSON.parse(line) as MemoryWriteTrace).filter((entry) => entry.id === id);
+}
+function memoryWrites(id: string, writer: TracedWriter): MemoryWriteTrace[] {
+  return memoryWriteTrace(id).filter((entry) => entry.writer === writer);
 }
 function expectIncrementalWrites(writes: MemoryWriteTrace[], fields: string[]): void {
   expect(writes.length, "no Memory write was traced").toBeGreaterThan(0);
@@ -109,9 +113,11 @@ function expectIncrementalWrites(writes: MemoryWriteTrace[], fields: string[]): 
     expect(entry.fields).toEqual([...fields].sort());
   }
 }
-function expectStampWrites(id: string): void {
-  expectIncrementalWrites(memoryWrites(id).filter((entry) => entry.promotionStatus === "approved"),
+function expectStampWrites(id: string, writer: "promotion-stamp-auto" | "promotion-stamp-manual"): void {
+  const writes = memoryWrites(id, writer);
+  expectIncrementalWrites(writes,
     ["promotionStatus", "promotedAt", "promotedBy", "promotionContentHash"]);
+  for (const entry of writes) expect(entry.promotionStatus).toBe("approved");
 }
 async function pendingCandidateIds(): Promise<string[]> {
   const rows = await opsCall({
@@ -324,6 +330,13 @@ beforeAll(async () => {
     target: join("dist", "resources", "zz-memory-write-trace-2478.js"),
     out: "memory-write-trace-2478.jsonl",
   } });
+  const lockPath = join(component.dir, "dist", "resources", "memory-write-lock.js");
+  const lockSource = readFileSync(lockPath, "utf8");
+  const invocation = "value: await fn(scope)";
+  expect(lockSource.split(invocation).length, "lock callback instrumentation site").toBe(2);
+  writeFileSync(lockPath,
+    'import { traceMemoryWriter } from "./zz-memory-write-trace-2478.js";\n' +
+    lockSource.replace(invocation, "value: await traceMemoryWriter(options.phase, () => fn(scope))"));
   await bootFirst();
 }, 240_000);
 
@@ -347,6 +360,8 @@ describe("visibility backfill is incremental and locked (real Harper)", () => {
       operation: "upsert", database: "flair", table: "Memory",
       records: [{ ...v2, tags: backfillTags }],
     });
+    expect(memoryWriteTrace(V2).some((entry) => entry.writer === "unattributed" && entry.method === "put")).toBe(true);
+    expect(memoryWrites(V2, "visibility-backfill")).toEqual([]);
 
     const putDenied = await memoryWrite(owner, "PUT", V2, { agentId: owner.id, content: V2_OWNER, visibility: "shared" });
     expect(putDenied.status, await putDenied.clone().text()).toBe(503);
@@ -373,7 +388,7 @@ describe("visibility backfill is incremental and locked (real Harper)", () => {
     expect(backfilled?.visibility).toBe("private");
     expect(backfilled?.tags).toEqual(backfillTags);
     expect(backfilled?.summary).toBe(backfillSummary);
-    expectIncrementalWrites(memoryWrites(V2), ["visibility"]);
+    expectIncrementalWrites(memoryWrites(V2, "visibility-backfill"), ["visibility"]);
 
     const put = await memoryWrite(owner, "PUT", V2, { agentId: owner.id, content: V2_OWNER, visibility: "shared" });
     expect(put.status, await put.clone().text()).toBe(200);
@@ -427,6 +442,25 @@ describe("promotion stamps are locked, incremental and bound (real Harper)", () 
   beforeAll(async () => {
     if (!faultInjectionBooted) await bootWithFaultInjection();
   }, 240_000);
+
+  it("raw fixture writes have no backfill or promotion-stamp trace entries", async () => {
+    expect(await waitForCycleDone(60_000)).toBe(true);
+    const id = "pvi-raw-writer-only";
+    await seedMemory({ id, visibility: "private" });
+    const row = await readRow(id);
+    await opsCall({
+      operation: "upsert", database: "flair", table: "Memory",
+      records: [{ ...row, summary: "raw fixture write" }],
+    });
+    expect((await readRow(id)).summary).toBe("raw fixture write");
+    const raw = memoryWriteTrace(id);
+    expect(raw.length).toBeGreaterThan(0);
+    expect(raw.some((entry) => entry.method === "put")).toBe(true);
+    for (const entry of raw) expect(entry.writer).toBe("unattributed");
+    for (const writer of ["visibility-backfill", "promotion-stamp-auto", "promotion-stamp-manual"] as const) {
+      expect(memoryWrites(id, writer)).toEqual([]);
+    }
+  }, 120_000);
 
   it.each(["matching", "mismatched", "legacy"])("admin selections check a %s promotion binding", async (binding) => {
     const id = `pvi-selected-${binding}`;
@@ -500,7 +534,7 @@ describe("promotion stamps are locked, incremental and bound (real Harper)", () 
     expect(stored.promotionContentHash).toBe(sha256(AUTO_CLAIM));
     expect(stored.tags).toEqual(stampTags);
     expect(stored.summary).toBe(stampSummary);
-    expectStampWrites(promoted.id);
+    expectStampWrites(promoted.id, "promotion-stamp-auto");
 
     // The later owner PUT clears the verdict when content changes.
     const put = await memoryWrite(owner, "PUT", promoted.id, { agentId: owner.id, content: "owner edit after the verdict", visibility: "private" });
@@ -520,7 +554,7 @@ describe("promotion stamps are locked, incremental and bound (real Harper)", () 
     expect(stored.promotionStatus).toBe("approved");
     expect(stored.promotedBy).toBe(owner.id);
     expect(stored.promotionContentHash).toBe(sha256(MANUAL_CLAIM));
-    expectStampWrites(memoryId);
+    expectStampWrites(memoryId, "promotion-stamp-manual");
 
     // A raw writer bypasses the authority guard and changes the text while the
     // old hash stays.
