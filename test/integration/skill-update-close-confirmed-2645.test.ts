@@ -55,6 +55,11 @@ async function memoryRow(id: string): Promise<any | null> {
   return rows[0] ?? null;
 }
 
+async function pointerRow(id: string): Promise<any | null> {
+  const rows = await ops({ operation: "search_by_id", database: "flair", table: "MemoryHostSource", ids: [id], get_attributes: ["*"] });
+  return rows[0] ?? null;
+}
+
 async function liveHeads(subjectId: string): Promise<string[]> {
   const rows = await ops({
     operation: "search_by_value", database: "flair", table: "Memory",
@@ -245,11 +250,15 @@ describe("flair#2645 — a skill UPDATE confirms the predecessor close before su
     expect((await versionsOf(predecessorId)).map((v) => v.kind), "the refused update left a version row").toEqual(["create"]);
   }, 120_000);
 
-  it("exhausted retries confirm both removals after commit under the version lock", async () => {
+  it("exhausted retries restore the exact predecessor pointer and confirm removals under the version lock", async () => {
     const id = nextId("exhausted");
     const successorId = nextId("exhausted-successor");
-    const created = await call(A, "PUT", memPath(id), skillBody(id, "v1"));
+    const created = await call(A, "PUT", memPath(id), skillBody(id, "v1", {
+      hostSource: { v: 1, host: "openclaw", kind: "run", id: "round6-exhaustion" }, hostSourceScope: "record",
+    }));
     expect(created.status, await created.text()).toBeLessThan(300);
+    const pointerBefore = await pointerRow(id);
+    expect(pointerBefore).not.toBeNull();
     const points = [...closePoints, "skill-version-rollback-staged", "skill-version-rollback-committed", "skill-update-successor-rollback-committed"];
     const response = await withPausedCloses(points,
       () => call(A, "PUT", memPath(successorId), skillBody(successorId, "v2", { supersedes: id })),
@@ -272,8 +281,37 @@ describe("flair#2645 — a skill UPDATE confirms the predecessor close before su
     expect((await memoryRow(id))?.content).toBe("competitor-3");
     expect(await memoryRow(successorId)).toBeNull();
     expect((await versionsOf(id)).map((v) => v.kind)).toEqual(["create"]);
+    expect(await pointerRow(id), "refused update lost or changed the predecessor pointer").toEqual(pointerBefore);
     expect(await liveHeads(id)).toEqual([id]);
   }, 120_000);
+
+  for (const timing of ["before", "during"] as const) {
+    it(`compensation preserves a later pointer set ${timing} restoration`, async () => {
+      const id = nextId("pointer-race");
+      const successorId = nextId("pointer-race-successor");
+      const created = await call(A, "PUT", memPath(id), skillBody(id, "v1", {
+        hostSource: { v: 1, host: "openclaw", kind: "run", id: "round6-pointer-race" }, hostSourceScope: "record",
+      }));
+      expect(created.status, await created.text()).toBeLessThan(300);
+      const pointerBefore = await pointerRow(id);
+      expect(pointerBefore).not.toBeNull();
+      const laterPointer = { ...pointerBefore, hostSource: JSON.stringify({ v: 1, host: "openclaw", kind: "run", id: "later-pointer" }), receivedAt: now() };
+      const points = [...closePoints, timing === "before" ? "skill-update-successor-rollback-committed" : "skill-update-pointer-restore-staged"];
+      const response = await withPausedCloses(points,
+        () => call(A, "PUT", memPath(successorId), skillBody(successorId, "v2", { supersedes: id })),
+        async (index) => {
+          if (index < closePoints.length) await commitNewerSkillWrite(id, `competitor-${index}`);
+          else await ops({ operation: "put", database: "flair", table: "MemoryHostSource", records: [laterPointer] });
+        });
+      expect(response.status, await response.clone().text()).toBe(500);
+      const outcome = await response.json();
+      expect(outcome.error).toBe("skill_update_compensation_failed");
+      expect(outcome.message).toContain("a different host-pointer row was left in place");
+      expect(await pointerRow(id)).toEqual(laterPointer);
+      expect(await memoryRow(successorId)).toBeNull();
+      expect((await versionsOf(id)).map((v) => v.kind)).toEqual(["create"]);
+    }, 120_000);
+  }
 
   it("a later update of the same skill is busy between committed version removal and confirmed successor removal", async () => {
     const id = nextId("cleanup-race");

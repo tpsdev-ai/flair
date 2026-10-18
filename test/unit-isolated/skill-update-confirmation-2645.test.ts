@@ -3,6 +3,17 @@ import { beforeEach, expect, mock, test } from "bun:test";
 type Row = Record<string, any>;
 const versions = new Map<string, Row>();
 const memories = new Map<string, Row>();
+const pointers = new Map<string, Row>();
+let removedPointer: any = null;
+let dropPointerRestore = false;
+let pointerConfirmationRead = false;
+let failPointerConfirmation = false;
+let replacementPointer: Row | undefined;
+let replaceAtRestore = false;
+const originalPointer = {
+  memoryId: "predecessor", hostSource: JSON.stringify({ v: 1, host: "openclaw", kind: "run", id: "round6" }),
+  scopeAtWrite: "shared", authorId: "writer", memoryInstanceToken: "predecessor-token", receivedAt: "2020-01-01T00:00:00.000Z",
+};
 let locked = false;
 let grantHeld = true;
 let dropCloses = false;
@@ -72,13 +83,30 @@ const memoryTable = {
     }
   },
 };
+const pointerTable = {
+  primaryStore: {},
+  async *search(_query: any, ctx?: any) {
+    if (confirmationRead && !ctx?.transaction) {
+      expect(locked).toBe(true);
+      expect(activeTransaction).toBeUndefined();
+      if (failPointerConfirmation) throw new Error("pointer confirmation unavailable");
+      if (pointers.has("predecessor")) pointerConfirmationRead = true;
+    }
+    for (const row of (ctx?.transaction?.pointers ?? pointers).values()) yield { ...row };
+  },
+  async put(row: Row, ctx: any) {
+    expect(locked).toBe(true);
+    ctx.transaction.pointers.set(row.memoryId, { ...row });
+    if (replaceAtRestore && replacementPointer) pointers.set(row.memoryId, replacementPointer);
+  },
+};
 const grantTable = {
   async *search() { if (grantHeld) yield { ownerId: "owner", granteeId: "writer", scope: "write" }; },
 };
 mock.module("harper", () => ({
   Resource: class {}, server: { http() {}, getUser: async () => null },
   databases: { flair: {
-    Memory: memoryTable, InstructionVersion: versionTable, MemoryGrant: grantTable,
+    Memory: memoryTable, MemoryHostSource: pointerTable, InstructionVersion: versionTable, MemoryGrant: grantTable,
     Agent: { get: async () => null },
   } },
 }));
@@ -87,17 +115,25 @@ const { removeAppendedVersion, recordDigest } = await import("../../resources/in
 const { confirmSkillClose, runSkillVersionWrite, defaultSkillHooks, authorizeSkillOwners } = await import("../../resources/skill-version-write.ts");
 
 beforeEach(() => {
+  pointers.clear(); removedPointer = null; dropPointerRestore = false; pointerConfirmationRead = false;
+  failPointerConfirmation = false; replacementPointer = undefined; replaceAtRestore = false;
   versions.clear(); memories.clear(); locked = false; grantHeld = true;
   dropCloses = false; revokeOnRetry = false; closeWrites = 0; confirmationRead = false; failDeleteCommit = false;
   activeTransaction = undefined; losePredecessor = false; closeSuccessorOnRead = undefined;
   failSuccessorConfirmation = false; failRetryWrite = false; failVersionConfirmation = false;
   (globalThis as any).transaction = async (ctx: any, cb: (txn: any) => Promise<any>) => {
-    const txn: any = { open: 1, saveCommits: false, versions: new Map(versions), memories: new Map(memories) };
+    const writes: any[] = [];
+    const txn: any = { open: 1, saveCommits: false, versions: new Map(versions), memories: new Map(memories), pointers: new Map(pointers), addWrite: (write: any) => writes.push(write) };
     ctx.transaction = txn;
     activeTransaction = txn;
     try {
       const result = await cb(txn);
+      for (const write of writes) write.commit(0, pointers.has(write.key) ? { value: pointers.get(write.key) } : null);
       txn.open = 0;
+      if (!dropPointerRestore || writes.length === 0) {
+        pointers.clear(); for (const [id, row] of txn.pointers) pointers.set(id, row);
+      }
+      if (removedPointer && replacementPointer && !replaceAtRestore && writes.length === 0) pointers.set("predecessor", replacementPointer);
       if (!failDeleteCommit) { versions.clear(); for (const [id, row] of txn.versions) versions.set(id, row); }
       if (txn.dropPredecessorClose) txn.memories.set("predecessor", memories.get("predecessor"));
       memories.clear(); for (const [id, row] of txn.memories) memories.set(id, row);
@@ -220,7 +256,15 @@ async function unlandedUpdate() {
     ctx: { request: { tpsAgent: "writer", tpsAgentIsAdmin: false, headers: new Headers({ authorization: "TPS-Ed25519 a1:1:n:s" }) } },
     subjectId: "subject", agentId: "writer", head: async () => predecessor,
     plan: () => ({ kind: "update", predecessor, successor, closePatch: { validTo: "closed" }, value: "v2", visibility: "shared", grantedClose: null }),
-    hooks: { ...defaultSkillHooks, authorizeClose: async () => null },
+    hooks: {
+      ...defaultSkillHooks, authorizeClose: async () => null,
+      removedPointer: () => removedPointer,
+      pointer: async (shared) => {
+        removedPointer = shared.transaction.pointers.get("predecessor") ?? null;
+        shared.transaction.pointers.delete("predecessor");
+        return null;
+      },
+    },
   });
 }
 
@@ -266,5 +310,46 @@ for (const failure of ["version", "successor"] as const) {
     if (result.ok) throw new Error("expected refusal");
     expect(result.response.status).toBe(500);
     expect(await result.response.json()).toEqual({ error: "skill_update_compensation_failed", message: "the undo of a close that did not land could not be confirmed" });
+  });
+}
+
+test("exhausted update restores the exact removed pointer and confirms it after commit under the version lock", async () => {
+  pointers.set("predecessor", originalPointer);
+  const result = await unlandedUpdate();
+  expect(result.ok).toBe(false);
+  if (result.ok) throw new Error("expected refusal");
+  expect(result.response.status).toBe(409);
+  expect((await result.response.json()).error).toBe("skill_update_not_closed");
+  expect(pointers.get("predecessor")).toEqual(originalPointer);
+  expect(pointerConfirmationRead).toBe(true);
+  expect(memories.has("successor")).toBe(false);
+  expect(versions.size).toBe(0);
+});
+
+for (const failure of ["commit", "read"] as const) {
+  test(`unconfirmed pointer restoration after a failed ${failure} reports unconfirmed undo`, async () => {
+    pointers.set("predecessor", originalPointer);
+    dropPointerRestore = failure === "commit";
+    failPointerConfirmation = failure === "read";
+    const result = await unlandedUpdate();
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected refusal");
+    expect(result.response.status).toBe(500);
+    expect(await result.response.json()).toEqual({ error: "skill_update_compensation_failed", message: "the undo of a close that did not land could not be confirmed" });
+  });
+}
+
+for (const timing of ["before", "during"] as const) {
+  test(`compensation preserves and reports a later pointer set ${timing} restoration`, async () => {
+    pointers.set("predecessor", originalPointer);
+    replacementPointer = { ...originalPointer, hostSource: "later-pointer", receivedAt: "2021-01-01T00:00:00.000Z" };
+    replaceAtRestore = timing === "during";
+    const result = await unlandedUpdate();
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected refusal");
+    expect(result.response.status).toBe(500);
+    expect(await result.response.json()).toEqual({ error: "skill_update_compensation_failed", message: "the undo of a close that did not land could not be confirmed; a different host-pointer row was left in place" });
+    expect(pointers.get("predecessor")).toEqual(replacementPointer);
+    expect(pointerConfirmationRead).toBe(true);
   });
 }

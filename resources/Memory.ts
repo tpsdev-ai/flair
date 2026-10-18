@@ -1313,6 +1313,7 @@ async function writeSkillCreateOrUpdate(
   const addressedId = storedRow ? String(storedRow.id) : explicitPredecessor ? String(explicitPredecessor.id) : null;
   const captured: { row: Record<string, any> | null; closed: Record<string, any> | null } = { row: null, closed: null };
   let unchangedHead: Record<string, any> | null = null;
+  let removedPointer: PointerRow | null = null;
   const outcome = await runSkillVersionWrite({
     ctx,
     subjectId,
@@ -1363,8 +1364,10 @@ async function writeSkillCreateOrUpdate(
     hooks: {
       ...defaultSkillHooks,
       authorizeClose: (row, shared) => authorizeSkillOwners(ctx, auth, [row], shared),
+      removedPointer: () => removedPointer,
       pointer: async (shared) => {
         if (captured.closed) {
+          removedPointer = await loadStoredPointer(String(captured.closed.id), shared);
           const denial = await deletePointerRow(String(captured.closed.id), shared);
           if (denial) return denial;
         }
