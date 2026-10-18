@@ -296,10 +296,10 @@ export function laneRunSetup(
     ? { ...invocation.limits, laneBudgetMs: derivedLaneBudgetMs ?? 0 }
     : undefined;
   const laneLimit = derivedLaneBudgetMs === undefined
-    ? "no lane budget left (the job is already spent)"
-    : `the lane after ${seconds(derivedLaneBudgetMs)}`;
+    ? "remaining lane budget below the start floor"
+    : `lane deadline: ${seconds(derivedLaneBudgetMs)}`;
   const mode = invocation.keepGoing
-    ? `keep-going: attempts later steps while budget remains; failures are summed at the end; a step is killed after ${seconds(STEP_TIMEOUT_MS)} (root unit tests: ${seconds(ROOT_STEP_TIMEOUT_MS)}) and ${laneLimit}`
+    ? `keep-going: attempts later steps while budget remains; failures are summed at the end; per-step caps: ${seconds(STEP_TIMEOUT_MS)} (root unit tests: ${seconds(ROOT_STEP_TIMEOUT_MS)}), pre-empted by an earlier lane deadline; ${laneLimit}`
     : "fail-fast: stops at the first failing step; steps are not time-limited";
   return { limits, mode };
 }

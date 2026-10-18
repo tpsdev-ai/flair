@@ -612,7 +612,7 @@ describe("shared unit lane", () => {
     // under it.
     const started = laneRunSetup(invocation, { [JOB_START_ENV]: String(now / 1000 - 300) }, now);
     expect(started.limits?.laneBudgetMs).toBe(KEEP_GOING_LANE_BUDGET_MS - 300_000);
-    expect(started.mode).toContain("and the lane after 900 s");
+    expect(started.mode).toContain("per-step caps: 150 s (root unit tests: 450 s), pre-empted by an earlier lane deadline; lane deadline: 900 s");
     const startedDir = fixture();
     const startedMarker = join(startedDir, "ran");
     const { result: startedCode } = captureErrors(() => runUnitSteps(
@@ -627,10 +627,9 @@ describe("shared unit lane", () => {
     // No record: the fixed budget stands, and the banner names it.
     const absent = laneRunSetup(invocation, {}, now);
     expect(absent.limits?.laneBudgetMs).toBe(KEEP_GOING_LANE_BUDGET_MS);
-    expect(absent.mode).toContain("and the lane after 1200 s");
+    expect(absent.mode).toContain("lane deadline: 1200 s");
 
-    // A start near the job limit leaves nothing: the applied budget is the 0
-    // `runUnitSteps` reports as exhausted before start, and no step runs.
+    // The remaining lane budget is below the start floor.
     const spent = now - (KEEP_GOING_LANE_BUDGET_MS - LANE_MIN_BUDGET_MS + 1000);
     const exhausted = laneRunSetup(invocation, { [JOB_START_ENV]: String(spent / 1000) }, now);
     expect(exhausted.limits?.laneBudgetMs).toBe(0);
@@ -673,7 +672,7 @@ describe("shared unit lane", () => {
     expect(result.signal).toBeNull();
     expect(result.status).toBe(1);
     expect(result.stdout).toContain("1 steps; keep-going: attempts later steps while budget remains;");
-    expect(result.stdout).toContain("no lane budget left");
+    expect(result.stdout).toContain("remaining lane budget below the start floor");
     expect(result.stderr).toContain("budget exhausted before start");
     expect(result.stderr).toContain("ran 0 of 1 steps, 0 failed, 1 not run");
     expect(result.stdout).not.toContain("entrypoint sentinel");
