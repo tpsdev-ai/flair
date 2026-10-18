@@ -5,6 +5,7 @@ type Row = Record<string, any>;
 const store = new Map<string, Row>();       // InstructionVersion rows
 const memoryStore = new Map<string, Row>(); // Memory rows
 const pointers = new Map<string, Row>();
+const eventStore = new Map<string, Row>();
 const locks = new Set<string>();
 let failNextAppend = false;
 let hideHead = false;
@@ -33,6 +34,18 @@ const InstructionVersionTable = {
   },
 };
 
+const OrgEventTable = {
+  async *search() {},
+  async create(record: Row, ctx: any): Promise<void> {
+    const rows = ctx?.transaction?.events ?? eventStore;
+    if (rows.has(record.id)) throw new Error("Record already exists");
+    rows.set(record.id, { ...record });
+  },
+  async delete(id: string, ctx: any): Promise<void> {
+    (ctx?.transaction?.events ?? eventStore).delete(id);
+  },
+};
+
 const MemoryTable = {
   async put(row: Row, ctx?: any) {
     (ctx?.transaction?.memories ?? memoryStore).set(row.id, { ...row });
@@ -52,6 +65,7 @@ mock.module("harper", () => ({
   databases: {
     flair: {
       InstructionVersion: InstructionVersionTable,
+      OrgEvent: OrgEventTable,
       Memory: MemoryTable,
       MemoryCandidate: { async *search() {} },
       Soul: { async *search() {} },
@@ -66,13 +80,14 @@ function mockTransaction(ctx: any, cb: (txn: any) => any): any {
   if (context.transaction && context.transaction.open === 1) return cb(context.transaction);
   const txn: any = {
     open: 1, saveCommits: false, aborted: false,
-    versions: new Map(store), memories: new Map(memoryStore), pointers: new Map(pointers),
+    versions: new Map(store), memories: new Map(memoryStore), pointers: new Map(pointers), events: new Map(eventStore),
     abort() { this.open = 0; this.aborted = true; },
     commit() {
       this.open = 0;
       store.clear(); for (const [id, row] of this.versions) store.set(id, row);
       memoryStore.clear(); for (const [id, row] of this.memories) memoryStore.set(id, row);
       pointers.clear(); for (const [id, row] of this.pointers) pointers.set(id, row);
+      eventStore.clear(); for (const [id, row] of this.events) eventStore.set(id, row);
     },
   };
   context.transaction = txn;
@@ -98,7 +113,7 @@ function failHook<T>(message: string): () => Promise<T> {
 }
 
 beforeEach(() => {
-  store.clear(); memoryStore.clear(); locks.clear(); pointers.clear();
+  store.clear(); memoryStore.clear(); locks.clear(); pointers.clear(); eventStore.clear();
   failNextAppend = false; hideHead = false;
   (globalThis as any).transaction = mockTransaction;
 });
