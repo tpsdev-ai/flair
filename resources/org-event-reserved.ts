@@ -9,12 +9,12 @@
  * PATCH that would create a row at a reserved addressed id, on addressed
  * DELETE, and on collection PUT/DELETE (any reserved element or selected row
  * refuses the request; the DELETE pre-scan reads id and kind whatever
- * projection the caller asked for). The allow hooks refuse a marker visible in
+ * projection the caller asked for). A non-admin agent's collection DELETE is
+ * refused by the owner entry guard first. The allow hooks refuse a marker visible in
  * their own arguments: allowCreate/allowUpdate see the proposed records and
  * allowDelete sees the target id prefix, not a stored kind at an ordinary id.
- * Anonymous callers are refused with 401; a malformed POST/PATCH/PUT body is
- * refused 400 by the body-shape guard first. The Harper operations API
- * (raw upsert/delete under admin auth) is the documented exception.
+ * The Harper operations API (raw upsert/delete under admin auth) is the
+ * documented exception.
  *
  * The predicate is pure so both the resource guards and the doctor check share
  * one definition. A record is reserved when its `kind` is `soul.changed` or

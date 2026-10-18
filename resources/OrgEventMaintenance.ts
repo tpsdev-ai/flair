@@ -1,7 +1,7 @@
 /**
  * OrgEventMaintenance.ts — Maintenance worker for expired OrgEvents.
  *
- * POST /OrgEventMaintenance/ — deletes all records where expiresAt < now.
+ * POST /OrgEventMaintenance/ — deletes ordinary records where expiresAt < now.
  * Auth: admin only.
  */
 

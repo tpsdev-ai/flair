@@ -173,11 +173,10 @@ export async function admitOwnerScopedWrite(
 
   // A table-specific refusal runs before this guard's collection and ownership
   // branches. When this pre-check can identify a reserved record (a proposed
-  // body marker, a stored row at the addressed id, or a reserved addressed id),
+  // body marker or a readable stored row),
   // its named refusal replaces this guard's generic one. A collection delete
   // this pre-check cannot resolve is still refused by the collection branch
-  // below, and the resource's delete() pre-scan reads the selection's id and
-  // kind whatever projection the caller asked for.
+  // below. Only callers reaching OrgEvent.delete() run its selection pre-scan.
   const reserved = await deps.refuseReservedWrite?.(table, method, target, context);
   if (reserved) throw reserved;
 

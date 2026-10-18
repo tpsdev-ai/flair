@@ -13,7 +13,7 @@
  * failed read (never an empty list).
  */
 
-import { RESERVED_EVENT_ID_PREFIX, RESERVED_EVENT_KINDS } from "./instruction-event-contract.js";
+import { RESERVED_EVENT_ID_PREFIX, RESERVED_EVENT_KINDS, isReservedEventRecord } from "./instruction-event-contract.js";
 
 export const INSTRUCTION_EVENT_ROWS_SQL = "SELECT id, kind, refId FROM flair.OrgEvent";
 export const INSTRUCTION_VERSION_ROWS_SQL = "SELECT id, subjectType FROM flair.InstructionVersion";
@@ -54,10 +54,7 @@ export function findInstructionEventImpostors(
   const impostors: string[] = [];
   for (const event of events) {
     const id = event.id;
-    const kind = event.kind;
-    const looksReserved = (typeof id === "string" && id.startsWith(RESERVED_EVENT_ID_PREFIX))
-      || (typeof kind === "string" && RESERVED_EVENT_KINDS.includes(kind));
-    if (!looksReserved) continue;
+    if (!isReservedEventRecord(event)) continue;
     const version = typeof event.refId === "string" ? byId.get(event.refId) : undefined;
     if (!instructionEventSatisfiesReaderRule(event, version)) {
       impostors.push(typeof id === "string" && id.length > 0 ? id : "(no id)");

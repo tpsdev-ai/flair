@@ -14,8 +14,6 @@
  *     written;
  *   - a collection DELETE that selects a reserved row is refused before
  *     anything is deleted; an ordinary-only selection deletes;
- *   - anonymous callers are refused with 401 (a malformed POST/PATCH/PUT body
- *     is refused 400 by the body-shape guard first);
  *   - `flair doctor` names a planted impostor and passes on a clean store; it
  *     lists every impostor id, and a real matching InstructionVersion passes;
  *   - a reserved event survives an OrgEventMaintenance run, including one
@@ -431,7 +429,19 @@ describe("anonymous callers with well-formed bodies are refused with 401", () =>
   }, 30_000);
 });
 
-describe("ordinary events are unchanged, except an anonymous collection PUT batch (401)", () => {
+describe("malformed non-admin collection writes", () => {
+  for (const method of ["PUT", "PATCH"]) {
+    it(`${method} returns the owner entry guard's collection refusal`, async () => {
+      const before = await countEvents();
+      const res = await send(agent, method, "/OrgEvent/", "malformed");
+      expect(res.status).toBe(403);
+      expect((await res.json()).error).toBe("forbidden: a non-admin write to OrgEvent must address one record by its id");
+      expect(await countEvents()).toBe(before);
+    }, 30_000);
+  }
+});
+
+describe("ordinary event writes", () => {
   it("POST, PUT, PATCH and DELETE of an ordinary event succeed", async () => {
     const id = `ordinary-verb-${randomUUID()}`;
     const post = await send(agent, "POST", "/OrgEvent", { id, kind: "status", summary: "created" });
