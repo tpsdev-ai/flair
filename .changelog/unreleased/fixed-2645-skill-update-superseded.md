@@ -1,1 +1,3 @@
-- **A superseding skill UPDATE whose committed successor a later update superseded in order now confirms success from its confirmed predecessor close and the version chain, instead of reporting a failed undo.**
+- **A skill update whose successor a later update superseded in order now reports success instead of a failed undo.**
+
+  Success still requires its predecessor close to be confirmed and the version chain to show that later update superseding this successor in order (#2645).
