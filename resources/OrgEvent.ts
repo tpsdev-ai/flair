@@ -92,6 +92,19 @@ function eventOutcomeRefusal(): Response {
   }), { status: 409, headers: { "Content-Type": "application/json" } });
 }
 
+/**
+ * Whether the committed row is the one this write staged. A PATCH that creates
+ * a row stores the addressed id as its key, and a table implementation may or
+ * may not also expose that key as an `id` field; when the staged row names no
+ * id, the key is the one this write already addressed, so it is not compared.
+ */
+function matchesStagedRow(committed: any, staged: any): boolean {
+  if (committed == null) return false;
+  const actual = { ...committed };
+  if (!Object.prototype.hasOwnProperty.call(staged, "id")) delete actual.id;
+  return isDeepStrictEqual(actual, staged);
+}
+
 export class OrgEvent extends (databases as any).flair.OrgEvent {
   allowRead() { return orgEventAuthGate.call(this); }
 
@@ -212,7 +225,7 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
             const denial = applyServerCreatedAt(record, basis, mode);
             if (denial) throw denial;
           }
-          plans.push({ id, basis, row: structuredClone(mode === "merge" ? { ...basis, ...record, id } : record) });
+          plans.push({ id, basis, row: structuredClone(mode === "merge" ? { ...basis, ...record } : record) });
         }
         const pause = pausePoint();
         if (pause) await pause;
@@ -232,7 +245,7 @@ export class OrgEvent extends (databases as any).flair.OrgEvent {
       for (const plan of plans) {
         const committed = await readEventForMutation(plan.id, {});
         if (isReservedEventRecord(committed)) return reservedEventRefusal();
-        if (!committed || !isDeepStrictEqual({ ...committed }, plan.row)) {
+        if (!matchesStagedRow(committed, plan.row)) {
           return eventOutcomeRefusal();
         }
       }
