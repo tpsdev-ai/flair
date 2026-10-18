@@ -191,8 +191,7 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
     // compares every field that selects the text (`content`, `trigger`, `tags`)
     // before staging; the helper confirms the committed row afterward. Drift
     // observed by either check aborts the attempt; remaining outer attempts
-    // re-read and may recompute. Changes after confirmation and before commit
-    // are not detected by these checks.
+    // re-read and may recompute.
     //
     // flair#2573: the vector is stamped with the current model id, the space it
     // was computed in, and the embedding-space guard is notified after the write

@@ -104,6 +104,9 @@ async function withPaused<T>(point: string, trigger: () => Promise<Response>, co
     writeFileSync(join(pauseDir, `go.${point}`), "");
   }
   const response = await pending;
+  if (!paused) {
+    console.error(`pause ${point} not reached: ${response.status} ${await response.clone().text()}\n${harper.getLog?.() ?? ""}`);
+  }
   const released = paused ? readFileSync(join(pauseDir, `released.${point}`), "utf8") : "never paused";
   return { response, competed, released, paused };
 }
@@ -163,7 +166,9 @@ beforeAll(async () => {
     writeFileSync(join(stubDir, "generate-response.json"), JSON.stringify({ candidates: [] }));
     appDir = mkdtempSync(join(tmpdir(), "flair-wbc-app-"));
     for (const name of ["dist", "schemas", "config.yaml"]) cpSync(resolve(name), join(appDir, name), { recursive: true });
-    cpSync(resolve("test/fixtures/write-back-app/WriteBackIndexProbe.js"), join(appDir, "dist/resources/WriteBackIndexProbe.js"));
+    for (const name of ["WriteBackIndexProbe.js", "WriteBackTrace.js"]) {
+      cpSync(resolve(`test/fixtures/write-back-app/${name}`), join(appDir, `dist/resources/${name}`));
+    }
     symlinkSync(resolve("node_modules"), join(appDir, "node_modules"), "dir");
     harper = await startHarper({
       cwd: appDir,
