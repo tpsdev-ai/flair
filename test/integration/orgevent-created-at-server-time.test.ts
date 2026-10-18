@@ -755,6 +755,7 @@ describe("what each malformed id or body gets", () => {
   const COLLECTION: Expect = { status: 403, error: COLLECTION_REFUSAL, body: { error: COLLECTION_REFUSAL } };
   const ATTRIBUTION: Expect = { status: 403, error: "forbidden: authorId must match authenticated agent" };
   const NOT_ADDRESSED: Expect = { status: 403, error: "write_id_not_addressed" };
+  const MISMATCH: Expect = { status: 400, error: "id_target_mismatch" };
   const HARPER_400: Expect = { status: 400, code: "ClientError" };
   const BODY_OBJECT: Expect = { status: 400, error: "body_must_be_object" };
 
@@ -827,13 +828,14 @@ describe("what each malformed id or body gets", () => {
 
   // POST at a path other than the root collection, [agent, admin]: a missing
   // id takes the path's id (test/integration/owner-scoped-writes.test.ts); an
-  // empty or non-string id does not generate one. A non-admin's string or
-  // number body id that differs from an addressed id is refused first by the
-  // owner-scoped write guard; every other case here is refused with invalid_event_id.
+  // empty or non-string id does not generate one. At an addressed path the
+  // owner-scoped write guard refuses a non-admin's differing body id first:
+  // write_id_not_addressed for a string or number, id_target_mismatch for any
+  // other type. Every other case here is refused with invalid_event_id.
   const ELSEWHERE_ID: Array<[string, unknown]> = [["empty", ""], ["0", 0], ["false", false], ["[]", []], ["object", { toString: null }]];
   const ELSEWHERE_WANT: Record<string, Record<string, [Expect, Expect]>> = {
     addressed: {
-      empty: [NOT_ADDRESSED, INVALID], "0": [NOT_ADDRESSED, INVALID], false: [INVALID, INVALID], "[]": [INVALID, INVALID], object: [INVALID, INVALID],
+      empty: [NOT_ADDRESSED, INVALID], "0": [NOT_ADDRESSED, INVALID], false: [MISMATCH, INVALID], "[]": [MISMATCH, INVALID], object: [MISMATCH, INVALID],
     },
     prefixed: {
       empty: [INVALID, INVALID], "0": [INVALID, INVALID], false: [INVALID, INVALID], "[]": [INVALID, INVALID], object: [INVALID, INVALID],
