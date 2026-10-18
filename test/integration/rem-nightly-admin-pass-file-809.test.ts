@@ -6,10 +6,12 @@
  * by the selected agent alone.
  *
  * The valid case executes the shim `flair rem nightly enable` renders, then
- * the real CLI against a real HOME-isolated Harper instance, with the cycle
- * authenticated as an agent (FLAIR_AGENT_ID + key) exactly like the systemd
- * unit. Only `--admin-pass-file` supplies admin credentials in this fixture;
- * the cycle itself is agent-authenticated.
+ * the real CLI against a real HOME-isolated Harper instance, with the selected
+ * agent (FLAIR_AGENT_ID + key) as in the systemd unit. Agent-scoped calls are
+ * signed by that agent; the dedup step and the pending-candidate count use the
+ * admin credential read from `--admin-pass-file`. The signing test also sets
+ * ambient admin and bearer credentials to show they do not take over the
+ * agent-scoped calls.
  *
  * The refusal cases name a missing / group-readable file: the run must fail at
  * startup, before any cycle work, including a paused cycle and a dry run. The
