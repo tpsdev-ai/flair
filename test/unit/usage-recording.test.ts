@@ -24,6 +24,7 @@
  * others' records only when non-private) rather than a stubbed rule.
  */
 import { mock, describe, it, expect } from "bun:test";
+import { format } from "node:util";
 import type { AgentAuthVerdict } from "../../resources/agent-auth.ts";
 import { WriteBackConflictError } from "../../resources/write-back.ts";
 
@@ -60,9 +61,11 @@ for (const outcome of ["conflict", "unconfirmed"] as const) {
         }
       } finally { console.error = saved; }
       expect(logs).toHaveLength(1);
-      expect(logs[0][0]).toContain(outcome === "conflict" ? "contribution count write aborted" : "usage count unconfirmed");
-      expect(logs[0][1]).toMatchObject({ memoryId: "m1", reason: "stored_row_changed", outcome });
-      expect(logs[0][1].err.message).toContain(outcome === "conflict" ? "no write committed by this attempt" : "unconfirmed after commit");
+      // The log uses a constant format string; assert on the message as printed.
+      const [fmt, phrase, detail] = logs[0];
+      expect(format(fmt, phrase)).toContain(outcome === "conflict" ? "contribution count write aborted" : "usage count unconfirmed");
+      expect(detail).toMatchObject({ memoryId: "m1", reason: "stored_row_changed", outcome });
+      expect(detail.err.message).toContain(outcome === "conflict" ? "no write committed by this attempt" : "unconfirmed after commit");
     });
   }
 }
