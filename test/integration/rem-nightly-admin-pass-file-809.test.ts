@@ -237,6 +237,52 @@ describe("flair#809 — nightly REM admin credential file", () => {
     expect(existsSync(statPath())).toBe(true);
   }, 180_000);
 
+  test("a pending count the real ops API refuses prints as unknown with the reason, never 0, and fails the run (flair#2680)", async () => {
+    // Only the count's credential is wrong: this proxy forwards the CLI's ops
+    // request to the real instance with a wrong admin password, so real Harper
+    // makes the refusal while the admin-authed dedup REST call still succeeds.
+    const upstream = new URL(harper.opsURL);
+    const statuses: number[] = [];
+    const proxy = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(req: Request) {
+        const res = await fetch(upstream.href, {
+          method: req.method,
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: "Basic " + btoa(`${harper.admin.username}:wrong-${harper.admin.password}`),
+          },
+          body: await req.text(),
+        });
+        statuses.push(res.status);
+        return new Response(await res.arrayBuffer(), { status: res.status });
+      },
+    });
+    try {
+      if (proxy.port === 9925 || proxy.port === 9926 || String(proxy.port) === upstream.port) {
+        throw new Error(`refusing to run: proxy port ${proxy.port} is not an ephemeral test port`);
+      }
+      rmSync(statPath(), { force: true });
+      const { stdout, stderr, exitCode } = await runCli([
+        "rem", "nightly", "run-once", "--agent", AGENT_ID,
+        "--ops-port", String(proxy.port), "--admin-pass-file", adminPassPath,
+      ]);
+      const text = stdout + stderr;
+      expect(statuses, text).toHaveLength(1);
+      expect(statuses[0], text).toBeGreaterThanOrEqual(400);
+      expect(text).toContain(`Pending:    unknown (ops API failed (${statuses[0]}))`);
+      expect(text).not.toMatch(/Pending:\s+0\b/);
+      expect(text).toContain("Status:     failed");
+      expect(text).toContain(`Errors:\n  - pending-count: ops API failed (${statuses[0]})`);
+      expect(text).not.toContain("dedup:");
+      expect(exitCode, text).toBe(1);
+      expect(existsSync(statPath())).toBe(true);
+    } finally {
+      proxy.stop(true);
+    }
+  }, 180_000);
+
   test("a shim path carrying shell syntax is executed literally: the file is read and no command runs", async () => {
     const evilDir = join(home, "secrets-evil");
     mkdirSync(evilDir, { recursive: true });

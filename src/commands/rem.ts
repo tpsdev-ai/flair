@@ -113,7 +113,11 @@ export function buildOpsSearch(
     });
     if (!res.ok) throw new Error(`ops API failed (${res.status})`);
     const raw = await res.json() as unknown;
-    return Array.isArray(raw) ? raw : ((raw as { results?: any[] })?.results ?? []);
+    if (Array.isArray(raw)) return raw;
+    const results = (raw as { results?: unknown } | null)?.results;
+    // flair#2680: an unrecognised body is an error, not zero rows.
+    if (Array.isArray(results)) return results;
+    throw new Error("ops API returned an unexpected response shape");
   };
 }
 
@@ -899,7 +903,7 @@ export function register(program: Command): void {
         console.error("Error: --agent or FLAIR_AGENT_ID env required");
         process.exit(1);
       }
-      const { runNightlyCycle } = await import("../rem/runner.js");
+      const { runNightlyCycle, formatPendingCandidates } = await import("../rem/runner.js");
       // The runner is agent-authed and cannot reach the ops port itself. When
       // admin credentials are available, inject ops-API and admin-authed REST
       // helpers so the pending-candidate count and the admin-gated dedup step
@@ -969,7 +973,7 @@ export function register(program: Command): void {
         }
         console.log(`Memories:   ${row.memoryCount ?? "—"}`);
         console.log(`Souls:      ${row.soulCount ?? "—"}`);
-        console.log(`Pending:    ${row.pendingCandidates ?? "—"}`);
+        console.log(`Pending:    ${formatPendingCandidates(row.pendingCandidates)}`);
         if (typeof row.archived === "number" || typeof row.expired === "number") {
           // #1503: `archived` counts validTo-expired and old-session rows the
           // pass soft-archived; `expired` counts ephemeral rows past their

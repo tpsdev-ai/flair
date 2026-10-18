@@ -227,10 +227,24 @@ export type ApiCall = (method: string, path: string, body?: unknown) => Promise<
 /**
  * Ops-API `search_by_conditions` helper (admin-authed). The runner is
  * agent-authed and cannot reach the ops port itself, so the CLI injects this
- * when admin credentials are available. When absent, `fetchPendingCandidateCount`
- * returns 0 (best-effort count).
+ * when admin credentials are available. When absent, the pending-candidate
+ * count is unknown.
  */
 export type OpsSearch = (table: string, conditions: any[], getAttributes: string[]) => Promise<any[]>;
+
+/**
+ * flair#2680: the cycle's pending-candidate count. A number is the exact count
+ * from a successful ops-API query; the object says why no count was taken.
+ */
+export type PendingCandidateCount = number | { state: "unknown"; reason: string };
+
+export const PENDING_NO_ADMIN_REASON = "no admin credential for the operations API";
+
+/** The `Pending:` value run-once prints: the count, `unknown (<reason>)`, or `—` when not reached. */
+export function formatPendingCandidates(count: PendingCandidateCount | undefined): string {
+  if (count === undefined) return "—";
+  return typeof count === "number" ? String(count) : `unknown (${count.reason})`;
+}
 
 export interface RunnerOpts {
   agentId: string;
@@ -245,7 +259,7 @@ export interface RunnerOpts {
   /**
    * Ops-API `search_by_conditions` helper (admin-authed). Injected by the CLI;
    * the runner is agent-authed and cannot reach the ops port itself. When
-   * absent, `fetchPendingCandidateCount` returns 0 (best-effort count).
+   * absent, the pending-candidate count is unknown.
    */
   opsSearch?: OpsSearch;
   /** Override snapshot root (testing). */
@@ -323,7 +337,8 @@ export interface RunnerLogRow {
   snapshotPath?: string;
   memoryCount?: number;
   soulCount?: number;
-  pendingCandidates?: number;
+  /** Absent when the cycle stopped before counting; see `PendingCandidateCount`. */
+  pendingCandidates?: PendingCandidateCount;
   durationMs: number;
   errors: string[];
   /** Deliberate stage skips; errors alone fail the run. */
@@ -502,20 +517,18 @@ export function hasAdkUserTags(memories: any[], agentId: string): boolean {
  *
  * Uses the ops-API `search_by_conditions` convention (admin-authed) via the
  * injected `opsSearch` helper — the same shape `flair rem candidates` uses.
- * Returns 0 when no `opsSearch` is available (the agent-authed runner carries
- * no admin creds) or on any error — the runner should not fail the cycle just
- * because the candidate count couldn't be sampled.
+ * A failed query returns `unknown` with the error (flair#2680).
  */
-async function fetchPendingCandidateCount(opsSearch: OpsSearch | undefined, agentId: string): Promise<number> {
-  if (!opsSearch) return 0;
+async function fetchPendingCandidateCount(opsSearch: OpsSearch, agentId: string): Promise<PendingCandidateCount> {
   try {
-    const rows = await opsSearch("MemoryCandidate", [
+    const rows: unknown = await opsSearch("MemoryCandidate", [
       { search_attribute: "agentId", search_type: "equals", search_value: agentId },
       { search_attribute: "status", search_type: "equals", search_value: "pending" },
     ], ["id"]);
+    if (!Array.isArray(rows)) return { state: "unknown", reason: "ops API returned an unexpected response shape" };
     return rows.length;
-  } catch {
-    return 0;
+  } catch (err: any) {
+    return { state: "unknown", reason: err?.message || String(err) };
   }
 }
 
@@ -699,7 +712,7 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
   let snapshotPath: string | undefined;
   let memoryCount = 0;
   let soulCount = 0;
-  let pendingCandidates = 0;
+  let pendingCandidates: PendingCandidateCount | undefined;
   // #1205b-1: the memories fetched here (for the snapshot) are reused by the
   // step-5 tag enumeration — no second fetch. Hoisted so step 5 can read them.
   let fetchedMemories: any[] = [];
@@ -718,7 +731,14 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
     // are multiple souls (different keys), or unwrap a single-row response.
     const soulForSnapshot = souls.length === 1 ? souls[0] : souls.length > 1 ? souls : null;
 
-    pendingCandidates = await fetchPendingCandidateCount(opts.opsSearch, opts.agentId);
+    // flair#2680: a failed count is a failed check (an `errors` entry), not 0.
+    // With no admin credential no query runs; the count is reported unknown.
+    if (opts.opsSearch) {
+      pendingCandidates = await fetchPendingCandidateCount(opts.opsSearch, opts.agentId);
+      if (typeof pendingCandidates !== "number") errors.push(`pending-count: ${pendingCandidates.reason}`);
+    } else {
+      pendingCandidates = { state: "unknown", reason: PENDING_NO_ADMIN_REASON };
+    }
 
     if (!opts.dryRun) {
       const created = await createSnapshot({
@@ -726,7 +746,7 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
         flairVersion: opts.flairVersion,
         memories,
         soul: soulForSnapshot as Record<string, unknown> | null,
-        pendingCandidateCount: pendingCandidates,
+        pendingCandidateCount: typeof pendingCandidates === "number" ? pendingCandidates : null,
         rootOverride: opts.snapshotRoot,
         nowOverride: opts.nowOverride,
       });
