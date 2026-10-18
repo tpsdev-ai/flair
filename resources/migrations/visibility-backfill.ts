@@ -250,7 +250,7 @@ export function createVisibilityBackfillMigration(
 
             const backfillRow = { ...existing, visibility: derived };
             stripUndeclaredMemoryAttributes(backfillRow);
-            return { write: backfillRow };
+            return { idempotent: true, write: backfillRow };
           },
           { label: "visibility-backfill", pausePre: () => txnPausePoint("visibility-backfill-pre"), pausePoint: () => txnPausePoint("visibility-backfill"), expectedRow: row },
         );

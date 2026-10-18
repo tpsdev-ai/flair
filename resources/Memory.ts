@@ -325,19 +325,12 @@ function sameDeclaredField(stored: unknown, declared: unknown): boolean {
   return isDeepStrictEqual(stored, declared);
 }
 
-/**
- * Compare the token and the declared fields after an ordinary owned row write
- * with a normal storage result, or a successful re-embed's inner commit, under
- * the lock. `fields` defaults to a PUT's POSTCOMMIT_VERIFY_FIELDS; an ordinary
- * PATCH passes retained request field names and staged values (a re-embed passes
- * an empty set). Refusals,
- * storage Responses and
- * skill PUT return before this read; composed promotion uses its caller's
- * in-transaction existence check. Return a verdict, never the stored row:
- * mismatch yields 409; a failed read or missing id yields an unknown outcome
- * (503).
- */
-async function verifyCommittedWrite(
+async function pausePostVerification(skill: boolean): Promise<void> {
+  const pause = skill ? txnPausePoint("memory-post-skill-verify") : txnPausePoint("memory-post-verify");
+  if (pause) await pause;
+}
+
+async function verifyWrittenRow(
   table: { get(id: any, ctx?: any): Promise<any> },
   declared: any,
   fallbackId: any,
@@ -1395,12 +1388,12 @@ async function writeSkillCreateOrUpdate(
      *  redaction replaced a value: that PUT always writes its redacted row. */
     requestedPayload?: Record<string, any>;
     /** flair#2467: receives the post-redaction text fields of the successor
-     *  row this write staged and committed (none when it wrote no row).
+     *  row this write staged (none when it wrote no row).
      *  flair#2561: only the `supplied` fields, the string-valued text fields
      *  and (flair#2575) the skill fields the request supplied; the successor
      *  row also holds the fields it carries over from its predecessor, and
      *  those are not reported. */
-    staged?: { supplied: readonly StoredTextField[]; text: StoredMemoryText | null };
+    staged?: { supplied: readonly StoredTextField[]; text: StoredMemoryText | null; row?: Record<string, any> };
   },
 ): Promise<any> {
   const { ctx, auth, content, storedRow, explicitPredecessor, method, pointer, inPlaceId, reembedding, requestedPayload } = args;
@@ -1420,8 +1413,11 @@ async function writeSkillCreateOrUpdate(
   const addressedId = storedRow ? String(storedRow.id) : explicitPredecessor ? String(explicitPredecessor.id) : null;
   const captured: { row: Record<string, any> | null; closed: Record<string, any> | null } = { row: null, closed: null };
   let unchangedHead: Record<string, any> | null = null;
+  const joinsCaller = method === "post" && isJoinableTransaction(ctx);
+  let successorBasis: any = null;
   const outcome = await runSkillVersionWrite({
     ctx,
+    joinCallerTransaction: method === "post",
     subjectId,
     agentId: String(content.agentId),
     head: (shared) => resolveSkillHead(subjectId, addressedId, shared),
@@ -1455,6 +1451,9 @@ async function writeSkillCreateOrUpdate(
       }
       await applyOriginatorInstanceId(successor, liveHead);
       applyFederationBookkeeping(successor, liveHead);
+      normalizeEmptyEmbedding(successor);
+      if (joinsCaller) successorBasis = await (databases as any).flair.Memory.get(successorId, shared);
+      if (args.staged) args.staged.row = structuredClone(successor);
       captured.row = successor;
       const value = typeof successor.content === "string" ? successor.content : null;
       const visibility = skillVersionVisibility(successor);
@@ -1470,13 +1469,25 @@ async function writeSkillCreateOrUpdate(
     hooks: {
       ...defaultSkillHooks,
       pointer: async (shared) => {
+        // Test-only: holds a skill POST after its successor (and predecessor
+        // close) are staged, before the transaction commits (flair#2656).
+        const stagedPause = txnPausePoint("memory-post-skill-staged");
+        if (stagedPause) await stagedPause;
         if (captured.closed) {
           const denial = await deletePointerRow(String(captured.closed.id), shared);
           if (denial) return denial;
         }
-        return pointer?.row
-          ? persistPointerRow({ ...pointer.row, memoryId: successorId, memoryInstanceToken: captured.row?.instanceToken }, shared)
+        const pointerDenial = pointer?.row
+          ? await persistPointerRow({ ...pointer.row, memoryId: successorId, memoryInstanceToken: captured.row?.instanceToken }, shared)
           : null;
+        if (pointerDenial) return pointerDenial;
+        if (joinsCaller) {
+          await pausePostVerification(true);
+          const committed = await (databases as any).flair.Memory.get(successorId, {});
+          // A skill write keeps its own target-changed refusal (flair#2263).
+          if (!sameStoredRow(committed, successorBasis)) return skillWriteConflict("skill_target_changed");
+        }
+        return null;
       },
     },
   });
@@ -1490,7 +1501,11 @@ async function writeSkillCreateOrUpdate(
     noteWriteStamp(captured.row.embeddingModel, captured.closed ?? undefined);
   }
   if (args.staged) args.staged.text = captured.row ? storedMemoryText(captured.row, args.staged.supplied) : null;
-  return { id: successorId, written: captured.row !== null, visibility: skillVersionVisibility(captured.row ?? unchangedHead) };
+  return {
+    id: successorId,
+    written: captured.row !== null,
+    visibility: skillVersionVisibility(captured.row ?? unchangedHead),
+  };
 }
 
 /** Attempts at re-applying a skill close whose committed write did not land (flair#2642). */
@@ -2171,9 +2186,6 @@ export class Memory extends (databases as any).flair.Memory {
     // discipline as `claimedClient` below. Pull the optional
     // `usedMemoryIds` off the write body now, BEFORE anything else touches
     // `content`, so it is NEVER persisted on the Memory record itself.
-    // Recording happens POST-COMMIT, only when this was present (see the
-    // failure-isolated recordCitations() call near the return below) —
-    // omitted ⇒ `undefined` ⇒ zero new calls, byte-identical behavior.
     const usedMemoryIds = content?.usedMemoryIds;
     if (content && typeof content === "object") delete content.usedMemoryIds;
 
@@ -2430,34 +2442,44 @@ export class Memory extends (databases as any).flair.Memory {
     // call is removed.
     stripUndeclaredMemoryAttributes(content);
     normalizeEmptyEmbedding(content);
+    // POST joins an open caller transaction and confirms before its commit;
+    // post-commit verification belongs to that owner (#2656 slice B).
+    // Without a caller transaction, POST owns the commit and verifies after it.
+    const postJoinsRequestTxn = isJoinableTransaction(ctx);
     if (isSkillWrite(content)) {
       const reservedId = [content?.id, (this as any).getId?.()].find((candidate) => isReservedSeedId("Memory", candidate));
-      const skillStaged: { supplied: readonly StoredTextField[]; text: StoredMemoryText | null } = { supplied: suppliedText, text: null };
+      const skillStaged: { supplied: readonly StoredTextField[]; text: StoredMemoryText | null; row?: Record<string, any> } = { supplied: suppliedText, text: null };
       const skillResult = await writeSkillCreateOrUpdate({
         ctx, auth, content, storedRow: postStored, explicitPredecessor: preparedSkill.predecessor, method: "post", pointer,
         inPlaceId: reservedId != null ? String(reservedId) : null, staged: skillStaged,
       });
-      if (!(skillResult instanceof Response)) await markDerivedSourcesReflected(content);
+      if (skillResult instanceof Response) return skillWriteResponse(skillResult, redactedValues, skillStaged.text);
+      if (!postJoinsRequestTxn) {
+        await pausePostVerification(true);
+        const skillVerified = await verifyWrittenRow(
+          (databases as any).flair.Memory,
+          skillStaged.row,
+          skillResult.id,
+          { expectedToken: skillStaged.row?.instanceToken },
+          [...POSTCOMMIT_VERIFY_FIELDS, "summary", "trigger", "metadata", "tags"],
+        );
+        if (skillVerified.unknown || skillVerified.mismatch) {
+          return skillVerified.unknown ? writeOutcomeUnknownFor(skillResult.id) : skillWriteConflict("skill_target_changed");
+        }
+      }
+      await markDerivedSourcesReflected(content);
       return skillWriteResponse(skillResult, redactedValues, skillStaged.text);
     }
-    // A1' item 2 (adjudication 0a): the Memory row and its pointer row share ONE
-    // transaction. With a request context they join its open transaction; with
-    // NO context (an internal direct call, e.g. new Memory().post(...))
-    // withSharedWriteTransaction creates one, so a failed pointer write rolls
-    // the Memory row back too instead of leaving it pointer-less.
-    // Pinned by test/unit/memory-host-source.test.ts (r20-atomic) — RED if the
-    // owned-transaction branch is bypassed.
     // flair#2467: the post-redaction text fields this write stages, for the response.
     let postStaged: StoredMemoryText = {};
-    // Read before the write: inside withSharedWriteTransaction an owned
-    // transaction is joinable too.
-    const postJoinsRequestTxn = isJoinableTransaction(ctx);
+    let stagedRow: any;
     let postResult: Response | null;
     let postRowId: string | undefined;
     let grantedClosed: Record<string, any> | null = null;
     try {
       postResult = await withSharedWriteTransaction(ctx, async (c) => {
         postStaged = storedMemoryText(content, suppliedText);
+        stagedRow = structuredClone(content);
         const newId = await writeMemoryRowPost((this as any).constructor, content, c);
         if (newId instanceof Response) return newId;
         postRowId = newId;
@@ -2466,16 +2488,40 @@ export class Memory extends (databases as any).flair.Memory {
           const persistDenial = await persistPointerRow(pointer.row, c);
           if (persistDenial) return persistDenial;
         }
+        // Test-only: holds the POST after its row and any pointer are staged, before
+        // the transaction commits (flair#2656).
+        const stagedPause = txnPausePoint("memory-post-staged");
+        if (stagedPause) await stagedPause;
         // Stage a grant-authorized close in the successor's transaction.
         grantedClosed = await closeGrantedSupersedeStaged(c, content, supersede.close, postJoinsRequestTxn);
+        if (postJoinsRequestTxn) {
+          await pausePostVerification(false);
+          try {
+            await confirmCommittedRow((databases as any).flair.Memory, newId, (committed) => sameStoredRow(committed, postStored));
+          } catch (err) {
+            abortRequestTransaction(c);
+            throw err;
+          }
+        }
         return null;
       });
     } catch (err) {
+      if (err instanceof CommittedRowChanged) return storedRowChangedRefusal("Memory");
       const refusal = grantedCloseRefusal(err);
       if (refusal) return refusal;
       throw err;
     }
     if (postResult instanceof Response) return writeResultResponse(postResult);
+    if (!postJoinsRequestTxn) {
+      await pausePostVerification(false);
+      const verified = await verifyWrittenRow(
+        (databases as any).flair.Memory, stagedRow, postRowId, { expectedToken: stagedRow.instanceToken },
+        POSTCOMMIT_VERIFY_FIELDS,
+      );
+      if (verified.unknown || verified.mismatch) {
+        return verified.unknown ? writeOutcomeUnknownFor(content.id ?? postRowId) : storedRowChangedRefusal("Memory");
+      }
+    }
     if (grantedClosed) noteMemoryUpsert(grantedClosed);
     const result: any = {};
     // flair#1357 — read-your-write for the lexical leg. The table change feed
@@ -2502,17 +2548,11 @@ export class Memory extends (databases as any).flair.Memory {
     if (supersede.close?.granteeId === undefined) await closeSupersededIfNeeded(ctx, content, supersede.close, "post");
     await markDerivedSourcesReflected(content);
 
-    // flair#744 slice A: citation-on-write — POST-COMMIT, fully
-    // failure-isolated. The write above already succeeded and `result` is
-    // final; crediting each cited memory through the shared usage ledger
-    // (same path as POST /RecordUsage) must never affect this response —
-    // any failure here is logged server-side and swallowed, never surfaced
-    // to the caller, never rolls back or retries the write.
     if (usedMemoryIds !== undefined) {
       try {
         await recordCitations(ctx, auth, usedMemoryIds, new Date().toISOString());
       } catch (err) {
-        console.error("Memory.post: citation recording failed (write already committed)", err);
+        console.error("Memory.post: citation recording failed", err);
       }
     }
 
@@ -2880,7 +2920,7 @@ export class Memory extends (databases as any).flair.Memory {
     const verifyPause = txnPausePoint("memory-patch-verify");
     if (verifyPause) await verifyPause;
     const staged = "staged" in patched ? patched.staged : content;
-    const verified = await verifyCommittedWrite((databases as any).flair.Memory, staged, (this as any).getId?.(), patched.identity, reembedRequest ? [] : declaredFields);
+    const verified = await verifyWrittenRow((databases as any).flair.Memory, staged, (this as any).getId?.(), patched.identity, reembedRequest ? [] : declaredFields);
     if (verified.unknown) return writeOutcomeUnknownFor(content?.id ?? (this as any).getId?.());
     if (verified.mismatch) return storedRowChangedRefusal("Memory");
     // A verified re-embed answers with its own response (it declares no text
@@ -3493,7 +3533,7 @@ export class Memory extends (databases as any).flair.Memory {
       // Test-only: holds the PUT after its commit, before the verification read.
       const verifyPause = txnPausePoint("memory-put-verify");
       if (verifyPause) await verifyPause;
-      const verified = await verifyCommittedWrite(
+      const verified = await verifyWrittenRow(
         (databases as any).flair.Memory, putResult.content, putResult.fallbackId,
         { expectedToken: putResult.content?.instanceToken },
       );

@@ -120,6 +120,8 @@ function fixtureRow(id: string, agentId: string, overrides: Record<string, unkno
     retrievalCount: 7,
     lastRetrieved: day(3),
     usageCount: 3,
+    // Server-set per-attempt write-back marker (flair#2653); a re-embed must preserve it.
+    writeBackWriteId: `marker-${id}`,
     promotionStatus: "approved",
     promotedAt: day(4),
     promotedBy: "reviewer-fixture",

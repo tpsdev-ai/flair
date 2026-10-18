@@ -6,7 +6,7 @@ import { databases } from "harper";
 import { authorizeSoulWrite } from "./soul-write-policy.js";
 import { authorizeSkillVersionWrite } from "./skill-write-policy.js";
 import { withKeyLock } from "./key-lock.js";
-import { withOwnedTransaction } from "./request-transaction.js";
+import { isJoinableTransaction, withOwnedTransaction, withSharedWriteTransaction } from "./request-transaction.js";
 import { maybeThrowSkillWriteFault } from "./skill-write-fault.js";
 import { PRIVATE_VISIBILITY, SHARED_VISIBILITY } from "./memory-visibility.js";
 import { txnPausePoint } from "./txn-pause-point.js";
@@ -296,12 +296,15 @@ export async function recordVersion(
   ctx: any,
   request: RecordVersionInput | PreparedVersionInput,
   mutateRow: (shared: any) => Promise<any>,
+  joinCallerTransaction = false,
 ): Promise<RecordVersionOutcome> {
   const store = (databases as any).flair?.InstructionVersion?.primaryStore;
+  const joinsCaller = joinCallerTransaction && isJoinableTransaction(ctx);
+  const callerTransaction = joinsCaller ? ctx.transaction : null;
   let outcome;
   try {
     outcome = await withKeyLock(store, [LOCK_NAMESPACE, request.subjectType], () =>
-      withOwnedTransaction(ctx, async (shared) => {
+      (joinsCaller ? withSharedWriteTransaction : withOwnedTransaction)(ctx, async (shared) => {
         const authorization = await resolveVersionAuthorization(request.subjectType, shared);
         if (authorization.denied) return { ok: false, response: authorization.denied } as RecordVersionOutcome;
         const attribution = authorization.attribution;
@@ -413,6 +416,7 @@ export async function recordVersion(
     LOCK_ATTEMPTS,
     LOCK_WAIT_MS);
   } catch (err) {
+    if (callerTransaction) callerTransaction.abort();
     if (err instanceof RowMutationDenied) return { ok: false, response: err.response };
     // A head-read, append or commit failure aborts the whole transaction; report
     // unavailable rather than a success, so no caller reads a missing version as

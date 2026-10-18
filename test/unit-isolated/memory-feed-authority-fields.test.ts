@@ -133,7 +133,14 @@ describe("FeedMemories.post authority fields", () => {
     expect(memoryStore.has("feed-forged")).toBe(false);
   });
 
-  test("an ordinary feed write still lands and carries no authority stamps", async () => {
+  test("a feed body cannot supply its write-back marker", async () => {
+    const result = await feed().post({ id: "feed-marker", agentId: "alice", content: "marker forgery", writeBackWriteId: "forged" });
+    expect(result).toBeInstanceOf(Response);
+    expect(result.status).toBe(403);
+    expect(memoryStore.has("feed-marker")).toBe(false);
+  });
+
+  test("an ordinary feed write stamps its commit marker and carries no promotion stamps", async () => {
     const result = await feed().post({
       id: "feed-clean",
       agentId: "alice",
@@ -142,6 +149,8 @@ describe("FeedMemories.post authority fields", () => {
     expect(result.id).toBe("feed-clean");
     expect(result.content).toBe("ordinary feed memory");
     const stored = memoryStore.get("feed-clean");
+    expect(stored.writeBackWriteId).toBeString();
+    expect(result).not.toHaveProperty("writeBackWriteId");
     expect(stored.content).toBe("ordinary feed memory");
     expect(stored.promotionStatus).toBeUndefined();
     expect(stored.promotedAt).toBeUndefined();

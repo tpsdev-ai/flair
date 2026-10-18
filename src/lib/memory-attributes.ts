@@ -27,6 +27,7 @@ export const DECLARED_MEMORY_ATTRIBUTES = Object.freeze([
   "retrievalCount",
   "lastRetrieved",
   "usageCount",
+  "writeBackWriteId",
   "promotionStatus",
   "promotedAt",
   "promotedBy",

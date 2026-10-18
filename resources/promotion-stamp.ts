@@ -1,7 +1,7 @@
 import { databases } from "harper";
 import { stripUndeclaredMemoryAttributes } from "./memory-declared-attributes.js";
 import { noteMemoryUpsert } from "./bm25-index-service.js";
-import { writeBackCommittedRow } from "./write-back.js";
+import { WriteBackConflictError, writeBackCommittedRow } from "./write-back.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 import { isJoinableTransaction } from "./request-transaction.js";
 
@@ -35,7 +35,7 @@ function isWrittenRow(row: any, written: PromotedRowIdentity | undefined): boole
 // transaction its Memory write used, and the stamp joins it.
 export async function stampMemoryPromotion(
   id: string, reviewerId: string, decidedAt: string, enumerationContext?: any, stagedContext?: any,
-  written?: PromotedRowIdentity,
+  written?: PromotedRowIdentity, onUnconfirmed?: () => void,
 ): Promise<void> {
   const table = (databases as any).flair.Memory;
   const stamp = (stored: any) => {
@@ -59,24 +59,24 @@ export async function stampMemoryPromotion(
   const outcome = await writeBackCommittedRow(
     table,
     id,
-    (stored) => ({ write: stamp(stored) }),
-    { ctx: enumerationContext, label: "promotion-stamp", pausePre: () => txnPausePoint("promotion-stamp-pre"), pausePoint: () => txnPausePoint("promotion-stamp"), matchFields: ["content"], expectedRow: selected },
+    (stored) => ({ idempotent: true, write: stamp(stored) }),
+    { ctx: enumerationContext, onUnconfirmed, label: "promotion-stamp", pausePre: () => txnPausePoint("promotion-stamp-pre"), pausePoint: () => txnPausePoint("promotion-stamp"), pauseBeforeCommit: () => txnPausePoint("promotion-stamp-commit"), matchFields: ["content"], expectedRow: selected },
   );
   if ("write" in outcome) noteMemoryUpsert(outcome.write);
 }
 
-/** Stamp after a successful Memory write. Failures must not abort a sweep or
- * leave a candidate pending (that re-writes the same claim next cycle).
- * Auto-promotion uses this non-fatal wrapper; manual promotion calls
+/** Stamp after a successful Memory write. Auto-promotion uses this non-fatal
+ * wrapper; manual promotion calls
  * stampMemoryPromotion directly, so a stamp failure fails that request. */
 export async function stampMemoryPromotionIsolated(
   id: string, reviewerId: string, decidedAt: string, enumerationContext?: any, written?: PromotedRowIdentity,
 ): Promise<boolean> {
+  let unconfirmed = false;
   try {
-    await stampMemoryPromotion(id, reviewerId, decidedAt, enumerationContext, undefined, written);
+    await stampMemoryPromotion(id, reviewerId, decidedAt, enumerationContext, undefined, written, () => { unconfirmed = true; });
     return true;
   } catch (err: any) {
-    console.warn(`stampMemoryPromotion failed for ${id}: ${err?.message ?? err}`);
+    console.warn("stampMemoryPromotion %s for %s: %s", unconfirmed ? "outcome unconfirmed" : "failed", id, err?.message ?? err, ...(unconfirmed ? [{ outcome: "unconfirmed" }] : err instanceof WriteBackConflictError ? [{ outcome: err.outcome }] : []));
     return false;
   }
 }
