@@ -423,6 +423,31 @@ describe("flair#2354 — the embedding backfill after a Memory write (real Harpe
 });
 
 describe("flair#2653 — usage contributions across agents (real Harper)", () => {
+  it("logs conflict when a contribution count write aborts before commit", async () => {
+    const id = "wbc-usage-conflict";
+    await insertRow(harper, { id, agentId: reflectAgent.id, content: "usage conflict", contentHash: id, instanceToken: randomUUID(), usageCount: 0 });
+    const replacement = randomUUID();
+    const { response, paused, released } = await withPaused("usage-count-pre",
+      () => authSend(harper, reflectAgent, "POST", "/RecordUsage", { memoryIds: [id] }),
+      async () => expect(await updateRow(harper, { id, instanceToken: replacement })).toBe(200));
+    expect(paused).toBe(true);
+    expect(released).toBe("go");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ recorded: true });
+    expect(await readRow(harper, id)).toMatchObject({ usageCount: 0, instanceToken: replacement });
+    const ledger = await adminOp(harper, { operation: "search_by_hash", database: "flair", table: "MemoryUsage", hash_values: [`${reflectAgent.id}:${id}`], get_attributes: ["*"] });
+    expect(ledger.status).toBe(200);
+    expect(await ledger.json()).toMatchObject([{ agentId: reflectAgent.id, memoryId: id }]);
+    let log = harper.getLog?.() ?? "";
+    for (const until = Date.now() + 5_000; !log.includes("contribution count write aborted, stored_row_changed") && Date.now() < until;) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      log = harper.getLog?.() ?? "";
+    }
+    expect(log).toContain("contribution count write aborted, stored_row_changed");
+    expect(log).toMatch(/outcome:\s*['"]conflict['"]/);
+    expect(log).toContain("no write committed by this attempt");
+  }, 60_000);
+
   it("does not repeat an agent's committed increment after another agent increments", async () => {
     const id = "wbc-usage-verify";
     await insertRow(harper, { id, agentId: reflectAgent.id, content: "shared usage", contentHash: id, instanceToken: randomUUID(), usageCount: 0 });
@@ -445,6 +470,8 @@ describe("flair#2653 — usage contributions across agents (real Harper)", () =>
       log = harper.getLog?.() ?? "";
     }
     expect(log).toContain("usage count unconfirmed, stored_row_changed");
+    expect(log).toMatch(/outcome:\s*['"]unconfirmed['"]/);
+    expect(log).toContain("staged values unconfirmed after commit");
     for (const agent of [reflectAgent, feedAgent]) {
       const ledger = await adminOp(harper, { operation: "search_by_hash", database: "flair", table: "MemoryUsage", hash_values: [`${agent.id}:${id}`], get_attributes: ["*"] });
       expect(ledger.status).toBe(200);

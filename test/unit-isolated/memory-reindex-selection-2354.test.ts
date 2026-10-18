@@ -36,7 +36,7 @@ mock.module("../../resources/agent-auth.ts", () => ({ isAdmin: async () => true,
 mock.module("../../resources/Memory.ts", () => ({ buildReindexRow: (content: any) => ({ row: content }) }));
 mock.module("../../resources/write-back.ts", () => ({
   WriteBackConflictError: class extends Error {
-    constructor(label: string, id: string) { super(`${label}: ${id} unconfirmed`); }
+    constructor(label: string, id: string, _attempts: number, readonly outcome: "conflict" | "unconfirmed" = "conflict") { super(`${label}: ${id} ${outcome}`); }
   },
   writeBackIdentity: (row: Record<string, unknown>) => Object.fromEntries(IDENTITY.map((field) => [field, row[field]])),
   writeBackCommittedRow: async (_table: unknown, id: string, plan: any, opts: any) => {
@@ -69,6 +69,9 @@ for (const missing of [false, true]) {
     const result = await r.post({});
     expect(result.stats.reindexed).toBe(missing ? 0 : rows.length);
     expect(result.stats.errors).toBe(missing ? rows.length : 0);
-    if (missing) expect(result.stats.errorSamples[0].message).toContain("MemoryReindex agentId index");
+    if (missing) {
+      expect(result.stats.errorSamples[0].message).toContain("MemoryReindex agentId index");
+      expect(result.stats.errorSamples[0].outcome).toBe("unconfirmed");
+    }
   });
 }

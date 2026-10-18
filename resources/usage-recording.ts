@@ -368,8 +368,7 @@ export async function recordCitations(
     } catch (err) {
       // Log per-id failures without stopping the batch.
       if (err instanceof WriteBackConflictError) {
-        // The ledger committed before the bump; the count outcome is unconfirmed.
-        console.error("recordCitations: usage count unconfirmed, stored_row_changed", { memoryId: id, reason: "stored_row_changed", outcome: err.outcome, err });
+        console.error(`recordCitations: ${err.outcome === "conflict" ? "contribution count write aborted" : "usage count unconfirmed"}, stored_row_changed`, { memoryId: id, reason: "stored_row_changed", outcome: err.outcome, err });
       } else if (err instanceof UsageLedgerReadError) {
         // flair#2333: the ledger read that decides whether this pair already
         // has a row failed — not "no row". This contribution is aborted (no
@@ -426,8 +425,7 @@ export async function recordUsageBatch(
     } catch (err) {
       // Log per-id failures without changing the response.
       if (err instanceof WriteBackConflictError) {
-        // The ledger committed before the bump; the count outcome is unconfirmed.
-        console.error("RecordUsage.post: usage count unconfirmed, stored_row_changed", { memoryId, reason: "stored_row_changed", outcome: err.outcome, err });
+        console.error(`RecordUsage.post: ${err.outcome === "conflict" ? "contribution count write aborted" : "usage count unconfirmed"}, stored_row_changed`, { memoryId, reason: "stored_row_changed", outcome: err.outcome, err });
       } else if (err instanceof UsageLedgerReadError) {
         // flair#2333: the ledger read failed — not "no row". This contribution
         // is aborted (no ledger write, no count bump); the other ids stand.

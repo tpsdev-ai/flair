@@ -381,8 +381,11 @@ export class FeedMemories extends Resource {
       );
     } catch (err) {
       if (refusal) return refusal;
-      // Unconfirmed staged values use the existing conflict response.
-      if (err instanceof WriteBackConflictError) return feedTargetChanged(record.id);
+      if (err instanceof WriteBackConflictError) {
+        return err.outcome === "conflict" ? feedTargetChanged(record.id) : Response.json({
+          error: "feed_write_unconfirmed", outcome: err.outcome, message: err.message,
+        }, { status: 409 });
+      }
       throw err;
     }
     if (refusal) return refusal;
@@ -590,7 +593,8 @@ export const FEED_TARGET_CHANGED_ERROR = "feed_target_changed";
 function feedTargetChanged(id: string): Response {
   return Response.json({
     error: FEED_TARGET_CHANGED_ERROR,
-    message: `the stored row ${JSON.stringify(id)} this write targets changed during the request; retry the write`,
+    outcome: "conflict",
+    message: `the stored row ${JSON.stringify(id)} this write targets changed during the request; write not applied; retry the write`,
   }, { status: 409 });
 }
 

@@ -42,7 +42,7 @@ type ReindexStats = {
   dryRun: boolean;
   agentFilter: string | null;
   drift: AgentDrift[];
-  errorSamples: Array<{ id: string; message: string }>;
+  errorSamples: Array<{ id: string; message: string; outcome?: WriteBackConflictError["outcome"] }>;
 };
 
 export class MemoryReindex extends Resource {
@@ -176,12 +176,12 @@ export class MemoryReindex extends Resource {
           }, {})) {
             if (String(row.id) === id) { indexed = true; break; }
           }
-          if (!indexed) throw new WriteBackConflictError("MemoryReindex agentId index", id, 1);
+          if (!indexed) throw new WriteBackConflictError("MemoryReindex agentId index", id, 1, "unconfirmed");
           stats.reindexed++;
         } catch (err: any) {
           stats.errors++;
           if (stats.errorSamples.length < 5) {
-            stats.errorSamples.push({ id, message: err?.message ?? String(err) });
+            stats.errorSamples.push({ id, message: err?.message ?? String(err), ...(err instanceof WriteBackConflictError ? { outcome: err.outcome } : {}) });
           }
         }
       }

@@ -25,6 +25,7 @@
  */
 import { mock, describe, it, expect } from "bun:test";
 import type { AgentAuthVerdict } from "../../resources/agent-auth.ts";
+import { WriteBackConflictError } from "../../resources/write-back.ts";
 
 // resources/usage-recording.ts imports `databases` from harper,
 // whose module chain throws when loaded outside a Harper runtime (the same
@@ -43,6 +44,28 @@ const { recordCitations, recordUsageBatch, isLedgerRowVisible, readableLedgerRow
 const CITER_ID = "agt_citer";
 const AGENT: AgentAuthVerdict = { kind: "agent", agentId: CITER_ID, isAdmin: false };
 const NOW = "2026-07-21T00:00:00.000Z";
+
+for (const outcome of ["conflict", "unconfirmed"] as const) {
+  for (const surface of ["recordCitations", "recordUsageBatch"] as const) {
+    it(`${surface} logs ${outcome} for the contribution count write`, async () => {
+      const saved = console.error;
+      const logs: any[][] = [];
+      console.error = (...args: any[]) => { logs.push(args); };
+      const record = async () => { throw new WriteBackConflictError("usage-recording", "m1", 1, outcome); };
+      try {
+        if (surface === "recordCitations") {
+          await recordCitations({}, AGENT, ["m1"], NOW, record, async () => ({ id: "m1", agentId: CITER_ID }));
+        } else {
+          await recordUsageBatch({}, CITER_ID, ["m1"], undefined, NOW, record);
+        }
+      } finally { console.error = saved; }
+      expect(logs).toHaveLength(1);
+      expect(logs[0][0]).toContain(outcome === "conflict" ? "contribution count write aborted" : "usage count unconfirmed");
+      expect(logs[0][1]).toMatchObject({ memoryId: "m1", reason: "stored_row_changed", outcome });
+      expect(logs[0][1].err.message).toContain(outcome === "conflict" ? "no write committed by this attempt" : "unconfirmed after commit");
+    });
+  }
+}
 
 interface Call {
   agentId: string;

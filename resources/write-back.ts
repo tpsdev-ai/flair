@@ -119,7 +119,7 @@ export const WRITE_BACK_ATTEMPTS = 3;
 export class WriteBackConflictError extends Error {
   readonly id: string;
   constructor(label: string, id: string, attempts: number, readonly outcome: "conflict" | "unconfirmed" = "conflict") {
-    super(`${label}: row ${id}; staged values unconfirmed (${attempts} attempts)`);
+    super(`${label}: row ${id}; ${outcome}: ${outcome === "conflict" ? "write aborted; no write committed by this attempt" : "staged values unconfirmed after commit"} (${attempts} attempts)`);
     this.name = "WriteBackConflictError";
     this.id = id;
   }
@@ -332,7 +332,7 @@ export async function writeBackCommittedRow(
     }
     if (!committedShowsWrite(committed, basis, decision)) {
       if (!decision.idempotent) throw new WriteBackConflictError(opts.label, id, attempt, "unconfirmed");
-      if (attempt >= attempts) throw new WriteBackConflictError(opts.label, id, attempts);
+      if (attempt >= attempts) throw new WriteBackConflictError(opts.label, id, attempts, "unconfirmed");
       continue;
     }
     return decision;

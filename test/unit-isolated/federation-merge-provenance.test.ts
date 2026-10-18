@@ -31,6 +31,7 @@ const PEER_ID = "inst-remote";
 let peerStore: Map<string, any>;
 let memoryStore: Map<string, any>;
 let syncLogStore: Map<string, any>;
+let writeRace: "conflict" | "unconfirmed" | undefined;
 
 function emptyGen() {
   async function* gen() {}
@@ -38,7 +39,7 @@ function emptyGen() {
 }
 
 const harperTxn = installFakeHarperTransaction((id: string, payload: { row: any }) => {
-  memoryStore.set(id, { ...payload.row });
+  memoryStore.set(id, { ...payload.row, ...(writeRace === "unconfirmed" ? { content: "competing" } : {}) });
 });
 
 mock.module("harper", () => ({
@@ -57,6 +58,7 @@ mock.module("harper", () => ({
       Memory: {
         get: async (id: string) => memoryStore.get(id) ?? null,
         put: async (r: any) => {
+          if (writeRace === "conflict") memoryStore.set(r.id, { ...memoryStore.get(r.id), content: "competing" });
           // flair#2441: the merge's Memory write is a write-back inside an owned
           // transaction — stage it so the committed re-read still sees the
           // committed store row (as real Harper does).
@@ -139,7 +141,22 @@ beforeEach(() => {
   peerStore = new Map();
   memoryStore = new Map();
   syncLogStore = new Map();
+  writeRace = undefined;
 });
+
+for (const outcome of ["conflict", "unconfirmed"] as const) {
+  it(`Federation maps ${outcome} to ${outcome === "conflict" ? "merge_target_changed" : "indeterminate"}`, async () => {
+    writeRace = outcome;
+    const { secretKey, publicKey } = keypair();
+    peerStore.set(PEER_ID, { id: PEER_ID, publicKey, role: "hub", status: "connected" });
+    const record = memoryRecord({ id: "race", data: { id: "race", agentId: "agent-a", content: "submitted", visibility: "shared", createdAt: "2026-09-02T00:00:00.000Z" }, updatedAt: "2026-09-02T00:00:00.000Z", originatorInstanceId: PEER_ID }, secretKey);
+    const result: any = await postSync({ instanceId: PEER_ID, records: [record], lamportClock: 9 }, secretKey);
+    expect(result.merged).toBe(0);
+    expect(result.skipped).toBe(outcome === "conflict" ? 1 : 0);
+    expect(result.indeterminate).toEqual(outcome === "unconfirmed" ? [{ table: "Memory", id: "race" }] : []);
+    if (outcome === "conflict") expect(result.refused).toContainEqual({ table: "Memory", id: "race", reason: "merge_target_changed" });
+  });
+}
 
 describe("flair#1940 round 22 — the federated merge preserves provenance", () => {
   const OLD = "2026-09-01T00:00:00.000Z";

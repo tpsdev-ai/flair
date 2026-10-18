@@ -245,7 +245,7 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
       }
     }
   } catch (err: any) {
-    console.error(`[auto-embed] Failed for ${memoryId}: ${err.message}`);
+    console.error(`[auto-embed] Failed for ${memoryId}: ${err.message}`, ...(err instanceof WriteBackConflictError ? [{ outcome: err.outcome }] : []));
   }
 }
 

@@ -1208,9 +1208,8 @@ export class FederationSync extends Resource {
       const planned = mergePresenceReceipt(local, validated.row, receivedAt);
       if (planned.action === "skip") return { reason: planned.reason };
 
-      // Same failure path as the generic merge: the started flag is set BEFORE
-      // the write, so a post-write exception is INDETERMINATE (not retryable),
-      // and a changed row is the SAME named conflict the generic merge reports.
+      // As in the generic merge: aborted writes are merge_target_changed;
+      // unconfirmed commits are indeterminate.
       let outcome: any;
       markWriteStarted();
       try {
@@ -1236,9 +1235,8 @@ export class FederationSync extends Resource {
           },
         );
       } catch (err) {
-        // Unconfirmed staged values: refuse the key as merge_target_changed.
         if (err instanceof WriteBackConflictError) {
-          return { reason: "merge_target_changed" };
+          return err.outcome === "conflict" ? { reason: "merge_target_changed" } : { indeterminate: true };
         }
         throw err;
       }
@@ -1502,9 +1500,8 @@ export class FederationSync extends Resource {
             },
           );
         } catch (err) {
-          // Unconfirmed staged values: refuse the key as merge_target_changed.
           if (err instanceof WriteBackConflictError) {
-            return { reason: "merge_target_changed" };
+            return err.outcome === "conflict" ? { reason: "merge_target_changed" } : { indeterminate: true };
           }
           throw err;
         }

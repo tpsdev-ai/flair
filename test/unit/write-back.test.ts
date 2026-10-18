@@ -10,10 +10,8 @@
  * needed here; the real helper is exercised end-to-end against a live instance
  * in test/integration/write-back-contention-2354.test.ts.
  *
- * Covers: a clean write; abort-and-retry from the committed row (the retried
- * plan wins); the bounded refusal (WriteBackConflictError, staged write never
- * landing); a plan's skip; and a read failure propagating rather than being
- * swallowed (fail-closed).
+ * Covers: clean writes, skips, pre-commit conflicts, post-commit unconfirmed
+ * outcomes, bounded retries, and read failures.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { isDeepStrictEqual } from "node:util";
@@ -87,6 +85,28 @@ afterAll(() => {
 
 const opts = (label: string) => ({ label });
 
+for (const idempotent of [false, true]) {
+  for (const kind of ["write", "update"] as const) {
+    for (const outcome of ["conflict", "unconfirmed"] as const) {
+      test(`${kind} plan (${idempotent ? "idempotent" : "non-idempotent"}) labels an exhausted ${outcome === "conflict" ? "pre-commit" : "post-commit"} race ${outcome}`, async () => {
+        const { table, store, commits } = stagedTable([{ id: "m1", count: 0 }]);
+        let changes = 0;
+        const compete = () => store.set("m1", { id: "m1", count: --changes });
+        if (outcome === "conflict") table.setCompeting(compete);
+        else table.setAfterCommit(compete);
+        const pending = writeBackCommittedRow(table, "m1", (row) => kind === "write"
+          ? { idempotent, write: { ...row, count: 1 } }
+          : { idempotent, update: { count: 1 } }, opts("labels"));
+        await expect(pending).rejects.toBeInstanceOf(WriteBackConflictError);
+        await expect(pending).rejects.toMatchObject({ outcome, message: expect.stringContaining(outcome === "conflict" ? "no write committed by this attempt" : "unconfirmed after commit") });
+        const attempts = outcome === "unconfirmed" && !idempotent ? 1 : WRITE_BACK_ATTEMPTS;
+        expect(changes).toBe(-attempts);
+        expect(commits).toHaveLength(outcome === "conflict" ? 0 : attempts);
+      });
+    }
+  }
+}
+
 describe("writeBackCommittedRow — staged values in the committed row", () => {
   test("a clean write lands and the plan's decision is returned", async () => {
     const { table, store, commits } = stagedTable([{ id: "m1", content: "a" }]);
@@ -134,9 +154,9 @@ describe("writeBackCommittedRow — abort and retry from the committed row", () 
     // The competing writer commits after EVERY staged write, so the committed
     // re-read never matches the row the attempt read.
     table.setCompeting(() => { store.set("m1", { id: "m1", content: `competing-${n++}` }); });
-    await expect(
-      writeBackCommittedRow(table, "m1", (row: Row) => ({ idempotent: true, write: { ...row, content: "written" } }), opts("conflict")),
-    ).rejects.toThrow(WriteBackConflictError);
+    const pending = writeBackCommittedRow(table, "m1", (row: Row) => ({ idempotent: true, write: { ...row, content: "written" } }), opts("conflict"));
+    await expect(pending).rejects.toThrow(WriteBackConflictError);
+    await expect(pending).rejects.toMatchObject({ outcome: "conflict", message: expect.stringContaining("write aborted; no write committed by this attempt") });
     expect(commits).toHaveLength(0);
     expect(store.get("m1")?.content).toBe(`competing-${n - 1}`); // the last competing value, never our write
     expect(WRITE_BACK_ATTEMPTS).toBe(3);
@@ -171,9 +191,9 @@ describe("writeBackCommittedRow — the post-commit verification (flair#2653)", 
       // Every attempt's commit is superseded by a newer write of the same field.
       store.set("m1", { id: "m1", content: "competing" });
     });
-    await expect(
-      writeBackCommittedRow(table, "m1", (row: Row) => ({ idempotent: true, write: { ...row, content: "written" } }), opts("post-commit-refuse")),
-    ).rejects.toThrow(WriteBackConflictError);
+    const pending = writeBackCommittedRow(table, "m1", (row: Row) => ({ idempotent: true, write: { ...row, content: "written" } }), opts("post-commit-refuse"));
+    await expect(pending).rejects.toThrow(WriteBackConflictError);
+    await expect(pending).rejects.toMatchObject({ outcome: "unconfirmed", message: expect.stringContaining("staged values unconfirmed after commit") });
     expect(store.get("m1")?.content).toBe("competing");
     expect(commits).toHaveLength(WRITE_BACK_ATTEMPTS);
   });
@@ -207,6 +227,7 @@ describe("writeBackCommittedRow — the post-commit verification (flair#2653)", 
     } catch (err) { error = err; }
     expect(error).toBeInstanceOf(WriteBackConflictError);
     expect((error as WriteBackConflictError).outcome).toBe("unconfirmed");
+    expect((error as Error).message).toContain("staged values unconfirmed after commit");
     expect(plans).toBe(1);
     expect(commits).toHaveLength(1);
     expect(store.get("m1")?.usageCount).toBe(2);
@@ -305,8 +326,10 @@ for (const field of ["agentId", "contentHash", "instanceToken", "createdAt"]) {
   test(`refuses a changed ${field} before the owned read`, async () => {
     const basis = { id: "m1", agentId: "owner", contentHash: "hash", instanceToken: "token", content: "a", createdAt: "2026-01-01T00:00:00.000Z" };
     const { table, commits } = stagedTable([{ ...basis, [field]: "replacement" }]);
-    await expect(writeBackCommittedRow(table, "m1", (row) => ({ idempotent: true, write: { ...row, content: "written" } }),
-      { label: "replacement", expectedRow: basis })).rejects.toThrow(WriteBackConflictError);
+    const pending = writeBackCommittedRow(table, "m1", (row) => ({ idempotent: true, write: { ...row, content: "written" } }),
+      { label: "replacement", expectedRow: basis });
+    await expect(pending).rejects.toThrow(WriteBackConflictError);
+    await expect(pending).rejects.toMatchObject({ outcome: "conflict", message: expect.stringContaining("write aborted; no write committed by this attempt") });
     expect(commits).toHaveLength(0);
   });
   test(`refuses a changed ${field} on retry`, async () => {

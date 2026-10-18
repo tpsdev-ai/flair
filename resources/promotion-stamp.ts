@@ -1,7 +1,7 @@
 import { databases } from "harper";
 import { stripUndeclaredMemoryAttributes } from "./memory-declared-attributes.js";
 import { noteMemoryUpsert } from "./bm25-index-service.js";
-import { writeBackCommittedRow } from "./write-back.js";
+import { WriteBackConflictError, writeBackCommittedRow } from "./write-back.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 import { isJoinableTransaction } from "./request-transaction.js";
 
@@ -76,7 +76,7 @@ export async function stampMemoryPromotionIsolated(
     await stampMemoryPromotion(id, reviewerId, decidedAt, enumerationContext, undefined, written);
     return true;
   } catch (err: any) {
-    console.warn(`stampMemoryPromotion failed for ${id}: ${err?.message ?? err}`);
+    console.warn(`stampMemoryPromotion failed for ${id}: ${err?.message ?? err}`, ...(err instanceof WriteBackConflictError ? [{ outcome: err.outcome }] : []));
     return false;
   }
 }
