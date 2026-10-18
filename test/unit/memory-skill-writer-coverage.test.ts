@@ -61,7 +61,7 @@ add("Memory", ["writer:(databases as any).flair.Memory.put#3"],
 add("Memory", ["writer:(databases as any).flair.Memory.put#1"],
   "closeSupersededRecord: read-modify-write close of an existing record (stamps validTo), preserves existing content/tags — not a new skill write.");
 add("Memory", ["writer:table.put#1"],
-  "confirmSkillDelete: re-applies the version close of the live head from a fresh read when the queued close did not land; it stamps only validTo/updatedAt on the row it re-read — not a new skill write (flair#2642).");
+  "confirmSkillDelete: closes the freshly read skill row without changing its content or tags (flair#2642).");
 add("Memory", ["writer:(databases as any).flair.Memory.put#2"],
   "stageGrantedClose: read-modify-write close of an existing record (stamps validTo), staged in the successor's transaction; preserves existing content/tags — not a new skill write.");
 // ── Bookkeeping, removal and read-only aliases inside Memory.ts ──
@@ -70,7 +70,7 @@ add("Memory", ["writer:patchRecord#1"],
 add("Memory", ["writer:(databases as any).flair.Memory.delete#1"],
   "Memory.delete(): removal, not a write.");
 add("Memory", ["alias-source:(databases as any).flair.Memory#1", "alias-source:(databases as any).flair.Memory#2", "alias-source:(databases as any).flair.Memory#3", "alias-source:(databases as any).flair.Memory#4", "alias-source:(databases as any).flair.Memory#5", "alias-source:(databases as any).flair.Memory#6", "alias-source:(databases as any).flair.Memory#7", "alias-source:(databases as any).flair.Memory#8", "alias-source:(databases as any)?.flair?.Memory#1"],
-  "Table handles: #1 is the table handed to patchRecord (that write is classified above as writer:patchRecord#1); #3 is the class heritage; the optional handle is the write-lock store read (flair#2478); the rest are read-only committed-row reads — #2 the re-embed's confirm (flair#2465), #4 the ordinary PATCH's post-commit verification (flair#2478), #5 the _reindex re-PUT's confirm (flair#2450), #6 Memory.put's confirm (flair#2441), #7 Memory.put's post-commit verification (flair#2478) and #8 confirmSkillDelete's committed and retry reads (flair#2642). All take only `get`.");
+  "Table handles: #1 is handed to patchRecord; #2 supplies confirmSkillDelete's reads and close retry (writer:table.put#1 above); #4 is the class heritage; the optional handle reads the write-lock store; #3/#5/#6/#7/#8 read committed rows.");
 
 // ── Non-skill writers in other modules ──
 add("MemoryFeed", ["alias-source:(databases as any).flair.Memory#1", "writer:writeBackCommittedRow#1", "writer:table.put#1"],

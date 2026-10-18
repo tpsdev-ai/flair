@@ -24,7 +24,6 @@ import {
   buildPointerRow,
   extractPointerInputs,
   isPointerEchoOf,
-  loadPointerRows,
   loadStoredPointer,
   projectRowsThroughPointers,
 } from "./memory-host-source.js";
@@ -1391,7 +1390,7 @@ async function writeSkillCreateOrUpdate(
 /** Attempts at re-applying a skill close whose committed write did not land (flair#2642). */
 const SKILL_DELETE_CLOSE_ATTEMPTS = 3;
 
-/** The named 500 when a close's tombstone or pointer write cannot be undone. */
+/** The named 500 for unconfirmed skill-close compensation. */
 function skillDeleteCompensationFailure(message: string): Response {
   return Response.json({ error: "skill_delete_compensation_failed", message }, { status: 500 });
 }
@@ -1429,24 +1428,24 @@ async function compensateUnlandedSkillClose(args: {
   try {
     const removal = await removeAppendedVersion(ctx, SKILL_SUBJECT_TYPE, subjectId, closeVersionId);
     if (removal !== "removed") {
-      return skillDeleteCompensationFailure("the version record of a close that did not land could not be removed");
+      return skillDeleteCompensationFailure("removal of the close version record could not be confirmed");
     }
     if (pointerBefore) {
-      const current = (await loadPointerRows([closedId], {})).get(closedId) ?? null;
+      const current = await loadStoredPointer(closedId, {});
       if (!current) {
         await withOwnedTransaction(ctx, async (c) => {
           await putPointerRow(pointerBefore, c);
         });
-        const restored = (await loadPointerRows([closedId], {})).get(closedId) ?? null;
+        const restored = await loadStoredPointer(closedId, {});
         if (!restored) {
-          return skillDeleteCompensationFailure("the host-pointer row of a close that did not land could not be restored");
+          return skillDeleteCompensationFailure("restoring the host-pointer row could not be confirmed");
         }
       }
     }
     return null;
   } catch (err) {
     console.error("Memory.delete: undoing an unapplied skill close failed", err);
-    return skillDeleteCompensationFailure("the writes of a close that did not land could not be undone");
+    return skillDeleteCompensationFailure("compensation for the unapplied skill close could not be confirmed");
   }
 }
 
@@ -1456,8 +1455,8 @@ async function compensateUnlandedSkillClose(args: {
  * the queued full put (it loses to a newer write of the same row) and still
  * commit the tombstone and pointer writes. A close that did not land is
  * re-applied from a fresh read, re-checking the row's identity and the caller's
- * authority; when it still does not land the request's writes are undone and
- * the answer is a named 409 (a named 500 when the undo cannot be confirmed).
+ * authority. Exhausted retries answer 409 after compensation, or 500 if
+ * compensation cannot be confirmed.
  * Returns null only when the close is confirmed (or the row is gone).
  */
 async function confirmSkillDelete(args: {
@@ -1557,7 +1556,7 @@ async function writeSkillDelete(args: { ctx: any; auth: AgentAuthVerdict; record
       closedRow = liveHead;
       // Captured for compensation: this attempt's pointer delete can land even
       // when its close does not.
-      pointerBefore = (await loadPointerRows([closedId], shared)).get(closedId) ?? null;
+      pointerBefore = await loadStoredPointer(closedId, shared);
       // flair#2511: a stale id resolves the live head, which can be another
       // agent's row a "write" grant authorizes this caller to close; the writer
       // re-checks that grant after the close is staged.

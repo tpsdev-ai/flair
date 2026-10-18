@@ -15,10 +15,10 @@ import { readFileSync } from "node:fs";
 import { rawTableWriteSites } from "../helpers/raw-table-writers";
 
 const classified = new Map<string, string>([
-  ["resources/instruction-version-record.ts:alias-source:(databases as any).flair?.InstructionVersion#1", "Head read (readHead) — read-only handle."],
-  ["resources/instruction-version-record.ts:alias-source:(databases as any).flair?.InstructionVersion#2", "Subject-type lock store — read-only handle."],
-  ["resources/instruction-version-record.ts:alias-source:(databases as any).flair?.InstructionVersion#3", "Raw table handle inside the append transaction."],
-  ["resources/instruction-version-record.ts:alias-source:(databases as any).flair?.InstructionVersion#4", "Removal check after the undo delete — read-only handle."],
+  ["resources/instruction-version-record.ts:alias-source:(databases as any).flair?.InstructionVersion#1", "Subject-type lock store for append compensation — reads primaryStore."],
+  ["resources/instruction-version-record.ts:alias-source:(databases as any).flair?.InstructionVersion#2", "Head read (readHead) — read-only handle."],
+  ["resources/instruction-version-record.ts:alias-source:(databases as any).flair?.InstructionVersion#3", "Subject-type lock store for append — reads primaryStore."],
+  ["resources/instruction-version-record.ts:alias-source:(databases as any).flair?.InstructionVersion#4", "Raw table handle inside the append transaction."],
   ["resources/instruction-version-record.ts:writer:(databases as any).flair.InstructionVersion.delete#1", "Undo of an append this request made whose close did not land (flair#2642)."],
   ["resources/instruction-version-record.ts:writer:table.create#1", "Old Soul tombstone after the destination check."],
   ["resources/instruction-version-record.ts:writer:table.create#2", "Application append for single-row Soul resource writes."],
