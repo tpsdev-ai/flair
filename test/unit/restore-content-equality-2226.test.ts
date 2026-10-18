@@ -106,7 +106,7 @@ describe("restore verifies preserved content (#2226)", () => {
     refused(await run(archive, [{ method: "GET", path: "/Memory/m1", body: stale }]), "m1", "flint", "tags");
   });
 
-  test("a restore that drops the promotion content binding fails, naming the field", async () => {
+  test("verification of a restore read that lacks the promotion content binding fails, naming the field", async () => {
     const archiveAgent = { id: "agent-a" };
     const archived = {
       id: "m1", agentId: "agent-a", content: "same",
