@@ -12,7 +12,7 @@
  *     written;
  *   - a collection DELETE that selects a reserved row is refused before
  *     anything is deleted; an ordinary-only selection deletes;
- *   - anonymous callers keep their existing 401;
+ *   - anonymous callers are refused with 401;
  *   - `flair doctor` names a planted impostor and passes on a clean store; it
  *     lists every impostor id, and a real matching InstructionVersion passes;
  *   - a reserved event survives an OrgEventMaintenance run, including one
@@ -411,7 +411,7 @@ describe("a collection DELETE selecting a reserved row is refused before it dele
   }, 60_000);
 });
 
-describe("anonymous callers keep their existing 401", () => {
+describe("anonymous callers are refused with 401", () => {
   it("POST, PUT, PATCH, DELETE and collection PUT on a reserved record are unauthenticated", async () => {
     const id = `stored-reserved-anon-${randomUUID()}`;
     await plantEvent(id);

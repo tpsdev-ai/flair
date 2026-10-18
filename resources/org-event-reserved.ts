@@ -12,7 +12,7 @@
  * projection the caller asked for). The allow hooks refuse a marker visible in
  * their own arguments: allowCreate/allowUpdate see the proposed records and
  * allowDelete sees the target id prefix, not a stored kind at an ordinary id.
- * Anonymous callers get their existing 401. The Harper operations API
+ * Anonymous callers are refused with 401. The Harper operations API
  * (raw upsert/delete under admin auth) is the documented exception.
  *
  * The predicate is pure so both the resource guards and the doctor check share
