@@ -2,8 +2,9 @@
  * promotion-visibility-incremental-2478.test.ts — flair#2478 slice 2, real Harper.
  *
  * The visibility backfill and both promotion stamps write incremental updates
- * under the per-memory-id write lock. These cases drive owner PUT/PATCH against
- * each converted writer:
+ * under the per-memory-id write lock. These cases race owner PUT/PATCH against
+ * the backfill and automatic stamp; manual promotion is tested for its bound
+ * verdict:
  *
  * - The backfill holds its id's lock at a pause point (before its write, or
  *   after its commit while still locked); an owner PUT/PATCH to that id is

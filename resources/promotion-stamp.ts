@@ -48,7 +48,8 @@ function promotionStampUpdate(stored: any, reviewerId: string, decidedAt: string
   };
 }
 
-/** Skip a row whose identity or content binding is already stale. */
+/** Automatic stamping checks the written row's identity; both paths skip an
+ * already mismatched content hash. */
 function isStaleBasis(stored: any, written: PromotedRowIdentity | undefined): boolean {
   if (written != null && !isWrittenRow(stored, written)) return true;
   const bound = stored?.promotionContentHash;
