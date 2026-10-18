@@ -2702,6 +2702,61 @@ it("a trusted PATCH repair invalidates a uniform verdict that did not cover the 
   expect(guard.spaceGuardState()).toEqual({ state: "uniform", reason: null, excluded: 0 });
 });
 
+describe("flair#2645 — PATCH staged values", () => {
+  for (const replaced of [false, true]) {
+    it(`redacted content ${replaced ? "replaced by a newer write answers 409" : "retained after commit answers success"}`, async () => {
+      const id = "patch-redacted";
+      memoryStore.set(id, {
+        id, agentId: "agent-1", content: "before", createdAt: "2026-01-01T00:00:00.000Z",
+        instanceToken: "same-incarnation",
+      });
+      const realPatch = BaseMemory.prototype.patch;
+      const patchSpy = spyOn(BaseMemory.prototype, "patch").mockImplementation(async function(this: any, body: any) {
+        expect(body.content).toBe("rotate [redacted]");
+        const result = await realPatch.call(this, body);
+        if (replaced) memoryStore.set(id, { ...memoryStore.get(id), content: "newer" });
+        return result;
+      });
+      try {
+        const m = makeMemory(agentCtx("agent-1"));
+        m._targetId = id;
+        const result = await m.patch({ content: `rotate ghp_${"A".repeat(36)}` });
+        if (replaced) {
+          expect(result).toBeInstanceOf(Response);
+          expect(result.status).toBe(409);
+          expect((await result.json()).error).toBe("stored_row_changed");
+        } else {
+          expect(result).toEqual({ id, written: true, redactedValues: 1, stored: { content: "rotate [redacted]" } });
+        }
+        expect(memoryStore.get(id).content).toBe(replaced ? "newer" : "rotate [redacted]");
+      } finally {
+        patchSpy.mockRestore();
+      }
+    });
+  }
+
+  it("a storage rewrite is verified against the staged value", async () => {
+    const id = "patch-storage-rewrite";
+    memoryStore.set(id, {
+      id, agentId: "agent-1", content: "before", createdAt: "2026-01-01T00:00:00.000Z",
+      instanceToken: "same-incarnation",
+    });
+    const realPatch = BaseMemory.prototype.patch;
+    const patchSpy = spyOn(BaseMemory.prototype, "patch").mockImplementation(async function(this: any, body: any) {
+      body.tags = body.tags.map((tag: string) => tag.trim());
+      return realPatch.call(this, body);
+    });
+    try {
+      const m = makeMemory(agentCtx("agent-1"));
+      m._targetId = id;
+      expect(await m.patch({ tags: [" staged "] })).toBeUndefined();
+      expect(memoryStore.get(id).tags).toEqual(["staged"]);
+    } finally {
+      patchSpy.mockRestore();
+    }
+  });
+});
+
 describe("flair#2478 — idless PATCH", () => {
   it("refuses before accessing the lock store or entering the verb body", async () => {
     const m: any = makeMemory(agentCtx("agent-1"));

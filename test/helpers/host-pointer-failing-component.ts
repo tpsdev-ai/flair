@@ -26,6 +26,8 @@ const FAILING_ADAPTER_JS = `// Test-only build replacement: every pointer-table 
 // not be the module the loader imports, so the failure would never be injected.
 export async function putPointerRow() { throw new Error("test adapter: forced host-pointer write failure"); }
 export async function deletePointerRowViaTable() { throw new Error("test adapter: forced host-pointer delete failure"); }
+export { PointerAlreadyStoredError } from "./host-pointer/registry.js";
+export { putPointerRow as restorePointerRowIfAbsent };
 `;
 
 /** The exact ESM source the composed copy writes over the adapter, so a test
