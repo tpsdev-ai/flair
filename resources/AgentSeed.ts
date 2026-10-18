@@ -17,11 +17,12 @@ import { randomUUID } from "node:crypto";
  *   { agent, soulEntries, memories, created, alreadyExisted, soulCreated, soulAlreadyExisted }
  *
  * `agent` and every `soulEntries` element are read back from the committed
- * store. For attempted creates, `created` / `soulCreated` mean the stored
- * fields match this seed's request; `alreadyExisted` / `soulAlreadyExisted`
- * report a different stored row or an entry found before staging a create.
- * An identical concurrent create is indistinguishable and reports as created:
- * the stored state is what the caller asked for.
+ * store. For attempted creates, `created` / `soulCreated` mean the stored row
+ * matches every field of this seed's staged row, including generated timestamps
+ * and Soul provenance. Otherwise, including an independent concurrent seed with
+ * the same input but different generated fields, or an entry found before staging,
+ * `alreadyExisted` / `soulAlreadyExisted` apply; the response does not claim a
+ * write that may not have landed.
  *
  * Auth: operator (verified Harper administrator Basic) or deliberate
  * `internalContext()`. Admin-agent Ed25519 keys are refused — role is not

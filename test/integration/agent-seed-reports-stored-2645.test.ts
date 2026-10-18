@@ -218,8 +218,47 @@ describe("flair#2645 — an AgentSeed response reports the stored rows", () => {
     expect((await probe(agentId)).status).toBe(200);
   }, 120_000);
 
+  it("independent seeds with the same input and different generated fields: the winner reports created and the held seed reports already existing", async () => {
+    const agentId = nextId("independent");
+    const input = { agentId, displayName: "same-name", soulTemplate: { motto: "same-motto" } };
+    let winner: any;
+    let staged: any;
+    const { response, paused, released } = await withPaused(
+      "agentseed-soul-write",
+      () => seed(input),
+      async () => {
+        staged = JSON.parse(readFileSync(join(pauseDir, "paused.agentseed-soul-write"), "utf8"));
+        while (Date.now() <= Date.parse(staged.createdAt)) await new Promise((r) => setTimeout(r, 1));
+        const res = await seed(input);
+        const text = await res.text();
+        expect(res.status, text.slice(0, 300)).toBe(200);
+        winner = JSON.parse(text);
+        expect(winner.agent.createdAt).not.toBe(staged.createdAt);
+      },
+    );
+    expect(paused).toBe(true);
+    expect(released).toBe("go");
+    const text = await response.text();
+    expect(response.status, text.slice(0, 300)).toBe(200);
+    const held = JSON.parse(text);
+    await expectStoredResponse(winner);
+    await expectStoredResponse(held);
+    expect(winner.created).toBe(true);
+    expect(winner.alreadyExisted).toBe(false);
+    expect(winner.soulAlreadyExisted).toEqual([]);
+    const keys = winner.soulEntries.map((entry: any) => entry.key).sort();
+    expect(winner.soulCreated.sort()).toEqual(keys);
+    expect(held.created).toBe(false);
+    expect(held.alreadyExisted).toBe(true);
+    expect(held.soulCreated).toEqual([]);
+    expect(held.soulAlreadyExisted.sort()).toEqual(keys);
+    expect(held.agent).toEqual(winner.agent);
+    expect(held.soulEntries).toEqual(winner.soulEntries);
+    expect(held.soulEntries.find((entry: any) => entry.key === staged.key).provenance).not.toBe(staged.provenance);
+  }, 120_000);
+
   for (const table of ["Agent", "Soul"]) {
-    it(`${table}: an identical concurrent create reports the stored row as created`, async () => {
+    it(`${table}: a concurrent create that copies the staged row reports the stored row as created`, async () => {
       const agentId = nextId(`identical-${table.toLowerCase()}`);
       const point = table === "Agent" ? "agentseed-agent-write" : "agentseed-soul-write";
       let competing: any;
