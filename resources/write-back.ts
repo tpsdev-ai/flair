@@ -58,6 +58,11 @@ export interface WriteBackOptions {
    *  the interleaving where this write's transaction opens first. Named at
    *  the call site, like `pausePre`. */
   pausePoint?: WriteBackPause;
+  /** Test-only pause after the committed-row confirmation and before this
+   *  transaction commits — the interleaving where another writer commits
+   *  between the confirmation and this write's commit. Named at the call
+   *  site, like `pausePoint`. */
+  confirmPoint?: WriteBackPause;
 }
 
 /** The fields of `expectedRow` (or of the helper's own first read) it compares
@@ -317,6 +322,10 @@ export async function writeBackCommittedRow(
         if ("update" in decision) await applyFieldUpdate(table, id, decision.update, c);
         else await table.put(decision.write, c);
         await confirmCommittedRow(table, id, (committed) => isDeepStrictEqual(committed, row));
+        if (opts.confirmPoint) {
+          const confirmed = opts.confirmPoint();
+          if (confirmed) await confirmed;
+        }
         return decision;
       });
       noteTestAttempt(opts.label, id, attempt, "skip" in decision ? "skipped" : "applied");

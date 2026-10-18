@@ -252,7 +252,7 @@ export function createVisibilityBackfillMigration(
 
               return { update: { visibility: derived } } as const;
             },
-            { label: "visibility-backfill", pausePre: () => txnPausePoint("visibility-backfill-pre"), pausePoint: () => txnPausePoint("visibility-backfill"), expectedRow: row },
+            { label: "visibility-backfill", pausePre: () => txnPausePoint("visibility-backfill-pre"), pausePoint: () => txnPausePoint("visibility-backfill"), confirmPoint: () => txnPausePoint("visibility-backfill-confirmed"), expectedRow: row },
           );
           // Test-only: the write-back committed and the lock is still held.
           const committed = txnPausePoint("visibility-backfill-committed");

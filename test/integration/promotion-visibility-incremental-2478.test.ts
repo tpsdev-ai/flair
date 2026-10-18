@@ -313,15 +313,40 @@ describe("visibility backfill is incremental and locked (real Harper)", () => {
     await bootWithFaultInjection("visibility-backfill");
     await assertPaused("visibility-backfill");
 
+    // A lock-less writer changes a field the backfill neither decides on nor
+    // matches. The incremental update must leave it stored.
+    const v2 = await readRow(V2);
+    const backfillTags = [...(v2.tags ?? []), "lockless:backfill"];
+    await opsCall({
+      operation: "upsert", database: "flair", table: "Memory",
+      records: [{ ...v2, tags: backfillTags }],
+    });
+
     const putDenied = await memoryWrite(owner, "PUT", V2, { agentId: owner.id, content: V2_OWNER, visibility: "shared" });
     expect(putDenied.status, await putDenied.clone().text()).toBe(503);
     expect((await putDenied.json() as any).error).toBe("memory_busy");
     const patchDenied = await memoryWrite(owner, "PATCH", V2, { agentId: owner.id, content: V2_OWNER, visibility: "shared" });
     expect(patchDenied.status, await patchDenied.clone().text()).toBe(503);
 
+    // The first attempt's whole-row confirmation sees that change and retries.
+    // On the retry, commit the same kind of change after the confirmation and
+    // before the write commits: the incremental update must not carry the
+    // stale row over it.
+    arm("visibility-backfill-confirmed");
     await release("visibility-backfill");
+    await assertPaused("visibility-backfill-confirmed");
+    const v2Confirmed = await readRow(V2);
+    const backfillSummary = "lockless backfill summary";
+    await opsCall({
+      operation: "upsert", database: "flair", table: "Memory",
+      records: [{ ...v2Confirmed, summary: backfillSummary }],
+    });
+    await release("visibility-backfill-confirmed");
+
     const backfilled = await waitForField(V2, "visibility", 30_000);
     expect(backfilled?.visibility).toBe("private");
+    expect(backfilled?.tags).toEqual(backfillTags);
+    expect(backfilled?.summary).toBe(backfillSummary);
 
     const put = await memoryWrite(owner, "PUT", V2, { agentId: owner.id, content: V2_OWNER, visibility: "shared" });
     expect(put.status, await put.clone().text()).toBe(200);
@@ -412,12 +437,33 @@ describe("promotion stamps are locked, incremental and bound (real Harper)", () 
     const promoted = (rows as any[]).find((r) => r.content === AUTO_CLAIM);
     expect(promoted, "the promoted row was not committed before the stamp").toBeTruthy();
 
+    // A lock-less writer changes a field the stamp neither matches nor writes.
+    const stampTags = [...(promoted.tags ?? []), "lockless:stamp"];
+    await opsCall({
+      operation: "upsert", database: "flair", table: "Memory",
+      records: [{ ...promoted, tags: stampTags }],
+    });
+
     const putDenied = await memoryWrite(owner, "PUT", promoted.id, { agentId: owner.id, content: "denied put", visibility: "private" });
     expect(putDenied.status, await putDenied.clone().text()).toBe(503);
     const patchDenied = await memoryWrite(owner, "PATCH", promoted.id, { agentId: owner.id, content: "denied patch", visibility: "private" });
     expect(patchDenied.status, await patchDenied.clone().text()).toBe(503);
 
+    // The first attempt's whole-row confirmation sees that change and retries.
+    // On the retry, commit the same kind of change after the confirmation and
+    // before the write commits: the incremental update must not carry the
+    // stale row over it.
+    arm("promotion-stamp-confirmed");
     await release("promotion-stamp");
+    await assertPaused("promotion-stamp-confirmed");
+    const confirmed = await readRow(promoted.id);
+    const stampSummary = "lockless stamp summary";
+    await opsCall({
+      operation: "upsert", database: "flair", table: "Memory",
+      records: [{ ...confirmed, summary: stampSummary }],
+    });
+    await release("promotion-stamp-confirmed");
+
     const res = await sweep;
     expect(res.status, (await res.clone().text()).slice(0, 300)).toBe(200);
 
@@ -425,6 +471,8 @@ describe("promotion stamps are locked, incremental and bound (real Harper)", () 
     expect(stored.promotionStatus).toBe("approved");
     expect(stored.promotedBy).toBe("machine:adk-auto-promote");
     expect(stored.promotionContentHash).toBe(sha256(AUTO_CLAIM));
+    expect(stored.tags).toEqual(stampTags);
+    expect(stored.summary).toBe(stampSummary);
 
     // The later owner PUT clears the verdict when content changes.
     const put = await memoryWrite(owner, "PUT", promoted.id, { agentId: owner.id, content: "owner edit after the verdict", visibility: "private" });

@@ -114,7 +114,7 @@ export async function stampMemoryPromotion(
         const update = promotionStampUpdate(stored, reviewerId, decidedAt);
         return { update };
       },
-      { ctx: enumerationContext, label: "promotion-stamp", pausePre: () => txnPausePoint("promotion-stamp-pre"), pausePoint: () => txnPausePoint("promotion-stamp"), matchFields: ["content", "promotionContentHash"], expectedRow: selected },
+      { ctx: enumerationContext, label: "promotion-stamp", pausePre: () => txnPausePoint("promotion-stamp-pre"), pausePoint: () => txnPausePoint("promotion-stamp"), confirmPoint: () => txnPausePoint("promotion-stamp-confirmed"), matchFields: ["content", "promotionContentHash"], expectedRow: selected },
     );
     // Test-only: the write-back committed and the lock is still held.
     const committed = txnPausePoint("promotion-stamp-committed");
