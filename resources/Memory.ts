@@ -110,6 +110,15 @@ function withoutCallerSelection(query: any): any {
   return copy;
 }
 
+function projectMemoryRead(table: any, row: any, target: any, ctx: any, byId = false): any {
+  if (row == null || row instanceof Response || typeof row !== "object") return row;
+  const select = byId && table.loadAsInstance !== false && target?.property
+    ? target.property : target?.select || target?.property;
+  if (!select) return row;
+  const selected = table.transformEntryForSelect(select, ctx, table._readTxnForContext(ctx))({ key: row.id, value: row });
+  return byId && selected === null ? Response.json(null) : selected;
+}
+
 /**
  * Write the Memory row joining transaction `c` (0a). Resource.prototype.post
  * uses the instance's OWN `#context`, which an internal caller (a direct
@@ -1682,12 +1691,14 @@ export class Memory extends (databases as any).flair.Memory {
     // its own plain id-only target) so the pointer decision below always sees
     // the stored `id`, `agentId`, `instanceToken`, `archived` and `visibility`.
     // A shaped read — a caller target carrying a selection, or a class that
-    // installs one — can never hand the join an already-projected value. Trusted
-    // internal and admin reads keep their target unchanged.
+    // installs one — can never hand the join an already-projected value.
     const nonAdminAgent = auth.kind === "agent" && !auth.isAdmin;
+    const boundId = (this as any).getId?.();
+    const legacyProperty = typeof target === "string" && (this.constructor as any).loadAsInstance !== false && boundId != null;
+    const selectionTarget = legacyProperty ? { property: target } : target;
     let readTarget: any = target;
-    if (nonAdminAgent) {
-      const targetId = typeof target === "string" ? target : (target as any)?.id;
+    if (nonAdminAgent || legacyProperty || (typeof target === "object" && (target.select != null || target.property != null))) {
+      const targetId = legacyProperty ? boundId : typeof target === "string" ? target : (target as any)?.id;
       readTarget = targetId != null ? { id: targetId } : {};
     }
     const result = await memoryByIdReadGate.call(this, readTarget, (t: any) => super.get(t));
@@ -1719,9 +1730,11 @@ export class Memory extends (databases as any).flair.Memory {
     if (result && typeof result === "object" && !(result instanceof Response) && typeof (result as any).agentId === "string") {
       const ctx = (this as any).getContext?.();
       const withHits = await applyHitStats(projected, ctx);
-      return applyPromotionBinding(attachTrust(withHits as any, wantsTrust(target, opts)));
+      const bound = applyPromotionBinding(attachTrust(withHits as any, wantsTrust(target, opts)));
+      return nonAdminAgent ? bound : projectMemoryRead(this.constructor, bound, selectionTarget, ctx, true);
     }
-    return applyPromotionBinding(projected);
+    const bound = applyPromotionBinding(projected);
+    return nonAdminAgent ? bound : projectMemoryRead(this.constructor, bound, selectionTarget, ctx, true);
   }
 
   /**
@@ -1750,10 +1763,11 @@ export class Memory extends (databases as any).flair.Memory {
     const gate = await resolveAuthGate(ctx, UNAUTH());
     if (gate.kind === "denied") return gate.response;
     if (gate.kind === "unfiltered") {
-      const source = overlayHitStatsResult(super.search(query), ctx);
+      const source = await overlayHitStatsResult(super.search(withoutCallerSelection(query)), ctx);
       if (!source || source instanceof Response || typeof source[Symbol.asyncIterator] !== "function") return source;
+      const table = this.constructor;
       return (async function* promotionBound() {
-        for await (const row of source) yield applyPromotionBinding(row);
+        for await (const row of source) yield projectMemoryRead(table, applyPromotionBinding(row), query, ctx);
       })();
     }
 

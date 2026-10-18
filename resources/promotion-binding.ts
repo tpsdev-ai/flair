@@ -1,23 +1,3 @@
-/**
- * promotion-binding.ts — the use-time promotion binding (flair#2478 slice 2).
- *
- * A promotion verdict is bound to the exact stored text it reviewed. The
- * stamp writes `promotionContentHash`: SHA-256 over the stored `content`
- * after redaction, UTF-8. This module is the ONE reader-side accessor: a
- * verdict is shown only while its hash equals the hash of the row's CURRENT
- * content. A verdict with no hash (one written before this field existed) or
- * with a different hash is suppressed: the verdict fields are returned as
- * `null`, so a reader through these paths does not see an approval for text
- * the verdict did not review.
- *
- * The accessor rewrites the whole binding — `promotionStatus`, `promotedAt`,
- * `promotedBy` and `promotionContentHash` — matching the write-side clear in
- * resources/authority-field-guard.ts. A row with none of the four binding
- * fields is returned unchanged.
- *
- * Legacy verdicts without a hash read as unverified; later promotions stamp
- * newly created memories.
- */
 import { createHash } from "node:crypto";
 
 /** The field carrying SHA-256 of the reviewed stored content. Server-only. */

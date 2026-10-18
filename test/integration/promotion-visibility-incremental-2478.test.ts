@@ -352,6 +352,29 @@ describe("visibility backfill is incremental and locked (real Harper)", () => {
 });
 
 describe("promotion stamps are locked, incremental and bound (real Harper)", () => {
+  it.each(["matching", "mismatched", "legacy"])("admin selections check a %s promotion binding", async (binding) => {
+    const id = `pvi-selected-${binding}`;
+    const content = "selected promotion content";
+    await seedMemory({
+      id, content, promotionStatus: "approved", promotedAt: new Date().toISOString(), promotedBy: owner.id,
+      ...(binding === "legacy" ? {} : { promotionContentHash: sha256(binding === "matching" ? content : "old content") }),
+    });
+    const status = binding === "matching" ? "approved" : null;
+    const get = async (path: string) => {
+      const response = await fetch(`${harper.httpURL}${path}`, {
+        headers: { Authorization: authHeader }, signal: AbortSignal.timeout(30_000),
+      });
+      expect(response.status, await response.clone().text()).toBe(200);
+      return response.json();
+    };
+    const path = `/Memory/${encodeURIComponent(id)}`;
+    expect(await get(`${path}.promotionStatus`)).toBe(status);
+    expect(await get(`${path}?select(promotionStatus)`)).toBe(status);
+    expect(await get(`${path}?select(id,promotionStatus)`)).toEqual({ id, promotionStatus: status });
+    expect(await get(`/Memory/?id=${encodeURIComponent(id)}&select(id,promotionStatus)`)).toEqual([{ id, promotionStatus: status }]);
+    expect(await get(`/Memory/?id=${encodeURIComponent(id)}&select(promotionStatus)`)).toEqual([status]);
+  }, 120_000);
+
   it("the automatic stamp holds the id; owner PUT/PATCH are refused, then the bound verdict lands", async () => {
     await seedCandidate("pvi-auto-cand", AUTO_CLAIM, AUTO_TAG);
     arm("promotion-stamp");

@@ -1,1 +1,1 @@
-- Promotion verdicts carry a server-only `promotionContentHash` bound to the stored text; the Memory read paths suppress a verdict whose hash is absent or no longer matches the row's content.
+- Promotion verdicts carry a server-only `promotionContentHash` bound to the stored text.
