@@ -1,4 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
+import { appendFileSync } from "node:fs";
+import { join } from "node:path";
 import { withOwnedTransaction } from "./request-transaction.js";
 
 /** The narrow surface the helper needs of a Harper table: a primary-key read
@@ -116,6 +118,28 @@ export function writeBackIdentity(row: Record<string, any>): Record<string, unkn
 /** Attempts of a write-back before it gives up on a row that keeps changing. */
 export const WRITE_BACK_ATTEMPTS = 3;
 
+/**
+ * Test-only: record attempt starts and settled outcomes when fault injection
+ * is armed and a pause directory is configured.
+ */
+function noteTestAttempt(label: string, id: string, attempt: number, outcome?: "applied" | "skipped" | "refused" | "unconfirmed"): void {
+  if (process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION !== "1") return;
+  const dir = process.env.FLAIR_TEST_PAUSE_DIR;
+  if (!dir) return;
+  try {
+    appendFileSync(join(dir, "attempts.write-back"), `${label}\t${id}\t${attempt}${outcome ? `\t${outcome}` : ""}\n`);
+  } catch {
+    // Append errors are ignored.
+  }
+}
+
+/**
+ * The helper's named failure. `outcome: "conflict"`: a check before the commit
+ * aborted the transaction, so this attempt committed no write. `outcome:
+ * "unconfirmed"`: the transaction's commit resolved, but a fresh committed read
+ * did not show the staged values (or could not be read), so whether the write
+ * landed is unknown.
+ */
 export class WriteBackConflictError extends Error {
   readonly id: string;
   constructor(label: string, id: string, attempts: number, readonly outcome: "conflict" | "unconfirmed" = "conflict") {
@@ -285,9 +309,10 @@ export async function writeBackCommittedRow(
     if (pre) await pre;
   }
   for (let attempt = 1; ; attempt++) {
+    noteTestAttempt(opts.label, id, attempt);
     let decision: WriteBackPlan;
     try {
-      decision = await withOwnedTransaction(opts.ctx, async (c) => {
+      decision = await withOwnedTransaction<WriteBackPlan>(opts.ctx, async (c) => {
         const row = await table.get(id, c);
         if (opts.matches && !opts.matches(row)) return { skip: true };
         const decision = await plan(row);
@@ -310,11 +335,15 @@ export async function writeBackCommittedRow(
         return decision;
       });
     } catch (err) {
+      noteTestAttempt(opts.label, id, attempt, "refused");
       if (!(err instanceof CommittedRowChanged)) throw err;
       if (attempt >= attempts) throw new WriteBackConflictError(opts.label, id, attempts);
       continue;
     }
-    if ("skip" in decision) return decision;
+    if ("skip" in decision) {
+      noteTestAttempt(opts.label, id, attempt, "skipped");
+      return decision;
+    }
     // flair#2653: the transaction's commit is not proof that the write landed.
     // A newer write committing in the window above can make Harper resolve the
     // commit while discarding this write. Re-read the committed store in a
@@ -327,14 +356,17 @@ export async function writeBackCommittedRow(
     try {
       committed = await table.get(id, {});
     } catch (err) {
+      noteTestAttempt(opts.label, id, attempt, "unconfirmed");
       if (!decision.idempotent) throw new WriteBackConflictError(opts.label, id, attempt, "unconfirmed");
       throw err;
     }
     if (!committedShowsWrite(committed, basis, decision)) {
+      noteTestAttempt(opts.label, id, attempt, "unconfirmed");
       if (!decision.idempotent) throw new WriteBackConflictError(opts.label, id, attempt, "unconfirmed");
       if (attempt >= attempts) throw new WriteBackConflictError(opts.label, id, attempts, "unconfirmed");
       continue;
     }
+    noteTestAttempt(opts.label, id, attempt, "applied");
     return decision;
   }
 }

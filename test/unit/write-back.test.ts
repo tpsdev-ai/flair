@@ -15,6 +15,9 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { isDeepStrictEqual } from "node:util";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { WRITE_BACK_ATTEMPTS, WRITE_BACK_IDENTITY_FIELDS, WriteBackConflictError, writeBackCommittedRow, writeBackIdentity } from "../../resources/write-back";
 
 type Row = { id: string } & Record<string, unknown>;
@@ -108,6 +111,63 @@ for (const idempotent of [false, true]) {
 }
 
 describe("writeBackCommittedRow — staged values in the committed row", () => {
+  test("attempt outcomes are logged after transaction settlement", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "flair-write-back-log-"));
+    const path = join(dir, "attempts.write-back");
+    const saved = {
+      FLAIR_ENABLE_TEST_FAULT_INJECTION: process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION,
+      FLAIR_TEST_PAUSE_DIR: process.env.FLAIR_TEST_PAUSE_DIR,
+    };
+    const host = globalThis as { transaction?: unknown };
+    const transaction = host.transaction;
+    const { table } = stagedTable([{ id: "m1", content: "a" }]);
+    let release!: () => void;
+    const settlement = new Promise<void>((resolve) => { release = resolve; });
+    let ready!: () => void;
+    const planned = new Promise<void>((resolve) => { ready = resolve; });
+    try {
+      process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION = "1";
+      process.env.FLAIR_TEST_PAUSE_DIR = dir;
+      host.transaction = async (_ctx: unknown, cb: () => unknown) => {
+        const result = await cb();
+        ready();
+        await settlement;
+        return result;
+      };
+      const pending = writeBackCommittedRow(table, "m1", () => ({ skip: true }), opts("settled"));
+      await planned;
+      expect(readFileSync(path, "utf8")).toBe("settled\tm1\t1\n");
+      release();
+      expect(await pending).toEqual({ skip: true });
+      expect(readFileSync(path, "utf8")).toBe("settled\tm1\t1\nsettled\tm1\t1\tskipped\n");
+      host.transaction = transaction;
+      await writeBackCommittedRow(table, "m1", (row) => ({ write: row, idempotent: true }), opts("applied"));
+      const refused = new Error("refused");
+      await expect(writeBackCommittedRow(table, "m1", () => { throw refused; }, opts("refused"))).rejects.toBe(refused);
+      const log = readFileSync(path, "utf8");
+      expect(log).toEndWith("applied\tm1\t1\napplied\tm1\t1\tapplied\nrefused\tm1\t1\nrefused\tm1\t1\trefused\n");
+      process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION = "0";
+      await writeBackCommittedRow(table, "m1", () => ({ skip: true }), opts("disabled"));
+      expect(readFileSync(path, "utf8")).toBe(log);
+      process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION = "1";
+      delete process.env.FLAIR_TEST_PAUSE_DIR;
+      await writeBackCommittedRow(table, "m1", () => ({ skip: true }), opts("no-directory"));
+      expect(readFileSync(path, "utf8")).toBe(log);
+      const file = join(dir, "regular-file");
+      writeFileSync(file, "");
+      process.env.FLAIR_TEST_PAUSE_DIR = file;
+      expect(await writeBackCommittedRow(table, "m1", () => ({ skip: true }), opts("append-error"))).toEqual({ skip: true });
+    } finally {
+      release();
+      host.transaction = transaction;
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("a clean write lands and the plan's decision is returned", async () => {
     const { table, store, commits } = stagedTable([{ id: "m1", content: "a" }]);
     const outcome = await writeBackCommittedRow(table, "m1", (row: Row) => ({ idempotent: true, write: { ...row, content: "b" } }), opts("clean"));
