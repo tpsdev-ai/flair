@@ -1,22 +1,4 @@
-/**
- * memory-delete-bm25.test.ts — flair#1940 slice 1 and flair#2041.
- *
- * The Memory delete joins its pointer delete in ONE shared transaction. The
- * lexical-index delete hook (`noteMemoryDelete`) used to run INSIDE that
- * transaction callback, BEFORE the pointer delete could abort it — so a failed
- * pointer delete left the Memory row in place but marked it deleted in a
- * WARMED BM25 index. The surviving row then vanished from lexical recall.
- *
- * This drives the REAL `Memory.delete` against a WARMED BM25 index (built from
- * one corpus scan, so `noteMemoryDelete` is applied synchronously) and asserts
- * the surviving row is still returned after a pointer-delete failure. RED if
- * the hook is moved back inside the transaction callback.
- *
- * Request-owned deletes must wait for a commit before the feed can remove them
- * from BM25. Runs in test/unit-isolated (own process) so the BM25 singleton
- * never leaks into the shared unit process. It reuses the shared Memory mock.
- */
-import { describe, it, expect, beforeEach } from "bun:test";
+import { describe, it, expect, beforeEach, spyOn } from "bun:test";
 import {
   harnessState,
   resetHarnessState,
@@ -28,30 +10,11 @@ import {
 process.env.FLAIR_RATE_LIMIT_ENABLED = "false";
 delete (process.env as any).FLAIR_PUBLIC;
 
-// Keep the committed feed open. The request tests publish only from mock
-// commit(), then await consumption before checking the warmed index.
-let emitCommittedDelete: ((id: string) => Promise<void>) | null = null;
-(databasesMock.flair.Memory as any).subscribe = () => {
-  const events: Array<{ id: string; consumed: () => void }> = [];
-  let wake: (() => void) | null = null;
-  emitCommittedDelete = (id) => new Promise<void>((consumed) => {
-    events.push({ id, consumed });
-    wake?.();
-  });
-  return {
-    async *[Symbol.asyncIterator]() {
-      while (true) {
-        if (events.length === 0) await new Promise<void>((resolve) => { wake = resolve; });
-        wake = null;
-        while (events.length > 0) {
-          const event = events.shift()!;
-          yield { type: "delete", id: event.id };
-          event.consumed(); // resumes only after BM25 consumed the event
-        }
-      }
-    },
-  };
-};
+(databasesMock.flair.Memory as any).subscribe = () => ({
+  async *[Symbol.asyncIterator]() {
+    await new Promise<void>(() => {});
+  },
+});
 
 const { Memory, _resetLocalInstanceIdCacheForTests } = await installMemoryHarperMock();
 const bm25 = await import("../../resources/bm25-index-service.ts");
@@ -68,6 +31,7 @@ function seedMemory(overrides: Record<string, any> = {}) {
     agentId: "agent-a",
     content: overrides.content ?? "retrieval corpus index latency ranking",
     contentHash: "h",
+    createdAt: "2026-01-01T00:00:00.000Z",
     visibility: "shared",
     instanceToken: overrides.instanceToken ?? `tok-${Math.random().toString(36).slice(2)}`,
     ...overrides,
@@ -106,46 +70,115 @@ beforeEach(() => {
   resetHarnessState();
   _resetLocalInstanceIdCacheForTests();
   bm25.__resetBm25IndexForTests();
-  emitCommittedDelete = null;
 });
 
-describe("flair#2041 — a request-owned delete reaches BM25 only after commit", () => {
-  it("commit: the row stays indexed until the request commits, then the feed removes it", async () => {
-    const row = seedMemory({ id: "mem-request-commit" });
-    expect(await lexicalIds()).toContain(row.id); // warm the real index
-    const ctx = { request: { tpsAgent: "agent-a" } } as any;
-    const owner = beginRequest(ctx);
-    const originalCommit = ctx.transaction.commit;
-    let delivered: Promise<void> | null = null;
-    ctx.transaction.commit = function () {
-      originalCommit.call(this);
-      delivered = emitCommittedDelete!(row.id); // committed table change feed
-    };
+function gate() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((r) => { resolve = r; });
+  return { promise, resolve };
+}
 
-    expect(await memoryWithContext(ctx).delete(row.id)).toBe(true);
-    expect(memoryStore.has(row.id)).toBe(true); // write is still staged
-    expect(await lexicalIds()).toContain(row.id); // no pre-commit notification
-    expect(delivered).toBeNull();
-
-    owner.commit();
-    await owner.done;
-    await delivered;
-    expect(memoryStore.has(row.id)).toBe(false);
-    expect(await lexicalIds()).not.toContain(row.id);
-  });
-
-  it("abort: the surviving row remains in the warmed lexical index", async () => {
-    const row = seedMemory({ id: "mem-request-abort" });
+describe("flair#2041 — BM25 removal follows the delete's confirmed owned commit", () => {
+  it("keeps the row indexed before owned commit and confirmation, then removes it with the request still open", async () => {
+    const row = seedMemory({ id: "mem-owned-boundaries" });
     expect(await lexicalIds()).toContain(row.id);
     const ctx = { request: { tpsAgent: "agent-a" } } as any;
     const owner = beginRequest(ctx);
+    const requestTransaction = ctx.transaction;
+    const staged = gate();
+    const allowCommit = gate();
+    const confirming = gate();
+    const allowConfirmation = gate();
+    const originalTransaction = (globalThis as any).transaction;
+    (globalThis as any).transaction = async (shared: any, cb: (txn: any) => any) => {
+      const result = await mockTransaction(shared, async (txn) => {
+        const value = await cb(txn);
+        staged.resolve();
+        await allowCommit.promise;
+        return value;
+      });
+      return result;
+    };
+    const originalGet = databasesMock.flair.Memory.get;
+    const confirmationRead = spyOn(databasesMock.flair.Memory, "get").mockImplementation(async (id?: any) => {
+      if (id === row.id && !memoryStore.has(row.id)) {
+        confirming.resolve();
+        await allowConfirmation.promise;
+      }
+      return originalGet(id);
+    });
+    const deletion = memoryWithContext(ctx).delete(row.id);
+    try {
+      await staged.promise;
+      expect(ctx.transaction).not.toBe(requestTransaction);
+      expect(memoryStore.has(row.id)).toBe(true);
+      expect(await lexicalIds()).toContain(row.id);
+      allowCommit.resolve();
+      await confirming.promise;
+      expect(memoryStore.has(row.id)).toBe(false);
+      expect(await lexicalIds()).toContain(row.id);
+      allowConfirmation.resolve();
+      expect(await deletion).toBe(true);
+      expect(ctx.transaction).toBe(requestTransaction);
+      expect(requestTransaction.open).toBe(1);
+      expect(await lexicalIds()).not.toContain(row.id);
+    } finally {
+      allowCommit.resolve();
+      allowConfirmation.resolve();
+      await deletion;
+      confirmationRead.mockRestore();
+      (globalThis as any).transaction = originalTransaction;
+      owner.commit();
+      await owner.done;
+    }
+  });
 
-    expect(await memoryWithContext(ctx).delete(row.id)).toBe(true);
-    expect(await lexicalIds()).toContain(row.id); // still indexed before abort
-    owner.abort(new Error("later request failure"));
-    await expect(owner.done).rejects.toThrow("later request failure");
-    expect(memoryStore.has(row.id)).toBe(true);
-    expect(await lexicalIds()).toContain(row.id); // no feed event on abort
+  it("keeps the row indexed through compensated attempts and a delete_not_applied refusal", async () => {
+    const row = seedMemory({ id: "mem-unapplied", durability: "persistent" });
+    const pointer = {
+      memoryId: row.id, hostSource: JSON.stringify(POINTER), scopeAtWrite: null,
+      authorId: row.agentId, memoryInstanceToken: row.instanceToken,
+      receivedAt: row.createdAt,
+    };
+    pointerStore.set(row.id, pointer);
+    expect(await lexicalIds()).toContain(row.id);
+    const historyTable = databasesMock.flair.MemoryDeletionHistory;
+    let historiesRemoved = 0;
+    (databasesMock.flair as any).MemoryDeletionHistory = {
+      put: historyTable.put,
+      get: async (id: string) => harnessState.deletionStore.get(id) ?? null,
+      delete: async (id: string, ctx: any) => {
+        expect(harnessState.deletionStore.has(id)).toBe(true);
+        ctx.transaction.staged.push(() => {
+          harnessState.deletionStore.delete(id);
+          historiesRemoved++;
+        });
+        return true;
+      },
+    };
+    let attempts = 0;
+    const droppedRemoval = spyOn(databasesMock.flair.Memory, "delete").mockImplementation(async () => {
+      attempts++;
+      expect(memoryStore.get(row.id)).toEqual(row);
+      expect(pointerStore.get(row.id)).toEqual(pointer);
+      expect(harnessState.deletionStore.size).toBe(0);
+      expect(await lexicalIds()).toContain(row.id);
+      return true;
+    });
+    try {
+      const res = await memoryWithContext({ request: { tpsAgent: "agent-a" } }).delete(row.id);
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toBe("delete_not_applied");
+      expect(attempts).toBe(3);
+      expect(historiesRemoved).toBe(3);
+      expect(memoryStore.get(row.id)).toEqual(row);
+      expect(pointerStore.get(row.id)).toEqual(pointer);
+      expect(harnessState.deletionStore.size).toBe(0);
+      expect(await lexicalIds()).toContain(row.id);
+    } finally {
+      droppedRemoval.mockRestore();
+      (databasesMock.flair as any).MemoryDeletionHistory = historyTable;
+    }
   });
 
   it("owned transaction: a context-less delete notifies after its own commit", async () => {
@@ -157,8 +190,8 @@ describe("flair#2041 — a request-owned delete reaches BM25 only after commit",
   });
 });
 
-describe("round 22 — (4) a failed pointer delete leaves the row in a WARMED BM25 index", () => {
-  it("(r22-delete-bm25) the surviving Memory row is still returned after the shared transaction aborts", async () => {
+describe("a failed pointer delete leaves the row in a warmed BM25 index", () => {
+  it("the surviving Memory row is still returned after the owned transaction aborts", async () => {
     const row = seedMemory({ id: "mem-bm25", agentId: "agent-a" });
     pointerStore.set(row.id, {
       memoryId: row.id,
@@ -166,6 +199,7 @@ describe("round 22 — (4) a failed pointer delete leaves the row in a WARMED BM
       scopeAtWrite: null,
       authorId: "agent-a",
       memoryInstanceToken: row.instanceToken,
+      receivedAt: row.createdAt,
     });
 
     // CONTROL: after warming, the index actually returns the row.
@@ -180,7 +214,6 @@ describe("round 22 — (4) a failed pointer delete leaves the row in a WARMED BM
     expect((res as Response)?.status).toBe(500); // assertion: the delete fails on the pointer write
     expect(memoryStore.has("mem-bm25")).toBe(true); // assertion: the Memory row survives (transaction aborted)
 
-    // fix 4 (round 22): the lexical index still returns the SURVIVING row.
     const after = await lexicalIds();
     expect(after).toContain("mem-bm25"); // assertion: the surviving row was NOT marked deleted in BM25
   });

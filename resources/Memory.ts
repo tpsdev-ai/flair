@@ -24,7 +24,6 @@ import {
   buildPointerRow,
   extractPointerInputs,
   isPointerEchoOf,
-  loadPointerRows,
   loadStoredPointer,
   projectRowsThroughPointers,
 } from "./memory-host-source.js";
@@ -402,12 +401,12 @@ async function compensateDroppedRemoval(
       }
     }
     if (pointerBefore) {
-      const current = (await loadPointerRows([memoryId], {})).get(memoryId) ?? null;
+      const current = await loadStoredPointer(memoryId, {});
       if (!current) {
         await withOwnedTransaction(ctx, async (c) => {
           await putPointerRow(pointerBefore, c);
         });
-        const restored = (await loadPointerRows([memoryId], {})).get(memoryId) ?? null;
+        const restored = await loadStoredPointer(memoryId, {});
         if (!restored) {
           return deleteCompensationFailure("the host-pointer row of a row that was not deleted could not be restored");
         }
@@ -3451,7 +3450,7 @@ export class Memory extends (databases as any).flair.Memory {
         }
         // Captured for compensation: this attempt's pointer delete may land even
         // when its row removal is dropped.
-        pointerBefore = (await loadPointerRows([deletedId], c)).get(deletedId) ?? null;
+        pointerBefore = await loadStoredPointer(deletedId, c);
         const d = await (databases as any).flair.Memory.delete(deletedId, c);
         if (d !== true) throw new Error("Memory row delete was not confirmed");
         const pointerDenial = await deletePointerRow(deletedId, c);
