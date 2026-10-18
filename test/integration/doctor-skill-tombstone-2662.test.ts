@@ -198,7 +198,8 @@ async function sendAs(agent: WriterAgent, method: string, path: string, body?: u
       Authorization: `TPS-Ed25519 ${agent.id}:${ts}:${nonce}:${Buffer.from(signature).toString("base64")}`,
     },
     body: body === undefined ? undefined : JSON.stringify(body),
-    signal: AbortSignal.timeout(15_000),
+    // A signed write can pay a one-time embedding-model load on a cold host.
+    signal: AbortSignal.timeout(60_000),
   });
 }
 
