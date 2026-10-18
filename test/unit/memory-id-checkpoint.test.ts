@@ -131,8 +131,59 @@ describe("flair#2218 — paged admin read", () => {
   test("the page walk has a hard upper bound", async () => {
     let counter = 0;
     const opsPost = async (body: Record<string, unknown>) =>
-      body.operation === "describe_table" ? { record_count: 100 } : [{ id: String(counter++).padStart(4, "0"), durability: "standard" }];
+      body.operation === "describe_table" ? { record_count: MAX_MEMORY_PAGES + 1 } : [{ id: String(counter++).padStart(4, "0"), durability: "standard" }];
     await expect(readMemoryRowsPaged(opsPost, { pageSize: 1, maxPages: MAX_MEMORY_PAGES })).rejects.toThrow(/page cap/);
+  }, 5_000);
+});
+
+describe("flair#2670 — a full final page at the cap", () => {
+  test("a full final page is complete when the rows read match the expected count", async () => {
+    // pageSize 2 x maxPages 4 = the hard cap; expected 8 fills every allowed page.
+    const ids = Array.from({ length: 8 }, (_, i) => `mem-${i}`);
+    const pages = [ids.slice(0, 2), ids.slice(2, 4), ids.slice(4, 6), ids.slice(6, 8)]
+      .map((page) => page.map((id) => ({ id, durability: "standard" })));
+    let page = 0;
+    const opsPost = async (body: Record<string, unknown>) =>
+      body.operation === "describe_table" ? { record_count: 8 } : pages[page++] ?? [];
+
+    const out = await readMemoryRowsPaged(opsPost, { pageSize: 2, maxPages: 4 });
+    expect(out.map((r) => r.id)).toEqual(ids);
+  }, 5_000);
+
+  test("one row beyond the cap is UNKNOWN", async () => {
+    // At pageSize 2 the hard MAX_MEMORY_PAGES bound covers 200 rows; 201 needs
+    // ceil(201 / 2) + 1 = 102 pages, so the hard cap (not the count) ends the walk.
+    let counter = 0;
+    const opsPost = async (body: Record<string, unknown>) =>
+      body.operation === "describe_table" ? { record_count: 201 } : [
+        { id: String(counter++).padStart(4, "0"), durability: "standard" },
+        { id: String(counter++).padStart(4, "0"), durability: "standard" },
+      ];
+
+    const result = await verifyCheckpoint({
+      checkpoint: checkpointOf([]),
+      target: NODE_A,
+      pageSize: 2,
+      opsPost,
+    });
+    expect(result.outcome).toBe("unknown");
+    expect(result.reason).toMatch(/page cap/);
+  }, 5_000);
+
+  test("a short read still refuses", async () => {
+    const opsPost = async (body: Record<string, unknown>) =>
+      body.operation === "describe_table" ? { record_count: 5 } : [{ id: "mem-0", durability: "standard" }];
+    await expect(readMemoryRowsPaged(opsPost, { pageSize: 2 })).rejects.toThrow("writes during checkpoint");
+  }, 5_000);
+
+  test("an unknown expected count keeps the count read and refuses without record_count", async () => {
+    let pageReads = 0;
+    const opsPost = async (body: Record<string, unknown>) => {
+      if (body.operation === "sql") pageReads++;
+      return {};
+    };
+    await expect(readMemoryRowsPaged(opsPost, { pageSize: 2 })).rejects.toThrow(/no record_count/);
+    expect(pageReads).toBe(0);
   }, 5_000);
 });
 

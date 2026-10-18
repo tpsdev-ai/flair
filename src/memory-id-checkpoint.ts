@@ -11,7 +11,7 @@ export const CHECKPOINT_FILENAME = "memory-id-checkpoint.json";
 
 /** Rows requested per operations-API page. */
 export const MEMORY_PAGE_SIZE = 10_000;
-/** A full final page at this cap is refused. */
+/** Hard page-walk bound; a read whose derived allowance exceeds it is UNKNOWN. */
 export const MAX_MEMORY_PAGES = 100;
 /** Per-request timeout for the admin read. Every operation is bounded. */
 export const OPS_READ_TIMEOUT_MS = 30_000;
@@ -100,9 +100,13 @@ export interface KeysetReadOptions {
 /**
  * Walk `flair.<table>` by primary key: `SELECT <select> ... [WHERE <filter> AND] id > cursor
  * ORDER BY id LIMIT <pageSize>`, resuming strictly after the last id read. A duplicate id
- * across pages, a full final page at the page cap, or a read that differs in size from
- * `expected` refuses. Duplicates raise InconsistentReadError; size mismatches do too by
- * default, but `mismatch` can return any Error. Errors from `opsPost` propagate unchanged.
+ * across pages, or a read that differs in size from `expected`, refuses. The walk stops once
+ * it has read `expected` rows, so a full final page at the cap is complete when the count
+ * matches. The page allowance is `ceil(expected / pageSize) + 1`, capped by `maxPages`
+ * (default MAX_MEMORY_PAGES): a read that needs more pages than that cap is UNKNOWN, so the
+ * bound never depends on server output. Duplicates raise InconsistentReadError; size
+ * mismatches do too by default, but `mismatch` can return any Error. Errors from `opsPost`
+ * propagate unchanged.
  */
 export async function readTableByIdPaged(opsPost: OpsPost, opts: KeysetReadOptions): Promise<any[]> {
   const pageSize = opts.pageSize ?? MEMORY_PAGE_SIZE;
@@ -110,12 +114,15 @@ export async function readTableByIdPaged(opsPost: OpsPost, opts: KeysetReadOptio
   if (!Number.isSafeInteger(pageSize) || pageSize < 1 || !Number.isSafeInteger(maxPages) || maxPages < 1) {
     throw new Error("invalid keyset paging bounds");
   }
+  // The expected count always fits in this allowance; the caller's hard cap wins so the
+  // number of requests never follows a server-reported value without a bound.
+  const pageAllowance = Math.min(maxPages, Math.ceil(opts.expected / pageSize) + 1);
   const mismatch = opts.mismatch ?? ((expected: number, read: number) => new InconsistentReadError(`${opts.table}: server reports ${expected} rows, integrity read ${read}`));
   const rows: any[] = [];
   let lastId: string | undefined;
   const seen = new Set<string>();
 
-  for (let page = 0; page < maxPages; page++) {
+  for (let page = 0; page < pageAllowance; page++) {
     if (lastId?.includes("\\")) throw new Error(`${opts.table} cursor contains an unsupported backslash`);
     const where: string[] = [];
     if (opts.filter) where.push(`(${opts.filter})`);
@@ -137,8 +144,10 @@ export async function readTableByIdPaged(opsPost: OpsPost, opts: KeysetReadOptio
       rows.push(r);
     }
     if (batch.length < pageSize) break;
-    if (page === maxPages - 1) {
-      throw new Error(`${opts.table} read reached the ${maxPages}-page cap`);
+    if (page === pageAllowance - 1) {
+      // A full final allowed page is complete when the rows read match the count.
+      if (rows.length === opts.expected) break;
+      throw new Error(`${opts.table} read reached the ${pageAllowance}-page cap`);
     }
   }
 

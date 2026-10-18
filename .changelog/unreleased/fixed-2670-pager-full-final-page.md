@@ -1,0 +1,1 @@
+- **A Memory keyset read whose final allowed page is full completes when the rows read match the expected count.** The page allowance is derived from that count and capped by the hard page bound, so a read at the cap no longer reports a false page-cap failure (#2670).
