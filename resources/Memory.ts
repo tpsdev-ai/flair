@@ -1897,7 +1897,14 @@ async function reembedStoredRow(
     );
     if (verdict === "unreadable") return { response: writeOutcomeUnknownResponse() };
     if (verdict !== "shown") {
-      if (attempt === REEMBED_WRITE_ATTEMPTS) return { response: storedRowChangedRefusal("Memory") };
+      // Idempotent: the plan recomputes the same vector for the same text, so a
+      // post-commit mismatch retries from a fresh read. Exhaustion is an
+      // unconfirmed outcome, never a conflict: the commit resolved, so nothing
+      // here proves no write landed.
+      if (attempt === REEMBED_WRITE_ATTEMPTS) {
+        console.warn(`[reembed] ${id}: the committed vector was not confirmed after ${REEMBED_WRITE_ATTEMPTS} attempts; outcome: unconfirmed`);
+        return { response: writeOutcomeUnknownResponse() };
+      }
       continue;
     }
     // flair#2561: the response names the row and its new updatedAt, and

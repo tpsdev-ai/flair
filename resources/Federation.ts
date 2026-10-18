@@ -770,11 +770,13 @@ export class FederationPair extends Resource {
       if (firstPairPause) await firstPairPause;
       let refusal: Response | undefined;
       let stagedFirstPeer: ReturnType<typeof firstPairPeerRow> | undefined;
+      let stagedConsumedAt: string | undefined;
       try {
         refusal = await withPairingTokenClaim(pairingToken, () =>
           withOwnedTransaction(ctx, async (owned) => {
             const claim = await consumePairingToken(pairingToken, instanceId, owned);
             if (claim.kind !== "consumed") return claim;
+            stagedConsumedAt = claim.consumedAt;
             stagedFirstPeer = firstPairPeerRow(instanceId, publicKey, role, endpoint);
             await (databases as any).flair.Peer.put(stagedFirstPeer, owned);
             // The pre-transaction read above returned no Peer row, and this first
@@ -811,10 +813,24 @@ export class FederationPair extends Resource {
       // committed one. A newer write committing after the confirm read can make
       // the commit resolve while discarding this write; answer `paired` only when
       // a fresh committed read is the row this request staged.
-      if (!stagedFirstPeer) return firstPairReadBackUnconfirmedRefusal();
+      //
+      // The pair is NON-IDEMPOTENT: it consumes a one-time token and creates the
+      // Peer row, so a retry cannot re-plan from a fresh read and a post-commit
+      // mismatch is terminal. Its commit is confirmed by commit-specific
+      // evidence — the PairingToken row this attempt consumed at
+      // `stagedConsumedAt` — together with the staged Peer row.
+      if (!stagedFirstPeer || !stagedConsumedAt) return firstPairReadBackUnconfirmedRefusal();
       const peerVerdict = await verifyCommittedFields((databases as any).flair.Peer, instanceId, stagedFirstPeer, stagedFirstPeer);
-      if (peerVerdict === "unreadable") return firstPairReadBackUnconfirmedRefusal();
-      if (peerVerdict !== "shown") return firstPairRowAppearedRefusal();
+      let tokenRow: any;
+      let tokenReadable = true;
+      try {
+        tokenRow = await (databases as any).flair.PairingToken.get(pairingToken, {});
+      } catch {
+        tokenReadable = false;
+      }
+      if (peerVerdict === "unreadable" || !tokenReadable) return firstPairReadBackUnconfirmedRefusal();
+      const tokenShowsConsume = tokenRow != null && tokenRow.consumedBy === instanceId && tokenRow.consumedAt === stagedConsumedAt;
+      if (peerVerdict !== "shown" || !tokenShowsConsume) return firstPairCommitUnconfirmedRefusal();
 
       // Test-only: inert unless the fault-injection env opt-in is set and armed.
       // Pause AFTER the token lock released (and the consume is committed) but
@@ -847,7 +863,7 @@ export class FederationPair extends Resource {
 
 /** One pairing's one-time token claim: the check-then-consume of a token (FederationPair.post runs it under the token's lock). */
 type PairingTokenClaim =
-  | { kind: "consumed" }
+  | { kind: "consumed"; consumedAt: string }
   | { kind: "refused" }
   | { kind: "bootstrap_mismatch" };
 
@@ -927,7 +943,19 @@ function peerRevokedRefusal(): Response {
 function firstPairRowAppearedRefusal(): Response {
   return new Response(JSON.stringify({
     error: "peer_row_appeared",
-    message: "a Peer row for this instance is in committed state although this pairing's earlier read found none; this request's Peer row is not the stored one",
+    outcome: "conflict",
+    message: "a Peer row for this instance is in committed state although this pairing's earlier read found none; this request wrote no Peer row and did not consume the pairing token",
+  }), { status: 409, headers: { "content-type": "application/json" } });
+}
+
+/** 409 for a first-time pair whose committed Peer row or token consume is not
+ *  this attempt's: the staged values are unconfirmed after the commit and the
+ *  non-idempotent pair is not retried. */
+function firstPairCommitUnconfirmedRefusal(): Response {
+  return new Response(JSON.stringify({
+    error: "peer_pair_unconfirmed",
+    outcome: "unconfirmed",
+    message: "the committed Peer row or the pairing token consume is not this pairing attempt's; the paired state is unconfirmed",
   }), { status: 409, headers: { "content-type": "application/json" } });
 }
 
@@ -936,7 +964,8 @@ function firstPairRowAppearedRefusal(): Response {
 function firstPairReadBackUnconfirmedRefusal(): Response {
   return new Response(JSON.stringify({
     error: "peer_read_back_unconfirmed",
-    message: "the committed Peer row could not be read back; this pairing's stored state is unconfirmed",
+    outcome: "unconfirmed",
+    message: "the committed Peer row or pairing token could not be read back; this pairing's stored state is unconfirmed",
   }), { status: 503, headers: { "content-type": "application/json" } });
 }
 
@@ -1084,13 +1113,16 @@ async function consumePairingToken(
     }
   }
 
-  // Consume the token
+  // Consume the token. `consumedAt` is this attempt's commit marker: the
+  // first-pair path confirms the committed PairingToken row by it after the
+  // commit, so a matching Peer value from another attempt cannot pass.
+  const consumedAt = new Date().toISOString();
   await (databases as any).flair.PairingToken.put({
     ...tokenRecord,
     consumedBy: consumerInstanceId,
-    consumedAt: new Date().toISOString(),
+    consumedAt,
   }, ctx);
-  return { kind: "consumed" };
+  return { kind: "consumed", consumedAt };
 }
 
 const RECORD_MERGE_DEADLINE_MS = 5_000;

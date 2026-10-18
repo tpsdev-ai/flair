@@ -60,8 +60,8 @@ const LOCK_NAMESPACE = "flair-agent-key-register";
 const LOCK_ATTEMPTS = 40;
 const LOCK_WAIT_MS = 25;
 
-const jsonRefusal = (status: number, error: string, message: string): Response =>
-  new Response(JSON.stringify({ error, message }), { status, headers: { "content-type": "application/json" } });
+const jsonRefusal = (status: number, error: string, message: string, outcome?: "conflict" | "unconfirmed"): Response =>
+  new Response(JSON.stringify({ error, message, ...(outcome ? { outcome } : {}) }), { status, headers: { "content-type": "application/json" } });
 
 /** Read a header off either header-object shape Harper hands us. */
 function readHeader(reqLike: any, name: string): string {
@@ -199,7 +199,7 @@ export class AgentKeyRegister extends Resource {
       );
     } catch (err) {
       if (err instanceof CommittedRowChanged) {
-        return jsonRefusal(409, REGISTRATION_CONFLICT, "the agent row changed while the key was being registered; nothing was changed");
+        return jsonRefusal(409, REGISTRATION_CONFLICT, "the agent row changed while the key was being registered; nothing was changed", "conflict");
       }
       // Constant format string + a structured data object (unsafe-formatstring).
       console.error("[agent-key-register] the registration transaction failed; nothing was changed", { agentId, err });
@@ -238,12 +238,25 @@ export class AgentKeyRegister extends Resource {
     const readBackPause = txnPausePoint("agent-key-register-read-back");
     if (readBackPause) await readBackPause;
 
+    // The registration is NON-IDEMPOTENT: it transitions a pending key once and
+    // writes a fresh audit row per attempt, so a retry cannot re-plan from the
+    // fresh read and must not run after a post-commit mismatch. Its commit is
+    // confirmed by commit-specific evidence — the AgentKeyRegistration row this
+    // attempt wrote under `registrationId` — together with the staged Agent
+    // fields; value equality alone does not name the attempt that committed.
     const readBackVerdict = await verifyCommittedFields(table, agentId, value.basis, { publicKey: registered, updatedAt: value.updatedAt });
-    if (readBackVerdict === "unreadable") {
-      return jsonRefusal(503, REGISTRATION_UNAVAILABLE, "the committed key could not be read back; the stored state is unconfirmed");
+    let registrationRow: any;
+    let registrationReadable = true;
+    try {
+      registrationRow = await audit.get(value.registrationId, {});
+    } catch {
+      registrationReadable = false;
     }
-    if (readBackVerdict !== "shown") {
-      return jsonRefusal(503, REGISTRATION_UNAVAILABLE, "the committed key could not be read back equal to the registered key; the stored state is unconfirmed");
+    if (readBackVerdict === "unreadable" || !registrationReadable) {
+      return jsonRefusal(503, REGISTRATION_UNAVAILABLE, "the committed key and its registration audit row could not be read back; the stored state is unconfirmed", "unconfirmed");
+    }
+    if (readBackVerdict !== "shown" || registrationRow == null || registrationRow.agentId !== agentId) {
+      return jsonRefusal(503, REGISTRATION_UNAVAILABLE, "the committed key could not be read back as this registration's row and audit; the stored state is unconfirmed", "unconfirmed");
     }
     return new Response(
       JSON.stringify({ agentId, publicKey: registered, updatedAt: value.updatedAt, registrationId: value.registrationId }),

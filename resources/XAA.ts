@@ -264,7 +264,9 @@ async function resolveOrCreatePrincipalLocked(
       // credential would commit in.
       const pause = txnPausePoint("xaa-credential-touch");
       if (pause) await pause;
-      // Update last used
+      // Update last used. This touch is IDEMPOTENT: re-applying the same
+      // lastUsedAt to the same matched credential yields the same committed
+      // row, so a post-commit mismatch may retry (this path refuses the grant).
       const touchedRow = {
         ...cred,
         lastUsedAt: nowISO(),
@@ -302,7 +304,11 @@ async function resolveOrCreatePrincipalLocked(
       // transaction commits (flair#2656).
       const commitPause = txnPausePoint("xaa-credential-touch-commit");
       if (commitPause) await commitPause;
-      touchedCredential = { id: String(cred.id), identity: touchedRow, fields: touchedRow };
+      // Harper assigns these timestamps; they are not staged application fields.
+      const touchedFields = { ...touchedRow };
+      delete touchedFields.__createdtime__;
+      delete touchedFields.__updatedtime__;
+      touchedCredential = { id: String(cred.id), identity: touchedRow, fields: touchedFields };
       return credentialPrincipalId(cred)!;
     }
 
@@ -366,8 +372,11 @@ async function resolveOrCreatePrincipalLocked(
       touchedCredential.identity,
       touchedCredential.fields,
     );
+    if (verdict === "unreadable") {
+      throw new Error("the matched IdP credential could not be read back after the touch (outcome: unconfirmed); the jwt-bearer grant is refused");
+    }
     if (verdict !== "shown") {
-      throw new Error("the matched IdP credential's committed state could not be confirmed as this grant's touched row; the jwt-bearer grant is refused");
+      throw new Error("the matched IdP credential's committed state is not this grant's touched row (outcome: unconfirmed); the jwt-bearer grant is refused");
     }
   }
   return principalId;

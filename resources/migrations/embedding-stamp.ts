@@ -491,6 +491,7 @@ export function createEmbeddingStampMigration(
           // bound; count the row touched only when the committed row shows the
           // staged fields and the text the vector was computed for.
           ok = false;
+          let unconfirmed = false;
           for (let attempt = 1; attempt <= CONTENT_SUFFIX_REGEN_ATTEMPTS; attempt++) {
             const rowNow = attempt === 1 ? existing : await table.get(id);
             if (!rowNow) break;
@@ -500,18 +501,18 @@ export function createEmbeddingStampMigration(
             }
             const staged = await regenContentSuffixRow(table, id, rowNow as Record<string, unknown>, current, contentSuffixRegen);
             if (!staged) break;
-            const verdict = await verifyCommittedFields(
-              table,
-              id,
-              staged.identity,
-              staged.fields,
-              (committed) => isDeepStrictEqual(committed, { ...staged.identity, ...staged.fields }),
-            );
+            // IDEMPOTENT: the same text yields the same vector and hash, so a
+            // post-commit mismatch retries from a fresh read.
+            const verdict = await verifyCommittedFields(table, id, staged.identity, staged.fields);
             if (verdict === "shown") {
               ok = true;
               break;
             }
+            unconfirmed = true;
             if (verdict === "unreadable") break;
+          }
+          if (!ok && unconfirmed) {
+            console.warn(`[embedding-stamp] ${id}: the content-suffix re-embed did not confirm its committed row; outcome: unconfirmed, the row stays pending`);
           }
         } else {
           // Test-only: inert unless the fault-injection env opt-in is set and armed.

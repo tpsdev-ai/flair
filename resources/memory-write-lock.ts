@@ -341,6 +341,7 @@ export function writeOutcomeUnknownResponse(): Response {
   return new Response(
     JSON.stringify({
       error: WRITE_OUTCOME_UNKNOWN_ERROR,
+      outcome: "unconfirmed",
       message: "the write outcome is unknown. Read the affected row before writing again.",
     }),
     { status: 503, headers: { "content-type": "application/json" } },

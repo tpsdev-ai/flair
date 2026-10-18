@@ -1044,7 +1044,8 @@ describe("flair#2656 — a first-time pair confirms the committed row after its 
     expect(competed?.publicKey, "the competing pair committed its own key").toBe(b64url(b.publicKey));
     const body = await response.json() as any;
     expect(response.status, JSON.stringify(body)).toBe(409);
-    expect(body.error).toBe("peer_row_appeared");
+    expect(body.error).toBe("peer_pair_unconfirmed");
+    expect(body.outcome).toBe("unconfirmed");
     expect(body.paired, "this request did not store its row, so it does not report paired").toBeUndefined();
     expect((await readPeer(peer))?.publicKey, "the committed row is the competitor's").toBe(b64url(b.publicKey));
   }, 60_000);
