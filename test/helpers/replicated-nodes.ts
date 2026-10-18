@@ -178,10 +178,22 @@ async function getFreePortOn(host: string): Promise<number> {
  * caller's FLAIR_MCP_* environment, so both can run MCP on with no pinned key.
  * `connect()` performs the cluster handshake. Callers MUST call `stop()`.
  */
+/** Why a replicated pair cannot run on this host, or null when it can: the
+ *  nodes bind random 127.0.0.0/8 addresses, which only Linux routes to loopback
+ *  by default (macOS configures 127.0.0.1 alone). */
+export function replicatedPairUnsupportedReason(): string | null {
+  if (process.platform !== "linux") {
+    return `the two-node harness binds random 127.0.0.0/8 addresses, which only Linux routes to loopback (this host is ${process.platform})`;
+  }
+  return null;
+}
+
 export async function startReplicatedPair(opts: { mutateConfig?: (shipped: string) => string } = {}): Promise<ReplicatedPair> {
   if (!PRO_INSTALL_DIR) {
     throw new Error("FLAIR_TEST_HARPER_PRO_DIR is not set; a replicated pair needs a Harper Pro install root");
   }
+  const unsupported = replicatedPairUnsupportedReason();
+  if (unsupported) throw new Error(`a replicated pair cannot start here: ${unsupported}`);
   const hostA = randomLoopbackHost();
   let hostB = randomLoopbackHost();
   while (hostB === hostA) hostB = randomLoopbackHost();

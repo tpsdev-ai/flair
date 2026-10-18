@@ -29,6 +29,7 @@ import {
   REPO_ROOT,
   assertOwnedInstance,
   makeNodeWorkDir,
+  replicatedPairUnsupportedReason,
   startReplicatedPair,
   waitUntil,
 } from "../helpers/replicated-nodes.js";
@@ -70,6 +71,10 @@ const HTTP_TIMEOUT_MS = 15_000;
 /** Stated bound for one direction: mint start to peer HTTP 200. */
 const CROSS_NODE_BOUND_MS = 60_000;
 
+const PAIR_UNSUPPORTED = replicatedPairUnsupportedReason();
+if (PRO_INSTALL_DIR && PAIR_UNSUPPORTED) {
+  console.log(`[flair#2208] SKIPPING the cross-node convergence test: ${PAIR_UNSUPPORTED}.`);
+}
 if (!PRO_INSTALL_DIR) {
   console.log(
     "[flair#2208] SKIPPING the cross-node convergence test: FLAIR_TEST_HARPER_PRO_DIR is not set. " +
@@ -199,7 +204,7 @@ describe(
       if (stopPair) await stopPair();
     }, HARPER_STOP_BUDGET_MS);
 
-    test.skipIf(!PRO_INSTALL_DIR)(
+    test.skipIf(!PRO_INSTALL_DIR || PAIR_UNSUPPORTED !== null)(
       "tokens minted on each node verify on the other after a measured wait",
       async () => {
         setMcpEnv();
