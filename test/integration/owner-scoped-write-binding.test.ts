@@ -1,8 +1,7 @@
 // owner-scoped-write-binding.test.ts — against a real Harper: a verified
 // non-admin agent's addressed POST, PUT or PATCH to an owner-scoped table whose
 // body names a record other than the addressed one is refused with a named
-// refusal, for each body id shape below, and a matching body id still writes
-// the caller's own record.
+// refusal, for each body id shape below.
 //
 // The tables come from OWNER_FIELDS (resources/record-owner-guard.ts), the
 // owner-scoped write guard's table list. A table added there fails the coverage
