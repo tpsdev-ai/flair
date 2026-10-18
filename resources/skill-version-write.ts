@@ -6,7 +6,7 @@ import { databases } from "harper";
 import { storageResult } from "./memory-write-response.js";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { recordVersion, readHead, skillRefReadable, SKILL_SUBJECT_TYPE, type RecordVersionOutcome } from "./instruction-version-record.js";
+import { recordVersion, readHead, readVersionRecord, readVersionRecordAfter, skillRefReadable, SKILL_SUBJECT_TYPE, type RecordVersionOutcome } from "./instruction-version-record.js";
 import { SKILL_TAG, enforceSkillDurability, skillEmbedText, skillMetadataHasDuplicateKey } from "./skill-write.js";
 import { stripUndeclaredMemoryAttributes } from "./memory-declared-attributes.js";
 import { skillWriteSource } from "./skill-write-policy.js";
@@ -453,6 +453,50 @@ async function compensateUnlandedSkillUpdate(args: {
     (args.journal.pointerChanged ? "; a different host-pointer row was left in place" : ""));
 }
 
+/**
+ * flair#2645 — a successor this request committed, later superseded by a
+ * follow-up update. This path succeeds only when the subject's version
+ * chain still holds this request's appended record and the record that follows
+ * it closes this request's successor. Reads the chain through the
+ * version-record reader; the follow-up row is read through the same committed
+ * Memory surface as the success confirmation.
+ */
+async function confirmSupersededInOrder(args: {
+  subjectId: string;
+  successor: Record<string, any>;
+  appendedVersionId: string | null;
+  memory: SkillCloseTable;
+}): Promise<Response | null> {
+  if (!args.appendedVersionId) return skillUpdateNotConfirmedRefusal();
+  let appended: Record<string, any> | null;
+  let following: Record<string, any> | null;
+  try {
+    appended = await readVersionRecord(SKILL_SUBJECT_TYPE, args.subjectId, args.appendedVersionId, {});
+    following = appended
+      ? await readVersionRecordAfter(SKILL_SUBJECT_TYPE, args.subjectId, appended.version, {})
+      : null;
+  } catch {
+    return skillUpdateUnconfirmedFailure();
+  }
+  if (!appended || appended.kind !== "update" || String(appended.memoryId) !== String(args.successor.id)) {
+    return skillUpdateNotConfirmedRefusal();
+  }
+  if (!following || following.kind !== "update") return skillUpdateNotConfirmedRefusal();
+  if (following.previousVersionHash !== appended.recordHash) return skillUpdateNotConfirmedRefusal();
+  const followingId = typeof following.memoryId === "string" ? following.memoryId : null;
+  if (!followingId) return skillUpdateNotConfirmedRefusal();
+  let followingRow: Record<string, any> | null;
+  try {
+    followingRow = await args.memory.get(followingId, {});
+  } catch {
+    return skillUpdateUnconfirmedFailure();
+  }
+  if (!followingRow || String(followingRow.supersedes ?? "") !== String(args.successor.id)) {
+    return skillUpdateNotConfirmedRefusal();
+  }
+  return null;
+}
+
 /** The table surface a confirmed skill close reads and re-applies through. */
 export interface SkillCloseTable {
   get(id: string, ctx?: any): Promise<any>;
@@ -564,6 +608,8 @@ async function confirmSkillUpdate(args: {
   successor: Record<string, any>;
   grantedClose: GrantedClose | null;
   authorize: (row: Record<string, any>, shared: any) => Promise<Response | null>;
+  /** The version record this request appended (null when it wrote no version). */
+  appendedVersionId: string | null;
 }): Promise<Response | null> {
   const { ctx, subjectId, predecessor, closePatch, successor, grantedClose, authorize } = args;
   const table = (databases as any).flair?.Memory;
@@ -577,8 +623,21 @@ async function confirmSkillUpdate(args: {
     } catch {
       return skillUpdateUnconfirmedFailure();
     }
-    if (!successorCommitted || !sameStoredRow(successorCommitted, successor) || !isOpenLiveRow(successorCommitted)) {
+    if (!successorCommitted || !sameStoredRow(successorCommitted, successor)) {
       return skillUpdateNotConfirmedRefusal();
+    }
+    if (!isOpenLiveRow(successorCommitted)) {
+      if (typeof successorCommitted.validTo !== "string" || successorCommitted.validTo.length === 0) {
+        return skillUpdateNotConfirmedRefusal();
+      }
+      // A closed successor is this request's own write only when the chain
+      // shows it landed and the next version superseded it in order.
+      return confirmSupersededInOrder({
+        subjectId,
+        successor,
+        appendedVersionId: args.appendedVersionId,
+        memory: table,
+      });
     }
     if (typeof table.search !== "function") return skillUpdateUnconfirmedFailure();
     const live: string[] = [];
@@ -722,6 +781,10 @@ async function runSkillVersionWriteInner(args: RunSkillVersionWriteArgs): Promis
   if (!outcome.ok || plan === null) return outcome;
   const writePlan = plan as SkillWritePlan;
   if (writePlan.kind !== "update" || !writePlan.predecessor) return outcome;
+  // Test-only: inert unless armed. Pauses between the committed write and the
+  // confirmation read, so a later update of the same subject can complete.
+  const confirmPause = txnPausePoint("skill-update-confirm");
+  if (confirmPause) await confirmPause;
   const authorize = args.hooks.authorizeClose ?? (async () => skillUpdateUnconfirmedFailure());
   // flair#2645: the owned transaction has committed, but its success is not
   // proof that the queued close was applied. Confirm against the committed
@@ -734,6 +797,7 @@ async function runSkillVersionWriteInner(args: RunSkillVersionWriteArgs): Promis
     successor: writePlan.successor,
     grantedClose: writePlan.grantedClose,
     authorize,
+    appendedVersionId: outcome.version || null,
   });
   if (confirmation) return { ok: false, response: confirmation };
   return outcome;

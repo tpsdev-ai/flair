@@ -230,8 +230,7 @@ function isTableLike(table: unknown): boolean {
  * the cached read snapshot; the read resource uses the same raw handle without a lock.
  */
 export async function readHead(subjectType: string, subjectId: string, shared?: any, soulIdentity?: { agentId: string; key: string }): Promise<Record<string, any> | null> {
-  const table = (databases as any).flair?.InstructionVersion;
-  if (!isTableLike(table)) throw new Error("flair: the InstructionVersion table is unavailable");
+  const table = instructionVersionTable();
   for await (const row of table.search({
     conditions: [
       { attribute: "subjectType", comparator: "equals", value: subjectType },
@@ -245,6 +244,51 @@ export async function readHead(subjectType: string, subjectId: string, shared?: 
     limit: 1,
   }, shared)) {
     return row as Record<string, any>;
+  }
+  return null;
+}
+
+function instructionVersionTable(): any {
+  const table = (databases as any).flair?.InstructionVersion;
+  if (!isTableLike(table)) throw new Error("flair: the InstructionVersion table is unavailable");
+  return table;
+}
+
+/** One version record of a subject's chain, by its addressable id, or null. */
+export async function readVersionRecord(
+  subjectType: string,
+  subjectId: string,
+  recordId: string,
+  shared?: any,
+): Promise<Record<string, any> | null> {
+  const table = instructionVersionTable();
+  for await (const row of table.search({
+    conditions: [
+      { attribute: "subjectType", comparator: "equals", value: subjectType },
+      { attribute: "subjectId", comparator: "equals", value: subjectId },
+    ],
+  }, shared)) {
+    if (String(row.id) === recordId) return row as Record<string, any>;
+  }
+  return null;
+}
+
+/** The version record that immediately follows `version` in a subject's chain, or null. */
+export async function readVersionRecordAfter(
+  subjectType: string,
+  subjectId: string,
+  version: bigint | number | string,
+  shared?: any,
+): Promise<Record<string, any> | null> {
+  const table = instructionVersionTable();
+  const next = BigInt(version) + 1n;
+  for await (const row of table.search({
+    conditions: [
+      { attribute: "subjectType", comparator: "equals", value: subjectType },
+      { attribute: "subjectId", comparator: "equals", value: subjectId },
+    ],
+  }, shared)) {
+    if (BigInt(row.version as any) === next) return row as Record<string, any>;
   }
   return null;
 }

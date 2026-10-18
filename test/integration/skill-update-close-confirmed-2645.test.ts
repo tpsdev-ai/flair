@@ -228,6 +228,46 @@ describe("flair#2645 — a skill UPDATE confirms the predecessor close before su
     expect(await liveHeads(predecessorId), "the lineage does not have exactly one live head").toEqual([successorId]);
   }, 120_000);
 
+  it("a completed later update of the same skill confirms the earlier update as superseded in order", async () => {
+    const id = nextId("superseded-in-order");
+    const successorId = nextId("superseded-first");
+    const laterId = nextId("superseded-second");
+    const created = await call(A, "PUT", memPath(id), skillBody(id, "v1"));
+    expect(created.status, await created.text()).toBeLessThan(300);
+
+    // Request 1 is paused after its commit and before its confirmation. A
+    // second update of the same skill runs to completion, closing request 1's
+    // successor and appending the next version.
+    let laterStatus = 0;
+    let laterText = "";
+    const { response, paused, released } = await withPaused(
+      "skill-update-confirm",
+      () => call(A, "PUT", memPath(successorId), skillBody(successorId, "v2", { supersedes: id })),
+      async () => {
+        const later = await call(A, "PUT", memPath(laterId), skillBody(laterId, "v3", { supersedes: successorId }));
+        laterStatus = later.status;
+        laterText = await later.text();
+      },
+    );
+    expect(paused, "the skill update did not pause before confirmation").toBe(true);
+    expect(released).toBe("go");
+    expect(laterStatus, laterText.slice(0, 300)).toBe(200);
+
+    const text = await response.text();
+    expect(response.status, text.slice(0, 300)).toBe(200);
+
+    const versions = await versionsOf(id);
+    expect(versions.map((v) => [Number(v.version), v.kind]), JSON.stringify(versions)).toEqual([[1, "create"], [2, "update"], [3, "update"]]);
+    expect(versions[1].memoryId, "this request's version does not name its successor").toBe(successorId);
+    expect(versions[2].memoryId, "the follow-up version does not name its successor").toBe(laterId);
+    expect(versions[2].previousVersionHash, "the follow-up version does not follow this request's version").toBe(versions[1].recordHash);
+
+    const first = await memoryRow(successorId);
+    expect(typeof first?.validTo, "the first successor is not closed").toBe("string");
+    expect((await memoryRow(laterId))?.supersedes, "the follow-up row does not supersede the first successor").toBe(successorId);
+    expect(await liveHeads(id), "the lineage does not have exactly one live head").toEqual([laterId]);
+  }, 120_000);
+
   it("a same-id replacement while the update is paused is refused and the successor rolled back", async () => {
     const predecessorId = nextId("replaced");
     const created = await call(A, "PUT", memPath(predecessorId), skillBody(predecessorId, "v1"));

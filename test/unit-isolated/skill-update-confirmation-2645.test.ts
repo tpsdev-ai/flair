@@ -34,6 +34,7 @@ let closeSuccessorOnRead: "committed" | "transaction" | undefined;
 let failSuccessorConfirmation = false;
 let failRetryWrite = false;
 let failVersionConfirmation = false;
+let supersedeOnSuccessorConfirmation = false;
 let activeTransaction: any;
 const primaryStore = {
   tryLock: () => { if (locked) return false; locked = true; return true; },
@@ -66,6 +67,25 @@ const memoryTable = {
   primaryStore: { getEntry(id: string) { return memories.has(id) ? { value: memories.get(id), version: id === "successor" ? successorVersion : 1 } : null; } },
   async get(id: string, ctx?: any) {
     const rows = ctx?.transaction?.memories ?? memories;
+    if (id === "successor" && !ctx?.transaction && supersedeOnSuccessorConfirmation) {
+      // A later update completed after this request's commit: it closed this
+      // request's successor and appended the next version in the chain.
+      const appended = versions.get("skill:subject:2");
+      if (appended) {
+        const following: Row = {
+          id: "skill:subject:3", subjectType: "skill", subjectId: "subject", agentId: "writer",
+          version: 3n, kind: "update", rowId: "later", memoryId: "later",
+          previousVersionHash: appended.recordHash, recordHash: "hash-3",
+          createdAt: "2020-01-01T00:00:01.000Z", guarded: false,
+        };
+        versions.set(following.id, following);
+        memories.set("later", { id: "later", agentId: "writer", content: "v3", tags: ["skill"],
+          visibility: "shared", durability: "persistent", skillSubjectId: "subject",
+          supersedes: "successor", createdAt: "2020-01-01T00:00:01.000Z" });
+        memories.set(id, { ...memories.get(id), validTo: "later-close" });
+        return { ...memories.get(id) };
+      }
+    }
     if (id === "successor" && confirmationRead) {
       expect(locked).toBe(true);
       if (closeSuccessorOnRead === (ctx?.transaction ? "transaction" : "committed")) {
@@ -141,6 +161,7 @@ beforeEach(() => {
   dropCloses = false; revokeOnRetry = false; closeWrites = 0; confirmationRead = false; failDeleteCommit = false;
   activeTransaction = undefined; losePredecessor = false; closeSuccessorOnRead = undefined;
   failSuccessorConfirmation = false; failRetryWrite = false; failVersionConfirmation = false;
+  supersedeOnSuccessorConfirmation = false;
   (globalThis as any).transaction = async (ctx: any, cb: (txn: any) => Promise<any>) => {
     const writes: any[] = [];
     const txn: any = { open: 1, saveCommits: false, versions: new Map(versions), memories: new Map(memories), pointers: new Map(pointers), addWrite: (write: any) => { const prior = [...writes].reverse().find((value) => value.store === write.store && value.key === write.key); if (prior) write.priorWrite = prior; writes.push(write); if (currentWriteJournal()) stagedOperations.push(write); write.commit(1, write.entry === undefined ? write.store.getEntry(write.key) : write.entry); return write; } };
@@ -299,6 +320,26 @@ async function unlandedUpdate() {
     },
   });
 }
+
+test("a successor closed by the next update in the chain confirms success", async () => {
+  seedVersion();
+  supersedeOnSuccessorConfirmation = true;
+  const predecessor = { id: "predecessor", agentId: "writer", content: "v1", tags: ["skill"], visibility: "shared", durability: "persistent", skillSubjectId: "subject", createdAt: "2020-01-01T00:00:00.000Z" };
+  const successor = { ...predecessor, id: "successor", content: "v2", instanceToken: "successor-token" };
+  memories.set(predecessor.id, predecessor);
+  const result = await runSkillVersionWrite({
+    ctx: { request: { tpsAgent: "writer", tpsAgentIsAdmin: false, headers: new Headers({ authorization: "TPS-Ed25519 a1:1:n:s" }) } },
+    subjectId: "subject", agentId: "writer", head: async () => predecessor,
+    plan: () => ({ kind: "update", predecessor, successor, closePatch: { validTo: "closed" }, value: "v2", visibility: "shared", grantedClose: null }),
+    hooks: { ...defaultSkillHooks, authorizeClose: async () => null },
+  });
+  expect(result.ok, result.ok ? "" : await result.response.clone().text()).toBe(true);
+  if (!result.ok) throw new Error("expected success");
+  expect(result.version).toBe("skill:subject:2");
+  expect(memories.get("successor")?.validTo).toBe("later-close");
+  expect(memories.get("later")?.supersedes).toBe("successor");
+  expect([...versions.values()].map((row) => Number(row.version))).toEqual([1, 2, 3]);
+});
 
 for (const read of ["committed", "transaction"] as const) {
   test(`compensation preserves a successor closed before its ${read} identity check`, async () => {
