@@ -77,15 +77,14 @@ function toMs(value: unknown): number | null {
 
 /**
  * The Presence row's own cursor: the later of `lastHeartbeatAt` and
- * `activityUpdatedAt`, as unix ms. Null when neither is a finite timestamp — a
+ * `activityUpdatedAt`, as unix ms. Null for an unusable Date cursor — a
  * row with no cursor cannot be placed against a watermark and is never sent.
  */
 export function presenceCursorMs(row: Record<string, any>): number | null {
   const heartbeat = toMs(row?.lastHeartbeatAt);
   const activity = toMs(row?.activityUpdatedAt);
-  if (heartbeat == null) return activity;
-  if (activity == null) return heartbeat;
-  return Math.max(heartbeat, activity);
+  const cursor = heartbeat == null ? activity : activity == null ? heartbeat : Math.max(heartbeat, activity);
+  return cursor != null && Number.isFinite(new Date(cursor).getTime()) ? cursor : null;
 }
 
 /** The stored per-table watermark (an ISO string) as unix ms, or 0 when it is
@@ -125,9 +124,8 @@ export function selectPresenceRowsToSend(
  * so the record's `id` and `data.id` are the row's `agentId` (the shared batch
  * key check wants `data.id === record.id`) and `data.agentId` carries the same
  * value. `updatedAt` is the row's own cursor: the receiver's future-timestamp
- * bound (classifyRecord's `future_timestamp`) is applied to it. classifyRecord's
- * staleness check is `no_op_same_hash`, which needs a contentHash, so it never
- * fires for this table. Null for an unusable key or timestamp.
+ * bound (classifyRecord's `future_timestamp`) is applied to it.
+ * Null for an unusable key or timestamp.
  */
 export function presenceWireRecord(
   row: Record<string, any>,

@@ -8,6 +8,6 @@
   a per-table watermark, clamped to scan time, less a 30 s overlap (floor
   zero). The watermark is kept on the local `Peer` row (`presenceLastSyncAt`);
   after confirmed contact, the sender attempts to write a candidate clamped to
-  scan time and capped below retryable or indeterminate rows. A failed write
-  leaves the stored value intact. A row dated more than 5 minutes ahead is not
-  sent. With the flag off the sender sends no Presence records.
+  scan time and capped below retryable or indeterminate rows.
+  A row dated more than 5 minutes ahead is not sent. With the flag off the
+  sender sends no Presence records.

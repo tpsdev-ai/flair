@@ -103,6 +103,17 @@ describe("presence-send — selection", () => {
 });
 
 describe("presence-send — wire record", () => {
+  it("skips cursors outside the Date range", () => {
+    for (const stamp of [10n ** 16n, Number.MAX_VALUE]) {
+      for (const field of ["lastHeartbeatAt", "activityUpdatedAt"]) {
+        const row = { agentId: "agent-a", originatorInstanceId: ME, lastHeartbeatAt: 1000, [field]: stamp };
+        expect(presenceWireRecord(row, ME)).toBeNull();
+        expect(presenceCursorMs(row)).toBeNull();
+        expect(selectPresenceRowsToSend([row], ME, 0)).toEqual([]);
+      }
+    }
+  });
+
   for (const stamp of ["1234", 1234n]) {
     it(`normalizes ${typeof stamp} timestamps for the receiver validator`, () => {
       const record = presenceWireRecord({

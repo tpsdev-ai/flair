@@ -488,8 +488,7 @@ export async function persistLocalPeerLastSyncAt(args: {
  * cannot revert `publicKey`/`status` or re-create a deleted row, and HTTP 200 is
  * not success — the id must appear in `update_hashes` or the update is a refusal.
  * Callers invoke it only after contact — a confirmed batch, or a successful
- * liveness ping on a no-change pass — so a failed batch leaves the watermark
- * frozen and the rows re-offer.
+ * liveness ping on a no-change pass.
  */
 export async function persistLocalPeerPresenceSyncAt(args: {
   opsEndpoint: string;
@@ -519,9 +518,7 @@ export async function persistLocalPeerPresenceSyncAt(args: {
     return {
       ok: false,
       status: updateRes.status,
-      error:
-        `Peer row ${args.peerId} was not matched by the presence-cursor update (deleted or missing) — ` +
-        `the presence watermark stays frozen; re-pair the hub. Not inserting a Peer row.`,
+      error: `Presence watermark update for Peer ${args.peerId} was not confirmed.`,
     };
   }
   return { ok: true, status: updateRes.status };
@@ -750,9 +747,7 @@ export function parseSyncBatchRefused(body: unknown): Array<{ table: string; id:
   return out;
 }
 
-/** One record the receiver left indeterminate in a FederationSync batch: it ran
- *  out of its merge deadline, so the merge may or may not have committed. Only
- *  well-formed entries are kept. */
+/** Keep well-formed indeterminate entries from a FederationSync batch. */
 export function parseSyncBatchIndeterminate(body: unknown): Array<{ table: string; id: string }> {
   if (body === null || typeof body !== "object" || Array.isArray(body)) return [];
   const indeterminate = (body as { indeterminate?: unknown }).indeterminate;
@@ -1154,7 +1149,7 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
       }
     };
 
-    // Attempt the watermark update after contact; a failed write leaves it intact.
+    // Attempt the watermark update after contact.
     const persistPresence = async (presenceMs: number) => {
       try {
         const advanced = await persistLocalPeerPresenceSyncAt({

@@ -208,6 +208,31 @@ describe("federation sync push — Presence sender (flair#2578 slice 2)", () => 
     expect(presenceUpdates()[0].body.records[0].presenceLastSyncAt).toBe(new Date(heartbeat).toISOString());
   });
 
+  for (const stamp of [10n ** 16n, Number.MAX_VALUE]) {
+    it(`flag ON: an out-of-range ${typeof stamp} cursor is skipped without advancing the watermark`, async () => {
+      process.env[PRESENCE_SEND_FLAG_ENV] = "1";
+      installMock({ presenceLastSyncAt: SINCE });
+      const heartbeat = Date.now() - 1000;
+      const invalidRows = [
+        homeRow({ agentId: "bad-heartbeat", lastHeartbeatAt: stamp }),
+        homeRow({ agentId: "bad-activity", activityUpdatedAt: stamp }),
+      ];
+      presenceRows = [invalidRows[0], homeRow({ lastHeartbeatAt: heartbeat }), invalidRows[1]];
+      const result = await run();
+      expect(result.error).toBeUndefined();
+      expect(presenceRecords().map((record) => record.id)).toEqual(["agent-a"]);
+      const saved = presenceUpdates()[0].body.records[0].presenceLastSyncAt;
+      expect(saved).toBe(new Date(heartbeat).toISOString());
+
+      installMock({ presenceLastSyncAt: saved });
+      presenceRows = invalidRows;
+      const next = await run();
+      expect(next.error).toBeUndefined();
+      expect(presenceRecords()).toEqual([]);
+      expect(presenceUpdates()).toEqual([]);
+    });
+  }
+
   it("flag ON: a non-home row is never pushed", async () => {
     process.env[PRESENCE_SEND_FLAG_ENV] = "1";
     installMock();
