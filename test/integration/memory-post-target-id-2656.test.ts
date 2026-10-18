@@ -152,13 +152,14 @@ async function observe(response: Response, id: string, ownContent: string): Prom
   };
 }
 
-/** A refusal that names the lost write, with the competitor's row still stored. */
-function refusedTruthfully(o: Observation): boolean {
-  return o.status === 409 && o.error === "stored_row_changed" && o.ownWriteStored === false;
+/** A refusal that names the lost write, with the competitor's row still stored.
+ *  A skill write refuses with its own target-changed code (flair#2263). */
+function refusedTruthfully(o: Observation, error = "stored_row_changed"): boolean {
+  return o.status === 409 && o.error === error && o.ownWriteStored === false;
 }
 
-async function expectAllRefused(observations: Observation[], label: string): Promise<void> {
-  const bad = observations.filter((o) => !refusedTruthfully(o));
+async function expectAllRefused(observations: Observation[], label: string, error = "stored_row_changed"): Promise<void> {
+  const bad = observations.filter((o) => !refusedTruthfully(o, error));
   expect(bad, `${label}: every paused POST must refuse by name with its write absent; got ${JSON.stringify(bad)}`).toEqual([]);
 }
 
@@ -277,7 +278,7 @@ describe("flair#2656 — a Memory POST's caller-supplied target id", () => {
     }
     console.log("POST skill observations", JSON.stringify(observations));
     expect(observations.every((o) => o.status !== 400)).toBe(true);
-    await expectAllRefused(observations, "skill POST");
+    await expectAllRefused(observations, "skill POST", "skill_target_changed");
   }, 600_000);
 
   it("a POST that no competitor touches stores its own row under the caller's id", async () => {

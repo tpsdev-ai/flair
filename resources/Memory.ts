@@ -1484,7 +1484,8 @@ async function writeSkillCreateOrUpdate(
         if (joinsCaller) {
           await pausePostVerification(true);
           const committed = await (databases as any).flair.Memory.get(successorId, {});
-          if (!sameStoredRow(committed, successorBasis)) return storedRowChangedRefusal("Memory");
+          // A skill write keeps its own target-changed refusal (flair#2263).
+          if (!sameStoredRow(committed, successorBasis)) return skillWriteConflict("skill_target_changed");
         }
         return null;
       },
@@ -2463,7 +2464,7 @@ export class Memory extends (databases as any).flair.Memory {
           [...POSTCOMMIT_VERIFY_FIELDS, "summary", "trigger", "metadata", "tags"],
         );
         if (skillVerified.unknown || skillVerified.mismatch) {
-          return skillVerified.unknown ? writeOutcomeUnknownFor(skillResult.id) : storedRowChangedRefusal("Memory");
+          return skillVerified.unknown ? writeOutcomeUnknownFor(skillResult.id) : skillWriteConflict("skill_target_changed");
         }
       }
       await markDerivedSourcesReflected(content);
