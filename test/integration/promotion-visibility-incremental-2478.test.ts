@@ -72,6 +72,13 @@ let installDir: string;
 let home: string;
 let pauseDir: string;
 let authHeader: string;
+const tempDirs: string[] = [];
+
+function tempDir(prefix: string): string {
+  const path = mkdtempSync(join(tmpdir(), prefix));
+  tempDirs.push(path);
+  return path;
+}
 
 async function opsCall(body: Record<string, unknown>): Promise<any> {
   const res = await fetch(harper.opsURL, {
@@ -235,7 +242,8 @@ function assertOwnInstance(): void {
 }
 
 async function bootFirst(): Promise<void> {
-  harper = await startHarper({ homeDir: home });
+  installDir = tempDir("flair-test-");
+  harper = await startHarper({ installDir, homeDir: home });
   authHeader = "Basic " + Buffer.from(`${harper.admin.username}:${harper.admin.password}`).toString("base64");
   assertOwnInstance();
   expect(await waitForCycleDone(60_000), "the first boot migration cycle did not finish").toBe(true);
@@ -278,15 +286,14 @@ async function bootWithFaultInjection(point: string): Promise<void> {
 
 beforeAll(async () => {
   if (process.env.HARPER_HTTP_URL) throw new Error("requires an isolated Harper; unset HARPER_HTTP_URL");
-  home = mkdtempSync(join(tmpdir(), "flair-2478s2-home-"));
-  pauseDir = mkdtempSync(join(tmpdir(), "flair-2478s2-pause-"));
+  home = tempDir("flair-2478s2-home-");
+  pauseDir = tempDir("flair-2478s2-pause-");
   await bootFirst();
 }, 240_000);
 
 afterAll(async () => {
-  if (harper) await stopHarper(harper).catch(() => {});
-  if (home) rmSync(home, { recursive: true, force: true });
-  if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
+  if (harper) await stopHarper(harper);
+  for (const path of tempDirs) rmSync(path, { recursive: true, force: true });
 }, HARPER_STOP_BUDGET_MS);
 
 describe("visibility backfill is incremental and locked (real Harper)", () => {
@@ -319,9 +326,10 @@ describe("visibility backfill is incremental and locked (real Harper)", () => {
   it("a PATCH is refused while the backfill holds its id after committing, then lands", async () => {
     // A migration this data dir already completed does not run again, so this
     // phase needs its own fresh install with one eligible row.
-    await stopHarper(harper, { keepInstallDir: true }).catch(() => {});
-    home = mkdtempSync(join(tmpdir(), "flair-2478s2-committed-home-"));
-    harper = await startHarper({ homeDir: home });
+    await stopHarper(harper, { keepInstallDir: true });
+    home = tempDir("flair-2478s2-committed-home-");
+    installDir = tempDir("flair-test-");
+    harper = await startHarper({ installDir, homeDir: home });
     authHeader = "Basic " + Buffer.from(`${harper.admin.username}:${harper.admin.password}`).toString("base64");
     expect(await waitForCycleDone(60_000), "the seed boot migration cycle did not finish").toBe(true);
     await opsCall({
