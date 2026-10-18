@@ -204,17 +204,17 @@ afterAll(async () => {
 describe("flair doctor names stored reserved-event impostors", () => {
   it("passes on a clean store, names a planted impostor, and passes again after it is removed", async () => {
     const clean = await runDoctor();
-    expect(clean.stdout).toContain("No stored OrgEvent carries a reserved kind or id without a matching InstructionVersion.");
+    expect(clean.stdout).toContain("No stored OrgEvent with a reserved kind or id fails the instruction-event reader rule.");
 
     const impostor = `${PREFIX}not-a-version-${randomUUID()}`;
     await plantEvent(impostor);
     const reported = await runDoctor();
-    expect(reported.stdout).toContain(impostor);
-    expect(reported.stdout).not.toContain("No stored OrgEvent carries a reserved kind or id without a matching InstructionVersion.");
+    expect(reported.stdout).toContain(`${impostor} (no matching version)`);
+    expect(reported.stdout).not.toContain("No stored OrgEvent with a reserved kind or id fails the instruction-event reader rule.");
 
     await deleteEvent(impostor);
     const cleanAgain = await runDoctor();
-    expect(cleanAgain.stdout).toContain("No stored OrgEvent carries a reserved kind or id without a matching InstructionVersion.");
+    expect(cleanAgain.stdout).toContain("No stored OrgEvent with a reserved kind or id fails the instruction-event reader rule.");
   }, 90_000);
 
   it("lists every impostor id when more than ten are stored", async () => {
@@ -226,6 +226,17 @@ describe("flair doctor names stored reserved-event impostors", () => {
     for (const id of ids) await deleteEvent(id);
   }, 120_000);
 
+  it("reports missing prefix for a kind-only event naming an existing version", async () => {
+    const versionId = `version-${randomUUID()}`;
+    const id = `kind-only-${randomUUID()}`;
+    await plantVersion(versionId, "soul");
+    await plantEvent(id, { kind: "soul.changed", refId: versionId });
+    const reported = await runDoctor();
+    expect(reported.stdout).toContain(`${id} (missing prefix)`);
+    await deleteEvent(id);
+    await adminOp({ operation: "delete", table: "InstructionVersion", hash_values: [versionId] });
+  }, 90_000);
+
   it("passes a real matching InstructionVersion and names a mismatched one", async () => {
     const versionId = `version-${randomUUID()}`;
     const matched = `${PREFIX}${versionId}`;
@@ -233,7 +244,7 @@ describe("flair doctor names stored reserved-event impostors", () => {
     await plantEvent(matched, { kind: "soul.changed", refId: versionId });
     const passed = await runDoctor();
     expect(passed.stdout).not.toContain(matched);
-    expect(passed.stdout).toContain("No stored OrgEvent carries a reserved kind or id without a matching InstructionVersion.");
+    expect(passed.stdout).toContain("No stored OrgEvent with a reserved kind or id fails the instruction-event reader rule.");
 
     // A subject-type mismatch fails the reader rule.
     await adminOp({
@@ -241,7 +252,7 @@ describe("flair doctor names stored reserved-event impostors", () => {
       records: [{ id: versionId, subjectType: "skill" }],
     });
     const mismatched = await runDoctor();
-    expect(mismatched.stdout).toContain(matched);
+    expect(mismatched.stdout).toContain(`${matched} (kind mismatch)`);
 
     await deleteEvent(matched);
     await adminOp({ operation: "delete", table: "InstructionVersion", hash_values: [versionId] });
@@ -402,10 +413,12 @@ describe("a collection DELETE selecting a reserved row is refused before it dele
     await plantEvent(reservedId);
     const before = await countEvents();
 
-    const refused = await basicSend("DELETE", "/OrgEvent/?select(summary)");
-    expectReserved(refused.status, await refused.text());
-    expect(await countEvents()).toBe(before);
-    for (const id of [...ordinaryIds, reservedId]) expect(await readEvent(id)).not.toBeNull();
+    for (const projection of ["select(summary)", "property(summary)"]) {
+      const refused = await basicSend("DELETE", `/OrgEvent/?${projection}`);
+      expectReserved(refused.status, await refused.text());
+      expect(await countEvents()).toBe(before);
+      for (const id of [...ordinaryIds, reservedId]) expect(await readEvent(id)).not.toBeNull();
+    }
 
     for (const id of ordinaryIds) await deleteEvent(id);
     await deleteEvent(reservedId);
@@ -473,6 +486,7 @@ describe("an instruction event survives OrgEventMaintenance", () => {
     const maintText = await res.text();
     expect(res.status, `maintenance ${res.status}: ${maintText.slice(0, 300)}`).toBeLessThan(300);
 
+    expect(JSON.parse(maintText)).toEqual({ deleted: 1, failed: 0 });
     expect(await readEvent(reserved)).not.toBeNull();
     expect(await readEvent(expiredReserved)).not.toBeNull();
     expect(await readEvent(expired)).toBeNull();

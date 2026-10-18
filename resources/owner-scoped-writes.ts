@@ -21,11 +21,7 @@
  *
  * ─── No static auth import; agent-auth.js loads on the first guarded write ──
  * Harper links a component's resource modules concurrently while it starts.
- * This module's static imports are `harper` and two modules with no
- * authentication-module dependency (record-owner-guard.ts, which also supplies
- * the `owner_check_unavailable` refusal, and owner-scoped-write-policy.ts), so
- * loading it adds no link of the authentication module graph to that startup
- * phase; a static import of agent-auth.js from here stopped Harper from
+ * A static import of agent-auth.js from here stopped Harper from
  * starting under Bun (test/integration/init-persisted-admin-harper5.test.ts).
  *
  * agent-auth.js is imported once, when the first guarded write needs its

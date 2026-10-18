@@ -38,6 +38,7 @@ let workspacePut: any = null;
 let orgEventPut: any = null;
 let orgEventPatch: { id: unknown; content: any } | null = null;
 const READ_FAILS_MARKER = "read-fails";
+const DELETE_FAILS_MARKER = "delete-fails";
 
 // In-memory OrgEvent store, keyed by id — backs OrgEvent.post()'s ownership read
 // (`databases.flair.OrgEvent.get`) and static put().
@@ -127,7 +128,11 @@ class BaseOrgEvent {
     if (typeof id === "string" && id.includes(READ_FAILS_MARKER)) return Promise.reject(new Error("injected stored-row read failure"));
     return orgEventStore.get(id) ?? null;
   }
-  static delete(id: any) { orgEventStore.delete(id); return Promise.resolve({ ok: true }); }
+  static delete(id: any) {
+    if (typeof id === "string" && id.includes(DELETE_FAILS_MARKER)) return Promise.reject(new Error("injected delete failure"));
+    orgEventStore.delete(id);
+    return Promise.resolve({ ok: true });
+  }
 }
 
 const databasesMock = {
@@ -137,9 +142,7 @@ const databasesMock = {
       // OrgEvent.post() calls `databases.flair.OrgEvent.put(content)` directly
       // (Harper-5 upsert), so the static put must capture AND persist too.
       put: async (content: any) => { orgEventPut = content; orgEventStore.set(content.id, { ...content }); return { ok: true, ...content }; },
-      // OrgEventMaintenance.post() iterates the table; an empty store is enough
-      // for the authorization test (the refusal runs before this call).
-      search: async function* () {},
+      search: async function* () { yield* orgEventStore.values(); },
     }),
     Agent: { get: async () => null, search: async () => [] },
   },
@@ -689,5 +692,21 @@ describe("OrgEventMaintenance.post() authorizes from getContext()", () => {
     // context, so this call fails unless post() reads getContext().
     const res: any = await r.post({}, {});
     expect(res?.status).toBe(403);
+  });
+});
+
+describe("OrgEventMaintenance deletion counts", () => {
+  it("counts only successful deletions and reports an injected failure separately", async () => {
+    for (const id of [DELETE_FAILS_MARKER, "deleted-after-failure"]) {
+      orgEventStore.set(id, {
+        id, authorId: "agent-a", kind: "status", summary: "expired",
+        createdAt: "2000-01-01T00:00:00.000Z", expiresAt: "2001-01-01T00:00:00.000Z",
+      });
+    }
+    const r: any = new (OrgEventMaintenance as any)();
+    r.getContext = () => ({ request: agentCtx("agent-admin", true) });
+    expect(await r.post({})).toEqual({ deleted: 1, failed: 1 });
+    expect(orgEventStore.has(DELETE_FAILS_MARKER)).toBe(true);
+    expect(orgEventStore.has("deleted-after-failure")).toBe(false);
   });
 });

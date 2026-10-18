@@ -1,7 +1,8 @@
 /**
  * OrgEventMaintenance.ts — Maintenance worker for expired OrgEvents.
  *
- * POST /OrgEventMaintenance/ — deletes ordinary records where expiresAt < now.
+ * POST /OrgEventMaintenance/ — attempts expired ordinary deletions.
+ * Reports successful deletions as `deleted` and delete errors as `failed`.
  * Auth: admin only.
  */
 
@@ -40,12 +41,17 @@ export class OrgEventMaintenance extends Resource {
       }
     }
 
+    let deleted = 0;
+    let failed = 0;
     for (const id of toDelete) {
       try {
         await (databases as any).flair.OrgEvent.delete(id);
-      } catch {}
+        deleted++;
+      } catch {
+        failed++;
+      }
     }
 
-    return { deleted: toDelete.length };
+    return { deleted, failed };
   }
 }

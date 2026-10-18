@@ -26,41 +26,58 @@ const KIND_SUBJECT: Readonly<Record<string, string>> = Object.freeze({
   "skill.changed": "skill",
 });
 
+function instructionEventReaderFailure(
+  event: InstructionEventRow,
+  version: InstructionVersionRow | undefined,
+): string | null {
+  const id = event.id;
+  const kind = event.kind;
+  if (typeof id !== "string" || !id.startsWith(RESERVED_EVENT_ID_PREFIX)) return "missing prefix";
+  if (typeof kind !== "string" || !RESERVED_EVENT_KINDS.includes(kind)) return "kind mismatch";
+  if (!version || typeof version.id !== "string") return "no matching version";
+  if (version.id !== id.slice(RESERVED_EVENT_ID_PREFIX.length)) return "suffix mismatch";
+  if (version.subjectType !== KIND_SUBJECT[kind]) return "kind mismatch";
+  return null;
+}
+
 /** Whether a stored event satisfies the reader rule. */
 export function instructionEventSatisfiesReaderRule(
   event: InstructionEventRow,
   version: InstructionVersionRow | undefined,
 ): boolean {
-  const id = event.id;
-  const kind = event.kind;
-  if (typeof id !== "string" || !id.startsWith(RESERVED_EVENT_ID_PREFIX)) return false;
-  if (typeof kind !== "string" || !RESERVED_EVENT_KINDS.includes(kind)) return false;
-  if (!version || typeof version.id !== "string" || typeof version.subjectType !== "string") return false;
-  return version.id === id.slice(RESERVED_EVENT_ID_PREFIX.length) && version.subjectType === KIND_SUBJECT[kind];
+  return instructionEventReaderFailure(event, version) === null;
 }
 
 /**
  * Every stored event that carries a reserved marker but fails the reader rule,
  * sorted by id. An event with neither marker is not an impostor.
  */
-export function findInstructionEventImpostors(
+function findInstructionEventFailures(
   events: readonly InstructionEventRow[],
   versions: readonly InstructionVersionRow[],
-): string[] {
+): Array<{ id: string; reason: string }> {
   const byId = new Map<string, InstructionVersionRow>();
   for (const version of versions) {
     if (typeof version.id === "string") byId.set(version.id, version);
   }
-  const impostors: string[] = [];
+  const impostors: Array<{ id: string; reason: string }> = [];
   for (const event of events) {
     const id = event.id;
     if (!isReservedEventRecord(event)) continue;
     const version = typeof event.refId === "string" ? byId.get(event.refId) : undefined;
-    if (!instructionEventSatisfiesReaderRule(event, version)) {
-      impostors.push(typeof id === "string" && id.length > 0 ? id : "(no id)");
+    const reason = instructionEventReaderFailure(event, version);
+    if (reason) {
+      impostors.push({ id: typeof id === "string" && id.length > 0 ? id : "(no id)", reason });
     }
   }
-  return impostors.sort();
+  return impostors.sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+}
+
+export function findInstructionEventImpostors(
+  events: readonly InstructionEventRow[],
+  versions: readonly InstructionVersionRow[],
+): string[] {
+  return findInstructionEventFailures(events, versions).map(({ id }) => id);
 }
 
 /** The doctor line for a stored impostor set: null when the store is clean. */
@@ -68,9 +85,9 @@ export function describeInstructionEventImpostors(
   events: readonly InstructionEventRow[],
   versions: readonly InstructionVersionRow[],
 ): string | null {
-  const impostors = findInstructionEventImpostors(events, versions);
+  const impostors = findInstructionEventFailures(events, versions);
   if (impostors.length === 0) return null;
-  return `${impostors.length} stored OrgEvent ${impostors.length === 1 ? "row carries" : "rows carry"} a reserved kind or id without a matching InstructionVersion: ${impostors.join(", ")}`;
+  return `${impostors.length} stored OrgEvent ${impostors.length === 1 ? "row carries" : "rows carry"} a reserved kind or id but ${impostors.length === 1 ? "fails" : "fail"} the instruction-event reader rule: ${impostors.map(({ id, reason }) => `${id} (${reason})`).join(", ")}`;
 }
 
 /** Read both tables through the ops API; null when either read fails. */
