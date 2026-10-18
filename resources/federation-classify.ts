@@ -6,6 +6,7 @@
  * in SyncLog.skippedReasons so operators can grep for them.
  */
 import { effectiveAgentStatus } from "./agent-status-guard.js";
+import { ADMIN_ROLE } from "./agent-admin.js";
 
 export interface SyncRecord {
   table: string;
@@ -69,6 +70,10 @@ export type SkipReason =
   // A record reaching the merge plan with publicKey different from stored `pending`,
   // unless the status guard refused it first. Earlier validation keeps its reason.
   | "agent_pending_key_not_federated"
+  // flair#2665: an inbound Agent record that would change an existing row's
+  // publicKey or home (originatorInstanceId) when the batch-verified sender is
+  // not the row's stored home (non-retryable).
+  | "agent_identity_not_from_home"
   // Emitted by FederationSync.post before the row is read: the payload's id is
   // missing or is not the envelope's id, so the record is not applied.
   | "id_mismatch"
@@ -135,6 +140,7 @@ export const SKIP_REASON_CLASS = {
   pointer_not_federated: "non_retryable",
   agent_status_not_federated: "non_retryable",
   agent_pending_key_not_federated: "non_retryable",
+  agent_identity_not_from_home: "non_retryable",
   id_mismatch: "non_retryable",
   invalid_expiry: "non_retryable",
   merge_target_changed: "retryable",
@@ -413,4 +419,83 @@ export function inboundChangesExistingPendingKey(
   const data = record.data;
   if (!data || typeof data !== "object") return false;
   return Object.prototype.hasOwnProperty.call(data, "publicKey") && (data as any).publicKey !== local.publicKey;
+}
+
+const hasOwn = (o: object, k: string): boolean => Object.prototype.hasOwnProperty.call(o, k);
+
+/** A missing, null or empty home all mean "no recorded home". */
+function sameAgentHome(a: unknown, b: unknown): boolean {
+  const none = (v: unknown) => v === null || v === undefined || v === "";
+  return (none(a) && none(b)) || a === b;
+}
+
+/**
+ * flair#2665: whether `senderInstanceId` (the batch-verified sender, not a
+ * field of the record) is the stored Agent row's home (`originatorInstanceId`).
+ * A row with no recorded home has no sender that matches.
+ */
+export function senderIsAgentHome(local: Record<string, any> | null, senderInstanceId: string): boolean {
+  const home = local?.originatorInstanceId;
+  return typeof home === "string" && home.length > 0 && home === senderInstanceId;
+}
+
+/**
+ * flair#2665: true for an inbound Agent record that would change an existing
+ * local row's `publicKey` or home (`originatorInstanceId`), regardless of
+ * timestamps.
+ */
+export function inboundChangesAgentIdentity(
+  record: SyncRecord,
+  local: Record<string, any> | null,
+): boolean {
+  if (record.table !== "Agent" || local == null) return false;
+  const data = record.data;
+  if (!data || typeof data !== "object") return false;
+  if (hasOwn(data, "publicKey") && (data as any).publicKey !== local.publicKey) return true;
+  return hasOwn(data, "originatorInstanceId") && !sameAgentHome((data as any).originatorInstanceId, local.originatorInstanceId);
+}
+
+/**
+ * flair#2665: the refusal for an inbound Agent record that would change an
+ * existing row's `publicKey` or home when the batch-verified sender is not that
+ * row's stored home, else null.
+ */
+export function agentIdentityRefusal(
+  record: SyncRecord,
+  local: Record<string, any> | null,
+  senderInstanceId: string,
+): SkipReason | null {
+  if (!inboundChangesAgentIdentity(record, local)) return null;
+  return senderIsAgentHome(local, senderInstanceId) ? null : "agent_identity_not_from_home";
+}
+
+/**
+ * flair#2665: admin authority is local to the receiving instance. Applied to the
+ * row a federation merge is about to write for an Agent record (mutates and
+ * returns `merged`):
+ *   - a NEW row (`stored` is null) is written without it: a `role` equal to
+ *     ADMIN_ROLE is removed and an `admin: true` mirror becomes false;
+ *   - an EXISTING row keeps its stored `role` when the merged one would change
+ *     whether the row is an administrator, and keeps its stored `admin` mirror
+ *     when the merged one differs from it.
+ * A non-admin `role` label still follows the merge.
+ */
+export function keepReceiverAgentAuthority(
+  merged: Record<string, any>,
+  stored: Record<string, any> | null,
+): Record<string, any> {
+  if (stored == null) {
+    if (merged.role === ADMIN_ROLE) delete merged.role;
+    if (merged.admin === true) merged.admin = false;
+    return merged;
+  }
+  if ((merged.role === ADMIN_ROLE) !== (stored.role === ADMIN_ROLE)) {
+    if (hasOwn(stored, "role")) merged.role = stored.role;
+    else delete merged.role;
+  }
+  if ((merged.admin === true) !== (stored.admin === true)) {
+    if (hasOwn(stored, "admin")) merged.admin = stored.admin;
+    else delete merged.admin;
+  }
+  return merged;
 }

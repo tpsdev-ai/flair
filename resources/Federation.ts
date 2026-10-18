@@ -41,6 +41,8 @@ import {
   checkPrincipalEntitlement,
   inboundChangesExistingPrincipalStatus,
   inboundChangesExistingPendingKey,
+  agentIdentityRefusal,
+  keepReceiverAgentAuthority,
   type FederationSyncTable,
   type SkipReason,
 } from "./federation-classify.js";
@@ -1464,6 +1466,16 @@ export class FederationSync extends Resource {
               // different from stored `pending`, regardless of timestamps.
               if (record.table === "Agent" && inboundChangesExistingPendingKey(record, row)) {
                 return { skip: true, reason: "agent_pending_key_not_federated" };
+              }
+              // flair#2665: an existing row's publicKey and home change only
+              // through a record whose batch-verified sender (`instanceId`) is
+              // the row's stored home; a record from another sender that would
+              // change either is skipped whole. Admin authority is the
+              // receiver's own: the merge does not set or change it.
+              if (record.table === "Agent") {
+                const identityRefusal = agentIdentityRefusal(record, row, instanceId);
+                if (identityRefusal) return { skip: true, reason: identityRefusal };
+                keepReceiverAgentAuthority(mergedData, row);
               }
               // Absorbing-state guard for the Message table (flair#1521 §12
               // P0-3). Generic newer-wins LWW would let a deadline-sweep `failed`
