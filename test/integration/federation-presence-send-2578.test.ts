@@ -164,6 +164,64 @@ describe("flair#2578 slice 2 — Presence sender end to end (real Harper, both f
     expect(result.pushed).toBeGreaterThanOrEqual(1);
   });
 
+  for (const failure of ["scan", "send"]) {
+    for (const confirmedGeneric of [true, false]) {
+      it(`Presence ${failure} failure returns an error and preserves its watermark; generic contact advances only with confirmed generic batches (${confirmedGeneric})`, async () => {
+        const since = confirmedGeneric ? "2020-01-01T00:00:00.000Z" : new Date(Date.now() + 60_000).toISOString();
+        const watermark = "2020-01-01T00:00:00.000Z";
+        const peer = await readRow(sender, "Peer", HUB_ID);
+        await ops(sender, { operation: "update", table: "Peer", records: [{
+          id: HUB_ID, publicKey: peer.publicKey, createdAt: peer.createdAt,
+          lastSyncAt: since, presenceLastSyncAt: watermark,
+        }] });
+        const agentId = `agent-failure-${failure}`;
+        if (confirmedGeneric) {
+          const now = new Date().toISOString();
+          await insertRow(sender, "Agent", {
+            id: agentId, name: agentId, publicKey: "k-failure", createdAt: now,
+            updatedAt: now, originatorInstanceId: SENDER_ID,
+          });
+        }
+        const realFetch = globalThis.fetch;
+        let genericMerged = 0;
+        let failed = false;
+        globalThis.fetch = (async (url: any, init?: RequestInit) => {
+          const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+          if ((failure === "scan" && body?.operation === "sql" && body.sql === "SELECT * FROM flair.Presence") ||
+              (failure === "send" && body?.records?.some((r: any) => r.table === "Presence"))) {
+            failed = true;
+            return new Response("Presence fault", { status: 500 });
+          }
+          const response = await realFetch(url, init);
+          if (String(url) === `${receiver.httpURL}/FederationSync` && body?.records?.length && response.ok) {
+            const outcome = await response.clone().json() as { merged: number };
+            genericMerged += outcome.merged;
+          }
+          return response;
+        }) as typeof fetch;
+        let result: Awaited<ReturnType<typeof sync>>;
+        try {
+          result = await sync();
+        } finally {
+          globalThis.fetch = realFetch;
+        }
+        expect(failed).toBe(true);
+        expect(result.error?.message).toContain(failure === "scan" ? "Presence scan failed (500)" : "Sync batch failed: HTTP 500");
+        expect(result.pushed).toBe(genericMerged);
+        const after = await readRow(sender, "Peer", HUB_ID);
+        expect(after.presenceLastSyncAt).toBe(watermark);
+        if (confirmedGeneric) {
+          expect(genericMerged).toBeGreaterThan(0);
+          expect(await readRow(receiver, "Agent", agentId)).not.toBeNull();
+          expect(Date.parse(after.lastSyncAt)).toBeGreaterThan(Date.parse(since));
+        } else {
+          expect(genericMerged).toBe(0);
+          expect(after.lastSyncAt).toBe(since);
+        }
+      });
+    }
+  }
+
   for (const representation of ["string", "bigint"]) {
     it(`the hub accepts sender-normalized ${representation} timestamps`, async () => {
       const heartbeat = Date.now();

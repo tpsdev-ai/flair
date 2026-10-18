@@ -1037,100 +1037,6 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
       }
     }
 
-    // ── flair#2578 slice 2: Presence push (P6) ──────────────────────────────
-    // Presence has no updatedAt/createdAt, so the generic cursor above cannot
-    // select it. Home rows travel by their OWN per-table watermark on
-    // lastHeartbeatAt / activityUpdatedAt, sent AFTER the generic tables so the
-    // receiver can bind Presence to an accepted Agent row.
-    // A scan, send or response failure returns before watermark persistence.
-    let presenceAdvanceMs: number | null = null;
-    let presenceCapMs = Number.POSITIVE_INFINITY;
-    if (presenceSendEnabled()) {
-      const presenceScanAtMs = Date.now();
-      let presenceRows: any[];
-      try {
-        const presenceRes = await fetch(`${opsEndpoint}/`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: auth },
-          body: JSON.stringify({ operation: "sql", sql: "SELECT * FROM flair.Presence" }),
-          signal: AbortSignal.timeout(15_000),
-        });
-        if (!presenceRes.ok) {
-          const text = await presenceRes.text().catch(() => "");
-          return { pushed: totalMerged, skipped: totalSkipped, error: new Error(`Presence scan failed (${presenceRes.status}): ${text.slice(0, 200)}`) };
-        }
-        const parsed = await presenceRes.json() as any;
-        const list = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.results) ? parsed.results : null;
-        if (!list) {
-          return { pushed: totalMerged, skipped: totalSkipped, error: new Error("Presence scan failed: body is not a row list") };
-        }
-        presenceRows = list;
-      } catch (err: any) {
-        return { pushed: totalMerged, skipped: totalSkipped, error: err instanceof Error ? err : new Error(String(err)) };
-      }
-      const watermarkMs = presenceWatermarkMs(hub.presenceLastSyncAt);
-      // Clamp selection to scan time.
-      const effectiveWatermarkMs = Math.min(watermarkMs, presenceScanAtMs);
-      // Re-scan from the effective watermark minus the overlap.
-      const scanFloorMs = Math.max(0, effectiveWatermarkMs - PRESENCE_SEND_OVERLAP_MS);
-      const toSend = selectPresenceRowsToSend(presenceRows, instance.id, scanFloorMs);
-      if (toSend.length === 0 && watermarkMs > effectiveWatermarkMs) {
-        presenceAdvanceMs = effectiveWatermarkMs;
-      }
-      if (toSend.length > 0) {
-        if (!secretKey) secretKey = await loadInstanceSecretKey(instance.id, opts);
-        let presenceBatch: any[] = [];
-        let presenceBatchBytes = 0;
-        // Overlap resends retain the effective watermark unless capped below.
-        let advanceMs = effectiveWatermarkMs;
-        const flushPresence = async () => {
-          const result = await sendBatch(presenceBatch, true);
-          totalMerged += result.merged;
-          totalSkipped += result.skipped;
-          totalBatches++;
-          // Cap the candidate below retryable refusals.
-          for (const refusal of result.refused) {
-            if (refusal.table !== "Presence") continue;
-            if (!PRESENCE_SEND_RETRYABLE_SKIP_REASONS.has(refusal.reason)) continue;
-            const sent = presenceBatch.find((r) => r.id === refusal.id);
-            if (!sent) continue;
-            const refusedCursor = Date.parse(sent.updatedAt);
-            if (Number.isFinite(refusedCursor)) presenceCapMs = Math.min(presenceCapMs, refusedCursor - 1);
-          }
-          // Apply the same cap to indeterminate outcomes.
-          for (const undecided of result.indeterminate) {
-            if (undecided.table !== "Presence") continue;
-            const sent = presenceBatch.find((r) => r.id === undecided.id);
-            if (!sent) continue;
-            const undecidedCursor = Date.parse(sent.updatedAt);
-            if (Number.isFinite(undecidedCursor)) presenceCapMs = Math.min(presenceCapMs, undecidedCursor - 1);
-          }
-          presenceBatch = [];
-          presenceBatchBytes = 0;
-        };
-        for (const row of toSend) {
-          const cursor = presenceCursorMs(row);
-          // A row dated more than the receiver's future allowance past this
-          // scan is left out of the batch: the receiver may refuse it, and
-          // its cursor must not count toward the watermark.
-          if (cursor != null && cursor > presenceScanAtMs + PRESENCE_SEND_FUTURE_ALLOWANCE_MS) continue;
-          const payload = presenceWireRecord(row, instance.id);
-          if (!payload) continue;
-          const sr = { ...payload, signature: signBody(payload, secretKey) };
-          const srBytes = JSON.stringify(sr).length;
-          if (presenceBatch.length >= BUDGET_RECORDS || (presenceBatch.length > 0 && presenceBatchBytes + srBytes > BUDGET_BYTES)) {
-            await flushPresence();
-          }
-          presenceBatch.push(sr);
-          presenceBatchBytes += srBytes;
-          // Clamp the candidate to scan time.
-          if (cursor != null && Math.min(cursor, presenceScanAtMs) > advanceMs) advanceMs = Math.min(cursor, presenceScanAtMs);
-        }
-        if (presenceBatch.length > 0) await flushPresence();
-        presenceAdvanceMs = Math.min(advanceMs, presenceCapMs);
-      }
-    }
-
     // lastSyncAt is contact, not "the driver ran" (flair#1146). Persist only
     // after a successful FederationSync response — sendBatch already threw on non-ok or invalid JSON, so
     // totalBatches > 0 means the hub answered. The no-change path must ping
@@ -1150,6 +1056,105 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
         console.warn(`⚠️  Local hub.lastSyncAt advance error: ${advErr?.message ?? advErr}. Next poll will re-send memories.`);
       }
     };
+
+    const genericBatches = totalBatches;
+    const failPresence = async (err: unknown) => {
+      if (genericBatches > 0) await stampLocalContact();
+      return { pushed: totalMerged, skipped: totalSkipped, error: err instanceof Error ? err : new Error(String(err)) };
+    };
+
+    // ── flair#2578 slice 2: Presence push (P6) ──────────────────────────────
+    // Presence has no updatedAt/createdAt, so the generic cursor above cannot
+    // select it. Home rows travel by their OWN per-table watermark on
+    // lastHeartbeatAt / activityUpdatedAt, sent AFTER the generic tables so the
+    // receiver can bind Presence to an accepted Agent row.
+    // A scan, send or response failure returns before watermark persistence.
+    let presenceAdvanceMs: number | null = null;
+    let presenceCapMs = Number.POSITIVE_INFINITY;
+    try {
+      if (presenceSendEnabled()) {
+        const presenceScanAtMs = Date.now();
+        const presenceRes = await fetch(`${opsEndpoint}/`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: auth },
+          body: JSON.stringify({ operation: "sql", sql: "SELECT * FROM flair.Presence" }),
+          signal: AbortSignal.timeout(15_000),
+        });
+        if (!presenceRes.ok) {
+          const text = await presenceRes.text().catch(() => "");
+          throw new Error(`Presence scan failed (${presenceRes.status}): ${text.slice(0, 200)}`);
+        }
+        const parsed = await presenceRes.json() as any;
+        const list = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.results) ? parsed.results : null;
+        if (!list) {
+          throw new Error("Presence scan failed: body is not a row list");
+        }
+        const presenceRows = list;
+        const watermarkMs = presenceWatermarkMs(hub.presenceLastSyncAt);
+        // Clamp selection to scan time.
+        const effectiveWatermarkMs = Math.min(watermarkMs, presenceScanAtMs);
+        // Re-scan from the effective watermark minus the overlap.
+        const scanFloorMs = Math.max(0, effectiveWatermarkMs - PRESENCE_SEND_OVERLAP_MS);
+        const toSend = selectPresenceRowsToSend(presenceRows, instance.id, scanFloorMs);
+        if (toSend.length === 0 && watermarkMs > effectiveWatermarkMs) {
+          presenceAdvanceMs = effectiveWatermarkMs;
+        }
+        if (toSend.length > 0) {
+          if (!secretKey) secretKey = await loadInstanceSecretKey(instance.id, opts);
+          let presenceBatch: any[] = [];
+          let presenceBatchBytes = 0;
+          // Overlap resends retain the effective watermark unless capped below.
+          let advanceMs = effectiveWatermarkMs;
+          const flushPresence = async () => {
+            const result = await sendBatch(presenceBatch, true);
+            totalMerged += result.merged;
+            totalSkipped += result.skipped;
+            totalBatches++;
+            // Cap the candidate below retryable refusals.
+            for (const refusal of result.refused) {
+              if (refusal.table !== "Presence") continue;
+              if (!PRESENCE_SEND_RETRYABLE_SKIP_REASONS.has(refusal.reason)) continue;
+              const sent = presenceBatch.find((r) => r.id === refusal.id);
+              if (!sent) continue;
+              const refusedCursor = Date.parse(sent.updatedAt);
+              if (Number.isFinite(refusedCursor)) presenceCapMs = Math.min(presenceCapMs, refusedCursor - 1);
+            }
+            // Apply the same cap to indeterminate outcomes.
+            for (const undecided of result.indeterminate) {
+              if (undecided.table !== "Presence") continue;
+              const sent = presenceBatch.find((r) => r.id === undecided.id);
+              if (!sent) continue;
+              const undecidedCursor = Date.parse(sent.updatedAt);
+              if (Number.isFinite(undecidedCursor)) presenceCapMs = Math.min(presenceCapMs, undecidedCursor - 1);
+            }
+            presenceBatch = [];
+            presenceBatchBytes = 0;
+          };
+          for (const row of toSend) {
+            const cursor = presenceCursorMs(row);
+            // A row dated more than the receiver's future allowance past this
+            // scan is left out of the batch: the receiver may refuse it, and
+            // its cursor must not count toward the watermark.
+            if (cursor != null && cursor > presenceScanAtMs + PRESENCE_SEND_FUTURE_ALLOWANCE_MS) continue;
+            const payload = presenceWireRecord(row, instance.id);
+            if (!payload) continue;
+            const sr = { ...payload, signature: signBody(payload, secretKey) };
+            const srBytes = JSON.stringify(sr).length;
+            if (presenceBatch.length >= BUDGET_RECORDS || (presenceBatch.length > 0 && presenceBatchBytes + srBytes > BUDGET_BYTES)) {
+              await flushPresence();
+            }
+            presenceBatch.push(sr);
+            presenceBatchBytes += srBytes;
+            // Clamp the candidate to scan time.
+            if (cursor != null && Math.min(cursor, presenceScanAtMs) > advanceMs) advanceMs = Math.min(cursor, presenceScanAtMs);
+          }
+          if (presenceBatch.length > 0) await flushPresence();
+          presenceAdvanceMs = Math.min(advanceMs, presenceCapMs);
+        }
+      }
+    } catch (err) {
+      return await failPresence(err);
+    }
 
     // Attempt the watermark update after contact.
     const persistPresence = async (presenceMs: number) => {

@@ -16,6 +16,7 @@ import { verifyBodySignature } from "../../resources/federation-crypto";
 import { reconstructRecordVerifyBody } from "../../resources/federation-classify";
 import { validatePresenceReceipt } from "../../resources/presence-receipt";
 import { keystore } from "../../src/keystore";
+import { resolveHome } from "../../src/lib/home";
 import { PRESENCE_SEND_FLAG_ENV } from "../../src/federation/presence-send";
 
 const origFetch = globalThis.fetch;
@@ -468,5 +469,79 @@ describe("federation sync push — Presence sender (flair#2578 slice 2)", () => 
     const result = await run();
     expect(result.error).toBeDefined();
     expect(presenceUpdates()).toEqual([]);
+  });
+
+  for (const failure of ["scan network", "scan HTTP", "scan parse", "scan shape", "selection", "signing", "send", "response"]) {
+    for (const confirmedGeneric of [false, true]) {
+      it(`flag ON: ${failure} failure preserves Presence progress and stamps contact only with confirmed generic batches (${confirmedGeneric})`, async () => {
+        process.env[PRESENCE_SEND_FLAG_ENV] = "1";
+        installMock({ presenceLastSyncAt: SINCE });
+        if (confirmedGeneric) genericRows = [{ id: "generic-a", updatedAt: new Date().toISOString() }];
+        presenceRows = [homeRow()];
+        if (failure === "selection") {
+          Object.defineProperty(presenceRows[0], "originatorInstanceId", { get() { throw new Error("selection failed"); } });
+        }
+        if (failure === "signing") presenceRows[0].extra = 1n;
+        const fetchMock = globalThis.fetch;
+        globalThis.fetch = mock(async (url: any, init?: RequestInit) => {
+          const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+          if (body?.operation === "sql") {
+            if (failure === "scan network") throw new Error("scan network failed");
+            if (failure === "scan HTTP") return res(false, 500, {});
+            if (failure === "scan parse") return { ...res(true, 200, []), json: async () => { throw new Error("scan parse failed"); } };
+            if (failure === "scan shape") return res(true, 200, {});
+            return { ...res(true, 200, []), json: async () => presenceRows };
+          }
+          if (body?.records?.some((r: any) => r.table === "Presence")) {
+            if (failure === "send") return res(false, 500, {});
+            if (failure === "response") return res(true, 200, { merged: 0, skipped: 0 });
+          }
+          return fetchMock(url, init);
+        }) as any;
+        const result = await run();
+        expect(result.error).toBeInstanceOf(Error);
+        expect(result.pushed).toBe(confirmedGeneric ? 4 : 0);
+        expect(presenceUpdates()).toEqual([]);
+        const contacts = captured.filter((c) => c.body?.operation === "update" && c.body.records?.[0]?.lastSyncAt !== undefined);
+        expect(contacts.length).toBe(confirmedGeneric ? 1 : 0);
+        if (confirmedGeneric) expect(Date.parse(contacts[0].body.records[0].lastSyncAt)).toBeGreaterThan(Date.parse(SINCE));
+      });
+    }
+  }
+
+  it("flag ON: a secret-key load failure with no generic batches leaves both cursors unchanged", async () => {
+    process.env[PRESENCE_SEND_FLAG_ENV] = "1";
+    installMock({ presenceLastSyncAt: SINCE });
+    presenceRows = [homeRow()];
+    const keyFile = join(resolveHome(), ".flair", "keys", `${INSTANCE_ID}.key`);
+    rmSync(keyFile);
+    try {
+      const result = await run();
+      expect(result.error?.message).toContain("No usable private key");
+      expect(presenceUpdates()).toEqual([]);
+      expect(captured.some((c) => c.body?.operation === "update")).toBe(false);
+      expect(pushed()).toEqual([]);
+    } finally {
+      keystore.setPrivateKeySeed(INSTANCE_ID, testKp.secretKey.slice(0, 32));
+    }
+  });
+
+  it("flag ON: a later Presence batch failure with no generic batches leaves both cursors unchanged", async () => {
+    process.env[PRESENCE_SEND_FLAG_ENV] = "1";
+    installMock({ presenceLastSyncAt: SINCE });
+    presenceRows = Array.from({ length: 51 }, (_, i) => homeRow({ agentId: `agent-${i}` }));
+    const fetchMock = globalThis.fetch;
+    let batches = 0;
+    globalThis.fetch = mock(async (url: any, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+      if (body?.records?.some((r: any) => r.table === "Presence") && ++batches === 2) return res(false, 500, {});
+      return fetchMock(url, init);
+    }) as any;
+    const result = await run();
+    expect(result.error?.message).toContain("Sync batch failed: HTTP 500");
+    expect(result.pushed).toBe(50);
+    expect(batches).toBe(2);
+    expect(presenceUpdates()).toEqual([]);
+    expect(captured.some((c) => c.body?.operation === "update")).toBe(false);
   });
 });
