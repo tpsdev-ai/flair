@@ -104,8 +104,9 @@ export interface KeysetReadOptions {
  * the cap is accepted when a read after its last id returns no row and the rows read equal
  * `expected`, the same evidence an uncapped walk ends on. The page allowance is
  * `ceil(expected / pageSize) + 1`, capped by `maxPages`
- * (default MAX_MEMORY_PAGES). Duplicates raise InconsistentReadError; size
- * mismatches do too by default, but `mismatch` can return any Error. Errors from `opsPost`
+ * (default MAX_MEMORY_PAGES). Duplicates raise InconsistentReadError. Outside the cap branch a
+ * size mismatch raises InconsistentReadError by default, but `mismatch` can return any Error;
+ * a mismatch on a full final page at the cap raises the page-cap error. Errors from `opsPost`
  * propagate unchanged.
  */
 export async function readTableByIdPaged(opsPost: OpsPost, opts: KeysetReadOptions): Promise<any[]> {

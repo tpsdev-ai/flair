@@ -242,8 +242,9 @@ describe("flair#2670 — parity between capped and uncapped walks under a balanc
   });
 
   test("one row beyond the cap is UNKNOWN", async () => {
-    // At pageSize 2 the hard MAX_MEMORY_PAGES bound covers 200 rows; 201 needs
-    // ceil(201 / 2) + 1 = 102 pages, so the hard cap (not the count) ends the walk.
+    // At pageSize 2 the hard MAX_MEMORY_PAGES bound covers 200 rows; for 201 rows the
+    // allowance formula computes ceil(201 / 2) + 1 = 102 pages, which exceeds the hard cap
+    // of 100, so the hard cap (not the count) ends the walk.
     let counter = 0;
     const opsPost = async (body: Record<string, unknown>) =>
       body.operation === "describe_table" ? { record_count: 201 } : [
