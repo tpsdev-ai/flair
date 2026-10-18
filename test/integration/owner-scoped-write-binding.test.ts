@@ -175,7 +175,7 @@ const SHAPES: Shape[] = [
   { label: "an array body whose record names another principal's record", want: NOT_ADDRESSED, id: (f) => f.otherId, arrayBody: true },
 ];
 
-describe("a non-admin addressed write commits only to the record its checks read", () => {
+describe("the owner-scoped guard checks a non-admin addressed write's body id for every id type", () => {
   beforeAll(async () => {
     harper = await startHarper();
     assertOwnInstance(harper);

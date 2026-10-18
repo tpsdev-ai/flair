@@ -1,4 +1,4 @@
-- **A non-admin agent's addressed owner-scoped write commits only to the record its ownership checks read, for every accepted id shape.**
+- **The owner-scoped write guard checks the body `id` of a non-admin agent's addressed write for every id type.**
   The owner-scoped write guard refuses a non-admin agent's addressed POST, PUT
   or PATCH whose body `id` is not a string or number and is not the addressed
   key with 400 `id_target_mismatch`, and checks each object element of an array
