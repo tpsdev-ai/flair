@@ -20,7 +20,7 @@ import {
 } from "../../src/federation/presence-send.js";
 // Test-only imports: src/ cannot import resources/ (packaging), so the two
 // sender-side mirrors are pinned to the receiver's own definitions here.
-import { PRESENCE_FUTURE_ALLOWANCE_MS } from "../../resources/presence-receipt.js";
+import { PRESENCE_FUTURE_ALLOWANCE_MS, validatePresenceReceipt } from "../../resources/presence-receipt.js";
 import { SKIP_REASON_CLASS } from "../../resources/federation-classify.js";
 
 const ME = "flair_spoke_a";
@@ -103,6 +103,32 @@ describe("presence-send — selection", () => {
 });
 
 describe("presence-send — wire record", () => {
+  for (const stamp of ["1234", 1234n]) {
+    it(`normalizes ${typeof stamp} timestamps for the receiver validator`, () => {
+      const record = presenceWireRecord({
+        agentId: "agent-a",
+        lastHeartbeatAt: stamp,
+        activityUpdatedAt: stamp,
+        receivedAt: stamp,
+      }, ME)!;
+      expect(record.data.lastHeartbeatAt).toBe(1234);
+      expect(record.data.activityUpdatedAt).toBe(1234);
+      expect(record.data.receivedAt).toBe(1234);
+      expect(validatePresenceReceipt(record.id, JSON.parse(JSON.stringify(record.data)), 1234, ME).ok).toBe(true);
+    });
+  }
+
+  it("rejects an unusable timestamp even when another stamp supplies a cursor", () => {
+    for (const field of ["lastHeartbeatAt", "activityUpdatedAt", "receivedAt"]) {
+      for (const value of ["invalid", Infinity, 10n ** 400n]) {
+        expect(presenceWireRecord({
+          agentId: "agent-a", lastHeartbeatAt: 1000, activityUpdatedAt: 2000, [field]: value,
+        }, ME)).toBeNull();
+      }
+    }
+    expect(presenceWireRecord({ agentId: "agent-a", activityUpdatedAt: 2000 }, ME)).toBeNull();
+  });
+
   it("keys on agentId: id, data.id and data.agentId all agree, and updatedAt is the cursor", () => {
     const cursor = Date.parse("2026-01-02T03:04:05.000Z");
     const record = presenceWireRecord(

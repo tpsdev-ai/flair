@@ -127,7 +127,7 @@ export function selectPresenceRowsToSend(
  * value. `updatedAt` is the row's own cursor: the receiver's future-timestamp
  * bound (classifyRecord's `future_timestamp`) is applied to it. classifyRecord's
  * staleness check is `no_op_same_hash`, which needs a contentHash, so it never
- * fires for this table. Null when the row has no usable `agentId` or cursor.
+ * fires for this table. Null for an unusable key or timestamp.
  */
 export function presenceWireRecord(
   row: Record<string, any>,
@@ -136,11 +136,18 @@ export function presenceWireRecord(
   const agentId = typeof row?.agentId === "string" && row.agentId.length > 0 ? row.agentId : null;
   const cursor = presenceCursorMs(row);
   if (!agentId || cursor == null) return null;
+  const data: Record<string, any> = { ...row, id: agentId, agentId };
+  for (const field of ["lastHeartbeatAt", "activityUpdatedAt", "receivedAt"]) {
+    if (field !== "lastHeartbeatAt" && data[field] == null) continue;
+    const timestamp = toMs(data[field]);
+    if (timestamp == null) return null;
+    data[field] = timestamp;
+  }
   return {
     v: 2,
     table: "Presence",
     id: agentId,
-    data: { ...row, id: agentId, agentId },
+    data,
     updatedAt: new Date(cursor).toISOString(),
     originatorInstanceId: instanceId,
   };

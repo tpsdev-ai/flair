@@ -479,8 +479,7 @@ export async function persistLocalPeerLastSyncAt(args: {
 }
 
 /**
- * Persist the Presence per-table watermark on the local Peer row after
- * confirmed contact (flair#2578 slice 2). Presence has no `updatedAt`, so
+ * Attempt the Presence watermark update after contact. Presence has no `updatedAt`, so
  * the row cursor over `lastHeartbeatAt` / `activityUpdatedAt` is compared against
  * this field instead of `lastSyncAt`.
  *
@@ -1047,12 +1046,7 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
     // lastHeartbeatAt / activityUpdatedAt, sent AFTER the generic tables so the
     // receiver can bind Presence to an accepted Agent row.
     // A scan, send or response failure returns before watermark persistence.
-    // After confirmed contact, save the greater of the effective watermark and
-    // sent cursors, clamped to scan time and capped below retryable refusals
-    // and indeterminate rows.
     let presenceAdvanceMs: number | null = null;
-    // The highest cursor the watermark may reach; lowered below any row the
-    // receiver refused for a retryable reason or left indeterminate (F1).
     let presenceCapMs = Number.POSITIVE_INFINITY;
     if (presenceSendEnabled()) {
       const presenceScanAtMs = Date.now();
@@ -1078,12 +1072,11 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
         return { pushed: totalMerged, skipped: totalSkipped, error: err instanceof Error ? err : new Error(String(err)) };
       }
       const watermarkMs = presenceWatermarkMs(hub.presenceLastSyncAt);
-      // Clamp selection to scan time; persist only after confirmed contact.
+      // Clamp selection to scan time.
       const effectiveWatermarkMs = Math.min(watermarkMs, presenceScanAtMs);
       // Re-scan from the effective watermark minus the overlap.
       const scanFloorMs = Math.max(0, effectiveWatermarkMs - PRESENCE_SEND_OVERLAP_MS);
       const toSend = selectPresenceRowsToSend(presenceRows, instance.id, scanFloorMs);
-      // A no-row pass saves the clamp after a successful ping.
       if (toSend.length === 0 && watermarkMs > effectiveWatermarkMs) {
         presenceAdvanceMs = effectiveWatermarkMs;
       }
@@ -1098,9 +1091,7 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
           totalMerged += result.merged;
           totalSkipped += result.skipped;
           totalBatches++;
-          // F1: a row the receiver refused for a reason a later re-offer can
-          // clear must stay above the watermark, so the next pass offers it
-          // again. Cap the watermark just below the oldest such row.
+          // Cap the candidate below retryable refusals.
           for (const refusal of result.refused) {
             if (refusal.table !== "Presence") continue;
             if (!PRESENCE_SEND_RETRYABLE_SKIP_REASONS.has(refusal.reason)) continue;
@@ -1109,9 +1100,7 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
             const refusedCursor = Date.parse(sent.updatedAt);
             if (Number.isFinite(refusedCursor)) presenceCapMs = Math.min(presenceCapMs, refusedCursor - 1);
           }
-          // An indeterminate row may have committed or not; the sender cannot
-          // know, so it is treated exactly like a retryable refusal and the
-          // watermark stays below it for the next pass to re-offer.
+          // Apply the same cap to indeterminate outcomes.
           for (const undecided of result.indeterminate) {
             if (undecided.table !== "Presence") continue;
             const sent = presenceBatch.find((r) => r.id === undecided.id);
@@ -1137,8 +1126,7 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
           }
           presenceBatch.push(sr);
           presenceBatchBytes += srBytes;
-          // The saved value never passes the scan time: a row sent with a
-          // cursor ahead of the scan advances it only to the scan time.
+          // Clamp the candidate to scan time.
           if (cursor != null && Math.min(cursor, presenceScanAtMs) > advanceMs) advanceMs = Math.min(cursor, presenceScanAtMs);
         }
         if (presenceBatch.length > 0) await flushPresence();
@@ -1166,9 +1154,7 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
       }
     };
 
-    // The Presence watermark is a local cursor, but the sender still writes it
-    // only after contact: the batch path has a confirmed FederationSync
-    // response, and the no-change path calls this after a successful ping.
+    // Attempt the watermark update after contact; a failed write leaves it intact.
     const persistPresence = async (presenceMs: number) => {
       try {
         const advanced = await persistLocalPeerPresenceSyncAt({

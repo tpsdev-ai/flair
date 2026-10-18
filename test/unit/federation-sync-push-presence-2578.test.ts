@@ -14,6 +14,7 @@ import { randomUUID } from "node:crypto";
 import nacl from "tweetnacl";
 import { verifyBodySignature } from "../../resources/federation-crypto";
 import { reconstructRecordVerifyBody } from "../../resources/federation-classify";
+import { validatePresenceReceipt } from "../../resources/presence-receipt";
 import { keystore } from "../../src/keystore";
 import { PRESENCE_SEND_FLAG_ENV } from "../../src/federation/presence-send";
 
@@ -173,6 +174,40 @@ describe("federation sync push — Presence sender (flair#2578 slice 2)", () => 
     expect(verifyBodySignature(reconstructRecordVerifyBody(record, INSTANCE_ID), publicKeyB64url)).toBe(true);
   });
 
+  it("flag ON: string and bigint timestamps reach the receiver validator as numbers", async () => {
+    process.env[PRESENCE_SEND_FLAG_ENV] = "1";
+    installMock();
+    const heartbeat = Date.now() - 1000;
+    presenceRows = [String(heartbeat), BigInt(heartbeat)].map((stamp, index) => homeRow({
+      agentId: `agent-${index}`, lastHeartbeatAt: stamp, activityUpdatedAt: stamp, receivedAt: stamp,
+    }));
+    const result = await run();
+    expect(result.error).toBeUndefined();
+    const records = presenceRecords();
+    expect(records).toHaveLength(2);
+    for (const record of records) {
+      expect(record.data.lastHeartbeatAt).toBe(heartbeat);
+      expect(record.data.activityUpdatedAt).toBe(heartbeat);
+      expect(record.data.receivedAt).toBe(heartbeat);
+      expect(validatePresenceReceipt(record.id, record.data, Date.now(), INSTANCE_ID).ok).toBe(true);
+    }
+    expect(presenceUpdates()[0].body.records[0].presenceLastSyncAt).toBe(new Date(heartbeat).toISOString());
+  });
+
+  it("flag ON: unusable timestamps are excluded from the batch and watermark", async () => {
+    process.env[PRESENCE_SEND_FLAG_ENV] = "1";
+    installMock();
+    const heartbeat = Date.now() - 1000;
+    presenceRows = [homeRow({ lastHeartbeatAt: heartbeat })];
+    for (const field of ["lastHeartbeatAt", "activityUpdatedAt", "receivedAt"]) {
+      presenceRows.push(homeRow({ agentId: field, lastHeartbeatAt: heartbeat + 500, activityUpdatedAt: heartbeat + 500, [field]: "invalid" }));
+    }
+    const result = await run();
+    expect(result.error).toBeUndefined();
+    expect(presenceRecords().map((record) => record.id)).toEqual(["agent-a"]);
+    expect(presenceUpdates()[0].body.records[0].presenceLastSyncAt).toBe(new Date(heartbeat).toISOString());
+  });
+
   it("flag ON: a non-home row is never pushed", async () => {
     process.env[PRESENCE_SEND_FLAG_ENV] = "1";
     installMock();
@@ -204,8 +239,6 @@ describe("federation sync push — Presence sender (flair#2578 slice 2)", () => 
     const updates1 = presenceUpdates();
     expect(updates1.length).toBe(1);
 
-    // A row stamped 1 s before the saved watermark (it committed after run 1's
-    // SQL read) is below the watermark, so only the overlap re-offers it.
     const h2 = h1 - 1_000;
     installMock({ presenceLastSyncAt: updates1[0].body.records[0].presenceLastSyncAt });
     presenceRows = [homeRow({ agentId: "agent-a", lastHeartbeatAt: h1 }), homeRow({ agentId: "agent-b", lastHeartbeatAt: h2 })];
@@ -214,7 +247,7 @@ describe("federation sync push — Presence sender (flair#2578 slice 2)", () => 
     expect(presenceRecords().map((r) => r.id)).toContain("agent-b");
   });
 
-  it("flag ON: a retryable refusal holds the watermark below that row and re-offers it (F1)", async () => {
+  it("flag ON: a retryable refusal caps the watermark update and re-offers the row (F1)", async () => {
     process.env[PRESENCE_SEND_FLAG_ENV] = "1";
     const hb = Date.now();
     installMock({ presenceLastSyncAt: SINCE });
@@ -222,16 +255,13 @@ describe("federation sync push — Presence sender (flair#2578 slice 2)", () => 
     presenceRows = [homeRow({ agentId: "agent-a", lastHeartbeatAt: hb })];
     const r1 = await run();
     expect(r1.error).toBeUndefined();
-    // The record was offered...
     expect(presenceRecords().map((r) => r.id)).toEqual(["agent-a"]);
-    // ...and the refusal held the watermark strictly below its cursor.
     const updates1 = presenceUpdates();
     expect(updates1.length).toBe(1);
     const saved = Date.parse(updates1[0].body.records[0].presenceLastSyncAt);
     expect(Number.isFinite(saved)).toBe(true);
     expect(saved).toBeLessThan(hb);
 
-    // Next pass: the hub now has the Agent row, and the row is offered again.
     installMock({ presenceLastSyncAt: updates1[0].body.records[0].presenceLastSyncAt });
     presenceRows = [homeRow({ agentId: "agent-a", lastHeartbeatAt: hb })];
     const r2 = await run();
@@ -239,7 +269,7 @@ describe("federation sync push — Presence sender (flair#2578 slice 2)", () => 
     expect(presenceRecords().map((r) => r.id)).toEqual(["agent-a"]);
   });
 
-  it("flag ON: newer confirmed cursors advance the watermark", async () => {
+  it("flag ON: confirmed cursors set the watermark update", async () => {
     process.env[PRESENCE_SEND_FLAG_ENV] = "1";
     const oldest = Date.now() - 5_000;
     const newest = Date.now();
@@ -270,7 +300,6 @@ describe("federation sync push — Presence sender (flair#2578 slice 2)", () => 
 
     // The far-future row is left out of the batch entirely.
     expect(presenceRecords().map((r) => r.id)).toEqual(["agent-normal"]);
-    // The watermark advanced to the sent row's cursor, never past the scan time.
     const updates = presenceUpdates();
     expect(updates.length).toBe(1);
     const saved = Date.parse(updates[0].body.records[0].presenceLastSyncAt);
@@ -278,9 +307,6 @@ describe("federation sync push — Presence sender (flair#2578 slice 2)", () => 
     expect(saved).toBeLessThanOrEqual(scanAfter);
     expect(saved).toBe(normal);
 
-    // Second run: only the normal row's heartbeat moved forward — to a stamp
-    // ahead of the clock, still inside the allowance. It is pushed, and the
-    // watermark advances only to the scan time, not to the row's future stamp.
     installMock({ presenceLastSyncAt: updates[0].body.records[0].presenceLastSyncAt });
     const movedForward = now + 60_000;
     presenceRows = [
@@ -300,7 +326,7 @@ describe("federation sync push — Presence sender (flair#2578 slice 2)", () => 
     expect(saved2).toBeLessThan(movedForward);
   });
 
-  it("flag ON: an indeterminate row holds the watermark below it and is re-offered (B1)", async () => {
+  it("flag ON: an indeterminate row caps the watermark update and is re-offered (B1)", async () => {
     process.env[PRESENCE_SEND_FLAG_ENV] = "1";
     const hb = Date.now();
     installMock({ presenceLastSyncAt: SINCE });
@@ -309,8 +335,6 @@ describe("federation sync push — Presence sender (flair#2578 slice 2)", () => 
     const r1 = await run();
     expect(r1.error).toBeUndefined();
     expect(presenceRecords().map((r) => r.id)).toEqual(["agent-a"]);
-    // The un-decided row is treated as a retryable refusal: the saved
-    // watermark stays strictly below its cursor.
     const updates1 = presenceUpdates();
     expect(updates1.length).toBe(1);
     const saved = Date.parse(updates1[0].body.records[0].presenceLastSyncAt);
@@ -345,7 +369,7 @@ describe("federation sync push — Presence sender (flair#2578 slice 2)", () => 
     ["skipped/refused mismatch", { merged: 1, skipped: 0, refused: [{ table: "Presence", id: "agent-a", reason: "merge_error" }] }],
     ["malformed entry", { merged: 2, skipped: 0, indeterminate: [{ table: "Presence" }] }],
   ] as const) {
-    it(`flag ON: ${name} resolves nothing in the Presence batch`, async () => {
+    it(`flag ON: ${name}: sender credits nothing and saves no watermark for the batch`, async () => {
       process.env[PRESENCE_SEND_FLAG_ENV] = "1";
       installMock({ presenceLastSyncAt: SINCE });
       presenceRows = [homeRow(), homeRow({ agentId: "agent-b" })];
@@ -368,7 +392,7 @@ describe("federation sync push — Presence sender (flair#2578 slice 2)", () => 
     expect(presenceUpdates()).toEqual([]);
   });
 
-  it("flag ON: confirmed contact clamps a stored future watermark to scan time (B5)", async () => {
+  it("flag ON: confirmed contact uses the scan-time clamp (B5)", async () => {
     process.env[PRESENCE_SEND_FLAG_ENV] = "1";
     const now = Date.now();
     // A watermark an hour ahead would suppress the current row if the scan
@@ -391,7 +415,7 @@ describe("federation sync push — Presence sender (flair#2578 slice 2)", () => 
     expect(saved).toBeLessThan(futureWatermark);
   });
 
-  it("flag ON: a successful ping saves the future watermark clamp with no rows sent (B5)", async () => {
+  it("flag ON: a no-row ping uses the scan-time clamp (B5)", async () => {
     process.env[PRESENCE_SEND_FLAG_ENV] = "1";
     const now = Date.now();
     const futureWatermark = now + 3_600_000;

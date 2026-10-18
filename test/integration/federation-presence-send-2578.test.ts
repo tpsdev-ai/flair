@@ -18,7 +18,8 @@ import { randomBytes } from "node:crypto";
 import nacl from "tweetnacl";
 import { startHarper, stopHarper, HARPER_STOP_BUDGET_MS, type HarperInstance } from "../helpers/harper-lifecycle";
 import { keystore } from "../../src/keystore";
-import { PRESENCE_SEND_FLAG_ENV } from "../../src/federation/presence-send";
+import { PRESENCE_SEND_FLAG_ENV, presenceWireRecord } from "../../src/federation/presence-send";
+import { signBody, signBodyFresh } from "../../resources/federation-crypto";
 
 const SENDER_ID = "flair_spoke_a";
 const HUB_ID = "flair_hub_a";
@@ -152,7 +153,7 @@ describe("flair#2578 slice 2 — Presence sender end to end (real Harper, both f
     expect(listed.presenceLastSyncAt).toBe(hubPeer.presenceLastSyncAt);
   });
 
-  it("an unchanged overlap resend preserves presence fields", async () => {
+  it("an unchanged overlap resend preserves the heartbeat and activity", async () => {
     const before = await readRow(receiver, "Presence", AGENT_HOME);
     const result = await sync();
     expect(result.error).toBeUndefined();
@@ -162,4 +163,31 @@ describe("flair#2578 slice 2 — Presence sender end to end (real Harper, both f
     expect(Number(after.receivedAt)).toBeGreaterThanOrEqual(Number(before.receivedAt));
     expect(result.pushed).toBeGreaterThanOrEqual(1);
   });
+
+  for (const representation of ["string", "bigint"]) {
+    it(`the hub accepts sender-normalized ${representation} timestamps`, async () => {
+      const heartbeat = Date.now();
+      const stamp = representation === "string" ? String(heartbeat) : BigInt(heartbeat);
+      const payload = presenceWireRecord({
+        agentId: AGENT_HOME, lastHeartbeatAt: stamp, activityUpdatedAt: stamp, receivedAt: stamp,
+      }, SENDER_ID)!;
+      expect(payload.data.lastHeartbeatAt).toBe(heartbeat);
+      expect(payload.data.activityUpdatedAt).toBe(heartbeat);
+      expect(payload.data.receivedAt).toBe(heartbeat);
+      const record = { ...payload, signature: signBody(payload, senderKp.secretKey) };
+      const response = await fetch(`${receiver.httpURL}/FederationSync`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(signBodyFresh({ instanceId: SENDER_ID, records: [record], lamportClock: heartbeat }, senderKp.secretKey)),
+        signal: AbortSignal.timeout(20_000),
+      });
+      expect(response.status).toBe(200);
+      const result = await response.json() as { merged: number; skipped: number };
+      expect(result.merged).toBe(1);
+      expect(result.skipped).toBe(0);
+      const stored = await readRow(receiver, "Presence", AGENT_HOME);
+      expect(Number(stored.lastHeartbeatAt)).toBe(heartbeat);
+      expect(Number(stored.activityUpdatedAt)).toBe(heartbeat);
+    });
+  }
 });

@@ -7,8 +7,7 @@
   selected by their own `lastHeartbeatAt` / `activityUpdatedAt` cursor against
   a per-table watermark, clamped to scan time, less a 30 s overlap (floor
   zero). The watermark is kept on the local `Peer` row (`presenceLastSyncAt`);
-  after confirmed contact, the greater of the effective watermark and sent
-  cursors is saved, clamped to scan time, but a retryable refusal or an
-  indeterminate outcome holds the saved value below that row's cursor (a row
-  dated more than 5 minutes ahead is not sent). With the flag off the sender
-  sends no Presence records.
+  after confirmed contact, the sender attempts to write a candidate clamped to
+  scan time and capped below retryable or indeterminate rows. A failed write
+  leaves the stored value intact. A row dated more than 5 minutes ahead is not
+  sent. With the flag off the sender sends no Presence records.
