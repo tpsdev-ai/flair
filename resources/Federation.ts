@@ -1208,8 +1208,8 @@ export class FederationSync extends Resource {
       const planned = mergePresenceReceipt(local, validated.row, receivedAt);
       if (planned.action === "skip") return { reason: planned.reason };
 
-      // As in the generic merge: aborted writes are merge_target_changed;
-      // unconfirmed commits are indeterminate.
+      // As in the generic merge: write-back conflicts aborted before commit are
+      // merge_target_changed; other errors after write-back starts are indeterminate.
       let outcome: any;
       markWriteStarted();
       try {

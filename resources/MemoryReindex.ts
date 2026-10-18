@@ -29,12 +29,13 @@ import { Resource, databases } from "harper";
 import { isAdmin, allowAdmin } from "./agent-auth.js";
 import { WriteBackConflictError, writeBackCommittedRow, writeBackIdentity } from "./write-back.js";
 
-/** The re-PUT's row is confirmed as staged, but a fresh agentId-index read
- *  does not list it: the row values are confirmed, the index is not. */
+/** The re-PUT's row was confirmed after its commit, but a later agentId-index
+ *  query does not list it. The miss is reported without a cause: another
+ *  writer may have changed or removed the row after the confirmation. */
 class ReindexIndexUnconfirmed extends Error {
   readonly outcome = "unconfirmed" as const;
   constructor(id: string) {
-    super(`MemoryReindex: row ${id} is stored as staged, but the agentId index does not list it (index unconfirmed)`);
+    super(`MemoryReindex: row ${id} was confirmed after commit but is now absent from the agentId index query (index unconfirmed)`);
     this.name = "ReindexIndexUnconfirmed";
   }
 }

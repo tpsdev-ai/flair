@@ -70,7 +70,7 @@ for (const missing of [false, true]) {
     expect(result.stats.reindexed).toBe(missing ? 0 : rows.length);
     expect(result.stats.errors).toBe(missing ? rows.length : 0);
     if (missing) {
-      expect(result.stats.errorSamples[0].message).toContain("is stored as staged, but the agentId index does not list it (index unconfirmed)");
+      expect(result.stats.errorSamples[0].message).toContain("was confirmed after commit but is now absent from the agentId index query (index unconfirmed)");
       expect(result.stats.errorSamples[0].outcome).toBe("unconfirmed");
     }
   });
