@@ -16,8 +16,8 @@
  *     anything is deleted; an ordinary-only selection deletes;
  *   - `flair doctor` names a planted impostor and passes on a clean store; it
  *     lists every impostor id, and a real matching InstructionVersion passes;
- *   - a reserved event survives an OrgEventMaintenance run, including one
- *     carrying an expired expiresAt, while an expired ordinary event is deleted;
+ *   - maintenance skips planted reserved rows, including an expired row,
+ *     and confirms removal of an expired ordinary row;
  *     non-admin and anonymous callers are denied on OrgEventMaintenance.
  *
  * Impostor rows are planted through the raw operations API, the documented
@@ -27,6 +27,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import nacl from "tweetnacl";
@@ -67,6 +68,7 @@ function assertOwnInstance(h: HarperInstance): void {
 
 let harper: HarperInstance;
 let cliHome: string;
+let pauseDir: string;
 const agent = mkAgent("agent-a");
 const adminAgent = mkAgent("agent-admin-a");
 
@@ -189,7 +191,10 @@ function runDoctor(): Promise<{ code: number | null; stdout: string; stderr: str
 }
 
 beforeAll(async () => {
-  harper = await startHarper();
+  pauseDir = await mkdtemp(join(tmpdir(), "flair-2139-expiry-pause-"));
+  harper = await startHarper({ env: {
+    FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_TEST_PAUSE_DIR: pauseDir,
+  } });
   assertOwnInstance(harper);
   cliHome = await mkdtemp(join(tmpdir(), "flair-2139s3a-doctor-home-"));
   await seedAgent(agent, "agent");
@@ -199,6 +204,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (cliHome) await rm(cliHome, { recursive: true, force: true, maxRetries: 4 });
+  if (pauseDir) await rm(pauseDir, { recursive: true, force: true });
 }, HARPER_STOP_BUDGET_MS);
 
 describe("flair doctor names stored reserved-event impostors", () => {
@@ -483,7 +489,7 @@ describe("ordinary event writes", () => {
   }, 30_000);
 });
 
-describe("an instruction event survives OrgEventMaintenance", () => {
+describe("OrgEventMaintenance expiry", () => {
   it("deletes the expired ordinary event and keeps reserved events, including an expired one", async () => {
     const reserved = `${PREFIX}maintenance-${randomUUID()}`;
     const expiredReserved = `${PREFIX}maintenance-expired-${randomUUID()}`;
@@ -496,7 +502,7 @@ describe("an instruction event survives OrgEventMaintenance", () => {
     const maintText = await res.text();
     expect(res.status, `maintenance ${res.status}: ${maintText.slice(0, 300)}`).toBeLessThan(300);
 
-    expect(JSON.parse(maintText)).toEqual({ deleted: 1, failed: 0 });
+    expect(JSON.parse(maintText)).toEqual({ deleted: 1, skipped: 0, failed: 0 });
     expect(await readEvent(reserved)).not.toBeNull();
     expect(await readEvent(expiredReserved)).not.toBeNull();
     expect(await readEvent(expired)).toBeNull();
@@ -520,4 +526,74 @@ describe("an instruction event survives OrgEventMaintenance", () => {
     const anonymous = await anonSend("POST", "/OrgEventMaintenance/", {});
     expect([401, 403], `anonymous ${anonymous.status}`).toContain(anonymous.status);
   }, 30_000);
+});
+
+async function pausedSweep(point: string, compete: () => Promise<void>): Promise<any> {
+  for (const marker of ["arm", "claimed", "paused", "released", "go"]) {
+    await rm(join(pauseDir, `${marker}.${point}`), { force: true });
+  }
+  writeFileSync(join(pauseDir, `arm.${point}`), "");
+  const pending = send(adminAgent, "POST", "/OrgEventMaintenance/", {});
+  let paused = false;
+  let response: Response;
+  try {
+    const deadline = Date.now() + 15_000;
+    while (!(paused = existsSync(join(pauseDir, `paused.${point}`))) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    expect(paused, `sweep did not reach ${point}`).toBe(true);
+    await compete();
+  } finally {
+    writeFileSync(join(pauseDir, `go.${point}`), "");
+    response = await pending;
+  }
+  expect(readFileSync(join(pauseDir, `released.${point}`), "utf8")).toBe("go");
+  expect(response.status).toBe(200);
+  return response.json();
+}
+
+describe("OrgEventMaintenance interleavings", () => {
+  for (const point of ["org-event-expiry-pre", "org-event-expiry-read", "org-event-expiry-commit"]) {
+    it(`${point}: a selected row changed to reserved survives and counts as skipped`, async () => {
+      const id = `expiry-reserved-${randomUUID()}`;
+      await plantEvent(id, { kind: "status", expiresAt: "2001-01-01T00:00:00.000Z" });
+      let newer: any;
+      try {
+        const result = await pausedSweep(point, async () => {
+          const before = await readEvent(id);
+          await adminOp({ operation: "update", table: "OrgEvent", records: [{
+            id, authorId: before.authorId, kind: "soul.changed", summary: before.summary,
+            createdAt: before.createdAt, expiresAt: before.expiresAt,
+          }] });
+          newer = await readEvent(id);
+        });
+        expect(await readEvent(id)).toEqual(newer);
+        expect(newer.kind).toBe("soul.changed");
+        expect(result).toEqual({ deleted: 0, skipped: 1, failed: 0 });
+      } finally {
+        await deleteEvent(id);
+      }
+    }, 45_000);
+  }
+
+  it("a newer ordinary write before delete commit survives and counts as skipped", async () => {
+    const id = `expiry-newer-${randomUUID()}`;
+    await plantEvent(id, { kind: "status", expiresAt: "2001-01-01T00:00:00.000Z" });
+    let newer: any;
+    try {
+      const result = await pausedSweep("org-event-expiry-commit", async () => {
+        const before = await readEvent(id);
+        await adminOp({ operation: "update", table: "OrgEvent", records: [{
+          id, authorId: before.authorId, kind: before.kind, summary: "newer ordinary",
+          createdAt: before.createdAt, expiresAt: before.expiresAt,
+        }] });
+        newer = await readEvent(id);
+      });
+      expect(await readEvent(id)).toEqual(newer);
+      expect(newer.summary).toBe("newer ordinary");
+      expect(result).toEqual({ deleted: 0, skipped: 1, failed: 0 });
+    } finally {
+      await deleteEvent(id);
+    }
+  }, 45_000);
 });

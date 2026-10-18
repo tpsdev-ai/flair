@@ -39,6 +39,8 @@ let orgEventPut: any = null;
 let orgEventPatch: { id: unknown; content: any } | null = null;
 const READ_FAILS_MARKER = "read-fails";
 const DELETE_FAILS_MARKER = "delete-fails";
+const DELETE_DROPPED_MARKER = "delete-dropped";
+let afterEventSelection: (() => void) | undefined;
 
 // In-memory OrgEvent store, keyed by id — backs OrgEvent.post()'s ownership read
 // (`databases.flair.OrgEvent.get`) and static put().
@@ -128,9 +130,12 @@ class BaseOrgEvent {
     if (typeof id === "string" && id.includes(READ_FAILS_MARKER)) return Promise.reject(new Error("injected stored-row read failure"));
     return orgEventStore.get(id) ?? null;
   }
-  static delete(id: any) {
+  static delete(id: any, ctx?: any) {
     if (typeof id === "string" && id.includes(DELETE_FAILS_MARKER)) return Promise.reject(new Error("injected delete failure"));
-    orgEventStore.delete(id);
+    if (id !== DELETE_DROPPED_MARKER) {
+      if (ctx?.transaction?.deletes) ctx.transaction.deletes.push(id);
+      else orgEventStore.delete(id);
+    }
     return Promise.resolve({ ok: true });
   }
 }
@@ -142,7 +147,7 @@ const databasesMock = {
       // OrgEvent.post() calls `databases.flair.OrgEvent.put(content)` directly
       // (Harper-5 upsert), so the static put must capture AND persist too.
       put: async (content: any) => { orgEventPut = content; orgEventStore.set(content.id, { ...content }); return { ok: true, ...content }; },
-      search: async function* () { yield* orgEventStore.values(); },
+      search: async function* () { yield* orgEventStore.values(); afterEventSelection?.(); },
     }),
     Agent: { get: async () => null, search: async () => [] },
   },
@@ -152,8 +157,19 @@ mock.module("harper", () => ({ server: { http: () => {}, getUser: async () => nu
 
 // Harper assigns `transaction` onto the global at load; the owner-delete
 // confirmation (resources/owner-delete-recheck.ts) creates one when the caller
-// has none. This mock's delete is not staged, so the stand-in just runs the cb.
-(globalThis as any).transaction = (_ctx: any, cb: () => any) => cb();
+// has none. OrgEvent deletes stage until this owned callback commits.
+(globalThis as any).transaction = async (ctx: any, cb: () => any) => {
+  const previous = ctx.transaction;
+  const deletes: string[] = [];
+  ctx.transaction = { open: 1, deletes };
+  try {
+    const result = await cb();
+    for (const id of deletes) orgEventStore.delete(id);
+    return result;
+  } finally {
+    ctx.transaction = previous;
+  }
+};
 
 const { WorkspaceState } = await import("../../resources/WorkspaceState.ts");
 const { OrgEvent } = await import("../../resources/OrgEvent.ts");
@@ -179,6 +195,7 @@ beforeEach(() => {
   workspacePut = null;
   orgEventPut = null;
   orgEventPatch = null;
+  afterEventSelection = undefined;
   workspaceStore = new Map();
   orgEventStore = new Map();
 });
@@ -720,7 +737,7 @@ describe("OrgEventMaintenance.post() authorizes from getContext()", () => {
 });
 
 describe("OrgEventMaintenance deletion counts", () => {
-  it("counts only successful deletions and reports an injected failure separately", async () => {
+  it("counts committed absence and reports an injected failure separately", async () => {
     for (const id of [DELETE_FAILS_MARKER, "deleted-after-failure"]) {
       orgEventStore.set(id, {
         id, authorId: "agent-a", kind: "status", summary: "expired",
@@ -729,8 +746,46 @@ describe("OrgEventMaintenance deletion counts", () => {
     }
     const r: any = new (OrgEventMaintenance as any)();
     r.getContext = () => ({ request: agentCtx("agent-admin", true) });
-    expect(await r.post({})).toEqual({ deleted: 1, failed: 1 });
+    expect(await r.post({})).toEqual({ deleted: 1, skipped: 0, failed: 1 });
     expect(orgEventStore.has(DELETE_FAILS_MARKER)).toBe(true);
     expect(orgEventStore.has("deleted-after-failure")).toBe(false);
+  });
+});
+
+describe("OrgEventMaintenance skipped selections", () => {
+  const id = "expiry-selection";
+  const expired = () => ({ id, authorId: "agent-a", kind: "status", summary: "expired",
+    createdAt: "2000-01-01T00:00:00.000Z", expiresAt: "2001-01-01T00:00:00.000Z" });
+  const sweep = () => {
+    const r: any = new (OrgEventMaintenance as any)();
+    r.getContext = () => ({ request: agentCtx("agent-admin", true) });
+    return r.post({});
+  };
+
+  for (const [name, change] of [
+    ["reserved kind", { kind: "soul.changed" }],
+    ["changed identity", { createdAt: "2002-01-01T00:00:00.000Z" }],
+    ["future expiry", { expiresAt: "9999-01-01T00:00:00.000Z" }],
+    ["removed expiry", { expiresAt: null }],
+  ] as const) {
+    it(`skips a selection with ${name} at its transactional read`, async () => {
+      orgEventStore.set(id, expired());
+      const newer = { ...expired(), ...change };
+      afterEventSelection = () => { orgEventStore.set(id, newer); };
+      expect(await sweep()).toEqual({ deleted: 0, skipped: 1, failed: 0 });
+      expect(orgEventStore.get(id)).toEqual(newer);
+    });
+  }
+
+  it("skips a selection removed before its transactional read", async () => {
+    orgEventStore.set(id, expired());
+    afterEventSelection = () => { orgEventStore.delete(id); };
+    expect(await sweep()).toEqual({ deleted: 0, skipped: 1, failed: 0 });
+  });
+
+  it("skips a resolved delete whose committed row remains", async () => {
+    orgEventStore.set(DELETE_DROPPED_MARKER, { ...expired(), id: DELETE_DROPPED_MARKER });
+    expect(await sweep()).toEqual({ deleted: 0, skipped: 1, failed: 0 });
+    expect(orgEventStore.has(DELETE_DROPPED_MARKER)).toBe(true);
   });
 });
