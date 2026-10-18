@@ -1,0 +1,1 @@
+- **A Memory `POST` confirms the row it committed carries its own write.** A caller-supplied target id whose row a newer write replaced answers the named 409 `stored_row_changed`; an unreadable row answers 503 `write_outcome_unknown` (#2656).

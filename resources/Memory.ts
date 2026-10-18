@@ -1469,6 +1469,10 @@ async function writeSkillCreateOrUpdate(
     hooks: {
       ...defaultSkillHooks,
       pointer: async (shared) => {
+        // Test-only: holds a skill POST after its successor (and predecessor
+        // close) are staged, before the transaction commits (flair#2656).
+        const stagedPause = txnPausePoint("memory-post-skill-staged");
+        if (stagedPause) await stagedPause;
         if (captured.closed) {
           const denial = await deletePointerRow(String(captured.closed.id), shared);
           if (denial) return denial;
@@ -1489,7 +1493,14 @@ async function writeSkillCreateOrUpdate(
     noteWriteStamp(captured.row.embeddingModel, captured.closed ?? undefined);
   }
   if (args.staged) args.staged.text = captured.row ? storedMemoryText(captured.row, args.staged.supplied) : null;
-  return { id: successorId, written: captured.row !== null, visibility: skillVersionVisibility(captured.row ?? unchangedHead) };
+  return {
+    id: successorId,
+    written: captured.row !== null,
+    visibility: skillVersionVisibility(captured.row ?? unchangedHead),
+    // Internal confirmation identity for the caller's committed-row check
+    // (flair#2656); the HTTP answer's allowlist drops it.
+    instanceToken: captured.row?.instanceToken ?? unchangedHead?.instanceToken ?? null,
+  };
 }
 
 /** Close the live head and delete its pointer in the version transaction. */
@@ -2279,16 +2290,35 @@ export class Memory extends (databases as any).flair.Memory {
         ctx, auth, content, storedRow: postStored, explicitPredecessor: preparedSkill.predecessor, method: "post", pointer,
         inPlaceId: reservedId != null ? String(reservedId) : null, staged: skillStaged,
       });
-      if (!(skillResult instanceof Response)) await markDerivedSourcesReflected(content);
+      if (skillResult instanceof Response) return skillWriteResponse(skillResult, redactedValues, skillStaged.text);
+      // flair#2656: the skill version writer owns and commits its transaction
+      // before returning. Confirm the committed successor is this POST's row
+      // (incarnation token) and carries the text fields it staged; a same-id
+      // replace answers 409, an unreadable row 503 — never success.
+      // Test-only: holds the POST after its commit, before the read.
+      const skillVerifyPause = txnPausePoint("memory-post-verify");
+      if (skillVerifyPause) await skillVerifyPause;
+      const skillVerified = await verifyCommittedWrite(
+        (databases as any).flair.Memory,
+        { id: skillResult.id, ...(skillStaged.text ?? {}) },
+        skillResult.id,
+        { expectedToken: skillResult.instanceToken },
+        Object.keys(skillStaged.text ?? {}),
+      );
+      if (skillVerified.unknown) return writeOutcomeUnknownFor(skillResult.id);
+      if (skillVerified.mismatch) return storedRowChangedRefusal("Memory");
+      await markDerivedSourcesReflected(content);
       return skillWriteResponse(skillResult, redactedValues, skillStaged.text);
     }
     // A1' item 2 (adjudication 0a): the Memory row and its pointer row share ONE
-    // transaction. With a request context they join its open transaction; with
-    // NO context (an internal direct call, e.g. new Memory().post(...))
-    // withSharedWriteTransaction creates one, so a failed pointer write rolls
-    // the Memory row back too instead of leaving it pointer-less.
-    // Pinned by test/unit/memory-host-source.test.ts (r20-atomic) — RED if the
-    // owned-transaction branch is bypassed.
+    // transaction. With a request context this POST OWNS a transaction (it is
+    // detached from the request's), and with NO context (an internal direct
+    // call, e.g. new Memory().post(...)) withSharedWriteTransaction creates one,
+    // so a failed pointer write rolls the Memory row back too instead of leaving
+    // it pointer-less. Owning it (flair#2656) is what lets the committed-row
+    // confirmation below run before the handler answers.
+    // Pinned by test/unit-isolated/memory-host-source.test.ts (r20-atomic) — RED
+    // if the owned-transaction branch is bypassed.
     // flair#2467: the post-redaction text fields this write stages, for the response.
     let postStaged: StoredMemoryText = {};
     // Read before the write: inside withSharedWriteTransaction an owned
@@ -2298,7 +2328,7 @@ export class Memory extends (databases as any).flair.Memory {
     let postRowId: string | undefined;
     let grantedClosed: Record<string, any> | null = null;
     try {
-      postResult = await withSharedWriteTransaction(ctx, async (c) => {
+      postResult = await withOwnedTransaction(ctx, async (c) => {
         postStaged = storedMemoryText(content, suppliedText);
         const newId = await writeMemoryRowPost((this as any).constructor, content, c);
         if (newId instanceof Response) return newId;
@@ -2308,6 +2338,10 @@ export class Memory extends (databases as any).flair.Memory {
           const persistDenial = await persistPointerRow(pointer.row, c);
           if (persistDenial) return persistDenial;
         }
+        // Test-only: holds the POST after its row and pointer are staged, before
+        // the transaction commits (flair#2656).
+        const stagedPause = txnPausePoint("memory-post-staged");
+        if (stagedPause) await stagedPause;
         // Stage a grant-authorized close in the successor's transaction.
         grantedClosed = await closeGrantedSupersedeStaged(c, content, supersede.close, postJoinsRequestTxn);
         return null;
@@ -2318,6 +2352,21 @@ export class Memory extends (databases as any).flair.Memory {
       throw err;
     }
     if (postResult instanceof Response) return writeResultResponse(postResult);
+    // flair#2656: the write transaction above committed before this read, so
+    // the row read here is the COMMITTED state. Confirm it is this POST's row
+    // (its server-stamped incarnation token) and still carries the fields the
+    // POST staged: a same-id replace or a dropped write answers 409, an
+    // unreadable row answers 503 — never success.
+    // Test-only: holds the POST after its transaction commits, before the read.
+    const verifyPause = txnPausePoint("memory-post-verify");
+    if (verifyPause) await verifyPause;
+    {
+      const verified = await verifyCommittedWrite(
+        (databases as any).flair.Memory, content, postRowId, { expectedToken: content.instanceToken },
+      );
+      if (verified.unknown) return writeOutcomeUnknownFor(content.id ?? postRowId);
+      if (verified.mismatch) return storedRowChangedRefusal("Memory");
+    }
     if (grantedClosed) noteMemoryUpsert(grantedClosed);
     const result: any = {};
     // flair#1357 — read-your-write for the lexical leg. The table change feed
