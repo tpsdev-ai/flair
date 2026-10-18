@@ -85,7 +85,7 @@ beforeAll(async () => {
   keystore.setPrivateKeySeed(SENDER_ID, senderSeed);
 
   // The hub starts with Presence receipt OFF (the default).
-  receiver = await startHarper();
+  receiver = await startHarper({ env: { FLAIR_FEDERATION_PRESENCE_RECEIVE: "0" } });
   sender = await startHarper({ env: { FLAIR_FEDERATION_PRESENCE_SEND: "1" } });
   assertOwnInstance(receiver, "receiver");
   assertOwnInstance(sender, "sender");
