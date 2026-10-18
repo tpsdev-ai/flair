@@ -181,6 +181,7 @@ function getAdminPass(): string | null {
 // them, and the crypto/decoder logic can't drift.
 
 async function backfillEmbedding(memoryId: string): Promise<void> {
+  let unconfirmed = false;
   try {
     const table = (databases as any).flair.Memory;
     // flair#2484: compute the vector before the owned write transaction opens.
@@ -190,7 +191,7 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
     // entries skip before the text comparison. For eligible rows, `matchFields`
     // compares every field that selects the text (`content`, `trigger`, `tags`)
     // before staging; the helper confirms the committed row afterward. Drift
-    // observed by either check aborts the attempt; remaining outer attempts
+    // observed before commit aborts the attempt; remaining outer attempts
     // re-read and may recompute.
     //
     // flair#2573: the vector is stamped with the current model id, the space it
@@ -225,6 +226,7 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
           },
           {
             label: "backfillEmbedding",
+            onUnconfirmed: () => { unconfirmed = true; },
             expectedRow: record,
             // Compare the text-selecting fields before staging, after the plan's skip checks.
             matchFields: [...MEMORY_EMBEDDING_INPUT_FIELDS, "tags"],
@@ -244,7 +246,7 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
       }
     }
   } catch (err: any) {
-    console.error("[auto-embed] Failed for %s: %s", memoryId, err.message, ...(err instanceof WriteBackConflictError ? [{ outcome: err.outcome }] : []));
+    console.error("[auto-embed] %s for %s: %s", unconfirmed ? "Outcome unconfirmed" : "Failed", memoryId, err.message, ...(unconfirmed ? [{ outcome: "unconfirmed" }] : err instanceof WriteBackConflictError ? [{ outcome: err.outcome }] : []));
   }
 }
 

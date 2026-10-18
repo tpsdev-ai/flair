@@ -62,9 +62,10 @@ for (const outcome of ["conflict", "unconfirmed"] as const) {
       } finally { console.error = saved; }
       expect(logs).toHaveLength(1);
       // The log uses a constant format string; assert on the message as printed.
-      const [fmt, phrase, detail] = logs[0];
-      expect(format(fmt, phrase)).toContain(outcome === "conflict" ? "contribution count write aborted" : "usage count unconfirmed");
-      expect(detail).toMatchObject({ memoryId: "m1", reason: "stored_row_changed", outcome });
+      const [fmt, phrase, reason, detail] = logs[0];
+      expect(format(fmt, phrase, reason)).toContain(outcome === "conflict" ? "contribution count write aborted" : "usage count unconfirmed");
+      expect(reason).toBe(outcome === "conflict" ? "stored_row_changed" : "write_unconfirmed");
+      expect(detail).toMatchObject({ memoryId: "m1", reason: outcome === "conflict" ? "stored_row_changed" : "write_unconfirmed", outcome });
       expect(detail.err.message).toContain(outcome === "conflict" ? "no write committed by this attempt" : "unconfirmed after commit");
     });
   }

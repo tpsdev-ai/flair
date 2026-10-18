@@ -91,15 +91,16 @@ const opts = (label: string) => ({ label });
 for (const idempotent of [false, true]) {
   for (const kind of ["write", "update"] as const) {
     for (const outcome of ["conflict", "unconfirmed"] as const) {
-      test(`${kind} plan (${idempotent ? "idempotent" : "non-idempotent"}) labels an exhausted ${outcome === "conflict" ? "pre-commit" : "post-commit"} race ${outcome}`, async () => {
+      test(`${kind} plan (${idempotent ? "idempotent" : "non-idempotent"}) labels a ${outcome === "conflict" ? "pre-commit" : "post-commit"} race ${outcome}`, async () => {
         const { table, store, commits } = stagedTable([{ id: "m1", count: 0 }]);
         let changes = 0;
         const compete = () => store.set("m1", { id: "m1", count: --changes });
         if (outcome === "conflict") table.setCompeting(compete);
         else table.setAfterCommit(compete);
+        const evidence = idempotent ? { idempotent: true as const } : { idempotent: false as const, commitMarkerField: "writeBackWriteId" };
         const pending = writeBackCommittedRow(table, "m1", (row) => kind === "write"
-          ? { idempotent, write: { ...row, count: 1 } }
-          : { idempotent, update: { count: 1 } }, opts("labels"));
+          ? { ...evidence, write: { ...row, count: 1 } }
+          : { ...evidence, update: { count: 1 } }, opts("labels"));
         await expect(pending).rejects.toBeInstanceOf(WriteBackConflictError);
         await expect(pending).rejects.toMatchObject({ outcome, message: expect.stringContaining(outcome === "conflict" ? "no write committed by this attempt" : "unconfirmed after commit") });
         const attempts = outcome === "unconfirmed" && !idempotent ? 1 : WRITE_BACK_ATTEMPTS;
@@ -198,13 +199,13 @@ describe("writeBackCommittedRow — abort and retry from the committed row", () 
     const outcome = await writeBackCommittedRow(
       table,
       "m1",
-      (row: Row) => { seen.push(String(row.content)); return { idempotent: false, write: { ...row, content: `${row.content}+written` } }; },
+      (row: Row) => { seen.push(String(row.content)); return { idempotent: false, commitMarkerField: "writeBackWriteId", write: { ...row, content: `${row.content}+written` } }; },
       opts("retry"),
     );
     // The first attempt read "a"; the retry read the committed "competing".
     expect(seen).toEqual(["a", "competing"]);
-    expect(outcome).toEqual({ idempotent: false, write: { id: "m1", content: "competing+written" } });
-    expect(store.get("m1")).toEqual({ id: "m1", content: "competing+written" });
+    expect(outcome).toEqual({ idempotent: false, commitMarkerField: "writeBackWriteId", write: { id: "m1", content: "competing+written" } });
+    expect(store.get("m1")).toEqual({ id: "m1", content: "competing+written", writeBackWriteId: expect.any(String) });
     expect(commits).toHaveLength(1); // only the retried write landed
   });
 
@@ -282,7 +283,7 @@ describe("writeBackCommittedRow — the post-commit verification (flair#2653)", 
     try {
       await writeBackCommittedRow(table, "m1", (row) => {
         plans++;
-        return { idempotent: false, update: { usageCount: row.usageCount + 1 } };
+        return { idempotent: false, commitMarkerField: "writeBackWriteId", update: { usageCount: row.usageCount + 1 } };
       }, opts("contribution"));
     } catch (err) { error = err; }
     expect(error).toBeInstanceOf(WriteBackConflictError);
@@ -293,15 +294,46 @@ describe("writeBackCommittedRow — the post-commit verification (flair#2653)", 
     expect(store.get("m1")?.usageCount).toBe(2);
   });
 
+  for (const kind of ["write", "update"] as const) {
+    test(`a non-idempotent ${kind} with another attempt's matching value is unconfirmed`, async () => {
+      const { table, store, commits } = stagedTable([{ id: "m1", usageCount: 5 }]);
+      table.setAfterCommit(() => store.set("m1", { id: "m1", usageCount: 6, writeBackWriteId: "other-attempt" }));
+      let plans = 0;
+      const pending = writeBackCommittedRow(table, "m1", (row) => {
+        plans++;
+        const evidence = { idempotent: false as const, commitMarkerField: "writeBackWriteId" };
+        return kind === "update"
+          ? { ...evidence, update: { usageCount: row.usageCount + 1 } }
+          : { ...evidence, write: { ...row, usageCount: row.usageCount + 1 } };
+      }, opts("same-value"));
+      await expect(pending).rejects.toMatchObject({ outcome: "unconfirmed" });
+      expect(plans).toBe(1);
+      expect(commits).toHaveLength(1);
+      expect(commits[0].writeBackWriteId).toBeString();
+      expect(commits[0].writeBackWriteId).not.toBe("other-attempt");
+      expect(store.get("m1")).toEqual({ id: "m1", usageCount: 6, writeBackWriteId: "other-attempt" });
+    });
+  }
+
   test("a non-idempotent pre-commit conflict may retry", async () => {
     const { table, store, commits } = stagedTable([{ id: "m1", usageCount: 0 }]);
+    const markers: unknown[] = [];
+    const update = table.update;
+    table.update = async (id, patch, ctx) => {
+      markers.push(patch.writeBackWriteId);
+      return update(id, patch, ctx);
+    };
     table.setCompeting(() => {
       table.setCompeting(undefined);
       store.set("m1", { id: "m1", usageCount: 1 });
     });
-    await writeBackCommittedRow(table, "m1", (row) => ({ idempotent: false, update: { usageCount: row.usageCount + 1 } }), opts("pre-contribution"));
+    await writeBackCommittedRow(table, "m1", (row) => ({ idempotent: false, commitMarkerField: "writeBackWriteId", update: { usageCount: row.usageCount + 1 } }), opts("pre-contribution"));
     expect(store.get("m1")?.usageCount).toBe(2);
     expect(commits).toHaveLength(1);
+    expect(markers).toHaveLength(2);
+    expect(markers.every((marker) => typeof marker === "string" && marker.length > 0)).toBe(true);
+    expect(markers[0]).not.toBe(markers[1]);
+    expect(store.get("m1")?.writeBackWriteId).toBe(markers[1]);
   });
 
   test("a non-idempotent unreadable confirmation is unconfirmed without retry", async () => {
@@ -318,7 +350,7 @@ describe("writeBackCommittedRow — the post-commit verification (flair#2653)", 
     };
     let error: unknown;
     try {
-      await writeBackCommittedRow(table, "m1", () => ({ idempotent: false, update: { usageCount: 1 } }),
+      await writeBackCommittedRow(table, "m1", () => ({ idempotent: false, commitMarkerField: "writeBackWriteId", update: { usageCount: 1 } }),
         { label: "unreadable-contribution", expectedRow: row });
     } catch (err) { error = err; }
     expect((error as WriteBackConflictError).outcome).toBe("unconfirmed");
@@ -338,15 +370,17 @@ describe("writeBackCommittedRow — the post-commit verification (flair#2653)", 
       },
       async put(row: Row): Promise<Row> { return row; },
     };
+    let unconfirmed = false;
     await expect(
       writeBackCommittedRow(table, "m1", (stored: Row) => ({ idempotent: true, write: { ...stored, content: "written" } }),
-        { label: "post-commit-read", expectedRow: { ...row } }),
+        { label: "post-commit-read", onUnconfirmed: () => { unconfirmed = true; }, expectedRow: { ...row } }),
     ).rejects.toThrow("committed read unavailable");
+    expect(unconfirmed).toBe(true);
   });
 });
 
-describe("writeBackCommittedRow — an update plan writes only the fields it names", () => {
-  test("an update plan lands its patch and leaves the stored row's other fields untouched", async () => {
+describe("writeBackCommittedRow — incremental update plans", () => {
+  test("an idempotent update plan lands its patch and leaves the stored row's other fields untouched", async () => {
     const { table, store, commits, writes } = stagedTable([{ id: "m1", content: "a", durability: "standard" }]);
     const outcome = await writeBackCommittedRow(table, "m1", () => ({ idempotent: true, update: { usageCount: 1 } }), opts("update-only"));
     expect(outcome).toEqual({ idempotent: true, update: { usageCount: 1 } });

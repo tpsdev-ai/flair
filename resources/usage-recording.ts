@@ -121,8 +121,7 @@ export class UsageLedgerReadError extends Error {
  * For a row the plan does not skip, an identity change the in-transaction read
  * already sees throws WriteBackConflictError at once (no retry). Only a
  * pre-commit conflict retries. A post-commit mismatch is terminal and
- * unconfirmed. recordUsageBatch / recordCitations log either
- * refusal with the reason `stored_row_changed`. The earlier read only decides
+ * unconfirmed. The earlier read only decides
  * the read-scope gate above; it never authorizes the count write on its own.
  *
  * Called by recordUsageBatch() (POST /RecordUsage, explicit usage feedback)
@@ -222,18 +221,6 @@ async function recordUsageContributionLocked(
   });
   if (!prepared) return;
 
-  // Targeted usageCount-ONLY bump: an INCREMENTAL update of exactly this one
-  // field through the shared helper, against the RAW Memory table, NEVER
-  // Memory.put() (the resource class): that would 403 this cross-agent write via
-  // its ownership check, and bypassing that check directly would risk letting
-  // this write path smuggle OTHER field changes through instead of just the
-  // count (RecordUsage.ts module doc's "WHY THIS IS ITS OWN ENDPOINT"). The helper
-  // confirms, inside its own transaction, that the stored row is still the one
-  // this contribution was checked against (flair#2441): a row deleted or purged
-  // before the in-transaction read is skipped by the plan (absent row), as is a
-  // row outside the agent's read scope; for any other row an identity mismatch
-  // seen by the check is refused. An error from the transactional read is not
-  // caught here: it propagates to the caller.
   await writeBackCommittedRow(
     (databases as any).flair.Memory,
     memoryId,
@@ -243,9 +230,7 @@ async function recordUsageContributionLocked(
       // above stays). The count is only ever bumped on a row in the agent's
       // read scope.
       if (!row || !canRead(row)) return { skip: true };
-      // Only `usageCount`: an incremental update, never a
-      // full-row put of the row read above (flair#2470).
-      return { idempotent: false, update: { usageCount: (row.usageCount ?? 0) + 1 } };
+      return { idempotent: false, commitMarkerField: "writeBackWriteId", update: { usageCount: (row.usageCount ?? 0) + 1 } };
     },
     {
       ctx,
@@ -256,6 +241,7 @@ async function recordUsageContributionLocked(
       expectedRow: prepared,
       pausePre: () => txnPausePoint("usage-count-pre"),
       pausePoint: () => txnPausePoint("usage-count"),
+      pauseBeforeCommit: () => txnPausePoint("usage-count-commit"),
       pauseBeforeVerify: () => txnPausePoint("usage-count-verify"),
     },
   );
@@ -368,7 +354,7 @@ export async function recordCitations(
     } catch (err) {
       // Log per-id failures without stopping the batch.
       if (err instanceof WriteBackConflictError) {
-        console.error("recordCitations: %s, stored_row_changed", err.outcome === "conflict" ? "contribution count write aborted" : "usage count unconfirmed", { memoryId: id, reason: "stored_row_changed", outcome: err.outcome, err });
+        console.error("recordCitations: %s, %s", err.outcome === "conflict" ? "contribution count write aborted" : "usage count unconfirmed", err.outcome === "conflict" ? "stored_row_changed" : "write_unconfirmed", { memoryId: id, reason: err.outcome === "conflict" ? "stored_row_changed" : "write_unconfirmed", outcome: err.outcome, err });
       } else if (err instanceof UsageLedgerReadError) {
         // flair#2333: the ledger read that decides whether this pair already
         // has a row failed — not "no row". This contribution is aborted (no
@@ -425,7 +411,7 @@ export async function recordUsageBatch(
     } catch (err) {
       // Log per-id failures without changing the response.
       if (err instanceof WriteBackConflictError) {
-        console.error("RecordUsage.post: %s, stored_row_changed", err.outcome === "conflict" ? "contribution count write aborted" : "usage count unconfirmed", { memoryId, reason: "stored_row_changed", outcome: err.outcome, err });
+        console.error("RecordUsage.post: %s, %s", err.outcome === "conflict" ? "contribution count write aborted" : "usage count unconfirmed", err.outcome === "conflict" ? "stored_row_changed" : "write_unconfirmed", { memoryId, reason: err.outcome === "conflict" ? "stored_row_changed" : "write_unconfirmed", outcome: err.outcome, err });
       } else if (err instanceof UsageLedgerReadError) {
         // flair#2333: the ledger read failed — not "no row". This contribution
         // is aborted (no ledger write, no count bump); the other ids stand.

@@ -5,7 +5,7 @@ import { AUTHORITY_FIELDS, guardAuthorityFields, stripAuthorityFields } from "..
 import { writerHelperCalls } from "../helpers/raw-table-writers";
 
 describe("workflow authority guard", () => {
-  test("each verdict field rejects creation, replacement and clearing", async () => {
+  test("each authority field rejects creation, replacement and clearing", async () => {
     for (const field of AUTHORITY_FIELDS.Memory) {
       for (const value of ["forged", null, ""]) {
         expect((await guardAuthorityFields(() => undefined, { [field]: value }, "Memory"))?.status).toBe(403);
@@ -33,6 +33,13 @@ describe("workflow authority guard", () => {
     expect(await guardAuthorityFields(() => stored, omitted, "Memory")).toBeNull();
     expect(omitted.promotionStatus).toBeNull();
   });
+  test("write-back markers reject forgery and tolerate the stored echo", async () => {
+    const stored = { content: "text", writeBackWriteId: "server-attempt" };
+    expect((await guardAuthorityFields(() => stored, { writeBackWriteId: "forged" }, "Memory"))?.status).toBe(403);
+    const echo = { ...stored };
+    expect(await guardAuthorityFields(() => stored, echo, "Memory")).toBeNull();
+    expect(echo.writeBackWriteId).toBe("server-attempt");
+  });
   test("a failed stored-state read cannot authorize a write", async () => {
     await expect(guardAuthorityFields(() => { throw new Error("unavailable"); }, {}, "Memory")).rejects.toThrow("unavailable");
   });
@@ -49,7 +56,7 @@ describe("workflow authority guard", () => {
     }
   });
   test("stripAuthorityFields drops every registered stamp and leaves the rest", () => {
-    const row: Record<string, unknown> = { content: "keep", promotionStatus: "approved", promotedAt: "t", promotedBy: "r", durability: "standard" };
+    const row: Record<string, unknown> = { content: "keep", promotionStatus: "approved", promotedAt: "t", promotedBy: "r", writeBackWriteId: "attempt", durability: "standard" };
     stripAuthorityFields(row, "Memory");
     expect(row).toEqual({ content: "keep", durability: "standard" });
   });
@@ -101,7 +108,7 @@ const CLASSIFICATIONS: Array<{ file: string; via: WriterVia; needle: string; kin
   { file: "resources/Memory.ts", via: "direct-put", needle: "flair.Memory.put(reindexRow, c)", kind: "admin-restate" },
   { file: "resources/Memory.ts", via: "patchRecord", needle: "reflectPatch", kind: "single-field" },
   { file: "resources/MemoryMaintenance.ts", via: "direct-update", needle: "archivePatch, c", kind: "echo" },
-  { file: "resources/usage-recording.ts", via: "write-back", needle: 'label: "usage-recording"', kind: "echo" },
+  { file: "resources/usage-recording.ts", via: "write-back", needle: 'label: "usage-recording"', kind: "trusted-stamp" },
   { file: "resources/AgentSeed.ts", via: "direct-put", needle: "put(record)", kind: "seed" },
   { file: "resources/auth-middleware.ts", via: "write-back", needle: 'label: "backfillEmbedding"', kind: "single-field" },
   { file: "resources/MemoryReflect.ts", via: "patchRecord", needle: "reflectPatch", kind: "single-field" },

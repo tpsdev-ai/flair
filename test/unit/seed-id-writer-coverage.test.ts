@@ -17,8 +17,7 @@ import { rawTableWriteSites } from "../helpers/raw-table-writers";
  *   GUARDED     — the decision runs on the ids this write can land on;
  *   OPERATOR    — the route already requires the operator source;
  *   BOOKKEEPING — lastReflected and embedding backfill update selected fields;
- *                 usage recording intends to change only usageCount but
- *                 re-PUTs the stored row and can take an agent-supplied id;
+ *                 usage recording can take an agent-supplied id;
  *   SERVER      — the server selects the rows (a sweep, a migration, a row it
  *                 just wrote under a generated id), or another table, or a
  *                 read-only alias.
@@ -69,7 +68,7 @@ add("MemoryPurge", ["writer:memory.delete#1"],
 add("Memory", ["writer:patchRecord#1"],
   "BOOKKEEPING: lastReflected on each derivedFrom source of a new row.");
 add("usage-recording", ["alias-source:(databases as any).flair.Memory#1", "writer:writeBackCommittedRow#1"],
-  "BOOKKEEPING: usageCount + 1 on a row the caller can read, through the shared write-back helper (flair#2441); the rest of the row is the stored row.");
+  "BOOKKEEPING: usageCount + 1 and commit marker on a row the caller can read, through the shared write-back helper (flair#2441); the rest of the row is the stored row.");
 add("auth-middleware", ["writer:writeBackCommittedRow#1"],
   "BOOKKEEPING: the embedding backfill for the id of a Memory write that already succeeded (and so passed the decision), through the shared helper (flair#2354).");
 add("MemoryReflect", ["writer:patchRecordSilent#1"],

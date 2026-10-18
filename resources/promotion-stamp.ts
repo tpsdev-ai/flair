@@ -35,7 +35,7 @@ function isWrittenRow(row: any, written: PromotedRowIdentity | undefined): boole
 // transaction its Memory write used, and the stamp joins it.
 export async function stampMemoryPromotion(
   id: string, reviewerId: string, decidedAt: string, enumerationContext?: any, stagedContext?: any,
-  written?: PromotedRowIdentity,
+  written?: PromotedRowIdentity, onUnconfirmed?: () => void,
 ): Promise<void> {
   const table = (databases as any).flair.Memory;
   const stamp = (stored: any) => {
@@ -60,7 +60,7 @@ export async function stampMemoryPromotion(
     table,
     id,
     (stored) => ({ idempotent: true, write: stamp(stored) }),
-    { ctx: enumerationContext, label: "promotion-stamp", pausePre: () => txnPausePoint("promotion-stamp-pre"), pausePoint: () => txnPausePoint("promotion-stamp"), pauseBeforeCommit: () => txnPausePoint("promotion-stamp-commit"), matchFields: ["content"], expectedRow: selected },
+    { ctx: enumerationContext, onUnconfirmed, label: "promotion-stamp", pausePre: () => txnPausePoint("promotion-stamp-pre"), pausePoint: () => txnPausePoint("promotion-stamp"), pauseBeforeCommit: () => txnPausePoint("promotion-stamp-commit"), matchFields: ["content"], expectedRow: selected },
   );
   if ("write" in outcome) noteMemoryUpsert(outcome.write);
 }
@@ -71,11 +71,12 @@ export async function stampMemoryPromotion(
 export async function stampMemoryPromotionIsolated(
   id: string, reviewerId: string, decidedAt: string, enumerationContext?: any, written?: PromotedRowIdentity,
 ): Promise<boolean> {
+  let unconfirmed = false;
   try {
-    await stampMemoryPromotion(id, reviewerId, decidedAt, enumerationContext, undefined, written);
+    await stampMemoryPromotion(id, reviewerId, decidedAt, enumerationContext, undefined, written, () => { unconfirmed = true; });
     return true;
   } catch (err: any) {
-    console.warn("stampMemoryPromotion failed for %s: %s", id, err?.message ?? err, ...(err instanceof WriteBackConflictError ? [{ outcome: err.outcome }] : []));
+    console.warn("stampMemoryPromotion %s for %s: %s", unconfirmed ? "outcome unconfirmed" : "failed", id, err?.message ?? err, ...(unconfirmed ? [{ outcome: "unconfirmed" }] : err instanceof WriteBackConflictError ? [{ outcome: err.outcome }] : []));
     return false;
   }
 }

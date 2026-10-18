@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { appendFileSync } from "node:fs";
 import { join } from "node:path";
@@ -18,12 +19,16 @@ export type WriteBackPause = () => Promise<void> | undefined;
 /** What the `plan` callback decides for the row it was handed.
  *
  * A `write` plan must supply a complete row for Harper `put`.
- * `update` writes only the named fields through Harper `update`.
+ * `update` writes through Harper `update`.
  * `idempotent` means re-planning from a fresh read after applying this plan
  * yields the same committed effect. Only those plans may retry after commit. */
+type WriteBackEvidence =
+  | { idempotent: true }
+  | { idempotent: false; commitMarkerField: string };
+
 export type WriteBackPlan =
-  | { write: Record<string, unknown>; idempotent: boolean }
-  | { update: Record<string, unknown>; idempotent: boolean }
+  | ({ write: Record<string, unknown> } & WriteBackEvidence)
+  | ({ update: Record<string, unknown> } & WriteBackEvidence)
   // A plan may name WHY it skipped, so a caller that maps a skip to an operator-
   // visible reason (FederationSync's skip log) can tell two skip causes apart
   // instead of labeling every skip with one hardcoded name (flair#2266). The
@@ -39,6 +44,7 @@ export interface WriteBackOptions {
   label: string;
   /** Bounded attempts before the named refusal. Default {@link WRITE_BACK_ATTEMPTS}. */
   attempts?: number;
+  onUnconfirmed?: () => void;
   expectedRow?: any;
   matches?: (row: any) => boolean;
   matchFields?: string[];
@@ -311,6 +317,7 @@ export async function writeBackCommittedRow(
   for (let attempt = 1; ; attempt++) {
     noteTestAttempt(opts.label, id, attempt);
     let decision: WriteBackPlan;
+    let writeId: string | undefined;
     try {
       decision = await withOwnedTransaction<WriteBackPlan>(opts.ctx, async (c) => {
         const row = await table.get(id, c);
@@ -323,8 +330,14 @@ export async function writeBackCommittedRow(
           const pause = opts.pausePoint();
           if (pause) await pause;
         }
-        if ("update" in decision) await applyFieldUpdate(table, id, decision.update, c);
-        else await table.put(decision.write, c);
+        let values = "update" in decision ? decision.update : decision.write;
+        if (!decision.idempotent) {
+          if (!decision.commitMarkerField) throw new Error("write-back: non-idempotent plans require a commit marker field");
+          writeId = randomUUID();
+          values = { ...values, [decision.commitMarkerField]: writeId };
+        }
+        if ("update" in decision) await applyFieldUpdate(table, id, values, c);
+        else await table.put(values, c);
         await confirmCommittedRow(table, id, (committed) => isDeepStrictEqual(committed, row));
         // Test-only: holds this write after its last pre-commit confirmation,
         // before the transaction commits (flair#2653).
@@ -356,11 +369,13 @@ export async function writeBackCommittedRow(
     try {
       committed = await table.get(id, {});
     } catch (err) {
+      opts.onUnconfirmed?.();
       noteTestAttempt(opts.label, id, attempt, "unconfirmed");
       if (!decision.idempotent) throw new WriteBackConflictError(opts.label, id, attempt, "unconfirmed");
       throw err;
     }
-    if (!committedShowsWrite(committed, basis, decision)) {
+    if (!committedShowsWrite(committed, basis, decision, writeId)) {
+      opts.onUnconfirmed?.();
       noteTestAttempt(opts.label, id, attempt, "unconfirmed");
       if (!decision.idempotent) throw new WriteBackConflictError(opts.label, id, attempt, "unconfirmed");
       if (attempt >= attempts) throw new WriteBackConflictError(opts.label, id, attempts, "unconfirmed");
@@ -374,15 +389,16 @@ export async function writeBackCommittedRow(
 // Harper assigns these timestamps; they are not staged application fields.
 const HARPER_MANAGED_FIELDS = ["__createdtime__", "__updatedtime__"] as const;
 
-/** Compare staged values; full-row plans also require omitted fields absent. */
-function committedShowsWrite(committed: any, basis: any, decision: WriteBackPlan): boolean {
+/** Compare staged values. */
+function committedShowsWrite(committed: any, basis: any, decision: WriteBackPlan, writeId?: string): boolean {
   if ("skip" in decision) return true;
+  if (!decision.idempotent && committed?.[decision.commitMarkerField] !== writeId) return false;
   if ("update" in decision) {
     if (!sameStoredRow(committed, basis)) return false;
-    return Object.entries(decision.update).every(([field, value]) => isDeepStrictEqual(committed?.[field], value));
+    return Object.entries(decision.update).every(([field, value]) => (!decision.idempotent && field === decision.commitMarkerField) || isDeepStrictEqual(committed?.[field], value));
   }
   if (!sameStoredRow(committed, decision.write)) return false;
   const managed = new Set<string>(HARPER_MANAGED_FIELDS);
-  return Object.entries(decision.write).every(([field, value]) => managed.has(field) || isDeepStrictEqual(committed?.[field], value)) &&
-    Object.keys(committed).every((field) => managed.has(field) || Object.hasOwn(decision.write, field));
+  return Object.entries(decision.write).every(([field, value]) => managed.has(field) || (!decision.idempotent && field === decision.commitMarkerField) || isDeepStrictEqual(committed?.[field], value)) &&
+    Object.keys(committed).every((field) => managed.has(field) || Object.hasOwn(decision.write, field) || (!decision.idempotent && field === decision.commitMarkerField));
 }

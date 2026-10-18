@@ -375,7 +375,7 @@ export class FeedMemories extends Resource {
             refusal = Response.json({ error: "invalid_expiry", message: expiryError }, { status: 400 });
             return { skip: true };
           }
-          return { idempotent: false, write: written };
+          return { idempotent: false, commitMarkerField: "writeBackWriteId", write: written };
         },
         { ctx, label: "MemoryFeed.ingest", pausePre: () => txnPausePoint("feed-ingest-pre"), pausePoint: () => txnPausePoint("feed-ingest"), expectedRow: existingRecord },
       );
