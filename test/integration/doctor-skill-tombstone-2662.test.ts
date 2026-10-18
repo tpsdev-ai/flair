@@ -4,8 +4,10 @@
  *
  * The "Skill tombstones" doctor section reports each skill subject whose newest
  * InstructionVersion is a `delete` tombstone while the skill's Memory row is
- * still live. It lists every subject (more than ten included), and a check that
- * cannot run is a counted issue rather than a pass.
+ * still open-live (not archived, not expired, no validTo — the skill writer's
+ * predicate). It lists every subject (more than ten included), and a table read
+ * that fails while the section runs is a counted NOT RUN issue rather than a
+ * pass.
  *
  * Build prerequisite: dist/cli.js and dist/resources/*.js must exist
  * (`bun run build && bun run build:cli`).
@@ -16,13 +18,14 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import nacl from "tweetnacl";
 import { childOverranDeadline, cliLeg } from "../helpers/child-deadline";
 import { nodeBin } from "../helpers/node-runtime";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 
 const CLI = join(process.cwd(), "dist", "cli.js");
 const ADMIN_PASS = "test123"; // matches harper-lifecycle's seeded admin pass
-const PASS_LINE = "No delete tombstone is the newest version of a skill with a live Memory row.";
+const PASS_LINE = "No delete tombstone is the newest version of a skill with an open-live Memory row (not archived, not expired, no validTo).";
 
 let harper: HarperInstance;
 let cliHome: string;
@@ -156,6 +159,48 @@ async function closeMemoryRow(rowId: string): Promise<void> {
   });
 }
 
+async function readRows(table: "Memory" | "InstructionVersion", attribute: string, value: string): Promise<any[]> {
+  const res = await fetch(harper.opsURL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: basic() },
+    body: JSON.stringify({
+      database: "flair",
+      operation: "search_by_value",
+      table,
+      search_attribute: attribute,
+      search_type: "equals",
+      search_value: value,
+      get_attributes: ["*"],
+    }),
+    signal: AbortSignal.timeout(15_000),
+  });
+  const text = await res.text();
+  expect(res.status, `read ${table}.${attribute} returned ${res.status}: ${text.slice(0, 300)}`).toBeLessThan(300);
+  return JSON.parse(text) as any[];
+}
+
+interface WriterAgent { id: string; publicKey: string; secretKey: Uint8Array }
+
+function mkAgent(id: string): WriterAgent {
+  const pair = nacl.sign.keyPair();
+  return { id, publicKey: Buffer.from(pair.publicKey).toString("base64"), secretKey: pair.secretKey };
+}
+
+/** Sign and send a request as the real agent-facing resource writer. */
+async function sendAs(agent: WriterAgent, method: string, path: string, body?: unknown): Promise<Response> {
+  const ts = String(Date.now());
+  const nonce = randomUUID();
+  const signature = nacl.sign.detached(new TextEncoder().encode(`${agent.id}:${ts}:${nonce}:${method}:${path}`), agent.secretKey);
+  return fetch(harper.httpURL + path, {
+    method,
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `TPS-Ed25519 ${agent.id}:${ts}:${nonce}:${Buffer.from(signature).toString("base64")}`,
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+}
+
 async function remove(table: "Memory" | "InstructionVersion", ids: string[]): Promise<void> {
   if (ids.length === 0) return;
   await ops({ operation: "delete", table, hash_values: ids });
@@ -197,6 +242,65 @@ describe("flair doctor — Skill tombstones section (flair#2662, real CLI + real
       await remove("Memory", [planted.rowId]);
     }
   }, 120_000);
+
+  test("the writer's own delete passes, and reopening its row names the ids it produced", async () => {
+    const agent = mkAgent("agent-a");
+    await ops({
+      operation: "insert",
+      table: "Agent",
+      records: [{ id: agent.id, name: agent.id, role: "agent", publicKey: agent.publicKey, createdAt: new Date().toISOString() }],
+    });
+    let subjectId = "";
+    let rowId = "";
+    let versionIds: string[] = [];
+    try {
+      const created = await sendAs(agent, "POST", "/Memory", {
+        agentId: agent.id,
+        content: "a writer-produced skill",
+        trigger: "when the seam test runs",
+        tags: ["skill"],
+        durability: "persistent",
+      });
+      expect([200, 201], `POST /Memory returned ${created.status}`).toContain(created.status);
+      rowId = String((await created.json()).id);
+      const [row] = await readRows("Memory", "id", rowId);
+      subjectId = String(row.skillSubjectId);
+      expect(subjectId.length).toBeGreaterThan(0);
+
+      const base = await runDoctor(ADMIN_PASS);
+      const baseCount = issueCount(base.stdout);
+
+      // Delete through the real Memory resource: the tombstone and the close
+      // are Flair-produced, not planted by the test.
+      const deleted = await sendAs(agent, "DELETE", `/Memory/${rowId}`);
+      expect(deleted.status, `DELETE /Memory returned ${deleted.status}`).toBe(200);
+      const [closed] = await readRows("Memory", "id", rowId);
+      expect(typeof closed.validTo === "string" && closed.validTo.length > 0, "the writer's close did not land").toBe(true);
+      const versions = await readRows("InstructionVersion", "subjectId", subjectId);
+      versionIds = versions.map((version) => String(version.id));
+      const tombstones = versions.filter((version) => version.kind === "delete");
+      expect(tombstones, "the writer did not append exactly one delete tombstone").toHaveLength(1);
+      const tombstoneId = String(tombstones[0].id);
+
+      const closedDoctor = await runDoctor(ADMIN_PASS);
+      expect(closedDoctor.stdout).toContain(PASS_LINE);
+      expect(issueCount(closedDoctor.stdout), "the writer's own closed row was reported").toBe(baseCount);
+
+      // Reopen the writer-produced row as an operator: clear its close.
+      await ops({ operation: "update", table: "Memory", records: [{ id: rowId, validTo: null }] });
+      const [reopened] = await readRows("Memory", "id", rowId);
+      expect(reopened.validTo ?? null, "the reopen did not clear validTo").toBeNull();
+
+      const reopenedDoctor = await runDoctor(ADMIN_PASS);
+      expect(reopenedDoctor.stdout).toContain(`${subjectId} (tombstone ${tombstoneId}, live row ${rowId})`);
+      expect(reopenedDoctor.stdout).not.toContain(PASS_LINE);
+      expect(issueCount(reopenedDoctor.stdout), "the reopened row did not move the summary").toBe(baseCount + 1);
+    } finally {
+      await remove("InstructionVersion", versionIds);
+      if (rowId) await ops({ operation: "delete", table: "Memory", hash_values: [rowId] });
+      await ops({ operation: "delete", table: "Agent", hash_values: [agent.id] });
+    }
+  }, 180_000);
 
   test("lists every subject when more than ten tombstones are over live rows", async () => {
     const base = await runDoctor(ADMIN_PASS);

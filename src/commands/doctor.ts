@@ -2427,8 +2427,11 @@ program
 
       // 8d. Skill tombstones (flair#2662) — for each skill subject whose
       // newest InstructionVersion is a `delete` tombstone, report the subject
-      // when its Memory row is still live. Read-only: nothing is rewritten.
-      // A check that cannot read the tables is NOT RUN and counted.
+      // when its Memory row is still open-live (the skill writer's predicate:
+      // not archived, not expired, no validTo). Read-only: nothing is
+      // rewritten. A table read that fails while this section runs is NOT RUN
+      // and counted; when Harper is not responding, the enclosing gate skips
+      // the section and doctor counts the server problem elsewhere.
       console.log(`\n  ${render.wrap(render.c.bold, "Skill tombstones")}`);
       if (rosterNotRun) {
         issues++;
@@ -2453,7 +2456,7 @@ program
         } else {
           const finding = describeLiveSkillTombstones(tables.versions, tables.memories);
           if (!finding) {
-            console.log(`  ${render.icons.ok} No delete tombstone is the newest version of a skill with a live Memory row.`);
+            console.log(`  ${render.icons.ok} No delete tombstone is the newest version of a skill with an open-live Memory row (not archived, not expired, no validTo).`);
           } else {
             issues++;
             console.log(`  ${render.icons.warn} ${finding}`);

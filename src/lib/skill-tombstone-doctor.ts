@@ -1,22 +1,30 @@
 /**
  * skill-tombstone-doctor.ts — the `flair doctor` check for skill subjects whose
  * newest InstructionVersion is a `delete` tombstone while the skill's Memory
- * row is still live (flair#2662).
+ * row is still open-live (flair#2662).
  *
  * A skill DELETE appends a tombstone and closes the live Memory row. When the
  * post-commit confirmation cannot read the close, the tombstone can commit
- * while the row stays live. This check reports that inconsistency; it never
- * repairs it.
+ * while the row stays open-live. This check reports that inconsistency; it
+ * never repairs it.
+ *
+ * "Open-live" is the skill writer's own predicate (isOpenLiveRow): not
+ * archived, not expired, and no `validTo`. An archived or expired row under a
+ * tombstone is not reported.
  *
  * The decision is pure. The reads use the operations API and return null on a
  * failed read (never an empty list), so a doctor that cannot read the tables
- * reports the check as unrun rather than passed.
+ * reports the check as unrun rather than passed when this section runs. When
+ * Harper is not responding, the enclosing gate skips the section and doctor
+ * reports the server problem elsewhere.
  */
+
+import { isOpenLiveRow } from "./open-live-row.js";
 
 export const SKILL_TOMBSTONE_VERSION_ROWS_SQL =
   "SELECT id, subjectType, subjectId, version, kind, rowId FROM flair.InstructionVersion";
 export const SKILL_TOMBSTONE_MEMORY_ROWS_SQL =
-  "SELECT id, skillSubjectId, validTo FROM flair.Memory";
+  "SELECT id, skillSubjectId, validTo, archived, expiresAt FROM flair.Memory";
 
 export interface SkillVersionRow {
   id?: unknown;
@@ -31,6 +39,8 @@ export interface SkillMemoryRow {
   id?: unknown;
   skillSubjectId?: unknown;
   validTo?: unknown;
+  archived?: unknown;
+  expiresAt?: unknown;
 }
 
 export interface LiveSkillTombstone {
@@ -46,9 +56,9 @@ function versionSequence(value: unknown): bigint | null {
   return null;
 }
 
-/** A Memory row is closed when `validTo` is a nonempty string; absent or empty means still live. */
-function memoryRowIsLive(row: SkillMemoryRow): boolean {
-  return !(typeof row.validTo === "string" && row.validTo.length > 0);
+/** The skill writer's open-live predicate, applied to a row read from Memory. */
+function memoryRowIsOpenLive(row: SkillMemoryRow): boolean {
+  return isOpenLiveRow(row as Record<string, any>);
 }
 
 function rowIdOf(row: { id?: unknown }): string | null {
@@ -57,8 +67,8 @@ function rowIdOf(row: { id?: unknown }): string | null {
 
 /**
  * Every skill subject whose newest InstructionVersion is a `delete` tombstone
- * and whose Memory row is still live, sorted by subject id. A closed or absent
- * Memory row passes.
+ * and whose Memory row is still open-live, sorted by subject id. A closed,
+ * archived, expired or absent Memory row passes.
  */
 export function findLiveSkillTombstones(
   versions: readonly SkillVersionRow[],
@@ -81,7 +91,7 @@ export function findLiveSkillTombstones(
     const live = memories
       .filter((memory) => {
         if (!memory || typeof memory !== "object") return false;
-        if (!memoryRowIsLive(memory)) return false;
+        if (!memoryRowIsOpenLive(memory)) return false;
         const id = rowIdOf(memory);
         if (id === null) return false;
         return memory.skillSubjectId === subjectId || (tombstoneRowId !== null && id === tombstoneRowId);
@@ -111,7 +121,7 @@ export function describeLiveSkillTombstones(
     .join(", ");
   const noun = findings.length === 1 ? "subject" : "subjects";
   const verb = findings.length === 1 ? "has" : "have";
-  return `${findings.length} skill ${noun} whose newest InstructionVersion is a delete tombstone still ${verb} a live Memory row: ${rows}`;
+  return `${findings.length} skill ${noun} whose newest InstructionVersion is a delete tombstone still ${verb} an open-live Memory row: ${rows}`;
 }
 
 interface Tables {

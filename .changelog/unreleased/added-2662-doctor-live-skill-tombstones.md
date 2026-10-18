@@ -1,1 +1,1 @@
-- `flair doctor` now reports skill subjects whose newest instruction version is a delete tombstone while the skill's Memory row is still live.
+- `flair doctor` now reports skill subjects whose newest instruction version is a delete tombstone while the skill's Memory row is still open-live (the skill writer's predicate: not archived, not expired, no `validTo`).

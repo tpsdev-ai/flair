@@ -26,10 +26,10 @@ describe("findLiveSkillTombstones", () => {
     expect(describeLiveSkillTombstones([], [])).toBeNull();
   });
 
-  it("names a delete tombstone whose Memory row is still live", () => {
+  it("names a delete tombstone whose Memory row is still open-live", () => {
     expect(describeLiveSkillTombstones([deleteVersion], [
       { id: "row-a", skillSubjectId: "skill-a", validTo: null },
-    ])).toBe("1 skill subject whose newest InstructionVersion is a delete tombstone still has a live Memory row: skill-a (tombstone skill:skill-a:2, live row row-a)");
+    ])).toBe("1 skill subject whose newest InstructionVersion is a delete tombstone still has an open-live Memory row: skill-a (tombstone skill:skill-a:2, live row row-a)");
   });
 
   it("passes a closed or absent Memory row", () => {
@@ -39,6 +39,18 @@ describe("findLiveSkillTombstones", () => {
     expect(findLiveSkillTombstones([deleteVersion], [])).toEqual([]);
     expect(findLiveSkillTombstones([deleteVersion], [
       { id: "row-a", skillSubjectId: "skill-a", validTo: "" },
+    ])).toHaveLength(1);
+  });
+
+  it("applies the writer's open-live predicate: an archived or expired row passes", () => {
+    expect(findLiveSkillTombstones([deleteVersion], [
+      { id: "row-a", skillSubjectId: "skill-a", archived: true },
+    ])).toEqual([]);
+    expect(findLiveSkillTombstones([deleteVersion], [
+      { id: "row-a", skillSubjectId: "skill-a", expiresAt: "2020-01-01T00:00:00.000Z" },
+    ])).toEqual([]);
+    expect(findLiveSkillTombstones([deleteVersion], [
+      { id: "row-a", skillSubjectId: "skill-a", archived: false, expiresAt: "2999-01-01T00:00:00.000Z" },
     ])).toHaveLength(1);
   });
 
