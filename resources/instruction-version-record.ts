@@ -50,6 +50,39 @@ export interface RecordVersionInput {
   previousRowId?: string | null;
 }
 
+/**
+ * flair#2642 — remove the version record this request appended, when it is
+ * still the subject's head. A close that a newer write made Harper skip can
+ * commit its tombstone while leaving the row open; undoing that tombstone must
+ * not leave a gap in the chain, so a record followed by a later version is left
+ * in place and reported as `superseded`.
+ */
+export async function removeAppendedVersion(
+  ctx: any,
+  subjectType: InstructionSubjectType,
+  subjectId: string,
+  versionRecordId: string,
+): Promise<"removed" | "superseded" | "busy" | "unavailable"> {
+  const store = (databases as any).flair?.InstructionVersion?.primaryStore;
+  const outcome = await withKeyLock(store, [LOCK_NAMESPACE, subjectType], async () => {
+    const staged = await withOwnedTransaction(ctx, async (shared) => {
+      const head = await readHead(subjectType, subjectId, shared);
+      if (!head) return "removed" as const;
+      if (String(head.id) !== versionRecordId) return "superseded" as const;
+      await (databases as any).flair.InstructionVersion.delete(versionRecordId, shared);
+      return "deleted" as const;
+    });
+    if (staged !== "deleted") return staged;
+    const left = await (databases as any).flair.InstructionVersion.get(versionRecordId, {});
+    return left == null ? ("removed" as const) : ("superseded" as const);
+  },
+  LOCK_ATTEMPTS,
+  LOCK_WAIT_MS);
+  if (outcome.kind === "busy") return "busy";
+  if (outcome.kind === "unavailable") return "unavailable";
+  return outcome.value;
+}
+
 export interface RecordVersionSuccess { ok: true; result: any; version: string }
 export interface RecordVersionFailure { ok: false; response: Response }
 export type RecordVersionOutcome = RecordVersionSuccess | RecordVersionFailure;

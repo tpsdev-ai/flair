@@ -60,6 +60,8 @@ add("Memory", ["writer:(databases as any).flair.Memory.put#3"],
   "Admin-only _reindex re-PUT (reindex_admin_only gate) — preserves existing content and tags.");
 add("Memory", ["writer:(databases as any).flair.Memory.put#1"],
   "closeSupersededRecord: read-modify-write close of an existing record (stamps validTo), preserves existing content/tags — not a new skill write.");
+add("Memory", ["writer:table.put#1"],
+  "confirmSkillDelete: closes the freshly read skill row without changing its content or tags (flair#2642).");
 add("Memory", ["writer:(databases as any).flair.Memory.put#2"],
   "stageGrantedClose: read-modify-write close of an existing record (stamps validTo), staged in the successor's transaction; preserves existing content/tags — not a new skill write.");
 // ── Bookkeeping, removal and read-only aliases inside Memory.ts ──
@@ -67,8 +69,8 @@ add("Memory", ["writer:patchRecord#1"],
   "derivedFrom/lastReflected bookkeeping patch — never writes skill content.");
 add("Memory", ["writer:(databases as any).flair.Memory.delete#1"],
   "Memory.delete(): removal, not a write.");
-add("Memory", ["alias-source:(databases as any).flair.Memory#1", "alias-source:(databases as any).flair.Memory#2", "alias-source:(databases as any).flair.Memory#3", "alias-source:(databases as any).flair.Memory#4", "alias-source:(databases as any).flair.Memory#5", "alias-source:(databases as any).flair.Memory#6", "alias-source:(databases as any).flair.Memory#7", "alias-source:(databases as any).flair.Memory#8", "alias-source:(databases as any).flair.Memory#9", "alias-source:(databases as any).flair.Memory#10", "alias-source:(databases as any)?.flair?.Memory#1"],
-  "Table handles; their writes are classified above.");
+add("Memory", ["alias-source:(databases as any).flair.Memory#1", "alias-source:(databases as any).flair.Memory#2", "alias-source:(databases as any).flair.Memory#3", "alias-source:(databases as any).flair.Memory#4", "alias-source:(databases as any).flair.Memory#5", "alias-source:(databases as any).flair.Memory#6", "alias-source:(databases as any).flair.Memory#7", "alias-source:(databases as any).flair.Memory#8", "alias-source:(databases as any).flair.Memory#9", "alias-source:(databases as any).flair.Memory#10", "alias-source:(databases as any).flair.Memory#11", "alias-source:(databases as any)?.flair?.Memory#1"],
+  "Table handles: #1 is handed to patchRecord; #2 supplies confirmSkillDelete's reads and close retry (writer:table.put#1 above); #4 is the class heritage; the optional handle reads the write-lock store; #3/#5/#6/#7/#8 read committed rows. #9 and #10 hand the reindex re-PUT and the composed ordinary PUT to confirmCommittedRow, and #11 hands the post-commit verifyWrittenRow its read: all three only read committed rows.");
 
 // ── Non-skill writers in other modules ──
 add("MemoryFeed", ["alias-source:(databases as any).flair.Memory#1", "writer:writeBackCommittedRow#1", "writer:table.put#1"],
