@@ -102,7 +102,7 @@ const CLASSIFICATIONS: Array<{ file: string; via: WriterVia; needle: string; kin
   { file: "resources/Memory.ts", via: "patchRecord", needle: "reflectPatch", kind: "single-field" },
   { file: "resources/MemoryMaintenance.ts", via: "direct-update", needle: "archivePatch, c", kind: "echo" },
   { file: "resources/usage-recording.ts", via: "write-back", needle: 'label: "usage-recording"', kind: "echo" },
-  { file: "resources/AgentSeed.ts", via: "direct-put", needle: "put(record)", kind: "seed" },
+  { file: "resources/AgentSeed.ts", via: "direct-put", needle: "put(record, c)", kind: "seed" },
   { file: "resources/auth-middleware.ts", via: "write-back", needle: 'label: "backfillEmbedding"', kind: "single-field" },
   { file: "resources/MemoryReflect.ts", via: "patchRecord", needle: "reflectPatch", kind: "single-field" },
   { file: "resources/table-helpers.ts", via: "write-back", needle: 'label: opts.label ?? "patchRecord"', kind: "single-field" },

@@ -72,6 +72,11 @@ mock.module("../../resources/agent-admin.ts", () => ({ reconcileAdminFields: (r:
 mock.module("../../resources/bm25-index-service.ts", () => ({ noteMemoryUpsert: () => {} }));
 mock.module("../../resources/skill-write.ts", () => ({ rejectSkillWritePath: () => null }));
 
+// request-transaction.ts needs Harper's global transaction() for the transaction
+// the seed owns (flair#2645): the stub runs the callback in the context it is
+// handed, and the mocked tables write/read their stores immediately.
+(globalThis as any).transaction = (_ctx: any, cb: (txn: any) => any) => cb(_ctx ?? {});
+
 const { AgentSeed } = await import("../../resources/AgentSeed.ts");
 const { _resetLocalInstanceIdCacheForTests } = await import("../../resources/instance-identity.ts");
 
