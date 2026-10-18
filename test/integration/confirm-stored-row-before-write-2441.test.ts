@@ -253,7 +253,7 @@ afterAll(async () => {
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
 }, HARPER_STOP_BUDGET_MS);
 
-it("an observation timeout fails without releasing the paused writer", async () => {
+it("a false observation rejects before the helper writes go", async () => {
   const point = "observation-timeout";
   await expect(withPaused(
     point,
