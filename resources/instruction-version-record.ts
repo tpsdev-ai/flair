@@ -51,9 +51,10 @@ export interface RecordVersionInput {
 }
 
 /**
- * flair#2645 — remove the version record this request appended, when it is
- * still the subject's head. A close that a newer write made Harper skip can
- * commit its version row while leaving the row open; undoing that write must
+ * flair#2645 / flair#2642 — remove the version record this request appended, when
+ * it is still the subject's head. A close that a newer write made Harper skip can
+ * commit its version row (an update's successor version or a delete's tombstone)
+ * while leaving the row open; undoing that write must
  * not leave a gap in the chain, so a record followed by a later version is left
  * in place and reported as `superseded`.
  */

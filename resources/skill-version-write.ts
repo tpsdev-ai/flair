@@ -370,17 +370,14 @@ export interface RunSkillVersionWriteArgs {
  * close or a delete's head close. A grant-authorized cross-agent close stands on
  * the grant read at authorization time; re-read it on committed state HERE,
  * after the close is staged, through the shared write-back helper the non-skill
- * close uses (Memory.ts closeSupersededRecord, flair#2333 H10). Returns the named
- * 409 when the grant is gone — the caller returns it, so the whole transaction
- * rolls back: no close, no successor, no version — else null. A plan with no
- * grant (same-agent, operator, internal) reads nothing.
+ * close uses (Memory.ts closeSupersededRecord, flair#2333 H10).
  *
  * For a grant-authorized supersede, `successor` is the planned successor row.
  * Before the grant re-check, the predecessor's COMMITTED row (an empty-context
  * read, as for the grant) must read with the successor's visibility: a write
  * grant does not include changing a record's visibility (grant-visibility.ts).
- * A mismatch returns the named 409 predecessor_visibility_changed, and the
- * whole write rolls back the same way. As with the grant, a change committed
+ * A mismatch returns the named 409 predecessor_visibility_changed.
+ * As with the grant, a change committed
  * after this re-read and before the transaction commits is not seen by it.
  */
 export async function afterCloseStaged(

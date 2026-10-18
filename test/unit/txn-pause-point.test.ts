@@ -86,6 +86,20 @@ describe("an armed point releases on go or timeout", () => {
     expect(readFileSync(join(dir, "released.supersede-close"), "utf8")).toBe("go");
   });
 
+  it("writes the supplied snapshot to the pause marker", async () => {
+    arm();
+    const row = { id: "seeded", name: "Seeded", publicKey: "pending", createdAt: "2026-01-01T00:00:00.000Z" };
+    const pause = txnPausePoint("supersede-close", env(), 1_000, row);
+    expect(pause).toBeInstanceOf(Promise);
+    try {
+      expect(JSON.parse(readFileSync(join(dir, "paused.supersede-close"), "utf8"))).toEqual(row);
+    } finally {
+      writeFileSync(join(dir, "go.supersede-close"), "");
+      await pause;
+    }
+    expect(readFileSync(join(dir, "released.supersede-close"), "utf8")).toBe("go");
+  });
+
   it("releases itself at its limit and records a timeout", async () => {
     arm();
     const pause = txnPausePoint("supersede-close", env(), 60);

@@ -36,6 +36,8 @@ const add = (file: string, sites: string[], reason: string) => {
 add("write-journal", ["alias-source:(databases as any).flair.Memory#1"], "Identifies successor undo pause points.");
 add("write-journal", ["writer:this.transactions.delete#1", "writer:this.staged.delete#1"], "In-memory journal bookkeeping.");
 
+add("Memory", ["writer:table.put#1"],
+  "GUARDED: reached through Memory.delete's reserved-id and writeSkillDelete's reserved-subject decisions; the retry re-checks the stored row identity and caller authority.");
 add("MemoryArchive", ["writer:Memory.put#1"], "GUARDED: Memory.put().");
 add("Memory", [
   "writer:cls.create#1", "writer:(databases as any).flair.Memory.post#1",
@@ -115,18 +117,17 @@ add("Federation", [
 ], "SERVER: other tables.");
 add("MemoryReflect", ["writer:(databases as any).flair.MemoryCandidate.put#1"], "SERVER: another table.");
 add("usage-recording", ["writer:(databases as any).flair.MemoryUsage.put#1"], "SERVER: another table.");
+add("Memory", ["alias-source:(databases as any).flair.Memory#2"],
+  "SERVER: confirmSkillDelete reads the committed row and supplies the guarded close retry's table handle; its put is classified above.");
 for (const [file, alias] of [
   ["Memory", "alias-source:(databases as any).flair.Memory#1"],
-  ["Memory", "alias-source:(databases as any).flair.Memory#2"],
   ["Memory", "alias-source:(databases as any).flair.Memory#3"],
-  // The committed-row confirms and post-commit verification reads: #4 the
-  // ordinary PATCH's post-commit verification (flair#2478), #5 the _reindex
-  // re-PUT's confirm (flair#2450), #6 Memory.put's confirm (flair#2441), #7
-  // Memory.put's post-commit verification (flair#2478).
+  // #4 is the class heritage; #3/#5/#6/#7/#8 read committed rows.
   ["Memory", "alias-source:(databases as any).flair.Memory#4"],
   ["Memory", "alias-source:(databases as any).flair.Memory#5"],
   ["Memory", "alias-source:(databases as any).flair.Memory#6"],
   ["Memory", "alias-source:(databases as any).flair.Memory#7"],
+  ["Memory", "alias-source:(databases as any).flair.Memory#8"],
   // The write-lock store handle (flair#2478) — a read of primaryStore, never a write.
   ["Memory", "alias-source:(databases as any)?.flair?.Memory#1"],
   ["AdminMemory", "alias-source:(databases as any).flair.Memory#1"],

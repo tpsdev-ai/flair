@@ -78,6 +78,8 @@ add("migrations/embedding-stamp", ["writer:table.update#1"], "LOCAL",
 add("MemoryArchive", ["writer:Memory.put#1"], "DELEGATED", "Existing row through Memory.put().");
 
 // ── ECHO: preserves an EXISTING row's stamp ──
+add("Memory", ["writer:table.put#1"], "ECHO",
+  "Skill DELETE retry preserves the stored embeddingModel and any nonempty vector; it computes no embedding.");
 add("Memory", ["writer:(databases as any).flair.Memory.put#1"], "ECHO",
   "closeSupersededRecord: read-modify-write validTo close, re-writes the existing stamp.");
 add("Memory", ["writer:(databases as any).flair.Memory.put#2"], "ECHO",

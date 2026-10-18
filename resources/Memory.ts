@@ -48,7 +48,8 @@ import {
 import { assertValidDurability, stampEphemeralExpiry } from "./memory-durability.js";
 import { embedTextField, enforceSkillDurability, isSkillWrite, type MemoryEmbeddingInputField, rejectSkillWritePath, refuseSkillWriteSource, skillEmbedText, skillScanGate, skillMetadataHasDuplicateKey } from "./skill-write.js";
 import { embeddedTextHash, hashEmbeddedText } from "./memory-embed-hash.js";
-import { buildSkillSuccessorRow, closedSkillPayloadReadable, defaultSkillHooks, grantedSkillClose, resolveSkillHead, rowIsSkill, runSkillVersionWrite, skillVersionVisibility, skillPayloadUnchanged, prepareSkillBody, validateSkillSnapshots, authorizeSkillOwners, skillWriteConflict } from "./skill-version-write.js";
+import { afterCloseStaged, buildSkillSuccessorRow, closedSkillPayloadReadable, defaultSkillHooks, grantedSkillClose, resolveSkillHead, rowIsSkill, runSkillVersionWrite, skillVersionVisibility, skillPayloadUnchanged, prepareSkillBody, validateSkillSnapshots, authorizeSkillOwners, skillWriteConflict } from "./skill-version-write.js";
+import { SKILL_SUBJECT_TYPE, removeAppendedVersion } from "./instruction-version-record.js";
 import { deriveSkillSubjectId } from "./skill-subject.js";
 import {
   DEDUP_COSINE_THRESHOLD_DEFAULT,
@@ -1493,10 +1494,156 @@ async function writeSkillCreateOrUpdate(
   return { id: successorId, written: captured.row !== null, visibility: skillVersionVisibility(captured.row ?? unchangedHead) };
 }
 
+/** Attempts at re-applying a skill close whose committed write did not land (flair#2642). */
+const SKILL_DELETE_CLOSE_ATTEMPTS = 3;
+
+/** The named 500 for unconfirmed skill-close compensation. */
+function skillDeleteCompensationFailure(message: string): Response {
+  return Response.json({ error: "skill_delete_compensation_failed", message }, { status: 500 });
+}
+
+/** The named 500 for a confirmation read that failed: the close is unverified, never success. */
+function skillDeleteUnconfirmedFailure(): Response {
+  return Response.json({
+    error: "skill_delete_unconfirmed",
+    message: "the committed skill row could not be read; the delete is unverified",
+  }, { status: 500 });
+}
+
+/** The named 409 for a skill DELETE whose version close still is not visible after the bounded re-applies. */
+function skillDeleteNotClosedRefusal(attempts: number): Response {
+  return Response.json({
+    error: "skill_delete_not_closed",
+    message: `the skill version close was not applied after ${attempts} attempts; not deleted`,
+  }, { status: 409 });
+}
+
+/** Compensate an unlanded close. */
+async function compensateUnlandedSkillClose(args: {
+  ctx: any;
+  subjectId: string;
+  closedId: string;
+  closeVersionId: string;
+  pointerBefore: any;
+}): Promise<Response | "restored" | "left_in_place" | "not_needed"> {
+  const { ctx, subjectId, closedId, closeVersionId, pointerBefore } = args;
+  try {
+    const removal = await removeAppendedVersion(ctx, SKILL_SUBJECT_TYPE, subjectId, closeVersionId);
+    if (removal !== "removed") {
+      return skillDeleteCompensationFailure("removal of the close version record could not be confirmed");
+    }
+    if (pointerBefore) {
+      let expected = await loadStoredPointer(closedId, {});
+      let pointerOutcome: "restored" | "left_in_place" = "left_in_place";
+      if (!expected) {
+        const pause = txnPausePoint("skill-delete-pointer-restore");
+        if (pause) await pause;
+        try {
+          await withOwnedTransaction(ctx, async (c) => {
+            expected = await loadStoredPointer(closedId, c);
+            if (!expected) {
+              await restorePointerRowIfAbsent(pointerBefore, c);
+              const staged = txnPausePoint("skill-delete-pointer-restore-staged");
+              if (staged) await staged;
+              expected = pointerBefore;
+              pointerOutcome = "restored";
+            }
+          });
+        } catch (err) {
+          if (!(err instanceof PointerAlreadyStoredError)) throw err;
+          expected = err.pointer;
+          pointerOutcome = "left_in_place";
+        }
+      }
+      const resulting = await loadStoredPointer(closedId, {});
+      const fields = ["memoryId", "hostSource", "scopeAtWrite", "authorId", "memoryInstanceToken", "receivedAt"] as const;
+      if (!resulting || fields.some((field) => resulting[field] !== expected?.[field])) {
+        return skillDeleteCompensationFailure("the restored or preserved host-pointer identity could not be confirmed");
+      }
+      return pointerOutcome;
+    }
+    return "not_needed";
+  } catch (err) {
+    console.error("Memory.delete: undoing an unapplied skill close failed", err);
+    return skillDeleteCompensationFailure("compensation for the unapplied skill close could not be confirmed");
+  }
+}
+
+/**
+ * flair#2642 — a skill DELETE confirms the close in a fresh committed read
+ * before answering success. Harper can resolve the close's commit while skipping
+ * the queued full put (it loses to a newer write of the same row) and still
+ * commit the tombstone and pointer writes. A close that did not land is
+ * re-applied from a fresh read, re-checking the row's identity and the caller's
+ * authority. Unconfirmed compensation answers 500.
+ * Returns null only when the close is confirmed (or the row is gone).
+ */
+async function confirmSkillDelete(args: {
+  ctx: any;
+  auth: AgentAuthVerdict;
+  subjectId: string;
+  closedId: string;
+  closedRow: Record<string, any>;
+  closeVersionId: string;
+  pointerBefore: any;
+  now: string;
+}): Promise<Response | null> {
+  const { ctx, auth, subjectId, closedId, closedRow, closeVersionId, pointerBefore, now } = args;
+  const table = (databases as any).flair.Memory;
+  const undo = async (refusal: Response): Promise<Response> => {
+    const compensation = await compensateUnlandedSkillClose({ ctx, subjectId, closedId, closeVersionId, pointerBefore });
+    if (compensation instanceof Response) return compensation;
+    return Response.json({ ...await refusal.json(), pointerCompensation: compensation }, { status: refusal.status });
+  };
+  for (let attempt = 1; ; attempt++) {
+    let committed: any;
+    try {
+      committed = await table.get(closedId, {});
+    } catch {
+      return skillDeleteUnconfirmedFailure();
+    }
+    if (!committed) return null;
+    if (!sameStoredRow(committed, closedRow)) {
+      // Replaced between the reads: not the row the caller meant.
+      return undo(storedRowChangedRefusal("Memory"));
+    }
+    if (typeof committed.validTo === "string" && committed.validTo.length > 0) return null;
+    if (attempt > SKILL_DELETE_CLOSE_ATTEMPTS) break;
+    let applied: "staged" | Response;
+    try {
+      applied = await withOwnedTransaction(ctx, async (c) => {
+        const stored = await table.get(closedId, c);
+        if (!stored) return "staged";
+        if (!sameStoredRow(stored, closedRow)) return storedRowChangedRefusal("Memory");
+        const denied = await authorizeSkillOwners(ctx, auth, [stored], c);
+        if (denied) return denied;
+        const closed = { ...stored, skillSubjectId: subjectId, validTo: now, updatedAt: now };
+        normalizeEmptyEmbedding(closed);
+        const result = storageResult(await table.put(closed, c));
+        if (result instanceof Response) throw result;
+        const pause = attempt === 1 ? txnPausePoint("skill-delete-retry-first")
+          : attempt === 2 ? txnPausePoint("skill-delete-retry-second")
+            : txnPausePoint("skill-delete-retry-third");
+        if (pause) await pause;
+        const revoked = await afterCloseStaged(grantedSkillClose(stored, ctx, auth));
+        if (revoked) throw revoked;
+        return "staged";
+      });
+    } catch (err) {
+      if (err instanceof Response) applied = err;
+      else return skillDeleteUnconfirmedFailure();
+    }
+    if (applied instanceof Response) return undo(applied);
+  }
+  return undo(skillDeleteNotClosedRefusal(SKILL_DELETE_CLOSE_ATTEMPTS));
+}
+
 /** Close the live head and delete its pointer in the version transaction. */
 async function writeSkillDelete(args: { ctx: any; auth: AgentAuthVerdict; record: Record<string, any> }): Promise<any> {
   const { ctx, auth, record } = args;
   let closedId = "";
+  let closedRow: Record<string, any> | null = null;
+  let pointerBefore: any = null;
   const now = new Date().toISOString();
   const subjectId = String(record.skillSubjectId ?? record.id);
   const seedLineageDenial = reservedSeedSubjectDenial("Memory", [subjectId], ctx, auth);
@@ -1537,6 +1684,10 @@ async function writeSkillDelete(args: { ctx: any; auth: AgentAuthVerdict; record
       if (memoryWriteOutcomeUnknown(String(head.id))) return writeOutcomeUnknownResponse();
       const liveHead = head;
       closedId = String(liveHead.id);
+      closedRow = liveHead;
+      // Captured for compensation: this attempt's pointer delete can land even
+      // when its close does not.
+      pointerBefore = await loadStoredPointer(closedId, shared);
       // flair#2511: a stale id resolves the live head, which can be another
       // agent's row a "write" grant authorizes this caller to close; the writer
       // re-checks that grant after the close is staged.
@@ -1545,6 +1696,13 @@ async function writeSkillDelete(args: { ctx: any; auth: AgentAuthVerdict; record
     hooks: { ...defaultSkillHooks, authorizeClose: (row, shared) => authorizeSkillOwners(ctx, auth, [row], shared), pointer: async (shared) => deletePointerRow(closedId, shared) },
   });
   if (!outcome.ok) return outcome.response;
+  // flair#2642: the owned transaction has committed, but its success is not
+  // proof that the queued close was applied. Confirm against the committed
+  // store before answering success.
+  const confirmation = await confirmSkillDelete({
+    ctx, auth, subjectId, closedId, closedRow: closedRow!, closeVersionId: outcome.version, pointerBefore, now,
+  });
+  if (confirmation) return confirmation;
   noteMemoryDelete(closedId);
   return new Response(JSON.stringify({ id: closedId, deleted: true }), {
     status: 200, headers: { "Content-Type": "application/json" },
