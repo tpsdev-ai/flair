@@ -259,7 +259,8 @@ export interface RunnerOpts {
   /**
    * Ops-API `search_by_conditions` helper (admin-authed). Injected by the CLI;
    * the runner is agent-authed and cannot reach the ops port itself. When
-   * absent, the pending-candidate count is unknown.
+   * absent and the cycle reaches the candidate-count step, the
+   * pending-candidate count is unknown.
    */
   opsSearch?: OpsSearch;
   /** Override snapshot root (testing). */
