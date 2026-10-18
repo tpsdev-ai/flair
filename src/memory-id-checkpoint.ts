@@ -100,11 +100,11 @@ export interface KeysetReadOptions {
 /**
  * Walk `flair.<table>` by primary key: `SELECT <select> ... [WHERE <filter> AND] id > cursor
  * ORDER BY id LIMIT <pageSize>`, resuming strictly after the last id read. A duplicate id
- * across pages, or a read that differs in size from `expected`, refuses. The walk stops once
- * it has read `expected` rows, so a full final page at the cap is complete when the count
- * matches. The page allowance is `ceil(expected / pageSize) + 1`, capped by `maxPages`
- * (default MAX_MEMORY_PAGES): a read that needs more pages than that cap is UNKNOWN, so the
- * bound never depends on server output. Duplicates raise InconsistentReadError; size
+ * across pages, or a read that differs in size from `expected`, refuses. On the last allowed
+ * page, a walk whose rows read equal `expected` is complete even when that page is full. The
+ * page allowance is `ceil(expected / pageSize) + 1`, capped by `maxPages` (default
+ * MAX_MEMORY_PAGES), so the hard cap does not depend on server output; a read that needs
+ * more pages than the cap is UNKNOWN. Duplicates raise InconsistentReadError; size
  * mismatches do too by default, but `mismatch` can return any Error. Errors from `opsPost`
  * propagate unchanged.
  */
@@ -114,8 +114,9 @@ export async function readTableByIdPaged(opsPost: OpsPost, opts: KeysetReadOptio
   if (!Number.isSafeInteger(pageSize) || pageSize < 1 || !Number.isSafeInteger(maxPages) || maxPages < 1) {
     throw new Error("invalid keyset paging bounds");
   }
-  // The expected count always fits in this allowance; the caller's hard cap wins so the
-  // number of requests never follows a server-reported value without a bound.
+  // The allowance is the pages the expected count needs plus one, or the caller's hard cap
+  // when that is smaller; the request count never follows a server-reported value without
+  // a bound.
   const pageAllowance = Math.min(maxPages, Math.ceil(opts.expected / pageSize) + 1);
   const mismatch = opts.mismatch ?? ((expected: number, read: number) => new InconsistentReadError(`${opts.table}: server reports ${expected} rows, integrity read ${read}`));
   const rows: any[] = [];
