@@ -673,7 +673,7 @@ export class FederationPair extends Resource {
               // no field of the deleted row survives.
               pairedAsFirst = !current;
               try {
-                await writePeerRow(owned, current ? rePairedRow(current) : firstPairPeerRow(instanceId, publicKey, role, endpoint));
+                await writePeerRow(owned, current ? rePairedRow(current) : { ...firstPairPeerRow(instanceId, publicKey, role, endpoint), pairAttemptWriteId: claim.pairAttemptWriteId });
               } catch (err) {
                 // Rethrow so the owned transaction ABORTS: the consume rolls back
                 // with the peer write (both commit or neither does). Tagged so the
