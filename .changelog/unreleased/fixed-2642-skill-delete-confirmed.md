@@ -4,4 +4,5 @@
   while the tombstone committed; the row then stayed open after a 200. The
   close is now confirmed in a fresh committed read, re-applied from that read
   with the row identity and caller authority re-checked, and refused with 409
-  `skill_delete_not_closed` when it still does not land (#2642).
+  `skill_delete_not_closed` (or 500 `skill_delete_compensation_failed` when its
+  writes cannot be undone) when it still does not land (#2642).

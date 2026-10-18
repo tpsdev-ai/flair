@@ -1457,8 +1457,8 @@ async function compensateUnlandedSkillClose(args: {
  * commit the tombstone and pointer writes. A close that did not land is
  * re-applied from a fresh read, re-checking the row's identity and the caller's
  * authority; when it still does not land the request's writes are undone and
- * the answer is a named 409. Returns null only when the close is confirmed (or
- * the row is gone).
+ * the answer is a named 409 (a named 500 when the undo cannot be confirmed).
+ * Returns null only when the close is confirmed (or the row is gone).
  */
 async function confirmSkillDelete(args: {
   ctx: any;
