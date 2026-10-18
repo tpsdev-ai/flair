@@ -65,3 +65,28 @@ describe("bodyMustBeObject — the response shape", () => {
     expect(await errorOf(res)).toBe(BODY_MUST_BE_OBJECT_ERROR);
   });
 });
+
+describe("bodyMustBeObject — the message follows allowArrayObjects", () => {
+  const STRICT = "the write body must be a JSON object";
+  const COLLECTION = "the write body must be a JSON object, or an array of them for a collection write";
+
+  test("without the flag it names a single JSON object only", async () => {
+    const body = (await bodyMustBeObject().json()) as { error: string; message: string };
+    expect(body.error).toBe(BODY_MUST_BE_OBJECT_ERROR);
+    expect(body.message).toBe(STRICT);
+    expect((await bodyMustBeObject(false).json() as { message: string }).message).toBe(STRICT);
+  });
+
+  test("with the flag it admits an array for a collection write", async () => {
+    const body = (await bodyMustBeObject(true).json()) as { error: string; message: string };
+    expect(body.error).toBe(BODY_MUST_BE_OBJECT_ERROR);
+    expect(body.message).toBe(COLLECTION);
+  });
+
+  test("guardObjectBody carries the caller's allowArrayObjects into the message", async () => {
+    const strict = (await guardObjectBody("abc")!.json()) as { message: string };
+    expect(strict.message).toBe(STRICT);
+    const collection = (await guardObjectBody([{ id: "a" }, "b"], { allowArrayObjects: true })!.json()) as { message: string };
+    expect(collection.message).toBe(COLLECTION);
+  });
+});
