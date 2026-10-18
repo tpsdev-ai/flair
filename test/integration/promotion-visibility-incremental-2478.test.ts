@@ -28,6 +28,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import nacl from "tweetnacl";
 import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
+import { componentWithReplayProbe, type ProbeComponent } from "../helpers/component-with-replay-probe";
 import { getModelId } from "../../resources/embeddings-provider.ts";
 import { stripEnginePrefix } from "../../resources/embedding-space-guard.ts";
 
@@ -67,6 +68,7 @@ const AUTO_TAG = "adk:app:alice";
 
 const sha256 = (text: string) => createHash("sha256").update(text, "utf8").digest("hex");
 
+let component: ProbeComponent;
 let harper: HarperInstance;
 let installDir: string;
 let home: string;
@@ -94,6 +96,22 @@ async function opsCall(body: Record<string, unknown>): Promise<any> {
 async function readRow(id: string, table = "Memory"): Promise<any> {
   const rows = await opsCall({ operation: "search_by_id", database: "flair", table, ids: [id], get_attributes: ["*"] });
   return Array.isArray(rows) ? rows[0] ?? null : rows;
+}
+interface MemoryWriteTrace { method: string; id: string; fields: string[]; promotionStatus?: string; }
+function memoryWrites(id: string): MemoryWriteTrace[] {
+  return readFileSync(join(installDir, "memory-write-trace-2478.jsonl"), "utf8")
+    .split("\n").filter(Boolean).map((line) => JSON.parse(line) as MemoryWriteTrace).filter((entry) => entry.id === id);
+}
+function expectIncrementalWrites(writes: MemoryWriteTrace[], fields: string[]): void {
+  expect(writes.length, "no Memory write was traced").toBeGreaterThan(0);
+  for (const entry of writes) {
+    expect(entry.method).toBe("update");
+    expect(entry.fields).toEqual([...fields].sort());
+  }
+}
+function expectStampWrites(id: string): void {
+  expectIncrementalWrites(memoryWrites(id).filter((entry) => entry.promotionStatus === "approved"),
+    ["promotionStatus", "promotedAt", "promotedBy", "promotionContentHash"]);
 }
 async function pendingCandidateIds(): Promise<string[]> {
   const rows = await opsCall({
@@ -255,7 +273,7 @@ function assertOwnInstance(): void {
 
 async function bootFirst(): Promise<void> {
   installDir = tempDir("flair-test-");
-  harper = await startHarper({ installDir, homeDir: home });
+  harper = await startHarper({ installDir, homeDir: home, cwd: component.dir, harperBinDir: component.sourceRoot });
   authHeader = "Basic " + Buffer.from(`${harper.admin.username}:${harper.admin.password}`).toString("base64");
   assertOwnInstance();
   expect(await waitForCycleDone(60_000), "the first boot migration cycle did not finish").toBe(true);
@@ -276,6 +294,7 @@ async function bootFirst(): Promise<void> {
 }
 
 async function bootWithFaultInjection(point?: string): Promise<void> {
+  rmSync(join(installDir, "memory-write-trace-2478.jsonl"), { force: true });
   if (point) arm(point);
   const saved = {
     FLAIR_ENABLE_TEST_FAULT_INJECTION: process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION,
@@ -284,7 +303,7 @@ async function bootWithFaultInjection(point?: string): Promise<void> {
   process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION = "1";
   process.env.FLAIR_TEST_PAUSE_DIR = pauseDir;
   try {
-    harper = await startHarper({ installDir, homeDir: home });
+    harper = await startHarper({ installDir, homeDir: home, cwd: component.dir, harperBinDir: component.sourceRoot });
   } finally {
     for (const [key, value] of Object.entries(saved)) {
       if (value === undefined) delete process.env[key];
@@ -300,18 +319,25 @@ beforeAll(async () => {
   if (process.env.HARPER_HTTP_URL) throw new Error("requires an isolated Harper; unset HARPER_HTTP_URL");
   home = tempDir("flair-2478s2-home-");
   pauseDir = tempDir("flair-2478s2-pause-");
+  component = componentWithReplayProbe({ probe: {
+    source: join("test", "fixtures", "memory-write-trace-2478", "probe.js"),
+    target: join("dist", "resources", "zz-memory-write-trace-2478.js"),
+    out: "memory-write-trace-2478.jsonl",
+  } });
   await bootFirst();
 }, 240_000);
 
 afterAll(async () => {
   if (harper) await stopHarper(harper);
   for (const path of tempDirs) rmSync(path, { recursive: true, force: true });
+  component?.cleanup();
 }, HARPER_STOP_BUDGET_MS);
 
 describe("visibility backfill is incremental and locked (real Harper)", () => {
   it("owner PUT and PATCH are refused while the backfill holds the id, then the owner's values are stored", async () => {
     await bootWithFaultInjection("visibility-backfill");
     await assertPaused("visibility-backfill");
+    writeFileSync(join(installDir, "memory-write-trace-2478.jsonl"), "");
 
     // A lock-less writer changes a field the backfill neither decides on nor
     // matches. The incremental update must leave it stored.
@@ -347,6 +373,7 @@ describe("visibility backfill is incremental and locked (real Harper)", () => {
     expect(backfilled?.visibility).toBe("private");
     expect(backfilled?.tags).toEqual(backfillTags);
     expect(backfilled?.summary).toBe(backfillSummary);
+    expectIncrementalWrites(memoryWrites(V2), ["visibility"]);
 
     const put = await memoryWrite(owner, "PUT", V2, { agentId: owner.id, content: V2_OWNER, visibility: "shared" });
     expect(put.status, await put.clone().text()).toBe(200);
@@ -366,7 +393,7 @@ describe("visibility backfill is incremental and locked (real Harper)", () => {
     await stopHarper(harper, { keepInstallDir: true });
     home = tempDir("flair-2478s2-committed-home-");
     installDir = tempDir("flair-test-");
-    harper = await startHarper({ installDir, homeDir: home });
+    harper = await startHarper({ installDir, homeDir: home, cwd: component.dir, harperBinDir: component.sourceRoot });
     authHeader = "Basic " + Buffer.from(`${harper.admin.username}:${harper.admin.password}`).toString("base64");
     expect(await waitForCycleDone(60_000), "the seed boot migration cycle did not finish").toBe(true);
     await opsCall({
@@ -473,6 +500,7 @@ describe("promotion stamps are locked, incremental and bound (real Harper)", () 
     expect(stored.promotionContentHash).toBe(sha256(AUTO_CLAIM));
     expect(stored.tags).toEqual(stampTags);
     expect(stored.summary).toBe(stampSummary);
+    expectStampWrites(promoted.id);
 
     // The later owner PUT clears the verdict when content changes.
     const put = await memoryWrite(owner, "PUT", promoted.id, { agentId: owner.id, content: "owner edit after the verdict", visibility: "private" });
@@ -492,6 +520,7 @@ describe("promotion stamps are locked, incremental and bound (real Harper)", () 
     expect(stored.promotionStatus).toBe("approved");
     expect(stored.promotedBy).toBe(owner.id);
     expect(stored.promotionContentHash).toBe(sha256(MANUAL_CLAIM));
+    expectStampWrites(memoryId);
 
     // A raw writer bypasses the authority guard and changes the text while the
     // old hash stays.
@@ -545,6 +574,27 @@ describe("promotion stamps are locked, incremental and bound (real Harper)", () 
     });
     expect(admin.status, await admin.clone().text()).toBe(200);
     expect(await admin.text()).toContain("not promoted");
+  }, 180_000);
+
+  it("FeedMemories suppresses a mismatched verdict for owner and administrator subscribers", async () => {
+    const id = "pvi-feed-binding";
+    const content = "feed binding content";
+    await seedMemory({
+      id, content, visibility: "private", promotionStatus: "approved",
+      promotedAt: new Date().toISOString(), promotedBy: owner.id, promotionContentHash: sha256(content),
+    });
+    const path = `/FeedMemories/${id}`;
+    for (const authorization of [ed25519Header(owner, "GET", path), authHeader]) {
+      expect((await feedRow(id, authorization)).promotionStatus).toBe("approved");
+    }
+    const stored = await readRow(id);
+    await opsCall({
+      operation: "upsert", database: "flair", table: "Memory",
+      records: [{ ...stored, promotionContentHash: sha256("different feed content") }],
+    });
+    for (const authorization of [ed25519Header(owner, "GET", path), authHeader]) {
+      expectSuppressed(await feedRow(id, authorization));
+    }
   }, 180_000);
 
   it("the automatic stamp skips a binding-only change before its transaction opens", async () => {
