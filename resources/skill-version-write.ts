@@ -350,7 +350,8 @@ export const defaultSkillHooks: SkillWriteHooks = {
 export interface RunSkillVersionWriteArgs {
   ctx: any;
   /** Join the caller's open transaction. A plan that supersedes a predecessor
-   *  instead runs in a transaction this write owns (flair#2645). */
+   *  is first built there without staging a write, then planned again and
+   *  committed in a transaction this write owns (flair#2645). */
   joinCallerTransaction?: boolean;
   /** The stable logical subject id. */
   subjectId: string;
@@ -361,7 +362,7 @@ export interface RunSkillVersionWriteArgs {
   /**
    * Build the write plan from the live head resolved under the lock. Returning
    * a Response refuses the write (and rolls back: nothing is written).
-   * `attempt.joined` is true when this attempt stages into the caller's transaction.
+   * `attempt.joined` is true when this attempt plans in the caller's transaction.
    */
   plan: (head: Record<string, any> | null, shared: any, attempt: { joined: boolean }) => SkillWritePlan | Response | null | Promise<SkillWritePlan | Response | null>;
   /** Resolve the live head under the lock. */

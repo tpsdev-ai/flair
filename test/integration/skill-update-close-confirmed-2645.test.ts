@@ -228,7 +228,7 @@ describe("flair#2645 — a skill UPDATE confirms the predecessor close before su
     expect(await liveHeads(predecessorId), "the lineage does not have exactly one live head").toEqual([successorId]);
   }, 120_000);
 
-  it("a superseding POST in its request transaction: a newer write committed while it is paused still leaves one live head", async () => {
+  it("a superseding POST over REST: a newer write committed while it is paused still leaves one live head", async () => {
     const predecessorId = nextId("post-race");
     const created = await call(A, "PUT", memPath(predecessorId), skillBody(predecessorId, "v1"));
     expect(created.status, (await created.text()).slice(0, 300)).toBeLessThan(300);
@@ -255,7 +255,7 @@ describe("flair#2645 — a skill UPDATE confirms the predecessor close before su
     expect(await liveHeads(predecessorId), "the lineage does not have exactly one live head").toEqual([successorId]);
   }, 120_000);
 
-  it("a superseding POST in its request transaction checks its committed successor after its commit", async () => {
+  it("a superseding POST over REST commits in a transaction it owns, then checks its committed successor", async () => {
     const predecessorId = nextId("post-verify");
     const created = await call(A, "PUT", memPath(predecessorId), skillBody(predecessorId, "v1"));
     expect(created.status, (await created.text()).slice(0, 300)).toBeLessThan(300);

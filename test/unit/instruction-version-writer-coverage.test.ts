@@ -15,10 +15,10 @@ import { readFileSync } from "node:fs";
 import { rawTableWriteSites } from "../helpers/raw-table-writers";
 
 const classified = new Map<string, string>([
-  ["resources/instruction-version-record.ts:alias-source:(databases as any).flair?.InstructionVersion#1", "Head read (readHead) — read-only handle."],
-  ["resources/instruction-version-record.ts:alias-source:(databases as any).flair?.InstructionVersion#2", "Subject-type lock store — read-only handle."],
-  ["resources/instruction-version-record.ts:alias-source:(databases as any).flair?.InstructionVersion#3", "Raw table handle inside the append transaction."],
-  ["resources/instruction-version-record.ts:alias-source:(databases as any).flair?.InstructionVersion#4", "Subject-type lock store of the append undo — read-only handle."],
+  ["resources/instruction-version-record.ts:alias-source:(databases as any).flair?.InstructionVersion#1", "Subject-type lock store of the append undo — read-only handle."],
+  ["resources/instruction-version-record.ts:alias-source:(databases as any).flair?.InstructionVersion#2", "Head read (readHead) — read-only handle."],
+  ["resources/instruction-version-record.ts:alias-source:(databases as any).flair?.InstructionVersion#3", "Subject-type lock store — read-only handle."],
+  ["resources/instruction-version-record.ts:alias-source:(databases as any).flair?.InstructionVersion#4", "Raw table handle inside the append transaction."],
   ["resources/instruction-version-record.ts:alias-source:(databases as any).flair.InstructionVersion#1", "Base table handle inside the undo transaction: the resource class overrides delete/get for REST authority, so the row is removed through the base prototype's raw delete."],
   ["resources/instruction-version-record.ts:alias-source:(databases as any).flair.InstructionVersion#2", "Base table handle for the post-commit read that confirms the undo."],
   ["resources/instruction-version-record.ts:writer:table.create#1", "Old Soul tombstone after the destination check."],
