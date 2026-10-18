@@ -154,8 +154,9 @@ describe("flair doctor — the Agent IDs section (flair#2359, real CLI + real sp
     expect(unreadable.stdout).toContain("Agent homes: NOT RUN");
     expect(unreadable.stdout).toContain("Audit log: NOT RUN");
     expect(unreadable.stdout).toContain("Instance identity: NOT RUN");
+    expect(unreadable.stdout).toContain("Instruction events: NOT RUN");
     expect(unreadable.stdout).not.toContain("No stored agent id is outside");
-    expect(issueCount(unreadable.stdout), "the unrun check left the summary clean").toBe(baseCount + 4);
+    expect(issueCount(unreadable.stdout), "the unrun checks left the summary clean").toBe(baseCount + 5);
 
     // 4. No admin credential at all: the Agent-ID check is a counted issue, not
     //    a pass; the Agent homes check is reported skipped and not counted.
