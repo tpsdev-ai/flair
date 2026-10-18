@@ -95,7 +95,6 @@ async function waitForRunTouching(id: string, timeoutMs: number) {
 
 beforeAll(async () => {
   pauseDir = mkdtempSync(join(tmpdir(), "flair-esc-gap-pause-"));
-  writeFileSync(join(pauseDir, `arm.${POINT}`), "");
   const saved = {
     FLAIR_ENABLE_TEST_FAULT_INJECTION: process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION,
     FLAIR_TEST_PAUSE_DIR: process.env.FLAIR_TEST_PAUSE_DIR,
@@ -111,22 +110,26 @@ beforeAll(async () => {
     }
   }
   authHeader = "Basic " + Buffer.from(`${harper.admin.username}:${harper.admin.password}`).toString("base64");
-  await opsCall({
-    operation: "insert", database: "flair", table: "Memory",
-    records: [{
-      id: LEGACY_ID, agentId: "esc-gap-agent", content: ORIGINAL,
-      embedding: STALE_EMBEDDING, embeddingModel: STALE_MODEL, createdAt: new Date().toISOString(),
-    }],
-  });
 }, 180_000);
 
 afterAll(async () => {
-  if (harper) await stopHarper(harper).catch(() => {});
+  if (harper) {
+    await stopHarper(harper).catch(() => {});
+    rmSync(harper.installDir, { recursive: true, force: true, maxRetries: 4 });
+  }
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
 }, HARPER_STOP_BUDGET_MS);
 
 describe("flair#2656 — the `.content`-suffix re-embed under a write committed in its commit gap (real Harper)", () => {
   it("the re-embed is retried after the gap, and the stored vector is bound to the newer text", async () => {
+    writeFileSync(join(pauseDir, `arm.${POINT}`), "");
+    await opsCall({
+      operation: "insert", database: "flair", table: "Memory",
+      records: [{
+        id: LEGACY_ID, agentId: "esc-gap-agent", content: ORIGINAL,
+        embedding: STALE_EMBEDDING, embeddingModel: STALE_MODEL, createdAt: new Date().toISOString(),
+      }],
+    });
     const paused = await waitFor(join(pauseDir, `paused.${POINT}`), 150_000);
     expect(paused, "no migration cycle paused at the re-embed's commit gap").toBe(true);
     try {
@@ -138,9 +141,6 @@ describe("flair#2656 — the `.content`-suffix re-embed under a write committed 
     }
     expect(await readWhenPresent(join(pauseDir, `released.${POINT}`), 30_000), "the pause ended by timeout, not by this test").toBe("go");
 
-    // The first attempt's commit dropped or superseded its write; the retry
-    // re-reads the newer text and must land the vector for it before the next
-    // migration cycle (at least 30 s away).
     const deadline = Date.now() + 10_000;
     let row = await readRow(LEGACY_ID);
     while (Date.now() < deadline) {
@@ -202,6 +202,12 @@ describe("flair#2656 — the `.content`-suffix re-embed under a write committed 
         id, agentId: "esc-deleted-agent", content: ORIGINAL,
         embedding: STALE_EMBEDDING, embeddingModel: STALE_MODEL, createdAt: new Date().toISOString(),
       })),
+    });
+    const installDir = harper.installDir;
+    await stopHarper(harper, { keepInstallDir: true });
+    harper = await startHarper({
+      installDir,
+      env: { FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_TEST_PAUSE_DIR: pauseDir },
     });
     expect(await waitFor(join(pauseDir, `paused.${VERIFY_POINT}`), 150_000), "no migration cycle paused before read-back").toBe(true);
     let deletedId = "";
