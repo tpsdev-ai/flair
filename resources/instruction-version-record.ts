@@ -273,7 +273,7 @@ export async function readVersionRecord(
   return null;
 }
 
-/** The version record that immediately follows `version` in a subject's chain, or null. */
+/** The record with the next sequence number after `version` for this subject, or null. */
 export async function readVersionRecordAfter(
   subjectType: string,
   subjectId: string,

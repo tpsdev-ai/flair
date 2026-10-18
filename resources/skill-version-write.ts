@@ -417,11 +417,11 @@ function skillUpdateNotClosedRefusal(attempts: number): Response {
   }, { status: 409 });
 }
 
-/** The named 409 when the committed store does not show this update as the only live head. */
+/** The named 409 when neither a sole live successor nor ordered supersession is confirmed. */
 function skillUpdateNotConfirmedRefusal(): Response {
   return Response.json({
     error: "skill_update_not_confirmed",
-    message: "the committed store does not show this update's successor as the only live head",
+    message: "the committed store confirms neither this update's successor as the only live head nor its closure with this request's version record present, the record with the next sequence number linked to it by hash, and that later version's row naming the successor as superseded",
   }, { status: 409 });
 }
 
@@ -454,12 +454,9 @@ async function compensateUnlandedSkillUpdate(args: {
 }
 
 /**
- * flair#2645 — a successor this request committed, later superseded by a
- * follow-up update. This path succeeds only when the subject's version
- * chain still holds this request's appended record and the record that follows
- * it closes this request's successor. Reads the chain through the
- * version-record reader; the follow-up row is read through the same committed
- * Memory surface as the success confirmation.
+ * flair#2645 — confirm a closed successor only when this request's update
+ * record is present, the record with the next sequence number links to it by
+ * hash, and that later version's row names this successor as superseded.
  */
 async function confirmSupersededInOrder(args: {
   subjectId: string;
@@ -514,7 +511,7 @@ export interface ConfirmSkillCloseArgs {
   /** Re-check the caller's authority on the current committed row. */
   authorize: (row: Record<string, any>, shared: any) => Promise<Response | null>;
   afterStaged?: (row: Record<string, any>, attempt: number) => Promise<Response | null>;
-  /** Check the committed effect beyond the close (a successor's live head). */
+  /** Check the committed effect beyond the close (a sole live successor or ordered supersession of a closed successor). */
   confirmEffect?: () => Promise<Response | null>;
   missing?: () => Response;
   /** The named refusal when the close never lands. */
@@ -597,8 +594,8 @@ async function confirmSkillCloseInner(args: ConfirmSkillCloseArgs, journal: Writ
 }
 
 /**
- * flair#2645 — a skill UPDATE's confirmation: the predecessor close plus the
- * rule that the request's successor is the only live head of the subject.
+ * flair#2645 — confirm the predecessor close and either this request's
+ * successor as the subject's only live head or its ordered supersession while closed.
  */
 async function confirmSkillUpdate(args: {
   ctx: any;
@@ -630,8 +627,7 @@ async function confirmSkillUpdate(args: {
       if (typeof successorCommitted.validTo !== "string" || successorCommitted.validTo.length === 0) {
         return skillUpdateNotConfirmedRefusal();
       }
-      // A closed successor is this request's own write only when the chain
-      // shows it landed and the next version superseded it in order.
+      // The successor is closed; confirm the ordered supersession.
       return confirmSupersededInOrder({
         subjectId,
         successor,
