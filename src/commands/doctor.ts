@@ -2428,6 +2428,8 @@ program
       // 8d. Instruction events (flair#2139 slice 3a) — name every stored
       // OrgEvent that carries a reserved kind or the reserved id prefix but
       // does not satisfy the reader rule. Read-only: nothing is rewritten.
+      // The check runs only with an admin credential and a verified operations
+      // endpoint; otherwise it reports skipped.
       console.log(`\n  ${render.wrap(render.c.bold, "Instruction events")}`);
       if (rosterNotRun) {
         issues++;

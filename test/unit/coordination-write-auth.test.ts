@@ -137,6 +137,9 @@ const databasesMock = {
       // OrgEvent.post() calls `databases.flair.OrgEvent.put(content)` directly
       // (Harper-5 upsert), so the static put must capture AND persist too.
       put: async (content: any) => { orgEventPut = content; orgEventStore.set(content.id, { ...content }); return { ok: true, ...content }; },
+      // OrgEventMaintenance.post() iterates the table; an empty store is enough
+      // for the authorization test (the refusal runs before this call).
+      search: async function* () {},
     }),
     Agent: { get: async () => null, search: async () => [] },
   },
@@ -151,6 +154,7 @@ mock.module("harper", () => ({ server: { http: () => {}, getUser: async () => nu
 
 const { WorkspaceState } = await import("../../resources/WorkspaceState.ts");
 const { OrgEvent } = await import("../../resources/OrgEvent.ts");
+const { OrgEventMaintenance } = await import("../../resources/OrgEventMaintenance.ts");
 
 // Build a resource instance whose getContext() returns the given auth context.
 function makeWorkspace(ctxRequest: any) {
@@ -673,5 +677,17 @@ describe("OrgEvent allow* hooks refuse reserved markers visible in their argumen
     // allowDelete receives the request target, not a stored row.
     expect(oe.allowDelete(null, { id: "instruction-change:x" }, {}), "allowDelete reserved id").toBe(false);
     expect(oe.allowDelete(null, { id: "ordinary-1" }, {}), "allowDelete ordinary id").toBe(true);
+  });
+});
+
+describe("OrgEventMaintenance.post() authorizes from getContext()", () => {
+  it("refuses a non-admin agent that reaches post() directly, not through allowCreate", async () => {
+    const r: any = new (OrgEventMaintenance as any)();
+    r.getContext = () => ({ request: agentCtx("agent-a") });
+    // Harper passes the request target as the second argument. An empty target
+    // resolves to the trusted internal verdict if it is mistaken for the auth
+    // context, so this call fails unless post() reads getContext().
+    const res: any = await r.post({}, {});
+    expect(res?.status).toBe(403);
   });
 });

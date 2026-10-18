@@ -5,14 +5,17 @@
  *   - POST, single-id PUT/PATCH/DELETE and collection PUT/DELETE refuse a
  *     proposed or stored reserved record (`soul.changed`/`skill.changed` kind,
  *     or an `instruction-change:` id prefix) for agents, admin agents and the
- *     credentialed Basic admin;
+ *     credentialed Basic admin; a non-admin agent's collection DELETE is
+ *     refused earlier by the owner-scoped entry guard with its generic
+ *     collection refusal, not `reserved_event`;
  *   - a POST to a reserved addressed id with an ordinary body, and a PATCH
  *     that would create a row at a reserved addressed id, are refused;
  *   - a reserved element refuses a collection PUT as a whole: no element is
  *     written;
  *   - a collection DELETE that selects a reserved row is refused before
  *     anything is deleted; an ordinary-only selection deletes;
- *   - anonymous callers are refused with 401;
+ *   - anonymous callers are refused with 401 (a malformed POST/PATCH/PUT body
+ *     is refused 400 by the body-shape guard first);
  *   - `flair doctor` names a planted impostor and passes on a clean store; it
  *     lists every impostor id, and a real matching InstructionVersion passes;
  *   - a reserved event survives an OrgEventMaintenance run, including one
@@ -411,7 +414,7 @@ describe("a collection DELETE selecting a reserved row is refused before it dele
   }, 60_000);
 });
 
-describe("anonymous callers are refused with 401", () => {
+describe("anonymous callers with well-formed bodies are refused with 401", () => {
   it("POST, PUT, PATCH, DELETE and collection PUT on a reserved record are unauthenticated", async () => {
     const id = `stored-reserved-anon-${randomUUID()}`;
     await plantEvent(id);
@@ -428,7 +431,7 @@ describe("anonymous callers are refused with 401", () => {
   }, 30_000);
 });
 
-describe("ordinary events are unchanged", () => {
+describe("ordinary events are unchanged, except an anonymous collection PUT batch (401)", () => {
   it("POST, PUT, PATCH and DELETE of an ordinary event succeed", async () => {
     const id = `ordinary-verb-${randomUUID()}`;
     const post = await send(agent, "POST", "/OrgEvent", { id, kind: "status", summary: "created" });

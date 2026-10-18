@@ -17,11 +17,11 @@ export class OrgEventMaintenance extends Resource {
     return allowAdmin((this as any).getContext?.());
   }
 
-  async post(_data: any, context?: any) {
-    // Admin-only — the same predicate allowCreate uses. An HTTP admin request
-    // reaches this method with the annotations on the context, not on a
-    // `.request` child, so the raw flag read refused every caller.
-    if (!(await allowAdmin(context ?? (this as any).getContext?.()))) {
+  async post(_data: any) {
+    // Admin-only — the same predicate allowCreate uses. Harper passes the
+    // request target, not the auth context, as post()'s second argument, so
+    // the authorization context is this.getContext().
+    if (!(await allowAdmin((this as any).getContext?.()))) {
       return new Response(
         JSON.stringify({ error: "forbidden: admin only" }),
         { status: 403, headers: { "Content-Type": "application/json" } },
