@@ -12,5 +12,10 @@
 # NODE_BIN is an ABSOLUTE path resolved at enable time — the shim performs
 # zero PATH lookups at run time. Do not replace it with a bare `node`: that
 # would hand binary selection to whatever PATH the service manager carries.
+#
+# ADMIN_PASS_FILE is the ABSOLUTE path of the owner-only admin-password file,
+# also resolved at enable time. The CLI reads the password from that file when
+# the cycle runs; the value is never written into this script, passed in argv,
+# or exported into the environment.
 set -e
-exec "{{NODE_BIN}}" "{{FLAIR_BIN}}" rem nightly run-once
+exec "{{NODE_BIN}}" "{{FLAIR_BIN}}" rem nightly run-once --admin-pass-file "{{ADMIN_PASS_FILE}}"

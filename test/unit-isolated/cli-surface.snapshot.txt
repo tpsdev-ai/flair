@@ -2,7 +2,7 @@
 # Byte-identical gate for src/cli.ts modularization. Do not edit by hand.
 # Refresh: UPDATE_CLI_SURFACE_SNAPSHOT=1 bun test test/unit-isolated/cli-surface-snapshot.test.ts
 # helpWidth=80 (pinned; TTY columns must not affect this file)
-# commands=143 options=652
+# commands=143 options=654
 #
 # TREE is registration order: every command/subcommand + declared options/args.
 # HELP is each command's outputHelp() (--help, including addHelpText).
@@ -1419,6 +1419,9 @@ flair rem nightly enable
     --flair-url <url>
       description: Flair HTTP URL the runner will hit (default http://127.0.0.1:<port>)
       attr: flairUrl
+    --admin-pass-file <path>
+      description: Absolute path of the owner-only admin-password file the shim passes to run-once (default: ~/.flair/admin-pass)
+      attr: adminPassFile
 
 flair rem nightly disable
   description: Remove the nightly scheduler (keeps snapshots + audit log)
@@ -1444,8 +1447,11 @@ flair rem nightly run-once
       description: Harper operations API port
       attr: opsPort
     --admin-pass <pass>
-      description: Admin password (or set FLAIR_ADMIN_PASS)
+      description: Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)
       attr: adminPass
+    --admin-pass-file <path>
+      description: Read the admin password from an owner-only file (mode 0600 enforced), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
+      attr: adminPassFile
     --admin-user <name>
       description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
       attr: adminUser
@@ -4432,15 +4438,18 @@ Usage: flair rem nightly enable [options]
 Install the nightly scheduler (launchd on macOS, systemd timer on Linux)
 
 Options:
-  --agent <id>       Agent id (or FLAIR_AGENT_ID env)
-  --at <HH:MM>       Local time to run nightly (default 03:00) (default:
-                     "03:00")
-  --flair-url <url>  Flair HTTP URL the runner will hit (default
-                     http://127.0.0.1:<port>)
-  -h, --help         display help for command
+  --agent <id>              Agent id (or FLAIR_AGENT_ID env)
+  --at <HH:MM>              Local time to run nightly (default 03:00) (default:
+                            "03:00")
+  --flair-url <url>         Flair HTTP URL the runner will hit (default
+                            http://127.0.0.1:<port>)
+  --admin-pass-file <path>  Absolute path of the owner-only admin-password file
+                            the shim passes to run-once (default:
+                            ~/.flair/admin-pass)
+  -h, --help                display help for command
 
 Global Options:
-  -v, --version      output the version number
+  -v, --version             output the version number
 
 ----- flair rem nightly disable -----
 Usage: flair rem nightly disable [options]
@@ -4472,16 +4481,23 @@ Run one nightly cycle now (snapshot + log). Same code path the scheduler will
 use.
 
 Options:
-  --agent <id>         Agent id (or FLAIR_AGENT_ID env)
-  --ops-port <port>    Harper operations API port
-  --admin-pass <pass>  Admin password (or set FLAIR_ADMIN_PASS)
-  --admin-user <name>  Admin username for Basic auth (env: FLAIR_ADMIN_USER;
-                       default: admin)
-  --dry-run            Log the row but skip the snapshot write
-  -h, --help           display help for command
+  --agent <id>              Agent id (or FLAIR_AGENT_ID env)
+  --ops-port <port>         Harper operations API port
+  --admin-pass <pass>       Admin password (legacy: lands in shell history and
+                            the process list — prefer --admin-pass-file or
+                            FLAIR_ADMIN_PASS)
+  --admin-pass-file <path>  Read the admin password from an owner-only file
+                            (mode 0600 enforced), keeping it out of shell
+                            history and the process list. An explicit option
+                            (this or --admin-pass) overrides FLAIR_ADMIN_PASS;
+                            combining it with --admin-pass is a usage error.
+  --admin-user <name>       Admin username for Basic auth (env:
+                            FLAIR_ADMIN_USER; default: admin)
+  --dry-run                 Log the row but skip the snapshot write
+  -h, --help                display help for command
 
 Global Options:
-  -v, --version        output the version number
+  -v, --version             output the version number
 
 ----- flair rem snapshot -----
 Usage: flair rem snapshot [options] [command]

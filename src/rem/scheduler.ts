@@ -70,6 +70,13 @@ export interface SchedulerSubstitutions {
   NODE_BIN: string;
   /** Absolute path to the shim script the scheduler should call. */
   SHIM_PATH: string;
+  /**
+   * Absolute path to the owner-only admin-password file the shim passes to
+   * `run-once` with `--admin-pass-file`. Resolved at enable time so the shim
+   * performs no path lookup when the scheduler runs it; the file's VALUE is
+   * never read here and never lands in the shim.
+   */
+  ADMIN_PASS_FILE: string;
   /** Operator's home directory (HOME env var value). */
   HOME: string;
   /** Agent id passed via env. */
@@ -116,6 +123,12 @@ export interface EnableOpts {
   homeOverride?: string;
   /** Override the template root for testing. */
   templateRootOverride?: string;
+  /**
+   * Admin-password file whose ABSOLUTE path is baked into the shim. Defaults
+   * to `<home>/.flair/admin-pass` (the file `flair init` writes). The file is
+   * not read at enable time; `run-once` reads it at run time.
+   */
+  adminPassFile?: string;
   /** Skip the launchctl/systemctl invocation (testing). */
   skipLoad?: boolean;
 }
@@ -241,11 +254,13 @@ function buildSubstitutions(opts: EnableOpts, shimPath: string, flairBin: string
   if (!/^[a-zA-Z0-9_-]+$/.test(opts.agentId)) {
     throw new Error(`invalid agent id: ${opts.agentId}`);
   }
+  const home = opts.homeOverride ?? resolveHome();
   return {
     FLAIR_BIN: flairBin,
     NODE_BIN: nodeBin,
     SHIM_PATH: shimPath,
-    HOME: opts.homeOverride ?? resolveHome(),
+    ADMIN_PASS_FILE: resolve(opts.adminPassFile ?? join(home, ".flair", "admin-pass")),
+    HOME: home,
     AGENT_ID: opts.agentId,
     FLAIR_URL: opts.flairUrl,
     HOUR: String(opts.hour),

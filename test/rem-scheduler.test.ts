@@ -75,6 +75,7 @@ const sampleSubs: SchedulerSubstitutions = {
   FLAIR_BIN: "/usr/local/bin/flair",
   NODE_BIN: "/usr/local/bin/node",
   SHIM_PATH: "/Users/test/.flair/bin/flair-rem-nightly",
+  ADMIN_PASS_FILE: "/Users/test/.flair/admin-pass",
   HOME: "/Users/test",
   AGENT_ID: "test-agent",
   FLAIR_URL: "http://127.0.0.1:9926",
@@ -152,6 +153,34 @@ describe("enableScheduler (darwin)", () => {
     expect(r.loadResult).toBeUndefined();
     expect(r.loadCommand[0]).toBe("launchctl");
     expect(r.loadCommand).toContain("bootstrap");
+  });
+
+  it("bakes the ABSOLUTE admin-pass path into the shim and never its value", () => {
+    const secretDir = join(testRoot, "secrets");
+    mkdirSync(secretDir, { recursive: true });
+    const passPath = join(secretDir, "admin-pass");
+    const secretValue = "fixture-admin-pass-value-809";
+    writeFileSync(passPath, secretValue, { mode: 0o600 });
+
+    enableScheduler(baseOpts({ platformOverride: "darwin", adminPassFile: passPath }));
+
+    const shim = readFileSync(shimPath, "utf-8");
+    expect(shim).toContain('rem nightly run-once --admin-pass-file "' + passPath + '"');
+    expect(shim).not.toContain(secretValue);
+  });
+
+  it("resolves a relative admin-pass path to an absolute one at enable time", () => {
+    enableScheduler(baseOpts({ platformOverride: "darwin", adminPassFile: "relative/admin-pass" }));
+
+    const shim = readFileSync(shimPath, "utf-8");
+    expect(shim).toContain('rem nightly run-once --admin-pass-file "' + resolve("relative/admin-pass") + '"');
+  });
+
+  it("defaults the baked admin-pass path under HOME/.flair/admin-pass", () => {
+    enableScheduler(baseOpts({ platformOverride: "linux" }));
+
+    const shim = readFileSync(shimPath, "utf-8");
+    expect(shim).toContain('--admin-pass-file "' + join(home, ".flair", "admin-pass") + '"');
   });
 });
 
