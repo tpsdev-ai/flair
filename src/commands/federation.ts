@@ -488,8 +488,9 @@ export async function persistLocalPeerLastSyncAt(args: {
  * field-only `update` carrying `{id, presenceLastSyncAt, updatedAt}`, so it
  * cannot revert `publicKey`/`status` or re-create a deleted row, and HTTP 200 is
  * not success — the id must appear in `update_hashes` or the update is a refusal.
- * Callers invoke it only after a confirmed batch, so a failed batch leaves the
- * watermark frozen and the rows re-offer.
+ * Callers invoke it only after contact — a confirmed batch, or a successful
+ * liveness ping on a no-change pass — so a failed batch leaves the watermark
+ * frozen and the rows re-offer.
  */
 export async function persistLocalPeerPresenceSyncAt(args: {
   opsEndpoint: string;
@@ -892,11 +893,12 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
       }
       const refused = parseSyncBatchRefused(body);
       const indeterminate = parseSyncBatchIndeterminate(body);
-      // Every record in the batch must be accounted for exactly once. A row the
-      // receiver left indeterminate is neither merged nor refused, but it is
-      // still listed; without this check its cursor would silently advance the
-      // Presence watermark. On a mismatch, resolve nothing: throw before the
-      // caller can use any part of the response.
+      // The counts must add up to the batch: merged plus the refused and
+      // indeterminate lists. A row the receiver left indeterminate is neither
+      // merged nor refused, but it is still listed; without this check its
+      // cursor would silently advance the Presence watermark. On a mismatch,
+      // resolve nothing: throw before the caller can use any part of the
+      // response.
       if (counts.merged + refused.length + indeterminate.length !== batch.length) {
         throw new Error(
           `Sync batch failed: invalid response (HTTP ${syncRes.status}, merged/refused/indeterminate do not account for ${batch.length} records)`,

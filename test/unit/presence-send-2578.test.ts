@@ -76,7 +76,7 @@ describe("presence-send — selection", () => {
     originatorInstanceId: ME,
   });
 
-  it("keeps only home rows whose cursor advanced past the watermark", () => {
+  it("keeps only home rows whose cursor is past the supplied floor", () => {
     const rows = [
       home("a", 5000),
       home("b", 1000),
@@ -92,7 +92,7 @@ describe("presence-send — selection", () => {
     expect(selectPresenceRowsToSend(rows, ME, 2000).map((r) => r.agentId)).toEqual(["a"]);
   });
 
-  it("a row exactly at the watermark is NOT re-sent", () => {
+  it("a row exactly at the floor is NOT re-sent", () => {
     expect(selectPresenceRowsToSend([home("a", 2000)], ME, 2000)).toEqual([]);
   });
 

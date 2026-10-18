@@ -93,8 +93,8 @@ export function presenceCursorMs(row: Record<string, any>): number | null {
 }
 
 /** The stored per-table watermark (an ISO string) as unix ms, or 0 when it is
- *  absent or unparseable — 0 selects every home row that has a cursor, which is
- *  the intended first-sync behaviour. */
+ *  absent or unparseable — 0 selects every home row whose cursor is positive,
+ *  which is the intended first-sync behaviour. */
 export function presenceWatermarkMs(value: unknown): number {
   if (typeof value !== "string" || value.trim() === "") return 0;
   const ms = Date.parse(value);

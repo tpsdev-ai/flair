@@ -33,7 +33,7 @@ type Peer @table(database: "flair") @export {
   lastSyncAt: String               # last contact with this peer (liveness signal)
   lastMergeAt: String              # last sync where merged > 0 (data-progress signal)
   lastSyncCursor: String           # Lamport clock or ISO timestamp for incremental sync
-  presenceLastSyncAt: String       # sender-side per-table Presence watermark (flair#2578): the newest cursor a pass treats as sent, clamped to that pass's scan time; a retryable refusal or indeterminate outcome saves it below that row's cursor, and the next pass re-scans from 30 s behind it (F1/F2). Presence has no updatedAt, so it cannot ride the lastSyncAt cursor.
+  presenceLastSyncAt: String       # sender-side per-table Presence watermark (flair#2578): the cursor bound a pass saves, clamped to that pass's scan time. The next pass re-scans from 30 s behind it, so rows below it inside that overlap are re-sent (F2); a retryable refusal or indeterminate outcome saves it below that row's cursor (F1). Presence has no updatedAt, so it cannot ride the lastSyncAt cursor.
   relayOnly: Boolean               # true for spoke-to-spoke peers announced by hub
   pairedAt: String
   createdAt: String! @indexed

@@ -14,9 +14,12 @@
  *     (the committed-after-the-scan case, F2);
  *   - a row the hub refuses for a RETRYABLE reason holds the watermark below it
  *     and is re-offered next pass (F1);
+ *   - an indeterminate row holds the watermark below it and is re-offered next
+ *     pass (B1), and a response whose counts do not add up saves nothing;
  *   - a far-future row is not sent and cannot advance the watermark past the
- *     scan time;
- *   - a confirmed batch advances the watermark (the local Peer row's
+ *     scan time; a stored watermark already ahead of the scan is clamped down
+ *     to the scan time (B5);
+ *   - a confirmed batch saves the watermark (the local Peer row's
  *     presenceLastSyncAt), and a failed batch does not.
  *
  * The real end-to-end case (a real sender against a real Harper receiver) is in
@@ -227,7 +230,7 @@ describe("federation sync push — Presence sender (flair#2578 slice 2)", () => 
     expect(presenceRecords().map((r) => r.id)).toEqual(["agent-a"]);
   });
 
-  it("flag ON: a confirmed batch advances the watermark to the newest sent cursor", async () => {
+  it("flag ON: a confirmed batch saves the watermark as the newest sent cursor", async () => {
     process.env[PRESENCE_SEND_FLAG_ENV] = "1";
     const oldest = Date.now() - 5_000;
     const newest = Date.now();

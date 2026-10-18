@@ -13,7 +13,7 @@
  * Guarantees: a home agent's Presence lands on the hub with the sender as its
  * originator (and the Agent lands too — ordering), a non-home row is never sent,
  * a row inside the re-scan overlap is re-offered and re-merged without changing
- * the presence data, and the sender's per-table watermark advances.
+ * the presence data, and the sender's per-table watermark is saved.
  * The flag-off and per-branch cases live in the unit/flag files.
  *
  * Fixtures are neutral (agent-, host- names) and both Harpers are loopback,
@@ -165,11 +165,10 @@ describe("flair#2578 slice 2 — Presence sender end to end (real Harper, both f
     expect(result.error).toBeUndefined();
     const after = await readRow(receiver, "Presence", AGENT_HOME);
     // The 30 s re-scan overlap re-offers a row whose cursor is at the watermark,
-    // so this pass re-sends the unchanged row. The receiver refuses only a
-    // STRICTLY older heartbeat (presence_stale_heartbeat); an equal heartbeat is
-    // re-merged, so the presence data is unchanged and receivedAt does not go
-    // backward. Reported as a finding: the slice-2 spec expected an
-    // older-or-equal heartbeat to be refused, and an equal one still re-stores.
+    // so this pass re-sends the unchanged row. The receiver refuses an older
+    // heartbeat, or a heartbeat tie whose activity stamp is older; an equal
+    // heartbeat with an equal or absent activity stamp re-merges, so the
+    // presence data is unchanged and receivedAt does not go backward.
     expect(after.lastHeartbeatAt).toBe(before.lastHeartbeatAt);
     expect(after.activity).toBe(before.activity);
     expect(Number(after.receivedAt)).toBeGreaterThanOrEqual(Number(before.receivedAt));

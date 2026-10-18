@@ -8,9 +8,9 @@
   `activityUpdatedAt` cursor against a per-table watermark (less a 30 s re-scan
   overlap, so a row inside the overlap is re-sent even though it is below the
   watermark) kept on the local `Peer` row (`presenceLastSyncAt`); a confirmed
-  batch saves the newest sent cursor, clamped to that pass's scan time, and a
-  retryable refusal or an indeterminate outcome saves a value below that row's
-  cursor (a row dated more than 5 minutes ahead is not sent). An
+  batch saves the newest cursor it sent, clamped to that pass's scan time, but
+  a retryable refusal or an indeterminate outcome holds the saved value below
+  that row's cursor (a row dated more than 5 minutes ahead is not sent). An
   admin `put()` that changes a declared field without advancing either
   timestamp waits for the agent's next heartbeat. With the flag off the sender
   sends no Presence records.
