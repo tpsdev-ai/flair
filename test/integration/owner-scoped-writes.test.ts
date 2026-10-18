@@ -4,8 +4,8 @@
 //
 // The auth middleware's stored-owner check runs first on an addressed URL and
 // returns the owner refusal when stored ownership denies the caller.
-// If reached, the guard checks string or number body
-// ids before stored ownership. Whichever check decides, it decides on the id
+// If reached, the guard checks the body id before
+// stored ownership. Whichever check decides, it decides on the id
 // Harper resolves from the canonical request target (an encoded slash is part of
 // the id); a non-canonical target (repeated slashes or a dot segment) is refused
 // with the named 400 before any routing. Collection PUT/PATCH/DELETE is refused;

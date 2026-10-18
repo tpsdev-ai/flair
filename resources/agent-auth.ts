@@ -19,7 +19,7 @@
 import { databases } from "harper";
 import { WINDOW_MS, importEd25519Key, b64ToArrayBuffer, parseTpsEd25519Header } from "./ed25519-auth.js";
 import { isKnownAgentReplay, claimAgentNonce } from "./replay-store.js";
-import { ADMIN_ROLE, agentRecordIsAdmin } from "./agent-admin.js";
+import { ADMIN_ROLE, agentRecordIsAdmin, configuredAdminAgentIds } from "./agent-admin.js";
 import { isPrincipalDeactivated } from "../src/lib/principal-status.js";
 
 /**
@@ -96,7 +96,7 @@ let adminCache: Set<string> = new Set();
 async function getAdminAgents(): Promise<Set<string>> {
   const now = Date.now();
   if (now < adminCacheExpiry) return adminCache;
-  const fromEnv = (process.env.FLAIR_ADMIN_AGENTS ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+  const fromEnv = configuredAdminAgentIds();
   const fromDb: string[] = [];
   try {
     const results = await (databases as any).flair.Agent.search([{ attribute: "role", value: ADMIN_ROLE, condition: "equals" }]);

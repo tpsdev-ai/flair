@@ -36,6 +36,7 @@ let soulStore: Map<string, any>;
 // localInstanceId() reads this via databases.flair.Instance.search().
 let instanceRow: any = null;
 let versionStore: Map<string, any>;
+let eventStore: Map<string, any>;
 const versionPrimaryStore = { tryLock: () => true, unlock: () => {}, resetReadTxn: () => {} };
 const InstructionVersionBase = {
   primaryStore: versionPrimaryStore,
@@ -95,9 +96,20 @@ class BaseSoul {
   }
 }
 
+// flair#2139 3b: the instruction-version writer appends one OrgEvent row in the
+// same transaction; the write aborts when the table is missing (D2).
+const OrgEventBase = {
+  async *search() {},
+  async create(record: any) {
+    if (eventStore.has(record.id)) throw new Error("Record already exists");
+    eventStore.set(record.id, { ...record });
+  },
+};
+
 const databasesMock = {
   flair: {
     Soul: BaseSoul,
+    OrgEvent: OrgEventBase,
     MemoryCandidate: { search: () => (async function* () {})() },
     Memory: { search: () => (async function* () {})() },
     Instance: {
@@ -128,6 +140,7 @@ const anonCtx = () => ({ tpsAnonymous: true });
 beforeEach(() => {
   soulStore = new Map();
   versionStore = new Map();
+  eventStore = new Map();
   instanceRow = null;
   _resetLocalInstanceIdCacheForTests();
   // The append helper runs the row write and the version append in one owned

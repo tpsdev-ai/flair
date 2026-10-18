@@ -232,6 +232,16 @@ The remedy is `flair upgrade` (the adapter), not a server upgrade alone.
 | POST | `/OrgEventMaintenance` | Ed25519 / admin | Expire / sweep org events. |
 | POST | `/AttentionQuery` | Ed25519 | Cross-table “what touches entity E”. Entity strings: [docs/entity-vocabulary.md](entity-vocabulary.md). |
 
+#### Instruction-change events (Soul and skill)
+
+Each version appended by Flair's Soul and skill application writers also creates an OrgEvent: kind `soul.changed` or `skill.changed`, id `instruction-change:<version id>`, `refId` the version id, `authorId` `flair:internal`, `createdAt` copied from the version, and `detail` built from these fields only: `subjectType`, `subjectId`, `key` (the Soul key; null for skills), `changeKind`, `actorKind`, `actorId`, `sourceClass`, `valueHash`, `previousVersionHash`, `recordHash`. A private skill's event omits the three hashes, including on the tombstone, whose stored visibility is the closed head's last state. `authorId` is `flair:internal`; `detail.actorKind` disambiguates the actor.
+
+Instruction events are readable by any verified agent. Three things a reader should not infer:
+
+- The stream begins with the release that ships this event; versions appended earlier have no event, and `InstructionVersion` remains the complete history. A missing event before the cutover does not mean nothing changed.
+- An event does not grant read access to its version record, which keeps stored-and-current authority.
+- Hashes emitted while a skill was shared stay readable in the append-only stream after the skill is tightened to private.
+
 ### Federation
 
 | Method | Path | Auth | Notes |

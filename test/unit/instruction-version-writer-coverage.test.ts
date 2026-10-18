@@ -25,6 +25,8 @@ const classified = new Map<string, string>([
   ["resources/instruction-version-record.ts:writer:table.create#2", "Application append for single-row Soul resource writes."],
   ["resources/instruction-version-record.ts:writer:createHash(\"sha256\").update#1", "Hashing, not a table write; listed by the conservative sink scan."],
   ["resources/instruction-version-record.ts:writer:createHash(\"sha256\").update#2", "Hashing, not a table write; listed by the conservative sink scan."],
+  ["resources/instruction-version-record.ts:writer:events.create#1", "Instruction event appended beside each version record in the same transaction (#2139 3b)."],
+  ["resources/instruction-version-record.ts:writer:events.delete#1", "Instruction event removed with the version record the close compensation takes away (#2642)."],
   ["resources/InstructionVersion.ts:alias-source:(databases as any).flair.InstructionVersion#1", "The resource class extends the table."],
   ["resources/skill-version-write.ts:alias-source:(databases as any).flair?.InstructionVersion#1", "Journal compensation lock."],
   ["resources/skill-version-write.ts:writer:(databases as any).flair.Memory.put#1", "Successor write; Memory table."],

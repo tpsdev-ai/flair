@@ -20,6 +20,7 @@ import { grantedCloseRevokedRefusal, sameStoredRow, storedRowChangedRefusal, wri
 import { isJoinableTransaction, withOwnedTransaction } from "./request-transaction.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 import { committedVisibilityDiffers, grantedSuccessorVisibilityDenial, predecessorVisibilityChangedRefusal } from "./grant-visibility.js";
+import { isOpenLiveRow } from "../src/lib/open-live-row.js";
 
 /** Durability-keyed default visibility (mirrors Memory's write default). */
 function defaultVisibilityForDurability(durability: unknown): "private" | "shared" {
@@ -116,14 +117,6 @@ export function buildSkillSuccessorRow(args: {
 
 function okResponse(): Response {
   return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "Content-Type": "application/json" } });
-}
-
-function isOpenLiveRow(row: Record<string, any> | null | undefined): boolean {
-  if (!row || typeof row !== "object") return false;
-  if (row.archived === true) return false;
-  if (row.expiresAt != null && (typeof row.expiresAt !== "string" || !(Date.parse(row.expiresAt) > Date.now()))) return false;
-  if (typeof row.validTo === "string" && row.validTo.length > 0) return false;
-  return true;
 }
 
 /** Is this row a skill-tagged Memory row? */

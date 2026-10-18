@@ -6,6 +6,7 @@ import { mock, spyOn } from "bun:test";
 type Row = Record<string, any>;
 const store = new Map<string, Row>();
 const soulStore = new Map<string, Row>();
+const eventStore = new Map<string, Row>();
 const locks = new Set<string>();
 let onBlocked: (() => void) | undefined;
 let pausePatch: (() => Promise<void>) | undefined;
@@ -13,6 +14,7 @@ let soulReads = 0;
 let forceCommitChange: Row | undefined;
 let hideHead = false;
 let failNextAppend = false;
+let failNextEvent = false;
 let failNextCommit = false;
 
 const primaryStore = {
@@ -33,6 +35,12 @@ function stage(ctx: any, apply: () => void): void {
 
 const InstructionVersionTable = {
   primaryStore,
+  async get(id: string, ctx?: any): Promise<Row | null> {
+    return (ctx?.transaction?.versions ?? store).get(id) ?? null;
+  },
+  async delete(id: string, ctx: any): Promise<void> {
+    (ctx?.transaction?.versions ?? store).delete(id);
+  },
   async *search(query: any, ctx?: any): AsyncGenerator<Row> {
     if (hideHead) return;
     const conds: any[] = query?.conditions ?? [];
@@ -49,6 +57,19 @@ const InstructionVersionTable = {
     const rows = ctx?.transaction?.versions ?? store;
     if (rows.has(record.id)) throw new Error("Record already exists");
     rows.set(record.id, { ...record });
+  },
+};
+
+const OrgEventTable = {
+  async *search() {},
+  async create(record: Row, ctx: any): Promise<void> {
+    if (failNextEvent) { failNextEvent = false; throw new Error("event-write-failed"); }
+    const rows = ctx?.transaction?.events ?? eventStore;
+    if (rows.has(record.id)) throw new Error("Record already exists");
+    rows.set(record.id, { ...record });
+  },
+  async delete(id: string, ctx: any): Promise<void> {
+    (ctx?.transaction?.events ?? eventStore).delete(id);
   },
 };
 
@@ -96,7 +117,7 @@ class BaseSoul {
   }
 }
 const empty = { async *search() {} };
-const flairTables = { InstructionVersion: InstructionVersionTable, Soul: BaseSoul as any, Memory: empty, MemoryCandidate: empty, Instance: empty };
+const flairTables = { InstructionVersion: InstructionVersionTable, OrgEvent: OrgEventTable, Soul: BaseSoul as any, Memory: empty, MemoryCandidate: empty, Instance: empty };
 mock.module("harper", () => ({
   Resource: class {}, server: { http() {} },
   databases: { flair: flairTables },
@@ -108,10 +129,11 @@ function mockTransaction(ctx: any, cb: (txn: any) => any): any {
   const staged: Array<() => void> = [];
   const txn: any = {
     open: 1, saveCommits: false, staged, aborted: false,
-    versions: new Map(store), souls: new Map(soulStore),
+    versions: new Map(store), souls: new Map(soulStore), events: new Map(eventStore),
     abort() { this.open = 0; this.aborted = true; staged.length = 0; },
     commit() { if (failNextCommit) { failNextCommit = false; this.abort(); throw new Error("commit-failed"); } this.open = 0; store.clear(); for (const [id, row] of this.versions) store.set(id, row);
       soulStore.clear(); for (const [id, row] of this.souls) soulStore.set(id, row);
+      eventStore.clear(); for (const [id, row] of this.events) eventStore.set(id, row);
       for (const f of staged) f(); staged.length = 0; },
   };
   context.transaction = txn;
@@ -124,7 +146,7 @@ function mockTransaction(ctx: any, cb: (txn: any) => any): any {
   return result;
 }
 
-const { recordVersion, recordDigest, valueDigest, versionId, soulSubjectId, subjectTypeReadable, RECORD_HASH_FIELDS } =
+const { recordVersion, removeAppendedVersion, recordDigest, valueDigest, versionId, soulSubjectId, subjectTypeReadable, RECORD_HASH_FIELDS } =
   await import("../../resources/instruction-version-record.ts");
 
 const NOW = "2020-01-01T00:00:00.000Z";
@@ -155,6 +177,7 @@ beforeEach(() => {
   flairTables.Soul = BaseSoul;
   store.clear();
   soulStore.clear();
+  eventStore.clear();
   locks.clear();
   pausePatch = undefined;
   onBlocked = undefined;
@@ -162,11 +185,31 @@ beforeEach(() => {
   forceCommitChange = undefined;
   hideHead = false;
   failNextAppend = false;
+  failNextEvent = false;
   failNextCommit = false;
   (globalThis as any).transaction = mockTransaction;
 });
 
 const okRow = () => new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "Content-Type": "application/json" } });
+
+test("compensating the head removes its event; a superseded version retains its event", async () => {
+  const request = input();
+  const first = await recordVersion(context(), request, async () => okRow());
+  expect(first.ok).toBe(true);
+  const firstId = versionId("soul", request.subjectId, 1n);
+  const firstEvent = eventStore.get(`instruction-change:${firstId}`);
+  expect(firstEvent).toBeDefined();
+  const second = await recordVersion(context(), input({ kind: "update" }), async () => okRow());
+  expect(second.ok).toBe(true);
+  const secondId = versionId("soul", request.subjectId, 2n);
+  expect(eventStore.has(`instruction-change:${secondId}`)).toBe(true);
+  expect(await removeAppendedVersion(context(), "soul", request.subjectId, firstId)).toBe("superseded");
+  expect(eventStore.get(`instruction-change:${firstId}`)).toEqual(firstEvent);
+  expect(await removeAppendedVersion(context(), "soul", request.subjectId, secondId)).toBe("removed");
+  expect(store.has(secondId)).toBe(false);
+  expect(eventStore.has(`instruction-change:${secondId}`)).toBe(false);
+  expect(eventStore.get(`instruction-change:${firstId}`)).toEqual(firstEvent);
+});
 
 describe("instruction version — pure helpers", () => {
   test("version ids encode the subject and sequence, never a content hash", () => {
@@ -210,6 +253,7 @@ describe("instruction version — pure helpers", () => {
     expect({ actorKind: row.actorKind, actorId: row.actorId, sourceClass: row.sourceClass }).toEqual(operator);
     expect(Date.parse(row.createdAt)).toBeGreaterThan(Date.parse(NOW));
     store.clear();
+    eventStore.clear();
     const internal = await recordVersion({ __flairInternal: true }, input({ attribution: operator }), async () => okRow());
     expect(internal.ok).toBe(true);
     const recorded = store.get("soul:agent-a:role:1")!;
@@ -356,6 +400,29 @@ describe("instruction version — guard, collisions and failure injection", () =
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.response.status).toBe(403);
     expect(store.size).toBe(0);
+  });
+
+  test("an event insert failure rolls back the version and the row (D2)", async () => {
+    failNextEvent = true;
+    const rowStore = new Map<string, number>();
+    const res = await recordVersion(context(), input(), async (shared: any) => {
+      stage(shared, () => rowStore.set("row", 1));
+      return okRow();
+    });
+    expect(res.ok).toBe(false);
+    expect(store.size).toBe(0);
+    expect(eventStore.size).toBe(0);
+    expect(rowStore.size).toBe(0);
+  });
+
+  test("one event is appended per version, keyed by the version id", async () => {
+    const res = await recordVersion(context(), input(), async () => okRow());
+    expect(res.ok).toBe(true);
+    const [version] = [...store.values()];
+    const [event] = [...eventStore.values()];
+    expect(event.id).toBe(`instruction-change:${version.id}`);
+    expect(event.refId).toBe(version.id);
+    expect(event.createdAt).toBe(version.createdAt);
   });
 
   test("a commit failure rolls back: no version, no row", async () => {
@@ -551,6 +618,7 @@ describe("Soul resource version snapshots", () => {
   test("key-change tombstone and successor collisions roll back the whole Soul write", async () => {
     for (const collision of ["role", "new"]) {
       store.clear();
+      eventStore.clear();
       const id = "agent-a:role";
       const before = { id, agentId: "agent-a", key: "role", value: "before", createdAt: NOW };
       soulStore.set(id, before);
@@ -609,7 +677,7 @@ describe("Soul resource version snapshots", () => {
 
     test(`${method} refuses an occupied destination without changing either row or history`, async () => {
       for (const field of ["agentId", "key"] as const) {
-        store.clear(); soulStore.clear();
+        store.clear(); soulStore.clear(); eventStore.clear();
         const destination = field === "agentId" ? { agentId: "b", key: "role" } : { agentId: "a", key: "other" };
         await soul("source").post({ id: "source", agentId: "a", key: "role", value: "before" });
         await soul("destination").post({ id: "destination", ...destination, value: "occupied" });
