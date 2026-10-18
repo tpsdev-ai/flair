@@ -171,9 +171,7 @@ async function waitFor(path: string, timeoutMs: number): Promise<boolean> {
 /**
  * Arm `point`, start `trigger`, run `compete` once the trigger is paused inside
  * that point, release, and await the trigger. Returns the trigger's response
- * and how the pause ended. When `observeCommitted` is supplied, the paused
- * writer is resumed only after a fresh read observes the competitor's
- * committed end state.
+ * and how the pause ended. A false observation fails before writing `go`.
  */
 async function withPaused<T>(
   point: string,
@@ -184,15 +182,16 @@ async function withPaused<T>(
   for (const marker of ["claimed", "paused", "go", "released"]) rmSync(join(pauseDir, `${marker}.${point}`), { force: true });
   writeFileSync(join(pauseDir, `arm.${point}`), "");
   const pending = trigger();
+  void pending.catch(() => {});
   const paused = await waitFor(join(pauseDir, `paused.${point}`), 20_000);
   let competed: T | undefined;
   let observed: boolean | undefined;
-  try {
-    if (paused) competed = await compete();
-    if (paused && observeCommitted) observed = await observeCommitted();
-  } finally {
-    writeFileSync(join(pauseDir, `go.${point}`), "");
+  if (paused) competed = await compete();
+  if (paused && observeCommitted) {
+    observed = await observeCommitted();
+    expect(observed, `the competitor's committed state was not observed at ${point}`).toBe(true);
   }
+  writeFileSync(join(pauseDir, `go.${point}`), "");
   const response = await pending;
   const released = paused ? readFileSync(join(pauseDir, `released.${point}`), "utf8") : "never paused";
   return { response, competed, released, paused, observed };
@@ -254,6 +253,20 @@ afterAll(async () => {
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
 }, HARPER_STOP_BUDGET_MS);
 
+it("an observation timeout fails without releasing the paused writer", async () => {
+  const point = "observation-timeout";
+  await expect(withPaused(
+    point,
+    async () => {
+      writeFileSync(join(pauseDir, `paused.${point}`), "");
+      return new Response();
+    },
+    async () => {},
+    async () => false,
+  )).rejects.toThrow("the competitor's committed state was not observed");
+  expect(existsSync(join(pauseDir, `go.${point}`))).toBe(false);
+});
+
 // ── usage-recording: the usageCount count bump ─────────────────────────────
 
 describe("flair#2441 — the usage-recording count bump confirms the stored row (real Harper)", () => {
@@ -261,10 +274,6 @@ describe("flair#2441 — the usage-recording count bump confirms the stored row 
     insertRow({ id, agentId: owner.id, content: `usage ${id}`, contentHash: id, instanceToken: token, durability: "persistent" });
   const record = (id: string) => authSend(owner, "POST", "/RecordUsage", { memoryIds: [id] });
 
-  // A DELETE whose transaction starts BEFORE the count bump's: the bump then
-  // reads the row and pauses mid-transaction. The bump is resumed only after a
-  // fresh read observes the row gone, and the row must be gone once both
-  // transactions have ended.
   it("a DELETE by an earlier transaction, with the count bump paused after reading and before staging its write, leaves the row deleted", async () => {
     const id = `csr-usage-del-${Date.now()}`;
     await seed(id, randomUUID());
@@ -277,21 +286,14 @@ describe("flair#2441 — the usage-recording count bump confirms the stored row 
     releasePoint("memory-delete");
     const del = await delPending;
     expect(del.status, (await del.clone().text()).slice(0, 200)).toBeLessThan(300);
-    // Resume the count bump only once a fresh read has observed the row gone. If
-    // the delete's commit is stalled behind the paused transaction this bound
-    // expires; the post-release observation below then decides the outcome.
     const visibleBeforeRelease = await waitForRowGone(id, 15_000);
+    expect(visibleBeforeRelease, "the owner DELETE did not become visible before resuming the count bump").toBe(true);
     releasePoint("usage-count");
     const rec = await recPending;
     expect(rec.status, (await rec.clone().text()).slice(0, 200)).toBe(200);
-    // After the paused transaction ends the row must be gone. A delete whose
-    // commit was stalled behind it lands here; a delete reported successful that
-    // never lands leaves the row.
     expect(
       await waitForRowGone(id, 15_000),
-      visibleBeforeRelease
-        ? "the count bump re-created the deleted row"
-        : "the owner DELETE did not become visible after the paused transaction ended",
+      "the count bump re-created the deleted row",
     ).toBe(true);
   }, 60_000);
 
@@ -612,6 +614,37 @@ describe("flair#2632 — an ordinary, non-skill owner DELETE confirms row remova
     const history = await historyRows(id);
     expect(history.length, "the confirmed removal must keep exactly one deletion-history record").toBe(1);
     expect(history[0]?.memoryInstanceToken, "the kept history record is not this row's").toBe(token);
+  }, 60_000);
+
+  it("a same-owner replacement before the first DELETE attempt is refused and unchanged", async () => {
+    const id = `csr-del-pre-replaced-${Date.now()}`;
+    const token = randomUUID();
+    const replacementToken = randomUUID();
+    await seed(id, token);
+    await insertPointer(id, token);
+    const originalPointers = await pointerRows(id);
+    let replacement: any;
+    const { response, paused, released, observed } = await withPaused(
+      "memory-delete-pre",
+      () => del(id),
+      async () => {
+        await deleteRow(id);
+        await seed(id, replacementToken);
+        replacement = await readRow(id);
+        expect(replacement?.agentId).toBe(owner.id);
+        expect(replacement?.instanceToken).toBe(replacementToken);
+      },
+      () => waitForCommitted(id, (row) => row?.instanceToken === replacementToken, 15_000),
+    );
+    expect(paused, "the owner DELETE was not paused before its first attempt").toBe(true);
+    expect(released).toBe("go");
+    expect(observed).toBe(true);
+    const text = await response.clone().text();
+    expect(response.status, text.slice(0, 300)).toBe(409);
+    expect(JSON.parse(text).error).toBe("stored_row_changed");
+    expect(await readRow(id), "the replacement row changed").toEqual(replacement);
+    expect(await historyRows(id)).toEqual([]);
+    expect(await pointerRows(id)).toEqual(originalPointers);
   }, 60_000);
 
   it("a same-id replacement with a new token while the DELETE is paused is refused and not deleted", async () => {

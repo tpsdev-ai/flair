@@ -218,3 +218,32 @@ describe("a failed pointer delete leaves the row in a warmed BM25 index", () => 
     expect(after).toContain("mem-bm25"); // assertion: the surviving row was NOT marked deleted in BM25
   });
 });
+
+describe("DELETE checks the identity from the original read", () => {
+  for (const initiallyPresent of [true, false]) {
+    it(`refuses a row installed before the first owned read (initially present: ${initiallyPresent})`, async () => {
+      const original = seedMemory({ id: "mem-first-attempt", instanceToken: "original-token" });
+      const replacement = { ...original, instanceToken: "replacement-token", content: "replacement retrieval corpus" };
+      if (!initiallyPresent) memoryStore.delete(original.id);
+      const originalGet = databasesMock.flair.Memory.get;
+      let installed = false;
+      const competingRead = spyOn(databasesMock.flair.Memory, "get").mockImplementation(async (id?: any) => {
+        if (!installed) {
+          installed = true;
+          memoryStore.set(original.id, replacement);
+        }
+        return originalGet(id);
+      });
+      try {
+        const response = await memoryWithContext({ request: { tpsAgent: "agent-a" } }).delete(original.id);
+        expect(installed).toBe(true);
+        expect(response.status).toBe(409);
+        expect((await response.json()).error).toBe("stored_row_changed");
+        expect(memoryStore.get(original.id)).toEqual(replacement);
+        expect(harnessState.deletionStore.size).toBe(0);
+      } finally {
+        competingRead.mockRestore();
+      }
+    });
+  }
+});

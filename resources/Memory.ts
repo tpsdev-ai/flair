@@ -366,9 +366,6 @@ function deleteCompensationFailure(message: string): Response {
   );
 }
 
-/** The row identity a DELETE retry re-checks: the id, the CURRENT owner and the
- *  server-stamped incarnation token. A same-id row with a different owner or
- *  token is a replacement, not the row the caller meant. */
 function sameDeleteTarget(
   row: any,
   target: { id: string; owner: unknown; token: unknown },
@@ -3409,6 +3406,11 @@ export class Memory extends (databases as any).flair.Memory {
       auth.kind === "internal" ? "internal" : auth.isAdmin ? "admin" : "agent";
     // flair#2355: hold the row still before the delete stages, so a competing
     // owner change can commit first and be seen by the re-read inside.
+    const target = record ? {
+      id: String(record.id),
+      owner: record[RECORD_TYPES.Memory.ownerField] ?? null,
+      token: record.instanceToken ?? null,
+    } : null;
     const beforeDelete = txnPausePoint("memory-delete-pre");
     if (beforeDelete) await beforeDelete;
     type DeleteAttempt =
@@ -3418,7 +3420,6 @@ export class Memory extends (databases as any).flair.Memory {
     // flair#2632: ordinary, non-skill DELETE confirms committed row absence.
     // Retry dropped removals with fresh reads; refuse a changed id/owner/token.
     const targetIdProbe = typeof id === "string" ? id : record?.id;
-    let target: { id: string; owner: unknown; token: unknown } | null = null;
     let applied = false;
     for (let attempt = 1; attempt <= DELETE_APPLY_ATTEMPTS; attempt++) {
       let historyId: string | null = null;
@@ -3434,9 +3435,7 @@ export class Memory extends (databases as any).flair.Memory {
           // mismatch here is a change committed since — refuse it, do not delete.
           return { kind: "response", response: ownerChangedRefusal("Memory") };
         }
-        if (!target) {
-          target = { id: deletedId, owner: stored[RECORD_TYPES.Memory.ownerField] ?? null, token: stored.instanceToken ?? null };
-        } else if (!sameDeleteTarget(stored, target, RECORD_TYPES.Memory.ownerField)) {
+        if (!target || !sameDeleteTarget(stored, target, RECORD_TYPES.Memory.ownerField)) {
           return { kind: "response", response: storedRowChangedRefusal("Memory") };
         }
         if (nonAdmin) {
