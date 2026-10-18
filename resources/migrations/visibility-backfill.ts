@@ -250,7 +250,9 @@ export function createVisibilityBackfillMigration(
                 );
               }
 
-              return { update: { visibility: derived } } as const;
+              // Idempotent: once visibility is committed, a fresh plan sees it
+              // present and skips, so re-applying leaves the same committed row.
+              return { idempotent: true, update: { visibility: derived } } as const;
             },
             { label: "visibility-backfill", pausePre: () => txnPausePoint("visibility-backfill-pre"), pausePoint: () => txnPausePoint("visibility-backfill"), confirmPoint: () => txnPausePoint("visibility-backfill-confirmed"), expectedRow: row },
           );

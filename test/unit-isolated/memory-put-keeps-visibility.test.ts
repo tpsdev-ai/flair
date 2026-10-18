@@ -137,6 +137,17 @@ describe("Memory updates preserve stored visibility", () => {
     expect(memoryStore.get("pub").durability).toBe("persistent"); // nothing written
   });
 
+  test("a new PUT leaves its stamped identity on the supplied row", async () => {
+    const body: any = { id: "fresh-stamp", agentId: "alice", content: "promotion stamp claim for the commit gap", createdAt: "2026-01-01T00:00:00.000Z", durability: "persistent", visibility: "private", tags: ["adk:app:alice"] };
+    const result = await makeMemory(body.id).put(body);
+    expect(result).not.toBeInstanceOf(Response);
+    const stored = memoryStore.get(body.id);
+    expect(body.instanceToken).toBeTruthy();
+    expect(stored.instanceToken).toBe(body.instanceToken);
+    expect(stored.content).toBe(body.content);
+    expect(stored.agentId).toBe(body.agentId);
+  });
+
   test("a NEW record still gets the durability-keyed default", async () => {
     await makeMemory("fresh").put({ id: "fresh", agentId: "alice", content: "new", durability: "standard" });
     expect(memoryStore.get("fresh").visibility).toBe("private");

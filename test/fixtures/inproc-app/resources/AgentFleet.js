@@ -122,13 +122,13 @@ class CallerAbort extends Error {}
  * transaction, and the caller's commit or abort decides it. With `abort`, the
  * caller throws after the write returns, so its transaction aborts.
  */
-async function supersedeInCallerTransaction(agentId, { id, content, durability = "standard", supersedes, abort }) {
+async function supersedeInCallerTransaction(agentId, { id, content, durability = "standard", supersedes, abort, tags, metadata, trigger }) {
   const ctx = agentContext(agentId);
   let written = null;
   try {
     await transaction(ctx, async () => {
       const h = await collectionResource(flair("Memory"), ctx);
-      written = await h.post({ id, agentId, content, durability, supersedes });
+      written = await h.post({ id, agentId, content, durability, supersedes, tags, metadata, trigger });
       if (abort && !(written instanceof Response)) throw new CallerAbort("the caller aborts its transaction after the write");
     });
   } catch (err) {
@@ -415,6 +415,11 @@ export class AgentFleet extends Resource {
         return run(() => registerAgent(body));
       case "remember":
         return run(() => remember(body.agentId, body));
+      case "postMemory":
+        return run(async () => {
+          const h = await collectionResource(flair("Memory"), agentContext(body.agentId));
+          return h.post(body.record);
+        });
       case "supersedeInCallerTransaction":
         return run(() => supersedeInCallerTransaction(body.agentId, body));
       case "supersedeWithCloseStorageRefusal":

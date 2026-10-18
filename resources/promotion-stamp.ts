@@ -1,7 +1,7 @@
 import { databases } from "harper";
 import { stripUndeclaredMemoryAttributes } from "./memory-declared-attributes.js";
 import { noteMemoryUpsert } from "./bm25-index-service.js";
-import { writeBackCommittedRow } from "./write-back.js";
+import { WriteBackConflictError, writeBackCommittedRow } from "./write-back.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 import { isJoinableTransaction } from "./request-transaction.js";
 import { promotionContentHash } from "./promotion-binding.js";
@@ -72,7 +72,7 @@ function memoryPrimaryStore(): unknown {
 // only verdict fields. The automatic write confirms identity, content and hash.
 export async function stampMemoryPromotion(
   id: string, reviewerId: string, decidedAt: string, enumerationContext?: any, stagedContext?: any,
-  written?: PromotedRowIdentity,
+  written?: PromotedRowIdentity, onUnconfirmed?: () => void,
 ): Promise<void> {
   const table = (databases as any).flair.Memory;
   if (isJoinableTransaction(stagedContext)) {
@@ -96,7 +96,6 @@ export async function stampMemoryPromotion(
     if (outcome.kind !== "done") throw new PromotionStampLockError(outcome.kind, id);
     return;
   }
-  // Test-only: inert unless the fault-injection opt-in is armed.
   // Test-only: the promotion's Memory write has committed; the stamp has not
   // taken the lock yet. Inert unless the fault-injection opt-in is armed.
   const entry = txnPausePoint("promotion-stamp-entry");
@@ -112,9 +111,12 @@ export async function stampMemoryPromotion(
       id,
       (stored) => {
         const update = promotionStampUpdate(stored, reviewerId, decidedAt);
-        return { update };
+        // Idempotent: the update rewrites the same verdict fields and re-derives
+        // the same content hash from content the update does not change, so
+        // re-planning from a fresh read after it commits writes the same values.
+        return { idempotent: true, update };
       },
-      { ctx: enumerationContext, label: "promotion-stamp", pausePre: () => txnPausePoint("promotion-stamp-pre"), pausePoint: () => txnPausePoint("promotion-stamp"), confirmPoint: () => txnPausePoint("promotion-stamp-confirmed"), matchFields: ["content", "promotionContentHash"], expectedRow: selected },
+      { ctx: enumerationContext, onUnconfirmed, label: "promotion-stamp", pausePre: () => txnPausePoint("promotion-stamp-pre"), pausePoint: () => txnPausePoint("promotion-stamp"), confirmPoint: () => txnPausePoint("promotion-stamp-confirmed"), pauseBeforeCommit: () => txnPausePoint("promotion-stamp-commit"), matchFields: ["content", "promotionContentHash"], expectedRow: selected },
     );
     // Test-only: the write-back committed and the lock is still held.
     const committed = txnPausePoint("promotion-stamp-committed");
@@ -131,11 +133,12 @@ export async function stampMemoryPromotion(
 export async function stampMemoryPromotionIsolated(
   id: string, reviewerId: string, decidedAt: string, enumerationContext?: any, written?: PromotedRowIdentity,
 ): Promise<boolean> {
+  let unconfirmed = false;
   try {
-    await stampMemoryPromotion(id, reviewerId, decidedAt, enumerationContext, undefined, written);
+    await stampMemoryPromotion(id, reviewerId, decidedAt, enumerationContext, undefined, written, () => { unconfirmed = true; });
     return true;
   } catch (err: any) {
-    console.warn(`stampMemoryPromotion failed for ${id}: ${err?.message ?? err}`);
+    console.warn("stampMemoryPromotion %s for %s: %s", unconfirmed ? "outcome unconfirmed" : "failed", id, err?.message ?? err, ...(unconfirmed ? [{ outcome: "unconfirmed" }] : err instanceof WriteBackConflictError ? [{ outcome: err.outcome }] : []));
     return false;
   }
 }

@@ -181,6 +181,7 @@ function getAdminPass(): string | null {
 // them, and the crypto/decoder logic can't drift.
 
 async function backfillEmbedding(memoryId: string): Promise<void> {
+  let unconfirmed = false;
   try {
     const table = (databases as any).flair.Memory;
     // flair#2484: compute the vector before the owned write transaction opens.
@@ -190,9 +191,8 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
     // entries skip before the text comparison. For eligible rows, `matchFields`
     // compares every field that selects the text (`content`, `trigger`, `tags`)
     // before staging; the helper confirms the committed row afterward. Drift
-    // observed by either check aborts the attempt; remaining outer attempts
-    // re-read and may recompute. Changes after confirmation and before commit
-    // are not detected by these checks.
+    // observed before commit aborts the attempt; remaining outer attempts
+    // re-read and may recompute.
     //
     // flair#2573: the vector is stamped with the current model id, the space it
     // was computed in, and the embedding-space guard is notified after the write
@@ -222,20 +222,20 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
             // update, never a full-row put of the row read above (flair#2470,
             // flair#2465). The newly computed hash is of `text`, the text this
             // vector was computed from (null for an empty owner).
-            return { update: { embedding, embeddingModel: model, embeddedContentHash: hashEmbeddedText(row.agentId, text) ?? null } };
+            return { idempotent: true, update: { embedding, embeddingModel: model, embeddedContentHash: hashEmbeddedText(row.agentId, text) ?? null } };
           },
           {
             label: "backfillEmbedding",
+            onUnconfirmed: () => { unconfirmed = true; },
             expectedRow: record,
             // Compare the text-selecting fields before staging, after the plan's skip checks.
             matchFields: [...MEMORY_EMBEDDING_INPUT_FIELDS, "tags"],
             pausePre: () => txnPausePoint("backfill-embedding-pre"),
             pausePoint: () => txnPausePoint("backfill-embedding"),
+            pauseBeforeCommit: () => txnPausePoint("backfill-embedding-commit"),
           },
         );
         if ("update" in outcome) {
-          // After the commit: the stamp the update stored (an absent one reads as
-          // untrusted and closes the guard) and the row it replaced.
           noteWriteStamp(outcome.update.embeddingModel as string | null | undefined, replaced);
           console.log(`[auto-embed] ${memoryId}: ${(outcome.update.embedding as number[]).length}d`);
         }
@@ -246,7 +246,7 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
       }
     }
   } catch (err: any) {
-    console.error(`[auto-embed] Failed for ${memoryId}: ${err.message}`);
+    console.error("[auto-embed] %s for %s: %s", unconfirmed ? "Outcome unconfirmed" : "Failed", memoryId, err.message, ...(unconfirmed ? [{ outcome: "unconfirmed" }] : err instanceof WriteBackConflictError ? [{ outcome: err.outcome }] : []));
   }
 }
 
