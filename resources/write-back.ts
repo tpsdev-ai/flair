@@ -424,6 +424,7 @@ export async function verifyCommittedFields(
   } catch {
     return "unreadable";
   }
+  if (committed == null) return "mismatch";
   return (also === undefined || also(committed)) && committedShowsFields(committed, identity, fields) ? "shown" : "mismatch";
 }
 

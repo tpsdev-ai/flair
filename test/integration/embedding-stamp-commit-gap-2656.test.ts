@@ -191,4 +191,43 @@ describe("flair#2656 — the `.content`-suffix re-embed under a write committed 
     expect(run, "the migration logged no run touching the row").not.toBeNull();
     expect(run, "the row was not counted exactly once by the run that landed its vector").toEqual({ processed: 1, touchedIds: [VERIFY_ID] });
   }, 260_000);
+
+  it("deletion after commit and before read-back leaves the row uncounted and processes the next candidate", async () => {
+    const ids = ["esc-deleted-a.content", "esc-deleted-b.content"];
+    for (const marker of ["claimed", "paused", "go", "released"]) rmSync(join(pauseDir, `${marker}.${VERIFY_POINT}`), { force: true });
+    writeFileSync(join(pauseDir, `arm.${VERIFY_POINT}`), "");
+    await opsCall({
+      operation: "insert", database: "flair", table: "Memory",
+      records: ids.map((id) => ({
+        id, agentId: "esc-deleted-agent", content: ORIGINAL,
+        embedding: STALE_EMBEDDING, embeddingModel: STALE_MODEL, createdAt: new Date().toISOString(),
+      })),
+    });
+    expect(await waitFor(join(pauseDir, `paused.${VERIFY_POINT}`), 150_000), "no migration cycle paused before read-back").toBe(true);
+    let deletedId = "";
+    let nextId = "";
+    try {
+      const rows = await Promise.all(ids.map(readRow));
+      const committed = rows.filter((row) => row?.embeddingModel === CURRENT_MODEL_ID);
+      const pending = rows.filter((row) => row?.embeddingModel === STALE_MODEL);
+      expect(committed).toHaveLength(1);
+      expect(pending).toHaveLength(1);
+      deletedId = committed[0].id;
+      nextId = pending[0].id;
+      expect(committed[0].embeddedContentHash).toBe(computeContentHash("esc-deleted-agent", ORIGINAL));
+      expect(Array.isArray(committed[0].embedding) && committed[0].embedding.length > 3).toBe(true);
+      await opsCall({ operation: "delete", database: "flair", table: "Memory", hash_values: [deletedId] });
+      expect(await readRow(deletedId)).toBeNull();
+    } finally {
+      writeFileSync(join(pauseDir, `go.${VERIFY_POINT}`), "");
+    }
+    expect(await readWhenPresent(join(pauseDir, `released.${VERIFY_POINT}`), 30_000)).toBe("go");
+    const run = await waitForRunTouching(nextId, 10_000);
+    expect(run, "the batch did not continue after the deletion").toEqual({ processed: 1, touchedIds: [nextId] });
+    expect(await readRow(deletedId)).toBeNull();
+    const next = await readRow(nextId);
+    expect(next?.embeddedContentHash).toBe(computeContentHash("esc-deleted-agent", ORIGINAL));
+    expect(next?.embeddingModel).toBe(CURRENT_MODEL_ID);
+    expect(Array.isArray(next?.embedding) && next.embedding.length > 3).toBe(true);
+  }, 260_000);
 });

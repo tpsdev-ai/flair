@@ -299,6 +299,27 @@ describe("flair#2645 — Memory writers under a newer full write", () => {
     expect(Array.isArray(row?.embedding) && row.embedding.length > 3, "the retried re-embed stored no usable vector").toBe(true);
   }, 120_000);
 
+  it("re-embed PATCH: deletion after commit and before read-back retries to not_found", async () => {
+    const id = nextId("reembed-deleted");
+    await seedRow(id, "reembed deleted after commit");
+    const { response, paused, released } = await withPaused(
+      "memory-reembed-verify",
+      () => call(A, "PATCH", memPath(id), { id, embedding: null, embeddingModel: null }),
+      async () => {
+        const committed = await memoryRow(id);
+        expect(Array.isArray(committed?.embedding) && committed.embedding.length > 3).toBe(true);
+        await ops({ operation: "delete", database: "flair", table: "Memory", hash_values: [id] });
+        expect(await memoryRow(id)).toBeNull();
+      },
+    );
+    expect(paused, "the re-embed PATCH was not paused before read-back").toBe(true);
+    expect(released).toBe("go");
+    const text = await response.text();
+    expect(response.status, text).toBe(404);
+    expect(JSON.parse(text).error).toBe("not found");
+    expect(await memoryRow(id)).toBeNull();
+  }, 120_000);
+
   it("federation merge: a newer full write committed after its read is refused as merge_target_changed", async () => {
     const id = nextId("federation");
     await seedRow(id, "federation v1");

@@ -1896,6 +1896,8 @@ async function reembedStoredRow(
       continue;
     }
     noteWriteStamp(outcome.model, preRead);
+    const verifyPause = txnPausePoint("memory-reembed-verify");
+    if (verifyPause) await verifyPause;
     // flair#2656: the commit is not proof the re-embed landed. Re-read the
     // committed row in a fresh context and answer success only when it shows
     // the staged values on the same row identity. A mismatch retries from the

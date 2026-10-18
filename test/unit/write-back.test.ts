@@ -18,9 +18,22 @@ import { isDeepStrictEqual } from "node:util";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { WRITE_BACK_ATTEMPTS, WRITE_BACK_IDENTITY_FIELDS, WriteBackConflictError, writeBackCommittedRow, writeBackIdentity } from "../../resources/write-back";
+import { WRITE_BACK_ATTEMPTS, WRITE_BACK_IDENTITY_FIELDS, WriteBackConflictError, verifyCommittedFields, writeBackCommittedRow, writeBackIdentity } from "../../resources/write-back";
 
 type Row = { id: string } & Record<string, unknown>;
+
+for (const absent of [null, undefined]) {
+  test(`verifyCommittedFields: ${absent} is a mismatch without calling also`, async () => {
+    let calls = 0;
+    const table = { async get() { return absent; } };
+    const verdict = await verifyCommittedFields(table, "m1", { id: "m1" }, { content: "staged" }, () => {
+      calls++;
+      throw new Error("also must not see an absent row");
+    });
+    expect(verdict).toBe("mismatch");
+    expect(calls).toBe(0);
+  });
+}
 
 /**
  * A fake Memory table with the helper's staged-write / committed-read model.
