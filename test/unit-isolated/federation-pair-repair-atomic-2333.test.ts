@@ -217,6 +217,48 @@ describe("flair#2656 — re-pair committed evidence (isolated)", () => {
   }
 });
 
+describe("flair#2656 — re-pair confirmation compares the staged application fields (isolated)", () => {
+  for (const withToken of [true, false]) {
+    it(`${withToken ? "token" : "no-token"} re-pair answers paired when only Harper's update time differs on the committed row`, async () => {
+      const k = nacl.sign.keyPair();
+      const peer = `repair-managed-${withToken}`;
+      const token = `repair-managed-token-${withToken}`;
+      const createdAt = new Date().toISOString();
+      // The stored row carries Harper's timestamps as enumerable fields, so the
+      // staged re-pair row, a spread of it, carries them too.
+      peers.set(peer, {
+        id: peer, publicKey: Buffer.from(k.publicKey).toString("base64url"), role: "spoke", status: "paired", createdAt,
+        __createdtime__: 1000, __updatedtime__: 1000,
+      });
+      if (withToken) tokens.set(token, { id: token, expiresAt: new Date(Date.now() + 60_000).toISOString(), createdAt });
+      let stagedRow: Record<string, unknown> | undefined;
+      afterCommit = () => {
+        stagedRow = { ...peers.get(peer)! };
+        expect(stagedRow.__updatedtime__, "the staged row does not carry the stored update time").toBe(1000);
+        expect(stagedRow.pairAttemptWriteId).toBeTruthy();
+        // The committed row gets a new update time; every application field
+        // keeps its staged value.
+        peers.set(peer, { ...stagedRow, __updatedtime__: 2000 });
+      };
+      const result = await makePair().post(rePairSignedBody(peer, k, withToken ? token : undefined));
+      const status = result instanceof Response ? result.status : 200;
+      const json = await readBody(result);
+      expect(status, JSON.stringify(json)).toBe(200);
+      expect(json.paired).toBe(true);
+      expect(stagedRow, "the re-pair committed no Peer write").toBeDefined();
+      const { __updatedtime__: committedTime, ...committedFields } = peers.get(peer)!;
+      const { __updatedtime__: stagedTime, ...stagedFields } = stagedRow!;
+      expect(committedTime).toBe(2000);
+      expect(stagedTime).toBe(1000);
+      expect(committedFields).toEqual(stagedFields);
+      if (withToken) {
+        expect(tokens.get(token)?.consumedBy).toBe(peer);
+        expect(tokens.get(token)?.pairAttemptWriteId).toBe(stagedRow!.pairAttemptWriteId);
+      }
+    });
+  }
+});
+
 // Keep the installed fake scoped to this file's process, like the other
 // isolated mocks (bun runs isolated files one process each).
 process.on("exit", () => { (globalThis as any).transaction = savedTransaction; });

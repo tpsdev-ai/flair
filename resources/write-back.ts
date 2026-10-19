@@ -429,7 +429,18 @@ export async function verifyCommittedFields(
 }
 
 // Harper assigns these timestamps; they are not staged application fields.
-const HARPER_MANAGED_FIELDS = ["__createdtime__", "__updatedtime__"] as const;
+export const HARPER_MANAGED_FIELDS = ["__createdtime__", "__updatedtime__"] as const;
+
+/**
+ * A copy of `row` without {@link HARPER_MANAGED_FIELDS}: the application fields
+ * of a row staged by spreading a stored row, as the `fields` a caller hands
+ * {@link verifyCommittedFields}. Every other field is kept; `row` is unchanged.
+ */
+export function withoutHarperManagedFields(row: Record<string, unknown>): Record<string, unknown> {
+  const fields: Record<string, unknown> = { ...row };
+  for (const field of HARPER_MANAGED_FIELDS) delete fields[field];
+  return fields;
+}
 
 /**
  * Does the committed row show this attempt's write? Its identity is the row

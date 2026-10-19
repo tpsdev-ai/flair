@@ -31,7 +31,7 @@ import { stripInboundMemoryRow, stripServerStampedFields } from "./memory-declar
 import { noteWriteStamp } from "./embedding-space-guard.js";
 import { initFederationCleanup } from "./federation-cleanup.js";
 import { verifyFederationRequestBody } from "./replay-store.js";
-import { CommittedRowChanged, confirmCommittedRow, verifyCommittedFields, writeBackCommittedRow, WriteBackConflictError } from "./write-back.js";
+import { CommittedRowChanged, confirmCommittedRow, verifyCommittedFields, withoutHarperManagedFields, writeBackCommittedRow, WriteBackConflictError } from "./write-back.js";
 import { withKeyLock } from "./key-lock.js";
 import { withOwnedTransaction } from "./request-transaction.js";
 import { txnPausePoint } from "./txn-pause-point.js";
@@ -755,7 +755,9 @@ export class FederationPair extends Resource {
         if (refusal) return refusal;
         const commitPause = txnPausePoint("federation-pair-repair-commit");
         if (commitPause) await commitPause;
-        if (!stagedPeer || await verifyCommittedFields((databases as any).flair.Peer, instanceId, stagedPeer, stagedPeer) !== "shown") return writeOutcomeUnknownResponse();
+        // The staged row spreads the re-read row, so the compared fields are its
+        // application fields: Harper's own timestamps are left out.
+        if (!stagedPeer || await verifyCommittedFields((databases as any).flair.Peer, instanceId, stagedPeer, withoutHarperManagedFields(stagedPeer)) !== "shown") return writeOutcomeUnknownResponse();
       }
     } else {
       // New peer — require a valid pairing token in the request body.
@@ -903,7 +905,11 @@ async function confirmTokenPairAfterCommit(pairingToken: string, stagedPeer: Sta
     if (readBackPause) await readBackPause;
   }
   const unreadableRefusal = firstPair ? firstPairReadBackUnconfirmedRefusal : firstPairCommitUnconfirmedRefusal;
-  const peerVerdict = await verifyCommittedFields((databases as any).flair.Peer, stagedPeer.id, stagedPeer, stagedPeer);
+  // A re-pair's staged row spreads the re-read row, so its compared fields are
+  // its application fields (Harper's own timestamps left out); a first pair's
+  // staged row is built from the request and is compared whole.
+  const peerFields = firstPair ? stagedPeer : withoutHarperManagedFields(stagedPeer);
+  const peerVerdict = await verifyCommittedFields((databases as any).flair.Peer, stagedPeer.id, stagedPeer, peerFields);
   let tokenRow: any;
   try {
     tokenRow = await (databases as any).flair.PairingToken.get(pairingToken, {});
