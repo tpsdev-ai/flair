@@ -52,4 +52,18 @@ test("bounded deletion-history keyset pages return the exact in-range ids and co
   expect(rows.map(row => row.id)).toEqual(inRange);
   expect(rows).toHaveLength(5);
   expect(await readExactCountSince(ops, "MemoryDeletionHistory", "at", since)).toBe(5);
+
+  const cappedQueries: string[] = [];
+  const capped = await readTableByIdPaged(async body => {
+    cappedQueries.push(String(body.sql));
+    return ops(body);
+  }, {
+    table: "MemoryDeletionHistory", select: "id, memoryId, memoryInstanceToken, durability, at",
+    filter: `at >= '${since}'`, expected, pageSize: expected, maxPages: 1,
+  });
+  expect(capped.map(row => row.id)).toEqual(inRange);
+  expect(cappedQueries).toEqual([
+    `SELECT id, memoryId, memoryInstanceToken, durability, at FROM flair.MemoryDeletionHistory WHERE (at >= '${since}') ORDER BY id LIMIT 5`,
+    `SELECT id FROM flair.MemoryDeletionHistory WHERE (at >= '${since}') AND id > 'hist-h' ORDER BY id LIMIT 1`,
+  ]);
 }, 90_000);

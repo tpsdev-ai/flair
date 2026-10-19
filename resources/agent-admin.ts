@@ -97,6 +97,16 @@ export function agentRecordIsAdmin(record: unknown): boolean {
 }
 
 /**
+ * The agent ids `FLAIR_ADMIN_AGENTS` names (comma-separated; entries trimmed,
+ * empty entries dropped). resources/agent-auth.ts's getAdminAgents() reads its
+ * environment half through this, and the federation merge reads the same set
+ * (flair#2665).
+ */
+export function configuredAdminAgentIds(raw: string | undefined = process.env.FLAIR_ADMIN_AGENTS): Set<string> {
+  return new Set((raw ?? "").split(",").map((s) => s.trim()).filter(Boolean));
+}
+
+/**
  * Make a record about to be written self-consistent, so the two fields can
  * never be STORED disagreeing.
  *

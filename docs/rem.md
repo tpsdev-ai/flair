@@ -59,6 +59,12 @@ Snapshot locality follows from this: a nightly cycle's pre-run snapshot (`~/.fla
 - **Interactive (`flair rem rapid`):** one bounded, synchronous distillation call — gather cap 50 memories, bounded output tokens, seconds not minutes. Executes by default, staging candidates and printing a summary; `--prompt-only` returns the reflection prompt instead, for the bring-your-own-model handoff. A cold generative backend (first Ollama model load) is warmed outside Harper's request transaction so execute fails as the documented 502/503, not HTTP 422 from the 30s open-transaction ceiling.
 - **Nightly (`flair rem nightly enable` / `run-once`):** fully detached — the scheduler runs the full cycle (snapshot → maintenance → distillation), candidates land as pending rows, and an audit row lands in `~/.flair/logs/rem-nightly.jsonl`. The operator reviews in the morning via `flair rem candidates`.
 
+### Nightly admin credential
+
+`flair rem nightly enable` bakes the absolute path of the admin-password file into the scheduler shim (`~/.flair/admin-pass` by default; override with `--admin-pass-file`). `run-once` reads the password from that file at run time; the value is never stored in the shim, exported into the environment, or passed in argv. The instance-wide dedup-cluster step calls an admin-gated route, so the file must exist and be owner-only (no group or world permission bits; `flair init` writes mode 0600). When the shim names a file that is missing, empty, or group-/world-readable, the run fails at startup before any cycle work with the dedup step NOT RUN, names the path and the remedy, and exits nonzero on every path, including a paused cycle and a dry run. An existing install picks up the new shim by re-running `flair rem nightly enable`; until then the previously installed shim stays in place.
+
+The pending-candidate count `run-once` prints (`Pending:`) uses the same credential through the operations API. When that query fails, the line reads `Pending: unknown (<reason>)`, the failure is listed under `Errors:`, and the run exits nonzero. With no admin credential, when the cycle reaches the candidate-count step, the line reads `Pending: unknown (no admin credential for the operations API)`.
+
 ### Safety bounds (a large backlog must not take the instance down)
 
 A first run over thousands of unreflected memories used to hold the Harper main thread long enough that `/Health` and search timed out. Nightly distillation is now bounded:

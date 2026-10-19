@@ -249,6 +249,7 @@ export class FeedMemories extends Resource {
         },
         hooks: {
           ...defaultSkillHooks,
+          authorizeClose: (row, shared) => authorizeSkillOwners(ctx, auth, [row], shared),
           pointer: async (shared) => {
             if (captured.closed) await deletePointerRowViaTable(String(captured.closed.id), shared);
             return null;

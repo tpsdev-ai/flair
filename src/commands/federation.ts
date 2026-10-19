@@ -47,6 +47,7 @@ import {
   presenceWireRecord,
   PRESENCE_SEND_FUTURE_ALLOWANCE_MS,
   PRESENCE_SEND_OVERLAP_MS,
+  PRESENCE_SEND_RECEIVE_DISABLED_SKIP_REASON,
   PRESENCE_SEND_RETRYABLE_SKIP_REASONS,
   selectPresenceRowsToSend,
 } from "../federation/presence-send.js";
@@ -719,16 +720,36 @@ export function parseTokenFromFile(filePath: string): {
  * sender's success log and the watch loop's line, so each must be an integer
  * from 0 to the number of records in the batch it answers; anything else
  * (text, a fraction, a negative, a count larger than the batch, a missing
- * field) makes the whole response invalid. The caller reports that in local
- * text, never the received value.
+ * field) makes the whole response invalid. Their sum must also be at most the
+ * batch size: a receiver cannot report more outcomes than records it was
+ * offered. The bound is "at most", not "equal", because older receivers send
+ * counts without refusal lists and indeterminate rows fall in neither count.
+ * The caller reports a rejection in local text, never a received value that is
+ * not an in-range count.
  */
 export function parseSyncBatchCounts(body: unknown, batchSize: number): { merged: number; skipped: number } | null {
   if (body === null || typeof body !== "object" || Array.isArray(body)) return null;
-  const isCount = (v: unknown): v is number =>
-    typeof v === "number" && Number.isSafeInteger(v) && v >= 0 && v <= batchSize;
   const { merged, skipped } = body as { merged?: unknown; skipped?: unknown };
-  if (!isCount(merged) || !isCount(skipped)) return null;
+  if (!isSyncBatchCount(merged, batchSize) || !isSyncBatchCount(skipped, batchSize)) return null;
+  if (merged + skipped > batchSize) return null;
   return { merged, skipped };
+}
+
+function isSyncBatchCount(v: unknown, batchSize: number): v is number {
+  return typeof v === "number" && Number.isSafeInteger(v) && v >= 0 && v <= batchSize;
+}
+
+/** Local text naming why a batch response's counts were rejected: the table
+ *  and, when both counts are in range individually, their values. Other
+ *  receiver-authored values stay out of the message. */
+export function describeSyncBatchCountsRejection(body: unknown, batchSize: number, table: string): string {
+  const counts = body !== null && typeof body === "object" && !Array.isArray(body)
+    ? (body as { merged?: unknown; skipped?: unknown })
+    : {};
+  if (isSyncBatchCount(counts.merged, batchSize) && isSyncBatchCount(counts.skipped, batchSize)) {
+    return `${table}: merged ${counts.merged} + skipped ${counts.skipped} exceeds ${batchSize} records offered`;
+  }
+  return `${table}: merged/skipped are not counts from 0 to ${batchSize}`;
 }
 
 /** One receiver-authored refusal from a FederationSync batch: which record the
@@ -882,8 +903,9 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
       }
       const counts = parseSyncBatchCounts(body, batch.length);
       if (!counts) {
+        const table = typeof batch[0]?.table === "string" ? batch[0].table : "batch";
         throw new Error(
-          `Sync batch failed: invalid response (HTTP ${syncRes.status}, merged/skipped are not counts from 0 to ${batch.length})`,
+          `Sync batch failed: invalid response (HTTP ${syncRes.status}, ${describeSyncBatchCountsRejection(body, batch.length, table)})`,
         );
       }
       const refused = parseSyncBatchRefused(body);
@@ -1110,10 +1132,13 @@ export async function runFederationSyncOnce(opts: any): Promise<{ pushed: number
             totalMerged += result.merged;
             totalSkipped += result.skipped;
             totalBatches++;
-            // Cap the candidate below retryable refusals.
+            // Cap the candidate below retryable refusals, and below a row
+            // refused because the hub's Presence receipt is off: enabling it
+            // later must not need a new heartbeat to re-offer that row.
             for (const refusal of result.refused) {
               if (refusal.table !== "Presence") continue;
-              if (!PRESENCE_SEND_RETRYABLE_SKIP_REASONS.has(refusal.reason)) continue;
+              if (!PRESENCE_SEND_RETRYABLE_SKIP_REASONS.has(refusal.reason) &&
+                  refusal.reason !== PRESENCE_SEND_RECEIVE_DISABLED_SKIP_REASON) continue;
               const sent = presenceBatch.find((r) => r.id === refusal.id);
               if (!sent) continue;
               const refusedCursor = Date.parse(sent.updatedAt);

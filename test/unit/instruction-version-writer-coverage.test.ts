@@ -15,16 +15,26 @@ import { readFileSync } from "node:fs";
 import { rawTableWriteSites } from "../helpers/raw-table-writers";
 
 const classified = new Map<string, string>([
-  ["resources/instruction-version-record.ts:alias-source:(databases as any).flair?.InstructionVersion#1", "Subject-type lock store for append compensation — reads primaryStore."],
+  ["resources/instruction-version-record.ts:alias-source:(databases as any).flair?.InstructionVersion#1", "Subject-type lock store of the append undo — read-only handle."],
   ["resources/instruction-version-record.ts:alias-source:(databases as any).flair?.InstructionVersion#2", "Head read (readHead) — read-only handle."],
-  ["resources/instruction-version-record.ts:alias-source:(databases as any).flair?.InstructionVersion#3", "Subject-type lock store for append — reads primaryStore."],
+  ["resources/instruction-version-record.ts:alias-source:(databases as any).flair?.InstructionVersion#3", "Subject-type lock store — read-only handle."],
   ["resources/instruction-version-record.ts:alias-source:(databases as any).flair?.InstructionVersion#4", "Raw table handle inside the append transaction."],
-  ["resources/instruction-version-record.ts:writer:(databases as any).flair.InstructionVersion.delete#1", "Undo of an append this request made whose close did not land (flair#2642)."],
+  ["resources/instruction-version-record.ts:alias-source:(databases as any).flair.InstructionVersion#1", "Base table handle inside the undo transaction: the resource class overrides delete/get for REST authority, so the row is removed through the base prototype's raw delete."],
+  ["resources/instruction-version-record.ts:alias-source:(databases as any).flair.InstructionVersion#2", "Base table handle for the post-commit read that confirms the undo."],
   ["resources/instruction-version-record.ts:writer:table.create#1", "Old Soul tombstone after the destination check."],
   ["resources/instruction-version-record.ts:writer:table.create#2", "Application append for single-row Soul resource writes."],
   ["resources/instruction-version-record.ts:writer:createHash(\"sha256\").update#1", "Hashing, not a table write; listed by the conservative sink scan."],
   ["resources/instruction-version-record.ts:writer:createHash(\"sha256\").update#2", "Hashing, not a table write; listed by the conservative sink scan."],
+  ["resources/instruction-version-record.ts:writer:events.create#1", "Instruction event appended beside each version record in the same transaction (#2139 3b)."],
+  ["resources/instruction-version-record.ts:writer:events.delete#1", "Instruction event removed with the version record the close compensation takes away (#2642)."],
   ["resources/InstructionVersion.ts:alias-source:(databases as any).flair.InstructionVersion#1", "The resource class extends the table."],
+  ["resources/skill-version-write.ts:alias-source:(databases as any).flair?.InstructionVersion#1", "Journal compensation lock."],
+  ["resources/skill-version-write.ts:writer:(databases as any).flair.Memory.put#1", "Successor write; Memory table."],
+  ["resources/skill-version-write.ts:writer:(databases as any).flair.Memory.put#2", "Predecessor close; Memory table."],
+  ["resources/skill-version-write.ts:writer:table.put#1", "Close retry; Memory table."],
+  ["resources/write-journal.ts:alias-source:(databases as any).flair.InstructionVersion#1", "Identifies version undo pause points."],
+  ["resources/write-journal.ts:writer:this.transactions.delete#1", "In-memory journal bookkeeping."],
+  ["resources/write-journal.ts:writer:this.staged.delete#1", "In-memory journal bookkeeping."],
 ]);
 
 test("raw InstructionVersion handles and mutation sinks in resources/**/*.ts have explicit classifications", () => {
