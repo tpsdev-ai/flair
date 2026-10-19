@@ -5,7 +5,8 @@
  * See resources/Memory.ts's stampOriginatorInstanceId doc for the full
  * contract (write-time, cached local instance id via resources/instance-
  * identity.ts's localInstanceId(), anti-clobber for federation-synced
- * records). Agent.ts stamps in both post() and put().
+ * records). Agent.ts stamps in post(); put() updates an existing row and keeps
+ * the stored value (a PUT to a missing id is refused).
  *
  * Same mocking technique as memory-integrity.test.ts / relationship-read-
  * gate.test.ts: mock harper so the resource class loads outside
@@ -118,12 +119,13 @@ describe("federation-edge-hardening slice 1 / flair#1965 — Agent.post() stamps
 });
 
 describe("federation-edge-hardening slice 1 / flair#1965 — Agent.put() create vs update", () => {
-  it("CREATE (put, no stored row) stamps the local id and ignores a body value", async () => {
+  it("CREATE (put, no stored row) is refused and writes no row", async () => {
     instanceRow = { id: "flair_local_test" };
     const a = makeAgent(agentCtx("agent-1"));
     const res: any = await a.put({ id: "agent-new", name: "Fresh Principal", originatorInstanceId: "instance-B" });
-    expect(res.originatorInstanceId).toBe("flair_local_test");
-    expect(res.originatorInstanceId).not.toBe("instance-B");
+    expect(res.status).toBe(404);
+    expect((await res.json()).error).toBe("agent_put_requires_existing");
+    expect(agentStore.has("agent-new")).toBe(false);
   });
 
   it("UPDATE (put) with a body value LEAVES the stored value — a client cannot change it", async () => {

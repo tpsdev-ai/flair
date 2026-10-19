@@ -231,11 +231,31 @@ export class Agent extends (databases as any).flair.Agent {
     const denial = await this.authorizePrincipalWrite(content);
     if (denial) return denial;
 
+    // Resolve the stored row BEFORE the replacement is built: a PUT updates an
+    // existing row, and the two immutable fields below carry its values. The
+    // row is resolved by the URL-BOUND target id, never a body `id` (Harper
+    // writes to the URL target); a mismatch or a failed read refuses the write.
+    const resolvedOriginRow = await resolveStoredRow(this, "Agent", content, () => super.get());
+    if (resolvedOriginRow.denial) return resolvedOriginRow.denial;
+    const stored = resolvedOriginRow.row;
+    if (!stored) {
+      // Harper's put is an upsert; an Agent PUT does not create one. 404 is the
+      // repo's "not found / use the other route" status
+      // (resources/table-patch-policy.ts, resources/Memory.ts's
+      // reindex_row_not_found), and the message names the creation path.
+      return new Response(JSON.stringify({
+        error: "agent_put_requires_existing",
+        message: "an Agent PUT updates an existing agent; to create an agent, use POST /AgentSeed",
+      }), { status: 404, headers: { "content-type": "application/json" } });
+    }
+
     content.updatedAt = new Date().toISOString();
 
-    // Protect immutable fields
-    delete content.createdAt;
-    delete content.publicKey; // key rotation goes through dedicated endpoint
+    // Immutable fields: a full replacement carries the STORED values, ignoring
+    // any client-supplied value, the way Integration.put carries its stored
+    // createdAt forward. Key rotation goes through its dedicated endpoint.
+    content.createdAt = stored.createdAt;
+    content.publicKey = stored.publicKey;
 
     // Keep the two admin fields agreeing on disk — see resources/agent-admin.ts.
     // Only an admin can have reached here with a privilege change (see
@@ -244,14 +264,10 @@ export class Agent extends (databases as any).flair.Agent {
     reconcileAdminFields(content);
 
     // Write-time originatorInstanceId — see post() above /
-    // resources/originator-instance.ts. A CREATE stamps the local id; an
-    // UPDATE keeps the stored value (a body value never replaces or clears it).
-    // The row is resolved by the URL-BOUND target id, never a body `id` (Harper
-    // writes to the URL target); a mismatch or a failed read refuses the write.
-    const resolvedOriginRow = await resolveStoredRow(this, "Agent", content, () => super.get());
-    if (resolvedOriginRow.denial) return resolvedOriginRow.denial;
-    await applyOriginatorInstanceId(content, resolvedOriginRow.row);
-    applyFederationBookkeeping(content, resolvedOriginRow.row);
+    // resources/originator-instance.ts. An UPDATE keeps the stored value (a
+    // body value never replaces or clears it).
+    await applyOriginatorInstanceId(content, stored);
+    applyFederationBookkeeping(content, stored);
 
     const result = await super.put(content);
     invalidateAdminCache();
