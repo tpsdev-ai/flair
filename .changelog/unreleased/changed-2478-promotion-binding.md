@@ -1,0 +1,1 @@
+- Newly stamped promotion verdicts carry a server-only `promotionContentHash` bound to the stored text.

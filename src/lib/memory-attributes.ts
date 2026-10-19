@@ -31,6 +31,7 @@ export const DECLARED_MEMORY_ATTRIBUTES = Object.freeze([
   "promotionStatus",
   "promotedAt",
   "promotedBy",
+  "promotionContentHash",
   "archived",
   "archivedAt",
   "archivedBy",

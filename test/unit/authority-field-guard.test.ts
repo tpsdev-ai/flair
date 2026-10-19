@@ -94,7 +94,7 @@ const CLASSIFICATIONS: Array<{ file: string; via: WriterVia; needle: string; kin
   // merge of a peer's Presence row (its table is always Presence).
   { file: "resources/Federation.ts", via: "write-back", needle: "mergePresenceReceipt(row", kind: "federation-merge" },
   { file: "resources/promotion-stamp.ts", via: "write-back", needle: 'label: "promotion-stamp"', kind: "trusted-stamp" },
-  { file: "resources/promotion-stamp.ts", via: "alias-source", needle: "put(row, stagedContext)", kind: "trusted-stamp" },
+  { file: "resources/promotion-stamp.ts", via: "alias-source", needle: "update(id, update, stagedContext)", kind: "trusted-stamp" },
   { file: "resources/Memory.ts", via: "direct-put", needle: "put(closed, c)", kind: "echo" },
   // Skill DELETE retry preserves the freshly read row's authority fields.
   { file: "resources/Memory.ts", via: "alias-source", needle: "table.put(closed, c)", kind: "echo" },

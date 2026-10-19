@@ -114,6 +114,13 @@ function stageOrRun(ctx: any, apply: () => void): void {
 }
 
 export class BaseMemory {
+  static _readTxnForContext(_ctx: any) { return undefined; }
+  static transformEntryForSelect(select: any) {
+    return ({ value: row }: any) => {
+      if (typeof select === "string") return row[select];
+      return Object.fromEntries(select.map((key: string) => [key, row[key]]));
+    };
+  }
   /** flair#2478: Memory PUT/PATCH refuse a store with no per-id lock; this
    *  double injects one (test/helpers/memory-lock-double.ts). */
   static primaryStore = memoryLockDouble();

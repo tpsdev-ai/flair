@@ -26,6 +26,16 @@ import { WriteBackConflictError, writeBackCommittedRow } from "./write-back.js";
 import { withOwnedTransaction } from "./request-transaction.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 import { stripInlinePointerFields } from "./host-source-visibility.js";
+import { applyPromotionBinding } from "./promotion-binding.js";
+
+/** Suppress an absent or mismatched promotion binding on a fed event's row
+ *  value (flair#2478 slice 2). Non-object values and events pass through. */
+function promotionBoundEvent(event: any): any {
+  const value = event?.value;
+  if (value == null || typeof value !== "object") return event;
+  const bound = applyPromotionBinding(value);
+  return bound === value ? event : { ...event, value: bound };
+}
 
 export class FeedMemories extends Resource {
   // Self-authorize via the Ed25519 agent verify (the auth reshape removes the
@@ -458,7 +468,7 @@ export class FeedMemories extends Resource {
       }
 
       for await (const event of subscription) {
-        yield event;
+        yield promotionBoundEvent(event);
       }
       return;
     }
@@ -475,7 +485,7 @@ export class FeedMemories extends Resource {
     for await (const event of subscription) {
       if (!(await readableRowEvent(event, auth.agentId, scope.isAllowed, readStored))) continue;
       if (replaysHistory && !(await storedRowReadable(event?.id, auth.agentId, scope.isAllowed, readStored))) continue;
-      yield event;
+      yield promotionBoundEvent(event);
     }
   }
 }

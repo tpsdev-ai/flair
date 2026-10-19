@@ -23,7 +23,7 @@ import { rawTableWriteSites } from "../helpers/raw-table-writers";
  * can carry a skill-tagged row is declared GATED (SkillScan + forced
  * durability), REJECTING (400 skill_write_path), or SKIPPING
  * (skill_not_federated), or preserves existing content and tags; other sinks
- * write non-skill rows, a different table, or are read-only aliases. A new
+ * write non-skill rows, a different table, or perform no Memory row write through the alias. A new
  * unclassified writer fails the build — the "unscanned skill-writer" tripwire.
  */
 
@@ -71,7 +71,7 @@ add("Memory", ["writer:table.put#1"],
   "confirmSkillDelete: closes the freshly read skill row without changing its content or tags (flair#2642).");
 add("Memory", ["writer:(databases as any).flair.Memory.put#2"],
   "stageGrantedClose: read-modify-write close of an existing record (stamps validTo), staged in the successor's transaction; preserves existing content/tags — not a new skill write.");
-// ── Bookkeeping, removal and read-only aliases inside Memory.ts ──
+// ── Bookkeeping, removal and table aliases inside Memory.ts ──
 add("Memory", ["writer:patchRecord#1"],
   "derivedFrom/lastReflected bookkeeping patch — never writes skill content.");
 add("Memory", ["writer:(databases as any).flair.Memory.delete#1"],
@@ -111,13 +111,13 @@ add("usage-recording", ["alias-source:(databases as any).flair.Memory#1", "write
   "usageCount increment and commit marker through the shared write-back helper (flair#2441) — non-skill.");
 add("promotion-stamp", ["writer:writeBackCommittedRow#1"],
   "Promotion status stamp — non-skill, through the shared write-back helper (flair#2354).");
-add("promotion-stamp", ["writer:table.put#1"],
-  "Promotion status stamp in the manual promotion's own write transaction — non-skill.");
+add("promotion-stamp", ["writer:table.update#1"],
+  "Promotion status stamp in the manual promotion's own write transaction — an incremental update of only the verdict fields (flair#2478 slice 2) — non-skill.");
 add("migrations/embedding-stamp", ["writer:table.update#1"],
   "Content-suffix migration embeds skillEmbedText(row) and stages an incremental update of only embedding/embeddingModel/updatedAt (flair#2465); confirmation compares the whole committed row. A change committed after confirmation and before commit is not seen.");
 add("migrations/synthetic-test-migration", ["alias-source:(databases as unknown as { flair: { Memory: MemoryTableLike } }).flair.Memory#1", "writer:writeBackCommittedRow#1"],
   "Migration backfill through the shared write-back helper — non-skill (flair#2354).");
-add("migrations/visibility-backfill", ["alias-source:(databases as unknown as { flair: { Memory: MemoryTableLike } }).flair.Memory#1", "writer:writeBackCommittedRow#1"],
+add("migrations/visibility-backfill", ["alias-source:(databases as unknown as { flair: { Memory: MemoryTableLike } }).flair.Memory#1", "alias-source:(databases as any)?.flair?.Memory#1", "writer:writeBackCommittedRow#1"],
   "Migration backfill through the shared write-back helper — non-skill (flair#2354).");
 
 // ── Other tables (conservative sink enumeration false-positives) ──
@@ -133,7 +133,7 @@ add("MemoryReflect", ["writer:(databases as any).flair.MemoryCandidate.put#1"],
 add("usage-recording", ["writer:(databases as any).flair.MemoryUsage.put#1"],
   "Other table (MemoryUsage), included by conservative sink enumeration.");
 
-// ── Read-only aliases (no write through these handles) ──
+// ── Table aliases ──
 add("skill-version-write", ["alias-source:(databases as any).flair?.Memory#1"],
   "Read-only alias (resolveSkillHead searches the live skill head).");
 add("AdminMemory", ["alias-source:(databases as any).flair.Memory#1"],
@@ -146,8 +146,8 @@ add("MemoryReindex", ["alias-source:(databases as any).flair.Memory#1"],
   "Read-only alias (reindex reads rows to re-embed).");
 add("auth-middleware", ["alias-source:(databases as any).flair.Memory#1"],
   "Read-only alias (auth reads rows).");
-add("promotion-stamp", ["alias-source:(databases as any).flair.Memory#1"],
-  "Read-only alias (promotion reads the row to stamp).");
+add("promotion-stamp", ["alias-source:(databases as any).flair.Memory#1", "alias-source:(databases as any)?.flair?.Memory#1"],
+  "The primary-store lock handle performs no Memory row write.");
 add("hit-tracking", ["alias-source:(databases as any).flair?.Memory#1"],
   "Read-only seed of Memory.retrievalCount on first HitStat write.");
 add("health", ["alias-source:db.flair?.Memory#1"],

@@ -1,0 +1,1 @@
+- Restore verification compares the promotion content binding: when the archived row contains `promotionContentHash`, a restore read missing it fails, naming the field, instead of verifying clean.

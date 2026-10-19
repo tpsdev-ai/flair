@@ -86,16 +86,16 @@ add("MemoryMaintenance", ["writer:(databases as any).flair.Memory.delete#1", "wr
   "SERVER: the sweep selects rows by state (expired ephemeral, closed, old session notes). The seed row is persistent and closing it by supersede requires the operator-source decision.");
 add("MemoryMaintenance", ["writer:table.delete#1"], "SERVER: MemoryHostSource pointer rows, another table.");
 add("MemoryReindex", ["writer:writeBackCommittedRow#1"], "SERVER: admin-only re-PUT of each stored row with its own stored fields, through the shared helper (flair#2354).");
-add("promotion-stamp", ["alias-source:(databases as any).flair.Memory#1", "writer:writeBackCommittedRow#1"],
+add("promotion-stamp", ["alias-source:(databases as any).flair.Memory#1", "alias-source:(databases as any)?.flair?.Memory#1", "writer:writeBackCommittedRow#1"],
   "SERVER: stamps a row the promotion just wrote through Memory.put under a server-generated id, via the shared write-back helper (flair#2354).");
-add("promotion-stamp", ["writer:table.put#1"],
-  "SERVER: stamps, in the manual promotion's own write transaction, the row it staged through Memory.put under a server-generated id.");
+add("promotion-stamp", ["writer:table.update#1"],
+  "SERVER: stamps, in the manual promotion's own write transaction, the row it staged through Memory.put under a server-generated id — an incremental verdict update (flair#2478 slice 2).");
 add("migrations/embedding-stamp", [
   "writer:table.update#1",
 ], "SERVER: the migration re-embeds a server-selected row through the raw table handle when its id ends in the `.content` property suffix — an id the by-id HTTP regen path cannot address; an incremental update of only the embedding fields (flair#2465).");
 add("migrations/graph-heal", ["writer:table.put#1"], "SERVER: boot migration over server-selected rows.");
 add("migrations/synthetic-test-migration", ["alias-source:(databases as unknown as { flair: { Memory: MemoryTableLike } }).flair.Memory#1", "writer:writeBackCommittedRow#1"], "SERVER: boot migration over server-selected rows, through the shared write-back helper (flair#2354).");
-add("migrations/visibility-backfill", ["alias-source:(databases as unknown as { flair: { Memory: MemoryTableLike } }).flair.Memory#1", "writer:writeBackCommittedRow#1"], "SERVER: boot migration over server-selected rows, through the shared write-back helper (flair#2354).");
+add("migrations/visibility-backfill", ["alias-source:(databases as unknown as { flair: { Memory: MemoryTableLike } }).flair.Memory#1", "alias-source:(databases as any)?.flair?.Memory#1", "writer:writeBackCommittedRow#1"], "SERVER: boot migration over server-selected rows, through the shared write-back helper (flair#2354).");
 add("hit-tracking", [
   "writer:this.pending.delete#1",
   "writer:this.cache.delete#1",

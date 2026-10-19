@@ -109,6 +109,7 @@ type Memory @table(database: "flair") {
   promotionStatus: String   # null | "pending" | "approved" | "rejected"
   promotedAt: String
   promotedBy: String        # authenticated agentId who approved
+  promotionContentHash: String  # server-only SHA-256 of the stored, post-redaction content at stamping time (flair#2478)
   archived: Boolean @indexed
   archivedAt: String
   archivedBy: String        # authenticated agentId who archived

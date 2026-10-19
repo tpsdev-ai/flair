@@ -25,6 +25,7 @@ import { nodeBin } from "../helpers/node-runtime.js";
 import { MEMORY_ATTRIBUTES } from "../../src/lib/memory-attributes.ts";
 import { getModelId } from "../../resources/embeddings-provider.ts";
 import { computeContentHash } from "../../resources/memory-feed-lib.ts";
+import { promotionContentHash } from "../../resources/promotion-binding.ts";
 import { stripEnginePrefix } from "../../resources/embedding-space-guard.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "..", "..");
@@ -125,6 +126,9 @@ function fixtureRow(id: string, agentId: string, overrides: Record<string, unkno
     promotionStatus: "approved",
     promotedAt: day(4),
     promotedBy: "reviewer-fixture",
+    // Bound to the content above, as the promotion stamp writes it. A skill row
+    // inherits this content binding; its embedding binding is the trigger.
+    promotionContentHash: promotionContentHash(content),
     archived: true,
     archivedAt: day(5),
     archivedBy: agentId,
@@ -227,6 +231,10 @@ async function expectOnlyEmbeddingChanged(before: any): Promise<void> {
     changed[key] = { before: before[key], after: after?.[key] };
   }
   expect(changed).toEqual({});
+  // flair#2478 slice 2: a re-embed neither drops nor recomputes a promotion
+  // binding for the stored, post-redaction content at stamping time.
+  expect(after.promotionContentHash).toBe(before.promotionContentHash);
+  expect(after.promotionStatus).toBe(before.promotionStatus);
   expect(after.embeddingModel).toBe(CURRENT_MODEL_ID);
   expect(after.updatedAt > before.updatedAt).toBe(true);
   expect(after.embedding).not.toEqual(before.embedding);

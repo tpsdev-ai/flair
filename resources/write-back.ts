@@ -66,6 +66,11 @@ export interface WriteBackOptions {
    *  the interleaving where this write's transaction opens first. Named at
    *  the call site, like `pausePre`. */
   pausePoint?: WriteBackPause;
+  /** Test-only pause after the committed-row confirmation and before this
+   *  transaction commits — the interleaving where another writer commits
+   *  between the confirmation and this write's commit. Named at the call
+   *  site, like `pausePoint`. */
+  confirmPoint?: WriteBackPause;
   /** Test-only pause between the final pre-commit confirmation and the owned
    *  transaction's commit — the window where a newer write can commit and
    *  Harper can drop this write's effect (flair#2653). Named at the call site,
@@ -339,6 +344,10 @@ export async function writeBackCommittedRow(
         if ("update" in decision) await applyFieldUpdate(table, id, values, c);
         else await table.put(values, c);
         await confirmCommittedRow(table, id, (committed) => isDeepStrictEqual(committed, row));
+        if (opts.confirmPoint) {
+          const confirmed = opts.confirmPoint();
+          if (confirmed) await confirmed;
+        }
         // Test-only: holds this write after its last pre-commit confirmation,
         // before the transaction commits (flair#2653).
         if (opts.pauseBeforeCommit) {

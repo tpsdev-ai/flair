@@ -7,6 +7,7 @@
  * import resources/Memory.ts) via test/helpers/memory-search-harness.ts.
  */
 import { describe, it, expect, beforeEach } from "bun:test";
+import { promotionContentHash } from "../../resources/promotion-binding.ts";
 import { FEDERATION_SYNC_TABLES, classifyRecord, type SyncRecord } from "../../resources/federation-classify.ts";
 import {
   harnessState,
@@ -734,22 +735,13 @@ describe("item 9 — archiving a row does not write the projected pointer back",
 });
 
 
-// ─── round 17: the handler reads an UNSHAPED row on the non-admin path ───────
-//
-// Flint's round-17 design ruling stops honouring a caller's selection on a
-// non-admin HTTP Memory read by STRIPPING it from the request URL in the auth
-// middleware, before Harper parses it (see memory-selection-middleware-1940
-// .test.ts and the real-Harper integration test). At the handler level the
-// by-id read-scope gate already reads an UNSHAPED target for a non-admin, and
-// hands the caller's target (with its selection) straight through for an admin,
-// so the two paths are pinned here.
-
-describe("round 17 — the by-id gate reads unshaped for a non-admin and passthrough for an admin", () => {
-  it("(n4) an ADMIN read keeps its selection (control): the caller's target reaches the base read", async () => {
+describe("by-id selections", () => {
+  it("(n4) an admin read projects the checked row", async () => {
     seedMemory({ id: "mem-n4", agentId: "agent-a", visibility: "shared", content: "body" });
     const res: any = await makeMemory(agentCtx("agent-a", true)).get({ id: "mem-n4", select: ["content"] });
-    expect(res instanceof Response).toBe(false); // assertion: an admin read
-    expect((harnessState.lastBaseGetTarget as any)?.select).toEqual(["content"]); // assertion: the admin path keeps the selection
+    expect(res instanceof Response).toBe(false);
+    expect((harnessState.lastBaseGetTarget as any)?.select).toBeUndefined();
+    expect(res).toEqual({ content: "body" });
   });
 
   it("(n5) a hostile target constructor cannot shape the non-admin scope read", async () => {
@@ -764,6 +756,57 @@ describe("round 17 — the by-id gate reads unshaped for a non-admin and passthr
 
 });
 
+describe("selected promotion bindings", () => {
+  for (const caller of ["admin", "internal"]) {
+    const resource = () => makeMemory(caller === "admin" ? agentCtx("agent-a", true) : undefined);
+    it.each(["matching", "mismatched", "legacy"])(`${caller} by-id reads check a %s binding before selection`, async (binding) => {
+      const row = seedMemory({
+        id: `selected-${binding}`, content: "current content", createdAt: new Date().toISOString(), promotionStatus: "approved",
+        ...(binding === "legacy" ? {} : { promotionContentHash: promotionContentHash(binding === "matching" ? "current content" : "old content") }),
+      });
+      const status = binding === "matching" ? "approved" : null;
+      const full = await resource().get(row.id);
+      expect(full.content).toBe(row.content);
+      expect(full.promotionStatus).toBe(status);
+      const loaded = resource();
+      loaded._targetId = row.id;
+      harnessState.getOverride = (key) => typeof harnessState.lastBaseGetTarget === "string" ? (row as Record<string, any>)[key] : undefined;
+      const legacyValue = await loaded.get("promotionStatus");
+      harnessState.getOverride = null;
+      expect(harnessState.lastBaseGetTarget).toEqual({ id: row.id });
+      for (const value of [
+        legacyValue,
+        await resource().get({ id: row.id, property: "promotionStatus" }),
+        await resource().get({ id: row.id, select: "promotionStatus" }),
+        await resource().get({ id: row.id, property: "promotionStatus", select: ["id", "promotionStatus"] }),
+      ]) {
+        if (value instanceof Response) {
+          expect(value.status).toBe(200);
+          expect(await value.json()).toBe(status);
+        } else expect(value).toBe(status);
+      }
+      expect(await resource().get({ id: row.id, select: ["id", "promotionStatus"] })).toEqual({ id: row.id, promotionStatus: status });
+      expect(harnessState.lastBaseGetTarget).toEqual({ id: row.id });
+      expect(memoryStore.get(row.id).promotionStatus).toBe("approved");
+    });
+    it.each(["matching", "mismatched", "legacy"])(`${caller} collection reads check a %s binding before selection`, async (binding) => {
+      const row = seedMemory({
+        id: `selected-${binding}`, content: "current content", createdAt: new Date().toISOString(), promotionStatus: "approved",
+        ...(binding === "legacy" ? {} : { promotionContentHash: promotionContentHash(binding === "matching" ? "current content" : "old content") }),
+      });
+      const status = binding === "matching" ? "approved" : null;
+      for (const select of ["promotionStatus", ["id", "promotionStatus"]]) {
+        const query = { conditions: [{ attribute: "id", comparator: "equals", value: row.id }], select };
+        const rows = [];
+        for await (const value of await resource().search(query)) rows.push(value);
+        expect(rows).toEqual([typeof select === "string" ? status : { id: row.id, promotionStatus: status }]);
+        expect(harnessState.lastBaseSearchQuery.select).toBeUndefined();
+      }
+      expect(memoryStore.get(row.id).promotionStatus).toBe("approved");
+    });
+  }
+});
+
 // ─── round 18: a non-admin contextual read keeps the full-row join boundary ──
 //
 // Flint's round-18 ruling: whatever target shape reaches Memory.get/search
@@ -771,7 +814,7 @@ describe("round 17 — the by-id gate reads unshaped for a non-admin and passthr
 // resource drops a caller selection (a key deletion, never a selection parser)
 // so the base read is unselected and the join sees the STORED row — a shaped
 // base value could omit `instanceToken`/`visibility`/`archived` and move the
-// pointer decision. Admin/trusted-internal reads are unchanged (n4 above).
+// pointer decision.
 
 describe("round 18 — a non-admin contextual read ignores the caller's selection (the join sees the stored row)", () => {
   it("(q1) a non-admin by-id get with a selection returns the FULL gated row; no selection reaches the base read", async () => {

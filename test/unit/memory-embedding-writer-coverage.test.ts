@@ -88,8 +88,8 @@ add("MemoryReindex", ["writer:writeBackCommittedRow#1"], "ECHO",
   "Admin reindex re-PUT of an existing local row through the shared write-back helper (flair#2354): echoes the stored embedding and embeddingModel; no re-embed.");
 add("promotion-stamp", ["writer:writeBackCommittedRow#1"], "ECHO",
   "Promotion status stamp: re-writes the existing local row through the shared write-back helper (flair#2354).");
-add("promotion-stamp", ["writer:table.put#1"], "ECHO",
-  "Promotion status stamp in the manual promotion's own write transaction: get-then-put re-writes the row it staged.");
+add("promotion-stamp", ["writer:table.update#1"], "ECHO",
+  "Promotion status stamp in the manual promotion's own write transaction: an incremental update of only the verdict fields (flair#2478 slice 2).");
 add("migrations/visibility-backfill", ["writer:writeBackCommittedRow#1"], "ECHO",
   "Boot migration re-PUT of existing rows through the shared write-back helper (flair#2354); the boot scan also runs.");
 add("skill-version-write", ["writer:(databases as any).flair.Memory.put#1"], "ECHO",
