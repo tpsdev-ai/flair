@@ -1,8 +1,9 @@
 /**
  * OAuth consent page — every value interpolated into the page is escaped, and
  * `state` is validated as opaque (printable ASCII, bounded) before rendering.
- * An unknown scope is refused with `invalid_scope`, and a request without an
- * S256 PKCE challenge with `invalid_request`, before rendering. The page also
+ * An unknown scope is refused with `invalid_scope` and, after the earlier
+ * request, scope and client checks pass, a request without an S256 PKCE
+ * challenge with `invalid_request`, before rendering. The page also
  * carries a Content-Security-Policy and `X-Content-Type-Options: nosniff`.
  *
  * Isolated lane: this file stubs `harper` for `databases`, so it must run

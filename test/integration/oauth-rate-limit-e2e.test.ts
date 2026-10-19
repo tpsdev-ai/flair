@@ -54,7 +54,7 @@ let harper: HarperInstance;
 const savedEnv: Record<string, string | undefined> = {};
 const clientId = `flair_cl_ratelimit_${randomUUID()}`;
 const validCode = `code_${randomUUID()}`;
-// The token endpoint requires the stored S256 challenge and a matching verifier.
+// Authorization-code exchange requires the stored S256 challenge and a matching verifier.
 const validVerifier = randomBytes(32).toString("base64url");
 const validChallenge = createHash("sha256").update(validVerifier).digest("base64url");
 

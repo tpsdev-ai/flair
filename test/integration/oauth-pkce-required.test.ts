@@ -1,6 +1,6 @@
 // oauth-pkce-required.test.ts — the authorization endpoints and the
-// authorization-code exchange require S256 PKCE (RFC 7636), as the discovery
-// metadata advertises (`code_challenge_methods_supported: ["S256"]`).
+// authorization-code exchange require S256 PKCE (RFC 7636); the discovery
+// metadata lists S256 as the supported method (`code_challenge_methods_supported: ["S256"]`).
 //
 // After the earlier request, scope and client checks pass, GET /OAuthAuthorize
 // (the consent page) and POST /OAuthAuthorize (its Approve) refuse a request

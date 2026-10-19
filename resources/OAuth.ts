@@ -200,8 +200,8 @@ async function checkConsentClient(clientId: unknown): Promise<ConsentCheck<{ cli
 const S256_CODE_CHALLENGE = /^[A-Za-z0-9_-]{43,128}$/;
 
 /**
- * PKCE is required, S256 only — what the metadata advertises
- * (`code_challenge_methods_supported: ["S256"]`). `code_challenge` must be a
+ * The handlers require PKCE, S256 only; the metadata lists S256 as the
+ * supported method (`code_challenge_methods_supported: ["S256"]`). `code_challenge` must be a
  * string matching S256_CODE_CHALLENGE and `code_challenge_method` exactly
  * "S256"; anything else (absent, empty, not a string, "plain") is refused with
  * 400 invalid_request. The consent page (GET) and the consent form's POST both

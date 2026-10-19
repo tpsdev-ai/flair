@@ -133,8 +133,9 @@ rather than registration.
 
 ### Authorization Code Flow with PKCE
 
-Standard OAuth 2.1 authorization code flow. PKCE is required, with the `S256`
-method only — the metadata's `code_challenge_methods_supported` is `["S256"]`:
+Standard OAuth 2.1 authorization code flow. The authorization endpoints and the
+authorization-code exchange require PKCE with the `S256` method only; the
+metadata's `code_challenge_methods_supported` lists `["S256"]` as the supported method:
 
 1. Client generates a PKCE `code_verifier` and its `S256` `code_challenge`
    (`BASE64URL(SHA256(code_verifier))`, RFC 7636)

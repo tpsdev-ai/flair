@@ -1,4 +1,4 @@
-- **The OAuth authorization endpoints and the authorization-code exchange require S256 PKCE, as the server's metadata advertises.**
+- **The OAuth authorization endpoints and the authorization-code exchange require S256 PKCE; the discovery metadata lists S256 as the supported method.**
   After the earlier request, scope and client checks pass, `GET /OAuthAuthorize`
   and its Approve (`POST /OAuthAuthorize`) answer 400 `invalid_request` when
   `code_challenge` is missing, empty or not 43-128 base64url characters, or when
