@@ -433,7 +433,7 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
         const isFlagged = record._safetyFlags && Array.isArray(record._safetyFlags) && record._safetyFlags.length > 0;
         const source = record.agentId !== agentId ? record.agentId : undefined;
         pushRanked(results, {
-          ...record,
+          ...applyPromotionBinding(record),
           content: isFlagged ? wrapUntrusted(record.content, source) : record.content,
           _score: Math.round(finalScore * 1000) / 1000,
           _rawScore: scoring !== "raw" ? Math.round(rawScore * 1000) / 1000 : undefined,
@@ -493,7 +493,7 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
         // composite mode (composite ordering is unchanged by #985 — its
         // rrfRaw input and result order are exactly the pre-#985 behavior).
         pushRanked(results, {
-          ...record,
+          ...applyPromotionBinding(record),
           content: isFlagged ? wrapUntrusted(record.content, source) : record.content,
           _score: Math.round(finalScore * 1000) / 1000,
           _rawScore: scoring !== "raw" ? Math.round(rawScore * 1000) / 1000 : undefined,
@@ -583,7 +583,7 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
       const isFlagged = record._safetyFlags && Array.isArray(record._safetyFlags) && record._safetyFlags.length > 0;
       const source = record.agentId !== agentId ? record.agentId : undefined;
       pushRanked(results, {
-        ...record,
+        ...applyPromotionBinding(record),
         content: isFlagged ? wrapUntrusted(record.content, source) : record.content,
         _score: Math.round(finalScore * 1000) / 1000,
         _rawScore: scoring !== "raw" ? Math.round(rawScore * 1000) / 1000 : undefined,
@@ -645,7 +645,7 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
       // bump) is the abstention confidence signal on this legacy/bootstrap
       // (HNSW-leg-only) path.
       pushRanked(results, {
-        ...rest,
+        ...applyPromotionBinding(rest),
         content: isFlagged ? wrapUntrusted(rest.content, source) : rest.content,
         _score: Math.round(finalScore * 1000) / 1000,
         _rawScore: scoring !== "raw" ? Math.round(rawScore * 1000) / 1000 : undefined,
@@ -685,7 +685,7 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
       const isFlagged = rest._safetyFlags && Array.isArray(rest._safetyFlags) && rest._safetyFlags.length > 0;
       const source = record.agentId !== agentId ? record.agentId : undefined;
       pushRanked(results, {
-        ...rest,
+        ...applyPromotionBinding(rest),
         content: isFlagged ? wrapUntrusted(rest.content, source) : rest.content,
         _score: Math.round(finalScore * 1000) / 1000,
         _rawScore: scoring !== "raw" ? Math.round(rawScore * 1000) / 1000 : undefined,
@@ -739,5 +739,5 @@ export async function retrieveCandidates(params: RetrieveCandidatesParams): Prom
     bm25: bm25LegIds,
     fused: filteredResults.map((r: any) => r.id),
   });
-  return filteredResults.map((row) => applyPromotionBinding(row));
+  return filteredResults;
 }
