@@ -60,13 +60,81 @@ is_harper_command() {
   return 1
 }
 
+# flair#2697: the pid Harper itself reads from hdb.pid. Harper's readPidFile is
+# Number.parseInt(<file contents>, 10): it skips leading whitespace and one
+# leading `+`, reads decimal digits up to the first non-digit, and yields NaN
+# when there is none (`123junk` is 123, `junk123` is NaN). This prints that pid
+# when it is a positive integer of at most 10 digits (leading zeros dropped, so
+# shell tests read it as decimal), and nothing otherwise: NaN, zero, a negative
+# number, or more digits than a pid has. Only ASCII whitespace is skipped; a
+# file that starts with other characters parseInt treats as whitespace (a
+# no-break space, a byte-order mark) prints nothing, so the launcher leaves it
+# to Harper's own check.
+harper_pid_file_pid() {
+  HP_RAW="$(cat "$1" 2>/dev/null || true)"
+  HP_RAW="${HP_RAW#"${HP_RAW%%[![:space:]]*}"}"
+  case "$HP_RAW" in +*) HP_RAW="${HP_RAW#+}" ;; esac
+  HP_PID="${HP_RAW%%[!0-9]*}"
+  HP_PID="${HP_PID#"${HP_PID%%[!0]*}"}"
+  case "$HP_PID" in ""|???????????*) return 0 ;; esac
+  printf '%s\n' "$HP_PID"
+}
+
+# flair#2697: is pid "$1" alive the way Harper's isProcessRunning counts it?
+# `kill -0` succeeds, or it fails only because the process belongs to another
+# user (EPERM), which Harper also counts as running. The shell's `kill` exit
+# status does not say which error it hit, so the second case is "ps lists the
+# pid".
+pid_exists() {
+  kill -0 "$1" 2>/dev/null && return 0
+  [ -n "$(ps -o pid= -p "$1" 2>/dev/null || true)" ]
+}
+
+# flair#2697: is there positive evidence that live pid "$1", whose command line
+# as ps reports it is "$2", is NOT this instance? Every condition must hold:
+#   - the command line is not empty;
+#   - it does not contain `harper`, in any letter case;
+#   - it does not contain this instance's ROOTPATH, as given or as its physical
+#     path;
+#   - when lsof is available, lsof lists no open file of that process (its
+#     working directory included) at or under either form of ROOTPATH.
+# A process that fails any of these is treated as possibly this instance. The
+# shape check alone is not enough: is_harper_command splits the ps line at
+# spaces, so a Harper whose node executable path contains a space is not
+# Harper-shaped, yet its command line names harper. Sets UP_LSOF to the clause
+# the launcher's message uses for the lsof condition.
+is_unrelated_process() {
+  UP_PID="$1"
+  UP_LINE="$2"
+  UP_LSOF="lsof is not available to list its open files"
+  case "$UP_LINE" in *[![:space:]]*) ;; *) return 1 ;; esac
+  UP_LOWER="$(printf '%s' "$UP_LINE" | tr '[:upper:]' '[:lower:]')"
+  case "$UP_LOWER" in *harper*) return 1 ;; esac
+  UP_ROOT="${ROOTPATH%/}"
+  [ -n "$UP_ROOT" ] || return 1
+  UP_PHYS="$(cd "$ROOTPATH" 2>/dev/null && pwd -P || true)"
+  UP_PHYS="${UP_PHYS%/}"
+  [ -n "$UP_PHYS" ] || UP_PHYS="$UP_ROOT"
+  case "$UP_LINE" in *"$UP_ROOT"*|*"$UP_PHYS"*) return 1 ;; esac
+  if command -v lsof >/dev/null 2>&1; then
+    UP_LSOF="lsof lists none of its open files there"
+    UP_FILES="$(lsof -n -P -w -p "$UP_PID" -Fn 2>/dev/null || true)"
+    while IFS= read -r UP_F; do
+      case "$UP_F" in "n$UP_ROOT"|"n$UP_ROOT"/*|"n$UP_PHYS"|"n$UP_PHYS"/*) return 1 ;; esac
+    done <<UP_EOF
+$UP_FILES
+UP_EOF
+  fi
+  return 0
+}
+
 # flair#2040 / flair#2056: do not start a second Harper on a data directory
 # whose hdb.pid names a live process with a Harper-shaped command line (see
-# is_harper_command above for what that does and does not establish). `kill -0`
-# alone proves only that SOME process has the pid: if a direct process dies and
-# leaves hdb.pid behind, another process can later get that pid, and a refusal
-# on `kill -0` alone would make every KeepAlive retry exit 0 without ever
-# starting Flair.
+# is_harper_command above for what that does and does not establish). That
+# some process has the pid proves little: if a direct process dies and leaves
+# hdb.pid behind, another process can later get that pid, and a refusal on
+# liveness alone would make every KeepAlive retry exit 0 without ever starting
+# Flair.
 #
 # So the launcher refuses only when the command line `ps -o command=` reports
 # for the live pid is Harper-shaped. A flair#1454 sidecar
@@ -82,26 +150,23 @@ is_harper_command() {
 # after its throttle interval; once that process has exited, a retry does not
 # refuse.
 #
-# flair#2697: Harper runs its own hdb.pid check at startup and exits 4
-# ("Harper is already running") whenever the pid in the file is alive, whatever
-# that process is. So when ps reports a command line for the live pid and that
-# line is NOT Harper-shaped, the launcher moves hdb.pid aside to
-# hdb.pid.stale-<epoch seconds> (with a .<n> suffix when that name exists; an
-# existing file is never overwritten), prints one line to stderr naming the pid
-# and the reason, and execs Harper. That includes a Harper started some other
-# way than node or bun followed by a Harper entry path, the shape flair starts
-# it with (see is_harper_command). If the move fails, it prints one line saying
-# so and execs Harper anyway, which then exits 4 as it did before. The file is
-# left in place when the pid is dead or unparseable (Harper ignores it), when
-# ps reports nothing for the pid, and whenever the command line is
-# Harper-shaped, with or without a disagreeing sidecar: Harper's own restart
-# forks a new main process whose pid the sidecar does not name, so a
-# Harper-shaped process with a disagreeing sidecar can still be the instance
-# serving this data directory, and Harper's check is what keeps a second one
-# from starting on it.
+# flair#2697: at startup Harper exits 4 ("Harper is already running") when the
+# pid it reads from hdb.pid is alive, is not its own pid, and is not a
+# recognised PID-1 init process. The launcher reads the pid as Harper does
+# (harper_pid_file_pid, within the limits stated there) and counts it alive as
+# Harper does (pid_exists). When the live pid is not Harper-shaped AND
+# is_unrelated_process finds positive evidence that it is not this instance,
+# the launcher marks hdb.pid to be moved aside; the move happens below, after
+# the admin-pass checks pass and just before the exec. In every other case
+# hdb.pid is left in place: a pid Harper would not count as alive, a
+# Harper-shaped pid (refused here when no sidecar disagrees; with a disagreeing
+# sidecar Harper's own check decides, because Harper's own restart forks a new
+# main process whose pid the sidecar does not name), and a live pid that is not
+# Harper-shaped but may be this instance.
+MOVE_PID_FILE=0
 if [ -n "${ROOTPATH:-}" ] && [ -f "$ROOTPATH/hdb.pid" ]; then
-  LIVE_PID="$(tr -cd '0-9' < "$ROOTPATH/hdb.pid" 2>/dev/null || true)"
-  if [ -n "$LIVE_PID" ] && [ "$LIVE_PID" != "$$" ] && [ "$LIVE_PID" -gt 1 ] 2>/dev/null && kill -0 "$LIVE_PID" 2>/dev/null; then
+  LIVE_PID="$(harper_pid_file_pid "$ROOTPATH/hdb.pid")"
+  if [ -n "$LIVE_PID" ] && [ "$LIVE_PID" != "$$" ] && [ "$LIVE_PID" -gt 1 ] 2>/dev/null && pid_exists "$LIVE_PID"; then
     DISAGREE=0
     SIDE="$ROOTPATH/flair-daemon.json"
     if [ -f "$SIDE" ]; then
@@ -137,26 +202,9 @@ if [ -n "${ROOTPATH:-}" ] && [ -f "$ROOTPATH/hdb.pid" ]; then
         echo "start-flair-with-admin-pass: $ROOTPATH/hdb.pid names pid $LIVE_PID, whose command line as ps reports it is node or bun followed by a Harper entry path; not starting a second instance. launchd retries after its throttle interval." >&2
         exit 0
       fi
-    else
-      case "$LIVE_CMD" in
-        *[![:space:]]*)
-          STALE_EPOCH="$(date +%s 2>/dev/null || true)"
-          STALE_BASE="$ROOTPATH/hdb.pid.stale-${STALE_EPOCH:-unknown}"
-          STALE="$STALE_BASE"
-          STALE_N=0
-          while [ -e "$STALE" ] || [ -L "$STALE" ]; do
-            STALE_N=$((STALE_N + 1))
-            if [ "$STALE_N" -gt 100 ]; then STALE=""; break; fi
-            STALE="$STALE_BASE.$STALE_N"
-          done
-          STALE_WHY="is alive, but its command line as ps reports it is not node or bun followed by a Harper entry path, so it is not treated as this instance"
-          if [ -n "$STALE" ] && mv "$ROOTPATH/hdb.pid" "$STALE" 2>/dev/null; then
-            echo "start-flair-with-admin-pass: $ROOTPATH/hdb.pid names pid $LIVE_PID, which $STALE_WHY; moved hdb.pid to $STALE and starting Harper." >&2
-          else
-            echo "start-flair-with-admin-pass: $ROOTPATH/hdb.pid names pid $LIVE_PID, which $STALE_WHY; could not move hdb.pid aside, starting Harper anyway, which exits while that pid is alive. Move $ROOTPATH/hdb.pid out of the way." >&2
-          fi
-          ;;
-      esac
+    elif is_unrelated_process "$LIVE_PID" "$LIVE_CMD"; then
+      MOVE_PID_FILE=1
+      MOVE_WHY="its command line as ps reports it contains neither \"harper\" (in any case) nor this data directory, and $UP_LSOF"
     fi
   fi
 fi
@@ -203,6 +251,42 @@ if [ -z "$ADMIN_PASS" ]; then
 fi
 
 export HDB_ADMIN_PASSWORD="$ADMIN_PASS"
+
+# flair#2697: move hdb.pid aside (marked above) so Harper's own check does not
+# refuse on a live process that is not this instance. The copy is named
+# hdb.pid.stale-<epoch seconds>, or .<n> after it when that name is taken. The
+# new name is made with `ln`, which fails rather than replace a name that exists
+# by then, and the original is removed only after the link succeeded. If the
+# link lands inside a directory created at that name meanwhile, it is removed
+# again. Any failure leaves hdb.pid in place and is reported on one line; Harper
+# then exits 4 if that pid is still alive.
+if [ "$MOVE_PID_FILE" = "1" ]; then
+  PID_FILE="$ROOTPATH/hdb.pid"
+  STALE_EPOCH="$(date +%s 2>/dev/null || true)"
+  STALE_BASE="$ROOTPATH/hdb.pid.stale-${STALE_EPOCH:-unknown}"
+  STALE="$STALE_BASE"
+  STALE_N=0
+  while [ -e "$STALE" ] || [ -L "$STALE" ]; do
+    STALE_N=$((STALE_N + 1))
+    if [ "$STALE_N" -gt 100 ]; then STALE=""; break; fi
+    STALE="$STALE_BASE.$STALE_N"
+  done
+  MOVED=0
+  if [ -n "$STALE" ] && ln -P "$PID_FILE" "$STALE" 2>/dev/null; then
+    if [ -d "$STALE" ]; then
+      rm -f "$STALE/hdb.pid" 2>/dev/null || true
+    elif rm -f "$PID_FILE" 2>/dev/null; then
+      MOVED=1
+    else
+      rm -f "$STALE" 2>/dev/null || true
+    fi
+  fi
+  if [ "$MOVED" = "1" ]; then
+    echo "start-flair-with-admin-pass: $PID_FILE names pid $LIVE_PID, a live process that is not this instance: $MOVE_WHY; moved hdb.pid to $STALE and starting Harper." >&2
+  else
+    echo "start-flair-with-admin-pass: $PID_FILE names pid $LIVE_PID, a live process that is not this instance: $MOVE_WHY; could not move hdb.pid aside. Starting Harper, which exits 4 if pid $LIVE_PID is still alive; move $PID_FILE out of the way." >&2
+  fi
+fi
 
 # exec (not spawn) so launchd tracks Harper itself — the job's PID is Harper's
 # PID, and KeepAlive restarts the real service rather than a dead launcher.
