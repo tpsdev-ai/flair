@@ -240,8 +240,10 @@ export class AgentKeyRegister extends Resource {
     if (readBackPause) await readBackPause;
 
     // The registration is NON-IDEMPOTENT: it transitions a pending key once and
-    // writes a fresh audit row per attempt, so a retry cannot re-plan from the
-    // fresh read and must not run after a post-commit mismatch. Its commit is
+    // writes a fresh audit row per attempt. Re-planning from a fresh read is
+    // unsafe after an unconfirmed commit: it can write another audit row. This
+    // handler does not retry; a post-commit mismatch or an unreadable read-back
+    // is answered 503 with outcome `unconfirmed`. Its commit is
     // confirmed by commit-specific evidence — the AgentKeyRegistration row this
     // attempt wrote under `registrationId` — together with the staged Agent
     // fields; value equality alone does not name the attempt that committed.

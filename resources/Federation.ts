@@ -953,14 +953,16 @@ function firstPairRowAppearedRefusal(): Response {
   }), { status: 409, headers: { "content-type": "application/json" } });
 }
 
-/** 409 for a first-time pair whose committed Peer row or token consume is not
- *  this attempt's: the staged values are unconfirmed after the commit and the
- *  non-idempotent pair is not retried. */
+/** 409 for a token pair whose committed Peer row and pairing token consume
+ *  could not be confirmed as this attempt's after the commit: on a first-time
+ *  pair, the committed rows do not show the staged values; on a token re-pair of
+ *  an existing Peer, they do not show them or could not be read. The
+ *  non-idempotent pair is not retried and is not reported as `paired`. */
 function firstPairCommitUnconfirmedRefusal(): Response {
   return new Response(JSON.stringify({
     error: "peer_pair_unconfirmed",
     outcome: "unconfirmed",
-    message: "the committed Peer row or the pairing token consume is not this pairing attempt's; the paired state is unconfirmed",
+    message: "this pairing attempt's committed Peer row and pairing token consume could not be confirmed; the paired state is unconfirmed",
   }), { status: 409, headers: { "content-type": "application/json" } });
 }
 

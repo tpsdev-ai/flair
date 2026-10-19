@@ -520,10 +520,12 @@ export function createEmbeddingStampMigration(
             // committed-row read-back.
             const verifyPause = txnPausePoint("embedding-stamp-content-suffix-verify");
             if (verifyPause) await verifyPause;
-            // IDEMPOTENT: the same text yields the same vector and hash, so a
-            // post-commit mismatch retries from a fresh read. The staged vector
-            // counts only when the committed row still carries the exact text
-            // the vector was computed for.
+            // Safe to retry from a fresh read: the same text yields the same
+            // vector and hash, and a retry restages `updatedAt`. A readable
+            // post-commit mismatch retries from a fresh read within
+            // CONTENT_SUFFIX_REGEN_ATTEMPTS; an unreadable verification stops
+            // without a retry. The staged vector counts only when the committed
+            // row still carries the exact text the vector was computed for.
             const verdict = await verifyCommittedFields(
               table, id, staged.identity, staged.fields,
               (committed) => skillEmbedText(committed) === staged.text,
