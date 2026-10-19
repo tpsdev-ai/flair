@@ -70,7 +70,7 @@ mock.module("harper", () => ({
 
 mock.module("../../resources/agent-auth.ts", () => ({
   allowVerified: async () => true,
-  isAdmin: async () => false,
+  annotatedCallerIsAdmin: async () => false,
   resolveAgentAuth: async () => ({ kind: "agent", agentId: "alice", isAdmin: false }),
 }));
 

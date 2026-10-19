@@ -4,7 +4,9 @@
  *
  * Pure: no I/O, no Harper, no network, no writes. A restore path hands this
  * module an archive's exact bytes and gets back either a validated archive or
- * a named refusal. Nothing here changes what `flair restore` does today.
+ * a named refusal. `flair restore` runs parseRestoreArchive in its preflight
+ * (src/lib/backup-artifact.ts readBackupArtifact); it does not call the
+ * Memory admission checks below.
  *
  * One buffer. `parseRestoreArchive` copies its input once, hashes that copy
  * (SHA-256, lowercase hex), decodes the same copy as strict UTF-8 and parses
@@ -17,9 +19,9 @@
  * compared after escape decoding, so `"a"` and `"\u0061"` are the same key.
  * The parser is iterative, so nesting depth does not bound it.
  *
- * Archive shape: the row checks `flair restore` applies (src/commands/
- * restore.ts) plus unique ids within each collection, over the document
- * `flair backup` writes (src/commands/backup.ts).
+ * Archive shape: the row checks `flair restore` applied inline before it
+ * used this parser (flair#2664 slice 1b) plus unique ids within each
+ * collection, over the document `flair backup` writes (src/commands/backup.ts).
  *
  * Archive diagnostics. `parseRestoreArchive` returns the first problem it
  * finds as one refusal with a JSON Pointer `location`. Decoding and JSON-syntax
@@ -592,11 +594,11 @@ export function parseRestoreArchive(bytes: Buffer | Uint8Array): RestoreArchiveP
   const input = new Uint8Array(bytes);
   const sha256 = createHash("sha256").update(input).digest("hex");
   const decoded = decodeStrictUtf8(input);
-  if (!decoded.ok) {
+  if (decoded.ok === false) {
     return { ok: false, code: "invalid-utf8", reason: decoded.reason, location: "", offset: decoded.offset, sha256 };
   }
   const parsed = parseStrictJson(decoded.text);
-  if (!parsed.ok) {
+  if (parsed.ok === false) {
     const offset = Buffer.byteLength(decoded.text.slice(0, parsed.index), "utf8");
     return { ok: false, code: parsed.code, reason: parsed.reason, location: parsed.location, offset, sha256 };
   }
@@ -773,8 +775,8 @@ export function validateRestoreSelection(archive: RestoreArchive, ids?: readonly
   const entries: ValidatedRestoreEntry[] = [];
   for (const row of resolved.rows) {
     const result = validateRestoreMemoryRow(row);
-    if (result.ok) entries.push(result.entry);
-    else failures.push(...result.failures);
+    if (result.ok === false) failures.push(...result.failures);
+    else entries.push(result.entry);
   }
   if (failures.length > 0) return entriesRefused(failures);
   return { ok: true, entries };

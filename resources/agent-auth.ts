@@ -19,7 +19,7 @@
 import { databases } from "harper";
 import { WINDOW_MS, importEd25519Key, b64ToArrayBuffer, parseTpsEd25519Header } from "./ed25519-auth.js";
 import { isKnownAgentReplay, claimAgentNonce } from "./replay-store.js";
-import { ADMIN_ROLE, agentRecordIsAdmin, configuredAdminAgentIds } from "./agent-admin.js";
+import { agentRecordIsAdmin, configuredAdminAgentIds } from "./agent-admin.js";
 import { isPrincipalDeactivated } from "../src/lib/principal-status.js";
 
 /**
@@ -80,58 +80,73 @@ export async function readCredentialedPrincipal(
 // them, and the crypto/decoder logic can't drift.
 
 // ─── Admin resolution ─────────────────────────────────────────────────────────
-// Admin agents come from FLAIR_ADMIN_AGENTS (comma-separated) OR Agent records
-// whose `role` is the admin sentinel. OR-combined, cached 60s. Distinct from
-// Harper's super_user — admin here gates flair-policy decisions (promotions,
-// raw ops).
+// An agent is a flair administrator when its id is named in FLAIR_ADMIN_AGENTS
+// (comma-separated) or its stored Agent row's `role` is the admin sentinel.
+// Distinct from Harper's super_user — admin here gates flair-policy decisions
+// (promotions, raw ops).
 //
-// The record half of that union is the ONE place the Agent table is consulted
-// for an authorization decision, and it resolves through
-// resources/agent-admin.ts's shared predicate so it cannot drift from the
-// reporters or from the MCP surface (flair#941 — they had drifted).
+// The decision is taken from an Agent ROW, never from a remembered set of ids.
+// The Ed25519 verifiers (doVerify below and resources/auth-middleware.ts) pass
+// the row they have just checked the request's signature against, so the key
+// check and the admin decision describe the same stored record, on every
+// request and on every worker thread. Nothing about admin status is kept
+// between requests, so a change to the Agent table (a role change, a removed
+// row, a new row under the same id) applies to the next request.
+//
+// The record half resolves through resources/agent-admin.ts's shared predicate
+// so it cannot drift from the reporters or from the MCP surface (flair#941).
 
-let adminCacheExpiry = 0;
-let adminCache: Set<string> = new Set();
-
-async function getAdminAgents(): Promise<Set<string>> {
-  const now = Date.now();
-  if (now < adminCacheExpiry) return adminCache;
-  const fromEnv = configuredAdminAgentIds();
-  const fromDb: string[] = [];
-  try {
-    const results = await (databases as any).flair.Agent.search([{ attribute: "role", value: ADMIN_ROLE, condition: "equals" }]);
-    for await (const row of results) if (row?.id && agentRecordIsAdmin(row)) fromDb.push(row.id);
-  } catch { /* Agent table may be empty */ }
-  adminCache = new Set([...fromEnv, ...fromDb]);
-  adminCacheExpiry = now + 60_000;
-  return adminCache;
+/**
+ * THE admin decision for an agent: its id is in the configured
+ * FLAIR_ADMIN_AGENTS set, or `row` (that agent's stored Agent row) carries the
+ * admin role. Pure: it reads no table. A verifier passes the row it checked the
+ * request's key against; a null or absent row leaves only the configured ids.
+ */
+export function agentIsAdmin(agentId: string, row: unknown): boolean {
+  return configuredAdminAgentIds().has(agentId) || agentRecordIsAdmin(row);
 }
 
 /**
- * Drop the memoised admin set so the NEXT isAdmin() re-reads the Agent table.
- *
- * The 60s TTL is a load optimisation, but on its own it makes a privilege
- * change take up to a minute to appear — which reads as "the change didn't
- * work", and is exactly the confusion flair#941 is about: an operator grants
- * admin, tests it, sees a denial, and starts changing other things. The write
- * path knows precisely when a principal's admin status changed, so it says so
- * and the grant is effective on the caller's very next request.
- *
- * Deliberately NOT a distributed invalidation: Harper runs N worker threads,
- * each with its own module instance and its own cache, so a promotion applied
- * on thread A still takes up to the TTL to be seen by thread B. Making that
- * exact would mean a shared invalidation channel, which is a much larger change
- * than the confusion warrants — the bound stays 60s, unchanged, and the common
- * single-threaded/dev case becomes immediate. Called by resources/Agent.ts's
- * write paths.
+ * The admin decision for an agent id when no row is in hand: reads the agent's
+ * Agent row now and applies {@link agentIsAdmin}. Nothing is kept between
+ * calls. A read that fails counts as no row, so only the configured ids can
+ * then admit.
  */
-export function invalidateAdminCache(): void {
-  adminCacheExpiry = 0;
-  adminCache = new Set();
+export async function isAdmin(agentId: string): Promise<boolean> {
+  let row: unknown = null;
+  try {
+    row = await (databases as any).flair.Agent.get(agentId);
+  } catch {
+    row = null;
+  }
+  return agentIsAdmin(agentId, row);
 }
 
-export async function isAdmin(agentId: string): Promise<boolean> {
-  return (await getAdminAgents()).has(agentId);
+/**
+ * The admin decision for a handler that identifies its caller by the request's
+ * `tpsAgent` annotation.
+ *
+ *   - A request the Ed25519 gate verified carries `tpsAgentAdminFromVerifiedRow`
+ *     (resources/auth-middleware.ts). Its `tpsAgentIsAdmin` is the decision the
+ *     gate took from the Agent row it verified the signature against, and that
+ *     decision is returned unchanged: no second read.
+ *   - Any other annotated caller (a Basic credential the gate annotated, an
+ *     in-process agentContext()/adminContext(), an MCP tool context built from
+ *     them) is decided by {@link isAdmin}: its Agent row read now, plus the
+ *     configured ids. Its `tpsAgentIsAdmin` is not consulted here.
+ *   - A request with no `tpsAgent` is not an admin here.
+ *
+ * All three are properties of the request object, never headers. On an HTTP
+ * request the gate sets `tpsAgent` and `tpsAgentIsAdmin`, and only its Ed25519
+ * branch sets `tpsAgentAdminFromVerifiedRow`. An in-process caller builds its
+ * own context with `tpsAgent` and `tpsAgentIsAdmin` (resources/in-process.ts),
+ * without the marker.
+ */
+export async function annotatedCallerIsAdmin(request: any): Promise<boolean> {
+  const agentId = request?.tpsAgent;
+  if (!agentId) return false;
+  if (request.tpsAgentAdminFromVerifiedRow === true) return request.tpsAgentIsAdmin === true;
+  return isAdmin(String(agentId));
 }
 
 // ─── Agent request verification ───────────────────────────────────────────────
@@ -185,7 +200,8 @@ async function doVerify(request: any): Promise<AgentAuth | null> {
   // Record the nonce instance-wide now that the signature has verified, and
   // before the request has any effect. A replay or an unusable store refuses.
   if (!(await claimAgentNonce(agentId, nonce)).ok) return null;
-  return { agentId, isAdmin: await isAdmin(agentId) };
+  // The admin decision uses the row the signature was just verified against.
+  return { agentId, isAdmin: agentIsAdmin(agentId, agent) };
 }
 
 /**

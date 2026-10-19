@@ -7,10 +7,13 @@
  */
 import { Command } from "commander";
 import { resolveAdminUser } from "../lib/auth-resolve.js";
+import { readBackupArtifact } from "../lib/backup-artifact.js";
+import { loadApprovedArchive } from "../lib/backup-approval-store.js";
+import type { RestoreArchive } from "../lib/restore-archive.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
 import { comparePreservedFields } from "../lib/restore-verify.js";
 import * as render from "../render.js";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 
 export type RestoreCli = {
   resolveHttpPort: (...args: any[]) => any;
@@ -58,13 +61,49 @@ program
       process.exit(1);
     }
 
-    const backup = JSON.parse(readFileSync(backupPath, "utf-8"));
-    if (backup.version !== 1) {
-      console.error(`Error: unsupported backup version: ${backup.version}`);
-      process.exit(1);
+    // Preflight (flair#2664), before any request in every mode, dry run
+    // included: read the archive once, hash and parse that one buffer, and
+    // require the hash to equal the digest flair backup wrote to
+    // `<archive>.sha256`. The parse refuses ill-formed UTF-8 or JSON, a
+    // repeated key or row id, an unsupported version, and rows restore cannot
+    // write (src/lib/restore-archive.ts).
+    //
+    // An archive with no sidecar (flair#2664 slice 1c) is admitted only by an
+    // unrevoked approval in this host's approval store
+    // (src/lib/backup-approval-store.ts) for the digest of the bytes just
+    // read, and only when the stored copy still hashes to that digest; the
+    // rows restored are parsed from that rechecked copy. A sidecar-backed
+    // archive needs no approval here.
+    const artifact = readBackupArtifact(backupPath);
+    let archive: RestoreArchive;
+    let admitted: string;
+    if (artifact.ok === false && (artifact.code !== "digest-missing" || artifact.sha256 === undefined)) {
+      console.error(`Error: ${artifact.reason}`);
+      process.exitCode = 1;
+      return;
+    }
+    if (artifact.ok === false) {
+      const approved = loadApprovedArchive(artifact.sha256!);
+      if (approved.ok === false) {
+        const reapprove = approved.code === "store-unsafe" || approved.code === "record-invalid"
+          ? ""
+          : ` Approve the archive again on this host with flair backup-approval legacy-admit ${backupPath}.`;
+        const reason = approved.code === "not-approved"
+          ? artifact.reason
+          : `archive digest sidecar ${backupPath}.sha256 not found, and ${approved.reason}; restore stopped before any write.${reapprove}`;
+        console.error(`Error: ${reason}`);
+        process.exitCode = 1;
+        return;
+      }
+      archive = approved.archive;
+      admitted = `${approved.sha256} (no digest sidecar; approved on this host by ${approved.record.approvedBy} ` +
+        `at ${approved.record.approvedAt}, ${approved.record.admission} admission)`;
+    } else {
+      archive = artifact.archive;
+      admitted = `${artifact.sha256} (matches ${artifact.digestPath})`;
     }
 
-    const { agents, memories, souls } = backup;
+    const { agents, memories, souls } = archive;
     const collections = [
       { name: "Agent", rows: agents },
       { name: "Soul", rows: souls },
@@ -75,29 +114,10 @@ program
       for (const failure of failures) console.error(`Error: ${failure}`);
       process.exitCode = 1;
     }
-    for (const { name, rows } of collections) {
-      if (!Array.isArray(rows)) {
-        failures.push(`${name}: archive collection is not an array`);
-        continue;
-      }
-      for (const [index, row] of rows.entries()) {
-        if (!row || typeof row !== "object" || Array.isArray(row)
-          || typeof row.id !== "string" || !row.id
-          || (name !== "Agent" && (typeof row.agentId !== "string" || !row.agentId))) {
-          failures.push(`${name} row ${index} (${row?.id ?? "missing ID"}): invalid archived row`);
-          continue;
-        }
-        try {
-          encodeRecordId(row.id);
-        } catch {
-          failures.push(`${name} ${row.id}: invalid archived ID`);
-        }
-      }
-    }
-    if (failures.length) { fail(); return; }
     const auth = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
 
     console.log(`Restoring from: ${backupPath}`);
+    console.log(`Archive SHA-256: ${admitted}`);
     console.log(`Mode: ${mode}${dryRun ? " (dry run)" : ""}`);
     console.log(`  Agents:   ${agents.length}`);
     console.log(`  Memories: ${memories.length}`);

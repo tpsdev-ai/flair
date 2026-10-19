@@ -17,7 +17,7 @@
 //   1. a write through the Agent resource can no longer STORE a disagreement
 //      (either field asks for admin → both are set; neither → both cleared),
 //   2. a non-admin can no longer grant itself admin by writing either field,
-//   3. a privilege change is effective immediately, not up to 60s later.
+//   3. a privilege change is effective on the agent's next request.
 //
 // MODEL: test/integration/gate4-authgate.test.ts (the admin-vs-non-admin agent
 // seeding + Ed25519 signing pattern for allowAdmin-gated resources).
@@ -238,9 +238,9 @@ describe("flair#941 — one meaning, one answer, on every surface", () => {
   });
 
   // ── The privilege change is effective immediately ────────────────────────
-  // getAdminAgents() caches for 60s. A correctness fix that only manifests a
-  // minute later is still confusing, so the write path invalidates the cache.
-  describe("a privilege change takes effect without waiting out the cache", () => {
+  // The admin decision for a signed request reads the Agent row its signature
+  // is verified against, so a promotion applies to the agent's next request.
+  describe("a privilege change takes effect on the next request", () => {
     test("an agent promoted through the resource is an admin on its very next request", async () => {
       const fresh = mkAgent(`aft-promoted-${randomUUID().slice(0, 8)}`);
       const now = new Date().toISOString();
@@ -250,7 +250,7 @@ describe("flair#941 — one meaning, one answer, on every surface", () => {
       });
       expect(seedRes.status).toBe(200);
 
-      // Populate the admin cache with a verdict that predates the promotion.
+      // A verdict that predates the promotion.
       expect(await probeAdminOnly(harper, fresh)).toBe(403);
 
       const path = `/Agent/${fresh.id}`;
@@ -266,7 +266,7 @@ describe("flair#941 — one meaning, one answer, on every surface", () => {
       });
       expect(promote.status, `admin promote returned ${promote.status}: ${await promote.text()}`).toBeLessThan(300);
 
-      // No sleep. Pre-fix this stayed 403 for up to 60 seconds.
+      // No sleep: the next request is decided from the promoted row.
       const status = await probeAdminOnly(harper, fresh);
       expect(status, `promoted agent got ${status}, expected 200 immediately`).toBe(200);
     }, 60_000);

@@ -1,7 +1,7 @@
 - **The OAuth authorization endpoints and the authorization-code exchange require S256 PKCE; the discovery metadata lists S256 as the supported method.**
   After the earlier request, scope and client checks pass, `GET /OAuthAuthorize`
   and its Approve (`POST /OAuthAuthorize`) answer 400 `invalid_request` when
-  `code_challenge` is missing, empty or not 43-128 base64url characters, or when
+  `code_challenge` is missing, empty or not exactly 43 base64url characters, or when
   `code_challenge_method` is not `S256`: the consent page is not rendered and no
   authorization code is stored. On the POST this check runs before
   authentication. After redirect-URI validation passes, a Deny still answers the
