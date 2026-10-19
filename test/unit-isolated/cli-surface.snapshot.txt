@@ -2,7 +2,7 @@
 # Byte-identical gate for src/cli.ts modularization. Do not edit by hand.
 # Refresh: UPDATE_CLI_SURFACE_SNAPSHOT=1 bun test test/unit-isolated/cli-surface-snapshot.test.ts
 # helpWidth=80 (pinned; TTY columns must not affect this file)
-# commands=143 options=654
+# commands=148 options=667
 #
 # TREE is registration order: every command/subcommand + declared options/args.
 # HELP is each command's outputHelp() (--help, including addHelpText).
@@ -18,7 +18,7 @@ flair
     -v, --version
       description: output the version number
       attr: version
-  subcommands: init, agent, keys, hook, mcp, principal, idp, grant, revoke, integrity, federation, rem, status, snapshot, upgrade, stop, start, restart, uninstall, reembed, test, deploy, fleet, doctor, quality, session, memory, search, bootstrap, relationship, soul, bridge, backup, restore, export, import, inspect, migrate-harness-memory, presence, workspace, orgevent, attention
+  subcommands: init, agent, keys, hook, mcp, principal, idp, grant, revoke, integrity, federation, rem, status, snapshot, upgrade, stop, start, restart, uninstall, reembed, test, deploy, fleet, doctor, quality, session, memory, search, bootstrap, relationship, soul, bridge, backup, restore, backup-approval, export, import, inspect, migrate-harness-memory, presence, workspace, orgevent, attention
 
 flair init
   description: One-command Flair setup — bootstrap the instance, register an agent, and wire MCP clients
@@ -2661,6 +2661,77 @@ flair restore
       description: Show what would be imported without making changes
       attr: dryRun
 
+flair backup-approval
+  description: Approve backup archives for restore on this host (a local store no REST route can reach)
+  usage: [options] [command]
+  options: (none)
+  subcommands: approve, legacy-admit, list, revoke
+
+flair backup-approval approve
+  description: Verify an archive against its .sha256 sidecar, store its exact bytes and record your approval
+  usage: [options] <archive>
+  arguments:
+    archive (required)
+  options:
+    --port <port>
+      description: Harper HTTP port of this host's Flair (its operations API verifies the credentials)
+      attr: port
+    --admin-pass <pass>
+      description: Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)
+      attr: adminPass
+    --admin-pass-file <path>
+      description: Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
+      attr: adminPassFile
+    --admin-user <name>
+      description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
+      attr: adminUser
+
+flair backup-approval legacy-admit
+  description: Approve an archive that has no .sha256 sidecar: prints its SHA-256; repeat it with --confirm-digest to approve
+  usage: [options] <archive>
+  arguments:
+    archive (required)
+  options:
+    --confirm-digest <sha256>
+      description: The archive's SHA-256, as printed by a first run, confirming you approve exactly these bytes
+      attr: confirmDigest
+    --port <port>
+      description: Harper HTTP port of this host's Flair (its operations API verifies the credentials)
+      attr: port
+    --admin-pass <pass>
+      description: Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)
+      attr: adminPass
+    --admin-pass-file <path>
+      description: Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
+      attr: adminPassFile
+    --admin-user <name>
+      description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
+      attr: adminUser
+
+flair backup-approval list
+  description: List the archive approvals on this host and check each stored copy
+  usage: [options]
+  options: (none)
+
+flair backup-approval revoke
+  description: Revoke the approval of an archive digest on this host
+  usage: [options] <sha256>
+  arguments:
+    sha256 (required)
+  options:
+    --port <port>
+      description: Harper HTTP port of this host's Flair (its operations API verifies the credentials)
+      attr: port
+    --admin-pass <pass>
+      description: Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)
+      attr: adminPass
+    --admin-pass-file <path>
+      description: Read the admin password from an owner-only file (group and world permission bits are refused; an owner-only mode such as 0600 or 0400 is accepted), keeping it out of shell history and the process list. An explicit option (this or --admin-pass) overrides FLAIR_ADMIN_PASS; combining it with --admin-pass is a usage error.
+      attr: adminPassFile
+    --admin-user <name>
+      description: Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)
+      attr: adminUser
+
 flair export
   description: Export a single agent's identity (soul + memories) to a portable file
   usage: [options] <agent-id>
@@ -2923,6 +2994,7 @@ Commands:
   bridge                                    Manage memory bridges (import/export between Flair and foreign systems)
   backup [options]                          Export agents, memories, and souls to a JSON archive
   restore [options] <path>                  Import a Flair backup archive
+  backup-approval                           Approve backup archives for restore on this host (a local store no REST route can reach)
   export [options] <agent-id>               Export a single agent's identity (soul + memories) to a portable file
   import [options] <path>                   Import an agent from an export file into this Flair instance
   inspect [options] <path>                  Show contents of a backup or export file
@@ -5973,6 +6045,121 @@ Options:
 
 Global Options:
   -v, --version        output the version number
+
+----- flair backup-approval -----
+Usage: flair backup-approval [options] [command]
+
+Approve backup archives for restore on this host (a local store no REST route
+can reach)
+
+Options:
+  -h, --help                        display help for command
+
+Global Options:
+  -v, --version                     output the version number
+
+Commands:
+  approve [options] <archive>       Verify an archive against its .sha256
+                                    sidecar, store its exact bytes and record
+                                    your approval
+  legacy-admit [options] <archive>  Approve an archive that has no .sha256
+                                    sidecar: prints its SHA-256; repeat it with
+                                    --confirm-digest to approve
+  list                              List the archive approvals on this host and
+                                    check each stored copy
+  revoke [options] <sha256>         Revoke the approval of an archive digest on
+                                    this host
+  help [command]                    display help for command
+
+----- flair backup-approval approve -----
+Usage: flair backup-approval approve [options] <archive>
+
+Verify an archive against its .sha256 sidecar, store its exact bytes and record
+your approval
+
+Options:
+  --port <port>             Harper HTTP port of this host's Flair (its
+                            operations API verifies the credentials)
+  --admin-pass <pass>       Admin password (legacy: lands in shell history and
+                            the process list — prefer --admin-pass-file or
+                            FLAIR_ADMIN_PASS)
+  --admin-pass-file <path>  Read the admin password from an owner-only file
+                            (group and world permission bits are refused; an
+                            owner-only mode such as 0600 or 0400 is accepted),
+                            keeping it out of shell history and the process
+                            list. An explicit option (this or --admin-pass)
+                            overrides FLAIR_ADMIN_PASS; combining it with
+                            --admin-pass is a usage error.
+  --admin-user <name>       Admin username for Basic auth (env:
+                            FLAIR_ADMIN_USER; default: admin)
+  -h, --help                display help for command
+
+Global Options:
+  -v, --version             output the version number
+
+----- flair backup-approval legacy-admit -----
+Usage: flair backup-approval legacy-admit [options] <archive>
+
+Approve an archive that has no .sha256 sidecar: prints its SHA-256; repeat it
+with --confirm-digest to approve
+
+Options:
+  --confirm-digest <sha256>  The archive's SHA-256, as printed by a first run,
+                             confirming you approve exactly these bytes
+  --port <port>              Harper HTTP port of this host's Flair (its
+                             operations API verifies the credentials)
+  --admin-pass <pass>        Admin password (legacy: lands in shell history and
+                             the process list — prefer --admin-pass-file or
+                             FLAIR_ADMIN_PASS)
+  --admin-pass-file <path>   Read the admin password from an owner-only file
+                             (group and world permission bits are refused; an
+                             owner-only mode such as 0600 or 0400 is accepted),
+                             keeping it out of shell history and the process
+                             list. An explicit option (this or --admin-pass)
+                             overrides FLAIR_ADMIN_PASS; combining it with
+                             --admin-pass is a usage error.
+  --admin-user <name>        Admin username for Basic auth (env:
+                             FLAIR_ADMIN_USER; default: admin)
+  -h, --help                 display help for command
+
+Global Options:
+  -v, --version              output the version number
+
+----- flair backup-approval list -----
+Usage: flair backup-approval list [options]
+
+List the archive approvals on this host and check each stored copy
+
+Options:
+  -h, --help     display help for command
+
+Global Options:
+  -v, --version  output the version number
+
+----- flair backup-approval revoke -----
+Usage: flair backup-approval revoke [options] <sha256>
+
+Revoke the approval of an archive digest on this host
+
+Options:
+  --port <port>             Harper HTTP port of this host's Flair (its
+                            operations API verifies the credentials)
+  --admin-pass <pass>       Admin password (legacy: lands in shell history and
+                            the process list — prefer --admin-pass-file or
+                            FLAIR_ADMIN_PASS)
+  --admin-pass-file <path>  Read the admin password from an owner-only file
+                            (group and world permission bits are refused; an
+                            owner-only mode such as 0600 or 0400 is accepted),
+                            keeping it out of shell history and the process
+                            list. An explicit option (this or --admin-pass)
+                            overrides FLAIR_ADMIN_PASS; combining it with
+                            --admin-pass is a usage error.
+  --admin-user <name>       Admin username for Basic auth (env:
+                            FLAIR_ADMIN_USER; default: admin)
+  -h, --help                display help for command
+
+Global Options:
+  -v, --version             output the version number
 
 ----- flair export -----
 Usage: flair export [options] <agent-id>

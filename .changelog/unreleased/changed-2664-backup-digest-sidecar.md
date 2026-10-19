@@ -12,6 +12,8 @@
   truncated or mismatched file; it does not prove who wrote the archive
   (flair#2664).
 
-  > **Heads-up:** existing backups without a sidecar (every archive written
-  > before this release) are refused by `flair restore`. Keep each new archive's `.sha256` file with
-  > it when you copy or move the archive.
+  > **Heads-up:** `flair restore` refuses existing backups without a sidecar
+  > (every archive written before this release) until you approve each one on
+  > the restoring host with `flair backup-approval legacy-admit` (see the
+  > backup approval entry). Keep each new archive's `.sha256` file with it
+  > when you copy or move the archive.

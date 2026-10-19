@@ -205,16 +205,37 @@ See [upgrade.md](upgrade.md) for the full walkthrough including re-embedding, ro
 ## Backup & restore
 
 ```bash
-# Backup all data (agents, memories, souls)
+# Backup all data (agents, memories, souls). Writes the archive and, beside it,
+# flair-backup-YYYYMMDD.json.sha256
 flair backup --output ~/flair-backup-$(date +%Y%m%d).json
 
-# Restore to a fresh instance
+# Restore to a fresh instance (the .sha256 sidecar must sit beside the archive)
 flair restore ~/flair-backup-20260405.json
 ```
 
 Always backup before upgrades. `flair backup` excludes private keys.
 
-`flair backup` writes two files: the archive and `<archive>.sha256`, the SHA-256 of the archive's exact bytes in `sha256sum` format (from the archive's directory, `shasum -a 256 -c <archive>.sha256` or GNU `sha256sum -c <archive>.sha256` checks it). Keep and move the two files together. `flair restore` verifies the pair before it sends any request, `--dry-run` included, and refuses an archive whose sidecar is missing or does not match. Existing backups without a sidecar (written before backup published digests) are refused by restore. The sidecar detects a damaged, truncated or mismatched file; it does not prove who wrote the archive.
+`flair backup` writes two files: the archive and `<archive>.sha256`, the SHA-256 of the archive's exact bytes in `sha256sum` format (from the archive's directory, `shasum -a 256 -c <archive>.sha256` or GNU `sha256sum -c <archive>.sha256` checks it). Keep and move the two files together. `flair restore` verifies the pair before it sends any request, `--dry-run` included, and refuses an archive whose sidecar is missing or does not match. The sidecar detects a damaged, truncated or mismatched file; it does not prove who wrote the archive.
+
+### Restoring an archive written before digest sidecars
+
+An archive with no `.sha256` sidecar is restored only after the operator approves its exact bytes on the host that restores it:
+
+```bash
+# 1. Print the archive's SHA-256. This approves nothing.
+flair backup-approval legacy-admit ~/flair-backup-20250101.json --admin-pass-file ~/.flair/admin-pass
+
+# 2. Compare that digest with a record you trust, then approve exactly those bytes.
+flair backup-approval legacy-admit ~/flair-backup-20250101.json \
+  --confirm-digest 3f5c...e1a9 --admin-pass-file ~/.flair/admin-pass
+
+# 3. Restore it.
+flair restore ~/flair-backup-20250101.json
+```
+
+Approving, legacy admission and revoking need operator credentials: the admin password, which the command checks as a super_user against this host's running Flair. Approvals live in `~/.flair/approved-archives/`, which must be owned by you with mode `0700` (its files `0600`); the store keeps a copy of each approved archive under its SHA-256 and a record of when and by whom it was approved. No REST route can approve, revoke, list or read it. `flair backup-approval list` shows the approvals and checks each stored copy; `flair backup-approval revoke <sha256>` withdraws one. Restore uses an approval only while it is unrevoked and its stored copy still hashes to the archive's digest, and it restores that stored copy.
+
+An approval authorizes those bytes on this host until you revoke it, so restoring an older approved archive deliberately is possible. It does not show where the archive came from, that a past promotion decision in it was right, or that an archive without a sidecar is unchanged since it was written. `flair backup-approval approve <archive>` records an approval for an archive that has its sidecar; `flair restore` does not need one for such an archive.
 
 ---
 

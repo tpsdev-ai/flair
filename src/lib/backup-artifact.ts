@@ -310,6 +310,8 @@ export type BackupArtifactResult = VerifiedBackupArtifact | BackupArtifactRefusa
 export interface BackupArtifactReadHooks {
   /** Reads a whole file; tests use it to count reads or change bytes between reads. */
   readFile?: (path: string) => Buffer;
+  /** What every refusal says stopped; defaults to "restore stopped before any write". */
+  stopped?: string;
 }
 
 function errnoCode(error: unknown): string {
@@ -329,7 +331,7 @@ function errnoCode(error: unknown): string {
 export function readBackupArtifact(archivePath: string, hooks: BackupArtifactReadHooks = {}): BackupArtifactResult {
   const readFile = hooks.readFile ?? ((path: string) => readFileSync(path));
   const digestPath = backupDigestPath(archivePath);
-  const stopped = "restore stopped before any write";
+  const stopped = hooks.stopped ?? "restore stopped before any write";
   const putSidecar = "put the .sha256 file written with this archive beside it";
 
   let bytes: Buffer;
@@ -355,8 +357,8 @@ export function readBackupArtifact(archivePath: string, hooks: BackupArtifactRea
         reason:
           `archive digest sidecar ${digestPath} not found; ${stopped}. ` +
           `flair backup writes the archive's SHA-256 to that file beside the archive: ${putSidecar}, or take a new ` +
-          "backup. An archive written before flair backup published digests has no sidecar, and restore refuses it " +
-          "(flair#2664).",
+          "backup. An archive written before flair backup published digests has no sidecar: restore admits it only " +
+          `after the operator approves it on this host with flair backup-approval legacy-admit ${archivePath}.`,
       };
     }
     return {
