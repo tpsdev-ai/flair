@@ -12,8 +12,10 @@
  * (src/mqtt-off-deploy.ts ensureMqttListenersOff) reads the target's
  * configuration, sees the application is isolated, restarts the shared worker
  * threads through `restart_service`, follows Harper's job to completion, and
- * passes only when the authenticated MQTT-over-WebSocket check gets Harper's
- * own answer for a disabled MQTT-over-WebSocket path ("off").
+ * passes only when the authenticated MQTT-over-WebSocket check — sent to the
+ * operations API URL's host on the HTTP port this Harper's configuration
+ * names, with no check URL given — gets Harper's own answer for a disabled
+ * MQTT-over-WebSocket path ("off").
  *
  * The test-Harper runs with MQTT over WebSocket on, an HTTPS port and UDS
  * mirrors (what Harper requires before it admits an isolated application), and
@@ -118,7 +120,8 @@ async function deployComponent(name: string, mqttCheck: boolean, progress: strin
   await deploy({
     target: harper.opsURL, // the Harper CLI sends deploy_component here
     opsUrl: harper.opsURL,
-    mqttCheckUrl: harper.httpURL, // MQTT over WebSocket shares the HTTP port
+    // No check URL: the check goes to the operations API URL's host on the
+    // HTTP port this Harper's configuration names (MQTT over WebSocket shares it).
     project: name,
     fabricUser: harper.admin.username,
     fabricPassword: harper.admin.password,
@@ -174,7 +177,8 @@ describe("MQTT off when the deployed application is isolated (real Harper deploy
     const log = second.join("\n");
     expect(log).toContain("isob is an isolated application");
     expect(log).toContain("restarting the shared HTTP worker threads");
-    expect(log).toContain("MQTT listeners checked off");
+    expect(log).toContain(`MQTT listeners verified off on the node at 127.0.0.1: the configuration read from its operations API (${harper.opsURL.replace(/\/$/, "")})`);
+    expect(log).toContain(`the authenticated MQTT-over-WebSocket check sent to http://127.0.0.1:${new URL(harper.httpURL).port} found it off`);
     const afterSecond = await threads();
     expect(afterSecond.some((t) => t.application === "isob"), "Harper started a dedicated worker for isob").toBe(true);
     expect(sharedWorkerIds(afterSecond).some((id) => !before.includes(id)), "a shared worker was replaced").toBe(true);

@@ -10,7 +10,7 @@ import { Command } from "commander";
 import { buildTargetUrl as buildDeployUrl, deploy as deployToFabric, validateOptions as validateDeployOptions } from "../deploy.js";
 import { renderFleetSweepTable, sweepFleet } from "../fleet-verify.js";
 import { readCheckpointFile, verifyCheckpoint } from "../memory-id-checkpoint.js";
-import { deployUrlRefusal, safeUrl } from "../mqtt-off-deploy.js";
+import { deployUrlRefusal, requireAllNodesVerifiedConflict, safeUrl, verifyNodeMqttListenersOff } from "../mqtt-off-deploy.js";
 
 export type DeployCli = {
   fleetSweepCallerExitMessage: (...args: any[]) => any;
@@ -77,9 +77,10 @@ program
   .option("--pkg-version <semver>", "Override version label (default: installed package version)")
   .option("--no-replicated", "Disable cluster-wide replication (default: replicated=true)")
   .option("--no-restart", "Do not restart the component after deploy (default: restart=true)")
-  .option("--keep-mqtt-config", "Leave the target's MQTT configuration as it is (default: set every MQTT listener off before deploying and check it after the deploy's restart)")
-  .option("--mqtt-check-url <url>", "URL that serves the target's HTTP port, for the post-restart MQTT-over-WebSocket check (default: the target URL)")
-  .option("--require-all-nodes-verified", "Fail the deploy when a cluster node other than the one the target URL reaches cannot be verified MQTT-off (default: report it NOT VERIFIED with the check to run)")
+  .option("--keep-mqtt-config", "Leave the target's MQTT configuration as it is (default: set every MQTT listener off before deploying and, after the deploy's restart, verify the node at the operations API URL's host)")
+  .option("--mqtt-check-url <url>", "Confirm the address of the post-restart MQTT-over-WebSocket check, and choose its scheme: it must name the operations API URL's host and an HTTP port that host's configuration names, or it is refused (default: that host on its configured HTTP port)")
+  .option("--require-all-nodes-verified", "Fail the deploy when a cluster node other than the one at the operations API URL's host cannot be verified MQTT-off (default: report it NOT VERIFIED with the check to run); refused with --no-verify, --no-restart, --keep-mqtt-config or --verify-mqtt-only")
+  .option("--verify-mqtt-only", "Deploy nothing: check the MQTT listeners of the node at the operations API URL's host (--ops-target, or derived from the target) — its configuration, and an authenticated MQTT-over-WebSocket check sent to that host on the HTTP port its configuration names — and exit 0 only when both show MQTT off")
   .option("--dry-run", "Resolve package, validate args, skip the deploy call")
   .option("--package-root <dir>", "Override package root (mainly for testing)")
   .option("--deployment-timeout <ms>", "Milliseconds harper waits for cluster-wide peer replication (env: FABRIC_DEPLOYMENT_TIMEOUT; default: 600000 — harper's own 120s default is too short for Fabric)")
@@ -100,10 +101,11 @@ program
     const yellow = (s: string) => `\x1b[33m${s}\x1b[0m`;
     const dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
 
-    // Every URL the deploy takes is checked before anything is printed: a
-    // user name, password, query or fragment is refused (src/mqtt-off-deploy.ts).
-    // An operations API URL derived from a target that passes is scheme, host
-    // and port only (deploy() checks it again).
+    // Every URL the deploy takes is checked before anything is printed: it
+    // needs an allowed scheme and a host, and a user name, password, query or
+    // fragment is refused (src/mqtt-off-deploy.ts). An operations API URL
+    // derived from a target that passes is scheme, host and port only
+    // (deploy() checks it again).
     {
       const fabricOrg = opts.fabricOrg ?? process.env.FABRIC_ORG;
       const fabricCluster = opts.fabricCluster ?? process.env.FABRIC_CLUSTER;
@@ -111,11 +113,59 @@ program
       const refusal = deployUrlRefusal([
         [earlyTarget, "deploy target URL (--target)"],
         [opts.opsTarget ?? process.env.FLAIR_OPS_TARGET, "operations API URL (--ops-target / FLAIR_OPS_TARGET)"],
-        [opts.mqttCheckUrl, "URL the MQTT check reaches (--mqtt-check-url)"],
+        [opts.mqttCheckUrl, "URL the MQTT check reaches (--mqtt-check-url)", "check"],
       ]);
       if (refusal) {
         console.error(red(refusal));
         process.exit(1);
+      }
+      // --require-all-nodes-verified needs the post-restart check: refused
+      // with an option that skips it, before anything is deployed or sent.
+      const conflict = requireAllNodesVerifiedConflict({
+        requireAllNodesVerified: opts.requireAllNodesVerified,
+        verify: opts.verify,
+        restart: opts.restart,
+        keepMqttConfig: opts.keepMqttConfig,
+        verifyMqttOnly: opts.verifyMqttOnly,
+      });
+      if (conflict) {
+        console.error(red(conflict));
+        process.exit(1);
+      }
+
+      // --verify-mqtt-only: the post-restart check for one node, and nothing else.
+      if (opts.verifyMqttOnly) {
+        let creds: { fabricUser?: string; fabricPassword?: string };
+        try {
+          creds = resolveFabricCredentials(opts);
+        } catch (err: any) {
+          console.error(red(`Error: ${err.message}`));
+          process.exit(1);
+        }
+        if (!creds.fabricUser || !creds.fabricPassword) {
+          console.error(red("flair deploy --verify-mqtt-only: needs the admin credential (FABRIC_USER and FABRIC_PASSWORD, or --fabric-user and --fabric-password-file). Nothing was sent."));
+          process.exit(1);
+        }
+        const opsUrl = cli.resolveEffectiveOpsUrl({ target: earlyTarget, opsTarget: opts.opsTarget });
+        if (!opsUrl) {
+          console.error(red("flair deploy --verify-mqtt-only: needs the node's operations API URL (--ops-target or FLAIR_OPS_TARGET), or a target to derive it from (--target, or --fabric-org and --fabric-cluster). Nothing was sent."));
+          process.exit(1);
+        }
+        console.log(`${green("→")} Checking the MQTT listeners of the node at ${safeUrl(opsUrl)} (nothing is deployed, set or restarted)`);
+        try {
+          const { verified } = await verifyNodeMqttListenersOff({
+            url: opsUrl,
+            fabricUser: creds.fabricUser,
+            fabricPassword: creds.fabricPassword,
+            checkUrl: opts.mqttCheckUrl,
+          });
+          console.log(`${green("✓")} ${verified}`);
+          console.log(dim("  Other cluster nodes are not checked: run this against each node's operations API URL."));
+          return;
+        } catch (err: any) {
+          console.error(red(`✗ ${err.message}`));
+          process.exit(1);
+        }
       }
     }
 

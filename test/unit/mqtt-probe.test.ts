@@ -2,8 +2,10 @@
  * mqtt-probe.test.ts — the deploy channel's MQTT-over-WebSocket check
  * (probeMqttOverWebSocket, src/mqtt-off-deploy.ts) against REAL local servers,
  * and the helpers its step relies on: the configuration it requires after
- * setting MQTT off (mqttOffConfirmed) and the URL rules (unsafeUrlProblem,
- * safeUrl, deployUrlRefusal).
+ * setting MQTT off (mqttOffConfirmed), the check's address (mqttCheckAddress:
+ * the operations API URL's host on the HTTP port its configuration names),
+ * the URL rules (unsafeUrlProblem, safeUrl, deployUrlRefusal) and the
+ * `--require-all-nodes-verified` conflicts (requireAllNodesVerifiedConflict).
  *
  * The check is authenticated with the deploy's credential and validates the
  * upgrade (101, a Sec-WebSocket-Accept matching the key, the mqtt
@@ -18,7 +20,7 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { createServer, type Server, type Socket } from "node:net";
-import { deployUrlRefusal, probeMqttOverWebSocket, safeUrl, unsafeUrlProblem } from "../../src/mqtt-off-deploy.ts";
+import { deployUrlRefusal, mqttCheckAddress, probeMqttOverWebSocket, requireAllNodesVerifiedConflict, safeUrl, unsafeUrlProblem } from "../../src/mqtt-off-deploy.ts";
 import { mqttOffConfirmed } from "../../src/lib/mqtt-config.ts";
 
 const servers: Array<{ stop: () => void }> = [];
@@ -167,7 +169,9 @@ describe("probeMqttOverWebSocket", () => {
   });
 
   test("a URL that may not be used is not probed", async () => {
-    expect(await probeMqttOverWebSocket("http://127.0.0.1:1/?token=x", CREDS)).toEqual({ outcome: "inconclusive", detail: "the URL to check may not be used" });
+    for (const url of ["http://127.0.0.1:1/?token=x", "file:///tmp/private-value", "javascript:private-value", "ftp://127.0.0.1:1/"]) {
+      expect([url, await probeMqttOverWebSocket(url, CREDS)]).toEqual([url, { outcome: "inconclusive", detail: "the URL to check may not be used" }]);
+    }
   });
 });
 
@@ -178,8 +182,68 @@ describe("mqttOffConfirmed", () => {
   test("names what is missing or still on; an empty answer is not off", () => {
     expect(mqttOffConfirmed(null)).toBe("the answer is not a configuration object");
     expect(mqttOffConfirmed({})).toBe("the answer has no mqtt section");
-    expect(mqttOffConfirmed({ mqtt: { webSocket: true, network: { port: 1883, securePort: null } } })).toBe("mqtt.webSocket is true, mqtt.network.port is 1883");
+    expect(mqttOffConfirmed({ mqtt: { webSocket: true, network: { port: 1883, securePort: null } } })).toBe("mqtt.webSocket is not false, mqtt.network.port is not null");
     expect(mqttOffConfirmed({ mqtt: { webSocket: false } })).toBe("mqtt.network is missing");
+    expect(mqttOffConfirmed({ mqtt: { network: {} } })).toBe("mqtt.webSocket is missing, mqtt.network.port is missing, mqtt.network.securePort is missing");
+  });
+  test("reports field names and categories only, never a value the answer carries", () => {
+    const reason = mqttOffConfirmed({ mqtt: { webSocket: "private-value", network: { port: "private-value", securePort: { v: "private-value" } } } });
+    expect(reason).toBe("mqtt.webSocket is not false, mqtt.network.port is not null, mqtt.network.securePort is not null");
+    expect(reason).not.toContain("private-value");
+  });
+});
+
+describe("mqttCheckAddress: the operations API URL's host, on the HTTP port its configuration names", () => {
+  const cfg = (http: Record<string, unknown>) => ({ http, mqtt: {} });
+  test("http.port over http; http.securePort over https; when both are set, the one matching the operations API URL's scheme", () => {
+    expect(mqttCheckAddress("http://node-a.example:9925", cfg({ port: 9926, securePort: null }))).toEqual({ url: "http://node-a.example:9926" });
+    expect(mqttCheckAddress("https://node-a.example:9925", cfg({ port: 9926, securePort: null }))).toEqual({ url: "http://node-a.example:9926" });
+    expect(mqttCheckAddress("http://node-a.example:9925", cfg({ port: null, securePort: 9927 }))).toEqual({ url: "https://node-a.example:9927" });
+    expect(mqttCheckAddress("http://node-a.example:9925", cfg({ port: 9926, securePort: 9927 }))).toEqual({ url: "http://node-a.example:9926" });
+    expect(mqttCheckAddress("https://node-a.example:9925", cfg({ port: 9926, securePort: 9927 }))).toEqual({ url: "https://node-a.example:9927" });
+    // Harper's "host:port" form, and an IPv6 host.
+    expect(mqttCheckAddress("http://127.0.0.1:9925", cfg({ port: "127.0.0.1:19926" }))).toEqual({ url: "http://127.0.0.1:19926" });
+    expect(mqttCheckAddress("http://[::1]:9925", cfg({ port: 9926 }))).toEqual({ url: "http://[::1]:9926" });
+  });
+  test("a configuration that names no usable HTTP port gives no address", () => {
+    for (const config of [{}, null, cfg({}), cfg({ port: null, securePort: null }), cfg({ port: "private-value" })]) {
+      const answer = mqttCheckAddress("http://node-a.example:9925", config);
+      expect([JSON.stringify(config), "problem" in answer]).toEqual([JSON.stringify(config), true]);
+      expect(JSON.stringify(answer)).not.toContain("private-value");
+    }
+  });
+  test("a check URL is used only when it names the same host (any case) and a configured HTTP port; its scheme is kept", () => {
+    const config = cfg({ port: 9926, securePort: 9927 });
+    expect(mqttCheckAddress("http://Node-A.example:9925", config, "wss://node-a.EXAMPLE:9927/")).toEqual({ url: "wss://node-a.EXAMPLE:9927/" });
+    expect(mqttCheckAddress("http://node-a.example:9925", config, "ws://node-a.example:9926")).toEqual({ url: "ws://node-a.example:9926" });
+    // The scheme's default port counts as the URL's port.
+    expect(mqttCheckAddress("https://node-a.example:9925", cfg({ securePort: 443 }), "https://node-a.example/")).toEqual({ url: "https://node-a.example/" });
+    for (const check of ["http://node-b.example:9926", "http://node-a.example:9928", "https://node-a.example/", "http://10.0.0.5:9926"]) {
+      const answer = mqttCheckAddress("http://node-a.example:9925", config, check);
+      expect([check, "problem" in answer]).toEqual([check, true]);
+      expect((answer as { problem: string }).problem).toContain("does not name the operations API URL's host (node-a.example) and an HTTP port that host's configuration names");
+    }
+  });
+});
+
+describe("requireAllNodesVerifiedConflict", () => {
+  test("refuses --require-all-nodes-verified with each option that skips the post-restart check, and with --verify-mqtt-only", () => {
+    for (const [over, flag] of [
+      [{ verify: false }, "--no-verify"],
+      [{ restart: false }, "--no-restart"],
+      [{ keepMqttConfig: true }, "--keep-mqtt-config"],
+      [{ verifyMqttOnly: true }, "--verify-mqtt-only"],
+    ] as const) {
+      const message = requireAllNodesVerifiedConflict({ requireAllNodesVerified: true, ...over });
+      expect([flag, message?.includes(`cannot be combined with ${flag}`)]).toEqual([flag, true]);
+      expect(message).toContain("Nothing was deployed or sent");
+    }
+    expect(requireAllNodesVerifiedConflict({ requireAllNodesVerified: true, verify: false, restart: false })).toContain("cannot be combined with --no-verify, --no-restart");
+  });
+  test("is null without the requirement, or with nothing that skips the check", () => {
+    expect(requireAllNodesVerifiedConflict({ verify: false, restart: false, keepMqttConfig: true, verifyMqttOnly: true })).toBeNull();
+    expect(requireAllNodesVerifiedConflict({ requireAllNodesVerified: true })).toBeNull();
+    expect(requireAllNodesVerifiedConflict({ requireAllNodesVerified: true, verify: true, restart: true, keepMqttConfig: false })).toBeNull();
   });
 });
 
@@ -198,11 +262,26 @@ describe("URL rules", () => {
     expect(unsafeUrlProblem("https://host.example:9925")).toBeNull();
     expect(unsafeUrlProblem("http://127.0.0.1:19925/")).toBeNull();
     expect(unsafeUrlProblem("https://host.example/flair")).toBeNull();
+    expect(unsafeUrlProblem("wss://host.example:9926/", "check")).toBeNull();
+    expect(unsafeUrlProblem("ws://127.0.0.1:19926", "check")).toBeNull();
+    expect(unsafeUrlProblem("http://127.0.0.1:19926", "check")).toBeNull();
   });
-  test("safeUrl prints scheme, host, port and path only", () => {
+  test("a scheme other than http or https (or, for the check URL, ws or wss), or a URL without a host, is refused", () => {
+    for (const url of ["file:///tmp/private-value", "javascript:private-value", "ftp://host.example/", "data:text/plain,private-value", "mailto:someone@host.example"]) {
+      expect([url, unsafeUrlProblem(url)]).toEqual([url, "its scheme is not http or https"]);
+      expect([url, unsafeUrlProblem(url, "check")]).toEqual([url, "its scheme is not http, https, ws or wss"]);
+    }
+    expect(unsafeUrlProblem("ws://host.example:9926")).toBe("its scheme is not http or https");
+    expect(unsafeUrlProblem("wss://host.example:9926")).toBe("its scheme is not http or https");
+  });
+  test("safeUrl prints scheme, host, port and path only, and only for an http, https, ws or wss URL with a host", () => {
     expect(safeUrl("https://user:pw@host.example:9925/ops?token=x#y")).toBe("https://host.example:9925/ops");
     expect(safeUrl("http://127.0.0.1:19925/")).toBe("http://127.0.0.1:19925");
+    expect(safeUrl("wss://127.0.0.1:19926/")).toBe("wss://127.0.0.1:19926");
     expect(safeUrl("::")).toBe("(an unparseable URL)");
+    for (const url of ["file:///tmp/private-value", "javascript:private-value"]) {
+      expect([url, safeUrl(url)]).toEqual([url, "(a URL that is not http, https, ws or wss with a host)"]);
+    }
   });
   test("deployUrlRefusal names the first URL that may not be used, showing it only through safeUrl", () => {
     const refusal = deployUrlRefusal([
@@ -214,5 +293,15 @@ describe("URL rules", () => {
     expect(refusal).not.toContain("hunter2");
     expect(refusal).not.toContain("token=abc");
     expect(deployUrlRefusal([["https://host.example", "deploy target URL"]])).toBeNull();
+  });
+  test("deployUrlRefusal applies each URL's grammar and never prints a refused URL's text", () => {
+    expect(deployUrlRefusal([["wss://host.example:9926", "URL the MQTT check reaches", "check"]])).toBeNull();
+    const refusal = deployUrlRefusal([["wss://host.example:9926", "operations API URL"]]);
+    expect(refusal).toContain("the operations API URL wss://host.example:9926 cannot be used: its scheme is not http or https");
+    for (const [url, kind] of [["javascript:private-value", "http"], ["file:///tmp/private-value", "check"]] as const) {
+      const message = deployUrlRefusal([[url, "URL", kind]]);
+      expect(message).toContain("cannot be used: its scheme is not");
+      expect(message).not.toContain("private-value");
+    }
   });
 });

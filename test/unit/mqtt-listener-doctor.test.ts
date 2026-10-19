@@ -7,12 +7,16 @@
  * terms (server/mqtt.ts `handleApplication`): a WebSocket path when
  * `mqtt.webSocket` is truthy, a TCP listener when `mqtt.network.port` is, a TLS
  * listener when `mqtt.network.securePort` is, and nothing when there is no
- * `mqtt` section. test/integration/mqtt-off-deploy-doctor.test.ts runs it
- * through the real CLI against a real Harper.
+ * `mqtt` section. It reads the saved configuration, not the running
+ * listeners, and every line it prints says so and names the live check
+ * (`flair deploy --verify-mqtt-only`).
+ * test/integration/mqtt-off-deploy-doctor.test.ts runs it through the real CLI
+ * against a real Harper, including one whose configuration is off while its
+ * worker threads still serve MQTT.
  */
 import { describe, expect, test } from "bun:test";
 import { MQTT_DISABLED_CONFIG, mqttListenersOn } from "../../src/lib/mqtt-config.ts";
-import { MQTT_LISTENERS_OFF_LINE, describeMqttListenerFinding, mqttListenerSection, readInstanceConfiguration } from "../../src/lib/mqtt-listener-doctor.ts";
+import { MQTT_CONFIGURATION_NOTE, MQTT_LISTENERS_OFF_LINE, describeMqttListenerFinding, mqttListenerSection, readInstanceConfiguration } from "../../src/lib/mqtt-listener-doctor.ts";
 import { rootConfigurationProblem } from "../../src/lib/mqtt-config.ts";
 
 /** Harper's shipped defaults (static/defaultConfig.yaml). */
@@ -112,16 +116,34 @@ describe("readInstanceConfiguration and the doctor's MQTT listeners section", ()
     expect(empty).toEqual({ kind: "not-run", reason: "the answer is not a recognizable root configuration (it has no http, operationsApi, rootPath)" });
   });
 
-  test("the section the doctor prints: the all-off line for MQTT off, the listeners and fix for MQTT on", () => {
-    expect(mqttListenerSection({ kind: "ok", config: { ...ROOT, mqtt: MQTT_DISABLED_CONFIG } })).toEqual({ status: "ok", line: MQTT_LISTENERS_OFF_LINE });
+  test("the section the doctor prints: the all-off line for MQTT off, the listeners and fix for MQTT on, each with the configuration note", () => {
+    expect(mqttListenerSection({ kind: "ok", config: { ...ROOT, mqtt: MQTT_DISABLED_CONFIG } })).toEqual({ status: "ok", line: MQTT_LISTENERS_OFF_LINE, note: MQTT_CONFIGURATION_NOTE });
     const on = mqttListenerSection({ kind: "ok", config: { ...ROOT, mqtt: HARPER_DEFAULTS } });
     expect(on.status).toBe("issue");
+    expect(on.note).toBe(MQTT_CONFIGURATION_NOTE);
     expect(on.fix).toContain("set_configuration");
+    expect(on.fix).toContain("flair deploy --verify-mqtt-only");
+    expect(mqttListenerSection({ kind: "not-run", reason: "x" }).note).toBe(MQTT_CONFIGURATION_NOTE);
   });
 
-  test("rootConfigurationProblem names what a partial answer lacks", () => {
+  test("the configuration note says the check reads the saved configuration, not the running listeners, and names the live check", () => {
+    expect(MQTT_CONFIGURATION_NOTE).toContain("This reads the saved configuration, not the running listeners");
+    expect(MQTT_CONFIGURATION_NOTE).toContain("worker threads that have not restarted since it changed keep serving MQTT");
+    expect(MQTT_CONFIGURATION_NOTE).toContain("flair deploy --verify-mqtt-only");
+  });
+
+  test("a configured port is printed only as the integer it parses to", () => {
+    expect(mqttListenersOn({ mqtt: { network: { port: "private-value", securePort: "0.0.0.0:8883" } } })).toEqual([
+      "MQTT on TCP port (mqtt.network.port)",
+      "MQTT on TLS port 8883 (mqtt.network.securePort)",
+    ]);
+  });
+
+  test("rootConfigurationProblem checks only http, operationsApi and rootPath: an answer missing one is refused, any object with all three is accepted", () => {
     expect(rootConfigurationProblem(ROOT)).toBeNull();
     expect(rootConfigurationProblem({ ...ROOT, rootPath: "" })).toBe("it has no rootPath");
     expect(rootConfigurationProblem(null)).toBe("the answer is not an object");
+    // Accepted although it is otherwise partial: the recognizer reads those three fields only.
+    expect(rootConfigurationProblem({ http: {}, operationsApi: {}, rootPath: "/x" })).toBeNull();
   });
 });

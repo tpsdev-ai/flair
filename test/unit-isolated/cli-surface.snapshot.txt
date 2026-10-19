@@ -2,7 +2,7 @@
 # Byte-identical gate for src/cli.ts modularization. Do not edit by hand.
 # Refresh: UPDATE_CLI_SURFACE_SNAPSHOT=1 bun test test/unit-isolated/cli-surface-snapshot.test.ts
 # helpWidth=80 (pinned; TTY columns must not affect this file)
-# commands=143 options=661
+# commands=143 options=662
 #
 # TREE is registration order: every command/subcommand + declared options/args.
 # HELP is each command's outputHelp() (--help, including addHelpText).
@@ -1671,13 +1671,13 @@ flair upgrade
       attr: replicated
       negate: true
     --keep-mqtt-config
-      description: For --target: leave the target's MQTT configuration as it is (default: set every MQTT listener off before deploying and check it after the deploy's restart)
+      description: For --target: leave the target's MQTT configuration as it is (default: set every MQTT listener off before deploying and, after the deploy's restart, verify the node at the operations API URL's host)
       attr: keepMqttConfig
     --mqtt-check-url <url>
-      description: For --target: URL that serves the target's HTTP port, for the post-restart MQTT-over-WebSocket check (default: --target)
+      description: For --target: confirm the address of the post-restart MQTT-over-WebSocket check, and choose its scheme: it must name the operations API URL's host and an HTTP port that host's configuration names, or it is refused (default: that host on its configured HTTP port)
       attr: mqttCheckUrl
     --require-all-nodes-verified
-      description: For --target: fail when a cluster node other than the one the target URL reaches cannot be verified MQTT-off (default: report it NOT VERIFIED with the check to run)
+      description: For --target: fail when a cluster node other than the one at the operations API URL's host cannot be verified MQTT-off (default: report it NOT VERIFIED with the check to run); refused with --no-restart or --keep-mqtt-config
       attr: requireAllNodesVerified
     --ops-target <url>
       description: For --target: operations API URL for the MQTT-off configuration and check (env: FLAIR_OPS_TARGET; default: derived from --target)
@@ -1816,14 +1816,17 @@ flair deploy
       attr: restart
       negate: true
     --keep-mqtt-config
-      description: Leave the target's MQTT configuration as it is (default: set every MQTT listener off before deploying and check it after the deploy's restart)
+      description: Leave the target's MQTT configuration as it is (default: set every MQTT listener off before deploying and, after the deploy's restart, verify the node at the operations API URL's host)
       attr: keepMqttConfig
     --mqtt-check-url <url>
-      description: URL that serves the target's HTTP port, for the post-restart MQTT-over-WebSocket check (default: the target URL)
+      description: Confirm the address of the post-restart MQTT-over-WebSocket check, and choose its scheme: it must name the operations API URL's host and an HTTP port that host's configuration names, or it is refused (default: that host on its configured HTTP port)
       attr: mqttCheckUrl
     --require-all-nodes-verified
-      description: Fail the deploy when a cluster node other than the one the target URL reaches cannot be verified MQTT-off (default: report it NOT VERIFIED with the check to run)
+      description: Fail the deploy when a cluster node other than the one at the operations API URL's host cannot be verified MQTT-off (default: report it NOT VERIFIED with the check to run); refused with --no-verify, --no-restart, --keep-mqtt-config or --verify-mqtt-only
       attr: requireAllNodesVerified
+    --verify-mqtt-only
+      description: Deploy nothing: check the MQTT listeners of the node at the operations API URL's host (--ops-target, or derived from the target) — its configuration, and an authenticated MQTT-over-WebSocket check sent to that host on the HTTP port its configuration names — and exit 0 only when both show MQTT off
+      attr: verifyMqttOnly
     --dry-run
       description: Resolve package, validate args, skip the deploy call
       attr: dryRun
@@ -4859,15 +4862,20 @@ Options:
                                  (default: replicated=true)
   --keep-mqtt-config             For --target: leave the target's MQTT
                                  configuration as it is (default: set every MQTT
-                                 listener off before deploying and check it
-                                 after the deploy's restart)
-  --mqtt-check-url <url>         For --target: URL that serves the target's HTTP
-                                 port, for the post-restart MQTT-over-WebSocket
-                                 check (default: --target)
+                                 listener off before deploying and, after the
+                                 deploy's restart, verify the node at the
+                                 operations API URL's host)
+  --mqtt-check-url <url>         For --target: confirm the address of the
+                                 post-restart MQTT-over-WebSocket check, and
+                                 choose its scheme: it must name the operations
+                                 API URL's host and an HTTP port that host's
+                                 configuration names, or it is refused (default:
+                                 that host on its configured HTTP port)
   --require-all-nodes-verified   For --target: fail when a cluster node other
-                                 than the one the target URL reaches cannot be
-                                 verified MQTT-off (default: report it NOT
-                                 VERIFIED with the check to run)
+                                 than the one at the operations API URL's host
+                                 cannot be verified MQTT-off (default: report it
+                                 NOT VERIFIED with the check to run); refused
+                                 with --no-restart or --keep-mqtt-config
   --ops-target <url>             For --target: operations API URL for the
                                  MQTT-off configuration and check (env:
                                  FLAIR_OPS_TARGET; default: derived from
@@ -5014,15 +5022,28 @@ Options:
                                  (default: restart=true)
   --keep-mqtt-config             Leave the target's MQTT configuration as it is
                                  (default: set every MQTT listener off before
-                                 deploying and check it after the deploy's
-                                 restart)
-  --mqtt-check-url <url>         URL that serves the target's HTTP port, for the
-                                 post-restart MQTT-over-WebSocket check
-                                 (default: the target URL)
+                                 deploying and, after the deploy's restart,
+                                 verify the node at the operations API URL's
+                                 host)
+  --mqtt-check-url <url>         Confirm the address of the post-restart
+                                 MQTT-over-WebSocket check, and choose its
+                                 scheme: it must name the operations API URL's
+                                 host and an HTTP port that host's configuration
+                                 names, or it is refused (default: that host on
+                                 its configured HTTP port)
   --require-all-nodes-verified   Fail the deploy when a cluster node other than
-                                 the one the target URL reaches cannot be
-                                 verified MQTT-off (default: report it NOT
-                                 VERIFIED with the check to run)
+                                 the one at the operations API URL's host cannot
+                                 be verified MQTT-off (default: report it NOT
+                                 VERIFIED with the check to run); refused with
+                                 --no-verify, --no-restart, --keep-mqtt-config
+                                 or --verify-mqtt-only
+  --verify-mqtt-only             Deploy nothing: check the MQTT listeners of the
+                                 node at the operations API URL's host
+                                 (--ops-target, or derived from the target) —
+                                 its configuration, and an authenticated
+                                 MQTT-over-WebSocket check sent to that host on
+                                 the HTTP port its configuration names — and
+                                 exit 0 only when both show MQTT off
   --dry-run                      Resolve package, validate args, skip the deploy
                                  call
   --package-root <dir>           Override package root (mainly for testing)

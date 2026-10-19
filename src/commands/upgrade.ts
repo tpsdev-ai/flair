@@ -10,7 +10,7 @@ import { Command } from "commander";
 import { detectWiredFlairMcp } from "../doctor-client.js";
 import { UPGRADE_SNAPSHOT_ROOT, fetchDeclaredHarperVersion, readInstalledHarperVersion } from "../engine-version.js";
 import { fabricUpgrade, type FabricUpgradeOptions } from "../fabric-upgrade.js";
-import { deployUrlRefusal, safeUrl } from "../mqtt-off-deploy.js";
+import { deployUrlRefusal, requireAllNodesVerifiedConflict, safeUrl } from "../mqtt-off-deploy.js";
 import { renderFleetSweepTable, sweepFleet } from "../fleet-verify.js";
 import { resolveNpmGlobalPrefix } from "../install/global-bin-path.js";
 import { defaultKeysDir } from "../lib/auth-resolve.js";
@@ -972,9 +972,9 @@ program
   .option("--harper-version <semver>", "Pin harper to this version for --target (default: registry latest, floored at the flair#513 fix)")
   .option("--project <name>", "Fabric component name for --target", "flair")
   .option("--no-replicated", "Disable cluster-wide replication for --target (default: replicated=true)")
-  .option("--keep-mqtt-config", "For --target: leave the target's MQTT configuration as it is (default: set every MQTT listener off before deploying and check it after the deploy's restart)")
-  .option("--mqtt-check-url <url>", "For --target: URL that serves the target's HTTP port, for the post-restart MQTT-over-WebSocket check (default: --target)")
-  .option("--require-all-nodes-verified", "For --target: fail when a cluster node other than the one the target URL reaches cannot be verified MQTT-off (default: report it NOT VERIFIED with the check to run)")
+  .option("--keep-mqtt-config", "For --target: leave the target's MQTT configuration as it is (default: set every MQTT listener off before deploying and, after the deploy's restart, verify the node at the operations API URL's host)")
+  .option("--mqtt-check-url <url>", "For --target: confirm the address of the post-restart MQTT-over-WebSocket check, and choose its scheme: it must name the operations API URL's host and an HTTP port that host's configuration names, or it is refused (default: that host on its configured HTTP port)")
+  .option("--require-all-nodes-verified", "For --target: fail when a cluster node other than the one at the operations API URL's host cannot be verified MQTT-off (default: report it NOT VERIFIED with the check to run); refused with --no-restart or --keep-mqtt-config")
   .option("--ops-target <url>", "For --target: operations API URL for the MQTT-off configuration and check (env: FLAIR_OPS_TARGET; default: derived from --target)")
   .option("--yes", "Skip the confirmation prompt for --target")
   .option("--install-hooks", "Consent to installing missing SessionStart hooks (claude-code / Codex) during upgrade. The hook executes at every session start — upgrade will not write it unprompted. Interactive runs prompt; non-interactive runs state the gap and withhold ✅ unless this flag is passed.")
@@ -997,10 +997,21 @@ program
       const refusal = deployUrlRefusal([
         [opts.target, "deploy target URL (--target)"],
         [opts.opsTarget ?? process.env.FLAIR_OPS_TARGET, "operations API URL (--ops-target / FLAIR_OPS_TARGET)"],
-        [opts.mqttCheckUrl, "URL the MQTT check reaches (--mqtt-check-url)"],
+        [opts.mqttCheckUrl, "URL the MQTT check reaches (--mqtt-check-url)", "check"],
       ]);
       if (refusal) {
         console.error(`\x1b[31m${refusal}\x1b[0m`);
+        process.exit(1);
+      }
+      // --require-all-nodes-verified needs deploy()'s post-restart check:
+      // refused with an option that skips it, before anything is staged.
+      const conflict = requireAllNodesVerifiedConflict({
+        requireAllNodesVerified: opts.requireAllNodesVerified,
+        restart: opts.restart,
+        keepMqttConfig: opts.keepMqttConfig,
+      });
+      if (conflict) {
+        console.error(`\x1b[31m${conflict}\x1b[0m`);
         process.exit(1);
       }
       if (!opts.check) console.log("OAuth redirect migration is local-only; --target requires target-side OAuth environment configuration.");

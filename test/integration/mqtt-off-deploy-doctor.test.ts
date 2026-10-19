@@ -10,10 +10,17 @@
  *   2. the deploy channel's own request (applyMqttOffConfiguration, the call
  *      `flair deploy` / `flair upgrade --target` make before deploying) is sent
  *      to this instance's operations API: its configuration then has every
- *      MQTT listener off, and `flair doctor` passes the check;
+ *      MQTT listener off, and `flair doctor` passes its configuration check —
+ *      while the worker threads, not yet restarted, still serve MQTT over
+ *      WebSocket. In that state doctor's section says it reads the saved
+ *      configuration, not the running listeners, and names the live check;
+ *      the live check itself (`flair deploy --verify-mqtt-only --ops-target
+ *      <this instance>`, the real CLI) reports MQTT still served and exits 1;
  *   3. restarting the worker threads, as the deploy's restart does, removes the
  *      MQTT-over-WebSocket path: an MQTT session that was accepted before is no
- *      longer served.
+ *      longer served, and `flair deploy --verify-mqtt-only` now reports the
+ *      node verified (exit 0), having sent its check to this instance's host on
+ *      the HTTP port its configuration names.
  * Throughout, the deploy channel's own check (probeMqttOverWebSocket,
  * authenticated with the administrator's credential) is pinned against this
  * real Harper: "served" while MQTT over WebSocket is on, "off" — Harper's
@@ -38,7 +45,7 @@ import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-
 import { MQTT_REASON, MqttClient } from "../helpers/mqtt-client";
 import { applyMqttOffConfiguration } from "../../src/deploy";
 import { probeMqttOverWebSocket } from "../../src/mqtt-off-deploy";
-import { MQTT_LISTENERS_OFF_LINE } from "../../src/lib/mqtt-listener-doctor";
+import { MQTT_CONFIGURATION_NOTE, MQTT_LISTENERS_OFF_LINE } from "../../src/lib/mqtt-listener-doctor";
 
 const CLI = join(process.cwd(), "dist", "cli.js");
 
@@ -62,10 +69,21 @@ function assertOwnInstance(h: HarperInstance): void {
 }
 
 function runDoctor(): Promise<RunResult> {
+  return runCli(["doctor", "--port", new URL(harper.httpURL).port]);
+}
+
+/** `flair deploy --verify-mqtt-only` against this instance's operations API, with its admin credential. */
+function runVerifyMqttOnly(): Promise<RunResult> {
+  return runCli(["deploy", "--verify-mqtt-only", "--ops-target", harper.opsURL], {
+    FABRIC_USER: harper.admin.username,
+    FABRIC_PASSWORD: harper.admin.password,
+  });
+}
+
+function runCli(args: string[], extraEnv: Record<string, string> = {}): Promise<RunResult> {
   return new Promise((resolve, reject) => {
-    const args = ["doctor", "--port", new URL(harper.httpURL).port];
     const startedAt = Date.now();
-    const env = {
+    const env: Record<string, string | undefined> = {
       ...process.env,
       HOME: cliHome,
       FLAIR_URL: harper.httpURL,
@@ -73,6 +91,9 @@ function runDoctor(): Promise<RunResult> {
       FLAIR_TOKEN: "",
       FLAIR_ADMIN_PASS: harper.admin.password,
       NO_COLOR: "1",
+      FLAIR_TARGET: "",
+      FLAIR_OPS_TARGET: "",
+      ...extraEnv,
     };
     const child = spawn(nodeBin({ env }), [CLI, ...args], { env, timeout: 20_000 });
     let stdout = "";
@@ -173,6 +194,21 @@ describe("MQTT off in a component deployment (real CLI + real spawned Harper)", 
     expect(off.stdout).not.toContain("MQTT over WebSocket on the HTTP port");
     expect(issueCount(off.stdout), "turning MQTT off did not move the summary by one").toBe(onCount - 1);
 
+    // The saved configuration is off, but the worker threads have not
+    // restarted: MQTT over WebSocket is still served. Doctor's section says
+    // it read the configuration, not the running listeners, and names the
+    // live check; the live check reports MQTT still served.
+    expect(await mqttSession(), "an administrator's MQTT session while the workers keep the old listeners").toBe(MQTT_REASON.SUCCESS);
+    expect(off.stdout).toContain("MQTT listeners (configuration)");
+    expect(off.stdout.replace(/\s+/g, " ")).toContain(MQTT_CONFIGURATION_NOTE);
+    const stale = await runVerifyMqttOnly();
+    expect(stale.code, `${stale.stdout}\n${stale.stderr}`).toBe(1);
+    const httpOrigin = `http://127.0.0.1:${new URL(harper.httpURL).port}`;
+    expect(stale.stderr).toContain(`${httpOrigin} still serves MQTT over WebSocket (an MQTT CONNACK came back), although the configuration of`);
+    expect(stale.stderr).toContain("shows the MQTT-off values: its worker threads have not applied it");
+    expect(stale.stderr).toContain('"operation":"restart_service"');
+    expect(stale.stdout).not.toContain("verified off");
+
     // 3. The deploy's restart (restart=true) restarts the HTTP worker threads,
     //    which register the MQTT listeners.
     const restart = await fetch(harper.opsURL, {
@@ -199,5 +235,12 @@ describe("MQTT off in a component deployment (real CLI + real spawned Harper)", 
     });
     const wrongPassword = await probeMqttOverWebSocket(harper.httpURL, { ...creds, password: "wrong-not-a-secret" });
     expect(wrongPassword.outcome, `a login failure (${wrongPassword.detail})`).toBe("inconclusive");
+
+    // The live check now verifies the node, at this host on its configured HTTP port.
+    const live = await runVerifyMqttOnly();
+    expect(live.code, `${live.stdout}\n${live.stderr}`).toBe(0);
+    expect(live.stdout).toContain("MQTT listeners verified off on the node at 127.0.0.1");
+    expect(live.stdout).toContain(`the authenticated MQTT-over-WebSocket check sent to ${httpOrigin} found it off`);
+    expect(live.stdout).toContain("Other cluster nodes are not checked");
   }, 240_000);
 });

@@ -8,19 +8,25 @@
  *   1. sends the MQTT-off configuration to the target's operations API
  *      (`set_configuration`) before anything is deployed — a refusal, or a
  *      cluster node the answer names as failed, stops it there;
- *   2. after the deploy's restart, verifies the node the target URL reaches:
- *      reads its configuration (it must show the MQTT-off values), restarts
- *      the shared worker threads when the application is isolated (failing on
- *      a failure the job reports — a completed restart job is not proof of a
- *      peer's restart), and checks MQTT over WebSocket — passing only on
- *      Harper's answer for a disabled path ("off"), and failing, with the
- *      restart and check to run, when MQTT is still served or the check is
- *      inconclusive. Every other cluster node the replicated answers name is
- *      reported NOT VERIFIED with the check to run on it;
- *      `requireAllNodesVerified` turns that into a failure.
- * Every URL is scheme, host, port and path only: a user name, password, query
- * or fragment is refused before anything is sent. Errors quote a remote's
- * HTTP status, never its body, a job's message or a transport error's text.
+ *   2. after the deploy's restart, verifies the node at the operations API
+ *      URL's host: reads its configuration (it must show the MQTT-off values),
+ *      takes the WebSocket check's address from it (that host, on the HTTP
+ *      port the configuration names; a given check URL naming another host or
+ *      port is refused before any check is sent), restarts the shared worker
+ *      threads when the application is isolated (failing on a failure the job
+ *      reports — a completed restart job is not proof of a peer's restart),
+ *      and checks MQTT over WebSocket — passing only on Harper's answer for a
+ *      disabled path ("off"), and failing, with the restart and live check to
+ *      run, when MQTT is still served or the check is inconclusive. Every
+ *      other cluster node the replicated answers name is reported NOT
+ *      VERIFIED with the live check to run on it; `requireAllNodesVerified`
+ *      turns that into a failure, and is refused before anything is deployed
+ *      with an option that skips the check.
+ * Every URL needs an allowed scheme and a host, and is scheme, host, port and
+ * path only: anything else is refused before anything is sent. A redirect
+ * from the operations API is not followed. Errors quote a remote's HTTP
+ * status, never its body, a job's message, a configuration value or a
+ * transport error's text.
  *
  * The whole deploy() path runs here against a REAL HTTP server standing in for
  * the target's operations API (the HTTP boundary), with a stub Harper binary
@@ -39,7 +45,7 @@ import { join } from "node:path";
 import { deploy, REQUIRED_PACKAGE_FILES } from "../../src/deploy.ts";
 import { MQTT_DISABLED_SET_CONFIGURATION } from "../../src/lib/mqtt-config.ts";
 import type { DeployOptions } from "../../src/deploy.ts";
-import type { MqttProbeOutcome } from "../../src/mqtt-off-deploy.ts";
+import { verifyNodeMqttListenersOff, type MqttProbeOutcome } from "../../src/mqtt-off-deploy.ts";
 
 interface Received {
   body: any;
@@ -60,13 +66,19 @@ let harperRanMarker = "";
 const temps: string[] = [];
 
 const MQTT_OFF = { network: { port: null, securePort: null, mtls: false }, webSocket: false, requireAuthentication: true };
+/** The HTTP port the stand-in's configuration names; nothing listens there (the WebSocket check is injected). */
+const NODE_HTTP_PORT = 47_926;
+/** A get_configuration answer for the node: its HTTP port, MQTT off, and `extra`. */
+const nodeConfig = (extra: Record<string, unknown> = {}) => ({ http: { port: NODE_HTTP_PORT, securePort: null }, mqtt: MQTT_OFF, ...extra });
+/** Where the check goes for the stand-in: the operations API URL's host, on the configured HTTP port. */
+let checkAddress: string;
 /** Harper's completed restart job: its own message, and for a replicated restart each node's (bin/restart.ts). */
 const completedJob = (body: any, nodes: unknown[] = [{ node: "node-b", message: "Successfully completed job: peer-job-1" }]) =>
   Response.json([{ id: body.id, status: "COMPLETE", message: `Successfully completed job: ${body.id}`, ...(lastRestartWasReplicated ? { result: { replicated: nodes } } : {}) }]);
 let lastRestartWasReplicated = false;
 const defaults = (): Record<string, Handler> => ({
   set_configuration: () => Response.json({ message: "Configuration successfully set." }),
-  get_configuration: () => Response.json({ mqtt: MQTT_OFF }),
+  get_configuration: () => Response.json(nodeConfig()),
   restart_service: (body) => { lastRestartWasReplicated = body.replicated === true; return Response.json({ message: "Restarting http_workers", job_id: "job-1" }); },
   get_job: (body) => completedJob(body),
 });
@@ -89,6 +101,7 @@ beforeAll(() => {
   });
   opsUrl = `http://127.0.0.1:${server.port}`;
   target = `http://127.0.0.1:${Number(server.port) + 1}`;
+  checkAddress = `http://127.0.0.1:${NODE_HTTP_PORT}`;
 });
 
 afterAll(() => {
@@ -249,17 +262,23 @@ describe("step 1: deploy() sends the MQTT-off configuration before Harper deploy
 });
 
 describe("step 2: after the deploy's restart, deploy() checks the MQTT listeners are off", () => {
-  test("a shared application: the configuration is read and MQTT over WebSocket is checked at the target URL; no extra restart", async () => {
+  test("a shared application: the configuration is read and MQTT over WebSocket is checked at the operations API URL's host on the HTTP port that configuration names, not at the target URL; no extra restart", async () => {
     reset();
     const probed: string[] = [];
-    await deploy(base({ mqttProbe: async (url) => { probed.push(url); return OFF; } }));
+    const progress: string[] = [];
+    await deploy(base({ mqttProbe: async (url) => { probed.push(url); return OFF; }, onProgress: (m) => progress.push(m) }));
     expect(ops()).toEqual(["set_configuration", "get_configuration"]);
     expect(received[1].harperHadRun, "the configuration was read after Harper deployed").toBe(true);
-    expect(probed).toEqual([target]);
+    expect(probed).toEqual([checkAddress]);
+    expect(probed).not.toContain(target);
+    const verified = progress.find((m) => m.startsWith("MQTT listeners verified off"));
+    expect(verified).toContain("verified off on the node at 127.0.0.1: the configuration read from its operations API");
+    expect(verified).toContain(`the authenticated MQTT-over-WebSocket check sent to ${checkAddress} found it off`);
+    expect(verified).toContain("a host name that load-balances across nodes is not separated");
   }, 60_000);
 
   test("an isolated application: the shared worker threads are restarted (pool scope, replicated), the job is awaited, then MQTT over WebSocket is checked", async () => {
-    reset({ get_configuration: () => Response.json({ mqtt: MQTT_OFF, flair: { isolated: true } }) });
+    reset({ get_configuration: () => Response.json(nodeConfig({ flair: { isolated: true } })) });
     let probesAfterRestart = 0;
     await deploy(base({ mqttProbe: async () => { if (ops().includes("restart_service")) probesAfterRestart++; return OFF; } }));
     expect(ops()).toEqual(["set_configuration", "get_configuration", "restart_service", "get_job"]);
@@ -270,7 +289,7 @@ describe("step 2: after the deploy's restart, deploy() checks the MQTT listeners
 
   test("a standalone isolated instance: the restart job answers that there is no replication, and the shared workers are restarted on their own", async () => {
     reset({
-      get_configuration: () => Response.json({ mqtt: MQTT_OFF, "my-flair": { isolated: true } }),
+      get_configuration: () => Response.json(nodeConfig({ "my-flair": { isolated: true } })),
       restart_service: (body) => Response.json({ message: "Restarting http_workers", job_id: body.replicated ? "job-r" : "job-1" }),
       get_job: (body) => body.id === "job-r"
         ? Response.json([{ id: "job-r", status: "ERROR", message: "Replication not implemented." }])
@@ -293,16 +312,28 @@ describe("step 2: after the deploy's restart, deploy() checks the MQTT listeners
     reset();
     let thrown: Error | undefined;
     try { await deploy(base({ mqttProbe: async () => SERVED })); } catch (err) { thrown = err as Error; }
-    expect(thrown?.message).toContain(`${target} still serves MQTT over WebSocket after the shared worker threads were restarted`);
+    expect(thrown?.message).toContain(`${checkAddress} still serves MQTT over WebSocket after the shared worker threads were restarted`);
     expect(thrown?.message).toContain('{"operation":"restart_service","service":"http_workers","scope":""}');
     expect(thrown?.message).toContain(opsUrl);
-    expect(thrown?.message).toContain("get_configuration");
+    expect(thrown?.message).toContain(`flair deploy --verify-mqtt-only --ops-target ${opsUrl}`);
     expect(ops().filter((o) => o === "restart_service").length).toBe(1);
   }, 60_000);
 
-  test("a configuration that still starts an MQTT listener fails the deploy by name", async () => {
-    reset({ get_configuration: () => Response.json({ mqtt: { ...MQTT_OFF, webSocket: true } }) });
-    await expect(deploy(base())).rejects.toThrow(/does not show the MQTT-off values that were set: mqtt.webSocket is true/);
+  test("a configuration that still starts an MQTT listener fails the deploy by field name and category", async () => {
+    reset({ get_configuration: () => Response.json(nodeConfig({ mqtt: { ...MQTT_OFF, webSocket: true } })) });
+    await expect(deploy(base())).rejects.toThrow(/does not show the MQTT-off values: mqtt.webSocket is not false\./);
+  }, 60_000);
+
+  test("a successful configuration answer that echoes a value is reported by field name and category only, never the value", async () => {
+    reset({
+      get_configuration: () => Response.json(nodeConfig({ mqtt: { webSocket: "private-value", network: { port: "private-value", securePort: "private-value" } } })),
+    });
+    const progress: string[] = [];
+    const warn = captureWarn();
+    let thrown: Error | undefined;
+    try { await deploy(base({ onProgress: (m) => progress.push(m) })); } catch (err) { thrown = err as Error; } finally { warn.restore(); }
+    expect(thrown?.message).toContain("mqtt.webSocket is not false, mqtt.network.port is not null, mqtt.network.securePort is not null");
+    expect([thrown?.message ?? "", ...progress, ...warn.lines].join("\n")).not.toContain("private-value");
   }, 60_000);
 
   test("a configuration that cannot be read fails the deploy by name", async () => {
@@ -312,7 +343,7 @@ describe("step 2: after the deploy's restart, deploy() checks the MQTT listeners
 
   test("a restart job that fails fails the deploy by name", async () => {
     reset({
-      get_configuration: () => Response.json({ mqtt: MQTT_OFF, flair: { isolated: true } }),
+      get_configuration: () => Response.json(nodeConfig({ flair: { isolated: true } })),
       get_job: () => Response.json([{ id: "job-1", status: "ERROR", message: "worker did not start" }]),
     });
     let thrown: Error | undefined;
@@ -339,7 +370,7 @@ describe("step 2: after the deploy's restart, deploy() checks the MQTT listeners
 });
 
 describe("step 2 fails unless every restart and the check are proven", () => {
-  const isolatedConfig = () => Response.json({ mqtt: MQTT_OFF, flair: { isolated: true } });
+  const isolatedConfig = () => Response.json(nodeConfig({ flair: { isolated: true } }));
 
   test("a restart answered without a job id fails the deploy by name", async () => {
     reset({ get_configuration: isolatedConfig, restart_service: () => Response.json({ message: "Restarting http_workers" }) });
@@ -386,9 +417,9 @@ describe("step 2 fails unless every restart and the check are proven", () => {
     reset();
     let thrown: Error | undefined;
     try { await deploy(base({ mqttProbe: async () => INCONCLUSIVE })); } catch (err) { thrown = err as Error; }
-    expect(thrown?.message).toContain(`could not confirm that ${target} no longer serves MQTT over WebSocket (test: no answer)`);
+    expect(thrown?.message).toContain(`could not confirm that ${checkAddress} no longer serves MQTT over WebSocket (test: no answer)`);
     expect(thrown?.message).toContain('"operation":"restart_service"');
-    expect(thrown?.message).toContain("get_configuration");
+    expect(thrown?.message).toContain("flair deploy --verify-mqtt-only");
     expect(ops()).not.toContain("restart_service"); // an inconclusive check is not taken for "served"
   }, 60_000);
 
@@ -404,22 +435,61 @@ describe("step 2 fails unless every restart and the check are proven", () => {
       [{}, "the answer has no mqtt section"],
       [[], "the answer is not a configuration object"],
       [{ mqtt: { webSocket: false } }, "mqtt.network is missing"],
-      [{ mqtt: { webSocket: false, network: { port: null } } }, "mqtt.network.securePort is undefined"],
+      [{ mqtt: { webSocket: false, network: { port: null } } }, "mqtt.network.securePort is missing"],
     ] as const) {
       reset({ get_configuration: () => Response.json(answer) });
       await expect(deploy(base()), JSON.stringify(answer)).rejects.toThrow(why);
     }
   }, 60_000);
 
-  test("the WebSocket check reaches --mqtt-check-url when given", async () => {
+  test("--mqtt-check-url naming the operations API URL's host and its configured HTTP port is used, with its own scheme", async () => {
     reset();
     const probed: string[] = [];
-    await deploy(base({ mqttCheckUrl: "https://flair.example.invalid", mqttProbe: async (url) => { probed.push(url); return OFF; } }));
-    expect(probed).toEqual(["https://flair.example.invalid"]);
+    await deploy(base({ mqttCheckUrl: `wss://127.0.0.1:${NODE_HTTP_PORT}/`, mqttProbe: async (url) => { probed.push(url); return OFF; } }));
+    expect(probed).toEqual([`wss://127.0.0.1:${NODE_HTTP_PORT}/`]);
+  }, 60_000);
+
+  test("--mqtt-check-url naming another host, or a port the configuration does not name, is refused before any check is sent", async () => {
+    for (const mqttCheckUrl of ["https://flair.example.invalid", `http://127.0.0.1:${NODE_HTTP_PORT + 1}`, `http://localhost:${NODE_HTTP_PORT}`]) {
+      reset();
+      const probed: string[] = [];
+      let thrown: Error | undefined;
+      try { await deploy(base({ mqttCheckUrl, mqttProbe: async (url) => { probed.push(url); return OFF; } })); } catch (err) { thrown = err as Error; }
+      expect([mqttCheckUrl, thrown?.message.includes("the MQTT-over-WebSocket check of the node at 127.0.0.1 was not sent")]).toEqual([mqttCheckUrl, true]);
+      expect(thrown?.message).toContain("does not name the operations API URL's host (127.0.0.1) and an HTTP port that host's configuration names");
+      expect(thrown?.message).toContain("drop --mqtt-check-url");
+      expect(probed, "no check was sent").toEqual([]);
+      expect(ops()).toEqual(["set_configuration", "get_configuration"]);
+    }
+  }, 60_000);
+
+  test("a configuration that names no HTTP port sends no check and fails the deploy by name", async () => {
+    reset({ get_configuration: () => Response.json({ mqtt: MQTT_OFF }) });
+    const probed: string[] = [];
+    let thrown: Error | undefined;
+    try { await deploy(base({ mqttProbe: async (url) => { probed.push(url); return OFF; } })); } catch (err) { thrown = err as Error; }
+    expect(thrown?.message).toContain("names no HTTP port (http.port, http.securePort)");
+    expect(probed).toEqual([]);
+  }, 60_000);
+
+  test("a redirect from the operations API is not followed: the configuration read fails by its status and the location gets nothing", async () => {
+    const elsewhere: string[] = [];
+    const other = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) { elsewhere.push(await req.text()); return Response.json(nodeConfig()); } });
+    try {
+      reset({ get_configuration: () => new Response(null, { status: 307, headers: { location: `http://127.0.0.1:${other.port}/` } }) });
+      const probed: string[] = [];
+      let thrown: Error | undefined;
+      try { await deploy(base({ mqttProbe: async (url) => { probed.push(url); return OFF; } })); } catch (err) { thrown = err as Error; }
+      expect(thrown?.message).toMatch(/could not read the configuration of .* \(HTTP 307\)/);
+      expect(elsewhere).toEqual([]);
+      expect(probed).toEqual([]);
+    } finally {
+      other.stop(true);
+    }
   }, 60_000);
 });
 
-describe("only the node the target URL reaches is verified; every other cluster node is NOT VERIFIED", () => {
+describe("only the node at the operations API URL's host is verified; every other cluster node is NOT VERIFIED", () => {
   /** A replicated set_configuration answer naming two peer nodes that took the setting. */
   const replicatedAnswer = () => Response.json({
     message: "Configuration successfully set.",
@@ -433,7 +503,7 @@ describe("only the node the target URL reaches is verified; every other cluster 
     const text = warn.lines.join("\n");
     for (const node of ["node-b", "node-c"]) {
       expect(text).toContain(`NOT VERIFIED: cluster node ${node}.`);
-      expect(text).toContain(`on ${node}, run flair doctor (its "MQTT listeners" section reports the listener state)`);
+      expect(text).toContain(`to check ${node} live, run flair deploy --verify-mqtt-only --ops-target http://${node}:${new URL(opsUrl).port}`);
       expect(text).toContain(`to http://${node}:${new URL(opsUrl).port} (Basic admin credential)`);
     }
     expect(text).toContain("a completed restart job is not proof of a peer's restart");
@@ -444,7 +514,7 @@ describe("only the node the target URL reaches is verified; every other cluster 
   test("the nodes an isolated application's restart job names are reported too", async () => {
     reset({
       set_configuration: () => Response.json({ message: "ok", replicated: [{ node: "node-b", message: "ok" }] }),
-      get_configuration: () => Response.json({ mqtt: MQTT_OFF, flair: { isolated: true } }),
+      get_configuration: () => Response.json(nodeConfig({ flair: { isolated: true } })),
       get_job: (body) => completedJob(body, [
         { node: "node-b", message: "Successfully completed job: peer-1" },
         { node: "node-d", message: "Successfully completed job: peer-2" },
@@ -462,7 +532,7 @@ describe("only the node the target URL reaches is verified; every other cluster 
     try { await deploy(base({ requireAllNodesVerified: true })); } catch (err) { thrown = err as Error; }
     expect(thrown?.message).toContain("--require-all-nodes-verified: 2 cluster nodes were NOT VERIFIED: node-b, node-c");
     expect(thrown?.message).toContain("a completed restart job is not proof of a peer's restart");
-    expect(thrown?.message).toContain("on node-b, run flair doctor");
+    expect(thrown?.message).toContain("to check node-b live, run flair deploy --verify-mqtt-only");
   }, 60_000);
 
   test("a standalone target (no cluster nodes) is fully verified, with or without --require-all-nodes-verified", async () => {
@@ -473,7 +543,88 @@ describe("only the node the target URL reaches is verified; every other cluster 
   }, 60_000);
 });
 
+describe("verifyNodeMqttListenersOff (flair deploy --verify-mqtt-only): the same reads and check for one node, nothing set or restarted", () => {
+  const creds = () => ({ url: opsUrl, fabricUser: "deploy-admin", fabricPassword: "not-a-real-password" });
+
+  test("verified: only the configuration is read, and the check goes to the operations API URL's host on its configured HTTP port", async () => {
+    reset();
+    const probed: string[] = [];
+    const { verified } = await verifyNodeMqttListenersOff({ ...creds(), probe: async (url) => { probed.push(url); return OFF; } });
+    expect(ops()).toEqual(["get_configuration"]);
+    expect(probed).toEqual([checkAddress]);
+    expect(verified).toContain("MQTT listeners verified off on the node at 127.0.0.1");
+  });
+
+  test("MQTT over WebSocket still served under a configuration that shows MQTT off: fails, naming the restart and the live check, and restarts nothing", async () => {
+    reset();
+    let thrown: Error | undefined;
+    try { await verifyNodeMqttListenersOff({ ...creds(), probe: async () => SERVED }); } catch (err) { thrown = err as Error; }
+    expect(thrown?.message).toContain(`${checkAddress} still serves MQTT over WebSocket (test: CONNACK), although the configuration of ${opsUrl} shows the MQTT-off values`);
+    expect(thrown?.message).toContain('"operation":"restart_service"');
+    expect(thrown?.message).toContain(`flair deploy --verify-mqtt-only --ops-target ${opsUrl}`);
+    expect(thrown?.message).not.toContain("Deployed");
+    expect(ops()).toEqual(["get_configuration"]);
+  });
+
+  test("an inconclusive check, a configuration that is not off, and a check URL for another node each fail without a restart", async () => {
+    reset();
+    await expect(verifyNodeMqttListenersOff({ ...creds(), probe: async () => INCONCLUSIVE })).rejects.toThrow(/could not confirm that .* serves no MQTT over WebSocket \(test: no answer\)/);
+    reset({ get_configuration: () => Response.json(nodeConfig({ mqtt: { ...MQTT_OFF, webSocket: true } })) });
+    await expect(verifyNodeMqttListenersOff({ ...creds(), probe: async () => OFF })).rejects.toThrow(/mqtt.webSocket is not false/);
+    reset();
+    const probed: string[] = [];
+    await expect(verifyNodeMqttListenersOff({ ...creds(), checkUrl: "http://flair.example.invalid:9926", probe: async (url) => { probed.push(url); return OFF; } }))
+      .rejects.toThrow(/was not sent: the URL given for the MQTT check/);
+    expect(probed).toEqual([]);
+    expect(ops()).toEqual(["get_configuration"]);
+  });
+});
+
+describe("--require-all-nodes-verified is refused with an option that skips the check, before anything is deployed or sent", () => {
+  for (const [label, over] of [
+    ["--no-verify", { mqttCheck: undefined, verify: false }],
+    ["--no-restart", { restart: false }],
+    ["--keep-mqtt-config", { keepMqttConfig: true }],
+  ] as const) {
+    test(`with ${label}`, async () => {
+      for (const dryRun of [false, true]) {
+        reset();
+        let thrown: Error | undefined;
+        try { await deploy(base({ ...over, dryRun, requireAllNodesVerified: true } as Partial<DeployOptions>)); } catch (err) { thrown = err as Error; }
+        expect(thrown?.message).toContain(`--require-all-nodes-verified cannot be combined with ${label}`);
+        expect(thrown?.message).toContain("Nothing was deployed or sent");
+        expect(received).toEqual([]);
+        expect(existsSync(harperRanMarker), "Harper ran").toBe(false);
+      }
+    }, 60_000);
+  }
+});
+
 describe("operations API URLs carry no credential and are printed redacted", () => {
+  test("a URL without an allowed scheme or a host is refused before anything is sent, and its text is never printed", async () => {
+    for (const over of [
+      { target: "file:///tmp/private-value" },
+      { target: "javascript:private-value" },
+      { opsUrl: "file:///tmp/private-value" },
+      { opsUrl: "javascript:private-value" },
+      { opsUrl: "ws://flair.example.invalid:9925" },
+      { mqttCheckUrl: "file:///tmp/private-value" },
+      { mqttCheckUrl: "javascript:private-value" },
+      { mqttCheckUrl: "ftp://flair.example.invalid/private-value" },
+    ] as Partial<DeployOptions>[]) {
+      reset();
+      const progress: string[] = [];
+      let thrown: Error | undefined;
+      try { await deploy(base({ opsUrl, ...over, onProgress: (m) => progress.push(m) })); } catch (err) { thrown = err as Error; }
+      expect([JSON.stringify(over), thrown?.message.includes("Nothing was sent")]).toEqual([JSON.stringify(over), true]);
+      expect(thrown?.message).toMatch(/its scheme is not (http or https|http, https, ws or wss)/);
+      expect(thrown?.message).not.toContain("private-value");
+      expect(progress).toEqual([]);
+      expect(received).toEqual([]);
+      expect(existsSync(harperRanMarker)).toBe(false);
+    }
+  }, 60_000);
+
   test("an operations URL with a user name and password is refused before any request, and the password is never printed", async () => {
     reset();
     const ops = new URL(opsUrl);
@@ -524,7 +675,7 @@ describe("operations API URLs carry no credential and are printed redacted", () 
     for (const over of [
       { set_configuration: echoing },
       { get_configuration: echoing },
-      { get_configuration: () => Response.json({ mqtt: MQTT_OFF, flair: { isolated: true } }), restart_service: echoing },
+      { get_configuration: () => Response.json(nodeConfig({ flair: { isolated: true } })), restart_service: echoing },
     ] as Record<string, Handler>[]) {
       reset(over);
       const progress: string[] = [];

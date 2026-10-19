@@ -33,7 +33,7 @@ import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
 import { createRegistryNoticePrinter, fetchDeclaredDependencies, fetchLatestVersion } from "./lib/npm-registry.js";
 import type { DeployOptions, DeployResult } from "./deploy.js";
-import { assertSafeUrl, safeUrl } from "./mqtt-off-deploy.js";
+import { assertSafeUrl, requireAllNodesVerifiedConflict, safeUrl } from "./mqtt-off-deploy.js";
 
 /**
  * Minimum harper version whose component packager works when the
@@ -224,9 +224,9 @@ export interface FabricUpgradeOptions {
   keepMqttConfig?: boolean;
   /** The target's operations API URL for deploy()'s MQTT-off configuration and check (DeployOptions.opsUrl). */
   opsUrl?: string;
-  /** The URL deploy()'s post-restart WebSocket check reaches (DeployOptions.mqttCheckUrl). */
+  /** Confirms the address of deploy()'s post-restart WebSocket check (DeployOptions.mqttCheckUrl): the operations API URL's host and an HTTP port its configuration names. */
   mqttCheckUrl?: string;
-  /** `--require-all-nodes-verified`: deploy() fails when a cluster node cannot be verified MQTT-off (DeployOptions.requireAllNodesVerified). */
+  /** `--require-all-nodes-verified`: deploy() fails when a cluster node cannot be verified MQTT-off (DeployOptions.requireAllNodesVerified); refused with `restart: false` or `keepMqttConfig`. */
   requireAllNodesVerified?: boolean;
   /**
    * flair#878: these were reachable from `flair deploy` but NOT from
@@ -487,11 +487,19 @@ export async function fabricUpgrade(
 ): Promise<FabricUpgradeResult> {
   const deps: FabricUpgradeDeps = { ...defaultDeps(), ...injected };
   const log = deps.log ?? (() => {});
-  // Every URL the upgrade uses is scheme, host, port and path only; anything
-  // else is refused before anything is fetched or printed.
+  // Every URL the upgrade uses has an allowed scheme and a host, and is
+  // scheme, host, port and path only; anything else is refused before
+  // anything is fetched or printed.
   assertSafeUrl(opts.target, "deploy target URL");
   if (opts.opsUrl !== undefined) assertSafeUrl(opts.opsUrl, "operations API URL");
-  if (opts.mqttCheckUrl !== undefined) assertSafeUrl(opts.mqttCheckUrl, "URL the MQTT check reaches");
+  if (opts.mqttCheckUrl !== undefined) assertSafeUrl(opts.mqttCheckUrl, "URL the MQTT check reaches", "check");
+  // deploy() refuses these too; refusing here keeps it before anything is staged.
+  const conflict = requireAllNodesVerifiedConflict({
+    requireAllNodesVerified: opts.requireAllNodesVerified,
+    restart: opts.restart,
+    keepMqttConfig: opts.keepMqttConfig,
+  });
+  if (conflict) throw new Error(conflict);
 
   // Step 1 + diff.
   const plan = await planFabricUpgrade(opts, deps);

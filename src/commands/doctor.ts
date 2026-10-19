@@ -2505,8 +2505,10 @@ program
       // through the same verified ops endpoint and admin credential as the
       // sections above. Read-only: nothing is changed. A configuration read
       // that fails, or an answer that is not a recognizable root
-      // configuration (`{}` included), is NOT RUN and counted.
-      console.log(`\n  ${render.wrap(render.c.bold, "MQTT listeners")}`);
+      // configuration (`{}` included), is NOT RUN and counted. It reports the
+      // saved configuration, not the running listeners, and says so on every
+      // line (`flair deploy --verify-mqtt-only` checks a node live).
+      console.log(`\n  ${render.wrap(render.c.bold, "MQTT listeners (configuration)")}`);
       if (rosterNotRun) {
         issues++;
         console.log(`  ${render.icons.warn} MQTT listeners: NOT RUN — ${rosterNotRun.reason}`);
@@ -2526,6 +2528,7 @@ program
         const section = mqttListenerSection(configuration);
         if (section.status !== "ok") issues++;
         console.log(`  ${section.status === "ok" ? render.icons.ok : render.icons.warn} ${section.line}`);
+        console.log(`     ${render.wrap(render.c.dim, section.note)}`);
         if (section.fix) console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${section.fix}`);
       }
     }

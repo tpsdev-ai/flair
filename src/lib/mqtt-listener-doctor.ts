@@ -1,14 +1,20 @@
 /**
  * mqtt-listener-doctor.ts — the `flair doctor` check that reports when the
- * instance it inspects has an MQTT listener on.
+ * saved configuration of the instance it inspects starts an MQTT listener.
  *
  * Flair runs Harper with MQTT off (src/lib/mqtt-config.ts): its local spawns
  * assert it, and `flair deploy` / `flair upgrade --target` set it on a
- * component deployment and check it after their restart. This check reads the instance's root configuration
- * through the operations API (`get_configuration`) and names each MQTT
- * listener that configuration starts — the TCP and TLS listeners and the
- * WebSocket path — with the change that turns them off. It never changes the
- * configuration.
+ * component deployment and check it after their restart. This check reads the
+ * instance's root configuration through the operations API
+ * (`get_configuration`) and names each MQTT listener that configuration starts
+ * — the TCP and TLS listeners and the WebSocket path — with the change that
+ * turns them off. It never changes the configuration.
+ *
+ * It reads the CONFIGURATION, not the running listeners: Harper applies a
+ * changed `mqtt` section when the HTTP worker threads restart, so worker
+ * threads that have not restarted since it changed keep serving what they
+ * started with. Every line says so, and points to `flair deploy
+ * --verify-mqtt-only`, which checks a node live (src/mqtt-off-deploy.ts).
  *
  * The read answers "not run" when it fails or when the answer is not a
  * recognizable root configuration (rootConfigurationProblem: `{}` or a partial
@@ -19,6 +25,11 @@ import { MQTT_DISABLED_SET_CONFIGURATION, mqttListenersOn, rootConfigurationProb
 
 /** The doctor line when the instance's configuration starts no MQTT listener. */
 export const MQTT_LISTENERS_OFF_LINE = "No MQTT listener is configured on this instance (mqtt.network.port, mqtt.network.securePort and mqtt.webSocket are off).";
+
+/** What every MQTT line adds: the check reads the configuration; the live check is a separate command. */
+export const MQTT_CONFIGURATION_NOTE =
+  "This reads the saved configuration, not the running listeners: worker threads that have not restarted since it changed keep serving MQTT. " +
+  "flair deploy --verify-mqtt-only --ops-target <operations API URL> checks a node live.";
 
 /** The set_configuration call that turns every MQTT listener off, as an operator would send it. */
 export function mqttOffOperation(): string {
@@ -32,8 +43,8 @@ export function describeMqttListenerFinding(config: unknown): { message: string;
   return {
     message: `This instance's configuration starts ${listeners.length === 1 ? "an MQTT listener" : `${listeners.length} MQTT listeners`}: ${listeners.join("; ")}. Flair runs Harper with MQTT off.`,
     fixHint:
-      `send ${mqttOffOperation()} to the operations API, then restart Harper's worker threads ` +
-      "(flair deploy and flair upgrade --target set this for a component deployment and check it after their restart on the node the target URL reaches, failing when they cannot confirm it there and reporting other cluster nodes NOT VERIFIED; flair's local spawns set it on every start).",
+      `send ${mqttOffOperation()} to the operations API, then restart Harper's worker threads and check the node live with flair deploy --verify-mqtt-only ` +
+      "(flair deploy and flair upgrade --target set this for a component deployment and, after their restart, verify the node at the operations API URL's host, failing when they cannot confirm it there and reporting other cluster nodes NOT VERIFIED; flair's local spawns set it on every start).",
   };
 }
 
@@ -74,16 +85,17 @@ export async function readInstanceConfiguration(args: {
 }
 
 /**
- * The doctor's "MQTT listeners" section for a configuration read: `ok` with
- * the all-off line, `issue` with the listeners on and the fix, or `not-run`
- * with why the configuration could not be established. Doctor counts every
- * status but `ok` as an issue.
+ * The doctor's "MQTT listeners (configuration)" section for a configuration
+ * read: `ok` with the all-off line, `issue` with the listeners on and the fix,
+ * or `not-run` with why the configuration could not be established; each with
+ * MQTT_CONFIGURATION_NOTE (the configuration, not the running listeners).
+ * Doctor counts every status but `ok` as an issue.
  */
-export function mqttListenerSection(read: InstanceConfigurationRead): { status: "ok" | "issue" | "not-run"; line: string; fix?: string } {
+export function mqttListenerSection(read: InstanceConfigurationRead): { status: "ok" | "issue" | "not-run"; line: string; note: string; fix?: string } {
   if (read.kind === "not-run") {
-    return { status: "not-run", line: `MQTT listeners: NOT RUN — ${read.reason}, so the MQTT listener check did not run.` };
+    return { status: "not-run", line: `MQTT listeners: NOT RUN — ${read.reason}, so the MQTT listener configuration check did not run.`, note: MQTT_CONFIGURATION_NOTE };
   }
   const finding = describeMqttListenerFinding(read.config);
-  if (!finding) return { status: "ok", line: MQTT_LISTENERS_OFF_LINE };
-  return { status: "issue", line: finding.message, fix: finding.fixHint };
+  if (!finding) return { status: "ok", line: MQTT_LISTENERS_OFF_LINE, note: MQTT_CONFIGURATION_NOTE };
+  return { status: "issue", line: finding.message, note: MQTT_CONFIGURATION_NOTE, fix: finding.fixHint };
 }

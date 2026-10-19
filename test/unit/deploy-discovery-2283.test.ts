@@ -166,9 +166,10 @@ describe("verifyDeployedMcpDiscovery (real HTTP)", () => {
   function routedTarget(routeShape: Shape, docIssuer?: string) {
     return (async (input: any, init?: any) => {
       const url = new URL(typeof input === "string" ? input : input.url);
-      // deploy()'s post-restart MQTT check reads the target's configuration.
+      // deploy()'s post-restart MQTT check reads the target's configuration
+      // (its HTTP port names the check's address; the check itself is injected).
       if (typeof init?.body === "string" && init.body.includes('"get_configuration"')) {
-        return new Response(JSON.stringify({ mqtt: { network: { port: null, securePort: null }, webSocket: false } }), { status: 200, headers: { "content-type": "application/json" } });
+        return new Response(JSON.stringify({ http: { port: 9926, securePort: null }, mqtt: { network: { port: null, securePort: null }, webSocket: false } }), { status: 200, headers: { "content-type": "application/json" } });
       }
       if (url.pathname === "/.well-known/oauth-authorization-server") return documentFor(docIssuer ?? url.origin, routeShape);
       if (url.pathname === "/OAuthMetadata") {

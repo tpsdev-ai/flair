@@ -1,7 +1,8 @@
 /**
  * mqtt-off-deploy.ts — the component-deployment channel's MQTT-off step
  * (`flair deploy`, `flair upgrade --target`; called by deploy() in
- * src/deploy.ts).
+ * src/deploy.ts), and the same check on its own (`flair deploy
+ * --verify-mqtt-only`).
  *
  * A component's config.yaml cannot turn Harper's MQTT listeners off: `mqtt` is
  * a section of the instance's ROOT configuration (config-root.schema.json),
@@ -12,12 +13,23 @@
  * Harper's defaults (mqtt.webSocket true, TCP 1883, TLS 8883). So the channel
  * sets it through the target's operations API, in two steps.
  *
- * URLs: the deploy target, its operations API URL and the URL the check
- * reaches must be scheme, host, port and path only — a user name, password,
- * query or fragment is refused before anything is sent or printed
- * (assertSafeUrl) — and every URL the channel prints goes through safeUrl.
- * Errors quote a remote's HTTP status code, never its body, reason phrase or
- * a transport error's text.
+ * URLs: the deploy target and its operations API URL must be http or https,
+ * and the URL given for the MQTT check http, https, ws or wss, each with a host
+ * and nothing but scheme, host, port and path — a user name, password, query
+ * or fragment is refused, as is any other scheme or a URL without a host,
+ * before anything is sent or printed (assertSafeUrl). Every URL the channel
+ * prints goes through safeUrl. The operations API's answers to these steps
+ * are followed no further than the URL given: a redirect is refused.
+ *
+ * Output: the errors and progress lines of the MQTT-off steps quote a remote
+ * answer's HTTP status code, a restart job's state (only Harper's ERROR,
+ * PENDING or IN_PROGRESS), the names of cluster nodes as its answers give them
+ * (only when shaped as a host name or address), and the HTTP port number its
+ * configuration names (an integer); never its body, reason phrase, a job's
+ * message, other configuration values or a transport error's text. A configuration mismatch
+ * is reported by field name and category ("mqtt.webSocket is not false").
+ * This covers only the MQTT-off steps: the Harper deploy between them
+ * (deploy() runs Harper's CLI) streams that child's output as it comes.
  *
  *   1. Before the deploy — applyMqttOffConfiguration: `set_configuration` with
  *      MQTT_DISABLED_SET_CONFIGURATION, sent with the deploy's Basic credential
@@ -33,11 +45,19 @@
  *      only that application's dedicated worker (components/operations.js,
  *      `restartScope`; server/threads/manageThreads.js `restartWorkers` skips
  *      the shared workers), and the shared workers keep their listeners. This
- *      step verifies ONE node — the one the target URL (or the caller's check
- *      URL) reaches, through the target's operations API:
- *        - it reads that configuration, which must show the MQTT-off values it
- *          set (`mqtt.network.port` and `mqtt.network.securePort` null,
- *          `mqtt.webSocket` false); an empty or malformed answer fails;
+ *      step verifies ONE node, the node at the operations API URL's host, by
+ *      address:
+ *        - it reads that host's configuration through its operations API,
+ *          which must show the MQTT-off values it set (`mqtt.network.port`
+ *          and `mqtt.network.securePort` null, `mqtt.webSocket` false); an
+ *          empty or malformed answer fails;
+ *        - it takes the address of the WebSocket check from that same answer:
+ *          the operations API URL's host, on the HTTP port the configuration
+ *          names (mqttCheckAddress). A URL given for the check (`mqttCheckUrl`,
+ *          `--mqtt-check-url`) is an explicit confirmation of that address,
+ *          which may choose its scheme: it is refused, before any check is
+ *          sent, unless it names that host and an HTTP port the configuration
+ *          names;
  *        - when the application is isolated, it restarts the shared worker
  *          threads through `restart_service` (`scope: ""`, Harper's pool scope;
  *          replicated when the deploy is) and waits for Harper's job, failing
@@ -45,8 +65,7 @@
  *          restart job is not proof of a peer's restart: Harper sends a node's
  *          restart-complete from a `finally` (bin/restart.ts) and drops the
  *          worker replacement's outcome;
- *        - it checks MQTT over WebSocket on the URL that serves that node's
- *          HTTP port, authenticated with the deploy's credential
+ *        - it sends the authenticated MQTT-over-WebSocket check to that address
  *          (probeMqttOverWebSocket). Only Harper's own answer for a disabled
  *          MQTT-over-WebSocket path (a validated upgrade closed with code 1011
  *          and "No resource was found to handle <path>") counts as off; a
@@ -56,16 +75,26 @@
  *          shared workers are restarted once and checked again. A check that
  *          does not end in "off" fails the step, naming the restart and check
  *          to run.
- *      Every other cluster node — those the replicated configuration and
- *      restart answers name — is reported NOT VERIFIED by name, with the check
- *      and restart to run on it (flair doctor on that node reports its
- *      listener state). The step succeeds for the verified node; with
- *      `requireAllNodesVerified` (`--require-all-nodes-verified`) an
- *      unverified node fails it.
+ *      What it verifies is the node at that host: the configuration read from
+ *      its operations API plus the authenticated WebSocket check sent to that
+ *      host. A host name that load-balances across nodes is not separated: the
+ *      two requests may reach different nodes behind it. Every other cluster
+ *      node — those the replicated configuration and restart answers name —
+ *      is reported NOT VERIFIED by name, with the check to run on it
+ *      (`flair deploy --verify-mqtt-only` against that node's operations API).
+ *      The step succeeds for the verified node; with `requireAllNodesVerified`
+ *      (`--require-all-nodes-verified`) an unverified node fails it, and that
+ *      option is refused before anything is deployed when combined with an
+ *      option that skips this step (requireAllNodesVerifiedConflict).
+ *
+ * verifyNodeMqttListenersOff runs step 2's reads and check for one node
+ * without deploying and without restarting anything: `flair deploy
+ * --verify-mqtt-only`.
  */
 import { createHash, randomBytes } from "node:crypto";
 import { connect as netConnect, type Socket } from "node:net";
 import { connect as tlsConnect } from "node:tls";
+import { harperPortValue } from "./lib/harper-port-value.js";
 import { MQTT_DISABLED_SET_CONFIGURATION, mqttOffConfirmed } from "./lib/mqtt-config.js";
 
 /** The operations-API request that turns every MQTT listener off on a deploy target. */
@@ -97,21 +126,38 @@ export const REPLICATION_NOT_IMPLEMENTED = "Replication not implemented";
 /** The message Harper's job runner gives a job that completed (server/jobs/jobProcess.ts). */
 const JOB_COMPLETED_MESSAGE = /^Successfully completed job\b/;
 
-// ─── URLs: refused when they carry anything but scheme, host, port and path ─
+// ─── URLs: an allowed scheme and a host, and nothing but scheme, host, port and path ─
 
 /**
- * Why `url` may not be used (as the deploy target, its operations API URL or
- * the URL the MQTT check reaches), or null when it may: it must parse, and
- * carry no user name or password, no query and no fragment. The deploy's
- * credential goes in its Basic header, never in a URL.
+ * Which URL grammar applies: `http` for the deploy target and its operations
+ * API URL (http or https), `check` for a URL given for the MQTT check (http,
+ * https, ws or wss).
  */
-export function unsafeUrlProblem(url: string): string | null {
+export type DeployUrlKind = "http" | "check";
+
+const ALLOWED_SCHEMES: Readonly<Record<DeployUrlKind, readonly string[]>> = Object.freeze({
+  http: Object.freeze(["http:", "https:"]),
+  check: Object.freeze(["http:", "https:", "ws:", "wss:"]),
+});
+
+/**
+ * Why `url` may not be used, or null when it may: it must parse; its scheme
+ * must be http or https (`kind` "http") or http, https, ws or wss (`kind`
+ * "check"); it must name a host; and it may carry no user name or password,
+ * no query and no fragment. The deploy's credential goes in its Basic header,
+ * never in a URL.
+ */
+export function unsafeUrlProblem(url: string, kind: DeployUrlKind = "http"): string | null {
   let parsed: URL;
   try {
     parsed = new URL(url);
   } catch {
     return "it is not a valid URL";
   }
+  if (!ALLOWED_SCHEMES[kind].includes(parsed.protocol)) {
+    return kind === "http" ? "its scheme is not http or https" : "its scheme is not http, https, ws or wss";
+  }
+  if (!parsed.hostname) return "it names no host";
   if (parsed.username || parsed.password) return "it carries a user name or password";
   if (parsed.search || url.includes("?")) return "it carries a query";
   if (parsed.hash || url.includes("#")) return "it carries a fragment";
@@ -120,26 +166,30 @@ export function unsafeUrlProblem(url: string): string | null {
 
 /**
  * `url` as flair prints it: scheme, host, port and path only — never a user
- * name, password, query or fragment. Every URL the deploy channel prints goes
- * through this.
+ * name, password, query or fragment — and only for an http, https, ws or wss
+ * URL with a host; any other URL is printed as a placeholder. Every URL the
+ * deploy channel prints goes through this.
  */
 export function safeUrl(url: string): string {
+  let parsed: URL;
   try {
-    const parsed = new URL(url);
-    const path = parsed.pathname === "/" ? "" : parsed.pathname;
-    return `${parsed.protocol}//${parsed.host}${path}`;
+    parsed = new URL(url);
   } catch {
     return "(an unparseable URL)";
   }
+  if (!ALLOWED_SCHEMES.check.includes(parsed.protocol) || !parsed.hostname) return "(a URL that is not http, https, ws or wss with a host)";
+  const path = parsed.pathname === "/" ? "" : parsed.pathname;
+  return `${parsed.protocol}//${parsed.host}${path}`;
 }
 
 /** Throw, before anything is sent or printed, when `url` may not be used; `label` names it. */
-export function assertSafeUrl(url: string, label: string): void {
-  const problem = unsafeUrlProblem(url);
+export function assertSafeUrl(url: string, label: string, kind: DeployUrlKind = "http"): void {
+  const problem = unsafeUrlProblem(url, kind);
   if (problem) {
+    const schemes = kind === "http" ? "http or https" : "http, https, ws or wss";
     throw new Error(
       `flair deploy: the ${label} ${safeUrl(url)} cannot be used: ${problem}. Nothing was sent. ` +
-        `Give it as scheme, host, port and path only, and pass the credential with FABRIC_USER / FABRIC_PASSWORD (or --fabric-user / --fabric-password-file).`,
+        `Give it as an ${schemes} URL with a host: scheme, host, port and path only, and pass the credential with FABRIC_USER / FABRIC_PASSWORD (or --fabric-user / --fabric-password-file).`,
     );
   }
 }
@@ -147,19 +197,51 @@ export function assertSafeUrl(url: string, label: string): void {
 /**
  * The refusal a CLI prints, before anything else, when a URL the deploy
  * channel would use may not be used; null when every one may. `urls` pairs
- * each URL (absent ones are skipped) with how the refusal names it; the
- * message shows the URL only through safeUrl.
+ * each URL (absent ones are skipped) with how the refusal names it and,
+ * optionally, its grammar (default `http`); the message shows the URL only
+ * through safeUrl.
  */
-export function deployUrlRefusal(urls: ReadonlyArray<readonly [string | undefined, string]>): string | null {
-  for (const [url, label] of urls) {
+export function deployUrlRefusal(urls: ReadonlyArray<readonly [string | undefined, string, DeployUrlKind?]>): string | null {
+  for (const [url, label, kind] of urls) {
     if (url === undefined || url === "") continue;
     try {
-      assertSafeUrl(url, label);
+      assertSafeUrl(url, label, kind ?? "http");
     } catch (err) {
       return (err as Error).message;
     }
   }
   return null;
+}
+
+/**
+ * Why `--require-all-nodes-verified` cannot be honoured with the other options
+ * given, or null when it can: the post-restart check that verifies nodes does
+ * not run with `--no-verify` (`verify: false`), `--no-restart` (`restart:
+ * false`) or `--keep-mqtt-config`, and `--verify-mqtt-only` checks one node and
+ * names no other. Refused before anything is deployed or sent.
+ */
+export function requireAllNodesVerifiedConflict(o: {
+  requireAllNodesVerified?: boolean;
+  verify?: boolean;
+  restart?: boolean;
+  keepMqttConfig?: boolean;
+  verifyMqttOnly?: boolean;
+}): string | null {
+  if (!o.requireAllNodesVerified) return null;
+  const skips = [
+    o.verify === false ? "--no-verify" : null,
+    o.restart === false ? "--no-restart" : null,
+    o.keepMqttConfig ? "--keep-mqtt-config" : null,
+    o.verifyMqttOnly ? "--verify-mqtt-only" : null,
+  ].filter((f): f is string => f !== null);
+  if (skips.length === 0) return null;
+  return (
+    `flair deploy: --require-all-nodes-verified cannot be combined with ${skips.join(", ")}: ` +
+    (o.verifyMqttOnly && skips.length === 1
+      ? "--verify-mqtt-only checks one node and names no other, so it cannot verify all of them. "
+      : "that skips the post-restart MQTT check, so no node would be verified. ") +
+    "Nothing was deployed or sent. Drop one of them."
+  );
 }
 
 // ─── What a remote answered, as printed: never its text ─────────────────────
@@ -177,8 +259,10 @@ function transportFailure(err: unknown): string {
 
 /** A cluster node's name as printed: a host name or address, else a fixed placeholder. */
 function nodeName(value: unknown): string {
-  return typeof value === "string" && /^[A-Za-z0-9._:\-[\]]{1,253}$/.test(value) ? value : "(a node whose name is not printable)";
+  return typeof value === "string" && PRINTABLE_NODE_NAME.test(value) ? value : "(a node whose name is not printable)";
 }
+
+const PRINTABLE_NODE_NAME = /^[A-Za-z0-9._:\-[\]]{1,253}$/;
 
 interface OpsTarget {
   /** The operations API URL. */
@@ -189,7 +273,12 @@ interface OpsTarget {
   timeoutMs?: number;
 }
 
-/** POST one operation to the endpoint's root, as flair's other ops calls do. Throws on a transport failure. */
+/**
+ * POST one operation to the endpoint's root, as flair's other ops calls do.
+ * A redirect is not followed: its 3xx answer is returned as not ok, so the
+ * configuration read and the check address always come from the URL given.
+ * Throws on a transport failure.
+ */
 async function postOperation(t: OpsTarget, body: Record<string, unknown>): Promise<{ status: number; ok: boolean; text: string }> {
   assertSafeUrl(t.url, "operations API URL");
   const fetchImpl = t.fetchImpl ?? globalThis.fetch;
@@ -199,8 +288,10 @@ async function postOperation(t: OpsTarget, body: Record<string, unknown>): Promi
     headers: { "Content-Type": "application/json", Authorization: `Basic ${auth}` },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(t.timeoutMs ?? 60_000),
+    redirect: "manual",
   });
-  return { status: res.status, ok: res.ok, text: await res.text().catch(() => "") };
+  const redirected = res.status >= 300 && res.status < 400;
+  return { status: res.status, ok: res.ok && !redirected, text: redirected ? "" : await res.text().catch(() => "") };
 }
 
 /** The entries of a replicated answer (Harper's per-node results), or [] when it lists none. */
@@ -286,32 +377,41 @@ export async function applyMqttOffConfiguration(o: OpsTarget & {
 
 /** The operations API URL of cluster node `node`, assuming the target's operations port and scheme. */
 function peerOpsUrl(opsUrl: string, node: string): string {
+  if (!PRINTABLE_NODE_NAME.test(node)) return "that node's operations API URL";
   try {
     const parsed = new URL(opsUrl);
     return `${parsed.protocol}//${node}${parsed.port ? `:${parsed.port}` : ""}`;
   } catch {
-    return `the operations API of ${node}`;
+    return "that node's operations API URL";
   }
 }
 
+/** The command that checks one node live, as an operator runs it. */
+function verifyOnlyCommand(opsUrl: string): string {
+  return `flair deploy --verify-mqtt-only --ops-target ${opsUrl} (with FABRIC_USER / FABRIC_PASSWORD)`;
+}
+
 /**
- * What to run to check one node's MQTT listeners by hand: `flair doctor` on
- * that node (its "MQTT listeners" section reports the listener state), or the
- * worker restart and the WebSocket check against that node.
+ * What to run to check one other cluster node's MQTT listeners: `flair deploy
+ * --verify-mqtt-only` against that node's operations API (assumed at the
+ * target's operations port and scheme), which reads that node's configuration
+ * and sends the authenticated MQTT-over-WebSocket check to that host on the
+ * HTTP port its configuration names; and the worker restart to send when it
+ * reports MQTT still served.
  */
 export function nodeCheckInstruction(opsUrl: string, node: string): string {
+  const peer = peerOpsUrl(opsUrl, node);
   return (
-    `on ${node}, run flair doctor (its "MQTT listeners" section reports the listener state); ` +
-    `or send ${JSON.stringify(buildSharedWorkerRestartOperation(false))} to ${peerOpsUrl(opsUrl, node)} (Basic admin credential), ` +
-    `read its mqtt section with get_configuration, and confirm an authenticated MQTT-over-WebSocket CONNECT to its HTTP port is closed with Harper's answer for a disabled MQTT-over-WebSocket path (close code 1011, "No resource was found to handle /")`
+    `to check ${node} live, run ${verifyOnlyCommand(peer)}: it reads that node's configuration and sends the authenticated MQTT-over-WebSocket check to that host on the HTTP port its configuration names; ` +
+    `if it reports MQTT still served, send ${JSON.stringify(buildSharedWorkerRestartOperation(false))} to ${peer} (Basic admin credential) and run it again`
   );
 }
 
-/** The restart and check an operator runs when the channel cannot confirm the target node's MQTT listeners are off. */
+/** The restart and live check an operator runs when the channel cannot confirm the node's MQTT listeners are off. */
 export function sharedWorkerRestartInstruction(opsUrl: string): string {
   return (
     `send ${JSON.stringify(buildSharedWorkerRestartOperation(false))} to ${safeUrl(opsUrl)} (Basic admin credential), ` +
-    `then read its mqtt section with get_configuration and confirm an authenticated MQTT-over-WebSocket CONNECT to its HTTP port is closed with Harper's answer for a disabled MQTT-over-WebSocket path (close code 1011, "No resource was found to handle /"); flair doctor on a node reports its MQTT listener state`
+    `then run ${verifyOnlyCommand(safeUrl(opsUrl))} to check that node live`
   );
 }
 
@@ -326,7 +426,7 @@ export function sharedWorkerRestartInstruction(opsUrl: string): string {
  */
 export function reportedRestartFailure(job: { status?: unknown; message?: unknown; result?: unknown }, replicated: boolean): string | null {
   if (job.status !== "COMPLETE") {
-    const status = typeof job.status === "string" && /^[A-Z_]{1,20}$/.test(job.status) ? job.status : "with an unrecognized status";
+    const status = job.status === "ERROR" || job.status === "PENDING" || job.status === "IN_PROGRESS" ? job.status : "with an unrecognized status";
     return `the job ended ${status}`;
   }
   if (typeof job.message !== "string" || !JOB_COMPLETED_MESSAGE.test(job.message)) {
@@ -473,7 +573,7 @@ export async function probeMqttOverWebSocket(
 ): Promise<MqttProbeOutcome> {
   const o = typeof opts === "number" ? { timeoutMs: opts } : opts;
   const timeoutMs = o.timeoutMs ?? 5_000;
-  if (unsafeUrlProblem(baseUrl)) return { outcome: "inconclusive", detail: "the URL to check may not be used" };
+  if (unsafeUrlProblem(baseUrl, "check")) return { outcome: "inconclusive", detail: "the URL to check may not be used" };
   const parsed = new URL(baseUrl);
   const secure = parsed.protocol === "https:" || parsed.protocol === "wss:";
   const port = Number(parsed.port) || (secure ? 443 : 80);
@@ -562,37 +662,71 @@ export async function probeMqttOverWebSocket(
   });
 }
 
+// ─── Step 2: the node at the operations API URL's host ─────────────────────
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
 /**
- * Step 2: after the deploy's restart, check the MQTT listeners of the node
- * the target reaches (see this module's header). Throws, naming what is still
- * on or unconfirmed and the restart and check to run, unless that node's
- * configuration shows the MQTT-off values and the WebSocket check finds MQTT
- * over WebSocket off. Every other cluster node — those the replicated
- * configuration and restart answers name — is answered as not verified;
- * `requireAllNodesVerified` turns any of them into a failure.
+ * Where the WebSocket check is sent for the node at the operations API URL's
+ * host, from `configuration` (that host's `get_configuration` answer): that
+ * host, on `http.port` over http or `http.securePort` over https (Harper's
+ * plain and TLS HTTP ports); when both are set, the one matching the
+ * operations API URL's scheme. A URL given for the check (`checkUrl`) is used
+ * instead only when it names that host (compared case-insensitively) and one
+ * of those ports (its explicit port, else its scheme's default), so it can
+ * choose the scheme but not another node. Answers the URL, or why there is
+ * none: no HTTP port in the configuration, or a check URL naming another host
+ * or port.
  */
-export async function ensureMqttListenersOff(o: OpsTarget & {
-  /** The URL that serves the target's HTTP port (what the WebSocket check reaches). */
-  baseUrl: string;
-  /** The application's name in the target's root configuration. */
-  project: string;
-  replicated: boolean;
-  /** Cluster nodes the replicated MQTT-off configuration named (step 1). */
-  peers?: readonly string[];
-  /** Fail when any cluster node other than the checked one cannot be verified. */
-  requireAllNodesVerified?: boolean;
-  /** How long the WebSocket check waits for MQTT over WebSocket to be off after a restart. */
-  checkTimeoutMs?: number;
-  checkIntervalMs?: number;
-  probe?: (baseUrl: string) => Promise<MqttProbeOutcome>;
-  jobTimeoutMs?: number;
-  onProgress?: (msg: string) => void;
-}): Promise<{ unverified: { node: string; instruction: string }[] }> {
+export function mqttCheckAddress(opsUrl: string, configuration: unknown, checkUrl?: string): { url: string } | { problem: string } {
+  const ops = new URL(opsUrl);
+  const http = isObject(configuration) && isObject(configuration.http) ? configuration.http : {};
+  const port = harperPortValue(http.port);
+  const securePort = harperPortValue(http.securePort);
+  if (port === null && securePort === null) {
+    return { problem: "the configuration its operations API returned names no HTTP port (http.port, http.securePort)" };
+  }
+  if (checkUrl !== undefined) {
+    const check = new URL(checkUrl);
+    const secure = check.protocol === "https:" || check.protocol === "wss:";
+    const checkPort = check.port ? Number(check.port) : secure ? 443 : 80;
+    const sameHost = check.hostname.toLowerCase() === ops.hostname.toLowerCase();
+    if (!sameHost || (checkPort !== port && checkPort !== securePort)) {
+      return {
+        problem:
+          `the URL given for the MQTT check (--mqtt-check-url) ${safeUrl(checkUrl)} does not name the operations API URL's host (${ops.hostname}) ` +
+          "and an HTTP port that host's configuration names, so it may reach another node",
+      };
+    }
+    return { url: checkUrl };
+  }
+  const preferTls = ops.protocol === "https:";
+  if (securePort !== null && (preferTls || port === null)) return { url: `https://${ops.hostname}:${securePort}` };
+  return { url: `http://${ops.hostname}:${port}` };
+}
+
+/** What step 2 and the verify-only check read from the node before any check is sent. */
+interface CheckedNode {
+  configuration: Record<string, unknown>;
+  /** The URL the WebSocket check is sent to (mqttCheckAddress). */
+  address: string;
+  /** The operations API URL's host, as the claim names the node. */
+  host: string;
+}
+
+/**
+ * Read the configuration of the node at the operations API URL's host, require
+ * the MQTT-off values, and derive the WebSocket check's address from it.
+ * Throws, before any check is sent, when the read fails, the values are not
+ * there, or there is no address (a check URL for another host or port
+ * included). `lead` begins each remedy ("Deployed; " after a deploy).
+ */
+async function readCheckedNode(o: OpsTarget & { checkUrl?: string }, lead: string): Promise<CheckedNode> {
   assertSafeUrl(o.url, "operations API URL");
-  assertSafeUrl(o.baseUrl, "URL the MQTT check reaches");
+  if (o.checkUrl !== undefined) assertSafeUrl(o.checkUrl, "URL the MQTT check reaches", "check");
   const shownOps = safeUrl(o.url);
-  const shownBase = safeUrl(o.baseUrl);
-  const probe = o.probe ?? ((url: string) => probeMqttOverWebSocket(url, { user: o.fabricUser, password: o.fabricPassword }));
   let configuration: unknown;
   let readProblem: string | null = null;
   try {
@@ -605,17 +739,90 @@ export async function ensureMqttListenersOff(o: OpsTarget & {
   if (readProblem) {
     throw new Error(
       `flair deploy: could not read the configuration of ${shownOps} to check that its MQTT listeners are off (${readProblem}). ` +
-        `Deployed; ${sharedWorkerRestartInstruction(o.url)}.`,
+        `${lead}${sharedWorkerRestartInstruction(o.url)}.`,
     );
   }
   const notOff = mqttOffConfirmed(configuration);
   if (notOff) {
     throw new Error(
-      `flair deploy: the configuration of ${shownOps} does not show the MQTT-off values that were set: ${notOff}. ` +
-        `Deployed; send ${JSON.stringify(buildMqttOffOperation(false))} to ${shownOps}, then ${sharedWorkerRestartInstruction(o.url)}.`,
+      `flair deploy: the configuration of ${shownOps} does not show the MQTT-off values: ${notOff}. ` +
+        `${lead}send ${JSON.stringify(buildMqttOffOperation(false))} to ${shownOps}, then ${sharedWorkerRestartInstruction(o.url)}.`,
     );
   }
-  const entry = (configuration as Record<string, unknown>)[o.project];
+  const address = mqttCheckAddress(o.url, configuration, o.checkUrl);
+  if ("problem" in address) {
+    // The check URL is the problem when the configuration alone gives an address.
+    const remedy = !("problem" in mqttCheckAddress(o.url, configuration))
+      ? "drop --mqtt-check-url (the check then goes to that host on the HTTP port its configuration names), or give one naming that host and port"
+      : "the node's configuration must name its HTTP port (http.port or http.securePort) for the check to be sent to it";
+    throw new Error(
+      `flair deploy: the MQTT-over-WebSocket check of the node at ${new URL(o.url).hostname} was not sent: ${address.problem}. ` +
+        `${lead}${remedy}; ${sharedWorkerRestartInstruction(o.url)}.`,
+    );
+  }
+  return { configuration: configuration as Record<string, unknown>, address: address.url, host: new URL(o.url).hostname };
+}
+
+/** The line that reports a verified node, naming exactly what was observed. */
+function verifiedLine(node: CheckedNode, opsUrl: string, detail: string): string {
+  return (
+    `MQTT listeners verified off on the node at ${node.host}: the configuration read from its operations API (${safeUrl(opsUrl)}) shows the MQTT-off values, ` +
+    `and the authenticated MQTT-over-WebSocket check sent to ${safeUrl(node.address)} found it off (${detail}); ` +
+    "a host name that load-balances across nodes is not separated"
+  );
+}
+
+/** Probe `address` until MQTT over WebSocket is off or the deadline passes; answers the last outcome. */
+async function checkUntilOff(
+  probe: (url: string) => Promise<MqttProbeOutcome>,
+  address: string,
+  timeoutMs: number,
+  intervalMs: number,
+): Promise<MqttProbeOutcome> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const result = await probe(address);
+    if (result.outcome === "off" || Date.now() >= deadline) return result;
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+}
+
+/**
+ * Step 2: after the deploy's restart, check the MQTT listeners of the node at
+ * the operations API URL's host (see this module's header). Throws, naming
+ * what is still on or unconfirmed and the restart and check to run, unless
+ * that node's configuration shows the MQTT-off values and the authenticated
+ * WebSocket check sent to that host, on the HTTP port that configuration
+ * names, finds MQTT over WebSocket off. Every other cluster node — those the
+ * replicated configuration and restart answers name — is answered as not
+ * verified; `requireAllNodesVerified` turns any of them into a failure.
+ */
+export async function ensureMqttListenersOff(o: OpsTarget & {
+  /**
+   * A URL given for the WebSocket check (`--mqtt-check-url`): refused, before
+   * any check is sent, unless it names the operations API URL's host and an
+   * HTTP port that host's configuration names.
+   */
+  checkUrl?: string;
+  /** The application's name in the target's root configuration. */
+  project: string;
+  replicated: boolean;
+  /** Cluster nodes the replicated MQTT-off configuration named (step 1). */
+  peers?: readonly string[];
+  /** Fail when any cluster node other than the checked one cannot be verified. */
+  requireAllNodesVerified?: boolean;
+  /** How long the WebSocket check waits for MQTT over WebSocket to be off after a restart. */
+  checkTimeoutMs?: number;
+  checkIntervalMs?: number;
+  probe?: (url: string) => Promise<MqttProbeOutcome>;
+  jobTimeoutMs?: number;
+  onProgress?: (msg: string) => void;
+}): Promise<{ verified: string; unverified: { node: string; instruction: string }[] }> {
+  const node = await readCheckedNode(o, "Deployed; ");
+  const shownOps = safeUrl(o.url);
+  const shownAddress = safeUrl(node.address);
+  const probe = o.probe ?? ((url: string) => probeMqttOverWebSocket(url, { user: o.fabricUser, password: o.fabricPassword }));
+  const entry = node.configuration[o.project];
   const isolated = entry !== null && typeof entry === "object" && (entry as { isolated?: unknown }).isolated === true;
   const peers = new Set(o.peers ?? []);
   let restarted = false;
@@ -628,41 +835,70 @@ export async function ensureMqttListenersOff(o: OpsTarget & {
     o.onProgress?.(`${o.project} is an isolated application on ${shownOps}: the deploy's restart covered only its own worker`);
     await restart();
   }
-  /** Probe until MQTT over WebSocket is off or the deadline; answers the last outcome. */
-  const checkUntilOff = async (): Promise<MqttProbeOutcome> => {
-    const deadline = Date.now() + (o.checkTimeoutMs ?? 120_000);
-    for (;;) {
-      const result = await probe(o.baseUrl);
-      if (result.outcome === "off" || Date.now() >= deadline) return result;
-      await new Promise((r) => setTimeout(r, o.checkIntervalMs ?? 2_000));
-    }
-  };
-  let last = await checkUntilOff();
+  const timeoutMs = o.checkTimeoutMs ?? 120_000;
+  const intervalMs = o.checkIntervalMs ?? 2_000;
+  let last = await checkUntilOff(probe, node.address, timeoutMs, intervalMs);
   if (last.outcome === "served" && !restarted) {
-    o.onProgress?.(`${shownBase} still serves MQTT over WebSocket after the deploy's restart`);
+    o.onProgress?.(`${shownAddress} still serves MQTT over WebSocket after the deploy's restart`);
     await restart();
-    last = await checkUntilOff();
+    last = await checkUntilOff(probe, node.address, timeoutMs, intervalMs);
   }
   if (last.outcome === "served") {
     throw new Error(
-      `flair deploy: ${shownBase} still serves MQTT over WebSocket after the shared worker threads were restarted (${last.detail}). ` +
+      `flair deploy: ${shownAddress} still serves MQTT over WebSocket after the shared worker threads were restarted (${last.detail}). ` +
         `Deployed; ${sharedWorkerRestartInstruction(o.url)}.`,
     );
   }
   if (last.outcome !== "off") {
     throw new Error(
-      `flair deploy: could not confirm that ${shownBase} no longer serves MQTT over WebSocket (${last.detail}). ` +
+      `flair deploy: could not confirm that ${shownAddress} no longer serves MQTT over WebSocket (${last.detail}). ` +
         `Deployed; ${sharedWorkerRestartInstruction(o.url)}.`,
     );
   }
-  o.onProgress?.(`MQTT listeners checked off on the node ${shownBase} reaches: the configuration of ${shownOps} shows the MQTT-off values, and MQTT over WebSocket is off (${last.detail})`);
-  const unverified = [...peers].map((node) => ({ node, instruction: nodeCheckInstruction(o.url, node) }));
+  const verified = verifiedLine(node, o.url, last.detail);
+  o.onProgress?.(verified);
+  const unverified = [...peers].map((name) => ({ node: name, instruction: nodeCheckInstruction(o.url, name) }));
   if (unverified.length > 0 && o.requireAllNodesVerified) {
     throw new Error(
       `flair deploy: --require-all-nodes-verified: ${unverified.length === 1 ? "a cluster node was" : `${unverified.length} cluster nodes were`} NOT VERIFIED: ` +
-        `${unverified.map((u) => u.node).join(", ")}. The MQTT-off configuration was sent to ${unverified.length === 1 ? "it" : "them"}, but flair checks only the node ${shownBase} reaches, ` +
+        `${unverified.map((u) => u.node).join(", ")}. The MQTT-off configuration was sent to ${unverified.length === 1 ? "it" : "them"}, but flair verifies only the node at ${node.host}, ` +
         `and a completed restart job is not proof of a peer's restart. Deployed; ${unverified.map((u) => u.instruction).join("; ")}.`,
     );
   }
-  return { unverified };
+  return { verified, unverified };
+}
+
+/**
+ * `flair deploy --verify-mqtt-only`: step 2's reads and check for the node at
+ * the operations API URL's host, without deploying, setting or restarting
+ * anything. Answers the verified line when that node's configuration shows the
+ * MQTT-off values and the authenticated WebSocket check sent to that host, on
+ * the HTTP port its configuration names, finds MQTT over WebSocket off. Throws
+ * otherwise — MQTT over WebSocket still served (as when worker threads have
+ * not restarted since the configuration changed), or not confirmed — naming
+ * the restart and check to run. Other cluster nodes are not checked or named.
+ */
+export async function verifyNodeMqttListenersOff(o: OpsTarget & {
+  checkUrl?: string;
+  /** How long to keep checking for "off" (default 0: one check). */
+  checkTimeoutMs?: number;
+  checkIntervalMs?: number;
+  probe?: (url: string) => Promise<MqttProbeOutcome>;
+}): Promise<{ verified: string }> {
+  const node = await readCheckedNode(o, "");
+  const shownAddress = safeUrl(node.address);
+  const probe = o.probe ?? ((url: string) => probeMqttOverWebSocket(url, { user: o.fabricUser, password: o.fabricPassword }));
+  const last = await checkUntilOff(probe, node.address, o.checkTimeoutMs ?? 0, o.checkIntervalMs ?? 2_000);
+  if (last.outcome === "served") {
+    throw new Error(
+      `flair deploy: ${shownAddress} still serves MQTT over WebSocket (${last.detail}), although the configuration of ${safeUrl(o.url)} shows the MQTT-off values: ` +
+        `its worker threads have not applied it. ${sharedWorkerRestartInstruction(o.url)}.`,
+    );
+  }
+  if (last.outcome !== "off") {
+    throw new Error(
+      `flair deploy: could not confirm that ${shownAddress} serves no MQTT over WebSocket (${last.detail}). ${sharedWorkerRestartInstruction(o.url)}.`,
+    );
+  }
+  return { verified: verifiedLine(node, o.url, last.detail) };
 }

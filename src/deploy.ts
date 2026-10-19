@@ -27,7 +27,7 @@ import { DEFAULT_STAMP_VERIFY_TIMEOUT_MS, verifyStampMigrationConverged } from "
 import { FABRIC_NPM_INSTALL_COMMAND } from "./fabric-npm-install.js";
 import { discriminateMcpOAuthDiscovery, reportMcpOAuthDiscovery } from "./lib/mcp-enable.js";
 import { mcpOAuthEnabledFromComponentEnv } from "./lib/mcp-oauth-env.js";
-import { applyMqttOffConfiguration, assertSafeUrl, ensureMqttListenersOff, sharedWorkerRestartInstruction, type MqttProbeOutcome } from "./mqtt-off-deploy.js";
+import { applyMqttOffConfiguration, assertSafeUrl, ensureMqttListenersOff, requireAllNodesVerifiedConflict, sharedWorkerRestartInstruction, type MqttProbeOutcome } from "./mqtt-off-deploy.js";
 import { resolveOpsUrlFromTarget } from "./lib/ops-url.js";
 
 export interface DeployOptions {
@@ -114,17 +114,23 @@ export interface DeployOptions {
   // How long the post-restart check waits for Harper's answer that MQTT over
   // WebSocket is off (default 120000 ms).
   mqttCheckTimeoutMs?: number;
-  // The URL that serves the target's HTTP port, which the post-restart
-  // WebSocket check reaches (`--mqtt-check-url`); default: the target URL.
+  // The post-restart WebSocket check is sent to the operations API URL's host,
+  // on the HTTP port that host's configuration names. `mqttCheckUrl`
+  // (`--mqtt-check-url`) confirms that address and may choose its scheme; it
+  // is refused, before any check is sent, unless it names that host and one
+  // of those ports.
   mqttCheckUrl?: string;
   // Injectable WebSocket check (probeMqttOverWebSocket, authenticated with
-  // the deploy's credential). Tests supply a fake.
-  mqttProbe?: (baseUrl: string) => Promise<MqttProbeOutcome>;
-  // The post-restart check verifies only the node the target URL reaches; the
-  // other cluster nodes the replicated configuration names are reported NOT
-  // VERIFIED (a completed restart job is not proof of a peer's restart).
-  // `requireAllNodesVerified: true` (`--require-all-nodes-verified`) turns any
-  // unverified node into a failure.
+  // the deploy's credential), called with the check's address. Tests supply a
+  // fake.
+  mqttProbe?: (url: string) => Promise<MqttProbeOutcome>;
+  // The post-restart check verifies only the node at the operations API URL's
+  // host; the other cluster nodes the replicated configuration names are
+  // reported NOT VERIFIED (a completed restart job is not proof of a peer's
+  // restart). `requireAllNodesVerified: true` (`--require-all-nodes-verified`)
+  // turns any unverified node into a failure; it is refused, before anything
+  // is deployed, with `verify: false`, `restart: false` or `keepMqttConfig`,
+  // which skip that check (requireAllNodesVerifiedConflict).
   requireAllNodesVerified?: boolean;
   // The executable that runs the Harper CLI (default: the runtime running
   // flair, process.execPath).
@@ -1275,6 +1281,15 @@ export async function deploy(opts: DeployOptions): Promise<DeployResult> {
   if (errors.length) {
     throw new Error(errors.join("\n"));
   }
+  // --require-all-nodes-verified needs the post-restart check: refused, before
+  // anything is deployed or sent, with an option that skips it.
+  const conflict = requireAllNodesVerifiedConflict({
+    requireAllNodesVerified: opts.requireAllNodesVerified,
+    verify: (opts.mqttCheck ?? opts.verify !== false) ? undefined : false,
+    restart: opts.restart,
+    keepMqttConfig: opts.keepMqttConfig,
+  });
+  if (conflict) throw new Error(conflict);
 
   const packageRoot = resolvePackageRoot(opts.packageRoot);
   validatePackageLayout(packageRoot);
@@ -1291,7 +1306,7 @@ export async function deploy(opts: DeployOptions): Promise<DeployResult> {
   assertSafeUrl(url, "deploy target URL");
   const opsUrl = opts.opsUrl ?? resolveOpsUrlFromTarget(url);
   assertSafeUrl(opsUrl, "operations API URL");
-  if (opts.mqttCheckUrl !== undefined) assertSafeUrl(opts.mqttCheckUrl, "URL the MQTT check reaches");
+  if (opts.mqttCheckUrl !== undefined) assertSafeUrl(opts.mqttCheckUrl, "URL the MQTT check reaches", "check");
 
   if (opts.dryRun) {
     return { url, project, version, packageRoot, dryRun: true };
@@ -1396,7 +1411,7 @@ export async function deploy(opts: DeployOptions): Promise<DeployResult> {
     if (opts.mqttCheck ?? opts.verify !== false) {
       const { unverified } = await ensureMqttListenersOff({
         url: opsUrl,
-        baseUrl: opts.mqttCheckUrl ?? url,
+        checkUrl: opts.mqttCheckUrl,
         project,
         fabricUser: opts.fabricUser as string,
         fabricPassword: opts.fabricPassword as string,
@@ -1410,7 +1425,7 @@ export async function deploy(opts: DeployOptions): Promise<DeployResult> {
       });
       for (const { node, instruction } of unverified) {
         const notice =
-          `NOT VERIFIED: cluster node ${node}. The MQTT-off configuration was sent to it, but flair checks only the node the target URL reaches, ` +
+          `NOT VERIFIED: cluster node ${node}. The MQTT-off configuration was sent to it, but flair verifies only the node at the operations API URL's host, ` +
           `and a completed restart job is not proof of a peer's restart; ${instruction}. Pass --require-all-nodes-verified to fail the deploy instead.`;
         console.warn(`⚠ flair deploy: ${notice}`);
         opts.onProgress?.(notice);

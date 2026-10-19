@@ -19,20 +19,25 @@
  *   - a component deployment (`flair deploy`, `flair upgrade --target`):
  *     src/mqtt-off-deploy.ts sends MQTT_DISABLED_SET_CONFIGURATION to the
  *     target's operations API before the deploy, and after the deploy's
- *     restart requires the configuration to show those values (mqttOffConfirmed),
- *     restarts the shared worker threads when the application is isolated,
- *     and checks MQTT over WebSocket on the node the target URL reaches,
- *     passing only on Harper's own answer for a disabled path; other cluster
- *     nodes are reported NOT VERIFIED. A component's own config.yaml cannot
- *     set it: `mqtt` is a section of the instance's root configuration, not of
- *     an application's.
- * `flair doctor` reports an instance whose configuration starts an MQTT
- * listener (src/lib/mqtt-listener-doctor.ts).
+ *     restart verifies the node at the operations API URL's host: its
+ *     configuration must show those values (mqttOffConfirmed), the shared
+ *     worker threads are restarted when the application is isolated, and the
+ *     authenticated MQTT-over-WebSocket check sent to that host, on the HTTP
+ *     port its configuration names, must get Harper's own answer for a
+ *     disabled path; other cluster nodes are reported NOT VERIFIED. `flair
+ *     deploy --verify-mqtt-only` runs that check for one node. A component's
+ *     own config.yaml cannot set it: `mqtt` is a section of the instance's
+ *     root configuration, not of an application's.
+ * `flair doctor` reports an instance whose saved configuration starts an MQTT
+ * listener (src/lib/mqtt-listener-doctor.ts); it reads the configuration, not
+ * the running listeners.
  *
  * Note: config-root.schema.json still documents a flat `mqtt.port` /
  * `mqtt.securePort`, but the runtime reads the nested `mqtt.network.*` form
  * (see static/defaultConfig.yaml) — the flat keys are stale.
  */
+
+import { harperPortValue } from "./harper-port-value.js";
 
 /** Harper's `mqtt` configuration section with every MQTT listener off. */
 export const MQTT_DISABLED_CONFIG = {
@@ -57,11 +62,13 @@ function isObject(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * Why `config` is not recognizable as an instance's root configuration (the
- * operations API's `get_configuration` answer), or null when it is: an object
- * with Harper's `http` and `operationsApi` sections and its `rootPath`, which
- * every root configuration carries. An empty or partial answer (`{}`, an error
- * object) is not one, so nothing is concluded from it.
+ * Why `config` is not taken for an instance's root configuration (the
+ * operations API's `get_configuration` answer), or null when it is: it must be
+ * an object with an object `http`, an object `operationsApi` and a non-empty
+ * string `rootPath`, which every root configuration Harper returns carries.
+ * It checks only those three fields: an answer missing any of them (`{}`, an
+ * error object) is refused, and nothing is concluded from it; any object that
+ * carries all three is accepted, whatever else it lacks.
  */
 export function rootConfigurationProblem(config: unknown): string | null {
   if (!isObject(config)) return "the answer is not an object";
@@ -88,8 +95,13 @@ export function mqttListenersOn(config: unknown): string[] {
   const listeners: string[] = [];
   if (mqtt.webSocket) listeners.push("MQTT over WebSocket on the HTTP port (mqtt.webSocket)");
   const network = isObject(mqtt.network) ? mqtt.network : {};
-  if (network.port) listeners.push(`MQTT on TCP port ${String(network.port)} (mqtt.network.port)`);
-  if (network.securePort) listeners.push(`MQTT on TLS port ${String(network.securePort)} (mqtt.network.securePort)`);
+  // A port is printed only as the integer it parses to; any other value is not.
+  const portText = (value: unknown) => {
+    const port = harperPortValue(value);
+    return port === null ? "" : ` ${port}`;
+  };
+  if (network.port) listeners.push(`MQTT on TCP port${portText(network.port)} (mqtt.network.port)`);
+  if (network.securePort) listeners.push(`MQTT on TLS port${portText(network.securePort)} (mqtt.network.securePort)`);
   return listeners;
 }
 
@@ -98,20 +110,22 @@ export function mqttListenersOn(config: unknown): string[] {
  * configuration was set) does not show those values, or null when it does:
  * an `mqtt` section whose `network.port` and `network.securePort` are null and
  * whose `webSocket` is false. Unlike mqttListenersOn, an empty or malformed
- * answer is not taken for "off".
+ * answer is not taken for "off". The reason names fixed field names and
+ * categories only ("mqtt.webSocket is not false"), never a value the answer
+ * carries.
  */
 export function mqttOffConfirmed(config: unknown): string | null {
   if (!isObject(config)) return "the answer is not a configuration object";
   const mqtt = config.mqtt;
   if (!isObject(mqtt)) return "the answer has no mqtt section";
   const problems: string[] = [];
-  if (mqtt.webSocket !== false) problems.push(`mqtt.webSocket is ${JSON.stringify(mqtt.webSocket)}`);
+  if (mqtt.webSocket !== false) problems.push(mqtt.webSocket === undefined ? "mqtt.webSocket is missing" : "mqtt.webSocket is not false");
   const network = mqtt.network;
   if (!isObject(network)) {
     problems.push("mqtt.network is missing");
   } else {
-    if (network.port !== null) problems.push(`mqtt.network.port is ${JSON.stringify(network.port)}`);
-    if (network.securePort !== null) problems.push(`mqtt.network.securePort is ${JSON.stringify(network.securePort)}`);
+    if (network.port !== null) problems.push(network.port === undefined ? "mqtt.network.port is missing" : "mqtt.network.port is not null");
+    if (network.securePort !== null) problems.push(network.securePort === undefined ? "mqtt.network.securePort is missing" : "mqtt.network.securePort is not null");
   }
   return problems.length ? problems.join(", ") : null;
 }
