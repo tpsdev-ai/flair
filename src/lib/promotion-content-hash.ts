@@ -1,15 +1,16 @@
 /**
- * promotion-content-hash.ts — the one promotion content-binding hash
- * (flair#2478), shared by the server and the CLI.
+ * promotion-content-hash.ts — the promotion content-binding hash (flair#2478)
+ * for `src/` callers: restore admission (src/lib/restore-archive.ts,
+ * flair#2664).
  *
- * resources/promotion-binding.ts (the read accessor), resources/promotion-
- * stamp.ts (the trusted stamp) and src/lib/restore-archive.ts (restore
- * admission, flair#2664) all bind a verdict through this function, so a stamped
- * hash and an admitted hash are computed the same way.
- *
- * Dependency-free apart from node:crypto, so both `src/` and `resources/`
- * import it: `src/` must not import `resources/`, because those imports do not
- * survive npm packaging.
+ * The server computes the same binding in resources/promotion-binding.ts,
+ * which the read accessor and the trusted stamp use. The two are separate
+ * implementations of one algorithm, SHA-256 over the content as UTF-8, because
+ * neither side may import the other: `src/` must not import `resources/`
+ * (those imports do not survive npm packaging), and a resource may statically
+ * import only `src/` helpers that load no modules at all (flair#1775), while
+ * this one loads node:crypto. test/unit/restore-archive-2664.test.ts pins
+ * their parity and that no resource imports this module.
  */
 import { createHash } from "node:crypto";
 

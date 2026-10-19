@@ -30,8 +30,11 @@
  *
  * Memory admission: `validateRestoreSelection` checks every selected row's
  * content, and its promotion fields when present, against the binding readers
- * enforce (resources/promotion-binding.ts, hashed by src/lib/promotion-content-
- * hash.ts). It returns either every selected entry validated or a refusal; it
+ * enforce (resources/promotion-binding.ts). The binding hash comes from
+ * src/lib/promotion-content-hash.ts, the CLI-side implementation of the
+ * server's algorithm; a parity test pins the two together, because a resource
+ * may statically import only dependency-free `src/` helpers (flair#1775). It
+ * returns either every selected entry validated or a refusal; it
  * never returns part of a selection. The refusal lists every unresolvable id
  * and every failing row, with two single-problem cases: a malformed selection
  * (not an array, empty, or an entry that is not a non-empty string) refuses as

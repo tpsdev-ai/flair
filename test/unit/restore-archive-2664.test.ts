@@ -516,8 +516,55 @@ describe("selectMemoryIds", () => {
 // ─── Promotion admission ─────────────────────────────────────────────────────
 
 describe("validateRestoreSelection admits promotion fields readers can interpret", () => {
-  test("restore admission binds with the server's promotion hash function", () => {
-    expect(serverPromotionContentHash).toBe(promotionContentHash);
+  // The CLI-side hash (src/lib/promotion-content-hash.ts) and the server's
+  // (resources/promotion-binding.ts) are separate implementations of one
+  // algorithm: a resource may statically import only src helpers that load no
+  // modules (flair#1775), and the hash loads node:crypto. These tests pin them
+  // together; a change to either breaks them.
+  const MULTI_BYTE = "h" + String.fromCodePoint(0xe9) + "llo " + String.fromCodePoint(0x2713) + " " +
+    String.fromCodePoint(0x4e2d, 0x6587) + " " + String.fromCodePoint(0x1f600) + " " +
+    String.fromCodePoint(0x1d11e) + " e" + String.fromCodePoint(0x301);
+
+  test("both promotion hash implementations match fixed SHA-256 vectors", () => {
+    // FIPS 180-2 vectors for "", "abc" and one million "a"; the multi-byte
+    // vector is SHA-256 of MULTI_BYTE's 31 UTF-8 bytes, computed with shasum.
+    expect(Buffer.byteLength(MULTI_BYTE, "utf8")).toBe(31);
+    const vectors: Array<[string, string]> = [
+      ["", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"],
+      ["abc", "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"],
+      ["a".repeat(1_000_000), "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"],
+      [MULTI_BYTE, "89ba5e67813919fc658b3614c7c3db05237a72498b8fac6bee8dc78a5735b462"],
+    ];
+    for (const [text, digest] of vectors) {
+      expect(promotionContentHash(text)).toBe(digest);
+      expect(serverPromotionContentHash(text)).toBe(digest);
+    }
+  });
+
+  test("both promotion hash implementations agree over a content corpus", () => {
+    const corpus: unknown[] = [
+      "", "plain ASCII content", "line\nbreak\ttab \"quoted\" \\ slash", MULTI_BYTE,
+      String.fromCodePoint(0x1f468, 0x200d, 0x1f469, 0x200d, 0x1f467),
+      "a" + String.fromCodePoint(0x308, 0x323) + " n" + String.fromCodePoint(0x303),
+      String.fromCodePoint(0xfeff) + "leading byte order mark", String.fromCharCode(0xd800) + " lone surrogate",
+      "x".repeat(1 << 20), (String.fromCodePoint(0xe9, 0x2713, 0x1f600) + " ").repeat(1 << 17),
+      null, undefined, 42,
+    ];
+    for (const content of corpus) {
+      const lib = promotionContentHash(content);
+      expect(lib).toMatch(/^[0-9a-f]{64}$/);
+      expect(serverPromotionContentHash(content)).toBe(lib);
+    }
+  });
+
+  test("no resource imports the CLI-side promotion hash module", () => {
+    const importsHashModule = (file: string) =>
+      /["'][^"'\n]*promotion-content-hash(?:\.[jt]s)?["']/.test(readFileSync(join(REPO, file), "utf8"));
+    const resources = [...new Bun.Glob("resources/**/*.ts").scanSync({ cwd: REPO })];
+    expect(resources.length).toBeGreaterThan(0);
+    expect(resources.filter(importsHashModule)).toEqual([]);
+    // The same check finds the module's known importer, so it can fire.
+    expect(importsHashModule("src/lib/restore-archive.ts")).toBe(true);
   });
 
   test("the declared statuses match schemas/memory.graphql", () => {
