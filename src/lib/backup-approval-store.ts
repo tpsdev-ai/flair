@@ -55,8 +55,10 @@
  * O_NOFOLLOW where the platform has it, and checked through the open
  * descriptor.
  *
- * An approval authorizes those bytes and the verdict claims in them on this
- * host until it is revoked. It does not establish where the archive came
+ * An approval admits those bytes to `flair restore` on this host until it is
+ * revoked; restoring the promotion verdicts in an archive is not part of it
+ * yet (the server refuses an absent Memory row that carries one). It does not
+ * establish where the archive came
  * from, that a past promotion decision was right, or that an archive without
  * a sidecar is unchanged since it was written.
  */
