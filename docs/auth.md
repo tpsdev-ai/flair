@@ -146,7 +146,7 @@ metadata's `code_challenge_methods_supported` lists `["S256"]` as the supported 
 
 After the earlier request, scope and client checks pass, `GET /OAuthAuthorize`
 (the consent page) and its Approve (`POST /OAuthAuthorize`) answer
-`400 invalid_request` when `code_challenge` is missing, empty or not 43-128
+`400 invalid_request` when `code_challenge` is missing, empty or not exactly 43
 base64url characters, or when `code_challenge_method` is anything other than
 `S256`. The consent page is not rendered and no authorization code is stored. A
 Deny needs no PKCE fields: after redirect-URI validation passes, it redirects with `access_denied` and issues nothing (an invalid `redirect_uri` is refused with `400 invalid_redirect_uri` first).
