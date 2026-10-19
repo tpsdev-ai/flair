@@ -4,17 +4,36 @@
 // run is scoped to the caller, and an admin run that names an agent is scoped to
 // that agent. Such a run counts and removes only orphan pointer rows whose
 // stamped author is the run's owner; a pointer with an empty author is outside
-// it. Fleet-wide admin maintenance (no agent named) sweeps every orphan pointer
-// row. A pointer whose Memory row is live is never removed in any mode.
+// it. Fleet-wide admin maintenance (no agent named) removes every orphan pointer
+// row, the empty-author one included. With no concurrent writer, a pointer whose
+// Memory row is live is not removed in any mode. Every run here is a real run: a
+// dry run skips the sweep and is not exercised.
 //
-// The tests run in file order against one Harper. Orphans a run must leave in
-// place stay seeded, so every later run also proves it left them unchanged;
-// `outstanding` tracks them, and each run compares against rows read back
-// immediately before it.
+// (e) replaces an in-scope orphan pointer with another author's row after the
+// sweep's final confirmation read, while the sweep is held at its
+// `maintenance-orphan-commit` pause (resources/txn-pause-point.ts, enabled for
+// THIS file's Harper only by FLAIR_ENABLE_TEST_FAULT_INJECTION and
+// FLAIR_TEST_PAUSE_DIR). The sweep's delete runs in a transaction whose time is
+// taken at its first read, before the confirmation read, so a replacement whose
+// transaction takes its time later is applied after the delete: the replacement
+// stays stored and the run does not count it. A competing transaction whose time
+// is taken before the sweep's first read and that commits after the
+// confirmation read is not exercised here; there is no compare-and-set, and
+// per-id serialization is tracked in flair#2478.
+//
+// The tests run in file order against one Harper. Tests (a) to (c) each seed
+// five orphans; orphans a run must leave in place stay seeded, so every later
+// run also proves it left them unchanged. `outstanding` tracks them, and orphan
+// rows are compared with a snapshot read immediately before each run. The live
+// pointers and their Memory rows are compared with a snapshot taken at setup.
+// (d) seeds nothing and (e) seeds one orphan of its own; both first remove any
+// orphans an earlier failed test left behind.
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { getModelId } from "../../resources/embeddings-provider.ts";
 import { startHarper, stopHarper, HARPER_STOP_BUDGET_MS, type HarperInstance } from "../helpers/harper-lifecycle";
 
@@ -48,6 +67,7 @@ function assertOwnInstance(harper: HarperInstance): void {
 }
 
 let harper: HarperInstance;
+let pauseDir = "";
 const agentA = makeAgent(`mm-scope-a-${SFX}`);
 const agentB = makeAgent(`mm-scope-b-${SFX}`);
 
@@ -86,6 +106,7 @@ async function maintain(mode: Mode): Promise<any> {
       Authorization: mode.kind === "agent" ? ed25519(mode.agent, "POST", "/MemoryMaintenance") : basicHeader(),
     },
     body: JSON.stringify(mode.body),
+    signal: AbortSignal.timeout(60_000),
   });
   const text = await res.text();
   expect(res.status, text.slice(0, 300)).toBe(200);
@@ -163,6 +184,17 @@ async function seedOrphans(tag: string): Promise<void> {
   }
 }
 
+/** Remove orphans an earlier failed test left stored, so a test can start
+ *  from the live pointers alone. */
+async function clearLeftoverOrphans(): Promise<void> {
+  const leftover = [...(await snapshotOrphans()).keys()];
+  if (leftover.length > 0) {
+    const res = await adminOp({ operation: "delete", database: "flair", table: "MemoryHostSource", hash_values: leftover });
+    expect(res.status).toBe(200);
+  }
+  outstanding.clear();
+}
+
 /** Every outstanding orphan's pointer and Memory rows, read back immediately
  *  before a run. A pointer already gone (only after an earlier test failed) is
  *  dropped, so each test judges only its own run. */
@@ -205,13 +237,41 @@ const liveBefore = new Map<string, { pointer: string; memory: string }>();
 async function expectLiveUnchanged(label: string): Promise<void> {
   for (const l of LIVE) {
     const before = liveBefore.get(l.id)!;
-    expect(await readPointer(l.id), `${label}: live pointer ${l.id} changed`).toBe(before.pointer); // assertion: a non-orphan pointer is never removed
+    expect(await readPointer(l.id), `${label}: live pointer ${l.id} changed`).toBe(before.pointer); // assertion: a non-orphan pointer is not removed
     expect(await readMemory(l.id), `${label}: live Memory ${l.id} changed`).toBe(before.memory);
   }
 }
 
+// ─── the sweep's commit pause (e) ────────────────────────────────────────────
+
+const COMMIT_PAUSE_POINT = "maintenance-orphan-commit";
+
+async function waitForFile(path: string, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (existsSync(path)) return true;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return false;
+}
+
 beforeAll(async () => {
-  harper = await startHarper();
+  pauseDir = mkdtempSync(join(tmpdir(), "flair-mm-scope-pause-"));
+  const saved = {
+    FLAIR_ENABLE_TEST_FAULT_INJECTION: process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION,
+    FLAIR_TEST_PAUSE_DIR: process.env.FLAIR_TEST_PAUSE_DIR,
+  };
+  process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION = "1";
+  process.env.FLAIR_TEST_PAUSE_DIR = pauseDir;
+  try {
+    harper = await startHarper();
+  } finally {
+    // The spawned Harper has its copy; no later Harper in this process inherits it.
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
   assertOwnInstance(harper);
   const now = new Date().toISOString();
   await insertRows("Agent", [
@@ -230,6 +290,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (harper) await stopHarper(harper);
+  if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
 }, HARPER_STOP_BUDGET_MS);
 
 describe("MemoryMaintenance orphan sweep is scoped to the run's owner (real Harper)", () => {
@@ -272,15 +333,9 @@ describe("MemoryMaintenance orphan sweep is scoped to the run's owner (real Harp
     await expectLiveUnchanged("fleet-wide admin run");
   }, 60_000);
 
-  it("(d) a pointer whose Memory row is live is never counted or removed in any mode", async () => {
-    // Only the live pointers are stored: orphans an earlier failed test left
-    // behind are removed first, so every run here must count zero.
-    const leftover = [...(await snapshotOrphans()).keys()];
-    if (leftover.length > 0) {
-      const res = await adminOp({ operation: "delete", database: "flair", table: "MemoryHostSource", hash_values: leftover });
-      expect(res.status).toBe(200);
-      outstanding.clear();
-    }
+  it("(d) with no concurrent writer, a pointer whose Memory row is live is not counted or removed in any mode", async () => {
+    // Only the live pointers are stored, so every run here must count zero.
+    await clearLeftoverOrphans();
     const modes: Array<[string, Mode]> = [
       ["non-admin A", { kind: "agent", agent: agentA, body: {} }],
       ["non-admin B", { kind: "agent", agent: agentB, body: {} }],
@@ -294,4 +349,45 @@ describe("MemoryMaintenance orphan sweep is scoped to the run's owner (real Harp
       await expectLiveUnchanged(label);
     }
   }, 120_000);
+
+  it("(e) a pointer replaced by another author's row after the sweep's final confirmation stays stored and is not counted", async () => {
+    await clearLeftoverOrphans();
+    const id = `mm-commit-window-${SFX}`;
+    const token = randomUUID();
+    await insertRows("Memory", [memoryRow(id, agentA.id, true, token)]);
+    await insertRows("MemoryHostSource", [pointerRow(id, agentA.id, token)]);
+    const memoryBefore = await readMemory(id);
+    const replacement = {
+      memoryId: id,
+      hostSource: JSON.stringify({ ...POINTER, id: "run-bbbbbbbb" }),
+      scopeAtWrite: null,
+      authorId: agentB.id,
+      memoryInstanceToken: randomUUID(),
+      receivedAt: new Date().toISOString(),
+    };
+
+    for (const marker of ["claimed", "paused", "go", "released"]) rmSync(join(pauseDir, `${marker}.${COMMIT_PAUSE_POINT}`), { force: true });
+    writeFileSync(join(pauseDir, `arm.${COMMIT_PAUSE_POINT}`), "");
+    const pending = maintain({ kind: "agent", agent: agentA, body: {} });
+    const paused = await waitForFile(join(pauseDir, `paused.${COMMIT_PAUSE_POINT}`), 15_000);
+    let replacementRow = "";
+    try {
+      expect(paused, "the sweep was not held after its final confirmation").toBe(true);
+      const res = await adminOp({ operation: "upsert", database: "flair", table: "MemoryHostSource", records: [replacement] });
+      expect(res.status, `replacement upsert returned ${res.status}`).toBe(200);
+      replacementRow = await readPointer(id);
+      expect(JSON.parse(replacementRow)[0]?.authorId, "the replacement is stored while the sweep is held").toBe(agentB.id);
+    } finally {
+      writeFileSync(join(pauseDir, `go.${COMMIT_PAUSE_POINT}`), "");
+    }
+    const body = await pending;
+    expect(readFileSync(join(pauseDir, `released.${COMMIT_PAUSE_POINT}`), "utf8"), "the sweep was not released by this test").toBe("go");
+
+    expect(await readPointer(id), "the replacement pointer was removed").toBe(replacementRow); // assertion: the replacement stays stored, byte-identical
+    expect(body.orphans, JSON.stringify(body)).toBe(0); // assertion: the run does not count the replaced pointer as removed
+    expect(body.skipped, JSON.stringify(body)).toBe(1); // assertion: it is reported as skipped
+    expect(await readMemory(id)).toBe(memoryBefore); // control: the archived Memory row is unchanged
+    await expectLiveUnchanged("commit-window run");
+    await adminOp({ operation: "delete", database: "flair", table: "MemoryHostSource", hash_values: [id] });
+  }, 90_000);
 });
