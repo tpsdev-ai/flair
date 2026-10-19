@@ -68,7 +68,6 @@ mock.module("harper", () => ({
 
 mock.module("../../resources/agent-auth.ts", () => ({
   allowAdmin: async () => true,
-  invalidateAdminCache: () => {},
 }));
 mock.module("../../resources/soul-write-policy.ts", () => ({
   authorizeSoulWrite: async () => ({ auth: { kind: "internal" }, source: "operator", denied: null }),

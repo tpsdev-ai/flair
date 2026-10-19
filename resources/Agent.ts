@@ -1,5 +1,5 @@
 import { databases } from "harper";
-import { isAdmin, resolveAgentAuth, allowVerified, allowAdmin, invalidateAdminCache } from "./agent-auth.js";
+import { resolveAgentAuth, allowVerified, allowAdmin } from "./agent-auth.js";
 import { agentRecordIsAdmin, reconcileAdminFields } from "./agent-admin.js";
 import { admitPrincipalWrite, statusWriteRefusal } from "./agent-status-guard.js";
 import { applyFederationBookkeeping, applyOriginatorInstanceId, dropClientFederationBookkeeping, resolveStoredRow, stampOriginatorOnCreate } from "./originator-instance.js";
@@ -253,9 +253,7 @@ export class Agent extends (databases as any).flair.Agent {
     await applyOriginatorInstanceId(content, resolvedOriginRow.row);
     applyFederationBookkeeping(content, resolvedOriginRow.row);
 
-    const result = await super.put(content);
-    invalidateAdminCache();
-    return result;
+    return super.put(content);
   }
 
   /**
@@ -340,9 +338,7 @@ export class Agent extends (databases as any).flair.Agent {
       content.updatedAt = new Date().toISOString();
     }
 
-    const result = await super.patch(content, query);
-    invalidateAdminCache();
-    return result;
+    return super.patch(content, query);
   }
 
   /**
@@ -459,7 +455,6 @@ export class Agent extends (databases as any).flair.Agent {
     }
 
     if (outcome.kind === "no-instance") return noInstance();
-    invalidateAdminCache();
     if (outcome.kind === "no-row") return noRow();
     if (outcome.kind === "ineligible") return ineligible();
     return new Response(
@@ -550,7 +545,6 @@ export class Agent extends (databases as any).flair.Agent {
       throw err;
     }
 
-    invalidateAdminCache();
     if (outcome.kind === "no-row") return noRow();
     if (outcome.kind === "unavailable") return unavailable();
     if (outcome.kind === "refused") return immutable();

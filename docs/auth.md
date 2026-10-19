@@ -289,6 +289,8 @@ flair principal add <principal-id> --admin
 
 `add` upserts the Agent row. If `~/.flair/keys/<principal-id>.key` already exists, that key is reused and is not regenerated. The upsert writes the record this command builds, including `role: admin` and `admin: true` when `--admin` is set. With `--admin` and no `--trust`, the trust tier written is `endorsed`.
 
+For a request signed with an agent key, the admin decision uses the Agent row the signature is verified against: the caller is an admin when that row has `role: admin`, or when its id is listed in the instance's `FLAIR_ADMIN_AGENTS` (comma-separated). The decision is made on every request and nothing is kept between requests, so a role change, a removed row, or a new row under the same id applies to the next request on every worker thread.
+
 ### CLI Reference
 
 | Command | Description |

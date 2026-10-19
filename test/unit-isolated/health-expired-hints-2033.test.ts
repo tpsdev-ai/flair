@@ -82,7 +82,7 @@ mock.module("harper", () => ({
 }));
 mock.module("../../resources/agent-auth.js", () => ({
   allowVerified: async () => true,
-  isAdmin: async () => false,
+  annotatedCallerIsAdmin: async () => false,
   resolveAgentAuth: async () => ({ kind: "internal" }),
 }));
 mock.module("../../resources/build-info.js", () => ({ resolveBuildInfo: () => null }));

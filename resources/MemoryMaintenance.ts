@@ -33,7 +33,7 @@ async function deletePointerRowOrThrow(memoryId: string, ctx: any): Promise<void
   }
   await table.delete(memoryId, ctx);
 }
-import { isAdmin } from "./agent-auth.js";
+import { annotatedCallerIsAdmin } from "./agent-auth.js";
 import { noteMemoryUpsert, noteMemoryDelete } from "./bm25-index-service.js";
 import { stripUndeclaredMemoryAttributes } from "./memory-declared-attributes.js";
 import { withOwnedTransaction } from "./request-transaction.js";
@@ -55,7 +55,7 @@ export class MemoryMaintenance extends Resource {
     const request = ctx?.request ?? ctx;
     const actorId: string | undefined = request?.tpsAgent;
     const callerIsAdmin: boolean = request?.tpsAgentIsAdmin === true
-      || (actorId ? await isAdmin(actorId) : false);
+      || (await annotatedCallerIsAdmin(request));
 
     // Scope rules:
     //   - Admin can pass agentId to maintain a specific agent (or omit it

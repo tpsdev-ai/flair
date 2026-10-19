@@ -1,3 +1,8 @@
+/**
+ * AgentSeed + the admin decision: an agent seeded with role "admin" is an admin
+ * once the seed's transaction commits, and not while its create is only staged.
+ * resources/agent-auth.ts isAdmin() reads the Agent row at the time of the call.
+ */
 import { beforeEach, expect, mock, test } from "bun:test";
 
 let agents = new Map<string, any>();
@@ -44,25 +49,23 @@ mock.module("../../resources/skill-write.ts", () => ({
 };
 
 const { AgentSeed } = await import("../../resources/AgentSeed.ts");
-const { invalidateAdminCache, isAdmin } = await import("../../resources/agent-auth.ts");
+const { isAdmin } = await import("../../resources/agent-auth.ts");
 const { _resetLocalInstanceIdCacheForTests } = await import("../../resources/instance-identity.ts");
 
 beforeEach(() => {
   agents = new Map();
   staged = new Map();
   souls = new Map();
-  invalidateAdminCache();
   _resetLocalInstanceIdCacheForTests();
 });
 
 for (const refused of [false, true]) {
-  test(`AgentSeed invalidates the admin cache after commit despite a pre-commit refill (refused: ${refused})`, async () => {
+  test(`AgentSeed: a seeded admin is an admin after the commit and not before it (refused: ${refused})`, async () => {
     let release!: () => void;
     let paused!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
     const reached = new Promise<void>((resolve) => { paused = resolve; });
     beforeCommit = async () => {
-      invalidateAdminCache();
       paused();
       await gate;
     };
