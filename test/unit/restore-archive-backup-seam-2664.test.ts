@@ -7,8 +7,9 @@
  * test/unit/backup-fail-closed-2214.test.ts does: `fetch` is replaced with a
  * fixture source for the REST and operations origins (`*.invalid`, no
  * network), and HOME and --output point into a throwaway directory. The test
- * then reads the published file's exact bytes and passes them to
- * parseRestoreArchive and validateRestoreSelection.
+ * then reads the published file's exact bytes, passes them to
+ * parseRestoreArchive, and passes the parsed archive it returns to
+ * validateRestoreSelection.
  *
  * Two fixture sources:
  * - "served" returns each stored Memory row through applyPromotionBinding,

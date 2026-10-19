@@ -14,7 +14,7 @@
  */
 import { createHash } from "node:crypto";
 
-/** SHA-256 over the exact stored, post-redaction content as UTF-8. */
+/** SHA-256 of the supplied content as UTF-8 (non-string content is converted with String(); null and undefined hash as ""). */
 export function promotionContentHash(content: unknown): string {
   const text = typeof content === "string" ? content : content == null ? "" : String(content);
   return createHash("sha256").update(text, "utf8").digest("hex");

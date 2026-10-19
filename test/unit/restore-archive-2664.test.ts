@@ -520,7 +520,7 @@ describe("validateRestoreSelection admits promotion fields readers can interpret
   // (resources/promotion-binding.ts) are separate implementations of one
   // algorithm: a resource may statically import only src helpers that load no
   // modules (flair#1775), and the hash loads node:crypto. These tests pin them
-  // together; a change to either breaks them.
+  // together: a divergence on the pinned vectors or the corpus fails them.
   const MULTI_BYTE = "h" + String.fromCodePoint(0xe9) + "llo " + String.fromCodePoint(0x2713) + " " +
     String.fromCodePoint(0x4e2d, 0x6587) + " " + String.fromCodePoint(0x1f600) + " " +
     String.fromCodePoint(0x1d11e) + " e" + String.fromCodePoint(0x301);
