@@ -9,8 +9,12 @@
  * child process, the way restore-confirmation-2215.test.ts does: `fetch` is
  * the command's only write path, replaced by a recorder that answers like an
  * empty Flair. A refusal must send no request at all, so it wrote nothing.
- * Refusals run in all three modes: merge (the default), --replace and
- * --dry-run.
+ * The per-mode loop runs its cases (admission, missing sidecar, sidecar for
+ * other bytes, one changed byte) in all three modes: merge (the default),
+ * --replace and --dry-run. The other refusal cases run once, in the mode each
+ * names (merge unless stated). Each refusal's message is checked for the
+ * file, what did not hold, that restore stopped before any write, and its
+ * remedy.
  *
  * Archives here are compact JSON, not the pretty-printed form flair backup
  * writes, and one case changes only whitespace: a digest computed over a
@@ -51,10 +55,10 @@ const MODES = [
 ] as const;
 
 /** Run `flair restore` on `bytes` with `sidecar` beside it; record every request. */
-async function restore(bytes: Uint8Array, sidecar: Sidecar, flags: readonly string[] = []) {
+async function restore(bytes: Uint8Array, sidecar: Sidecar, flags: readonly string[] = [], existingPath?: string) {
   const dir = tempDir("flair-restore-preflight-2664-");
-  const archivePath = join(dir, "archive.json");
-  writeFileSync(archivePath, bytes);
+  const archivePath = existingPath ?? join(dir, "archive.json");
+  if (existingPath === undefined) writeFileSync(archivePath, bytes);
   if (sidecar !== null) {
     if (typeof sidecar === "object" && !Buffer.isBuffer(sidecar)) mkdirSync(`${archivePath}.sha256`);
     else writeFileSync(`${archivePath}.sha256`, sidecar);
@@ -92,6 +96,8 @@ async function restore(bytes: Uint8Array, sidecar: Sidecar, flags: readonly stri
   return { archivePath, stdout, stderr, exitCode, calls };
 }
 
+const STOPPED = "restore stopped before any write";
+
 /** Refused before any request: non-zero, no completion line, each fragment in stderr. */
 function refusedBeforeAnyRequest(result: Awaited<ReturnType<typeof restore>>, ...fragments: string[]) {
   expect(result.exitCode).not.toBe(0);
@@ -123,14 +129,17 @@ describe("restore verifies the archive's digest sidecar before any request (#266
     test(`${label}: a missing sidecar refuses, naming the sidecar path`, async () => {
       const result = await restore(COMPACT, null, flags);
       refusedBeforeAnyRequest(result, `archive digest sidecar ${result.archivePath}.sha256 not found`,
-        "restore refuses it before any write", "copy the .sha256 file written with this archive");
+        STOPPED, "put the .sha256 file written with this archive beside it, or take a new backup");
     });
 
     test(`${label}: a sidecar for other bytes refuses, naming both digests`, async () => {
       const other = Buffer.from(JSON.stringify({ ...archive, source: "http://other.invalid" }));
       const result = await restore(COMPACT, sidecarFor(other), flags);
       refusedBeforeAnyRequest(result, `archive ${result.archivePath} does not match its digest sidecar`,
-        `its bytes hash to SHA-256 ${sha256(COMPACT)}`, `records ${sha256(other)}`, "restore refuses it before any write");
+        `its bytes hash to SHA-256 ${sha256(COMPACT)}`, `records ${sha256(other)}`, STOPPED,
+        "Use a copy of the archive and sidecar that match each other", "or take a new backup");
+      // The mismatch does not say which file is at fault.
+      expect(result.stderr).not.toContain("changed after");
     });
 
     test(`${label}: an archive with one byte changed refuses`, async () => {
@@ -158,19 +167,31 @@ describe("restore verifies the archive's digest sidecar before any request (#266
   ] as const) {
     test(`a sidecar that is not a digest line refuses: ${label}`, async () => {
       const result = await restore(COMPACT, sidecar);
-      refusedBeforeAnyRequest(result, `archive digest sidecar ${result.archivePath}.sha256 is not a SHA-256 digest line`, why);
+      refusedBeforeAnyRequest(result, `archive digest sidecar ${result.archivePath}.sha256 is not a SHA-256 digest line`, why,
+        STOPPED, "Put the .sha256 file written with this archive beside it, or take a new backup");
     });
   }
 
   test("a sidecar that cannot be read refuses", async () => {
     const result = await restore(COMPACT, { directory: true });
-    refusedBeforeAnyRequest(result, `cannot read archive digest sidecar ${result.archivePath}.sha256 (EISDIR)`);
+    refusedBeforeAnyRequest(result, `cannot read archive digest sidecar ${result.archivePath}.sha256 (EISDIR)`, STOPPED,
+      "Check that the sidecar is a file this user can read, or put the .sha256 file written with this archive beside it");
+  });
+
+  test("an archive that cannot be read refuses", async () => {
+    const dir = tempDir("flair-restore-preflight-2664-");
+    const archivePath = join(dir, "archive-dir.json");
+    mkdirSync(archivePath);
+    const result = await restore(Buffer.alloc(0), null, [], archivePath);
+    refusedBeforeAnyRequest(result, `cannot read archive ${archivePath} (EISDIR)`, STOPPED,
+      "Check the path and that this user can read the file");
   });
 
   test("a verified archive the parser refuses is not restored: a repeated key", async () => {
     const duplicated = Buffer.from(JSON.stringify(archive).replace('"content":"Strategy note"', '"content":"Strategy note","content":"Other"'));
     const result = await restore(duplicated, sidecarFor(duplicated));
-    refusedBeforeAnyRequest(result, `archive ${result.archivePath} refused`, "duplicate object key", "duplicate-key at /memories/0/content");
+    refusedBeforeAnyRequest(result, `archive ${result.archivePath} matches its digest sidecar but is not a restorable archive`,
+      "duplicate object key", "duplicate-key at /memories/0/content", STOPPED, "Restore from another backup, or take a new one");
   });
 
   test("a verified archive the parser refuses is not restored: a repeated Memory id", async () => {
@@ -228,6 +249,12 @@ describe("readBackupArtifact hashes and parses one read of the archive (#2664)",
     const dir = tempDir("flair-restore-one-buffer-2664-");
     const archivePath = join(dir, "missing.json");
     writeFileSync(`${archivePath}.sha256`, sidecarFor(COMPACT));
-    expect(readBackupArtifact(archivePath)).toMatchObject({ ok: false, code: "archive-unreadable" });
+    const reads: string[] = [];
+    const readFile = (path: string): Buffer => {
+      reads.push(path);
+      return readFileSync(path);
+    };
+    expect(readBackupArtifact(archivePath, { readFile })).toMatchObject({ ok: false, code: "archive-unreadable" });
+    expect(reads).toEqual([archivePath]);
   });
 });

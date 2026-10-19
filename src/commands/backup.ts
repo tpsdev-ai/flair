@@ -281,14 +281,17 @@ addSharedCredentialOptions(
     const outputPath: string = opts.output ?? defaultOutput;
     const serialized = JSON.stringify(backup, null, 2) + "\n";
     // flair#2664: the archive is published together with `<output>.sha256`,
-    // the SHA-256 of exactly these bytes as read back from disk. The sidecar
-    // is removed before the archive changes and written after it is in place,
-    // so a crash never leaves a sidecar beside bytes it does not describe
+    // the SHA-256 of exactly these bytes as read back from disk. The previous
+    // sidecar is removed before the archive changes and the new one is written
+    // after it is in place, so a crash of this backup never leaves the sidecar
+    // it wrote beside other bytes. Concurrent backups to one output path are
+    // not serialized; a mismatched pair they leave is refused at restore
     // (src/lib/backup-artifact.ts).
     let sha256: string;
     let digestPath: string;
+    let stagingLeft: { path: string; reason: string } | undefined;
     try {
-      ({ sha256, digestPath } = publishBackupArtifact({
+      ({ sha256, digestPath, stagingLeft } = publishBackupArtifact({
         outputPath,
         serialized,
         verify(written) {
@@ -320,6 +323,9 @@ addSharedCredentialOptions(
     log(render.kv("Souls", render.wrap(render.c.bold, String(souls.length))));
     log(render.kv("Output", render.wrap(render.c.dim, outputPath)));
     log(render.kv("SHA-256", render.wrap(render.c.dim, `${sha256} (${digestPath})`)));
+    if (stagingLeft) {
+      console.error(`Warning: the staging directory ${stagingLeft.path} could not be removed (${stagingLeft.reason}); remove it by hand.`);
+    }
   });
 
 }

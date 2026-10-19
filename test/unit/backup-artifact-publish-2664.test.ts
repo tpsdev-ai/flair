@@ -1,23 +1,31 @@
 /**
  * backup-artifact-publish-2664.test.ts — flair#2664 slice 1b: a backup
- * archive and its digest sidecar are published as one coherent artifact
- * (src/lib/backup-artifact.ts publishBackupArtifact).
+ * archive and its digest sidecar are published as one coherent artifact by a
+ * single writer (src/lib/backup-artifact.ts publishBackupArtifact).
  *
- * The published names are `<out>` and `<out>.sha256`. A state is consistent
- * when there is no sidecar, or the sidecar's digest is the SHA-256 of the
- * archive bytes beside it. Each case starts from one of three states (no
- * files, an earlier consistent pair, an earlier archive with no sidecar) and
- * stops the publication immediately before one step:
+ * The published names are `<out>` and `<out>.sha256`. Each table case starts
+ * from one of four states: no files; an earlier consistent pair; an earlier
+ * archive with no sidecar; or a stale sidecar with no archive (the one
+ * inconsistent start). It stops the publication immediately before one step:
  * - "crash": a child process publishing for real is killed with SIGKILL at
  *   that step, so no cleanup or error handling runs;
  * - "failure": the step throws in-process, so the error path runs;
  * - "observed": the state at each step is recorded without stopping.
- * Every case asserts the exact state the published names hold (the table
- * below), and that each one is consistent.
+ * Every table case asserts the exact state the published names hold (the
+ * table in expectedStates). Apart from the stale-sidecar start before step 5,
+ * every state in the table is consistent: no sidecar, or a sidecar whose
+ * digest is the SHA-256 of the archive bytes beside it. Concurrent writers
+ * are out of scope here.
+ *
+ * Other cases: the published bytes and modes; input that is not in canonical
+ * JSON form (the digest covers the exact bytes given, not a re-serialization);
+ * a refusal from the caller's verify; staged bytes changed before read-back;
+ * a staging directory that cannot be removed, after success and after a
+ * failure; and the sidecar line format, including canonical escaping.
  */
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "../helpers/temp-dir.ts";
 import {
@@ -31,43 +39,45 @@ import {
 
 const MODULE = join(import.meta.dir, "..", "..", "src", "lib", "backup-artifact.ts");
 
-const archiveText = (label: string): string =>
-  JSON.stringify({
-    version: 1, createdAt: "2026-10-19T00:00:00.000Z", source: `http://${label}.invalid`,
-    agents: [{ id: "flint" }], souls: [], memories: [{ id: `m-${label}`, agentId: "flint", content: `${label} content é ✓` }],
-  }, null, 2) + "\n";
+const archiveValue = (label: string) => ({
+  version: 1, createdAt: "2026-10-19T00:00:00.000Z", source: `http://${label}.invalid`,
+  agents: [{ id: "flint" }], souls: [], memories: [{ id: `m-${label}`, agentId: "flint", content: `${label} content é ✓` }],
+});
+const archiveText = (label: string): string => JSON.stringify(archiveValue(label), null, 2) + "\n";
 const OLD = archiveText("old");
 const NEW = archiveText("new");
 const sha256 = (bytes: string | Uint8Array): string => createHash("sha256").update(bytes).digest("hex");
 
-type Start = "no files" | "earlier pair" | "earlier archive alone";
-const STARTS: readonly Start[] = ["no files", "earlier pair", "earlier archive alone"];
+type Start = "no files" | "earlier pair" | "earlier archive alone" | "stale sidecar alone";
+const STARTS: readonly Start[] = ["no files", "earlier pair", "earlier archive alone", "stale sidecar alone"];
 
 function setUp(start: Start): { dir: string; out: string } {
   const dir = tempDir("flair-backup-artifact-2664-");
   const out = join(dir, "flair-backup.json");
-  if (start !== "no files") writeFileSync(out, OLD);
-  if (start === "earlier pair") writeFileSync(`${out}.sha256`, formatBackupDigest(sha256(OLD), "flair-backup.json"));
+  if (start === "earlier pair" || start === "earlier archive alone") writeFileSync(out, OLD);
+  if (start === "earlier pair" || start === "stale sidecar alone") {
+    writeFileSync(`${out}.sha256`, formatBackupDigest(sha256(OLD), "flair-backup.json"));
+  }
   return { dir, out };
 }
 
-/** What the published names hold, in words; anything inconsistent says so. */
+/** What the published names hold, in words; a mismatched or unreadable pair says so. */
 function publishedState(out: string): string {
   const archive = existsSync(out) ? readFileSync(out) : null;
   const sidecar = existsSync(`${out}.sha256`) ? readFileSync(`${out}.sha256`) : null;
   const which = archive === null ? null : archive.equals(Buffer.from(OLD)) ? "earlier" : archive.equals(Buffer.from(NEW)) ? "new" : "unknown";
   if (sidecar === null) return which === null ? "nothing" : `${which} archive alone`;
   const recorded = parseBackupDigest(sidecar);
-  if (!recorded.ok) return `INCONSISTENT: unreadable sidecar (${recorded.reason})`;
-  if (archive === null) return "INCONSISTENT: sidecar with no archive";
-  if (recorded.sha256 !== sha256(archive)) return `INCONSISTENT: ${which} archive beside a sidecar for other bytes`;
+  if (!recorded.ok) return `INVALID: unreadable sidecar (${recorded.reason})`;
+  if (archive === null) return recorded.sha256 === sha256(OLD) ? "stale sidecar alone" : "MISMATCH: new sidecar with no archive";
+  if (recorded.sha256 !== sha256(archive)) return `MISMATCH: ${which} archive beside a sidecar for other bytes`;
   return `${which} pair`;
 }
 
 /** The state a stop immediately before each step leaves, then the completed state. */
 function expectedStates(start: Start): Record<BackupPublishStep | "completed", string> {
-  const before = { "no files": "nothing", "earlier pair": "earlier pair", "earlier archive alone": "earlier archive alone" }[start];
-  const oldDigestRemoved = start === "no files" ? "nothing" : "earlier archive alone";
+  const before = { "no files": "nothing", "earlier pair": "earlier pair", "earlier archive alone": "earlier archive alone", "stale sidecar alone": "stale sidecar alone" }[start];
+  const oldDigestRemoved = start === "earlier pair" || start === "earlier archive alone" ? "earlier archive alone" : "nothing";
   return {
     "stage-archive": before,
     "sync-archive": before,
@@ -103,7 +113,7 @@ console.log("published");
   expect(stdout).not.toContain("published");
 }
 
-describe("publishing a backup archive with its digest sidecar (#2664)", () => {
+describe("publishing a backup archive with its digest sidecar, single writer (#2664)", () => {
   test("publishes the exact bytes and a sidecar holding their SHA-256, both mode 0600, and leaves no staging directory", () => {
     const { dir, out } = setUp("earlier pair");
     const result = publishBackupArtifact({ outputPath: out, serialized: NEW });
@@ -117,8 +127,22 @@ describe("publishing a backup archive with its digest sidecar (#2664)", () => {
     expect(verified).toMatchObject({ ok: true, sha256: sha256(NEW) });
   });
 
+  test("the digest covers the exact bytes given, not a re-serialization: non-canonical input", () => {
+    const { out } = setUp("no files");
+    // Neither the compact nor the pretty-printed form of this document.
+    const serialized = `{ "version":1,"agents" : [ {"id":"flint"} ], "souls":[],\n"memories":[]  }\n`;
+    const value = JSON.parse(serialized);
+    expect(serialized).not.toBe(JSON.stringify(value));
+    expect(serialized).not.toBe(JSON.stringify(value, null, 2) + "\n");
+    const result = publishBackupArtifact({ outputPath: out, serialized });
+    expect(result.sha256).toBe(sha256(serialized));
+    expect(readFileSync(out, "utf8")).toBe(serialized);
+    expect(readFileSync(`${out}.sha256`, "latin1")).toBe(`${sha256(serialized)}  flair-backup.json\n`);
+    expect(readBackupArtifact(out)).toMatchObject({ ok: true, sha256: sha256(serialized) });
+  });
+
   for (const start of STARTS) {
-    test(`from ${start}: the state at every step is the expected consistent state`, () => {
+    test(`from ${start}: the state at every step is the expected state`, () => {
       const { out } = setUp(start);
       const observed: Record<string, string> = {};
       publishBackupArtifact({ outputPath: out, serialized: NEW }, { beforeStep: (step) => { observed[step] = publishedState(out); } });
@@ -127,7 +151,7 @@ describe("publishing a backup archive with its digest sidecar (#2664)", () => {
     });
   }
 
-  for (const start of ["no files", "earlier pair"] as const) {
+  for (const start of STARTS) {
     for (const step of BACKUP_PUBLISH_STEPS) {
       test(`from ${start}: a crash (SIGKILL) at ${step} leaves ${expectedStates(start)[step]}`, async () => {
         const { out } = setUp(start);
@@ -156,26 +180,16 @@ describe("publishing a backup archive with its digest sidecar (#2664)", () => {
         expect(publishedState(out)).toBe(state);
         if (state === "new archive alone") {
           expect(message).toContain(`${out} holds the new archive but its digest sidecar ${out}.sha256 was not written`);
-        } else if (step === "publish-archive" && start === "earlier pair") {
+        } else if (step === "publish-archive" && (start === "earlier pair" || start === "stale sidecar alone")) {
           expect(message).toContain(`the previous digest sidecar ${out}.sha256 was removed and ${out} was not replaced`);
         } else {
           expect(message).toContain("nothing was published");
         }
+        expect(message).not.toContain("could not be removed");
         expect(stagingDirs(dir)).toEqual([]);
       });
     }
   }
-
-  test("a stale sidecar with no archive beside it is removed before the new archive is published", () => {
-    const { out } = setUp("no files");
-    writeFileSync(`${out}.sha256`, formatBackupDigest(sha256(OLD), "flair-backup.json"));
-    const observed: Record<string, string> = {};
-    publishBackupArtifact({ outputPath: out, serialized: NEW }, { beforeStep: (step) => { observed[step] = publishedState(out); } });
-    expect(observed["remove-old-digest"]).toBe("INCONSISTENT: sidecar with no archive");
-    expect(observed["publish-archive"]).toBe("nothing");
-    expect(observed["publish-digest"]).toBe("new archive alone");
-    expect(publishedState(out)).toBe("new pair");
-  });
 
   test("a refusal from the caller's verify publishes nothing", () => {
     const { dir, out } = setUp("earlier pair");
@@ -197,6 +211,36 @@ describe("publishing a backup archive with its digest sidecar (#2664)", () => {
     })).toThrow("archive bytes on disk do not match the serialized archive; nothing was published");
     expect(publishedState(out)).toBe("earlier pair");
   });
+
+  test("a staging directory that cannot be removed after publication is reported, and the pair stays published", () => {
+    const { dir, out } = setUp("earlier pair");
+    const result = publishBackupArtifact({ outputPath: out, serialized: NEW }, {
+      removeDir: () => { throw Object.assign(new Error("injected removal failure"), { code: "EBUSY" }); },
+    });
+    const [staging] = stagingDirs(dir);
+    expect(result).toEqual({ sha256: sha256(NEW), digestPath: `${out}.sha256`, stagingLeft: { path: join(dir, staging!), reason: "EBUSY" } });
+    expect(publishedState(out)).toBe("new pair");
+    rmSync(join(dir, staging!), { recursive: true, force: true });
+  });
+
+  test("a staging directory that cannot be removed after a failure is reported with the publication state", () => {
+    const { dir, out } = setUp("earlier pair");
+    let message = "";
+    try {
+      publishBackupArtifact({ outputPath: out, serialized: NEW }, {
+        beforeStep: (step) => { if (step === "publish-digest") throw new Error("injected publish-digest failure"); },
+        removeDir: () => { throw Object.assign(new Error("injected removal failure"), { code: "EACCES" }); },
+      });
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    const [staging] = stagingDirs(dir);
+    expect(message).toContain("injected publish-digest failure");
+    expect(message).toContain(`${out} holds the new archive but its digest sidecar ${out}.sha256 was not written`);
+    expect(message).toContain(`the staging directory ${join(dir, staging!)} could not be removed (EACCES): remove it by hand`);
+    expect(publishedState(out)).toBe("new archive alone");
+    rmSync(join(dir, staging!), { recursive: true, force: true });
+  });
 });
 
 describe("the digest sidecar line (#2664)", () => {
@@ -211,22 +255,29 @@ describe("the digest sidecar line (#2664)", () => {
     const line = formatBackupDigest(digest, "a\\b\nc\rd.json");
     expect(line).toBe(`\\${digest}  a\\\\b\\nc\\rd.json\n`);
     expect(parseBackupDigest(Buffer.from(line))).toEqual({ ok: true, sha256: digest });
+    expect(parseBackupDigest(Buffer.from(formatBackupDigest(digest, "back\\slash.json")))).toEqual({ ok: true, sha256: digest });
   });
 
-  for (const [label, text] of [
-    ["empty", ""],
-    ["no trailing line feed", `${digest}  a.json`],
-    ["two lines", `${digest}  a.json\n${digest}  b.json\n`],
-    ["CRLF ending", `${digest}  a.json\r\n`],
-    ["uppercase hex", `${digest.toUpperCase()}  a.json\n`],
-    ["63 hex characters", `${digest.slice(1)}  a.json\n`],
-    ["one space", `${digest} a.json\n`],
-    ["binary-mode marker", `${digest} *a.json\n`],
-    ["no name", `${digest}  \n`],
-    ["digest only", `${digest}\n`],
+  for (const [label, text, reason] of [
+    ["empty", "", "the file is empty"],
+    ["no trailing line feed", `${digest}  a.json`, "does not end with a line feed"],
+    ["two lines", `${digest}  a.json\n${digest}  b.json\n`, "more than one line"],
+    ["CRLF ending", `${digest}  a.json\r\n`, "expected 64 lowercase hex"],
+    ["uppercase hex", `${digest.toUpperCase()}  a.json\n`, "expected 64 lowercase hex"],
+    ["63 hex characters", `${digest.slice(1)}  a.json\n`, "expected 64 lowercase hex"],
+    ["one space", `${digest} a.json\n`, "expected 64 lowercase hex"],
+    ["binary-mode marker", `${digest} *a.json\n`, "expected 64 lowercase hex"],
+    ["no name", `${digest}  \n`, "expected 64 lowercase hex"],
+    ["digest only", `${digest}\n`, "expected 64 lowercase hex"],
+    ["an unescaped backslash in the name", `${digest}  back\\slash.json\n`, "does not start with the escape marker"],
+    ["the escape marker with no escape in the name", `\\${digest}  plain.json\n`, "is not escaped as"],
+    ["the escape marker with an unknown escape", `\\${digest}  tab\\tname.json\n`, "is not escaped as"],
+    ["the escape marker with a lone trailing backslash", `\\${digest}  name\\n.json\\\n`, "is not escaped as"],
   ] as const) {
     test(`refuses a sidecar line: ${label}`, () => {
-      expect(parseBackupDigest(Buffer.from(text))).toMatchObject({ ok: false });
+      const result = parseBackupDigest(Buffer.from(text));
+      expect(result.ok).toBe(false);
+      expect(result.ok ? "" : result.reason).toContain(reason);
     });
   }
 });
