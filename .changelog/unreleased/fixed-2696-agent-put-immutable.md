@@ -1,1 +1,1 @@
-- **Agent PUT keeps the stored `createdAt` and `publicKey`; a PUT to an id with no stored row is refused with 404 `agent_put_requires_existing`.** Other fields are replaced from the request body. `POST /AgentSeed` remains the creation path, and key rotation remains on its dedicated endpoint.
+- **Agent PUT keeps the stored `createdAt` and `publicKey`; a PUT to an id with no stored row is refused with 404 `agent_put_requires_existing`.** `POST /AgentSeed` remains the creation path, and key rotation remains on its dedicated endpoint.

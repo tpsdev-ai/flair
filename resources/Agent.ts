@@ -233,8 +233,8 @@ export class Agent extends (databases as any).flair.Agent {
 
     // Resolve the stored row BEFORE the replacement is built: a PUT updates an
     // existing row, and the two immutable fields below carry its values. The
-    // row is resolved by the URL-BOUND target id, never a body `id` (Harper
-    // writes to the URL target); a mismatch or a failed read refuses the write.
+    // stored row is resolved by the write's target id; a body/URL mismatch or a
+    // failed read refuses the write.
     const resolvedOriginRow = await resolveStoredRow(this, "Agent", content, () => super.get());
     if (resolvedOriginRow.denial) return resolvedOriginRow.denial;
     const stored = resolvedOriginRow.row;

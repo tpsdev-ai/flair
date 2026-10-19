@@ -1,15 +1,15 @@
 // agent-put-immutable-2696.test.ts — flair#2696.
 //
-// An Agent PUT replaces every field of an EXISTING row except the two immutable
-// ones: the STORED createdAt and publicKey are carried into the replacement,
-// ignoring any value the body sends. A PUT whose target id has no stored row is
-// refused with 404 `agent_put_requires_existing` (the creation path is
-// POST /AgentSeed) and writes nothing. Authorization is unchanged, and PATCH
-// keeps its merge behaviour.
+// An Agent PUT updates an EXISTING row: the STORED createdAt and publicKey are
+// carried into the replacement, ignoring any value the body sends. A PUT whose
+// target id has no stored row is refused with 404
+// `agent_put_requires_existing` (the creation path is POST /AgentSeed) and
+// writes nothing. Authorization is unchanged, and PATCH keeps its merge
+// behaviour.
 //
-// Each case runs against a real Harper and reads the row back with an
-// operations search_by_id in a separate request, so the assertion is on the
-// committed row rather than the write's response.
+// Each case runs against a real Harper; the stored-row assertions use an
+// operations search_by_id in a separate request, so they read the committed
+// row rather than the write's response.
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
