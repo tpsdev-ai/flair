@@ -11,7 +11,8 @@
  *
  * The operations port answers `get_configuration` with the process's own two
  * ports and `search_by_conditions` on MemoryCandidate from the seeded rows.
- * The HTTP port serves GET/PUT/DELETE on Memory, Soul and MemoryCandidate.
+ * The HTTP port serves GET/PUT/DELETE on Memory, Soul and MemoryCandidate, or
+ * answers every PUT and DELETE with a 307 when `redirectWritesTo` is seeded.
  * Every request is appended to a log file that `requests()` reads.
  */
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
@@ -30,6 +31,8 @@ export interface StubSeed {
   memories?: Array<Record<string, unknown>>;
   souls?: Array<Record<string, unknown>>;
   candidates?: Array<Record<string, unknown>>;
+  /** When set, every PUT and DELETE on the HTTP port answers 307 to this base URL plus the request path. */
+  redirectWritesTo?: string;
 }
 
 export interface StubInstance {
@@ -74,6 +77,9 @@ async function httpFetch(req) {
   const url = new URL(req.url);
   const body = req.method === "PUT" ? await req.json() : undefined;
   log({ endpoint: "http", method: req.method, path: url.pathname });
+  if (seed.redirectWritesTo && (req.method === "PUT" || req.method === "DELETE")) {
+    return new Response(null, { status: 307, headers: { location: seed.redirectWritesTo + url.pathname } });
+  }
   const [table, rawId] = url.pathname.split("/").filter(Boolean);
   const rows = tables[table];
   const id = rawId ? decodeURIComponent(rawId) : "";

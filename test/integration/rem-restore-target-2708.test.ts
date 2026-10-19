@@ -17,6 +17,13 @@
  * configured pair (no config file in HOME): FLAIR_URL names B and
  * FLAIR_OPS_PORT names A's operations port. Restore must refuse before any
  * listing, delete or write, and both instances keep every row.
+ *
+ * The third test runs the remote branch of the preflight pair check
+ * (`establishRestorePair` with a target marked remote) against the two real
+ * Harpers: it passes only when the HTTP endpoint and the operations endpoint
+ * each report exactly one flair.Instance row with the same id, and refuses
+ * with no row on a side or with A's HTTP endpoint and B's operations endpoint
+ * once each has its own row.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -25,6 +32,7 @@ import { join } from "node:path";
 import { startHarper, stopHarpers, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { nodeBin } from "../helpers/node-runtime";
 import { createSnapshot } from "../../src/rem/snapshot.ts";
+import { establishRestorePair, type RestoreTarget } from "../../src/commands/rem.ts";
 
 const CLI = join(process.cwd(), "dist", "cli.js");
 const AGENT_ID = "agent-a";
@@ -211,5 +219,38 @@ describe("flair#2708 — rem restore on a real instance", () => {
     expect(result.stderr).toContain("nothing was listed, deleted or written");
     expect(result.stdout).not.toContain("Deleted:");
     expect(await snapshotRows()).toEqual(before);
+  }, 300_000);
+
+  test("the remote pair check passes only when both endpoints of real instances report the same single identity", async () => {
+    if (!b) {
+      b = await startHarper();
+      assertOwnInstance(b);
+    }
+    const second = b;
+    const remote = (http: HarperInstance, opsSide: HarperInstance): RestoreTarget => ({
+      baseUrl: http.httpURL.replace(/\/+$/, ""),
+      opsUrl: opsSide.opsURL.replace(/\/+$/, ""),
+      httpPort: Number(new URL(http.httpURL).port),
+      opsPort: Number(new URL(opsSide.opsURL).port),
+      loopback: false,
+    });
+    const admin = { user: a.admin.username, pass: a.admin.password };
+    const instanceRow = (id: string) => ({ id, publicKey: `seed-pub-${id}`, role: "hub", status: "active", createdAt: new Date().toISOString() });
+
+    // A fresh instance has no Instance row, so nothing proves the pair.
+    await expect(establishRestorePair(remote(a, a), admin)).rejects.toThrow(/reports no flair\.Instance row/);
+
+    await ops(a, { operation: "insert", table: "Instance", records: [instanceRow("instance-a-2708")] });
+    await establishRestorePair(remote(a, a), admin);
+
+    // A's HTTP endpoint with B's operations endpoint, B still without a row.
+    await expect(establishRestorePair(remote(a, second), admin)).rejects.toThrow(
+      /the operations endpoint's Instance read reports no flair\.Instance row/,
+    );
+
+    await ops(second, { operation: "insert", table: "Instance", records: [instanceRow("instance-b-2708")] });
+    await expect(establishRestorePair(remote(a, second), admin)).rejects.toThrow(/report different flair\.Instance ids/);
+    await expect(establishRestorePair(remote(second, a), admin)).rejects.toThrow(/report different flair\.Instance ids/);
+    await establishRestorePair(remote(second, second), admin);
   }, 300_000);
 });
