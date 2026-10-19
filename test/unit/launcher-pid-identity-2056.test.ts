@@ -141,7 +141,7 @@ function launcherLines(stderr: string): string[] {
 }
 
 /** Whether lsof is on this host's PATH (the launcher consults it when it is). */
-const LSOF_AVAILABLE = spawnSync("sh", ["-c", "command -v lsof"], { encoding: "utf-8", timeout: 5_000 }).status === 0;
+const LSOF_AVAILABLE = Bun.which("lsof") !== null;
 
 /** The clause the launcher's move line uses for its lsof condition on this host. */
 const LSOF_CLAUSE = LSOF_AVAILABLE ? "lsof lists none of its open files there" : "lsof is not available to list its open files";
@@ -357,10 +357,9 @@ function shimDir(root: string, name: string, body: string): string {
   return dir;
 }
 
-/** The absolute path of `cmd` as this host's sh resolves it. */
+/** The absolute path of `cmd` on this process's PATH (a lookup, not a spawn). */
 function which(cmd: string): string {
-  const r = spawnSync("sh", ["-c", `command -v ${cmd}`], { encoding: "utf-8", timeout: 5_000 });
-  const p = (r.stdout ?? "").trim();
+  const p = Bun.which(cmd) ?? "";
   expect(p.startsWith("/")).toBe(true);
   return p;
 }

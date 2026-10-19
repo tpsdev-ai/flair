@@ -152,7 +152,10 @@ is_unrelated_process() {
     UP_WHY="lsof is not available to list its open files"
     return 0
   fi
-  UP_FILES="$(lsof -n -P -w -p "$UP_PID" -Fn 2>/dev/null)" || return 1
+  # -Ffn names both output fields: lsof on Linux prints only the fields named
+  # (-Fn alone gives no fd lines, so no `fcwd`), lsof on macOS adds fd lines
+  # either way.
+  UP_FILES="$(lsof -n -P -w -p "$UP_PID" -Ffn 2>/dev/null)" || return 1
   UP_FILES="$NL$UP_FILES$NL"
   case "$UP_FILES" in *"${NL}fcwd${NL}n/"*) ;; *) return 1 ;; esac
   case "$UP_FILES" in *"${NL}n$UP_ROOT$NL"*|*"${NL}n$UP_ROOT/"*|*"${NL}n$UP_PHYS$NL"*|*"${NL}n$UP_PHYS/"*) return 1 ;; esac

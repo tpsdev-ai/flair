@@ -58,8 +58,7 @@ afterAll(() => {
 /** This host's node, as an absolute path (Harper's native modules need node, not bun). */
 function nodeBin(): string {
   if (process.env.NODE_BIN) return process.env.NODE_BIN;
-  const r = spawnSync("sh", ["-c", "command -v node"], { encoding: "utf-8", timeout: 5_000 });
-  const p = (r.stdout ?? "").trim();
+  const p = Bun.which("node") ?? "";
   if (!p.startsWith("/")) throw new Error("node is not on PATH");
   return p;
 }
