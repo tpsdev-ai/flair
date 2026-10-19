@@ -224,6 +224,8 @@ import { applyRepointPlan, repointSystemdUserUnit, restartOnLinux, type MainServ
 import { snapshotRegularFile, type AtomicWriteHooks, type FileSnapshot as AtomicFileSnapshot } from "./lib/atomic-write.js";
 import { preferVersionManagerAlias } from "./lib/node-alias-path.js";
 import { stabilizeMqttNetworkKeyOrder } from "./lib/stabilize-mqtt-network.js";
+import { MQTT_DISABLED_CONFIG } from "./lib/mqtt-config.js";
+import { FABRIC_OPS_PORT, resolveOpsUrlFromTarget } from "./lib/ops-url.js";
 import { detectOpsApiAllInterfacesBind } from "./lib/ops-api-bind.js";
 import {
   applyUpgradeHookConsent,
@@ -552,8 +554,8 @@ function shouldShowInlineSecretWarning(
 // ─── Defaults ────────────────────────────────────────────────────────────────
 
 const DEFAULT_PORT = 19926;
-const DEFAULT_OPS_PORT = 19925;
-const FABRIC_OPS_PORT = 9925;
+// DEFAULT_OPS_PORT and FABRIC_OPS_PORT live in src/lib/ops-url.ts with
+// resolveOpsUrlFromTarget, shared with the deploy channel (src/deploy.ts).
 // DEFAULT_ADMIN_USER + resolveAdminUser (flag > FLAIR_ADMIN_USER env > "admin")
 // live in src/lib/auth-resolve.ts — imported above (flair#1345).
 //
@@ -1979,26 +1981,9 @@ export function buildOperationsApiConfig(
   };
 }
 
-/**
- * Harper config that fully disables the MQTT broker (flair#1586).
- *
- * Flair does not use MQTT. Harper's mqtt component (server/mqtt.ts
- * `handleApplication`) binds a TCP listener on `mqtt.network.port` (1883) and
- * a TLS listener on `mqtt.network.securePort` (8883) whenever EITHER is truthy
- * (`if (port || securePort)`), plus a WebSocket upgrade path when
- * `mqtt.webSocket` is true. Nulling only `network.port` leaves
- * `network.securePort` at its 8883 default, so the TLS listener still binds.
- * Fully disabling MQTT requires nulling BOTH ports and turning off the
- * WebSocket path.
- *
- * Note: config-root.schema.json still documents a flat `mqtt.port` /
- * `mqtt.securePort`, but the runtime reads the nested `mqtt.network.*` form
- * (see static/defaultConfig.yaml) — the flat keys are stale.
- */
-const MQTT_DISABLED_CONFIG = {
-  network: { port: null, securePort: null },
-  webSocket: false,
-};
+// MQTT_DISABLED_CONFIG — the Harper `mqtt` section with every MQTT listener
+// off — lives in src/lib/mqtt-config.ts, shared with the component-deployment
+// channel (src/deploy.ts) and `flair doctor`.
 
 /**
  * Build the flair-owned environment overrides for a DIRECT (non-launchd)
@@ -2585,17 +2570,6 @@ function resolveOpsTarget(opts: { opsTarget?: string }): string | undefined {
   return opts.opsTarget || process.env.FLAIR_OPS_TARGET || undefined;
 }
 
-/** Derive the ops API URL from a Flair base URL.
- *  https with effective port 443 (no explicit port, or explicit :443): returns
- *    <host>:9925 (FABRIC_OPS_PORT) — the Fabric managed case where port-1/:442
- *    is a dead-end.
- *  All other cases unchanged:
- *    https with non-443 explicit port → port-1 (self-hosted TLS: 19926→19925, 8443→8442)
- *    http with explicit port → port-1 (19926→19925)
- *    http with no port → DEFAULT_OPS_PORT (19925)
- *  Bare hosts are normalised to https:// (effective-443 → Fabric path).
- *  Throws on unparseable URLs or out-of-range ports.
- */
 /** Compute the effective ops API URL for remote commands.
  *  - If --ops-target is set, use it directly (no derivation).
  *  - Else if --target is set, derive ops URL via resolveOpsUrlFromTarget.
@@ -2607,39 +2581,6 @@ function resolveEffectiveOpsUrl(opts: { target?: string; opsTarget?: string }): 
   const target = resolveTarget(opts);
   if (target) return resolveOpsUrlFromTarget(target);
   return undefined;
-}
-
-function resolveOpsUrlFromTarget(targetUrl: string): string {
-  // Normalise bare hosts: add https:// prefix so URL parser can handle them.
-  const normalised = targetUrl.includes("://") ? targetUrl : `https://${targetUrl}`;
-  const url = new URL(normalised);
-
-  // https target with effective port 443 (no explicit port, or explicit :443):
-  // this is the Fabric managed case — the ops API is on the well-known Fabric
-  // ops port, never REST-adjacent. The port-1 / :442 logic is a dead-end here.
-  if (url.protocol === "https:" && (url.port === "" || url.port === "443")) {
-    url.port = String(FABRIC_OPS_PORT);
-    return url.toString().replace(/\/$/, "");
-  }
-
-  // All other cases: unchanged port-1 convention.
-  //   https with non-443 explicit port → port-1 (self-hosted TLS: 19926→19925, 8443→8442)
-  //   http with explicit port → port-1 (19926→19925)
-  //   http with no port → DEFAULT_OPS_PORT (19925)
-  const port = parseInt(url.port, 10);
-  if (!isNaN(port) && port > 0 && port <= 65535) {
-    const opsPort = port - 1;
-    if (opsPort < 1) throw new Error(`Derived ops port ${opsPort} is out of range; target port must be > 1`);
-    url.port = String(opsPort);
-    return url.toString().replace(/\/$/, "");
-  }
-  // No valid explicit port — reject port 0 or out-of-range
-  if (url.port !== "" && url.port !== undefined) {
-    throw new Error(`Invalid target port: ${url.port} (must be 1-65535)`);
-  }
-  // No explicit port on http — use the default ops port.
-  url.port = String(DEFAULT_OPS_PORT);
-  return url.toString().replace(/\/$/, "");
 }
 
 /**
@@ -5393,6 +5334,7 @@ bindUpgradeCli({
   probeOpenclawPluginVersion,
   relativeTime,
   resolveFabricCredentials,
+  resolveEffectiveOpsUrl,
   resolveFlairMcpFinding,
   resolveHttpPort,
   resolveInstalledFlairCli,

@@ -126,6 +126,10 @@ describe("verifyDeployedMcpDiscovery (real HTTP)", () => {
   // ─── Part B: the whole deploy() path, so the CALL is under test ─────────────
 
   const TARGET = "https://prod.acme.harperfabric.com";
+  // deploy() checks after its restart that the target no longer serves MQTT
+  // over WebSocket (test/unit/deploy-mqtt-off.test.ts); these tests are about
+  // discovery, so that check answers a definitive refusal with no network.
+  const notServingMqtt = async () => ({ outcome: "refused" as const, detail: "test: refused" });
   const temps: string[] = [];
 
   afterAll(() => {
@@ -160,8 +164,12 @@ describe("verifyDeployedMcpDiscovery (real HTTP)", () => {
    *  document whose issuer differs from the probed origin (a vanity public URL) can
    *  be exercised. */
   function routedTarget(routeShape: Shape, docIssuer?: string) {
-    return (async (input: any) => {
+    return (async (input: any, init?: any) => {
       const url = new URL(typeof input === "string" ? input : input.url);
+      // deploy()'s post-restart MQTT check reads the target's configuration.
+      if (typeof init?.body === "string" && init.body.includes('"get_configuration"')) {
+        return new Response(JSON.stringify({ mqtt: { network: { port: null, securePort: null }, webSocket: false } }), { status: 200, headers: { "content-type": "application/json" } });
+      }
       if (url.pathname === "/.well-known/oauth-authorization-server") return documentFor(docIssuer ?? url.origin, routeShape);
       if (url.pathname === "/OAuthMetadata") {
         return new Response(JSON.stringify({ issuer: TARGET }), { status: 200, headers: { "content-type": "application/json" } });
@@ -192,6 +200,7 @@ describe("verifyDeployedMcpDiscovery (real HTTP)", () => {
             fabricUser: "admin",
             fabricPassword: "pw",
             packageRoot: pkgRoot,
+            mqttProbe: notServingMqtt,
             verifyTimeoutMs: 40_000,
           } as any),
         ).rejects.toThrow(/document advertises flair's own token endpoint/);
@@ -231,6 +240,7 @@ describe("verifyDeployedMcpDiscovery (real HTTP)", () => {
             fabricUser: "admin",
             fabricPassword: "pw",
             packageRoot: pkgRoot,
+            mqttProbe: notServingMqtt,
             verifyTimeoutMs: 40_000,
           } as any),
         ).rejects.toThrow(/could not read the staged \.env; discovery not verified/);
@@ -260,6 +270,7 @@ describe("verifyDeployedMcpDiscovery (real HTTP)", () => {
             fabricUser: "admin",
             fabricPassword: "pw",
             packageRoot: pkgRoot,
+            mqttProbe: notServingMqtt,
             verifyTimeoutMs: 40_000,
           } as any),
         ).rejects.toThrow(/document advertises flair's own token endpoint/);
@@ -291,6 +302,7 @@ describe("verifyDeployedMcpDiscovery (real HTTP)", () => {
             fabricUser: "admin",
             fabricPassword: "pw",
             packageRoot: pkgRoot,
+            mqttProbe: notServingMqtt,
             verifyTimeoutMs: 40_000,
           } as any),
         ).rejects.toThrow(/document advertises flair's own token endpoint/);

@@ -219,6 +219,12 @@ export interface FabricUpgradeOptions {
   check?: boolean; // plan only, do not deploy
   restart?: boolean;
   replicated?: boolean;
+  /** `--keep-mqtt-config`: deploy() leaves the target's MQTT configuration as it is (DeployOptions.keepMqttConfig). */
+  keepMqttConfig?: boolean;
+  /** The target's operations API URL for deploy()'s MQTT-off configuration and check (DeployOptions.opsUrl). */
+  opsUrl?: string;
+  /** The URL deploy()'s post-restart WebSocket check reaches (DeployOptions.mqttCheckUrl). */
+  mqttCheckUrl?: string;
   /**
    * flair#878: these were reachable from `flair deploy` but NOT from
    * `flair upgrade --target` — this module built its deploy() options by hand
@@ -535,6 +541,9 @@ export async function fabricUpgrade(
       fabricPassword: opts.fabricPassword,
       restart: opts.restart,
       replicated: opts.replicated,
+      keepMqttConfig: opts.keepMqttConfig,
+      opsUrl: opts.opsUrl,
+      mqttCheckUrl: opts.mqttCheckUrl,
       packageRoot,
       // flair#878 — see FabricUpgradeOptions: these used to stop at this
       // boundary, which is why the upgrade path could not act on harper's own

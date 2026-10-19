@@ -27,6 +27,8 @@ import { DEFAULT_STAMP_VERIFY_TIMEOUT_MS, verifyStampMigrationConverged } from "
 import { FABRIC_NPM_INSTALL_COMMAND } from "./fabric-npm-install.js";
 import { discriminateMcpOAuthDiscovery, reportMcpOAuthDiscovery } from "./lib/mcp-enable.js";
 import { mcpOAuthEnabledFromComponentEnv } from "./lib/mcp-oauth-env.js";
+import { applyMqttOffConfiguration, assertOperationsUrlCarriesNoCredential, ensureMqttListenersOff, sharedWorkerRestartInstruction, type MqttProbeOutcome } from "./mqtt-off-deploy.js";
+import { resolveOpsUrlFromTarget } from "./lib/ops-url.js";
 
 export interface DeployOptions {
   fabricOrg?: string;
@@ -96,6 +98,40 @@ export interface DeployOptions {
   // Injectable seam for the convergence/quiescence polls (tests supply fakes;
   // real runs get defaultConvergenceDeps built from the Fabric credentials).
   convergenceDeps?: ConvergenceDeps;
+  // ── MQTT off (src/mqtt-off-deploy.ts) ──────────────────────────────────────
+  // Flair runs Harper with MQTT off. Before the deploy, deploy() sends the
+  // MQTT-off configuration to the target's operations API (set_configuration,
+  // replicated with the deploy); after the deploy's restart it checks the
+  // listeners are off (restarting the shared worker threads when the
+  // application is isolated). `keepMqttConfig: true` (`--keep-mqtt-config`)
+  // leaves the target's MQTT configuration as it is — for an operator who
+  // turned MQTT on deliberately — and skips both steps.
+  keepMqttConfig?: boolean;
+  // The post-restart MQTT check (ensureMqttListenersOff). Defaults to
+  // `verify` (`--no-verify` skips it, and the deploy says what to run);
+  // never runs with --no-restart.
+  mqttCheck?: boolean;
+  // How long the post-restart check waits for a definitive refusal of MQTT
+  // over WebSocket (default 120000 ms).
+  mqttCheckTimeoutMs?: number;
+  // The URL that serves the target's HTTP port, which the post-restart
+  // WebSocket check reaches (`--mqtt-check-url`); default: the target URL.
+  mqttCheckUrl?: string;
+  // Injectable WebSocket check (probeMqttOverWebSocket). Tests supply a fake.
+  mqttProbe?: (baseUrl: string) => Promise<MqttProbeOutcome>;
+  // The executable that runs the Harper CLI (default: the runtime running
+  // flair, process.execPath).
+  harperRuntime?: string;
+  // The target's operations API URL for the requests deploy() itself sends
+  // there (the MQTT-off configuration and check). `flair deploy` and
+  // `flair upgrade --target` pass what every remote command resolves
+  // (--ops-target / FLAIR_OPS_TARGET, else derived from the target); when
+  // absent it is derived from the target URL (resolveOpsUrlFromTarget: :9925
+  // for a Fabric URL, port-1 otherwise).
+  opsUrl?: string;
+  // Injectable fetch for those requests. Tests supply a fake; real runs use
+  // the global fetch.
+  operationsFetch?: typeof fetch;
   // Optional progress sink so callers (the CLI) can surface what would
   // otherwise be a silent multi-minute poll. Never required — deploy() and
   // verifyDeployServing() work fine without it (e.g. fabric-upgrade.ts's
@@ -544,9 +580,10 @@ function spawnHarperCaptured(
   args: string[],
   cwd: string,
   env: NodeJS.ProcessEnv,
+  runtime: string = process.execPath,
 ): Promise<HarperSpawnResult> {
   return new Promise((resolveP, rejectP) => {
-    const p = spawn(process.execPath, [bin, ...args], {
+    const p = spawn(runtime, [bin, ...args], {
       cwd,
       stdio: ["inherit", "pipe", "pipe"],
       env,
@@ -600,7 +637,7 @@ async function runHarperDeploy(
   let lastConvergence: ConvergenceResult | null = null;
 
   for (let attempt = 1; attempt <= totalAttempts; attempt++) {
-    const { code, output } = await spawnHarperCaptured(bin, args, cwd, env);
+    const { code, output } = await spawnHarperCaptured(bin, args, cwd, env, opts.harperRuntime);
     if (code === 0) return { replicationWarning: false, convergedAfterReplicationError: false };
 
     const isReplicationFailure = REPLICATION_FAILURE_RE.test(output);
@@ -1222,6 +1259,10 @@ export async function verifyDeployedMcpDiscovery(o: {
   }
 }
 
+// The MQTT-off step of this channel lives in src/mqtt-off-deploy.ts; these
+// re-exports keep it reachable from the deploy module.
+export { applyMqttOffConfiguration, buildMqttOffOperation, ensureMqttListenersOff } from "./mqtt-off-deploy.js";
+
 export async function deploy(opts: DeployOptions): Promise<DeployResult> {
   const errors = validateOptions(opts);
   if (errors.length) {
@@ -1252,6 +1293,29 @@ export async function deploy(opts: DeployOptions): Promise<DeployResult> {
 
   const harperBin = resolveHarperBin(packageRoot);
   const args = buildHarperDeployArgs(opts, url, project);
+
+  // MQTT off on the target's configuration before anything is deployed
+  // (src/mqtt-off-deploy.ts, step 1); checked after the deploy's restart below.
+  // The operations API URL must carry no credential; nothing is sent if it does.
+  const opsUrl = opts.opsUrl ?? resolveOpsUrlFromTarget(url);
+  if (!opts.keepMqttConfig) assertOperationsUrlCarriesNoCredential(opsUrl);
+  if (opts.keepMqttConfig) {
+    opts.onProgress?.("--keep-mqtt-config: leaving the target's MQTT configuration as it is");
+  } else {
+    await applyMqttOffConfiguration({
+      url: opsUrl,
+      fabricUser: opts.fabricUser as string,
+      fabricPassword: opts.fabricPassword as string,
+      replicated: opts.replicated !== false,
+      fetchImpl: opts.operationsFetch,
+      onProgress: opts.onProgress,
+    });
+    if (opts.restart === false) {
+      const notice = `--no-restart: the MQTT-off configuration takes effect when the target's worker threads restart; ${sharedWorkerRestartInstruction(opsUrl)}`;
+      console.warn(`⚠ flair deploy: ${notice}`);
+      opts.onProgress?.(notice);
+    }
+  }
 
   // Credentials go via env, not argv, so they don't appear in `ps` output
   // for the lifetime of the Harper child process. Harper's cliOperations
@@ -1312,6 +1376,29 @@ export async function deploy(opts: DeployOptions): Promise<DeployResult> {
       stagedEnvReadError = String(err?.message ?? err);
     }
     staged.cleanup();
+  }
+
+  // After the deploy's restart: confirm the MQTT listeners are off
+  // (src/mqtt-off-deploy.ts, step 2).
+  if (!opts.keepMqttConfig && opts.restart !== false) {
+    if (opts.mqttCheck ?? opts.verify !== false) {
+      await ensureMqttListenersOff({
+        url: opsUrl,
+        baseUrl: opts.mqttCheckUrl ?? url,
+        project,
+        fabricUser: opts.fabricUser as string,
+        fabricPassword: opts.fabricPassword as string,
+        replicated: opts.replicated !== false,
+        fetchImpl: opts.operationsFetch,
+        probe: opts.mqttProbe,
+        checkTimeoutMs: opts.mqttCheckTimeoutMs,
+        onProgress: opts.onProgress,
+      });
+    } else {
+      const notice = `the MQTT listener check did not run${opts.mqttCheck === false ? "" : " (--no-verify)"}; ${sharedWorkerRestartInstruction(opsUrl)}`;
+      console.warn(`⚠ flair deploy: ${notice}`);
+      opts.onProgress?.(notice);
+    }
   }
 
   // harper can print "Successfully deployed" for a component that isn't

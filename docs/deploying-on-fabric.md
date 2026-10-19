@@ -305,6 +305,76 @@ without this re-flip will appear healthy (`/Health` green) while its MCP tools a
 dark to every connected client. If you rely on MCP, add the re-flip to your upgrade
 runbook.
 
+### MQTT is off
+
+Flair does not use MQTT, and runs Harper with every MQTT listener off: the TCP
+and TLS listeners (`mqtt.network.port`, `mqtt.network.securePort`) and MQTT
+over WebSocket on the HTTP port (`mqtt.webSocket`). Flair's local spawns set
+this on every start. A component deployment does not go through those spawns,
+and a component's `config.yaml` cannot set it (`mqtt` belongs to the instance's
+root configuration), so `flair deploy` and `flair upgrade --target` set it
+through the target's operations API, in two steps.
+
+**Before deploying**, they send:
+
+```json
+{ "operation": "set_configuration", "mqtt_network_port": null, "mqtt_network_securePort": null, "mqtt_webSocket": false, "replicated": true }
+```
+
+`replicated` follows the deploy (`--no-replicated` sends it to the origin
+only; an instance without replication is set on its own). If the target
+refuses it, or its answer names a cluster node that did not take it, nothing
+is deployed and the error names the node and what to run.
+
+**After the deploy's restart**, they read the target's configuration, which
+must show the values they set (`mqtt.network.port` and
+`mqtt.network.securePort` null, `mqtt.webSocket` false; an empty or malformed
+answer fails), and check MQTT over WebSocket with an MQTT CONNECT. Only a
+definitive refusal confirms it is off: an HTTP 4xx answer to the WebSocket
+upgrade, or a WebSocket close frame instead of an MQTT answer. A CONNACK means
+MQTT is still served; a connection error, an HTTP 5xx, a connection that ends
+without a close frame or no answer in time is inconclusive, and an
+inconclusive check fails the deploy.
+
+Harper applies the setting when the shared HTTP worker threads, which register
+the MQTT listeners, restart. The deploy's restart covers them, except when the
+root configuration marks Flair `isolated: true`: Harper then restarts only
+Flair's own worker. In that case, and whenever the check still finds MQTT
+served, they restart the shared worker threads through the operations API
+(`restart_service`, `"service": "http_workers"`, `"scope": ""`, replicated with
+the deploy) and follow Harper's job: it must complete, and a replicated
+restart's result must list every cluster node's restart as completed (a node
+Harper could not restart fails the deploy, by name). Then they check again; if
+MQTT is still served, or the check is inconclusive, the deploy fails and names
+the restart and check to run.
+
+The check reaches the URL that serves the target's HTTP port — the target URL,
+or `--mqtt-check-url` — and so the node that URL routes to; the other nodes are
+covered by the replicated configuration and restart answers, which are
+inspected node by node. With `--no-verify` the check is skipped, and with
+`--no-restart` the setting takes effect at the next restart; both print the
+restart and check to run.
+
+The operations API URL is resolved as for every remote command:
+`--ops-target` / `FLAIR_OPS_TARGET`, else derived from the target. Both
+commands accept them. It must not carry a credential (a user name, a password,
+or a credential in its query); such a URL is refused before anything is sent,
+and URLs are printed without user name, password or query.
+
+`flair doctor` (local instances; it takes no `--target`) reports an instance
+whose configuration starts an MQTT listener, and names the call that turns it
+off. For a deployed instance, read its `mqtt` section with the operations API's
+`get_configuration`.
+
+**Turning MQTT on deliberately.** Send `set_configuration` with the listeners
+you want (for example `"mqtt_webSocket": true`), then restart the worker threads
+(`restart_service` with `"service": "http_workers"`). Pass `--keep-mqtt-config`
+to later `flair deploy` / `flair upgrade --target` runs so they leave the
+instance's MQTT configuration as it is. Table subscriptions, publishes and
+retained publishes over MQTT then follow the same policy as SSE and WebSocket
+subscriptions: administrators and trusted internal callers only
+([api-reference.md](api-reference.md)).
+
 ### npm cache on the node
 
 `flair deploy` and `flair upgrade --target` pass Harper an `install_command` that runs

@@ -2,7 +2,7 @@
 # Byte-identical gate for src/cli.ts modularization. Do not edit by hand.
 # Refresh: UPDATE_CLI_SURFACE_SNAPSHOT=1 bun test test/unit-isolated/cli-surface-snapshot.test.ts
 # helpWidth=80 (pinned; TTY columns must not affect this file)
-# commands=143 options=654
+# commands=143 options=659
 #
 # TREE is registration order: every command/subcommand + declared options/args.
 # HELP is each command's outputHelp() (--help, including addHelpText).
@@ -1670,6 +1670,15 @@ flair upgrade
       description: Disable cluster-wide replication for --target (default: replicated=true)
       attr: replicated
       negate: true
+    --keep-mqtt-config
+      description: For --target: leave the target's MQTT configuration as it is (default: set every MQTT listener off before deploying and check it after the deploy's restart)
+      attr: keepMqttConfig
+    --mqtt-check-url <url>
+      description: For --target: URL that serves the target's HTTP port, for the post-restart MQTT-over-WebSocket check (default: --target)
+      attr: mqttCheckUrl
+    --ops-target <url>
+      description: For --target: operations API URL for the MQTT-off configuration and check (env: FLAIR_OPS_TARGET; default: derived from --target)
+      attr: opsTarget
     --yes
       description: Skip the confirmation prompt for --target
       attr: yes
@@ -1803,6 +1812,12 @@ flair deploy
       description: Do not restart the component after deploy (default: restart=true)
       attr: restart
       negate: true
+    --keep-mqtt-config
+      description: Leave the target's MQTT configuration as it is (default: set every MQTT listener off before deploying and check it after the deploy's restart)
+      attr: keepMqttConfig
+    --mqtt-check-url <url>
+      description: URL that serves the target's HTTP port, for the post-restart MQTT-over-WebSocket check (default: the target URL)
+      attr: mqttCheckUrl
     --dry-run
       description: Resolve package, validate args, skip the deploy call
       attr: dryRun
@@ -1827,7 +1842,7 @@ flair deploy
       attr: verifyResource
       default: []
     --ops-target <url>
-      description: Operations API URL override for the Memory checkpoint report (env: FLAIR_OPS_TARGET)
+      description: Operations API URL override for the MQTT-off configuration and check and the Memory checkpoint report (env: FLAIR_OPS_TARGET)
       attr: opsTarget
     --memory-checkpoint <path>
       description: After deploy, verify this instance's Memory ids against a `flair memory checkpoint` file and add a Memory id/tier check line to the report
@@ -4836,6 +4851,17 @@ Options:
                                  "flair")
   --no-replicated                Disable cluster-wide replication for --target
                                  (default: replicated=true)
+  --keep-mqtt-config             For --target: leave the target's MQTT
+                                 configuration as it is (default: set every MQTT
+                                 listener off before deploying and check it
+                                 after the deploy's restart)
+  --mqtt-check-url <url>         For --target: URL that serves the target's HTTP
+                                 port, for the post-restart MQTT-over-WebSocket
+                                 check (default: --target)
+  --ops-target <url>             For --target: operations API URL for the
+                                 MQTT-off configuration and check (env:
+                                 FLAIR_OPS_TARGET; default: derived from
+                                 --target)
   --yes                          Skip the confirmation prompt for --target
   --install-hooks                Consent to installing missing SessionStart
                                  hooks (claude-code / Codex) during upgrade. The
@@ -4976,6 +5002,13 @@ Options:
                                  replicated=true)
   --no-restart                   Do not restart the component after deploy
                                  (default: restart=true)
+  --keep-mqtt-config             Leave the target's MQTT configuration as it is
+                                 (default: set every MQTT listener off before
+                                 deploying and check it after the deploy's
+                                 restart)
+  --mqtt-check-url <url>         URL that serves the target's HTTP port, for the
+                                 post-restart MQTT-over-WebSocket check
+                                 (default: the target URL)
   --dry-run                      Resolve package, validate args, skip the deploy
                                  call
   --package-root <dir>           Override package root (mainly for testing)
@@ -4994,7 +5027,8 @@ Options:
   --verify-resource <name>       Resource to verify is serving after deploy
                                  (repeatable; default: derived from the deployed
                                  package's dist/resources) (default: [])
-  --ops-target <url>             Operations API URL override for the Memory
+  --ops-target <url>             Operations API URL override for the MQTT-off
+                                 configuration and check and the Memory
                                  checkpoint report (env: FLAIR_OPS_TARGET)
   --memory-checkpoint <path>     After deploy, verify this instance's Memory ids
                                  against a `flair memory checkpoint` file and

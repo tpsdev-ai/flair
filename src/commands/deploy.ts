@@ -76,6 +76,8 @@ program
   .option("--pkg-version <semver>", "Override version label (default: installed package version)")
   .option("--no-replicated", "Disable cluster-wide replication (default: replicated=true)")
   .option("--no-restart", "Do not restart the component after deploy (default: restart=true)")
+  .option("--keep-mqtt-config", "Leave the target's MQTT configuration as it is (default: set every MQTT listener off before deploying and check it after the deploy's restart)")
+  .option("--mqtt-check-url <url>", "URL that serves the target's HTTP port, for the post-restart MQTT-over-WebSocket check (default: the target URL)")
   .option("--dry-run", "Resolve package, validate args, skip the deploy call")
   .option("--package-root <dir>", "Override package root (mainly for testing)")
   .option("--deployment-timeout <ms>", "Milliseconds harper waits for cluster-wide peer replication (env: FABRIC_DEPLOYMENT_TIMEOUT; default: 600000 — harper's own 120s default is too short for Fabric)")
@@ -83,7 +85,7 @@ program
   .option("--no-verify", "Skip post-deploy served-API verification (default: verify — on by design, so the CLI can't report success on an empty/broken deploy)")
   .option("--verify-timeout <ms>", "Milliseconds to wait for the served API to settle after harper's post-deploy restart before verifying (default: 300000)")
   .option("--verify-resource <name>", "Resource to verify is serving after deploy (repeatable; default: derived from the deployed package's dist/resources)", (val: string, prev: string[]) => [...prev, val], [] as string[])
-  .option("--ops-target <url>", "Operations API URL override for the Memory checkpoint report (env: FLAIR_OPS_TARGET)")
+  .option("--ops-target <url>", "Operations API URL override for the MQTT-off configuration and check and the Memory checkpoint report (env: FLAIR_OPS_TARGET)")
   .option("--memory-checkpoint <path>", "After deploy, verify this instance's Memory ids against a `flair memory checkpoint` file and add a Memory id/tier check line to the report")
   .option("--deploy-retries <n>", "Retry the full harper deploy this many times, ONLY when peer replication is positively observed not to converge (default: 0 — retrying re-runs harper's component install and can escalate a transient replication warning into a hard ENOTEMPTY install failure; see flair#878)", "0")
   .option("--ignore-replication-errors", "If peer replication still hasn't converged, treat it as a non-fatal warning and succeed with an origin-only deploy (the peer catches up via federation sync or a later deploy)")
@@ -117,6 +119,7 @@ program
       version: opts.pkgVersion,
       replicated: opts.replicated !== false,
       restart: opts.restart !== false,
+      keepMqttConfig: opts.keepMqttConfig ?? false,
       dryRun: opts.dryRun ?? false,
       packageRoot: opts.packageRoot,
       deploymentTimeoutMs: Number(opts.deploymentTimeout ?? process.env.FABRIC_DEPLOYMENT_TIMEOUT ?? 600_000),
@@ -147,7 +150,13 @@ program
     if (deployOpts.dryRun) console.log(dim("  (dry-run: skipping API call)"));
 
     try {
-      const result = await deployToFabric(deployOpts);
+      const result = await deployToFabric({
+        ...deployOpts,
+        // The target's operations API, resolved as for every remote command
+        // (--ops-target / FLAIR_OPS_TARGET, else derived from the target).
+        opsUrl: cli.resolveEffectiveOpsUrl({ target: url, opsTarget: opts.opsTarget }),
+        mqttCheckUrl: opts.mqttCheckUrl,
+      });
       if (result.dryRun) {
         console.log(`${green("✓")} dry-run OK: ${result.project} ${result.version} ready to deploy to ${result.url}`);
         console.log(dim(`  package root: ${result.packageRoot}`));

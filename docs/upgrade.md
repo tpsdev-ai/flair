@@ -416,6 +416,15 @@ stayed split for days after 0.30.0 was the incident this closes.
 
 ### Post-deploy fleet verify
 
+Both `flair deploy` and `flair upgrade --target` set every MQTT listener off in
+the target's configuration before deploying, and after the deploy's restart
+check it — passing only when the configuration shows those values and an
+MQTT-over-WebSocket CONNECT is definitively refused, and failing with the
+restart and check to run otherwise (`--ops-target` / `FLAIR_OPS_TARGET` name
+the operations API for both); pass `--keep-mqtt-config` to leave an MQTT
+configuration you turned on deliberately
+([deploying-on-fabric.md](deploying-on-fabric.md#mqtt-is-off)).
+
 As of flair#636, both `flair deploy` and `flair upgrade --target` automatically run a
 fleet convergence sweep after a successful deploy — Harper's own "Successfully
 deployed" (and the served-API verify above) only confirm the *origin* node; nothing

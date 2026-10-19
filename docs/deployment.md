@@ -46,6 +46,18 @@ flair init --port 8000
 
 Or edit `~/.flair/config.yaml` and restart.
 
+### MQTT
+
+Flair runs Harper with MQTT off: no TCP or TLS MQTT listener and no MQTT over
+WebSocket. Every local start re-asserts it, and `flair doctor` reports an
+instance whose configuration starts an MQTT listener. For a component deployed
+with `flair deploy` or `flair upgrade --target` — which set MQTT off and check
+it after their restart, failing when they cannot confirm it — see
+[deploying-on-fabric.md](deploying-on-fabric.md#mqtt-is-off), including how an
+operator turns MQTT on deliberately; table subscriptions, publishes and
+retained publishes over MQTT then follow the same policy as SSE and WebSocket
+subscriptions.
+
 ---
 
 ## Linux

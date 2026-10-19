@@ -9,7 +9,7 @@
 import { Command } from "commander";
 import { detectWiredFlairMcp } from "../doctor-client.js";
 import { UPGRADE_SNAPSHOT_ROOT, fetchDeclaredHarperVersion, readInstalledHarperVersion } from "../engine-version.js";
-import { fabricUpgrade } from "../fabric-upgrade.js";
+import { fabricUpgrade, type FabricUpgradeOptions } from "../fabric-upgrade.js";
 import { renderFleetSweepTable, sweepFleet } from "../fleet-verify.js";
 import { resolveNpmGlobalPrefix } from "../install/global-bin-path.js";
 import { defaultKeysDir } from "../lib/auth-resolve.js";
@@ -60,6 +60,8 @@ export type UpgradeCli = {
   probeOpenclawPluginVersion: (...args: any[]) => any;
   relativeTime: (...args: any[]) => any;
   resolveFabricCredentials: (...args: any[]) => any;
+  /** The remote-command operations URL resolver (--ops-target / FLAIR_OPS_TARGET, else derived from --target). */
+  resolveEffectiveOpsUrl: (opts: { target?: string; opsTarget?: string }) => string | undefined;
   resolveFlairMcpFinding: (...args: any[]) => any;
   resolveHttpPort: (...args: any[]) => any;
   resolveInstalledFlairCli: (...args: any[]) => any;
@@ -221,6 +223,42 @@ function verifyAuthedGet(...args: any[]): any {
   return cli.verifyAuthedGet(...args);
 }
 
+/**
+ * The options `flair upgrade --target` hands fabricUpgrade(), from the
+ * command's options and resolved credentials. `opsUrl` is what every remote
+ * command resolves (`resolveOpsUrl`: --ops-target / FLAIR_OPS_TARGET, else
+ * derived from --target); deploy() sends the MQTT-off configuration and check
+ * there.
+ */
+export function buildFabricUpgradeOptions(
+  opts: any,
+  creds: { fabricUser?: string; fabricPassword?: string },
+  resolveOpsUrl: (o: { target?: string; opsTarget?: string }) => string | undefined,
+): FabricUpgradeOptions {
+  return {
+    target: opts.target as string,
+    project: opts.project,
+    // flair#926: `--flair-version`, never `opts.version` — that attribute name
+    // belongs to the program's `-v, --version` and never reaches this action.
+    version: opts.flairVersion,
+    harperVersion: opts.harperVersion,
+    fabricUser: creds.fabricUser,
+    fabricPassword: creds.fabricPassword,
+    check: opts.check ?? false,
+    restart: opts.restart !== false,
+    replicated: opts.replicated !== false,
+    keepMqttConfig: opts.keepMqttConfig ?? false,
+    opsUrl: resolveOpsUrl({ target: opts.target, opsTarget: opts.opsTarget }),
+    mqttCheckUrl: opts.mqttCheckUrl,
+    // flair#878 — previously unreachable from this command; see
+    // FabricUpgradeOptions.
+    deployRetries: Number(opts.deployRetries ?? 0),
+    ignoreReplicationErrors: opts.ignoreReplicationErrors ?? false,
+    convergenceCheck: opts.convergenceCheck !== false,
+    convergenceTimeoutMs: opts.convergenceTimeout != null ? Number(opts.convergenceTimeout) : undefined,
+  };
+}
+
 async function runFabricUpgrade(opts: any): Promise<void> {
   const green = (s: string) => `\x1b[32m${s}\x1b[0m`;
   const red = (s: string) => `\x1b[31m${s}\x1b[0m`;
@@ -256,25 +294,7 @@ async function runFabricUpgrade(opts: any): Promise<void> {
   // resolver's own warning strings.
   for (const w of credWarnings) console.error(dim(w));
 
-  const upgradeOpts = {
-    target: opts.target as string,
-    project: opts.project,
-    // flair#926: `--flair-version`, never `opts.version` — that attribute name
-    // belongs to the program's `-v, --version` and never reaches this action.
-    version: opts.flairVersion,
-    harperVersion: opts.harperVersion,
-    fabricUser,
-    fabricPassword,
-    check,
-    restart: opts.restart !== false,
-    replicated: opts.replicated !== false,
-    // flair#878 — previously unreachable from this command; see
-    // FabricUpgradeOptions.
-    deployRetries: Number(opts.deployRetries ?? 0),
-    ignoreReplicationErrors: opts.ignoreReplicationErrors ?? false,
-    convergenceCheck: opts.convergenceCheck !== false,
-    convergenceTimeoutMs: opts.convergenceTimeout != null ? Number(opts.convergenceTimeout) : undefined,
-  };
+  const upgradeOpts = buildFabricUpgradeOptions(opts, { fabricUser, fabricPassword }, cli.resolveEffectiveOpsUrl);
 
   console.log(`${green("→")} Upgrading Fabric Flair at ${upgradeOpts.target}`);
   if (check) console.log(dim("  (--check: plan only, no deploy)"));
@@ -950,6 +970,9 @@ program
   .option("--harper-version <semver>", "Pin harper to this version for --target (default: registry latest, floored at the flair#513 fix)")
   .option("--project <name>", "Fabric component name for --target", "flair")
   .option("--no-replicated", "Disable cluster-wide replication for --target (default: replicated=true)")
+  .option("--keep-mqtt-config", "For --target: leave the target's MQTT configuration as it is (default: set every MQTT listener off before deploying and check it after the deploy's restart)")
+  .option("--mqtt-check-url <url>", "For --target: URL that serves the target's HTTP port, for the post-restart MQTT-over-WebSocket check (default: --target)")
+  .option("--ops-target <url>", "For --target: operations API URL for the MQTT-off configuration and check (env: FLAIR_OPS_TARGET; default: derived from --target)")
   .option("--yes", "Skip the confirmation prompt for --target")
   .option("--install-hooks", "Consent to installing missing SessionStart hooks (claude-code / Codex) during upgrade. The hook executes at every session start — upgrade will not write it unprompted. Interactive runs prompt; non-interactive runs state the gap and withhold ✅ unless this flag is passed.")
   .option("--no-fleet-verify", "Skip the automatic post-upgrade fleet convergence sweep for --target (default: sweep runs — see flair#636)")

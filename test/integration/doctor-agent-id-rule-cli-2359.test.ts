@@ -148,8 +148,9 @@ describe("flair doctor — the Agent IDs section (flair#2359, real CLI + real sp
     //    cannot show the two ports are one instance, and both checks are
     //    reported NOT RUN rather than read. flair#2520: the audit-log and
     //    instance-identity sections share that pair check, so they are NOT RUN
-    //    and counted too; the instruction-event and skill-tombstone sections
-    //    read through the same ops endpoint and are NOT RUN and counted too.
+    //    and counted too; the instruction-event, skill-tombstone and MQTT
+    //    listener sections read through the same ops endpoint and are NOT RUN
+    //    and counted too.
     const unreadable = await runDoctor("wrong-admin-pass-not-a-secret");
     expect(unreadable.stdout).toContain("Agent IDs: NOT RUN");
     expect(unreadable.stdout).toContain("Agent homes: NOT RUN");
@@ -157,18 +158,20 @@ describe("flair doctor — the Agent IDs section (flair#2359, real CLI + real sp
     expect(unreadable.stdout).toContain("Instance identity: NOT RUN");
     expect(unreadable.stdout).toContain("Instruction events: NOT RUN");
     expect(unreadable.stdout).toContain("Skill tombstones: NOT RUN");
+    expect(unreadable.stdout).toContain("MQTT listeners: NOT RUN");
     expect(unreadable.stdout).not.toContain("No stored agent id is outside");
-    expect(issueCount(unreadable.stdout), "the unrun checks left the summary clean").toBe(baseCount + 6);
+    expect(issueCount(unreadable.stdout), "the unrun checks left the summary clean").toBe(baseCount + 7);
 
     // 4. No admin credential at all: the Agent-ID check is a counted issue, not
     //    a pass; the Agent homes check is reported skipped and not counted; the
-    //    skill-tombstone check cannot read its tables, so it is NOT RUN and
-    //    counted.
+    //    skill-tombstone check cannot read its tables and the MQTT listener
+    //    check cannot read the configuration, so both are NOT RUN and counted.
     const noCred = await runDoctor("");
     expect(noCred.stdout).toContain("no admin credentials");
     expect(noCred.stdout).toContain("Agent homes check skipped (no admin credential)");
     expect(noCred.stdout).toContain("Skill tombstones: NOT RUN");
-    expect(issueCount(noCred.stdout), "the skipped check left the summary clean").toBe(baseCount + 2);
+    expect(noCred.stdout).toContain("MQTT listeners: NOT RUN");
+    expect(issueCount(noCred.stdout), "the skipped check left the summary clean").toBe(baseCount + 3);
   }, 120_000);
 
   test("an unsafe or empty admin-pass file: doctor completes and counts the unrun check with the resolver's reason", async () => {
