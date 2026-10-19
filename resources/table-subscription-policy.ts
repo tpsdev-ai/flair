@@ -12,12 +12,15 @@
  * streams it, a PUBLISH writes a message to it, and a retained PUBLISH writes
  * (or, with an empty payload, deletes) the row itself. A table subscription
  * streams the table's stored rows, while flair's per-record read rules are
- * applied by each resource's get()/search(). So every table subscription and
- * every MQTT publish to a table, retained or not, refuses a caller that is not
- * an administrator or a trusted internal call: a verified non-admin agent gets
- * 403, a caller without a valid credential 401. Resources that are not tables,
- * such as the feed resources, decide their own subscribers and are not
- * affected.
+ * applied by each resource's get()/search(). So these entries refuse a caller
+ * that is not an administrator or a trusted internal call — an SSE or
+ * WebSocket subscription; an MQTT SUBSCRIBE, PUBLISH or retained PUBLISH to a
+ * table topic; and a last-will on a table topic when Harper publishes it — a
+ * verified non-admin agent with 403, a caller without a valid credential with
+ * 401. An MQTT UNSUBSCRIBE is not guarded: it only ends a subscription the
+ * session already holds and reaches no table. CONNECT is Harper's own
+ * authentication. Resources that are not tables, such as the feed resources,
+ * decide their own subscribers and are not affected.
  *
  * ── The seam ────────────────────────────────────────────────────────────────
  * Harper enters a table through statics of the class registered for its path,
@@ -30,23 +33,29 @@
  *   - `publish()` — an MQTT PUBLISH (publishMessage);
  *   - `put()` / `delete()` — a retained MQTT PUBLISH and a retained last-will
  *     (publishMessage). Harper passes the session's own context for a session's
- *     publish and for the will it publishes when a session disconnects, and the
- *     stored will record itself for a will it replays when its first worker
- *     starts (every will still stored: a session that never disconnected, or
- *     one whose will was not published as it dropped). These two statics are
- *     also the entry of ordinary put and delete calls (a REST PUT or DELETE,
- *     flair's own writes), so their guard decides only a call whose explicit
- *     context argument is one of those two, recognised from that argument's own
- *     data properties (isDirectMqttSessionContext and isLastWillReplayContext
- *     in resources/protocol-context.ts). A replayed will carries no verified
+ *     publish and for the will it publishes when a session disconnects, and a
+ *     copy of the stored will record (with `authorize: true`) for a will it
+ *     replays when its first worker starts (every will still stored: a session
+ *     that never disconnected, or one whose will was not published as it
+ *     dropped). These two statics are also the entry of ordinary put and delete
+ *     calls (a REST PUT or DELETE, flair's own writes), so their guard decides
+ *     only a call whose explicit context argument is one of those two,
+ *     recognised from that argument's own data properties
+ *     (isDirectMqttSessionContext and isLastWillReplayContext in
+ *     resources/protocol-context.ts). A replayed will carries no verified
  *     principal, so it is decided as a caller without a valid credential:
- *     refused for every table, an administrator's will included. Every other
- *     put()/delete() call goes to the inherited static with the same arguments
- *     and receiver, synchronously: the guard invokes no getter and no
- *     `getContext()` of its arguments and resolves no caller, so the write
- *     keeps flair's write rules and Harper reads its context as it would
- *     without the guard. Harper's `post()` and `patch()` statics are separate
- *     and not wrapped (an MQTT PUBLISH reaches neither).
+ *     refused for every table, an administrator's will included. To classify a
+ *     call, the guard reads the own property descriptors of the argument at
+ *     Harper's explicit-context position (`socket` — and only when it is
+ *     present, `session` and the session's `addSubscription` — then
+ *     `authorize`, and only when that is true, `topic` and `retain`); it
+ *     invokes no getter and no `getContext()`. Every other put()/delete() call
+ *     then goes to the inherited static with the same arguments and receiver,
+ *     synchronously, and resolves no caller, so the write keeps flair's write
+ *     rules and Harper reads its context itself. An argument whose descriptor
+ *     read throws (a Proxy's getOwnPropertyDescriptor trap) propagates that
+ *     error before the inherited static runs. Harper's `post()` and `patch()`
+ *     statics are separate and not wrapped (an MQTT PUBLISH reaches neither).
  * `guardTableSubscriptions` replaces these statics on every table class in the
  * flair database's table registry, read at load
  * (resources/table-subscriptions.ts), not from a list someone maintains. For
@@ -62,8 +71,13 @@
  *   - a flair resource class that extends a table inherits the guarded
  *     statics, and an INSTANCE method it overrides runs only after them,
  *     because the static runs first. A class that defines one of these STATICS
- *     itself replaces the guarded one; none does today, and one that does must
- *     apply the same check itself;
+ *     itself replaces the guarded one and must reach the guard itself. One
+ *     does: OrgEvent (resources/OrgEvent.ts) defines a static put() whose
+ *     branch for an array body on its collection path runs before the table's
+ *     guarded static — OrgEvent's own instance checks run there first — and
+ *     then stores the array through the guarded table put() with the same
+ *     context, where a call made with an MQTT session's context is decided;
+ *     every other call it passes to the guarded static (super.put);
  *   - flair's own in-process readers (the feed resources, which apply their
  *     own subscriber rules, and the BM25 index) read a table's changes through
  *     `subscribeInProcess()`, which calls the table's subscribe() as Harper
@@ -93,8 +107,8 @@
  * its will on the session's own context, decided like the session's own
  * publish. When Harper's first worker starts (an instance start or a worker
  * restart), it replays every will still stored — a session that never
- * disconnected, or one whose will was not published as it dropped — on the
- * stored record itself, which carries no verified principal: a retained will
+ * disconnected, or one whose will was not published as it dropped — on a copy
+ * of the stored record, which carries no verified principal: a retained will
  * is decided as a caller without a valid credential (retainedPublishCaller),
  * and a will that is not retained resolves as anonymous like any context
  * still carrying `authorize: true`. So a replayed will on a table topic is
@@ -303,14 +317,14 @@ export const RETAINED_PUBLISH_STATICS: readonly string[] = Object.freeze(["put",
  * put()/delete() call. Harper's publishMessage passes the context explicitly,
  * `put(target, data, context)` / `delete(target, context)`: a session's own
  * context (isDirectMqttSessionContext) when the session publishes, or when
- * Harper publishes its will as it disconnects; the stored will record
- * (isLastWillReplayContext) when Harper replays a stored will as its first
- * worker starts. So this takes the argument at
- * the position Harper reads an explicit context (the third when one is given,
- * otherwise the second) and returns it only when it is one of those. Only own
- * data properties of the argument are read: no getter and no `getContext()` of
- * it is invoked, so an ordinary write's context is read by Harper alone, as
- * without the guard. The ambient context is not consulted.
+ * Harper publishes its will as it disconnects; a copy of the stored will
+ * record (isLastWillReplayContext) when Harper replays a stored will as its
+ * first worker starts. So this takes the argument at the position Harper
+ * reads an explicit context (the third when one is given, otherwise the
+ * second) and returns it only when it is one of those. It reads only own
+ * property descriptors of that argument and invokes no getter and no
+ * `getContext()`; an argument whose descriptor read throws propagates the
+ * error. The ambient context is not consulted.
  */
 export function retainedPublishContext(args: readonly unknown[]): unknown {
   const explicit = args[2] ? args[2] : args[1];
@@ -347,9 +361,9 @@ function guardedRetainedWrite(
   const guarded = {
     [method](this: unknown, ...args: unknown[]) {
       const context = retainedPublishContext(args);
-      // Every write that is not an MQTT session's goes to the inherited static
-      // as it was called: same arguments, same receiver, same synchronous call,
-      // with nothing read from its context.
+      // Every other write goes to the inherited static as it was called: same
+      // arguments, same receiver, same synchronous call, with nothing read
+      // from its context but the descriptors retainedPublishContext read.
       if (context === undefined) return inherited.apply(this, args);
       return (async () => {
         let caller: SubscriptionCaller;

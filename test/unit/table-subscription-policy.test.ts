@@ -167,7 +167,7 @@ describe("guardTableSubscriptions", () => {
 });
 
 describe("guardTableSubscriptions — MQTT subscribe() and publish()", () => {
-  it("guards connect(), subscribe() and publish(), and nothing else", () => {
+  it("guards the stream statics connect(), subscribe() and publish() (put() and delete() are guarded for a retained publish)", () => {
     expect(Object.keys(GUARDED_TABLE_STATICS).sort()).toEqual(["connect", "publish", "subscribe"]);
     const { Table } = makeStreamTable();
     guardTableSubscriptions({ Memory: Table }, { resolveAuth: byContext, ambientContext: () => ({}) });
@@ -371,7 +371,7 @@ describe("guardTableSubscriptions — retained MQTT publish (put() / delete())",
     expect(retainedPublishContext([{}, { content: "x" }, replayed({ content: "x" })])).toBeDefined();
   });
 
-  it("retainedPublishContext is undefined for every other call, and reads nothing but own data properties", () => {
+  it("retainedPublishContext is undefined for every other call, and invokes no getter or getContext()", () => {
     let accessorReads = 0;
     let getContextCalls = 0;
     const session = { addSubscription: () => undefined };
@@ -388,7 +388,49 @@ describe("guardTableSubscriptions — retained MQTT publish (put() / delete())",
     expect(getContextCalls).toBe(0);
   });
 
-  it("an ordinary put()/delete() reads its context exactly as often as it does without the guard", () => {
+  it("on an ordinary put()/delete() the guard reads only own property descriptors of the context argument, then passes the call through", () => {
+    /** A context Proxy that records every trap it receives (key-taking traps with their key). */
+    function recordingContext(target: Record<string, unknown>) {
+      const traps: string[] = [];
+      const handler: ProxyHandler<Record<string, unknown>> = {};
+      const keyed = new Set(["get", "set", "has", "deleteProperty", "getOwnPropertyDescriptor", "defineProperty"]);
+      for (const trap of ["get", "set", "has", "deleteProperty", "ownKeys", "getOwnPropertyDescriptor", "defineProperty",
+        "getPrototypeOf", "setPrototypeOf", "isExtensible", "preventExtensions"] as const) {
+        (handler as any)[trap] = (...a: any[]) => {
+          traps.push(keyed.has(trap) ? `${trap} ${String(a[1])}` : trap);
+          return (Reflect as any)[trap](...a);
+        };
+      }
+      return { context: new Proxy(target, handler), traps };
+    }
+    // makeWriteTable's statics do not touch their arguments, so every trap below is the guard's.
+    const { Table, calls } = makeWriteTable();
+    guardTableSubscriptions({ Memory: Table }, {
+      resolveAuth: async () => { throw new Error("an ordinary write resolves no caller"); },
+      ambientContext: () => { throw new Error("an ordinary write reads no ambient context"); },
+    });
+
+    const plain = recordingContext({ transaction: {} });
+    expect((Table as any).put({ id: "m" }, { content: "x" }, plain.context)).toBe("put-result");
+    expect(plain.traps).toEqual(["getOwnPropertyDescriptor socket", "getOwnPropertyDescriptor authorize"]);
+
+    const twoArgument = recordingContext({ transaction: {} });
+    expect((Table as any).delete({ id: "m" }, twoArgument.context)).toBe("delete-result");
+    expect(twoArgument.traps).toEqual(["getOwnPropertyDescriptor socket", "getOwnPropertyDescriptor authorize"]);
+
+    // A request Harper marked for authorization adds the read of `topic`, and no more.
+    const marked = recordingContext({ headers: {}, authorize: true });
+    expect((Table as any).put({ id: "m" }, { content: "x" }, marked.context)).toBe("put-result");
+    expect(marked.traps).toEqual(["getOwnPropertyDescriptor socket", "getOwnPropertyDescriptor authorize", "getOwnPropertyDescriptor topic"]);
+    expect(calls.length).toBe(3);
+
+    // A descriptor read that throws propagates before the inherited static runs.
+    const throwing = new Proxy({}, { getOwnPropertyDescriptor() { throw new Error("descriptor read refused"); } });
+    expect(() => (Table as any).put({ id: "m" }, { content: "x" }, throwing)).toThrow("descriptor read refused");
+    expect(calls.length).toBe(3);
+  });
+
+  it("an ordinary put()/delete() calls getContext() and gets properties of its context exactly as often as without the guard", () => {
     /**
      * A table whose static put()/delete() read an explicit context the way
      * Harper's transactional() does (resources/Resource.ts: the context is
@@ -456,7 +498,9 @@ describe("a call a protocol layer made is never the trusted internal caller", ()
 
   it("an MQTT session context without an HTTP request (Harper's TCP listener) is refused with 401 on subscribe() and publish()", async () => {
     const { Table, calls } = makeStreamTable();
-    // resolveAgentAuth answers `internal` for a context with no HTTP request.
+    // A resolver that answers `internal` for these requestless contexts, so the
+    // guard's own rule decides (resolveAgentAuth answers anonymous for them,
+    // since they carry authorize: true).
     guardTableSubscriptions({ Memory: Table }, { resolveAuth: async () => INTERNAL, ambientContext: () => ({}) });
     const mqttContext = { session: {}, socket: {}, user: { role: { permission: { super_user: true } } }, authorize: true };
     await expect((Table as any).subscribe({ id: null, checkPermission: {} }, mqttContext)).rejects.toMatchObject({ statusCode: 401 });

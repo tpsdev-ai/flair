@@ -18,9 +18,11 @@
  *
  * A retained MQTT PUBLISH reaches a table's static put()/delete(), which
  * ordinary writes also use. isDirectMqttSessionContext recognises the session's
- * context there, and isLastWillReplayContext the will record Harper replays,
- * from the argument's own data properties alone, so the guard reads
- * nothing from an ordinary write's context.
+ * context there, and isLastWillReplayContext the copy of a stored will record
+ * Harper replays, from the argument's own property descriptors alone: on an
+ * ordinary write's context they invoke no getter and no `getContext()`. A
+ * Proxy's getOwnPropertyDescriptor trap does run, and an error it throws
+ * propagates to the caller.
  *
  * This module has no imports, so it is unit-tested directly.
  */
@@ -60,8 +62,10 @@ function dataValueInChain(target: object, key: string): unknown {
  * key and an own `session` holding an object with an `addSubscription`
  * method. Harper's `createContext()` returns a plain object literal, and a
  * session's retained will copies it, so the context Harper passes satisfies
- * this. No getter or method of `value` is invoked, so a call with any other
- * context reads nothing from it (no `getContext()`, no accessor).
+ * this. It reads the own property descriptor of `socket` and, only when that
+ * exists, of `session` and the session's `addSubscription` (along its
+ * prototype chain); it invokes no getter or method of `value` (no
+ * `getContext()`, no accessor). A descriptor read that throws propagates.
  */
 export function isDirectMqttSessionContext(value: unknown): boolean {
   if (value == null || typeof value !== "object") return false;
@@ -74,13 +78,14 @@ export function isDirectMqttSessionContext(value: unknown): boolean {
 /**
  * Whether `value` is the context Harper uses when it replays the last-will
  * messages still stored as its first worker starts (an instance start or a
- * worker restart; server/DurableSubscriptionsSession.ts): the stored will
- * record itself (`{ id, topic, data, qos, retain, user }`) with
- * `authorize: true`, passed to put()/delete() for a retained will. It carries
- * no HTTP request and no credential flair verifies; its `user` is the name the
- * session connected with, looked up again. Read from own data properties only
- * — `authorize` true, `topic` a string, `retain` true — so no getter is
- * invoked.
+ * worker restart; server/DurableSubscriptionsSession.ts): a shallow copy of
+ * the stored will record (`{ id, topic, data, qos, retain, user }`) on which
+ * Harper sets `authorize: true`, passed to put()/delete() for a retained will.
+ * It carries no HTTP request and no credential flair verifies; its `user` is
+ * the name the session connected with, looked up again. Read from own property
+ * descriptors only — `authorize` true, then `topic` a string, then `retain`
+ * true, each read only while the previous one matches — so no getter is
+ * invoked; a descriptor read that throws propagates.
  */
 export function isLastWillReplayContext(value: unknown): boolean {
   if (value == null || typeof value !== "object") return false;

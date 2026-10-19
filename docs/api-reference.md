@@ -82,10 +82,13 @@ does not yet verify the Harper user of an MCP session as a flair caller.
 Flair's local installs run Harper with MQTT off. When an operator turns MQTT
 on, an exported table's path is also an MQTT topic (`<Table>/#`,
 `<Table>/<id>`) — except a path that a resource other than the table serves
-(`AgentReadPosition`, `OAuthToken`), which follows that resource's own rules —
-and every MQTT action on a table topic follows the same rule: a SUBSCRIBE, a
-PUBLISH, and a retained PUBLISH (which writes the row, or with an empty payload
-deletes it) are served to administrators and trusted internal callers only.
+(`AgentReadPosition`, `OAuthToken`), which follows that resource's own rules.
+On a table topic, these MQTT actions are served to administrators and trusted
+internal callers only: SUBSCRIBE; PUBLISH; a retained PUBLISH (which writes
+the row, or with an empty payload deletes it); and a session's last-will when
+Harper publishes it. UNSUBSCRIBE is not guarded: it only ends a subscription
+the session already holds. CONNECT is Harper's own authentication.
+
 Over MQTT 5, a refused SUBSCRIBE gets SUBACK reason code `0x87` (not
 authorized) for a verified non-admin agent and `0x80` for a caller without a
 valid credential whose session Harper admits (Harper may instead refuse that
@@ -93,18 +96,21 @@ caller at CONNECT). A refused PUBLISH is answered only when it asks for an
 acknowledgment: at QoS 1 (PUBACK) or QoS 2 (PUBREC) it gets the same codes, and
 a verified non-admin agent's also carries the refusal as a reason string unless
 the client turned problem information off or the string would exceed its
-maximum packet size. A refused QoS 0 PUBLISH gets no answer. MQTT 3.1.1 has
-only `0x80` for every refusal. A refused publish reaches no subscriber, and a
-refused retained publish leaves the row as it was. A session's last-will
-message is decided when Harper publishes it: when the session drops without
-DISCONNECT, as that session's own publish; and when Harper replays the wills
-it still holds as its first worker starts, as a caller without a valid
-credential, so a replayed will on a table topic is refused, an administrator's
-included. Over MQTT on WebSocket
-the credential is the one on the WebSocket upgrade request, as for SSE and
-WebSocket. An MQTT connection on Harper's TCP or TLS listener carries no HTTP
-request, so flair resolves the caller of each of its actions as one without a
-valid credential, whatever it sent in CONNECT.
+maximum packet size. A refused QoS 0 PUBLISH gets no answer. Over MQTT 3.1.1, a
+refused SUBSCRIBE gets SUBACK `0x80`, and a PUBACK carries no reason code, so a
+3.1.1 client cannot tell a refused PUBLISH from an accepted one. A refused
+publish reaches no subscriber, and a refused retained publish leaves the row as
+it was.
+
+A session's last-will message is decided when Harper publishes it: when the
+session drops without DISCONNECT, as that session's own publish; and when
+Harper replays the wills it still holds as its first worker starts, as a
+caller without a valid credential, so a replayed will on a table topic is
+refused, an administrator's included. Over MQTT on WebSocket the credential is
+the one on the WebSocket upgrade request, as for SSE and WebSocket. An MQTT
+connection on Harper's TCP or TLS listener carries no HTTP request, so flair
+resolves the caller of each of its actions as one without a valid credential,
+whatever it sent in CONNECT.
 
 Every Ed25519-signed request and federation body carries a nonce, recorded
 once per instance in the `ReplayNonce` table before the request takes effect.

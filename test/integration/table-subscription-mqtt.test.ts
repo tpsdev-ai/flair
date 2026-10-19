@@ -268,7 +268,7 @@ for (const config of HARPERS) {
         await adminInsert("MemoryUsage", { id: ids.usage, agentId: A.id, memoryId: ids.memory, createdAt: now() });
       }, 60_000);
 
-      test("(a) every table: a non-admin is refused SUBSCRIBE on its collection and by-id topics; a marker row committed to each table reaches the administrator's subscription and not the non-admin; the non-admin's PUBLISH and retained PUBLISH (write and delete) to each table are refused, leave the row unchanged and reach no subscriber; an administrator's PUBLISH passes the policy and is delivered on the positive-control tables", async () => {
+      test("(a) every table: a non-admin is refused SUBSCRIBE on its collection and by-id topics; a marker row committed to each table reaches the administrator's subscription on every listed table whose path is the table, and the non-admin on none; the non-admin's PUBLISH and retained PUBLISH (write and delete) to each table but the two paths another resource serves are refused, leave the row unchanged and reach no subscriber; an administrator's PUBLISH passes the policy and is delivered on the positive-control tables", async () => {
         const schema = await flairTables();
         const tables = [...schema.keys()];
         const listed: string[] = [];

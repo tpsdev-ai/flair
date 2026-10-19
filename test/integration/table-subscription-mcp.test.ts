@@ -181,7 +181,7 @@ describe("Harper's native MCP resources/subscribe on flair tables", () => {
     if (harper) await stopHarper(harper);
   }, 60_000);
 
-  test("refuses an administrator and a non-admin on every flair table, with no row data on the response or the stream", async () => {
+  test("refuses an administrator and a non-admin on every advertised table-owned route, with no row data on the response or the stream", async () => {
     const schema = await flairTableShapes(adminOp);
     const tables = [...schema.keys()];
     expect(tables).toContain("Memory");

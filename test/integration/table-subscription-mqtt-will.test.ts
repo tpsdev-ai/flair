@@ -4,10 +4,11 @@
 // A session registers a will at CONNECT; Harper stores it and publishes it
 // later: when the session's connection ends without DISCONNECT (on the
 // session's own context), or at a later worker start for a will still stored
-// (on the stored will record, which carries no verified principal) — a session
-// that never disconnected because the server stopped, or one whose will Harper
-// could not publish as it dropped. A retained will on a table topic writes the
-// row (or, with an empty payload, deletes it). This file starts one test-Harper
+// (on a copy of the stored will record, which carries no verified principal)
+// — a session that never disconnected because the server stopped, or one whose
+// will Harper could not publish as it dropped. A retained will on a table
+// topic writes the row (or, with an empty payload, deletes it). The rows here
+// are MemoryUsage rows. This file starts one test-Harper
 // with MQTT over WebSocket and a TCP listener on, and checks both moments:
 //   (1) Session drop. A non-admin Harper user and an unauthenticated session
 //       (which Harper authorizes locally as its super user), each over TCP and
@@ -202,7 +203,7 @@ describe("MQTT last-will messages on flair tables", () => {
     ["ws", "unauthenticated session"],
   ];
 
-  test("(1) a will published as its session drops: refused for a non-admin and an unauthenticated session, applied for an administrator; a will on a non-table topic is not decided by the policy", async () => {
+  test("(1) a retained will on MemoryUsage published as its session drops: refused for a non-admin and an unauthenticated session, applied for an administrator; a will on a non-table topic is not decided by the policy", async () => {
     const admin = await openSession("ws", "administrator");
     expect((await admin.connect({ clientId: `${run}-watch` })).kind).toBe("answered");
     expect(await admin.subscribe(["MemoryUsage/#"])).toEqual({ kind: "answered", value: [0] });
@@ -250,7 +251,7 @@ describe("MQTT last-will messages on flair tables", () => {
     expect(POLICY_REFUSALS.some((r) => otherReason.includes(r)), otherReason.slice(0, 200)).toBe(false);
   }, 180_000);
 
-  test("(2) a will Harper replays at startup is refused for every table, an administrator's included", async () => {
+  test("(2) a retained will on MemoryUsage that Harper replays at startup is refused, an administrator's included", async () => {
     const sessions: Array<[Transport, Who]> = [...REFUSED, ["ws", "administrator"]];
     const rows: string[] = [];
     for (const [transport, who] of sessions) {
