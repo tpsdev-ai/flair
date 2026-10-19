@@ -26,7 +26,7 @@
  *   - `event: task.status`, `data:` a JSON-RPC result `{ type: "task", task }`
  *     after an `org.event` frame when statusFromOrgEvent() finds a status for
  *     the event: from its detail, its `status` or `kind`, or words in its
- *     summary (a summary containing "error" reads as `failed`);
+ *     summary (the helper may infer `failed` from `error` in the summary);
  *   - `event: error`, `data:` a JSON-RPC error, sent once when a read is
  *     refused or fails while the stream is open; the stream then ends. A read
  *     that settles after the stream has ended sends nothing.
