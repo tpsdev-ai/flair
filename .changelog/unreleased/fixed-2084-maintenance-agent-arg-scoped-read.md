@@ -1,2 +1,2 @@
-- **Memory maintenance refuses a supplied `agentId` that is not a non-blank string and reads a scoped run's pointer rows by author.**
+- **Memory maintenance refuses an admin-supplied `agentId` that is not a non-blank string and reads an agent-scoped run's pointer rows by author.**
   An admin run is fleet-wide only when `agentId` is absent; an empty, blank, or non-string value is refused with 400 naming `agentId`, and nothing is removed. A run scoped to one agent searches `MemoryHostSource` by its indexed `authorId` instead of scanning the table and filtering in process; counts, removals, and the post-commit read are unchanged. A fleet-wide admin run still scans every pointer row (#2084).
