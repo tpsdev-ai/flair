@@ -193,7 +193,7 @@ import type { Migration, RunBatchResult } from "./types.js";
 import { EMBEDDING_STAMP_ID } from "./stamp-outstanding.js";
 import { endsWithContentSelectorSuffix } from "../../src/lib/memory-id-policy.js";
 import { skillEmbedText } from "../skill-write.js";
-import { embeddedHashMatches, embeddedTextHash } from "../memory-embed-hash.js";
+import { embeddedHashMatches, embeddedTextHash, holdsOwnStaleVector, type StagedVector } from "../memory-embed-hash.js";
 
 export { EMBEDDING_STAMP_ID };
 
@@ -353,7 +353,7 @@ const defaultContentSuffixRegenDeps: ContentSuffixRegenDeps = {
 type ContentSuffixAttempt =
   | { kind: "skipped" }
   | { kind: "lock"; outcome: Exclude<MemoryLockOutcome<unknown>["kind"], "done"> }
-  | { kind: "verified"; verdict: CommittedWriteVerdict };
+  | { kind: "verified"; verdict: CommittedWriteVerdict; staged: StagedVector };
 
 /**
  * Re-embed a legacy row whose id ends in the `.content` property suffix. The
@@ -429,7 +429,7 @@ async function regenContentSuffixRow(
       // still held.
       const committedPause = txnPausePoint("embedding-stamp-content-suffix-committed");
       if (committedPause) await committedPause;
-      return { kind: "verified", verdict };
+      return { kind: "verified", verdict, staged: { embedding, text: staged.text } };
     }, { phase: "embedding-stamp-content-suffix" });
     if (locked.kind !== "done") return { kind: "lock", outcome: locked.kind };
     return locked.value;
@@ -608,16 +608,22 @@ export function createEmbeddingStampMigration(
           // staged fields and the text the vector was computed for.
           ok = false;
           let unconfirmed = false;
+          // The vector and text of this row's last unconfirmed attempt.
+          let ownUnconfirmed: StagedVector | undefined;
           for (let attempt = 1; attempt <= CONTENT_SUFFIX_REGEN_ATTEMPTS; attempt++) {
             const rowNow = attempt === 1 ? existing : await table.get(id);
             if (!rowNow) break;
             // A row another writer already made current is not this migration's
             // write. Leave it uncounted; a later scan decides whether anything
-            // still needs re-embedding.
-            if (attempt > 1 && rowEmbeddingCurrent(rowNow as Record<string, unknown>, current)) break;
+            // still needs re-embedding. A row still holding this loop's own
+            // unconfirmed vector while its text changed is not current, whatever
+            // its stored hash says: a row with an empty owner stores a null hash,
+            // which passes the hash comparison for any text (flair#2478).
+            if (attempt > 1 && rowEmbeddingCurrent(rowNow as Record<string, unknown>, current) &&
+                !holdsOwnStaleVector(rowNow as Record<string, unknown>, ownUnconfirmed)) break;
             const attemptResult = await regenContentSuffixRow(table, id, rowNow as Record<string, unknown>, current, contentSuffixRegen);
             if (attemptResult.kind === "lock") {
-              console.warn(`[embedding-stamp] ${id}: the per-id write lock answered ${attemptResult.outcome}; nothing was written and the row is left pending for a later scan`);
+              console.warn(`[embedding-stamp] ${id}: the per-id write lock answered ${attemptResult.outcome}; nothing was written; the row is uncounted and the next scan decides whether it is still stale`);
               break;
             }
             if (attemptResult.kind === "skipped") break;
@@ -631,6 +637,7 @@ export function createEmbeddingStampMigration(
               break;
             }
             unconfirmed = true;
+            ownUnconfirmed = attemptResult.staged;
             if (attemptResult.verdict === "unreadable") break;
           }
           if (!ok && unconfirmed) {

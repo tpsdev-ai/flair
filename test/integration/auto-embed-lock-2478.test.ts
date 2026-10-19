@@ -40,12 +40,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HARPER_STOP_BUDGET_MS, startHarper, stopHarper } from "../helpers/harper-lifecycle";
 import type { ProbeComponent } from "../helpers/component-with-replay-probe";
-import { RaceHarness, composeTracedComponent, cosine, expectRefused, newAgent } from "../helpers/embedding-writer-race";
+import { RaceHarness, composeTracedComponent, cosine, expectEmptyOwnerVector, expectRefused, newAgent } from "../helpers/embedding-writer-race";
 import { getModelId } from "../../resources/embeddings-provider.ts";
 import { stripEnginePrefix } from "../../resources/embedding-space-guard.ts";
 import { computeContentHash } from "../../resources/memory-feed-lib.ts";
 
 const owner = newAgent("ael2478-owner");
+// An administrator agent (Ed25519): the only HTTP writer that passes this
+// middleware's backfill for a row with an empty owner.
+const adminAgent = newAgent("ael2478-admin");
 const CURRENT_MODEL_ID = getModelId();
 const SEED_MODEL_ID = stripEnginePrefix(CURRENT_MODEL_ID);
 const SHORT_EMBEDDING = [0.1, 0.1, 0.1];
@@ -139,6 +142,8 @@ beforeAll(async () => {
   component = composeTracedComponent();
   h = new RaceHarness(pauseDir);
   await bootHarper();
+  // Seeded before the first request, so the server's admin set includes it.
+  await h.seedAgent(adminAgent, "admin");
   await h.seedAgent(owner);
   for (const text of [ORIGINAL, OWNER_TEXT, EDITED]) await vectorOf(text);
 }, 240_000);
@@ -345,6 +350,37 @@ describe("flair#2478 — the backfill stores a vector only for the text it was c
       await expectBoundTo(await h.readRow(id), EDITED, ORIGINAL);
     }, 120_000);
   }
+
+  it("a row with an empty owner, text changed between its confirmation and its commit: the stored vector is the new text's, never the old", async () => {
+    // An empty owner stores a null text hash, which would match any text: the
+    // backfill recognises its own committed vector by the vector itself. No
+    // agent owns the row, so an administrator agent's metadata-only PATCH
+    // starts the backfill.
+    const id = "ael-drift-gap-no-owner";
+    await h.seedMemory({ id, agentId: "", content: ORIGINAL }, { embedding: SHORT_EMBEDDING, embeddingModel: SEED_MODEL_ID });
+    h.arm(CONFIRMED);
+    const res = await h.signed(adminAgent, "PATCH", memPath(id), { subject: `trigger-${++triggers}` });
+    expect(res.status, await res.clone().text()).toBe(204);
+    try {
+      await h.assertPaused(CONFIRMED);
+      await h.rawUpdate(id, { content: EDITED });
+      await handOff(CONFIRMED, COMMITTED);
+      // The read-back finds the text changed; the retry re-reads the row,
+      // recognises its own vector for the old text, and re-embeds the new text.
+      await h.assertPaused(COMMITTED);
+      const row = await h.readRow(id);
+      expect(row.content).toBe(EDITED);
+      expectEmptyOwnerVector(row, CURRENT_MODEL_ID, await vectorOf(EDITED), await vectorOf(ORIGINAL));
+      await h.release(COMMITTED);
+    } finally {
+      h.letGo(CONFIRMED);
+      h.letGo(COMMITTED);
+    }
+    h.expectIncrementalWrites(id, WRITER, FIELDS);
+    expect(h.writesBy(id, WRITER), "the backfill did not write the new text's vector after its own").toHaveLength(2);
+    await Bun.sleep(250);
+    expectEmptyOwnerVector(await h.readRow(id), CURRENT_MODEL_ID, await vectorOf(EDITED), await vectorOf(ORIGINAL));
+  }, 120_000);
 });
 
 describe("flair#2478 — the backfill's unknown outcomes and the fence (real Harper)", () => {

@@ -85,3 +85,39 @@ export function embeddedHashMatches(row: Record<string, any> | null | undefined)
   const expected = embeddedTextHash(row);
   return typeof expected === "string" && recorded === expected;
 }
+
+/**
+ * The vector one write attempt staged and the text it was computed from: the
+ * attempt-scoped identity a writer keeps for its own write whose committed row
+ * it could not confirm (flair#2478).
+ */
+export interface StagedVector {
+  embedding: readonly number[];
+  text: string;
+}
+
+/** Element-wise tolerance for {@link holdsOwnStaleVector}: wide enough for a
+ *  float32 round-trip of a stored value, far below the distance between the
+ *  vectors of two different texts. */
+const STAGED_VECTOR_TOLERANCE = 1e-6;
+
+/**
+ * True when `row` still holds the vector `staged` describes while the row's
+ * current embedding text (`skillEmbedText`) is not the text that vector was
+ * computed from: the writer's own vector, now bound to text the row no longer
+ * has. The vector itself is the identity (compared element-wise), never the
+ * stored `embeddedContentHash`, which is null for a row with an empty owner and
+ * so would match any text. Returns false when nothing was staged, when the row
+ * holds a different vector, or when its text is still the staged text.
+ */
+export function holdsOwnStaleVector(row: Record<string, any> | null | undefined, staged: StagedVector | undefined): boolean {
+  if (!staged || !row || typeof row !== "object") return false;
+  if (skillEmbedText(row) === staged.text) return false;
+  const stored = row.embedding as ArrayLike<unknown> | null | undefined;
+  if (stored == null || typeof stored.length !== "number" || stored.length !== staged.embedding.length) return false;
+  for (let i = 0; i < staged.embedding.length; i++) {
+    const value = stored[i];
+    if (typeof value !== "number" || !(Math.abs(value - staged.embedding[i]) <= STAGED_VECTOR_TOLERANCE)) return false;
+  }
+  return true;
+}

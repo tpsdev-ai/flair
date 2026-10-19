@@ -43,7 +43,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HARPER_STOP_BUDGET_MS, startHarper, stopHarper } from "../helpers/harper-lifecycle";
 import type { ProbeComponent } from "../helpers/component-with-replay-probe";
-import { RaceHarness, composeTracedComponent, cosine, expectRefused, newAgent } from "../helpers/embedding-writer-race";
+import { RaceHarness, composeTracedComponent, cosine, expectEmptyOwnerVector, expectRefused, newAgent } from "../helpers/embedding-writer-race";
 import { getModelId } from "../../resources/embeddings-provider.ts";
 import { computeContentHash } from "../../resources/memory-feed-lib.ts";
 
@@ -425,6 +425,24 @@ describe("flair#2478 — the migration's `.content`-suffix fallback writes under
     for (const id of [c5, c6, c8]) expect(touched(id), `${id} was not counted exactly once`).toBe(1);
     expect(touched(c7), "the unconfirmed row was counted").toBe(0);
     for (const id of [c1, c5, c6, c8, c9]) h.expectIncrementalWrites(id, SUFFIX_WRITER);
+  }, 300_000);
+
+  it("a row with an empty owner, text changed between the fallback's confirmation and its commit: its retry stores the new text's vector, never the old", async () => {
+    // An empty owner stores a null text hash, which passes the migration's hash
+    // comparison for any text: the retry recognises its own committed vector by
+    // the vector itself and re-embeds the current text.
+    const e1 = "esl-e1.content";
+    await seedAndReboot([staleRow(e1, { agentId: "" })], S_CONFIRMED);
+    await h.assertPaused(S_CONFIRMED);
+    await h.rawUpdate(e1, { content: EDITED });
+    await h.release(S_CONFIRMED);
+    expect(await waitForCycleDone(90_000), "the cycle did not finish").toBe(true);
+    const row = await h.readRow(e1);
+    expect(row.content).toBe(EDITED);
+    expectEmptyOwnerVector(row, CURRENT_MODEL_ID, await vectorOf(EDITED), await vectorOf(ORIGINAL));
+    expect(touched(e1), `${e1} was not counted exactly once`).toBe(1);
+    h.expectIncrementalWrites(e1, SUFFIX_WRITER);
+    expect(h.writesBy(e1, SUFFIX_WRITER), "the fallback did not write the new text's vector after its own").toHaveLength(2);
   }, 300_000);
 });
 

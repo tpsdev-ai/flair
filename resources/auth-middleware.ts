@@ -4,7 +4,7 @@ import { withMemoryWriteLockOnce } from "./memory-write-lock.js";
 import { server, databases } from "harper";
 import { getEmbedding, getModelId } from "./embeddings-provider.js";
 import { noteWriteStamp } from "./embedding-space-guard.js";
-import { embeddedHashMatches, hashEmbeddedText } from "./memory-embed-hash.js";
+import { hashEmbeddedText, holdsOwnStaleVector, type StagedVector } from "./memory-embed-hash.js";
 import { MEMORY_EMBEDDING_INPUT_FIELDS, skillEmbedText } from "./skill-write.js";
 import { agentIsAdmin, isPrincipalDeactivated, FLAIR_AGENT_USERNAME, readCredentialedPrincipal, AGENT_LOOKUP_FAILED } from "./agent-auth.js";
 import { WINDOW_MS, importEd25519Key, b64ToArrayBuffer, parseTpsEd25519Header } from "./ed25519-auth.js";
@@ -204,27 +204,33 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
     // shared with the owner verbs (resources/memory-write-lock.ts), taken once,
     // after the vector is computed: no provider call runs while the id is locked.
     // A held id, an id with an unresolved write outcome, or a store with no lock
-    // is skipped and logged, and nothing is written; a skipped backfill is not
-    // retried, and the id's next successful write starts another (a row with a
-    // stale or missing stamp is also re-embedded by the embedding-stamp
-    // migration). Holding the lock, the helper's first read is the committed
-    // row: a row whose text changed, or that has a vector of more than 100
-    // entries, is not written (a changed text is re-read and re-embedded after
-    // the lock is released). The update commits, and the committed row is read
-    // back (identity, the written fields, and the text the vector was computed
-    // for), before the lock is released. A background write whose read-back
-    // cannot confirm it is logged; it does not mark the id outcome-unknown.
+    // is skipped and logged, and nothing is written. A skipped backfill is not
+    // retried by this call: the next successful HTTP Memory write of the id that
+    // passes through this middleware starts another (a raw or direct table write
+    // starts none), and a row with a stale or missing stamp is re-embedded by
+    // the embedding-stamp migration. Holding the lock, the helper's first read
+    // is the committed row: a row whose text changed, or that has a vector of
+    // more than 100 entries, is not written (a changed text is re-read and
+    // re-embedded after the lock is released). The update commits, and the
+    // committed row is read back (identity, the written fields, and the text the
+    // vector was computed for) before the lock is released. A read-back that
+    // does not show them retries from a fresh read, bounded by
+    // WRITE_BACK_ATTEMPTS (3); the read-back checks only the final committed
+    // state of those fields, so a lock-bypassing write committed and then
+    // overwritten inside this write's window is not detected. A background write whose
+    // read-back cannot confirm it is logged; it does not mark the id
+    // outcome-unknown.
     //
     // A row holding a vector of more than 100 entries is already embedded,
-    // except one holding the vector an earlier attempt of this backfill
-    // committed for text that has since changed: its stored text hash is the
-    // one that attempt staged and no longer matches the row's text. That row is
-    // re-read and re-embedded, so the backfill does not end on a vector for text
-    // the row no longer holds.
-    let stagedHash: string | null | undefined;
-    let ownStaleHash: string | null | undefined;
-    const alreadyEmbedded = (row: any): boolean => row.embedding?.length > 100 &&
-      !(ownStaleHash !== undefined && row.embeddedContentHash === ownStaleHash && !embeddedHashMatches(row));
+    // except one still holding the exact vector an earlier attempt of this call
+    // staged while its text is no longer the text that vector was computed from
+    // (holdsOwnStaleVector): that attempt's own vector for text the row no
+    // longer has. That row is re-read and re-embedded, so the backfill does not
+    // end on a vector for text the row no longer holds. The identity is the
+    // vector, not the stored text hash: a row with an empty owner stores a null
+    // hash, which would match any text.
+    let ownUnconfirmed: StagedVector | undefined;
+    const alreadyEmbedded = (row: any): boolean => row.embedding?.length > 100 && !holdsOwnStaleVector(row, ownUnconfirmed);
     for (let attempt = 1; attempt <= WRITE_BACK_ATTEMPTS; attempt++) {
       const record = await table.get(memoryId, {});
       const text = record ? skillEmbedText(record) : undefined;
@@ -254,12 +260,11 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
               // update, never a full-row put of the row read above (flair#2470,
               // flair#2465). The newly computed hash is of `text`, the text this
               // vector was computed from (null for an empty owner).
-              stagedHash = hashEmbeddedText(row.agentId, text) ?? null;
-              return { idempotent: true, update: { embedding, embeddingModel: model, embeddedContentHash: stagedHash } };
+              return { idempotent: true, update: { embedding, embeddingModel: model, embeddedContentHash: hashEmbeddedText(row.agentId, text) ?? null } };
             },
             {
               label: "backfillEmbedding",
-              onUnconfirmed: () => { unconfirmed = true; ownStaleHash = stagedHash; },
+              onUnconfirmed: () => { unconfirmed = true; ownUnconfirmed = { embedding, text }; },
               expectedRow: record,
               // Compare the text-selecting fields before staging, after the plan's skip checks.
               matchFields: [...MEMORY_EMBEDDING_INPUT_FIELDS, "tags"],

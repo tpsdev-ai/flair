@@ -242,6 +242,19 @@ export function cosine(a: number[], b: number[]): number {
   return dot / Math.sqrt(na * nb);
 }
 
+/** A row with an empty owner holds the server's vector `own` stamped `model`,
+ *  closer to `own` than to `other`. Its text hash is null: there is no owner
+ *  to compute it with (resources/memory-embed-hash.ts). */
+export function expectEmptyOwnerVector(row: any, model: string, own: number[], other: number[]): void {
+  expect(row?.agentId).toBe("");
+  expect(row?.embeddingModel).toBe(model);
+  expect(row?.embeddedContentHash ?? null, "a vector for an empty owner carries no text hash").toBeNull();
+  expect(Array.isArray(row?.embedding) && row.embedding.length > 100, "no server vector stored").toBe(true);
+  const toOwn = cosine(row.embedding, own);
+  expect(toOwn, "the stored vector is not the server's vector for the expected text").toBeGreaterThan(0.999);
+  expect(toOwn, "the stored vector is closer to the old text's vector").toBeGreaterThan(cosine(row.embedding, other));
+}
+
 /** A 503 lock refusal with its named code; returns the parsed body. */
 export async function expectRefused(res: Response, error: string): Promise<any> {
   const text = await res.text();
