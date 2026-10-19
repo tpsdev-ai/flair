@@ -1,7 +1,10 @@
 // agent-put-immutable-2696.test.ts — flair#2696.
 //
-// An Agent PUT is an administrator operation. The target id is checked first:
-// an id outside the agent-id rule is refused 400 (agent-id-rule-2359.test.ts).
+// An Agent PUT is an administrator operation. For a request that reaches
+// Agent.put(), the target id is checked first: an id outside the agent-id rule
+// is refused 400 (agent-id-rule-2359.test.ts); authentication, routing and
+// Harper's resource admission (allowCreate() for a missing target) can refuse
+// earlier.
 // For a valid id, a signed PUT from an agent that is not an administrator is
 // refused 403 and writes nothing: with
 // `agent_put_admin_only` when the record exists, and by Harper's create check
