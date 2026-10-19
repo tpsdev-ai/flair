@@ -13,7 +13,14 @@
  * ports and `search_by_conditions` on MemoryCandidate from the seeded rows.
  * The HTTP port serves GET/PUT/DELETE on Memory, Soul and MemoryCandidate, or
  * answers every PUT and DELETE with a 307 when `redirectWritesTo` is seeded.
- * Every request is appended to a log file that `requests()` reads.
+ *
+ * Every request either port receives is appended to a log file that
+ * `requests()` reads, before anything else is done with it: the body is read
+ * as text and parsed by a step that cannot throw, so a malformed body is
+ * logged too. After logging, a request without the admin credential
+ * (`Authorization: Basic admin:<adminPass>`, default {@link STUB_ADMIN_PASS})
+ * is answered 401, so a client that omits the credential fails as it would
+ * against a real instance.
  */
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -27,12 +34,17 @@ export interface StubRequest {
   table?: string;
 }
 
+/** The admin password a stub instance requires unless the seed names another. */
+export const STUB_ADMIN_PASS = "test-admin-pass";
+
 export interface StubSeed {
   memories?: Array<Record<string, unknown>>;
   souls?: Array<Record<string, unknown>>;
   candidates?: Array<Record<string, unknown>>;
   /** When set, every PUT and DELETE on the HTTP port answers 307 to this base URL plus the request path. */
   redirectWritesTo?: string;
+  /** The admin password every request must carry as `Basic admin:<adminPass>`; default {@link STUB_ADMIN_PASS}. */
+  adminPass?: string;
 }
 
 export interface StubInstance {
@@ -41,7 +53,7 @@ export interface StubInstance {
   httpUrl: string;
   opsUrl: string;
   pid: number;
-  /** Every request this instance received, in order. */
+  /** Every request this instance received, in order, including ones it answered 401 or 400. */
   requests: () => StubRequest[];
   /** Stops the process by its pid and removes its directory. */
   stop: () => Promise<void>;
@@ -58,11 +70,16 @@ const tables = {
 };
 const ports = { http: 0, ops: 0 };
 const log = (entry) => appendFileSync(logPath, JSON.stringify(entry) + "\n");
+const expectedAuth = "Basic " + Buffer.from("admin:" + seed.adminPass).toString("base64");
+const unauthorized = (req) => req.headers.get("authorization") !== expectedAuth;
+// Neither step can throw, so every request reaches its log line.
+const readText = async (req) => { try { return await req.text(); } catch { return ""; } };
+const parseJson = (text) => { try { return text ? JSON.parse(text) : undefined; } catch { return undefined; } };
 
 async function opsFetch(req) {
-  let body;
-  try { body = await req.json(); } catch { body = undefined; }
+  const body = parseJson(await readText(req));
   log({ endpoint: "ops", method: req.method, path: new URL(req.url).pathname, operation: body?.operation, table: body?.table });
+  if (unauthorized(req)) return new Response("unauthorized", { status: 401 });
   if (body?.operation === "get_configuration") {
     return Response.json({ http: { port: ports.http }, operationsApi: { network: { port: ports.ops } } });
   }
@@ -75,8 +92,11 @@ async function opsFetch(req) {
 
 async function httpFetch(req) {
   const url = new URL(req.url);
-  const body = req.method === "PUT" ? await req.json() : undefined;
+  const text = await readText(req);
   log({ endpoint: "http", method: req.method, path: url.pathname });
+  if (unauthorized(req)) return new Response("unauthorized", { status: 401 });
+  const body = parseJson(text);
+  if (req.method === "PUT" && body === undefined) return new Response("malformed body", { status: 400 });
   if (seed.redirectWritesTo && (req.method === "PUT" || req.method === "DELETE")) {
     return new Response(null, { status: 307, headers: { location: seed.redirectWritesTo + url.pathname } });
   }
@@ -139,7 +159,7 @@ export async function startStubInstance(seed: StubSeed = {}): Promise<StubInstan
   const logPath = join(dir, "requests.jsonl");
   const seedPath = join(dir, "seed.json");
   writeFileSync(script, STUB_SERVER_SOURCE);
-  writeFileSync(seedPath, JSON.stringify(seed));
+  writeFileSync(seedPath, JSON.stringify({ ...seed, adminPass: seed.adminPass ?? STUB_ADMIN_PASS }));
   writeFileSync(logPath, "");
 
   const proc = Bun.spawn(["bun", script, logPath, seedPath], { stdout: "pipe", stderr: "pipe" });

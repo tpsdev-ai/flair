@@ -524,10 +524,12 @@ async function readRestoreIdentity(label: string, request: () => Promise<Respons
  *   unreadable identity on either side refuses, and so does a redirect.
  *
  * It is a preflight: it says nothing about a process that takes over either
- * endpoint after it returns. No request it sends follows a redirect, and every
- * one goes to the target's host (the operations URL is built on it). The admin
- * credential is sent to the operations endpoint and, for a non-loopback URL, to
- * the target's `/Instance/`.
+ * endpoint after it returns. No request it sends follows a redirect. For a
+ * loopback URL its requests go to the operations port on 127.0.0.1, the
+ * endpoint the OS listener check proves, whichever loopback name (127.0.0.1,
+ * localhost or [::1]) the target URL uses. For any other URL they go to the
+ * target URL's host: its `/Instance/` and the operations URL built on that
+ * host. The admin credential is sent with each of them.
  */
 export async function establishRestorePair(
   target: RestoreTarget,
@@ -1636,15 +1638,19 @@ export function register(program: Command): void {
             process.exit(1);
           }
         }
+        // With a resolved admin credential (always on --apply), every Memory,
+        // Soul and MemoryCandidate read, delete and write sends it explicitly:
+        // --admin-pass, --admin-pass-file, or the default resolveLocalAdminPass
+        // fell back to. A dry run without one reads through the shared
+        // resolver's own tiers.
         const targetApi = (method: string, path: string, body?: unknown) =>
-          api(method, path, body, { baseUrl: restoreTarget.baseUrl, refuseRedirects: true });
+          api(method, path, body, adminPass
+            ? { baseUrl: restoreTarget.baseUrl, explicitAdminPass: adminPass, adminUser: opts.adminUser, agentId: null, refuseRedirects: true }
+            : { baseUrl: restoreTarget.baseUrl, refuseRedirects: true });
         const opsSearch = adminPass
           ? buildOpsSearch({ opsUrl: restoreTarget.opsUrl, adminUser: opts.adminUser, adminPass })
           : undefined;
-        const soulApiCall = adminPass
-          ? (method: string, path: string, body?: unknown) =>
-              api(method, path, body, { baseUrl: restoreTarget.baseUrl, explicitAdminPass: adminPass, adminUser: opts.adminUser, agentId: null, refuseRedirects: true })
-          : undefined;
+        const soulApiCall = adminPass ? targetApi : undefined;
         try {
           const result = await applySnapshot({
             agentId,

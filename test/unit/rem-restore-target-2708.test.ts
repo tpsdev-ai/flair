@@ -23,7 +23,7 @@ import { createSnapshot } from "../../src/rem/snapshot.ts";
 import { establishRestorePair, resolveRestoreTarget, type RestoreTarget } from "../../src/commands/rem.ts";
 import { resolveOpsUrlFromTarget } from "../../src/cli.ts";
 import { ApiHttpError, authedRequest } from "../../src/lib/auth-resolve.ts";
-import { startStubInstance, type StubInstance, type StubRequest, type StubSeed } from "../helpers/rem-restore-stub-instance.ts";
+import { STUB_ADMIN_PASS, startStubInstance, type StubInstance, type StubRequest, type StubSeed } from "../helpers/rem-restore-stub-instance.ts";
 
 const cliPath = join(import.meta.dirname, "..", "..", "src", "cli.ts");
 const fetchLogPreload = join(import.meta.dirname, "..", "helpers", "fetch-request-log-preload.ts");
@@ -87,6 +87,8 @@ async function runRestore(args: {
   home: string;
   date: string;
   env: Record<string, string | undefined>;
+  /** The admin credential flags; default `--admin-pass <STUB_ADMIN_PASS>`. */
+  credential?: string[];
 }): Promise<{ code: number | null; stdout: string; stderr: string; fetches: FetchRecord[] }> {
   const fetchLog = join(args.home, "fetch-log.jsonl");
   const env: Record<string, string | undefined> = {
@@ -98,6 +100,8 @@ async function runRestore(args: {
     FLAIR_TARGET: undefined,
     FLAIR_TOKEN: undefined,
     FLAIR_ADMIN_PASS: undefined,
+    FLAIR_ADMIN_USER: undefined,
+    HDB_ADMIN_PASSWORD: undefined,
     FLAIR_AGENT_ID: undefined,
     FLAIR_TEST_FETCH_LOG: fetchLog,
     NO_COLOR: "1",
@@ -105,7 +109,7 @@ async function runRestore(args: {
   };
   for (const [key, value] of Object.entries(env)) if (value === undefined) delete env[key];
   const child = Bun.spawn(
-    ["bun", "--preload", fetchLogPreload, cliPath, "rem", "restore", args.date, "--agent", AGENT_ID, "--apply", "--admin-pass", "test-admin-pass"],
+    ["bun", "--preload", fetchLogPreload, cliPath, "rem", "restore", args.date, "--agent", AGENT_ID, "--apply", ...(args.credential ?? ["--admin-pass", STUB_ADMIN_PASS])],
     { env: env as Record<string, string>, timeout: 30_000, stdout: "pipe", stderr: "pipe" },
   );
   const stdout = await new Response(child.stdout).text();
@@ -152,6 +156,27 @@ describe("flair#2708 — rem restore target (CLI)", () => {
     // log saw them, so an empty log elsewhere means nothing was sent).
     expect(result.fetches.length).toBeGreaterThan(0);
     expect([...new Set(result.fetches.map((f) => f.host))].sort()).toEqual([hostOf(b, "http"), hostOf(b, "ops")].sort());
+  }, 60_000);
+
+  test("with only --admin-pass-file and no local admin-password file, every request carries the credential and the restore completes", async () => {
+    const a = await startInstance();
+    const b = await startInstance();
+    const { home, date } = await makeHome(a);
+    expect(existsSync(join(home, ".flair", "admin-pass"))).toBe(false);
+    const passDir = mkdtempSync(join(tmpdir(), "flair-2708-pass-"));
+    dirs.push(passDir);
+    const passFile = join(passDir, "restore-admin-pass");
+    writeFileSync(passFile, STUB_ADMIN_PASS, { mode: 0o600 });
+
+    const result = await runRestore({ home, date, env: { FLAIR_URL: b.httpUrl }, credential: ["--admin-pass-file", passFile] });
+
+    // The stub answers 401 to any request without the credential, so a
+    // completed restore means the reads, deletes and writes all carried it.
+    expect(result.code, result.stderr).toBe(0);
+    expect(result.stdout).toContain("Status:       completed");
+    expect(result.stdout).toContain("Deleted:      2 memories, 1 souls, 1 candidates");
+    expect(b.requests().some((r) => r.endpoint === "http" && r.method === "GET" && r.path === "/Memory")).toBe(true);
+    expect(a.requests()).toEqual([]);
   }, 60_000);
 
   test("refuses before any request when FLAIR_OPS_PORT conflicts with the configured pair", async () => {

@@ -15,7 +15,10 @@
   operations endpoint must each report exactly one `flair.Instance` row with
   the same id; a missing, unreadable or redirected identity read refuses. The
   check covers the endpoints as they answer it, not a process that takes one
-  over after it passes. Restore's REST calls do not follow redirects. A
+  over after it passes. Restore's REST calls do not follow redirects, and each
+  Memory, Soul and candidate read, delete and write carries the admin
+  credential restore resolved (`--admin-pass`, `--admin-pass-file`, or the
+  default), so no local admin-password file is needed when a flag gives one. A
   `FLAIR_OPS_TARGET` does not select the listing endpoint: restore refuses
   while it is set to anything but that endpoint's root URL, a value of only
   whitespace included (an empty value counts as unset). Restore refuses a

@@ -4,6 +4,10 @@
  *
  * The candidate listing and the writes must reach the same instance.
  *
+ * The test HOME holds NO local admin-password file, so every restore here runs
+ * on the credential its flags give it (`--admin-pass-file` or `--admin-pass`)
+ * and nothing else: a call that omitted it would be denied by Harper.
+ *
  * Instance A is the restore target in the first test. Its rows start different
  * from the snapshot (a changed Memory, an extra Memory, a changed Soul), and it
  * holds a leftover MemoryCandidate for the agent whose claim is the snapshot
@@ -11,14 +15,15 @@
  * delete it, since the learned-content guard refuses the Soul write while the
  * candidate exists, and must end with exactly the snapshot's rows. A candidate
  * search that returned nothing would leave the candidate in place and fail the
- * Soul write.
+ * Soul write. That restore uses only --admin-pass-file; a second one, from a
+ * newly drifted state, uses only --admin-pass.
  *
- * The second test starts instance B, a second real Harper, and runs with NO
+ * The refusal test starts instance B, a second real Harper, and runs with NO
  * configured pair (no config file in HOME): FLAIR_URL names B and
  * FLAIR_OPS_PORT names A's operations port. Restore must refuse before any
  * listing, delete or write, and both instances keep every row.
  *
- * The third test runs the non-loopback branch of the preflight pair check
+ * The last test runs the non-loopback branch of the preflight pair check
  * (`establishRestorePair` with a target marked non-loopback) against the two real
  * Harpers: it passes only when the HTTP endpoint and the operations endpoint
  * each report exactly one flair.Instance row with the same id, and refuses
@@ -26,7 +31,8 @@
  * once each has its own row.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { basename } from "node:path";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startHarper, stopHarpers, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
@@ -45,7 +51,10 @@ const SNAPSHOT_SOUL_VALUE = "restored soul";
 let a: HarperInstance;
 let b: HarperInstance | undefined;
 let home: string;
-let snapshotDate: string;
+let passDir: string;
+let passFile: string;
+/** The snapshot's file name without `.tar.gz`: a prefix only it matches, unlike the pre-restore snapshots restores add. */
+let snapshotStem: string;
 
 const createdAt = new Date().toISOString();
 const snapshotMemory = { id: MEMORY_ID, agentId: AGENT_ID, content: "restored memory", durability: "persistent", createdAt };
@@ -94,7 +103,7 @@ function candidateRow(id: string, claim: string) {
   return { id, agentId: AGENT_ID, claim, generatedAt: new Date().toISOString(), status: "pending" };
 }
 
-function runRestore(env: Record<string, string | undefined>, adminPass: string, date: string) {
+function runRestore(env: Record<string, string | undefined>, credential: string[], date: string) {
   const childEnv: Record<string, string | undefined> = {
     ...process.env,
     HOME: home,
@@ -104,13 +113,15 @@ function runRestore(env: Record<string, string | undefined>, adminPass: string, 
     FLAIR_TARGET: undefined,
     FLAIR_TOKEN: undefined,
     FLAIR_ADMIN_PASS: undefined,
+    FLAIR_ADMIN_USER: undefined,
+    HDB_ADMIN_PASSWORD: undefined,
     FLAIR_AGENT_ID: undefined,
     NO_COLOR: "1",
     ...env,
   };
   for (const [key, value] of Object.entries(childEnv)) if (value === undefined) delete childEnv[key];
   const child = Bun.spawn(
-    [nodeBin({ env: childEnv as Record<string, string> }), CLI, "rem", "restore", date, "--agent", AGENT_ID, "--apply", "--admin-pass", adminPass],
+    [nodeBin({ env: childEnv as Record<string, string> }), CLI, "rem", "restore", date, "--agent", AGENT_ID, "--apply", ...credential],
     { env: childEnv as Record<string, string>, timeout: 60_000, stdout: "pipe", stderr: "pipe" },
   );
   return (async () => {
@@ -126,10 +137,12 @@ beforeAll(async () => {
   assertOwnInstance(a);
   home = mkdtempSync(join(tmpdir(), "flair-2708-real-"));
   mkdirSync(join(home, ".flair"), { recursive: true });
-  writeFileSync(join(home, ".flair", "admin-pass"), a.admin.password, { mode: 0o600 });
-  chmodSync(join(home, ".flair", "admin-pass"), 0o600);
+  // The admin password lives OUTSIDE the test HOME, read only through --admin-pass-file.
+  passDir = mkdtempSync(join(tmpdir(), "flair-2708-pass-"));
+  passFile = join(passDir, "restore-admin-pass");
+  writeFileSync(passFile, a.admin.password, { mode: 0o600 });
   const now = new Date();
-  await createSnapshot({
+  const created = await createSnapshot({
     agentId: AGENT_ID,
     flairVersion: "0.0.0-test",
     memories: [snapshotMemory],
@@ -138,7 +151,7 @@ beforeAll(async () => {
     rootOverride: join(home, ".flair", "snapshots"),
     nowOverride: now,
   });
-  snapshotDate = now.toISOString().slice(0, 10);
+  snapshotStem = basename(created.path).replace(/\.tar\.gz$/, "");
 }, 300_000);
 
 afterAll(async () => {
@@ -146,6 +159,7 @@ afterAll(async () => {
     await stopHarpers([a, b]);
   } finally {
     if (home) rmSync(home, { recursive: true, force: true });
+    if (passDir) rmSync(passDir, { recursive: true, force: true });
     for (const h of [a, b]) {
       if (h?.installDir?.startsWith(tmpdir())) rmSync(h.installDir, { recursive: true, force: true });
     }
@@ -166,11 +180,12 @@ describe("flair#2708 — rem restore on a real instance", () => {
     await ops(a, { operation: "insert", table: "Soul", records: [{ ...snapshotSoul, value: "drifted soul" }] });
     await ops(a, { operation: "insert", table: "MemoryCandidate", records: [candidateRow(CANDIDATE_ID, SNAPSHOT_SOUL_VALUE)] });
     expect(await agentRows(a, "MemoryCandidate", ["id"])).toEqual([{ id: CANDIDATE_ID }]);
+    expect(existsSync(join(home, ".flair", "admin-pass"))).toBe(false);
 
     const result = await runRestore(
       { FLAIR_URL: a.httpURL, FLAIR_OPS_PORT: new URL(a.opsURL).port },
-      a.admin.password,
-      snapshotDate,
+      ["--admin-pass-file", passFile],
+      snapshotStem,
     );
 
     expect(result.code, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`).toBe(0);
@@ -179,6 +194,35 @@ describe("flair#2708 — rem restore on a real instance", () => {
     expect(result.stdout).toContain("Restored:     1 memories, 1 souls");
 
     expect(await agentRows(a, "MemoryCandidate", ["id"])).toEqual([]);
+    expect(await agentRows(a, "Memory", ["id", "content"])).toEqual([{ id: MEMORY_ID, content: "restored memory" }]);
+    expect(await agentRows(a, "Soul", ["id", "key", "value"])).toEqual([{ id: SOUL_ID, key: "identity", value: SNAPSHOT_SOUL_VALUE }]);
+  }, 120_000);
+
+  test("with only --admin-pass and no local admin-password file, rewinds a newly drifted state to the snapshot", async () => {
+    await ops(a, {
+      operation: "upsert",
+      table: "Memory",
+      records: [
+        { ...snapshotMemory, content: "drifted again" },
+        { id: "m-extra-2", agentId: AGENT_ID, content: "also not in the snapshot", durability: "persistent", createdAt },
+      ],
+    });
+    await ops(a, { operation: "upsert", table: "Soul", records: [{ ...snapshotSoul, value: "drifted again" }] });
+    // Whatever an earlier test left, the state now differs from the snapshot.
+    const drifted = await agentRows(a, "Memory", ["id", "content"]);
+    expect(drifted).toContainEqual({ id: "m-extra-2", content: "also not in the snapshot" });
+    expect(drifted).toContainEqual({ id: MEMORY_ID, content: "drifted again" });
+    expect(existsSync(join(home, ".flair", "admin-pass"))).toBe(false);
+
+    const result = await runRestore(
+      { FLAIR_URL: a.httpURL, FLAIR_OPS_PORT: new URL(a.opsURL).port },
+      ["--admin-pass", a.admin.password],
+      snapshotStem,
+    );
+
+    expect(result.code, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`).toBe(0);
+    expect(result.stdout).toContain("Status:       completed");
+    expect(result.stdout).toMatch(/Deleted: +\d+ memories, 1 souls, \d+ candidates/);
     expect(await agentRows(a, "Memory", ["id", "content"])).toEqual([{ id: MEMORY_ID, content: "restored memory" }]);
     expect(await agentRows(a, "Soul", ["id", "key", "value"])).toEqual([{ id: SOUL_ID, key: "identity", value: SNAPSHOT_SOUL_VALUE }]);
   }, 120_000);
@@ -210,7 +254,7 @@ describe("flair#2708 — rem restore on a real instance", () => {
     expect(before[`${a.httpURL} MemoryCandidate`]).toContainEqual({ id: "c-on-a", claim: "a candidate on instance A" });
 
     const aOps = new URL(a.opsURL).port;
-    const result = await runRestore({ FLAIR_URL: b.httpURL, FLAIR_OPS_PORT: aOps }, b.admin.password, snapshotDate);
+    const result = await runRestore({ FLAIR_URL: b.httpURL, FLAIR_OPS_PORT: aOps }, ["--admin-pass", b.admin.password], snapshotStem);
 
     expect(result.code, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`).not.toBe(0);
     expect(result.stderr).toContain(
