@@ -1217,8 +1217,8 @@ describe("flair#2697 — the launcher moves aside an hdb.pid only on positive ev
   }, 30_000);
 
   // lsof is the evidence for a process of this user: an lsof that fails, is
-  // killed, or returns no complete listing is no evidence, whether or not the
-  // process holds a file under ROOTPATH.
+  // killed, or returns a listing that is empty or missing the working directory
+  // is no evidence, whether or not the process holds a file under ROOTPATH.
   test("lsof fails (exit 1, with or without a listing; killed), or exits 0 with no listing or one without the working directory -> hdb.pid untouched", async () => {
     const kinds = ["exit-1", "listing-exit-1", "empty-exit-0", "no-cwd-exit-0", "killed"] as const;
     const root0 = mkRoot();
