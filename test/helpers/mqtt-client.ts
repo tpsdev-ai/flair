@@ -5,10 +5,11 @@
  *
  * It speaks only what the tests need — CONNECT (optionally with a last-will),
  * SUBSCRIBE, PUBLISH (QoS 0/1, retained or not) and DISCONNECT out; CONNACK,
- * SUBACK, PUBACK, PUBLISH and DISCONNECT in — and keeps the text of everything
- * the server sent, decoded as UTF-8 (`receivedText`), so a test can scan the
- * stream for an ASCII marker regardless of how Harper encoded a payload (JSON,
- * MessagePack and CBOR all carry a string as its UTF-8 bytes). The bytes
+ * SUBACK, PUBACK and PUBLISH in. It keeps the text of everything the server
+ * sent, decoded as UTF-8 (`receivedText`), so a test can scan the stream for
+ * an ASCII marker regardless of how Harper encoded a payload (JSON,
+ * MessagePack and CBOR all carry a string as its UTF-8 bytes), and, for each
+ * inbound PUBLISH, its topic and payload bytes (`publishes`). The raw frames
  * themselves are not kept.
  *
  * MQTT 5 is used, not 3.1.1, because only 5 carries a reason code on SUBACK
@@ -302,8 +303,10 @@ export class MqttClient {
   }
 
   /**
-   * Send PUBLISH. QoS 1 waits for PUBACK and answers its reason code; QoS 0
-   * has no acknowledgement and answers SUCCESS once the packet is written.
+   * Send PUBLISH. QoS 1 waits for PUBACK and answers its reason code. QoS 0
+   * has no acknowledgement: it answers a local placeholder (SUCCESS) after
+   * the send attempt, which is evidence neither that the packet was written
+   * nor that the server accepted it.
    * `retain: true` sets the RETAIN flag, which Harper turns into a write of the
    * row (a put) — or, with a `null` payload (zero bytes), a delete.
    */

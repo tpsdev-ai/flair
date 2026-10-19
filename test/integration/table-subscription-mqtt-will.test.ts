@@ -1,14 +1,17 @@
 // MQTT last-will messages on flair's tables follow the table-subscription
 // policy (resources/table-subscription-policy.ts).
 //
-// A session registers a will at CONNECT; Harper stores it and publishes it
-// later: when the session's connection ends without DISCONNECT (on the
-// session's own context), or at a later worker start for a will still stored
-// (on a copy of the stored will record, which carries no verified principal)
-// — a session that never disconnected because the server stopped, or one whose
-// will Harper could not publish as it dropped. A retained will on a table
-// topic writes the row (or, with an empty payload, deletes it). The rows here
-// are MemoryUsage rows. This file starts one test-Harper
+// A session registers a will at CONNECT; Harper stores it and, if it is
+// eligible, passes it to publishMessage later: when the session's connection
+// ends without DISCONNECT (on the session's own context), or at a later worker
+// start for a will still stored (on a copy of the stored will record, which
+// carries no verified principal) — a session that never disconnected because
+// the server stopped, or one whose will Harper could not publish as it
+// dropped. Harper drops an expired scoped-token will before publishMessage in
+// both cases. A retained will on a table topic writes the row (or, with an
+// empty payload, deletes it). The rows here are MemoryUsage rows, and every
+// will this file registers is an ordinary (not scoped-token) will. This file
+// starts one test-Harper
 // with MQTT over WebSocket and a TCP listener on, and checks both moments:
 //   (1) Session drop. A non-admin Harper user and an unauthenticated session
 //       (which Harper authorizes locally as its super user), each over TCP and

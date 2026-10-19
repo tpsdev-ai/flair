@@ -104,9 +104,11 @@ it was.
 
 A session's last-will message is decided when Harper publishes it: when the
 session drops without DISCONNECT, as that session's own publish; and when
-Harper replays the wills it still holds as its first worker starts, as a
-caller without a valid credential, so a replayed will on a table topic is
-refused, an administrator's included. Over MQTT on WebSocket the credential is
+Harper replays the eligible wills it still holds as its first worker starts,
+as a caller without a valid credential, so a replayed will on a table topic is
+refused, an administrator's included. Harper drops an expired scoped-token
+will before this check, on replay and when a session drops. Over MQTT on
+WebSocket the credential is
 the one on the WebSocket upgrade request, as for SSE and WebSocket. An MQTT
 connection on Harper's TCP or TLS listener carries no HTTP request, so flair
 resolves the caller of each of its actions as one without a valid credential,

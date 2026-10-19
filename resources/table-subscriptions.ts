@@ -13,11 +13,11 @@
  * through with the same arguments and no caller resolved. Each guarded static
  * reads the call's arguments as Harper reads them; the guard's boundary is
  * protocol-layer callers, whose contexts Harper constructs, and in-process code
- * is trusted (see the policy module for what is read and how an ambiguous
- * reading is decided). Harper's native MCP route resolves every caller as
- * anonymous, so it refuses administrators too (see the policy module). The
- * tables are read from the registry, so the class of a table added to the
- * schema gets the guard without being named here.
+ * is trusted (see the policy module for what is read and which readings are
+ * listed). Harper's native MCP route resolves every caller as anonymous, so it
+ * refuses administrators too (see the policy module). The tables are read from
+ * the registry, so the class of a table added to the schema gets the guard
+ * without being named here.
  *
  * This module deliberately exports nothing: Harper registers exported values of
  * a resource module as routes.

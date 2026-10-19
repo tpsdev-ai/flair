@@ -48,9 +48,11 @@
  *     (publishMessage). Harper passes the session's own context for a session's
  *     publish and for the will it publishes when a session disconnects, and a
  *     copy of the stored will record (with `authorize: true`) for a will it
- *     replays when its first worker starts (every will still stored: a session
- *     that never disconnected, or one whose will was not published as it
- *     dropped). These two statics are also the entry of ordinary put and delete
+ *     replays when its first worker starts (each eligible will still stored: a
+ *     session that never disconnected, or one whose will was not published as
+ *     it dropped). Harper drops an expired scoped-token will before
+ *     publishMessage, on replay and when a session drops, so this guard never
+ *     sees it. These two statics are also the entry of ordinary put and delete
  *     calls (a REST PUT or DELETE, flair's own writes), so their guard decides
  *     only a call where an argument Harper may take as the context
  *     (retainedPublishContext) carries the markers of one of those two
@@ -85,13 +87,16 @@
  * markers — the replacement resolves the caller from the context Harper takes
  * from the call's arguments, read as Harper's transactional() reads them
  * (harperCallContexts; for put()/delete(), retainedContextCandidates). Where
- * Harper's reading turns on something the guard does not test — whether an
- * argument is one of Harper's DatabaseTransactions or its one
- * released-transaction sentinel, or what an array's element 0 is — each reading
- * is decided and all must be admitted. A replayed will is a caller without a
- * valid credential. Every decision asks ONE decision function,
- * `tableSubscriptionRefusal`, so the entries
- * cannot drift apart:
+ * the guard lists more than one reading — because Harper's reading turns on
+ * whether an argument is one of Harper's DatabaseTransactions or its one
+ * released-transaction sentinel, or on what an array's element 0 is — each
+ * listed reading is decided and all must be admitted. Harper's `{ transaction:
+ * second }` wrapper for a transaction second argument is not listed
+ * (harperContextReading). A replayed will is a caller without a valid
+ * credential. A successfully resolved caller is decided by ONE function,
+ * `tableSubscriptionRefusal`, so the entries cannot drift apart; a caller that
+ * cannot be resolved is refused directly (unverifiedSubscriberRefusal), fail
+ * closed:
  *   - a table added to the schema is in that registry, so its class gets the
  *     guard without anyone naming it, and its routes and topics use the guard
  *     once the table is exported;
@@ -133,13 +138,15 @@
  * known there. When a session disconnects without DISCONNECT, Harper publishes
  * its will on the session's own context, decided like the session's own
  * publish. When Harper's first worker starts (an instance start or a worker
- * restart), it replays every will still stored — a session that never
+ * restart), it replays each eligible will still stored — a session that never
  * disconnected, or one whose will was not published as it dropped — on a copy
  * of the stored record, which carries no verified principal: a retained will
  * is decided as a caller without a valid credential (retainedPublishCaller),
  * and a will that is not retained resolves as anonymous like any context
  * still carrying `authorize: true`. So a replayed will on a table topic is
- * refused, an administrator's included.
+ * refused, an administrator's included. Harper drops an expired scoped-token
+ * will before publishMessage (server/DurableSubscriptionsSession.ts), on
+ * replay and when a session drops, so this guard never sees one.
  *
  * Harper's native MCP component calls subscribe() with
  * `{ user, authorize: true, request: <RequestTarget> }`. The Harper user it
@@ -275,11 +282,13 @@ function harperContextReading(
     const form = contentFormOf(first);
     if (form === "record") return [fromArgument(unwrapContext(second))];
     // Harper takes the second as the context only when it is, or carries, one
-    // of its DatabaseTransactions (a class flair cannot test; a transaction
-    // itself becomes `{ transaction: second }`, which carries no caller and
-    // resolves as the trusted internal caller, so it cannot change a decision
-    // and is not listed). For an array, the (data, context) reading is decided
-    // as well.
+    // of its DatabaseTransactions (a class flair cannot test). A transaction
+    // itself becomes `{ transaction: second }`; that wrapper is not listed. It
+    // carries no caller identity of its own — it comes from trusted in-process
+    // code, outside the guard's boundary — and were it listed it would be
+    // decided like any internal verdict: admitted, or refused on a target
+    // that carries Harper's permission marker (subscriptionCaller). For an
+    // array, the (data, context) reading is decided as well.
     return form === "array"
       ? [fromArgument(unwrapContext(second)), fromArgument(second), AMBIENT]
       : [fromArgument(second), AMBIENT];
@@ -296,8 +305,11 @@ function harperContextReading(
 /**
  * The contexts the guard decides for a connect(), subscribe() or publish()
  * call with `args`, read as Harper's transactional() reads the arguments: one,
- * except where Harper's reading turns on something the guard does not test,
- * when each reading is returned and every one of them is decided. Harper drops
+ * except where the guard lists more than one reading (a second argument of
+ * connect()/publish() that Harper takes only if it is or carries one of its
+ * DatabaseTransactions, a sentinel-shaped argument, an array first argument),
+ * when every listed reading is decided. Harper's `{ transaction: second }`
+ * wrapper is not listed (see harperContextReading). Harper drops
  * its one released-transaction sentinel in the second or third position; an
  * argument of that shape (isReleasedTransactionPlaceholder) is read both as
  * given and as absent. For a Harper-constructed context this is the context
@@ -363,8 +375,10 @@ export const MAX_REFUSAL_REASON_BYTES = 123;
 /**
  * The decision: why `caller` may not subscribe to (or publish to) a table, as
  * the error the route or topic returns; null for an administrator or a trusted
- * internal call. Every guarded entry asks this function, so subscription and
- * publish decide a resolved caller the same way.
+ * internal call. Every guarded entry asks this function for each caller it
+ * resolves, so subscription and publish decide a resolved caller the same
+ * way; a caller that cannot be resolved is refused before this function is
+ * asked (unverifiedSubscriberRefusal).
  */
 export function tableSubscriptionRefusal(
   caller: SubscriptionCaller,
@@ -524,9 +538,9 @@ function guardedStatic(
   // A named function expression, so the replaced static keeps its name.
   const guarded = {
     async [method](this: unknown, ...args: unknown[]) {
-      // Decide on the context Harper takes from these arguments; where its
-      // reading turns on something the guard does not test, every reading
-      // must be admitted.
+      // Decide on the context Harper takes from these arguments; where the
+      // guard lists more than one reading, every listed reading must be
+      // admitted.
       for (const source of harperCallContexts(method, args)) {
         const context = source.from === "argument" ? source.value : deps.ambientContext();
         let caller: SubscriptionCaller;
