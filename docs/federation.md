@@ -308,6 +308,27 @@ so B's copy would then hold a different key from A's. A B row that is absent
 can receive A's registered-key row: the pending-key guard applies only to a row B
 already holds with `publicKey: "pending"`.
 
+### An agent's key, home and admin fields in a sync
+
+An existing Agent row's `publicKey` and home (`originatorInstanceId`) change
+through a sync only when the batch's signing sender is the row's stored home. A
+record from another peer that would change either is skipped whole as
+`agent_identity_not_from_home`. A missing, null or empty stored home counts as
+no home: such a row takes no key change from a peer and cannot acquire a
+non-empty home through a sync.
+
+A sync does not set or change `role: "admin"` or `admin: true`: a new row is
+stored without them, and an existing row keeps its stored admin state (whether
+`role` is `"admin"` and whether `admin` is `true`) when the record's would change
+it. A `role` label follows the merge when the stored and incoming roles are both
+non-admin. A record that would
+create a row whose id the receiving instance's `FLAIR_ADMIN_AGENTS` names is
+skipped as `agent_admin_id_not_federated`.
+
+Earlier checks, including the status and pending-key rules, keep their own
+reasons. The receiving instance's administrator can write these fields, or
+create the row, through its operations API.
+
 ## Troubleshooting
 
 ### Listen port drift

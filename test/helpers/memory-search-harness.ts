@@ -21,6 +21,8 @@ export const harnessState = {
   pointerStore: new Map<string, any>(),
   // flair#2213: Flair's deletion writers append records here in the row delete's transaction.
   deletionStore: new Map<string, any>(),
+  // flair#2139 3b: instruction-version writes append one OrgEvent row in the same transaction.
+  eventStore: new Map<string, any>(),
   instanceRow: null as any,
   pointerSearchCalls: 0,
   failNextPointerPut: false,
@@ -43,6 +45,7 @@ export function resetHarnessState(): void {
   harnessState.memoryStore.clear();
   harnessState.pointerStore.clear();
   harnessState.deletionStore.clear();
+  harnessState.eventStore.clear();
   harnessState.instanceRow = null;
   harnessState.pointerSearchCalls = 0;
   harnessState.failNextPointerPut = false;
@@ -342,9 +345,23 @@ export class BaseMemoryDeletionHistory {
   }
 }
 
+// flair#2139 3b: the instruction-version writer appends one event per version
+// through `databases.flair.OrgEvent.create(record, shared)`.
+export class BaseOrgEvent {
+  static async create(record: any, ctx?: any) {
+    stageOrRun(ctx, () => harnessState.eventStore.set(record.id, { ...record }));
+  }
+  async create(record: any, ctx?: any) {
+    return BaseOrgEvent.create(record, ctx);
+  }
+  static async *search() {}
+  async *search() {}
+}
+
 export const databasesMock = {
   flair: {
     Memory: BaseMemory,
+    OrgEvent: BaseOrgEvent,
     MemoryHostSource: BaseMemoryHostSource,
     MemoryDeletionHistory: BaseMemoryDeletionHistory,
     Agent: { get: async () => null, search: async () => [] },

@@ -17,7 +17,7 @@ import { existsSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 
 import { dirname, resolve } from "node:path";
 import * as render from "../render.js";
-import { isLocalBase, resolveAdminUser, resolveLocalAdminPass } from "../lib/auth-resolve.js";
+import { isLocalBase, resolveAdminUser, resolveLocalAdminPass, resolveAdminPassFromSources, AdminPassSourceError, ADMIN_PASS_FILE_FLAG, ADMIN_PASS_FILE_HELP, ADMIN_PASS_FLAG, ADMIN_PASS_HELP } from "../lib/auth-resolve.js";
 import type { OpsSearch } from "../rem/restore.js";
 import {
   validatePromoteOpts,
@@ -805,7 +805,12 @@ export function register(program: Command): void {
     .option("--agent <id>", "Agent id (or FLAIR_AGENT_ID env)")
     .option("--at <HH:MM>", "Local time to run nightly (default 03:00)", "03:00")
     .option("--flair-url <url>", "Flair HTTP URL the runner will hit (default http://127.0.0.1:<port>)")
+    .option(ADMIN_PASS_FILE_FLAG, "Absolute path of the owner-only admin-password file the shim passes to run-once (default: ~/.flair/admin-pass)")
     .action(async (opts: any) => {
+      if (opts.adminPassFile === "") {
+        console.error("Error: --admin-pass-file must not be empty");
+        process.exit(1);
+      }
       const agentId = opts.agent || process.env.FLAIR_AGENT_ID;
       if (!agentId) {
         console.error("Error: --agent or FLAIR_AGENT_ID env required");
@@ -824,7 +829,7 @@ export function register(program: Command): void {
 
       const { enableScheduler, formatEnableReport } = await import("../rem/scheduler.js");
       try {
-        const r = enableScheduler({ agentId, flairUrl, hour, minute });
+        const r = enableScheduler({ agentId, flairUrl, hour, minute, adminPassFile: opts.adminPassFile });
         // formatEnableReport() owns the success-vs-failure decision (flair#850:
         // do not print a success headline before activation is known to have
         // succeeded) — see src/rem/scheduler.ts for the unit-tested logic.
@@ -884,7 +889,8 @@ export function register(program: Command): void {
     .description("Run one nightly cycle now (snapshot + log). Same code path the scheduler will use.")
     .option("--agent <id>", "Agent id (or FLAIR_AGENT_ID env)")
     .option("--ops-port <port>", "Harper operations API port")
-    .option("--admin-pass <pass>", "Admin password (or set FLAIR_ADMIN_PASS)")
+    .option(ADMIN_PASS_FLAG, ADMIN_PASS_HELP)
+    .option(ADMIN_PASS_FILE_FLAG, ADMIN_PASS_FILE_HELP)
     .option("--admin-user <name>", "Admin username for Basic auth (env: FLAIR_ADMIN_USER; default: admin)")
     .option("--dry-run", "Log the row but skip the snapshot write")
     .action(async (opts: any) => {
@@ -895,10 +901,40 @@ export function register(program: Command): void {
       }
       const { runNightlyCycle } = await import("../rem/runner.js");
       // The runner is agent-authed and cannot reach the ops port itself. When
-      // admin credentials are available, inject an ops-API `search_by_conditions`
-      // helper so the pending-candidate count can be sampled; otherwise the count
-      // is best-effort 0 (the cycle still runs).
-      const adminPass: string = opts.adminPass ?? process.env.FLAIR_ADMIN_PASS ?? "";
+      // admin credentials are available, inject ops-API and admin-authed REST
+      // helpers so the pending-candidate count and the admin-gated dedup step
+      // can run. A file named with --admin-pass-file is read through the ONE
+      // shared resolver before any cycle work; when it is unavailable the run
+      // fails at startup with NOT RUN rather than issuing an agent-authed call
+      // that an agent key cannot authorize.
+      let adminPass = "";
+      try {
+        adminPass = resolveAdminPassFromSources({
+          adminPassFile: opts.adminPassFile,
+          adminPass: opts.adminPass,
+          envPass: process.env.FLAIR_ADMIN_PASS ?? process.env.HDB_ADMIN_PASSWORD,
+        });
+      } catch (err: any) {
+        console.error(`Error: ${err.message}`);
+        if (opts.adminPassFile !== undefined) {
+          const remedy = err instanceof AdminPassSourceError
+            ? ""
+            : ` Provide an owner-only (chmod 600), non-empty admin password file${opts.adminPassFile === "" ? " via --admin-pass-file <path>" : ` at ${opts.adminPassFile}`}, then re-run \`flair rem nightly run-once\`.`;
+          console.error(`Dedup:      NOT RUN — ${err.message}${remedy}`);
+        }
+        process.exit(1);
+      }
+      // Every agent-scoped call is signed by the selected agent and nothing
+      // else: the identity is pinned here (never FLAIR_AGENT_ID), and
+      // signedOnly refuses FLAIR_TOKEN / FLAIR_ADMIN_PASS / the local
+      // admin-pass file. A selected agent with no key is refused, not
+      // silently replaced by an ambient credential.
+      const agentApiCall = (method: string, path: string, body?: unknown) =>
+        api(method, path, body, { agentId, agentIdSource: "flag", signedOnly: true });
+      const adminApiCall = adminPass
+        ? (method: string, path: string, body?: unknown) =>
+            api(method, path, body, { explicitAdminPass: adminPass, adminUser: opts.adminUser, agentId: null })
+        : undefined;
       const opsSearch = adminPass
         ? buildOpsSearch({ opsPort: resolveOpsPort(opts), adminUser: opts.adminUser, adminPass })
         : undefined;
@@ -907,7 +943,8 @@ export function register(program: Command): void {
         const result = await runNightlyCycle({
           agentId,
           flairVersion: __pkgVersion,
-          apiCall: api,
+          apiCall: agentApiCall,
+          adminApiCall,
           opsSearch,
           dryRun: !!opts.dryRun,
           healthProbe: async (timeoutMs) => {

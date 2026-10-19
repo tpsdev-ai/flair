@@ -237,6 +237,12 @@ export interface RunnerOpts {
   flairVersion: string;
   apiCall: ApiCall;
   /**
+   * Admin-authed REST call for the instance-wide, admin-only dedup step.
+   * Defaults to `apiCall`. The CLI injects it when an admin credential is
+   * available; agents cannot reach POST /MemoryDedupStats with their own key.
+   */
+  adminApiCall?: ApiCall;
+  /**
    * Ops-API `search_by_conditions` helper (admin-authed). Injected by the CLI;
    * the runner is agent-authed and cannot reach the ops port itself. When
    * absent, `fetchPendingCandidateCount` returns 0 (best-effort count).
@@ -1070,7 +1076,7 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
 
   if (!opts.dryRun && !distillAborted) {
     try {
-      const dedupRaw = await opts.apiCall("POST", "/MemoryDedupStats", {});
+      const dedupRaw = await (opts.adminApiCall ?? opts.apiCall)("POST", "/MemoryDedupStats", {});
       const obj = (dedupRaw && typeof dedupRaw === "object") ? (dedupRaw as Record<string, unknown>) : {};
       if (obj.error) {
         errors.push(`dedup: ${describeApiError(obj.error)}`);

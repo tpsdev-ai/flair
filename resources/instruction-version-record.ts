@@ -18,6 +18,70 @@ export type InstructionSubjectType = "soul" | "skill";
 export type ActorKind = "operator" | "agent" | "internal" | "instance";
 export type SourceClass = "operator" | "internal" | "agent" | "federation" | "seed";
 
+/** flair#2139 S3b — an instruction event is reserved to the internal appender. */
+export const INSTRUCTION_EVENT_ID_PREFIX = "instruction-change:";
+
+/** The ten allowlisted detail fields, in this order (Sherlock 4). */
+export const INSTRUCTION_EVENT_DETAIL_FIELDS = [
+  "subjectType",
+  "subjectId",
+  "key",
+  "changeKind",
+  "actorKind",
+  "actorId",
+  "sourceClass",
+  "valueHash",
+  "previousVersionHash",
+  "recordHash",
+] as const;
+
+/** The three value-derived hashes D1 omits for a private skill's event. */
+const PRIVATE_SKILL_EVENT_OMITTED = ["valueHash", "previousVersionHash", "recordHash"] as const;
+
+/**
+ * flair#2139 S3b — the event for one appended version, built by explicit field
+ * enumeration of selected row fields. The three
+ * value-derived hashes are absent for a private skill (D1), gated on the
+ * version's stored visibility (which a tombstone carries as the closed head's
+ * last state).
+ */
+export function instructionEventFor(record: Record<string, any>): Record<string, unknown> {
+  const subjectType = record.subjectType === "soul" ? "soul" : "skill";
+  const detail: Record<string, unknown> = {
+    subjectType,
+    subjectId: record.subjectId,
+    key: subjectType === "soul" ? (record.key ?? null) : null,
+    changeKind: record.kind,
+    actorKind: record.actorKind,
+    actorId: record.actorId ?? null,
+    sourceClass: record.sourceClass,
+    valueHash: record.valueHash ?? null,
+    previousVersionHash: record.previousVersionHash ?? null,
+    recordHash: record.recordHash ?? null,
+  };
+  if (subjectType === "skill" && record.visibility === PRIVATE_VISIBILITY) {
+    for (const field of PRIVATE_SKILL_EVENT_OMITTED) delete detail[field];
+  }
+  return {
+    id: `${INSTRUCTION_EVENT_ID_PREFIX}${record.id}`,
+    authorId: "flair:internal",
+    kind: `${subjectType}.changed`,
+    scope: record.agentId,
+    summary: `${subjectType === "soul" ? "Soul entry" : "Skill"} ${record.kind}d`,
+    detail: JSON.stringify(detail),
+    targetIds: [],
+    refId: record.id,
+    createdAt: record.createdAt,
+  };
+}
+
+/** Append the event in the caller's transaction; a failure aborts the write (D2). */
+async function appendInstructionEvent(record: Record<string, any>, shared: any): Promise<void> {
+  const events = (databases as any).flair?.OrgEvent;
+  if (!isTableLike(events)) throw new Error("flair: the OrgEvent table is unavailable");
+  await events.create(instructionEventFor(record), shared);
+}
+
 /** Server-derived attribution for one version row; never read from a request body. */
 export interface VersionAttribution {
   actorKind: ActorKind;
@@ -70,6 +134,10 @@ export async function removeAppendedVersion(
       if (!head) return "removed" as const;
       if (String(head.id) !== versionRecordId) return "superseded" as const;
       await (databases as any).flair.InstructionVersion.delete(versionRecordId, shared);
+      // Remove this record's event in the same transaction.
+      const events = (databases as any).flair?.OrgEvent;
+      if (!isTableLike(events)) throw new Error("flair: the OrgEvent table is unavailable");
+      await events.delete(`${INSTRUCTION_EVENT_ID_PREFIX}${versionRecordId}`, shared);
       return "deleted" as const;
     });
     if (staged !== "deleted") return staged;
@@ -377,6 +445,7 @@ export async function recordVersion(
           };
           oldRecord.recordHash = recordDigest(oldRecord);
           await table.create(oldRecord, shared);
+          await appendInstructionEvent(oldRecord, shared);
         }
         const sequence = head ? BigInt(head.version as any) + 1n : 1n;
         const id = versionId(input.subjectType, input.subjectId, sequence);
@@ -411,6 +480,7 @@ export async function recordVersion(
         // too: no successor, no close, no version.
         if (input.subjectType === "skill") maybeThrowSkillWriteFault("append", input.agentId);
         await table.create(record, shared);
+        await appendInstructionEvent(record, shared);
         return { ok: true, result, version: id } as RecordVersionOutcome;
       }),
     LOCK_ATTEMPTS,

@@ -42,7 +42,6 @@ describe("federation sync push — Presence sender (flair#2578 slice 2)", () => 
   let syncStatus = 200;
   let syncRefused: Array<{ table: string; id: string; reason: string }> = [];
   let syncIndeterminate: Array<{ table: string; id: string }> = [];
-  let syncMergedDelta = 0;
   let syncResponse: Record<string, unknown> | undefined;
   let genericRows: any[] = [];
 
@@ -62,7 +61,6 @@ describe("federation sync push — Presence sender (flair#2578 slice 2)", () => 
     syncStatus = 200;
     syncRefused = [];
     syncIndeterminate = [];
-    syncMergedDelta = 0;
     syncResponse = undefined;
     genericRows = [];
     globalThis.fetch = mock(async (urlInput: string | URL | Request, init?: RequestInit) => {
@@ -91,7 +89,7 @@ describe("federation sync push — Presence sender (flair#2578 slice 2)", () => 
         if (syncStatus !== 200) return res(false, syncStatus, { error: "refused" });
         const records = body?.records ?? [];
         return res(true, 200, syncResponse ?? {
-          merged: records.length - syncRefused.length - syncIndeterminate.length + syncMergedDelta,
+          merged: records.length - syncRefused.length - syncIndeterminate.length,
           skipped: syncRefused.length,
           refused: syncRefused,
           indeterminate: syncIndeterminate,
@@ -123,6 +121,38 @@ describe("federation sync push — Presence sender (flair#2578 slice 2)", () => 
     originatorInstanceId: INSTANCE_ID,
     ...over,
   });
+
+  for (const table of ["Memory", "Soul", "Agent", "Relationship", "Presence"]) {
+    it(`flair#2667: ${table} sender rejects merged + skipped above the batch size and preserves its cursor`, async () => {
+      installMock({ presenceLastSyncAt: SINCE });
+      syncResponse = { merged: 3, skipped: 3 };
+      if (table === "Presence") {
+        process.env[PRESENCE_SEND_FLAG_ENV] = "1";
+        presenceRows = ["agent-a", "agent-b", "agent-c"].map((agentId) => homeRow({ agentId }));
+      } else {
+        genericRows = ["a", "b", "c"].map((id) => ({ id, updatedAt: new Date().toISOString() }));
+        const fetchMock = globalThis.fetch;
+        globalThis.fetch = mock(async (url: any, init?: RequestInit) => {
+          const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+          if (body?.operation === "search_by_conditions" && body.table !== table) return res(true, 200, []);
+          return fetchMock(url, init);
+        }) as any;
+      }
+      const result = await run();
+      expect(pushed().map((record) => record.table)).toEqual([table, table, table]);
+      expect(result.error?.message).toBe(
+        `Sync batch failed: invalid response (HTTP 200, ${table}: merged 3 + skipped 3 exceeds 3 records offered)`,
+      );
+      expect(result.pushed).toBe(0);
+      expect(result.skipped).toBe(0);
+      const cursor = table === "Presence" ? "presenceLastSyncAt" : "lastSyncAt";
+      expect(captured.filter((call) =>
+        ["update", "upsert"].includes(call.body?.operation) &&
+        call.body?.table === "Peer" &&
+        call.body?.records?.some((record: any) => record[cursor] !== undefined),
+      )).toEqual([]);
+    });
+  }
 
   it("flag OFF: sends nothing and never scans the Presence table", async () => {
     installMock();
@@ -352,7 +382,7 @@ describe("federation sync push — Presence sender (flair#2578 slice 2)", () => 
     expect(saved2).toBeLessThan(movedForward);
   });
 
-  it("flag ON: an indeterminate row caps the watermark update and is re-offered (B1)", async () => {
+  it("flag ON: a below-size sum with an indeterminate outcome passes Presence accounting and caps the watermark (B1)", async () => {
     process.env[PRESENCE_SEND_FLAG_ENV] = "1";
     const hb = Date.now();
     installMock({ presenceLastSyncAt: SINCE });
@@ -408,13 +438,14 @@ describe("federation sync push — Presence sender (flair#2578 slice 2)", () => 
     });
   }
 
-  it("flag ON: a response that does not account for every record saves no watermark (B1)", async () => {
+  it("flag ON: a below-size sum without outcome lists fails Presence accounting and saves no watermark (B1)", async () => {
     process.env[PRESENCE_SEND_FLAG_ENV] = "1";
     installMock({ presenceLastSyncAt: SINCE });
-    syncMergedDelta = -1;
+    syncResponse = { merged: 0, skipped: 0 };
     presenceRows = [homeRow({ lastHeartbeatAt: Date.now() })];
     const result = await run();
     expect(result.error).toBeDefined();
+    expect(result.error?.message).toBe("Sync batch failed: invalid response (HTTP 200, outcomes do not account for 1 offered records)");
     expect(presenceUpdates()).toEqual([]);
   });
 

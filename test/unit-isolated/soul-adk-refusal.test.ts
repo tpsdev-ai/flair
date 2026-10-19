@@ -11,6 +11,7 @@ let soulStore: Map<string, any>;
 let candidateStore: any[];
 let memoryStore: any[];
 let versionStore: Map<string, any>;
+let eventStore: Map<string, any>;
 let lookupFails = false;
 let getBehavior: "ok" | "throw" | "empty" = "ok";
 
@@ -62,6 +63,16 @@ class BaseSoul {
   }
 }
 
+// flair#2139 3b: the instruction-version writer appends one OrgEvent row in the
+// same transaction; the write aborts when the table is missing (D2).
+const OrgEventBase = {
+  async *search() {},
+  async create(record: any) {
+    if (eventStore.has(record.id)) throw new Error("Record already exists");
+    eventStore.set(record.id, { ...record });
+  },
+};
+
 function search(rows: any[]) {
   return {
     async *[Symbol.asyncIterator]() {
@@ -81,6 +92,7 @@ mock.module("harper", () => ({
       Memory: { search: () => search(memoryStore) },
       Instance: { search: () => search([]) },
       InstructionVersion: InstructionVersionBase,
+      OrgEvent: OrgEventBase,
     },
   },
 }));
@@ -100,6 +112,7 @@ function makeSoul(id?: string) {
 beforeEach(() => {
   soulStore = new Map();
   versionStore = new Map();
+  eventStore = new Map();
   candidateStore = [];
   memoryStore = [];
   getBehavior = "ok";

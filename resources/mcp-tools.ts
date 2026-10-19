@@ -750,10 +750,8 @@ async function bootstrap(agent: ResolvedAgent, args: any) {
   // flair#744 slice 2 — opt-in task-relevance abstention verdict. Forwarded
   // ONLY when requested so a plain bootstrap delegates a byte-identical body.
   if (args?.abstain === true) body.abstain = true;
-  // flair#1199 — org-event knobs. `includeEventDetail` opts the verbose per-event
-  // `detail` JSON back in (default OFF: a connector reads lean events); `maxEvents`
-  // overrides the default cap. Both forwarded ONLY when set, so a plain bootstrap
-  // delegates a byte-identical body.
+  // flair#1199 — `includeEventDetail` opts ordinary event detail in;
+  // `maxEvents` overrides the default cap.
   if (args?.includeEventDetail === true) body.includeEventDetail = true;
   if (args?.maxEvents !== undefined) body.maxEvents = args.maxEvents;
   // flair#831 — attach the running Flair version to the RESPONSE (not the
@@ -1459,8 +1457,7 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
           { path: "events", type: "array" }, { path: "sections", type: "object" },
           { path: "skills", type: "array" }, { path: "skillDiagnostics", type: "array" }, // #2141
         ],
-        // #1200 — dedup by the SEMANTIC content key (excludes id/createdAt, which
-        // vary across physical duplicate rows). See ToolInvariants.dedupSignature.
+        // #1200 — content dedup; instruction events use refId in the checker.
         dedupSignature: { container: "events", signatureFields: ["kind", "summary", "detail", "targetIds"] },
         // #1199 — tokenEstimate via the wrapper's own estimator over the delivered
         // payload (minus the two fields added after it was measured).
