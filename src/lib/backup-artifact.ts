@@ -11,8 +11,9 @@
  * those characters are written as `\\`, `\n` and `\r`. Perl `shasum` reads the
  * backslash and line-feed escapes but not `\r`; the BSD `sha256sum` that ships
  * with macOS reads only unescaped lines. Restore checks the digest, the line
- * framing and the escaping, and does not compare the name with the archive's
- * file name, so a pair renamed together still verifies.
+ * framing, the escaping and that the name is UTF-8 (as the formatter writes
+ * it), and does not compare the name with the archive's file name, so a pair
+ * renamed together still verifies.
  *
  * The sidecar detects a damaged, truncated or substituted archive and an
  * archive paired with another backup's digest. It is not an authenticity
@@ -62,11 +63,15 @@
  * (restore-archive.ts) hashes that buffer and parses the same buffer. The
  * sidecar is read once and its digest must equal that hash; only then is the
  * parse result considered. Nothing here writes anything. Every refusal names
- * the file and what did not hold, says restore stopped before any write, and
- * gives a remedy that does not assume which file is at fault.
+ * the file and what did not hold and gives a remedy that does not assume
+ * which file is at fault. By default it also says restore stopped before any
+ * write; a caller that is not restore (`flair backup-approval approve`)
+ * passes its own clause. A missing sidecar is one whose path does not exist
+ * at all: a symbolic link at the sidecar path whose target is missing is
+ * refused as unreadable, never treated as missing.
  */
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, openSync, closeSync, fsyncSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, mkdtempSync, openSync, closeSync, fsyncSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { fsyncDir } from "./atomic-write.js";
 import { parseRestoreArchive, type RestoreArchive, type RestoreArchiveRefusal } from "./restore-archive.js";
@@ -103,10 +108,10 @@ export type BackupDigestParse =
 /**
  * Read a sidecar's digest. Accepts exactly one line in the format
  * formatBackupDigest writes: 64 lowercase hex characters, two spaces, a
- * non-empty name, and one trailing line feed. A name written without escapes
- * holds no backslash; a name written with escapes follows a leading `\`, uses
- * only `\\`, `\n` and `\r`, and holds at least one of them. Anything else is
- * refused with a reason. The name is not compared with any file name.
+ * non-empty name in UTF-8, and one trailing line feed. A name written without
+ * escapes holds no backslash; a name written with escapes follows a leading
+ * `\`, uses only `\\`, `\n` and `\r`, and holds at least one of them. Anything
+ * else is refused with a reason. The name is not compared with any file name.
  */
 export function parseBackupDigest(bytes: Uint8Array): BackupDigestParse {
   // latin1 maps each byte to one character, so the check is over the bytes
@@ -116,6 +121,11 @@ export function parseBackupDigest(bytes: Uint8Array): BackupDigestParse {
   const match = DIGEST_LINE.exec(text);
   if (match) {
     const [, marker, sha256, name] = match;
+    try {
+      new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(name!, "latin1"));
+    } catch {
+      return { ok: false, reason: "the file name is not UTF-8" };
+    }
     if (marker === "") {
       if (name!.includes("\\")) {
         return { ok: false, reason: "the file name holds a backslash, but the line does not start with the escape marker \\" };
@@ -314,6 +324,16 @@ export interface BackupArtifactReadHooks {
   stopped?: string;
 }
 
+/** Whether anything, a dangling symbolic link included, exists at `path`. */
+function lstatExists(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function errnoCode(error: unknown): string {
   const code = (error as NodeJS.ErrnoException)?.code;
   return typeof code === "string" ? code : "read failed";
@@ -351,6 +371,14 @@ export function readBackupArtifact(archivePath: string, hooks: BackupArtifactRea
   try {
     sidecar = readFile(digestPath);
   } catch (error) {
+    if (errnoCode(error) === "ENOENT" && lstatExists(digestPath)) {
+      return {
+        ok: false, code: "digest-unreadable", sha256,
+        reason:
+          `archive digest sidecar ${digestPath} is a symbolic link whose target does not exist; ${stopped}. ` +
+          `Replace it with the .sha256 file written with this archive.`,
+      };
+    }
     if (errnoCode(error) === "ENOENT") {
       return {
         ok: false, code: "digest-missing", sha256,

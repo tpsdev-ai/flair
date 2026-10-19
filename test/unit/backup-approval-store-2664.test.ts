@@ -4,11 +4,15 @@
  * temp root.
  *
  * Covered: modes and ownership (created exactly 0700/0600 under a zero
- * umask; a wider mode or another owner refuses); symbolic links and unsafe
- * import paths; a stored copy changed, removed or swapped for a link after
- * approval, caught on use; invalid records; revocation and re-approval; and
- * approval that fails or is killed (SIGKILL) at each step, which never leaves
- * an approved record for bytes the store does not hold.
+ * umask; a wider mode or another owner refuses, and an unsafe existing entry
+ * refuses before any missing sibling is created); every entry is validated
+ * (unknown names, dot files, symbolic links, temp files readable by others
+ * refuse; a private temp file an interrupted approval left is ignored);
+ * symbolic links and unsafe import paths; a stored copy changed, removed or
+ * swapped for a link after approval, caught on use; invalid records;
+ * revocation and re-approval; and approval that fails or is killed (SIGKILL)
+ * at each step: a fresh approval publishes no record, and a failed
+ * re-approval of a revoked digest leaves it revoked.
  */
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
@@ -126,6 +130,47 @@ describe("the approval store's layout, modes and ownership (#2664)", () => {
     expect(loadApprovedArchive(SHA, { root, uid: other })).toMatchObject({ ok: false, code: "store-unsafe" });
   });
 
+  test("an unsafe existing directory refuses before a missing sibling is created", () => {
+    const { root, archives, approvals } = store();
+    mkdirSync(root, { mode: 0o700 });
+    chmodSync(root, 0o700);
+    mkdirSync(approvals, { mode: 0o700 });
+    chmodSync(approvals, 0o750);
+    const error = refusal(() => approve(root));
+    expect(error.message).toContain(`${approvals} has mode 750, not 700`);
+    expect(existsSync(archives)).toBe(false);
+    expect(readdirSync(root)).toEqual(["approvals"]);
+  });
+
+  for (const [label, place, make] of [
+    ["an unknown entry in the root", "root", (dir: string) => writeFileSync(join(dir, "notes.txt"), "x", { mode: 0o600 })],
+    ["an unknown entry among the records", "approvals", (dir: string) => writeFileSync(join(dir, "extra.json"), "{}", { mode: 0o600 })],
+    ["a dot file among the archives", "archives", (dir: string) => writeFileSync(join(dir, ".DS_Store"), "x", { mode: 0o600 })],
+    ["a temp-named symbolic link among the records", "approvals", (dir: string) => symlinkSync("/etc/hosts", join(dir, `.${"a".repeat(64)}.1.deadbeef.tmp`))],
+    ["a temp file readable by others", "archives", (dir: string) => { const p = join(dir, `.${"b".repeat(64)}.2.cafebabe.tmp`); writeFileSync(p, "x"); chmodSync(p, 0o644); }],
+    ["a record-named directory", "approvals", (dir: string) => mkdirSync(join(dir, `${"c".repeat(64)}.json`))],
+  ] as const) {
+    test(`${label} refuses every operation`, () => {
+      const paths = store();
+      approve(paths.root);
+      make(paths[place]);
+      for (const fn of [() => approve(paths.root), () => listApprovals({ root: paths.root }), () => revokeApproval(SHA, "admin", { root: paths.root })]) {
+        expect(refusal(fn).code).toBe("store-unsafe");
+      }
+      expect(loadApprovedArchive(SHA, { root: paths.root })).toMatchObject({ ok: false, code: "store-unsafe" });
+    });
+  }
+
+  test("a private temp file an interrupted approval left is ignored", () => {
+    const paths = store();
+    approve(paths.root);
+    const leftover = join(paths.archives, `.${SHA}.12345.0badf00d.tmp`);
+    writeFileSync(leftover, "partial", { mode: 0o600 });
+    chmodSync(leftover, 0o600);
+    expect(listApprovals({ root: paths.root }).map((entry) => entry.record.sha256)).toEqual([SHA]);
+    expect(loadApprovedArchive(SHA, { root: paths.root })).toMatchObject({ ok: true });
+  });
+
   test("listing or using a store that does not exist creates nothing", () => {
     const { root } = store();
     expect(listApprovals({ root })).toEqual([]);
@@ -160,11 +205,11 @@ describe("symbolic links and unsafe paths (#2664)", () => {
     const copy = join(tempDir("flair-approval-real-2664-"), "copy.json");
     writeFileSync(copy, ARCHIVE, { mode: 0o600 });
     const stored = join(paths.archives, `${SHA}.json`);
-    renameSync(stored, `${stored}.moved`);
+    renameSync(stored, join(tempDir("flair-approval-real-2664-"), "original.json"));
     symlinkSync(copy, stored);
     const loaded = loadApprovedArchive(SHA, { root: paths.root });
     expect(loaded).toMatchObject({ ok: false, code: "store-unsafe" });
-    expect(loaded.ok ? "" : loaded.reason).toContain(`stored archive ${stored} is a symbolic link`);
+    expect(loaded.ok ? "" : loaded.reason).toContain(`approval store file ${stored} is a symbolic link`);
   });
 
   test("an import refuses a symbolic link to a valid archive", () => {

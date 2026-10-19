@@ -12,22 +12,33 @@
  *     approvals/                           0700
  *       <sha256>.json                      0600, the approval record
  *
- * Every directory must be a real directory (not a symbolic link) owned by the
- * current user with mode exactly 0700, and every file a regular file owned by
- * the current user with mode exactly 0600; anything else refuses, naming the
- * path. The store creates what is missing with those modes, whatever the
- * umask, and never loosens or repairs an existing entry.
+ * Every operation checks the root, both directories and every entry in them
+ * before it creates or reads anything (openStore). Each directory must be a
+ * real directory (not a symbolic link) owned by the current user with mode
+ * exactly 0700. In the root only `archives` and `approvals` may appear. In
+ * those, a managed file (`<sha256>.json`) must be a regular file owned by the
+ * current user with mode exactly 0600; a temp file an interrupted approval
+ * left (`.<sha256>.<pid>.<random>.tmp`) must be a regular file owned by the
+ * current user with no group or other permission, and is otherwise ignored;
+ * any other entry refuses. A refusal names the path and changes nothing. The
+ * store creates what is missing with exact modes, whatever the umask, and
+ * never loosens or repairs an existing entry.
  *
- * Archives are content-addressed and immutable: an archive is published under
- * the SHA-256 of its bytes with a no-clobber link, and a copy already there is
- * reused only when its bytes still hash to its name. A record names the
- * digest, how it was admitted (`sidecar`: the archive matched its detached
- * digest; `legacy`: an archive with no sidecar, whose digest the operator
- * confirmed), the approval time and operator, and, once revoked, the
- * revocation time and operator. Approval writes the record only after the
- * archive copy is published and read back to the approved digest, so a failed
- * or interrupted approval never leaves a record for bytes the store does not
- * hold.
+ * Stored archives are content-addressed, no-clobber copies whose bytes are
+ * rechecked on use: an archive is published under the SHA-256 of its bytes
+ * with a link that never replaces an existing file, and a copy already there
+ * is reused only when its bytes still hash to its name. Nothing prevents
+ * another writer with the operator's file access from changing a stored file,
+ * which is why use rechecks it. A record names the digest, how it was
+ * admitted (`sidecar`: the archive matched its detached digest; `legacy`: an
+ * archive with no sidecar, whose digest the operator confirmed), the approval
+ * time and operator, and, once revoked, the revocation time and operator.
+ *
+ * Approval writes a record only after the archive copy is published and read
+ * back to the approved digest. So a fresh approval that fails or is
+ * interrupted publishes no record, and a failed re-approval does not publish
+ * a new one: a record that was already there stays as it was (and use still
+ * rechecks its stored copy).
  *
  * Using an approval (loadApprovedArchive) rechecks it: the record must be
  * well formed and unrevoked, and the stored copy is read once, hashed and
@@ -277,25 +288,68 @@ function ensurePrivateDirectory(path: string, uid: number | undefined): void {
   checkPrivateDirectory(path, lstatSync(path), uid);
 }
 
+const MANAGED_FILE = /^[0-9a-f]{64}\.json$/;
+const TEMP_FILE = /^\.[0-9a-f]{64}\.\d+\.[0-9a-f]{8}\.tmp$/;
+const ROOT_ENTRIES = new Set(["archives", "approvals"]);
+
 /**
- * Open the store. With `create`, missing directories are created (the parent
- * of the root with mode 0700 when it is missing too). Returns undefined when
- * the store does not exist and `create` is false. Every existing directory
- * is checked.
+ * Check every entry of an existing store directory. In the root only
+ * `archives` and `approvals` may appear. In those two, a managed file
+ * (`<sha256>.json`) must be a regular file owned by `uid` with mode exactly
+ * 0600; a temp file an interrupted approval left (`.<sha256>.<pid>.<random>.tmp`)
+ * must be a regular file owned by `uid` with no group or other permission,
+ * and is otherwise ignored. Any other entry refuses.
+ */
+function checkEntries(dir: string, isRoot: boolean, uid: number | undefined): void {
+  for (const name of readdirSync(dir)) {
+    const path = join(dir, name);
+    if (isRoot) {
+      if (!ROOT_ENTRIES.has(name)) throw storeUnsafe(`approval store entry ${path} is not archives or approvals; the store refuses it`);
+      continue;
+    }
+    const managed = MANAGED_FILE.test(name);
+    if (!managed && !TEMP_FILE.test(name)) {
+      throw storeUnsafe(`approval store entry ${path} is not <sha256>.json or an approval's temp file; the store refuses it`);
+    }
+    const st = lstatSync(path);
+    if (st.isSymbolicLink()) throw storeUnsafe(`approval store file ${path} is a symbolic link; the store refuses it`);
+    if (managed) {
+      checkPrivateFile(path, st, uid);
+    } else {
+      if (!st.isFile()) throw storeUnsafe(`approval store file ${path} is not a regular file; the store refuses it`);
+      if (uid !== undefined && st.uid !== uid) {
+        throw storeUnsafe(`approval store file ${path} is owned by uid ${st.uid}, not the current user (uid ${uid}); the store refuses it`);
+      }
+      if ((st.mode & 0o077) !== 0) throw storeUnsafe(`approval store file ${path} has mode ${modeText(st.mode)}, readable by others; the store refuses it`);
+    }
+  }
+}
+
+/**
+ * Open the store. Every directory that already exists is checked, and so is
+ * every entry in it (checkEntries), before anything is created; with
+ * `create`, the missing directories are then created (the parent of the
+ * root with mode 0700 when it is missing too). Returns undefined when the
+ * store does not exist and `create` is false.
  */
 function openStore(options: ApprovalStoreOptions, create: boolean): StorePaths | undefined {
   const paths = storePaths(options);
   const uid = currentUid(options);
-  if (!create) {
-    const st = lstatOrUndefined(paths.root);
-    if (st === undefined) return undefined;
-    checkPrivateDirectory(paths.root, st, uid);
+  const rootStat = lstatOrUndefined(paths.root);
+  if (rootStat === undefined && !create) return undefined;
+  const existing: Array<[string, boolean]> = [];
+  if (rootStat !== undefined) {
+    checkPrivateDirectory(paths.root, rootStat, uid);
+    existing.push([paths.root, true]);
     for (const dir of [paths.archives, paths.approvals]) {
       const sub = lstatOrUndefined(dir);
-      if (sub !== undefined) checkPrivateDirectory(dir, sub, uid);
+      if (sub === undefined) continue;
+      checkPrivateDirectory(dir, sub, uid);
+      existing.push([dir, false]);
     }
-    return paths;
   }
+  for (const [dir, isRoot] of existing) checkEntries(dir, isRoot, uid);
+  if (!create) return paths;
   const parent = dirname(paths.root);
   if (lstatOrUndefined(parent) === undefined) mkdirSync(parent, { recursive: true, mode: 0o700 });
   ensurePrivateDirectory(paths.root, uid);
@@ -454,7 +508,7 @@ export interface ApproveArchiveInput {
  * record. Replaces an existing record for the digest, revoked or not. Throws
  * an ApprovalStoreError (or the underlying I/O error) when approval does not
  * complete; no record is written or changed before the stored copy is
- * verified.
+ * verified, so a failure leaves any existing record as it was.
  */
 export function approveArchive(input: ApproveArchiveInput, options: ApprovalStoreOptions = {}, hooks: ApprovalPublishHooks = {}): ApprovalRecord {
   const step = hooks.beforeStep ?? (() => {});
@@ -552,7 +606,8 @@ export function listApprovals(options: ApprovalStoreOptions = {}): ListedApprova
   if (paths === undefined || lstatOrUndefined(paths.approvals) === undefined) return [];
   const listed: ListedApproval[] = [];
   for (const name of readdirSync(paths.approvals).sort()) {
-    if (name.startsWith(".")) continue;
+    // A temp file an interrupted approval left; openStore already checked it.
+    if (TEMP_FILE.test(name)) continue;
     const sha256 = name.endsWith(".json") ? name.slice(0, -".json".length) : "";
     if (!SHA256_HEX.test(sha256)) {
       throw storeUnsafe(`approval store entry ${join(paths.approvals, name)} is not <sha256>.json; the store refuses it`);

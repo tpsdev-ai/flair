@@ -2,7 +2,7 @@
 # Byte-identical gate for src/cli.ts modularization. Do not edit by hand.
 # Refresh: UPDATE_CLI_SURFACE_SNAPSHOT=1 bun test test/unit-isolated/cli-surface-snapshot.test.ts
 # helpWidth=80 (pinned; TTY columns must not affect this file)
-# commands=148 options=667
+# commands=148 options=670
 #
 # TREE is registration order: every command/subcommand + declared options/args.
 # HELP is each command's outputHelp() (--help, including addHelpText).
@@ -2674,8 +2674,11 @@ flair backup-approval approve
     archive (required)
   options:
     --port <port>
-      description: Harper HTTP port of this host's Flair (its operations API verifies the credentials)
+      description: Harper HTTP port of this host's Flair
       attr: port
+    --ops-port <port>
+      description: Harper operations API port of this host's Flair, which verifies the credentials (default: FLAIR_OPS_PORT, local config, or HTTP port minus one)
+      attr: opsPort
     --admin-pass <pass>
       description: Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)
       attr: adminPass
@@ -2696,8 +2699,11 @@ flair backup-approval legacy-admit
       description: The archive's SHA-256, as printed by a first run, confirming you approve exactly these bytes
       attr: confirmDigest
     --port <port>
-      description: Harper HTTP port of this host's Flair (its operations API verifies the credentials)
+      description: Harper HTTP port of this host's Flair
       attr: port
+    --ops-port <port>
+      description: Harper operations API port of this host's Flair, which verifies the credentials (default: FLAIR_OPS_PORT, local config, or HTTP port minus one)
+      attr: opsPort
     --admin-pass <pass>
       description: Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)
       attr: adminPass
@@ -2720,8 +2726,11 @@ flair backup-approval revoke
     sha256 (required)
   options:
     --port <port>
-      description: Harper HTTP port of this host's Flair (its operations API verifies the credentials)
+      description: Harper HTTP port of this host's Flair
       attr: port
+    --ops-port <port>
+      description: Harper operations API port of this host's Flair, which verifies the credentials (default: FLAIR_OPS_PORT, local config, or HTTP port minus one)
+      attr: opsPort
     --admin-pass <pass>
       description: Admin password (legacy: lands in shell history and the process list — prefer --admin-pass-file or FLAIR_ADMIN_PASS)
       attr: adminPass
@@ -6078,8 +6087,11 @@ Verify an archive against its .sha256 sidecar, store its exact bytes and record
 your approval
 
 Options:
-  --port <port>             Harper HTTP port of this host's Flair (its
-                            operations API verifies the credentials)
+  --port <port>             Harper HTTP port of this host's Flair
+  --ops-port <port>         Harper operations API port of this host's Flair,
+                            which verifies the credentials (default:
+                            FLAIR_OPS_PORT, local config, or HTTP port minus
+                            one)
   --admin-pass <pass>       Admin password (legacy: lands in shell history and
                             the process list — prefer --admin-pass-file or
                             FLAIR_ADMIN_PASS)
@@ -6106,8 +6118,11 @@ with --confirm-digest to approve
 Options:
   --confirm-digest <sha256>  The archive's SHA-256, as printed by a first run,
                              confirming you approve exactly these bytes
-  --port <port>              Harper HTTP port of this host's Flair (its
-                             operations API verifies the credentials)
+  --port <port>              Harper HTTP port of this host's Flair
+  --ops-port <port>          Harper operations API port of this host's Flair,
+                             which verifies the credentials (default:
+                             FLAIR_OPS_PORT, local config, or HTTP port minus
+                             one)
   --admin-pass <pass>        Admin password (legacy: lands in shell history and
                              the process list — prefer --admin-pass-file or
                              FLAIR_ADMIN_PASS)
@@ -6142,8 +6157,11 @@ Usage: flair backup-approval revoke [options] <sha256>
 Revoke the approval of an archive digest on this host
 
 Options:
-  --port <port>             Harper HTTP port of this host's Flair (its
-                            operations API verifies the credentials)
+  --port <port>             Harper HTTP port of this host's Flair
+  --ops-port <port>         Harper operations API port of this host's Flair,
+                            which verifies the credentials (default:
+                            FLAIR_OPS_PORT, local config, or HTTP port minus
+                            one)
   --admin-pass <pass>       Admin password (legacy: lands in shell history and
                             the process list — prefer --admin-pass-file or
                             FLAIR_ADMIN_PASS)

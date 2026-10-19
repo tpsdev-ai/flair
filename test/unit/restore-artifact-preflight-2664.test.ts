@@ -23,7 +23,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "../helpers/temp-dir.ts";
 import { readBackupArtifact } from "../../src/lib/backup-artifact.ts";
@@ -45,7 +45,7 @@ const PRETTY = Buffer.from(JSON.stringify(archive, null, 2) + "\n");
 const sha256 = (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex");
 const sidecarFor = (bytes: Uint8Array, name = "archive.json"): string => `${sha256(bytes)}  ${name}\n`;
 
-type Sidecar = string | Buffer | { directory: true } | null;
+type Sidecar = string | Buffer | { directory: true } | { danglingLink: true } | null;
 type Call = { method: string; path: string; body?: string };
 
 const MODES = [
@@ -60,8 +60,10 @@ async function restore(bytes: Uint8Array, sidecar: Sidecar, flags: readonly stri
   const archivePath = existingPath ?? join(dir, "archive.json");
   if (existingPath === undefined) writeFileSync(archivePath, bytes);
   if (sidecar !== null) {
-    if (typeof sidecar === "object" && !Buffer.isBuffer(sidecar)) mkdirSync(`${archivePath}.sha256`);
-    else writeFileSync(`${archivePath}.sha256`, sidecar);
+    if (typeof sidecar === "object" && !Buffer.isBuffer(sidecar)) {
+      if ("danglingLink" in sidecar) symlinkSync(join(dir, "no-such-sidecar.sha256"), `${archivePath}.sha256`);
+      else mkdirSync(`${archivePath}.sha256`);
+    } else writeFileSync(`${archivePath}.sha256`, sidecar);
   }
   const callsPath = join(dir, "calls.json");
   const driver = join(dir, "driver.ts");
@@ -176,6 +178,13 @@ describe("restore verifies the archive's digest sidecar before any request (#266
     const result = await restore(COMPACT, { directory: true });
     refusedBeforeAnyRequest(result, `cannot read archive digest sidecar ${result.archivePath}.sha256 (EISDIR)`, STOPPED,
       "Check that the sidecar is a file this user can read, or put the .sha256 file written with this archive beside it");
+  });
+
+  test("a symbolic link at the sidecar path whose target is missing is unreadable, not missing", async () => {
+    const result = await restore(COMPACT, { danglingLink: true });
+    refusedBeforeAnyRequest(result, `archive digest sidecar ${result.archivePath}.sha256 is a symbolic link whose target does not exist`,
+      STOPPED, "Replace it with the .sha256 file written with this archive");
+    expect(result.stderr).not.toContain("not found");
   });
 
   test("an archive that cannot be read refuses", async () => {

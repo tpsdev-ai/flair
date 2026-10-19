@@ -6,12 +6,15 @@
   or read it. `approve` verifies an archive against its `.sha256` sidecar.
   `legacy-admit` prints a sidecar-free archive's SHA-256 and approves it only
   when the operator repeats that digest with `--confirm-digest`. `list`
-  checks each stored copy, and `revoke` withdraws an approval. Approving and
-  revoking need operator credentials, checked as a super_user against this
-  host's operations API. `flair restore` admits an archive with no sidecar
+  checks each stored copy, and `revoke` withdraws an approval. Approving
+  (including a confirmed legacy admission) and revoking need operator
+  credentials, checked as a super_user against this host's operations API,
+  whose port comes from `--ops-port`, `FLAIR_OPS_PORT`, the local config, or
+  the HTTP port minus one. `flair restore` admits an archive with no sidecar
   only when this host holds an unrevoked approval for its digest whose stored
-  copy still hashes to it, and restores that stored copy; a sidecar-backed
-  archive needs no approval. An approval authorizes those bytes until it is
+  copy still hashes to it, and restores that stored copy. An approval of
+  either kind admits those bytes. A sidecar-backed archive needs no
+  approval: a matching sidecar alone admits it. An approval authorizes those bytes until it is
   revoked. It does not show where they came from or that a sidecar-free
   archive is unchanged since it was written (flair#2664).
 

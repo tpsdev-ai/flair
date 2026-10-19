@@ -10,14 +10,17 @@
  * all. The refusal cases for a missing approval run in all three modes; the
  * others run in the mode each names (merge unless stated).
  *
- * Admission rule: the store must hold an unrevoked approval for the digest of
- * the bytes read at the archive path, and the stored copy must still hash to
- * it; the rows restored come from that stored copy. A sidecar-backed archive
- * keeps the slice 1b preflight and does not consult the store.
+ * Admission rule: the store must hold an unrevoked approval, of either kind
+ * (sidecar or legacy), for the digest of the bytes read at the archive path,
+ * and the stored copy must still hash to it; the rows restored come from that
+ * stored copy. A sidecar-backed archive keeps the slice 1b preflight and does
+ * not consult the store. A symbolic link at the sidecar path whose target is
+ * missing is not a missing sidecar: restore refuses it without consulting
+ * the store.
  */
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { chmodSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, readFileSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "../helpers/temp-dir.ts";
 import { approveArchive, revokeApproval } from "../../src/lib/backup-approval-store.ts";
@@ -42,15 +45,16 @@ function home(): { home: string; root: string } {
   return { home: dir, root: join(dir, ".flair", "approved-archives") };
 }
 
-function approve(root: string): void {
-  approveArchive({ bytes: ARCHIVE, sha256: SHA, admission: "legacy", operator: "operator-x", archiveName: "old.json", now: "2026-10-19T00:00:00.000Z" }, { root });
+function approve(root: string, admission: "legacy" | "sidecar" = "legacy"): void {
+  approveArchive({ bytes: ARCHIVE, sha256: SHA, admission, operator: "operator-x", archiveName: "old.json", now: "2026-10-19T00:00:00.000Z" }, { root });
 }
 
-async function restore(homeDir: string, bytes: Buffer, flags: string[] = [], sidecar = false) {
+async function restore(homeDir: string, bytes: Buffer, flags: string[] = [], sidecar: boolean | "dangling" = false) {
   const dir = tempDir("flair-restore-legacy-2664-");
   const archivePath = join(dir, "old-backup.json");
   writeFileSync(archivePath, bytes);
-  if (sidecar) writeFileSync(`${archivePath}.sha256`, `${createHash("sha256").update(bytes).digest("hex")}  old-backup.json\n`);
+  if (sidecar === "dangling") symlinkSync(join(dir, "missing.sha256"), `${archivePath}.sha256`);
+  else if (sidecar) writeFileSync(`${archivePath}.sha256`, `${createHash("sha256").update(bytes).digest("hex")}  old-backup.json\n`);
   const callsPath = join(dir, "calls.json");
   const driver = join(dir, "driver.ts");
   writeFileSync(driver, `
@@ -170,6 +174,23 @@ describe("restore admits an archive with no sidecar only by an approval on this 
     const other = Buffer.from(JSON.stringify({ ...archiveValue, memories: [] }));
     const result = await restore(h, other);
     refusedBeforeAnyRequest(result, "not found", `flair backup-approval legacy-admit ${result.archivePath}`);
+  });
+
+  test("an approval of either kind admits the same bytes: a sidecar approval admits them once the sidecar is gone", async () => {
+    const { home: h, root } = home();
+    approve(root, "sidecar");
+    const result = await restore(h, ARCHIVE);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("approved on this host by operator-x at 2026-10-19T00:00:00.000Z, sidecar admission)");
+    expect(result.calls.filter((call) => call.method === "PUT")).toHaveLength(2);
+  });
+
+  test("a symbolic link at the sidecar path whose target is missing refuses, even with an approval on this host", async () => {
+    const { home: h, root } = home();
+    approve(root);
+    const result = await restore(h, ARCHIVE, [], "dangling");
+    refusedBeforeAnyRequest(result, `archive digest sidecar ${result.archivePath}.sha256 is a symbolic link whose target does not exist`, STOPPED);
+    expect(result.stdout).not.toContain("approved on this host");
   });
 
   test("a sidecar-backed archive keeps the slice 1b preflight and does not consult the store, even a revoked approval of the same digest", async () => {

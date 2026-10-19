@@ -9182,7 +9182,6 @@ registerRestore(program);
 bindBackupApprovalCli({
   addSharedCredentialOptions,
   applyAdminPassFile,
-  resolveHttpPort,
   resolveOpsPort,
 });
 registerBackupApproval(program);

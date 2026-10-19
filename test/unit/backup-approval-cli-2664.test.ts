@@ -7,8 +7,11 @@
  * a temp directory, so the approval store is `<HOME>/.flair/approved-archives`.
  * `fetch` is replaced by a recorder that answers the operations API's
  * `user_info` as the case says (a super_user by default), so operator
- * credential verification is exercised without a server. Every refusal is
- * checked for leaving no approval record.
+ * credential verification is exercised without a server (the real operations
+ * API is exercised in test/integration/backup-approval-real-harper-2664.test.ts).
+ * Refusals of a fresh approval or legacy admission start from a HOME with no
+ * store and are checked for leaving no approval record; the revoke refusals
+ * start from an existing approval and are checked for leaving it unchanged.
  */
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
@@ -190,6 +193,14 @@ describe("flair backup-approval legacy-admit (#2664)", () => {
     symlinkSync(archive, join(dir, "link.json"));
     const result = await cli(["backup-approval", "legacy-admit", join(dir, "link.json"), "--confirm-digest", SHA, ...CREDS]);
     refusedWithoutRecord(result, "is a symbolic link");
+  });
+
+  test("a symbolic link at the sidecar path whose target is missing is not a missing sidecar: legacy admission is refused", async () => {
+    const { dir, archive } = workDir(null);
+    symlinkSync(join(dir, "missing.sha256"), `${archive}.sha256`);
+    const result = await cli(["backup-approval", "legacy-admit", archive, "--confirm-digest", SHA, ...CREDS]);
+    refusedWithoutRecord(result, "so it is not a legacy archive; nothing was approved");
+    expect(result.calls).toEqual([]);
   });
 
   test("an archive restore could not parse is refused", async () => {

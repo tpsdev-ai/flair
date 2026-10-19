@@ -4,13 +4,16 @@
  *
  * The approvals live in a local, operator-owned store
  * (src/lib/backup-approval-store.ts); no REST route can approve, revoke,
- * list or read them. `approve`, `legacy-admit` and `revoke` change the store
- * and need operator credentials: Basic admin credentials (`--admin-pass-file`,
- * `--admin-pass`, or FLAIR_ADMIN_PASS), which the command verifies against
- * this host's operations API on loopback with `user_info` and requires to be
- * a super_user before it writes anything, the same preflight `flair
- * federation pair` uses. The verified user name is recorded as the operator.
- * `list` only reads the store.
+ * list or read them. `approve`, a confirmed `legacy-admit` (one with
+ * `--confirm-digest`) and `revoke` change the store and need operator
+ * credentials: Basic admin credentials (`--admin-pass-file`, `--admin-pass`,
+ * or FLAIR_ADMIN_PASS), which the command verifies with `user_info` against
+ * this host's operations API on loopback, found by the CLI's ops-port ladder
+ * (`--ops-port`, FLAIR_OPS_PORT, the local config, then the HTTP port minus
+ * one), and requires to be a super_user before it writes anything; this is
+ * the preflight `flair federation pair` uses. The verified user name is
+ * recorded as the operator. A `legacy-admit` without `--confirm-digest` only
+ * prints the digest and checks no credentials; `list` only reads the store.
  *
  * `approve` takes an archive with its `.sha256` sidecar, verifies the pair as
  * restore does, and stores the exact bytes it verified. `legacy-admit` takes
@@ -42,7 +45,6 @@ import * as render from "../render.js";
 export type BackupApprovalCli = {
   addSharedCredentialOptions: (...args: any[]) => any;
   applyAdminPassFile: (...args: any[]) => any;
-  resolveHttpPort: (...args: any[]) => any;
   resolveOpsPort: (...args: any[]) => any;
 };
 
@@ -58,6 +60,15 @@ const NOTHING_REVOKED = "nothing was revoked";
 
 /** A refusal: print it and set a non-zero exit code. */
 class Refusal extends Error {}
+
+/** A short, secret-free label for a failed fetch. */
+function fetchFailure(error: unknown): string {
+  const cause = (error as { cause?: { code?: unknown } })?.cause?.code;
+  const code = (error as { code?: unknown })?.code;
+  if (typeof cause === "string") return cause;
+  if (typeof code === "string") return code;
+  return error instanceof Error ? error.name : "connection failed";
+}
 
 function errnoCode(error: unknown): string {
   const code = (error as NodeJS.ErrnoException)?.code;
@@ -78,9 +89,10 @@ async function verifyOperator(opts: any, action: string, nothing = NOTHING_APPRO
       `${action} needs operator credentials: pass --admin-pass-file (preferred), --admin-pass, or set FLAIR_ADMIN_PASS; ${nothing}`,
     );
   }
-  const opsUrl = opts.port !== undefined
-    ? `http://127.0.0.1:${cli.resolveHttpPort(opts) - 1}`
-    : `http://127.0.0.1:${cli.resolveOpsPort(opts)}`;
+  // The repo's ops-port ladder (src/cli.ts resolveOpsPort): --ops-port, then
+  // FLAIR_OPS_PORT, then the local config's opsPort, then the resolved HTTP
+  // port minus one. Always loopback: the credentials are checked on this host.
+  const opsUrl = `http://127.0.0.1:${cli.resolveOpsPort(opts)}`;
   let res: Response;
   try {
     res = await fetch(`${opsUrl}/`, {
@@ -92,7 +104,8 @@ async function verifyOperator(opts: any, action: string, nothing = NOTHING_APPRO
   } catch (error) {
     throw new Refusal(
       `could not reach this host's operations API at ${opsUrl} to verify the operator credentials ` +
-        `(${error instanceof Error ? error.name : "error"}); start Flair or pass --port; ${nothing}`,
+        `(${fetchFailure(error)}); check that Flair is running on this host and name its operations port with ` +
+        `--ops-port (or FLAIR_OPS_PORT); ${nothing}`,
     );
   }
   if (res.status === 401 || res.status === 403) {
@@ -146,7 +159,8 @@ export function register(program: Command): void {
     group
       .command("approve <archive>")
       .description("Verify an archive against its .sha256 sidecar, store its exact bytes and record your approval")
-      .option("--port <port>", "Harper HTTP port of this host's Flair (its operations API verifies the credentials)"),
+      .option("--port <port>", "Harper HTTP port of this host's Flair")
+      .option("--ops-port <port>", "Harper operations API port of this host's Flair, which verifies the credentials (default: FLAIR_OPS_PORT, local config, or HTTP port minus one)"),
   ).action((archivePath: string, opts: any) => run(async () => {
     const archiveBytes = importFile(archivePath, "archive");
     const digestPath = backupDigestPath(archivePath);
@@ -187,7 +201,8 @@ export function register(program: Command): void {
       .command("legacy-admit <archive>")
       .description("Approve an archive that has no .sha256 sidecar: prints its SHA-256; repeat it with --confirm-digest to approve")
       .option("--confirm-digest <sha256>", "The archive's SHA-256, as printed by a first run, confirming you approve exactly these bytes")
-      .option("--port <port>", "Harper HTTP port of this host's Flair (its operations API verifies the credentials)"),
+      .option("--port <port>", "Harper HTTP port of this host's Flair")
+      .option("--ops-port <port>", "Harper operations API port of this host's Flair, which verifies the credentials (default: FLAIR_OPS_PORT, local config, or HTTP port minus one)"),
   ).action((archivePath: string, opts: any) => run(async () => {
     const bytes = importFile(archivePath, "archive");
     const digestPath = backupDigestPath(archivePath);
@@ -254,7 +269,8 @@ export function register(program: Command): void {
     group
       .command("revoke <sha256>")
       .description("Revoke the approval of an archive digest on this host")
-      .option("--port <port>", "Harper HTTP port of this host's Flair (its operations API verifies the credentials)"),
+      .option("--port <port>", "Harper HTTP port of this host's Flair")
+      .option("--ops-port <port>", "Harper operations API port of this host's Flair, which verifies the credentials (default: FLAIR_OPS_PORT, local config, or HTTP port minus one)"),
   ).action((sha256: string, opts: any) => run(async () => {
     const operator = await verifyOperator(opts, "revocation", NOTHING_REVOKED);
     const record = revokeApproval(sha256, operator);

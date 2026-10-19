@@ -258,6 +258,16 @@ describe("the digest sidecar line (#2664)", () => {
     expect(parseBackupDigest(Buffer.from(formatBackupDigest(digest, "back\\slash.json")))).toEqual({ ok: true, sha256: digest });
   });
 
+  test("a name is UTF-8 as the formatter writes it: a raw 0xff byte refuses, the formatter's UTF-8 parses", () => {
+    const raw = Buffer.concat([Buffer.from(`${digest}  caf`), Buffer.from([0xff]), Buffer.from(".json\n")]);
+    expect(parseBackupDigest(raw)).toEqual({ ok: false, reason: "the file name is not UTF-8" });
+    const formatted = Buffer.from(formatBackupDigest(digest, "caf\u00ff-\u00e9.json"), "utf-8");
+    expect(formatted.includes(Buffer.from([0xc3, 0xbf]))).toBe(true);
+    expect(parseBackupDigest(formatted)).toEqual({ ok: true, sha256: digest });
+    const escaped = Buffer.concat([Buffer.from(`\\${digest}  a\\\\b`), Buffer.from([0xfe]), Buffer.from("\n")]);
+    expect(parseBackupDigest(escaped)).toEqual({ ok: false, reason: "the file name is not UTF-8" });
+  });
+
   for (const [label, text, reason] of [
     ["empty", "", "the file is empty"],
     ["no trailing line feed", `${digest}  a.json`, "does not end with a line feed"],
