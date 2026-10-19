@@ -1,4 +1,5 @@
 import { stampMemoryPromotionIsolated, type PromotedRowIdentity } from "./promotion-stamp.js";
+import { promotionBindingMatches } from "./promotion-binding.js";
 /**
  * POST /AutoPromoteCandidates  (#1205b-2 — the UNATTENDED promotion path)
  *
@@ -35,11 +36,20 @@ import { stampMemoryPromotionIsolated, type PromotedRowIdentity } from "./promot
  *                       (the hard-lock made explicit + testable).
  *
  * Response:
- *   { agentId, promoted: string[], skipped: {id, reason}[], count, considered }
+ *   { agentId, promoted: string[], skipped: {id, reason}[],
+ *     incomplete: {memoryId, candidateId, error}[], count, considered }
+ *
+ *   `promoted` lists the Memory id of every candidate this call marked
+ *   `promoted`; `count` is its length. `incomplete` lists a promotion whose
+ *   Memory row was written and stamped but whose candidate update threw: the
+ *   candidate stays pending, and the entry counts neither toward `count` nor
+ *   toward the per-call cap. The next sweep adopts that recorded, stamped row
+ *   without writing another one and marks the candidate promoted (flair#2714).
  *
  * Thin orchestrator over the pure, tested policy in ./auto-promote-lib.ts.
  */
 
+import { randomUUID } from "node:crypto";
 import { Resource, databases, logger } from "harper";
 import { isAdmin, allowVerified } from "./agent-auth.js";
 import { resolveReflectActor } from "./memory-reflect-lib.js";
@@ -59,25 +69,42 @@ import {
  *
  * The row is addressed by the id and incarnation token recorded on the
  * candidate, not by an owner, tag or content match: those fields are not proof
- * that the sweep wrote the row. The row is reused only when its `id` and
+ * that the sweep wrote the row. The row is used only when its `id` and
  * `instanceToken` equal the recorded ones, its `agentId` is the sweeping
- * agent, `promotionStatus` is unset, `archived` is not true, `content` equals
- * the candidate's claim, `visibility` and `durability` equal the values this
- * sweep writes, and `tags` include every tag this sweep writes. No other field
- * is compared, and an ordinary same-id Memory write keeps the row's incarnation
- * token (Memory.ts stampInstanceToken), so a match identifies the incarnation,
- * not an unedited row. A row that fails any check falls through to a fresh write.
- * The stamp re-checks the same fields, `archived` included, at its first read
- * under the per-id Memory lock (promotion-stamp.ts isWrittenRow); a row that no
- * longer passes is refused with nothing stamped and the candidate stays pending.
+ * agent, `archived` is not true, `content` equals the candidate's claim,
+ * `visibility` and `durability` equal the values this sweep writes, and `tags`
+ * include every tag this sweep writes. No other field is compared, and an
+ * ordinary same-id Memory write keeps the row's incarnation token (Memory.ts
+ * stampInstanceToken), so a match identifies the incarnation, not an unedited
+ * row. A row that fails any check falls through to a fresh write.
+ *
+ * Its verdict then decides how it is used:
+ *   - `promotionStatus` unset → `stamped: false`: the sweep stamps it. The
+ *     stamp re-checks the same fields, `archived` included, at its first read
+ *     under the per-id Memory lock (promotion-stamp.ts isWrittenRow); a row
+ *     that no longer passes is refused with nothing stamped and the candidate
+ *     stays pending.
+ *   - flair#2714: `promotionStatus` "approved", `promotedBy` this sweep's
+ *     reviewer and a `promotionContentHash` that matches the row's content
+ *     (promotionBindingMatches) → `stamped: true`: an earlier sweep wrote and
+ *     stamped this row but its candidate update did not land (or its stamp was
+ *     reported unconfirmed and did land). The sweep adopts the row as written:
+ *     no Memory write, no stamp, only the candidate update. The verdict
+ *     fields are server-written (no REST Memory write can set them, an
+ *     administrator's included, and a content-changing write clears them),
+ *     so a verdict with this reviewer on the recorded incarnation is the
+ *     stamp an auto-promote sweep put there.
+ *   - any other verdict (another reviewer, another status, or a binding that
+ *     does not match the content) → null: a fresh write, as before.
  */
-async function findReusablePromotedRow(
+async function findRecordedPromotedRow(
   agentId: string,
   candidate: any,
   requiredTags: string[],
   visibility: string,
   durability: string,
-): Promise<any | null> {
+  reviewerId: string,
+): Promise<{ row: any; stamped: boolean } | null> {
   const recordedId = candidate.promotedRowId;
   const recordedToken = candidate.promotedRowInstanceToken;
   if (typeof recordedId !== "string" || recordedId.length === 0) return null;
@@ -88,18 +115,29 @@ async function findReusablePromotedRow(
   if (String(row.id) !== recordedId) return null;
   if (row.agentId !== agentId) return null;
   if (row.instanceToken !== recordedToken) return null;
-  if (row.promotionStatus != null) return null;
   if (row.archived === true) return null;
   if (row.content !== candidate.claim) return null;
   if (row.visibility !== visibility) return null;
   if (row.durability !== durability) return null;
   if (!Array.isArray(row.tags) || !requiredTags.every((tag) => row.tags.includes(tag))) return null;
-  return row;
+  if (row.promotionStatus == null) return { row, stamped: false };
+  if (row.promotionStatus === "approved" && row.promotedBy === reviewerId && promotionBindingMatches(row)) {
+    return { row, stamped: true };
+  }
+  return null;
 }
 
 interface SkipRecord {
   id: string;
   reason: string;
+}
+
+/** flair#2714: a promotion whose Memory row was written and stamped but whose
+ *  candidate update threw. The candidate stays pending. */
+interface IncompleteRecord {
+  memoryId: string;
+  candidateId: string;
+  error: string;
 }
 
 export class AutoPromoteCandidates extends Resource {
@@ -162,6 +200,7 @@ export class AutoPromoteCandidates extends Resource {
     const MemoryCls = (await import("./Memory.js")).Memory;
     const promoted: string[] = [];
     const skipped: SkipRecord[] = [];
+    const incomplete: IncompleteRecord[] = [];
     let considered = 0;
 
     // Bounded enumeration (Sherlock non-blocking + Kern's cost ceiling): filter
@@ -188,32 +227,45 @@ export class AutoPromoteCandidates extends Resource {
         continue;
       }
 
-      const decidedAt = new Date().toISOString();
+      let decidedAt = new Date().toISOString();
       const promotedTags = buildAutoPromotedTags(c.id, decision.scopeTag);
       const promotedVisibility = decidePromotedVisibility(c);
       const promotedDurability = "persistent";
 
-      // ── Reuse this candidate's earlier row on a retry ─────────────────────
-      // A sweep whose stamp is reported refused leaves the candidate pending.
-      // When that sweep's recording of the row's id and incarnation token was
-      // persisted (a failed recording is logged and ignored below) and the
-      // recorded row passes findReusablePromotedRow — including carrying no
-      // promotionStatus — this sweep stamps it instead of writing a second
-      // promoted row. Otherwise it writes a fresh row: without a persisted
-      // recording nothing is reused, and a recorded row that already carries
-      // a verdict, including one whose stamp was reported unconfirmed, is not
-      // reused. Memory's dedup gate only reports a near-duplicate and never
-      // suppresses the write.
-      const reusable = await findReusablePromotedRow(
-        agentId, c, promotedTags, promotedVisibility, promotedDurability,
+      // ── Use this candidate's earlier row on a retry ───────────────────────
+      // A sweep that leaves its candidate pending after writing a row — its
+      // stamp reported refused, or (flair#2714) its candidate update threw
+      // after the stamp — leaves that row behind. When that sweep's recording
+      // of the row's id and incarnation token was persisted (a failed
+      // recording is logged and ignored below) and the recorded row passes
+      // findRecordedPromotedRow, this sweep uses it instead of writing a
+      // second promoted row: an unstamped row is stamped; a row that already
+      // carries this sweep's verdict, bound to its content, is adopted as is
+      // and only the candidate is updated. Otherwise it writes a fresh row:
+      // without a persisted recording nothing is reused, and a recorded row
+      // with any other verdict is not reused. Memory's dedup gate only reports
+      // a near-duplicate and never suppresses the write.
+      const recorded = await findRecordedPromotedRow(
+        agentId, c, promotedTags, promotedVisibility, promotedDurability, decision.reviewerId,
       );
       let memId: string;
-      let writtenRow: PromotedRowIdentity;
+      // The identity the stamp is bound to. Left undefined only for an adopted
+      // row, which is not stamped again.
+      let writtenRow: PromotedRowIdentity | undefined;
       // The candidate row Harper hands the sweep is frozen; the recorded
       // identity is kept in locals and submitted with the next candidate write.
       let recordedRowId: unknown = c.promotedRowId;
       let recordedRowToken: unknown = c.promotedRowInstanceToken;
-      if (reusable) {
+      if (recorded?.stamped) {
+        // flair#2714: an earlier sweep wrote and stamped this row; only its
+        // candidate update is missing. The candidate records when the verdict
+        // was stamped, not when this sweep found it.
+        memId = String(recorded.row.id);
+        if (typeof recorded.row.promotedAt === "string" && recorded.row.promotedAt.length > 0) {
+          decidedAt = recorded.row.promotedAt;
+        }
+      } else if (recorded) {
+        const reusable = recorded.row;
         memId = String(reusable.id);
         writtenRow = {
           agentId: reusable.agentId,
@@ -227,7 +279,11 @@ export class AutoPromoteCandidates extends Resource {
           unarchived: true,
         };
       } else {
-        memId = `${agentId}-promoted-${Date.now()}-${promoted.length}`;
+        // A random id, like PromoteMemoryCandidate's. A count suffix would
+        // not advance past a row this call wrote but did not report promoted
+        // (stamp_refused, incomplete), so two writes in one millisecond could
+        // share an id and the second would replace the first row.
+        memId = `${agentId}-promoted-${randomUUID()}`;
         const memRow = {
           id: memId,
           agentId,
@@ -307,18 +363,22 @@ export class AutoPromoteCandidates extends Resource {
         }
       }
 
-      const stamped = await stampMemoryPromotionIsolated(memId, decision.reviewerId, decidedAt, ctx, writtenRow);
-
       // ── A refused stamp leaves its candidate pending ───────────────────────
       // The stamp reports false when it refuses (the row its first read
       // returns is no longer the one this sweep wrote, e.g. a concurrent
       // replace) or when its outcome cannot be confirmed. Marking the candidate
       // promoted then would record a promotion whose verdict is not confirmed
       // on the row, so leave it pending for the next sweep — the safe failure
-      // state above.
-      if (!stamped) {
-        skipped.push({ id: c.id, reason: "stamp_refused" });
-        continue;
+      // state above. An adopted row already carries this sweep's verdict and
+      // is not stamped again; every other row is, and a missing identity is
+      // treated as a refusal.
+      if (!recorded?.stamped) {
+        const stamped = writtenRow !== undefined &&
+          await stampMemoryPromotionIsolated(memId, decision.reviewerId, decidedAt, ctx, writtenRow);
+        if (!stamped) {
+          skipped.push({ id: c.id, reason: "stamp_refused" });
+          continue;
+        }
       }
 
       // ── Mark the candidate promoted (commit point) ─────────────────────────
@@ -327,7 +387,13 @@ export class AutoPromoteCandidates extends Resource {
       // candidate is still pending, never a candidate marked promoted with no
       // Memory behind it. In the refused-stamp case above the candidate stays
       // pending; a later sweep stamps the recorded row only when the recording
-      // persisted and the row still passes findReusablePromotedRow, unstamped.
+      // persisted and the row still passes findRecordedPromotedRow, unstamped.
+      //
+      // flair#2714: when this update throws, the row is written and stamped
+      // but the candidate is still pending, so the promotion is reported under
+      // `incomplete`, not `promoted`, and does not count toward the cap. A
+      // later sweep adopts the recorded row (findRecordedPromotedRow,
+      // `stamped: true`) and repeats only this update.
       try {
         await (databases as any).flair.MemoryCandidate.put({
           ...c,
@@ -340,12 +406,17 @@ export class AutoPromoteCandidates extends Resource {
           promotedRowInstanceToken: recordedRowToken,
         });
       } catch (err: any) {
-        logger.warn?.(`AutoPromoteCandidates: candidate row update failed for ${c.id} (Memory ${memId} written): ${err?.message ?? err}`);
+        const error = typeof err?.message === "string" ? err.message : String(err);
+        logger.warn?.(`AutoPromoteCandidates: candidate row update failed for ${c.id} (Memory ${memId} written and stamped; candidate left pending): ${error}`);
+        incomplete.push({ memoryId: memId, candidateId: c.id, error });
+        continue;
       }
 
       promoted.push(memId);
-      // Cost ceiling (Kern): cap the number PROMOTED this cycle. Remaining
-      // eligible candidates stay pending and are swept on a later cycle.
+      // Cost ceiling (Kern): cap the number PROMOTED this cycle — candidates
+      // marked promoted, an adopted row included. An incomplete promotion
+      // does not count. Remaining eligible candidates stay pending and are
+      // swept on a later cycle.
       if (promoted.length >= cap) break;
     }
 
@@ -353,6 +424,7 @@ export class AutoPromoteCandidates extends Resource {
       agentId,
       promoted,
       skipped,
+      incomplete,
       count: promoted.length,
       considered,
     };

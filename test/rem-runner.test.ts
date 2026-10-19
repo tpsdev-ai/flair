@@ -24,6 +24,7 @@ import {
   DEFAULT_HEALTH_PREFLIGHT_MS,
   PENDING_NO_ADMIN_REASON,
   formatPendingCandidates,
+  formatAutoPromoted,
   type ApiCall,
   type RunnerOpts,
 } from "../src/rem/runner.ts";
@@ -863,8 +864,45 @@ describe("ADK auto-promote wiring (#1205b-2)", () => {
     expect(typeof autoPromoteCalls[0].limit).toBe("number");
     expect(autoPromoteCalls[0].limit).toBeGreaterThan(0);
     // outcome recorded on the audit row.
-    expect(r.logRow.autoPromoted).toEqual({ promoted: 2, skipped: 1 });
+    expect(r.logRow.autoPromoted).toEqual({ promoted: 2, skipped: 1, incomplete: 0 });
     expect(r.logRow.errors).toEqual([]);
+  });
+
+  // flair#2714: a promotion whose candidate update failed is reported by the
+  // server under `incomplete`, apart from `promoted`. The runner carries its
+  // count onto the audit row rather than dropping it, and does not add it to
+  // the promoted count.
+  it("records the server's incomplete promotions apart from the promoted count", async () => {
+    const { api } = makeTagAwareApi({
+      activeTags: ["adk:app:alice"],
+      reflect: () => ({ candidates: [{ id: "cand_alice" }], count: 1, model: "default", gathered: 1, unreflected: 1 }),
+      autoPromote: () => ({
+        agentId: "test-agent",
+        promoted: ["m-1"],
+        skipped: [],
+        incomplete: [
+          { memoryId: "m-2", candidateId: "c-2", error: "write failed" },
+          { memoryId: "m-3", candidateId: "c-3", error: "write failed" },
+        ],
+        count: 1,
+        considered: 3,
+      }),
+    });
+    const r = await runNightlyCycle(baseOpts({ apiCall: api }));
+    expect(r.status).toBe("completed");
+    expect(r.logRow.autoPromoted).toEqual({ promoted: 1, skipped: 0, incomplete: 2 });
+    expect(formatAutoPromoted(r.logRow.autoPromoted!)).toBe(
+      "Auto-promoted: 1 to own memory (0 left pending); 2 incomplete (memory written, candidate update failed; left pending for the next cycle)",
+    );
+  });
+
+  it("formats the run-once auto-promote line, naming incomplete promotions only when there are any", () => {
+    expect(formatAutoPromoted({ promoted: 2, skipped: 1, incomplete: 0 })).toBe("Auto-promoted: 2 to own memory (1 left pending)");
+    // A log row written before `incomplete` existed.
+    expect(formatAutoPromoted({ promoted: 2, skipped: 1 })).toBe("Auto-promoted: 2 to own memory (1 left pending)");
+    expect(formatAutoPromoted({ promoted: 0, skipped: 0, incomplete: 1 })).toBe(
+      "Auto-promoted: 0 to own memory (0 left pending); 1 incomplete (memory written, candidate update failed; left pending for the next cycle)",
+    );
   });
 
   it("does NOT call /AutoPromoteCandidates for a NON-ADK agent (no adk tags)", async () => {

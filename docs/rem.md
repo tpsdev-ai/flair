@@ -96,6 +96,15 @@ For ADK agents, the nightly cycle **auto-promotes** these `scopeTag`-bearing can
 
 Anything ineligible (no scope tag, flagged content, already decided) is left pending for the human `rem promote` path. The step is bounded per cycle and non-fatal; `flair rem nightly run-once` reports the count auto-promoted. **Non-ADK candidates never auto-promote** — the human review gate below is unchanged for them.
 
+The sweep writes and stamps the promoted memory before it marks the candidate `promoted`, so a failure in between leaves a pending candidate with its memory already written, never a promoted candidate with no memory. `POST /AutoPromoteCandidates` answers `{ agentId, promoted, skipped, incomplete, count, considered }`:
+
+- `promoted`: the memory id of each candidate this call marked `promoted`. `count` is its length, and the per-call `limit` caps it.
+- `skipped`: `{ id, reason }` for each candidate left pending without a promotion, for example `no_adk_scope_tag`, `content_safety:…`, `memory_write_error` or `stamp_refused`.
+- `incomplete`: `{ memoryId, candidateId, error }` for each promotion whose memory was written and stamped but whose candidate update failed. The candidate stays pending. These entries are not counted in `promoted`, `count` or the `limit`.
+- `considered`: the number of pending candidates the call examined.
+
+The next sweep re-reads such a candidate and finds the memory recorded on it (`promotedRowId`, `promotedRowInstanceToken`). When that memory still carries the sweep's own approval (`promotionStatus` `approved`, `promotedBy` `machine:adk-auto-promote`, and a `promotionContentHash` that matches its content), the sweep marks the candidate `promoted` without writing another memory and reports that memory id under `promoted`. Memory's dedup gate only reports a near-duplicate, so this check is what prevents the second row. When the memory no longer qualifies (for example, a different verdict, edited content, or archived), or when the candidate has no recorded memory because recording it also failed, the sweep writes and stamps a new memory instead. `flair rem nightly run-once` prints the incomplete count on its `Auto-promoted:` line.
+
 ## Memory retention and deletion
 
 Durability is owner-controlled, including `permanent`: owners may create, change, archive and delete their own memories at every tier. Administrators may delete any owner’s memory. The permanent tier controls retention and bootstrap priority; it does not prevent an explicit owner deletion.

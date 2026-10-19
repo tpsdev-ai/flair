@@ -246,6 +246,19 @@ export function formatPendingCandidates(count: PendingCandidateCount | undefined
   return typeof count === "number" ? String(count) : `unknown (${count.reason})`;
 }
 
+/**
+ * The `Auto-promoted:` line run-once prints for the auto-promote step's
+ * outcome. flair#2714: an incomplete promotion (Memory written and stamped,
+ * candidate update failed) is named on the line, never folded into the
+ * promoted count. A log row written before `incomplete` existed reads as 0.
+ */
+export function formatAutoPromoted(outcome: { promoted: number; skipped: number; incomplete?: number }): string {
+  const line = `Auto-promoted: ${outcome.promoted} to own memory (${outcome.skipped} left pending)`;
+  const incomplete = outcome.incomplete ?? 0;
+  if (incomplete === 0) return line;
+  return `${line}; ${incomplete} incomplete (memory written, candidate update failed; left pending for the next cycle)`;
+}
+
 export interface RunnerOpts {
   agentId: string;
   flairVersion: string;
@@ -357,12 +370,18 @@ export interface RunnerLogRow {
    * non-dry-run cycle for an ADK agentId (active adk: tags this cycle).
    * `promoted` is the count of candidates auto-promoted to own memory this
    * cycle; `skipped` the count left pending by a fail-closed gate (absent
-   * scope tag, content-safety, already-decided). Absent for dry-run / non-ADK
-   * cycles, exactly like `candidates`.
+   * scope tag, content-safety, already-decided). `incomplete` (flair#2714) is
+   * the count whose Memory row was written and stamped but whose candidate
+   * update failed: those candidates stay pending and are not counted in
+   * `promoted`. The next cycle re-sweeps them and, when the recorded row still
+   * carries the sweep's approval, marks them promoted without writing another
+   * row. 0 when the server's response has no `incomplete` list. Absent for
+   * dry-run / non-ADK cycles, exactly like `candidates`.
    */
   autoPromoted?: {
     promoted: number;
     skipped: number;
+    incomplete: number;
   };
   /**
    * flair#1257 slice 3: count of SETTLED continuity sessions distilled this
@@ -1070,7 +1089,10 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
         } else {
           const promotedCount = typeof obj.count === "number" ? obj.count : asArray(obj.promoted).length;
           const skippedCount = asArray(obj.skipped).length;
-          autoPromoted = { promoted: promotedCount, skipped: skippedCount };
+          // flair#2714: a promotion whose candidate update failed is reported
+          // apart from `promoted`; carry its count instead of dropping it.
+          const incompleteCount = asArray(obj.incomplete).length;
+          autoPromoted = { promoted: promotedCount, skipped: skippedCount, incomplete: incompleteCount };
         }
       } catch (err: any) {
         errors.push(`auto-promote: ${describeApiError(err?.message ?? err)}`);

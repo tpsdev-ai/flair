@@ -170,7 +170,7 @@ registrations; its key field is the fingerprint, not the key.
 | GET / write | `/Asset` | Ed25519 | Owner-only blobs linked by `memoryId`. No MCP and no federation in this slice. |
 | GET / write | `/MemoryCandidate` | Ed25519 | Owner-only REM drafts. Never auto-promoted except the narrow ADK path. |
 | POST | `/PromoteMemoryCandidate` | Ed25519 | Promote/reject with required rationale. |
-| POST | `/AutoPromoteCandidates` | Ed25519 | ADK per-user auto-promote only. |
+| POST | `/AutoPromoteCandidates` | Ed25519 | ADK per-user auto-promote only. Answers `promoted` (memory ids), `skipped` (`{ id, reason }`), `incomplete` (`{ memoryId, candidateId, error }`: memory written and stamped, candidate update failed, candidate still pending; the next sweep marks it promoted without a second memory), `count` (`promoted` only) and `considered`. See [docs/rem.md](rem.md#auto-promote-adk-only). |
 | POST | `/FeedMemories` | Ed25519 | Ingest path; `agentId` stamped from the caller (`stamp-strict`). |
 | POST | `/MemoryArchive` | Ed25519 | Basement / restore (`memory_basement` / `memory_restore` on `/mcp`). |
 | POST | `/MemoryMaintenance` | Ed25519 or admin | Hygiene: expire ephemeral, archive old standard. Agent-scoped unless admin. |

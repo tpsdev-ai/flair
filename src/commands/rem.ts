@@ -908,7 +908,7 @@ export function register(program: Command): void {
         console.error("Error: --agent or FLAIR_AGENT_ID env required");
         process.exit(1);
       }
-      const { runNightlyCycle, formatPendingCandidates } = await import("../rem/runner.js");
+      const { runNightlyCycle, formatPendingCandidates, formatAutoPromoted } = await import("../rem/runner.js");
       // The runner is agent-authed and cannot reach the ops port itself. When
       // admin credentials are available, inject ops-API and admin-authed REST
       // helpers so the pending-candidate count and the admin-gated dedup step
@@ -998,9 +998,10 @@ export function register(program: Command): void {
           if (row.distill.aborted) console.log(`Aborted:    yes — in-flight distillation stopped (flair rem pause)`);
         }
         // row.autoPromoted populates when step 5b (#1205b-2 ADK auto-promote) ran
-        // this cycle — i.e. a non-dry-run cycle for an ADK agentId.
+        // this cycle — i.e. a non-dry-run cycle for an ADK agentId. An
+        // incomplete promotion is named on the line (flair#2714).
         if (row.autoPromoted) {
-          console.log(`Auto-promoted: ${row.autoPromoted.promoted} to own memory (${row.autoPromoted.skipped} left pending)`);
+          console.log(formatAutoPromoted(row.autoPromoted));
         }
         // A guard refusal carries null counts and the guard's named state.
         const dedupRow = row.dedup;
