@@ -157,9 +157,11 @@ export interface RestoreTarget {
   /** The operations port in `opsUrl`. */
   opsPort: number;
   /**
-   * Whether the target is this host's loopback (127.0.0.1 or localhost). Only a
-   * loopback target is compared with this host's configured pair and checked
-   * against the OS listener table.
+   * Whether the target URL names a loopback host: 127.0.0.1, localhost or ::1
+   * (written `[::1]` in a URL), or no FLAIR_URL is set. Only a loopback URL is
+   * compared with this host's configured pair and checked against the OS
+   * listener table; any other URL, including one with this machine's LAN
+   * address, takes the identity check ({@link establishRestorePair}).
    */
   loopback: boolean;
 }
@@ -170,7 +172,11 @@ export interface RestoreTargetEnv {
   flairUrl?: string;
   /** FLAIR_OPS_PORT: an explicit operations port for the target. */
   opsPort?: string;
-  /** FLAIR_OPS_TARGET: an operations endpoint other commands use. Restore never sends to it; it only compares it. */
+  /**
+   * FLAIR_OPS_TARGET: an operations endpoint other commands use. It does not
+   * select restore's listing endpoint; restore compares it with the one it
+   * resolves, and refuses unless the two are the same root URL.
+   */
   opsTarget?: string;
 }
 
@@ -185,7 +191,7 @@ export interface RestoreTargetDeps {
 /**
  * A URL as restore prints it: scheme, host, port and path. User info, a query
  * and a fragment are never printed. A value that is not an http(s) URL prints
- * as `placeholder`, since its parts cannot be told apart.
+ * as `placeholder`: its parts are hidden, so untrusted input is not echoed.
  */
 export function displayRestoreUrl(raw: string, placeholder: string): string {
   let u: URL;
@@ -196,6 +202,11 @@ export function displayRestoreUrl(raw: string, placeholder: string): string {
   }
   if (u.protocol !== "http:" && u.protocol !== "https:") return placeholder;
   return `${u.protocol}//${u.host}${u.pathname.replace(/\/+$/, "")}`;
+}
+
+/** Whether a target URL names a loopback host: 127.0.0.1, localhost, or ::1 (`[::1]` in a URL). */
+function isLoopbackTargetUrl(u: URL): boolean {
+  return u.hostname === "127.0.0.1" || u.hostname === "localhost" || u.hostname === "[::1]";
 }
 
 /** A URL's port, or its scheme's default port when the URL names none. */
@@ -224,17 +235,20 @@ function withoutPairRemedy(message: string): string {
  *   or 80/443 when it names none. The operations port is FLAIR_OPS_PORT when
  *   set, else the conventional derivation from the target URL
  *   (`resolveOpsUrlFromTarget`); a target with no derivable operations port
- *   and no FLAIR_OPS_PORT is refused. The operations URL is built on the
- *   target's host. For a loopback target the two ports also go through the
- *   paired resolver, which refuses a pair that conflicts with this host's
- *   configured pair; that configuration describes this host only, so a remote
- *   target is not compared with it.
+ *   and no FLAIR_OPS_PORT is refused. For a loopback URL (127.0.0.1,
+ *   localhost or [::1]) the operations URL is http://127.0.0.1:<operations
+ *   port>, the endpoint the OS listener check proves, and the two ports also go
+ *   through the paired resolver, which refuses a pair that conflicts with this
+ *   host's configured pair. Any other URL, including one with this machine's
+ *   LAN address, gets its operations URL on the target's host and is not
+ *   compared with this host's configuration.
  * - A FLAIR_URL carrying user info, a query or a fragment is refused, and the
  *   message prints none of their values.
- * - FLAIR_OPS_TARGET is never used as the listing endpoint. When it is set and
- *   is not exactly the root URL of the operations API resolved here (compared
- *   as normalized root URLs, with no user info, query, fragment or path),
- *   restore refuses.
+ * - FLAIR_OPS_TARGET does not select the listing endpoint. When it is set to
+ *   anything but exactly the root URL of the operations API resolved here
+ *   (compared as normalized root URLs, with no user info, query, fragment or
+ *   path), restore refuses; a value of only whitespace is refused too. An
+ *   empty value counts as unset, as FLAIR_URL and FLAIR_OPS_PORT do here.
  */
 export function resolveRestoreTarget(env: RestoreTargetEnv, deps: RestoreTargetDeps = {}): RestoreTarget {
   const resolvePairImpl = deps.resolvePair ?? resolvePair;
@@ -323,7 +337,7 @@ function resolveUrlRestoreTarget(
     opsPort = effectivePort(derived);
   }
 
-  const loopback = isLocalBase(base);
+  const loopback = isLoopbackTargetUrl(u);
   if (loopback) {
     try {
       resolvePairImpl({ port: httpPort, opsPort });
@@ -355,13 +369,21 @@ function normalizedRoot(u: URL): string {
  * operations API. The two are compared as normalized root URLs (scheme, host
  * and port, with the default port written out). User info, a query, a fragment
  * or a path other than `/` refuses even on the same scheme, host and port, and
- * the message prints only the override's scheme, host and port. Restore never
- * sends a request to FLAIR_OPS_TARGET: its listing endpoint is always the one
- * resolved from its own target.
+ * the message prints only the override's scheme, host and port. A value of
+ * only whitespace is set, not unset, and is refused; an empty value counts as
+ * unset. The setting does not select restore's listing endpoint, which is
+ * always the one resolved from restore's own target; when the two are the same
+ * root URL, the listing goes to that endpoint.
  */
 function refuseOtherOpsTarget(opsTargetEnv: string | undefined, target: RestoreTarget): void {
-  const raw = opsTargetEnv?.trim();
-  if (!raw) return;
+  if (opsTargetEnv === undefined || opsTargetEnv === "") return;
+  const raw = opsTargetEnv.trim();
+  if (!raw) {
+    throw new Error(
+      `FLAIR_OPS_TARGET is set but holds only whitespace, so it names no operations endpoint to compare with the one restore lists candidates on (${target.opsUrl}); `
+        + `nothing was sent. Unset FLAIR_OPS_TARGET for this command, or set it to ${target.opsUrl}.`,
+    );
+  }
   let named: URL | null;
   try {
     named = new URL(raw);
@@ -487,13 +509,14 @@ async function readRestoreIdentity(label: string, request: () => Promise<Respons
  * anything (flair#2708). Returns when the check passes; otherwise throws an
  * Error naming what was not proven and the remedy. What it establishes:
  *
- * - Loopback target: the check the local delete paths use
+ * - Loopback URL (127.0.0.1, localhost or [::1], or no FLAIR_URL): the check
+ *   the local delete paths use
  *   (`proveLocalInstancePair`, src/lib/local-instance-pair.ts). The operations
  *   endpoint's own configuration records that operations port and an HTTP
  *   port, and the OS listener table shows one process with a Harper command
  *   line listening on both ports, with the same pid and start time on two
  *   reads. Restore then requires that HTTP port to be the target's.
- * - Remote target, which this host's listener table cannot see: the HTTP
+ * - Any other URL, including one with this machine's LAN address: the HTTP
  *   endpoint (`GET /Instance/`) and the operations endpoint (an SQL read of
  *   `flair.Instance`) must each report exactly one Instance row, with the same
  *   id ({@link decideRemoteRestorePair}). Matching port numbers in a
@@ -503,7 +526,7 @@ async function readRestoreIdentity(label: string, request: () => Promise<Respons
  * It is a preflight: it says nothing about a process that takes over either
  * endpoint after it returns. No request it sends follows a redirect, and every
  * one goes to the target's host (the operations URL is built on it). The admin
- * credential is sent to the operations endpoint and, for a remote target, to
+ * credential is sent to the operations endpoint and, for a non-loopback URL, to
  * the target's `/Instance/`.
  */
 export async function establishRestorePair(
@@ -551,7 +574,7 @@ export async function establishRestorePair(
   const verdict = decideRemoteRestorePair(httpRead, opsRead);
   if (verdict.kind === "proven") return;
   const hostRemedy =
-    "Run restore on that instance's host (FLAIR_URL unset, or set to its loopback URL), where the OS listener table can show the pair.";
+    "On the instance's own host, unset FLAIR_URL or set it to the instance's loopback URL (127.0.0.1, localhost or [::1]); the pair check then reads the OS listener table instead.";
   if (verdict.kind === "different") {
     throw new Error(
       `restore target ${target.baseUrl} and the operations API at ${target.opsUrl} report different flair.Instance ids, so restore treats them as two instances; ${nothingSent}. `
@@ -562,11 +585,13 @@ export async function establishRestorePair(
   const remedy = statuses.includes(401) || statuses.includes(403)
     ? RESTORE_CREDENTIAL_REMEDY
     : verdict.reads.some((r) => r.noRow)
-      ? `${hostRemedy} An instance with no Instance row gets one from its first GET /FederationInstance, which \`flair federation status --target <its URL>\` sends.`
+      ? `${hostRemedy} Or give the instance its Instance row: an authorized, successful GET /FederationInstance creates one when there is none `
+        + "(it needs the admin credential; `flair federation status --target <its URL>` sends it). That request can refuse, for example when the "
+        + "Instance table cannot be read or the row cannot be created; resolve any refusal it returns first."
       : hostRemedy;
   throw new Error(
     `restore target ${target.baseUrl} is not proven to share one identity with the operations API at ${target.opsUrl}: ${verdict.reads.map((r) => r.detail).join("; ")}. `
-      + `For a target on another host, restore requires both endpoints to report exactly one flair.Instance row with the same id; ${nothingSent}. ${remedy}`,
+      + `For a target URL that is not a loopback URL, restore requires both endpoints to report exactly one flair.Instance row with the same id; ${nothingSent}. ${remedy}`,
   );
 }
 
@@ -1599,7 +1624,7 @@ export function register(program: Command): void {
         // The candidate listing goes to the operations API and every write to
         // the target's HTTP endpoint. establishRestorePair is the preflight
         // check of that pair (see its comment for what it establishes on a
-        // loopback and on a remote target), and it runs before applySnapshot
+        // loopback URL and on any other URL), and it runs before applySnapshot
         // sends anything. Without an admin credential (a dry run only) there is
         // no listing and no check, and only the target is read. Every REST
         // call below refuses redirects, so it stays at the checked endpoint.

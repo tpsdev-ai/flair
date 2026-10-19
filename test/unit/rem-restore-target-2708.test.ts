@@ -421,6 +421,36 @@ describe("flair#2708 — resolveRestoreTarget", () => {
     }
   });
 
+  test("a FLAIR_OPS_TARGET of only whitespace is set, not unset, and is refused; an empty one counts as unset", () => {
+    const deps = { resolvePair: recordingPair([]), deriveOpsUrl: resolveOpsUrlFromTarget };
+    for (const opsTarget of [" ", "   ", "\t", " \n "]) {
+      expect(() => resolveRestoreTarget({ flairUrl: "https://flair.example:9926", opsTarget }, deps)).toThrow(
+        "FLAIR_OPS_TARGET is set but holds only whitespace, so it names no operations endpoint to compare with the one restore lists candidates on (https://flair.example:9925); nothing was sent. Unset FLAIR_OPS_TARGET for this command, or set it to https://flair.example:9925.",
+      );
+    }
+    expect(resolveRestoreTarget({ flairUrl: "https://flair.example:9926", opsTarget: "" }, deps).opsUrl).toBe("https://flair.example:9925");
+  });
+
+  test("the check is chosen by the URL: 127.0.0.1, localhost and [::1] are loopback URLs; a LAN address is not", () => {
+    for (const host of ["127.0.0.1", "localhost", "[::1]"]) {
+      const calls: PairCall[] = [];
+      const target = resolveRestoreTarget(
+        { flairUrl: `http://${host}:19926` },
+        { resolvePair: recordingPair(calls), deriveOpsUrl: resolveOpsUrlFromTarget },
+      );
+      expect(target.loopback).toBe(true);
+      expect(target.opsUrl).toBe("http://127.0.0.1:19925");
+      expect(calls).toEqual([{ port: 19926, opsPort: 19925 }]);
+    }
+    const calls: PairCall[] = [];
+    const lan = resolveRestoreTarget(
+      { flairUrl: "http://192.168.1.10:19926" },
+      { resolvePair: recordingPair(calls), deriveOpsUrl: resolveOpsUrlFromTarget },
+    );
+    expect(lan).toEqual({ baseUrl: "http://192.168.1.10:19926", opsUrl: "http://192.168.1.10:19925", httpPort: 19926, opsPort: 19925, loopback: false });
+    expect(calls).toEqual([]);
+  });
+
   test("an invalid FLAIR_OPS_PORT and a non-http FLAIR_URL are refused without printing the URL", () => {
     const deps = { resolvePair: recordingPair([]), deriveOpsUrl: resolveOpsUrlFromTarget };
     expect(() => resolveRestoreTarget({ flairUrl: "https://flair.example", opsPort: "0" }, deps)).toThrow(/invalid FLAIR_OPS_PORT/);
