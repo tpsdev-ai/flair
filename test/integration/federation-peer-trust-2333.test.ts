@@ -1252,3 +1252,52 @@ describe("flair#2656 — a first-time pair confirms the committed row after its 
     expect(tokenRow?.pairAttemptWriteId, "the committed token consume carries the same marker").toBe(row?.pairAttemptWriteId);
   }, 60_000);
 });
+
+describe("flair#2656 — re-pair post-commit confirmation (real Harper)", () => {
+  for (const withToken of [true, false]) {
+    for (const evidence of withToken ? ["Peer", "PairingToken", "unreadable"] : ["Peer", "unreadable"]) {
+      it(`${withToken ? "token" : "no-token"} re-pair refuses unconfirmed evidence (${evidence})`, async () => {
+        const token = `pt-2656-repair-${withToken}-${evidence}-${sfx}`;
+        const k = nacl.sign.keyPair();
+        const peer = `f2656-repair-${withToken}-${evidence}-${sfx}`;
+        await seedPeer(peer, b64url(k.publicKey));
+        if (withToken) await seedToken(token);
+        const { response, competed, released, paused } = await withPaused(
+          withToken ? "federation-pair-repair-token-commit" : "federation-pair-repair-commit",
+          () => pairRequest(pairBody(peer, b64url(k.publicKey), k.secretKey, withToken ? token : undefined)),
+          async () => {
+            const peerRow = await readPeer(peer);
+            expect(peerRow?.pairAttemptWriteId).toBeTruthy();
+            if (withToken) {
+              const tokenRow = await readToken(token);
+              expect(tokenRow?.pairAttemptWriteId).toBe(peerRow.pairAttemptWriteId);
+              expect(tokenRow?.consumedBy).toBe(peer);
+              expect(tokenRow?.consumedAt).toBeTruthy();
+            }
+            if (evidence === "unreadable") {
+              writeFileSync(join(pauseDir, `arm.converted-peer-read-fail.${peer}`), "");
+              return peerRow;
+            }
+            const table = evidence;
+            const row = table === "Peer" ? peerRow : await readToken(token);
+            await ops({
+              operation: "update", database: "flair", table,
+              records: [{ ...row, pairAttemptWriteId: "other-attempt" }],
+            });
+            const committed = table === "Peer" ? await readPeer(peer) : await readToken(token);
+            expect(committed?.pairAttemptWriteId).toBe("other-attempt");
+            return committed;
+          },
+        );
+        expect(paused).toBe(true);
+        expect(released).toBe("go");
+        const body = await response.json() as any;
+        expect(response.status, JSON.stringify(body)).toBe(withToken ? 409 : 503);
+        expect(body.error).toBe(withToken ? "peer_pair_unconfirmed" : "write_outcome_unknown");
+        expect(body.outcome).toBe("unconfirmed");
+        expect(body.paired).toBeUndefined();
+        expect(evidence === "PairingToken" ? await readToken(token) : await readPeer(peer)).toEqual(competed);
+      }, 90_000);
+    }
+  }
+});

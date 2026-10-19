@@ -428,16 +428,15 @@ export async function verifyCommittedFields(
   return (also === undefined || also(committed)) && committedShowsFields(committed, identity, fields) ? "shown" : "mismatch";
 }
 
+// Harper assigns these timestamps; they are not staged application fields.
+const HARPER_MANAGED_FIELDS = ["__createdtime__", "__updatedtime__"] as const;
+
 /**
  * Does the committed row show this attempt's write? Its identity is the row
  * this attempt wrote (an update keeps the basis's identity); each field the
  * plan wrote holds its staged value, and a non-idempotent plan is confirmed by
  * this attempt's commit marker (`writeId`), not by value equality.
  */
-// Harper assigns these timestamps; they are not staged application fields.
-const HARPER_MANAGED_FIELDS = ["__createdtime__", "__updatedtime__"] as const;
-
-/** Compare staged values. */
 function committedShowsWrite(committed: any, basis: any, decision: WriteBackPlan, writeId?: string): boolean {
   if ("skip" in decision) return true;
   if (!decision.idempotent && committed?.[decision.commitMarkerField] !== writeId) return false;

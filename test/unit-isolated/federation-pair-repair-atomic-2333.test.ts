@@ -35,6 +35,8 @@ const tokens = new Map<string, Record<string, unknown>>();
 
 /** Fail the next Peer write, as a store error would. */
 let failPeerWrite = false;
+let afterCommit: (() => void) | undefined;
+let unreadablePeer = false;
 
 function asyncRows<T>(items: T[]) {
   return {
@@ -61,6 +63,7 @@ const savedTransaction = (globalThis as any).transaction;
     const out = await cb({});
     for (const [id, row] of mine.tokens) tokens.set(id, { ...row });
     for (const [id, row] of mine.peers) peers.set(id, { ...row });
+    if (mine.peers.size) afterCommit?.();
     return out;
   } finally {
     staged = prev;
@@ -71,7 +74,10 @@ const databasesMock = {
   flair: {
     Instance: { search: () => asyncRows(instanceRows) },
     Peer: {
-      get: async (id: string) => peers.get(id) ?? null,
+      get: async (id: string) => {
+        if (unreadablePeer) throw new Error("test: Peer read unavailable");
+        return peers.get(id) ?? null;
+      },
       put: async (row: Record<string, unknown>) => {
         if (failPeerWrite) throw new Error("mock: Peer write failed");
         if (staged) { staged.peers.set(String(row.id), { ...row }); return row; }
@@ -129,6 +135,8 @@ beforeEach(() => {
   peers.clear();
   tokens.clear();
   failPeerWrite = false;
+  afterCommit = undefined;
+  unreadablePeer = false;
 });
 
 describe("flair#2333 — a re-pair's token consume and Peer write commit together (isolated)", () => {
@@ -173,6 +181,40 @@ describe("flair#2333 — a re-pair's token consume and Peer write commit togethe
     expect(tokens.get(token)?.consumedBy).toBe(peer);
     expect(peers.get(peer)?.updatedAt).not.toBe("2026-01-01T00:00:00.000Z");
   });
+});
+
+describe("flair#2656 — re-pair committed evidence (isolated)", () => {
+  for (const withToken of [true, false]) {
+    for (const evidence of withToken ? ["Peer", "PairingToken", "unreadable"] : ["Peer", "unreadable"]) {
+      it(`${withToken ? "token" : "no-token"} re-pair refuses unconfirmed evidence (${evidence})`, async () => {
+        const k = nacl.sign.keyPair();
+        const peer = `repair-confirm-${withToken}-${evidence}`;
+        const token = `repair-confirm-token-${evidence}`;
+        const createdAt = new Date().toISOString();
+        peers.set(peer, { id: peer, publicKey: Buffer.from(k.publicKey).toString("base64url"), status: "paired", createdAt });
+        if (withToken) tokens.set(token, { id: token, expiresAt: new Date(Date.now() + 60_000).toISOString(), createdAt });
+        afterCommit = () => {
+          const row = peers.get(peer)!;
+          expect(row.pairAttemptWriteId).toBeTruthy();
+          if (withToken) {
+            expect(tokens.get(token)?.pairAttemptWriteId).toBe(row.pairAttemptWriteId);
+            expect(tokens.get(token)?.consumedBy).toBe(peer);
+            expect(tokens.get(token)?.consumedAt).toBeTruthy();
+          }
+          if (evidence === "unreadable") unreadablePeer = true;
+          else if (evidence === "PairingToken") tokens.set(token, { ...tokens.get(token), pairAttemptWriteId: "other-attempt" });
+          else peers.set(peer, { ...row, pairAttemptWriteId: "other-attempt" });
+        };
+        const result = await makePair().post(rePairSignedBody(peer, k, withToken ? token : undefined));
+        expect(result).toBeInstanceOf(Response);
+        expect((result as Response).status).toBe(withToken ? 409 : 503);
+        const body = await readBody(result);
+        expect(body.error).toBe(withToken ? "peer_pair_unconfirmed" : "write_outcome_unknown");
+        expect(body.outcome).toBe("unconfirmed");
+        expect(body.paired).toBeUndefined();
+      });
+    }
+  }
 });
 
 // Keep the installed fake scoped to this file's process, like the other

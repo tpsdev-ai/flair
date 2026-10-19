@@ -34,6 +34,7 @@ import { CommittedRowChanged, confirmCommittedRow, verifyCommittedFields, writeB
 import { withKeyLock } from "./key-lock.js";
 import { withOwnedTransaction } from "./request-transaction.js";
 import { txnPausePoint } from "./txn-pause-point.js";
+import { writeOutcomeUnknownResponse } from "./memory-write-lock.js";
 import { retryRowProblem } from "./federation-retry-lib.js";
 import {
   classifyRecord,
@@ -652,7 +653,8 @@ export class FederationPair extends Resource {
         const tokenRepairPause = txnPausePoint("federation-pair-repair-token-pre");
         if (tokenRepairPause) await tokenRepairPause;
         let refusal: Response | undefined;
-        let stagedFirstPeer: StagedFirstPeer | undefined;
+        let stagedFirstPeer: StagedPairPeer | undefined;
+        let stagedPeer: StagedPairPeer | undefined;
         let stagedToken: StagedPairingToken | undefined;
         try {
           refusal = await withPairingTokenClaim(pairingToken, () =>
@@ -675,7 +677,8 @@ export class FederationPair extends Resource {
               // no field of the deleted row survives.
               if (!current) stagedFirstPeer = { ...firstPairPeerRow(instanceId, publicKey, role, endpoint), pairAttemptWriteId: claim.pairAttemptWriteId };
               try {
-                await writePeerRow(owned, current ? rePairedRow(current) : stagedFirstPeer);
+                stagedPeer = current ? { ...rePairedRow(current), pairAttemptWriteId: claim.pairAttemptWriteId } : stagedFirstPeer;
+                await writePeerRow(owned, stagedPeer);
               } catch (err) {
                 // Rethrow so the owned transaction ABORTS: the consume rolls back
                 // with the peer write (both commit or neither does). Tagged so the
@@ -711,12 +714,12 @@ export class FederationPair extends Resource {
           throw err;
         }
         if (refusal) return refusal;
-        if (stagedFirstPeer) {
-          if (!stagedToken) return firstPairReadBackUnconfirmedRefusal();
-          const unconfirmed = await confirmFirstPairAfterCommit(pairingToken, stagedFirstPeer, stagedToken);
-          if (unconfirmed) return unconfirmed;
-          await dropPairBootstrapUser(pairingToken, ctx);
-        }
+        const commitPause = txnPausePoint("federation-pair-repair-token-commit");
+        if (commitPause) await commitPause;
+        if (!stagedPeer || !stagedToken) return firstPairCommitUnconfirmedRefusal();
+        const unconfirmed = await confirmTokenPairAfterCommit(pairingToken, stagedPeer, stagedToken, !!stagedFirstPeer);
+        if (unconfirmed) return unconfirmed;
+        if (stagedFirstPeer) await dropPairBootstrapUser(pairingToken, ctx);
       }
 
       // The NO-token re-pair's peer write: the token path wrote the row inside the
@@ -735,15 +738,20 @@ export class FederationPair extends Resource {
       if (repairPause) await repairPause;
       if (!pairingToken) {
         const ctx = (this as any).getContext?.() ?? {};
+        let stagedPeer: StagedPairPeer | undefined;
         const refusal = await withOwnedTransaction(ctx, async (owned) => {
           const current = await (databases as any).flair.Peer.get(instanceId, owned);
           if (!current) return pairingTokenRequiredRefusal();
           if (current.publicKey !== publicKey) return publicKeyMismatchRefusal();
           if (current.status === "revoked") return peerRevokedRefusal();
-          await writePeerRow(owned, rePairedRow(current));
+          stagedPeer = { ...rePairedRow(current), pairAttemptWriteId: randomUUID() };
+          await writePeerRow(owned, stagedPeer);
           return undefined;
         });
         if (refusal) return refusal;
+        const commitPause = txnPausePoint("federation-pair-repair-commit");
+        if (commitPause) await commitPause;
+        if (!stagedPeer || await verifyCommittedFields((databases as any).flair.Peer, instanceId, stagedPeer, stagedPeer) !== "shown") return writeOutcomeUnknownResponse();
       }
     } else {
       // New peer — require a valid pairing token in the request body.
@@ -777,7 +785,7 @@ export class FederationPair extends Resource {
       const firstPairPause = txnPausePoint("federation-pair-first-pre");
       if (firstPairPause) await firstPairPause;
       let refusal: Response | undefined;
-      let stagedFirstPeer: StagedFirstPeer | undefined;
+      let stagedFirstPeer: StagedPairPeer | undefined;
       let stagedToken: StagedPairingToken | undefined;
       try {
         refusal = await withPairingTokenClaim(pairingToken, () =>
@@ -797,7 +805,7 @@ export class FederationPair extends Resource {
       }
       if (refusal) return refusal;
       if (!stagedFirstPeer || !stagedToken) return firstPairReadBackUnconfirmedRefusal();
-      const unconfirmed = await confirmFirstPairAfterCommit(pairingToken, stagedFirstPeer, stagedToken);
+      const unconfirmed = await confirmTokenPairAfterCommit(pairingToken, stagedFirstPeer, stagedToken);
       if (unconfirmed) return unconfirmed;
 
       // Test-only: inert unless the fault-injection env opt-in is set and armed.
@@ -877,7 +885,7 @@ function firstPairPeerRow(instanceId: string, publicKey: string, role: unknown, 
 
 type StagedPairingToken = { consumedBy: string; consumedAt: string; pairAttemptWriteId: string };
 
-type StagedFirstPeer = ReturnType<typeof firstPairPeerRow> & { pairAttemptWriteId: string };
+type StagedPairPeer = { id: string; pairAttemptWriteId: string } & Record<string, unknown>;
 
 async function confirmFirstPairBeforeCommit(instanceId: string): Promise<void> {
   await confirmCommittedRow((databases as any).flair.Peer, instanceId, (committed) => committed == null);
@@ -885,17 +893,20 @@ async function confirmFirstPairBeforeCommit(instanceId: string): Promise<void> {
   if (commitPause) await commitPause;
 }
 
-async function confirmFirstPairAfterCommit(pairingToken: string, stagedPeer: StagedFirstPeer, stagedToken: StagedPairingToken): Promise<Response | undefined> {
-  const readBackPause = txnPausePoint("federation-pair-first-read-back");
-  if (readBackPause) await readBackPause;
+async function confirmTokenPairAfterCommit(pairingToken: string, stagedPeer: StagedPairPeer, stagedToken: StagedPairingToken, firstPair = true): Promise<Response | undefined> {
+  if (firstPair) {
+    const readBackPause = txnPausePoint("federation-pair-first-read-back");
+    if (readBackPause) await readBackPause;
+  }
+  const unreadableRefusal = firstPair ? firstPairReadBackUnconfirmedRefusal : firstPairCommitUnconfirmedRefusal;
   const peerVerdict = await verifyCommittedFields((databases as any).flair.Peer, stagedPeer.id, stagedPeer, stagedPeer);
   let tokenRow: any;
   try {
     tokenRow = await (databases as any).flair.PairingToken.get(pairingToken, {});
   } catch {
-    return firstPairReadBackUnconfirmedRefusal();
+    return unreadableRefusal();
   }
-  if (peerVerdict === "unreadable") return firstPairReadBackUnconfirmedRefusal();
+  if (peerVerdict === "unreadable") return unreadableRefusal();
   if (peerVerdict !== "shown" || tokenRow?.pairAttemptWriteId !== stagedToken.pairAttemptWriteId ||
     tokenRow?.consumedBy !== stagedToken.consumedBy || tokenRow?.consumedAt !== stagedToken.consumedAt) return firstPairCommitUnconfirmedRefusal();
   return undefined;
