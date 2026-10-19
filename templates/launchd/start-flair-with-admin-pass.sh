@@ -60,18 +60,28 @@ is_harper_command() {
   return 1
 }
 
-# flair#2697: the pid Harper itself reads from hdb.pid. Harper's readPidFile is
-# Number.parseInt(<file contents>, 10): it skips leading whitespace and one
-# leading `+`, reads decimal digits up to the first non-digit, and yields NaN
-# when there is none (`123junk` is 123, `junk123` is NaN). This prints that pid
-# when it is a positive integer of at most 10 digits (leading zeros dropped, so
-# shell tests read it as decimal), and nothing otherwise: NaN, zero, a negative
-# number, or more digits than a pid has. Only ASCII whitespace is skipped; a
-# file that starts with other characters parseInt treats as whitespace (a
-# no-break space, a byte-order mark) prints nothing, so the launcher leaves it
-# to Harper's own check.
+# A newline, for matching whole lines of multi-line output with `case`.
+NL='
+'
+
+# flair#2697: the pid Harper itself reads from hdb.pid, when the launcher can
+# act on it. Harper's readPidFile is Number.parseInt(<file contents>, 10): it
+# skips leading whitespace, takes one leading `+` or `-`, reads decimal digits
+# up to the first non-digit, and yields NaN when there is none (`123junk` is
+# 123, `junk123` is NaN, `-123` is -123). This prints the pid only when that
+# parse is a positive integer of at most 10 digits (leading zeros dropped, so
+# shell tests read it as decimal). It prints nothing, leaving the file to
+# Harper's own check, for every other file: NaN, zero, a negative value (which
+# Harper passes to process.kill, where it names a process group that can be
+# alive), more digits than a pid has, a file containing a NUL byte (command
+# substitution drops NUL bytes, so the shell would not see what Harper reads),
+# and a file whose leading whitespace is not ASCII (a no-break space or a
+# byte-order mark, which parseInt also skips).
 harper_pid_file_pid() {
-  HP_RAW="$(cat "$1" 2>/dev/null || true)"
+  HP_BYTES="$(wc -c < "$1" 2>/dev/null | tr -cd '0-9')"
+  HP_NONUL="$(tr -d '\000' < "$1" 2>/dev/null | wc -c | tr -cd '0-9')"
+  if [ -z "$HP_BYTES" ] || [ "$HP_BYTES" != "$HP_NONUL" ]; then return 0; fi
+  HP_RAW="$(cat "$1" 2>/dev/null)" || return 0
   HP_RAW="${HP_RAW#"${HP_RAW%%[![:space:]]*}"}"
   case "$HP_RAW" in +*) HP_RAW="${HP_RAW#+}" ;; esac
   HP_PID="${HP_RAW%%[!0-9]*}"
@@ -96,35 +106,52 @@ pid_exists() {
 #   - it does not contain `harper`, in any letter case;
 #   - it does not contain this instance's ROOTPATH, as given or as its physical
 #     path;
-#   - when lsof is available, lsof lists no open file of that process (its
-#     working directory included) at or under either form of ROOTPATH.
-# A process that fails any of these is treated as possibly this instance. The
-# shape check alone is not enough: is_harper_command splits the ps line at
-# spaces, so a Harper whose node executable path contains a space is not
-# Harper-shaped, yet its command line names harper. Sets UP_LSOF to the clause
-# the launcher's message uses for the lsof condition.
+#   - one of:
+#       - ps reports the process's uid and it is not this launcher's uid (the
+#         Harper this launcher starts runs as this launcher's user; lsof
+#         cannot list another user's files unless run as root);
+#       - same uid, and lsof is not installed;
+#       - same uid, and `lsof -p` exits 0 with a listing that includes the
+#         process's working directory, and lists no open file (the working
+#         directory included) at or under either form of ROOTPATH.
+# Anything else, including a failed or empty lsof listing or any failed step
+# here, returns 1: the process is treated as possibly this instance. The shape
+# check alone is not enough: is_harper_command splits the ps line at spaces, so
+# a Harper whose node executable path contains a space is not Harper-shaped,
+# yet its command line names harper. On success, UP_WHY holds the clause the
+# launcher's message uses for the last condition.
 is_unrelated_process() {
   UP_PID="$1"
   UP_LINE="$2"
-  UP_LSOF="lsof is not available to list its open files"
+  UP_WHY=""
   case "$UP_LINE" in *[![:space:]]*) ;; *) return 1 ;; esac
-  UP_LOWER="$(printf '%s' "$UP_LINE" | tr '[:upper:]' '[:lower:]')"
+  UP_LOWER="$(printf '%s' "$UP_LINE" | tr '[:upper:]' '[:lower:]')" || return 1
+  [ -n "$UP_LOWER" ] || return 1
   case "$UP_LOWER" in *harper*) return 1 ;; esac
   UP_ROOT="${ROOTPATH%/}"
   [ -n "$UP_ROOT" ] || return 1
-  UP_PHYS="$(cd "$ROOTPATH" 2>/dev/null && pwd -P || true)"
+  UP_PHYS="$(cd -P -- "$ROOTPATH" >/dev/null 2>&1 && pwd -P)" || return 1
   UP_PHYS="${UP_PHYS%/}"
-  [ -n "$UP_PHYS" ] || UP_PHYS="$UP_ROOT"
+  [ -n "$UP_PHYS" ] || return 1
   case "$UP_LINE" in *"$UP_ROOT"*|*"$UP_PHYS"*) return 1 ;; esac
-  if command -v lsof >/dev/null 2>&1; then
-    UP_LSOF="lsof lists none of its open files there"
-    UP_FILES="$(lsof -n -P -w -p "$UP_PID" -Fn 2>/dev/null || true)"
-    while IFS= read -r UP_F; do
-      case "$UP_F" in "n$UP_ROOT"|"n$UP_ROOT"/*|"n$UP_PHYS"|"n$UP_PHYS"/*) return 1 ;; esac
-    done <<UP_EOF
-$UP_FILES
-UP_EOF
+  UP_UID="$(ps -o uid= -p "$UP_PID" 2>/dev/null)" || return 1
+  UP_UID="$(printf '%s' "$UP_UID" | tr -d '[:space:]')" || return 1
+  UP_MY_UID="$(id -u 2>/dev/null)" || return 1
+  case "$UP_UID" in ""|*[!0-9]*) return 1 ;; esac
+  case "$UP_MY_UID" in ""|*[!0-9]*) return 1 ;; esac
+  if [ "$UP_UID" != "$UP_MY_UID" ]; then
+    UP_WHY="it runs as uid $UP_UID, not as this launcher's uid $UP_MY_UID"
+    return 0
   fi
+  if ! command -v lsof >/dev/null 2>&1; then
+    UP_WHY="lsof is not available to list its open files"
+    return 0
+  fi
+  UP_FILES="$(lsof -n -P -w -p "$UP_PID" -Fn 2>/dev/null)" || return 1
+  UP_FILES="$NL$UP_FILES$NL"
+  case "$UP_FILES" in *"${NL}fcwd${NL}n/"*) ;; *) return 1 ;; esac
+  case "$UP_FILES" in *"${NL}n$UP_ROOT$NL"*|*"${NL}n$UP_ROOT/"*|*"${NL}n$UP_PHYS$NL"*|*"${NL}n$UP_PHYS/"*) return 1 ;; esac
+  UP_WHY="lsof lists none of its open files there"
   return 0
 }
 
@@ -151,18 +178,19 @@ UP_EOF
 # refuse.
 #
 # flair#2697: at startup Harper exits 4 ("Harper is already running") when the
-# pid it reads from hdb.pid is alive, is not its own pid, and is not a
-# recognised PID-1 init process. The launcher reads the pid as Harper does
-# (harper_pid_file_pid, within the limits stated there) and counts it alive as
-# Harper does (pid_exists). When the live pid is not Harper-shaped AND
+# pid it reads from hdb.pid is non-zero, is not its own pid or a recognised
+# PID-1 init process, and process.kill(pid, 0) succeeds or fails with EPERM.
+# The launcher acts only on a positive pid read as Harper reads it
+# (harper_pid_file_pid, which yields no pid for every other file) and counts it
+# alive as Harper does (pid_exists). When the live pid is not Harper-shaped AND
 # is_unrelated_process finds positive evidence that it is not this instance,
 # the launcher marks hdb.pid to be moved aside; the move happens below, after
 # the admin-pass checks pass and just before the exec. In every other case
-# hdb.pid is left in place: a pid Harper would not count as alive, a
-# Harper-shaped pid (refused here when no sidecar disagrees; with a disagreeing
-# sidecar Harper's own check decides, because Harper's own restart forks a new
-# main process whose pid the sidecar does not name), and a live pid that is not
-# Harper-shaped but may be this instance.
+# hdb.pid is left in place: a file that yields no pid, a pid that is not alive,
+# a Harper-shaped pid (refused here when no sidecar disagrees; with a
+# disagreeing sidecar Harper's own check decides, because Harper's own restart
+# forks a new main process whose pid the sidecar does not name), and a live pid
+# that is not Harper-shaped but may be this instance.
 MOVE_PID_FILE=0
 if [ -n "${ROOTPATH:-}" ] && [ -f "$ROOTPATH/hdb.pid" ]; then
   LIVE_PID="$(harper_pid_file_pid "$ROOTPATH/hdb.pid")"
@@ -204,7 +232,7 @@ if [ -n "${ROOTPATH:-}" ] && [ -f "$ROOTPATH/hdb.pid" ]; then
       fi
     elif is_unrelated_process "$LIVE_PID" "$LIVE_CMD"; then
       MOVE_PID_FILE=1
-      MOVE_WHY="its command line as ps reports it contains neither \"harper\" (in any case) nor this data directory, and $UP_LSOF"
+      MOVE_WHY="its command line as ps reports it contains neither \"harper\" (in any case) nor this data directory, and $UP_WHY"
     fi
   fi
 fi
@@ -254,12 +282,16 @@ export HDB_ADMIN_PASSWORD="$ADMIN_PASS"
 
 # flair#2697: move hdb.pid aside (marked above) so Harper's own check does not
 # refuse on a live process that is not this instance. The copy is named
-# hdb.pid.stale-<epoch seconds>, or .<n> after it when that name is taken. The
-# new name is made with `ln`, which fails rather than replace a name that exists
-# by then, and the original is removed only after the link succeeded. If the
-# link lands inside a directory created at that name meanwhile, it is removed
-# again. Any failure leaves hdb.pid in place and is reported on one line; Harper
-# then exits 4 if that pid is still alive.
+# hdb.pid.stale-<epoch seconds>, or .<n> after it when that name is taken when
+# checked. The copy is made with `ln`, which never replaces an existing name: if
+# a file or symlink appears at that name meanwhile, `ln` fails; if a directory
+# appears there, `ln` puts the link inside it, and the launcher removes that
+# link, checks the removal, and treats the move as failed. The original is
+# removed only after a link at the chosen name succeeded; if that removal fails,
+# the launcher removes the link again (checked) and treats the move as failed.
+# A failed move leaves hdb.pid in place and is reported on one line, which also
+# names any link the launcher could not remove; Harper then exits 4 if that pid
+# is still alive.
 if [ "$MOVE_PID_FILE" = "1" ]; then
   PID_FILE="$ROOTPATH/hdb.pid"
   STALE_EPOCH="$(date +%s 2>/dev/null || true)"
@@ -272,19 +304,27 @@ if [ "$MOVE_PID_FILE" = "1" ]; then
     STALE="$STALE_BASE.$STALE_N"
   done
   MOVED=0
+  LEFT_LINK=""
   if [ -n "$STALE" ] && ln -P "$PID_FILE" "$STALE" 2>/dev/null; then
     if [ -d "$STALE" ]; then
-      rm -f "$STALE/hdb.pid" 2>/dev/null || true
+      LINK="$STALE/hdb.pid"
     elif rm -f "$PID_FILE" 2>/dev/null; then
       MOVED=1
+      LINK=""
     else
-      rm -f "$STALE" 2>/dev/null || true
+      LINK="$STALE"
+    fi
+    if [ -n "$LINK" ]; then
+      rm -f "$LINK" 2>/dev/null || true
+      if [ -e "$LINK" ] || [ -L "$LINK" ]; then LEFT_LINK="$LINK"; fi
     fi
   fi
   if [ "$MOVED" = "1" ]; then
     echo "start-flair-with-admin-pass: $PID_FILE names pid $LIVE_PID, a live process that is not this instance: $MOVE_WHY; moved hdb.pid to $STALE and starting Harper." >&2
   else
-    echo "start-flair-with-admin-pass: $PID_FILE names pid $LIVE_PID, a live process that is not this instance: $MOVE_WHY; could not move hdb.pid aside. Starting Harper, which exits 4 if pid $LIVE_PID is still alive; move $PID_FILE out of the way." >&2
+    LEFT_NOTE=""
+    if [ -n "$LEFT_LINK" ]; then LEFT_NOTE=" (the link it made at $LEFT_LINK could not be removed)"; fi
+    echo "start-flair-with-admin-pass: $PID_FILE names pid $LIVE_PID, a live process that is not this instance: $MOVE_WHY; could not move hdb.pid aside$LEFT_NOTE. Starting Harper, which exits 4 if pid $LIVE_PID is still alive; move $PID_FILE out of the way." >&2
   fi
 fi
 
