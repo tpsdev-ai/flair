@@ -22,9 +22,10 @@
  * digest approves it; `flair restore` then writes from the approved copy. The
  * Memory row (deleted since the backup) is re-created and the Soul row
  * (changed since the backup) is restored, and restore verifies both. The
- * Agent row, which exists on the target, is restored through its admin PUT:
- * the archived name comes back, while the PUT keeps the target's stored
- * `createdAt` and `publicKey` (the key rotated since the backup stays), and
+ * Agent row, which exists on the target, is written through its admin PUT,
+ * with that PUT's field rules: the archived name is stored, while the PUT
+ * keeps the target's stored `createdAt` and `publicKey` (the key rotated since
+ * the backup stays); restore's read-back verifies the Agent row's id only, and
  * restore exits zero. An Agent row ABSENT on the target is refused by that
  * PUT with HTTP 404 (`agent_put_requires_existing`), so restore reports it
  * and exits non-zero while the Memory and Soul rows restore; restoring agents
@@ -33,8 +34,8 @@
  * Archived promotion verdicts: restoring a promoted Memory needs the server
  * writer of slice 2. Until then the authority-field guard refuses the admin
  * PUT of a row that is absent from the store, and restore reports that row
- * as failed (HTTP 403) and exits non-zero while the other rows (the Agent
- * row included) restore.
+ * as failed (HTTP 403) and exits non-zero while the Memory and Soul rows
+ * restore and the Agent row is written.
  *
  * Build prerequisite: dist/cli.js and dist/resources/*.js
  * (`bun run build && bun run build:cli`).
@@ -237,7 +238,7 @@ describe("flair backup-approval verifies operator credentials with the real oper
 });
 
 describe("an archive without a sidecar restores through legacy admission (#2664)", () => {
-  test("refused without an approval, approved with the confirmed digest, then the Agent, Memory and Soul rows restored and verified from the approved copy", async () => {
+  test("refused without an approval, approved with the confirmed digest, then the Agent row written and the Memory and Soul rows restored and verified from the approved copy", async () => {
     const home = tempDir("flair-2664-real-home-");
     const archive = await backup(home, "legacy.json");
     const archived = JSON.parse(readFileSync(archive, "utf8"));
@@ -284,7 +285,7 @@ describe("an archive without a sidecar restores through legacy admission (#2664)
     });
   }, 300_000);
 
-  test("an archived promotion verdict waits for the slice 2 writer: that row is refused (HTTP 403) and restore exits non-zero while the Agent row restores", async () => {
+  test("an archived promotion verdict waits for the slice 2 writer: that row is refused (HTTP 403) and restore exits non-zero while the Agent row is written", async () => {
     const content = "A reviewed lesson with an approved verdict";
     await op({
       operation: "upsert", database: "flair", table: "Memory",

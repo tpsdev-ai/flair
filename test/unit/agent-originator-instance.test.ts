@@ -142,7 +142,7 @@ describe("federation-edge-hardening slice 1 / flair#1965 — Agent.post() stamps
 // An Agent PUT is an administrator operation (flair#2696). The successful cases
 // run as an administrator; the non-admin case asserts the refusal and an
 // unchanged row.
-describe("federation-edge-hardening slice 1 / flair#1965 — Agent.put() create vs update", () => {
+describe("federation-edge-hardening slice 1 / flair#1965 — Agent.put() keeps the stored originatorInstanceId; a non-admin or missing-row PUT is refused", () => {
   it("a non-admin agent's PUT is refused 403 agent_put_admin_only and writes nothing", async () => {
     instanceRow = { id: "flair_local_test" };
     agentStore.set("agent-1", { id: "agent-1", name: "Agent One", originatorInstanceId: "instance-B" });
