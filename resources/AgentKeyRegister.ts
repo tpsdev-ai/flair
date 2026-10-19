@@ -256,7 +256,7 @@ export class AgentKeyRegister extends Resource {
       registrationReadable = false;
     }
     if (readBackVerdict === "unreadable" || !registrationReadable) {
-      return jsonRefusal(503, REGISTRATION_UNAVAILABLE, "the committed key and its registration audit row could not be read back; the stored state is unconfirmed", "unconfirmed");
+      return jsonRefusal(503, REGISTRATION_UNAVAILABLE, "the committed key or its registration audit row could not be read back; the stored state is unconfirmed", "unconfirmed");
     }
     if (readBackVerdict !== "shown" || registrationRow == null || registrationRow.agentId !== agentId) {
       return jsonRefusal(503, REGISTRATION_UNAVAILABLE, "the committed key could not be read back as this registration's row and audit; the stored state is unconfirmed", "unconfirmed");

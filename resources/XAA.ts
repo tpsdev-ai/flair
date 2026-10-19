@@ -264,9 +264,9 @@ async function resolveOrCreatePrincipalLocked(
       // credential would commit in.
       const pause = txnPausePoint("xaa-credential-touch");
       if (pause) await pause;
-      // Update last used. This touch is IDEMPOTENT: re-applying the same
-      // lastUsedAt to the same matched credential yields the same committed
-      // row, so a post-commit mismatch may retry (this path refuses the grant).
+      // Update last used with a fresh lastUsedAt. This handler does not retry
+      // the touch: a post-commit mismatch or an unreadable read-back refuses
+      // the grant.
       const touchedRow = {
         ...cred,
         lastUsedAt: nowISO(),

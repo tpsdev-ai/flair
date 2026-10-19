@@ -966,8 +966,9 @@ function firstPairCommitUnconfirmedRefusal(): Response {
   }), { status: 409, headers: { "content-type": "application/json" } });
 }
 
-/** 503 for a first-time pair whose committed Peer row could not be read back;
- *  the stored state is unconfirmed and the request did not answer `paired`. */
+/** 503 for a first-time pair whose committed Peer row or PairingToken row
+ *  could not be read back; the stored state is unconfirmed and the request did
+ *  not answer `paired`. */
 function firstPairReadBackUnconfirmedRefusal(): Response {
   return new Response(JSON.stringify({
     error: "peer_read_back_unconfirmed",
