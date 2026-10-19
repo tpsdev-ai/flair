@@ -21,6 +21,7 @@ import { WINDOW_MS, importEd25519Key, b64ToArrayBuffer, parseTpsEd25519Header } 
 import { isKnownAgentReplay, claimAgentNonce } from "./replay-store.js";
 import { ADMIN_ROLE, agentRecordIsAdmin, configuredAdminAgentIds } from "./agent-admin.js";
 import { isPrincipalDeactivated } from "../src/lib/principal-status.js";
+import { isProtocolLayerContext } from "./protocol-context.js";
 
 /**
  * Shared Harper user that verified Ed25519 agents resolve to (least-privilege
@@ -428,6 +429,12 @@ export async function resolveAgentAuth(context: any): Promise<AgentAuthVerdict> 
     if (auth) return { kind: "agent", agentId: auth.agentId, isAdmin: auth.isAdmin };
     return { kind: "anonymous" };
   }
+
+  // A context a protocol layer built (an MQTT session's action — on Harper's
+  // TCP or TLS listener it carries no HTTP request — or one still carrying
+  // Harper's `authorize: true`) is a remote caller with no credential flair can
+  // verify: anonymous, never internal (resources/protocol-context.ts).
+  if (isProtocolLayerContext(context)) return { kind: "anonymous" };
 
   noteInternalVerdict(context);
   return { kind: "internal" };

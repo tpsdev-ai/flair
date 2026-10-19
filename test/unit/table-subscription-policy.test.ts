@@ -1,18 +1,33 @@
 /**
- * table-subscription-policy.test.ts — the guard that limits table subscription
- * routes to administrators and trusted internal calls
+ * table-subscription-policy.test.ts — the guard that limits table subscriptions
+ * and publishes to administrators and trusted internal calls
  * (resources/table-subscription-policy.ts).
  *
- * The integration test (test/integration/table-subscription-default-deny.test.ts)
- * checks the rule on the collection and by-id routes of every table of a real
- * Harper, over SSE and WebSocket. These cases pin the parts a
- * real Harper does not exercise on demand: the static `connect()` it replaces,
- * inheritance by resource subclasses, how the caller's context is resolved, a
- * caller that cannot be resolved, and the length limit on the refusal text.
+ * The integration tests check the rule on a real Harper: on the collection and
+ * by-id routes of every table over SSE and WebSocket
+ * (test/integration/table-subscription-default-deny.test.ts), and on every
+ * table's MQTT topics: SUBSCRIBE to each table's collection and by-id topics,
+ * and PUBLISH, retained PUBLISH and retained delete to each table topic (but
+ * the two paths another resource serves), with a marker row committed to every
+ * table
+ * (test/integration/table-subscription-mqtt.test.ts). These cases pin the parts
+ * a real Harper does not exercise on demand: the statics it replaces
+ * (`connect()`, `subscribe()`, `publish()`, and `put()`/`delete()` for an MQTT
+ * session's call), inheritance by resource subclasses, how the caller's context
+ * is resolved for each, the rule for a call a protocol layer made, the
+ * in-process entry, a caller that cannot be resolved, and the length limit on
+ * the refusal text.
  */
 import { describe, it, expect } from "bun:test";
 import {
+  GUARDED_TABLE_STATICS,
+  RETAINED_PUBLISH_STATICS,
+  retainedWriteContext,
   guardTableSubscriptions,
+  isProtocolEntry,
+  subscribeCallerContext,
+  subscribeInProcess,
+  subscriptionCaller,
   subscriptionCallerContext,
   tableSubscriptionRefusal,
   unverifiedSubscriberRefusal,
@@ -28,6 +43,30 @@ function makeTable() {
     static connect(this: unknown, ...args: unknown[]) {
       calls.push({ self: this, args });
       return Promise.resolve({ subscription: true });
+    }
+  }
+  return { Table, calls };
+}
+
+/**
+ * A stand-in for a Harper table class with all three statics the guard
+ * replaces; each records its calls and returns synchronously, as Harper's
+ * subscribe() may.
+ */
+function makeStreamTable() {
+  const calls: Array<{ method: string; self: unknown; args: unknown[] }> = [];
+  class Table {
+    static connect(this: unknown, ...args: unknown[]) {
+      calls.push({ method: "connect", self: this, args });
+      return { subscription: "connect" };
+    }
+    static subscribe(this: unknown, ...args: unknown[]) {
+      calls.push({ method: "subscribe", self: this, args });
+      return { subscription: "subscribe" };
+    }
+    static publish(this: unknown, ...args: unknown[]) {
+      calls.push({ method: "publish", self: this, args });
+      return { published: true };
     }
   }
   return { Table, calls };
@@ -127,6 +166,265 @@ describe("guardTableSubscriptions", () => {
   });
 });
 
+describe("guardTableSubscriptions — MQTT subscribe() and publish()", () => {
+  it("guards connect(), subscribe() and publish(), and nothing else", () => {
+    expect(Object.keys(GUARDED_TABLE_STATICS).sort()).toEqual(["connect", "publish", "subscribe"]);
+    const { Table } = makeStreamTable();
+    guardTableSubscriptions({ Memory: Table }, { resolveAuth: byContext, ambientContext: () => ({}) });
+    for (const m of ["connect", "subscribe", "publish"]) {
+      expect(Object.prototype.hasOwnProperty.call(Table, m), m).toBe(true);
+      expect((Table as any)[m].name, m).toBe(m);
+    }
+  });
+
+  it("refuses a verified non-admin agent's subscribe(target, context) with 403 and never reaches the table's subscribe()", async () => {
+    const { Table, calls } = makeStreamTable();
+    guardTableSubscriptions({ Memory: Table }, { resolveAuth: byContext, ambientContext: () => ({}) });
+    let thrown: any;
+    try { await (Table as any).subscribe({ id: null }, AGENT); } catch (err) { thrown = err; }
+    expect(thrown?.statusCode).toBe(403);
+    expect(thrown?.message).toBe("table subscriptions are for administrators");
+    expect(calls).toEqual([]);
+  });
+
+  it("refuses an anonymous subscribe() with 401", async () => {
+    const { Table, calls } = makeStreamTable();
+    guardTableSubscriptions({ Memory: Table }, { resolveAuth: byContext, ambientContext: () => ({}) });
+    await expect((Table as any).subscribe({ id: null }, ANON)).rejects.toMatchObject({ statusCode: 401 });
+    expect(calls).toEqual([]);
+  });
+
+  it("refuses a non-admin publish(target, data, context) with 403 and an anonymous one with 401, naming publishes", async () => {
+    const { Table, calls } = makeStreamTable();
+    guardTableSubscriptions({ Memory: Table }, { resolveAuth: byContext, ambientContext: () => ({}) });
+    let thrown: any;
+    try { await (Table as any).publish({ id: "m1" }, { content: "x" }, AGENT); } catch (err) { thrown = err; }
+    expect(thrown?.statusCode).toBe(403);
+    expect(thrown?.message).toBe("table publishes are for administrators");
+    thrown = undefined;
+    try { await (Table as any).publish({ id: "m1" }, { content: "x" }, ANON); } catch (err) { thrown = err; }
+    expect(thrown?.statusCode).toBe(401);
+    expect(thrown?.message).toBe("table publishes need an administrator credential");
+    expect(calls).toEqual([]);
+  });
+
+  it("passes an administrator's subscribe() and publish() through unchanged, with the same arguments and receiver", async () => {
+    const { Table, calls } = makeStreamTable();
+    guardTableSubscriptions({ Memory: Table }, { resolveAuth: byContext, ambientContext: () => ({}) });
+    const target = { id: null };
+    const data = { content: "x" };
+    expect(await (Table as any).subscribe(target, ADMIN)).toEqual({ subscription: "subscribe" });
+    expect(await (Table as any).publish(target, data, ADMIN)).toEqual({ published: true });
+    expect(calls.map((c) => c.method)).toEqual(["subscribe", "publish"]);
+    expect(calls[0].self).toBe(Table);
+    expect(calls[0].args).toEqual([target, ADMIN]);
+    expect(calls[1].args[0]).toBe(target);
+    expect(calls[1].args[1]).toBe(data);
+    expect(calls[1].args[2]).toBe(ADMIN);
+  });
+
+  it("a resource class that extends a guarded table inherits the subscribe() and publish() guards", async () => {
+    const { Table, calls } = makeStreamTable();
+    guardTableSubscriptions({ Memory: Table }, { resolveAuth: byContext, ambientContext: () => ({}) });
+    class MemoryResource extends Table {
+      subscribe() { return "instance subscribe is not the topic entry"; }
+      publish() { return "instance publish is not the topic entry"; }
+    }
+    await expect((MemoryResource as any).subscribe({ id: null }, AGENT)).rejects.toMatchObject({ statusCode: 403 });
+    await expect((MemoryResource as any).publish({ id: "m" }, {}, AGENT)).rejects.toMatchObject({ statusCode: 403 });
+    await (MemoryResource as any).subscribe({ id: null }, ADMIN);
+    expect(calls.map((c) => c.self)).toEqual([MemoryResource]);
+  });
+
+  it("decides subscribe() on the context Harper would use: the second argument, the third when both are passed, or the ambient one", async () => {
+    const { Table, calls } = makeStreamTable();
+    let ambient: unknown = AGENT;
+    guardTableSubscriptions({ Memory: Table }, { resolveAuth: byContext, ambientContext: () => ambient });
+    // (target, context): the second argument is the context, even one that does not look like a context
+    await expect((Table as any).subscribe({ id: null }, { verdict: { kind: "anonymous" } })).rejects.toMatchObject({ statusCode: 401 });
+    // (target, data, context): the third
+    await expect((Table as any).subscribe({ id: null }, ADMIN, AGENT)).rejects.toMatchObject({ statusCode: 403 });
+    // (target): the ambient context
+    await expect((Table as any).subscribe({ id: null })).rejects.toMatchObject({ statusCode: 403 });
+    ambient = {};
+    await (Table as any).subscribe({ id: null });
+    expect(calls.length).toBe(1);
+  });
+
+  it("refuses when the caller of a subscribe() or publish() cannot be resolved", async () => {
+    const { Table, calls } = makeStreamTable();
+    guardTableSubscriptions({ Memory: Table }, {
+      resolveAuth: async () => { throw new Error("agent table unavailable"); },
+      ambientContext: () => ({}),
+    });
+    await expect((Table as any).subscribe({ id: null }, AGENT)).rejects.toMatchObject({ statusCode: 500 });
+    let thrown: any;
+    try { await (Table as any).publish({ id: "m" }, {}, AGENT); } catch (err) { thrown = err; }
+    expect(thrown?.statusCode).toBe(500);
+    expect(thrown?.message).toContain("the publisher could not be verified");
+    expect(calls).toEqual([]);
+  });
+
+  it("guards a table class that has only some of the three statics", async () => {
+    class OnlySubscribe { static subscribe() { return "s"; } }
+    const guarded = guardTableSubscriptions({ OnlySubscribe }, { resolveAuth: byContext, ambientContext: () => ({}) });
+    expect(guarded).toEqual(["OnlySubscribe"]);
+    await expect((OnlySubscribe as any).subscribe({ id: null }, AGENT)).rejects.toMatchObject({ statusCode: 403 });
+    expect(Object.prototype.hasOwnProperty.call(OnlySubscribe, "connect")).toBe(false);
+  });
+});
+
+describe("guardTableSubscriptions — retained MQTT publish (put() / delete())", () => {
+  /** A table class whose static put()/delete() record their calls and answer synchronously. */
+  function makeWriteTable() {
+    const calls: Array<{ method: string; self: unknown; args: unknown[] }> = [];
+    class Table {
+      static put(this: unknown, ...args: unknown[]) { calls.push({ method: "put", self: this, args }); return "put-result"; }
+      static delete(this: unknown, ...args: unknown[]) { calls.push({ method: "delete", self: this, args }); return "delete-result"; }
+    }
+    return { Table, calls };
+  }
+  /** An MQTT session's context carrying the verdict byContext reads. */
+  const mqtt = (verdict: unknown) => ({ session: { addSubscription: () => undefined }, socket: {}, authorize: true, verdict });
+
+  it("guards put() and delete()", () => {
+    expect([...RETAINED_PUBLISH_STATICS].sort()).toEqual(["delete", "put"]);
+    const { Table } = makeWriteTable();
+    expect(guardTableSubscriptions({ Memory: Table }, { resolveAuth: byContext, ambientContext: () => ({}) })).toEqual(["Memory"]);
+    expect((Table as any).put.name).toBe("put");
+    expect((Table as any).delete.name).toBe("delete");
+  });
+
+  it("refuses an MQTT session's retained put/delete for a non-admin (403) and an anonymous caller (401), naming publishes", async () => {
+    const { Table, calls } = makeWriteTable();
+    guardTableSubscriptions({ Memory: Table }, { resolveAuth: byContext, ambientContext: () => ({}) });
+    let thrown: any;
+    try { await (Table as any).put({ id: "m" }, { content: "x" }, mqtt(AGENT.verdict)); } catch (err) { thrown = err; }
+    expect(thrown?.statusCode).toBe(403);
+    expect(thrown?.message).toBe("table publishes are for administrators");
+    await expect((Table as any).delete({ id: "m" }, mqtt(ANON.verdict))).rejects.toMatchObject({ statusCode: 401 });
+    expect(calls).toEqual([]);
+  });
+
+  it("an MQTT session's context that resolves as internal is a caller without a credential (Harper's TCP listener)", async () => {
+    const { Table, calls } = makeWriteTable();
+    guardTableSubscriptions({ Memory: Table }, { resolveAuth: async () => ({ kind: "internal" }), ambientContext: () => ({}) });
+    await expect((Table as any).put({ id: "m" }, { content: "x" }, mqtt(undefined))).rejects.toMatchObject({ statusCode: 401 });
+    expect(calls).toEqual([]);
+  });
+
+  it("passes an administrator's retained put/delete through with the same arguments and receiver", async () => {
+    const { Table, calls } = makeWriteTable();
+    guardTableSubscriptions({ Memory: Table }, { resolveAuth: byContext, ambientContext: () => ({}) });
+    const ctx = mqtt(ADMIN.verdict);
+    expect(await (Table as any).put({ id: "m" }, { content: "x" }, ctx)).toBe("put-result");
+    expect(await (Table as any).delete({ id: "m" }, ctx)).toBe("delete-result");
+    expect(calls.map((c) => [c.method, c.self, c.args.length])).toEqual([["put", Table, 3], ["delete", Table, 2]]);
+  });
+
+  it("every other write goes to the inherited static synchronously, without resolving a caller", () => {
+    const { Table, calls } = makeWriteTable();
+    let resolved = 0;
+    guardTableSubscriptions({ Memory: Table }, {
+      resolveAuth: async () => { resolved++; return { kind: "anonymous" }; },
+      ambientContext: () => mqtt(ANON.verdict), // the ambient context is not consulted
+    });
+    // A REST request, an in-process call with no context, the two-argument form, a protocol marker on the target only.
+    expect((Table as any).put({ id: "m" }, { content: "x" }, { headers: {}, authorize: true })).toBe("put-result");
+    expect((Table as any).put({ id: "m", content: "x" })).toBe("put-result");
+    expect((Table as any).put({ id: "m", content: "x" }, { transaction: {} })).toBe("put-result");
+    expect((Table as any).delete({ id: "m", checkPermission: {} }, { request: { headers: {} } })).toBe("delete-result");
+    expect(resolved).toBe(0);
+    expect(calls.length).toBe(4);
+  });
+
+  it("refuses an MQTT session's retained put/delete when the caller cannot be resolved", async () => {
+    const { Table, calls } = makeWriteTable();
+    guardTableSubscriptions({ Memory: Table }, { resolveAuth: async () => { throw new Error("down"); }, ambientContext: () => ({}) });
+    await expect((Table as any).put({ id: "m" }, {}, mqtt(undefined))).rejects.toMatchObject({ statusCode: 500 });
+    expect(calls).toEqual([]);
+  });
+
+  it("retainedWriteContext reads the explicit context the way Harper does, never the ambient one", () => {
+    const ctx = { user: 1 };
+    expect(retainedWriteContext("put", [{}, { data: 1 }, ctx])).toBe(ctx);
+    expect(retainedWriteContext("put", [{}, ctx])).toBe(ctx); // (record, context) form
+    expect(retainedWriteContext("put", [{ id: "x" }])).toBeUndefined();
+    expect(retainedWriteContext("delete", [{}, ctx])).toBe(ctx);
+    expect(retainedWriteContext("delete", [{}, { data: 1 }, ctx])).toBe(ctx);
+    expect(retainedWriteContext("delete", ["id"])).toBeUndefined();
+  });
+});
+
+describe("a call a protocol layer made is never the trusted internal caller", () => {
+  const INTERNAL: SubscriptionCaller = { kind: "internal" };
+
+  it("isProtocolEntry reads Harper's markers: a non-null, non-false checkPermission, or authorize: true", () => {
+    expect(isProtocolEntry({ checkPermission: {} }, undefined)).toBe(true);
+    expect(isProtocolEntry({ checkPermission: { super_user: true } }, undefined)).toBe(true);
+    expect(isProtocolEntry({ id: null }, { authorize: true })).toBe(true);
+    expect(isProtocolEntry({ checkPermission: false }, undefined)).toBe(false);
+    expect(isProtocolEntry({ checkPermission: null }, { authorize: false })).toBe(false);
+    expect(isProtocolEntry({ id: null }, {})).toBe(false);
+    expect(isProtocolEntry(undefined, undefined)).toBe(false);
+    expect(isProtocolEntry("an id", "not a context")).toBe(false);
+  });
+
+  it("subscriptionCaller turns an internal verdict on a protocol-layer call into a caller without a credential", () => {
+    expect(subscriptionCaller(INTERNAL, { checkPermission: {} }, {})).toEqual({ kind: "anonymous" });
+    expect(subscriptionCaller(INTERNAL, { id: null }, { authorize: true })).toEqual({ kind: "anonymous" });
+    expect(subscriptionCaller(INTERNAL, { id: null }, {})).toEqual(INTERNAL);
+    const admin: SubscriptionCaller = { kind: "agent", agentId: "root", isAdmin: true };
+    expect(subscriptionCaller(admin, { checkPermission: {} }, { authorize: true })).toBe(admin);
+  });
+
+  it("an MQTT session context without an HTTP request (Harper's TCP listener) is refused with 401 on subscribe() and publish()", async () => {
+    const { Table, calls } = makeStreamTable();
+    // resolveAgentAuth answers `internal` for a context with no HTTP request.
+    guardTableSubscriptions({ Memory: Table }, { resolveAuth: async () => INTERNAL, ambientContext: () => ({}) });
+    const mqttContext = { session: {}, socket: {}, user: { role: { permission: { super_user: true } } }, authorize: true };
+    await expect((Table as any).subscribe({ id: null, checkPermission: {} }, mqttContext)).rejects.toMatchObject({ statusCode: 401 });
+    await expect((Table as any).publish({ id: "m", checkPermission: {} }, { content: "x" }, mqttContext)).rejects.toMatchObject({ statusCode: 401 });
+    // The same verdict without the markers is a trusted internal call.
+    await (Table as any).subscribe({ id: null });
+    expect(calls.map((c) => c.method)).toEqual(["subscribe"]);
+  });
+});
+
+describe("subscribeInProcess", () => {
+  it("calls the table's own subscribe() synchronously, with the same argument and receiver, without consulting the guard", () => {
+    const { Table, calls } = makeStreamTable();
+    let resolved = 0;
+    guardTableSubscriptions({ Memory: Table }, {
+      resolveAuth: async () => { resolved++; return { kind: "anonymous" }; },
+      ambientContext: () => AGENT,
+    });
+    const request = { omitCurrent: true };
+    expect(subscribeInProcess(Table, request)).toEqual({ subscription: "subscribe" }); // not a promise
+    expect(resolved).toBe(0);
+    expect(calls).toEqual([{ method: "subscribe", self: Table, args: [request] }]);
+  });
+
+  it("subscribes to a table the guard was not installed on directly", () => {
+    const { Table, calls } = makeStreamTable();
+    expect(subscribeInProcess(Table, { id: "x" })).toEqual({ subscription: "subscribe" });
+    expect(calls.length).toBe(1);
+  });
+});
+
+describe("subscribeCallerContext", () => {
+  const ambient = () => "ambient";
+  it("reads the second argument as the context, the third when both are passed, unwrapping getContext()", () => {
+    const ctx = { user: 1 };
+    expect(subscribeCallerContext(ctx, undefined, ambient)).toBe(ctx);
+    expect(subscribeCallerContext({ data: true }, ctx, ambient)).toBe(ctx);
+    expect(subscribeCallerContext({ getContext: () => ctx }, undefined, ambient)).toBe(ctx);
+  });
+  it("falls back to the ambient context", () => {
+    expect(subscribeCallerContext(undefined, undefined, ambient)).toBe("ambient");
+  });
+});
+
 describe("subscriptionCallerContext", () => {
   const ambient = () => "ambient";
   it("prefers the explicit context, unwrapping getContext()", () => {
@@ -151,6 +449,9 @@ describe("refusal text", () => {
       tableSubscriptionRefusal({ kind: "agent", agentId: "b", isAdmin: false })!,
       tableSubscriptionRefusal({ kind: "anonymous" })!,
       unverifiedSubscriberRefusal(),
+      tableSubscriptionRefusal({ kind: "agent", agentId: "b", isAdmin: false }, "publish")!,
+      tableSubscriptionRefusal({ kind: "anonymous" }, "publish")!,
+      unverifiedSubscriberRefusal("publish"),
     ];
     for (const err of refusals) {
       expect(Buffer.byteLength(`Error: ${err.message}`)).toBeLessThanOrEqual(MAX_REFUSAL_REASON_BYTES);
@@ -160,8 +461,12 @@ describe("refusal text", () => {
     expect(tableSubscriptionRefusal({ kind: "agent", agentId: "b", isAdmin: false })!.message).toBe("table subscriptions are for administrators");
     expect(tableSubscriptionRefusal({ kind: "anonymous" })!.message).toBe("table subscriptions need an administrator credential");
   });
-  it("admits only administrators and internal calls", () => {
-    expect(tableSubscriptionRefusal({ kind: "internal" })).toBeNull();
-    expect(tableSubscriptionRefusal({ kind: "agent", agentId: "root", isAdmin: true })).toBeNull();
+  it("admits only administrators and internal calls, for subscriptions and publishes alike", () => {
+    for (const action of ["subscribe", "publish"] as const) {
+      expect(tableSubscriptionRefusal({ kind: "internal" }, action)).toBeNull();
+      expect(tableSubscriptionRefusal({ kind: "agent", agentId: "root", isAdmin: true }, action)).toBeNull();
+      expect(tableSubscriptionRefusal({ kind: "agent", agentId: "b", isAdmin: false }, action)?.statusCode).toBe(403);
+      expect(tableSubscriptionRefusal({ kind: "anonymous" }, action)?.statusCode).toBe(401);
+    }
   });
 });

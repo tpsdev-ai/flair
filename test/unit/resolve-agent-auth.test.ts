@@ -89,6 +89,48 @@ describe("resolveAgentAuth — internal vs anonymous", () => {
   });
 });
 
+// ─── a context a protocol layer built is never internal ──────────────────────
+//
+// Harper's MQTT layer hands every action of a session a context it builds
+// itself: { session, socket, user, authorize: true, request? } — `request` only
+// for MQTT over WebSocket. On Harper's TCP or TLS listener there is no HTTP
+// request, so such a context would otherwise land on the final `internal`
+// return (resources/protocol-context.ts).
+
+/** A stand-in for Harper's MQTT session object (DurableSubscriptionsSession). */
+const mqttSession = () => ({ sessionId: "client-1", addSubscription: async () => undefined });
+
+describe("resolveAgentAuth — protocol-layer contexts", () => {
+  it("an MQTT session's context without an HTTP request → anonymous, whatever user CONNECT produced", async () => {
+    expect(await resolveAgentAuth({ session: mqttSession(), socket: {}, user: superUser, authorize: true }))
+      .toEqual({ kind: "anonymous" });
+    // Harper clears `authorize` after its first entry call; the session still marks the context.
+    expect(await resolveAgentAuth({ session: mqttSession(), socket: {}, user: superUser, authorize: false }))
+      .toEqual({ kind: "anonymous" });
+    expect(await resolveAgentAuth({ session: mqttSession(), socket: undefined, user: undefined }))
+      .toEqual({ kind: "anonymous" });
+  });
+
+  it("a context still carrying authorize: true with no HTTP request (Harper's MCP subscription shape) → anonymous", async () => {
+    expect(await resolveAgentAuth({ user: superUser, authorize: true, request: { id: "x", isCollection: false } }))
+      .toEqual({ kind: "anonymous" });
+  });
+
+  it("an MQTT-over-WebSocket context is resolved from its upgrade request", async () => {
+    expect(await resolveAgentAuth({ session: mqttSession(), socket: {}, user: superUser, authorize: true, request: getShape() }))
+      .toEqual({ kind: "anonymous" });
+    expect(await resolveAgentAuth({ session: mqttSession(), socket: {}, request: { tpsAgent: "agent-9", tpsAgentIsAdmin: true } }))
+      .toEqual({ kind: "agent", agentId: "agent-9", isAdmin: true });
+  });
+
+  it("a context with no request and no protocol-layer marker is still the trusted internal call", async () => {
+    expect(await resolveAgentAuth({})).toEqual({ kind: "internal" });
+    expect(await resolveAgentAuth({ user: superUser, authorize: false })).toEqual({ kind: "internal" });
+    // A `session` that is not an MQTT session object (no socket, no subscriptions) does not mark it.
+    expect(await resolveAgentAuth({ session: { id: "cookie-session" } })).toEqual({ kind: "internal" });
+  });
+});
+
 // ─── gate annotations (unchanged) ─────────────────────────────────────────────
 
 describe("resolveAgentAuth — gate annotations (handler phase)", () => {

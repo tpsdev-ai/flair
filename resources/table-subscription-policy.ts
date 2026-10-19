@@ -1,44 +1,85 @@
 /**
- * Subscriptions on flair's table routes are served to administrators and
- * trusted internal callers only.
+ * Subscriptions and publishes on flair's tables are served to administrators
+ * and trusted internal callers only, on every transport.
  *
  * An exported table has a subscription route: SSE (`Accept:
  * text/event-stream`, which Harper dispatches as CONNECT) and WebSocket on
- * `/<Table>/` and `/<Table>/<id>`. A table subscription streams the table's
- * stored rows, while flair's per-record read rules are applied by each
- * resource's get()/search(). So the table route refuses every caller that is
- * not an administrator or a trusted internal call: a verified non-admin agent
- * gets 403, a caller without a valid credential 401. Resources that are not
- * tables, such as the feed resources, decide their own subscribers and are not
+ * `/<Table>/` and `/<Table>/<id>`. When Harper's MQTT broker is on, the same
+ * table is also an MQTT topic (`<Table>/#`, `<Table>/<id>`, ...): a SUBSCRIBE
+ * streams it, a PUBLISH writes a message to it, and a retained PUBLISH writes
+ * (or, with an empty payload, deletes) the row itself. A table subscription
+ * streams the table's stored rows, while flair's per-record read rules are
+ * applied by each resource's get()/search(). So every table subscription and
+ * every MQTT publish to a table, retained or not, refuses a caller that is not
+ * an administrator or a trusted internal call: a verified non-admin agent gets
+ * 403, a caller without a valid credential 401. Resources that are not tables,
+ * such as the feed resources, decide their own subscribers and are not
  * affected.
  *
  * ── The seam ────────────────────────────────────────────────────────────────
- * Harper enters an exported table's subscription route — SSE and WebSocket
- * alike — through the static `connect()` of the class registered for that
- * route, and hands it the request as its context. `guardTableSubscriptions`
- * replaces that static `connect()` on every table class in the flair
- * database's table registry, read at load (resources/table-subscriptions.ts),
- * not from a list someone maintains:
+ * Harper enters a table through statics of the class registered for its path,
+ * each handed the caller's context:
+ *   - `connect()` — the SSE and WebSocket subscription routes (the context is
+ *     the HTTP request);
+ *   - `subscribe()` — an MQTT SUBSCRIBE (DurableSubscriptionsSession's
+ *     addSubscription), and Harper's MCP `resources/subscribe` when that
+ *     component is configured;
+ *   - `publish()` — an MQTT PUBLISH (publishMessage);
+ *   - `put()` / `delete()` — a retained MQTT PUBLISH (publishMessage, and a
+ *     session's retained will). These two statics are also the entry of
+ *     ordinary put and delete calls (a REST PUT or DELETE, flair's own
+ *     writes), so their guard decides only a call whose context is an MQTT
+ *     session's (resources/protocol-context.ts); every other put()/delete()
+ *     call goes to the inherited static unchanged and synchronously, without
+ *     resolving a caller, and keeps flair's write rules. Harper's `post()` and
+ *     `patch()` statics are separate and not wrapped (an MQTT PUBLISH reaches
+ *     neither).
+ * `guardTableSubscriptions` replaces these statics on every table class in the
+ * flair database's table registry, read at load
+ * (resources/table-subscriptions.ts), not from a list someone maintains. For
+ * every call it decides — each connect(), subscribe() and publish(), and each
+ * put()/delete() made with an MQTT session's context — the replacement
+ * resolves the caller from the context Harper would use for that call and
+ * asks ONE decision function, `tableSubscriptionRefusal`, so the entries
+ * cannot drift apart:
  *   - a table added to the schema is in that registry, so its class gets the
- *     guard without anyone naming it, and its route uses the guard once the
- *     table is exported;
- *   - a flair resource class that extends a table inherits the guarded static,
- *     and overriding an INSTANCE `connect()`/`subscribe()` does not bypass it,
- *     because the static runs first. A class that defines its own STATIC
- *     `connect()` replaces the guarded one; none does today, and one that does
- *     must apply the same check itself;
- *   - in-process callers (the feed resources, the BM25 index) subscribe
- *     through the table's `subscribe()`, not `connect()`, so they are
- *     unaffected.
+ *     guard without anyone naming it, and its routes and topics use the guard
+ *     once the table is exported;
+ *   - a flair resource class that extends a table inherits the guarded
+ *     statics, and an INSTANCE method it overrides runs only after them,
+ *     because the static runs first. A class that defines one of these STATICS
+ *     itself replaces the guarded one; none does today, and one that does must
+ *     apply the same check itself;
+ *   - flair's own in-process readers (the feed resources, which apply their
+ *     own subscriber rules, and the BM25 index) read a table's changes through
+ *     `subscribeInProcess()`, which calls the table's subscribe() as Harper
+ *     defines it. A call that reaches the static `subscribe()` instead is
+ *     decided by the guard like any other.
+ *
+ * ── Which caller is decided on ──────────────────────────────────────────────
+ * resolveAgentAuth (resources/agent-auth.ts) resolves the context: over SSE,
+ * WebSocket and MQTT over WebSocket the context carries the HTTP request whose
+ * Authorization header identifies the caller. A context a protocol layer built
+ * without an HTTP request — an MQTT session on Harper's TCP or TLS listener —
+ * resolves as anonymous, and so does any other context with no HTTP request
+ * that Harper marks for authorization; a call with neither is the trusted
+ * `internal` verdict of in-process code. The guard also treats a call whose
+ * target carries Harper's protocol-layer marker (a non-null, non-false
+ * `checkPermission`) as never `internal`: it is decided as a caller without a
+ * valid credential (401).
+ *
  * test/integration/table-subscription-default-deny.test.ts reads every table in
  * the database at runtime and fails if a non-admin subscriber is admitted to a
  * table's collection route (`/<Table>/`) or by-id route (`/<Table>/<id>`), over
- * SSE or WebSocket.
+ * SSE or WebSocket. test/integration/table-subscription-mqtt.test.ts checks
+ * MQTT subscribe, publish and retained publish on a Harper with MQTT turned on.
  *
- * This module has no imports, so it is unit-tested directly
+ * This module imports only resources/protocol-context.ts, which has no
+ * imports, so it is unit-tested directly
  * (test/unit/table-subscription-policy.test.ts); the dependencies it needs are
  * passed in by resources/table-subscriptions.ts.
  */
+import { isMqttSessionContext, isProtocolLayerContext } from "./protocol-context.js";
 
 /** The caller verdict the guard decides on (resources/agent-auth.ts's AgentAuthVerdict). */
 export type SubscriptionCaller =
@@ -53,9 +94,28 @@ export interface TableSubscriptionGuardDeps {
   ambientContext: () => unknown;
 }
 
-/** Marks a table class whose static `connect()` has been guarded. */
+/** Marks a table class whose subscription and publish statics have been guarded. */
 export const TABLE_SUBSCRIPTION_GUARD: unique symbol = Symbol.for("flair.tableSubscriptionGuard");
 
+/**
+ * Holds a guarded table's subscribe() as Harper defines it, for
+ * subscribeInProcess(). Not exported: in-process readers go through
+ * subscribeInProcess().
+ */
+const IN_PROCESS_SUBSCRIBE: unique symbol = Symbol.for("flair.tableSubscriptionInProcessSubscribe");
+
+/**
+ * The table statics the guard replaces, and what each one does: connect() and
+ * subscribe() open a subscription, publish() writes a message to the table.
+ */
+export const GUARDED_TABLE_STATICS = Object.freeze({
+  connect: "subscribe",
+  subscribe: "subscribe",
+  publish: "publish",
+} as const);
+
+/** What a guarded call does, as the refusal names it. */
+export type TableStreamAction = (typeof GUARDED_TABLE_STATICS)[keyof typeof GUARDED_TABLE_STATICS];
 
 function looksLikeContext(value: unknown): boolean {
   if (value == null || typeof value !== "object") return false;
@@ -71,20 +131,70 @@ function looksLikeContext(value: unknown): boolean {
   );
 }
 
+function unwrapContext(value: unknown): unknown {
+  return (value as any)?.getContext?.() || value;
+}
+
 /**
- * The context a static `connect(target, data, context)` call runs under,
- * resolved the way Harper resolves it: the explicit context argument (the
- * request, for SSE and WebSocket), else a context passed in the data position
- * (the two-argument in-process form), else the ambient context.
+ * The context a static `connect(target, data, context)` or
+ * `publish(target, data, context)` call runs under, resolved the way Harper
+ * resolves it: the explicit context argument (the request, for SSE and
+ * WebSocket; the MQTT session's context, for a publish), else a context passed
+ * in the data position (the two-argument in-process form), else the ambient
+ * context.
  */
 export function subscriptionCallerContext(
   data: unknown,
   context: unknown,
   ambientContext: () => unknown,
 ): unknown {
-  if (context) return (context as any).getContext?.() || context;
-  if (looksLikeContext(data)) return (data as any).getContext?.() || data;
+  if (context) return unwrapContext(context);
+  if (looksLikeContext(data)) return unwrapContext(data);
   return ambientContext();
+}
+
+/**
+ * The context a static `subscribe(target, context)` call runs under. subscribe()
+ * takes no body, so Harper reads its second argument as the context — or, when
+ * a third is passed, the third. Without either, the ambient context.
+ */
+export function subscribeCallerContext(
+  second: unknown,
+  third: unknown,
+  ambientContext: () => unknown,
+): unknown {
+  if (second && third) return unwrapContext(third);
+  if (second) return unwrapContext(second);
+  return ambientContext();
+}
+
+/**
+ * Whether Harper marked this call as made by a protocol layer: REST, MQTT and
+ * MCP set a non-null, non-false `checkPermission` on the target; MQTT and MCP
+ * set `authorize: true` on the context, and an MQTT session's context carries
+ * the session (resources/protocol-context.ts).
+ */
+export function isProtocolEntry(target: unknown, context: unknown): boolean {
+  const permission = target != null && typeof target === "object"
+    ? (target as { checkPermission?: unknown }).checkPermission
+    : undefined;
+  if (permission != null && permission !== false) return true;
+  return isProtocolLayerContext(context);
+}
+
+/**
+ * The caller a guarded call is decided on: the resolved verdict, except that a
+ * call a protocol layer made is never the trusted internal caller. Such a call
+ * whose context carries no HTTP request with a credential is a caller without
+ * a valid credential.
+ */
+export function subscriptionCaller(
+  verdict: SubscriptionCaller,
+  target: unknown,
+  context: unknown,
+): SubscriptionCaller {
+  if (verdict.kind === "internal" && isProtocolEntry(target, context)) return { kind: "anonymous" };
+  return verdict;
 }
 
 /**
@@ -96,31 +206,135 @@ export function subscriptionCallerContext(
 export const MAX_REFUSAL_REASON_BYTES = 123;
 
 /**
- * Why `caller` may not subscribe to a table route, as the error the route
- * returns; null for an administrator or a trusted internal call.
+ * The decision: why `caller` may not subscribe to (or publish to) a table, as
+ * the error the route or topic returns; null for an administrator or a trusted
+ * internal call. Every guarded entry asks this function, so subscription and
+ * publish admit exactly the same callers.
  */
-export function tableSubscriptionRefusal(caller: SubscriptionCaller): (Error & { statusCode: number }) | null {
+export function tableSubscriptionRefusal(
+  caller: SubscriptionCaller,
+  action: TableStreamAction = "subscribe",
+): (Error & { statusCode: number }) | null {
   if (caller.kind === "internal") return null;
   if (caller.kind === "agent" && caller.isAdmin === true) return null;
+  const what = action === "publish" ? "table publishes" : "table subscriptions";
   if (caller.kind === "agent") {
-    return Object.assign(new Error("table subscriptions are for administrators"), { statusCode: 403 });
+    return Object.assign(new Error(`${what} are for administrators`), { statusCode: 403 });
   }
-  return Object.assign(new Error("table subscriptions need an administrator credential"), { statusCode: 401 });
+  return Object.assign(new Error(`${what} need an administrator credential`), { statusCode: 401 });
 }
 
-/** The error for a subscription whose caller could not be resolved. */
-export function unverifiedSubscriberRefusal(): Error & { statusCode: number } {
-  return Object.assign(
-    new Error("the subscriber could not be verified, so the table subscription was refused; retry"),
-    { statusCode: 500 },
-  );
+/** The error for a subscription or publish whose caller could not be resolved. */
+export function unverifiedSubscriberRefusal(action: TableStreamAction = "subscribe"): Error & { statusCode: number } {
+  const message = action === "publish"
+    ? "the publisher could not be verified, so the table publish was refused; retry"
+    : "the subscriber could not be verified, so the table subscription was refused; retry";
+  return Object.assign(new Error(message), { statusCode: 500 });
 }
 
 /**
- * Replace the static `connect()` of every table class in `tables` with one that
- * admits only administrators and trusted internal calls, then delegates to the
- * inherited `connect()` unchanged. Idempotent. A failure to resolve the caller
- * refuses the subscription. Returns the names of the guarded tables.
+ * Read a flair table's changes from flair's own in-process code: the table's
+ * subscribe() as Harper defines it, called synchronously with the same
+ * argument, without the guard. Clients cannot invoke this helper directly: an
+ * authorized feed request reaches it through FeedMemories.connect() or
+ * FeedSouls.connect(), after those resources apply their own subscriber
+ * rules, and the BM25 index calls it for its own feed. A table the guard was
+ * not installed on is subscribed to directly.
+ */
+export function subscribeInProcess(table: any, request?: unknown): any {
+  const subscribe = table?.[IN_PROCESS_SUBSCRIBE];
+  return typeof subscribe === "function" ? subscribe.call(table, request) : table.subscribe(request);
+}
+
+/**
+ * The table statics a retained MQTT PUBLISH reaches: Harper's publishMessage
+ * calls `put(target, data, context)` for a retained message with a payload and
+ * `delete(target, context)` for one without. Their guard decides only a call
+ * made with an MQTT session's context; every other put()/delete() call passes
+ * through without resolving a caller.
+ */
+export const RETAINED_PUBLISH_STATICS: readonly string[] = Object.freeze(["put", "delete"]);
+
+/**
+ * The explicit context of a `put(target, data, context)` or
+ * `delete(target, context)` call, as Harper reads it; undefined when the call
+ * passes none (the ambient context is not consulted: Harper's MQTT layer
+ * always passes its session's context explicitly).
+ */
+export function retainedWriteContext(method: string, args: readonly unknown[]): unknown {
+  return method === "delete"
+    ? subscribeCallerContext(args[1], args[2], () => undefined)
+    : subscriptionCallerContext(args[1], args[2], () => undefined);
+}
+
+/** Harper reads `reliesOnPrototype` off its static entry functions; the replacement keeps it. */
+function carryStaticMarkers<T extends Function>(replacement: T, inherited: Function): T {
+  const marker = (inherited as { reliesOnPrototype?: unknown }).reliesOnPrototype;
+  if (marker !== undefined) Object.defineProperty(replacement, "reliesOnPrototype", { value: marker });
+  return replacement;
+}
+
+function guardedRetainedWrite(
+  method: string,
+  inherited: (...args: unknown[]) => unknown,
+  deps: TableSubscriptionGuardDeps,
+) {
+  const guarded = {
+    [method](this: unknown, ...args: unknown[]) {
+      const context = retainedWriteContext(method, args);
+      // Every write that is not an MQTT session's goes to the inherited static
+      // as it was called: same arguments, same receiver, same synchronous call.
+      if (!isMqttSessionContext(context)) return inherited.apply(this, args);
+      return (async () => {
+        let caller: SubscriptionCaller;
+        try {
+          caller = subscriptionCaller(await deps.resolveAuth(context), args[0], context);
+        } catch {
+          throw unverifiedSubscriberRefusal("publish");
+        }
+        const refusal = tableSubscriptionRefusal(caller, "publish");
+        if (refusal) throw refusal;
+        return inherited.apply(this, args);
+      })();
+    },
+  }[method];
+  return guarded;
+}
+
+function guardedStatic(
+  method: keyof typeof GUARDED_TABLE_STATICS,
+  inherited: (...args: unknown[]) => unknown,
+  deps: TableSubscriptionGuardDeps,
+) {
+  const action = GUARDED_TABLE_STATICS[method];
+  const contextOf = method === "subscribe" ? subscribeCallerContext : subscriptionCallerContext;
+  // A named function expression, so the replaced static keeps its name.
+  const guarded = {
+    async [method](this: unknown, ...args: unknown[]) {
+      const context = contextOf(args[1], args[2], deps.ambientContext);
+      let caller: SubscriptionCaller;
+      try {
+        caller = subscriptionCaller(await deps.resolveAuth(context), args[0], context);
+      } catch {
+        throw unverifiedSubscriberRefusal(action);
+      }
+      const refusal = tableSubscriptionRefusal(caller, action);
+      if (refusal) throw refusal;
+      return inherited.apply(this, args);
+    },
+  }[method];
+  return guarded;
+}
+
+/**
+ * Replace the static `connect()`, `subscribe()` and `publish()` of every table
+ * class in `tables` with ones that admit only administrators and trusted
+ * internal calls, then delegate to the inherited static unchanged; and its
+ * static `put()` and `delete()` with ones that decide the same way a call made
+ * with an MQTT session's context (a retained MQTT PUBLISH) and pass every other
+ * put()/delete() call through without resolving a caller. Idempotent. A
+ * failure to resolve the caller refuses the call.
+ * Returns the names of the guarded tables.
  */
 export function guardTableSubscriptions(
   tables: Record<string, unknown> | null | undefined,
@@ -134,24 +348,33 @@ export function guardTableSubscriptions(
       guarded.push(name);
       continue;
     }
-    const inherited = table.connect;
-    if (typeof inherited !== "function") continue; // no subscription entry point to guard
-    Object.defineProperty(table, "connect", {
-      configurable: true,
-      writable: true,
-      enumerable: false,
-      value: async function connect(this: unknown, target: unknown, data?: unknown, context?: unknown) {
-        let caller: SubscriptionCaller;
-        try {
-          caller = await deps.resolveAuth(subscriptionCallerContext(data, context, deps.ambientContext));
-        } catch {
-          throw unverifiedSubscriberRefusal();
-        }
-        const refusal = tableSubscriptionRefusal(caller);
-        if (refusal) throw refusal;
-        return inherited.call(this, target, data, context);
-      },
-    });
+    let replaced = 0;
+    for (const method of Object.keys(GUARDED_TABLE_STATICS) as Array<keyof typeof GUARDED_TABLE_STATICS>) {
+      const inherited = table[method];
+      if (typeof inherited !== "function") continue; // no such entry point to guard
+      if (method === "subscribe") {
+        Object.defineProperty(table, IN_PROCESS_SUBSCRIBE, { value: inherited });
+      }
+      Object.defineProperty(table, method, {
+        configurable: true,
+        writable: true,
+        enumerable: false,
+        value: carryStaticMarkers(guardedStatic(method, inherited, deps), inherited),
+      });
+      replaced++;
+    }
+    for (const method of RETAINED_PUBLISH_STATICS) {
+      const inherited = table[method];
+      if (typeof inherited !== "function") continue;
+      Object.defineProperty(table, method, {
+        configurable: true,
+        writable: true,
+        enumerable: false,
+        value: carryStaticMarkers(guardedRetainedWrite(method, inherited, deps), inherited),
+      });
+      replaced++;
+    }
+    if (replaced === 0) continue;
     Object.defineProperty(table, TABLE_SUBSCRIPTION_GUARD, { value: true });
     guarded.push(name);
   }

@@ -76,6 +76,22 @@ a valid credential with **401** (close code 3000). Verified agents receive
 changes to the memories they can read through `/FeedMemories`, and soul changes
 through `/FeedSouls`; neither is a table.
 
+Flair's local installs run Harper with MQTT off. When an operator turns MQTT
+on, an exported table's path is also an MQTT topic (`<Table>/#`,
+`<Table>/<id>`) — except a path that a resource other than the table serves
+(`AgentReadPosition`, `OAuthToken`), which follows that resource's own rules —
+and every MQTT action on a table topic follows the same rule: a SUBSCRIBE, a
+PUBLISH, and a retained PUBLISH (which writes the row, or with an empty payload
+deletes it) are served to administrators and trusted internal callers only. A
+verified non-admin agent gets SUBACK or PUBACK reason code `0x87` (not
+authorized); a caller without a valid credential is refused at CONNECT, or gets
+`0x80` when Harper admits its session. A refused publish reaches no subscriber,
+and a refused retained publish leaves the row as it was. Over MQTT on WebSocket
+the credential is the one on the WebSocket upgrade request, as for SSE and
+WebSocket. An MQTT connection on Harper's TCP or TLS listener carries no HTTP
+request, so flair resolves the caller of each of its actions as one without a
+valid credential, whatever it sent in CONNECT.
+
 Every Ed25519-signed request and federation body carries a nonce, recorded
 once per instance in the `ReplayNonce` table before the request takes effect.
 A nonce already recorded, or being recorded by a concurrent request, is refused
