@@ -257,7 +257,7 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
       flairVersion: opts.flairVersion,
       memories: currentMem,
       soul: currentSouls.length === 1 ? currentSouls[0] : currentSouls.length > 1 ? currentSouls : null,
-      pendingCandidateCount: 0, // not load-bearing at restore time
+      pendingCandidateCount: null, // not counted at restore time (flair#2680)
       rootOverride: opts.preRestoreSnapshotRoot,
       runId: `rem-restore-pre-${(opts.nowOverride ?? new Date()).toISOString().replace(/[:.]/g, "-")}`,
       nowOverride: opts.nowOverride,

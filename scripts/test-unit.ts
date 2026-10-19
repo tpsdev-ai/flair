@@ -47,21 +47,26 @@ export function unitTempBase(platform: NodeJS.Platform, env: NodeJS.ProcessEnv):
 // final summary nor the end-of-lane guards ever run. Every number below is
 // derived from that job: `.github/workflows/test.yml`, job `test-unit`,
 // `timeout-minutes: 22`. Measured on 105 completed `Unit Tests (node N, shard
-// M)` legs from the last 45 `test.yml` runs (2026-10-17), plus a local run on
-// the same tree:
+// M)` legs from the last 45 `test.yml` runs (2026-10-17), plus 16 legs from 8
+// recent completed `test.yml` runs and a local run on the same tree
+// (2026-10-18):
 //   - the job's own steps outside the lane (setup before it, the skip-count
 //     check and post steps after it): at most 53 s (2026-09-29);
 //   - the whole lane: each leg runs one shard (flair#2311); the slowest shard
-//     measured at least 781 s (its slowest legs were killed at the old 780 s cap,
-//     so 781 s is a lower bound; p90 over the sample 755 s), 740 s locally;
+//     measured 793 s on 2026-10-18 (earlier legs were killed at the old 780 s
+//     cap; p90 over the 2026-10-17 sample 755 s), 740 s locally;
 //   - `root unit tests`: 96–266 s per root shard, and the two root shards one
 //     lane shard carries together measure 229–330 s and 392–526 s;
 //   - the slowest non-root step measured 43 s; in that set the median is 1–2 s.
-// The budget is whole-lane headroom: 1320 − 120 = 1200 s, at most about 1.54×
-// the slowest measured shard (at least 781 s), still subject to each step's own limit below;
-// the old 780 s budget sat below that shard and killed whichever late step was
-// running on a busy runner (flair#2614: four node-22 shard runs were killed at
-// `test/unit-isolated/` steps with steps unrun on 2026-10-17).
+// A CI leg starts the lane after the job's first step records the start, so it
+// runs under the DERIVED budget, not this fixed fallback. Setup measured
+// 24–34 s on the 2026-10-18 legs (`lane deadline: 1166–1176 s`), leaving at
+// least 1.45× the slowest lane at the worst setup (1166 s vs 793 s), still
+// subject to each step's own limit below; the fixed 1320 − 120 = 1200 s
+// fallback is used only when no usable start was recorded. The old 780 s
+// budget sat below the slowest shard and killed whichever late step was running on a busy runner
+// (flair#2614: four node-22 shard runs were killed at `test/unit-isolated/`
+// steps with steps unrun on 2026-10-17).
 // unit-runner.test.ts pins the job limit and re-checks the arithmetic, so a
 // change to either side fails there first.
 //
@@ -100,12 +105,12 @@ export function laneBudgetMsFromJobStart(env: NodeJS.ProcessEnv, nowMs: number):
 /**
  * The default per-step limit: 150 s, at least 3× the slowest ordinary step (43 s). One
  * hung step costs at most that, so the rest of the slowest lane still runs
- * inside the budget (781 + 150 = 931 s ≤ 1200 s).
+ * inside the worst derived budget (793 + 150 = 943 s ≤ 1166 s).
  */
 export const STEP_TIMEOUT_MS = 150_000;
 // `root unit tests`' own limit is 450 s, 1.69× its slowest measured root shard
-// (266 s). If it hangs, the slowest lane shard's other steps still fit (781 −
-// 266 + 450 = 965 s ≤ 1200 s). It is defined in scripts/ci/lane-shards.mjs, which
+// (266 s). If it hangs, the slowest lane shard's other steps still fit (793 −
+// 266 + 450 = 977 s ≤ 1166 s). It is defined in scripts/ci/lane-shards.mjs, which
 // builds the plan, and re-exported above for this module's tests.
 
 /** The time limits a lane runs under (flair#2030). */

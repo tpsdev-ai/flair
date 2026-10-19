@@ -3,6 +3,7 @@ import { Resource, databases, server } from "harper";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import nacl from "tweetnacl";
 import { allowAdmin } from "./agent-auth.js";
+import { configuredAdminAgentIds } from "./agent-admin.js";
 import {
   canonicalize,
   signBody,
@@ -41,6 +42,9 @@ import {
   checkPrincipalEntitlement,
   inboundChangesExistingPrincipalStatus,
   inboundChangesExistingPendingKey,
+  agentAdminIdCreateRefusal,
+  agentIdentityRefusal,
+  keepReceiverAgentAuthority,
   type FederationSyncTable,
   type SkipReason,
 } from "./federation-classify.js";
@@ -1208,9 +1212,8 @@ export class FederationSync extends Resource {
       const planned = mergePresenceReceipt(local, validated.row, receivedAt);
       if (planned.action === "skip") return { reason: planned.reason };
 
-      // Same failure path as the generic merge: the started flag is set BEFORE
-      // the write, so a post-write exception is INDETERMINATE (not retryable),
-      // and a changed row is the SAME named conflict the generic merge reports.
+      // As in the generic merge: write-back conflicts aborted before commit are
+      // merge_target_changed; other errors after write-back starts are indeterminate.
       let outcome: any;
       markWriteStarted();
       try {
@@ -1224,7 +1227,7 @@ export class FederationSync extends Resource {
             if (currentHome) return { skip: true, reason: currentHome };
             const current = mergePresenceReceipt(row, validated.row, receivedAt);
             if (current.action === "skip") return { skip: true, reason: current.reason };
-            return { write: current.row };
+            return { idempotent: true, write: current.row };
           },
           {
             label: "FederationSync",
@@ -1236,11 +1239,8 @@ export class FederationSync extends Resource {
           },
         );
       } catch (err) {
-        // The helper's named refusal for a row that changed: the owned
-        // transaction aborted, so nothing was written — refuse the key, not
-        // indeterminate. Matches the generic merge's handler below.
         if (err instanceof WriteBackConflictError) {
-          return { reason: "merge_target_changed" };
+          return err.outcome === "conflict" ? { reason: "merge_target_changed" } : { indeterminate: true };
         }
         throw err;
       }
@@ -1440,8 +1440,6 @@ export class FederationSync extends Resource {
         // merge read and built from): a change to any field committed between that
         // read and the helper's in-transaction read skips the record as
         // merge_target_changed. The committed row is checked again before commit.
-        // A change committed after that final read is not seen: Harper has no
-        // compare-and-set (write-back.ts).
         //
         // flair#2450 set `wholeRow` for Soul, Agent, Relationship and Message;
         // flair#2475 extends it to Memory: Memory's identity fields
@@ -1471,6 +1469,20 @@ export class FederationSync extends Resource {
               if (record.table === "Agent" && inboundChangesExistingPendingKey(record, row)) {
                 return { skip: true, reason: "agent_pending_key_not_federated" };
               }
+              // flair#2665: a new row whose id the receiver's FLAIR_ADMIN_AGENTS
+              // names is not created. An existing row's publicKey and home
+              // change only through a record whose batch-verified sender
+              // (`instanceId`) is the row's stored home; a record from another
+              // sender that would change either is skipped whole. The merge
+              // does not set or change the `role: "admin"` / `admin: true`
+              // fields.
+              if (record.table === "Agent") {
+                const agentRefusal =
+                  agentAdminIdCreateRefusal(record, row, configuredAdminAgentIds()) ??
+                  agentIdentityRefusal(record, row, instanceId);
+                if (agentRefusal) return { skip: true, reason: agentRefusal };
+                keepReceiverAgentAuthority(mergedData, row);
+              }
               // Absorbing-state guard for the Message table (flair#1521 §12
               // P0-3). Generic newer-wins LWW would let a deadline-sweep `failed`
               // (or any other state) written on a peer overwrite a locally-
@@ -1489,7 +1501,7 @@ export class FederationSync extends Resource {
                 }
               }
               if (record.table === "Memory") normalizeEmptyEmbedding(mergedData);
-              return { write: mergedData };
+              return { idempotent: true, write: mergedData };
             },
             {
               label: "FederationSync",
@@ -1506,14 +1518,8 @@ export class FederationSync extends Resource {
             },
           );
         } catch (err) {
-          // A merge refusal returned by the write path itself: the helper
-          // names a changed row with WriteBackConflictError only after its
-          // owned transaction aborted, whether the change was seen at the
-          // in-transaction comparison or at the committed-row confirmation
-          // after staging. Nothing was written, so the key is refused, not
-          // indeterminate.
           if (err instanceof WriteBackConflictError) {
-            return { reason: "merge_target_changed" };
+            return err.outcome === "conflict" ? { reason: "merge_target_changed" } : { indeterminate: true };
           }
           throw err;
         }

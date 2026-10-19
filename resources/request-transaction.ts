@@ -1,3 +1,4 @@
+import { currentWriteJournal } from "./write-journal-context.js";
 /**
  * request-transaction.ts — one shared write scope for the host-pointer path
  * (flair#1940 slice 1). A Memory row and its `MemoryHostSource` pointer row
@@ -58,7 +59,15 @@ export async function withSharedWriteTransaction<T>(ctx: any, fn: (shared: any) 
       "flair: Harper's transaction() is unavailable — refusing to run a Memory/pointer write unwrapped (A7: no silent loss)",
     );
   }
-  return (await txn(shared, () => fn(shared))) as T;
+  const journal = currentWriteJournal();
+  if (!journal) return (await txn(shared, () => fn(shared))) as T;
+  return journal.transaction(shared, (capture, complete) => txn(shared, async () => {
+    capture();
+    const result = await fn(shared);
+    journal.assertCoverage();
+    complete();
+    return result;
+  }));
 }
 
 /**

@@ -4,8 +4,7 @@
  * which never stamped `visibility` at all. riskClass 'derived-only':
  * `visibility` here is a derived stamp recomputable at any time from
  * `durability` (which remains on the row, untouched, forever) — never the
- * only copy of anything (invariant I) — and this migration only ever writes
- * into a field that is CURRENTLY EMPTY, so the cheapest posture applies:
+ * only copy of anything (invariant I). The plan requires an empty visibility:
  * metadata-only snapshot, no content-hash gate (row-count + stamp
  * convergence only, same as `embedding-stamp`/`graph-heal`).
  *
@@ -45,13 +44,8 @@
  * definition is the safer contract than a shared import with a landmine
  * behind it. If this rule ever changes, both copies must change together.
  *
- * NEVER OVERWRITES an existing `visibility` value — that is an explicit
- * author decision (their own call, even if it disagrees with what this
- * migration would have derived). Only rows where `visibility` is
- * null/undefined are eligible, and `run()` below re-verifies that on a
- * freshly-read record immediately before writing (the actual enforcement
- * of "never overwrite" — see the write-gate comment there), independent of
- * how precisely the candidate-selection query below narrowed things.
+ * The per-id Memory lock shared with owner PUT/PATCH protects the missing-
+ * visibility decision and write. Writers outside that lock are not serialized.
  *
  * THE CANDIDATE QUERY — why it looks different from `embedding-stamp`'s:
  * `visibility` is declared in `schemas/memory.graphql` but NOT `@indexed`
@@ -134,9 +128,9 @@
  * omitting it.
  */
 import { databases } from "harper";
-import { stripUndeclaredMemoryAttributes } from "../memory-declared-attributes.js";
 import { writeBackCommittedRow as writeBackCommittedRowImpl, type WriteBackFn } from "../write-back.js";
 import { txnPausePoint } from "../txn-pause-point.js";
+import { withMemoryWriteLockOnce } from "../memory-write-lock.js";
 import type { Migration, RunBatchResult } from "./types.js";
 
 export type BackfilledVisibility = "private" | "shared";
@@ -149,6 +143,11 @@ export interface MemoryTableLike {
 
 function defaultMemoryTable(): MemoryTableLike {
   return (databases as unknown as { flair: { Memory: MemoryTableLike } }).flair.Memory;
+}
+
+/** The per-id lock the backfill's writes run under (flair#2478 slice 2). */
+function defaultMemoryLockStore(): unknown {
+  return (databases as any)?.flair?.Memory?.primaryStore;
 }
 
 export const VISIBILITY_BACKFILL_ID = "visibility-backfill";
@@ -189,6 +188,7 @@ function pendingCondition() {
 export function createVisibilityBackfillMigration(
   getTable: () => MemoryTableLike = defaultMemoryTable,
   writeBackCommittedRow: WriteBackFn = writeBackCommittedRowImpl,
+  getLockStore: () => unknown = defaultMemoryLockStore,
 ): Migration {
   return {
     id: VISIBILITY_BACKFILL_ID,
@@ -222,39 +222,46 @@ export function createVisibilityBackfillMigration(
       for (const row of candidates) {
         const id = String((row as { id?: unknown }).id ?? "");
         if (!id) continue;
-        const outcome = await writeBackCommittedRow(
-          table as unknown as Parameters<WriteBackFn>[0],
-          id,
-          (existing: any) => {
-            if (!existing) return { skip: true } as const; // deleted since the search above — nothing to fix
+        // The decision and the write run under the per-id memory write lock
+        // (flair#2478 slice 2). One attempt: a held id is left for the next
+        // cycle, never written unserialized and never waited on unboundedly.
+        const outcome = await withMemoryWriteLockOnce(getLockStore(), [id], async () => {
+          const result = await writeBackCommittedRow(
+            table as unknown as Parameters<WriteBackFn>[0],
+            id,
+            (existing: any) => {
+              if (!existing) return { skip: true } as const; // deleted since the search above — nothing to fix
 
-            // The write-gate: this is what actually enforces "never overwrite an
-            // existing visibility value", independent of how precisely the
-            // candidate query above narrowed things (see module doc — a
-            // garbage third value would still be pulled in as a candidate).
-            if (existing.visibility !== undefined && existing.visibility !== null) return { skip: true } as const;
+              // Under the per-id Memory lock shared with owner PUT/PATCH,
+              // fill only an absent visibility.
+              if (existing.visibility !== undefined && existing.visibility !== null) return { skip: true } as const;
 
-            const derived = deriveVisibilityFromDurability(existing.durability);
-            // Never-widen invariant, asserted, not just tested: the only two
-            // values `deriveVisibilityFromDurability` can ever produce are
-            // "private"/"shared" (see its own doc), so this can never fire
-            // today — it exists to fail loudly (halting this migration via the
-            // runner's mid-batch-throw path, never a silent bad write) if a
-            // future edit to that function ever widens its return type or is
-            // bypassed via a type-unsafe call.
-            if (derived !== "private" && derived !== "shared") {
-              throw new Error(
-                `visibility-backfill: derived an invalid visibility for row ${id} — refusing to write`,
-              );
-            }
+              const derived = deriveVisibilityFromDurability(existing.durability);
+              // Never-widen invariant, asserted, not just tested: the only two
+              // values `deriveVisibilityFromDurability` can ever produce are
+              // "private"/"shared" (see its own doc), so this can never fire
+              // today — it exists to fail loudly (halting this migration via the
+              // runner's mid-batch-throw path, never a silent bad write) if a
+              // future edit to that function ever widens its return type or is
+              // bypassed via a type-unsafe call.
+              if (derived !== "private" && derived !== "shared") {
+                throw new Error(
+                  `visibility-backfill: derived an invalid visibility for row ${id} — refusing to write`,
+                );
+              }
 
-            const backfillRow = { ...existing, visibility: derived };
-            stripUndeclaredMemoryAttributes(backfillRow);
-            return { write: backfillRow };
-          },
-          { label: "visibility-backfill", pausePre: () => txnPausePoint("visibility-backfill-pre"), pausePoint: () => txnPausePoint("visibility-backfill"), expectedRow: row },
-        );
-        if ("write" in outcome) touchedIds.push(id);
+              // Idempotent: once visibility is committed, a fresh plan sees it
+              // present and skips, so re-applying leaves the same committed row.
+              return { idempotent: true, update: { visibility: derived } } as const;
+            },
+            { label: "visibility-backfill", pausePre: () => txnPausePoint("visibility-backfill-pre"), pausePoint: () => txnPausePoint("visibility-backfill"), confirmPoint: () => txnPausePoint("visibility-backfill-confirmed"), expectedRow: row },
+          );
+          // Test-only: the write-back committed and the lock is still held.
+          const committed = txnPausePoint("visibility-backfill-committed");
+          if (committed) await committed;
+          return result;
+        }, { phase: "visibility-backfill" });
+        if (outcome.kind === "done" && "update" in outcome.value) touchedIds.push(id);
       }
 
       return { processed: touchedIds.length, touchedIds };

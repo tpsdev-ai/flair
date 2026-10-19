@@ -26,6 +26,16 @@ import { WriteBackConflictError, writeBackCommittedRow } from "./write-back.js";
 import { withOwnedTransaction } from "./request-transaction.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 import { stripInlinePointerFields } from "./host-source-visibility.js";
+import { applyPromotionBinding } from "./promotion-binding.js";
+
+/** Suppress an absent or mismatched promotion binding on a fed event's row
+ *  value (flair#2478 slice 2). Non-object values and events pass through. */
+function promotionBoundEvent(event: any): any {
+  const value = event?.value;
+  if (value == null || typeof value !== "object") return event;
+  const bound = applyPromotionBinding(value);
+  return bound === value ? event : { ...event, value: bound };
+}
 
 export class FeedMemories extends Resource {
   // Self-authorize via the Ed25519 agent verify (the auth reshape removes the
@@ -249,6 +259,7 @@ export class FeedMemories extends Resource {
         },
         hooks: {
           ...defaultSkillHooks,
+          authorizeClose: (row, shared) => authorizeSkillOwners(ctx, auth, [row], shared),
           pointer: async (shared) => {
             if (captured.closed) await deletePointerRowViaTable(String(captured.closed.id), shared);
             return null;
@@ -375,14 +386,17 @@ export class FeedMemories extends Resource {
             refusal = Response.json({ error: "invalid_expiry", message: expiryError }, { status: 400 });
             return { skip: true };
           }
-          return { write: written };
+          return { idempotent: false, commitMarkerField: "writeBackWriteId", write: written };
         },
         { ctx, label: "MemoryFeed.ingest", pausePre: () => txnPausePoint("feed-ingest-pre"), pausePoint: () => txnPausePoint("feed-ingest"), expectedRow: existingRecord },
       );
     } catch (err) {
       if (refusal) return refusal;
-      // The target row was replaced, or kept changing: nothing was written.
-      if (err instanceof WriteBackConflictError) return feedTargetChanged(record.id);
+      if (err instanceof WriteBackConflictError) {
+        return err.outcome === "conflict" ? feedTargetChanged(record.id) : Response.json({
+          error: "feed_write_unconfirmed", outcome: err.outcome, message: err.message,
+        }, { status: 409 });
+      }
       throw err;
     }
     if (refusal) return refusal;
@@ -454,7 +468,7 @@ export class FeedMemories extends Resource {
       }
 
       for await (const event of subscription) {
-        yield event;
+        yield promotionBoundEvent(event);
       }
       return;
     }
@@ -471,7 +485,7 @@ export class FeedMemories extends Resource {
     for await (const event of subscription) {
       if (!(await readableRowEvent(event, auth.agentId, scope.isAllowed, readStored))) continue;
       if (replaysHistory && !(await storedRowReadable(event?.id, auth.agentId, scope.isAllowed, readStored))) continue;
-      yield event;
+      yield promotionBoundEvent(event);
     }
   }
 }
@@ -587,12 +601,11 @@ const FEED_DEDUP_REPAIR_ATTEMPTS = 3;
 
 export const FEED_TARGET_CHANGED_ERROR = "feed_target_changed";
 
-/** A retryable 409: the row a feed write targets changed during the request,
- *  so nothing was written. */
 function feedTargetChanged(id: string): Response {
   return Response.json({
     error: FEED_TARGET_CHANGED_ERROR,
-    message: `the stored row ${JSON.stringify(id)} this write targets changed during the request; retry the write`,
+    outcome: "conflict",
+    message: `the stored row ${JSON.stringify(id)} this write targets changed during the request; write not applied; retry the write`,
   }, { status: 409 });
 }
 

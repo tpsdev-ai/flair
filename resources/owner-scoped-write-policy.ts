@@ -6,8 +6,10 @@
  * resources/record-owner-guard.ts's OWNER_FIELDS, through a resource class that
  * extends that table:
  *   - addressed to one record (POST/PUT/PATCH/DELETE to `/<Table>/<id>`) is
- *     checked for a differing string or number body `id` on POST/PUT/PATCH
- *     (`writeIdNotAddressedRefusal`, 403), then for a stored owner other than
+ *     checked on POST/PUT/PATCH for a body `id` that names a record other than
+ *     the addressed one (`bodyIdRefusal`: `writeIdNotAddressedRefusal`, 403,
+ *     for a string or number id; `idTargetMismatchRefusal`, 400, for a present,
+ *     non-null id of any other type; an absent or null id passes), then for a stored owner other than
  *     the caller (`ownerMutationRefusal`, 403), if reached. The middleware can
  *     return the owner refusal first on a plain addressed URL;
  *   - addressed to no single record (the table's collection, with or without a
@@ -66,6 +68,18 @@ export interface OwnerScopedWriteDeps {
   unreadable: (err: unknown) => Response;
   /** Reads body data from the entry call's context. */
   readBody: (context: unknown) => unknown;
+  /**
+   * An optional table-specific refusal run before this guard's collection and
+   * ownership branches. It lets a table refuse a write shape that this guard
+   * would otherwise refuse for a different reason (for example a reserved
+   * record in a collection write).
+   */
+  refuseReservedWrite?: (
+    table: string,
+    method: string,
+    target: { id?: unknown; isCollection?: unknown },
+    context: unknown,
+  ) => Promise<Response | null>;
 }
 
 /** Marks a table class whose writes have been guarded. */
@@ -77,7 +91,7 @@ export const GUARDED_WRITE_METHODS: readonly string[] = Object.freeze(["put", "p
 /** Methods refused on a collection target, where the request does not resolve to one addressed row. */
 const STORED_RECORD_METHODS: ReadonlySet<string> = new Set(["put", "patch", "delete"]);
 
-/** Methods whose string or number body `id` must name the addressed record. */
+/** Methods whose body `id` must name the addressed record. */
 const BODY_ID_METHODS: ReadonlySet<string> = new Set(["put", "patch", "post"]);
 
 /**
@@ -119,16 +133,51 @@ export function writeIdNotAddressedRefusal(): Response {
 }
 
 /**
- * Whether a parsed request `body` carries a string or number body `id` that
- * names a record other than `targetId` (the addressed record).
+ * The named refusal for an addressed write whose body `id` is present, not
+ * null, not a string or number, and not the addressed key. It answers the error and status of
+ * resources/originator-instance.ts's body-id check and echoes no submitted value.
  */
-export function bodyNamesDifferentRecord(targetId: unknown, body: unknown): boolean {
-  if (targetId == null) return false;
-  if (body == null || typeof body !== "object" || Array.isArray(body)) return false;
-  const bodyId = (body as { id?: unknown }).id;
-  if (bodyId == null) return false;
-  if (typeof bodyId !== "string" && typeof bodyId !== "number") return false;
-  return String(bodyId) !== String(targetId);
+export function idTargetMismatchRefusal(): Response {
+  return new Response(JSON.stringify({
+    error: "id_target_mismatch",
+    message: "the request body id does not match the address it was sent to",
+  }), { status: 400, headers: { "Content-Type": "application/json" } });
+}
+
+function isScalarId(id: unknown): id is string | number {
+  return typeof id === "string" || typeof id === "number";
+}
+
+/**
+ * Whether `id` is the key `targetId` addresses: the same text for a string or
+ * number pair, or two arrays whose elements are strictly equal in order.
+ */
+export function isAddressedKey(targetId: unknown, id: unknown): boolean {
+  if (isScalarId(targetId) && isScalarId(id)) return String(id) === String(targetId);
+  if (Array.isArray(targetId) && Array.isArray(id)) {
+    return targetId.length === id.length && targetId.every((part, i) => part === id[i]);
+  }
+  return false;
+}
+
+/**
+ * The refusal for a write addressed to `targetId` whose parsed `body` names a
+ * record other than the addressed one, or null. It checks the body when it is
+ * an object, and each object element of an array body. A record whose `id` is
+ * absent, null or the addressed key passes. Otherwise a string or number `id`
+ * at a string or number address gets `writeIdNotAddressedRefusal` (403), and
+ * any other `id` gets `idTargetMismatchRefusal` (400).
+ */
+export function bodyIdRefusal(targetId: unknown, body: unknown): Response | null {
+  if (targetId == null || body == null || typeof body !== "object") return null;
+  const records: unknown[] = Array.isArray(body) ? body : [body];
+  for (const record of records) {
+    if (record == null || typeof record !== "object" || Array.isArray(record)) continue;
+    const id = (record as { id?: unknown }).id;
+    if (id == null || isAddressedKey(targetId, id)) continue;
+    return isScalarId(id) && isScalarId(targetId) ? writeIdNotAddressedRefusal() : idTargetMismatchRefusal();
+  }
+  return null;
 }
 
 /**
@@ -139,8 +188,8 @@ export function bodyNamesDifferentRecord(targetId: unknown, body: unknown): bool
  * In order: resolve the caller (an unresolvable one is refused); leave an
  * administrator, a trusted internal call and an anonymous caller to their
  * existing handling; refuse a collection PUT/PATCH/DELETE; refuse an addressed
- * POST/PUT/PATCH whose string or number body `id` names a record other than the
- * addressed one; then refuse a write to a stored record owned by another
+ * POST/PUT/PATCH whose body names a record other than the addressed one
+ * (`bodyIdRefusal`); then refuse a write to a stored record owned by another
  * principal. Each refusal by this guard leaves the target row unchanged.
  */
 export async function admitOwnerScopedWrite(
@@ -159,12 +208,21 @@ export async function admitOwnerScopedWrite(
   }
   if (caller.kind !== "agent" || caller.isAdmin === true) return;
 
+  // A table-specific refusal runs before this guard's collection and ownership
+  // branches. When this pre-check can identify a reserved record (a proposed
+  // body marker or a readable stored row),
+  // its named refusal replaces this guard's generic one. A collection delete
+  // this pre-check cannot resolve is still refused by the collection branch
+  // below. Only callers reaching OrgEvent.delete() run its selection pre-scan.
+  const reserved = await deps.refuseReservedWrite?.(table, method, target, context);
+  if (reserved) throw reserved;
+
   if (addressesNoSingleRecord(target)) {
     if (STORED_RECORD_METHODS.has(method)) throw collectionWriteRefusal(table);
     return;
   }
 
-  // Addressed write: a string or number body `id` must name the addressed record.
+  // Addressed write: the body may name only the addressed record.
   if (BODY_ID_METHODS.has(method)) {
     let body: unknown;
     try {
@@ -173,7 +231,8 @@ export async function admitOwnerScopedWrite(
       // A body that cannot be read cannot be checked: refuse rather than admit.
       throw writeBodyUnreadableRefusal(table);
     }
-    if (bodyNamesDifferentRecord(target.id, body)) throw writeIdNotAddressedRefusal();
+    const idRefusal = bodyIdRefusal(target.id, body);
+    if (idRefusal) throw idRefusal;
   }
 
   let stored: unknown;

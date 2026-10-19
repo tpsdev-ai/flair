@@ -339,6 +339,7 @@ function harperBinPath(harperBinDir: string): string {
   const candidates = [
     join(harperBinDir, "node_modules", "harper", "dist", "bin", "harper.js"),
     join(harperBinDir, "node_modules", "@harperfast", "harper", "dist", "bin", "harper.js"),
+    join(harperBinDir, "node_modules", "@harperfast", "harper-pro", "dist", "bin", "harper.js"),
   ];
   for (const c of candidates) if (existsSync(c)) return c;
   return candidates[0];
@@ -905,6 +906,12 @@ export interface StartHarperOptions {
   /** Environment overrides for this instance's child processes. */
   env?: Record<string, string>;
   /**
+   * Node identity for this instance (Harper's NODE_HOSTNAME). Defaults to
+   * 127.0.0.1. A replicated pair needs distinct identities so `add_node` can
+   * name its peer.
+   */
+  nodeHostname?: string;
+  /**
    * LOWER the readiness budget for this local spawn (default
    * `HARPER_STARTUP_BUDGET_MS`). Meant for tests of the readiness-failure
    * diagnostic itself (test/integration/harper-startup-failure-diagnostic-2568
@@ -1014,7 +1021,7 @@ export async function startHarper(opts: StartHarperOptions = {}): Promise<Harper
     HDB_ADMIN_USERNAME: "admin",
     HDB_ADMIN_PASSWORD: "test123",
     THREADS_COUNT: String(opts.threads ?? 1),
-    NODE_HOSTNAME: "127.0.0.1",     // IPv4 only — avoids bun uv_ip6_addr panic
+    NODE_HOSTNAME: opts.nodeHostname ?? "127.0.0.1", // IPv4 only — avoids bun uv_ip6_addr panic
     // Port audit (flair#1586): every listener a test-Harper can bind.
     //
     // HTTP / ops: ephemeral via HTTP_PORT + OPERATIONSAPI_NETWORK_PORT

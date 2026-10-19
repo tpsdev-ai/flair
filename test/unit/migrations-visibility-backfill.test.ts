@@ -25,8 +25,10 @@ const { createVisibilityBackfillMigration, deriveVisibilityFromDurability, VISIB
 
 /** Every call site below injects the fake write-back (flair#2354); the real
  *  helper is exercised in the contention test. */
-const makeMigration = (getTable: () => any, writeBack = makeFakeWriteBack()) =>
-  createVisibilityBackfillMigration(getTable, writeBack);
+const makeLockStore = () => ({ tryLock: () => true, unlock: () => {} });
+
+const makeMigration = (getTable: () => any, writeBack = makeFakeWriteBack(), lockStore = makeLockStore()) =>
+  createVisibilityBackfillMigration(getTable, writeBack, () => lockStore);
 
 type Row = Record<string, unknown> & { id: string };
 
@@ -72,6 +74,12 @@ function makeFakeMemoryTable(seed: Row[]) {
       async put(content: Row) {
         store.set(content.id, { ...content });
         return content;
+      },
+      async update(id: string, patch: Record<string, unknown>) {
+        const current = store.get(id);
+        if (!current) throw new Error(`fake table: no row ${id}`);
+        store.set(id, { ...current, ...patch });
+        return store.get(id);
       },
       search(query: any): AsyncIterable<Row> {
         const conditions = Array.isArray(query?.conditions) ? query.conditions : [];
@@ -207,7 +215,7 @@ describe("visibility-backfill migration — run() derives and writes visibility"
     expect(await m.countPending()).toBe(0);
   });
 
-  it("preserves every OTHER field on the row — full read-modify-write, never a partial put()", async () => {
+  it("preserves every OTHER field on the row — the update names only visibility", async () => {
     const { table, store } = makeFakeMemoryTable([
       {
         id: "m1",

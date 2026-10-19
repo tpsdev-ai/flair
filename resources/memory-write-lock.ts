@@ -254,9 +254,8 @@ export async function withMemoryWriteLock<T>(
   return acquire(lockStore(store), normalizeIds(ids), MEMORY_LOCK_ATTEMPTS, MEMORY_LOCK_WAIT_MS, fn, options);
 }
 
-/** One attempt, no wait. No writer calls it yet: it is the shape part 2's
- *  automatic writers take (flair#2478). A held lock or a marker answers
- *  `busy`/`unknown`. */
+/** One attempt, no wait, used by visibility backfill and automatic promotion
+ *  stamps. A held lock or a marker answers `busy`/`unknown`. */
 export async function withMemoryWriteLockOnce<T>(
   store: unknown,
   ids: readonly (string | number)[],

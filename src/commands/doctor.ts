@@ -19,6 +19,8 @@ import { buildEd25519Auth, defaultAdminPassPath, defaultKeysDir, requestTarget, 
 import { proveLocalHarperListener, type LocalInstancePairProof } from "../lib/local-instance-pair.js";
 import { AGENT_ID_RULE } from "../lib/agent-id-rule.js";
 import { agentHomeEndpoint, readAgentHomeRows, resolveTargetInstanceIdentity } from "../lib/agent-home.js";
+import { describeInstructionEventImpostors, readInstructionEventTables } from "../lib/instruction-event-doctor.js";
+import { describeLiveSkillTombstones, readSkillTombstoneTables } from "../lib/skill-tombstone-doctor.js";
 import { readAgentRoster } from "../lib/agent-roster.js";
 import { flairConfigYamlCandidates, readPortFromYamlFile, resolveFlairConfigYaml } from "../lib/doctor-config-path.js";
 import { collectFederationEnv, describeFederationDriverFinding, federationPeersConfigured, loadYamlDoc } from "../lib/doctor-federation-driver.js";
@@ -2420,6 +2422,78 @@ program
             console.log(`  ${homeFinding.severity === "info" ? render.icons.info : render.icons.warn} ${homeFinding.message}`);
             if (homeFinding.fixHint) console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${homeFinding.fixHint}`);
             if (homeFinding.isIssue) issues++;
+          }
+        }
+      }
+
+      // 8d. Instruction events (flair#2139 slice 3a) — name every stored
+      // OrgEvent that carries a reserved kind or the reserved id prefix but
+      // does not satisfy the reader rule. Read-only: nothing is rewritten.
+      console.log(`\n  ${render.wrap(render.c.bold, "Instruction events")}`);
+      if (rosterNotRun) {
+        issues++;
+        console.log(`  ${render.icons.warn} Instruction events: NOT RUN — ${rosterNotRun.reason}`);
+        console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${rosterNotRun.remedy}`);
+      } else if (!rosterAdminPass || rosterOpsPort === null) {
+        console.log(`  ${render.icons.info} Instruction-event check skipped (no admin credential or unverified ops endpoint).`);
+      } else {
+        const instructionAuth = `Basic ${Buffer.from(`${resolveAdminUser()}:${rosterAdminPass}`).toString("base64")}`;
+        const tables = await readInstructionEventTables({
+          opsUrl: `http://127.0.0.1:${rosterOpsPort}/`,
+          authHeader: instructionAuth,
+          timeoutMs: 5000,
+        });
+        if (tables === null) {
+          issues++;
+          console.log(`  ${render.icons.warn} Could not read the stored OrgEvent and InstructionVersion tables, so the instruction-event check did not run.`);
+        } else {
+          const finding = describeInstructionEventImpostors(tables.events, tables.versions);
+          if (!finding) {
+            console.log(`  ${render.icons.ok} No stored OrgEvent with a reserved kind or id fails the instruction-event reader rule.`);
+          } else {
+            issues++;
+            console.log(`  ${render.icons.warn} ${finding}`);
+            console.log(`     ${render.wrap(render.c.dim, "Fix:")} confirm it is not a genuine instruction event, then delete the row through the operations API.`);
+          }
+        }
+      }
+
+      // 8e. Skill tombstones (flair#2662) — for each skill subject whose
+      // newest InstructionVersion is a `delete` tombstone, report the subject
+      // when its Memory row is still open-live (the skill writer's predicate:
+      // not archived, not expired, no validTo). Read-only: nothing is
+      // rewritten. A table read that fails while this section runs is NOT RUN
+      // and counted; when Harper is not responding, the enclosing gate skips
+      // the section and doctor counts the server problem elsewhere.
+      console.log(`\n  ${render.wrap(render.c.bold, "Skill tombstones")}`);
+      if (rosterNotRun) {
+        issues++;
+        console.log(`  ${render.icons.warn} Skill tombstones: NOT RUN — ${rosterNotRun.reason}`);
+        console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${rosterNotRun.remedy}`);
+      } else if (!rosterAdminPass || rosterOpsPort === null) {
+        issues++;
+        const reason = rosterProbe.credIssue
+          ? `the admin credential could not be resolved (${rosterProbe.credIssue})`
+          : rosterAdminPass ? "the ops endpoint was not verified" : "no admin credentials to read the stored tables";
+        console.log(`  ${render.icons.warn} Skill tombstones: NOT RUN — ${reason}.`);
+      } else {
+        const tombstoneAuth = `Basic ${Buffer.from(`${resolveAdminUser()}:${rosterAdminPass}`).toString("base64")}`;
+        const tables = await readSkillTombstoneTables({
+          opsUrl: `http://127.0.0.1:${rosterOpsPort}/`,
+          authHeader: tombstoneAuth,
+          timeoutMs: 5000,
+        });
+        if (tables === null) {
+          issues++;
+          console.log(`  ${render.icons.warn} Could not read the stored InstructionVersion and Memory tables, so the skill-tombstone check did not run.`);
+        } else {
+          const finding = describeLiveSkillTombstones(tables.versions, tables.memories);
+          if (!finding) {
+            console.log(`  ${render.icons.ok} No delete tombstone is the newest version of a skill with an open-live Memory row (not archived, not expired, no validTo).`);
+          } else {
+            issues++;
+            console.log(`  ${render.icons.warn} ${finding}`);
+            console.log(`     ${render.wrap(render.c.dim, "Report only:")} this check does not modify the store.`);
           }
         }
       }

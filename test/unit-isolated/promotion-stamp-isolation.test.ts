@@ -56,8 +56,10 @@ mock.module("harper", () => ({
       Memory: {
         // No earlier promoted row for any candidate: the sweep's reuse lookup finds none.
         search: () => (async function* () {})(),
+        primaryStore: { tryLock: () => true, unlock: () => {} },
         get: async (_id: string, ctx?: any) => { stampReadContexts.push(ctx); return null; },
         put: async () => { throw new Error("stamp put should not run when get misses"); },
+        update: async () => { throw new Error("stamp update should not run when get misses"); },
       },
     },
   },

@@ -98,17 +98,18 @@ type Memory @table(database: "flair") {
                                # /RecordUsage (resources/RecordUsage.ts) and citation-on-write
                                # (resources/Memory.ts post()/put() → recordCitations(), which also
                                # validates each cited id against the writer's read scope,
-                               # flair#775). It does a targeted get-then-put increment on this
-                               # field alone (never through Memory.put() — see RecordUsage.ts's
+                               # flair#775). It increments through the raw table (see RecordUsage.ts's
                                # module doc for why: usage feedback writes to ANOTHER agent's
                                # memory, and Memory's ownership check would 403 every legit
                                # call). Drives usageBoost in resources/scoring.ts, which replaces
                                # retrievalBoost in compositeScore (retrievalCount was the
                                # contaminated "retrieval counted as usage" signal root-caused in
                                # flair#623).
+  writeBackWriteId: String
   promotionStatus: String   # null | "pending" | "approved" | "rejected"
   promotedAt: String
   promotedBy: String        # authenticated agentId who approved
+  promotionContentHash: String  # server-only SHA-256 of the stored, post-redaction content at stamping time (flair#2478)
   archived: Boolean @indexed
   archivedAt: String
   archivedBy: String        # authenticated agentId who archived

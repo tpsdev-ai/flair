@@ -51,6 +51,8 @@ const add = (file: string, sites: string[], policy: Policy, reason: string) => {
 };
 
 // ── LATCH: raw put that can land an externally-sourced foreign stamp ──
+add("write-journal", ["writer:this.transactions.delete#1", "writer:this.staged.delete#1"], "OTHER_TABLE", "In-memory journal bookkeeping.");
+
 add("Federation", ["writer:writeBackCommittedRow#1"], "OTHER_TABLE",
   "The Presence receipt branch (flair#2578 slice 1): its table is always Presence; it writes no Memory row.");
 add("Federation", ["writer:writeBackCommittedRow#2"], "LATCH",
@@ -88,20 +90,22 @@ add("MemoryReindex", ["writer:writeBackCommittedRow#1"], "ECHO",
   "Admin reindex re-PUT of an existing local row through the shared write-back helper (flair#2354): echoes the stored embedding and embeddingModel; no re-embed.");
 add("promotion-stamp", ["writer:writeBackCommittedRow#1"], "ECHO",
   "Promotion status stamp: re-writes the existing local row through the shared write-back helper (flair#2354).");
-add("promotion-stamp", ["writer:table.put#1"], "ECHO",
-  "Promotion status stamp in the manual promotion's own write transaction: get-then-put re-writes the row it staged.");
+add("promotion-stamp", ["writer:table.update#1"], "ECHO",
+  "Promotion status stamp in the manual promotion's own write transaction: an incremental update of only the verdict fields (flair#2478 slice 2).");
 add("migrations/visibility-backfill", ["writer:writeBackCommittedRow#1"], "ECHO",
   "Boot migration re-PUT of existing rows through the shared write-back helper (flair#2354); the boot scan also runs.");
 add("skill-version-write", ["writer:(databases as any).flair.Memory.put#1"], "ECHO",
   "Memory's skill caller computes or retains the stamp and calls noteWriteStamp; FeedMemories refuses a body embedding or embeddingModel (flair#2354), so its skill successor carries the stored row's stamp or none.");
 add("skill-version-write", ["writer:(databases as any).flair.Memory.put#2"], "ECHO",
   "flair#2139 S2 skill predecessor close: read-modify-write re-writes the existing row's own stamp.");
+add("skill-version-write", ["writer:table.put#1"], "ECHO",
+  "flair#2645 re-apply of a close that did not land: read-modify-write of the committed row's own stamp.");
 
 // ── NON_EMBED: writes no stamp, or a partial update/patch/delete ──
 // The feed refuses a body embedding or embeddingModel (flair#2354), so its
 // ingest is NON_EMBED and its skill successor ECHO.
 add("usage-recording", ["writer:writeBackCommittedRow#1"], "NON_EMBED",
-  "Usage-count bump: writes only usageCount (flair#2470).");
+  "Usage-count bump and commit marker (flair#2653).");
 add("migrations/synthetic-test-migration", ["writer:writeBackCommittedRow#1"], "NON_EMBED",
   "Test-only migration: writes only source (flair#2470).");
 add("MemoryFeed", ["writer:(databases as any).flair.Memory.update#1"], "NON_EMBED",

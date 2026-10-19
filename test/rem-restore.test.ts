@@ -168,6 +168,27 @@ describe("applySnapshot — dry-run", () => {
     const writes = calls.filter((c) => c.method === "DELETE" || c.method === "PUT");
     expect(writes).toEqual([]);
   });
+
+  it("reports an unrecognised ops-API candidate body as an error, not as no candidates (flair#2680)", async () => {
+    const snapshotPath = await makeTestSnapshot();
+    const { api } = recordingApi({
+      "GET:/Memory": () => [],
+      "GET:/Soul": () => [],
+    });
+    const fakeFetch = (async () => new Response(JSON.stringify({ error: "fixture" }), { status: 200 })) as unknown as typeof fetch;
+    const r = await applySnapshot({
+      agentId: "test-agent",
+      snapshotPath,
+      flairVersion: "0.0.0-test",
+      apiCall: api,
+      opsSearch: buildOpsSearch({ opsPort: 19926, adminPass: "s3cret" }, fakeFetch),
+      preRestoreSnapshotRoot: snapshotRoot,
+      tmpRootOverride: testRoot,
+      dryRun: true,
+    });
+    expect(r.status).toBe("failed");
+    expect(r.errors).toEqual(["fetch-current: ops API returned an unexpected response shape"]);
+  });
 });
 
 describe("applySnapshot — agent-id mismatch", () => {
@@ -373,6 +394,8 @@ describe("applySnapshot — real restore", () => {
       .split("\n")
       .map((l) => JSON.parse(l));
     expect(lines).toEqual(beforeState);
+    // flair#2680: restore takes no candidate count, so the metadata says so.
+    expect(JSON.parse(readFileSync(join(extractDir, "metadata.json"), "utf-8")).pendingCandidateCount).toBeNull();
   });
 });
 
@@ -554,5 +577,14 @@ describe("buildOpsSearch — CLI-wired candidate list uses the ops root", () => 
       new Response("does not have a post method implemented", { status: 405 })) as unknown as typeof fetch;
     const opsSearch = buildOpsSearch({ opsPort: 19926, adminPass: "s3cret" }, fakeFetch);
     await expect(opsSearch("MemoryCandidate", [], ["id"])).rejects.toThrow(/ops API failed \(405\)/);
+  });
+
+  it("throws on a 2xx body that is neither rows nor { results: rows } (flair#2680)", async () => {
+    let body: unknown = { error: "fixture" };
+    const fakeFetch = (async () => new Response(JSON.stringify(body), { status: 200 })) as unknown as typeof fetch;
+    const opsSearch = buildOpsSearch({ opsPort: 19926, adminPass: "s3cret" }, fakeFetch);
+    await expect(opsSearch("MemoryCandidate", [], ["id"])).rejects.toThrow("ops API returned an unexpected response shape");
+    body = { results: [{ id: "c1" }] };
+    expect(await opsSearch("MemoryCandidate", [], ["id"])).toEqual([{ id: "c1" }]);
   });
 });

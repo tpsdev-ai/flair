@@ -129,6 +129,7 @@ describe("citation-on-write e2e (real Harper) — flair#744 slice A", () => {
     const check = await getMemory(harper, owner, citedId);
     const rec: any = await check.json();
     expect(rec.usageCount).toBe(1);
+    expect(rec.writeBackWriteId).toBeString();
   }, 60_000);
 
   test("usedMemoryIds is stripped — NEVER persisted on the writing memory's own row", async () => {

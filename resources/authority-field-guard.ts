@@ -1,9 +1,9 @@
 /** Workflow verdicts can only be stamped by their trusted raw-table paths.
  * Keep unchanged echoes compatible with full-row clients, and preserve omitted
  * stamps on PUT; omission must not erase a verdict. A content change drops the
- * stamp: the verdict is bound to the reviewed text. No admin/body bypass. */
+ * stamp. No admin/body bypass. */
 export const AUTHORITY_FIELDS = {
-  Memory: ["promotionStatus", "promotedAt", "promotedBy"],
+  Memory: ["promotionStatus", "promotedAt", "promotedBy", "promotionContentHash", "writeBackWriteId"],
   MemoryCandidate: ["promotedRowId", "promotedRowInstanceToken"],
 } as const;
 
@@ -15,13 +15,11 @@ export async function guardAuthorityFields(
   const existing = await getExisting() as Record<string, unknown> | undefined;
   for (const field of AUTHORITY_FIELDS[table]) {
     if (Object.hasOwn(content, field) && content[field] !== existing?.[field]) {
-      return new Response(JSON.stringify({ error: `forbidden: ${field} is set by the promotion workflow` }), {
+      return new Response(JSON.stringify({ error: `forbidden: ${field} is set by ${field === "writeBackWriteId" ? "write-back" : "the promotion workflow"}` }), {
         status: 403, headers: { "content-type": "application/json" },
       });
     }
   }
-  // The stamp means this specific content was reviewed. Echo-tolerance and
-  // omitted-field restore apply only when the body does not change `content`.
   // Null the columns (do not merely delete) so PATCH and PUT both drop them.
   if (existing && Object.hasOwn(content, "content") && content.content !== existing.content) {
     for (const field of AUTHORITY_FIELDS[table]) content[field] = null;
@@ -33,9 +31,6 @@ export async function guardAuthorityFields(
   return null;
 }
 
-/** Drop workflow stamps from a request-origin raw write. Unconditional: even
- * stamps the guard would restore onto an omitted-field update must not land
- * through ingest paths that are not a promotion-stamp site. */
 export function stripAuthorityFields(
   record: Record<string, unknown>,
   table: keyof typeof AUTHORITY_FIELDS,

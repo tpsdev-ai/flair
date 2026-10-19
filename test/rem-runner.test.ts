@@ -22,9 +22,12 @@ import {
   DEFAULT_MAX_MEMORIES_PER_RUN,
   ABSOLUTE_MAX_MEMORIES_PER_RUN,
   DEFAULT_HEALTH_PREFLIGHT_MS,
+  PENDING_NO_ADMIN_REASON,
+  formatPendingCandidates,
   type ApiCall,
   type RunnerOpts,
 } from "../src/rem/runner.ts";
+import { extractSnapshot } from "../src/rem/snapshot.ts";
 import {
   DEFAULT_MAX_MEMORIES_PER_RUN as LIB_DEFAULT_MAX_MEMORIES_PER_RUN,
   ABSOLUTE_MAX_MEMORIES_PER_RUN as LIB_ABSOLUTE_MAX_MEMORIES_PER_RUN,
@@ -125,7 +128,8 @@ describe("happy path", () => {
     expect(r.status).toBe("completed");
     expect(r.logRow.memoryCount).toBe(2);
     expect(r.logRow.soulCount).toBe(1);
-    expect(r.logRow.pendingCandidates).toBe(0);
+    // flair#2680: no opsSearch injected (no admin credential), so no count was taken.
+    expect(r.logRow.pendingCandidates).toEqual({ state: "unknown", reason: PENDING_NO_ADMIN_REASON });
     expect(r.logRow.errors).toEqual([]);
     // With distillation wired in this PR, baseline (non-dry-run) cycles are
     // now full slice-2 — distillation was attempted (see rem-runner.test.ts
@@ -144,6 +148,13 @@ describe("happy path", () => {
       opsSearch: async () => [{ id: "c1" }, { id: "c2" }, { id: "c3" }],
     }));
     expect(r.logRow.pendingCandidates).toBe(3);
+  });
+
+  it("reports an exact 0 from a successful empty candidate search", async () => {
+    const r = await runNightlyCycle(baseOpts({ opsSearch: async () => [] }));
+    expect(r.status).toBe("completed");
+    expect(r.logRow.pendingCandidates).toBe(0);
+    expect(formatPendingCandidates(r.logRow.pendingCandidates)).toBe("0");
   });
 
   it("handles Harper response shapes (results[] and items[])", async () => {
@@ -501,13 +512,30 @@ describe("failure modes", () => {
     expect(r.logRow.errors[0]).toContain("soul gone");
   });
 
-  it("does not fail on candidate-count errors — degrades gracefully to 0", async () => {
+  it("reports a failed candidate count as unknown with the error and fails the run (flair#2680)", async () => {
     const r = await runNightlyCycle(baseOpts({
       opsSearch: async () => { throw new Error("candidate table missing"); },
     }));
-    // Candidate count is a non-fatal signal — the cycle still completes.
-    expect(r.status).toBe("completed");
-    expect(r.logRow.pendingCandidates).toBe(0);
+    expect(r.logRow.pendingCandidates).toEqual({ state: "unknown", reason: "candidate table missing" });
+    expect(formatPendingCandidates(r.logRow.pendingCandidates)).toBe("unknown (candidate table missing)");
+    expect(r.status).toBe("failed");
+    expect(r.logRow.errors).toEqual(["pending-count: candidate table missing"]);
+    // The later steps still ran, and the snapshot records the count as not taken.
+    expect(r.logRow.slice).toBe("2");
+    expect(r.logRow.dedup?.clusterCount).toBe(0);
+    const ex = await extractSnapshot({ snapshotPath: r.snapshotPath!, targetDir: join(testRoot, "extracted") });
+    expect(ex.entries.map((e) => e.path)).toContain("metadata.json");
+    expect(JSON.parse(readFileSync(join(testRoot, "extracted", "metadata.json"), "utf-8")).pendingCandidateCount).toBeNull();
+    expect(readLogRows()[0].pendingCandidates).toEqual({ state: "unknown", reason: "candidate table missing" });
+  });
+
+  it("reports a non-array candidate search result as unknown, not 0 (flair#2680)", async () => {
+    const r = await runNightlyCycle(baseOpts({
+      opsSearch: async () => ({ error: "fixture" }) as unknown as any[],
+    }));
+    expect(r.logRow.pendingCandidates).toEqual({ state: "unknown", reason: "ops API returned an unexpected response shape" });
+    expect(r.status).toBe("failed");
+    expect(r.logRow.errors).toEqual(["pending-count: ops API returned an unexpected response shape"]);
   });
 
   it("captures maintenance errors and exits failed (snapshot preserved)", async () => {

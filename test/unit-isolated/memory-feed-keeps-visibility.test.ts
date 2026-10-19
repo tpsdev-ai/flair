@@ -9,9 +9,10 @@ import { installFakeHarperTransaction } from "../helpers/fake-harper-txn";
 let memoryStore: Map<string, any>;
 let getCount = 0;
 let failGetAt: number | null = null;
+let writeRace: "conflict" | "unconfirmed" | undefined;
 
 // Model Harper's global transaction (the write-back helper reaches it there).
-const txn = installFakeHarperTransaction((id, row) => memoryStore.set(id, row));
+const txn = installFakeHarperTransaction((id, row) => memoryStore.set(id, writeRace === "unconfirmed" ? { ...row, content: "competing" } : row));
 afterAll(() => txn.restore());
 
 const databasesMock = {
@@ -25,6 +26,7 @@ const databasesMock = {
       // Harper PUT semantics: the stored row IS the record (full replacement);
       // a write inside the owned transaction is staged (lands on commit).
       put: async (record: any) => {
+        if (writeRace === "conflict") memoryStore.set(record.id, { ...memoryStore.get(record.id), instanceToken: "replacement" });
         if (txn.stage(record.id, { ...record })) return record;
         memoryStore.set(record.id, { ...record });
         return record;
@@ -57,8 +59,20 @@ beforeEach(() => {
   memoryStore = new Map();
   getCount = 0;
   failGetAt = null;
+  writeRace = undefined;
   memoryStore.set("owned", { id: "owned", agentId: "alice", content: "owner-only note", durability: "standard", visibility: "private" });
 });
+
+for (const outcome of ["conflict", "unconfirmed"] as const) {
+  test(`FeedMemories answers ${outcome} after a ${outcome === "conflict" ? "pre-commit" : "post-commit"} race`, async () => {
+    writeRace = outcome;
+    const response = await feed().post({ id: "owned", agentId: "alice", content: "submitted" });
+    expect(response).toBeInstanceOf(Response);
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: outcome === "conflict" ? "feed_target_changed" : "feed_write_unconfirmed", outcome });
+    expect(memoryStore.get("owned").content).toBe(outcome === "conflict" ? "owner-only note" : "competing");
+  });
+}
 
 describe("FeedMemories.post preserves stored visibility on an update", () => {
   test("a changed-content update keeps the stored visibility", async () => {

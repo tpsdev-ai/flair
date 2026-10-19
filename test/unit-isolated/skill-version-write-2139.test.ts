@@ -5,6 +5,7 @@ type Row = Record<string, any>;
 const store = new Map<string, Row>();       // InstructionVersion rows
 const memoryStore = new Map<string, Row>(); // Memory rows
 const pointers = new Map<string, Row>();
+const eventStore = new Map<string, Row>();
 const locks = new Set<string>();
 let failNextAppend = false;
 let hideHead = false;
@@ -33,6 +34,18 @@ const InstructionVersionTable = {
   },
 };
 
+const OrgEventTable = {
+  async *search() {},
+  async create(record: Row, ctx: any): Promise<void> {
+    const rows = ctx?.transaction?.events ?? eventStore;
+    if (rows.has(record.id)) throw new Error("Record already exists");
+    rows.set(record.id, { ...record });
+  },
+  async delete(id: string, ctx: any): Promise<void> {
+    (ctx?.transaction?.events ?? eventStore).delete(id);
+  },
+};
+
 const MemoryTable = {
   async put(row: Row, ctx?: any) {
     (ctx?.transaction?.memories ?? memoryStore).set(row.id, { ...row });
@@ -52,6 +65,7 @@ mock.module("harper", () => ({
   databases: {
     flair: {
       InstructionVersion: InstructionVersionTable,
+      OrgEvent: OrgEventTable,
       Memory: MemoryTable,
       MemoryCandidate: { async *search() {} },
       Soul: { async *search() {} },
@@ -66,13 +80,15 @@ function mockTransaction(ctx: any, cb: (txn: any) => any): any {
   if (context.transaction && context.transaction.open === 1) return cb(context.transaction);
   const txn: any = {
     open: 1, saveCommits: false, aborted: false,
-    versions: new Map(store), memories: new Map(memoryStore), pointers: new Map(pointers),
+    addWrite(write: any) { write.commit(1, null); return write; },
+    versions: new Map(store), memories: new Map(memoryStore), pointers: new Map(pointers), events: new Map(eventStore),
     abort() { this.open = 0; this.aborted = true; },
     commit() {
       this.open = 0;
       store.clear(); for (const [id, row] of this.versions) store.set(id, row);
       memoryStore.clear(); for (const [id, row] of this.memories) memoryStore.set(id, row);
       pointers.clear(); for (const [id, row] of this.pointers) pointers.set(id, row);
+      eventStore.clear(); for (const [id, row] of this.events) eventStore.set(id, row);
     },
   };
   context.transaction = txn;
@@ -98,7 +114,7 @@ function failHook<T>(message: string): () => Promise<T> {
 }
 
 beforeEach(() => {
-  store.clear(); memoryStore.clear(); locks.clear(); pointers.clear();
+  store.clear(); memoryStore.clear(); locks.clear(); pointers.clear(); eventStore.clear();
   failNextAppend = false; hideHead = false;
   (globalThis as any).transaction = mockTransaction;
 });
@@ -118,6 +134,72 @@ const closePredecessor = async (predecessor: Row, patch: Record<string, unknown>
 function liveSkill(id: string, subjectId: string | null, content: string, visibility = "shared"): Row {
   return { id, agentId: "agent-a", tags: ["skill"], trigger: "t", content, visibility, durability: "persistent", createdAt: "2020-01-01T00:00:00.000Z", ...(subjectId ? { skillSubjectId: subjectId } : {}) };
 }
+
+describe("skill POST version writes in a caller transaction", () => {
+  test("a pointer refusal can release the caller context before rollback", async () => {
+    const ctx = agentCtx() as any;
+    const successor = liveSkill("joined", "joined", "joined content");
+    const transaction = {
+      open: 1, saveCommits: false, memories: new Map(), versions: new Map(),
+      abort() {
+        this.open = 0;
+        this.memories.clear();
+        this.versions.clear();
+        delete ctx.transaction;
+      },
+    };
+    ctx.transaction = transaction;
+    const result = await runSkillVersionWrite({
+      ctx, joinCallerTransaction: true, subjectId: "joined", agentId: "agent-a",
+      head: (shared) => resolveSkillHead("joined", null, shared),
+      plan: () => ({ kind: "create", predecessor: null, successor, closePatch: {}, value: successor.content, visibility: "shared", grantedClose: null }),
+      hooks: {
+        createSuccessor, closePredecessor,
+        pointer: async () => {
+          transaction.abort();
+          return Response.json({ error: "pointer_write_failed" }, { status: 500 });
+        },
+      },
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("pointer refusal answered success");
+    expect(result.response.status).toBe(500);
+    expect(await result.response.json()).toEqual({ error: "pointer_write_failed" });
+    expect(ctx.transaction).toBeUndefined();
+    expect(transaction.memories.size).toBe(0);
+    expect(transaction.versions.size).toBe(0);
+    expect(memoryStore.size).toBe(0);
+    expect(store.size).toBe(0);
+  });
+
+  for (const abort of [true, false]) {
+    test(`the successor and version follow the caller's ${abort ? "abort" : "commit"}`, async () => {
+      const ctx = agentCtx();
+      const successor = liveSkill("joined", "joined", "joined content");
+      const write = mockTransaction(ctx, async () => {
+        const transaction = (ctx as any).transaction;
+        const result = await runSkillVersionWrite({
+          ctx, joinCallerTransaction: true, subjectId: "joined", agentId: "agent-a",
+          head: (shared) => resolveSkillHead("joined", null, shared),
+          plan: () => ({ kind: "create", predecessor: null, successor, closePatch: {}, value: successor.content, visibility: "shared", grantedClose: null }),
+          hooks: { createSuccessor, closePredecessor },
+        });
+        expect(result.ok).toBe(true);
+        expect((ctx as any).transaction).toBe(transaction);
+        expect(transaction.open).toBe(1);
+        expect(memoryStore.has("joined")).toBe(false);
+        expect(store.has("skill:joined:1")).toBe(false);
+        expect(transaction.memories.get("joined")).toEqual(successor);
+        expect(transaction.versions.get("skill:joined:1").memoryId).toBe("joined");
+        if (abort) throw new Error("caller abort");
+      });
+      if (abort) await expect(write).rejects.toThrow("caller abort");
+      else await write;
+      expect(memoryStore.has("joined")).toBe(!abort);
+      expect(store.has("skill:joined:1")).toBe(!abort);
+    });
+  }
+});
 
 describe("flair#2139 S2 — skill version write: create", () => {
   test("a first create appends a create version referencing the successor", async () => {

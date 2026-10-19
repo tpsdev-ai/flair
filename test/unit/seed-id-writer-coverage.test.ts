@@ -17,8 +17,7 @@ import { rawTableWriteSites } from "../helpers/raw-table-writers";
  *   GUARDED     — the decision runs on the ids this write can land on;
  *   OPERATOR    — the route already requires the operator source;
  *   BOOKKEEPING — lastReflected and embedding backfill update selected fields;
- *                 usage recording intends to change only usageCount but
- *                 re-PUTs the stored row and can take an agent-supplied id;
+ *                 usage recording can take an agent-supplied id;
  *   SERVER      — the server selects the rows (a sweep, a migration, a row it
  *                 just wrote under a generated id), or another table, or a
  *                 read-only alias.
@@ -33,6 +32,9 @@ const add = (file: string, sites: string[], reason: string) => {
 };
 
 // ── GUARDED ──
+add("write-journal", ["alias-source:(databases as any).flair.Memory#1"], "Identifies successor undo pause points.");
+add("write-journal", ["writer:this.transactions.delete#1", "writer:this.staged.delete#1"], "In-memory journal bookkeeping.");
+
 add("Memory", ["writer:table.put#1"],
   "GUARDED: reached through Memory.delete's reserved-id and writeSkillDelete's reserved-subject decisions; the retry re-checks the stored row identity and caller authority.");
 add("MemoryArchive", ["writer:Memory.put#1"], "GUARDED: Memory.put().");
@@ -62,6 +64,8 @@ add("skill-version-write", ["writer:(databases as any).flair.Memory.put#1", "wri
   "GUARDED: the transactional skill writer (flair#2139 S2) is reached only after Memory.post/put/delete or FeedMemories ran the reserved-id decision on the write's ids; the successor upsert and predecessor close ride the same transaction.");
 add("skill-version-write", ["alias-source:(databases as any).flair?.Memory#1"],
   "SERVER: a table handle (resolveSkillHead searches the live skill head).");
+add("skill-version-write", ["writer:table.put#1", "alias-source:(databases as any).flair?.Memory#2"],
+  "GUARDED: retries use the predecessor id checked by the reserved-id decision.");
 
 // ── OPERATOR ──
 add("AgentSeed", ["writer:(databases as any).flair.Memory.put#1"],
@@ -73,7 +77,7 @@ add("MemoryPurge", ["writer:memory.delete#1"],
 add("Memory", ["writer:patchRecord#1"],
   "BOOKKEEPING: lastReflected on each derivedFrom source of a new row.");
 add("usage-recording", ["alias-source:(databases as any).flair.Memory#1", "writer:writeBackCommittedRow#1"],
-  "BOOKKEEPING: usageCount + 1 on a row the caller can read, through the shared write-back helper (flair#2441); the rest of the row is the stored row.");
+  "BOOKKEEPING: usageCount + 1 and commit marker on a row the caller can read, through the shared write-back helper (flair#2441); the rest of the row is the stored row.");
 add("auth-middleware", ["writer:writeBackCommittedRow#1"],
   "BOOKKEEPING: the embedding backfill for the id of a Memory write that already succeeded (and so passed the decision), through the shared helper (flair#2354).");
 add("MemoryReflect", ["writer:patchRecordSilent#1"],
@@ -84,16 +88,16 @@ add("MemoryMaintenance", ["writer:(databases as any).flair.Memory.delete#1", "wr
   "SERVER: the sweep selects rows by state (expired ephemeral, closed, old session notes). The seed row is persistent and closing it by supersede requires the operator-source decision.");
 add("MemoryMaintenance", ["writer:table.delete#1"], "SERVER: MemoryHostSource pointer rows, another table.");
 add("MemoryReindex", ["writer:writeBackCommittedRow#1"], "SERVER: admin-only re-PUT of each stored row with its own stored fields, through the shared helper (flair#2354).");
-add("promotion-stamp", ["alias-source:(databases as any).flair.Memory#1", "writer:writeBackCommittedRow#1"],
+add("promotion-stamp", ["alias-source:(databases as any).flair.Memory#1", "alias-source:(databases as any)?.flair?.Memory#1", "writer:writeBackCommittedRow#1"],
   "SERVER: stamps a row the promotion just wrote through Memory.put under a server-generated id, via the shared write-back helper (flair#2354).");
-add("promotion-stamp", ["writer:table.put#1"],
-  "SERVER: stamps, in the manual promotion's own write transaction, the row it staged through Memory.put under a server-generated id.");
+add("promotion-stamp", ["writer:table.update#1"],
+  "SERVER: stamps, in the manual promotion's own write transaction, the row it staged through Memory.put under a server-generated id — an incremental verdict update (flair#2478 slice 2).");
 add("migrations/embedding-stamp", [
   "writer:table.update#1",
 ], "SERVER: the migration re-embeds a server-selected row through the raw table handle when its id ends in the `.content` property suffix — an id the by-id HTTP regen path cannot address; an incremental update of only the embedding fields (flair#2465).");
 add("migrations/graph-heal", ["writer:table.put#1"], "SERVER: boot migration over server-selected rows.");
 add("migrations/synthetic-test-migration", ["alias-source:(databases as unknown as { flair: { Memory: MemoryTableLike } }).flair.Memory#1", "writer:writeBackCommittedRow#1"], "SERVER: boot migration over server-selected rows, through the shared write-back helper (flair#2354).");
-add("migrations/visibility-backfill", ["alias-source:(databases as unknown as { flair: { Memory: MemoryTableLike } }).flair.Memory#1", "writer:writeBackCommittedRow#1"], "SERVER: boot migration over server-selected rows, through the shared write-back helper (flair#2354).");
+add("migrations/visibility-backfill", ["alias-source:(databases as unknown as { flair: { Memory: MemoryTableLike } }).flair.Memory#1", "alias-source:(databases as any)?.flair?.Memory#1", "writer:writeBackCommittedRow#1"], "SERVER: boot migration over server-selected rows, through the shared write-back helper (flair#2354).");
 add("hit-tracking", [
   "writer:this.pending.delete#1",
   "writer:this.cache.delete#1",
@@ -119,12 +123,16 @@ add("Memory", ["alias-source:(databases as any).flair.Memory#2"],
 for (const [file, alias] of [
   ["Memory", "alias-source:(databases as any).flair.Memory#1"],
   ["Memory", "alias-source:(databases as any).flair.Memory#3"],
-  // #4 is the class heritage; #3/#5/#6/#7/#8 read committed rows.
+  // #4 is the class heritage; #3/#5/#6/#7/#8 and #9-#11 read committed rows.
   ["Memory", "alias-source:(databases as any).flair.Memory#4"],
   ["Memory", "alias-source:(databases as any).flair.Memory#5"],
   ["Memory", "alias-source:(databases as any).flair.Memory#6"],
   ["Memory", "alias-source:(databases as any).flair.Memory#7"],
   ["Memory", "alias-source:(databases as any).flair.Memory#8"],
+  ["Memory", "alias-source:(databases as any).flair.Memory#9"],
+  ["Memory", "alias-source:(databases as any).flair.Memory#10"],
+  // #9/#10 feed confirmCommittedRow and #11 the post-commit verifyWrittenRow: committed-row reads only.
+  ["Memory", "alias-source:(databases as any).flair.Memory#11"],
   // The write-lock store handle (flair#2478) — a read of primaryStore, never a write.
   ["Memory", "alias-source:(databases as any)?.flair?.Memory#1"],
   ["AdminMemory", "alias-source:(databases as any).flair.Memory#1"],
