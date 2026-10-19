@@ -4,8 +4,9 @@
  * temp root.
  *
  * Covered: modes and ownership (created exactly 0700/0600 under a zero
- * umask; a wider mode or another owner refuses, and an unsafe existing entry
- * refuses before any missing sibling is created); every entry is validated
+ * umask; a wider mode or another owner refuses, and an unsafe existing
+ * directory, an invalid record or a changed stored copy refuses before any
+ * missing directory is created); every entry is validated
  * (unknown names, dot files, symbolic links, temp files readable by others
  * refuse; a private temp file an interrupted approval left is ignored);
  * symbolic links and unsafe import paths; a stored copy changed, removed or
@@ -140,6 +141,26 @@ describe("the approval store's layout, modes and ownership (#2664)", () => {
     expect(error.message).toContain(`${approvals} has mode 750, not 700`);
     expect(existsSync(archives)).toBe(false);
     expect(readdirSync(root)).toEqual(["approvals"]);
+  });
+
+  test("an invalid record refuses approval before the missing archives directory is created", () => {
+    const { root, archives, approvals } = store();
+    for (const dir of [root, approvals]) { mkdirSync(dir, { mode: 0o700 }); chmodSync(dir, 0o700); }
+    writeFileSync(join(approvals, `${SHA}.json`), "{ not a record", { mode: 0o600 });
+    chmodSync(join(approvals, `${SHA}.json`), 0o600);
+    expect(refusal(() => approve(root)).code).toBe("record-invalid");
+    expect(existsSync(archives)).toBe(false);
+    expect(readdirSync(root)).toEqual(["approvals"]);
+  });
+
+  test("a stored copy that no longer hashes to its name refuses approval before the missing approvals directory is created", () => {
+    const { root, archives, approvals } = store();
+    for (const dir of [root, archives]) { mkdirSync(dir, { mode: 0o700 }); chmodSync(dir, 0o700); }
+    writeFileSync(join(archives, `${SHA}.json`), "other bytes", { mode: 0o600 });
+    chmodSync(join(archives, `${SHA}.json`), 0o600);
+    expect(refusal(() => approve(root)).code).toBe("stored-mismatch");
+    expect(existsSync(approvals)).toBe(false);
+    expect(readdirSync(root)).toEqual(["archives"]);
   });
 
   for (const [label, place, make] of [

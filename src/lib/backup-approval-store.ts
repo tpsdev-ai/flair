@@ -12,17 +12,23 @@
  *     approvals/                           0700
  *       <sha256>.json                      0600, the approval record
  *
- * Every operation checks the root, both directories and every entry in them
- * before it creates or reads anything (openStore). Each directory must be a
- * real directory (not a symbolic link) owned by the current user with mode
- * exactly 0700. In the root only `archives` and `approvals` may appear. In
- * those, a managed file (`<sha256>.json`) must be a regular file owned by the
- * current user with mode exactly 0600; a temp file an interrupted approval
- * left (`.<sha256>.<pid>.<random>.tmp`) must be a regular file owned by the
- * current user with no group or other permission, and is otherwise ignored;
- * any other entry refuses. A refusal names the path and changes nothing. The
- * store creates what is missing with exact modes, whatever the umask, and
- * never loosens or repairs an existing entry.
+ * Every store operation checks the root, both directories and every entry in
+ * them before it creates anything in the store or reads a store file
+ * (openStore); approval also checks this digest's existing record and stored
+ * copy before it creates a missing directory. (The CLI reads the operator's
+ * import file before it opens the store.) Each directory must be a real
+ * directory (not a symbolic link) owned by the current user with mode exactly
+ * 0700. In the root only `archives` and `approvals` may appear. In those, a
+ * managed record or archive file (`<sha256>.json`) must be a regular file
+ * owned by the current user with mode exactly 0600. The one exception is a
+ * temp file an interrupted approval left (`.<sha256>.<pid>.<random>.tmp`),
+ * which must be a regular file owned by the current user with no group or
+ * other permission and is otherwise ignored. Any other entry refuses. A
+ * refusal of the existing state names the path and creates or changes
+ * nothing. A failure while writing (a full disk, say) can leave a directory
+ * the approval created and a temp file, never a record for bytes the store
+ * does not hold. The store creates what is missing with exact modes, whatever
+ * the umask, and never loosens or repairs an existing entry.
  *
  * Stored archives are content-addressed, no-clobber copies whose bytes are
  * rechecked on use: an archive is published under the SHA-256 of its bytes
@@ -490,6 +496,14 @@ export function readImportFile(path: string, describe: string, options: Approval
 
 // ─── Approval ────────────────────────────────────────────────────────────────
 
+function changedStoredCopy(paths: StorePaths, sha256: string): ApprovalStoreError {
+  return new ApprovalStoreError(
+    "stored-mismatch",
+    `stored archive ${join(paths.archives, `${sha256}.json`)} no longer hashes to ${sha256}; the store refuses to reuse it. ` +
+      "Move it out of the store and approve the archive again",
+  );
+}
+
 export interface ApproveArchiveInput {
   /** The archive's exact bytes, as read once by the caller. */
   readonly bytes: Uint8Array;
@@ -503,12 +517,15 @@ export interface ApproveArchiveInput {
 }
 
 /**
- * Record an approval: publish the archive bytes under their digest (reusing
- * a stored copy that still hashes to it), read them back, then publish the
- * record. Replaces an existing record for the digest, revoked or not. Throws
- * an ApprovalStoreError (or the underlying I/O error) when approval does not
- * complete; no record is written or changed before the stored copy is
- * verified, so a failure leaves any existing record as it was.
+ * Record an approval: check the store as it stands, create any missing
+ * directory, publish the archive bytes under their digest (reusing a stored
+ * copy that still hashes to it), read them back, then publish the record.
+ * Replaces an existing record for the digest, revoked or not. Throws an
+ * ApprovalStoreError (or the underlying I/O error) when approval does not
+ * complete. A refusal of the existing state (an unsafe directory or entry,
+ * an invalid record, a stored copy that no longer hashes to its name) comes
+ * before anything is created. No record is written or changed before the
+ * stored copy is verified, so a failure leaves any existing record as it was.
  */
 export function approveArchive(input: ApproveArchiveInput, options: ApprovalStoreOptions = {}, hooks: ApprovalPublishHooks = {}): ApprovalRecord {
   const step = hooks.beforeStep ?? (() => {});
@@ -520,19 +537,20 @@ export function approveArchive(input: ApproveArchiveInput, options: ApprovalStor
   const uid = currentUid(options);
 
   step("open-store");
+  // Check the store as it stands (its directories, every entry, this
+  // digest's record and its stored copy) before creating any missing
+  // directory, so a refusal of existing state creates nothing.
+  const found = openStore(options, false);
+  if (found !== undefined) {
+    readRecord(found, input.sha256, uid);
+    const prior = readStoredArchive(found, input.sha256, uid);
+    if (prior !== undefined && sha256Of(prior) !== input.sha256) throw changedStoredCopy(found, input.sha256);
+  }
   const paths = openStore(options, true)!;
-  // An existing record must be well formed before anything replaces it.
-  readRecord(paths, input.sha256, uid);
 
   const final = join(paths.archives, `${input.sha256}.json`);
   const existing = readStoredArchive(paths, input.sha256, uid);
-  if (existing !== undefined && sha256Of(existing) !== input.sha256) {
-    throw new ApprovalStoreError(
-      "stored-mismatch",
-      `stored archive ${final} no longer hashes to ${input.sha256}; the store refuses to reuse it. ` +
-        "Move it out of the store and approve the archive again",
-    );
-  }
+  if (existing !== undefined && sha256Of(existing) !== input.sha256) throw changedStoredCopy(paths, input.sha256);
   if (existing === undefined) {
     step("stage-archive");
     const staged = tempPath(paths.archives, input.sha256);

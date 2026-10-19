@@ -1,6 +1,8 @@
 - **`flair backup-approval` lets the operator approve backup archives on the restoring host, including archives written before digest sidecars.**
-  Approvals live in `~/.flair/approved-archives/`: directories mode 0700
-  and files 0600, owned by the operator, with anything else refused. The
+  Approvals live in `~/.flair/approved-archives/`, owned by the operator:
+  directories mode 0700, and managed record and archive files mode 0600
+  (a private temp file an interrupted approval left is ignored). Any other
+  entry is refused, before the store creates anything. The
   store keeps a copy of each approved archive under its SHA-256 and a record
   of the approval time and operator. No REST route can approve, revoke, list
   or read it. `approve` verifies an archive against its `.sha256` sidecar.

@@ -3,9 +3,13 @@
  * against a REAL Harper and the REAL built CLI.
  *
  * One Harper is started with startHarper, which assigns its HTTP and
- * operations ports independently (the operations port is not the HTTP port
- * minus one). Every CLI call names this instance explicitly and runs with a
- * throwaway HOME, so the approval store is `<HOME>/.flair/approved-archives`.
+ * operations ports independently. The setup restarts it until the operations
+ * port is not the HTTP port minus one and nothing listens on the HTTP port
+ * minus one, and asserts both: a CLI that derived the operations port from
+ * the HTTP port would reach no operations API, so every case below fails.
+ * Every CLI call names this instance explicitly (`--port`, `--ops-port`, or
+ * `--url` and `--ops-target`) and runs with a throwaway HOME, so the approval
+ * store is `<HOME>/.flair/approved-archives`.
  * The admin password is read from a 0600 credential file.
  *
  * Operator credentials (`flair backup-approval approve`), through Harper's
@@ -36,7 +40,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { createServer } from "node:net";
+import { connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import nacl from "tweetnacl";
@@ -54,6 +58,7 @@ const PROMOTED_ID = "restore-2664-promoted";
 const CREATED_AT = "2026-10-01T00:00:00.000Z";
 
 let harper: HarperInstance;
+let running: HarperInstance | undefined;
 let httpPort: string;
 let opsPort: string;
 let passFile: string;
@@ -115,6 +120,17 @@ async function operatorPut(path: string, body: unknown): Promise<number> {
 const row = async (table: string, id: string): Promise<any> =>
   (await op({ operation: "search_by_id", database: "flair", table, ids: [id], get_attributes: ["*"] }))[0];
 
+/** Whether something accepts TCP connections on 127.0.0.1:`port`. */
+function accepting(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = connect({ host: "127.0.0.1", port });
+    const settle = (value: boolean) => { socket.destroy(); resolve(value); };
+    socket.setTimeout(2_000, () => settle(false));
+    socket.once("connect", () => settle(true));
+    socket.once("error", () => settle(false));
+  });
+}
+
 /** A loopback port nothing listens on. */
 async function closedPort(): Promise<number> {
   const server = createServer();
@@ -141,10 +157,21 @@ const credentials = () => ["--port", httpPort, "--ops-port", opsPort, "--admin-p
 
 beforeAll(async () => {
   if (process.env.HARPER_HTTP_URL) throw new Error("requires an isolated Harper; unset HARPER_HTTP_URL");
-  harper = await startHarper();
-  assertOwnInstance(harper);
+  for (let attempt = 1; ; attempt++) {
+    harper = await startHarper();
+    running = harper;
+    assertOwnInstance(harper);
+    const http = Number(new URL(harper.httpURL).port);
+    const ops = Number(new URL(harper.opsURL).port);
+    if (ops !== http - 1 && !(await accepting(http - 1))) break;
+    await stopHarper(harper);
+    running = undefined;
+    if (attempt === 5) throw new Error("could not start Harper with nothing on its HTTP port minus one after 5 attempts");
+  }
   httpPort = new URL(harper.httpURL).port;
   opsPort = new URL(harper.opsURL).port;
+  expect(Number(opsPort)).not.toBe(Number(httpPort) - 1);
+  expect(await accepting(Number(httpPort) - 1)).toBe(false);
   // Lives for the whole file, so it is not a per-test tempDir (which is swept after each test).
   secrets = mkdtempSync(join(tmpdir(), "flair-2664-real-secrets-"));
   passFile = join(secrets, "admin-pass");
@@ -168,7 +195,7 @@ beforeAll(async () => {
 }, HARPER_START_BUDGET_MS);
 
 afterAll(async () => {
-  if (harper) await stopHarper(harper);
+  if (running) await stopHarper(running);
   if (secrets) rmSync(secrets, { recursive: true, force: true });
 }, HARPER_STOP_BUDGET_MS);
 
