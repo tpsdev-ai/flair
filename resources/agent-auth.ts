@@ -124,19 +124,23 @@ export async function isAdmin(agentId: string): Promise<boolean> {
 
 /**
  * The admin decision for a handler that identifies its caller by the request's
- * server-set `tpsAgent` annotation.
+ * `tpsAgent` annotation.
  *
  *   - A request the Ed25519 gate verified carries `tpsAgentAdminFromVerifiedRow`
  *     (resources/auth-middleware.ts). Its `tpsAgentIsAdmin` is the decision the
  *     gate took from the Agent row it verified the signature against, and that
  *     decision is returned unchanged: no second read.
- *   - Any other annotated caller (a Basic credential, an in-process
- *     agentContext()/adminContext(), an MCP tool context) is decided by
- *     {@link isAdmin}: its Agent row read now, plus the configured ids.
+ *   - Any other annotated caller (a Basic credential the gate annotated, an
+ *     in-process agentContext()/adminContext(), an MCP tool context built from
+ *     them) is decided by {@link isAdmin}: its Agent row read now, plus the
+ *     configured ids. Its `tpsAgentIsAdmin` is not consulted here.
  *   - A request with no `tpsAgent` is not an admin here.
  *
- * Both annotations are request-object properties the server sets; neither is
- * ever read from a header.
+ * All three are properties of the request object, never headers. On an HTTP
+ * request the gate sets `tpsAgent` and `tpsAgentIsAdmin`, and only its Ed25519
+ * branch sets `tpsAgentAdminFromVerifiedRow`. An in-process caller builds its
+ * own context with `tpsAgent` and `tpsAgentIsAdmin` (resources/in-process.ts),
+ * without the marker.
  */
 export async function annotatedCallerIsAdmin(request: any): Promise<boolean> {
   const agentId = request?.tpsAgent;

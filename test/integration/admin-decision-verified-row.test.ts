@@ -3,11 +3,14 @@
  *
  * The admin decision for an Ed25519-verified agent uses the Agent row the
  * verifier reads for the key check, plus the ids FLAIR_ADMIN_AGENTS names. Each
- * case below changes the Agent table and then sends the very next signed
- * request, with no wait, to an admin-only route (AgentKeyRegistration, whose
- * allowRead is allowAdmin) and to a route any verified agent may read (its own
- * Agent row), so a refusal is shown to come from the admin decision and not
- * from a failed signature check.
+ * case changes the Agent table and then, with no wait, sends signed requests to
+ * an admin-only route (AgentKeyRegistration, whose allowRead is allowAdmin).
+ * The four removal cases and the two role-change cases first read the caller's
+ * own Agent row with the same key (a route any verified agent may read), so
+ * their admin-only refusal is shown to come from the admin decision and not from
+ * a failed signature check. The control case reads the non-admin agent's own
+ * row; the creation case and the configured-id case probe only the admin-only
+ * route.
  *
  * Cases:
  *   - an admin agent's row is removed (through the operations API, as `flair
@@ -16,9 +19,9 @@
  *     from an administrator, or by a federation merge from a paired peer): the
  *     new key's next admin-only request is refused;
  *   - an agent created with role "admin" by an administrator is admitted on its
- *     first request, and refused on the first request after an administrator
+ *     first request, and its next admin-only request after an administrator
  *     changes its role (through the Agent resource, or through the operations
- *     API);
+ *     API) is refused;
  *   - an id FLAIR_ADMIN_AGENTS names is admitted with a non-admin row.
  *
  * One ephemeral, loopback, HOME-isolated Harper (test/helpers/harper-lifecycle).
@@ -224,7 +227,7 @@ describe("the admin decision for a verified agent uses the Agent row the verifie
     expect(await adminOnly(CREATED, createdKp)).toBe(200);
   }, 60_000);
 
-  it("the next request after an administrator changes that agent's role through the Agent resource is refused", async () => {
+  it("the next admin-only request after an administrator changes that agent's role through the Agent resource is refused", async () => {
     expect(await adminOnly(CREATED, createdKp), "an admin before the change").toBe(200);
     // Both fields: a PATCH reconciles the two admin fields against the merged row.
     const res = await asOperator("PATCH", `/Agent/${CREATED}`, { role: "agent", admin: false });
@@ -236,7 +239,7 @@ describe("the admin decision for a verified agent uses the Agent row the verifie
     expect(await adminOnly(CREATED, createdKp)).toBe(403);
   }, 60_000);
 
-  it("the next request after an administrator changes an agent's role through the operations API is refused", async () => {
+  it("the next admin-only request after an administrator changes an agent's role through the operations API is refused", async () => {
     const res = await asOperator("PATCH", `/Agent/${CREATED}`, { role: "admin" });
     expect(res.status, `PATCH: ${res.text}`).toBeLessThan(300);
     expect(await adminOnly(CREATED, createdKp), "an admin before the change").toBe(200);
