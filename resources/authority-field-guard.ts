@@ -1,7 +1,7 @@
 /** Workflow verdicts can only be stamped by their trusted raw-table paths.
  * Keep unchanged echoes compatible with full-row clients, and preserve omitted
- * stamps on PUT; omission must not erase a verdict. A content change drops the
- * stamp. No admin/body bypass. */
+ * stamps on PUT; omission must not erase a verdict. A Memory content change
+ * drops Memory's stamps; other tables keep theirs. No admin/body bypass. */
 export const AUTHORITY_FIELDS = {
   Memory: ["promotionStatus", "promotedAt", "promotedBy", "promotionContentHash", "writeBackWriteId"],
   MemoryCandidate: ["promotedRowId", "promotedRowInstanceToken"],
@@ -20,8 +20,10 @@ export async function guardAuthorityFields(
       });
     }
   }
-  // Null the columns (do not merely delete) so PATCH and PUT both drop them.
-  if (existing && Object.hasOwn(content, "content") && content.content !== existing.content) {
+  // Memory's verdict and content binding attest to its content, so a Memory
+  // content change drops them. Null the columns (do not merely delete) so PATCH
+  // and PUT both drop them. Other tables' fields are preserved below.
+  if (table === "Memory" && existing && Object.hasOwn(content, "content") && content.content !== existing.content) {
     for (const field of AUTHORITY_FIELDS[table]) content[field] = null;
     return null;
   }

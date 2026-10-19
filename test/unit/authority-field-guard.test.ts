@@ -33,6 +33,15 @@ describe("workflow authority guard", () => {
     expect(await guardAuthorityFields(() => stored, omitted, "Memory")).toBeNull();
     expect(omitted.promotionStatus).toBeNull();
   });
+  test("a MemoryCandidate body carrying content keeps the recorded promoted-row identity", async () => {
+    const stored = { claim: "distilled", promotedRowId: "row-1", promotedRowInstanceToken: "token-1" };
+    const patch: Record<string, unknown> = { content: "an extra attribute" };
+    expect(await guardAuthorityFields(() => stored, patch, "MemoryCandidate")).toBeNull();
+    expect(patch).toMatchObject({ promotedRowId: "row-1", promotedRowInstanceToken: "token-1" });
+    const put: Record<string, unknown> = { claim: "distilled", content: "another extra attribute" };
+    expect(await guardAuthorityFields(() => stored, put, "MemoryCandidate")).toBeNull();
+    expect(put).toMatchObject({ promotedRowId: "row-1", promotedRowInstanceToken: "token-1" });
+  });
   test("write-back markers reject forgery and tolerate the stored echo", async () => {
     const stored = { content: "text", writeBackWriteId: "server-attempt" };
     expect((await guardAuthorityFields(() => stored, { writeBackWriteId: "forged" }, "Memory"))?.status).toBe(403);

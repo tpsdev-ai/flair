@@ -65,8 +65,11 @@ const memoryCandidateAuthGate = makeAuthGate();
  * (mirrors MemoryGrant.ts's delete() ownership check). Internal calls (the
  * FLAIR-NIGHTLY-REM staging writer — resources/MemoryReflect.ts's
  * `databases.flair.MemoryCandidate.put(row)` — and resources/health.ts's
- * pending-count read) and admin agents pass every method unfiltered, exactly
- * like every other table this pattern covers.
+ * pending-count read) and admin agents pass the ownership checks of every
+ * method unfiltered, exactly like every other table this pattern covers. The
+ * promoted-row identity (`promotedRowId`, `promotedRowInstanceToken`,
+ * flair#2645) is server-written: a REST POST, PUT or PATCH that changes it is
+ * refused for every caller, admin included.
  */
 export class MemoryCandidate extends (databases as any).flair.MemoryCandidate {
   /**

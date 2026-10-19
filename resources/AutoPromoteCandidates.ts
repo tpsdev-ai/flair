@@ -67,6 +67,9 @@ import {
  * is compared, and an ordinary same-id Memory write keeps the row's incarnation
  * token (Memory.ts stampInstanceToken), so a match identifies the incarnation,
  * not an unedited row. A row that fails any check falls through to a fresh write.
+ * The stamp re-checks the same fields, `archived` included, at its first read
+ * under the per-id Memory lock (promotion-stamp.ts isWrittenRow); a row that no
+ * longer passes is refused with nothing stamped and the candidate stays pending.
  */
 async function findReusablePromotedRow(
   agentId: string,
@@ -221,6 +224,7 @@ export class AutoPromoteCandidates extends Resource {
           visibility: promotedVisibility,
           durability: promotedDurability,
           unstamped: true,
+          unarchived: true,
         };
       } else {
         memId = `${agentId}-promoted-${Date.now()}-${promoted.length}`;

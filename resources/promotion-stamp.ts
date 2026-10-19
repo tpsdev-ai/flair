@@ -9,7 +9,8 @@ import { withMemoryWriteLock, withMemoryWriteLockOnce, type MemoryLockOutcome } 
 
 /** The row a promotion's Memory write produced: its owner, content and
  *  incarnation token. A row an earlier sweep recorded adds the fields that
- *  sweep wrote, re-checked at the stamp's first read. */
+ *  sweep wrote and requires the row to be unstamped and not archived; all of
+ *  them are re-checked at the stamp's first read, under the per-id Memory lock. */
 export interface PromotedRowIdentity {
   agentId: unknown;
   content: unknown;
@@ -18,6 +19,7 @@ export interface PromotedRowIdentity {
   visibility?: string;
   durability?: string;
   unstamped?: boolean;
+  unarchived?: boolean;
 }
 
 /** The stamp's first read is not the row the promotion wrote: nothing stamped. */
@@ -49,6 +51,7 @@ function isWrittenRow(row: any, written: PromotedRowIdentity | undefined): boole
   if (row.agentId !== written.agentId || row.content !== written.content ||
     row.instanceToken !== written.instanceToken) return false;
   if (written.unstamped && row.promotionStatus != null) return false;
+  if (written.unarchived && row.archived === true) return false;
   if (written.visibility !== undefined && row.visibility !== written.visibility) return false;
   if (written.durability !== undefined && row.durability !== written.durability) return false;
   if (written.tags !== undefined &&

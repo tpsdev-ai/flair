@@ -768,6 +768,56 @@ describe("flair#2354 — the promotion stamp write-back under a concurrent chang
     expect((await readCandidate(harper, candidateId))?.status).toBe("promoted");
   }, 60_000);
 
+  it("refuses to stamp a recorded row the owner archives before the stamp takes its lock", async () => {
+    const agentId = "wbc-stamp-agent-archived-entry";
+    const stampAgent = mkAgent(agentId);
+    await seedAgent(harper, stampAgent);
+    const claim = "promotion stamp claim archived before the stamp";
+    const candidateId = "wbc-stamp-cand-archived-entry";
+    const rowId = "wbc-stamp-row-archived-entry";
+    const token = randomUUID();
+    // A recorded, unstamped row that passes the reuse lookup.
+    await insertRow(harper, {
+      id: rowId, agentId, content: claim, contentHash: rowId, instanceToken: token,
+      visibility: "private", durability: "persistent",
+      tags: [`adk:app:${agentId}`, "nightly-rem-promoted", "auto-promoted", `from:${candidateId}`],
+    });
+    await seedCandidate(harper, agentId, {
+      id: candidateId, claim, scopeTag: `adk:app:${agentId}`, sourceMemoryIds: [],
+      promotedRowId: rowId, promotedRowInstanceToken: token,
+    });
+
+    // promotion-stamp-entry: after the lookup chose the row, before the stamp's
+    // lock and first read. The owner archives the row through its own PATCH.
+    const { response, released, paused, competed } = await withPaused(
+      "promotion-stamp-entry",
+      () => authSend(harper, stampAgent, "POST", "/AutoPromoteCandidates", { agentId }),
+      async () => {
+        const patch = await authSend(harper, stampAgent, "PATCH", `/Memory/${rowId}`, { archived: true });
+        return { status: patch.status, text: (await patch.text()).slice(0, 300) };
+      },
+    );
+    expect(paused, "the promotion stamp did not pause at its entry").toBe(true);
+    expect(released, "the promotion stamp was not paused and released by this test").toBe("go");
+    expect(competed?.status, `the owner's archive PATCH was not applied: ${competed?.text}`).toBeLessThan(300);
+    expect(response.status, (await response.clone().text()).slice(0, 300)).toBeLessThan(300);
+    const body = await response.json() as any;
+    expect(body.skipped.find((s: any) => s.id === candidateId)?.reason, "the stamp on the archived row is refused").toBe("stamp_refused");
+    expect(body.promoted).not.toContain(rowId);
+    const row = await readRow(harper, rowId);
+    expect(row?.archived, "the owner's archive is kept").toBe(true);
+    expect(row?.instanceToken).toBe(token);
+    expect(row?.promotionStatus ?? null, "no verdict is stamped onto the archived row").toBeNull();
+    expect(row?.promotedBy ?? null, "no reviewer is stamped onto the archived row").toBeNull();
+    expect(row?.promotionContentHash ?? null, "no content binding is stamped onto the archived row").toBeNull();
+    const rows = (await memoryRowsForAgent(harper, agentId)).filter((r) => r.content === claim);
+    expect(rows.length, "the sweep chose the recorded row and wrote no other").toBe(1);
+    const cand = await readCandidate(harper, candidateId);
+    expect(cand?.status, "a refused stamp leaves the candidate pending").toBe("pending");
+    expect(cand?.promotedRowId).toBe(rowId);
+    expect(cand?.promotedRowInstanceToken).toBe(token);
+  }, 60_000);
+
   it("does not reuse a row with the candidate's tag and claim that the sweep did not write", async () => {
     const agentId = "wbc-stamp-agent-owner-row";
     const stampAgent = mkAgent(agentId);
@@ -962,6 +1012,21 @@ describe("flair#2354 — the promotion stamp write-back under a concurrent chang
     expect(afterPatch?.promotedRowId, "a PATCH without the identity keeps the recorded id").toBe(c.recordedId);
     expect(afterPatch?.promotedRowInstanceToken, "a PATCH without the identity keeps the recorded token").toBe(c.recordedToken);
   }, 60_000);
+
+  for (const verb of ["PUT", "PATCH"] as const) {
+    it(`accepts an owner ${verb} that carries content and leaves the recorded promoted-row identity out, and keeps it`, async () => {
+      const c = await recordedIdentityCandidate(`${verb.toLowerCase()}-content`);
+      const edit = { content: `owner content edit by ${verb}`, rationalePrompt: `owner edit with content by ${verb}` };
+      const body = verb === "PUT" ? { ...c.withoutIdentity, ...edit } : edit;
+      const res = await authSend(harper, c.agent, verb, `/MemoryCandidate/${c.candidateId}`, body);
+      expect(res.status, (await res.clone().text()).slice(0, 300)).toBeLessThan(300);
+      const after = await readCandidate(harper, c.candidateId);
+      expect(after?.rationalePrompt, `the ${verb} was applied`).toBe(edit.rationalePrompt);
+      expect(after?.content, `the ${verb}'s content was stored`).toBe(edit.content);
+      expect(after?.promotedRowId, `a ${verb} carrying content keeps the recorded id`).toBe(c.recordedId);
+      expect(after?.promotedRowInstanceToken, `a ${verb} carrying content keeps the recorded token`).toBe(c.recordedToken);
+    }, 60_000);
+  }
 
   // promotion-stamp-select: between the Memory write and the stamp's first
   // read; the other two are the write-back helper's own points.
