@@ -154,7 +154,7 @@ Flair accepts the public key as 64-char hex, or base64 of the raw 32 bytes.
 
 Both verified end to end: an agent registered this way, with a key its app minted, then authenticated over HTTP with a real `TPS-Ed25519` signature — and a request signed with the *wrong* key was rejected.
 
-> **Two traps.** `Agent.put()` on the *resource* silently strips `publicKey`, so set the key when you **create** the record; to rotate one later, write `databases.flair.Agent.put({ ...existing, publicKey })` on the raw table (which is what `flair agent rotate-key` does through the admin ops API — there is no dedicated endpoint today). And do **not** call `AgentSeed` in-process: although its `allowCreate()` explicitly permits the trusted `internal` verdict, its `post()` then re-checks for a named admin and returns `403 forbidden: admin only` — confirmed by running it.
+> **Two traps.** `Agent.put()` on the *resource* updates an existing record and keeps its stored `publicKey` (a `publicKey` in the body is ignored), and a PUT to an id with no record is refused with `404 agent_put_requires_existing`, so set the key when you **create** the record; to rotate one later, write `databases.flair.Agent.put({ ...existing, publicKey })` on the raw table (`flair agent rotate-key` does the equivalent through the admin operations API, an `update` of the record's `publicKey` — there is no dedicated endpoint today). And do **not** call `AgentSeed` in-process: although its `allowCreate()` explicitly permits the trusted `internal` verdict, its `post()` then re-checks for a named admin and returns `403 forbidden: admin only` — confirmed by running it.
 
 ---
 

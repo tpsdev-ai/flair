@@ -3,9 +3,11 @@
 // An Agent PUT updates an EXISTING row: the STORED createdAt and publicKey are
 // carried into the replacement, ignoring any value the body sends. A PUT whose
 // target id has no stored row is refused with 404
-// `agent_put_requires_existing` (the creation path is POST /AgentSeed) and
-// writes nothing. Authorization is unchanged, and PATCH keeps its merge
-// behaviour.
+// `agent_put_requires_existing` (its message names POST /AgentSeed, a creation
+// path; POST /Agent/ also creates a row) and writes nothing. Authorization is
+// unchanged, and PATCH keeps its merge behaviour. A deletion or a key rotation
+// committed between the PUT's read and its write is covered by
+// agent-put-race-2696.test.ts.
 //
 // Each case runs against a real Harper; the stored-row assertions use an
 // operations search_by_id in a separate request, so they read the committed

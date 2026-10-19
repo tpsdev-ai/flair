@@ -224,54 +224,85 @@ export class Agent extends (databases as any).flair.Agent {
 
   async put(content: any) {
     // flair#2359 — refuse an id outside the shared rule before any read or
-    // write. A PUT to a new id is a create (Harper's put is an upsert).
+    // write.
     const idDenial = agentIdDenial(writeTargetId(this, content));
     if (idDenial) return idDenial;
 
     const denial = await this.authorizePrincipalWrite(content);
     if (denial) return denial;
 
-    // Resolve the stored row BEFORE the replacement is built: a PUT updates an
-    // existing row, and the two immutable fields below carry its values. The
-    // stored row is resolved by the write's target id; a body/URL mismatch or a
-    // failed read refuses the write.
+    // A PUT updates an EXISTING row (flair#2696). Harper's put is an upsert; an
+    // Agent PUT does not create one. 404 is the repo's "not found / use the
+    // other route" status (resources/table-patch-policy.ts, resources/Memory.ts's
+    // reindex_row_not_found), and the message names POST /AgentSeed, a creation
+    // path.
+    const requiresExisting = () => new Response(JSON.stringify({
+      error: "agent_put_requires_existing",
+      message: "an Agent PUT updates an existing agent; to create an agent, use POST /AgentSeed",
+    }), { status: 404, headers: { "content-type": "application/json" } });
+
+    // The stored row, resolved by the write's target id; a body/URL mismatch or
+    // a failed read refuses the write, and a missing row is refused.
     const resolvedOriginRow = await resolveStoredRow(this, "Agent", content, () => super.get());
     if (resolvedOriginRow.denial) return resolvedOriginRow.denial;
-    const stored = resolvedOriginRow.row;
-    if (!stored) {
-      // Harper's put is an upsert; an Agent PUT does not create one. 404 is the
-      // repo's "not found / use the other route" status
-      // (resources/table-patch-policy.ts, resources/Memory.ts's
-      // reindex_row_not_found), and the message names the creation path.
-      return new Response(JSON.stringify({
-        error: "agent_put_requires_existing",
-        message: "an Agent PUT updates an existing agent; to create an agent, use POST /AgentSeed",
-      }), { status: 404, headers: { "content-type": "application/json" } });
-    }
+    if (!resolvedOriginRow.row) return requiresExisting();
 
-    content.updatedAt = new Date().toISOString();
+    // Test-only: inert unless the fault-injection env opt-in is set and armed.
+    // Holds the PUT after the stored-row read above, before the owned
+    // transaction below, so a deletion or a key rotation can commit in between
+    // (test/integration/agent-put-race-2696.test.ts).
+    const prePause = txnPausePoint("agent-put-pre");
+    if (prePause) await prePause;
 
-    // Immutable fields: a full replacement carries the STORED values, ignoring
-    // any client-supplied value, the way Integration.put carries its stored
-    // createdAt forward. Key rotation goes through its dedicated endpoint.
-    content.createdAt = stored.createdAt;
-    content.publicKey = stored.publicKey;
+    // The replacement is built and written inside a FRESH OWNED transaction
+    // (withOwnedTransaction detaches the request's), from a re-read of the row
+    // in that transaction, never from the read above, which a deletion or a key
+    // rotation may have overtaken. Harper stamps a transaction's writes with one
+    // time, taken at its first read (here, the re-read), and applies the writes
+    // to a row in the order of those times:
+    //   - a deletion or rotation committed before the re-read is SEEN by it: a
+    //     row the re-read finds absent is refused (the PUT never re-creates it),
+    //     and the immutable fields are taken from the re-read row;
+    //   - one committed after the re-read carries a later time, so Harper applies
+    //     it after this write (a deletion stays deleted, a rotated key stands).
+    // Not covered: a write whose own transaction took its time before the
+    // re-read and commits after it. There is no compare-and-set; per-id
+    // serialization is tracked in flair#2478.
+    const outcome = await withOwnedTransaction((this as any).getContext?.(), async (c: unknown) => {
+      const current = await resolveStoredRow(this, "Agent", content, () => super.get(), c);
+      if (current.denial) return { kind: "denied" as const, denial: current.denial };
+      const stored = current.row;
+      if (!stored) return { kind: "gone" as const };
 
-    // Keep the two admin fields agreeing on disk — see resources/agent-admin.ts.
-    // Only an admin can have reached here with a privilege change (see
-    // authorizePrincipalWrite), so this normalises an authorized intent; it
-    // never manufactures one.
-    reconcileAdminFields(content);
+      content.updatedAt = new Date().toISOString();
 
-    // Write-time originatorInstanceId — see post() above /
-    // resources/originator-instance.ts. An UPDATE keeps the stored value (a
-    // body value never replaces or clears it).
-    await applyOriginatorInstanceId(content, stored);
-    applyFederationBookkeeping(content, stored);
+      // Immutable fields: a full replacement carries the STORED values, ignoring
+      // any client-supplied value, the way Integration.put carries its stored
+      // createdAt forward. A key is rotated by `flair agent rotate-key`, an
+      // `update` through Harper's operations API, not by this PUT.
+      content.createdAt = stored.createdAt;
+      content.publicKey = stored.publicKey;
 
-    const result = await super.put(content);
+      // Keep the two admin fields agreeing on disk — see resources/agent-admin.ts.
+      // Only an admin can have reached here with a privilege change (see
+      // authorizePrincipalWrite), so this normalises an authorized intent; it
+      // never manufactures one.
+      reconcileAdminFields(content);
+
+      // Write-time originatorInstanceId — see post() above /
+      // resources/originator-instance.ts. An UPDATE keeps the stored value (a
+      // body value never replaces or clears it).
+      await applyOriginatorInstanceId(content, stored);
+      applyFederationBookkeeping(content, stored);
+
+      // The resource's write joins the owned transaction: Harper resolves an
+      // instance write's transaction from its context at write time.
+      return { kind: "written" as const, result: await super.put(content) };
+    });
+    if (outcome.kind === "denied") return outcome.denial;
+    if (outcome.kind === "gone") return requiresExisting();
     invalidateAdminCache();
-    return result;
+    return outcome.result;
   }
 
   /**

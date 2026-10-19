@@ -92,6 +92,21 @@ beforeEach(() => {
   agentStore = new Map();
   instanceRow = null;
   _resetLocalInstanceIdCacheForTests();
+  // Agent.put() re-reads the row and writes inside one owned transaction
+  // (resources/request-transaction.ts, flair#2696); this mock owns/commits one.
+  (globalThis as any).transaction = (ctx: any, cb: (txn: any) => any) => {
+    const context = ctx && typeof ctx === "object" ? ctx : {};
+    if (context.transaction && context.transaction.open === 1) return cb(context.transaction);
+    const txn: any = { open: 1, saveCommits: false };
+    context.transaction = txn;
+    let result: any;
+    try { result = cb(txn); } catch (e) { txn.open = 0; throw e; }
+    if (result && typeof result.then === "function") {
+      return result.then((v: any) => { txn.open = 0; return v; }, (e: any) => { txn.open = 0; throw e; });
+    }
+    txn.open = 0;
+    return result;
+  };
 });
 
 describe("federation-edge-hardening slice 1 / flair#1965 — Agent.post() stamps a server-set originatorInstanceId", () => {
