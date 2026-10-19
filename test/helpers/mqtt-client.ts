@@ -331,10 +331,11 @@ export class MqttClient {
 
   /**
    * PUBLISH at QoS 1 (retained when `retain`), answering the PUBACK reason
-   * code and its reason string (MQTT 5 property 0x1F), if any. Harper sets
-   * the reason string to the refusal's message for a 403 or 404 only when the
-   * client has not turned problem information off and the string fits the
-   * client's maximum packet size (server/mqtt.ts).
+   * code and its reason string (MQTT 5 property 0x1F), if any. For a 403 or
+   * 404 refusal Harper truncates the refusal's UTF-8 message at its
+   * reason-string limit, then includes the resulting string only when the
+   * client has not turned problem information off and it fits the client's
+   * maximum packet size (server/mqtt.ts).
    */
   publishDetailed(topic: string, payload: unknown, opts: { retain?: boolean; ms?: number } = {}): Promise<MqttOutcome<{ code: number; reason?: string }>> {
     const data = payload === null ? [] : [...enc.encode(typeof payload === "string" ? payload : JSON.stringify(payload))];
