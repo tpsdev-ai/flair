@@ -116,7 +116,8 @@ export class MqttClient {
 
   /**
    * Open an MQTT-over-WebSocket connection. `opened` is false when the upgrade
-   * failed or the socket closed first. The `mqtt` subprotocol is what routes
+   * failed, the socket closed first, or no open came within `ms`. The `mqtt`
+   * subprotocol is what routes
    * the upgrade to Harper's MQTT handler; `protocol` reports what the server
    * negotiated.
    */
@@ -250,9 +251,10 @@ export class MqttClient {
 
   /**
    * Send CONNECT (MQTT 5, clean start) and wait for CONNACK: its reason code.
-   * `will` registers a last-will message, which the server publishes when the
-   * connection ends without DISCONNECT (`drop()`); a `null` payload is zero
-   * bytes, which a retained will turns into a delete.
+   * `will` registers a last-will message. When the connection ends without
+   * DISCONNECT (`drop()`), Harper attempts to publish an eligible will (it
+   * skips an expired scoped-token will), and the table guard may refuse it.
+   * A `null` payload is zero bytes, which a retained will turns into a delete.
    */
   connect(opts: {
     clientId: string;
@@ -329,8 +331,10 @@ export class MqttClient {
 
   /**
    * PUBLISH at QoS 1 (retained when `retain`), answering the PUBACK reason
-   * code and its reason string (MQTT 5 property 0x1F), which Harper sets to the
-   * refusal's message for a 403 or 404.
+   * code and its reason string (MQTT 5 property 0x1F), if any. Harper sets
+   * the reason string to the refusal's message for a 403 or 404 only when the
+   * client has not turned problem information off and the string fits the
+   * client's maximum packet size (server/mqtt.ts).
    */
   publishDetailed(topic: string, payload: unknown, opts: { retain?: boolean; ms?: number } = {}): Promise<MqttOutcome<{ code: number; reason?: string }>> {
     const data = payload === null ? [] : [...enc.encode(typeof payload === "string" ? payload : JSON.stringify(payload))];
@@ -372,7 +376,10 @@ export class MqttClient {
     return this.publish(topic, payload, 1, ms, { retain: true });
   }
 
-  /** Wait until a received PUBLISH matches, or `ms` passes. */
+  /**
+   * Wait until a received PUBLISH matches, `ms` passes, or the connection
+   * closes (whichever comes first); undefined when none matched.
+   */
   async waitForPublish(pred: (p: MqttPublishIn) => boolean, ms = 10_000): Promise<MqttPublishIn | undefined> {
     const deadline = Date.now() + ms;
     while (Date.now() < deadline) {
@@ -385,8 +392,9 @@ export class MqttClient {
   }
 
   /**
-   * End the connection without DISCONNECT, as a client that dropped would: the
-   * server then publishes the session's last-will message, if it has one.
+   * End the connection without DISCONNECT, as a client that dropped would:
+   * Harper then attempts to publish the session's will if it is eligible (it
+   * skips an expired scoped-token will), and the table guard may refuse it.
    */
   async drop(): Promise<void> {
     try { this.transport.drop(); } catch { /* already closed */ }

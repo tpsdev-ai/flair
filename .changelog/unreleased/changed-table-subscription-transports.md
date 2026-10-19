@@ -15,22 +15,25 @@
   it: as its session's own publish when the session drops, and as a caller
   without a valid credential when Harper replays the eligible stored wills at a
   worker start (Harper drops an expired scoped-token will before this guard), so
-  a replayed will on a table topic is refused. The guard resolves each guarded
-  call's caller from the context Harper takes from the call's arguments, read as
-  Harper reads them (where the guard lists more than one reading, each listed
-  reading is decided); a resolved caller is decided by one shared policy
-  function, and a caller that cannot be resolved is refused directly. The
-  guarded calls are each table's `connect()`, `subscribe()` and `publish()`, and
-  its `put()`/`delete()` when an argument Harper may take as the context carries
-  the markers of an MQTT session's context or a replayed will record; every
-  other `put()`/`delete()` call passes through with its arguments and keeps its
-  write rules. The guard's boundary is protocol-layer callers, whose contexts
-  Harper constructs; in-process code is trusted, and the guard makes no claim
-  about objects an in-process caller crafts. A call that Harper's MQTT layer
-  makes without an HTTP request (its TCP and TLS listeners) resolves, everywhere
-  flair resolves a caller, as one without a valid credential, and so does a call
-  from Harper's native MCP component: its `resources/subscribe`, when an
-  operator configures that component, refuses every table subscription,
-  administrators included. Flair's feed resources (`/FeedMemories`,
-  `/FeedSouls`) and the BM25 index now read table changes in-process through
-  `subscribeInProcess`, with their own subscriber rules as before.
+  a replayed will on a table topic is refused. The guard decides the contexts
+  Harper may take from a guarded call's arguments, read as Harper reads them —
+  every listed reading for `connect()`, `subscribe()` and `publish()`, every
+  marked candidate for `put()`/`delete()` — and all must be admitted. For each
+  it resolves the caller, except a replayed will record, which is decided as a
+  caller without a valid credential without calling the resolver; a resolved
+  caller is decided by one shared policy function, and a caller that cannot be
+  resolved is refused directly. The guarded calls are each table's `connect()`,
+  `subscribe()` and `publish()`, and its `put()`/`delete()` when an argument
+  Harper may take as the context carries the markers of an MQTT session's
+  context or a replayed will record; every other `put()`/`delete()` call passes
+  through with its arguments and keeps its write rules. The guard's boundary is
+  protocol-layer callers, whose contexts Harper constructs; in-process code is
+  trusted, and the guard makes no claim about objects an in-process caller
+  crafts. A call that Harper's MQTT layer makes without an HTTP request (its TCP
+  and TLS listeners) resolves, everywhere flair resolves a caller, as one
+  without a valid credential, and so does a call from Harper's native MCP
+  component: its `resources/subscribe`, when an operator configures that
+  component, refuses every table subscription, administrators included. Flair's
+  feed resources (`/FeedMemories`, `/FeedSouls`) and the BM25 index now read
+  table changes in-process through `subscribeInProcess`, with their own
+  subscriber rules as before.

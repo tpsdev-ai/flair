@@ -22,7 +22,7 @@ import { describe, it, expect } from "bun:test";
 import {
   GUARDED_TABLE_STATICS,
   RETAINED_PUBLISH_STATICS,
-  retainedPublishContext,
+  retainedPublishContexts,
   guardTableSubscriptions,
   isProtocolEntry,
   subscribeInProcess,
@@ -74,9 +74,14 @@ function makeStreamTable() {
 
 /** resolveAuth reads the verdict off the context the guard hands it. */
 const byContext = async (ctx: any): Promise<SubscriptionCaller> => ctx?.verdict ?? { kind: "internal" };
-// Each carries a transaction, as the contexts Harper passes do (it calls these
-// statics inside transaction(context, ...)), so Harper reads it as a context in
-// every argument position.
+// Each carries a `transaction` property, as the contexts Harper passes do (it
+// calls these statics inside transaction(context, ...)). That is what makes
+// Harper read a second argument of subscribe() as its context; in the other
+// forms these fixtures are used in — a third argument, the (data, context)
+// form, delete() — Harper reads them as the context whatever they carry. In
+// the two-argument connect()/publish() form with a target first, Harper
+// checks for a real DatabaseTransaction, which `{}` is not
+// (resources/Resource.ts); those cases are read both ways.
 const AGENT = { verdict: { kind: "agent", agentId: "b", isAdmin: false }, transaction: {} };
 const ADMIN = { verdict: { kind: "agent", agentId: "root", isAdmin: true }, transaction: {} };
 const ANON = { verdict: { kind: "anonymous" }, transaction: {} };
@@ -351,27 +356,27 @@ describe("guardTableSubscriptions — retained MQTT publish (put() / delete())",
     expect(calls).toEqual([]);
   });
 
-  it("retainedPublishContext returns the MQTT session context Harper passes, at the position Harper reads it", () => {
+  it("retainedPublishContexts returns the MQTT session context Harper passes, at the position Harper reads it", () => {
     const ctx = mqtt(ADMIN.verdict);
-    expect(retainedPublishContext("put", [{}, { data: 1 }, ctx])).toBe(ctx); // put(target, data, context)
-    expect(retainedPublishContext("delete", [{}, ctx])).toBe(ctx); // delete(target, context)
-    expect(retainedPublishContext("put", [{}, { data: 1 }, { ...ctx, user: {} }])).toBeDefined(); // a session's will copies the context
+    expect(retainedPublishContexts("put", [{}, { data: 1 }, ctx])).toEqual([ctx]); // put(target, data, context)
+    expect(retainedPublishContexts("delete", [{}, ctx])).toEqual([ctx]); // delete(target, context)
+    expect(retainedPublishContexts("put", [{}, { data: 1 }, { ...ctx, user: {} }])).toHaveLength(1); // a session's will copies the context
   });
 
-  it("retainedPublishContext classifies the argument Harper takes as the context, as Harper reads put() and delete()", () => {
+  it("retainedPublishContexts classifies the arguments Harper may take as the context, as Harper reads put() and delete()", () => {
     const ctx = mqtt(ADMIN.verdict);
     const target = new URLSearchParams("id=m"); // Harper's RequestTarget
     const released = Object.freeze({ open: 0, addWrite() {}, setContext() {} });
     const replayShaped = { id: "m", topic: "Memory/m", retain: true, authorize: true };
     const withTxn = { ...ctx, transaction: { commit() { return {}; } } };
-    expect(retainedPublishContext("put", [{ id: "m" }, ctx])).toBe(ctx); // (data, context)
-    expect(retainedPublishContext("put", [target, replayShaped])).toBeUndefined(); // Harper reads it as data
-    expect(retainedPublishContext("put", [target, withTxn])).toBe(withTxn); // a second argument carrying a transaction
-    expect(retainedPublishContext("put", [target, { data: 1 }, released])).toBeUndefined(); // released counts as absent
-    expect(retainedPublishContext("put", [{ id: "m" }, ctx, released])).toBe(ctx);
-    expect(retainedPublishContext("delete", [target, ctx, released])).toBe(ctx);
-    expect(retainedPublishContext("delete", [target, undefined, ctx])).toBe(ctx);
-    expect(retainedPublishContext("put", [target, { data: 1 }, ctx])).toBe(ctx);
+    expect(retainedPublishContexts("put", [{ id: "m" }, ctx])).toEqual([ctx]); // (data, context)
+    expect(retainedPublishContexts("put", [target, replayShaped])).toEqual([]); // Harper reads it as data
+    expect(retainedPublishContexts("put", [target, withTxn])).toEqual([withTxn]); // a second argument carrying a transaction
+    expect(retainedPublishContexts("put", [target, { data: 1 }, released])).toEqual([]); // released counts as absent
+    expect(retainedPublishContexts("put", [{ id: "m" }, ctx, released])).toEqual([ctx]);
+    expect(retainedPublishContexts("delete", [target, ctx, released])).toEqual([ctx]);
+    expect(retainedPublishContexts("delete", [target, undefined, ctx])).toEqual([ctx]);
+    expect(retainedPublishContexts("put", [target, { data: 1 }, ctx])).toEqual([ctx]);
   });
 
   it("a will Harper replays is decided as a caller without a credential, an administrator's included", async () => {
@@ -390,22 +395,22 @@ describe("guardTableSubscriptions — retained MQTT publish (put() / delete())",
     await expect((Table as any).delete({ id: "m" }, replayed(undefined))).rejects.toMatchObject({ statusCode: 401 });
     expect(resolved).toBe(0);
     expect(calls).toEqual([]);
-    expect(retainedPublishContext("put", [{}, { content: "x" }, replayed({ content: "x" })])).toBeDefined();
+    expect(retainedPublishContexts("put", [{}, { content: "x" }, replayed({ content: "x" })])).toHaveLength(1);
   });
 
-  it("retainedPublishContext is undefined for a context of neither shape, and invokes no getter or getContext()", () => {
+  it("retainedPublishContexts is empty for a context of neither shape, and invokes no getter or getContext()", () => {
     let accessorReads = 0;
     let getContextCalls = 0;
     const session = { addSubscription: () => undefined };
     const viaAccessor = { socket: {}, get session() { accessorReads++; return session; } };
     const viaGetContext = { getContext() { getContextCalls++; return mqtt(ADMIN.verdict); } };
-    expect(retainedPublishContext("put", [{}, { data: 1 }, { user: 1 }])).toBeUndefined();
-    expect(retainedPublishContext("put", [{}, { data: 1 }, { headers: {}, authorize: true }])).toBeUndefined();
-    expect(retainedPublishContext("put", [{ id: "x" }])).toBeUndefined();
-    expect(retainedPublishContext("delete", ["id"])).toBeUndefined();
-    expect(retainedPublishContext("put", [{}, { data: 1 }, viaAccessor])).toBeUndefined();
-    expect(retainedPublishContext("delete", [{}, viaGetContext])).toBeUndefined();
-    expect(retainedPublishContext("put", [{}, { data: 1 }, Object.create(mqtt(ADMIN.verdict))])).toBeUndefined(); // inherited, not own
+    expect(retainedPublishContexts("put", [{}, { data: 1 }, { user: 1 }])).toEqual([]);
+    expect(retainedPublishContexts("put", [{}, { data: 1 }, { headers: {}, authorize: true }])).toEqual([]);
+    expect(retainedPublishContexts("put", [{ id: "x" }])).toEqual([]);
+    expect(retainedPublishContexts("delete", ["id"])).toEqual([]);
+    expect(retainedPublishContexts("put", [{}, { data: 1 }, viaAccessor])).toEqual([]);
+    expect(retainedPublishContexts("delete", [{}, viaGetContext])).toEqual([]);
+    expect(retainedPublishContexts("put", [{}, { data: 1 }, Object.create(mqtt(ADMIN.verdict))])).toEqual([]); // inherited, not own
     expect(accessorReads).toBe(0);
     expect(getContextCalls).toBe(0);
   });
@@ -691,6 +696,26 @@ describe("caller-made shapes the guard decides fail closed", () => {
     await expect((Table as any).put(target, { content: "x" }, mimic())).rejects.toMatchObject({ statusCode: 403 });
     await expect((Table as any).delete(target, mimic())).rejects.toMatchObject({ statusCode: 403 });
     expect(calls).toEqual([]);
+  });
+
+  it("put()/delete() with two marked candidates decides both: an administrator's first and a non-admin's second is refused", async () => {
+    const calls: string[] = [];
+    class Table {
+      static put() { calls.push("put"); return "put-result"; }
+      static delete() { calls.push("delete"); return "delete-result"; }
+    }
+    guardTableSubscriptions({ Memory: Table }, { resolveAuth: byContext, ambientContext: () => ADMIN });
+    const session = (verdict: unknown, sentinelShaped = false) => ({
+      session: { addSubscription: () => undefined }, socket: {}, authorize: true, verdict,
+      ...(sentinelShaped ? { open: 0, addWrite() {}, setContext() {} } : {}),
+    });
+    // The third argument is sentinel-shaped, so Harper may skip it and take the second: both are candidates.
+    await expect((Table as any).put({ id: "m" }, session(AGENT.verdict), session(ADMIN.verdict, true))).rejects.toMatchObject({ statusCode: 403 });
+    await expect((Table as any).delete(target, session(AGENT.verdict), session(ADMIN.verdict, true))).rejects.toMatchObject({ statusCode: 403 });
+    expect(retainedPublishContexts("put", [{ id: "m" }, session(AGENT.verdict), session(ADMIN.verdict, true)])).toHaveLength(2);
+    // Both administrators: admitted.
+    expect(await (Table as any).put({ id: "m" }, session(ADMIN.verdict), session(ADMIN.verdict, true))).toBe("put-result");
+    expect(calls).toEqual(["put"]);
   });
 
   it("an array first argument: no element is read, and the call is refused when either reading is a non-admin", async () => {
