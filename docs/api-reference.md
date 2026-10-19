@@ -126,7 +126,22 @@ is `GET /Name/<id>` unless noted.
 | GET | `/HealthDetail` | Ed25519 | Rich stats (counts, agents, migration). `bm25.summary` is this worker's lexical index: `building N/M docs`, `ready · N docs`, or `disabled — reason`. |
 | GET | `/AgentCard/<agentId>` | Public | A2A agent-card; field-allowlisted. |
 | GET | `/a2a`, `/A2AAdapter` | Public | A2A discovery. |
-| POST | `/a2a`, `/A2AAdapter` | Ed25519 | JSON-RPC actions (writes OrgEvents, reads tasks). GET-only is public; POST is not. |
+| POST | `/a2a`, `/A2AAdapter` | Ed25519 | JSON-RPC actions (writes OrgEvents, streams the caller's OrgEvents, reads tasks). GET-only is public; POST is not. Methods: [A2A JSON-RPC](#a2a-json-rpc-post-a2a). |
+
+#### A2A JSON-RPC (`POST /a2a`)
+
+`POST /a2a` takes a JSON-RPC 2.0 request and requires a `TPS-Ed25519`
+signature or admin Basic auth. A request with neither is answered with error
+`-32001` `Unauthorized`. Where a method takes `params.agentId`, a non-admin
+caller may name only its own agent id; any other id is answered with error
+`-32001` `Forbidden`. An admin caller may name any agent.
+
+| Method | What it does |
+|--------|--------------|
+| `message/send` | Writes an `a2a.message` OrgEvent authored by `params.agentId` (the caller), targeted at `params.toAgentId`, or at the sender when that is omitted. |
+| `message/stream` | Answers with a `text/event-stream` of the OrgEvents for `params.agentId` created after the stream opens: the events `GET /OrgEventCatchup/<agentId>` returns to that caller (targeted at the agent, or broadcast with no targets). The events are read in process with the caller's own identity, and the stream does not move the agent's catch-up watermark. It answers only for the caller's own agent id (admins: any), with the same `-32001` `Forbidden` as `message/send` otherwise; a missing `params.agentId` is error `-32602`. Each event arrives as an `org.event` frame whose `data` is a JSON-RPC result `{ type: "event", event }`; an event that carries a task status is followed by a `task.status` frame. The stream ends when the client disconnects, after 5 minutes, after a terminal status (`completed`, `failed`, `canceled`) for the task named in `params.taskId`, or with one `error` frame (a JSON-RPC error) when a read fails. Send the request without `Accept: text/event-stream`: Harper routes a request carrying that header to the resource's subscription path, which does not answer `message/stream`. |
+| `tasks/get` | One task by `params.taskId`, with its OrgEvent history. |
+| `tasks/list` | The instance's task board (the Beads issues on the Flair host), optionally filtered by `params.agentId` (assignee) and `params.status`. Any authenticated caller receives the whole board: it is shared within one instance, not scoped per caller. An anonymous request is refused (`-32001`). |
 
 ### Identity — Agent, Presence, Soul
 

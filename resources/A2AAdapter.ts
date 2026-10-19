@@ -2,7 +2,18 @@ import { Resource, databases } from "harper";
 import { access, readFile, readdir } from "node:fs/promises";
 import { constants } from "node:fs";
 import { basename, extname, join } from "node:path";
-import { localBaseUrl, resolvePublicBaseUrl } from "./a2a-url.js";
+import { resolvePublicBaseUrl } from "./a2a-url.js";
+import {
+  cleanText,
+  orgEventStream,
+  rpcError,
+  rpcResult,
+  type CatchupPageReader,
+  type JsonRpcId,
+} from "./a2a-stream.js";
+import { positionAfterTimestamp } from "./agent-read-position-lib.js";
+import { adminContext, agentContext } from "./in-process.js";
+import { OrgEventCatchup } from "./OrgEventCatchup.js";
 
 type JsonRpcRequest = {
   jsonrpc: string;
@@ -26,22 +37,6 @@ type BeadsIssue = {
 const BEADS_ROOT = join(process.env.HOME || "/root", "ops", ".beads");
 const BEADS_ISSUES_DIR = join(BEADS_ROOT, "issues");
 const BEADS_ISSUES_JSONL = join(BEADS_ROOT, "issues.jsonl");
-
-function rpcResult(id: string | number | null | undefined, result: any) {
-  return { jsonrpc: "2.0", id: id ?? null, result };
-}
-
-function rpcError(id: string | number | null | undefined, code: number, message: string, data?: any) {
-  return {
-    jsonrpc: "2.0",
-    id: id ?? null,
-    error: data === undefined ? { code, message } : { code, message, data },
-  };
-}
-
-function cleanText(value: unknown): string {
-  return String(value ?? "").trim();
-}
 
 function truncate(value: string, max: number): string {
   return value.length <= max ? value : `${value.slice(0, Math.max(0, max - 1))}…`;
@@ -239,58 +234,40 @@ async function publishOrgEvent(event: any): Promise<void> {
   });
 }
 
-function parseJsonSafe(value: unknown): any | null {
-  if (typeof value !== "string" || !value.trim()) return null;
-  try {
-    return JSON.parse(value);
-  } catch {
-    return null;
-  }
-}
-
-function normalizeA2AStatus(statusRaw: unknown): string | null {
-  const status = cleanText(statusRaw).toLowerCase();
-  if (!status) return null;
-  if (status === "done" || status === "closed" || status === "complete" || status === "completed") return "completed";
-  if (status === "failed" || status === "error") return "failed";
-  if (status === "cancelled" || status === "canceled") return "canceled";
-  if (status === "working" || status === "in_progress" || status === "open" || status === "active" || status === "todo") {
-    return "working";
+/**
+ * The caller acts only as itself: a non-admin caller may name only its own
+ * agent id as `params.agentId` (message/send's sender, message/stream's
+ * subscriber); an admin caller may name any agent. Returns the JSON-RPC
+ * refusal, or null when the caller may act as `agentId`.
+ */
+function actAsRefusal(
+  id: JsonRpcId,
+  callerAgent: string | undefined,
+  callerIsAdmin: boolean,
+  agentId: string,
+  action: "send" | "stream",
+) {
+  if (!callerIsAdmin && callerAgent !== agentId) {
+    return rpcError(id, -32001, "Forbidden", {
+      detail: `caller ${callerAgent ?? "(anon)"} cannot ${action} as ${agentId}`,
+    });
   }
   return null;
 }
 
-function inferStatusFromText(textRaw: unknown): string | null {
-  const text = cleanText(textRaw).toLowerCase();
-  if (!text) return null;
-  if (text.includes("completed") || text.includes("complete") || text.includes("done")) return "completed";
-  if (text.includes("failed") || text.includes("error")) return "failed";
-  if (text.includes("cancelled") || text.includes("canceled")) return "canceled";
-  if (text.includes("working") || text.includes("started") || text.includes("in progress")) return "working";
-  return null;
-}
-
-function taskIdFromEvent(event: any): string | null {
-  const refId = cleanText(event?.refId);
-  if (refId.startsWith("bd://")) {
-    const taskId = cleanText(refId.slice("bd://".length));
-    if (taskId) return taskId;
-  }
-  const detail = parseJsonSafe(event?.detail);
-  const fromDetail = cleanText(detail?.taskId ?? detail?.id ?? detail?.task?.id);
-  if (fromDetail) return fromDetail;
-  return null;
-}
-
-function statusFromOrgEvent(event: any): string | null {
-  const detail = parseJsonSafe(event?.detail);
-  return (
-    normalizeA2AStatus(detail?.status) ??
-    normalizeA2AStatus(detail?.task?.status) ??
-    normalizeA2AStatus(event?.status) ??
-    normalizeA2AStatus(event?.kind) ??
-    inferStatusFromText(event?.summary) ??
-    null
+/**
+ * message/stream's reader: one page of `participantId`'s catch-up after a
+ * cursor, read in process through OrgEventCatchup with the caller's own
+ * identity, which is the targeting, expiry, order and owner check that
+ * GET /OrgEventCatchup/<participantId> applies to that caller. Each read gets
+ * a fresh context (and so its own transaction), carrying exactly the caller's
+ * agent id and admin flag. The read passes an explicit `after` cursor, so it
+ * never creates or moves the agent's durable catch-up watermark.
+ */
+function callerCatchupReader(participantId: string, callerAgent: string, callerIsAdmin: boolean): CatchupPageReader {
+  return (after) => (OrgEventCatchup as any).get(
+    { id: participantId, conditions: [{ attribute: "after", value: after }] },
+    callerIsAdmin ? adminContext(callerAgent) : agentContext(callerAgent),
   );
 }
 
@@ -298,15 +275,18 @@ export class A2AAdapter extends Resource {
   // A2A discovery surface — agent-card metadata (GET) is intentionally
   // public so other agents/clients can discover this Flair as a memory
   // peer. POST is JSON-RPC for actions (message/send writes OrgEvents,
-  // tasks/list reads Beads issues, message/stream subscribes to events)
-  // and is auth-gated upstream by auth-middleware's narrowed allow-list
-  // (GET /a2a passes through; POST /a2a must carry TPS-Ed25519 or admin
-  // Basic). The post() handler below additionally enforces sender ==
-  // params.agentId for message/send so an authenticated caller can only
-  // act AS themselves, not impersonate another agent. message/send routes
-  // a DIRECTED handoff to params.toAgentId (the recipient) by setting the
-  // OrgEvent's targetIds = [toAgentId]; OrgEventCatchup filters on that, so
-  // the recipient — not the sender — receives the message.
+  // tasks/list reads the instance's Beads task board, message/stream
+  // streams the caller's OrgEvents) and is auth-gated upstream by
+  // auth-middleware's narrowed allow-list (GET /a2a passes through;
+  // POST /a2a must carry TPS-Ed25519 or admin Basic). The post() handler
+  // below additionally enforces caller == params.agentId for message/send
+  // and message/stream (actAsRefusal) so a non-admin caller can only act
+  // AS itself and read only its own event stream. message/send
+  // routes a DIRECTED handoff to params.toAgentId (the recipient) by
+  // setting the OrgEvent's targetIds = [toAgentId]; OrgEventCatchup filters
+  // on that, so the recipient — not the sender — receives the message.
+  // tasks/list returns the whole board to any authenticated caller: the
+  // board is shared within one instance, not scoped per caller.
   allowRead() { return true; }
   allowCreate() { return true; }
 
@@ -381,83 +361,21 @@ export class A2AAdapter extends Resource {
         if (!agentId) {
           return rpcError(id, -32602, "Invalid params: agentId is required");
         }
+        const refusal = actAsRefusal(id, callerAgent, callerIsAdmin, agentId, "stream");
+        if (refusal) return refusal;
+        // The reader needs the caller's agent id to build its context; an
+        // admin-flagged request without one cannot be read as anyone.
+        if (!callerAgent) {
+          return rpcError(id, -32001, "Forbidden", { detail: `caller (anon) cannot stream as ${agentId}` });
+        }
 
-        const taskIdHint = cleanText(params.taskId) || null;
-        const encoder = new TextEncoder();
-        const startedAt = Date.now();
-        const timeoutMs = 5 * 60 * 1000;
-        let lastSeen = new Date(startedAt).toISOString();
-        let closed = false;
-        const seenEventIds = new Set<string>();
-        const seenEventQueue: string[] = [];
-
-        const stream = new ReadableStream<Uint8Array>({
-          start(controller) {
-            const writeEvent = (eventName: string, payload: any) => {
-              if (closed) return;
-              const frame = `event: ${eventName}\ndata: ${JSON.stringify(payload)}\n\n`;
-              controller.enqueue(encoder.encode(frame));
-            };
-
-            const closeStream = () => {
-              if (closed) return;
-              closed = true;
-              clearInterval(pollTimer);
-              clearTimeout(timeoutTimer);
-              controller.close();
-            };
-
-            const poll = async () => {
-              if (closed) return;
-              if (Date.now() - startedAt >= timeoutMs) { closeStream(); return; }
-
-              const catchupUrl =
-                `${localBaseUrl()}/OrgEventCatchup/${encodeURIComponent(agentId)}?since=${lastSeen}`;
-
-              let events: any[] = [];
-              try {
-                const response = await fetch(catchupUrl);
-                if (!response.ok) return;
-                const data = await response.json();
-                if (Array.isArray(data)) events = data;
-                else if (Array.isArray(data?.events)) events = data.events;
-              } catch { return; }
-
-              for (const event of events) {
-                const eventId = cleanText(event?.id) || `${cleanText(event?.createdAt)}:${cleanText(event?.summary)}`;
-                if (eventId && seenEventIds.has(eventId)) continue;
-                if (eventId) {
-                  seenEventIds.add(eventId);
-                  seenEventQueue.push(eventId);
-                  if (seenEventQueue.length > 500) {
-                    const removed = seenEventQueue.shift();
-                    if (removed) seenEventIds.delete(removed);
-                  }
-                }
-                const createdAt = cleanText(event?.createdAt);
-                if (createdAt && createdAt > lastSeen) lastSeen = createdAt;
-
-                const status = statusFromOrgEvent(event);
-                if (!status) continue;
-
-                writeEvent("task.status", rpcResult(id, {
-                  type: "task",
-                  task: { id: taskIdFromEvent(event) ?? taskIdHint, status },
-                }));
-
-                if (status === "completed" || status === "failed" || status === "canceled") {
-                  closeStream(); return;
-                }
-              }
-            };
-
-            const pollTimer = setInterval(() => { void poll(); }, 2000);
-            const timeoutTimer = setTimeout(() => { closeStream(); }, timeoutMs);
-            void poll();
-          },
-          cancel() { closed = true; },
+        const stream = orgEventStream({
+          rpcId: id,
+          readPage: callerCatchupReader(agentId, callerAgent, callerIsAdmin),
+          // Events created after the stream opens.
+          startAfter: positionAfterTimestamp(new Date().toISOString()),
+          taskId: cleanText(params.taskId) || null,
         });
-
         return new Response(stream, {
           headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" },
         });
@@ -476,11 +394,8 @@ export class A2AAdapter extends Resource {
         // attributed to any other agent — defeats the whole signed-envelopes
         // model that delegationChain enforces for TPS mail.
         // NOTE: agentId is the SENDER. The recipient is params.toAgentId.
-        if (!callerIsAdmin && callerAgent !== agentId) {
-          return rpcError(id, -32001, "Forbidden", {
-            detail: `caller ${callerAgent ?? "(anon)"} cannot send as ${agentId}`,
-          });
-        }
+        const refusal = actAsRefusal(id, callerAgent, callerIsAdmin, agentId, "send");
+        if (refusal) return refusal;
 
         const sender = await (databases as any).flair.Agent.get(agentId).catch(() => null);
         if (!sender) {
