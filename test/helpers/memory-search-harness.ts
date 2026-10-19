@@ -87,8 +87,10 @@ export function mockTransaction(ctx: any, cb: (txn: any) => any): any {
     saveCommits: false,
     staged,
     aborted: false,
+    // Harper passes a commit-time guard its commit time and the stored entry.
     addWrite(write: any) {
-      staged.push(() => write.commit(0, write.store.getEntry(write.key)));
+      staged.push(() => write.commit(1, write.store.getEntry(write.key)));
+      return write;
     },
     abort() { this.open = 0; this.aborted = true; staged.length = 0; },
     commit() { this.open = 0; for (const f of staged) f(); staged.length = 0; },

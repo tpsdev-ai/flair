@@ -7,9 +7,9 @@ import { authorizeSoulWrite } from "./soul-write-policy.js";
 import { authorizeSkillVersionWrite } from "./skill-write-policy.js";
 import { withKeyLock } from "./key-lock.js";
 import { isJoinableTransaction, withOwnedTransaction, withSharedWriteTransaction } from "./request-transaction.js";
+import { txnPausePoint } from "./txn-pause-point.js";
 import { maybeThrowSkillWriteFault } from "./skill-write-fault.js";
 import { PRIVATE_VISIBILITY, SHARED_VISIBILITY } from "./memory-visibility.js";
-import { txnPausePoint } from "./txn-pause-point.js";
 
 export const INSTRUCTION_VERSION_TABLE = "InstructionVersion";
 
@@ -115,9 +115,10 @@ export interface RecordVersionInput {
 }
 
 /**
- * flair#2642 — remove the version record this request appended, when it is
- * still the subject's head. A close that a newer write made Harper skip can
- * commit its tombstone while leaving the row open; undoing that tombstone must
+ * flair#2645 / flair#2642 — remove the version record this request appended, when
+ * it is still the subject's head. A close that a newer write made Harper skip can
+ * commit its version row (an update's successor version or a delete's tombstone)
+ * while leaving the row open; undoing that write must
  * not leave a gap in the chain, so a record followed by a later version is left
  * in place and reported as `superseded`.
  */
@@ -133,16 +134,30 @@ export async function removeAppendedVersion(
       const head = await readHead(subjectType, subjectId, shared);
       if (!head) return "removed" as const;
       if (String(head.id) !== versionRecordId) return "superseded" as const;
-      await (databases as any).flair.InstructionVersion.delete(versionRecordId, shared);
+      const table = (databases as any).flair.InstructionVersion;
+      // The resource class overrides `delete` and `get` for REST authority; the
+      // append helper's own table is its base prototype, which exposes the raw
+      // writer this in-process undo needs.
+      const raw = Object.getPrototypeOf(table);
+      if (typeof raw?.delete !== "function" || typeof raw?.get !== "function") return "unavailable" as const;
+      await raw.delete.call(table, versionRecordId, shared);
       // Remove this record's event in the same transaction.
       const events = (databases as any).flair?.OrgEvent;
       if (!isTableLike(events)) throw new Error("flair: the OrgEvent table is unavailable");
       await events.delete(`${INSTRUCTION_EVENT_ID_PREFIX}${versionRecordId}`, shared);
+      const pause = txnPausePoint("skill-version-rollback-staged");
+      if (pause) await pause;
       return "deleted" as const;
     });
-    if (staged !== "deleted") return staged;
-    const left = await (databases as any).flair.InstructionVersion.get(versionRecordId, {});
-    return left == null ? ("removed" as const) : ("superseded" as const);
+    if (staged !== "deleted" && staged !== "removed") return staged;
+    const table = (databases as any).flair.InstructionVersion;
+    const raw = Object.getPrototypeOf(table);
+    if (typeof raw?.get !== "function") return "unavailable" as const;
+    const pause = txnPausePoint("skill-version-rollback-committed");
+    if (pause) await pause;
+    const left = await raw.get.call(table, versionRecordId, {});
+    if (left != null) return "unavailable" as const;
+    return await raw.get.call(table, versionRecordId, {}) == null ? "removed" as const : "unavailable" as const;
   },
   LOCK_ATTEMPTS,
   LOCK_WAIT_MS);
@@ -283,8 +298,7 @@ function isTableLike(table: unknown): boolean {
  * the cached read snapshot; the read resource uses the same raw handle without a lock.
  */
 export async function readHead(subjectType: string, subjectId: string, shared?: any, soulIdentity?: { agentId: string; key: string }): Promise<Record<string, any> | null> {
-  const table = (databases as any).flair?.InstructionVersion;
-  if (!isTableLike(table)) throw new Error("flair: the InstructionVersion table is unavailable");
+  const table = instructionVersionTable();
   for await (const row of table.search({
     conditions: [
       { attribute: "subjectType", comparator: "equals", value: subjectType },
@@ -298,6 +312,51 @@ export async function readHead(subjectType: string, subjectId: string, shared?: 
     limit: 1,
   }, shared)) {
     return row as Record<string, any>;
+  }
+  return null;
+}
+
+function instructionVersionTable(): any {
+  const table = (databases as any).flair?.InstructionVersion;
+  if (!isTableLike(table)) throw new Error("flair: the InstructionVersion table is unavailable");
+  return table;
+}
+
+/** One version record of a subject's chain, by its addressable id, or null. */
+export async function readVersionRecord(
+  subjectType: string,
+  subjectId: string,
+  recordId: string,
+  shared?: any,
+): Promise<Record<string, any> | null> {
+  const table = instructionVersionTable();
+  for await (const row of table.search({
+    conditions: [
+      { attribute: "subjectType", comparator: "equals", value: subjectType },
+      { attribute: "subjectId", comparator: "equals", value: subjectId },
+    ],
+  }, shared)) {
+    if (String(row.id) === recordId) return row as Record<string, any>;
+  }
+  return null;
+}
+
+/** The record with the next sequence number after `version` for this subject, or null. */
+export async function readVersionRecordAfter(
+  subjectType: string,
+  subjectId: string,
+  version: bigint | number | string,
+  shared?: any,
+): Promise<Record<string, any> | null> {
+  const table = instructionVersionTable();
+  const next = BigInt(version) + 1n;
+  for await (const row of table.search({
+    conditions: [
+      { attribute: "subjectType", comparator: "equals", value: subjectType },
+      { attribute: "subjectId", comparator: "equals", value: subjectId },
+    ],
+  }, shared)) {
+    if (BigInt(row.version as any) === next) return row as Record<string, any>;
   }
   return null;
 }

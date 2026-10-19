@@ -32,6 +32,9 @@ const add = (file: string, sites: string[], reason: string) => {
 };
 
 // ── GUARDED ──
+add("write-journal", ["alias-source:(databases as any).flair.Memory#1"], "Identifies successor undo pause points.");
+add("write-journal", ["writer:this.transactions.delete#1", "writer:this.staged.delete#1"], "In-memory journal bookkeeping.");
+
 add("Memory", ["writer:table.put#1"],
   "GUARDED: reached through Memory.delete's reserved-id and writeSkillDelete's reserved-subject decisions; the retry re-checks the stored row identity and caller authority.");
 add("MemoryArchive", ["writer:Memory.put#1"], "GUARDED: Memory.put().");
@@ -59,6 +62,8 @@ add("skill-version-write", ["writer:(databases as any).flair.Memory.put#1", "wri
   "GUARDED: the transactional skill writer (flair#2139 S2) is reached only after Memory.post/put/delete or FeedMemories ran the reserved-id decision on the write's ids; the successor upsert and predecessor close ride the same transaction.");
 add("skill-version-write", ["alias-source:(databases as any).flair?.Memory#1"],
   "SERVER: a table handle (resolveSkillHead searches the live skill head).");
+add("skill-version-write", ["writer:table.put#1", "alias-source:(databases as any).flair?.Memory#2"],
+  "GUARDED: retries use the predecessor id checked by the reserved-id decision.");
 
 // ── OPERATOR ──
 add("AgentSeed", ["writer:(databases as any).flair.Memory.put#1"],

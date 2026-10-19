@@ -11,7 +11,6 @@ add("Soul", ["alias-source:(databases as any).flair.Soul#1", "writer:super.post#
 add("Soul", ["alias-source:(databases as any).flair?.Soul#1"], "Static-table handle the PATCH retry loop reads the committed row and writes this attempt's row from, inside the version transaction.");
 add("Soul", ["writer:table.put#1"], "The PATCH attempt's full-row write of the row built from that attempt's read; a confirmation read follows inside the transaction.");
 add("instruction-version-record", ["alias-source:(databases as any).flair?.Soul#1"], "Destination occupancy read inside the version transaction.");
-add("instruction-version-record", ["writer:(databases as any).flair.InstructionVersion.delete#1"], "Skill-close compensation removes this request's version record only while it is the subject head; writes no Soul row.");
 add("instruction-version-record", ["writer:table.create#1", "writer:table.create#2", 'writer:createHash("sha256").update#1', 'writer:createHash("sha256").update#2'], "Version appends and hashes included by conservative sink enumeration.");
 add("instruction-version-record", ["writer:events.create#1", "writer:events.delete#1"], "Instruction events appended and removed with their version record, included by conservative sink enumeration.");
 add("AgentSeed", ["writer:(databases as any).flair.Soul.put#1"], "Provisioning: source authorization and whole-template content validation precede mutations.");

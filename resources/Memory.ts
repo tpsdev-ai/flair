@@ -1403,7 +1403,7 @@ async function writeSkillCreateOrUpdate(
      *  and (flair#2575) the skill fields the request supplied; the successor
      *  row also holds the fields it carries over from its predecessor, and
      *  those are not reported. */
-    staged?: { supplied: readonly StoredTextField[]; text: StoredMemoryText | null; row?: Record<string, any> };
+    staged?: { supplied: readonly StoredTextField[]; text: StoredMemoryText | null; row?: Record<string, any>; joined?: boolean };
   },
 ): Promise<any> {
   const { ctx, auth, content, storedRow, explicitPredecessor, method, pointer, inPlaceId, reembedding, requestedPayload } = args;
@@ -1423,7 +1423,7 @@ async function writeSkillCreateOrUpdate(
   const addressedId = storedRow ? String(storedRow.id) : explicitPredecessor ? String(explicitPredecessor.id) : null;
   const captured: { row: Record<string, any> | null; closed: Record<string, any> | null } = { row: null, closed: null };
   let unchangedHead: Record<string, any> | null = null;
-  const joinsCaller = method === "post" && isJoinableTransaction(ctx);
+  let joinsCaller = false;
   let successorBasis: any = null;
   const outcome = await runSkillVersionWrite({
     ctx,
@@ -1431,7 +1431,18 @@ async function writeSkillCreateOrUpdate(
     subjectId,
     agentId: String(content.agentId),
     head: (shared) => resolveSkillHead(subjectId, addressedId, shared),
-    plan: async (head, shared) => {
+    plan: async (head, shared, attempt) => {
+      // A superseding plan from a joined attempt is planned again, owned
+      // (flair#2645); no state from the earlier attempt carries over.
+      joinsCaller = attempt.joined;
+      captured.row = null;
+      captured.closed = null;
+      unchangedHead = null;
+      successorBasis = null;
+      if (args.staged) {
+        delete args.staged.row;
+        delete args.staged.joined;
+      }
       const stale = await validateSkillSnapshots(storedRow, explicitPredecessor, content.id ?? null, shared);
       const denied = await authorizeSkillOwners(ctx, auth, [storedRow, explicitPredecessor, head ?? content], shared);
       if (denied) return denied;
@@ -1463,7 +1474,10 @@ async function writeSkillCreateOrUpdate(
       applyFederationBookkeeping(successor, liveHead);
       normalizeEmptyEmbedding(successor);
       if (joinsCaller) successorBasis = await (databases as any).flair.Memory.get(successorId, shared);
-      if (args.staged) args.staged.row = structuredClone(successor);
+      if (args.staged) {
+        args.staged.row = structuredClone(successor);
+        args.staged.joined = joinsCaller;
+      }
       captured.row = successor;
       const value = typeof successor.content === "string" ? successor.content : null;
       const visibility = skillVersionVisibility(successor);
@@ -1478,6 +1492,7 @@ async function writeSkillCreateOrUpdate(
     },
     hooks: {
       ...defaultSkillHooks,
+      authorizeClose: (row, shared) => authorizeSkillOwners(ctx, auth, [row], shared),
       pointer: async (shared) => {
         // Test-only: holds a skill POST after its successor (and predecessor
         // close) are staged, before the transaction commits (flair#2656).
@@ -1717,7 +1732,7 @@ async function writeSkillDelete(args: { ctx: any; auth: AgentAuthVerdict; record
       // re-checks that grant after the close is staged.
       return { kind: "delete", predecessor: liveHead, closePatch: { skillSubjectId: subjectId, validTo: now, updatedAt: now }, value: null, visibility: skillVersionVisibility(liveHead), grantedClose: grantedSkillClose(liveHead, ctx, auth) };
     },
-    hooks: { ...defaultSkillHooks, pointer: async (shared) => deletePointerRow(closedId, shared) },
+    hooks: { ...defaultSkillHooks, authorizeClose: (row, shared) => authorizeSkillOwners(ctx, auth, [row], shared), pointer: async (shared) => deletePointerRow(closedId, shared) },
   });
   if (!outcome.ok) return outcome.response;
   // flair#2642: the owned transaction has committed, but its success is not
@@ -2469,13 +2484,15 @@ export class Memory extends (databases as any).flair.Memory {
     const postJoinsRequestTxn = isJoinableTransaction(ctx);
     if (isSkillWrite(content)) {
       const reservedId = [content?.id, (this as any).getId?.()].find((candidate) => isReservedSeedId("Memory", candidate));
-      const skillStaged: { supplied: readonly StoredTextField[]; text: StoredMemoryText | null; row?: Record<string, any> } = { supplied: suppliedText, text: null };
+      const skillStaged: { supplied: readonly StoredTextField[]; text: StoredMemoryText | null; row?: Record<string, any>; joined?: boolean } = { supplied: suppliedText, text: null };
       const skillResult = await writeSkillCreateOrUpdate({
         ctx, auth, content, storedRow: postStored, explicitPredecessor: preparedSkill.predecessor, method: "post", pointer,
         inPlaceId: reservedId != null ? String(reservedId) : null, staged: skillStaged,
       });
       if (skillResult instanceof Response) return skillWriteResponse(skillResult, redactedValues, skillStaged.text);
-      if (!postJoinsRequestTxn) {
+      // Verify after the commit when this write owned it, as a skill POST
+      // that supersedes a version does (flair#2645).
+      if (skillStaged.joined !== true) {
         await pausePostVerification(true);
         const skillVerified = await verifyWrittenRow(
           (databases as any).flair.Memory,

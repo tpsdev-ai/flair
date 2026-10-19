@@ -95,6 +95,10 @@ function pointerTable(): any {
   return (databases as any).flair?.[MEMORY_HOST_SOURCE_TABLE];
 }
 
+export function isMemoryHostSourceStore(store: unknown): boolean {
+  return store != null && pointerTable()?.primaryStore === store;
+}
+
 /**
  * flair#1940 A1'' item 6 (adjudication B, hardened in round 5/adjudication 0e)
  * — is an incoming hostSource an ECHO of the STORED pointer? Preservation (do
