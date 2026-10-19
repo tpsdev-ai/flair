@@ -7,9 +7,10 @@
 // access_denied redirect (no code, no write), then the scope check, then the
 // OAuthClient record check, then authentication, then the code is issued.
 //
-// This is a REAL Harper spawn: each consent POST is sent over HTTP, as JSON or
-// as the rendered form's URL-encoded fields, and the OAuthAuthCode table is
-// read back through the operations API after it.
+// This exercises real Harper over HTTP (a Harper the harness spawns, as CI
+// runs it, or an existing one when HARPER_HTTP_URL is set): each consent POST
+// is sent as JSON or as the rendered form's URL-encoded fields, and the
+// OAuthAuthCode table is read back through the operations API after it.
 //
 // MODEL: test/integration/oauth-authorize-authz.test.ts.
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
