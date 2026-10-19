@@ -576,10 +576,14 @@ function archiveShapeRefusal(doc: unknown): ShapeRefusal | undefined {
  * a version other than 1, a missing or non-array `agents`, `souls` or
  * `memories` collection, a row that is not an object with a non-empty string
  * id addressing one record path segment (Soul and Memory rows also need a
- * non-empty string `agentId`), and a repeated id within a collection. The
- * checks run in that order; collections are checked in a fixed order
- * (`agents`, `souls`, then `memories`) and rows in array order, and the first
- * problem found that way is returned as the one refusal. Every result, refusal included, carries the input's digest.
+ * non-empty string `agentId`), and a repeated id within a collection.
+ * Decoding runs first, then the single parse, which reports whichever syntax
+ * error or repeated key it reaches first (a leading byte order mark is refused
+ * there). Then comes the version check, then each collection in turn
+ * (`agents`, `souls`, then `memories`): first that it is an array, then each
+ * row in array order, checking its shape and then that its id is not a
+ * repeat. The first problem found is returned as the one refusal. Every
+ * result, refusal included, carries the input's digest.
  */
 export function parseRestoreArchive(bytes: Buffer | Uint8Array): RestoreArchiveParseResult {
   if (!(bytes instanceof Uint8Array)) {
