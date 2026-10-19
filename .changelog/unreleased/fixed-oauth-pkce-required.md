@@ -4,8 +4,8 @@
   `code_challenge` is missing, empty or not 43-128 base64url characters, or when
   `code_challenge_method` is not `S256`: the consent page is not rendered and no
   authorization code is stored. On the POST this check runs before
-  authentication. A Deny still answers the `access_denied` redirect and issues
-  no code. The authorization-code exchange at `POST /OAuthToken` redeems a code
+  authentication. After redirect-URI validation passes, a Deny still answers the
+  `access_denied` redirect and issues no code. The authorization-code exchange at `POST /OAuthToken` redeems a code
   only with a `code_verifier` whose S256 hash matches the challenge stored with
   it. A code stored without an S256 challenge is `invalid_grant`; for an
   otherwise valid, unused code carrying an S256 challenge, a missing verifier is

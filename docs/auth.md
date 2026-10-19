@@ -141,7 +141,7 @@ metadata's `code_challenge_methods_supported` lists `["S256"]` as the supported 
    (`BASE64URL(SHA256(code_verifier))`, RFC 7636)
 2. Client redirects user to `GET /OAuthAuthorize?response_type=code&client_id=...&redirect_uri=...&code_challenge=...&code_challenge_method=S256`
 3. User approves or denies on the consent page
-4. Flair redirects back with authorization code
+4. Flair redirects back with an authorization code on approve, or with `error=access_denied` on deny
 5. Client exchanges code and `code_verifier` for access token at `POST /OAuthToken`
 
 After the earlier request, scope and client checks pass, `GET /OAuthAuthorize`
@@ -149,7 +149,7 @@ After the earlier request, scope and client checks pass, `GET /OAuthAuthorize`
 `400 invalid_request` when `code_challenge` is missing, empty or not 43-128
 base64url characters, or when `code_challenge_method` is anything other than
 `S256`. The consent page is not rendered and no authorization code is stored. A
-Deny needs no PKCE fields: it redirects with `access_denied` and issues nothing.
+Deny needs no PKCE fields: after redirect-URI validation passes, it redirects with `access_denied` and issues nothing (an invalid `redirect_uri` is refused with `400 invalid_redirect_uri` first).
 
 The authorization-code exchange at `POST /OAuthToken` redeems a code only with a
 `code_verifier` whose S256 hash equals the challenge stored with the code. A code

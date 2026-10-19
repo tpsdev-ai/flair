@@ -515,8 +515,9 @@ ${scopeTokens.map((s: string) => `<div class="scope">${esc(s)}</div>`).join("")}
     // in the same order and with the same 400 bodies, that get() runs before
     // rendering the form. All three run before authentication (get() runs them
     // with none) and before any code is issued or stored. A deny is answered
-    // above, before these: it issues nothing, stores nothing, and redirects
-    // only to the pinned redirect_uri, so it needs no PKCE fields.
+    // above, before these and after redirect-URI validation: it issues nothing,
+    // stores nothing, and redirects only to the pinned redirect_uri, so it needs
+    // no PKCE fields.
     const scopeCheck = checkConsentScope(requestedScope);
     if (!scopeCheck.ok) return scopeCheck.response;
     const { scope } = scopeCheck;
