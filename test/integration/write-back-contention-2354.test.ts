@@ -7,6 +7,7 @@ import nacl from "tweetnacl";
 import { HarperInstance, startHarper, stopHarper, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { WRITE_BACK_ATTEMPTS } from "../../resources/write-back.ts";
 import { getModelId } from "../../resources/embeddings-provider.ts";
+import { promotionContentHash } from "../../resources/promotion-binding.ts";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
 function mkAgent(id: string): TestAgent {
@@ -761,6 +762,8 @@ describe("flair#2354 — the promotion stamp write-back under a concurrent chang
     expect(rows[0].id).toBe(rowId);
     expect(rows[0].promotionStatus, "the verdict landed on the recorded row").toBe("approved");
     expect(rows[0].promotedBy).toBeTruthy();
+    expect(rows[0].promotionContentHash, "the verdict is bound to the recorded row's stored content")
+      .toBe(promotionContentHash(claim));
     expect(body.promoted, "the sweep reports the row it stamped").toContain(rowId);
     expect((await readCandidate(harper, candidateId))?.status).toBe("promoted");
   }, 60_000);
