@@ -35,7 +35,7 @@
  *
  * Build prerequisite: dist/cli.js and dist/resources/*.js. Run
  * `bun run build && bun run build:cli`: `bun run build` alone leaves
- * dist/cli.js absent, and every case then fails at its first `flair backup`
+ * dist/cli.js absent, and each case then fails at its first `flair` call
  * with "Cannot find module .../dist/cli.js". The file checks for the CLI
  * before starting Harper and stops with that remedy in one error.
  */
