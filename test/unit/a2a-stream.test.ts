@@ -6,7 +6,14 @@
  * runs it against a real Harper with the in-process OrgEventCatchup reader.
  */
 import { describe, expect, test } from "bun:test";
-import { orgEventStream, type CatchupPage, type CatchupPageReader } from "../../resources/a2a-stream";
+import {
+  orgEventStream,
+  streamOpeningPosition,
+  type CatchupPage,
+  type CatchupPageReader,
+} from "../../resources/a2a-stream";
+import { comparePosition, positionAfterTimestamp, recordPosition } from "../../resources/agent-read-position-lib";
+import { collectCatchupEvents, pageCatchupEvents } from "../../resources/org-event-catchup-lib";
 
 const POLL_MS = 15;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -51,6 +58,17 @@ function page(events: any[], nextAfter: string, hasMore = false): CatchupPage {
   return { events, nextAfter, hasMore };
 }
 
+/** The opening millisecond every clocked case uses. */
+const T_ISO = "2026-10-19T00:00:00.000Z";
+const T_MS = Date.parse(T_ISO);
+const OPEN = streamOpeningPosition(T_MS);
+
+/** A clock that reads T on the first call (the opening) and T + 1 ms after it. */
+function clockFrom(ms: number): () => number {
+  let calls = 0;
+  return () => (calls++ === 0 ? ms : ms + 1);
+}
+
 function event(id: string, extra: Record<string, unknown> = {}) {
   return { id, kind: "note", summary: `summary ${id}`, createdAt: "2026-10-19T00:00:00.000Z", targetIds: ["a"], position: `p-${id}`, ...extra };
 }
@@ -63,14 +81,14 @@ describe("orgEventStream", () => {
       if (calls.length === 1) return page([event("e1"), event("e2")], "p-e2");
       return page([], after);
     };
-    const { raw } = await collect(orgEventStream({ rpcId: 7, readPage, startAfter: "start", pollMs: POLL_MS }), POLL_MS * 6);
+    const { raw } = await collect(orgEventStream({ rpcId: 7, readPage, now: clockFrom(T_MS), pollMs: POLL_MS }), POLL_MS * 6);
     const frames = parseFrames(raw);
     expect(frames[0].comment).toBe(": stream open");
     const delivered = frames.filter((f) => f.event === "org.event");
     expect(delivered.map((f) => f.data.result.event.id)).toEqual(["e1", "e2"]);
     expect(delivered[0].data).toEqual({ jsonrpc: "2.0", id: 7, result: { type: "event", event: event("e1") } });
     // The first read starts at the opening cursor; later reads continue from the page's nextAfter.
-    expect(calls[0]).toBe("start");
+    expect(calls[0]).toBe(OPEN);
     expect(calls.slice(1).every((c) => c === "p-e2")).toBe(true);
     expect(calls.length).toBeGreaterThan(1);
   });
@@ -79,20 +97,20 @@ describe("orgEventStream", () => {
     const calls: string[] = [];
     const readPage: CatchupPageReader = async (after) => {
       calls.push(after);
-      if (after === "start") return page([event("e1")], "p-e1", true);
+      if (after === OPEN) return page([event("e1")], "p-e1", true);
       if (after === "p-e1") return page([event("e2")], "p-e2", false);
       return page([], after);
     };
-    const { raw } = await collect(orgEventStream({ rpcId: 1, readPage, startAfter: "start", pollMs: 10_000 }), 100);
+    const { raw } = await collect(orgEventStream({ rpcId: 1, readPage, now: clockFrom(T_MS), pollMs: 10_000 }), 100);
     expect(parseFrames(raw).filter((f) => f.event === "org.event").map((f) => f.data.result.event.id)).toEqual(["e1", "e2"]);
-    expect(calls).toEqual(["start", "p-e1"]);
+    expect(calls).toEqual([OPEN, "p-e1"]);
   });
 
   test("an event with a task status adds a task.status frame after its org.event frame", async () => {
     let n = 0;
     const readPage: CatchupPageReader = async (after) =>
       n++ === 0 ? page([event("s1", { refId: "bd://ops-1", detail: JSON.stringify({ status: "working" }) })], "p-s1") : page([], after);
-    const { raw } = await collect(orgEventStream({ rpcId: "r", readPage, startAfter: "start", pollMs: POLL_MS }), POLL_MS * 4);
+    const { raw } = await collect(orgEventStream({ rpcId: "r", readPage, now: clockFrom(T_MS), pollMs: POLL_MS }), POLL_MS * 4);
     const frames = parseFrames(raw).filter((f) => f.event);
     expect(frames.map((f) => f.event)).toEqual(["org.event", "task.status"]);
     expect(frames[1].data.result).toEqual({ type: "task", task: { id: "ops-1", status: "working" } });
@@ -105,11 +123,11 @@ describe("orgEventStream", () => {
       return page([event("t1", { refId: "bd://ops-9", detail: JSON.stringify({ status: "completed" }) }), event("t2")], "p-t2");
     };
     const { raw, done } = await collect(
-      orgEventStream({ rpcId: 1, readPage, startAfter: "start", taskId: "ops-9", pollMs: POLL_MS }),
+      orgEventStream({ rpcId: 1, readPage, now: clockFrom(T_MS), taskId: "ops-9", pollMs: POLL_MS }),
       POLL_MS * 8,
     );
     expect(done).toBe(true);
-    expect(calls).toEqual(["start"]);
+    expect(calls).toEqual([OPEN]);
     // t2 follows the terminal event in the same page and is not delivered.
     expect(parseFrames(raw).filter((f) => f.event === "org.event").map((f) => f.data.result.event.id)).toEqual(["t1"]);
   });
@@ -119,7 +137,7 @@ describe("orgEventStream", () => {
       let n = 0;
       const readPage: CatchupPageReader = async (after) =>
         n++ === 0 ? page([event("d1", { summary: "the deploy is done", refId: "bd://ops-9" })], "p-d1") : page([], after);
-      const { done } = await collect(orgEventStream({ rpcId: 1, readPage, startAfter: "start", taskId, pollMs: POLL_MS }), POLL_MS * 6);
+      const { done } = await collect(orgEventStream({ rpcId: 1, readPage, now: clockFrom(T_MS), taskId, pollMs: POLL_MS }), POLL_MS * 6);
       expect(done).toBe(false);
       expect(n).toBeGreaterThan(1);
     }
@@ -131,7 +149,7 @@ describe("orgEventStream", () => {
       calls++;
       return new Response(JSON.stringify({ error: "forbidden: can only fetch events for yourself" }), { status: 403 });
     };
-    const { raw, done } = await collect(orgEventStream({ rpcId: 3, readPage, startAfter: "start", pollMs: POLL_MS }), POLL_MS * 8);
+    const { raw, done } = await collect(orgEventStream({ rpcId: 3, readPage, now: clockFrom(T_MS), pollMs: POLL_MS }), POLL_MS * 8);
     expect(done).toBe(true);
     expect(calls).toBe(1);
     const errors = parseFrames(raw).filter((f) => f.event === "error");
@@ -150,7 +168,7 @@ describe("orgEventStream", () => {
       calls++;
       throw new Error("catch-up store unavailable");
     };
-    const { raw, done } = await collect(orgEventStream({ rpcId: 4, readPage, startAfter: "start", pollMs: POLL_MS }), POLL_MS * 8);
+    const { raw, done } = await collect(orgEventStream({ rpcId: 4, readPage, now: clockFrom(T_MS), pollMs: POLL_MS }), POLL_MS * 8);
     expect(done).toBe(true);
     expect(calls).toBe(1);
     const errors = parseFrames(raw).filter((f) => f.event === "error");
@@ -161,7 +179,7 @@ describe("orgEventStream", () => {
 
   test("a read that returns no page ends the stream with a JSON-RPC error frame", async () => {
     const readPage = (async () => undefined) as unknown as CatchupPageReader;
-    const { raw, done } = await collect(orgEventStream({ rpcId: 5, readPage, startAfter: "start", pollMs: POLL_MS }), POLL_MS * 8);
+    const { raw, done } = await collect(orgEventStream({ rpcId: 5, readPage, now: clockFrom(T_MS), pollMs: POLL_MS }), POLL_MS * 8);
     expect(done).toBe(true);
     expect(parseFrames(raw).filter((f) => f.event === "error").map((f) => f.data.error.code)).toEqual([-32000]);
   });
@@ -169,7 +187,7 @@ describe("orgEventStream", () => {
   test("cancelling the stream stops the polling: no read starts after the cancel", async () => {
     let calls = 0;
     const readPage: CatchupPageReader = async (after) => { calls++; return page([], after); };
-    const stream = orgEventStream({ rpcId: 1, readPage, startAfter: "start", pollMs: POLL_MS });
+    const stream = orgEventStream({ rpcId: 1, readPage, now: clockFrom(T_MS), pollMs: POLL_MS });
     const reader = stream.getReader();
     await reader.read(); // the opening comment
     await sleep(POLL_MS * 5);
@@ -189,7 +207,7 @@ describe("orgEventStream", () => {
       await gate;
       return page([event("late")], "p-late");
     };
-    const stream = orgEventStream({ rpcId: 1, readPage, startAfter: "start", pollMs: POLL_MS });
+    const stream = orgEventStream({ rpcId: 1, readPage, now: clockFrom(T_MS), pollMs: POLL_MS });
     const reader = stream.getReader();
     await reader.read(); // the opening comment
     await sleep(POLL_MS);
@@ -200,10 +218,65 @@ describe("orgEventStream", () => {
     expect(calls).toBe(1);
   });
 
+  test("an event created earlier in the opening millisecond is not delivered, whatever its id", async () => {
+    // The timestamp cursor for the opening millisecond admits an earlier event of that same millisecond.
+    const old = { createdAt: T_ISO, id: "old" };
+    expect(comparePosition(recordPosition(old), positionAfterTimestamp(T_ISO))).toBeGreaterThan(0);
+    // The stream's opening position does not, for any id, and admits the next millisecond.
+    for (const id of ["old", "zzz", "\uffff"]) {
+      expect(comparePosition(recordPosition({ createdAt: T_ISO, id }), OPEN)).toBeLessThan(0);
+    }
+    expect(comparePosition(recordPosition({ createdAt: "2026-10-19T00:00:00.001Z", id: "a" }), OPEN)).toBeGreaterThan(0);
+
+    // Through the stream, with the catch-up library's own eligibility and paging.
+    const store = [
+      { id: "old", kind: "note", summary: "before open", createdAt: T_ISO, targetIds: ["a"] },
+      { id: "zzz", kind: "note", summary: "before open", createdAt: T_ISO, targetIds: ["a"] },
+      { id: "new", kind: "note", summary: "after open", createdAt: "2026-10-19T00:00:00.001Z", targetIds: ["a"] },
+    ];
+    const readPage: CatchupPageReader = async (after) => {
+      const paged = pageCatchupEvents(await collectCatchupEvents(store, { participantId: "a", after }), after, 50);
+      return { events: paged.page, nextAfter: paged.nextAfter, hasMore: paged.hasMore };
+    };
+    const { raw } = await collect(orgEventStream({ rpcId: 1, readPage, now: clockFrom(T_MS), pollMs: POLL_MS }), POLL_MS * 6);
+    expect(parseFrames(raw).filter((f) => f.event === "org.event").map((f) => f.data.result.event.id)).toEqual(["new"]);
+  });
+
+  test("the opening comment and the first read wait until the clock has left the opening millisecond", async () => {
+    let clockNow = T_MS;
+    let calls = 0;
+    const readPage: CatchupPageReader = async (after) => { calls++; return page([], after); };
+    const stream = orgEventStream({ rpcId: 1, readPage, now: () => clockNow, pollMs: POLL_MS });
+    const reader = stream.getReader();
+    const first = reader.read();
+    let settled = false;
+    void first.then(() => { settled = true; });
+    await sleep(POLL_MS * 3);
+    expect(settled).toBe(false);
+    expect(calls).toBe(0);
+    clockNow = T_MS + 1;
+    const chunk = await first;
+    expect(new TextDecoder().decode(chunk.value)).toBe(": stream open\n\n");
+    await sleep(POLL_MS * 2);
+    expect(calls).toBeGreaterThan(0);
+    await reader.cancel();
+  });
+
+  test("cancelling before the opening millisecond has passed starts no read", async () => {
+    let calls = 0;
+    const readPage: CatchupPageReader = async (after) => { calls++; return page([], after); };
+    const stream = orgEventStream({ rpcId: 1, readPage, now: () => T_MS, pollMs: POLL_MS });
+    const reader = stream.getReader();
+    await sleep(POLL_MS * 2);
+    await reader.cancel();
+    await sleep(POLL_MS * 4);
+    expect(calls).toBe(0);
+  });
+
   test("the stream ends after maxMs", async () => {
     let calls = 0;
     const readPage: CatchupPageReader = async (after) => { calls++; return page([], after); };
-    const { done } = await collect(orgEventStream({ rpcId: 1, readPage, startAfter: "start", pollMs: POLL_MS, maxMs: POLL_MS * 4 }), POLL_MS * 20);
+    const { done } = await collect(orgEventStream({ rpcId: 1, readPage, now: clockFrom(T_MS), pollMs: POLL_MS, maxMs: POLL_MS * 4 }), POLL_MS * 20);
     expect(done).toBe(true);
     const atEnd = calls;
     await sleep(POLL_MS * 5);

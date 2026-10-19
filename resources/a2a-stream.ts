@@ -3,25 +3,39 @@
  * envelope helpers the A2A adapter shares with it.
  *
  * Harper-free on purpose: the stream reads through a `readPage` function the
- * caller supplies, so its lifecycle (polling, cursor, cancel, error frames) is
- * pinned by test/unit/a2a-stream.test.ts without a store. resources/A2AAdapter.ts
- * supplies a reader that runs OrgEventCatchup in process with the caller's own
- * context (see callerCatchupReader there).
+ * caller supplies, so its lifecycle (opening cursor, polling, cancel, error
+ * frames) is pinned by test/unit/a2a-stream.test.ts without a store.
+ * resources/A2AAdapter.ts supplies a reader that runs OrgEventCatchup in
+ * process with the requesting caller's own context (see callerCatchupReader
+ * there); which events a read returns (targeting, expiry) is decided there.
+ *
+ * Cursor: the stream keeps its own position cursor and never reads or moves
+ * the durable catch-up watermark. It starts at streamOpeningPosition(): after
+ * every event created in or before the millisecond the stream opened, whatever
+ * the event's id. The opening comment, and with it the response headers, is
+ * written only once the clock has passed that millisecond, so an event created
+ * after the client receives the headers sorts after the cursor.
  *
  * Wire format (Server-Sent Events):
- *   - an opening `: stream open` comment, so the response headers reach the
- *     client before the first event;
+ *   - an opening `: stream open` comment;
  *   - `event: org.event`, `data:` a JSON-RPC result `{ type: "event", event }`
- *     for every OrgEvent the reader returns, in catch-up position order;
+ *     for each event a read returns, in catch-up position order, until the
+ *     stream ends;
  *   - `event: task.status`, `data:` a JSON-RPC result `{ type: "task", task }`
- *     after an `org.event` frame whose event carries a task status;
+ *     after an `org.event` frame when statusFromOrgEvent() finds a status for
+ *     the event: from its detail, its `status` or `kind`, or words in its
+ *     summary (a summary containing "error" reads as `failed`);
  *   - `event: error`, `data:` a JSON-RPC error, sent once when a read is
- *     refused or fails; the stream then ends.
+ *     refused or fails while the stream is open; the stream then ends. A read
+ *     that settles after the stream has ended sends nothing.
  *
  * The stream ends when the client disconnects or cancels (the pending poll is
- * cleared and no further read starts), after `maxMs`, after a terminal status
- * for the task the request named, or after an error frame.
+ * cleared and no further read starts), after `maxMs`, at an event whose task
+ * id is `taskId` and whose status is terminal (later events in that page are
+ * not sent), or after an error frame.
  */
+
+import { positionAfterTimestamp } from "./agent-read-position-lib.js";
 
 export type JsonRpcId = string | number | null | undefined;
 
@@ -116,12 +130,24 @@ export interface OrgEventStreamOptions {
   /** The JSON-RPC request id every frame answers. */
   rpcId: JsonRpcId;
   readPage: CatchupPageReader;
-  /** Exclusive starting cursor: events at or before it are not delivered. */
-  startAfter: string;
-  /** `params.taskId`: a terminal status for this task ends the stream. */
+  /** `params.taskId`: an event for this task with a terminal status ends the stream. */
   taskId?: string | null;
   pollMs?: number;
   maxMs?: number;
+  /** Clock in epoch milliseconds (Date.now by default); the opening millisecond is read from it. */
+  now?: () => number;
+}
+
+/**
+ * The stream's opening cursor for a stream opened at `openMs`: the first
+ * position of the next millisecond. Every `${createdAt}\t${id}` position whose
+ * createdAt is in or before the opening millisecond sorts below it, whatever
+ * the id; every position in a later millisecond (with a non-empty id) sorts
+ * above it. A cursor of positionAfterTimestamp(<opening millisecond>) would
+ * still admit an event created earlier in that same millisecond.
+ */
+export function streamOpeningPosition(openMs: number): string {
+  return positionAfterTimestamp(new Date(openMs + 1).toISOString());
 }
 
 export const A2A_STREAM_POLL_MS = 2000;
@@ -151,9 +177,9 @@ async function refusalError(rpcId: JsonRpcId, response: Response) {
 }
 
 /**
- * The `message/stream` body. Polls `readPage` from `startAfter`, draining every
- * page (`hasMore`) on each poll, and schedules the next poll only after the
- * current one finishes, so two reads never overlap.
+ * The `message/stream` body. Polls `readPage` from streamOpeningPosition(),
+ * draining every page (`hasMore`) on each poll, and schedules the next poll
+ * only after the current one finishes, so two reads never overlap.
  */
 export function orgEventStream(opts: OrgEventStreamOptions): ReadableStream<Uint8Array> {
   const pollMs = opts.pollMs ?? A2A_STREAM_POLL_MS;
@@ -164,7 +190,9 @@ export function orgEventStream(opts: OrgEventStreamOptions): ReadableStream<Uint
   let closed = false;
   let pollTimer: ReturnType<typeof setTimeout> | undefined;
   let maxTimer: ReturnType<typeof setTimeout> | undefined;
-  let after = opts.startAfter;
+  const now = opts.now ?? Date.now;
+  const openMs = now();
+  let after = streamOpeningPosition(openMs);
 
   // Stop scheduling: no poll starts after this. A read already in flight
   // finishes, sees `closed`, and writes nothing.
@@ -244,9 +272,18 @@ export function orgEventStream(opts: OrgEventStreamOptions): ReadableStream<Uint
   return new ReadableStream<Uint8Array>({
     start(c) {
       controller = c;
-      write(": stream open\n\n");
-      maxTimer = setTimeout(end, maxMs);
-      pollTimer = setTimeout(() => { void poll(); }, 0);
+      // Hold the opening comment (and so the response headers) until the
+      // clock has left the opening millisecond: an event created after the
+      // client sees the headers then has a later createdAt than the cursor.
+      const open = () => {
+        pollTimer = undefined;
+        if (closed) return;
+        if (now() <= openMs) { pollTimer = setTimeout(open, 1); return; }
+        write(": stream open\n\n");
+        maxTimer = setTimeout(end, maxMs);
+        pollTimer = setTimeout(() => { void poll(); }, 0);
+      };
+      open();
     },
     cancel() {
       stop();

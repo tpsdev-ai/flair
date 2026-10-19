@@ -11,7 +11,6 @@ import {
   type CatchupPageReader,
   type JsonRpcId,
 } from "./a2a-stream.js";
-import { positionAfterTimestamp } from "./agent-read-position-lib.js";
 import { adminContext, agentContext } from "./in-process.js";
 import { OrgEventCatchup } from "./OrgEventCatchup.js";
 
@@ -235,10 +234,12 @@ async function publishOrgEvent(event: any): Promise<void> {
 }
 
 /**
- * The caller acts only as itself: a non-admin caller may name only its own
- * agent id as `params.agentId` (message/send's sender, message/stream's
- * subscriber); an admin caller may name any agent. Returns the JSON-RPC
- * refusal, or null when the caller may act as `agentId`.
+ * The caller-match rule for message/send (params.agentId is the sender) and
+ * message/stream (params.agentId is the agent whose events are streamed): a
+ * non-admin caller may name only its own agent id; an admin caller may name
+ * another agent. tasks/list does not use this rule (its params.agentId is an
+ * assignee filter). Returns the JSON-RPC refusal, -32001 "Forbidden" with a
+ * detail naming the method, or null when the caller may name `agentId`.
  */
 function actAsRefusal(
   id: JsonRpcId,
@@ -256,11 +257,12 @@ function actAsRefusal(
 }
 
 /**
- * message/stream's reader: one page of `participantId`'s catch-up after a
- * cursor, read in process through OrgEventCatchup with the caller's own
- * identity, which is the targeting, expiry, order and owner check that
- * GET /OrgEventCatchup/<participantId> applies to that caller. Each read gets
- * a fresh context (and so its own transaction), carrying exactly the caller's
+ * message/stream's reader: one page of `participantId`'s catch-up after the
+ * stream's own cursor, read in process through OrgEventCatchup with the
+ * requesting caller's identity. OrgEventCatchup applies its owner check to
+ * that caller and returns the events targeted at `participantId` or carrying
+ * no targets, not expired, after the cursor, in position order. Each read gets
+ * a fresh context (and so its own transaction) carrying exactly the caller's
  * agent id and admin flag. The read passes an explicit `after` cursor, so it
  * never creates or moves the agent's durable catch-up watermark.
  */
@@ -276,17 +278,17 @@ export class A2AAdapter extends Resource {
   // public so other agents/clients can discover this Flair as a memory
   // peer. POST is JSON-RPC for actions (message/send writes OrgEvents,
   // tasks/list reads the instance's Beads task board, message/stream
-  // streams the caller's OrgEvents) and is auth-gated upstream by
+  // streams the OrgEvents for params.agentId) and is auth-gated upstream by
   // auth-middleware's narrowed allow-list (GET /a2a passes through;
   // POST /a2a must carry TPS-Ed25519 or admin Basic). The post() handler
-  // below additionally enforces caller == params.agentId for message/send
-  // and message/stream (actAsRefusal) so a non-admin caller can only act
-  // AS itself and read only its own event stream. message/send
+  // below additionally applies the caller-match rule to message/send and
+  // message/stream (actAsRefusal): a non-admin caller may name only its own
+  // agent id there; an admin caller may name another agent. message/send
   // routes a DIRECTED handoff to params.toAgentId (the recipient) by
   // setting the OrgEvent's targetIds = [toAgentId]; OrgEventCatchup filters
   // on that, so the recipient — not the sender — receives the message.
-  // tasks/list returns the whole board to any authenticated caller: the
-  // board is shared within one instance, not scoped per caller.
+  // tasks/list is not caller-scoped: any authenticated caller can request
+  // the unfiltered board, and its params.agentId only filters by assignee.
   allowRead() { return true; }
   allowCreate() { return true; }
 
@@ -372,8 +374,6 @@ export class A2AAdapter extends Resource {
         const stream = orgEventStream({
           rpcId: id,
           readPage: callerCatchupReader(agentId, callerAgent, callerIsAdmin),
-          // Events created after the stream opens.
-          startAfter: positionAfterTimestamp(new Date().toISOString()),
           taskId: cleanText(params.taskId) || null,
         });
         return new Response(stream, {
@@ -461,6 +461,11 @@ export class A2AAdapter extends Resource {
       }
 
       if (body.method === "tasks/list") {
+        // One source, never both: the `.yaml`/`.yml` issue files under
+        // ~/ops/.beads/issues/ when at least one exists, otherwise
+        // ~/ops/.beads/issues.jsonl. params.agentId filters by assignee and
+        // params.status by the mapped A2A status; neither is matched to the
+        // caller.
         const yamlIssues = await readIssuesFromYamlDir();
         const issues = yamlIssues.length > 0 ? yamlIssues : await readIssuesFromJsonl();
 

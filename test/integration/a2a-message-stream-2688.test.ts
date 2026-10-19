@@ -1,10 +1,11 @@
 /**
  * a2a-message-stream-2688.test.ts — A2A `message/stream` against a real Harper.
  *
- * `message/stream` answers with a Server-Sent Events stream of the caller's
- * OrgEvents, read in process through OrgEventCatchup with the caller's own
- * identity. It answers only for the caller's own agent id (the check
- * message/send applies), and its polling stops when the client disconnects.
+ * `message/stream` answers with a Server-Sent Events stream of the OrgEvents
+ * for params.agentId, read in process through OrgEventCatchup with the
+ * requesting caller's own identity. A non-admin caller may name only its own
+ * agent id (message/send's caller-match rule; an admin may name another
+ * agent), and the polling stops when the client disconnects.
  *
  * Harper runs a private composed copy of the built component with one added
  * test module (test/fixtures/catchup-read-probe-2688/probe.js) that records
@@ -14,11 +15,13 @@
  * that no read starts after the client is gone.
  *
  * Mutations (each fails a named case):
- *   - read the catch-up through the earlier HTTP self-request
+ *   - read the catch-up through an unauthenticated HTTP self-request
  *       → "delivers an OrgEvent targeted at the caller ..."
  *   - drop the agentId == caller check from message/stream
  *       → "a request naming another agent is refused ..."
  *   - read with an admin or internal context instead of the caller's
+ *       → "an event targeted at another agent never reaches the stream ..."
+ *   - add a discarded read of another agent's catch-up to each poll
  *       → "an event targeted at another agent never reaches the stream ..."
  *   - leave the poll running after the client closes
  *       → "after the client disconnects no further catch-up read runs ..."
@@ -252,7 +255,7 @@ afterAll(async () => {
   composed?.cleanup();
 }, HARPER_STOP_BUDGET_MS + 10_000);
 
-describe("A2A message/stream delivers the caller's OrgEvents", () => {
+describe("A2A message/stream delivers the OrgEvents for the named agent", () => {
   it("delivers an OrgEvent targeted at the caller, published after the stream opens, as an org.event frame", async () => {
     const { rpcId, stream } = await postA2A(A, "message/stream", { agentId: A.id });
     try {
@@ -287,7 +290,9 @@ describe("A2A message/stream delivers the caller's OrgEvents", () => {
   }, 40_000);
 
   it("an event targeted at another agent never reaches the stream, and every catch-up read behind it runs as the caller", async () => {
-    const readsBefore = readsFor(A.id).length;
+    // The COMPLETE read log, every participant: a read of any other agent's
+    // catch-up made while this stream is open counts against it.
+    const logBefore = probeReads().length;
     const { stream } = await postA2A(A, "message/stream", { agentId: A.id });
     const markerB = `marker-for-b-${randomUUID()}`;
     try {
@@ -309,10 +314,11 @@ describe("A2A message/stream delivers the caller's OrgEvents", () => {
     expect(carriesMarker(`x ${markerB} y`, markerB)).toBe(true);
     expect(carriesMarker(`data: {"b":"${Buffer.from(`{"s":"${markerB}"}`).toString("base64")}"}`, markerB)).toBe(true);
 
-    const reads = readsFor(A.id).slice(readsBefore);
+    const reads = probeReads().slice(logBefore);
     expect(reads.length).toBeGreaterThan(0);
     for (const r of reads) {
-      expect(r).toMatchObject({ participantId: A.id, tpsAgent: A.id, tpsAgentIsAdmin: false, http: false });
+      expect({ participantId: r.participantId, tpsAgent: r.tpsAgent, tpsAgentIsAdmin: r.tpsAgentIsAdmin, http: r.http })
+        .toEqual({ participantId: A.id, tpsAgent: A.id, tpsAgentIsAdmin: false, http: false });
     }
   }, 40_000);
 
