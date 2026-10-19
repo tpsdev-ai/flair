@@ -348,7 +348,11 @@ describe("flair#2478 — the migration's `.content`-suffix fallback writes under
     // c1: a PUT and a PATCH naming the id at each held point.
     for (const [point, next] of [[S_STAGED, S_CONFIRMED], [S_CONFIRMED, S_COMMITTED], [S_COMMITTED, S_STAGED]] as const) {
       await h.assertPaused(point);
-      for (const verb of ["PUT", "PATCH"] as const) await expectRefused(await suffixWrite(verb, c1), "memory_busy");
+      for (const verb of ["PUT", "PATCH"] as const) {
+        // The busy refusal carries the code and the caller's id, nothing else.
+        const body = await expectRefused(await suffixWrite(verb, c1), "memory_busy");
+        expect(body, `${verb} at ${point}`).toEqual({ error: "memory_busy", caller: h.harper.admin.username });
+      }
       const held = await h.readRow(c1);
       expect(held.content).toBe(ORIGINAL);
       if (point === S_COMMITTED) await expectBoundTo(held, ORIGINAL);
