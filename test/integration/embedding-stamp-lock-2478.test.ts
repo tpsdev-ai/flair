@@ -8,16 +8,20 @@
  *    write lock (phase `patch-reembed`) with the owner budget, re-reads the
  *    committed row under it, embeds the stored text and commits before the
  *    release. A refused PATCH (`503 memory_busy`, `write_outcome_unknown`,
- *    `memory_provider_timeout`) leaves the row uncounted and pending; the
- *    migration logs the refusal.
+ *    `memory_provider_timeout`) leaves the row uncounted, and the migration
+ *    logs the refusal; the next scan decides whether the row is still stale
+ *    (an owner write can make it current meanwhile, as the owner-first case
+ *    shows).
  *  - The `.content`-suffix fallback: for an id the by-id PATCH cannot address,
  *    the migration computes the vector first, then takes the id's lock once
  *    (phase `embedding-stamp-content-suffix`). A held id or an outcome-unknown
- *    marker leaves the row pending for a later scan. Under the lock it re-reads
- *    the committed row and writes only if the row is the one it embedded;
- *    it stages an incremental update of the four embedding fields, confirms
- *    the committed row, commits, and verifies the committed row before the
- *    release.
+ *    marker is written nothing and left uncounted; the next scan decides
+ *    whether it is still stale. Under the lock it re-reads the committed row
+ *    and writes only if the row is the one it embedded; it stages an
+ *    incremental update of the four embedding fields, confirms the committed
+ *    row, commits, and verifies the committed row before the release. A retry
+ *    after its own unconfirmed attempt re-embeds a changed text even for a row
+ *    with an empty owner (whose stored text hash is null).
  *
  * Owner PUT/PATCH/DELETE refuse a `.content`-suffixed id, so the fallback's
  * owner cases name the id in the body of a PUT or PATCH: while the fallback

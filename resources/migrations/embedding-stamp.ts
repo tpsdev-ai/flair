@@ -165,17 +165,21 @@
  * under the id's lock shared with the owner verbs (resources/memory-write-lock.ts).
  * The HTTP delegation's `PATCH /Memory/:id` takes it in Memory.patch (phase
  * `patch-reembed`) with the owner budget; a refusal (`503 memory_busy`,
- * `write_outcome_unknown`, `memory_provider_timeout`) leaves the row uncounted
- * and pending for a later scan, and is logged. Under the lock that PATCH re-reads
- * the committed row and embeds its stored text, so an owner edit committed after
+ * `write_outcome_unknown`, `memory_provider_timeout`) is logged and leaves the
+ * row uncounted; the next scan decides whether it is still stale (an owner write
+ * can make it current meanwhile). Under the lock that PATCH re-reads the
+ * committed row and embeds its stored text, so an owner edit committed after
  * this migration's read is the row it re-embeds; it writes only the embedding
- * fields and commits before the lock is released. The `.content`-suffix fallback
- * computes its vector first, then takes the id's lock once (phase
- * `embedding-stamp-content-suffix`): a held id, an id with an unresolved write
- * outcome, or a store with no lock leaves the row pending for a later scan and is
- * logged. Under the lock it re-reads the committed row, writes only when that row
- * is the one it embedded, and commits and verifies the committed row before the
- * release.
+ * fields (and gives a legacy row with no `instanceToken` one) and commits before
+ * the lock is released. The `.content`-suffix fallback computes its vector
+ * first, then takes the id's lock once (phase `embedding-stamp-content-suffix`):
+ * a held id, an id with an unresolved write outcome, or a store with no lock is
+ * logged, written nothing, and left uncounted; the next scan decides whether it
+ * is still stale. Under the lock it re-reads the committed row, writes only when
+ * that row is the one it embedded, and commits and verifies the committed row
+ * before the release. A retry after its own unconfirmed attempt recognises that
+ * attempt's vector by the vector itself, not by the stored text hash (null for a
+ * row with an empty owner), so a text change re-embeds the current text.
  */
 import { databases } from "harper";
 import { appendFileSync } from "node:fs";
@@ -293,10 +297,13 @@ async function regenViaHttpPatch(
   }
 }
 
-/** A 503 from the re-embed request is a refusal by the per-id write lock or the
- *  locked-provider bound (flair#2478): nothing was written for that refusal, or
- *  (`write_outcome_unknown`) an earlier write of the id is unresolved. The row
- *  stays pending; a later scan decides. Logs the refusal's code. */
+/** A 503 from the re-embed request (flair#2478). `memory_busy` (the id stayed
+ *  held through the request's wait budget) and `memory_provider_timeout` (the
+ *  locked-provider bound) wrote nothing. `write_outcome_unknown` means the id
+ *  has an unresolved write, which can be this request's own re-embed whose
+ *  committed row could not be read back, so that write may have committed. The
+ *  row is uncounted; the next scan decides whether it is still stale. Logs the
+ *  refusal's code. */
 async function logRegenRefusal(id: string, res: Response): Promise<void> {
   let code = "unnamed";
   try {
@@ -305,7 +312,7 @@ async function logRegenRefusal(id: string, res: Response): Promise<void> {
   } catch {
     // An unreadable refusal body is logged as unnamed.
   }
-  console.warn(`[embedding-stamp] ${id}: the re-embed request was refused 503 ${code}; the row is left pending for a later scan`);
+  console.warn(`[embedding-stamp] ${id}: the re-embed request was refused 503 ${code}; the row is uncounted and the next scan decides whether it is still stale`);
 }
 
 /** A vector this migration may stamp as current: a non-empty array of finite numbers. */
@@ -331,8 +338,8 @@ export interface ContentSuffixRegenDeps {
   embed: (text: string) => Promise<unknown>;
   inTransaction: <T>(fn: (txn: unknown) => Promise<T>) => Promise<T>;
   /** The store whose per-id lock the fallback writes under: `Memory.primaryStore`
-   *  (flair#2478). A store with no lock leaves the row pending, never written
-   *  unserialized. */
+   *  (flair#2478). With a store that has no lock nothing is written (never
+   *  unserialized) and the row is uncounted. */
   lockStore?: () => unknown;
 }
 
@@ -393,8 +400,9 @@ type ContentSuffixAttempt =
  * After the commit, still holding the lock, it re-reads the committed row in a
  * fresh context (flair#2656) and returns the verdict: `shown` only when the row
  * still has this attempt's identity, the staged fields, and the text the vector
- * was computed for. The lock is released after that read. A row that still
- * exists with a stale stamp stays pending for the next batch or cycle.
+ * was computed for. The lock is released after that read. A row this attempt
+ * did not confirm is uncounted; the next batch or scan decides whether it is
+ * still stale.
  */
 async function regenContentSuffixRow(
   table: MemoryTableLike,

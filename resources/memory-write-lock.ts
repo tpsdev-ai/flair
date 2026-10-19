@@ -266,8 +266,10 @@ export async function withMemoryWriteLock<T>(
 /** One attempt, no wait, used by the automatic writers: the visibility
  *  backfill, the automatic promotion stamp, the embedding backfill and the
  *  embedding-stamp migration's `.content`-suffix fallback. A held lock or a
- *  marker answers `busy`/`unknown`; the writer skips the id and leaves it for a
- *  later pass. */
+ *  marker answers `busy`/`unknown`; the writer skips the id and writes nothing.
+ *  Whether the id is visited again is each writer's own rule (a later scan
+ *  decides whether a migration row is still stale; the embedding backfill runs
+ *  again only after the id's next successful HTTP Memory write). */
 export async function withMemoryWriteLockOnce<T>(
   store: unknown,
   ids: readonly (string | number)[],

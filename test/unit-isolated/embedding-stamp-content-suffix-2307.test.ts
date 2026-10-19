@@ -176,7 +176,7 @@ describe("flair#2307 — the content-suffix re-embed validates the vector and co
     expect(memoryLock.held.has(key), "the lock was not released").toBe(false);
   });
 
-  it("flair#2478: a held id is left pending and unwritten, and is written once it is free", async () => {
+  it("flair#2478: a held id is not written and not counted, and is written once it is free", async () => {
     const key = ["memory", LEGACY_ID];
     expect(memoryLock.tryLock(key)).toBe(true);
     try {
