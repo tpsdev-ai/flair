@@ -33,7 +33,7 @@ const MUTATION_DENIED = (): Response =>
     JSON.stringify({
       error: "instruction_version_immutable",
       message:
-        "InstructionVersion: resource REST clients cannot write or delete version records; the server appends them and removes only its own just-appended head when that request's close fails",
+        "InstructionVersion: resource REST clients cannot write or delete version records; the server appends them, and when a request's close fails it attempts to remove the version that request appended only while that version is still the head, reporting a compensation failure when the removal cannot be confirmed",
     }),
     { status: 403, headers: { "Content-Type": "application/json" } },
   );

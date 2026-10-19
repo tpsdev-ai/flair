@@ -52,15 +52,21 @@ import {
 } from "./auto-promote-lib.js";
 
 /**
- * flair#2645 — the Memory row an earlier sweep wrote for this candidate, when
- * it is still that row and carries no verdict. A retry must stamp that row
- * instead of writing a second promoted row: Memory's dedup gate only reports a
- * near-duplicate and always proceeds with the write.
+ * flair#2645 — the Memory row an earlier sweep recorded on this candidate, when
+ * it passes the checks below. A retry stamps that row instead of writing a
+ * second promoted row: Memory's dedup gate only reports a near-duplicate and
+ * always proceeds with the write.
  *
- * The row is addressed by the id and incarnation token the sweep recorded on
- * the candidate, not by an owner, tag or content match: those fields are not
- * proof that the sweep wrote the row. Only a row the sweep recorded, unchanged
- * since, is reused; anything else falls through to a fresh write.
+ * The row is addressed by the id and incarnation token recorded on the
+ * candidate, not by an owner, tag or content match: those fields are not proof
+ * that the sweep wrote the row. The row is reused only when its `id` and
+ * `instanceToken` equal the recorded ones, its `agentId` is the sweeping
+ * agent, `promotionStatus` is unset, `archived` is not true, `content` equals
+ * the candidate's claim, `visibility` and `durability` equal the values this
+ * sweep writes, and `tags` include every tag this sweep writes. No other field
+ * is compared, and an ordinary same-id Memory write keeps the row's incarnation
+ * token (Memory.ts stampInstanceToken), so a match identifies the incarnation,
+ * not an unedited row. A row that fails any check falls through to a fresh write.
  */
 async function findReusablePromotedRow(
   agentId: string,
@@ -185,12 +191,16 @@ export class AutoPromoteCandidates extends Resource {
       const promotedDurability = "persistent";
 
       // ── Reuse this candidate's earlier row on a retry ─────────────────────
-      // A sweep whose stamp was refused leaves the candidate pending and the
-      // row it wrote unstamped. That sweep recorded the row's id and
-      // incarnation token on the candidate; when the recorded row is still
-      // that incarnation, unstamped, and carries the fields this sweep writes,
-      // stamp it here instead of writing a second promoted row. Memory's dedup
-      // gate only reports a near-duplicate and never suppresses the write.
+      // A sweep whose stamp is reported refused leaves the candidate pending.
+      // When that sweep's recording of the row's id and incarnation token was
+      // persisted (a failed recording is logged and ignored below) and the
+      // recorded row passes findReusablePromotedRow — including carrying no
+      // promotionStatus — this sweep stamps it instead of writing a second
+      // promoted row. Otherwise it writes a fresh row: without a persisted
+      // recording nothing is reused, and a recorded row that already carries
+      // a verdict, including one whose stamp was reported unconfirmed, is not
+      // reused. Memory's dedup gate only reports a near-duplicate and never
+      // suppresses the write.
       const reusable = await findReusablePromotedRow(
         agentId, c, promotedTags, promotedVisibility, promotedDurability,
       );
@@ -275,10 +285,11 @@ export class AutoPromoteCandidates extends Resource {
         };
 
         // Record the row this sweep wrote on the candidate before its stamp.
-        // A refused stamp then leaves the identity behind for the next sweep;
-        // the status write below carries the same fields on success. A failed
-        // recording does not abort the promotion: the row is written and the
-        // stamp still runs, so the safe state is kept.
+        // When this write persists, a refused stamp leaves the identity behind
+        // for the next sweep; the status write below carries the same fields
+        // on success. A failed recording is logged and does not abort the
+        // promotion: the stamp still runs, but if it is refused the next sweep
+        // has no recorded row to reuse and writes a new one.
         if (typeof writtenRow.instanceToken === "string" && writtenRow.instanceToken.length > 0) {
           recordedRowId = memId;
           recordedRowToken = writtenRow.instanceToken;
@@ -295,10 +306,12 @@ export class AutoPromoteCandidates extends Resource {
       const stamped = await stampMemoryPromotionIsolated(memId, decision.reviewerId, decidedAt, ctx, writtenRow);
 
       // ── A refused stamp leaves its candidate pending ───────────────────────
-      // The stamp refuses when the row its first read returns is no longer the
-      // one this sweep wrote (a concurrent replace). Marking the candidate
-      // promoted then would record a promotion whose verdict never landed, so
-      // leave it pending for the next sweep — the safe failure state above.
+      // The stamp reports false when it refuses (the row its first read
+      // returns is no longer the one this sweep wrote, e.g. a concurrent
+      // replace) or when its outcome cannot be confirmed. Marking the candidate
+      // promoted then would record a promotion whose verdict is not confirmed
+      // on the row, so leave it pending for the next sweep — the safe failure
+      // state above.
       if (!stamped) {
         skipped.push({ id: c.id, reason: "stamp_refused" });
         continue;
@@ -309,7 +322,8 @@ export class AutoPromoteCandidates extends Resource {
       // promote path: the safe failure state is a promoted Memory whose
       // candidate is still pending, never a candidate marked promoted with no
       // Memory behind it. In the refused-stamp case above the candidate stays
-      // pending with the row it recorded, so a later sweep can stamp that row.
+      // pending; a later sweep stamps the recorded row only when the recording
+      // persisted and the row still passes findReusablePromotedRow, unstamped.
       try {
         await (databases as any).flair.MemoryCandidate.put({
           ...c,
