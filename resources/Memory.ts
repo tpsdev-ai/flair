@@ -1917,7 +1917,9 @@ async function reembedStoredRow(
     // committed row in a fresh context and answer success only when it shows
     // the staged values on the same row identity. A mismatch retries from the
     // next attempt's fresh read (which re-checks the text, the owner and the
-    // identity); an unreadable read is unknown.
+    // identity); an unreadable read is unknown. Both unconfirmed outcomes mark
+    // the id outcome-unknown (writeOutcomeUnknownFor), so a later PUT, PATCH or
+    // DELETE of it is refused as after an ordinary PUT or PATCH.
     const verdict = await verifyCommittedFields(
       (databases as any).flair.Memory,
       id,
@@ -1925,7 +1927,7 @@ async function reembedStoredRow(
       outcome.fields,
       (committed) => skillEmbedText(committed) === textToEmbed,
     );
-    if (verdict === "unreadable") return { response: writeOutcomeUnknownResponse() };
+    if (verdict === "unreadable") return { response: writeOutcomeUnknownFor(id) };
     if (verdict !== "shown") {
       // Safe to retry from a fresh read: for unchanged text and owner the next
       // attempt writes the same vector and hash (changed text recomputes them)
@@ -1937,7 +1939,7 @@ async function reembedStoredRow(
       // recomputation can still answer 409 reembed_row_changed.
       if (attempt === REEMBED_WRITE_ATTEMPTS) {
         console.warn(`[reembed] ${id}: the committed vector was not confirmed after ${REEMBED_WRITE_ATTEMPTS} attempts; outcome: unconfirmed`);
-        return { response: writeOutcomeUnknownResponse() };
+        return { response: writeOutcomeUnknownFor(id) };
       }
       continue;
     }

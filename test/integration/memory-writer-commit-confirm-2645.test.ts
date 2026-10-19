@@ -15,6 +15,13 @@
  * of the stored row with a new `content`, so the identity fields the writers
  * compare (instanceToken, contentHash, createdAt, agentId) do not move.
  *
+ * Two re-embed cases end in an unconfirmed outcome (an unreadable read-back,
+ * and a read-back mismatch on every attempt) and then check that a later
+ * DELETE, PUT and PATCH of the same id are refused 503 write_outcome_unknown,
+ * as after an ordinary PUT or PATCH whose outcome is unknown. The file runs
+ * against a composed copy of the built component that can fail one armed
+ * Memory read (test/helpers/host-pointer-failing-component.ts).
+ *
  * Real Harper, ephemeral instance; every URL is asserted to be this test's own
  * instance before the first call.
  */
@@ -27,6 +34,7 @@ import nacl from "tweetnacl";
 import { getModelId } from "../../resources/embeddings-provider.ts";
 import { signBodyFresh } from "../../resources/federation-crypto.js";
 import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
+import { componentWithFailingMemoryRead, type FailingComponent } from "../helpers/host-pointer-failing-component";
 import { ensureFlairAgentRole, ensureFlairAgentUser } from "../../src/cli";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array }
@@ -42,6 +50,7 @@ const PEER = `mwc-peer-${sfx}`;
 const now = () => new Date().toISOString();
 
 let harper: HarperInstance;
+let component: FailingComponent | undefined;
 let pauseDir = "";
 let seq = 0;
 const nextId = (label: string) => `mwc-${label}-${sfx}-${++seq}`;
@@ -141,6 +150,39 @@ async function withPaused(point: string, trigger: () => Promise<Response>, compe
   return { response, released, paused };
 }
 
+function armPoint(point: string): void {
+  for (const marker of ["claimed", "paused", "go", "released"]) rmSync(join(pauseDir, `${marker}.${point}`), { force: true });
+  writeFileSync(join(pauseDir, `arm.${point}`), "");
+}
+
+/** Release a held pause point and require that the release, not its time limit, ended it. */
+async function releasePoint(point: string): Promise<void> {
+  writeFileSync(join(pauseDir, `go.${point}`), "");
+  const path = join(pauseDir, `released.${point}`);
+  const deadline = Date.now() + 30_000;
+  let released = "";
+  while (Date.now() < deadline && !released) {
+    if (existsSync(path)) released = readFileSync(path, "utf8");
+    if (!released) await new Promise((r) => setTimeout(r, 25));
+  }
+  expect(released, `${point}: the pause ended by timeout, not by this test`).toBe("go");
+}
+
+/** A DELETE, a PUT and a PATCH of `id` are each refused 503 write_outcome_unknown
+ *  (the outcome-unknown fence, test/integration/memory-outcome-unknown-fence-2478.test.ts). */
+async function expectLaterWritesRefused(id: string): Promise<void> {
+  for (const [method, body] of [
+    ["DELETE", undefined],
+    ["PUT", { id, agentId: A.id, content: "a write after the unknown outcome", durability: "persistent" }],
+    ["PATCH", { embedding: null, embeddingModel: null }],
+  ] as const) {
+    const res = await call(A, method, memPath(id), body as any);
+    const text = await res.text();
+    expect(res.status, `${method}: ${text}`).toBe(503);
+    expect(JSON.parse(text).error, method).toBe("write_outcome_unknown");
+  }
+}
+
 /** One signed FederationSync push of a single Memory record from PEER. */
 async function federatedPush(record: Record<string, unknown>): Promise<Response> {
   const body = signBodyFresh(
@@ -163,7 +205,8 @@ beforeAll(async () => {
   process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION = "1";
   process.env.FLAIR_TEST_PAUSE_DIR = pauseDir;
   try {
-    harper = await startHarper();
+    component = componentWithFailingMemoryRead();
+    harper = await startHarper({ cwd: component.dir });
   } finally {
     for (const [key, value] of Object.entries(saved)) {
       if (value === undefined) delete process.env[key];
@@ -185,6 +228,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (harper) await stopHarper(harper);
+  if (component) component.cleanup();
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
 }, HARPER_STOP_BUDGET_MS);
 
@@ -319,6 +363,79 @@ describe("flair#2645 — Memory writers under a newer full write", () => {
     expect(JSON.parse(text).error).toBe("not found");
     expect(await memoryRow(id)).toBeNull();
   }, 120_000);
+
+  it("re-embed PATCH: an unreadable read-back answers write_outcome_unknown, and a later DELETE, PUT and PATCH of the id are refused", async () => {
+    const id = nextId("reembed-unreadable");
+    await seedRow(id, "reembed read-back unreadable");
+    const { response, paused, released } = await withPaused(
+      "memory-reembed-verify",
+      () => call(A, "PATCH", memPath(id), { id, embedding: null, embeddingModel: null }),
+      async () => {
+        writeFileSync(join(pauseDir, `arm.memory-get-fail.${id}`), "");
+      },
+    );
+    expect(paused, "the re-embed PATCH was not paused before read-back").toBe(true);
+    expect(released).toBe("go");
+    const text = await response.text();
+    expect(response.status, text).toBe(503);
+    expect(JSON.parse(text).error).toBe("write_outcome_unknown");
+    expect(existsSync(join(pauseDir, `arm.memory-get-fail.${id}`)), "the read-back was not the read that failed").toBe(false);
+    const before = await memoryRow(id);
+    expect(before, "the re-embedded row is missing").not.toBeNull();
+
+    await expectLaterWritesRefused(id);
+    expect(await memoryRow(id), "a refused write changed the row").toEqual(before);
+  }, 120_000);
+
+  it("re-embed PATCH: a read-back mismatch on every attempt answers write_outcome_unknown, and a later DELETE, PUT and PATCH of the id are refused", async () => {
+    const id = nextId("reembed-mismatch");
+    await seedRow(id, "reembed read-back mismatch on every attempt");
+    const MOVED = [0.2, 0.3, 0.4];
+    const ATTEMPTS = 3; // REEMBED_WRITE_ATTEMPTS in resources/Memory.ts
+    const VERIFY = "memory-reembed-verify";
+    const COMMIT = "memory-reembed-commit";
+    armPoint(VERIFY);
+    const pending = call(A, "PATCH", memPath(id), { id, embedding: null, embeddingModel: null });
+    let driven = false;
+    try {
+      for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
+        expect(await waitFor(join(pauseDir, `paused.${VERIFY}`), 20_000), `attempt ${attempt} never reached its read-back pause`).toBe(true);
+        const committed = await memoryRow(id);
+        expect(committed?.embeddingModel, `attempt ${attempt}: the re-embed did not commit before read-back`).toBe(getModelId());
+        expect(committed?.embedding, `attempt ${attempt}: the committed vector is the moved one`).not.toEqual(MOVED);
+        // A direct write moves the committed vector off this attempt's staged
+        // value; the row's identity and text do not change.
+        await ops({ operation: "update", database: "flair", table: "Memory", records: [{ id, embedding: MOVED }] });
+        expect((await memoryRow(id))?.embedding).toEqual(MOVED);
+        // The next attempt is held at its commit point, where the read-back
+        // point is armed again for it.
+        if (attempt < ATTEMPTS) armPoint(COMMIT);
+        await releasePoint(VERIFY);
+        if (attempt < ATTEMPTS) {
+          expect(await waitFor(join(pauseDir, `paused.${COMMIT}`), 20_000), `attempt ${attempt + 1} never reached its commit pause`).toBe(true);
+          armPoint(VERIFY);
+          await releasePoint(COMMIT);
+        }
+      }
+      driven = true;
+    } finally {
+      // A failed step must not leave the PATCH held at a pause point.
+      if (!driven) {
+        writeFileSync(join(pauseDir, `go.${VERIFY}`), "");
+        writeFileSync(join(pauseDir, `go.${COMMIT}`), "");
+      }
+    }
+    const response = await pending;
+    const text = await response.text();
+    expect(response.status, text).toBe(503);
+    expect(JSON.parse(text).error).toBe("write_outcome_unknown");
+    expect(existsSync(join(pauseDir, `arm.${VERIFY}`)) || existsSync(join(pauseDir, `arm.${COMMIT}`)), "a pause point stayed armed").toBe(false);
+    const before = await memoryRow(id);
+    expect(before?.embedding, "the moved vector is not the committed one").toEqual(MOVED);
+
+    await expectLaterWritesRefused(id);
+    expect(await memoryRow(id), "a refused write changed the row").toEqual(before);
+  }, 180_000);
 
   it("federation merge: a newer full write committed after its read is refused as merge_target_changed", async () => {
     const id = nextId("federation");
