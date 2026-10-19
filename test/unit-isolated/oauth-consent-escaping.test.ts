@@ -1,8 +1,9 @@
 /**
  * OAuth consent page — every value interpolated into the page is escaped, and
  * `state` is validated as opaque (printable ASCII, bounded) before rendering.
- * An unknown scope is refused with `invalid_scope`. The page also carries a
- * Content-Security-Policy and `X-Content-Type-Options: nosniff`.
+ * An unknown scope is refused with `invalid_scope`, and a request without an
+ * S256 PKCE challenge with `invalid_request`, before rendering. The page also
+ * carries a Content-Security-Policy and `X-Content-Type-Options: nosniff`.
  *
  * Isolated lane: this file stubs `harper` for `databases`, so it must run
  * one-process-per-file (flair#1817) — the shared `test/unit` process would let
@@ -36,6 +37,8 @@ const ALLOWED_REDIRECT_URI = "https://claude.com/api/mcp/auth_callback";
 /** Bland probe: angle brackets and quotes, not a script tag. */
 const VALUE = "a<b>c\"d'e`f";
 const ESCAPED = "a&lt;b&gt;c&quot;d&#39;e&#96;f";
+/** The S256 challenge of RFC 7636 Appendix B. */
+const CODE_CHALLENGE = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
 
 beforeEach(() => {
   CLIENTS.clear();
@@ -43,7 +46,13 @@ beforeEach(() => {
 });
 
 function q(params: Record<string, string>): string {
-  return "?" + new URLSearchParams({ response_type: "code", client_id: CLIENT_ID, ...params }).toString();
+  return "?" + new URLSearchParams({
+    response_type: "code",
+    client_id: CLIENT_ID,
+    code_challenge: CODE_CHALLENGE,
+    code_challenge_method: "S256",
+    ...params,
+  }).toString();
 }
 function authorize(query: string): Promise<Response> {
   const inst: any = new (OAuthAuthorize as any)();
@@ -62,6 +71,8 @@ describe("OAuth consent page — escaping and validation", () => {
     expect(html).toContain(`name="redirect_uri" value="${ALLOWED_REDIRECT_URI}"`);
     expect(html).toContain('name="scope" value="memory:read"');
     expect(html).toContain('name="state" value="abc123"');
+    expect(html).toContain(`name="code_challenge" value="${CODE_CHALLENGE}"`);
+    expect(html).toContain('name="code_challenge_method" value="S256"');
     expect(html).toContain('<form method="POST" action="/OAuthAuthorize"');
   });
 
@@ -71,13 +82,22 @@ describe("OAuth consent page — escaping and validation", () => {
     expect(html).not.toContain(VALUE);
   });
 
-  it("escapes code_challenge and code_challenge_method", async () => {
-    const html = await (
-      await authorize(q({ code_challenge: VALUE, code_challenge_method: VALUE }))
-    ).text();
-    expect(html).toContain(`name="code_challenge" value="${ESCAPED}"`);
-    expect(html).toContain(`name="code_challenge_method" value="${ESCAPED}"`);
-    expect(html).not.toContain(VALUE);
+  it("refuses a code_challenge or code_challenge_method that carries markup with invalid_request, before rendering, and echoes neither", async () => {
+    const cases: Array<Record<string, string>> = [
+      { code_challenge: VALUE },
+      { code_challenge_method: VALUE },
+      { code_challenge: VALUE, code_challenge_method: VALUE },
+    ];
+    for (const params of cases) {
+      const res = await authorize(q(params));
+      expect(res.status).toBe(400);
+      expect(res.headers.get("content-type")).toBe("application/json");
+      const text = await res.text();
+      expect(JSON.parse(text)).toMatchObject({ error: "invalid_request" });
+      expect(text).not.toContain(VALUE);
+      expect(text).not.toContain(ESCAPED);
+      expect(text).not.toContain("<form");
+    }
   });
 
   it("escapes the client name rendered in the heading", async () => {

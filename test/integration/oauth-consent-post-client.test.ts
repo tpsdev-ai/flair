@@ -5,7 +5,9 @@
 //
 // Order on POST: redirect_uri, then a non-approve action answers the
 // access_denied redirect (no code, no write), then the scope check, then the
-// OAuthClient record check, then authentication, then the code is issued.
+// OAuthClient record check, then the S256 PKCE check
+// (test/integration/oauth-pkce-required.test.ts), then authentication, then the
+// code is issued.
 //
 // This exercises real Harper over HTTP (a Harper the harness spawns, as CI
 // runs it, or an existing one when HARPER_HTTP_URL is set): each consent POST
@@ -420,11 +422,20 @@ describe("POST /OAuthAuthorize applies the consent page's scope and client check
   }, 30_000);
 
   test("an approve with a blank scope stores the scope the consent page renders for a blank scope (memory:read)", async () => {
-    const page = await getConsent({ client_id: registeredClient, scope: "  ", redirect_uri: ALLOWED_REDIRECT_URI });
-    expect(page.status).toBe(200);
-    expect(hiddenValue(await page.text(), "scope")).toBe("memory:read");
-
     const { challenge } = pkcePair();
+    const page = await getConsent({
+      client_id: registeredClient,
+      scope: "  ",
+      redirect_uri: ALLOWED_REDIRECT_URI,
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+    });
+    expect(page.status).toBe(200);
+    const html = await page.text();
+    expect(hiddenValue(html, "scope")).toBe("memory:read");
+    expect(hiddenValue(html, "code_challenge") === challenge).toBe(true);
+    expect(hiddenValue(html, "code_challenge_method")).toBe("S256");
+
     const res = await postConsent({
       action: "approve",
       client_id: registeredClient,

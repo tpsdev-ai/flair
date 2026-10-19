@@ -27,7 +27,9 @@ import { esc } from "./admin-layout.js";
  *
  * 1.0 constraints (per FLAIR-PRINCIPALS § 2):
  *   - Only https://claude.com/api/mcp/auth_callback permitted as redirect URI
- *   - PKCE required (S256 only)
+ *   - PKCE required (S256 only): GET and POST /OAuthAuthorize refuse a request
+ *     without an S256 code_challenge (checkConsentPkce), and the token
+ *     endpoint requires the stored challenge and a matching code_verifier
  *   - Access tokens: max 1 hour
  *   - Refresh token rotation on each use
  *   - No "remember this decision" — each authorize is explicit
@@ -187,6 +189,37 @@ async function checkConsentClient(clientId: unknown): Promise<ConsentCheck<{ cli
     };
   }
   return { ok: true, client };
+}
+
+/**
+ * An S256 `code_challenge` (RFC 7636 §4.2): 43 to 128 characters of the
+ * base64url alphabet. BASE64URL(SHA256(verifier)) is always 43 of them.
+ */
+const S256_CODE_CHALLENGE = /^[A-Za-z0-9_-]{43,128}$/;
+
+/**
+ * PKCE is required, S256 only — what the metadata advertises
+ * (`code_challenge_methods_supported: ["S256"]`). `code_challenge` must be a
+ * string matching S256_CODE_CHALLENGE and `code_challenge_method` exactly
+ * "S256"; anything else (absent, empty, not a string, "plain") is refused with
+ * 400 invalid_request. The consent page (GET) and the consent form's POST both
+ * run this, after checkConsentClient: GET before rendering the form, POST
+ * before authentication and before any authorization code is issued or stored.
+ */
+function checkConsentPkce(codeChallenge: unknown, codeChallengeMethod: unknown): ConsentCheck<{ codeChallenge: string }> {
+  const refuse = (description: string): ConsentCheck<{ codeChallenge: string }> => ({
+    ok: false,
+    response: new Response(JSON.stringify({ error: "invalid_request", error_description: description }), {
+      status: 400, headers: { "content-type": "application/json" },
+    }),
+  });
+  if (typeof codeChallenge !== "string" || !S256_CODE_CHALLENGE.test(codeChallenge)) {
+    return refuse("PKCE is required: code_challenge must be an S256 challenge of 43-128 base64url characters");
+  }
+  if (codeChallengeMethod !== "S256") {
+    return refuse("PKCE is required: code_challenge_method must be S256");
+  }
+  return { ok: true, codeChallenge };
 }
 
 /** `state` is an opaque passthrough: printable ASCII, bounded (RFC 6749 §4.1.2). */
@@ -390,8 +423,9 @@ export class OAuthAuthorize extends Resource {
       }), { status: 400, headers: { "content-type": "application/json" } });
     }
 
-    // Scope, then client — the same two checks, in the same order, that the
-    // consent form's POST runs before it issues a code.
+    // Scope, then client, then PKCE — the same three checks, in the same order,
+    // that the consent form's POST runs before it issues a code. The form is
+    // rendered only for a request that passes all three.
     const scopeCheck = checkConsentScope(requestedScope);
     if (!scopeCheck.ok) return scopeCheck.response;
     const { scope, scopeTokens } = scopeCheck;
@@ -399,6 +433,9 @@ export class OAuthAuthorize extends Resource {
     const clientCheck = await checkConsentClient(clientId);
     if (!clientCheck.ok) return clientCheck.response;
     const { client } = clientCheck;
+
+    const pkceCheck = checkConsentPkce(codeChallenge, codeChallengeMethod);
+    if (!pkceCheck.ok) return pkceCheck.response;
 
     // Server-rendered consent page (minimal HTML, no JS frameworks). EVERY
     // interpolated value passes through `esc` — correct for element text and
@@ -418,8 +455,8 @@ ${scopeTokens.map((s: string) => `<div class="scope">${esc(s)}</div>`).join("")}
 <input type="hidden" name="redirect_uri" value="${esc(redirectUri || ALLOWED_REDIRECT_URI)}">
 <input type="hidden" name="scope" value="${esc(scope)}">
 <input type="hidden" name="state" value="${esc(state)}">
-<input type="hidden" name="code_challenge" value="${esc(codeChallenge)}">
-<input type="hidden" name="code_challenge_method" value="${esc(codeChallengeMethod)}">
+<input type="hidden" name="code_challenge" value="${esc(pkceCheck.codeChallenge)}">
+<input type="hidden" name="code_challenge_method" value="S256">
 <button type="submit" name="action" value="approve" class="approve">Approve</button>
 <button type="submit" name="action" value="deny" class="deny">Deny</button>
 </form></body></html>`;
@@ -445,8 +482,10 @@ ${scopeTokens.map((s: string) => `<div class="scope">${esc(s)}</div>`).join("")}
     const redirectUri = data?.redirect_uri || ALLOWED_REDIRECT_URI;
     const requestedScope = consentScope(data?.scope);
     const state = data?.state ?? "";
-    const codeChallenge = data?.code_challenge ?? "";
-    const codeChallengeMethod = data?.code_challenge_method ?? "S256";
+    // As received: checkConsentPkce refuses an absent, empty, non-string or
+    // non-S256 value.
+    const codeChallenge = data?.code_challenge;
+    const codeChallengeMethod = data?.code_challenge_method;
 
     // Sherlock 2026-04-11: validate redirect_uri in POST handler too.
     // Without this, an attacker can CSRF the approval form with an arbitrary
@@ -470,17 +509,21 @@ ${scopeTokens.map((s: string) => `<div class="scope">${esc(s)}</div>`).join("")}
     }
 
     // An approve must name what the consent page accepts: the scope check, then
-    // the OAuthClient record check — the same checks, in the same order and
-    // with the same 400 bodies, that get() runs before rendering the form. Both
-    // run before authentication (get() runs them with none) and before any
-    // code is issued or stored. A deny is answered above, before these: it
-    // issues nothing and redirects only to the pinned redirect_uri.
+    // the OAuthClient record check, then the S256 PKCE check — the same checks,
+    // in the same order and with the same 400 bodies, that get() runs before
+    // rendering the form. All three run before authentication (get() runs them
+    // with none) and before any code is issued or stored. A deny is answered
+    // above, before these: it issues nothing, stores nothing, and redirects
+    // only to the pinned redirect_uri, so it needs no PKCE fields.
     const scopeCheck = checkConsentScope(requestedScope);
     if (!scopeCheck.ok) return scopeCheck.response;
     const { scope } = scopeCheck;
 
     const clientCheck = await checkConsentClient(clientId);
     if (!clientCheck.ok) return clientCheck.response;
+
+    const pkceCheck = checkConsentPkce(codeChallenge, codeChallengeMethod);
+    if (!pkceCheck.ok) return pkceCheck.response;
 
     // Determine authenticated principal. Harper v5 does not populate
     // this.request on Resource subclasses, so `(this as any).request?.tpsAgent`
@@ -554,8 +597,8 @@ ${scopeTokens.map((s: string) => `<div class="scope">${esc(s)}</div>`).join("")}
       principalId,
       redirectUri,
       scope,
-      codeChallenge,
-      codeChallengeMethod,
+      codeChallenge: pkceCheck.codeChallenge,
+      codeChallengeMethod: "S256",
       expiresAt: futureISO(AUTH_CODE_TTL_MS),
       used: false,
       createdAt: now,
@@ -632,19 +675,26 @@ export class OAuthToken extends Resource {
       });
     }
 
-    // PKCE verification
-    if (authCode.codeChallenge) {
-      if (!codeVerifier) {
-        return new Response(JSON.stringify({ error: "invalid_grant", error_description: "code_verifier required" }), {
-          status: 400, headers: { "content-type": "application/json" },
-        });
-      }
-      const expectedChallenge = createHash("sha256").update(codeVerifier).digest("base64url");
-      if (expectedChallenge !== authCode.codeChallenge) {
-        return new Response(JSON.stringify({ error: "invalid_grant", error_description: "PKCE verification failed" }), {
-          status: 400, headers: { "content-type": "application/json" },
-        });
-      }
+    // PKCE (S256) on every exchange: the stored code must carry an S256
+    // challenge, the request must carry a code_verifier, and the verifier's
+    // S256 hash must equal the stored challenge. Each refusal comes before the
+    // single-use claim and the `used` write below, so a refused exchange
+    // leaves the code unredeemed and the answer names the PKCE refusal.
+    if (typeof authCode.codeChallenge !== "string" || !authCode.codeChallenge || authCode.codeChallengeMethod !== "S256") {
+      return new Response(JSON.stringify({ error: "invalid_grant", error_description: "authorization code has no S256 code_challenge" }), {
+        status: 400, headers: { "content-type": "application/json" },
+      });
+    }
+    if (typeof codeVerifier !== "string" || !codeVerifier) {
+      return new Response(JSON.stringify({ error: "invalid_request", error_description: "code_verifier required" }), {
+        status: 400, headers: { "content-type": "application/json" },
+      });
+    }
+    const expectedChallenge = createHash("sha256").update(codeVerifier).digest("base64url");
+    if (expectedChallenge !== authCode.codeChallenge) {
+      return new Response(JSON.stringify({ error: "invalid_grant", error_description: "PKCE verification failed" }), {
+        status: 400, headers: { "content-type": "application/json" },
+      });
     }
 
     // Claim to redeem once per instance under a per-key lock before any token

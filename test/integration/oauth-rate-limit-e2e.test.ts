@@ -13,7 +13,7 @@
 //
 // MODEL: test/integration/oauth-authorize-authz.test.ts.
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
-import { randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
 const ALLOWED_REDIRECT_URI = "https://claude.com/api/mcp/auth_callback";
@@ -54,6 +54,9 @@ let harper: HarperInstance;
 const savedEnv: Record<string, string | undefined> = {};
 const clientId = `flair_cl_ratelimit_${randomUUID()}`;
 const validCode = `code_${randomUUID()}`;
+// The token endpoint requires the stored S256 challenge and a matching verifier.
+const validVerifier = randomBytes(32).toString("base64url");
+const validChallenge = createHash("sha256").update(validVerifier).digest("base64url");
 
 describe("OAuth rate limiting (real Harper, real HTTP)", () => {
   beforeAll(async () => {
@@ -94,6 +97,7 @@ describe("OAuth rate limiting (real Harper, real HTTP)", () => {
       records: [{
         id: validCode, clientId, principalId: "admin",
         redirectUri: ALLOWED_REDIRECT_URI, scope: "memory:read",
+        codeChallenge: validChallenge, codeChallengeMethod: "S256",
         expiresAt: new Date(Date.now() + 600_000).toISOString(),
         used: false, createdAt: new Date().toISOString(),
       }],
@@ -113,10 +117,21 @@ describe("OAuth rate limiting (real Harper, real HTTP)", () => {
   test("POSITIVE CONTROL: a genuinely valid authorization code still exchanges for a token", async () => {
     const res = await postToken(harper, {
       grant_type: "authorization_code", code: validCode, client_id: clientId,
-      redirect_uri: ALLOWED_REDIRECT_URI,
+      redirect_uri: ALLOWED_REDIRECT_URI, code_verifier: validVerifier,
     });
     expect(res.status).toBe(200);
     expect(JSON.parse(res.text).access_token).toStartWith("flair_at_");
+    // The exchange redeemed the seeded code: read back through the operations
+    // API, which this budget does not count.
+    const row = await adminOp(harper, {
+      operation: "search_by_value", database: "flair", table: "OAuthAuthCode",
+      search_attribute: "id", search_value: validCode, get_attributes: ["used", "codeChallengeMethod"],
+    });
+    expect(row.status).toBe(200);
+    const rows: any[] = await row.json();
+    expect(rows.length).toBe(1);
+    expect(rows[0].used).toBe(true);
+    expect(rows[0].codeChallengeMethod).toBe("S256");
   });
 
   test("POSITIVE CONTROL: every request up to the limit is served, none is throttled", async () => {
@@ -152,11 +167,11 @@ describe("OAuth rate limiting (real Harper, real HTTP)", () => {
     // good" — a cleaner oracle than the 400 the endpoint already returns.
     const good = await postToken(harper, {
       grant_type: "authorization_code", code: validCode, client_id: clientId,
-      redirect_uri: ALLOWED_REDIRECT_URI,
+      redirect_uri: ALLOWED_REDIRECT_URI, code_verifier: validVerifier,
     });
     const bad = await postToken(harper, {
       grant_type: "authorization_code", code: "definitely-not-a-real-code", client_id: "flair_cl_nope",
-      redirect_uri: ALLOWED_REDIRECT_URI,
+      redirect_uri: ALLOWED_REDIRECT_URI, code_verifier: "not-the-verifier",
     });
     expect(good.status).toBe(429);
     expect(bad.status).toBe(429);

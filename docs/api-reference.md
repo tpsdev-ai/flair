@@ -275,7 +275,7 @@ operator audit trail.
 | GET | `/.well-known/oauth-authorization-server`, `/OAuthMetadata` | Public | RFC 8414. CORS `*`. |
 | GET | `/.well-known/oauth-protected-resource`, `…/mcp` | Public | RFC 9728. |
 | POST | `/OAuthRegister` | `X-Flair-Initial-Access-Token` | DCR. **Off** unless `FLAIR_OAUTH_DCR_TOKEN` is set (32–508 chars). Rate-limited. |
-| GET / POST | `/OAuthAuthorize` | Public (user consent) | Authorization code + PKCE. |
+| GET / POST | `/OAuthAuthorize` | Public (user consent) | Authorization code + PKCE (`S256` required). |
 | POST | `/OAuthToken` | Public (client + code/assertion) | Token + `jwt-bearer` (XAA). |
 | POST | `/OAuthRevoke` | Public (token) | Revocation. |
 | GET / POST | `/mcp` | OAuth bearer | Curated tools. **Unmounted** until `FLAIR_MCP_OAUTH=true` and an issuer. |

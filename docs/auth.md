@@ -133,13 +133,27 @@ rather than registration.
 
 ### Authorization Code Flow with PKCE
 
-Standard OAuth 2.1 authorization code flow:
+Standard OAuth 2.1 authorization code flow. PKCE is required, with the `S256`
+method only — the metadata's `code_challenge_methods_supported` is `["S256"]`:
 
-1. Client generates PKCE `code_verifier` and `code_challenge`
-2. Client redirects user to `GET /OAuthAuthorize?client_id=...&code_challenge=...&redirect_uri=...`
-3. User approves (or auto-approves for trusted clients)
+1. Client generates a PKCE `code_verifier` and its `S256` `code_challenge`
+   (`BASE64URL(SHA256(code_verifier))`, RFC 7636)
+2. Client redirects user to `GET /OAuthAuthorize?response_type=code&client_id=...&redirect_uri=...&code_challenge=...&code_challenge_method=S256`
+3. User approves or denies on the consent page
 4. Flair redirects back with authorization code
-5. Client exchanges code for access token at `POST /OAuthToken`
+5. Client exchanges code and `code_verifier` for access token at `POST /OAuthToken`
+
+`GET /OAuthAuthorize` (the consent page) and its Approve (`POST /OAuthAuthorize`)
+answer `400 invalid_request` when `code_challenge` is missing, empty or not 43-128
+base64url characters, or when `code_challenge_method` is anything other than
+`S256`. The consent page is not rendered and no authorization code is stored. A
+Deny needs no PKCE fields: it redirects with `access_denied` and issues nothing.
+
+`POST /OAuthToken` exchanges an authorization code only with a `code_verifier`
+whose S256 hash equals the challenge stored with the code. A missing verifier is
+`400 invalid_request`; a verifier that does not match, or a code stored without
+an S256 challenge, is `400 invalid_grant`. A refused exchange does not redeem
+the code.
 
 ### Endpoints
 
