@@ -1,8 +1,12 @@
 /**
- * Which call contexts a protocol layer built, read from what Harper puts on
- * them. Shared by the caller resolver (resources/agent-auth.ts) and the
- * table-subscription guard (resources/table-subscription-policy.ts), so both
- * read a protocol-layer call the same way.
+ * The markers Harper's protocol layers put on the call contexts they build,
+ * and the tests that read them. Shared by the caller resolver
+ * (resources/agent-auth.ts) and the table-subscription guard
+ * (resources/table-subscription-policy.ts), so both read a protocol-layer call
+ * the same way. Every test here accepts a shape or a marker; none establishes
+ * who built the object. The guard's boundary is protocol-layer callers, whose
+ * contexts Harper constructs; in-process code is trusted and may pass objects
+ * of any shape (see the policy module).
  *
  * Harper's MQTT layer gives every action of a session a context built by the
  * session itself (server/DurableSubscriptionsSession.ts `createContext()`):
@@ -19,17 +23,21 @@
  * A retained MQTT PUBLISH reaches a table's static put()/delete(), which
  * ordinary writes also use. isDirectMqttSessionContext recognises the session's
  * context there, and isLastWillReplayContext the copy of a stored will record
- * Harper replays. Both classify by shape (they do not prove Harper built the
- * object) and read property descriptors only — the argument's own, and for a
- * session-shaped argument the nested session's along its prototype chain —
- * so on an ordinary write's context they invoke no getter and no
- * `getContext()`. A Proxy's descriptor traps do run, and an error one throws
- * propagates to the caller.
+ * Harper replays. Both accept a shape, and use descriptor and prototype reads
+ * only — the argument's own property descriptors, and for a session-marked
+ * argument descriptors along the nested session's prototype chain — so on a
+ * Harper-constructed or plain-object context they invoke no getter and no
+ * `getContext()`. An exotic object (a Proxy) observes those reads, and an
+ * error one throws propagates to the caller.
  *
  * This module has no imports, so it is unit-tested directly.
  */
 
-/** Whether `context` is one Harper's MQTT layer built for a session's action. */
+/**
+ * Whether `context` carries an MQTT session's markers: a `socket` key (own or
+ * inherited) and a `session` object with an `addSubscription` method, read
+ * with ordinary property access (getters run). Used by the caller resolver.
+ */
 export function isMqttSessionContext(context: unknown): boolean {
   if (context == null || typeof context !== "object") return false;
   const c = context as { session?: unknown };
@@ -104,13 +112,14 @@ export function isLastWillReplayContext(value: unknown): boolean {
 }
 
 /**
- * Whether `value` has the shape of Harper's released-transaction placeholder
- * (resources/DatabaseTransaction.ts `RELEASED_TRANSACTION`), which Harper
- * treats as an absent argument: a frozen object whose own data properties
- * include an `addWrite` and a `setContext` function and `open` 0. Harper
- * tests identity with that one instance, which flair cannot reach, so this
- * tests the shape, from own property descriptors only (`addWrite` first; the
- * others only while the previous ones match).
+ * Whether `value` has the shape of Harper's released-transaction sentinel.
+ * Harper's sentinel (resources/DatabaseTransaction.ts `RELEASED_TRANSACTION`)
+ * is one frozen object, which Harper treats as an absent argument by identity;
+ * flair cannot reach that instance. This matcher is broader: it accepts any
+ * object, frozen or not, whose own data properties include an `addWrite` and a
+ * `setContext` function and `open` 0, read from own property descriptors
+ * (`addWrite` first; the others only while the previous ones match). Callers
+ * use it only to read an argument both as given and as absent.
  */
 export function isReleasedTransactionPlaceholder(value: unknown): boolean {
   if (value == null || typeof value !== "object") return false;
@@ -120,11 +129,11 @@ export function isReleasedTransactionPlaceholder(value: unknown): boolean {
 }
 
 /**
- * Whether `value` carries a transaction: an own data `transaction` property
- * holding an object with a `commit` method (along its prototype chain), the
- * shape of Harper's DatabaseTransaction. Harper tests `instanceof
- * DatabaseTransaction`, a class flair cannot reach. Reads property
- * descriptors only.
+ * Whether `value` carries a transaction-shaped object: an own data
+ * `transaction` property holding an object with a `commit` method (found as a
+ * data property along its prototype chain). Harper tests `instanceof
+ * DatabaseTransaction`, a class flair cannot reach; this shape test is
+ * broader. Uses descriptor and prototype reads only.
  */
 export function carriesTransaction(value: unknown): boolean {
   if (value == null || typeof value !== "object") return false;
@@ -134,8 +143,9 @@ export function carriesTransaction(value: unknown): boolean {
 }
 
 /**
- * Whether `context` was built by a protocol layer: an MQTT session's context,
- * or one still carrying Harper's `authorize: true` request for authorization.
+ * Whether `context` carries a protocol layer's markers: an MQTT session's
+ * markers (isMqttSessionContext), or `authorize: true`, which Harper's
+ * protocol layers set to ask for authorization and clear once it is used.
  */
 export function isProtocolLayerContext(context: unknown): boolean {
   if (context == null || typeof context !== "object") return false;

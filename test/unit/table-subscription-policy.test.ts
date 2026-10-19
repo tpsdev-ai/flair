@@ -410,7 +410,7 @@ describe("guardTableSubscriptions — retained MQTT publish (put() / delete())",
     expect(getContextCalls).toBe(0);
   });
 
-  it("on an ordinary put()/delete() the guard reads only own property descriptors of the context argument, then passes the call through", () => {
+  it("an ordinary put()/delete() classifies its context from own property descriptors only (pinned trap by trap with a recording Proxy), then passes the call through", () => {
     /** A context Proxy that records every trap it receives (key-taking traps with their key). */
     function recordingContext(target: Record<string, unknown>) {
       const traps: string[] = [];
@@ -588,7 +588,8 @@ describe("harperCallContexts: the context Harper's transactional() uses for each
   it("connect()/publish() with no third argument: the (data, context) form, else both readings Harper may take", () => {
     for (const method of ["connect", "publish"] as const) {
       expect([method, harperCallContexts(method, [{ id: "m" }, ctx])]).toEqual([method, [arg(ctx)]]);
-      expect([method, harperCallContexts(method, [[{ id: "m" }], ctx])]).toEqual([method, [arg(ctx)]]);
+      // An array first argument: Harper tells the form from element 0, which flair does not read, so every reading is decided.
+      expect([method, harperCallContexts(method, [[{ id: "m" }], ctx])]).toEqual([method, [arg(ctx), AMBIENT]]);
       // Harper takes the second as the context only when it is or carries a DatabaseTransaction.
       expect([method, harperCallContexts(method, [target, ctx])]).toEqual([method, [arg(ctx), AMBIENT]]);
       expect([method, harperCallContexts(method, ["m", ctx])]).toEqual([method, [arg(ctx), AMBIENT]]);
@@ -603,7 +604,7 @@ describe("harperCallContexts: the context Harper's transactional() uses for each
   });
 });
 
-describe("the guard decides on the context Harper will use (conflicting ambient and explicit callers)", () => {
+describe("the guard decides on the context Harper takes from the arguments (conflicting ambient and explicit callers)", () => {
   /** A table whose statics record that they ran. */
   function guarded(ambient: unknown) {
     const { Table, calls } = makeStreamTable();
@@ -666,6 +667,61 @@ describe("the guard decides on the context Harper will use (conflicting ambient 
       try { await call(Table); } catch (err) { thrown = err; }
       expect([form, calls.length, admitted ? undefined : thrown?.statusCode]).toEqual([form, admitted ? 1 : 0, admitted ? undefined : 403]);
     }
+  });
+});
+
+describe("caller-made shapes the guard decides fail closed", () => {
+  const target = new URLSearchParams("id=m");
+
+  it("a session-shaped context that is also shaped like Harper's released-transaction sentinel is decided in put() and delete()", async () => {
+    const { Table, calls } = (() => {
+      const calls: string[] = [];
+      class Table {
+        static put() { calls.push("put"); return "put-result"; }
+        static delete() { calls.push("delete"); return "delete-result"; }
+      }
+      return { Table, calls };
+    })();
+    guardTableSubscriptions({ Memory: Table }, { resolveAuth: byContext, ambientContext: () => ADMIN });
+    const mimic = () => ({
+      session: { addSubscription: () => undefined }, socket: {}, authorize: true, verdict: AGENT.verdict,
+      open: 0, addWrite() {}, setContext() {},
+    });
+    await expect((Table as any).put({ id: "m" }, { content: "x" }, mimic())).rejects.toMatchObject({ statusCode: 403 });
+    await expect((Table as any).put(target, { content: "x" }, mimic())).rejects.toMatchObject({ statusCode: 403 });
+    await expect((Table as any).delete(target, mimic())).rejects.toMatchObject({ statusCode: 403 });
+    expect(calls).toEqual([]);
+  });
+
+  it("an array first argument: no element is read, and the call is refused when either reading is a non-admin", async () => {
+    /** An array whose element 0 alternates between a record and a string on every read, counting reads. */
+    function alternating() {
+      const state = { reads: 0 };
+      const array: unknown[] = [];
+      Object.defineProperty(array, 0, { get() { state.reads++; return state.reads % 2 ? { id: "m" } : "m"; }, enumerable: true });
+      return { array, state };
+    }
+    for (const method of ["connect", "publish"] as const) {
+      // ambient non-admin, explicit administrator: one reading (the ambient one) is a non-admin
+      const { Table, calls } = makeStreamTable();
+      guardTableSubscriptions({ Memory: Table }, { resolveAuth: byContext, ambientContext: () => AGENT });
+      const a = alternating();
+      await expect((Table as any)[method](a.array, ADMIN)).rejects.toMatchObject({ statusCode: 403 });
+      // ambient administrator, explicit non-admin: the (data, context) reading is a non-admin
+      const { Table: T2, calls: c2 } = makeStreamTable();
+      guardTableSubscriptions({ Memory: T2 }, { resolveAuth: byContext, ambientContext: () => ADMIN });
+      const b = alternating();
+      await expect((T2 as any)[method](b.array, AGENT)).rejects.toMatchObject({ statusCode: 403 });
+      expect([method, a.state.reads, b.state.reads, calls.length, c2.length]).toEqual([method, 0, 0, 0, 0]);
+    }
+    // put([...], context): the session-marked second argument is decided without reading an element
+    const writes: string[] = [];
+    class W { static put() { writes.push("put"); return "put-result"; } }
+    guardTableSubscriptions({ Memory: W }, { resolveAuth: byContext, ambientContext: () => ADMIN });
+    const c = alternating();
+    const session = { session: { addSubscription: () => undefined }, socket: {}, authorize: true, verdict: AGENT.verdict };
+    await expect((W as any).put(c.array, session)).rejects.toMatchObject({ statusCode: 403 });
+    expect([c.state.reads, writes.length]).toEqual([0, 0]);
   });
 });
 

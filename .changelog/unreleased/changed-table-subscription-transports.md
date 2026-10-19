@@ -15,15 +15,18 @@
   it: as its session's own publish when the session drops, and as a caller
   without a valid credential when Harper replays stored wills at a worker start,
   so a replayed will on a table topic is refused. One decision function decides
-  every guarded call, on the context Harper will use for it (read from the
-  arguments as Harper reads them): each table's `connect()`, `subscribe()` and
-  `publish()`, and its `put()`/`delete()` when that context has the shape of an
-  MQTT session's context or a replayed will record. To tell, the guard reads
-  only property descriptors (no getter, no `getContext()`), and every other
-  `put()`/`delete()` call then passes through with its arguments and keeps its
-  write rules. A call that Harper's MQTT layer makes without an HTTP request
-  (its TCP and TLS listeners) resolves, everywhere flair resolves a caller, as
-  one without a valid credential, and so does a call from Harper's native MCP
+  every guarded call, on the context Harper takes from the call's arguments,
+  read as Harper reads them (where Harper's reading turns on something the guard
+  does not test, each reading is decided): each table's `connect()`,
+  `subscribe()` and `publish()`, and its `put()`/`delete()` when an argument
+  Harper may take as the context carries the markers of an MQTT session's
+  context or a replayed will record; every other `put()`/`delete()` call passes
+  through with its arguments and keeps its write rules. The guard's boundary is
+  protocol-layer callers, whose contexts Harper constructs; in-process code is
+  trusted, and the guard makes no claim about objects an in-process caller
+  crafts. A call that Harper's MQTT layer makes without an HTTP request (its TCP
+  and TLS listeners) resolves, everywhere flair resolves a caller, as one
+  without a valid credential, and so does a call from Harper's native MCP
   component: its `resources/subscribe`, when an operator configures that
   component, refuses every table subscription, administrators included. Flair's
   feed resources (`/FeedMemories`, `/FeedSouls`) and the BM25 index now read

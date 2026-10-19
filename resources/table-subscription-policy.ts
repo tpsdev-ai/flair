@@ -22,6 +22,19 @@
  * authentication. Resources that are not tables, such as the feed resources,
  * decide their own subscribers and are not affected.
  *
+ * ── The boundary ────────────────────────────────────────────────────────────
+ * The guard decides PROTOCOL-LAYER callers, whose context objects Harper
+ * constructs: the HTTP request of an SSE or WebSocket subscription, an MQTT
+ * session's context, the copy of a stored will record Harper replays, and the
+ * native MCP context. In-process code is trusted — it can call the raw tables
+ * directly — so the guard makes no claim about objects an in-process caller
+ * crafts: an exotic object (a Proxy, stateful getters, a stateful
+ * `getContext()`) or one that mimics Harper's markers or sentinels. Where such
+ * an object reaches the guard, the guard decides on what it reads at that
+ * moment (for `getContext()`, the value it returns when the guard calls it),
+ * and the shape tests below fail closed where that is cheap: an ambiguous
+ * reading is decided both ways.
+ *
  * ── The seam ────────────────────────────────────────────────────────────────
  * Harper enters a table through statics of the class registered for its path,
  * each handed the caller's context:
@@ -39,38 +52,45 @@
  *     that never disconnected, or one whose will was not published as it
  *     dropped). These two statics are also the entry of ordinary put and delete
  *     calls (a REST PUT or DELETE, flair's own writes), so their guard decides
- *     only a call whose context, as Harper reads the arguments
- *     (retainedPublishContext), has the shape of one of those two
+ *     only a call where an argument Harper may take as the context
+ *     (retainedPublishContext) carries the markers of one of those two
  *     (isDirectMqttSessionContext and isLastWillReplayContext in
- *     resources/protocol-context.ts). That is a shape test: a context of that
- *     shape is decided, wherever it came from. A replayed will carries no
+ *     resources/protocol-context.ts). The test is on markers: an argument that
+ *     carries them is decided, whoever built it. An argument shaped like
+ *     Harper's released-transaction sentinel is still classified (Harper
+ *     discards only its one sentinel instance). A replayed will carries no
  *     verified principal, so it is decided as a caller without a valid
  *     credential: refused for every table, an administrator's will included. To
- *     classify a call, the guard reads property descriptors only: of the
- *     arguments Harper may take as the context, the third and then the second
- *     (the own descriptor of `addWrite`, Harper's released-transaction shape;
- *     of `socket`, and only when it exists of `session` and then, along the
- *     session's prototype chain, of `addSubscription`; of `authorize`, and only
- *     when that is true of `topic` and `retain`), and in two-argument put()
- *     forms of the second argument's `transaction`. It invokes no getter and no
- *     `getContext()`. Every other put()/delete() call then goes to the
- *     inherited static with the same arguments and receiver, synchronously, and
- *     resolves no caller, so the write keeps flair's write rules and Harper
- *     reads its context itself. A descriptor read that throws (a Proxy's trap)
- *     propagates that error before the inherited static runs. Harper's `post()`
- *     and `patch()` statics are separate and not wrapped (an MQTT PUBLISH
- *     reaches neither).
+ *     classify a Harper-constructed context or an ordinary plain-object one,
+ *     the guard reads property descriptors: of the arguments Harper may take as
+ *     the context, the third and then the second (the own descriptor of
+ *     `addWrite`, the sentinel's shape; of `socket`, and only when it exists of
+ *     `session` and then, along the session's prototype chain, of
+ *     `addSubscription`; of `authorize`, and only when that is true of `topic`
+ *     and `retain`), and in two-argument put() forms of the second argument's
+ *     `transaction`. On those objects it invokes no getter and no
+ *     `getContext()`, and reads no array element; an in-process caller's exotic
+ *     object (a Proxy) observes these reads, and an error one throws propagates
+ *     before the inherited static runs. Every other put()/delete() call then
+ *     goes to the inherited static with the same arguments and receiver,
+ *     synchronously, and resolves no caller, so the write keeps flair's write
+ *     rules and Harper reads its context itself. Harper's `post()` and
+ *     `patch()` statics are separate and not wrapped (an MQTT PUBLISH reaches
+ *     neither).
  * `guardTableSubscriptions` replaces these statics on every table class in the
  * flair database's table registry, read at load
  * (resources/table-subscriptions.ts), not from a list someone maintains. For
  * every call it decides — each connect(), subscribe() and publish(), and each
  * put()/delete() whose context has an MQTT session's or a replayed will's
- * shape — the replacement resolves the caller from the context Harper will use
- * for that call, read from the arguments as Harper's transactional() reads
- * them (harperCallContexts; where Harper's choice turns on something flair
- * cannot test, from each possible context, and all must be admitted; a
- * replayed will is a caller without a valid credential), and asks ONE
- * decision function, `tableSubscriptionRefusal`, so the entries
+ * markers — the replacement resolves the caller from the context Harper takes
+ * from the call's arguments, read as Harper's transactional() reads them
+ * (harperCallContexts; for put()/delete(), retainedContextCandidates). Where
+ * Harper's reading turns on something the guard does not test — whether an
+ * argument is one of Harper's DatabaseTransactions or its one
+ * released-transaction sentinel, or what an array's element 0 is — each reading
+ * is decided and all must be admitted. A replayed will is a caller without a
+ * valid credential. Every decision asks ONE decision function,
+ * `tableSubscriptionRefusal`, so the entries
  * cannot drift apart:
  *   - a table added to the schema is in that registry, so its class gets the
  *     guard without anyone naming it, and its routes and topics use the guard
@@ -201,15 +221,28 @@ export type CallContextSource = { readonly from: "argument"; readonly value: unk
 const AMBIENT: CallContextSource = Object.freeze({ from: "ambient" });
 const fromArgument = (value: unknown): CallContextSource => ({ from: "argument", value });
 
-/** Harper's `context.getContext?.() || context`. */
+/**
+ * Harper's `context.getContext?.() || context`. The guard decides on what
+ * `getContext()` returns when the guard calls it; Harper calls it again when
+ * the call proceeds. Harper's protocol layers pass contexts with no
+ * `getContext()` (an MQTT session's context, a replayed will's record copy,
+ * the MCP context) or Harper's own request objects; an in-process caller,
+ * which is trusted, may pass anything.
+ */
 function unwrapContext(value: unknown): unknown {
   return (value as any)?.getContext?.() || value;
 }
 
-/** Harper's test for the `(data, context)` form: a first argument that is a record, not a target or id. */
-function isContentObject(first: unknown): boolean {
-  return typeof first === "object" && first !== null && !(first instanceof URLSearchParams)
-    && (!Array.isArray(first) || typeof first[0] === "object");
+/**
+ * How Harper's test for the `(data, context)` form — a first argument that is
+ * an object, not a URLSearchParams (Harper's RequestTarget), and not an array
+ * unless its first element is an object — reads `first`: "record", "array"
+ * (Harper's answer turns on element 0, which the guard does not read, so both
+ * answers are decided), or "other".
+ */
+function contentFormOf(first: unknown): "record" | "array" | "other" {
+  if (typeof first !== "object" || first === null || first instanceof URLSearchParams) return "other";
+  return Array.isArray(first) ? "array" : "record";
 }
 
 /**
@@ -223,7 +256,9 @@ function isContentObject(first: unknown): boolean {
  *     context when the first is a record (the `(data, context)` form), and
  *     otherwise only when the second is, or carries, one of Harper's
  *     DatabaseTransactions — a class flair cannot test, so both readings are
- *     returned (the second argument as given, and the ambient context);
+ *     returned (the second argument as given, and the ambient context); for an
+ *     array first argument, whose form Harper tells from element 0, all of
+ *     those readings are returned and no element is read;
  *   - delete() takes the second; subscribe() takes the second when it has a
  *     `transaction` or a `getContext`;
  *   - otherwise the ambient context.
@@ -237,8 +272,17 @@ function harperContextReading(
   if (hasContent === true) {
     if (third) return [fromArgument(unwrapContext(third))];
     if (!second) return [AMBIENT];
-    if (isContentObject(first)) return [fromArgument(unwrapContext(second))];
-    return [fromArgument(second), AMBIENT];
+    const form = contentFormOf(first);
+    if (form === "record") return [fromArgument(unwrapContext(second))];
+    // Harper takes the second as the context only when it is, or carries, one
+    // of its DatabaseTransactions (a class flair cannot test; a transaction
+    // itself becomes `{ transaction: second }`, which carries no caller and
+    // resolves as the trusted internal caller, so it cannot change a decision
+    // and is not listed). For an array, the (data, context) reading is decided
+    // as well.
+    return form === "array"
+      ? [fromArgument(unwrapContext(second)), fromArgument(second), AMBIENT]
+      : [fromArgument(second), AMBIENT];
   }
   if (second) {
     if (third) return [fromArgument(unwrapContext(third))];
@@ -250,12 +294,15 @@ function harperContextReading(
 }
 
 /**
- * Every context Harper may use for a guarded static called with `args`: one,
- * except where Harper's choice turns on something flair cannot test, when each
- * possibility is returned and every one of them is decided. Harper drops its
- * released-transaction placeholder in the second or third position before
- * reading the arguments; an argument of that shape
- * (isReleasedTransactionPlaceholder) is read both as given and as absent.
+ * The contexts the guard decides for a connect(), subscribe() or publish()
+ * call with `args`, read as Harper's transactional() reads the arguments: one,
+ * except where Harper's reading turns on something the guard does not test,
+ * when each reading is returned and every one of them is decided. Harper drops
+ * its one released-transaction sentinel in the second or third position; an
+ * argument of that shape (isReleasedTransactionPlaceholder) is read both as
+ * given and as absent. For a Harper-constructed context this is the context
+ * Harper uses; an in-process caller's exotic object (a stateful getter or
+ * `getContext()`) is decided on what the guard reads from it.
  */
 export function harperCallContexts(
   method: keyof typeof STATIC_CONTENT,
@@ -365,47 +412,57 @@ export function subscribeInProcess(table: any, request?: unknown): any {
 export const RETAINED_PUBLISH_STATICS: readonly string[] = Object.freeze(["put", "delete"]);
 
 /**
- * The argument Harper takes as a put()/delete() call's context, read as
- * Harper's transactional() reads it (resources/Resource.ts), or undefined when
- * Harper takes none and uses the ambient context: a truthy third argument;
- * else, for delete(), a truthy second; for put(), a truthy second when the
- * first is a record (the `(data, context)` form) or when the second carries a
- * transaction (carriesTransaction). Harper's released-transaction placeholder
- * counts as absent in either position (isReleasedTransactionPlaceholder).
- * Unlike Harper it never calls `getContext()`: an argument that provides one
- * is classified as given.
+ * The arguments Harper may take as a put()/delete() call's context, read as
+ * Harper's transactional() reads them (resources/Resource.ts): a truthy third
+ * argument; else, for delete(), a truthy second; for put(), a truthy second
+ * when the first is an object other than a URLSearchParams (the `(data,
+ * context)` form; for an array, whose form Harper tells from element 0, the
+ * second is listed without reading any element) or when the second carries a
+ * transaction (carriesTransaction). Harper drops its one released-transaction
+ * sentinel; an argument of that shape (isReleasedTransactionPlaceholder) is
+ * listed and also read as absent, so a session- or will-shaped argument is
+ * never skipped for its shape. Unlike Harper it never calls `getContext()`:
+ * an argument that provides one is classified as given. The ambient context
+ * is not listed.
  */
-function retainedExplicitContext(method: string, args: readonly unknown[]): unknown {
-  const present = (value: unknown) => (value && !isReleasedTransactionPlaceholder(value) ? value : undefined);
-  const third = present(args[2]);
-  if (third) return third;
-  const second = present(args[1]);
-  if (!second) return undefined;
-  if (method === "delete") return second;
-  return isContentObject(args[0]) || carriesTransaction(second) ? second : undefined;
+function retainedContextCandidates(method: string, args: readonly unknown[]): unknown[] {
+  const readings = (value: unknown): unknown[] =>
+    !value ? [undefined] : isReleasedTransactionPlaceholder(value) ? [value, undefined] : [value];
+  const candidates: unknown[] = [];
+  for (const third of readings(args[2])) {
+    if (third) {
+      candidates.push(third);
+      continue;
+    }
+    for (const second of readings(args[1])) {
+      if (!second) continue;
+      if (method === "delete" || contentFormOf(args[0]) !== "other" || carriesTransaction(second)) candidates.push(second);
+    }
+  }
+  return candidates;
 }
 
 /**
  * The context of a retained MQTT publish, or undefined for any other
- * put()/delete() call: the argument Harper takes as the call's context
- * (retainedExplicitContext) when it has the shape of a session's own context
- * (isDirectMqttSessionContext) or of a copy of a stored will record
+ * put()/delete() call: the first argument Harper may take as the call's
+ * context (retainedContextCandidates) that has the markers of a session's own
+ * context (isDirectMqttSessionContext) or of a copy of a stored will record
  * (isLastWillReplayContext). Harper's publishMessage passes a session's own
  * context when the session publishes and when Harper publishes its will as it
  * disconnects, and a copy of the stored will record when Harper replays a
  * stored will as its first worker starts, always as `put(target, data,
- * context)` / `delete(target, context)`. This classifies by shape: it does not
- * prove that Harper built the context. It reads only property descriptors —
- * of the argument (own descriptors) and, for a session-shaped one, of its
- * nested session (along its prototype chain) — and invokes no getter and no
- * `getContext()`; a descriptor read that throws propagates. The ambient
- * context is not consulted: Harper's MQTT layer always passes its context
- * explicitly, and a put()/delete() that runs under the ambient context is an
- * in-process call.
+ * context)` / `delete(target, context)`. The test is on markers, not on who
+ * built the object. For Harper-constructed contexts and ordinary plain-object
+ * contexts it reads property descriptors (and, for a session-marked argument,
+ * the nested session's prototype chain) and invokes no getter and no
+ * `getContext()`; an in-process caller's exotic object (a Proxy) observes
+ * those reads, and an error one throws propagates. The ambient context is not
+ * consulted: Harper's MQTT layer always passes its context explicitly, and a
+ * put()/delete() that runs under the ambient context is an in-process call.
  */
 export function retainedPublishContext(method: string, args: readonly unknown[]): unknown {
-  const explicit = retainedExplicitContext(method, args);
-  return isDirectMqttSessionContext(explicit) || isLastWillReplayContext(explicit) ? explicit : undefined;
+  return retainedContextCandidates(method, args)
+    .find((candidate) => isDirectMqttSessionContext(candidate) || isLastWillReplayContext(candidate));
 }
 
 /**
@@ -467,8 +524,9 @@ function guardedStatic(
   // A named function expression, so the replaced static keeps its name.
   const guarded = {
     async [method](this: unknown, ...args: unknown[]) {
-      // Decide on the context Harper will use; where that turns on something
-      // flair cannot test, every possible one must be admitted.
+      // Decide on the context Harper takes from these arguments; where its
+      // reading turns on something the guard does not test, every reading
+      // must be admitted.
       for (const source of harperCallContexts(method, args)) {
         const context = source.from === "argument" ? source.value : deps.ambientContext();
         let caller: SubscriptionCaller;
