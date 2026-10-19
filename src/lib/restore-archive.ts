@@ -14,18 +14,30 @@
  * Strict JSON. `parseStrictJson` accepts the RFC 8259 grammar JSON.parse
  * accepts and builds the same value, except that an object naming one key
  * twice, at any depth, is refused instead of keeping the last value. Keys are
- * compared after escape decoding, so `"a"` and `"a"` are the same key.
+ * compared after escape decoding, so `"a"` and `"\u0061"` are the same key.
  * The parser is iterative, so nesting depth does not bound it.
  *
  * Archive shape: the row checks `flair restore` applies (src/commands/
  * restore.ts) plus unique ids within each collection, over the document
  * `flair backup` writes (src/commands/backup.ts).
  *
+ * Archive diagnostics. `parseRestoreArchive` returns the first problem it
+ * finds as one refusal with a JSON Pointer `location`. Decoding and JSON-syntax
+ * refusals (`invalid-utf8`, `invalid-json`, `duplicate-key`) also carry a byte
+ * `offset` into the input; archive-shape refusals carry a location only.
+ * `parseStrictJson` reports a UTF-16 `index` into the decoded text, which
+ * `parseRestoreArchive` converts to that byte offset.
+ *
  * Memory admission: `validateRestoreSelection` checks every selected row's
- * content and promotion fields against the binding readers enforce
- * (resources/promotion-binding.ts, hashed by src/lib/promotion-content-
- * hash.ts). It returns either every selected entry validated or a refusal
- * listing every failure; it never returns part of a selection.
+ * content, and its promotion fields when present, against the binding readers
+ * enforce (resources/promotion-binding.ts, hashed by src/lib/promotion-content-
+ * hash.ts). It returns either every selected entry validated or a refusal; it
+ * never returns part of a selection. The refusal lists every unresolvable id
+ * and every failing row, with two single-problem cases: a malformed selection
+ * (not an array, empty, or an entry that is not a non-empty string) refuses as
+ * `invalid-selection` with no per-id failures, before any id is resolved; and a
+ * row whose shape is not restorable (not an object, or no usable id or
+ * agentId) reports that one `invalid-row` failure and is not checked further.
  */
 import { createHash } from "node:crypto";
 import { promotionContentHash } from "./promotion-content-hash.js";
@@ -94,7 +106,9 @@ export interface RestoreArchiveRefusal {
   readonly reason: string;
   /** RFC 6901 JSON Pointer to the refused value; "" is the whole document. */
   readonly location: string;
-  /** Byte offset into the input, for decoding and syntax refusals. */
+  /** Byte offset into the input where the refusal was decided. Present on
+   *  `invalid-utf8`, `invalid-json` and `duplicate-key` refusals; absent on
+   *  archive-shape refusals, which carry `location` only. */
   readonly offset?: number;
   /** SHA-256 of the exact input bytes, lowercase hex. */
   readonly sha256: string;
@@ -559,8 +573,9 @@ function archiveShapeRefusal(doc: unknown): ShapeRefusal | undefined {
  * a version other than 1, a missing or non-array `agents`, `souls` or
  * `memories` collection, a row that is not an object with a non-empty string
  * id addressing one record path segment (Soul and Memory rows also need a
- * non-empty string `agentId`), and a repeated id within a collection. Every
- * result, refusal included, carries the input's digest.
+ * non-empty string `agentId`), and a repeated id within a collection. The
+ * first problem found, in that order and in document order, is returned as
+ * the one refusal. Every result, refusal included, carries the input's digest.
  */
 export function parseRestoreArchive(bytes: Buffer | Uint8Array): RestoreArchiveParseResult {
   if (!(bytes instanceof Uint8Array)) {
@@ -647,9 +662,9 @@ function resolveSelection(
  * Resolve an optional selection of Memory ids against the archive. Omitted:
  * every Memory row, in archive order. Given: the named rows in selection
  * order. A selection that is not a non-empty array of non-empty strings
- * refuses as `invalid-selection`; an id the archive does not hold, or names
- * twice, refuses the whole selection as `entries-refused`, listing every such
- * id.
+ * refuses as `invalid-selection`, with no per-id failures and before any id
+ * is resolved. Otherwise an id the archive does not hold, or names twice,
+ * refuses the whole selection as `entries-refused`, listing every such id.
  */
 export function selectMemoryIds(archive: RestoreArchive, ids?: readonly string[]): MemorySelectionResult {
   const resolved = resolveSelection(archive, ids);
@@ -674,7 +689,9 @@ function isDeclaredStatus(value: unknown): value is MemoryPromotionStatus {
  *   with a `promotionStatus`; an approved verdict has both, non-empty;
  * - `promotionContentHash`, when set, is 64 lowercase hex characters, is set
  *   only with a `promotionStatus`, and equals `promotionContentHash(content)`.
- * Null and absent fields are the same. Every failure is listed; a valid row is
+ * Null and absent fields are the same. A row whose shape is not restorable
+ * reports that one `invalid-row` failure and is not checked further;
+ * otherwise every content and promotion failure is listed. A valid row is
  * classified as `bound`, `legacy-unbound` or `unpromoted`.
  */
 export function validateRestoreMemoryRow(row: unknown): MemoryRowValidation {
@@ -735,8 +752,11 @@ export function validateRestoreMemoryRow(row: unknown): MemoryRowValidation {
  * Validate a Memory restore selection before any write. Resolves the optional
  * selection (see `selectMemoryIds`), validates every selected row (see
  * `validateRestoreMemoryRow`), and returns either every selected entry
- * validated, in selection order, or a refusal listing every failing id and
- * reason. Unselected rows are not validated.
+ * validated, in selection order, or a refusal. A malformed selection returns
+ * the single `invalid-selection` refusal `selectMemoryIds` describes, and no
+ * row is validated. Otherwise the refusal lists every unresolvable id and
+ * every failing row's failures (one `invalid-row` failure for a row whose
+ * shape is not restorable). Unselected rows are not validated.
  */
 export function validateRestoreSelection(archive: RestoreArchive, ids?: readonly string[]): RestoreSelectionValidation {
   const resolved = resolveSelection(archive, ids);

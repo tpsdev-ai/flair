@@ -2,9 +2,19 @@
  * restore-archive-2664.test.ts — flair#2664 slice 1a: restore archive
  * validation (src/lib/restore-archive.ts).
  *
- * Every refusal case starts from an archive the validator accepts and changes
- * exactly one thing, then asserts the one refusal that change produces; every
- * acceptance case asserts the classification its rule decides.
+ * How the cases are built:
+ * - Promotion-admission refusals start from a row the validator accepts,
+ *   change one field, and assert the single failure (code and field) that
+ *   change produces. "a row with several problems lists each of them"
+ *   deliberately combines problems to show every one is listed.
+ * - Archive-shape refusals change one part of an archive the validator
+ *   accepts and assert the refusal code and location.
+ * - Decoding and grammar refusals use malformed bytes or documents; grammar
+ *   cases also assert that JSON.parse refuses the same text.
+ * - Promotion acceptance cases assert the classification their rule decides;
+ *   parser and shape acceptance cases assert the parsed value or `ok`.
+ * The real `flair backup` output is covered in
+ * restore-archive-backup-seam-2664.test.ts.
  */
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
@@ -216,12 +226,69 @@ describe("a repeated object key refuses at any depth", () => {
   });
 
   test("the offset is the byte offset of the repeated key", () => {
-    const text = `${head}{"id":"m","agentId":"a","content":"héllo ✓ \u{1F600}","content":"x"}]}`;
+    const text = `${head}{"id":"m","agentId":"a","content":"h\u00e9llo \u2713 \u{1F600}","content":"x"}]}`;
     const input = Buffer.from(text, "utf8");
     const result = parseRestoreArchive(input);
     expect(result).toMatchObject({ ok: false, code: "duplicate-key" });
     expect(result.ok ? undefined : result.offset).toBe(input.lastIndexOf('"content"'));
     expect(input.lastIndexOf('"content"')).not.toBe(text.lastIndexOf('"content"'));
+  });
+});
+
+// ─── Refusal diagnostics ───────────────────────────────────────────────────────
+
+describe("refusal diagnostics are scoped to what each refusal knows", () => {
+  const head = '{"version":1,"agents":[],"souls":[],"memories":[';
+  const wide = String.fromCodePoint(0xe9, 0x20, 0x2713, 0x20, 0x1f600);
+
+  test("a JSON-syntax refusal's offset is a byte offset into the input", () => {
+    const text = `${head}{"id":"m","agentId":"a","content":"${wide}","tags":[1,]}]}`;
+    const input = Buffer.from(text, "utf8");
+    const result = parseRestoreArchive(input);
+    expect(result).toMatchObject({ ok: false, code: "invalid-json", location: "/memories/0/tags/1" });
+    expect(result.ok ? undefined : result.offset).toBe(input.indexOf(",]") + 1);
+    expect(input.indexOf(",]")).not.toBe(text.indexOf(",]"));
+  });
+
+  test("parseStrictJson reports a UTF-16 index into the text, not a byte offset", () => {
+    const text = `["${wide}",]`;
+    const index = text.indexOf("]");
+    expect(parseStrictJson(text)).toMatchObject({ ok: false, code: "invalid-json", index });
+    expect(Buffer.byteLength(text.slice(0, index), "utf8")).not.toBe(index);
+  });
+
+  test("archive-shape refusals carry a location and no offset", () => {
+    const cases: Array<[Row, string, string]> = [
+      [backup(undefined, { version: 2 }), "unsupported-version", "/version"],
+      [backup(undefined, { souls: {} }), "invalid-collection", "/souls"],
+      [backup([memory("m-1", { agentId: "" })]), "invalid-row", "/memories/0/agentId"],
+      [backup([memory("m-1"), memory("m-1")]), "duplicate-id", "/memories/1/id"],
+    ];
+    for (const [doc, code, location] of cases) {
+      const result = parseRestoreArchive(bytes(doc));
+      expect(result).toMatchObject({ ok: false, code, location });
+      expect("offset" in result).toBe(false);
+    }
+  });
+
+  test("an archive with several problems is refused at the first, in document order", () => {
+    const result = parseRestoreArchive(bytes(backup([memory("m-1", { agentId: "" }), memory("m-2", { id: "" })])));
+    expect(result).toMatchObject({ ok: false, code: "invalid-row", location: "/memories/0/agentId" });
+  });
+
+  test("a malformed selection is one refusal with no per-id failures, even when it names an absent id", () => {
+    const archive = accepted(backup([memory("m-1")]));
+    const selection = ["m-9", 2] as unknown as string[];
+    for (const result of [selectMemoryIds(archive, selection), validateRestoreSelection(archive, selection)]) {
+      expect(result).toEqual({ ok: false, code: "invalid-selection", reason: expect.any(String), failures: [] });
+    }
+  });
+
+  test("a row without a restorable shape reports one invalid-row failure and is not checked further", () => {
+    const result = validateRestoreMemoryRow({ id: "m-1", content: 7, promotionStatus: "maybe", promotionContentHash: "x" });
+    expect(result.ok ? [] : result.failures.map(({ id, code, field }) => ({ id, code, field }))).toEqual([
+      { id: "m-1", code: "invalid-row", field: "agentId" },
+    ]);
   });
 });
 
@@ -233,7 +300,7 @@ describe("the archive bytes decode as strict UTF-8", () => {
   const withContentBytes = (content: number[]) => Buffer.concat([prefix, Buffer.from(content), suffix]);
 
   test("well-formed multi-byte content decodes exactly", () => {
-    const content = "héllo ✓ 中文 \u{1F600}";
+    const content = "h\u00e9llo \u2713 \u4e2d\u6587 \u{1F600}";
     const result = parseRestoreArchive(withContentBytes([...Buffer.from(content, "utf8")]));
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -275,7 +342,7 @@ describe("parseStrictJson matches JSON.parse", () => {
   const valid = [
     "0", "-0.5e-3", "1E+2", "123456789012345678901234567890", "1e400", "true", "false", "null",
     '""', '"plain"', '"\\"\\\\\\/\\b\\f\\n\\r\\t"', '"\\u00e9\\u2713\\ud83d\\ude00"', '"\\ud800"',
-    '"héllo \u{1F600}"', "[]", "{}", " \t\n\r[ 1 , [ ] , { } ]\n", '{"a":{"b":[1,{"c":null}]},"2":true,"1":false}',
+    '"h\u00e9llo \u{1F600}"', "[]", "{}", " \t\n\r[ 1 , [ ] , { } ]\n", '{"a":{"b":[1,{"c":null}]},"2":true,"1":false}',
     '{"":1," ":2}',
   ];
   for (const text of valid) {
@@ -303,7 +370,7 @@ describe("parseStrictJson matches JSON.parse", () => {
     "", " ", "[1,]", '{"a":1,}', "[1 2]", '{"a" 1}', '{"a":1 "b":2}', "{'a':1}", "[01]", "[1.]", "[.5]", "[+1]",
     "[-]", "[1e]", "NaN", "Infinity", "[undefined]", "// c\n1", "/* c */ 1", '"\\x41"', '"\\u12G4"', '"\\u12"',
     '"unterminated', '"tab\there"', '"line\nbreak"', "[1]x", "{} {}", "tru", "nul", '{"a":1}}', "[[]", '{"a":1',
-    " 1",
+    "\u00a01",
   ];
   for (const text of invalid) {
     test(`refuses ${JSON.stringify(text)}, as JSON.parse does`, () => {
