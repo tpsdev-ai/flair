@@ -7,8 +7,9 @@
 // access_denied redirect (no code, no write), then the scope check, then the
 // OAuthClient record check, then authentication, then the code is issued.
 //
-// This is a REAL Harper spawn: the POST is sent over HTTP and the OAuthAuthCode
-// table is read back through the operations API after every request.
+// This is a REAL Harper spawn: each consent POST is sent over HTTP, as JSON or
+// as the rendered form's URL-encoded fields, and the OAuthAuthCode table is
+// read back through the operations API after it.
 //
 // MODEL: test/integration/oauth-authorize-authz.test.ts.
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
@@ -123,6 +124,57 @@ function hiddenValue(html: string, name: string): string | null {
   return m ? m[1] : null;
 }
 
+/** Reverse of resources/admin-layout.ts `esc`, for reading attribute values back. */
+function unescapeAttr(value: string): string {
+  return value
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#96;/g, "`")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+}
+
+/** The hidden fields of the rendered consent form, in page order. */
+function formFields(html: string): Array<[string, string]> {
+  const form = html.match(/<form method="POST" action="\/OAuthAuthorize"[^>]*>([\s\S]*?)<\/form>/);
+  expect(form).not.toBeNull();
+  const fields: Array<[string, string]> = [];
+  for (const m of form![1].matchAll(/<input type="hidden" name="([^"]+)" value="([^"]*)">/g)) {
+    fields.push([m[1], unescapeAttr(m[2])]);
+  }
+  return fields;
+}
+
+/** Render the consent page for `clientId` and return its form's hidden fields. */
+async function renderConsentForm(clientId: string, challenge: string, state: string): Promise<Array<[string, string]>> {
+  const page = await getConsent({
+    client_id: clientId,
+    redirect_uri: ALLOWED_REDIRECT_URI,
+    scope: "memory:read memory:write",
+    state,
+    code_challenge: challenge,
+    code_challenge_method: "S256",
+  });
+  expect(page.status).toBe(200);
+  const fields = formFields(await page.text());
+  expect(fields.map(([name]) => name)).toEqual([
+    "client_id", "redirect_uri", "scope", "state", "code_challenge", "code_challenge_method",
+  ]);
+  return fields;
+}
+
+/** Submit the consent form the way a browser does: its fields plus the clicked button, URL-encoded. */
+function submitConsentForm(fields: Array<[string, string]>, action: "approve" | "deny"): Promise<Response> {
+  const body = new URLSearchParams([...fields, ["action", action]]);
+  return fetch(`${harper.httpURL}/OAuthAuthorize`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", Authorization: basicAdmin() },
+    redirect: "manual",
+    body: body.toString(),
+  });
+}
+
 const registeredClient = `flair_cl_test_${randomUUID()}`;
 // Registered, and named only by requests the scope check refuses or that deny.
 const scopeClient = `flair_cl_test_scope_${randomUUID()}`;
@@ -192,6 +244,13 @@ describe("POST /OAuthAuthorize applies the consent page's scope and client check
       exchangeError: "invalid_request",
     },
     {
+      name: "a null client_id",
+      body: () => ({ client_id: null }),
+      error: "invalid_client",
+      exchangeClient: () => null,
+      exchangeError: "invalid_request",
+    },
+    {
       name: "a client_id that is not a string",
       body: () => ({ client_id: [registeredClient] }),
       error: "invalid_client",
@@ -203,6 +262,13 @@ describe("POST /OAuthAuthorize applies the consent page's scope and client check
       body: () => ({ client_id: scopeClient, scope: "memory:read flair:unsupported" }),
       error: "invalid_scope",
       page: () => ({ client_id: scopeClient, scope: "memory:read flair:unsupported" }),
+      exchangeClient: () => scopeClient,
+      exchangeError: "invalid_grant",
+    },
+    {
+      name: "a null scope",
+      body: () => ({ client_id: scopeClient, scope: null }),
+      error: "invalid_scope",
       exchangeClient: () => scopeClient,
       exchangeError: "invalid_grant",
     },
@@ -404,6 +470,94 @@ describe("POST /OAuthAuthorize applies the consent page's scope and client check
       expect(await authCodeIds()).toEqual(before);
     }, 30_000);
   }
+
+  // ── The rendered form, submitted URL-encoded (the browser's path) ─────────
+
+  test("the rendered consent form submitted URL-encoded with Approve issues a code for a registered client", async () => {
+    const { verifier, challenge } = pkcePair();
+    const state = randomUUID();
+    const fields = await renderConsentForm(registeredClient, challenge, state);
+    const before = await authCodeIds();
+
+    const res = await submitConsentForm(fields, "approve");
+    expect(res.status).toBe(302);
+    const location = new URL(res.headers.get("location") ?? "");
+    expect(`${location.origin}${location.pathname}`).toBe(ALLOWED_REDIRECT_URI);
+    expect(location.searchParams.get("state")).toBe(state);
+    const code = location.searchParams.get("code");
+    expect(typeof code).toBe("string");
+
+    const after = await authCodeIds();
+    expect(after.length).toBe(before.length + 1);
+    const rows = await authCodeRow(code!);
+    expect(rows.length).toBe(1);
+    expect(rows[0].clientId).toBe(registeredClient);
+    expect(rows[0].principalId).toBe(harper.admin.username);
+    expect(rows[0].redirectUri).toBe(ALLOWED_REDIRECT_URI);
+    expect(rows[0].scope).toBe("memory:read memory:write");
+    expect(rows[0].codeChallenge).toBe(challenge);
+    expect(rows[0].codeChallengeMethod).toBe("S256");
+
+    const tokenRes = await exchange({
+      code,
+      client_id: registeredClient,
+      redirect_uri: ALLOWED_REDIRECT_URI,
+      code_verifier: verifier,
+    });
+    expect(tokenRes.status).toBe(200);
+    expect((await tokenRes.json()).token_type).toBe("Bearer");
+  }, 30_000);
+
+  test("the rendered consent form submitted URL-encoded with Approve after its client record is deleted answers 400 invalid_client and stores no code", async () => {
+    const formClient = `flair_cl_test_form_${randomUUID()}`;
+    await registerClient(formClient, "consent form deleted client");
+    const { verifier, challenge } = pkcePair();
+    const fields = await renderConsentForm(formClient, challenge, randomUUID());
+
+    const del = await adminOp({ operation: "delete", database: "flair", table: "OAuthClient", ids: [formClient] });
+    expect(del.status).toBe(200);
+    const before = await authCodeIds();
+
+    const res = await submitConsentForm(fields, "approve");
+    expect(res.status).toBe(400);
+    expect(res.headers.get("location")).toBeNull();
+    const text = await res.text();
+    expect(JSON.parse(text)).toEqual({ error: "invalid_client" });
+    expect(text).not.toContain("code=");
+
+    expect(await authCodeIds()).toEqual(before);
+    expect((await authCodeRowsFor(formClient)).length).toBe(0);
+
+    const tokenRes = await exchange({
+      code: randomBytes(32).toString("base64url"),
+      client_id: formClient,
+      redirect_uri: ALLOWED_REDIRECT_URI,
+      code_verifier: verifier,
+    });
+    expect(tokenRes.status).toBe(400);
+    const tokenBody: any = await tokenRes.json();
+    expect(tokenBody.error).toBe("invalid_grant");
+    expect(tokenBody).not.toHaveProperty("access_token");
+  }, 30_000);
+
+  test("the rendered consent form submitted URL-encoded with Deny answers the access_denied redirect and stores no code", async () => {
+    const formClient = `flair_cl_test_form_deny_${randomUUID()}`;
+    await registerClient(formClient, "consent form deny client");
+    const state = randomUUID();
+    const fields = await renderConsentForm(formClient, pkcePair().challenge, state);
+    const before = await authCodeIds();
+
+    const res = await submitConsentForm(fields, "deny");
+    expect(res.status).toBe(302);
+    const location = new URL(res.headers.get("location") ?? "");
+    expect(`${location.origin}${location.pathname}`).toBe(ALLOWED_REDIRECT_URI);
+    expect(location.searchParams.get("error")).toBe("access_denied");
+    expect(location.searchParams.get("state")).toBe(state);
+    expect(location.searchParams.has("code")).toBe(false);
+
+    expect(await authCodeIds()).toEqual(before);
+    expect((await authCodeRowsFor(formClient)).length).toBe(0);
+  }, 30_000);
 
   test("no code was ever stored for the client named only by refused and denied requests", async () => {
     expect((await authCodeRowsFor(scopeClient)).length).toBe(0);

@@ -132,12 +132,14 @@ const SUPPORTED_SCOPES = new Set<string>(buildAuthorizationServerMetadata().scop
 const DEFAULT_CONSENT_SCOPE = "memory:read";
 
 /**
- * The scope a consent request names: trimmed, and `memory:read` when absent or
- * blank. `null` when the value is not a string (a JSON body can carry any
- * type); checkConsentScope refuses that.
+ * The scope a consent request names: `memory:read` when the field is absent
+ * (`undefined`), else the string trimmed, `memory:read` when that is blank.
+ * Any other value — `null`, a number, an array, an object — gives `null`,
+ * which checkConsentScope refuses with invalid_scope. get() passes an absent
+ * query parameter as `undefined`.
  */
 function consentScope(raw: unknown): string | null {
-  if (raw === undefined || raw === null) return DEFAULT_CONSENT_SCOPE;
+  if (raw === undefined) return DEFAULT_CONSENT_SCOPE;
   if (typeof raw !== "string") return null;
   return raw.trim() || DEFAULT_CONSENT_SCOPE;
 }
@@ -167,7 +169,10 @@ function checkConsentScope(scope: string | null): ConsentCheck<{ scope: string; 
  * The OAuthClient record for `clientId` must exist (invalid_client). The
  * consent page (GET) and the consent form's POST both run this, after
  * checkConsentScope; the POST runs it before any authorization code is issued.
- * A client_id that is not a string is refused without a lookup.
+ * post() passes the body's value as received; get() passes the query
+ * parameter, an absent one as the empty string. A value that is not a string
+ * (`undefined`, `null`, a number, an array, an object) is refused without a
+ * lookup; every string is looked up, the empty string included.
  */
 async function checkConsentClient(clientId: unknown): Promise<ConsentCheck<{ client: any }>> {
   const client = typeof clientId === "string"
@@ -359,7 +364,7 @@ export class OAuthAuthorize extends Resource {
     const clientId = url.searchParams.get("client_id") ?? "";
     const redirectUri = url.searchParams.get("redirect_uri") ?? "";
     const responseType = url.searchParams.get("response_type") ?? "";
-    const requestedScope = consentScope(url.searchParams.get("scope"));
+    const requestedScope = consentScope(url.searchParams.get("scope") ?? undefined);
     const state = url.searchParams.get("state") ?? "";
     const codeChallenge = url.searchParams.get("code_challenge") ?? "";
     const codeChallengeMethod = url.searchParams.get("code_challenge_method") ?? "";
@@ -435,7 +440,8 @@ ${scopeTokens.map((s: string) => `<div class="scope">${esc(s)}</div>`).join("")}
 
   async post(data: any) {
     const action = data?.action;
-    const clientId = data?.client_id ?? "";
+    // As received: checkConsentClient refuses a non-string without a lookup.
+    const clientId = data?.client_id;
     const redirectUri = data?.redirect_uri || ALLOWED_REDIRECT_URI;
     const requestedScope = consentScope(data?.scope);
     const state = data?.state ?? "";
