@@ -19,6 +19,10 @@ import { dirname, resolve } from "node:path";
 import * as render from "../render.js";
 import { isLocalBase, resolveAdminUser, resolveLocalAdminPass, resolveAdminPassFromSources, AdminPassSourceError, ADMIN_PASS_FILE_FLAG, ADMIN_PASS_FILE_HELP, ADMIN_PASS_FLAG, ADMIN_PASS_HELP } from "../lib/auth-resolve.js";
 import type { OpsSearch } from "../rem/restore.js";
+import { proveLocalInstancePair, type LocalInstancePairDeps } from "../lib/local-instance-pair.js";
+import { harperPortValue } from "../lib/harper-port-value.js";
+import { decideProbedPairIdentity, readHttpInstanceIdentity, type TargetInstanceIdentity } from "../lib/agent-home.js";
+import { decideInstanceAnswer, readInstanceRows, type InstanceIdentityRow, type OpsEndpoint } from "../lib/instance-identity-row.js";
 import {
   validatePromoteOpts,
   validateRejectOpts,
@@ -53,8 +57,9 @@ export type RemCli = {
   addSharedCredentialOptions: (cmd: Command) => Command;
   readPortFromConfig: () => number | null;
   resolveHttpPort: (opts: { port?: string | number; dataDir?: string }, mode?: "address" | "create") => number;
-  resolveEffectiveOpsUrl: (opts: { target?: string; opsTarget?: string }) => string | undefined;
+  resolveOpsUrlFromTarget: (target: string) => string;
   resolveAgentHomeTarget: (opts: { port?: string | number; opsPort?: string | number; dataDir?: string }) => { httpPort: number; opsPort: number };
+  INSTANCE_TARGET_REMEDY: string;
   humanBytes: (n: number) => string;
   relativeTime: (iso: string | null | undefined) => string;
   DEFAULT_PORT: number;
@@ -86,8 +91,8 @@ function readPortFromConfig(): number | null {
 function resolveHttpPort(opts: { port?: string | number; dataDir?: string }, mode: "address" | "create" = "address"): number {
   return cli.resolveHttpPort(opts, mode);
 }
-function deriveOpsUrl(target: string): string | undefined {
-  return cli.resolveEffectiveOpsUrl({ target });
+function deriveOpsUrl(target: string): string {
+  return cli.resolveOpsUrlFromTarget(target);
 }
 function resolvePair(opts: { port?: string | number; opsPort?: string | number }): { httpPort: number; opsPort: number } {
   return cli.resolveAgentHomeTarget(opts);
@@ -106,7 +111,9 @@ function relativeTime(iso: string | null | undefined): string {
  * `resource.post()` and never routes a URL suffix, so `/MemoryCandidate/
  * search_by_conditions` 405s. Both the nightly pending-candidate count and
  * the restore-time candidate cleanup must reach the ops port this way.
- * `fetchImpl` is injectable for tests.
+ * `opsUrl` (restore's operations URL) takes precedence over `opsPort` (a
+ * loopback port). A redirect is refused, so the admin credential goes only to
+ * the URL built here. `fetchImpl` is injectable for tests.
  */
 export function buildOpsSearch(
   opts: { opsPort?: number; opsUrl?: string; adminUser?: string; adminPass: string },
@@ -117,6 +124,7 @@ export function buildOpsSearch(
   return async (table, conditions, getAttributes) => {
     const res = await fetchImpl(`${root}/`, {
       method: "POST",
+      redirect: "error",
       headers: { "Content-Type": "application/json", Authorization: auth },
       body: JSON.stringify({ operation: "search_by_conditions", schema: "flair", table, operator: "and", conditions, get_attributes: getAttributes }),
     });
@@ -135,23 +143,99 @@ export function buildOpsSearch(
   };
 }
 
+/** The instance a restore lists candidates on and writes to (flair#2708). */
+export interface RestoreTarget {
+  /** Base URL of the restore's reads and writes. */
+  baseUrl: string;
+  /** Operations API URL of the candidate listing. */
+  opsUrl: string;
+  /** The target's HTTP port: the URL's port, or 80/443 for a URL without one. */
+  httpPort: number;
+  /** The operations port in `opsUrl`. */
+  opsPort: number;
+  /**
+   * Whether the target is this host's loopback (127.0.0.1 or localhost). Only a
+   * loopback target is compared with this host's configured pair and checked
+   * against the OS listener table.
+   */
+  loopback: boolean;
+}
+
+/** The environment {@link resolveRestoreTarget} reads. */
+export interface RestoreTargetEnv {
+  /** FLAIR_URL: the target's base URL; unset means the local instance. */
+  flairUrl?: string;
+  /** FLAIR_OPS_PORT: an explicit operations port for the target. */
+  opsPort?: string;
+  /** FLAIR_OPS_TARGET: an operations endpoint other commands use. Restore only checks it. */
+  opsTarget?: string;
+}
+
+/** Injectable seams for {@link resolveRestoreTarget}. */
+export interface RestoreTargetDeps {
+  /** The paired resolver (`resolveAgentHomeTarget`, flair#2474). */
+  resolvePair?: (opts: { port?: string | number; opsPort?: string | number }) => { httpPort: number; opsPort: number };
+  /** The conventional operations URL of a target URL (`resolveOpsUrlFromTarget`). Reads no environment. */
+  deriveOpsUrl?: (target: string) => string;
+}
+
 /**
- * Resolves the one instance a restore writes to and lists candidates from.
- *
- * `flairUrl` is the target the writes use. With no FLAIR_URL, the port pair is
- * the resolved local instance. With FLAIR_URL, its HTTP port and the
- * operations port (FLAIR_OPS_PORT when set, else derived from the target URL)
- * go through the paired resolver `resolveAgentHomeTarget` (flair#2474), so a
- * port that conflicts with a configured pair is refused rather than split
- * across two instances. The operations URL is built from that same target.
- * `resolvePairImpl` and `deriveOpsUrlImpl` are injectable for tests.
+ * A URL as restore prints it: scheme, host, port and path. User info, a query
+ * and a fragment are never printed. A value that is not an http(s) URL prints
+ * as `placeholder`, since its parts cannot be told apart.
  */
-export function resolveRestoreTarget(
-  flairUrl: string | undefined,
-  opsPortEnv: string | undefined,
-  resolvePairImpl: (opts: { port?: string | number; opsPort?: string | number }) => { httpPort: number; opsPort: number } = resolvePair,
-  deriveOpsUrlImpl: (target: string) => string | undefined = deriveOpsUrl,
-): { baseUrl: string; opsUrl: string } {
+export function displayRestoreUrl(raw: string, placeholder: string): string {
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    return placeholder;
+  }
+  if (u.protocol !== "http:" && u.protocol !== "https:") return placeholder;
+  return `${u.protocol}//${u.host}${u.pathname.replace(/\/+$/, "")}`;
+}
+
+/** A URL's port, or its scheme's default port when the URL names none. */
+function effectivePort(u: URL): number {
+  if (u.port) return Number(u.port);
+  return u.protocol === "https:" ? 443 : 80;
+}
+
+/** The paired resolver's message without its stamp-home remedy, which names flags restore does not have. */
+function withoutPairRemedy(message: string): string {
+  const remedy = cli?.INSTANCE_TARGET_REMEDY;
+  return remedy && message.endsWith(remedy) ? message.slice(0, -remedy.length).trimEnd() : message;
+}
+
+/**
+ * Resolves the one instance a restore writes to and lists candidates on
+ * (flair#2708). Nothing here sends a request; {@link establishRestorePair}
+ * then checks the pair against the live instance before any listing, delete
+ * or write.
+ *
+ * - With no FLAIR_URL, the target is the local instance: its port pair comes
+ *   from the paired resolver (`resolveAgentHomeTarget`, flair#2474), which
+ *   refuses FLAIR_OPS_PORT when no complete configured pair can show which
+ *   HTTP port it belongs with.
+ * - With FLAIR_URL, the writes go to that URL. Its HTTP port is the URL's port,
+ *   or 80/443 when it names none. The operations port is FLAIR_OPS_PORT when
+ *   set, else the conventional derivation from the target URL
+ *   (`resolveOpsUrlFromTarget`); a target with no derivable operations port
+ *   and no FLAIR_OPS_PORT is refused. The operations URL is built on the
+ *   target's host. For a loopback target the two ports also go through the
+ *   paired resolver, which refuses a pair that conflicts with this host's
+ *   configured pair; that configuration describes this host only, so a remote
+ *   target is not compared with it.
+ * - A FLAIR_URL carrying user info, a query or a fragment is refused, and the
+ *   message prints none of their values.
+ * - FLAIR_OPS_TARGET is never used as the listing endpoint. When it is set and
+ *   names an endpoint other than the operations URL resolved here, restore
+ *   refuses.
+ */
+export function resolveRestoreTarget(env: RestoreTargetEnv, deps: RestoreTargetDeps = {}): RestoreTarget {
+  const resolvePairImpl = deps.resolvePair ?? resolvePair;
+  const deriveOpsUrlImpl = deps.deriveOpsUrl ?? deriveOpsUrl;
+  const opsPortEnv = env.opsPort;
   const declared = opsPortEnv === undefined || opsPortEnv === "" ? null : Number(opsPortEnv);
   if (declared !== null && (!Number.isInteger(declared) || declared < 1 || declared > 65535)) {
     throw new Error(
@@ -159,76 +243,250 @@ export function resolveRestoreTarget(
     );
   }
 
-  const noDerivableOps = (reason?: string): Error => {
-    const detail = reason ? ` (${reason})` : "";
-    return new Error(
-      `restore target ${flairUrl} has no derivable operations API URL${detail}. `
-        + "The candidate listing and the writes must address one instance; the operations API is derived from FLAIR_URL. "
-        + "Set FLAIR_URL to the instance's base URL with a port whose operations API can be derived, or run restore on that instance's host.",
-    );
-  };
-
-  if (!flairUrl) {
-    const pair = resolvePairImpl(declared === null ? {} : { opsPort: declared });
-    const base = `http://127.0.0.1:${pair.httpPort}`;
-    return { baseUrl: base, opsUrl: `http://127.0.0.1:${pair.opsPort}` };
-  }
-
-  const base = flairUrl.replace(/\/+$/, "");
-  let parsed: URL;
-  try {
-    parsed = new URL(base);
-  } catch (err: any) {
-    throw noDerivableOps(err?.message ?? String(err));
-  }
-
-  let derivedPort: number | null = null;
-  if (parsed.port) {
-    let derived: string | undefined;
+  let target: RestoreTarget;
+  if (!env.flairUrl) {
+    let pair: { httpPort: number; opsPort: number };
     try {
-      derived = deriveOpsUrlImpl(base);
+      pair = resolvePairImpl(declared === null ? {} : { opsPort: declared });
     } catch (err: any) {
-      throw noDerivableOps(err?.message ?? String(err));
-    }
-    if (!derived) throw noDerivableOps();
-    derivedPort = Number(new URL(derived).port);
-  } else {
-    // No explicit port to pair numerically (for example an https target on
-    // 443). The conventional operations URL is the only derivation.
-    let derived: string | undefined;
-    try {
-      derived = deriveOpsUrlImpl(base);
-    } catch (err: any) {
-      throw noDerivableOps(err?.message ?? String(err));
-    }
-    if (!derived) throw noDerivableOps();
-    if (declared !== null && Number(new URL(derived).port) !== declared) {
       throw new Error(
-        `restore target ${base} pairs with the operations API at ${derived}, but FLAIR_OPS_PORT=${opsPortEnv} names a different instance. `
-          + "The candidate listing and the writes must address one instance. "
-          + `Unset FLAIR_OPS_PORT, or set it to ${new URL(derived).port} to match the target.`,
+        `the local restore target could not be paired: ${withoutPairRemedy(err?.message ?? String(err))} `
+          + "Set FLAIR_URL to the instance's base URL and FLAIR_OPS_PORT to its operations port, or unset FLAIR_OPS_PORT to use the configured pair.",
       );
     }
-    return { baseUrl: base, opsUrl: derived };
+    target = {
+      baseUrl: `http://127.0.0.1:${pair.httpPort}`,
+      opsUrl: `http://127.0.0.1:${pair.opsPort}`,
+      httpPort: pair.httpPort,
+      opsPort: pair.opsPort,
+      loopback: true,
+    };
+  } else {
+    target = resolveUrlRestoreTarget(env.flairUrl, declared, resolvePairImpl, deriveOpsUrlImpl);
+  }
+  refuseOtherOpsTarget(env.opsTarget, target);
+  return target;
+}
+
+function resolveUrlRestoreTarget(
+  raw: string,
+  declared: number | null,
+  resolvePairImpl: NonNullable<RestoreTargetDeps["resolvePair"]>,
+  deriveOpsUrlImpl: NonNullable<RestoreTargetDeps["deriveOpsUrl"]>,
+): RestoreTarget {
+  const example = "for example http://127.0.0.1:19926";
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    throw new Error(
+      `FLAIR_URL is not a parseable URL, so restore has no instance to address. Set FLAIR_URL to the instance's base URL (${example}), or unset it to restore the local instance.`,
+    );
+  }
+  if (u.protocol !== "http:" && u.protocol !== "https:") {
+    throw new Error(
+      `FLAIR_URL is not an http:// or https:// URL, so restore has no instance to address. Set FLAIR_URL to the instance's base URL (${example}), or unset it to restore the local instance.`,
+    );
+  }
+  const shown = displayRestoreUrl(raw, "<FLAIR_URL>");
+  const carried: string[] = [];
+  if (u.username || u.password) carried.push("user info");
+  if (u.search || raw.includes("?")) carried.push("a query");
+  if (u.hash || raw.includes("#")) carried.push("a fragment");
+  if (carried.length > 0) {
+    throw new Error(
+      `FLAIR_URL ${shown} carries ${carried.join(" and ")}. Restore refuses a target URL that carries user info, a query or a fragment, and prints none of their values. `
+        + "Set FLAIR_URL to the instance's base URL (scheme, host and port), and pass the admin credential with --admin-pass-file or FLAIR_ADMIN_PASS.",
+    );
   }
 
-  let pair: { httpPort: number; opsPort: number };
-  try {
-    pair = resolvePairImpl({ port: Number(parsed.port), opsPort: declared ?? derivedPort! });
-  } catch (err: any) {
-    throw new Error(
-      `restore target ${base} could not be paired with FLAIR_OPS_PORT=${opsPortEnv ?? "(unset)"}: ${err?.message ?? String(err)} `
-        + "The candidate listing and the writes must address one instance. "
-        + "Unset FLAIR_OPS_PORT to derive the operations port from the restore target, or set it to that instance's operations port.",
-    );
+  const base = shown;
+  const httpPort = effectivePort(u);
+  let opsPort: number;
+  if (declared !== null) {
+    opsPort = declared;
+  } else {
+    let derived: URL;
+    try {
+      derived = new URL(deriveOpsUrlImpl(base));
+    } catch (err: any) {
+      throw new Error(
+        `restore target ${shown} has no derivable operations API URL (${err?.message ?? String(err)}). `
+          + "Restore lists candidates on the operations API of the instance it writes to, and derives that API's port from FLAIR_URL when FLAIR_OPS_PORT is unset. "
+          + "Set FLAIR_OPS_PORT to that instance's operations port, or set FLAIR_URL to the instance's base URL with its HTTP port.",
+      );
+    }
+    opsPort = effectivePort(derived);
+  }
+
+  const loopback = isLocalBase(base);
+  if (loopback) {
+    try {
+      resolvePairImpl({ port: httpPort, opsPort });
+    } catch (err: any) {
+      throw new Error(
+        `restore target ${shown} could not be paired with operations port ${opsPort}`
+          + `${declared === null ? " (derived from FLAIR_URL)" : " (FLAIR_OPS_PORT)"}: ${withoutPairRemedy(err?.message ?? String(err))} `
+          + `Set FLAIR_OPS_PORT to the operations port of the instance serving HTTP port ${httpPort}, or unset it to derive the operations port from FLAIR_URL.`,
+      );
+    }
+    // The endpoint the OS listener check proves (src/lib/local-instance-pair.ts),
+    // as on the local delete paths.
+    return { baseUrl: base, opsUrl: `http://127.0.0.1:${opsPort}`, httpPort, opsPort, loopback };
   }
 
   const ops = new URL(base);
-  ops.port = String(pair.opsPort);
+  ops.port = String(opsPort);
   ops.pathname = "";
-  ops.search = "";
-  ops.hash = "";
-  return { baseUrl: base, opsUrl: ops.toString().replace(/\/$/, "") };
+  return { baseUrl: base, opsUrl: ops.toString().replace(/\/$/, ""), httpPort, opsPort, loopback };
+}
+
+/** Refuses a FLAIR_OPS_TARGET naming an endpoint other than `target`'s operations URL. */
+function refuseOtherOpsTarget(opsTargetEnv: string | undefined, target: RestoreTarget): void {
+  const raw = opsTargetEnv?.trim();
+  if (!raw) return;
+  let same = false;
+  try {
+    const named = new URL(raw);
+    const ours = new URL(target.opsUrl);
+    same = named.protocol === ours.protocol && named.hostname === ours.hostname && effectivePort(named) === effectivePort(ours);
+  } catch {
+    same = false;
+  }
+  if (same) return;
+  throw new Error(
+    `FLAIR_OPS_TARGET names the operations endpoint ${displayRestoreUrl(raw, "<not an http(s) URL>")}, `
+      + `but restore target ${target.baseUrl} pairs with the operations API at ${target.opsUrl}. `
+      + "Restore lists candidates only on the instance it writes to, and sends nothing to FLAIR_OPS_TARGET. "
+      + `Unset FLAIR_OPS_TARGET for this command, or set it to ${target.opsUrl}.`,
+  );
+}
+
+/** Injectable seams for {@link establishRestorePair}: its fetch and the OS reads of the loopback check. */
+export type RestorePairDeps = LocalInstancePairDeps;
+
+/** The remedy for a pair check that answered without naming one. */
+function restorePairRemedy(target: RestoreTarget, status: number | null): string {
+  if (status === 401 || status === 403) {
+    return "Check that the admin credential restore uses (--admin-pass, --admin-pass-file or FLAIR_ADMIN_PASS) is the target instance's.";
+  }
+  return `Set FLAIR_OPS_PORT to the operations port of the instance serving ${target.baseUrl}, or unset it; `
+    + "if that instance's configuration records ports it does not serve, correct it and restart the instance.";
+}
+
+/** The `flair.Instance` identity an operations endpoint reports, by the shared one-row rule. */
+async function readOpsInstanceIdentity(endpoint: OpsEndpoint): Promise<TargetInstanceIdentity> {
+  let rows: InstanceIdentityRow[];
+  try {
+    rows = await readInstanceRows(endpoint);
+  } catch {
+    return { kind: "unreadable" };
+  }
+  const decision = decideInstanceAnswer(rows);
+  if (decision.kind === "answer") return { kind: "one", id: decision.row.id };
+  if (decision.kind === "refuse-multiple") return { kind: "multiple", count: decision.rows.length };
+  return { kind: "none" };
+}
+
+/**
+ * Establishes, before restore lists, deletes or writes anything, that the
+ * operations API it lists candidates on and the HTTP endpoint it writes to are
+ * one instance (flair#2708). Returns when they are; otherwise throws an Error
+ * naming what could not be established and the remedy.
+ *
+ * - A loopback target runs the check the local delete paths use
+ *   (`proveLocalInstancePair`, src/lib/local-instance-pair.ts): the
+ *   operations endpoint's configuration records that operations port and an
+ *   HTTP port, and the OS listener table shows one Harper process listening
+ *   on both. Restore then requires that HTTP port to be the target's.
+ * - A remote target is not in this host's listener table. Its operations
+ *   endpoint's configuration (`get_configuration`) must record the operations
+ *   port asked and the target's HTTP port (`http.port` or `http.securePort`),
+ *   or the two endpoints must report the same single `flair.Instance`
+ *   identity; two different identities refuse either way. A target whose
+ *   public ports differ from the ports its configuration records (behind a
+ *   proxy) and whose instance has no Instance row is refused.
+ *
+ * Every request goes to the target's host (the operations URL is built on it)
+ * and is sent with redirects refused. The admin credential is sent to the
+ * operations endpoint and, for a remote target, to the target's `/Instance/`.
+ */
+export async function establishRestorePair(
+  target: RestoreTarget,
+  admin: { user: string; pass: string },
+  deps: RestorePairDeps = {},
+): Promise<void> {
+  const authorization = `Basic ${Buffer.from(`${admin.user}:${admin.pass}`).toString("base64")}`;
+  const baseFetch = deps.fetchImpl ?? fetch;
+  const fetchImpl = ((input: Parameters<typeof fetch>[0], init?: RequestInit) =>
+    baseFetch(input, { ...init, redirect: "error" })) as typeof fetch;
+  const nothingSent = "nothing was listed, deleted or written";
+
+  if (target.loopback) {
+    const proof = await proveLocalInstancePair(target.opsPort, authorization, { ...deps, fetchImpl });
+    if (proof.kind === "unproven") {
+      throw new Error(
+        `operations port ${target.opsPort} is not proven to pair with restore target ${target.baseUrl} (${proof.detail}); ${nothingSent}. `
+          + (proof.remedy ?? restorePairRemedy(target, proof.status)),
+      );
+    }
+    if (proof.httpPort !== target.httpPort) {
+      throw new Error(
+        `operations port ${target.opsPort} belongs to the instance serving HTTP port ${proof.httpPort}, not restore target ${target.baseUrl} (HTTP port ${target.httpPort}); ${nothingSent}. `
+          + `Set FLAIR_OPS_PORT to the operations port of the instance serving HTTP port ${target.httpPort}, or unset it to derive the operations port from the target.`,
+      );
+    }
+    return;
+  }
+
+  const unestablished = (detail: string, status: number | null = null): Error =>
+    new Error(
+      `restore target ${target.baseUrl} is not established to pair with the operations API at ${target.opsUrl} (${detail}); ${nothingSent}. `
+        + restorePairRemedy(target, status),
+    );
+  let response: Response;
+  try {
+    response = await fetchImpl(`${target.opsUrl}/`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: authorization },
+      body: JSON.stringify({ operation: "get_configuration" }),
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch {
+    throw unestablished("its configuration request got no answer");
+  }
+  if (!response.ok) throw unestablished(`its configuration request answered HTTP ${response.status}`, response.status);
+  let config: any;
+  try {
+    config = await response.json();
+  } catch {
+    throw unestablished("its configuration answer is not JSON");
+  }
+  const ports = (values: unknown[]): number[] =>
+    values.map((v) => harperPortValue(v)).filter((p): p is number => p !== null);
+  const httpPorts = ports([config?.http?.port, config?.http?.securePort]);
+  const opsPorts = ports([config?.operationsApi?.network?.port, config?.operationsApi?.network?.securePort]);
+  const portsMatch = opsPorts.includes(target.opsPort) && httpPorts.includes(target.httpPort);
+
+  const [httpIdentity, opsIdentity] = await Promise.all([
+    readHttpInstanceIdentity(target.baseUrl, admin.user, admin.pass, fetchImpl),
+    readOpsInstanceIdentity({ opsUrl: target.opsUrl, credentials: admin, fetchImpl }),
+  ]);
+  const identity = decideProbedPairIdentity(httpIdentity, opsIdentity);
+  if (identity.kind === "different") {
+    throw new Error(
+      `restore target ${target.baseUrl} and the operations API at ${target.opsUrl} report different instance identities, so they are two instances; ${nothingSent}. `
+        + restorePairRemedy(target, null),
+    );
+  }
+  if (portsMatch || identity.kind === "same") return;
+  const listed = (values: number[]): string => (values.length > 0 ? values.join(" and ") : "none");
+  throw new Error(
+    `restore target ${target.baseUrl} is not established to pair with the operations API at ${target.opsUrl}: `
+      + `that API's configuration records HTTP port ${listed(httpPorts)} and operations port ${listed(opsPorts)}, `
+      + `not HTTP port ${target.httpPort} with operations port ${target.opsPort}, and ${identity.detail}; ${nothingSent}. `
+      + `Set FLAIR_OPS_PORT to the operations port of the instance serving ${target.baseUrl}, or run restore on that instance's host with FLAIR_URL unset.`,
+  );
 }
 
 // ─── flair rem rapid — pure helpers ──────────────────────────────────────────
@@ -1227,9 +1485,13 @@ export function register(program: Command): void {
       if (opts.apply) {
         const { applySnapshot } = await import("../rem/restore.js");
         applyAdminPassFile(opts);
-        let restoreTarget: { baseUrl: string; opsUrl: string };
+        let restoreTarget: RestoreTarget;
         try {
-          restoreTarget = resolveRestoreTarget(process.env.FLAIR_URL, process.env.FLAIR_OPS_PORT);
+          restoreTarget = resolveRestoreTarget({
+            flairUrl: process.env.FLAIR_URL,
+            opsPort: process.env.FLAIR_OPS_PORT,
+            opsTarget: process.env.FLAIR_OPS_TARGET,
+          });
         } catch (err: any) {
           console.error(`Error: ${err.message}`);
           process.exit(1);
@@ -1252,6 +1514,18 @@ export function register(program: Command): void {
               "(Soul rewrite is operator-only; an agent key is refused).",
           );
           process.exit(1);
+        }
+        // The candidate listing goes to the operations API and every write to
+        // the target's HTTP endpoint, so the two are checked as one instance
+        // before applySnapshot sends anything. Without an admin credential (a
+        // dry run only) there is no listing, and only the target is read.
+        if (adminPass) {
+          try {
+            await establishRestorePair(restoreTarget, { user: resolveAdminUser(opts.adminUser), pass: adminPass });
+          } catch (err: any) {
+            console.error(`Error: ${err.message}`);
+            process.exit(1);
+          }
         }
         const targetApi = (method: string, path: string, body?: unknown) =>
           api(method, path, body, { baseUrl: restoreTarget.baseUrl });

@@ -1,27 +1,47 @@
 /**
- * rem-restore-target-2708.test.ts — `flair rem restore` against one real
- * Harper (flair#2708).
+ * rem-restore-target-2708.test.ts — `flair rem restore` against real Harpers
+ * (flair#2708).
  *
- * The candidate listing and the writes must reach the same instance. This
- * exercises the normal path with a real Harper: FLAIR_URL names the instance
- * and FLAIR_OPS_PORT names its operations port, and the restore lists and
- * rewinds the rows there.
+ * The candidate listing and the writes must reach the same instance.
+ *
+ * Instance A is the restore target in the first test. Its rows start different
+ * from the snapshot (a changed Memory, an extra Memory, a changed Soul), and it
+ * holds a leftover MemoryCandidate for the agent whose claim is the snapshot
+ * Soul's value. Restore must find that candidate through A's operations API and
+ * delete it, since the learned-content guard refuses the Soul write while the
+ * candidate exists, and must end with exactly the snapshot's rows. A candidate
+ * search that returned nothing would leave the candidate in place and fail the
+ * Soul write.
+ *
+ * The second test starts instance B, a second real Harper, and runs with NO
+ * configured pair (no config file in HOME): FLAIR_URL names B and
+ * FLAIR_OPS_PORT names A's operations port. Restore must refuse before any
+ * listing, delete or write, and both instances keep every row.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
+import { startHarper, stopHarpers, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { nodeBin } from "../helpers/node-runtime";
 import { createSnapshot } from "../../src/rem/snapshot.ts";
 
 const CLI = join(process.cwd(), "dist", "cli.js");
 const AGENT_ID = "agent-a";
 const MEMORY_ID = "m-restored";
+const EXTRA_MEMORY_ID = "m-extra";
 const SOUL_ID = `soul-${AGENT_ID}`;
+const CANDIDATE_ID = "c-leftover";
+const SNAPSHOT_SOUL_VALUE = "restored soul";
 
-let harper: HarperInstance;
+let a: HarperInstance;
+let b: HarperInstance | undefined;
 let home: string;
+let snapshotDate: string;
+
+const createdAt = new Date().toISOString();
+const snapshotMemory = { id: MEMORY_ID, agentId: AGENT_ID, content: "restored memory", durability: "persistent", createdAt };
+const snapshotSoul = { id: SOUL_ID, agentId: AGENT_ID, key: "identity", value: SNAPSHOT_SOUL_VALUE, createdAt };
 
 function assertOwnInstance(h: HarperInstance): void {
   for (const raw of [h.httpURL, h.opsURL]) {
@@ -36,12 +56,12 @@ function assertOwnInstance(h: HarperInstance): void {
   }
 }
 
-async function ops(body: Record<string, unknown>): Promise<any> {
-  const res = await fetch(harper.opsURL, {
+async function ops(h: HarperInstance, body: Record<string, unknown>): Promise<any> {
+  const res = await fetch(h.opsURL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: "Basic " + btoa(`${harper.admin.username}:${harper.admin.password}`),
+      Authorization: "Basic " + btoa(`${h.admin.username}:${h.admin.password}`),
     },
     body: JSON.stringify({ ...body, database: "flair" }),
     signal: AbortSignal.timeout(15_000),
@@ -50,75 +70,146 @@ async function ops(body: Record<string, unknown>): Promise<any> {
   return res.json();
 }
 
+/** Every row of `table` for AGENT_ID on `h`, with the named attributes, sorted by id. */
+async function agentRows(h: HarperInstance, table: string, attributes: string[]): Promise<any[]> {
+  const rows = await ops(h, {
+    operation: "search_by_conditions",
+    table,
+    operator: "and",
+    conditions: [{ search_attribute: "agentId", search_type: "equals", search_value: AGENT_ID }],
+    get_attributes: attributes,
+  });
+  return [...rows].sort((x: any, y: any) => String(x.id).localeCompare(String(y.id)));
+}
+
+function candidateRow(id: string, claim: string) {
+  return { id, agentId: AGENT_ID, claim, generatedAt: new Date().toISOString(), status: "pending" };
+}
+
+function runRestore(env: Record<string, string | undefined>, adminPass: string, date: string) {
+  const childEnv: Record<string, string | undefined> = {
+    ...process.env,
+    HOME: home,
+    FLAIR_URL: undefined,
+    FLAIR_OPS_PORT: undefined,
+    FLAIR_OPS_TARGET: undefined,
+    FLAIR_TARGET: undefined,
+    FLAIR_TOKEN: undefined,
+    FLAIR_ADMIN_PASS: undefined,
+    FLAIR_AGENT_ID: undefined,
+    NO_COLOR: "1",
+    ...env,
+  };
+  for (const [key, value] of Object.entries(childEnv)) if (value === undefined) delete childEnv[key];
+  const child = Bun.spawn(
+    [nodeBin({ env: childEnv as Record<string, string> }), CLI, "rem", "restore", date, "--agent", AGENT_ID, "--apply", "--admin-pass", adminPass],
+    { env: childEnv as Record<string, string>, timeout: 60_000, stdout: "pipe", stderr: "pipe" },
+  );
+  return (async () => {
+    const stdout = await new Response(child.stdout).text();
+    const stderr = await new Response(child.stderr).text();
+    const code = await child.exited;
+    return { code, stdout, stderr };
+  })();
+}
+
 beforeAll(async () => {
-  harper = await startHarper();
-  assertOwnInstance(harper);
+  a = await startHarper();
+  assertOwnInstance(a);
   home = mkdtempSync(join(tmpdir(), "flair-2708-real-"));
   mkdirSync(join(home, ".flair"), { recursive: true });
-  writeFileSync(join(home, ".flair", "admin-pass"), harper.admin.password, { mode: 0o600 });
+  writeFileSync(join(home, ".flair", "admin-pass"), a.admin.password, { mode: 0o600 });
   chmodSync(join(home, ".flair", "admin-pass"), 0o600);
+  const now = new Date();
+  await createSnapshot({
+    agentId: AGENT_ID,
+    flairVersion: "0.0.0-test",
+    memories: [snapshotMemory],
+    soul: snapshotSoul,
+    pendingCandidateCount: null,
+    rootOverride: join(home, ".flair", "snapshots"),
+    nowOverride: now,
+  });
+  snapshotDate = now.toISOString().slice(0, 10);
 }, 300_000);
 
 afterAll(async () => {
   try {
-    await stopHarper(harper);
+    await stopHarpers([a, b]);
   } finally {
     if (home) rmSync(home, { recursive: true, force: true });
-    if (harper?.installDir?.startsWith(tmpdir())) rmSync(harper.installDir, { recursive: true, force: true });
+    for (const h of [a, b]) {
+      if (h?.installDir?.startsWith(tmpdir())) rmSync(h.installDir, { recursive: true, force: true });
+    }
   }
-}, HARPER_STOP_BUDGET_MS);
+}, HARPER_STOP_BUDGET_MS * 2);
 
 describe("flair#2708 — rem restore on a real instance", () => {
-  test("lists and restores on the FLAIR_URL instance with an explicit ops port", async () => {
-    const now = new Date();
-    const createdAt = now.toISOString();
-    const memory = { id: MEMORY_ID, agentId: AGENT_ID, content: "restored memory", durability: "persistent", createdAt };
-    const soul = { id: SOUL_ID, agentId: AGENT_ID, key: "identity", value: "restored soul", createdAt };
-    await ops({ operation: "insert", table: "Memory", records: [memory] });
-    await ops({ operation: "insert", table: "Soul", records: [soul] });
-
-    await createSnapshot({
-      agentId: AGENT_ID,
-      flairVersion: "0.0.0-test",
-      memories: [memory],
-      soul,
-      pendingCandidateCount: null,
-      rootOverride: join(home, ".flair", "snapshots"),
-      nowOverride: now,
-    });
-
-    const env: Record<string, string | undefined> = {
-      ...process.env,
-      HOME: home,
-      FLAIR_URL: harper.httpURL,
-      FLAIR_OPS_PORT: new URL(harper.opsURL).port,
-      FLAIR_TOKEN: undefined,
-      FLAIR_ADMIN_PASS: undefined,
-      FLAIR_AGENT_ID: undefined,
-      NO_COLOR: "1",
-    };
-    const child = Bun.spawn(
-      [
-        nodeBin({ env: env as Record<string, string> }),
-        CLI,
-        "rem", "restore", now.toISOString().slice(0, 10),
-        "--agent", AGENT_ID,
-        "--apply",
-        "--admin-pass", harper.admin.password,
+  test("finds and deletes the target's leftover candidate and rewinds its drifted rows to the snapshot", async () => {
+    // The live state differs from the snapshot in every table restore touches.
+    await ops(a, {
+      operation: "insert",
+      table: "Memory",
+      records: [
+        { ...snapshotMemory, content: "drifted memory" },
+        { id: EXTRA_MEMORY_ID, agentId: AGENT_ID, content: "not in the snapshot", durability: "persistent", createdAt },
       ],
-      { env: env as Record<string, string>, timeout: 60_000, stdout: "pipe", stderr: "pipe" },
+    });
+    await ops(a, { operation: "insert", table: "Soul", records: [{ ...snapshotSoul, value: "drifted soul" }] });
+    await ops(a, { operation: "insert", table: "MemoryCandidate", records: [candidateRow(CANDIDATE_ID, SNAPSHOT_SOUL_VALUE)] });
+    expect(await agentRows(a, "MemoryCandidate", ["id"])).toEqual([{ id: CANDIDATE_ID }]);
+
+    const result = await runRestore(
+      { FLAIR_URL: a.httpURL, FLAIR_OPS_PORT: new URL(a.opsURL).port },
+      a.admin.password,
+      snapshotDate,
     );
-    const stdout = await new Response(child.stdout).text();
-    const stderr = await new Response(child.stderr).text();
-    const code = await child.exited;
 
-    expect(code, `stdout:\n${stdout}\nstderr:\n${stderr}`).toBe(0);
-    expect(stdout).toContain("Status:       completed");
+    expect(result.code, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`).toBe(0);
+    expect(result.stdout).toContain("Status:       completed");
+    expect(result.stdout).toContain("Deleted:      2 memories, 1 souls, 1 candidates");
+    expect(result.stdout).toContain("Restored:     1 memories, 1 souls");
 
-    const memories = await ops({ operation: "search_by_id", table: "Memory", ids: [MEMORY_ID], get_attributes: ["id", "content"] });
-    expect(memories).toEqual([{ id: MEMORY_ID, content: "restored memory" }]);
-    const souls = await ops({ operation: "search_by_id", table: "Soul", ids: [SOUL_ID], get_attributes: ["id", "agentId", "key", "value"] });
-    expect(souls).toHaveLength(1);
-    expect(souls[0].value).toBe("restored soul");
+    expect(await agentRows(a, "MemoryCandidate", ["id"])).toEqual([]);
+    expect(await agentRows(a, "Memory", ["id", "content"])).toEqual([{ id: MEMORY_ID, content: "restored memory" }]);
+    expect(await agentRows(a, "Soul", ["id", "key", "value"])).toEqual([{ id: SOUL_ID, key: "identity", value: SNAPSHOT_SOUL_VALUE }]);
   }, 120_000);
+
+  test("with no configured pair, refuses FLAIR_URL at one instance and FLAIR_OPS_PORT at another before any listing or write", async () => {
+    b = await startHarper();
+    assertOwnInstance(b);
+    expect(existsSync(join(home, ".flair", "config.yaml"))).toBe(false);
+
+    await ops(a, { operation: "insert", table: "MemoryCandidate", records: [candidateRow("c-on-a", "a candidate on instance A")] });
+    await ops(b, {
+      operation: "insert",
+      table: "Memory",
+      records: [{ id: "m-on-b", agentId: AGENT_ID, content: "instance B memory", durability: "persistent", createdAt }],
+    });
+    await ops(b, { operation: "insert", table: "Soul", records: [{ id: SOUL_ID, agentId: AGENT_ID, key: "identity", value: "instance B soul", createdAt }] });
+
+    const tables: Array<[string, string[]]> = [
+      ["Memory", ["id", "content"]],
+      ["Soul", ["id", "value"]],
+      ["MemoryCandidate", ["id", "claim"]],
+    ];
+    const snapshotRows = async () => {
+      const out: Record<string, unknown> = {};
+      for (const h of [a, b!]) for (const [table, attrs] of tables) out[`${h.httpURL} ${table}`] = await agentRows(h, table, attrs);
+      return out;
+    };
+    const before = await snapshotRows();
+    expect(before[`${a.httpURL} MemoryCandidate`]).toContainEqual({ id: "c-on-a", claim: "a candidate on instance A" });
+
+    const aOps = new URL(a.opsURL).port;
+    const result = await runRestore({ FLAIR_URL: b.httpURL, FLAIR_OPS_PORT: aOps }, b.admin.password, snapshotDate);
+
+    expect(result.code, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`).not.toBe(0);
+    expect(result.stderr).toContain(
+      `operations port ${aOps} belongs to the instance serving HTTP port ${new URL(a.httpURL).port}, not restore target ${b.httpURL}`,
+    );
+    expect(result.stderr).toContain("nothing was listed, deleted or written");
+    expect(result.stdout).not.toContain("Deleted:");
+    expect(await snapshotRows()).toEqual(before);
+  }, 300_000);
 });
