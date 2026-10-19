@@ -341,8 +341,12 @@ describe("launcher script — never a second instance on a served data directory
     const r = launch(f);
     expect(r.status).toBe(0);
     expect(existsSync(f.marker)).toBe(true);
-    // The pid file is left as it was.
-    expect(readFileSync(join(f.rootPath, "hdb.pid"), "utf-8")).toBe(String(process.pid));
+    // flair#2697: the pid file is moved aside, content unchanged, so Harper's
+    // own hdb.pid check does not refuse on the live, unrelated pid.
+    expect(existsSync(join(f.rootPath, "hdb.pid"))).toBe(false);
+    const stale = readdirSync(f.rootPath).filter((n) => n.startsWith("hdb.pid.stale-"));
+    expect(stale.length).toBe(1);
+    expect(readFileSync(join(f.rootPath, stale[0]), "utf-8")).toBe(String(process.pid));
   });
 
   test("CONTROL: hdb.pid names a DEAD process -> the launcher starts Harper as before", () => {
