@@ -1,22 +1,26 @@
-// oauth-pkce-required.test.ts — the authorization endpoints and the token
-// exchange require S256 PKCE (RFC 7636), as the discovery metadata advertises
-// (`code_challenge_methods_supported: ["S256"]`).
+// oauth-pkce-required.test.ts — the authorization endpoints and the
+// authorization-code exchange require S256 PKCE (RFC 7636), as the discovery
+// metadata advertises (`code_challenge_methods_supported: ["S256"]`).
 //
-// GET /OAuthAuthorize (the consent page) and POST /OAuthAuthorize (its Approve)
-// refuse a request whose code_challenge is absent, empty, not a string, or not
-// 43-128 base64url characters, or whose code_challenge_method is not exactly
-// "S256", with 400 invalid_request and the same body: GET before rendering the
-// form, POST before authentication and before any authorization code is stored.
-// The order on both is scope, then client, then PKCE. A deny is answered before
-// all three and needs no PKCE fields.
+// After the earlier request, scope and client checks pass, GET /OAuthAuthorize
+// (the consent page) and POST /OAuthAuthorize (its Approve) refuse a request
+// whose code_challenge is absent, empty, not a string, or not 43-128 base64url
+// characters, or whose code_challenge_method is not exactly "S256", with 400
+// invalid_request and the same body: GET before rendering the form, POST before
+// authentication and before any authorization code is stored. The order on both
+// is scope, then client, then PKCE. A deny is answered before all three and
+// needs no PKCE fields.
 //
-// POST /OAuthToken (authorization_code) requires the stored code row to carry
-// an S256 challenge (invalid_grant otherwise), a code_verifier (invalid_request
-// when it is missing, empty or not a string) and a verifier whose S256 hash
-// equals the stored challenge (invalid_grant otherwise). Each refusal comes
-// before the code's single-use claim and its `used` write: a refused exchange
-// leaves the code unredeemed and records no claim, so the same code then
-// exchanges once with the matching verifier.
+// The authorization-code exchange (POST /OAuthToken, grant_type
+// authorization_code) requires the stored code row to carry an S256 challenge
+// (invalid_grant otherwise). For an otherwise valid, unused code carrying an
+// S256 challenge, it requires a code_verifier (invalid_request when it is
+// missing, empty or not a string) whose S256 hash equals the stored challenge
+// (invalid_grant otherwise). These refusals come before the code's single-use
+// claim and its `used` write, and record no claim. After a verifier refusal of
+// an otherwise valid, unused code, the same code still exchanges once with the
+// matching verifier; a code stored without an S256 challenge is refused at
+// every exchange.
 //
 // This exercises real Harper over HTTP (a Harper the harness spawns, as CI
 // runs it, or an existing one when HARPER_HTTP_URL is set). The OAuthAuthCode

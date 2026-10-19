@@ -28,8 +28,10 @@ import { esc } from "./admin-layout.js";
  * 1.0 constraints (per FLAIR-PRINCIPALS § 2):
  *   - Only https://claude.com/api/mcp/auth_callback permitted as redirect URI
  *   - PKCE required (S256 only): GET and POST /OAuthAuthorize refuse a request
- *     without an S256 code_challenge (checkConsentPkce), and the token
- *     endpoint requires the stored challenge and a matching code_verifier
+ *     without an S256 code_challenge (checkConsentPkce), and the
+ *     authorization-code exchange at /OAuthToken requires the stored challenge
+ *     and a matching code_verifier (the refresh_token and jwt-bearer grants
+ *     take other branches)
  *   - Access tokens: max 1 hour
  *   - Refresh token rotation on each use
  *   - No "remember this decision" — each authorize is explicit
