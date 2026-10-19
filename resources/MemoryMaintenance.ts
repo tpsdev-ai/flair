@@ -40,6 +40,20 @@ import { withOwnedTransaction } from "./request-transaction.js";
 import { recordMemoryDeletion } from "./memory-deletion-history.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 
+/** What a request's `agentId` says about the run's target. A run names an agent
+ *  only when the field is a non-blank string; an ABSENT field is a fleet-wide
+ *  admin run, and any other supplied value is invalid. */
+type RequestedAgent =
+  | { kind: "absent" }
+  | { kind: "named"; agentId: string }
+  | { kind: "invalid" };
+
+function parseRequestedAgent(value: unknown): RequestedAgent {
+  if (value === undefined) return { kind: "absent" };
+  if (typeof value !== "string" || value.trim().length === 0) return { kind: "invalid" };
+  return { kind: "named", agentId: value };
+}
+
 export class MemoryMaintenance extends Resource {
   /** POST requires auth — either an agent acting on its own memories, or admin. */
   allowCreate(): boolean {
@@ -59,11 +73,19 @@ export class MemoryMaintenance extends Resource {
 
     // Scope rules:
     //   - Admin can pass agentId to maintain a specific agent (or omit it
-    //     for fleet-wide maintenance).
+    //     for fleet-wide maintenance). An admin-supplied agentId that is not a
+    //     non-blank string is refused.
     //   - Non-admin agents are scoped to their own memories — bodyAgentId
     //     either matches the authenticated agent or is ignored.
+    const requestedAgent = parseRequestedAgent(bodyAgentId);
+    if (callerIsAdmin && requestedAgent.kind === "invalid") {
+      return new Response(JSON.stringify({ error: "agentId must be a non-empty string" }), {
+        status: 400,
+        headers: { "content-type": "application/json" },
+      });
+    }
     const targetAgent: string | undefined = callerIsAdmin
-      ? bodyAgentId
+      ? (requestedAgent.kind === "named" ? requestedAgent.agentId : undefined)
       : actorId;
 
     if (!targetAgent && !callerIsAdmin) {
@@ -221,23 +243,29 @@ export class MemoryMaintenance extends Resource {
         throw new Error("MemoryHostSource table unavailable (orphan sweep)");
       }
       if (pointerTable?.search && !dryRun) {
-        // Scope the sweep by the same rule as the Memory loop above. The
-        // table-wide pointer search supplies each row; a non-admin run, and an
-        // admin run that names an agent, then keeps only pointer rows whose
-        // stamped author is that agent, before the pointed Memory read and every
-        // later per-row effect (count, error, delete). A pointer's owner is the
-        // `authorId` the write path stamped on the row; a pointer with an empty
-        // author has no owner and is outside an owner-targeted run. No target
-        // means fleet-wide admin maintenance, which considers every pointer row.
+        // Scope the sweep by the same rule as the Memory loop above: a run
+        // that names an agent searches the pointer table by its indexed
+        // `authorId`, so that agent's rows are the rows supplied; a fleet-wide
+        // run scans every row. The in-process check applies the same rule to
+        // each row before the pointed Memory read and every later per-row effect
+        // (count, error, delete). A pointer's owner is the `authorId` the write
+        // path stamped on the row; a pointer with an empty author has no owner
+        // and is outside an owner-targeted run.
         // How a pointer replaced after this selection is handled, and the bound
         // on that, is stated at the owned transaction below.
         const pointerInScope = (pointer: any): boolean => {
           if (!targetAgent) return true;
-          const author = pointer?.authorId;
-          if (typeof author !== "string" || author.length === 0) return false;
-          return author === targetAgent;
+          const author = parseRequestedAgent(pointer?.authorId);
+          return author.kind === "named" && author.agentId === targetAgent;
         };
-        for await (const ptr of pointerTable.search()) {
+        // A scoped run's pointer search reads only the target agent's rows:
+        // authorId is @indexed in schemas/memory.graphql, so the search is an
+        // indexed condition rather than a table-wide scan filtered in process.
+        // No target means fleet-wide admin maintenance, which scans every row.
+        const pointerSearch = targetAgent
+          ? pointerTable.search({ conditions: [{ attribute: "authorId", comparator: "equals", value: targetAgent }] })
+          : pointerTable.search();
+        for await (const ptr of pointerSearch) {
           if (!pointerInScope(ptr)) continue;
           const memoryId = ptr?.memoryId;
           if (typeof memoryId !== "string" || memoryId.length === 0) continue;
