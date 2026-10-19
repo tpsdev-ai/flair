@@ -83,7 +83,7 @@ test("reports a written row that the committed agentId index does not list", asy
 });
 
 for (const count of [50, 200]) {
-  test(`index entries visited grow linearly with the number of written rows (${count})`, async () => {
+  test(`mocked agentId search results consumed grow linearly with the number of selected rows when every write succeeds (${count})`, async () => {
     rows = makeRows(count);
     countIndexVisits = true;
     const result = await reindexer().post({ batchSize: 1000 });
