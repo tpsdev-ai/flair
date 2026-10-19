@@ -1,7 +1,9 @@
 // agent-put-immutable-2696.test.ts — flair#2696.
 //
-// An Agent PUT is an administrator operation. A signed PUT from an agent that
-// is not an administrator is refused 403 and writes nothing: with
+// An Agent PUT is an administrator operation. The target id is checked first:
+// an id outside the agent-id rule is refused 400 (agent-id-rule-2359.test.ts).
+// For a valid id, a signed PUT from an agent that is not an administrator is
+// refused 403 and writes nothing: with
 // `agent_put_admin_only` when the record exists, and by Harper's create check
 // (the resource's allowCreate(), administrators only) when it does not. An
 // anonymous PUT is refused. An administrator's PUT (a signed admin agent or
@@ -12,7 +14,8 @@
 // supplies other values or omits them; updatedAt is set by the handler; role
 // and admin are reconciled. Every other field comes from the body, so an
 // ordinary field the body omits (`status` and `role` included) is not kept. An
-// administrator's PUT whose target id has no stored row is refused with 404
+// administrator's PUT to a valid id with no stored row (and no body id that
+// disagrees with the URL's) is refused with 404
 // `agent_put_requires_existing` (its message names POST /AgentSeed, a creation
 // path; POST /Agent/ also creates a row) and writes nothing. PATCH keeps its merge behaviour. A deletion or a key rotation
 // committed after an administrator's PUT's first read and before its re-read
@@ -187,7 +190,8 @@ describe("flair#2696 — an Agent PUT updates an existing row and carries its im
     };
     const base = { id, name: id, role: "agent", status: "active" };
 
-    // The body supplies different values for every carried field.
+    // The body supplies different values for originatorInstanceId and every
+    // receiver federation field.
     const supplied = await basicPut({
       ...base, displayName: "basic-supplied",
       originatorInstanceId: "inst-forged", _originatorInstanceId: "forged", _syncedFrom: "forged", _syncedAt: "1999-01-01T00:00:00.000Z",

@@ -1,8 +1,8 @@
 // agent-authority-guard-2696.test.ts — flair#2696, against a REAL Harper.
 //
-// An Agent PUT is an administrator operation: a signed PUT from an agent that
-// is not an administrator is refused 403 `agent_put_admin_only`, whatever its
-// body names, and the row is byte-identical afterwards. Such an agent updates
+// An Agent PUT is an administrator operation: a signed PUT to an existing row
+// with a valid id, from an agent that is not an administrator, is refused 403
+// `agent_put_admin_only` whatever its body names, and the row is byte-identical afterwards. Such an agent updates
 // its own record with PATCH, which merges the body into the stored row.
 //
 // A non-admin PATCH that names `role` or `admin` goes through the guard in

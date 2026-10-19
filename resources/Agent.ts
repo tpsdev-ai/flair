@@ -239,7 +239,8 @@ export class Agent extends (databases as any).flair.Agent {
 
     // An Agent PUT is an administrator operation (flair#2696). It is a full
     // replacement. The server sets these fields, whatever the body says: the
-    // id is the URL's target; createdAt, publicKey, originatorInstanceId and
+    // id is the URL's target (a trusted in-process call with no URL target uses
+    // its body id); createdAt, publicKey, originatorInstanceId and
     // the receiver federation fields (_originatorInstanceId, _syncedFrom,
     // _syncedAt) are carried from the stored row; updatedAt is set here; and
     // role and admin are reconciled (an admin role or `admin: true` sets both,
