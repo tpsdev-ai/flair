@@ -340,7 +340,7 @@ describe("tampering, records and revocation (#2664)", () => {
   });
 });
 
-describe("approval that fails or is killed part-way leaves no approved record (#2664)", () => {
+describe("approval that fails or is killed before the record is published leaves no approved record (#2664)", () => {
   const recordPath = (root: string) => join(root, "approvals", `${SHA}.json`);
   const temps = (root: string) => ["archives", "approvals"].flatMap((dir) =>
     existsSync(join(root, dir)) ? readdirSync(join(root, dir)).filter((name) => name.endsWith(".tmp")) : []);
