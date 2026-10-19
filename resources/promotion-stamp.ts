@@ -78,7 +78,9 @@ function isStaleBasis(stored: any, written: PromotedRowIdentity | undefined): bo
   return typeof bound === "string" && bound.length > 0 && bound !== promotionContentHash(stored.content);
 }
 
-function memoryPrimaryStore(): unknown {
+/** The `Memory.primaryStore` write-lock handle. Also used by auto-promotion's
+ *  adoption of a recorded row (AutoPromoteCandidates.ts, flair#2714). */
+export function memoryPrimaryStore(): unknown {
   return (databases as any)?.flair?.Memory?.primaryStore;
 }
 

@@ -864,15 +864,16 @@ describe("ADK auto-promote wiring (#1205b-2)", () => {
     expect(typeof autoPromoteCalls[0].limit).toBe("number");
     expect(autoPromoteCalls[0].limit).toBeGreaterThan(0);
     // outcome recorded on the audit row.
-    expect(r.logRow.autoPromoted).toEqual({ promoted: 2, skipped: 1, incomplete: 0 });
+    expect(r.logRow.autoPromoted).toEqual({ promoted: 2, skipped: 1, incomplete: 0, unconfirmed: 0 });
     expect(r.logRow.errors).toEqual([]);
   });
 
   // flair#2714: a promotion whose candidate update failed is reported by the
-  // server under `incomplete`, apart from `promoted`. The runner carries its
-  // count onto the audit row rather than dropping it, and does not add it to
-  // the promoted count.
-  it("records the server's incomplete promotions apart from the promoted count", async () => {
+  // server under `incomplete` (candidate read back pending) or `unconfirmed`
+  // (state not confirmed), apart from `promoted`. The runner carries both
+  // counts onto the audit row rather than dropping them, and adds neither to
+  // the promoted or skipped counts.
+  it("records the server's incomplete and unconfirmed promotions apart from the promoted count", async () => {
     const { api } = makeTagAwareApi({
       activeTags: ["adk:app:alice"],
       reflect: () => ({ candidates: [{ id: "cand_alice" }], count: 1, model: "default", gathered: 1, unreflected: 1 }),
@@ -884,24 +885,28 @@ describe("ADK auto-promote wiring (#1205b-2)", () => {
           { memoryId: "m-2", candidateId: "c-2", error: "write failed" },
           { memoryId: "m-3", candidateId: "c-3", error: "write failed" },
         ],
+        unconfirmed: [{ memoryId: "m-4", candidateId: "c-4", error: "write failed", readBack: "read failed: timeout" }],
         count: 1,
-        considered: 3,
+        considered: 4,
       }),
     });
     const r = await runNightlyCycle(baseOpts({ apiCall: api }));
     expect(r.status).toBe("completed");
-    expect(r.logRow.autoPromoted).toEqual({ promoted: 1, skipped: 0, incomplete: 2 });
+    expect(r.logRow.autoPromoted).toEqual({ promoted: 1, skipped: 0, incomplete: 2, unconfirmed: 1 });
     expect(formatAutoPromoted(r.logRow.autoPromoted!)).toBe(
-      "Auto-promoted: 1 to own memory (0 left pending); 2 incomplete (memory written, candidate update failed; left pending for the next cycle)",
+      "Auto-promoted: 1 to own memory (0 skipped); 2 incomplete (memory written, candidate update failed, candidate still pending); 1 unconfirmed (memory written, candidate update failed, candidate state not confirmed)",
     );
   });
 
-  it("formats the run-once auto-promote line, naming incomplete promotions only when there are any", () => {
-    expect(formatAutoPromoted({ promoted: 2, skipped: 1, incomplete: 0 })).toBe("Auto-promoted: 2 to own memory (1 left pending)");
-    // A log row written before `incomplete` existed.
-    expect(formatAutoPromoted({ promoted: 2, skipped: 1 })).toBe("Auto-promoted: 2 to own memory (1 left pending)");
+  it("formats the run-once auto-promote line, naming incomplete and unconfirmed promotions only when there are any", () => {
+    expect(formatAutoPromoted({ promoted: 2, skipped: 1, incomplete: 0, unconfirmed: 0 })).toBe("Auto-promoted: 2 to own memory (1 skipped)");
+    // A log row written before `incomplete` and `unconfirmed` existed.
+    expect(formatAutoPromoted({ promoted: 2, skipped: 1 })).toBe("Auto-promoted: 2 to own memory (1 skipped)");
     expect(formatAutoPromoted({ promoted: 0, skipped: 0, incomplete: 1 })).toBe(
-      "Auto-promoted: 0 to own memory (0 left pending); 1 incomplete (memory written, candidate update failed; left pending for the next cycle)",
+      "Auto-promoted: 0 to own memory (0 skipped); 1 incomplete (memory written, candidate update failed, candidate still pending)",
+    );
+    expect(formatAutoPromoted({ promoted: 0, skipped: 3, unconfirmed: 2 })).toBe(
+      "Auto-promoted: 0 to own memory (3 skipped); 2 unconfirmed (memory written, candidate update failed, candidate state not confirmed)",
     );
   });
 
