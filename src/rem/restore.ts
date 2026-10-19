@@ -272,12 +272,16 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
 
   // 5. Delete current memories, souls, and leftover candidates. Candidates
   // are not in the snapshot, but refuseLearnedSoulWrite matches claim text,
-  // so a leftover row 403s Soul PUT after operator auth succeeds.
+  // so a leftover row 403s Soul PUT after operator auth succeeds. A failed
+  // candidate listing stops the restore before any delete.
   let currentCandidates: any[] = [];
   try {
     currentCandidates = await listAgentCandidates(opts.opsSearch, opts.agentId);
   } catch (err: any) {
     errors.push(`fetch-candidates: ${err?.message ?? String(err)}`);
+    result.status = "failed";
+    rmSync(tmp, { recursive: true, force: true });
+    return result;
   }
   for (const m of currentMem) {
     if (!m?.id) continue;

@@ -41,7 +41,7 @@ import { stampMemoryPromotionIsolated, type PromotedRowIdentity } from "./promot
  */
 
 import { Resource, databases, logger } from "harper";
-import { isAdmin, allowVerified } from "./agent-auth.js";
+import { annotatedCallerIsAdmin, allowVerified } from "./agent-auth.js";
 import { resolveReflectActor } from "./memory-reflect-lib.js";
 import { agentContext } from "./in-process.js";
 import {
@@ -134,7 +134,7 @@ export class AutoPromoteCandidates extends Resource {
     const request = ctx?.request ?? ctx;
     const actorId: string | undefined = request?.tpsAgent;
     const callerIsAdmin: boolean =
-      request?.tpsAgentIsAdmin === true || (actorId ? await isAdmin(actorId) : false);
+      request?.tpsAgentIsAdmin === true || (await annotatedCallerIsAdmin(request));
 
     const actorResolution = resolveReflectActor({ bodyAgentId, actorId, callerIsAdmin });
     if (actorResolution.error) {

@@ -26,7 +26,7 @@
  */
 
 import { Resource, databases } from "harper";
-import { isAdmin, allowAdmin } from "./agent-auth.js";
+import { annotatedCallerIsAdmin, allowAdmin } from "./agent-auth.js";
 import { WriteBackConflictError, writeBackCommittedRow, writeBackIdentity } from "./write-back.js";
 
 /** The re-PUT's row was confirmed after its commit, but a later agentId-index
@@ -72,7 +72,7 @@ export class MemoryReindex extends Resource {
     const isBasicAdmin = basicAgent === "admin";
     const isEd25519Admin = Boolean(authAgent) && request?.tpsAgentIsAdmin === true;
 
-    if (!isBasicAdmin && !(isEd25519Admin && (await isAdmin(authAgent!)))) {
+    if (!isBasicAdmin && !(isEd25519Admin && (await annotatedCallerIsAdmin(request)))) {
       return new Response(
         JSON.stringify({ error: "forbidden: admin required" }),
         { status: 403, headers: { "Content-Type": "application/json" } },

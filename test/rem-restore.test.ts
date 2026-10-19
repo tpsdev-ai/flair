@@ -397,6 +397,33 @@ describe("applySnapshot — real restore", () => {
     // flair#2680: restore takes no candidate count, so the metadata says so.
     expect(JSON.parse(readFileSync(join(extractDir, "metadata.json"), "utf-8")).pendingCandidateCount).toBeNull();
   });
+
+  it("a failed candidate listing stops --apply before any delete or write (flair#2687)", async () => {
+    const snapshotPath = await makeTestSnapshot();
+    const { api, calls } = recordingApi({
+      "GET:/Memory": () => [{ id: "mem-1", agentId: "test-agent" }],
+      "GET:/Soul": () => [{ id: "soul-1", agentId: "test-agent" }],
+    });
+    const opsSearch: OpsSearch = async () => {
+      throw new Error("ops down");
+    };
+
+    const r = await applySnapshot({
+      agentId: "test-agent",
+      snapshotPath,
+      flairVersion: "0.0.0-test",
+      apiCall: api,
+      opsSearch,
+      preRestoreSnapshotRoot: snapshotRoot,
+      tmpRootOverride: testRoot,
+    });
+
+    expect(r.status).toBe("failed");
+    const writes = calls.filter((c) => ["DELETE", "PUT", "POST", "PATCH"].includes(c.method));
+    expect(writes).toEqual([]);
+    expect(r.deleted).toEqual({ memories: 0, souls: 0, candidates: 0 });
+    expect(r.errors).toEqual(["fetch-candidates: ops down"]);
+  });
 });
 
 describe("applySnapshot — post-restore verification (detects silent write drift)", () => {

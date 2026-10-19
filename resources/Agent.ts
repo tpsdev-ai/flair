@@ -1,5 +1,5 @@
 import { databases } from "harper";
-import { isAdmin, resolveAgentAuth, allowVerified, allowAdmin, invalidateAdminCache } from "./agent-auth.js";
+import { resolveAgentAuth, allowVerified, allowAdmin } from "./agent-auth.js";
 import { agentRecordIsAdmin, reconcileAdminFields } from "./agent-admin.js";
 import { admitPrincipalWrite, statusWriteRefusal } from "./agent-status-guard.js";
 import { applyFederationBookkeeping, applyOriginatorInstanceId, dropClientFederationBookkeeping, resolveStoredRow, stampOriginatorOnCreate } from "./originator-instance.js";
@@ -258,7 +258,11 @@ export class Agent extends (databases as any).flair.Agent {
     // which merges the body into the stored row. Only an administrator or a
     // trusted internal call goes past this point; anonymous and unrecognized
     // verdicts are refused (by Harper's allowUpdate()/allowCreate() checks or
-    // by authorizePrincipalWrite).
+    // by authorizePrincipalWrite). "Administrator" is the caller verdict
+    // authorizePrincipalWrite uses too: for a signed request, the decision the
+    // request gate took from the Agent row it verified the signature against
+    // (agentIsAdmin in resources/agent-auth.ts: role "admin" on that row, or an
+    // id FLAIR_ADMIN_AGENTS names).
     if (admitPrincipalWrite(await resolveAgentAuth((this as any).getContext?.())) === "non-admin") {
       return new Response(JSON.stringify({
         error: "agent_put_admin_only",
@@ -346,7 +350,6 @@ export class Agent extends (databases as any).flair.Agent {
     });
     if (outcome.kind === "denied") return outcome.denial;
     if (outcome.kind === "gone") return requiresExisting();
-    invalidateAdminCache();
     return outcome.result;
   }
 
@@ -449,9 +452,7 @@ export class Agent extends (databases as any).flair.Agent {
       content.updatedAt = new Date().toISOString();
     }
 
-    const result = await super.patch(content, query);
-    invalidateAdminCache();
-    return result;
+    return super.patch(content, query);
   }
 
   /**
@@ -568,7 +569,6 @@ export class Agent extends (databases as any).flair.Agent {
     }
 
     if (outcome.kind === "no-instance") return noInstance();
-    invalidateAdminCache();
     if (outcome.kind === "no-row") return noRow();
     if (outcome.kind === "ineligible") return ineligible();
     return new Response(
@@ -659,7 +659,6 @@ export class Agent extends (databases as any).flair.Agent {
       throw err;
     }
 
-    invalidateAdminCache();
     if (outcome.kind === "no-row") return noRow();
     if (outcome.kind === "unavailable") return unavailable();
     if (outcome.kind === "refused") return immutable();

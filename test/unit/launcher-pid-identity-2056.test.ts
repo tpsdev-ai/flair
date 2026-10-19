@@ -18,22 +18,56 @@
 // first process listening on the port, if any. The Harper-shaped processes
 // here are timer stubs: they serve nothing.
 //
-// Hermetic: the stub Harper the launcher execs only prints a marker. Each
-// launcher run is a spawnSync with a timeout, and each case has its own
-// timeout. The background processes this file starts are killed in afterEach
-// by the pids it recorded; each also exits by itself within 120 s, or (the
-// `sh` reading a pipe) when this process exits.
+// flair#2697: at startup Harper exits 4 when the pid it reads from hdb.pid
+// (Number.parseInt of the file) is truthy, is not its own pid, is not a
+// recognised PID-1 init, and process.kill(pid, 0) succeeds or fails with EPERM
+// (harperRefusesOn below replicates this; a negative value tests a process
+// group). The launcher acts only on a positive pid read the same way, and
+// leaves every other file to Harper: no digits, zero, a negative value, a
+// file containing a NUL byte, or a non-ASCII byte before the digits (the parse
+// runs with LC_ALL=C). It moves hdb.pid aside only on positive evidence
+// that the live pid is not this instance: the command line ps reports is not
+// Harper-shaped, is not empty, contains neither `harper` (any case) nor
+// ROOTPATH (as given or physical), and either the process runs as another uid,
+// or lsof is not installed, or lsof exits 0 with a listing that includes the
+// process's working directory and reports no file under ROOTPATH (an exit-0
+// listing can omit an open file, which this check cannot detect). A failed or
+// killed lsof, or a listing that is empty or lacks the working directory, is no
+// evidence. The move happens after the
+// admin-pass checks pass, just before the exec: `ln -n -P` to
+// hdb.pid.stale-<epoch seconds> (a .<n> suffix when that name exists), then
+// removal of hdb.pid. `ln -n -P` never replaces a name: a file or symlink
+// created there meanwhile makes it fail; for a real directory created there,
+// `ln` puts the link inside it, and the launcher removes that link, checks the
+// removal and treats the move as failed. One stderr line reports the move or
+// its failure, naming any link it could not remove; after a failed move,
+// Harper decides from the hdb.pid present when it starts. In every other case
+// the launcher leaves the file in place, including any Harper-shaped pid, with
+// or without a disagreeing sidecar. With an hdb.pid naming an unrelated live
+// process and nothing listening on the port, resolveInstanceServingPid returns
+// null, so the doctor plans no adopt (which would clean-stop that process).
+//
+// Hermetic: the stub Harper the launcher execs only prints a marker (and, for
+// flair#2697, what hdb.pid holds when it runs). `ps`, `ln`, `mv`, `rm`, `lsof`
+// and `date` stand-ins are put first on the launcher's PATH only, from a
+// directory in the case's own temporary root. Each launcher run is a spawnSync
+// with a timeout, and each case has its own timeout. The background processes
+// this file starts are killed in afterEach by the pids it recorded; each also
+// exits by itself within 120 s, or (the `sh` reading a pipe) when this process
+// exits.
 import { shellScript } from "../helpers/shell-script.ts";
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { connect, createServer } from "node:net";
 import { readProcessStartSecondMs, readProcessStartTimeMs } from "../../src/lib/process-start-time.js";
 import { isHarperProcessCommandLine, sidecarStartAgrees } from "../../src/lib/daemon-liveness.js";
 import { defaultReadProcessCmdline } from "../../src/lib/upgrade-exec-path.js";
 import { resolveInstanceServingPid } from "../../src/cli.ts";
+import { assessLaunchdManagement } from "../../src/lib/launchd-management.js";
+import { planLaunchdRepair } from "../../src/lib/launchd-repair.js";
 
 const REPO_ROOT = join(import.meta.dirname, "..", "..");
 const LAUNCHER = join(REPO_ROOT, "templates", "launchd", "start-flair-with-admin-pass.sh");
@@ -72,6 +106,261 @@ function childEnv(root: string): Record<string, string> {
 function stubHarper(root: string): string {
   const p = join(root, "stub-harper.js");
   writeFileSync(p, `console.log(${JSON.stringify(MARKER)});\n`);
+  return p;
+}
+
+const PIDFILE_AT_EXEC = "HDB_PID_AT_EXEC=";
+
+/**
+ * A stub Harper that prints the marker and what `<ROOTPATH>/hdb.pid` holds at
+ * the moment the launcher execs it: `HDB_PID_AT_EXEC=<content, trimmed>`, or
+ * `HDB_PID_AT_EXEC=absent` when there is no such file (flair#2697).
+ */
+function stubHarperReportingPidFile(root: string): string {
+  const p = join(root, "stub-harper-pidfile.js");
+  writeFileSync(
+    p,
+    [
+      `const { existsSync, readFileSync } = require("node:fs");`,
+      `const f = require("node:path").join(process.env.ROOTPATH, "hdb.pid");`,
+      `console.log(${JSON.stringify(MARKER)});`,
+      `console.log(${JSON.stringify(PIDFILE_AT_EXEC)} + (existsSync(f) ? readFileSync(f, "utf-8").trim() : "absent"));`,
+    ].join("\n") + "\n",
+  );
+  return p;
+}
+
+/** The `hdb.pid.stale-*` names in `root`, sorted. */
+function staleCopies(root: string): string[] {
+  return readdirSync(root).filter((n) => n.startsWith("hdb.pid.stale-")).sort();
+}
+
+/** The stderr lines the launcher itself printed. */
+function launcherLines(stderr: string): string[] {
+  return stderr.split("\n").filter((l) => l.startsWith("start-flair-with-admin-pass:"));
+}
+
+/** Whether lsof is on this host's PATH (the launcher consults it when it is). */
+const LSOF_AVAILABLE = Bun.which("lsof") !== null;
+
+/** The clause the launcher's move line uses for its lsof condition on this host. */
+const LSOF_CLAUSE = LSOF_AVAILABLE ? "lsof lists none of its open files there" : "lsof is not available to list its open files";
+
+/**
+ * The evidence part of the line the launcher prints when it moves (or fails to
+ * move) hdb.pid naming `pid`; `clause` is its last condition (LSOF_CLAUSE for a
+ * process of this user).
+ */
+function notThisInstance(pid: number, clause: string = LSOF_CLAUSE): string {
+  return `hdb.pid names pid ${pid}, a live process that is not this instance: its command line as ps reports it contains neither "harper" (in any case) nor this data directory, and ${clause}; `;
+}
+
+/** Exactly one launcher line, saying hdb.pid naming `pid` was moved to `stalePath`. */
+function expectMovedLine(stderr: string, pid: number, stalePath: string, clause: string = LSOF_CLAUSE): void {
+  const lines = launcherLines(stderr);
+  expect(lines.length).toBe(1);
+  expect(lines[0]).toContain(notThisInstance(pid, clause));
+  expect(lines[0]).toContain(`; moved hdb.pid to ${stalePath} and starting Harper.`);
+}
+
+/**
+ * Exactly one launcher line, saying hdb.pid naming `pid` could not be moved;
+ * with `leftLink`, it also names that link as one the launcher could not remove.
+ * The line makes no claim about what Harper then does: Harper decides from the
+ * hdb.pid present when it starts.
+ */
+function expectMoveFailedLine(stderr: string, pid: number, leftLink?: string): void {
+  const lines = launcherLines(stderr);
+  expect(lines.length).toBe(1);
+  expect(lines[0]).toContain(notThisInstance(pid));
+  const note = leftLink === undefined ? "" : ` (the link it made at ${leftLink} could not be removed)`;
+  expect(lines[0]).toContain(`; could not move hdb.pid aside${note}. Starting Harper, whose own check decides from the hdb.pid present when it starts;`);
+}
+
+const HARPER_DIST = join(REPO_ROOT, "node_modules", "harper", "dist");
+const HARPER_PROCESS_MANAGEMENT = join(HARPER_DIST, "utility", "processManagement", "processManagement.js");
+
+/**
+ * What Harper's own startup check does with `file`, evaluated in node (the
+ * runtime Harper runs under), replicating harper 5.3.1 line for line:
+ * readPidFile (processManagement.js:177-184) is Number.parseInt of the file
+ * read as utf8; getHdbPid (processManagement.js:116-128) ignores a falsy pid
+ * and its own pid; isProcessRunning (processManagement.js:190-206) is
+ * process.kill(pid, 0), with EPERM counted as running; run.js:177-181 exits 4
+ * when getHdbPid returns a pid. The PID-1 init branch is not replicated (no
+ * case here names pid 1). Returns the pid Harper would refuse on, or null.
+ * The "Harper's pid check source" test pins these lines to the installed Harper.
+ */
+function harperRefusesOn(file: string): number | null {
+  const code = [
+    `const fs = require("node:fs");`,
+    `let hdbPid; try { hdbPid = Number.parseInt(fs.readFileSync(process.argv[1], "utf8"), 10); } catch { hdbPid = null; }`,
+    `let running = false;`,
+    `if (hdbPid && hdbPid !== process.pid) { try { process.kill(hdbPid, 0); running = true; } catch (err) { running = err.code === "EPERM"; } }`,
+    `process.stdout.write(running ? String(hdbPid) : "none");`,
+  ].join("\n");
+  const r = spawnSync("node", ["-e", code, file], { encoding: "utf-8", timeout: 10_000 });
+  expect(r.status).toBe(0);
+  return r.stdout === "none" ? null : Number(r.stdout);
+}
+
+/** A live `sleep` in a process group of its own (so `-<pid>` names a live group). Returns its pid. */
+function startGroupLeader(): number {
+  const proc = spawn("sleep", ["60"], { detached: true, stdio: "ignore" });
+  const pid = proc.pid as number;
+  pids.push(pid);
+  return pid;
+}
+
+/** A PATH directory whose `lsof` stand-in behaves as `kind` says, never listing anything real. */
+function lsofStandIn(root: string, kind: "exit-1" | "listing-exit-1" | "empty-exit-0" | "no-cwd-exit-0" | "killed"): string {
+  const body = {
+    "exit-1": "exit 1",
+    "listing-exit-1": `printf 'p%s\\nfcwd\\nn/\\nftxt\\nn/bin/sh\\n' "$$"; exit 1`,
+    "empty-exit-0": "exit 0",
+    "no-cwd-exit-0": `printf 'p%s\\nf0\\nn/dev/null\\n' "$$"; exit 0`,
+    killed: "kill -9 $$",
+  }[kind];
+  const dir = join(root, `shim-lsof-${kind}`);
+  mkdirSync(dir, { recursive: true });
+  const p = join(dir, "lsof");
+  writeFileSync(p, `#!/bin/sh\n${body}\n`);
+  chmodSync(p, 0o755);
+  return dir;
+}
+
+/** The epoch the `date` stand-in from fixedDateShim answers for `date +%s`. */
+const FIXED_EPOCH = "1700000000";
+
+/** A PATH directory whose `date +%s` prints FIXED_EPOCH; every other date call is the real one. */
+function fixedDateShim(root: string): string {
+  return shimDir(root, "date", `if [ "$#" -eq 1 ] && [ "$1" = "+%s" ]; then echo ${FIXED_EPOCH}; exit 0; fi\nexec "${which("date")}" "$@"`);
+}
+
+/**
+ * A PATH directory whose `name` (ln or mv) first creates its LAST argument when
+ * it does not exist (a file holding `created-concurrently`, an empty directory,
+ * or a symlink to `symlinkTarget`), then runs the real command with the same
+ * arguments: a name taken by someone else between the launcher's check and its
+ * move. The stand-in only creates the race; the real command does the work.
+ */
+function racingShim(root: string, name: "ln" | "mv", kind: "file" | "dir" | "symlink", symlinkTarget?: string): string {
+  const create = kind === "dir" ? `mkdir "$last"`
+    : kind === "symlink" ? `"${which("ln")}" -s "${symlinkTarget}" "$last"`
+    : `printf 'created-concurrently\\n' > "$last"`;
+  const dir = join(root, `shim-race-${name}`);
+  mkdirSync(dir, { recursive: true });
+  const p = join(dir, name);
+  writeFileSync(p, `#!/bin/sh\nfor a in "$@"; do last="$a"; done\nif [ ! -e "$last" ]; then ${create}; fi\nexec "${which(name)}" "$@"\n`);
+  chmodSync(p, 0o755);
+  return dir;
+}
+
+/** `shimDirs` first, then this process's PATH. */
+function shimPath(...shimDirs: string[]): string {
+  return [...shimDirs, process.env.PATH ?? "/usr/bin:/bin"].join(":");
+}
+
+/** A live `sleep` run through a symlink named like a system daemon (`…/usr/libexec/logd-lookalike`). */
+function startDaemonLookalike(): number {
+  const dir = join(mkRoot(), "usr", "libexec");
+  mkdirSync(dir, { recursive: true });
+  const link = join(dir, "logd-lookalike");
+  symlinkSync(which("sleep"), link);
+  return startBackground([link, "60"]);
+}
+
+/**
+ * A live process of ANOTHER user (so `kill -0` from here fails with EPERM),
+ * pid above 1, whose command line does not contain `harper`; null when this
+ * process runs as root or ps lists none.
+ */
+function otherUserPid(): number | null {
+  if (typeof process.getuid !== "function" || process.getuid() === 0) return null;
+  const me = process.getuid();
+  const r = spawnSync("ps", ["-A", "-o", "pid=,uid=,command="], { encoding: "utf-8", timeout: 5_000 });
+  for (const line of (r.stdout ?? "").split("\n")) {
+    const m = line.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/);
+    if (!m) continue;
+    const pid = Number(m[1]);
+    if (pid <= 1 || Number(m[2]) === me || /harper/i.test(m[3])) continue;
+    try {
+      process.kill(pid, 0);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "EPERM") return pid;
+    }
+  }
+  return null;
+}
+
+/**
+ * A Harper-shaped timer script run by a node whose path contains a space:
+ * `<dir>/node bin dir/node` (a symlink to this host's node) followed by
+ * `<dir>/node_modules/harper/dist/bin/harper.js run .`, in a directory of its
+ * own (not a ROOTPATH). It serves nothing.
+ */
+function startSpacePathHarperEntry(): number {
+  const dir = mkRoot();
+  const nodeDir = join(dir, "node bin dir");
+  mkdirSync(nodeDir, { recursive: true });
+  const spaceNode = join(nodeDir, "node");
+  symlinkSync(which("node"), spaceNode);
+  const scriptDir = join(dir, "node_modules", "harper", "dist", "bin");
+  mkdirSync(scriptDir, { recursive: true });
+  const script = join(scriptDir, "harper.js");
+  writeFileSync(script, "setTimeout(() => {}, 120_000);\n");
+  return startBackground([spaceNode, script, "run", "."]);
+}
+
+/**
+ * A live `node -e` that holds `file` open, with neither `harper` nor the
+ * file's path on its command line (the path comes from its environment).
+ * Returns once lsof lists the open file.
+ */
+async function startFileHolder(file: string): Promise<number> {
+  writeFileSync(file, "x");
+  const proc = Bun.spawn(["node", "-e", "require('node:fs').openSync(process.env.HOLD_FILE, 'r'); setTimeout(() => {}, 120000)"], {
+    env: { ...process.env, HOLD_FILE: file },
+    stdin: "ignore",
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  pids.push(proc.pid);
+  const want = `n${realpathSync(file)}`;
+  for (let i = 0; i < 250; i++) {
+    const r = spawnSync("lsof", ["-n", "-P", "-w", "-p", String(proc.pid), "-Fn"], { encoding: "utf-8", timeout: 5_000 });
+    if ((r.stdout ?? "").split("\n").includes(want)) return proc.pid;
+    await Bun.sleep(20);
+  }
+  throw new Error(`pid ${proc.pid} did not open ${file}`);
+}
+
+/** A pid that was alive a moment ago and has exited. */
+function deadPid(): number {
+  const r = spawnSync("sh", [shellScript("echo $$")], { encoding: "utf-8", timeout: 5_000 });
+  const pid = Number(r.stdout.trim());
+  expect(Number.isInteger(pid) && pid > 1).toBe(true);
+  expect(alive(pid)).toBe(false);
+  return pid;
+}
+
+/**
+ * A directory holding one executable `name` (a shell script with `body`), to
+ * put first on the launcher's PATH.
+ */
+function shimDir(root: string, name: string, body: string): string {
+  const dir = join(root, `shim-${name}`);
+  mkdirSync(dir, { recursive: true });
+  const p = join(dir, name);
+  writeFileSync(p, `#!/bin/sh\n${body}\n`);
+  chmodSync(p, 0o755);
+  return dir;
+}
+
+/** The absolute path of `cmd` on this process's PATH (a lookup, not a spawn). */
+function which(cmd: string): string {
+  const p = Bun.which(cmd) ?? "";
+  expect(p.startsWith("/")).toBe(true);
   return p;
 }
 
@@ -270,14 +559,19 @@ async function freePort(): Promise<number> {
   });
 }
 
-function runLauncher(root: string, node: string, harperBin: string): { status: number | null; stdout: string; stderr: string } {
+function runLauncher(
+  root: string,
+  node: string,
+  harperBin: string,
+  envOverride: Record<string, string> = {},
+): { status: number | null; stdout: string; stderr: string } {
   const passFile = join(root, "admin-pass");
   writeFileSync(passFile, "not-a-real-secret\n", { mode: 0o600 });
   chmodSync(passFile, 0o600);
   const r = spawnSync("sh", [LAUNCHER, passFile, node, harperBin], {
     encoding: "utf-8",
     timeout: 20_000,
-    env: childEnv(root),
+    env: { ...childEnv(root), ...envOverride },
   });
   return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
 }
@@ -536,6 +830,452 @@ describe("flair#2056 — the launchd launcher refuses only when hdb.pid names a 
   }, 30_000);
 });
 
+describe("flair#2697 — the launcher moves aside an hdb.pid only on positive evidence that its live pid is not this instance", () => {
+  test("hdb.pid names a live UNRELATED process, no sidecar -> moved to hdb.pid.stale-<epoch>; Harper starts with no hdb.pid", async () => {
+    const root = mkRoot();
+    const pid = startSleep();
+    await waitStarted(pid);
+    writeFileSync(join(root, "hdb.pid"), `${pid}\n`);
+    const r = runLauncher(root, "node", stubHarperReportingPidFile(root));
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain(MARKER);
+    expect(r.stdout).toContain(`${PIDFILE_AT_EXEC}absent`);
+    expect(existsSync(join(root, "hdb.pid"))).toBe(false);
+    const stale = staleCopies(root);
+    expect(stale.length).toBe(1);
+    expect(stale[0]).toMatch(/^hdb\.pid\.stale-\d+$/);
+    expect(readFileSync(join(root, stale[0]), "utf-8")).toBe(`${pid}\n`);
+    expectMovedLine(r.stderr, pid, join(root, stale[0]));
+    expect(alive(pid)).toBe(true); // the unrelated process is not signalled
+  }, 30_000);
+
+  test("hdb.pid names a live process whose path looks like a system daemon -> moved aside", async () => {
+    const root = mkRoot();
+    const pid = startDaemonLookalike();
+    await waitStarted(pid);
+    expect(psCommand(pid)).toContain("/usr/libexec/logd-lookalike"); // what the launcher reads
+    writeFileSync(join(root, "hdb.pid"), `${pid}\n`);
+    const r = runLauncher(root, "node", stubHarperReportingPidFile(root));
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain(`${PIDFILE_AT_EXEC}absent`);
+    const stale = staleCopies(root);
+    expect(stale.length).toBe(1);
+    expect(readFileSync(join(root, stale[0]), "utf-8")).toBe(`${pid}\n`);
+    expectMovedLine(r.stderr, pid, join(root, stale[0]));
+  }, 30_000);
+
+  // The incident shape: the reused pid belongs to a system daemon of another
+  // user, so `kill -0` fails with EPERM, which Harper's isProcessRunning still
+  // counts as running.
+  const otherPid = otherUserPid();
+  test.skipIf(otherPid === null)("hdb.pid names a live process of ANOTHER user (kill -0 gets EPERM) -> moved aside", () => {
+    const pid = otherPid as number;
+    let code = "";
+    try {
+      process.kill(pid, 0);
+    } catch (err) {
+      code = (err as NodeJS.ErrnoException).code ?? "";
+    }
+    expect(code).toBe("EPERM");
+    const root = mkRoot();
+    writeFileSync(join(root, "hdb.pid"), `${pid}\n`);
+    expect(harperRefusesOn(join(root, "hdb.pid"))).toBe(pid); // Harper's own check refuses on it
+    const uid = spawnSync("ps", ["-o", "uid=", "-p", String(pid)], { encoding: "utf-8", timeout: 5_000 }).stdout.trim();
+    const r = runLauncher(root, "node", stubHarperReportingPidFile(root));
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain(`${PIDFILE_AT_EXEC}absent`);
+    const stale = staleCopies(root);
+    expect(stale.length).toBe(1);
+    expect(readFileSync(join(root, stale[0]), "utf-8")).toBe(`${pid}\n`);
+    expectMovedLine(r.stderr, pid, join(root, stale[0]), `it runs as uid ${uid}, not as this launcher's uid ${process.getuid?.()}`);
+  }, 30_000);
+
+  // A sidecar does not keep an unrelated process in hdb.pid.
+  const SIDECARS: ReadonlyArray<readonly [string, (pid: number) => [number, number]]> = [
+    ["a sidecar naming a DIFFERENT pid", (pid) => [pid + 1, Date.now()]],
+    ["a sidecar with the same pid and a start time 2500 ms off", (pid) => [pid, psLstartSecond(pid) * 1000 + 2_500]],
+    ["a sidecar that agrees on pid and start second", (pid) => [pid, psLstartSecond(pid) * 1000]],
+  ];
+  for (const [label, sidecarFor] of SIDECARS) {
+    test(`hdb.pid names a live UNRELATED process with ${label} -> moved aside; Harper starts with no hdb.pid`, async () => {
+      const root = mkRoot();
+      const pid = startSleep();
+      await waitStarted(pid);
+      const [sidePid, sideStart] = sidecarFor(pid);
+      writeSidecar(root, sidePid, sideStart);
+      writeFileSync(join(root, "hdb.pid"), `${pid}\n`);
+      const r = runLauncher(root, "node", stubHarperReportingPidFile(root));
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain(MARKER);
+      expect(r.stdout).toContain(`${PIDFILE_AT_EXEC}absent`);
+      const stale = staleCopies(root);
+      expect(stale.length).toBe(1);
+      expect(readFileSync(join(root, stale[0]), "utf-8")).toBe(`${pid}\n`);
+      expectMovedLine(r.stderr, pid, join(root, stale[0]));
+    }, 30_000);
+  }
+
+  test("a Harper run by a node whose path contains a SPACE (not Harper-shaped to the ps parse) -> hdb.pid untouched; Harper is exec'd and sees it", async () => {
+    const root = mkRoot();
+    const pid = startSpacePathHarperEntry();
+    await waitStarted(pid);
+    const line = psCommand(pid);
+    expect(line).toContain("/node bin dir/node "); // the space is in the executable path
+    expect(isHarperProcessCommandLine(line)).toBe(false); // the shape check rejects it
+    expect(line).not.toContain(root);
+    writeFileSync(join(root, "hdb.pid"), `${pid}\n`);
+    const r = runLauncher(root, "node", stubHarperReportingPidFile(root));
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain(MARKER);
+    expect(r.stdout).toContain(`${PIDFILE_AT_EXEC}${pid}`);
+    expect(launcherLines(r.stderr)).toEqual([]);
+    expect(readFileSync(join(root, "hdb.pid"), "utf-8")).toBe(`${pid}\n`);
+    expect(staleCopies(root)).toEqual([]);
+  }, 30_000);
+
+  // ROOTPATH is a symlink whose target path does not contain the link's path,
+  // so the command line names it in one form only.
+  test("a live process whose command line contains this ROOTPATH (as given, or as its physical path) -> hdb.pid untouched", async () => {
+    const target = join(mkRoot(), "actual-data");
+    mkdirSync(target);
+    const root = join(mkRoot(), "rootpath-link");
+    symlinkSync(target, root);
+    const physical = realpathSync(root);
+    expect(physical.includes(root)).toBe(false);
+    for (const named of [root, physical]) {
+      const pid = startBackground(["sh", shellScript("read -r line"), named], "pipe");
+      await waitStarted(pid);
+      expect(psCommand(pid)).toContain(named);
+      expect(psCommand(pid).toLowerCase()).not.toContain("harper");
+      writeFileSync(join(root, "hdb.pid"), `${pid}\n`);
+      const r = runLauncher(root, "node", stubHarperReportingPidFile(root));
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain(`${PIDFILE_AT_EXEC}${pid}`);
+      expect(launcherLines(r.stderr)).toEqual([]);
+      expect(readFileSync(join(root, "hdb.pid"), "utf-8")).toBe(`${pid}\n`);
+      expect(staleCopies(root)).toEqual([]);
+    }
+  }, 30_000);
+
+  test.skipIf(!LSOF_AVAILABLE)("a live process that holds a file open under ROOTPATH (lsof), with a clean command line -> hdb.pid untouched", async () => {
+    const root = mkRoot();
+    const pid = await startFileHolder(join(root, "data.mdb"));
+    expect(psCommand(pid).toLowerCase()).not.toContain("harper");
+    expect(psCommand(pid)).not.toContain(root);
+    expect(psCommand(pid)).not.toContain(realpathSync(root));
+    writeFileSync(join(root, "hdb.pid"), `${pid}\n`);
+    const r = runLauncher(root, "node", stubHarperReportingPidFile(root));
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain(`${PIDFILE_AT_EXEC}${pid}`);
+    expect(launcherLines(r.stderr)).toEqual([]);
+    expect(readFileSync(join(root, "hdb.pid"), "utf-8")).toBe(`${pid}\n`);
+    expect(staleCopies(root)).toEqual([]);
+  }, 30_000);
+
+  test("a Harper-shaped stub with an agreeing sidecar, and with NO sidecar -> refused (exit 0, no exec); hdb.pid untouched", async () => {
+    for (const withSidecar of [true, false]) {
+      const root = mkRoot();
+      const pid = startHarperEntry(root);
+      await waitStarted(pid);
+      if (withSidecar) writeSidecar(root, pid, psLstartSecond(pid) * 1000);
+      writeFileSync(join(root, "hdb.pid"), `${pid}\n`);
+      const r = runLauncher(root, "node", stubHarperReportingPidFile(root));
+      expect(r.status).toBe(0);
+      expect(r.stdout).not.toContain(MARKER);
+      expect(r.stderr).toContain(refusal(pid));
+      expect(launcherLines(r.stderr).length).toBe(1);
+      expect(readFileSync(join(root, "hdb.pid"), "utf-8")).toBe(`${pid}\n`);
+      expect(staleCopies(root)).toEqual([]);
+    }
+  }, 30_000);
+
+  test("a Harper-shaped stub with a DISAGREEING sidecar (other pid; start 60 s off) -> Harper is exec'd with hdb.pid untouched", async () => {
+    for (const sidecarFor of [(pid: number): [number, number] => [pid + 1, Date.now()], (pid: number): [number, number] => [pid, psLstartSecond(pid) * 1000 + 60_000]]) {
+      const root = mkRoot();
+      const pid = startHarperEntry(root);
+      await waitStarted(pid);
+      const [sidePid, sideStart] = sidecarFor(pid);
+      writeSidecar(root, sidePid, sideStart);
+      writeFileSync(join(root, "hdb.pid"), `${pid}\n`);
+      const r = runLauncher(root, "node", stubHarperReportingPidFile(root));
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain(MARKER);
+      // Harper's own check sees the live pid (and a real Harper exits 4 while it lives).
+      expect(r.stdout).toContain(`${PIDFILE_AT_EXEC}${pid}`);
+      expect(launcherLines(r.stderr)).toEqual([]);
+      expect(readFileSync(join(root, "hdb.pid"), "utf-8")).toBe(`${pid}\n`);
+      expect(staleCopies(root)).toEqual([]);
+    }
+  }, 30_000);
+
+  test("Harper's pid check source: the lines harperRefusesOn replicates are the installed Harper's", () => {
+    const pm = readFileSync(HARPER_PROCESS_MANAGEMENT, "utf-8");
+    expect(pm).toContain("return Number.parseInt(fs.readFileSync(pidFile, 'utf8'), 10);");
+    expect(pm).toContain("if (!hdbPid || hdbPid === process.pid)");
+    expect(pm).toContain("process.kill(pid, 0);");
+    expect(pm).toContain("if (err.code === 'EPERM') {");
+    const run = readFileSync(join(HARPER_DIST, "bin", "run.js"), "utf-8");
+    expect(run).toMatch(/getHdbPid\)\(\);\s*if \(hdbPid\) \{[\s\S]{0,200}?process\.exit\(4\);/);
+  });
+
+  // Harper reads hdb.pid with Number.parseInt(<contents>, 10).
+  test("a pid Harper ignores (dead; no digits; digits after junk; zero; empty; a NUL before the digits) -> untouched; Harper is exec'd and sees it", async () => {
+    const live = startSleep();
+    await waitStarted(live);
+    for (const content of [`${deadPid()}\n`, "not-a-pid\n", `junk${live}\n`, "0\n", "\n", `\u0000${live}\n`]) {
+      const root = mkRoot();
+      writeFileSync(join(root, "hdb.pid"), content);
+      expect(harperRefusesOn(join(root, "hdb.pid"))).toBeNull();
+      const r = runLauncher(root, "node", stubHarperReportingPidFile(root));
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain(MARKER);
+      expect(r.stdout).toContain(`${PIDFILE_AT_EXEC}${content.trim()}`);
+      expect(launcherLines(r.stderr)).toEqual([]);
+      expect(readFileSync(join(root, "hdb.pid"), "utf-8")).toBe(content);
+      expect(staleCopies(root)).toEqual([]);
+    }
+    expect(alive(live)).toBe(true);
+  }, 30_000);
+
+  // Harper's own check would refuse on these (exit 4); the launcher leaves them to it.
+  test("a NEGATIVE value naming a live process group, and a NUL after the digits -> Harper refuses on them; the launcher leaves hdb.pid in place", async () => {
+    const group = startGroupLeader();
+    await waitStarted(group);
+    expect(spawnSync("ps", ["-o", "pgid=", "-p", String(group)], { encoding: "utf-8", timeout: 5_000 }).stdout.trim()).toBe(String(group));
+    const live = startSleep();
+    await waitStarted(live);
+    for (const [content, refusedOn] of [[`-${group}\n`, -group], [`${live}\u0000\n`, live]] as const) {
+      const root = mkRoot();
+      writeFileSync(join(root, "hdb.pid"), content);
+      expect(harperRefusesOn(join(root, "hdb.pid"))).toBe(refusedOn);
+      const r = runLauncher(root, "node", stubHarperReportingPidFile(root));
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain(MARKER);
+      expect(launcherLines(r.stderr)).toEqual([]);
+      expect(readFileSync(join(root, "hdb.pid"), "utf-8")).toBe(content);
+      expect(staleCopies(root)).toEqual([]);
+    }
+  }, 30_000);
+
+  test("a no-break space before the digits (parseInt skips it) -> no launcher pid under LC_ALL=C.UTF-8 or C; Harper's own check decides; hdb.pid untouched", async () => {
+    const live = startSleep();
+    await waitStarted(live);
+    for (const locale of ["C.UTF-8", "C"]) {
+      const root = mkRoot();
+      const content = `\u00a0${live}\n`;
+      writeFileSync(join(root, "hdb.pid"), content);
+      expect([...readFileSync(join(root, "hdb.pid")).subarray(0, 2)]).toEqual([0xc2, 0xa0]); // U+00A0 as UTF-8
+      expect(harperRefusesOn(join(root, "hdb.pid"))).toBe(live); // Harper reads the pid
+      const r = runLauncher(root, "node", stubHarperReportingPidFile(root), { LC_ALL: locale });
+      expect(r.status, `LC_ALL=${locale}`).toBe(0);
+      expect(r.stdout).toContain(MARKER);
+      expect(launcherLines(r.stderr)).toEqual([]);
+      expect(readFileSync(join(root, "hdb.pid"), "utf-8")).toBe(content);
+      expect(staleCopies(root)).toEqual([]);
+    }
+  }, 30_000);
+
+  test("a pid Harper reads from leading whitespace, a +, leading zeros and trailing junk names the live process -> moved aside, content unchanged", async () => {
+    const pid = startSleep();
+    await waitStarted(pid);
+    for (const content of [`${pid}junk\n`, ` \t\n+00${pid}\n999\n`]) {
+      const root = mkRoot();
+      writeFileSync(join(root, "hdb.pid"), content);
+      expect(harperRefusesOn(join(root, "hdb.pid"))).toBe(pid); // Harper's own check refuses on it
+      const r = runLauncher(root, "node", stubHarperReportingPidFile(root));
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain(`${PIDFILE_AT_EXEC}absent`);
+      const stale = staleCopies(root);
+      expect(stale.length).toBe(1);
+      expect(readFileSync(join(root, stale[0]), "utf-8")).toBe(content);
+      expectMovedLine(r.stderr, pid, join(root, stale[0]));
+    }
+  }, 30_000);
+
+  test("an admin-pass file that fails its checks -> exit 1 before any move; hdb.pid untouched", async () => {
+    const root = mkRoot();
+    const pid = startSleep();
+    await waitStarted(pid);
+    writeFileSync(join(root, "hdb.pid"), `${pid}\n`);
+    const r = spawnSync("sh", [LAUNCHER, join(root, "no-such-admin-pass"), "node", stubHarperReportingPidFile(root)], {
+      encoding: "utf-8",
+      timeout: 20_000,
+      env: childEnv(root),
+    });
+    expect(r.status).toBe(1);
+    expect(r.stdout ?? "").not.toContain(MARKER);
+    expect(launcherLines(r.stderr ?? "")).toEqual([expect.stringContaining("admin-pass file not found")]);
+    expect(readFileSync(join(root, "hdb.pid"), "utf-8")).toBe(`${pid}\n`);
+    expect(staleCopies(root)).toEqual([]);
+  }, 30_000);
+
+  test("an existing hdb.pid.stale-<epoch>, .1 and .2 (a directory) are not overwritten; the copy takes .3", async () => {
+    const root = mkRoot();
+    const pid = startSleep();
+    await waitStarted(pid);
+    writeFileSync(join(root, `hdb.pid.stale-${FIXED_EPOCH}`), "older-0\n");
+    writeFileSync(join(root, `hdb.pid.stale-${FIXED_EPOCH}.1`), "older-1\n");
+    mkdirSync(join(root, `hdb.pid.stale-${FIXED_EPOCH}.2`));
+    writeFileSync(join(root, "hdb.pid"), `${pid}\n`);
+    const r = runLauncher(root, "node", stubHarperReportingPidFile(root), { PATH: shimPath(fixedDateShim(root)) });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain(`${PIDFILE_AT_EXEC}absent`);
+    expect(readFileSync(join(root, `hdb.pid.stale-${FIXED_EPOCH}`), "utf-8")).toBe("older-0\n");
+    expect(readFileSync(join(root, `hdb.pid.stale-${FIXED_EPOCH}.1`), "utf-8")).toBe("older-1\n");
+    expect(statSync(join(root, `hdb.pid.stale-${FIXED_EPOCH}.2`)).isDirectory()).toBe(true);
+    expect(readdirSync(join(root, `hdb.pid.stale-${FIXED_EPOCH}.2`))).toEqual([]);
+    expect(readFileSync(join(root, `hdb.pid.stale-${FIXED_EPOCH}.3`), "utf-8")).toBe(`${pid}\n`);
+    expect(staleCopies(root)).toEqual([`hdb.pid.stale-${FIXED_EPOCH}`, `hdb.pid.stale-${FIXED_EPOCH}.1`, `hdb.pid.stale-${FIXED_EPOCH}.2`, `hdb.pid.stale-${FIXED_EPOCH}.3`]);
+    expectMovedLine(r.stderr, pid, join(root, `hdb.pid.stale-${FIXED_EPOCH}.3`));
+  }, 30_000);
+
+  // A name created by someone else between the launcher's check and its move:
+  // `ln` and `mv` stand-ins create it first, then run the real command.
+  test("a FILE created at the chosen name just before the move is not replaced -> the move fails; the launcher does not remove hdb.pid", async () => {
+    const root = mkRoot();
+    const pid = startSleep();
+    await waitStarted(pid);
+    writeFileSync(join(root, "hdb.pid"), `${pid}\n`);
+    const shims = [fixedDateShim(root), racingShim(root, "ln", "file"), racingShim(root, "mv", "file")];
+    const r = runLauncher(root, "node", stubHarperReportingPidFile(root), { PATH: shimPath(...shims) });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain(`${PIDFILE_AT_EXEC}${pid}`);
+    expect(readFileSync(join(root, `hdb.pid.stale-${FIXED_EPOCH}`), "utf-8")).toBe("created-concurrently\n");
+    expect(readFileSync(join(root, "hdb.pid"), "utf-8")).toBe(`${pid}\n`);
+    expect(staleCopies(root)).toEqual([`hdb.pid.stale-${FIXED_EPOCH}`]);
+    expectMoveFailedLine(r.stderr, pid);
+  }, 30_000);
+
+  test("a DIRECTORY created at the chosen name just before the move: the link ln puts inside it is removed -> the move fails; the launcher does not remove hdb.pid", async () => {
+    const root = mkRoot();
+    const pid = startSleep();
+    await waitStarted(pid);
+    writeFileSync(join(root, "hdb.pid"), `${pid}\n`);
+    const shims = [fixedDateShim(root), racingShim(root, "ln", "dir"), racingShim(root, "mv", "dir")];
+    const r = runLauncher(root, "node", stubHarperReportingPidFile(root), { PATH: shimPath(...shims) });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain(`${PIDFILE_AT_EXEC}${pid}`);
+    expect(statSync(join(root, `hdb.pid.stale-${FIXED_EPOCH}`)).isDirectory()).toBe(true);
+    expect(readdirSync(join(root, `hdb.pid.stale-${FIXED_EPOCH}`))).toEqual([]);
+    expect(readFileSync(join(root, "hdb.pid"), "utf-8")).toBe(`${pid}\n`);
+    expectMoveFailedLine(r.stderr, pid);
+  }, 30_000);
+
+  // The real `ln` runs; the stand-in only creates the symlink first. With a
+  // failing `rm`, a link that `ln` had put inside the directory would stay
+  // there and be named in the line, so the case shows `ln` made none.
+  test("a SYMLINK to a directory created at the chosen name just before the move -> the real ln -n fails and links nothing into the directory; hdb.pid not removed by the launcher", async () => {
+    for (const failingRm of [false, true]) {
+      const root = mkRoot();
+      const target = join(mkRoot(), "elsewhere");
+      mkdirSync(target);
+      const pid = startSleep();
+      await waitStarted(pid);
+      writeFileSync(join(root, "hdb.pid"), `${pid}\n`);
+      const shims = [fixedDateShim(root), racingShim(root, "ln", "symlink", target), ...(failingRm ? [shimDir(root, "rm", "exit 1")] : [])];
+      const r = runLauncher(root, "node", stubHarperReportingPidFile(root), { PATH: shimPath(...shims) });
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain(MARKER);
+      const stale = join(root, `hdb.pid.stale-${FIXED_EPOCH}`);
+      expect(lstatSync(stale).isSymbolicLink()).toBe(true);
+      expect(readlinkSync(stale)).toBe(target);
+      expect(readdirSync(target)).toEqual([]);
+      expect(readFileSync(join(root, "hdb.pid"), "utf-8")).toBe(`${pid}\n`);
+      expectMoveFailedLine(r.stderr, pid);
+    }
+  }, 30_000);
+
+  test("a link the launcher cannot remove again (directory race; original not removable) is named in the failure line; the launcher does not remove hdb.pid", async () => {
+    // Directory race with an `rm` that fails: the link inside the directory stays.
+    {
+      const root = mkRoot();
+      const pid = startSleep();
+      await waitStarted(pid);
+      writeFileSync(join(root, "hdb.pid"), `${pid}\n`);
+      const shims = [fixedDateShim(root), racingShim(root, "ln", "dir"), shimDir(root, "rm", "exit 1")];
+      const r = runLauncher(root, "node", stubHarperReportingPidFile(root), { PATH: shimPath(...shims) });
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain(`${PIDFILE_AT_EXEC}${pid}`);
+      const inside = join(root, `hdb.pid.stale-${FIXED_EPOCH}`, "hdb.pid");
+      expect(readFileSync(inside, "utf-8")).toBe(`${pid}\n`);
+      expect(readFileSync(join(root, "hdb.pid"), "utf-8")).toBe(`${pid}\n`);
+      expectMoveFailedLine(r.stderr, pid, inside);
+    }
+    // No race, but hdb.pid cannot be removed after the link: the link is removed again, or named.
+    {
+      const root = mkRoot();
+      const pid = startSleep();
+      await waitStarted(pid);
+      writeFileSync(join(root, "hdb.pid"), `${pid}\n`);
+      const r = runLauncher(root, "node", stubHarperReportingPidFile(root), { PATH: shimPath(fixedDateShim(root), shimDir(root, "rm", "exit 1")) });
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain(`${PIDFILE_AT_EXEC}${pid}`);
+      const link = join(root, `hdb.pid.stale-${FIXED_EPOCH}`);
+      expect(readFileSync(link, "utf-8")).toBe(`${pid}\n`);
+      expect(readFileSync(join(root, "hdb.pid"), "utf-8")).toBe(`${pid}\n`);
+      expectMoveFailedLine(r.stderr, pid, link);
+    }
+  }, 30_000);
+
+  // lsof is the evidence for a process of this user: an lsof that fails, is
+  // killed, or returns a listing that is empty or missing the working directory
+  // is no evidence, whether or not the process holds a file under ROOTPATH.
+  test("lsof fails (exit 1, with or without a listing; killed), or exits 0 with no listing or one without the working directory -> hdb.pid untouched", async () => {
+    const kinds = ["exit-1", "listing-exit-1", "empty-exit-0", "no-cwd-exit-0", "killed"] as const;
+    const root0 = mkRoot();
+    const holder = LSOF_AVAILABLE ? await startFileHolder(join(root0, "data.mdb")) : null;
+    const sleeper = startSleep();
+    await waitStarted(sleeper);
+    for (const kind of kinds) {
+      for (const [pid, root] of [[sleeper, mkRoot()], ...(holder === null ? [] : [[holder, root0]])] as Array<[number, string]>) {
+        writeFileSync(join(root, "hdb.pid"), `${pid}\n`);
+        const r = runLauncher(root, "node", stubHarperReportingPidFile(root), { PATH: shimPath(lsofStandIn(root, kind)) });
+        expect(r.status).toBe(0);
+        expect(r.stdout).toContain(`${PIDFILE_AT_EXEC}${pid}`);
+        expect(launcherLines(r.stderr)).toEqual([]);
+        expect(readFileSync(join(root, "hdb.pid"), "utf-8")).toBe(`${pid}\n`);
+        expect(staleCopies(root)).toEqual([]);
+      }
+    }
+  }, 30_000);
+
+  test("ps reports no command line for the live pid (prints nothing for it; or fails outright) -> hdb.pid untouched; Harper is exec'd and sees it", async () => {
+    const realPs = which("ps");
+    const standIns = [
+      // `ps -o command=` prints nothing; every other ps call is the real one.
+      `case "$*" in *command=*) exit 0 ;; esac\nexec "${realPs}" "$@"`,
+      "exit 1",
+    ];
+    for (const [i, body] of standIns.entries()) {
+      const root = mkRoot();
+      const pid = startSleep();
+      await waitStarted(pid);
+      writeFileSync(join(root, "hdb.pid"), `${pid}\n`);
+      const r = runLauncher(root, "node", stubHarperReportingPidFile(root), { PATH: shimPath(shimDir(root, "ps", body)) });
+      expect(r.status, `stand-in ${i}`).toBe(0);
+      expect(r.stdout).toContain(MARKER);
+      expect(r.stdout).toContain(`${PIDFILE_AT_EXEC}${pid}`);
+      expect(launcherLines(r.stderr)).toEqual([]);
+      expect(readFileSync(join(root, "hdb.pid"), "utf-8")).toBe(`${pid}\n`);
+      expect(staleCopies(root)).toEqual([]);
+    }
+  }, 30_000);
+
+  test("the link fails -> one line saying so, and Harper is exec'd anyway; the launcher does not remove hdb.pid", async () => {
+    const root = mkRoot();
+    const pid = startSleep();
+    await waitStarted(pid);
+    writeFileSync(join(root, "hdb.pid"), `${pid}\n`);
+    const r = runLauncher(root, "node", stubHarperReportingPidFile(root), { PATH: shimPath(shimDir(root, "ln", "exit 1"), shimDir(root, "mv", "exit 1")) });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain(MARKER);
+    expect(r.stdout).toContain(`${PIDFILE_AT_EXEC}${pid}`);
+    expectMoveFailedLine(r.stderr, pid);
+    expect(readFileSync(join(root, "hdb.pid"), "utf-8")).toBe(`${pid}\n`);
+    expect(staleCopies(root)).toEqual([]);
+  }, 30_000);
+});
+
 describe("flair#2056 — resolveInstanceServingPid uses the hdb.pid pid only when its command line is Harper-shaped", () => {
   // freePort(): nothing listens there, so a pid that is not used yields null.
   test("a live unrelated pid in hdb.pid is not returned", async () => {
@@ -649,5 +1389,72 @@ describe("flair#2056 — resolveInstanceServingPid uses the hdb.pid pid only whe
     writeFileSync(join(root, "hdb.pid"), `${pid}\n`);
     expect(isHarperProcessCommandLine(psCommand(pid))).toBe(false);
     expect(resolveInstanceServingPid(root, port)).toBe(pid);
+  }, 30_000);
+});
+
+describe("flair#2697 — the doctor plans no adopt for an hdb.pid whose live pid is not Harper-shaped", () => {
+  // planLaunchdRepairFor (src/cli.ts) sets
+  //   directProcessRunning = resolveInstanceServingPid(dataDir, port) !== null && observation.state !== "managed"
+  // and hands it to planLaunchdRepair; an adopt plan clean-stops that process.
+  // The observation is the one a KeepAlive retry loop leaves: the job is loaded
+  // and not running, and its last run exited 4.
+  function planFor(root: string, instancePid: number | null) {
+    const label = "ai.tpsdev.flair.test2697";
+    const plistPath = join(root, `${label}.plist`);
+    const observation = assessLaunchdManagement({
+      platform: "darwin",
+      label,
+      plistPath,
+      instancePid,
+      plistExists: () => true,
+      list: (l) => ({ code: 0, stdout: `{\n\t"Label" = "${l}";\n\t"OnDemand" = false;\n\t"LastExitStatus" = 1024;\n};\n` }),
+      diagnose: () => null,
+    });
+    const plan = planLaunchdRepair({
+      observation,
+      disposition: "ours",
+      plistPath,
+      directProcessRunning: instancePid !== null && observation.state !== "managed",
+      configReadable: true,
+      adminPassPath: join(root, "admin-pass"),
+      adminPass: { kind: "existing-valid" },
+    });
+    return { observation, plan };
+  }
+
+  test("a live UNRELATED process in hdb.pid and nothing on the port -> no serving pid, so the plan is regenerate, not adopt", async () => {
+    const root = mkRoot();
+    const pid = startSleep();
+    await waitStarted(pid);
+    writeFileSync(join(root, "hdb.pid"), `${pid}\n`);
+    const picked = resolveInstanceServingPid(root, await freePort());
+    expect(picked).toBeNull();
+    const { observation, plan } = planFor(root, picked);
+    expect(observation.state).toBe("detached");
+    expect(plan.kind).toBe("regenerate");
+  }, 30_000);
+
+  const otherPid = otherUserPid();
+  test.skipIf(otherPid === null)("a live process of ANOTHER user in hdb.pid and nothing on the port -> no serving pid, so the plan is regenerate, not adopt", async () => {
+    const root = mkRoot();
+    writeFileSync(join(root, "hdb.pid"), `${otherPid}\n`);
+    const picked = resolveInstanceServingPid(root, await freePort());
+    expect(picked).toBeNull();
+    const { observation, plan } = planFor(root, picked);
+    expect(observation.state).toBe("detached");
+    expect(plan.kind).toBe("regenerate");
+  }, 30_000);
+
+  test("CONTROL: a Harper-shaped stub in hdb.pid (no sidecar) -> it is the serving pid, and the plan is adopt", async () => {
+    const root = mkRoot();
+    const pid = startHarperEntry(root);
+    await waitStarted(pid);
+    await waitHarperCommand(pid);
+    writeFileSync(join(root, "hdb.pid"), `${pid}\n`);
+    const picked = resolveInstanceServingPid(root, await freePort());
+    expect(picked).toBe(pid);
+    const { observation, plan } = planFor(root, picked);
+    expect(observation.state).toBe("detached");
+    expect(plan.kind).toBe("adopt");
   }, 30_000);
 });

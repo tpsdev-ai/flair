@@ -1,0 +1,1 @@
+- **The OAuth authorization endpoints accept an S256 `code_challenge` of exactly 43 base64url characters**, the length of BASE64URL(SHA256(verifier)); a longer challenge is refused with `400 invalid_request` at the consent page and the approve instead of being stored.
