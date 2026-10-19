@@ -2642,10 +2642,13 @@ export class Memory extends (databases as any).flair.Memory {
   // via the one shared delegate. (Admin/internal — including the _reindex
   // path in put() — pass through the delegate untouched.)
   /** PATCH requires a target id and lock before its body runs. Ordinary and
-   *  re-embed owned writes commit before releasing the lock. */
+   *  re-embed owned writes commit before releasing the lock. A re-embed body
+   *  (flair#2296) holds the lock under its own phase name, `patch-reembed`, so
+   *  a hold warning names the re-embed (flair#2478 slice 3). */
   async patch(content: any, query?: any) {
     const ids = putLockIds(this, content);
     if (ids.length === 0) return memoryIdRequiredResponse();
+    const phase = isReembedPatch(content) ? "patch-reembed" : "patch";
     const outcome = await withMemoryWriteLock(memoryWriteLockStore(), ids, async () => {
       const result = await this.patchLocked(content, query);
       // Test-only: the verb body has returned and the lock is still held. A body
@@ -2654,7 +2657,7 @@ export class Memory extends (databases as any).flair.Memory {
       const committed = txnPausePoint("memory-patch-committed");
       if (committed) await committed;
       return result;
-    }, { phase: "patch" });
+    }, { phase });
     if (outcome.kind === "done") return outcome.value;
     return memoryLockRefusal(outcome, memoryLockCallerId(this))!;
   }
