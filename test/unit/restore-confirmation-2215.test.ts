@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,7 +18,10 @@ type Fault = { method: string; path: string; status?: number; body?: unknown; er
 async function run(faults: Fault[] = [], backup: unknown = archive, flags: string[] = []) {
   const dir = mkdtempSync(join(tmpdir(), "restore-2215-"));
   try {
-    writeFileSync(join(dir, "archive.json"), JSON.stringify(backup));
+    const bytes = Buffer.from(JSON.stringify(backup));
+    writeFileSync(join(dir, "archive.json"), bytes);
+    // The detached digest flair backup publishes beside the archive (#2664).
+    writeFileSync(join(dir, "archive.json.sha256"), `${createHash("sha256").update(bytes).digest("hex")}  archive.json\n`);
     writeFileSync(join(dir, "driver.ts"), `
       import { Command } from ${JSON.stringify(commanderPath)};
       import { bindCli, register } from ${JSON.stringify(commandPath)};
@@ -177,7 +181,9 @@ describe("restore confirms archived IDs (#2215)", () => {
 
   test("invalid archived row names its position and sends no requests", async () => {
     const result = await run([], { ...archive, memories: [null] });
-    refused(result, "Memory row 0", "missing ID");
+    // The archive is refused by the restore-archive parser (#2664), which
+    // names the row's position, why it is refused, and its JSON Pointer.
+    refused(result, "Memory row 0", "the row is not a JSON object", "invalid-row at /memories/0");
     expect(result.calls).toEqual([]);
   });
 });

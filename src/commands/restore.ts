@@ -7,10 +7,11 @@
  */
 import { Command } from "commander";
 import { resolveAdminUser } from "../lib/auth-resolve.js";
+import { readBackupArtifact } from "../lib/backup-artifact.js";
 import { encodeRecordId } from "../lib/record-id-path.js";
 import { comparePreservedFields } from "../lib/restore-verify.js";
 import * as render from "../render.js";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 
 export type RestoreCli = {
   resolveHttpPort: (...args: any[]) => any;
@@ -58,13 +59,20 @@ program
       process.exit(1);
     }
 
-    const backup = JSON.parse(readFileSync(backupPath, "utf-8"));
-    if (backup.version !== 1) {
-      console.error(`Error: unsupported backup version: ${backup.version}`);
-      process.exit(1);
+    // Preflight (flair#2664), before any request in every mode, dry run
+    // included: read the archive once, hash and parse that one buffer, and
+    // require the hash to equal the digest flair backup wrote to
+    // `<archive>.sha256`. The parse refuses ill-formed UTF-8 or JSON, a
+    // repeated key or row id, an unsupported version, and rows restore cannot
+    // write (src/lib/restore-archive.ts).
+    const artifact = readBackupArtifact(backupPath);
+    if (artifact.ok === false) {
+      console.error(`Error: ${artifact.reason}`);
+      process.exitCode = 1;
+      return;
     }
 
-    const { agents, memories, souls } = backup;
+    const { agents, memories, souls } = artifact.archive;
     const collections = [
       { name: "Agent", rows: agents },
       { name: "Soul", rows: souls },
@@ -75,29 +83,10 @@ program
       for (const failure of failures) console.error(`Error: ${failure}`);
       process.exitCode = 1;
     }
-    for (const { name, rows } of collections) {
-      if (!Array.isArray(rows)) {
-        failures.push(`${name}: archive collection is not an array`);
-        continue;
-      }
-      for (const [index, row] of rows.entries()) {
-        if (!row || typeof row !== "object" || Array.isArray(row)
-          || typeof row.id !== "string" || !row.id
-          || (name !== "Agent" && (typeof row.agentId !== "string" || !row.agentId))) {
-          failures.push(`${name} row ${index} (${row?.id ?? "missing ID"}): invalid archived row`);
-          continue;
-        }
-        try {
-          encodeRecordId(row.id);
-        } catch {
-          failures.push(`${name} ${row.id}: invalid archived ID`);
-        }
-      }
-    }
-    if (failures.length) { fail(); return; }
     const auth = `Basic ${Buffer.from(`${adminUser}:${adminPass}`).toString("base64")}`;
 
     console.log(`Restoring from: ${backupPath}`);
+    console.log(`Archive SHA-256: ${artifact.sha256} (matches ${artifact.digestPath})`);
     console.log(`Mode: ${mode}${dryRun ? " (dry run)" : ""}`);
     console.log(`  Agents:   ${agents.length}`);
     console.log(`  Memories: ${memories.length}`);

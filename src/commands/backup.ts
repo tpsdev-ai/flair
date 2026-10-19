@@ -9,9 +9,8 @@ import { Command } from "commander";
 import { readExactTableCount } from "../lib/ops-table-count.js";
 import { resolveAdminUser } from "../lib/auth-resolve.js";
 import { flairBackupOutputPath } from "../lib/flair-paths.js";
+import { publishBackupArtifact } from "../lib/backup-artifact.js";
 import * as render from "../render.js";
-import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 
 export type BackupCli = {
   addSharedCredentialOptions: (...args: any[]) => any;
@@ -280,34 +279,38 @@ addSharedCredentialOptions(
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
     const defaultOutput = flairBackupOutputPath(timestamp);
     const outputPath: string = opts.output ?? defaultOutput;
-    let stagingDir: string | undefined;
+    const serialized = JSON.stringify(backup, null, 2) + "\n";
+    // flair#2664: the archive is published together with `<output>.sha256`,
+    // the SHA-256 of exactly these bytes as read back from disk. The sidecar
+    // is removed before the archive changes and written after it is in place,
+    // so a crash never leaves a sidecar beside bytes it does not describe
+    // (src/lib/backup-artifact.ts).
+    let sha256: string;
+    let digestPath: string;
     try {
-      mkdirSync(join(outputPath, ".."), { recursive: true });
-      stagingDir = mkdtempSync(join(outputPath, "..", ".flair-backup-"));
-      const tmp = join(stagingDir, "archive.json");
-      const serialized = JSON.stringify(backup, null, 2) + "\n";
-      writeFileSync(tmp, serialized, { encoding: "utf-8", flag: "wx", mode: 0o600 });
-      const written = readFileSync(tmp, "utf-8");
-      const archive = JSON.parse(written);
-      for (const table of ["agents", "memories", "souls"] as const) {
-        if (!Array.isArray(archive[table]) || archive[table].length !== backup[table].length) {
-          throw new Error(`${table}: archive count does not match fetched count ${backup[table].length}`);
-        }
-        for (const [index, row] of backup[table].entries()) {
-          if (archive[table][index]?.id !== row.id) {
-            throw new Error(`${table} row ${row.id}: archive id does not match fetched id`);
+      ({ sha256, digestPath } = publishBackupArtifact({
+        outputPath,
+        serialized,
+        verify(written) {
+          const archive = JSON.parse(written);
+          for (const table of ["agents", "memories", "souls"] as const) {
+            if (!Array.isArray(archive[table]) || archive[table].length !== backup[table].length) {
+              throw new Error(`${table}: archive count does not match fetched count ${backup[table].length}`);
+            }
+            for (const [index, row] of backup[table].entries()) {
+              if (archive[table][index]?.id !== row.id) {
+                throw new Error(`${table} row ${row.id}: archive id does not match fetched id`);
+              }
+              if (JSON.stringify(archive[table][index]) !== JSON.stringify(row)) {
+                throw new Error(`${table} row ${row.id}: archive contents do not match fetched row`);
+              }
+            }
           }
-          if (JSON.stringify(archive[table][index]) !== JSON.stringify(row)) {
-            throw new Error(`${table} row ${row.id}: archive contents do not match fetched row`);
-          }
-        }
-      }
-      if (written !== serialized) throw new Error("archive contents do not match fetched data");
-      renameSync(tmp, outputPath);
+          if (written !== serialized) throw new Error("archive contents do not match fetched data");
+        },
+      }));
     } catch (error) {
       throw new Error(`Backup archive ${outputPath}: ${error instanceof Error ? error.message : String(error)}`);
-    } finally {
-      if (stagingDir) rmSync(stagingDir, { recursive: true, force: true });
     }
 
     log(`\n${render.icons.ok} ${render.wrap(render.c.green, "Backup complete")}`);
@@ -316,6 +319,7 @@ addSharedCredentialOptions(
     log(render.kv("Memories", render.wrap(render.c.bold, String(memories.length))));
     log(render.kv("Souls", render.wrap(render.c.bold, String(souls.length))));
     log(render.kv("Output", render.wrap(render.c.dim, outputPath)));
+    log(render.kv("SHA-256", render.wrap(render.c.dim, `${sha256} (${digestPath})`)));
   });
 
 }
