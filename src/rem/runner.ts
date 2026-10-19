@@ -372,7 +372,8 @@ export interface RunnerLogRow {
   /**
    * #1205b-2: outcome of the server-side ADK auto-promote step (POST
    * /AutoPromoteCandidates), populated only when this cycle ran it and the
-   * server answered — i.e. a non-aborted, non-dry-run cycle with active adk:
+   * server returned a response without an error — i.e. a non-aborted,
+   * non-dry-run cycle with active adk:
    * tags or selected settled continuity sessions (flair#1257 slice 3);
    * successful distillation is not required.
    * `promoted` is the count of candidates auto-promoted to own memory this

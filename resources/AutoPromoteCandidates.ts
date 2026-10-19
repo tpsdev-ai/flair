@@ -377,13 +377,14 @@ export class AutoPromoteCandidates extends Resource {
       // that changes the content clears the verdict (authority-field-guard.ts)
       // under the per-id Memory lock, so the adoption takes that lock, re-reads
       // the row and re-runs recordedRowUse on the fresh read, and holds the
-      // lock through the candidate update. An owner edit that commits first
-      // leaves a row that no longer qualifies: nothing is written and the
-      // candidate stays pending (`recorded_row_changed`), to be swept again.
-      // An owner edit that waits for the lock commits after the candidate
-      // update. When that update is reported promoted, the edit clears the
-      // verdict on a row the candidate points to — the same as an owner edit to
-      // any promoted Memory after its promotion; when the update throws, the
+      // lock through the candidate update. A content-changing owner edit that
+      // commits first leaves a row that no longer qualifies: nothing is written
+      // and the candidate stays pending (`recorded_row_changed`), to be swept
+      // again. A content-changing owner edit that waits for the lock commits
+      // after the candidate update. When that update is reported promoted, the
+      // edit clears the verdict on a row the candidate points to — the same as
+      // a content change to any promoted Memory after its promotion (an edit
+      // that changes no content need not clear it); when the update throws, the
       // candidate is reported from the confirming read (commitCandidatePromotion).
       // Writers that take no Memory lock (the admin operations API among them)
       // are not serialized by this.

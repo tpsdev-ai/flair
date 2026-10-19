@@ -616,9 +616,9 @@ describe("flair#2714 — a thrown candidate update is reported from the candidat
     const cand = await readCandidate(harper, cid);
     expect(cand.status).toBe("promoted");
     expect(cand.promotedRowId).toBe(recordedId);
-    // The candidate update was reported promoted and the edit committed after
-    // it: it cleared the verdict on the row the candidate points to, as an
-    // edit to any promoted Memory does.
+    // The candidate update was reported promoted and the content-changing
+    // edit committed after it: it cleared the verdict on the row the candidate
+    // points to, as a content change to any promoted Memory does.
     const edited = await readMemory(harper, recordedId);
     expect(edited.content).toBe(EDITED);
     expect(edited.promotionStatus ?? null).toBeNull();
