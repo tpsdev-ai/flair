@@ -1,4 +1,9 @@
-import { createHash } from "node:crypto";
+import { promotionContentHash } from "../src/lib/promotion-content-hash.js";
+
+/** SHA-256 over the exact stored, post-redaction content as UTF-8. Defined in
+ *  src/lib/promotion-content-hash.ts so restore admission binds with the same
+ *  function the stamp uses. */
+export { promotionContentHash };
 
 /** Server-only SHA-256 of the stored, post-redaction content at stamping time. */
 export const PROMOTION_CONTENT_HASH_FIELD = "promotionContentHash";
@@ -10,12 +15,6 @@ export const PROMOTION_BINDING_FIELDS = [
   "promotedBy",
   PROMOTION_CONTENT_HASH_FIELD,
 ] as const;
-
-/** SHA-256 over the exact stored, post-redaction content as UTF-8. */
-export function promotionContentHash(content: unknown): string {
-  const text = typeof content === "string" ? content : content == null ? "" : String(content);
-  return createHash("sha256").update(text, "utf8").digest("hex");
-}
 
 /**
  * Does `row` carry a promotion binding that matches its current content? An
