@@ -30,8 +30,10 @@
 // Harper-shaped, is not empty, contains neither `harper` (any case) nor
 // ROOTPATH (as given or physical), and either the process runs as another uid,
 // or lsof is not installed, or lsof exits 0 with a listing that includes the
-// process's working directory and no open file under ROOTPATH. A failed,
-// killed or empty lsof listing is no evidence. The move happens after the
+// process's working directory and reports no file under ROOTPATH (an exit-0
+// listing can omit an open file, which this check cannot detect). A failed or
+// killed lsof, or a listing that is empty or lacks the working directory, is no
+// evidence. The move happens after the
 // admin-pass checks pass, just before the exec: `ln -n -P` to
 // hdb.pid.stale-<epoch seconds> (a .<n> suffix when that name exists), then
 // removal of hdb.pid. `ln -n -P` never replaces a name: a file or symlink
