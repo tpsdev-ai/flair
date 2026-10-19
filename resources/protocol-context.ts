@@ -19,9 +19,11 @@
  * A retained MQTT PUBLISH reaches a table's static put()/delete(), which
  * ordinary writes also use. isDirectMqttSessionContext recognises the session's
  * context there, and isLastWillReplayContext the copy of a stored will record
- * Harper replays, from the argument's own property descriptors alone: on an
- * ordinary write's context they invoke no getter and no `getContext()`. A
- * Proxy's getOwnPropertyDescriptor trap does run, and an error it throws
+ * Harper replays. Both classify by shape (they do not prove Harper built the
+ * object) and read property descriptors only — the argument's own, and for a
+ * session-shaped argument the nested session's along its prototype chain —
+ * so on an ordinary write's context they invoke no getter and no
+ * `getContext()`. A Proxy's descriptor traps do run, and an error one throws
  * propagates to the caller.
  *
  * This module has no imports, so it is unit-tested directly.
@@ -57,15 +59,19 @@ function dataValueInChain(target: object, key: string): unknown {
 }
 
 /**
- * Whether `value` is itself the context Harper's MQTT layer built for a
- * session's action, read from its own data properties only: an own `socket`
- * key and an own `session` holding an object with an `addSubscription`
- * method. Harper's `createContext()` returns a plain object literal, and a
- * session's retained will copies it, so the context Harper passes satisfies
- * this. It reads the own property descriptor of `socket` and, only when that
- * exists, of `session` and the session's `addSubscription` (along its
- * prototype chain); it invokes no getter or method of `value` (no
- * `getContext()`, no accessor). A descriptor read that throws propagates.
+ * Whether `value` has the shape of the context Harper's MQTT layer builds
+ * for a session's action: an own `socket` property (a data property or an
+ * accessor, which is not invoked) and an own data property `session` holding
+ * an object whose `addSubscription`, found as a data property along that
+ * object's prototype chain, is a function. Harper's `createContext()` returns
+ * a plain object literal of this shape, and a session's retained will copies
+ * it. This classifies by shape: it does not prove that Harper built the
+ * object. It reads the own property descriptor of `socket`; only when one
+ * exists, the own descriptor of `session`; and only when that holds an
+ * object, descriptors along the session's prototype chain (getPrototypeOf
+ * included) until it finds `addSubscription`. It invokes no getter or method
+ * of `value` or the session (no `getContext()`, no accessor). A descriptor or
+ * prototype read that throws propagates.
  */
 export function isDirectMqttSessionContext(value: unknown): boolean {
   if (value == null || typeof value !== "object") return false;
@@ -76,22 +82,55 @@ export function isDirectMqttSessionContext(value: unknown): boolean {
 }
 
 /**
- * Whether `value` is the context Harper uses when it replays the last-will
- * messages still stored as its first worker starts (an instance start or a
- * worker restart; server/DurableSubscriptionsSession.ts): a shallow copy of
+ * Whether `value` has the shape of the context Harper uses when it replays
+ * the last-will messages still stored as its first worker starts (an instance
+ * start or a worker restart; server/DurableSubscriptionsSession.ts): a
+ * shallow copy of
  * the stored will record (`{ id, topic, data, qos, retain, user }`) on which
  * Harper sets `authorize: true`, passed to put()/delete() for a retained will.
  * It carries no HTTP request and no credential flair verifies; its `user` is
  * the name the session connected with, looked up again. Read from own property
  * descriptors only — `authorize` true, then `topic` a string, then `retain`
  * true, each read only while the previous one matches — so no getter is
- * invoked; a descriptor read that throws propagates.
+ * invoked; a descriptor read that throws propagates. It classifies by shape:
+ * an object of that shape is decided as a replayed will wherever it came
+ * from.
  */
 export function isLastWillReplayContext(value: unknown): boolean {
   if (value == null || typeof value !== "object") return false;
   return ownDataValue(value, "authorize") === true
     && typeof ownDataValue(value, "topic") === "string"
     && ownDataValue(value, "retain") === true;
+}
+
+/**
+ * Whether `value` has the shape of Harper's released-transaction placeholder
+ * (resources/DatabaseTransaction.ts `RELEASED_TRANSACTION`), which Harper
+ * treats as an absent argument: a frozen object whose own data properties
+ * include an `addWrite` and a `setContext` function and `open` 0. Harper
+ * tests identity with that one instance, which flair cannot reach, so this
+ * tests the shape, from own property descriptors only (`addWrite` first; the
+ * others only while the previous ones match).
+ */
+export function isReleasedTransactionPlaceholder(value: unknown): boolean {
+  if (value == null || typeof value !== "object") return false;
+  return typeof ownDataValue(value, "addWrite") === "function"
+    && typeof ownDataValue(value, "setContext") === "function"
+    && ownDataValue(value, "open") === 0;
+}
+
+/**
+ * Whether `value` carries a transaction: an own data `transaction` property
+ * holding an object with a `commit` method (along its prototype chain), the
+ * shape of Harper's DatabaseTransaction. Harper tests `instanceof
+ * DatabaseTransaction`, a class flair cannot reach. Reads property
+ * descriptors only.
+ */
+export function carriesTransaction(value: unknown): boolean {
+  if (value == null || typeof value !== "object") return false;
+  const transaction = ownDataValue(value, "transaction");
+  if (transaction == null || typeof transaction !== "object") return false;
+  return typeof dataValueInChain(transaction, "commit") === "function";
 }
 
 /**

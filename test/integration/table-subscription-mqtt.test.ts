@@ -375,8 +375,9 @@ for (const config of HARPERS) {
               if (admin.receivedText.includes(marker)) found.push(`${t}: the non-admin's ${marker.endsWith("-b") ? "PUBLISH" : "retained PUBLISH"} reached the administrator's subscription`);
             }
           }
-          // The non-admin's own PUBACKs echo its topics in their reason strings,
-          // so after it has published, its connection is checked for messages.
+          // After it has published, the non-admin's connection is checked for
+          // any PUBLISH on a table topic. Its own PUBACKs carry a reason code
+          // and, for a refusal, the policy's message as the reason string.
           const later = nonAdmin.publishes.filter((m) => !NOT_TABLE_ROUTES.has(m.topic.split("/")[0]));
           if (later.length > 0) found.push(`the non-admin received ${later.length} table messages: ${later.map((m) => m.topic).join(", ")}`);
         } finally {

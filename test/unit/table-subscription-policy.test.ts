@@ -25,14 +25,14 @@ import {
   retainedPublishContext,
   guardTableSubscriptions,
   isProtocolEntry,
-  subscribeCallerContext,
   subscribeInProcess,
   subscriptionCaller,
-  subscriptionCallerContext,
+  harperCallContexts,
   tableSubscriptionRefusal,
   unverifiedSubscriberRefusal,
   MAX_REFUSAL_REASON_BYTES,
   TABLE_SUBSCRIPTION_GUARD,
+  type CallContextSource,
   type SubscriptionCaller,
 } from "../../resources/table-subscription-policy";
 
@@ -74,9 +74,12 @@ function makeStreamTable() {
 
 /** resolveAuth reads the verdict off the context the guard hands it. */
 const byContext = async (ctx: any): Promise<SubscriptionCaller> => ctx?.verdict ?? { kind: "internal" };
-const AGENT = { verdict: { kind: "agent", agentId: "b", isAdmin: false } };
-const ADMIN = { verdict: { kind: "agent", agentId: "root", isAdmin: true } };
-const ANON = { verdict: { kind: "anonymous" } };
+// Each carries a transaction, as the contexts Harper passes do (it calls these
+// statics inside transaction(context, ...)), so Harper reads it as a context in
+// every argument position.
+const AGENT = { verdict: { kind: "agent", agentId: "b", isAdmin: false }, transaction: {} };
+const ADMIN = { verdict: { kind: "agent", agentId: "root", isAdmin: true }, transaction: {} };
+const ANON = { verdict: { kind: "anonymous" }, transaction: {} };
 
 describe("guardTableSubscriptions", () => {
   it("refuses a verified non-admin agent with 403 and never reaches the table's connect()", async () => {
@@ -236,14 +239,17 @@ describe("guardTableSubscriptions — MQTT subscribe() and publish()", () => {
     expect(calls.map((c) => c.self)).toEqual([MemoryResource]);
   });
 
-  it("decides subscribe() on the context Harper would use: the second argument, the third when both are passed, or the ambient one", async () => {
+  it("decides subscribe() on the context Harper would use: the second argument when Harper reads it as one, a truthy third, or the ambient one", async () => {
     const { Table, calls } = makeStreamTable();
     let ambient: unknown = AGENT;
     guardTableSubscriptions({ Memory: Table }, { resolveAuth: byContext, ambientContext: () => ambient });
-    // (target, context): the second argument is the context, even one that does not look like a context
-    await expect((Table as any).subscribe({ id: null }, { verdict: { kind: "anonymous" } })).rejects.toMatchObject({ statusCode: 401 });
-    // (target, data, context): the third
+    // (target, context): a second argument carrying a transaction is the context
+    await expect((Table as any).subscribe({ id: null }, ANON)).rejects.toMatchObject({ statusCode: 401 });
+    // (target, plain object): Harper reads it as data and uses the ambient context
+    await expect((Table as any).subscribe({ id: null }, { verdict: { kind: "anonymous" } })).rejects.toMatchObject({ statusCode: 403 });
+    // (target, data, context) and (target, undefined, context): the third
     await expect((Table as any).subscribe({ id: null }, ADMIN, AGENT)).rejects.toMatchObject({ statusCode: 403 });
+    await expect((Table as any).subscribe({ id: null }, undefined, ANON)).rejects.toMatchObject({ statusCode: 401 });
     // (target): the ambient context
     await expect((Table as any).subscribe({ id: null })).rejects.toMatchObject({ statusCode: 403 });
     ambient = {};
@@ -347,9 +353,25 @@ describe("guardTableSubscriptions — retained MQTT publish (put() / delete())",
 
   it("retainedPublishContext returns the MQTT session context Harper passes, at the position Harper reads it", () => {
     const ctx = mqtt(ADMIN.verdict);
-    expect(retainedPublishContext([{}, { data: 1 }, ctx])).toBe(ctx); // put(target, data, context)
-    expect(retainedPublishContext([{}, ctx])).toBe(ctx); // delete(target, context)
-    expect(retainedPublishContext([{}, { data: 1 }, { ...ctx, user: {} }])).toBeDefined(); // a session's will copies the context
+    expect(retainedPublishContext("put", [{}, { data: 1 }, ctx])).toBe(ctx); // put(target, data, context)
+    expect(retainedPublishContext("delete", [{}, ctx])).toBe(ctx); // delete(target, context)
+    expect(retainedPublishContext("put", [{}, { data: 1 }, { ...ctx, user: {} }])).toBeDefined(); // a session's will copies the context
+  });
+
+  it("retainedPublishContext classifies the argument Harper takes as the context, as Harper reads put() and delete()", () => {
+    const ctx = mqtt(ADMIN.verdict);
+    const target = new URLSearchParams("id=m"); // Harper's RequestTarget
+    const released = Object.freeze({ open: 0, addWrite() {}, setContext() {} });
+    const replayShaped = { id: "m", topic: "Memory/m", retain: true, authorize: true };
+    const withTxn = { ...ctx, transaction: { commit() { return {}; } } };
+    expect(retainedPublishContext("put", [{ id: "m" }, ctx])).toBe(ctx); // (data, context)
+    expect(retainedPublishContext("put", [target, replayShaped])).toBeUndefined(); // Harper reads it as data
+    expect(retainedPublishContext("put", [target, withTxn])).toBe(withTxn); // a second argument carrying a transaction
+    expect(retainedPublishContext("put", [target, { data: 1 }, released])).toBeUndefined(); // released counts as absent
+    expect(retainedPublishContext("put", [{ id: "m" }, ctx, released])).toBe(ctx);
+    expect(retainedPublishContext("delete", [target, ctx, released])).toBe(ctx);
+    expect(retainedPublishContext("delete", [target, undefined, ctx])).toBe(ctx);
+    expect(retainedPublishContext("put", [target, { data: 1 }, ctx])).toBe(ctx);
   });
 
   it("a will Harper replays is decided as a caller without a credential, an administrator's included", async () => {
@@ -368,22 +390,22 @@ describe("guardTableSubscriptions — retained MQTT publish (put() / delete())",
     await expect((Table as any).delete({ id: "m" }, replayed(undefined))).rejects.toMatchObject({ statusCode: 401 });
     expect(resolved).toBe(0);
     expect(calls).toEqual([]);
-    expect(retainedPublishContext([{}, { content: "x" }, replayed({ content: "x" })])).toBeDefined();
+    expect(retainedPublishContext("put", [{}, { content: "x" }, replayed({ content: "x" })])).toBeDefined();
   });
 
-  it("retainedPublishContext is undefined for every other call, and invokes no getter or getContext()", () => {
+  it("retainedPublishContext is undefined for a context of neither shape, and invokes no getter or getContext()", () => {
     let accessorReads = 0;
     let getContextCalls = 0;
     const session = { addSubscription: () => undefined };
     const viaAccessor = { socket: {}, get session() { accessorReads++; return session; } };
     const viaGetContext = { getContext() { getContextCalls++; return mqtt(ADMIN.verdict); } };
-    expect(retainedPublishContext([{}, { data: 1 }, { user: 1 }])).toBeUndefined();
-    expect(retainedPublishContext([{}, { data: 1 }, { headers: {}, authorize: true }])).toBeUndefined();
-    expect(retainedPublishContext([{ id: "x" }])).toBeUndefined();
-    expect(retainedPublishContext(["id"])).toBeUndefined();
-    expect(retainedPublishContext([{}, { data: 1 }, viaAccessor])).toBeUndefined();
-    expect(retainedPublishContext([{}, viaGetContext])).toBeUndefined();
-    expect(retainedPublishContext([{}, { data: 1 }, Object.create(mqtt(ADMIN.verdict))])).toBeUndefined(); // inherited, not own
+    expect(retainedPublishContext("put", [{}, { data: 1 }, { user: 1 }])).toBeUndefined();
+    expect(retainedPublishContext("put", [{}, { data: 1 }, { headers: {}, authorize: true }])).toBeUndefined();
+    expect(retainedPublishContext("put", [{ id: "x" }])).toBeUndefined();
+    expect(retainedPublishContext("delete", ["id"])).toBeUndefined();
+    expect(retainedPublishContext("put", [{}, { data: 1 }, viaAccessor])).toBeUndefined();
+    expect(retainedPublishContext("delete", [{}, viaGetContext])).toBeUndefined();
+    expect(retainedPublishContext("put", [{}, { data: 1 }, Object.create(mqtt(ADMIN.verdict))])).toBeUndefined(); // inherited, not own
     expect(accessorReads).toBe(0);
     expect(getContextCalls).toBe(0);
   });
@@ -412,16 +434,16 @@ describe("guardTableSubscriptions — retained MQTT publish (put() / delete())",
 
     const plain = recordingContext({ transaction: {} });
     expect((Table as any).put({ id: "m" }, { content: "x" }, plain.context)).toBe("put-result");
-    expect(plain.traps).toEqual(["getOwnPropertyDescriptor socket", "getOwnPropertyDescriptor authorize"]);
+    expect(plain.traps).toEqual(["getOwnPropertyDescriptor addWrite", "getOwnPropertyDescriptor socket", "getOwnPropertyDescriptor authorize"]);
 
     const twoArgument = recordingContext({ transaction: {} });
     expect((Table as any).delete({ id: "m" }, twoArgument.context)).toBe("delete-result");
-    expect(twoArgument.traps).toEqual(["getOwnPropertyDescriptor socket", "getOwnPropertyDescriptor authorize"]);
+    expect(twoArgument.traps).toEqual(["getOwnPropertyDescriptor addWrite", "getOwnPropertyDescriptor socket", "getOwnPropertyDescriptor authorize"]);
 
     // A request Harper marked for authorization adds the read of `topic`, and no more.
     const marked = recordingContext({ headers: {}, authorize: true });
     expect((Table as any).put({ id: "m" }, { content: "x" }, marked.context)).toBe("put-result");
-    expect(marked.traps).toEqual(["getOwnPropertyDescriptor socket", "getOwnPropertyDescriptor authorize", "getOwnPropertyDescriptor topic"]);
+    expect(marked.traps).toEqual(["getOwnPropertyDescriptor addWrite", "getOwnPropertyDescriptor socket", "getOwnPropertyDescriptor authorize", "getOwnPropertyDescriptor topic"]);
     expect(calls.length).toBe(3);
 
     // A descriptor read that throws propagates before the inherited static runs.
@@ -532,34 +554,118 @@ describe("subscribeInProcess", () => {
   });
 });
 
-describe("subscribeCallerContext", () => {
-  const ambient = () => "ambient";
-  it("reads the second argument as the context, the third when both are passed, unwrapping getContext()", () => {
-    const ctx = { user: 1 };
-    expect(subscribeCallerContext(ctx, undefined, ambient)).toBe(ctx);
-    expect(subscribeCallerContext({ data: true }, ctx, ambient)).toBe(ctx);
-    expect(subscribeCallerContext({ getContext: () => ctx }, undefined, ambient)).toBe(ctx);
+describe("harperCallContexts: the context Harper's transactional() uses for each call form", () => {
+  const ctx = { user: 1 };
+  const other = { user: 2 };
+  const arg = (value: unknown): CallContextSource => ({ from: "argument", value });
+  const AMBIENT: CallContextSource = { from: "ambient" };
+  const target = new URLSearchParams("id=m"); // Harper's RequestTarget is a URLSearchParams
+  const released = Object.freeze({ open: 0, addWrite() {}, setContext() {}, commit() { return { txnTime: 0 }; } });
+
+  it("a truthy third argument is the context whatever the second, for every static", () => {
+    for (const method of ["connect", "subscribe", "publish"] as const) {
+      expect([method, harperCallContexts(method, [target, undefined, ctx])]).toEqual([method, [arg(ctx)]]);
+      expect([method, harperCallContexts(method, [target, { data: 1 }, ctx])]).toEqual([method, [arg(ctx)]]);
+      expect([method, harperCallContexts(method, [target, other, ctx])]).toEqual([method, [arg(ctx)]]);
+    }
   });
-  it("falls back to the ambient context", () => {
-    expect(subscribeCallerContext(undefined, undefined, ambient)).toBe("ambient");
+
+  it("unwraps getContext() where Harper does, and keeps a bare third argument of subscribe() as is", () => {
+    const wrapper = { getContext: () => ctx };
+    expect(harperCallContexts("connect", [target, undefined, wrapper])).toEqual([arg(ctx)]);
+    expect(harperCallContexts("subscribe", [target, other, wrapper])).toEqual([arg(ctx)]);
+    expect(harperCallContexts("subscribe", [target, undefined, wrapper])).toEqual([arg(wrapper)]);
+  });
+
+  it("subscribe(): the second argument when it has a transaction or a getContext, otherwise the ambient context", () => {
+    const withTxn = { transaction: {}, user: 3 };
+    expect(harperCallContexts("subscribe", [target, withTxn])).toEqual([arg(withTxn)]);
+    expect(harperCallContexts("subscribe", [target, { getContext: () => ctx }])).toEqual([arg(ctx)]);
+    expect(harperCallContexts("subscribe", [target, { user: 1 }])).toEqual([AMBIENT]); // data, as Harper reads it
+    expect(harperCallContexts("subscribe", [target])).toEqual([AMBIENT]);
+  });
+
+  it("connect()/publish() with no third argument: the (data, context) form, else both readings Harper may take", () => {
+    for (const method of ["connect", "publish"] as const) {
+      expect([method, harperCallContexts(method, [{ id: "m" }, ctx])]).toEqual([method, [arg(ctx)]]);
+      expect([method, harperCallContexts(method, [[{ id: "m" }], ctx])]).toEqual([method, [arg(ctx)]]);
+      // Harper takes the second as the context only when it is or carries a DatabaseTransaction.
+      expect([method, harperCallContexts(method, [target, ctx])]).toEqual([method, [arg(ctx), AMBIENT]]);
+      expect([method, harperCallContexts(method, ["m", ctx])]).toEqual([method, [arg(ctx), AMBIENT]]);
+      expect([method, harperCallContexts(method, [target])]).toEqual([method, [AMBIENT]]);
+    }
+  });
+
+  it("an argument shaped like Harper's released-transaction placeholder is read both as given and as absent", () => {
+    expect(harperCallContexts("subscribe", [target, { transaction: {}, user: 3 }, released]))
+      .toEqual([arg(released), arg({ transaction: {}, user: 3 })]);
+    expect(harperCallContexts("connect", [target, released, ctx])).toEqual([arg(ctx)]);
   });
 });
 
-describe("subscriptionCallerContext", () => {
-  const ambient = () => "ambient";
-  it("prefers the explicit context, unwrapping getContext()", () => {
-    const inner = { user: 1 };
-    expect(subscriptionCallerContext(null, { getContext: () => inner }, ambient)).toBe(inner);
-    const request = { headers: {} };
-    expect(subscriptionCallerContext({ queue: true }, request, ambient)).toBe(request);
+describe("the guard decides on the context Harper will use (conflicting ambient and explicit callers)", () => {
+  /** A table whose statics record that they ran. */
+  function guarded(ambient: unknown) {
+    const { Table, calls } = makeStreamTable();
+    guardTableSubscriptions({ Memory: Table }, { resolveAuth: byContext, ambientContext: () => ambient });
+    return { Table: Table as any, calls };
+  }
+  const target = new URLSearchParams("id=m");
+
+  it("ambient administrator, explicit non-admin or anonymous: refused wherever Harper uses the explicit context", async () => {
+    for (const explicit of [AGENT, ANON]) {
+      const status = explicit === AGENT ? 403 : 401;
+      const forms: Array<[string, (t: any) => unknown]> = [
+        ["subscribe(target, context)", (t) => t.subscribe(target, explicit)],
+        ["subscribe(target, undefined, context)", (t) => t.subscribe(target, undefined, explicit)],
+        ["subscribe(target, data, context)", (t) => t.subscribe(target, { data: 1 }, explicit)],
+        ["connect(target, data, context)", (t) => t.connect(target, { data: 1 }, explicit)],
+        ["connect(target, undefined, context)", (t) => t.connect(target, undefined, explicit)],
+        ["connect(record, context)", (t) => t.connect({ id: "m" }, explicit)],
+        ["connect(target, context)", (t) => t.connect(target, explicit)],
+        ["publish(target, data, context)", (t) => t.publish(target, { data: 1 }, explicit)],
+        ["publish(target, undefined, context)", (t) => t.publish(target, undefined, explicit)],
+        ["publish(record, context)", (t) => t.publish({ id: "m" }, explicit)],
+        ["publish(target, context)", (t) => t.publish(target, explicit)],
+      ];
+      for (const [form, call] of forms) {
+        const { Table, calls } = guarded(ADMIN);
+        let thrown: any;
+        try { await call(Table); } catch (err) { thrown = err; }
+        expect([form, thrown?.statusCode, calls.length]).toEqual([form, status, 0]);
+      }
+    }
   });
-  it("uses a context passed in the data position", () => {
-    const ctx = { request: {} };
-    expect(subscriptionCallerContext(ctx, undefined, ambient)).toBe(ctx);
+
+  it("ambient administrator: admitted where Harper uses the ambient context", async () => {
+    for (const [form, call] of [
+      ["subscribe(target)", (t: any) => t.subscribe(target)],
+      ["subscribe(target, data)", (t: any) => t.subscribe(target, { data: 1 })],
+      ["connect(target)", (t: any) => t.connect(target)],
+      ["publish(target, data)", (t: any) => t.publish(target, { data: 1 })], // data resolves as internal; the ambient admin is admitted
+    ] as const) {
+      const { Table, calls } = guarded(ADMIN);
+      await call(Table);
+      expect([form, calls.length]).toEqual([form, 1]);
+    }
   });
-  it("falls back to the ambient context", () => {
-    expect(subscriptionCallerContext(undefined, undefined, ambient)).toBe("ambient");
-    expect(subscriptionCallerContext({ messages: [] }, undefined, ambient)).toBe("ambient");
+
+  it("ambient non-admin, explicit administrator: admitted only where Harper acts as the administrator", async () => {
+    for (const [form, call, admitted] of [
+      ["subscribe(target, undefined, admin)", (t: any) => t.subscribe(target, undefined, ADMIN), true],
+      ["subscribe(target, { verdict })", (t: any) => t.subscribe(target, { verdict: ADMIN.verdict }), false], // Harper reads a plain second argument as data
+      ["connect(target, data, admin)", (t: any) => t.connect(target, { data: 1 }, ADMIN), true],
+      ["connect(record, admin)", (t: any) => t.connect({ id: "m" }, ADMIN), true],
+      // Harper uses the second only if it carries one of its transactions; flair cannot tell, so both readings must be admitted.
+      ["connect(target, admin)", (t: any) => t.connect(target, ADMIN), false],
+      ["publish(target, undefined, admin)", (t: any) => t.publish(target, undefined, ADMIN), true],
+      ["subscribe(target)", (t: any) => t.subscribe(target), false],
+    ] as const) {
+      const { Table, calls } = guarded(AGENT);
+      let thrown: any;
+      try { await call(Table); } catch (err) { thrown = err; }
+      expect([form, calls.length, admitted ? undefined : thrown?.statusCode]).toEqual([form, admitted ? 1 : 0, admitted ? undefined : 403]);
+    }
   });
 });
 

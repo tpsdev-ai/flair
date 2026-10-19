@@ -98,7 +98,7 @@ a verified non-admin agent's also carries the refusal as a reason string unless
 the client turned problem information off or the string would exceed its
 maximum packet size. A refused QoS 0 PUBLISH gets no answer. Over MQTT 3.1.1, a
 refused SUBSCRIBE gets SUBACK `0x80`, and a PUBACK carries no reason code, so a
-3.1.1 client cannot tell a refused PUBLISH from an accepted one. A refused
+PUBACK alone cannot tell a refused PUBLISH from an accepted one. A refused
 publish reaches no subscriber, and a refused retained publish leaves the row as
 it was.
 

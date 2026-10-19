@@ -4,7 +4,14 @@
  * table-subscription guard.
  */
 import { describe, expect, it } from "bun:test";
-import { isDirectMqttSessionContext, isLastWillReplayContext, isMqttSessionContext, isProtocolLayerContext } from "../../resources/protocol-context";
+import {
+  carriesTransaction,
+  isDirectMqttSessionContext,
+  isLastWillReplayContext,
+  isMqttSessionContext,
+  isProtocolLayerContext,
+  isReleasedTransactionPlaceholder,
+} from "../../resources/protocol-context";
 
 /** A stand-in for Harper's MQTT session object (DurableSubscriptionsSession). */
 const session = () => ({ sessionId: "c1", addSubscription: async () => undefined });
@@ -36,7 +43,14 @@ describe("isDirectMqttSessionContext", () => {
     expect(isDirectMqttSessionContext({ session: new Session(), socket: {} })).toBe(true);
   });
 
-  it("does not take any other value for one, and invokes no getter while deciding", () => {
+  it("classifies by shape: an own socket property (an accessor is accepted, not invoked) and an own data session with a data addSubscription", () => {
+    let reads = 0;
+    const viaAccessorSocket = Object.defineProperty({ session: session() }, "socket", { get() { reads++; return {}; }, enumerable: true });
+    expect(isDirectMqttSessionContext(viaAccessorSocket)).toBe(true);
+    expect(reads).toBe(0);
+  });
+
+  it("is false without that shape (no own socket, a session that is inherited, accessor-held or lacks a data addSubscription), and invokes no getter while deciding", () => {
     let reads = 0;
     const counted = (value: unknown) => ({ get() { reads++; return value; }, enumerable: true });
     expect(isDirectMqttSessionContext(undefined)).toBe(false);
@@ -60,7 +74,7 @@ describe("isLastWillReplayContext", () => {
     expect(isLastWillReplayContext({ ...replayed(), data: undefined, user: undefined })).toBe(true); // an empty will: a delete
   });
 
-  it("does not take any other context for one, and invokes no getter while deciding", () => {
+  it("is false without that shape (authorize true, a string topic, retain true, each an own data property), and invokes no getter while deciding", () => {
     let reads = 0;
     const counted = (value: unknown) => ({ get() { reads++; return value; }, enumerable: true });
     expect(isLastWillReplayContext(undefined)).toBe(false);
@@ -77,6 +91,33 @@ describe("isLastWillReplayContext", () => {
       delete value[key];
       expect(isLastWillReplayContext(Object.defineProperty(value, key, counted(held)))).toBe(false);
     }
+    expect(reads).toBe(0);
+  });
+});
+
+describe("isReleasedTransactionPlaceholder and carriesTransaction", () => {
+  // The shape of Harper's RELEASED_TRANSACTION (resources/DatabaseTransaction.ts).
+  const released = Object.freeze({
+    open: 0, transaction: undefined, writes: Object.freeze([]),
+    commit() { return { txnTime: 0 }; }, abort() {}, getReadTxn() {}, addWrite() { throw new Error("released"); }, setContext() { throw new Error("released"); },
+  });
+  class DatabaseTransactionLike { commit() { return {}; } }
+
+  it("recognises the released-transaction shape and nothing else", () => {
+    expect(isReleasedTransactionPlaceholder(released)).toBe(true);
+    expect(isReleasedTransactionPlaceholder({ ...released, open: 1 })).toBe(false);
+    expect(isReleasedTransactionPlaceholder(new DatabaseTransactionLike())).toBe(false); // methods on the prototype
+    expect(isReleasedTransactionPlaceholder({ transaction: {}, user: 1 })).toBe(false);
+    expect(isReleasedTransactionPlaceholder(undefined)).toBe(false);
+  });
+
+  it("carriesTransaction: an own data transaction with a commit method along its chain", () => {
+    expect(carriesTransaction({ transaction: new DatabaseTransactionLike() })).toBe(true);
+    expect(carriesTransaction({ transaction: released })).toBe(true); // the shape; Harper's own class test would refuse it
+    expect(carriesTransaction({ transaction: { id: 1 } })).toBe(false); // JSON data cannot carry a method
+    expect(carriesTransaction(Object.create({ transaction: new DatabaseTransactionLike() }))).toBe(false);
+    let reads = 0;
+    expect(carriesTransaction(Object.defineProperty({}, "transaction", { get() { reads++; return new DatabaseTransactionLike(); } }))).toBe(false);
     expect(reads).toBe(0);
   });
 });
