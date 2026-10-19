@@ -22,7 +22,7 @@ import { describe, it, expect } from "bun:test";
 import {
   GUARDED_TABLE_STATICS,
   RETAINED_PUBLISH_STATICS,
-  retainedWriteContext,
+  retainedPublishContext,
   guardTableSubscriptions,
   isProtocolEntry,
   subscribeCallerContext,
@@ -345,14 +345,71 @@ describe("guardTableSubscriptions — retained MQTT publish (put() / delete())",
     expect(calls).toEqual([]);
   });
 
-  it("retainedWriteContext reads the explicit context the way Harper does, never the ambient one", () => {
-    const ctx = { user: 1 };
-    expect(retainedWriteContext("put", [{}, { data: 1 }, ctx])).toBe(ctx);
-    expect(retainedWriteContext("put", [{}, ctx])).toBe(ctx); // (record, context) form
-    expect(retainedWriteContext("put", [{ id: "x" }])).toBeUndefined();
-    expect(retainedWriteContext("delete", [{}, ctx])).toBe(ctx);
-    expect(retainedWriteContext("delete", [{}, { data: 1 }, ctx])).toBe(ctx);
-    expect(retainedWriteContext("delete", ["id"])).toBeUndefined();
+  it("retainedPublishContext returns the MQTT session context Harper passes, at the position Harper reads it", () => {
+    const ctx = mqtt(ADMIN.verdict);
+    expect(retainedPublishContext([{}, { data: 1 }, ctx])).toBe(ctx); // put(target, data, context)
+    expect(retainedPublishContext([{}, ctx])).toBe(ctx); // delete(target, context)
+    expect(retainedPublishContext([{}, { data: 1 }, { ...ctx, user: {} }])).toBeDefined(); // a session's will copies the context
+  });
+
+  it("retainedPublishContext is undefined for every other call, and reads nothing but own data properties", () => {
+    let accessorReads = 0;
+    let getContextCalls = 0;
+    const session = { addSubscription: () => undefined };
+    const viaAccessor = { socket: {}, get session() { accessorReads++; return session; } };
+    const viaGetContext = { getContext() { getContextCalls++; return mqtt(ADMIN.verdict); } };
+    expect(retainedPublishContext([{}, { data: 1 }, { user: 1 }])).toBeUndefined();
+    expect(retainedPublishContext([{}, { data: 1 }, { headers: {}, authorize: true }])).toBeUndefined();
+    expect(retainedPublishContext([{ id: "x" }])).toBeUndefined();
+    expect(retainedPublishContext(["id"])).toBeUndefined();
+    expect(retainedPublishContext([{}, { data: 1 }, viaAccessor])).toBeUndefined();
+    expect(retainedPublishContext([{}, viaGetContext])).toBeUndefined();
+    expect(retainedPublishContext([{}, { data: 1 }, Object.create(mqtt(ADMIN.verdict))])).toBeUndefined(); // inherited, not own
+    expect(accessorReads).toBe(0);
+    expect(getContextCalls).toBe(0);
+  });
+
+  it("an ordinary put()/delete() reads its context exactly as often as it does without the guard", () => {
+    /**
+     * A table whose static put()/delete() read an explicit context the way
+     * Harper's transactional() does (resources/Resource.ts: the context is
+     * replaced by `context.getContext?.() || context`).
+     */
+    function makeHarperLikeWriteTable() {
+      const read = (args: unknown[]) => { const explicit: any = args[2] ? args[2] : args[1]; return explicit?.getContext?.() || explicit; };
+      class Table {
+        static put(...args: unknown[]) { read(args); return "put-result"; }
+        static delete(...args: unknown[]) { read(args); return "delete-result"; }
+      }
+      return Table;
+    }
+    /** A context that counts its getContext() calls and every property read. */
+    function countingContext() {
+      const counts = { getContext: 0, reads: 0 };
+      const target: Record<string, unknown> = { transaction: {} };
+      target.getContext = () => { counts.getContext++; return target; };
+      const context = new Proxy(target, { get(t, key, receiver) { counts.reads++; return Reflect.get(t, key, receiver); } });
+      return { context, counts };
+    }
+    const writes: Array<[string, (table: any, context: unknown) => unknown]> = [
+      ["put(target, data, context)", (t, c) => t.put({ id: "m" }, { content: "x" }, c)],
+      ["put(record, context)", (t, c) => t.put({ id: "m", content: "x" }, c)],
+      ["delete(target, context)", (t, c) => t.delete({ id: "m" }, c)],
+      ["delete(target, data, context)", (t, c) => t.delete({ id: "m" }, { reason: "x" }, c)],
+    ];
+    for (const [form, write] of writes) {
+      const unguarded = countingContext();
+      const unguardedResult = write(makeHarperLikeWriteTable(), unguarded.context);
+      const Guarded = makeHarperLikeWriteTable();
+      guardTableSubscriptions({ Memory: Guarded }, {
+        resolveAuth: async () => { throw new Error("an ordinary write resolves no caller"); },
+        ambientContext: () => { throw new Error("an ordinary write reads no ambient context"); },
+      });
+      const guarded = countingContext();
+      expect([form, write(Guarded, guarded.context)]).toEqual([form, unguardedResult]);
+      expect([form, guarded.counts]).toEqual([form, unguarded.counts]);
+      expect([form, unguarded.counts.getContext]).toEqual([form, 1]);
+    }
   });
 });
 

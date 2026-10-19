@@ -3,13 +3,16 @@
  * on every table class in the flair database's table registry when the
  * component loads: the static `connect()` (the entry Harper uses for an exported
  * table's SSE and WebSocket subscription routes), `subscribe()` (an MQTT
- * SUBSCRIBE) and `publish()` (an MQTT PUBLISH) of each table class admit only
- * administrators and trusted internal calls, and so do its static `put()` and
- * `delete()` for a call made with an MQTT session's context (a retained MQTT
- * PUBLISH); every other put()/delete() call passes through them unchanged,
- * without resolving a caller. The tables are
- * read from the registry, so the class of a table added to the schema gets the
- * guard without being named here.
+ * SUBSCRIBE, and Harper's native MCP `resources/subscribe` when that component
+ * is configured) and `publish()` (an MQTT PUBLISH) of each table class admit
+ * only administrators and trusted internal calls, and so do its static `put()`
+ * and `delete()` for a call whose explicit context argument is itself an MQTT
+ * session's context (a retained MQTT PUBLISH). Every other put()/delete() call
+ * passes through them with the same arguments, with nothing read from its
+ * context and no caller resolved. Harper's native MCP route resolves every
+ * caller as anonymous, so it refuses administrators too (see the policy
+ * module). The tables are read from the registry, so the class of a table
+ * added to the schema gets the guard without being named here.
  *
  * This module deliberately exports nothing: Harper registers exported values of
  * a resource module as routes.

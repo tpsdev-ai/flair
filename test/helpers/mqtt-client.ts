@@ -4,10 +4,11 @@
  * listener (`openTcp`).
  *
  * It speaks only what the tests need — CONNECT, SUBSCRIBE, PUBLISH (QoS 0/1,
- * retained or not) and DISCONNECT out; CONNACK, SUBACK, PUBACK, PUBLISH and DISCONNECT in — and
- * keeps every byte the server sent, so a test can scan the raw stream for a
- * marker regardless of how Harper encoded a payload (JSON, MessagePack and
- * CBOR all carry a string as its UTF-8 bytes).
+ * retained or not) and DISCONNECT out; CONNACK, SUBACK, PUBACK, PUBLISH and
+ * DISCONNECT in — and keeps the text of everything the server sent, decoded as
+ * UTF-8 (`receivedText`), so a test can scan the stream for an ASCII marker
+ * regardless of how Harper encoded a payload (JSON, MessagePack and CBOR all
+ * carry a string as its UTF-8 bytes). The bytes themselves are not kept.
  *
  * MQTT 5 is used, not 3.1.1, because only 5 carries a reason code on SUBACK
  * failures other than 0x80 and on PUBACK at all: a 3.1.1 PUBACK for a refused
@@ -165,7 +166,7 @@ export class MqttClient {
     return this.transport.protocol();
   }
 
-  /** Every byte the server sent, decoded as UTF-8 (for marker scans). */
+  /** Everything the server sent, decoded as UTF-8 (for marker scans). */
   get receivedText(): string {
     return this.rawText;
   }

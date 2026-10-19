@@ -1,6 +1,9 @@
 /**
  * Subscriptions and publishes on flair's tables are served to administrators
- * and trusted internal callers only, on every transport.
+ * and trusted internal callers only, on every transport. Harper's native MCP
+ * subscription route refuses every caller, administrators included, until a
+ * verified bridge from Harper's MCP session to a flair caller exists (see
+ * "Which caller is decided on").
  *
  * An exported table has a subscription route: SSE (`Accept:
  * text/event-stream`, which Harper dispatches as CONNECT) and WebSocket on
@@ -22,18 +25,23 @@
  *   - `connect()` — the SSE and WebSocket subscription routes (the context is
  *     the HTTP request);
  *   - `subscribe()` — an MQTT SUBSCRIBE (DurableSubscriptionsSession's
- *     addSubscription), and Harper's MCP `resources/subscribe` when that
- *     component is configured;
+ *     addSubscription), and Harper's native MCP `resources/subscribe` when
+ *     that component is configured;
  *   - `publish()` — an MQTT PUBLISH (publishMessage);
- *   - `put()` / `delete()` — a retained MQTT PUBLISH (publishMessage, and a
- *     session's retained will). These two statics are also the entry of
- *     ordinary put and delete calls (a REST PUT or DELETE, flair's own
- *     writes), so their guard decides only a call whose context is an MQTT
- *     session's (resources/protocol-context.ts); every other put()/delete()
- *     call goes to the inherited static unchanged and synchronously, without
- *     resolving a caller, and keeps flair's write rules. Harper's `post()` and
- *     `patch()` statics are separate and not wrapped (an MQTT PUBLISH reaches
- *     neither).
+ *   - `put()` / `delete()` — a retained MQTT PUBLISH (publishMessage, which
+ *     passes the session's own context, as it does for the retained will a
+ *     session publishes when it disconnects). These two statics are also the
+ *     entry of ordinary put and delete calls (a REST PUT or DELETE, flair's
+ *     own writes), so their guard decides only a call whose explicit context
+ *     argument is itself an MQTT session's context, recognised from that
+ *     argument's own data properties (isDirectMqttSessionContext in
+ *     resources/protocol-context.ts). Every other put()/delete() call goes to
+ *     the inherited static with the same arguments and receiver,
+ *     synchronously: the guard invokes no getter and no `getContext()` of its
+ *     arguments and resolves no caller, so the write keeps flair's write rules
+ *     and Harper reads its context as it would without the guard. Harper's
+ *     `post()` and `patch()` statics are separate and not wrapped (an MQTT
+ *     PUBLISH reaches neither).
  * `guardTableSubscriptions` replaces these statics on every table class in the
  * flair database's table registry, read at load
  * (resources/table-subscriptions.ts), not from a list someone maintains. For
@@ -63,23 +71,36 @@
  * without an HTTP request — an MQTT session on Harper's TCP or TLS listener —
  * resolves as anonymous, and so does any other context with no HTTP request
  * that Harper marks for authorization; a call with neither is the trusted
- * `internal` verdict of in-process code. The guard also treats a call whose
- * target carries Harper's protocol-layer marker (a non-null, non-false
- * `checkPermission`) as never `internal`: it is decided as a caller without a
- * valid credential (401).
+ * `internal` verdict of in-process code. The guard never decides a
+ * protocol-layer call as `internal` (subscriptionCaller): when the resolver
+ * answers `internal` for a call whose target carries Harper's protocol-layer
+ * marker (a non-null, non-false `checkPermission`) or whose context a
+ * protocol layer built, the call is decided as a caller without a valid
+ * credential (401). Every other verdict is decided as resolved.
+ *
+ * Harper's native MCP component calls subscribe() with
+ * `{ user, authorize: true, request: <RequestTarget> }`. The Harper user it
+ * authenticated is not a credential flair verifies, and that context carries no
+ * HTTP request, so the call resolves as anonymous: the route refuses every
+ * table subscription, administrators included. Admitting an administrator
+ * there needs a verified bridge from Harper's MCP session to a flair caller,
+ * which does not exist yet; test/integration/table-subscription-mcp.test.ts
+ * drives that route and holds it to the refusal.
  *
  * test/integration/table-subscription-default-deny.test.ts reads every table in
  * the database at runtime and fails if a non-admin subscriber is admitted to a
  * table's collection route (`/<Table>/`) or by-id route (`/<Table>/<id>`), over
  * SSE or WebSocket. test/integration/table-subscription-mqtt.test.ts checks
- * MQTT subscribe, publish and retained publish on a Harper with MQTT turned on.
+ * MQTT subscribe, publish and retained publish on a Harper with MQTT turned on,
+ * and test/integration/table-subscription-mcp.test.ts checks Harper's native
+ * MCP `resources/subscribe` on a Harper with that component configured.
  *
  * This module imports only resources/protocol-context.ts, which has no
  * imports, so it is unit-tested directly
  * (test/unit/table-subscription-policy.test.ts); the dependencies it needs are
  * passed in by resources/table-subscriptions.ts.
  */
-import { isMqttSessionContext, isProtocolLayerContext } from "./protocol-context.js";
+import { isDirectMqttSessionContext, isProtocolLayerContext } from "./protocol-context.js";
 
 /** The caller verdict the guard decides on (resources/agent-auth.ts's AgentAuthVerdict). */
 export type SubscriptionCaller =
@@ -209,7 +230,7 @@ export const MAX_REFUSAL_REASON_BYTES = 123;
  * The decision: why `caller` may not subscribe to (or publish to) a table, as
  * the error the route or topic returns; null for an administrator or a trusted
  * internal call. Every guarded entry asks this function, so subscription and
- * publish admit exactly the same callers.
+ * publish decide a resolved caller the same way.
  */
 export function tableSubscriptionRefusal(
   caller: SubscriptionCaller,
@@ -256,15 +277,19 @@ export function subscribeInProcess(table: any, request?: unknown): any {
 export const RETAINED_PUBLISH_STATICS: readonly string[] = Object.freeze(["put", "delete"]);
 
 /**
- * The explicit context of a `put(target, data, context)` or
- * `delete(target, context)` call, as Harper reads it; undefined when the call
- * passes none (the ambient context is not consulted: Harper's MQTT layer
- * always passes its session's context explicitly).
+ * The MQTT session context of a retained publish, or undefined for any other
+ * put()/delete() call. Harper's publishMessage passes its session's context
+ * itself, explicitly: `put(target, data, context)` / `delete(target, context)`.
+ * So this takes the argument at the position Harper reads an explicit context
+ * (the third when one is given, otherwise the second) and returns it only when
+ * it is that context (isDirectMqttSessionContext). Only own data properties of
+ * the argument are read: no getter and no `getContext()` of it is invoked, so
+ * an ordinary write's context is read by Harper alone, as without the guard.
+ * The ambient context is not consulted.
  */
-export function retainedWriteContext(method: string, args: readonly unknown[]): unknown {
-  return method === "delete"
-    ? subscribeCallerContext(args[1], args[2], () => undefined)
-    : subscriptionCallerContext(args[1], args[2], () => undefined);
+export function retainedPublishContext(args: readonly unknown[]): unknown {
+  const explicit = args[2] ? args[2] : args[1];
+  return isDirectMqttSessionContext(explicit) ? explicit : undefined;
 }
 
 /** Harper reads `reliesOnPrototype` off its static entry functions; the replacement keeps it. */
@@ -281,10 +306,11 @@ function guardedRetainedWrite(
 ) {
   const guarded = {
     [method](this: unknown, ...args: unknown[]) {
-      const context = retainedWriteContext(method, args);
+      const context = retainedPublishContext(args);
       // Every write that is not an MQTT session's goes to the inherited static
-      // as it was called: same arguments, same receiver, same synchronous call.
-      if (!isMqttSessionContext(context)) return inherited.apply(this, args);
+      // as it was called: same arguments, same receiver, same synchronous call,
+      // with nothing read from its context.
+      if (context === undefined) return inherited.apply(this, args);
       return (async () => {
         let caller: SubscriptionCaller;
         try {
@@ -330,10 +356,11 @@ function guardedStatic(
  * Replace the static `connect()`, `subscribe()` and `publish()` of every table
  * class in `tables` with ones that admit only administrators and trusted
  * internal calls, then delegate to the inherited static unchanged; and its
- * static `put()` and `delete()` with ones that decide the same way a call made
- * with an MQTT session's context (a retained MQTT PUBLISH) and pass every other
- * put()/delete() call through without resolving a caller. Idempotent. A
- * failure to resolve the caller refuses the call.
+ * static `put()` and `delete()` with ones that decide the same way a call
+ * whose explicit context argument is itself an MQTT session's context (a
+ * retained MQTT PUBLISH) and pass every other put()/delete() call through
+ * without reading its context or resolving a caller. Idempotent. A failure to
+ * resolve the caller refuses the call.
  * Returns the names of the guarded tables.
  */
 export function guardTableSubscriptions(

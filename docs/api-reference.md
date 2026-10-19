@@ -74,7 +74,10 @@ or an admin agent) and trusted internal callers only. A verified non-admin
 agent is refused with **403** (WebSocket close code 3003), and a caller without
 a valid credential with **401** (close code 3000). Verified agents receive
 changes to the memories they can read through `/FeedMemories`, and soul changes
-through `/FeedSouls`; neither is a table.
+through `/FeedSouls`; neither is a table. Harper's native MCP
+`resources/subscribe`, available only when an operator configures Harper's MCP
+component, refuses every table subscription, administrators included: flair
+does not yet verify the Harper user of an MCP session as a flair caller.
 
 Flair's local installs run Harper with MQTT off. When an operator turns MQTT
 on, an exported table's path is also an MQTT topic (`<Table>/#`,
@@ -82,11 +85,17 @@ on, an exported table's path is also an MQTT topic (`<Table>/#`,
 (`AgentReadPosition`, `OAuthToken`), which follows that resource's own rules —
 and every MQTT action on a table topic follows the same rule: a SUBSCRIBE, a
 PUBLISH, and a retained PUBLISH (which writes the row, or with an empty payload
-deletes it) are served to administrators and trusted internal callers only. A
-verified non-admin agent gets SUBACK or PUBACK reason code `0x87` (not
-authorized); a caller without a valid credential is refused at CONNECT, or gets
-`0x80` when Harper admits its session. A refused publish reaches no subscriber,
-and a refused retained publish leaves the row as it was. Over MQTT on WebSocket
+deletes it) are served to administrators and trusted internal callers only.
+Over MQTT 5, a refused SUBSCRIBE gets SUBACK reason code `0x87` (not
+authorized) for a verified non-admin agent and `0x80` for a caller without a
+valid credential whose session Harper admits (Harper may instead refuse that
+caller at CONNECT). A refused PUBLISH is answered only when it asks for an
+acknowledgment: at QoS 1 (PUBACK) or QoS 2 (PUBREC) it gets the same codes, and
+a verified non-admin agent's also carries the refusal as a reason string unless
+the client turned problem information off or the string would exceed its
+maximum packet size. A refused QoS 0 PUBLISH gets no answer. MQTT 3.1.1 has
+only `0x80` for every refusal. A refused publish reaches no subscriber, and a
+refused retained publish leaves the row as it was. Over MQTT on WebSocket
 the credential is the one on the WebSocket upgrade request, as for SSE and
 WebSocket. An MQTT connection on Harper's TCP or TLS listener carries no HTTP
 request, so flair resolves the caller of each of its actions as one without a

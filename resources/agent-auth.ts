@@ -433,7 +433,9 @@ export async function resolveAgentAuth(context: any): Promise<AgentAuthVerdict> 
   // A context a protocol layer built (an MQTT session's action — on Harper's
   // TCP or TLS listener it carries no HTTP request — or one still carrying
   // Harper's `authorize: true`) is a remote caller with no credential flair can
-  // verify: anonymous, never internal (resources/protocol-context.ts).
+  // verify: anonymous, never internal (resources/protocol-context.ts). Harper's
+  // native MCP route builds such a context; flair has no verified bridge from
+  // its Harper user to a flair caller, so that caller is anonymous too.
   if (isProtocolLayerContext(context)) return { kind: "anonymous" };
 
   noteInternalVerdict(context);

@@ -63,6 +63,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { startHarper, stopHarper, HarperInstance } from "../helpers/harper-lifecycle";
 import { MQTT_REASON, MqttClient } from "../helpers/mqtt-client";
+import { commitMarkerRow, flairTableShapes, type TableShape } from "../helpers/table-markers";
 import { ensureFlairAgentRole, ensureFlairAgentUser } from "../../src/cli";
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
@@ -222,22 +223,8 @@ for (const config of HARPERS) {
       return res.kind === "answered" ? res.value : res.kind;
     }
 
-    interface TableShape { primaryKey: string; types: Map<string, string | undefined> }
-
-    /** Tables in the flair database, each with its primary-key attribute and attribute types, read from the database itself. */
-    async function flairTables(): Promise<Map<string, TableShape>> {
-      const res = await adminOp({ operation: "describe_database", database: "flair" });
-      const body = await res.json();
-      expect(res.status, JSON.stringify(body).slice(0, 200)).toBe(200);
-      const out = new Map<string, TableShape>();
-      for (const t of Object.keys(body).sort()) {
-        const primaryKey = body[t]?.primary_key;
-        expect(typeof primaryKey, `describe_database names ${t}'s primary key`).toBe("string");
-        const types = new Map<string, string | undefined>((body[t].attributes ?? []).map((a: any) => [String(a.attribute), typeof a.type === "string" ? a.type : undefined]));
-        out.set(t, { primaryKey, types });
-      }
-      return out;
-    }
+    /** Tables in the flair database, read from the database itself (test/helpers/table-markers.ts). */
+    const flairTables = () => flairTableShapes(adminOp);
 
     /** Whether an administrator's collection read of `/<table>/` returns the table's rows. */
     async function listedByAdmin(table: string): Promise<boolean> {
@@ -247,36 +234,8 @@ for (const config of HARPERS) {
       try { return Array.isArray(JSON.parse(text)); } catch { return false; }
     }
 
-    /** A value of `type` for a required attribute: the marker for text and ids. */
-    function fillValue(type: string | undefined, marker: string): unknown {
-      switch (type) {
-        case "Int": case "Long": case "Float": case "BigInt": return 1;
-        case "Boolean": return false;
-        case "array": case "Array": return [];
-        default: return marker;
-      }
-    }
-
-    /**
-     * Commit a row to `table` whose primary key is `key`, through the
-     * operations API, filling each attribute the table requires (named by the
-     * table's own validation answer) from its declared type. Answers the row.
-     */
-    async function insertMarkerRow(table: string, shape: TableShape, key: string): Promise<Record<string, unknown>> {
-      const row: Record<string, unknown> = { [shape.primaryKey]: key };
-      let last = "";
-      for (let attempt = 0; attempt < 5; attempt++) {
-        const res = await adminOp({ operation: "upsert", database: "flair", table, records: [row] });
-        last = await res.text();
-        if (res.status === 200) return row;
-        const required = [...last.matchAll(/Property (\w+) is required/g)].map((m) => m[1]);
-        const arrays = [...last.matchAll(/in property (\w+) must be an Array/g)].map((m) => m[1]);
-        if (required.length === 0 && arrays.length === 0) break;
-        for (const name of required) row[name] = fillValue(shape.types.get(name), key);
-        for (const name of arrays) row[name] = [];
-      }
-      throw new Error(`could not commit a marker row to ${table}: ${last.slice(0, 300)}`);
-    }
+    /** Commit a row to `table` whose primary key is `key` (test/helpers/table-markers.ts). */
+    const insertMarkerRow = (table: string, shape: TableShape, key: string) => commitMarkerRow(adminOp, table, shape, key);
 
     /** The stored row of `table` whose primary key is `key`, read through the operations API; undefined when absent. */
     async function storedRow(table: string, primaryKey: string, key: string): Promise<Record<string, unknown> | undefined> {
