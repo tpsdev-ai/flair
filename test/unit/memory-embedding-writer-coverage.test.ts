@@ -72,7 +72,7 @@ add("Memory", ["writer:super.patch#1"], "GATED",
 add("Memory", ["writer:(databases as any).flair.Memory.update#1"], "LOCAL",
   "Memory.patch() re-embed (flair#2465): an incremental update of only embedding/embeddingModel/updatedAt for a locally computed vector and getModelId(); noteWriteStamp.");
 add("migrations/embedding-stamp", ["writer:table.update#1"], "LOCAL",
-  "Content-suffix fallback (flair#2465): an incremental update of only embedding/embeddingModel/updatedAt for a locally computed vector and current model ID — never a full-row put.");
+  "Content-suffix fallback (flair#2465): an incremental update of only embedding/embeddingModel/updatedAt for a locally computed vector and current model ID — never a full-row put. Written under the id's per-id Memory write lock, taken once after the vector is computed (flair#2478).");
 
 // ── DELEGATED: embedding handling occurs in the resource write path ──
 add("MemoryArchive", ["writer:Memory.put#1"], "DELEGATED", "Existing row through Memory.put().");
