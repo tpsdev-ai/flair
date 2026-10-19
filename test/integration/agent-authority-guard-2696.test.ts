@@ -1,22 +1,27 @@
 // agent-authority-guard-2696.test.ts — flair#2696, against a REAL Harper.
 //
-// A non-admin write cannot change an agent's authority. The guard PUT and
-// PATCH share (authorizePrincipalWrite in resources/Agent.ts) compares the
-// stored `role` with the role the record will have once the body is merged
-// onto the stored row and reconciled (reconcileAdminFields in
-// resources/agent-admin.ts). `role === "admin"` is the authority; the `admin`
-// field is a mirror and is not read as authority.
+// An Agent PUT is an administrator operation: a signed PUT from an agent that
+// is not an administrator is refused 403 `agent_put_admin_only`, whatever its
+// body names, and the row is byte-identical afterwards. Such an agent updates
+// its own record with PATCH, which merges the body into the stored row.
 //
-// Every row here carries `admin: true` without the admin role: the shape
-// test/integration/admin-field-truth.test.ts seeds and shows is not an admin
-// on the gate. Two variants, with no `role` and with `role: "agent"`. For each:
-//   - its owner's signed PUT or PATCH naming `admin: true` or `role: "admin"`
-//     is refused 403, and the row is byte-identical afterwards;
-//   - its owner's ordinary self-update naming neither field succeeds and never
-//     stores the admin role: a PATCH leaves `role` and `admin` as stored; a PUT
-//     stores the body's fields, which name no role, with the mirror reconciled
-//     to `admin: false`.
-// An administrator's write naming `admin: true` on such a row is admitted and
+// A non-admin PATCH that names `role` or `admin` goes through the guard in
+// authorizePrincipalWrite (resources/Agent.ts): it compares the role of the
+// row it reads with the role that row would have once the body is merged onto
+// it and reconciled (reconcileAdminFields in resources/agent-admin.ts).
+// `role === "admin"` is the authority; the `admin` field is a mirror and is not
+// read as authority. A change an administrator commits after that read is
+// covered by agent-patch-race-2696.test.ts.
+//
+// The PUT refusals run on an ordinary row and on rows whose mirror says admin
+// while the role does not: the shape test/integration/admin-field-truth.test.ts
+// seeds and shows is not an admin on the gate (two variants, with no `role`
+// and with `role: "agent"`). On each mismatched row:
+//   - its owner's PATCH naming `admin: true` or `role: "admin"` is refused 403,
+//     and the row is byte-identical afterwards;
+//   - its owner's PATCH naming neither field succeeds and leaves `role` and
+//     `admin` as stored.
+// An administrator's PATCH naming `admin: true` on such a row is admitted and
 // stores the admin role.
 //
 // The stored-row assertions read the committed row through an operations
@@ -106,6 +111,26 @@ const MISMATCHED_ROWS: { label: string; fields: Record<string, unknown> }[] = [
   { label: "admin:true with role \"agent\"", fields: { role: "agent", admin: true } },
 ];
 
+/** An ordinary non-admin row, plus the two mismatched variants. */
+const PUT_ROWS: { label: string; fields: Record<string, unknown>; mismatched: boolean }[] = [
+  { label: "role \"agent\" and admin:false", fields: { role: "agent", admin: false }, mismatched: false },
+  ...MISMATCHED_ROWS.map((row) => ({ ...row, mismatched: true })),
+];
+
+/** Seed a fresh row owned by its own key, and return that agent. */
+async function seedRow(fields: Record<string, unknown>): Promise<TestAgent> {
+  const agent = mkAgent(`auth2696-${randomUUID().slice(0, 13)}`);
+  await adminOp({
+    operation: "insert", database: "flair", table: "Agent",
+    records: [{
+      id: agent.id, name: agent.id, status: "active", displayName: "stored-name",
+      runtime: "stored-runtime", publicKey: agent.publicKey, createdAt: STORED_CREATED_AT, ...fields,
+    }],
+  });
+  expect(await rowIn(agent.id), "the row was not seeded").not.toBeNull();
+  return agent;
+}
+
 /** Seed a fresh mismatched row owned by its own key, and return that agent. */
 async function seedMismatched(fields: Record<string, unknown>): Promise<TestAgent> {
   const agent = mkAgent(`auth2696-${randomUUID().slice(0, 13)}`);
@@ -138,28 +163,51 @@ afterAll(async () => {
   if (harper) await stopHarper(harper);
 }, HARPER_STOP_BUDGET_MS);
 
-describe("flair#2696 — a non-admin write cannot change an agent's authority", () => {
+describe("flair#2696 — an agent that is not an administrator cannot PUT, and its PATCH cannot change admin status", () => {
   test("positive control: the admin principal passes the admin gate", async () => {
     expect(await probeAdminOnly(ADMIN)).toBe(200);
   }, 30_000);
 
+  for (const row of PUT_ROWS) {
+    describe(`a row with ${row.label}`, () => {
+      const putRefusals: { name: string; body: (id: string) => Record<string, unknown> }[] = [
+        { name: "its owner's PUT naming neither role nor admin", body: (id) => ({ id, name: id, displayName: "put-name" }) },
+        { name: "its owner's PUT naming admin: true", body: (id) => ({ id, name: id, displayName: "put-name", admin: true }) },
+        { name: "its owner's PUT naming role \"admin\"", body: (id) => ({ id, name: id, displayName: "put-name", role: "admin" }) },
+        { name: "its owner's PUT naming status", body: (id) => ({ id, name: id, displayName: "put-name", status: "active" }) },
+      ];
+      for (const c of putRefusals) {
+        test(`${c.name} is refused 403 agent_put_admin_only and the row is byte-identical`, async () => {
+          const owner = row.mismatched ? await seedMismatched(row.fields) : await seedRow(row.fields);
+          const before = await rowIn(owner.id);
+          const path = `/Agent/${owner.id}`;
+
+          const res = await send("PUT", owner, path, c.body(owner.id));
+
+          expect(res.status, `PUT answered ${res.status}: ${res.text}`).toBe(403);
+          expect(JSON.parse(res.text).error).toBe("agent_put_admin_only");
+          expect(await rowIn(owner.id), "the refused PUT changed the row").toEqual(before);
+          expect(await probeAdminOnly(owner), "the row's owner passes the admin gate").toBe(403);
+        }, 30_000);
+      }
+    });
+  }
+
   for (const shape of MISMATCHED_ROWS) {
     describe(`a row with ${shape.label}`, () => {
-      const refusals: { name: string; method: "PUT" | "PATCH"; body: (id: string) => Record<string, unknown> }[] = [
-        { name: "its owner's PUT naming admin: true", method: "PUT", body: (id) => ({ id, name: id, displayName: "put-name", admin: true }) },
-        { name: "its owner's PUT naming role \"admin\"", method: "PUT", body: (id) => ({ id, name: id, displayName: "put-name", role: "admin" }) },
-        { name: "its owner's PATCH naming admin: true", method: "PATCH", body: () => ({ admin: true }) },
-        { name: "its owner's PATCH naming role \"admin\"", method: "PATCH", body: () => ({ role: "admin" }) },
+      const patchRefusals: { name: string; body: Record<string, unknown> }[] = [
+        { name: "its owner's PATCH naming admin: true", body: { admin: true } },
+        { name: "its owner's PATCH naming role \"admin\"", body: { role: "admin" } },
       ];
-      for (const c of refusals) {
+      for (const c of patchRefusals) {
         test(`${c.name} is refused 403 and the row is byte-identical`, async () => {
           const owner = await seedMismatched(shape.fields);
           const before = await rowIn(owner.id);
           const path = `/Agent/${owner.id}`;
 
-          const res = await send(c.method, owner, path, c.body(owner.id));
+          const res = await send("PATCH", owner, path, c.body);
 
-          expect(res.status, `${c.method} answered ${res.status}: ${res.text}`).toBe(403);
+          expect(res.status, `PATCH answered ${res.status}: ${res.text}`).toBe(403);
           expect(JSON.parse(res.text).error).toBe("only admin principals can change a principal's admin status");
           expect(await rowIn(owner.id), "the refused write changed the row").toEqual(before);
           expect(await probeAdminOnly(owner), "the row's owner passes the admin gate").toBe(403);
@@ -178,22 +226,6 @@ describe("flair#2696 — a non-admin write cannot change an agent's authority", 
         expect(after?.runtime, "the PATCH's runtime was not stored").toBe("patched-runtime");
         expect(after?.role, "the PATCH changed the stored role").toBe(before?.role);
         expect(after?.admin, "the PATCH changed the stored admin mirror").toBe(before?.admin);
-        expect(await probeAdminOnly(owner), "the row's owner passes the admin gate").toBe(403);
-      }, 30_000);
-
-      test("its owner's PUT naming neither field succeeds and stores no admin role", async () => {
-        const owner = await seedMismatched(shape.fields);
-        const path = `/Agent/${owner.id}`;
-
-        const res = await send("PUT", owner, path, { id: owner.id, name: owner.id, displayName: "put-name" });
-
-        expect(res.status, `PUT answered ${res.status}: ${res.text}`).toBeLessThan(300);
-        const after = await rowIn(owner.id);
-        expect(after?.displayName, "the PUT's displayName was not stored").toBe("put-name");
-        expect(after?.role, "the PUT stored the admin role").not.toBe("admin");
-        expect(after?.role ?? null, "the PUT stored a role its body did not name").toBeNull();
-        expect(after?.admin, "the PUT did not reconcile the mirror to the stored role").toBe(false);
-        expect(after?.publicKey, "the PUT replaced the stored publicKey").toBe(owner.publicKey);
         expect(await probeAdminOnly(owner), "the row's owner passes the admin gate").toBe(403);
       }, 30_000);
     });

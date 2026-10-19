@@ -1,9 +1,11 @@
 // agent-put-race-2696.test.ts — flair#2696, against a REAL Harper.
 //
-// An Agent PUT reads the stored row, then re-reads it inside its own write
-// transaction and writes a full replacement that carries the re-read row's
-// createdAt and publicKey. A deletion or a key rotation that commits after the
-// PUT's first read and BEFORE that re-read is not undone by the PUT:
+// An Agent PUT is an administrator operation. It reads the stored row, then
+// re-reads it inside its own write transaction and writes a full replacement
+// that carries the re-read row's createdAt, publicKey and server-maintained
+// federation fields; the other fields come from its body. A deletion or a key
+// rotation that commits after an administrator's PUT's first read and BEFORE
+// that re-read stands after the PUT:
 //   (a) a deleted agent stays deleted (the PUT never re-creates it), and the
 //       PUT is refused with 404 `agent_put_requires_existing`;
 //   (b) the stored publicKey is the ROTATED key, never the one the first read
@@ -152,7 +154,7 @@ afterAll(async () => {
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
 }, HARPER_STOP_BUDGET_MS);
 
-describe("flair#2696 — a write committed between an Agent PUT's first read and its re-read is not undone", () => {
+describe("flair#2696 — a deletion or key rotation committed between an administrator's Agent PUT's first read and its re-read stands after the PUT", () => {
   test("(a) a deletion committed after the PUT's first read and before its re-read leaves the agent deleted", async () => {
     const target = mkAgent(`put2696race-del-${randomUUID()}`);
     await seed({

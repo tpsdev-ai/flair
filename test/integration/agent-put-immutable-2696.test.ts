@@ -1,16 +1,20 @@
 // agent-put-immutable-2696.test.ts — flair#2696.
 //
-// An Agent PUT updates an EXISTING row: the STORED createdAt and publicKey are
-// carried into the replacement, ignoring any value the body sends. An otherwise
-// admissible PUT whose target id has no stored row is refused with 404
-// `agent_put_requires_existing` (its message names POST /AgentSeed, a creation
-// path; POST /Agent/ also creates a row) and writes nothing; the authorization
-// refusals come first (a signed non-admin PUT that includes `status`, for
-// example, is refused 403). PATCH keeps its merge behaviour. A deletion or a
-// key rotation committed after the PUT's first read and before its re-read in
-// the write transaction is covered by agent-put-race-2696.test.ts; a non-admin
-// write that would change an agent's authority, by
-// agent-authority-guard-2696.test.ts.
+// An Agent PUT is an administrator operation. A signed PUT from an agent that
+// is not an administrator is refused 403 and writes nothing: with
+// `agent_put_admin_only` when the record exists, and by Harper's create check
+// (the resource's allowCreate(), administrators only) when it does not. An
+// anonymous PUT is refused. An administrator's PUT updates an EXISTING row: the
+// STORED createdAt and publicKey are carried into the replacement, ignoring any
+// value the body sends, and the other fields come from the body, so a field
+// the body omits (`status` included) is not kept. An administrator's PUT whose target id has
+// no stored row is refused with 404 `agent_put_requires_existing` (its message
+// names POST /AgentSeed, a creation path; POST /Agent/ also creates a row) and
+// writes nothing. PATCH keeps its merge behaviour. A deletion or a key rotation
+// committed after an administrator's PUT's first read and before its re-read
+// in the write transaction is covered by agent-put-race-2696.test.ts; the
+// non-admin PUT refusals on more row shapes and the PATCH admin-status guard,
+// by agent-authority-guard-2696.test.ts.
 //
 // Each case runs against a real Harper; the stored-row assertions use an
 // operations search_by_id in a separate request, so they read the committed
@@ -144,7 +148,7 @@ describe("flair#2696 — an Agent PUT updates an existing row and carries its im
     expect(after?.runtime, "the PUT's runtime was not stored").toBe("put-runtime");
   }, 30_000);
 
-  test("a PUT to an id with no stored row is refused and writes no row", async () => {
+  test("an administrator's PUT to an id with no stored row is refused 404 and writes no row", async () => {
     const id = `put2696-new-${randomUUID()}`;
     const path = `/Agent/${id}`;
     const res = await put(path, {
@@ -161,11 +165,40 @@ describe("flair#2696 — an Agent PUT updates an existing row and carries its im
     expect(await rowIn(id), "a refused PUT wrote a row").toBeNull();
   }, 30_000);
 
-  test("a signed non-admin PUT to a missing id that includes status is refused 403 before the existence check", async () => {
+  test("a signed non-admin PUT to a missing id is refused 403 and writes no row", async () => {
+    // A PUT to an id with no record is a create to Harper, which checks the
+    // resource's allowCreate() (administrators only) and refuses it before
+    // put() runs.
     const id = `put2696-new-${randomUUID()}`;
     const res = await put(`/Agent/${id}`, { id, name: id, status: "active" }, OTHER);
-    expect(res.status, `a non-admin PUT with status returned ${res.status}: ${res.text}`).toBe(403);
+    expect(res.status, `a non-admin PUT to a missing id returned ${res.status}: ${res.text}`).toBe(403);
     expect(await rowIn(id), "a refused PUT wrote a row").toBeNull();
+  }, 30_000);
+
+  test("an administrator's PUT stores the fields its body names: a stored status it omits is not kept", async () => {
+    const target = mkAgent(`put2696-status-${randomUUID().slice(0, 8)}`);
+    const seedRes = await fetch(harper.opsURL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Basic " + btoa(`${harper.admin.username}:${harper.admin.password}`),
+      },
+      body: JSON.stringify({ operation: "insert", database: "flair", table: "Agent", records: [{
+        id: target.id, name: target.id, role: "agent", admin: false, status: "deactivated",
+        publicKey: target.publicKey, createdAt: STORED_CREATED_AT,
+      }] }),
+    });
+    expect(seedRes.status, `seed returned ${seedRes.status}: ${await seedRes.text()}`).toBe(200);
+    expect((await rowIn(target.id))?.status).toBe("deactivated");
+
+    const res = await put(`/Agent/${target.id}`, { id: target.id, name: target.id, displayName: "put-name" }, ADMIN);
+    expect(res.status, `admin PUT returned ${res.status}: ${res.text}`).toBeLessThan(300);
+
+    const after = await rowIn(target.id);
+    expect(after?.displayName).toBe("put-name");
+    expect(after?.status ?? null, "the PUT kept a status its body did not name").toBeNull();
+    expect(after?.role ?? null, "the PUT kept a role its body did not name").toBeNull();
+    expect(after?.publicKey).toBe(target.publicKey);
   }, 30_000);
 
   test("an unauthorized PUT is refused and leaves the row byte-identical", async () => {
@@ -175,6 +208,7 @@ describe("flair#2696 — an Agent PUT updates an existing row and carries its im
 
     const other = await put(path, { id: TARGET.id, name: TARGET.id, displayName: "hijacked" }, OTHER);
     expect(other.status, `another agent's PUT returned ${other.status}: ${other.text}`).toBe(403);
+    expect(JSON.parse(other.text).error).toBe("agent_put_admin_only");
     expect(await rowIn(TARGET.id), "another agent's refused PUT changed the row").toEqual(before);
 
     const anonymous = await put(path, { id: TARGET.id, name: TARGET.id, displayName: "hijacked" }, null);

@@ -5,8 +5,10 @@
 // treated as active (resources/agent-auth.ts's isPrincipalDeactivated). The
 // Agent resource's PUT and PATCH admit a trusted internal call and an
 // administrator. A non-admin agent's PUT or PATCH whose body includes `status`
-// is refused with 403 on any row, including its own; without `status`, it goes
-// on to the existing per-record rules. (A federation peer's record merges
+// is refused with 403 on any row, including its own. Without `status`, its
+// PATCH goes on to the existing per-record rules; its PUT is refused
+// regardless, since an Agent PUT is an administrator operation
+// (test/integration/agent-authority-guard-2696.test.ts). (A federation peer's record merges
 // through the raw table — test/integration/agent-status-federation-2108.test.ts.)
 //
 // These run against real Harper, booted from a private copy of the built

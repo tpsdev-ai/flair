@@ -5,8 +5,9 @@
  * See resources/Memory.ts's stampOriginatorInstanceId doc for the full
  * contract (write-time, cached local instance id via resources/instance-
  * identity.ts's localInstanceId(), anti-clobber for federation-synced
- * records). Agent.ts stamps in post(); put() updates an existing row and keeps
- * the stored value (a PUT to a missing id is refused).
+ * records). Agent.ts stamps in post(); put(), an administrator operation,
+ * updates an existing row and keeps the stored value (a PUT to a missing id is
+ * refused).
  *
  * Same mocking technique as memory-integrity.test.ts / relationship-read-
  * gate.test.ts: mock harper so the resource class loads outside
@@ -133,10 +134,23 @@ describe("federation-edge-hardening slice 1 / flair#1965 — Agent.post() stamps
   });
 });
 
+// An Agent PUT is an administrator operation (flair#2696): these drive it as an
+// administrator. A non-admin agent's PUT is refused before any read or write.
 describe("federation-edge-hardening slice 1 / flair#1965 — Agent.put() create vs update", () => {
+  it("a non-admin agent's PUT is refused 403 agent_put_admin_only and writes nothing", async () => {
+    instanceRow = { id: "flair_local_test" };
+    agentStore.set("agent-1", { id: "agent-1", name: "Agent One", originatorInstanceId: "instance-B" });
+    const a = makeAgent(agentCtx("agent-1"));
+    const res: any = await a.put({ id: "agent-1", name: "Agent One Updated" });
+    expect(res instanceof Response).toBe(true);
+    expect(res.status).toBe(403);
+    expect((await res.json()).error).toBe("agent_put_admin_only");
+    expect(agentStore.get("agent-1")).toEqual({ id: "agent-1", name: "Agent One", originatorInstanceId: "instance-B" });
+  });
+
   it("CREATE (put, no stored row) is refused and writes no row", async () => {
     instanceRow = { id: "flair_local_test" };
-    const a = makeAgent(agentCtx("agent-1"));
+    const a = makeAgent(agentCtx("agent-admin", true));
     const res: any = await a.put({ id: "agent-new", name: "Fresh Principal", originatorInstanceId: "instance-B" });
     expect(res.status).toBe(404);
     expect((await res.json()).error).toBe("agent_put_requires_existing");
@@ -146,7 +160,7 @@ describe("federation-edge-hardening slice 1 / flair#1965 — Agent.put() create 
   it("UPDATE (put) with a body value LEAVES the stored value — a client cannot change it", async () => {
     instanceRow = { id: "flair_local_test" };
     agentStore.set("agent-1", { id: "agent-1", name: "Agent One", originatorInstanceId: "instance-B" });
-    const a = makeAgent(agentCtx("agent-1"));
+    const a = makeAgent(agentCtx("agent-admin", true));
     const res: any = await a.put({ id: "agent-1", name: "Agent One Updated", originatorInstanceId: "instance-attacker" });
     expect(res.originatorInstanceId).toBe("instance-B");
     expect(res.originatorInstanceId).not.toBe("instance-attacker");
@@ -155,7 +169,7 @@ describe("federation-edge-hardening slice 1 / flair#1965 — Agent.put() create 
   it("UPDATE (put) that OMITS the field leaves the stored value", async () => {
     instanceRow = { id: "flair_local_test" };
     agentStore.set("agent-2", { id: "agent-2", name: "Agent Two", originatorInstanceId: "instance-B" });
-    const a = makeAgent(agentCtx("agent-2"));
+    const a = makeAgent(agentCtx("agent-admin", true));
     const res: any = await a.put({ id: "agent-2", name: "Agent Two Updated" });
     expect(res.originatorInstanceId).toBe("instance-B");
   });

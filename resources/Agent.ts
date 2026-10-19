@@ -148,6 +148,9 @@ export class Agent extends (databases as any).flair.Agent {
    * It lives in one place because it previously lived only in put(), and PATCH
    * does not route through put() — so every rule written here was enforced on
    * one verb and not the other. Returns a Response to send, or null to proceed.
+   * put() refuses a caller that is not an administrator before calling this
+   * (an Agent PUT is an administrator operation), so the per-record rules
+   * below decide a non-admin PATCH.
    *
    * Three rules:
    *   1. Only an admin principal may modify a principal OTHER than itself.
@@ -204,15 +207,13 @@ export class Agent extends (databases as any).flair.Agent {
 
     // 2. Only admin principals can change admin status. Both sides of the
     // comparison read the AUTHORITY, `role` (resources/agent-admin.ts), never
-    // the `admin` mirror: the stored role, against the role the record will
-    // have once the body is merged onto the stored row and reconciled
-    // (reconcileAdminFields turns `admin: true` into `role: "admin"`). The
-    // merged record is what a PATCH stores. A PUT stores its body's fields
-    // alone; whenever those reconcile to the admin role, so does the merged
-    // record, so a PUT that would store the admin role on a non-admin row is
-    // refused here too. An ordinary self-update that names neither field is
-    // unaffected, and a write whose reconciled role keeps the stored authority
-    // is admitted.
+    // the `admin` mirror: the role of the row read above, against the role
+    // that row would have once the body is merged onto it and reconciled
+    // (reconcileAdminFields turns `admin: true` into `role: "admin"`), which is
+    // how patch() reconciles. An ordinary self-update that names neither field
+    // is unaffected, and a write whose reconciled role keeps the read row's
+    // authority is admitted. For a change an administrator commits after this
+    // read, see patch().
     const touchesPrivilegeFields =
       content != null && typeof content === "object" && ("role" in content || "admin" in content);
     if (touchesPrivilegeFields) {
@@ -234,6 +235,19 @@ export class Agent extends (databases as any).flair.Agent {
     const idDenial = agentIdDenial(writeTargetId(this, content));
     if (idDenial) return idDenial;
 
+    // An Agent PUT is an administrator operation (flair#2696). It is a full
+    // replacement: apart from the fields carried below, it stores the fields
+    // its body names, so a field the body omits (`status` and `role` included)
+    // is not kept. An agent that is not an administrator updates its own record
+    // with PATCH, which merges the body into the stored row. Only an
+    // administrator or a trusted internal call goes past this point; anonymous
+    // and unrecognized verdicts are refused by authorizePrincipalWrite (401).
+    if (admitPrincipalWrite(await resolveAgentAuth((this as any).getContext?.())) === "non-admin") {
+      return new Response(JSON.stringify({
+        error: "agent_put_admin_only",
+        message: "an Agent PUT is an administrator operation; to update your own agent record, use PATCH",
+      }), { status: 403, headers: { "content-type": "application/json" } });
+    }
     const denial = await this.authorizePrincipalWrite(content);
     if (denial) return denial;
 
@@ -292,9 +306,8 @@ export class Agent extends (databases as any).flair.Agent {
       content.publicKey = stored.publicKey;
 
       // Keep the two admin fields agreeing on disk — see resources/agent-admin.ts.
-      // Only an admin can have reached here with a privilege change (see
-      // authorizePrincipalWrite), so this normalises an authorized intent; it
-      // never manufactures one.
+      // Only an administrator or a trusted internal call reaches here (see the
+      // refusal at the top of put()), so this normalises an authorized intent.
       reconcileAdminFields(content);
 
       // Write-time originatorInstanceId — see post() above /
@@ -368,6 +381,23 @@ export class Agent extends (databases as any).flair.Agent {
       }
     }
 
+    // Test-only: inert unless the fault-injection env opt-in is set and armed.
+    // Holds an ordinary PATCH after authorizePrincipalWrite's read and decision,
+    // before the merge below, so an administrator's change can commit in
+    // between (test/integration/agent-patch-race-2696.test.ts).
+    const prePause = txnPausePoint("agent-patch-pre");
+    if (prePause) await prePause;
+
+    // The ordinary PATCH reads and writes in the request's transaction. Harper
+    // stamps a transaction's writes with one time, taken at its first read
+    // (before the pause above), and applies the writes to a row in the order of
+    // those times. So a change an administrator commits after that read, from a
+    // transaction that takes its time after it, is applied after this PATCH: a
+    // role the administrator sets stands over the role reconciled here, and
+    // `status`, which a non-admin PATCH cannot name, is not written by it at
+    // all. Not covered: a write whose transaction took its time before this
+    // request's first read and commits after it (per-id serialization is
+    // tracked in flair#2478).
     if (content != null && typeof content === "object") {
       // A partial update must not be able to leave the record's two admin
       // fields disagreeing, so reconcile against the MERGED result rather than
