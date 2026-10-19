@@ -128,6 +128,62 @@ async function withTokenLifecycleLock<T>(
  */
 const SUPPORTED_SCOPES = new Set<string>(buildAuthorizationServerMetadata().scopes_supported);
 
+/** The scope a consent request names when it names none, or only whitespace. */
+const DEFAULT_CONSENT_SCOPE = "memory:read";
+
+/**
+ * The scope a consent request names: trimmed, and `memory:read` when absent or
+ * blank. `null` when the value is not a string (a JSON body can carry any
+ * type); checkConsentScope refuses that.
+ */
+function consentScope(raw: unknown): string | null {
+  if (raw === undefined || raw === null) return DEFAULT_CONSENT_SCOPE;
+  if (typeof raw !== "string") return null;
+  return raw.trim() || DEFAULT_CONSENT_SCOPE;
+}
+
+type ConsentCheck<T> = { ok: true } & T | { ok: false; response: Response };
+
+/**
+ * Every requested scope must be one the server advertises (RFC 6749
+ * §4.1.2.1: invalid_scope). The consent page (GET) and the consent form's POST
+ * both run this, before checkConsentClient.
+ */
+function checkConsentScope(scope: string | null): ConsentCheck<{ scope: string; scopeTokens: string[] }> {
+  if (scope !== null) {
+    const scopeTokens = scope.split(/\s+/).filter(Boolean);
+    if (scopeTokens.every((s) => SUPPORTED_SCOPES.has(s))) return { ok: true, scope, scopeTokens };
+  }
+  return {
+    ok: false,
+    response: new Response(JSON.stringify({
+      error: "invalid_scope",
+      error_description: "one or more requested scopes are not supported by this server",
+    }), { status: 400, headers: { "content-type": "application/json" } }),
+  };
+}
+
+/**
+ * The OAuthClient record for `clientId` must exist (invalid_client). The
+ * consent page (GET) and the consent form's POST both run this, after
+ * checkConsentScope; the POST runs it before any authorization code is issued.
+ * A client_id that is not a string is refused without a lookup.
+ */
+async function checkConsentClient(clientId: unknown): Promise<ConsentCheck<{ client: any }>> {
+  const client = typeof clientId === "string"
+    ? await (databases as any).flair.OAuthClient.get(clientId)
+    : null;
+  if (!client) {
+    return {
+      ok: false,
+      response: new Response(JSON.stringify({ error: "invalid_client" }), {
+        status: 400, headers: { "content-type": "application/json" },
+      }),
+    };
+  }
+  return { ok: true, client };
+}
+
 /** `state` is an opaque passthrough: printable ASCII, bounded (RFC 6749 §4.1.2). */
 const STATE_MAX_LENGTH = 512;
 function isOpaqueState(value: string): boolean {
@@ -303,7 +359,7 @@ export class OAuthAuthorize extends Resource {
     const clientId = url.searchParams.get("client_id") ?? "";
     const redirectUri = url.searchParams.get("redirect_uri") ?? "";
     const responseType = url.searchParams.get("response_type") ?? "";
-    const scope = (url.searchParams.get("scope") ?? "").trim() || "memory:read";
+    const requestedScope = consentScope(url.searchParams.get("scope"));
     const state = url.searchParams.get("state") ?? "";
     const codeChallenge = url.searchParams.get("code_challenge") ?? "";
     const codeChallengeMethod = url.searchParams.get("code_challenge_method") ?? "";
@@ -329,23 +385,15 @@ export class OAuthAuthorize extends Resource {
       }), { status: 400, headers: { "content-type": "application/json" } });
     }
 
-    // Every requested scope must be one the server advertises (RFC 6749
-    // §4.1.2.1: invalid_scope).
-    const scopeTokens = scope.split(/\s+/).filter(Boolean);
-    if (scopeTokens.some((s) => !SUPPORTED_SCOPES.has(s))) {
-      return new Response(JSON.stringify({
-        error: "invalid_scope",
-        error_description: "one or more requested scopes are not supported by this server",
-      }), { status: 400, headers: { "content-type": "application/json" } });
-    }
+    // Scope, then client — the same two checks, in the same order, that the
+    // consent form's POST runs before it issues a code.
+    const scopeCheck = checkConsentScope(requestedScope);
+    if (!scopeCheck.ok) return scopeCheck.response;
+    const { scope, scopeTokens } = scopeCheck;
 
-    // Verify client exists
-    const client = await (databases as any).flair.OAuthClient.get(clientId);
-    if (!client) {
-      return new Response(JSON.stringify({ error: "invalid_client" }), {
-        status: 400, headers: { "content-type": "application/json" },
-      });
-    }
+    const clientCheck = await checkConsentClient(clientId);
+    if (!clientCheck.ok) return clientCheck.response;
+    const { client } = clientCheck;
 
     // Server-rendered consent page (minimal HTML, no JS frameworks). EVERY
     // interpolated value passes through `esc` — correct for element text and
@@ -389,7 +437,7 @@ ${scopeTokens.map((s: string) => `<div class="scope">${esc(s)}</div>`).join("")}
     const action = data?.action;
     const clientId = data?.client_id ?? "";
     const redirectUri = data?.redirect_uri || ALLOWED_REDIRECT_URI;
-    const scope = data?.scope ?? "memory:read";
+    const requestedScope = consentScope(data?.scope);
     const state = data?.state ?? "";
     const codeChallenge = data?.code_challenge ?? "";
     const codeChallengeMethod = data?.code_challenge_method ?? "S256";
@@ -414,6 +462,19 @@ ${scopeTokens.map((s: string) => `<div class="scope">${esc(s)}</div>`).join("")}
       const params = new URLSearchParams({ error: "access_denied", state });
       return redirectTo(`${redirectUri}?${params}`);
     }
+
+    // An approve must name what the consent page accepts: the scope check, then
+    // the OAuthClient record check — the same checks, in the same order and
+    // with the same 400 bodies, that get() runs before rendering the form. Both
+    // run before authentication (get() runs them with none) and before any
+    // code is issued or stored. A deny is answered above, before these: it
+    // issues nothing and redirects only to the pinned redirect_uri.
+    const scopeCheck = checkConsentScope(requestedScope);
+    if (!scopeCheck.ok) return scopeCheck.response;
+    const { scope } = scopeCheck;
+
+    const clientCheck = await checkConsentClient(clientId);
+    if (!clientCheck.ok) return clientCheck.response;
 
     // Determine authenticated principal. Harper v5 does not populate
     // this.request on Resource subclasses, so `(this as any).request?.tpsAgent`

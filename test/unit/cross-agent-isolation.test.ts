@@ -77,7 +77,9 @@ const databasesMock = {
     OAuthAuthCode: {
       put: async (rec: any) => { authCodePut = rec; return rec; },
     },
-    OAuthClient: { get: async () => null },
+    // The OAuthAuthorize.post() fixtures name client_id "cl1"; the consent
+    // POST requires its OAuthClient record before it issues a code.
+    OAuthClient: { get: async (id: string) => (id === "cl1" ? { id: "cl1", name: "cl1 test client" } : null) },
     Agent: { get: async () => null, search: async function* () {} },
     IdpConfig: GenericTable,
     IdJagReplay: GenericTable,
