@@ -797,6 +797,51 @@ describe("flair#2354 — the promotion stamp write-back under a concurrent chang
     expect(body.promoted).not.toContain(ownerRowId);
   }, 60_000);
 
+  it("does not reuse a matching row the owner wrote through the Memory resource", async () => {
+    const agentId = "wbc-stamp-agent-client-row";
+    const stampAgent = mkAgent(agentId);
+    await seedAgent(harper, stampAgent);
+    const claim = "promotion stamp claim with a row the owner wrote through /Memory";
+    const candidateId = "wbc-stamp-cand-client-row";
+    const clientRowId = "wbc-stamp-row-client-written";
+    const sweepTags = [`adk:app:${agentId}`, "nightly-rem-promoted", "auto-promoted", `from:${candidateId}`];
+    // The owner's own authenticated Memory write: the candidate's claim, every
+    // tag the sweep writes, and the sweep's visibility and durability.
+    const written = await authSend(harper, stampAgent, "PUT", `/Memory/${clientRowId}`, {
+      id: clientRowId, agentId, content: claim, visibility: "private", durability: "persistent", tags: sweepTags,
+    });
+    expect(written.status, (await written.clone().text()).slice(0, 300)).toBeLessThan(300);
+    const clientRow = await readRow(harper, clientRowId);
+    expect(clientRow?.agentId).toBe(agentId);
+    expect(clientRow?.content).toBe(claim);
+    expect(clientRow?.visibility).toBe("private");
+    expect(clientRow?.durability).toBe("persistent");
+    expect(clientRow?.archived === true, "the owner-written row is live").toBe(false);
+    for (const tag of sweepTags) expect(clientRow?.tags, `the owner-written row carries ${tag}`).toContain(tag);
+    expect(clientRow?.promotionStatus ?? null, "the owner-written row starts unstamped").toBeNull();
+    expect(typeof clientRow?.instanceToken).toBe("string");
+    await seedCandidate(harper, agentId, { id: candidateId, claim, scopeTag: `adk:app:${agentId}`, sourceMemoryIds: [] });
+
+    const response = await authSend(harper, stampAgent, "POST", "/AutoPromoteCandidates", { agentId });
+    expect(response.status, (await response.clone().text()).slice(0, 300)).toBeLessThan(300);
+    const body = await response.json() as any;
+    const rows = (await memoryRowsForAgent(harper, agentId)).filter((r) => r.content === claim);
+    expect(rows.length, "the owner-written row must not be reused").toBe(2);
+    const ownerRow = rows.find((r) => r.id === clientRowId);
+    expect(ownerRow?.promotionStatus ?? null, "nothing is stamped onto the owner-written row").toBeNull();
+    expect(ownerRow?.promotedBy ?? null, "no reviewer is stamped onto the owner-written row").toBeNull();
+    expect(ownerRow?.promotedAt ?? null, "no decision time is stamped onto the owner-written row").toBeNull();
+    expect(ownerRow?.promotionContentHash ?? null, "no content binding is stamped onto the owner-written row").toBeNull();
+    expect(ownerRow?.instanceToken, "the owner-written row keeps its incarnation").toBe(clientRow.instanceToken);
+    const freshRow = rows.find((r) => r.id !== clientRowId);
+    expect(freshRow?.promotionStatus, "the sweep writes and stamps its own row").toBe("approved");
+    expect(body.promoted).toContain(freshRow?.id);
+    expect(body.promoted).not.toContain(clientRowId);
+    const cand = await readCandidate(harper, candidateId);
+    expect(cand?.status).toBe("promoted");
+    expect(cand?.promotedRowId, "the candidate records the row the sweep wrote").toBe(freshRow?.id);
+  }, 60_000);
+
   for (const mismatch of [
     { name: "visibility", visibility: "shared", durability: "persistent" },
     { name: "durability", visibility: "private", durability: "standard" },
@@ -854,6 +899,68 @@ describe("flair#2354 — the promotion stamp write-back under a concurrent chang
     expect(post.status, (await post.clone().text()).slice(0, 300)).toBe(403);
     expect((await readCandidate(harper, candidateId))?.promotedRowId ?? null, "the refused write changed nothing").toBeNull();
     expect(await readCandidate(harper, "wbc-stamp-cand-identity-create")).toBeNull();
+  }, 60_000);
+
+  /** A pending candidate that records a promoted row, and the owner's view of it. */
+  async function recordedIdentityCandidate(slug: string) {
+    const agentId = `wbc-stamp-agent-identity-${slug}`;
+    const agent = mkAgent(agentId);
+    await seedAgent(harper, agent);
+    const candidateId = `wbc-stamp-cand-identity-${slug}`;
+    const recordedId = `wbc-stamp-row-identity-${slug}`;
+    const recordedToken = randomUUID();
+    await seedCandidate(harper, agentId, {
+      id: candidateId, claim: `promotion stamp claim with a recorded identity (${slug})`, scopeTag: `adk:app:${agentId}`,
+      sourceMemoryIds: [], promotedRowId: recordedId, promotedRowInstanceToken: recordedToken,
+    });
+    const before = await authSend(harper, agent, "GET", `/MemoryCandidate/${candidateId}`);
+    expect(before.status).toBe(200);
+    const stored = await before.json() as any;
+    expect(stored.promotedRowId).toBe(recordedId);
+    expect(stored.promotedRowInstanceToken).toBe(recordedToken);
+    const { promotedRowId: _id, promotedRowInstanceToken: _token, ...withoutIdentity } = stored;
+    return { agent, candidateId, recordedId, recordedToken, withoutIdentity };
+  }
+
+  for (const verb of ["PUT", "PATCH"] as const) {
+    for (const forgery of [
+      { slug: "token", name: "promotedRowInstanceToken only", fields: () => ({ promotedRowInstanceToken: randomUUID() }), refused: /^forbidden: promotedRowInstanceToken is set by the promotion workflow$/ },
+      { slug: "id", name: "promotedRowId only", fields: () => ({ promotedRowId: "wbc-stamp-row-identity-forged" }), refused: /^forbidden: promotedRowId is set by the promotion workflow$/ },
+      {
+        slug: "both", name: "both promoted-row fields",
+        fields: () => ({ promotedRowId: "wbc-stamp-row-identity-forged", promotedRowInstanceToken: randomUUID() }),
+        refused: /^forbidden: promotedRow(Id|InstanceToken) is set by the promotion workflow$/,
+      },
+    ]) {
+      it(`refuses an owner ${verb} that sets ${forgery.name} on a candidate and keeps the recorded identity`, async () => {
+        const c = await recordedIdentityCandidate(`${verb.toLowerCase()}-${forgery.slug}`);
+        const body = verb === "PUT" ? { ...c.withoutIdentity, ...forgery.fields() } : forgery.fields();
+        const res = await authSend(harper, c.agent, verb, `/MemoryCandidate/${c.candidateId}`, body);
+        const text = await res.text();
+        // The stored candidate is read back before the response is judged.
+        const after = await readCandidate(harper, c.candidateId);
+        expect(after?.promotedRowId, `the refused write keeps the recorded id (${res.status})`).toBe(c.recordedId);
+        expect(after?.promotedRowInstanceToken, `the refused write keeps the recorded token (${res.status})`).toBe(c.recordedToken);
+        expect(res.status, text.slice(0, 300)).toBe(403);
+        expect(JSON.parse(text).error).toMatch(forgery.refused);
+      }, 60_000);
+    }
+  }
+
+  it("accepts an owner PUT or PATCH that leaves the recorded promoted-row identity out, and keeps it", async () => {
+    const c = await recordedIdentityCandidate("unchanged");
+    const put = await authSend(harper, c.agent, "PUT", `/MemoryCandidate/${c.candidateId}`, { ...c.withoutIdentity, rationalePrompt: "owner edit by PUT" });
+    expect(put.status, (await put.clone().text()).slice(0, 300)).toBeLessThan(300);
+    const afterPut = await readCandidate(harper, c.candidateId);
+    expect(afterPut?.rationalePrompt).toBe("owner edit by PUT");
+    expect(afterPut?.promotedRowId, "a PUT that omits the identity keeps the recorded id").toBe(c.recordedId);
+    expect(afterPut?.promotedRowInstanceToken, "a PUT that omits the identity keeps the recorded token").toBe(c.recordedToken);
+    const patch = await authSend(harper, c.agent, "PATCH", `/MemoryCandidate/${c.candidateId}`, { rationalePrompt: "owner edit by PATCH" });
+    expect(patch.status, (await patch.clone().text()).slice(0, 300)).toBeLessThan(300);
+    const afterPatch = await readCandidate(harper, c.candidateId);
+    expect(afterPatch?.rationalePrompt).toBe("owner edit by PATCH");
+    expect(afterPatch?.promotedRowId, "a PATCH without the identity keeps the recorded id").toBe(c.recordedId);
+    expect(afterPatch?.promotedRowInstanceToken, "a PATCH without the identity keeps the recorded token").toBe(c.recordedToken);
   }, 60_000);
 
   // promotion-stamp-select: between the Memory write and the stamp's first
