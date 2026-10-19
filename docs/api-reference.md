@@ -77,7 +77,10 @@ changes to the memories they can read through `/FeedMemories`, and soul changes
 through `/FeedSouls`; neither is a table. Harper's native MCP
 `resources/subscribe`, available only when an operator configures Harper's MCP
 component, refuses every table subscription, administrators included: flair
-does not yet verify the Harper user of an MCP session as a flair caller.
+does not yet verify the Harper user of an MCP session as a flair caller. For
+the same reason, that component's application tools (`get_`, `search_`,
+`create_`, `update_`, `delete_`) are resolved, wherever flair resolves a
+caller, as a caller without a valid credential, administrators included.
 
 Flair's local installs run Harper with MQTT off. When an operator turns MQTT
 on, an exported table's path is also an MQTT topic (`<Table>/#`,

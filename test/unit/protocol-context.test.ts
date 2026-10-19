@@ -9,6 +9,7 @@ import {
   isDirectMqttSessionContext,
   isLastWillReplayContext,
   isMqttSessionContext,
+  isPermissionMarkedRequestlessContext,
   isProtocolLayerContext,
   isReleasedTransactionPlaceholder,
 } from "../../resources/protocol-context";
@@ -122,10 +123,49 @@ describe("isReleasedTransactionPlaceholder and carriesTransaction", () => {
   });
 });
 
+/** The context Harper's native MCP application tools build (application.ts `buildContext()`). */
+const applicationToolContext = (permission: unknown = { flair: { tables: {} } }) =>
+  ({ user: { username: "reader", role: { permission } }, authorize: true, checkPermission: permission });
+
+describe("isPermissionMarkedRequestlessContext", () => {
+  it("recognises a native MCP application tool's context, before and after Harper clears authorize", () => {
+    const context = applicationToolContext();
+    expect(isPermissionMarkedRequestlessContext(context)).toBe(true);
+    context.authorize = false as any;
+    expect(isPermissionMarkedRequestlessContext(context)).toBe(true);
+    // A role with no permission object: Harper passes `{}`.
+    expect(isPermissionMarkedRequestlessContext({ user: undefined, authorize: false, checkPermission: {} })).toBe(true);
+    // The transaction Harper's transaction() adds does not change the shape.
+    expect(isPermissionMarkedRequestlessContext({ ...applicationToolContext(), authorize: false, transaction: {} })).toBe(true);
+  });
+
+  it("is false without that shape (an own data checkPermission other than null or false, and no request value), and invokes no getter while deciding", () => {
+    expect(isPermissionMarkedRequestlessContext({ user: {}, authorize: false })).toBe(false);
+    expect(isPermissionMarkedRequestlessContext({ checkPermission: null })).toBe(false);
+    expect(isPermissionMarkedRequestlessContext({ checkPermission: false })).toBe(false);
+    expect(isPermissionMarkedRequestlessContext({ checkPermission: undefined })).toBe(false);
+    // An inherited marker is not an own property.
+    expect(isPermissionMarkedRequestlessContext(Object.create({ checkPermission: {} }))).toBe(false);
+    // A context carrying a request is not requestless.
+    expect(isPermissionMarkedRequestlessContext({ checkPermission: {}, request: {} })).toBe(false);
+    expect(isPermissionMarkedRequestlessContext({ checkPermission: {}, request: { headers: { get: () => undefined } } })).toBe(false);
+    expect(isPermissionMarkedRequestlessContext({ request: {}, __flairInternal: true })).toBe(false);
+    expect(isPermissionMarkedRequestlessContext(null)).toBe(false);
+    expect(isPermissionMarkedRequestlessContext("checkPermission")).toBe(false);
+    let reads = 0;
+    expect(isPermissionMarkedRequestlessContext(Object.defineProperty({}, "checkPermission", { get() { reads++; return {}; } }))).toBe(false);
+    // A `request` accessor is not invoked; it holds no data value, so the context reads as requestless.
+    expect(isPermissionMarkedRequestlessContext(Object.defineProperty({ checkPermission: {} }, "request", { get() { reads++; return {}; } }))).toBe(true);
+    expect(reads).toBe(0);
+  });
+});
+
 describe("isProtocolLayerContext", () => {
-  it("is an MQTT session's context or one still carrying authorize: true", () => {
+  it("is an MQTT session's context, one still carrying authorize: true, or a requestless one carrying checkPermission", () => {
     expect(isProtocolLayerContext({ session: session(), socket: {} })).toBe(true);
     expect(isProtocolLayerContext({ user: {}, authorize: true, request: {} })).toBe(true);
+    expect(isProtocolLayerContext(applicationToolContext())).toBe(true);
+    expect(isProtocolLayerContext({ ...applicationToolContext(), authorize: false })).toBe(true);
     expect(isProtocolLayerContext({ authorize: false })).toBe(false);
     expect(isProtocolLayerContext({ request: {}, __flairInternal: true })).toBe(false);
     expect(isProtocolLayerContext(null)).toBe(false);

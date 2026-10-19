@@ -14,11 +14,14 @@
  * `session` is the MQTT session object and `request` is present only for MQTT
  * over WebSocket (the upgrade request). Harper's native MCP resource
  * subscriptions use `{ user, authorize: true, request: <RequestTarget> }`, a
- * context with no HTTP request; flair has no verified bridge from that Harper
- * user to a flair caller, so the resolver answers anonymous for it. Harper
- * clears `authorize` once its first entry call has used it
- * (resources/Resource.ts), so the MQTT session object is the marker that stays
- * on the context.
+ * context with no HTTP request, and its native MCP application tools (get_,
+ * search_, create_, update_, delete_ and custom-method tools) use
+ * `{ user, authorize: true, checkPermission }`, a context with no request at
+ * all. flair has no verified bridge from that Harper user to a flair caller, so
+ * the resolver answers anonymous for both until one exists. Harper clears
+ * `authorize` once its first entry call has used it (resources/Resource.ts), so
+ * the MQTT session object, and on an application tool's context the
+ * `checkPermission` property, is the marker that stays on the context.
  *
  * A retained MQTT PUBLISH reaches a table's static put()/delete(), which
  * ordinary writes also use. isDirectMqttSessionContext recognises the session's
@@ -143,11 +146,40 @@ export function carriesTransaction(value: unknown): boolean {
 }
 
 /**
+ * Whether `value` has the shape of the context Harper's native MCP application
+ * tools build for each call (components/mcp/tools/application.ts
+ * `buildContext()`): `{ user, authorize: true, checkPermission }`, where
+ * `checkPermission` is the Harper user's role permission object (`{}` when the
+ * role has none). It carries no `request`. Harper clears `authorize` once its
+ * first entry call has used it (resources/Resource.ts) and leaves
+ * `checkPermission`, so `checkPermission` is the marker that stays on the
+ * context through the resource's authorization hooks and its handlers. The
+ * test: an own data property `checkPermission` whose value is neither null,
+ * undefined nor false, and no own data property `request` holding a value
+ * other than null or undefined (an accessor `request` is not invoked and does
+ * not count as a request). Read from own property descriptors only
+ * (`checkPermission` first, `request` only when it matches), so no getter is
+ * invoked; a descriptor read that throws propagates. It classifies by shape:
+ * it does not prove that Harper built the object.
+ */
+export function isPermissionMarkedRequestlessContext(value: unknown): boolean {
+  if (value == null || typeof value !== "object") return false;
+  const permission = ownDataValue(value, "checkPermission");
+  if (permission == null || permission === false) return false;
+  return ownDataValue(value, "request") == null;
+}
+
+/**
  * Whether `context` carries a protocol layer's markers: an MQTT session's
- * markers (isMqttSessionContext), or `authorize: true`, which Harper's
- * protocol layers set to ask for authorization and clear once it is used.
+ * markers (isMqttSessionContext); `authorize: true`, which Harper's protocol
+ * layers set to ask for authorization and clear once it is used; or the
+ * requestless, permission-marked shape of a native MCP application tool's
+ * context (isPermissionMarkedRequestlessContext), which keeps its marker after
+ * `authorize` is cleared.
  */
 export function isProtocolLayerContext(context: unknown): boolean {
   if (context == null || typeof context !== "object") return false;
-  return (context as { authorize?: unknown }).authorize === true || isMqttSessionContext(context);
+  return (context as { authorize?: unknown }).authorize === true
+    || isMqttSessionContext(context)
+    || isPermissionMarkedRequestlessContext(context);
 }

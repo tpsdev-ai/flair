@@ -340,8 +340,9 @@ export function harperCallContexts(
 /**
  * Whether Harper marked this call as made by a protocol layer: REST, MQTT and
  * MCP set a non-null, non-false `checkPermission` on the target; MQTT and MCP
- * set `authorize: true` on the context, and an MQTT session's context carries
- * the session (resources/protocol-context.ts).
+ * set `authorize: true` on the context, an MQTT session's context carries the
+ * session, and a native MCP application tool's requestless context carries
+ * `checkPermission` itself (resources/protocol-context.ts).
  */
 export function isProtocolEntry(target: unknown, context: unknown): boolean {
   const permission = target != null && typeof target === "object"

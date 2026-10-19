@@ -123,6 +123,48 @@ describe("resolveAgentAuth — protocol-layer contexts", () => {
       .toEqual({ kind: "agent", agentId: "agent-9", isAdmin: true });
   });
 
+  // Harper's native MCP application tools (components/mcp/tools/application.ts
+  // `buildContext()`) build `{ user, authorize: true, checkPermission }` for
+  // every call; Resource clears `authorize` before the allow* hooks and the
+  // handler run, and leaves `checkPermission`.
+  const applicationToolContext = (user: any) => ({ user, authorize: true, checkPermission: user?.role?.permission ?? {} });
+
+  it("a native MCP application tool's context → anonymous, with authorize still true and after Harper clears it, whatever Harper user it carries", async () => {
+    for (const user of [perAgentUser, superUser, undefined]) {
+      const context = applicationToolContext(user);
+      expect(await resolveAgentAuth(context)).toEqual({ kind: "anonymous" });
+      context.authorize = false as any;
+      expect(await resolveAgentAuth(context)).toEqual({ kind: "anonymous" });
+      // Harper's transaction() adds the transaction to the same object.
+      expect(await resolveAgentAuth({ ...context, transaction: {} })).toEqual({ kind: "anonymous" });
+    }
+  });
+
+  it("a context whose authorize has become false but still carries checkPermission is not admitted by the admin or verified gates", async () => {
+    const context = { user: superUser, authorize: false, checkPermission: superUser.role.permission };
+    expect(await allowAdmin(context)).toBe(false);
+    expect(await allowVerified(context)).toBe(false);
+  });
+
+  it("the checkPermission marker leaves HTTP, in-process and MQTT resolution as it was", async () => {
+    // An HTTP request is decided from its headers whatever else the context carries.
+    expect(await resolveAgentAuth({ ...getShape(), checkPermission: {} })).toEqual({ kind: "anonymous" });
+    expect(await resolveAgentAuth({ request: getShape(), checkPermission: {} })).toEqual({ kind: "anonymous" });
+    expect(await resolveAgentAuth({ ...getShape(BASIC), user: superUser, checkPermission: {} }))
+      .toEqual({ kind: "agent", agentId: "admin", isAdmin: true });
+    // In-process contexts are unchanged.
+    expect(await resolveAgentAuth(internalContext())).toEqual({ kind: "internal" });
+    expect(await resolveAgentAuth(agentContext("agent-7"))).toEqual({ kind: "agent", agentId: "agent-7", isAdmin: false });
+    expect(await resolveAgentAuth(adminContext("ops"))).toEqual({ kind: "agent", agentId: "ops", isAdmin: true });
+    // MQTT session contexts are unchanged.
+    expect(await resolveAgentAuth({ session: mqttSession(), socket: {}, user: superUser, authorize: false }))
+      .toEqual({ kind: "anonymous" });
+    expect(await resolveAgentAuth({ session: mqttSession(), socket: {}, request: { tpsAgent: "agent-9", tpsAgentIsAdmin: false } }))
+      .toEqual({ kind: "agent", agentId: "agent-9", isAdmin: false });
+    // A requestless context with no marker is still the trusted internal call.
+    expect(await resolveAgentAuth({ user: superUser, authorize: false })).toEqual({ kind: "internal" });
+  });
+
   it("a context with no request and no protocol-layer marker is still the trusted internal call", async () => {
     expect(await resolveAgentAuth({})).toEqual({ kind: "internal" });
     expect(await resolveAgentAuth({ user: superUser, authorize: false })).toEqual({ kind: "internal" });

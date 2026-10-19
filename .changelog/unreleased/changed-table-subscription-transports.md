@@ -32,10 +32,16 @@
   crafts. A call that Harper's MQTT layer makes without an HTTP request (its TCP
   and TLS listeners) resolves, everywhere flair resolves a caller, as one
   without a valid credential, as does a requestless context still carrying
-  Harper's `authorize: true`. Harper's native MCP `resources/subscribe`, when
-  an operator configures that component, is refused at the guarded entry for
-  every table subscription, administrators included; this change makes no
-  claim about how other native MCP operations resolve. Flair's
+  Harper's `authorize: true`, and a requestless context carrying Harper's
+  `checkPermission` marker, as Harper's native MCP application component
+  builds for its tools (the marker stays after Harper clears `authorize`).
+  When an operator configures Harper's native MCP component, its
+  `resources/subscribe` is refused at the guarded entry for every table
+  subscription, and its application tools (`get_`, `search_`, `create_`,
+  `update_`, `delete_`) resolve, everywhere flair resolves a caller, in the
+  resource's authorization hooks and in its handlers, as a caller without a
+  valid credential, administrators included, until a principal bridge from
+  Harper's MCP session to a flair caller exists. Flair's
   feed resources (`/FeedMemories`, `/FeedSouls`) and the BM25 index now read
   table changes in-process through `subscribeInProcess`, with their own
   subscriber rules as before.
