@@ -347,6 +347,13 @@ function harperBinPath(harperBinDir: string): string {
 
 // External service mode: set HARPER_HTTP_URL (and optionally HARPER_OPS_URL) to
 // skip the local spawn and connect to an already-running Harper instance (e.g. Docker).
+//
+// A suite that needs server behaviour configured by an environment variable (a
+// raised rate limit, a trusted-proxy hop, fault injection) declares it through
+// StartHarperOptions.serverEnv. A local spawn receives those values; in external
+// mode a non-empty serverEnv is REFUSED, naming every variable and value the
+// external service must have been started with. Refusing rather than skipping is
+// deliberate: a skipped security-relevant suite reads as green.
 const HARPER_HTTP_URL = process.env.HARPER_HTTP_URL;
 const HARPER_OPS_URL_ENV = process.env.HARPER_OPS_URL;
 const HARPER_ADMIN_USER = process.env.HARPER_ADMIN_USER ?? "admin";
@@ -906,6 +913,20 @@ export interface StartHarperOptions {
   /** Environment overrides for this instance's child processes. */
   env?: Record<string, string>;
   /**
+   * Server environment this suite needs the spawned Harper to run with — e.g.
+   * `{ FLAIR_OAUTH_RATE_LIMIT: "1000" }` for a suite that sends more requests
+   * than the default budget. Applied to the install and run children after
+   * `env`, over the inherited environment; helper-owned variables (ROOTPATH,
+   * HOME, ports) are set afterwards and take precedence.
+   *
+   * In external mode (`HARPER_HTTP_URL` set) a non-empty serverEnv is refused
+   * with an error naming each variable and value the external service must have
+   * been started with. The helper cannot change an already-running service's
+   * environment, and skipping instead would leave a security-relevant suite
+   * looking green.
+   */
+  serverEnv?: Record<string, string>;
+  /**
    * Node identity for this instance (Harper's NODE_HOSTNAME). Defaults to
    * 127.0.0.1. A replicated pair needs distinct identities so `add_node` can
    * name its peer.
@@ -939,6 +960,18 @@ export function applyMultiWorkerUnsafeSpawnOption(
   }
 }
 
+/**
+ * The inherited environment with the suite's declared overrides applied:
+ * `env` first, then `serverEnv`. Helper-owned variables are added after this
+ * merge, so they cannot be replaced by a suite.
+ */
+export function buildHarperServerEnv(
+  inherited: Record<string, string>,
+  opts: Pick<StartHarperOptions, "env" | "serverEnv">,
+): Record<string, string> {
+  return { ...inherited, ...opts.env, ...opts.serverEnv };
+}
+
 export async function startHarper(opts: StartHarperOptions = {}): Promise<HarperInstance> {
   if (
     opts.readinessTimeoutMs !== undefined &&
@@ -955,6 +988,14 @@ export async function startHarper(opts: StartHarperOptions = {}): Promise<Harper
 
   // ── External mode: connect to Docker service ─────────────────────────────
   if (HARPER_HTTP_URL) {
+    const serverEnv = opts.serverEnv ?? {};
+    if (Object.keys(serverEnv).length > 0) {
+      const required = Object.entries(serverEnv).map(([name, value]) => `${name}=${value}`).join(", ");
+      throw new Error(
+        `[harper-lifecycle] refused serverEnv in external mode (HARPER_HTTP_URL is set): ` +
+        `the external service must have been started with ${required}`,
+      );
+    }
     if (opts.multiWorkerUnsafe === false) {
       throw new Error("[harper-lifecycle] refused fixture requires local spawn; external HARPER_HTTP_URL cannot honor multiWorkerUnsafe: false");
     }
@@ -1002,7 +1043,7 @@ export async function startHarper(opts: StartHarperOptions = {}): Promise<Harper
   // Deny-list: strip CI secrets from the inherited env so Harper's child
   // process (and any log dump on failure) doesn't leak them onto a public
   // CI runner (Sherlock review on #467).
-  const parentEnv = { ...process.env as Record<string, string>, ...opts.env };
+  const parentEnv = buildHarperServerEnv(process.env as Record<string, string>, opts);
   delete parentEnv.GITHUB_TOKEN;
   delete parentEnv.NPM_TOKEN;
 

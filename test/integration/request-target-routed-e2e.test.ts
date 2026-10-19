@@ -215,21 +215,22 @@ const HAS_MODEL = existsSync(join(process.env.FLAIR_MODELS_DIR ?? join(process.c
 
 // A rate-limit budget small enough to spend in a few requests.
 const OAUTH_LIMIT = 5;
-const savedEnv: Record<string, string | undefined> = {};
 
 beforeAll(async () => {
-  for (const k of ["FLAIR_OAUTH_RATE_LIMIT", "FLAIR_RATE_LIMIT", "FLAIR_TRUSTED_PROXY"]) savedEnv[k] = process.env[k];
-  process.env.FLAIR_OAUTH_RATE_LIMIT = String(OAUTH_LIMIT);
-  delete process.env.FLAIR_RATE_LIMIT;
-  delete process.env.FLAIR_TRUSTED_PROXY;
-
   component = componentWithOwnerGuardLoadFailure();
   // Omit the migration trigger from this private copy: its re-embed can give
   // the seeded Memory row (3) a vector the backfill did not write.
   const trigger = join(component.dir, OMITTED_TRIGGER_REL);
   rmSync(trigger, { force: true });
   if (existsSync(trigger)) throw new Error(`could not omit ${trigger}`);
-  harper = await startHarper({ cwd: component.dir });
+  harper = await startHarper({
+    cwd: component.dir,
+    serverEnv: {
+      FLAIR_OAUTH_RATE_LIMIT: String(OAUTH_LIMIT),
+      FLAIR_RATE_LIMIT: "",
+      FLAIR_TRUSTED_PROXY: "",
+    },
+  });
   assertOwnInstance(harper);
   for (const a of [owner, other]) {
     await seed("Agent", { id: a.id, name: a.id, role: "agent", admin: false, publicKey: a.publicKey, createdAt: NOW });
@@ -248,9 +249,6 @@ beforeAll(async () => {
 afterAll(async () => {
   if (harper) { disarm(); await stopHarper(harper); }
   if (component) component.cleanup();
-  for (const [k, v] of Object.entries(savedEnv)) {
-    if (v === undefined) delete process.env[k]; else process.env[k] = v;
-  }
 }, HARPER_STOP_BUDGET_MS);
 
 describe("(1) the owner guard decides on the full routed record id", () => {

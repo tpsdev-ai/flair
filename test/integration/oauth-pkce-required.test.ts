@@ -257,27 +257,19 @@ const flowClient = `flair_cl_test_pkce_flow_${randomUUID()}`;
 // Never registered.
 const unknownClient = `flair_cl_unregistered_${randomUUID()}`;
 
-const savedEnv: Record<string, string | undefined> = {};
-
 describe("S256 PKCE is required at the authorization endpoints and the token exchange", () => {
   beforeAll(async () => {
     // This file sends more than the default 30 OAuth requests a minute from one
     // caller; the budget is raised so every answer comes from the handler.
-    for (const k of ["FLAIR_OAUTH_RATE_LIMIT", "FLAIR_RATE_LIMIT"]) savedEnv[k] = process.env[k];
-    process.env.FLAIR_OAUTH_RATE_LIMIT = "1000";
-    delete process.env.FLAIR_RATE_LIMIT;
-
-    harper = await startHarper();
+    harper = await startHarper({
+      serverEnv: { FLAIR_OAUTH_RATE_LIMIT: "1000", FLAIR_RATE_LIMIT: "" },
+    });
     await registerClient(pkceClient, "PKCE refusal test client");
     await registerClient(flowClient, "PKCE flow test client");
   }, 180_000);
 
   afterAll(async () => {
     if (harper) await stopHarper(harper);
-    for (const [k, v] of Object.entries(savedEnv)) {
-      if (v === undefined) delete process.env[k];
-      else process.env[k] = v;
-    }
   }, HARPER_STOP_BUDGET_MS);
 
   // ── (a) The authorization endpoints refuse a request without S256 PKCE ────
