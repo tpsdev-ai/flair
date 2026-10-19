@@ -5162,6 +5162,8 @@ bindRemCli({
   addSharedCredentialOptions,
   readPortFromConfig,
   resolveHttpPort,
+  resolveEffectiveOpsUrl,
+  resolveAgentHomeTarget,
   humanBytes,
   relativeTime,
   DEFAULT_PORT,

@@ -53,6 +53,8 @@ export type RemCli = {
   addSharedCredentialOptions: (cmd: Command) => Command;
   readPortFromConfig: () => number | null;
   resolveHttpPort: (opts: { port?: string | number; dataDir?: string }, mode?: "address" | "create") => number;
+  resolveEffectiveOpsUrl: (opts: { target?: string; opsTarget?: string }) => string | undefined;
+  resolveAgentHomeTarget: (opts: { port?: string | number; opsPort?: string | number; dataDir?: string }) => { httpPort: number; opsPort: number };
   humanBytes: (n: number) => string;
   relativeTime: (iso: string | null | undefined) => string;
   DEFAULT_PORT: number;
@@ -84,6 +86,12 @@ function readPortFromConfig(): number | null {
 function resolveHttpPort(opts: { port?: string | number; dataDir?: string }, mode: "address" | "create" = "address"): number {
   return cli.resolveHttpPort(opts, mode);
 }
+function deriveOpsUrl(target: string): string | undefined {
+  return cli.resolveEffectiveOpsUrl({ target });
+}
+function resolvePair(opts: { port?: string | number; opsPort?: string | number }): { httpPort: number; opsPort: number } {
+  return cli.resolveAgentHomeTarget(opts);
+}
 function humanBytes(n: number): string {
   return cli.humanBytes(n);
 }
@@ -101,12 +109,13 @@ function relativeTime(iso: string | null | undefined): string {
  * `fetchImpl` is injectable for tests.
  */
 export function buildOpsSearch(
-  opts: { opsPort: number; adminUser?: string; adminPass: string },
+  opts: { opsPort?: number; opsUrl?: string; adminUser?: string; adminPass: string },
   fetchImpl: typeof fetch = fetch,
 ): OpsSearch {
+  const root = (opts.opsUrl ?? `http://127.0.0.1:${opts.opsPort}`).replace(/\/+$/, "");
   const auth = `Basic ${Buffer.from(`${resolveAdminUser(opts.adminUser)}:${opts.adminPass}`).toString("base64")}`;
   return async (table, conditions, getAttributes) => {
-    const res = await fetchImpl(`http://127.0.0.1:${opts.opsPort}/`, {
+    const res = await fetchImpl(`${root}/`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: auth },
       body: JSON.stringify({ operation: "search_by_conditions", schema: "flair", table, operator: "and", conditions, get_attributes: getAttributes }),
@@ -124,6 +133,102 @@ export function buildOpsSearch(
     if (Array.isArray(results)) return results;
     throw new Error("ops API returned an unexpected response shape");
   };
+}
+
+/**
+ * Resolves the one instance a restore writes to and lists candidates from.
+ *
+ * `flairUrl` is the target the writes use. With no FLAIR_URL, the port pair is
+ * the resolved local instance. With FLAIR_URL, its HTTP port and the
+ * operations port (FLAIR_OPS_PORT when set, else derived from the target URL)
+ * go through the paired resolver `resolveAgentHomeTarget` (flair#2474), so a
+ * port that conflicts with a configured pair is refused rather than split
+ * across two instances. The operations URL is built from that same target.
+ * `resolvePairImpl` and `deriveOpsUrlImpl` are injectable for tests.
+ */
+export function resolveRestoreTarget(
+  flairUrl: string | undefined,
+  opsPortEnv: string | undefined,
+  resolvePairImpl: (opts: { port?: string | number; opsPort?: string | number }) => { httpPort: number; opsPort: number } = resolvePair,
+  deriveOpsUrlImpl: (target: string) => string | undefined = deriveOpsUrl,
+): { baseUrl: string; opsUrl: string } {
+  const declared = opsPortEnv === undefined || opsPortEnv === "" ? null : Number(opsPortEnv);
+  if (declared !== null && (!Number.isInteger(declared) || declared < 1 || declared > 65535)) {
+    throw new Error(
+      `invalid FLAIR_OPS_PORT ${JSON.stringify(opsPortEnv)}. Set it to the restore target instance's operations port (1-65535), or unset it.`,
+    );
+  }
+
+  const noDerivableOps = (reason?: string): Error => {
+    const detail = reason ? ` (${reason})` : "";
+    return new Error(
+      `restore target ${flairUrl} has no derivable operations API URL${detail}. `
+        + "The candidate listing and the writes must address one instance; the operations API is derived from FLAIR_URL. "
+        + "Set FLAIR_URL to the instance's base URL with a port whose operations API can be derived, or run restore on that instance's host.",
+    );
+  };
+
+  if (!flairUrl) {
+    const pair = resolvePairImpl(declared === null ? {} : { opsPort: declared });
+    const base = `http://127.0.0.1:${pair.httpPort}`;
+    return { baseUrl: base, opsUrl: `http://127.0.0.1:${pair.opsPort}` };
+  }
+
+  const base = flairUrl.replace(/\/+$/, "");
+  let parsed: URL;
+  try {
+    parsed = new URL(base);
+  } catch (err: any) {
+    throw noDerivableOps(err?.message ?? String(err));
+  }
+
+  let derivedPort: number | null = null;
+  if (parsed.port) {
+    let derived: string | undefined;
+    try {
+      derived = deriveOpsUrlImpl(base);
+    } catch (err: any) {
+      throw noDerivableOps(err?.message ?? String(err));
+    }
+    if (!derived) throw noDerivableOps();
+    derivedPort = Number(new URL(derived).port);
+  } else {
+    // No explicit port to pair numerically (for example an https target on
+    // 443). The conventional operations URL is the only derivation.
+    let derived: string | undefined;
+    try {
+      derived = deriveOpsUrlImpl(base);
+    } catch (err: any) {
+      throw noDerivableOps(err?.message ?? String(err));
+    }
+    if (!derived) throw noDerivableOps();
+    if (declared !== null && Number(new URL(derived).port) !== declared) {
+      throw new Error(
+        `restore target ${base} pairs with the operations API at ${derived}, but FLAIR_OPS_PORT=${opsPortEnv} names a different instance. `
+          + "The candidate listing and the writes must address one instance. "
+          + `Unset FLAIR_OPS_PORT, or set it to ${new URL(derived).port} to match the target.`,
+      );
+    }
+    return { baseUrl: base, opsUrl: derived };
+  }
+
+  let pair: { httpPort: number; opsPort: number };
+  try {
+    pair = resolvePairImpl({ port: Number(parsed.port), opsPort: declared ?? derivedPort! });
+  } catch (err: any) {
+    throw new Error(
+      `restore target ${base} could not be paired with FLAIR_OPS_PORT=${opsPortEnv ?? "(unset)"}: ${err?.message ?? String(err)} `
+        + "The candidate listing and the writes must address one instance. "
+        + "Unset FLAIR_OPS_PORT to derive the operations port from the restore target, or set it to that instance's operations port.",
+    );
+  }
+
+  const ops = new URL(base);
+  ops.port = String(pair.opsPort);
+  ops.pathname = "";
+  ops.search = "";
+  ops.hash = "";
+  return { baseUrl: base, opsUrl: ops.toString().replace(/\/$/, "") };
 }
 
 // ─── flair rem rapid — pure helpers ──────────────────────────────────────────
@@ -1122,7 +1227,13 @@ export function register(program: Command): void {
       if (opts.apply) {
         const { applySnapshot } = await import("../rem/restore.js");
         applyAdminPassFile(opts);
-        const restoreBase = process.env.FLAIR_URL || `http://127.0.0.1:${resolveHttpPort({})}`;
+        let restoreTarget: { baseUrl: string; opsUrl: string };
+        try {
+          restoreTarget = resolveRestoreTarget(process.env.FLAIR_URL, process.env.FLAIR_OPS_PORT);
+        } catch (err: any) {
+          console.error(`Error: ${err.message}`);
+          process.exit(1);
+        }
         // Candidates are only reachable through the ops port (Harper has no
         // REST search_by_conditions route), so the dry-run candidate count
         // needs admin creds too. Dry-run treats credential resolution as
@@ -1130,7 +1241,7 @@ export function register(program: Command): void {
         // file — while --apply requires creds (Soul rewrite) and fails loudly.
         let adminPass: string | undefined;
         try {
-          adminPass = resolveLocalAdminPass(opts.adminPass, !isLocalBase(restoreBase));
+          adminPass = resolveLocalAdminPass(opts.adminPass, !isLocalBase(restoreTarget.baseUrl));
         } catch (err: any) {
           if (!opts.dryRun) throw err;
           adminPass = undefined;
@@ -1142,19 +1253,21 @@ export function register(program: Command): void {
           );
           process.exit(1);
         }
+        const targetApi = (method: string, path: string, body?: unknown) =>
+          api(method, path, body, { baseUrl: restoreTarget.baseUrl });
         const opsSearch = adminPass
-          ? buildOpsSearch({ opsPort: resolveOpsPort(opts), adminUser: opts.adminUser, adminPass })
+          ? buildOpsSearch({ opsUrl: restoreTarget.opsUrl, adminUser: opts.adminUser, adminPass })
           : undefined;
         const soulApiCall = adminPass
           ? (method: string, path: string, body?: unknown) =>
-              api(method, path, body, { explicitAdminPass: adminPass, adminUser: opts.adminUser, agentId: null })
+              api(method, path, body, { baseUrl: restoreTarget.baseUrl, explicitAdminPass: adminPass, adminUser: opts.adminUser, agentId: null })
           : undefined;
         try {
           const result = await applySnapshot({
             agentId,
             snapshotPath: match.path,
             flairVersion: __pkgVersion,
-            apiCall: api,
+            apiCall: targetApi,
             opsSearch,
             soulApiCall,
             dryRun: !!opts.dryRun,

@@ -70,7 +70,7 @@ test("flair rem nightly run-once prints a failed pending-candidate count as unkn
       throw new Error("unexpected route " + path);
     },
     resolveOpsPort: () => OPS_PORT, applyAdminPassFile: () => {}, addSharedCredentialOptions: (command) => command,
-    readPortFromConfig: () => null, resolveHttpPort: () => 1, humanBytes: String, relativeTime: String,
+    readPortFromConfig: () => null, resolveHttpPort: () => 1, resolveEffectiveOpsUrl: () => undefined, resolveAgentHomeTarget: () => ({ httpPort: 1, opsPort: 1 }), humanBytes: String, relativeTime: String,
     DEFAULT_PORT: 1, pkgVersion: "fixture",
   });
   try {
@@ -130,7 +130,7 @@ test("a healthy flair rem nightly run-once dry run without an admin credential p
       return { archived: 0, expired: 0 };
     },
     resolveOpsPort: () => OPS_PORT, applyAdminPassFile: () => {}, addSharedCredentialOptions: (command) => command,
-    readPortFromConfig: () => null, resolveHttpPort: () => 1, humanBytes: String, relativeTime: String,
+    readPortFromConfig: () => null, resolveHttpPort: () => 1, resolveEffectiveOpsUrl: () => undefined, resolveAgentHomeTarget: () => ({ httpPort: 1, opsPort: 1 }), humanBytes: String, relativeTime: String,
     DEFAULT_PORT: 1, pkgVersion: "fixture",
   });
   try {
