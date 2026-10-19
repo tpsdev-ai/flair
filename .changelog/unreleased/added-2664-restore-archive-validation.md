@@ -5,8 +5,8 @@
   already refuses. Selected Memory rows need string content. Their promotion
   fields are checked when present: `promotionStatus` must be a declared
   value, an approved verdict needs a non-empty `promotedAt` and `promotedBy`,
-  and a `promotionContentHash` must bind the archived content. Rows without a
-  verdict, and verdicts without a hash, are admitted. Each row is reported as
+  and a `promotionContentHash` must bind the archived content. Rows with no
+  promotion fields, and otherwise valid verdicts without a hash, are admitted. Each row is reported as
   bound, legacy-unbound (a verdict with no binding, which readers suppress)
   or unpromoted. One failing row refuses the whole selection. Restore does
   not use the validator yet (flair#2664).

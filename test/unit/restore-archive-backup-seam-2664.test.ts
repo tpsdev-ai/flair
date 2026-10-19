@@ -1,6 +1,7 @@
 /**
  * restore-archive-backup-seam-2664.test.ts — flair#2664 slice 1a: the file the
- * real `flair backup` command publishes is admitted by the restore validator.
+ * real `flair backup` command publishes is parsed and checked by the restore
+ * validator.
  *
  * Each case runs src/commands/backup.ts in a child process, the way
  * test/unit/backup-fail-closed-2214.test.ts does: `fetch` is replaced with a

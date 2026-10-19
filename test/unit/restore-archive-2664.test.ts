@@ -271,7 +271,7 @@ describe("refusal diagnostics are scoped to what each refusal knows", () => {
     }
   });
 
-  test("an archive with several problems is refused at the first, in document order", () => {
+  test("an archive with several problems is refused at the first found in the fixed check order", () => {
     const result = parseRestoreArchive(bytes(backup([memory("m-1", { agentId: "" }), memory("m-2", { id: "" })])));
     expect(result).toMatchObject({ ok: false, code: "invalid-row", location: "/memories/0/agentId" });
   });

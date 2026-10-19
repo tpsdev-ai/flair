@@ -574,8 +574,9 @@ function archiveShapeRefusal(doc: unknown): ShapeRefusal | undefined {
  * `memories` collection, a row that is not an object with a non-empty string
  * id addressing one record path segment (Soul and Memory rows also need a
  * non-empty string `agentId`), and a repeated id within a collection. The
- * first problem found, in that order and in document order, is returned as
- * the one refusal. Every result, refusal included, carries the input's digest.
+ * checks run in that order; collections are checked in a fixed order
+ * (`agents`, `souls`, then `memories`) and rows in array order, and the first
+ * problem found that way is returned as the one refusal. Every result, refusal included, carries the input's digest.
  */
 export function parseRestoreArchive(bytes: Buffer | Uint8Array): RestoreArchiveParseResult {
   if (!(bytes instanceof Uint8Array)) {
