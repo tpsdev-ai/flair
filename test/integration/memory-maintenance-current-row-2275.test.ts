@@ -75,14 +75,14 @@ async function updateMemory(records: Record<string, any>[]): Promise<void> {
 async function insertPointer(memoryId: string): Promise<void> {
   const res = await adminOp({
     operation: "insert", database: "flair", table: "MemoryHostSource",
-    records: [{ memoryId, hostSource: JSON.stringify(POINTER), scopeAtWrite: null, authorId: "host-a", memoryInstanceToken: randomUUID(), receivedAt: new Date().toISOString() }],
+    records: [{ memoryId, hostSource: JSON.stringify(POINTER), scopeAtWrite: null, authorId: memoryId, memoryInstanceToken: randomUUID(), receivedAt: new Date().toISOString() }],
   });
   expect(res.status, `MemoryHostSource insert returned ${res.status}`).toBe(200);
 }
 async function replacePointer(memoryId: string, memoryInstanceToken: string): Promise<void> {
   const res = await adminOp({
     operation: "upsert", database: "flair", table: "MemoryHostSource",
-    records: [{ memoryId, hostSource: JSON.stringify({ ...POINTER, id: "run-bbbbbbbb" }), scopeAtWrite: null, authorId: "host-a", memoryInstanceToken, receivedAt: new Date().toISOString() }],
+    records: [{ memoryId, hostSource: JSON.stringify({ ...POINTER, id: "run-bbbbbbbb" }), scopeAtWrite: null, authorId: memoryId, memoryInstanceToken, receivedAt: new Date().toISOString() }],
   });
   expect(res.status, `MemoryHostSource upsert returned ${res.status}`).toBe(200);
 }

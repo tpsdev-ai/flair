@@ -150,7 +150,7 @@ async function insertPointer(memoryId: string): Promise<void> {
     records: [{
       memoryId,
       hostSource: JSON.stringify({ v: 1, host: "host-a", kind: "run", id: "run-aaaaaaaa" }),
-      scopeAtWrite: null, authorId: "host-a", memoryInstanceToken: randomUUID(), receivedAt: now(),
+      scopeAtWrite: null, authorId: A.id, memoryInstanceToken: randomUUID(), receivedAt: now(),
     }],
   });
 }

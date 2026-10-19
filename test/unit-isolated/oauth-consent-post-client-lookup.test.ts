@@ -18,6 +18,8 @@ import { mock, describe, it, expect, beforeEach } from "bun:test";
 
 const REGISTERED = "flair_cl_registered";
 const ALLOWED_REDIRECT_URI = "https://claude.com/api/mcp/auth_callback";
+/** The S256 challenge of RFC 7636 Appendix B. */
+const CODE_CHALLENGE = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
 
 /** Every id passed to OAuthClient.get, in order. */
 const lookups: unknown[] = [];
@@ -65,7 +67,7 @@ function post(fields: Record<string, unknown>): Promise<Response> {
     redirect_uri: ALLOWED_REDIRECT_URI,
     scope: "memory:read",
     state: "s1",
-    code_challenge: "cc",
+    code_challenge: CODE_CHALLENGE,
     code_challenge_method: "S256",
     ...fields,
   });
@@ -111,6 +113,22 @@ describe("consent POST — client_id lookup", () => {
     const res = await post({ client_id: REGISTERED });
     expect(lookups).toEqual([REGISTERED]);
     expect(res.status).toBe(401);
+    expect(codePuts).toEqual([]);
+  });
+
+  it("a registered client_id is looked up before the PKCE check: an approve without an S256 challenge is then refused with 400 invalid_request", async () => {
+    const res = await post({ client_id: REGISTERED, code_challenge: undefined });
+    expect(lookups).toEqual([REGISTERED]);
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe("invalid_request");
+    expect(codePuts).toEqual([]);
+  });
+
+  it("a client_id that is not a string is refused with invalid_client before the PKCE check", async () => {
+    const res = await post({ client_id: 42, code_challenge: undefined });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "invalid_client" });
+    expect(lookups).toEqual([]);
     expect(codePuts).toEqual([]);
   });
 });

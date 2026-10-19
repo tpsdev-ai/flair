@@ -90,7 +90,7 @@ export const ADMIN_ROLE = "admin";
  *
  * Note this covers Agent RECORDS only. `FLAIR_ADMIN_AGENTS` is a separate,
  * env-configured admin source union-ed in by resources/agent-auth.ts's
- * getAdminAgents(); it names agent ids and never touches a record.
+ * agentIsAdmin(); it names agent ids and never touches a record.
  */
 export function agentRecordIsAdmin(record: unknown): boolean {
   return (record as { role?: unknown } | null | undefined)?.role === ADMIN_ROLE;
@@ -98,9 +98,9 @@ export function agentRecordIsAdmin(record: unknown): boolean {
 
 /**
  * The agent ids `FLAIR_ADMIN_AGENTS` names (comma-separated; entries trimmed,
- * empty entries dropped). resources/agent-auth.ts's getAdminAgents() reads its
- * environment half through this, and the federation merge reads the same set
- * (flair#2665).
+ * empty entries dropped), read from the environment on every call.
+ * resources/agent-auth.ts's agentIsAdmin() reads its environment half through
+ * this, and the federation merge reads the same set (flair#2665).
  */
 export function configuredAdminAgentIds(raw: string | undefined = process.env.FLAIR_ADMIN_AGENTS): Set<string> {
   return new Set((raw ?? "").split(",").map((s) => s.trim()).filter(Boolean));

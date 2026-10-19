@@ -6,7 +6,7 @@ import { isOperatorSeedPut, redactMemoryWrite, redactSkillWrite, storedMemoryTex
 import { REDACTION_RULES, buildFromAllowlist, storageResult, withheldWriteResult, writeResultResponse, type FieldRules } from "./memory-write-response.js";
 import { isDeepStrictEqual } from "node:util";
 import { patchRecord, withDetachedTxn } from "./table-helpers.js";
-import { isAdmin, resolveAgentAuth, type AgentAuthVerdict } from "./agent-auth.js";
+import { annotatedCallerIsAdmin, resolveAgentAuth, type AgentAuthVerdict } from "./agent-auth.js";
 import { guardAuthorityFields } from "./authority-field-guard.js";
 import { isForbiddenOwnerMutation } from "./record-owner-guard.js";
 import { guardOwnerFieldImmutable } from "./owner-field-guard.js";
@@ -3058,7 +3058,7 @@ export class Memory extends (databases as any).flair.Memory {
       const ctx = (this as any).getContext?.();
       const request = ctx?.request ?? ctx;
       const actorId = request?.tpsAgent;
-      if (actorId && !(await isAdmin(actorId))) {
+      if (actorId && !(await annotatedCallerIsAdmin(request))) {
         return new Response(JSON.stringify({ error: "reindex_admin_only" }), {
           status: 403,
           headers: { "Content-Type": "application/json" },

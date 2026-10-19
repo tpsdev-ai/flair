@@ -82,7 +82,7 @@ mock.module("harper", () => ({
     delete: deletePointer,
   } } },
 }));
-mock.module("../../resources/agent-auth.js", () => ({ isAdmin: async () => false }));
+mock.module("../../resources/agent-auth.js", () => ({ annotatedCallerIsAdmin: async () => false }));
 mock.module("../../resources/bm25-index-service.js", () => ({
   noteMemoryUpsert, noteMemoryDelete,
   bm25IndexInRetrievalPath: () => false,

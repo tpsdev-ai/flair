@@ -52,7 +52,7 @@ import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { homedir } from "node:os";
 import { setImmediate as yieldToRequests } from "node:timers/promises";
-import { isAdmin, allowVerified } from "./agent-auth.js";
+import { annotatedCallerIsAdmin, allowVerified } from "./agent-auth.js";
 import { patchRecordSilent } from "./table-helpers.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 import {
@@ -114,7 +114,7 @@ export class ReflectMemories extends Resource {
     const request = ctx?.request ?? ctx;
     const actorId: string | undefined = request?.tpsAgent;
     const callerIsAdmin: boolean = request?.tpsAgentIsAdmin === true
-      || (actorId ? await isAdmin(actorId) : false);
+      || (await annotatedCallerIsAdmin(request));
 
     // Same actor rules for both modes (spec §3A item 9) — resolved once via
     // the shared, tested helper before either branch runs.

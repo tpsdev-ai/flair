@@ -224,7 +224,7 @@ function stage(fs: Resolved, target: string, content: string, mode: number): str
 }
 
 /** Best-effort directory fsync so the renames themselves are durable. */
-function fsyncDir(dir: string): void {
+export function fsyncDir(dir: string): void {
   try {
     const fd = openSync(dir, "r");
     try { fsyncSync(fd); } finally { closeSync(fd); }
