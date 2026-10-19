@@ -33,8 +33,11 @@
  * PUT of a row that is absent from the store, and restore reports that row
  * as failed (HTTP 403) and exits non-zero while the other rows restore.
  *
- * Build prerequisite: dist/cli.js and dist/resources/*.js
- * (`bun run build && bun run build:cli`).
+ * Build prerequisite: dist/cli.js and dist/resources/*.js. Run
+ * `bun run build && bun run build:cli`: `bun run build` alone leaves
+ * dist/cli.js absent, and every case then fails at its first `flair backup`
+ * with "Cannot find module .../dist/cli.js". The file checks for the CLI
+ * before starting Harper and stops with that remedy in one error.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
@@ -156,6 +159,9 @@ const sha256Of = (path: string): string => createHash("sha256").update(readFileS
 const credentials = () => ["--port", httpPort, "--ops-port", opsPort, "--admin-pass-file", passFile];
 
 beforeAll(async () => {
+  if (!existsSync(CLI)) {
+    throw new Error("dist/cli.js is missing: run `bun run build:cli` before this file; `bun run build` alone does not build the CLI");
+  }
   if (process.env.HARPER_HTTP_URL) throw new Error("requires an isolated Harper; unset HARPER_HTTP_URL");
   for (let attempt = 1; ; attempt++) {
     harper = await startHarper();
