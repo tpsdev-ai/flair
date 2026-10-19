@@ -19,8 +19,8 @@ import { tmpdir } from "node:os";
 import { childOverranDeadline } from "../helpers/child-deadline.js";
 
 const CLI_SOURCE = join(__dirname, "..", "..", "src", "cli.ts");
+// The child's own deadline (20 s) and the case budget above it (60 s) are literals the spawn-budget gate reads.
 const CHILD_DEADLINE_MS = 20_000;
-const CASE_BUDGET_MS = 60_000;
 const home = mkdtempSync(join(tmpdir(), "flair-deploy-url-refusal-"));
 afterAll(() => rmSync(home, { recursive: true, force: true }));
 
@@ -32,7 +32,7 @@ function runCLI(args: string[], env: Record<string, string> = {}): { exitCode: n
   }
   const r = spawnSync("bun", [CLI_SOURCE, ...args], {
     env: { ...clean, HOME: home, ...env },
-    timeout: CHILD_DEADLINE_MS,
+    timeout: 20_000,
     encoding: "utf8",
   });
   if (r.status === null && r.signal) {
@@ -66,6 +66,6 @@ describe("flair deploy / flair upgrade --target refuse an unsafe URL before prin
       // The refusal is the first thing printed: nothing reaches stdout, and stderr opens with it.
       expect(r.stdout).toBe("");
       expect(r.stderr.replace(/\x1b\[[0-9;]*m/g, "")).toMatch(/^flair deploy: the .* cannot be used: it carries a (user name or password|query|fragment)\. Nothing was sent\./);
-    }, CASE_BUDGET_MS);
+    }, 60_000);
   }
 });
