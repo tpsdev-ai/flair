@@ -37,8 +37,12 @@ class BaseAgent {
   // the URL-bound target on the instance (unset for a direct in-process call,
   // where the body id IS the write key). See resources/originator-instance.ts.
   getId() { return (this as any)._targetId; }
-  async put(content: any) {
-    const id = this.getId() ?? content.id;
+  // Real Harper's instance put: put(record) writes to the URL-bound target, and
+  // put(target, record) writes to `target` — the form resources/Agent.ts uses
+  // for an in-process call on a collection resource with no URL target.
+  async put(targetOrContent: any, record?: any) {
+    const content = record === undefined ? targetOrContent : record;
+    const id = record === undefined ? (this.getId() ?? content.id) : targetOrContent;
     const rec = { ...content, id };
     agentStore.set(id, rec);
     return rec;
@@ -94,7 +98,8 @@ beforeEach(() => {
   instanceRow = null;
   _resetLocalInstanceIdCacheForTests();
   // Agent.put() re-reads the row and writes inside one owned transaction
-  // (resources/request-transaction.ts, flair#2696); this mock owns/commits one.
+  // (resources/request-transaction.ts, flair#2696); this mock supplies and
+  // closes that transaction context (the stub table's writes land at once).
   (globalThis as any).transaction = (ctx: any, cb: (txn: any) => any) => {
     const context = ctx && typeof ctx === "object" ? ctx : {};
     if (context.transaction && context.transaction.open === 1) return cb(context.transaction);
@@ -134,8 +139,9 @@ describe("federation-edge-hardening slice 1 / flair#1965 — Agent.post() stamps
   });
 });
 
-// An Agent PUT is an administrator operation (flair#2696): these drive it as an
-// administrator. A non-admin agent's PUT is refused before any read or write.
+// An Agent PUT is an administrator operation (flair#2696). The successful cases
+// run as an administrator; the non-admin case asserts the refusal and an
+// unchanged row.
 describe("federation-edge-hardening slice 1 / flair#1965 — Agent.put() create vs update", () => {
   it("a non-admin agent's PUT is refused 403 agent_put_admin_only and writes nothing", async () => {
     instanceRow = { id: "flair_local_test" };
@@ -148,7 +154,7 @@ describe("federation-edge-hardening slice 1 / flair#1965 — Agent.put() create 
     expect(agentStore.get("agent-1")).toEqual({ id: "agent-1", name: "Agent One", originatorInstanceId: "instance-B" });
   });
 
-  it("CREATE (put, no stored row) is refused and writes no row", async () => {
+  it("a PUT to a missing row is refused and writes no row", async () => {
     instanceRow = { id: "flair_local_test" };
     const a = makeAgent(agentCtx("agent-admin", true));
     const res: any = await a.put({ id: "agent-new", name: "Fresh Principal", originatorInstanceId: "instance-B" });

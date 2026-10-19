@@ -9,6 +9,19 @@ import { AGENT_HOME_STAMP_FIELD, AGENT_PRINCIPAL_WRITE_BACK_FIELD, AGENT_PRINCIP
 import { withOwnedTransaction } from "./request-transaction.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 
+/** The resource's URL-bound target id (`getId()`), or null when it has none
+ *  (an in-process call on a collection resource) or the id is not a scalar. */
+function urlBoundId(resource: any): string | number | null {
+  try {
+    const getId = resource?.getId;
+    const id = typeof getId === "function" ? getId.call(resource) : undefined;
+    if (typeof id === "string" || typeof id === "number") return id;
+  } catch {
+    /* getId() threw — no URL-bound target */
+  }
+  return null;
+}
+
 /**
  * The id this write lands on: the URL-bound target (`getId()`) when there is
  * one, otherwise the body `id` (an in-process call, where the body id IS the
@@ -17,13 +30,8 @@ import { txnPausePoint } from "./txn-pause-point.js";
  * is absent. A non-scalar target is ignored.
  */
 function writeTargetId(resource: any, content: any): { present: boolean; value: unknown } {
-  try {
-    const getId = resource?.getId;
-    const id = typeof getId === "function" ? getId.call(resource) : undefined;
-    if (typeof id === "string" || typeof id === "number") return { present: true, value: id };
-  } catch {
-    /* getId() threw — fall back to the body id below */
-  }
+  const bound = urlBoundId(resource);
+  if (bound !== null) return { present: true, value: bound };
   if (content != null && typeof content === "object" && "id" in content && content.id !== undefined) {
     return { present: true, value: content.id };
   }
@@ -326,8 +334,15 @@ export class Agent extends (databases as any).flair.Agent {
       applyFederationBookkeeping(content, stored);
 
       // The resource's write joins the owned transaction: Harper resolves an
-      // instance write's transaction from its context at write time.
-      return { kind: "written" as const, result: await super.put(content) };
+      // instance write's transaction from its context at write time. A resource
+      // bound to a URL target writes to that target. An in-process call on a
+      // collection resource has no URL target, so the write names the body id
+      // (the id resolveStoredRow read the row by) as its target explicitly.
+      const bound = urlBoundId(this);
+      const result = bound !== null
+        ? await super.put(content)
+        : await super.put(writeTargetId(this, content).value, content);
+      return { kind: "written" as const, result };
     });
     if (outcome.kind === "denied") return outcome.denial;
     if (outcome.kind === "gone") return requiresExisting();
