@@ -9,12 +9,14 @@
  * process with the requesting caller's own context (see callerCatchupReader
  * there); which events a read returns (targeting, expiry) is decided there.
  *
- * Cursor: the stream keeps its own position cursor and never reads or moves
- * the durable catch-up watermark. It starts at streamOpeningPosition(): after
+ * Cursor: the stream keeps its own position cursor, passed to each catch-up
+ * read as an explicit `after`, so it never moves the durable catch-up watermark
+ * and the watermark does not decide what the stream delivers (the catch-up read
+ * still looks the watermark up). It starts at streamOpeningPosition(): after
  * every event created in or before the millisecond the stream opened, whatever
- * the event's id. The opening comment, and with it the response headers, is
- * written only once the clock has passed that millisecond, so an event created
- * after the client receives the headers sorts after the cursor.
+ * the event's id. The opening comment and the first read are delayed until the
+ * clock has passed that millisecond; when Harper sends the response headers is
+ * Harper's, and is not tied to that delay.
  *
  * Wire format (Server-Sent Events):
  *   - an opening `: stream open` comment;
@@ -272,9 +274,9 @@ export function orgEventStream(opts: OrgEventStreamOptions): ReadableStream<Uint
   return new ReadableStream<Uint8Array>({
     start(c) {
       controller = c;
-      // Hold the opening comment (and so the response headers) until the
-      // clock has left the opening millisecond: an event created after the
-      // client sees the headers then has a later createdAt than the cursor.
+      // Hold the opening comment and the first read until the clock has left
+      // the opening millisecond (when Harper sends the response headers is
+      // not tied to this delay).
       const open = () => {
         pollTimer = undefined;
         if (closed) return;
