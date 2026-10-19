@@ -6,8 +6,9 @@
  * SUBSCRIBE, and Harper's native MCP `resources/subscribe` when that component
  * is configured) and `publish()` (an MQTT PUBLISH) of each table class admit
  * only administrators and trusted internal calls, and so do its static `put()`
- * and `delete()` for a call whose explicit context argument is itself an MQTT
- * session's context (a retained MQTT PUBLISH). Every other put()/delete() call
+ * and `delete()` for a call whose explicit context argument is an MQTT
+ * session's context or a stored will record Harper replays (a retained
+ * MQTT PUBLISH or last-will). Every other put()/delete() call
  * passes through them with the same arguments, with nothing read from its
  * context and no caller resolved. Harper's native MCP route resolves every
  * caller as anonymous, so it refuses administrators too (see the policy

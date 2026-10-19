@@ -95,7 +95,12 @@ a verified non-admin agent's also carries the refusal as a reason string unless
 the client turned problem information off or the string would exceed its
 maximum packet size. A refused QoS 0 PUBLISH gets no answer. MQTT 3.1.1 has
 only `0x80` for every refusal. A refused publish reaches no subscriber, and a
-refused retained publish leaves the row as it was. Over MQTT on WebSocket
+refused retained publish leaves the row as it was. A session's last-will
+message is decided when Harper publishes it: when the session drops without
+DISCONNECT, as that session's own publish; and when Harper replays the wills
+it still holds as its first worker starts, as a caller without a valid
+credential, so a replayed will on a table topic is refused, an administrator's
+included. Over MQTT on WebSocket
 the credential is the one on the WebSocket upgrade request, as for SSE and
 WebSocket. An MQTT connection on Harper's TCP or TLS listener carries no HTTP
 request, so flair resolves the caller of each of its actions as one without a

@@ -3,12 +3,13 @@
  * on (StartHarperOptions.mqttWebSocket): over WebSocket (`open`) or over a TCP
  * listener (`openTcp`).
  *
- * It speaks only what the tests need — CONNECT, SUBSCRIBE, PUBLISH (QoS 0/1,
- * retained or not) and DISCONNECT out; CONNACK, SUBACK, PUBACK, PUBLISH and
- * DISCONNECT in — and keeps the text of everything the server sent, decoded as
- * UTF-8 (`receivedText`), so a test can scan the stream for an ASCII marker
- * regardless of how Harper encoded a payload (JSON, MessagePack and CBOR all
- * carry a string as its UTF-8 bytes). The bytes themselves are not kept.
+ * It speaks only what the tests need — CONNECT (optionally with a last-will),
+ * SUBSCRIBE, PUBLISH (QoS 0/1, retained or not) and DISCONNECT out; CONNACK,
+ * SUBACK, PUBACK, PUBLISH and DISCONNECT in — and keeps the text of everything
+ * the server sent, decoded as UTF-8 (`receivedText`), so a test can scan the
+ * stream for an ASCII marker regardless of how Harper encoded a payload (JSON,
+ * MessagePack and CBOR all carry a string as its UTF-8 bytes). The bytes
+ * themselves are not kept.
  *
  * MQTT 5 is used, not 3.1.1, because only 5 carries a reason code on SUBACK
  * failures other than 0x80 and on PUBACK at all: a 3.1.1 PUBACK for a refused
@@ -79,6 +80,8 @@ interface MqttTransport {
   opened: Promise<boolean>;
   send: (bytes: Uint8Array) => void;
   close: () => void;
+  /** End the connection at once, without a closing handshake on TCP. */
+  drop: () => void;
   onData: (cb: (chunk: Uint8Array) => void) => void;
   onClose: (cb: (code: number | undefined) => void) => void;
   protocol: () => string;
@@ -129,6 +132,7 @@ export class MqttClient {
       }),
       send: (bytes) => { if (ws.readyState === WebSocket.OPEN) ws.send(bytes); },
       close: () => ws.close(),
+      drop: () => ws.close(),
       onData: (cb) => ws.addEventListener("message", (m: MessageEvent) => {
         const d = m.data;
         cb(d instanceof ArrayBuffer ? new Uint8Array(d) : typeof d === "string" ? enc.encode(d) : new Uint8Array(d as ArrayBufferLike));
@@ -153,6 +157,7 @@ export class MqttClient {
       }),
       send: (bytes) => { if (!socket.destroyed) socket.write(bytes); },
       close: () => socket.end(),
+      drop: () => socket.destroy(),
       onData: (cb) => socket.on("data", (d: Buffer) => cb(new Uint8Array(d))),
       onClose: (cb) => socket.once("close", () => cb(undefined)),
       protocol: () => "",
@@ -242,15 +247,35 @@ export class MqttClient {
     });
   }
 
-  /** Send CONNECT (MQTT 5, clean start) and wait for CONNACK: its reason code. */
-  connect(opts: { clientId: string; username?: string; password?: string; ms?: number }): Promise<MqttOutcome<number>> {
+  /**
+   * Send CONNECT (MQTT 5, clean start) and wait for CONNACK: its reason code.
+   * `will` registers a last-will message, which the server publishes when the
+   * connection ends without DISCONNECT (`drop()`); a `null` payload is zero
+   * bytes, which a retained will turns into a delete.
+   */
+  connect(opts: {
+    clientId: string;
+    username?: string;
+    password?: string;
+    will?: { topic: string; payload: unknown; qos?: 0 | 1; retain?: boolean };
+    ms?: number;
+  }): Promise<MqttOutcome<number>> {
     let flags = 0x02; // clean start
     if (opts.username !== undefined) flags |= 0x80;
     if (opts.password !== undefined) flags |= 0x40;
+    const will: number[] = [];
+    if (opts.will) {
+      flags |= 0x04 | ((opts.will.qos ?? 1) << 3) | (opts.will.retain ? 0x20 : 0);
+      const p = opts.will.payload;
+      const data = p === null ? [] : [...enc.encode(typeof p === "string" ? p : JSON.stringify(p))];
+      // will properties (none), will topic, will payload (two-byte length + bytes)
+      will.push(0, ...mqttString(opts.will.topic), data.length >> 8, data.length & 0xff, ...data);
+    }
     const body = [
       ...mqttString("MQTT"), 5, flags, 0, 60, // protocol name, level 5, flags, keep alive 60 s
       0, // no properties
       ...mqttString(opts.clientId),
+      ...will,
       ...(opts.username !== undefined ? mqttString(opts.username) : []),
       ...(opts.password !== undefined ? mqttString(opts.password) : []),
     ];
@@ -354,6 +379,15 @@ export class MqttClient {
       await new Promise((r) => setTimeout(r, 50));
     }
     return this.publishes.find(pred);
+  }
+
+  /**
+   * End the connection without DISCONNECT, as a client that dropped would: the
+   * server then publishes the session's last-will message, if it has one.
+   */
+  async drop(): Promise<void> {
+    try { this.transport.drop(); } catch { /* already closed */ }
+    await Promise.race([this.closedPromise, new Promise((r) => setTimeout(r, 2_000))]);
   }
 
   /** Send DISCONNECT and close the connection. */

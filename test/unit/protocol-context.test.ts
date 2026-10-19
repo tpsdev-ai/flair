@@ -4,7 +4,7 @@
  * table-subscription guard.
  */
 import { describe, expect, it } from "bun:test";
-import { isDirectMqttSessionContext, isMqttSessionContext, isProtocolLayerContext } from "../../resources/protocol-context";
+import { isDirectMqttSessionContext, isLastWillReplayContext, isMqttSessionContext, isProtocolLayerContext } from "../../resources/protocol-context";
 
 /** A stand-in for Harper's MQTT session object (DurableSubscriptionsSession). */
 const session = () => ({ sessionId: "c1", addSubscription: async () => undefined });
@@ -47,6 +47,36 @@ describe("isDirectMqttSessionContext", () => {
     expect(isDirectMqttSessionContext(Object.defineProperty({ socket: {} }, "session", counted(session())))).toBe(false);
     expect(isDirectMqttSessionContext({ socket: {}, session: Object.defineProperty({}, "addSubscription", counted(() => undefined)) })).toBe(false);
     expect(isDirectMqttSessionContext({ getContext: () => { reads++; return { session: session(), socket: {} }; } })).toBe(false);
+    expect(reads).toBe(0);
+  });
+});
+
+describe("isLastWillReplayContext", () => {
+  /** The context Harper's will replay passes: a copy of the stored will record, with authorize: true. */
+  const replayed = () => ({ id: "c1", topic: "Memory/m1", data: { content: "x" }, qos: 1, retain: true, user: { username: "u" }, authorize: true });
+
+  it("recognises the stored will record Harper replays for a retained will", () => {
+    expect(isLastWillReplayContext(replayed())).toBe(true);
+    expect(isLastWillReplayContext({ ...replayed(), data: undefined, user: undefined })).toBe(true); // an empty will: a delete
+  });
+
+  it("does not take any other context for one, and invokes no getter while deciding", () => {
+    let reads = 0;
+    const counted = (value: unknown) => ({ get() { reads++; return value; }, enumerable: true });
+    expect(isLastWillReplayContext(undefined)).toBe(false);
+    expect(isLastWillReplayContext({ ...replayed(), retain: false })).toBe(false); // not retained: never a put()/delete()
+    expect(isLastWillReplayContext({ ...replayed(), authorize: false })).toBe(false); // Harper already consumed authorize
+    expect(isLastWillReplayContext({ ...replayed(), topic: undefined })).toBe(false);
+    expect(isLastWillReplayContext({ headers: {}, authorize: true })).toBe(false); // a REST request Harper marked
+    expect(isLastWillReplayContext({ user: {}, authorize: true, request: {} })).toBe(false); // Harper's MCP context
+    expect(isLastWillReplayContext({ session: session(), socket: {}, authorize: true })).toBe(false); // a session's context
+    expect(isLastWillReplayContext(Object.create(replayed()))).toBe(false); // inherited, not own
+    for (const key of ["authorize", "topic", "retain"]) {
+      const value = replayed() as Record<string, unknown>;
+      const held = value[key];
+      delete value[key];
+      expect(isLastWillReplayContext(Object.defineProperty(value, key, counted(held)))).toBe(false);
+    }
     expect(reads).toBe(0);
   });
 });

@@ -352,6 +352,25 @@ describe("guardTableSubscriptions — retained MQTT publish (put() / delete())",
     expect(retainedPublishContext([{}, { data: 1 }, { ...ctx, user: {} }])).toBeDefined(); // a session's will copies the context
   });
 
+  it("a will Harper replays is decided as a caller without a credential, an administrator's included", async () => {
+    const { Table, calls } = makeWriteTable();
+    let resolved = 0;
+    guardTableSubscriptions({ Memory: Table }, {
+      resolveAuth: async () => { resolved++; return ADMIN.verdict as SubscriptionCaller; },
+      ambientContext: () => ({}),
+    });
+    // The stored will record, as Harper's will replay passes it (its user looked up by name).
+    const replayed = (data: unknown) => ({ id: "c1", topic: "Memory/m", data, qos: 1, retain: true, user: { username: "admin", role: { permission: { super_user: true } } }, authorize: true });
+    let thrown: any;
+    try { await (Table as any).put({ id: "m" }, { content: "x" }, replayed({ content: "x" })); } catch (err) { thrown = err; }
+    expect(thrown?.statusCode).toBe(401);
+    expect(thrown?.message).toBe("table publishes need an administrator credential");
+    await expect((Table as any).delete({ id: "m" }, replayed(undefined))).rejects.toMatchObject({ statusCode: 401 });
+    expect(resolved).toBe(0);
+    expect(calls).toEqual([]);
+    expect(retainedPublishContext([{}, { content: "x" }, replayed({ content: "x" })])).toBeDefined();
+  });
+
   it("retainedPublishContext is undefined for every other call, and reads nothing but own data properties", () => {
     let accessorReads = 0;
     let getContextCalls = 0;
