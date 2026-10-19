@@ -1,4 +1,5 @@
 import { expect, mock, spyOn, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { Command } from "commander";
 import { bindCli, register } from "../../src/commands/rem.ts";
 
@@ -7,7 +8,7 @@ import { bindCli, register } from "../../src/commands/rem.ts";
 const OPS_PORT = 1;
 const OPS_URL = `http://127.0.0.1:${OPS_PORT}/`;
 
-type Scenario = { name: string; ops: () => Promise<Response>; pending: string; error?: string };
+type Scenario = { name: string; ops: () => Promise<Response>; pending: string; error?: string; sentinel?: string };
 
 const scenarios: Scenario[] = [
   { name: "count", ops: async () => new Response(JSON.stringify([{ id: "c1" }, { id: "c2" }])), pending: "2" },
@@ -23,6 +24,17 @@ const scenarios: Scenario[] = [
     ops: async () => new Response(JSON.stringify({ error: "fixture" })),
     pending: "unknown (ops API returned an unexpected response shape)",
     error: "pending-count: ops API returned an unexpected response shape",
+  },
+  {
+    name: "invalid JSON",
+    ops: async () => {
+      const response = new Response("sentinel2683");
+      response.json = async () => JSON.parse(await response.text());
+      return response;
+    },
+    pending: "unknown (ops API returned invalid JSON)",
+    error: "pending-count: ops API returned invalid JSON",
+    sentinel: "sentinel2683",
   },
   {
     name: "rejected",
@@ -62,6 +74,7 @@ test("flair rem nightly run-once prints a failed pending-candidate count as unkn
     DEFAULT_PORT: 1, pkgVersion: "fixture",
   });
   try {
+    const { REM_NIGHTLY_LOG } = await import("../../src/rem/runner.ts");
     for (scenario of scenarios) {
       exit.mockClear();
       output.length = 0;
@@ -70,6 +83,12 @@ test("flair rem nightly run-once prints a failed pending-candidate count as unkn
       register(program);
       await program.parseAsync(["rem", "nightly", "run-once", "--agent", "fixture", "--dry-run"], { from: "user" });
       const text = output.join("\n");
+      if (scenario.sentinel) {
+        const auditLine = readFileSync(REM_NIGHTLY_LOG, "utf8").trimEnd().split("\n").at(-1)!;
+        expect(text, scenario.name).not.toContain(scenario.sentinel);
+        expect(auditLine, scenario.name).not.toContain(scenario.sentinel);
+        expect(JSON.parse(auditLine).errors, scenario.name).toEqual([scenario.error]);
+      }
       expect(opsTargets, scenario.name).toEqual([OPS_URL]);
       expect(text, scenario.name).toContain(`\nPending:    ${scenario.pending}\n`);
       if (scenario.error) {

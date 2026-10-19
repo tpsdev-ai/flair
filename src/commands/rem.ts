@@ -112,7 +112,12 @@ export function buildOpsSearch(
       body: JSON.stringify({ operation: "search_by_conditions", schema: "flair", table, operator: "and", conditions, get_attributes: getAttributes }),
     });
     if (!res.ok) throw new Error(`ops API failed (${res.status})`);
-    const raw = await res.json() as unknown;
+    let raw: unknown;
+    try {
+      raw = await res.json();
+    } catch {
+      throw new Error("ops API returned invalid JSON");
+    }
     if (Array.isArray(raw)) return raw;
     const results = (raw as { results?: unknown } | null)?.results;
     // flair#2680: an unrecognised body is an error, not zero rows.
