@@ -443,6 +443,42 @@ describe("writeBackCommittedRow — incremental update plans", () => {
   });
 });
 
+describe("writeBackCommittedRow — verifyAlso and pauseAfterStage (flair#2478)", () => {
+  test("a committed row that fails verifyAlso is unconfirmed: an idempotent plan retries, then refuses unconfirmed", async () => {
+    const { table, store, commits } = stagedTable([{ id: "m1", content: "a" }]);
+    // A text change lands with every commit, after the confirmation.
+    table.setAfterCommit(() => store.set("m1", { ...store.get("m1")!, content: "b" }));
+    let unconfirmed = 0;
+    const pending = writeBackCommittedRow(table, "m1", () => ({ idempotent: true, update: { vector: [1] } }), {
+      label: "verify-also", onUnconfirmed: () => { unconfirmed++; }, verifyAlso: (row) => row?.content === "a",
+    });
+    await expect(pending).rejects.toMatchObject({ outcome: "unconfirmed" });
+    expect(unconfirmed).toBe(WRITE_BACK_ATTEMPTS);
+    expect(commits).toHaveLength(WRITE_BACK_ATTEMPTS);
+  });
+
+  test("a committed row that passes verifyAlso is applied once", async () => {
+    const { table, commits } = stagedTable([{ id: "m1", content: "a" }]);
+    const outcome = await writeBackCommittedRow(table, "m1", () => ({ idempotent: true, update: { vector: [1] } }), {
+      label: "verify-also-ok", verifyAlso: (row) => row?.content === "a",
+    });
+    expect(outcome).toEqual({ idempotent: true, update: { vector: [1] } });
+    expect(commits).toHaveLength(1);
+  });
+
+  test("pauseAfterStage runs after the write is staged and before the confirmation", async () => {
+    const { table, writes } = stagedTable([{ id: "m1", content: "a" }]);
+    const order: string[] = [];
+    await writeBackCommittedRow(table, "m1", () => ({ idempotent: true, update: { vector: [1] } }), {
+      label: "after-stage",
+      pausePoint: () => { order.push(`pausePoint:${writes.length}`); return undefined; },
+      pauseAfterStage: () => { order.push(`pauseAfterStage:${writes.length}`); return undefined; },
+      confirmPoint: () => { order.push("confirmPoint"); return undefined; },
+    });
+    expect(order).toEqual(["pausePoint:0", "pauseAfterStage:1", "confirmPoint"]);
+  });
+});
+
 describe("writeBackCommittedRow — failures are never swallowed", () => {
   test("a read failure propagates (unknown is not a pass)", async () => {
     const table = {

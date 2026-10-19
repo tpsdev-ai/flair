@@ -38,7 +38,7 @@
  * Home-isolated ephemeral Harper; every URL is asserted to be this test's own.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HARPER_STOP_BUDGET_MS, startHarper, stopHarper } from "../helpers/harper-lifecycle";
@@ -104,13 +104,7 @@ function runs(): { processed: number; touchedIds: string[] }[] {
 }
 const touched = (id: string) => runs().filter((run) => run.touchedIds.includes(id)).length;
 
-/** Harper's captured output and its log files, for the migration's own log lines. */
-function serverLog(): string {
-  let text = h.harper.getLog?.() ?? "";
-  const dir = join(h.harper.installDir, "log");
-  if (existsSync(dir)) for (const name of readdirSync(dir)) text += readFileSync(join(dir, name), "utf8");
-  return text;
-}
+const serverLog = () => h.serverLog();
 
 async function expectBoundTo(row: any, text: string, other?: string): Promise<void> {
   expect(row?.embeddingModel).toBe(CURRENT_MODEL_ID);

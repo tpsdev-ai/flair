@@ -1,9 +1,10 @@
 import { WRITE_BACK_ATTEMPTS, WriteBackConflictError, writeBackCommittedRow } from "./write-back.js";
 import { txnPausePoint } from "./txn-pause-point.js";
+import { withMemoryWriteLockOnce } from "./memory-write-lock.js";
 import { server, databases } from "harper";
 import { getEmbedding, getModelId } from "./embeddings-provider.js";
 import { noteWriteStamp } from "./embedding-space-guard.js";
-import { hashEmbeddedText } from "./memory-embed-hash.js";
+import { embeddedHashMatches, hashEmbeddedText } from "./memory-embed-hash.js";
 import { MEMORY_EMBEDDING_INPUT_FIELDS, skillEmbedText } from "./skill-write.js";
 import { agentIsAdmin, isPrincipalDeactivated, FLAIR_AGENT_USERNAME, readCredentialedPrincipal, AGENT_LOOKUP_FAILED } from "./agent-auth.js";
 import { WINDOW_MS, importEd25519Key, b64ToArrayBuffer, parseTpsEd25519Header } from "./ed25519-auth.js";
@@ -198,46 +199,93 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
     // was computed in, and the embedding-space guard is notified after the write
     // commits with that stamp and the row it replaced, as for any other notified
     // vector write.
+    //
+    // flair#2478 slice 3: the write runs under the id's per-id Memory write lock
+    // shared with the owner verbs (resources/memory-write-lock.ts), taken once,
+    // after the vector is computed: no provider call runs while the id is locked.
+    // A held id, an id with an unresolved write outcome, or a store with no lock
+    // is skipped and logged, and nothing is written. Holding the lock, the helper's
+    // first read is the committed row: a row whose text changed, or that has a
+    // vector of more than 100 entries, is not written (a changed text is re-read
+    // and re-embedded after the lock is released). The update commits, and the
+    // committed row is read back (identity, the written fields, and the text the
+    // vector was computed for), before the lock is released. A background write
+    // whose read-back cannot confirm it is logged; it does not mark the id
+    // outcome-unknown.
+    //
+    // A row holding a vector of more than 100 entries is already embedded,
+    // except one holding the vector an earlier attempt of this backfill
+    // committed for text that has since changed: its stored text hash is the
+    // one that attempt staged and no longer matches the row's text. That row is
+    // re-read and re-embedded, so the backfill does not end on a vector for text
+    // the row no longer holds.
+    let stagedHash: string | null | undefined;
+    let ownStaleHash: string | null | undefined;
+    const alreadyEmbedded = (row: any): boolean => row.embedding?.length > 100 &&
+      !(ownStaleHash !== undefined && row.embeddedContentHash === ownStaleHash && !embeddedHashMatches(row));
     for (let attempt = 1; attempt <= WRITE_BACK_ATTEMPTS; attempt++) {
       const record = await table.get(memoryId, {});
       const text = record ? skillEmbedText(record) : undefined;
       if (typeof text !== "string" || text.length === 0) return;
-      if (record.embedding?.length > 100) return;
+      if (alreadyEmbedded(record)) return;
       const embedding = await getEmbedding(text, "document");
       if (!Array.isArray(embedding) || embedding.length === 0) return;
       const model = getModelId();
+      // Test-only: inert unless the fault-injection opt-in is armed. The vector
+      // is computed and the id's lock is not yet taken.
+      const entry = txnPausePoint("backfill-embedding-entry");
+      if (entry) await entry;
       // The vector fields of the committed row the update replaces, for the
       // guard notification.
       let replaced: { embedding?: unknown; embeddingModel?: unknown } | null = null;
       try {
-        const outcome = await writeBackCommittedRow(
-          table,
-          memoryId,
-          (row: any) => {
-            const rowText = row ? skillEmbedText(row) : undefined;
-            if (typeof rowText !== "string" || rowText.length === 0) return { skip: true };
-            if (row.embedding?.length > 100) return { skip: true };
-            replaced = { embedding: row.embedding, embeddingModel: row.embeddingModel };
-            // Only `embedding`, its model stamp and its text hash: an incremental
-            // update, never a full-row put of the row read above (flair#2470,
-            // flair#2465). The newly computed hash is of `text`, the text this
-            // vector was computed from (null for an empty owner).
-            return { idempotent: true, update: { embedding, embeddingModel: model, embeddedContentHash: hashEmbeddedText(row.agentId, text) ?? null } };
-          },
-          {
-            label: "backfillEmbedding",
-            onUnconfirmed: () => { unconfirmed = true; },
-            expectedRow: record,
-            // Compare the text-selecting fields before staging, after the plan's skip checks.
-            matchFields: [...MEMORY_EMBEDDING_INPUT_FIELDS, "tags"],
-            pausePre: () => txnPausePoint("backfill-embedding-pre"),
-            pausePoint: () => txnPausePoint("backfill-embedding"),
-            pauseBeforeCommit: () => txnPausePoint("backfill-embedding-commit"),
-          },
-        );
+        const locked = await withMemoryWriteLockOnce(table.primaryStore, [memoryId], async () => {
+          const written = await writeBackCommittedRow(
+            table,
+            memoryId,
+            (row: any) => {
+              const rowText = row ? skillEmbedText(row) : undefined;
+              if (typeof rowText !== "string" || rowText.length === 0) return { skip: true };
+              if (alreadyEmbedded(row)) return { skip: true };
+              replaced = { embedding: row.embedding, embeddingModel: row.embeddingModel };
+              // Only `embedding`, its model stamp and its text hash: an incremental
+              // update, never a full-row put of the row read above (flair#2470,
+              // flair#2465). The newly computed hash is of `text`, the text this
+              // vector was computed from (null for an empty owner).
+              stagedHash = hashEmbeddedText(row.agentId, text) ?? null;
+              return { idempotent: true, update: { embedding, embeddingModel: model, embeddedContentHash: stagedHash } };
+            },
+            {
+              label: "backfillEmbedding",
+              onUnconfirmed: () => { unconfirmed = true; ownStaleHash = stagedHash; },
+              expectedRow: record,
+              // Compare the text-selecting fields before staging, after the plan's skip checks.
+              matchFields: [...MEMORY_EMBEDDING_INPUT_FIELDS, "tags"],
+              // After the commit, the committed row must still carry the text this
+              // vector was computed from.
+              verifyAlso: (committed: any) => skillEmbedText(committed) === text,
+              pausePre: () => txnPausePoint("backfill-embedding-pre"),
+              pausePoint: () => txnPausePoint("backfill-embedding"),
+              pauseAfterStage: () => txnPausePoint("backfill-embedding-staged"),
+              pauseBeforeCommit: () => txnPausePoint("backfill-embedding-commit"),
+            },
+          );
+          // Test-only: the update has committed and been read back; the lock is
+          // still held.
+          const committed = txnPausePoint("backfill-embedding-committed");
+          if (committed) await committed;
+          return written;
+        }, { phase: "auto-embed" });
+        if (locked.kind !== "done") {
+          console.warn(`[auto-embed] ${memoryId}: skipped; the per-id write lock answered ${locked.kind}, so nothing was written`);
+          return;
+        }
+        const outcome = locked.value;
         if ("update" in outcome) {
           noteWriteStamp(outcome.update.embeddingModel as string | null | undefined, replaced);
           console.log(`[auto-embed] ${memoryId}: ${(outcome.update.embedding as number[]).length}d`);
+        } else if (unconfirmed) {
+          console.warn(`[auto-embed] ${memoryId}: an earlier attempt's vector was not confirmed on the committed row, and the row is now skipped; outcome: unconfirmed`, { outcome: "unconfirmed" });
         }
         return;
       } catch (err) {

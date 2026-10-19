@@ -79,7 +79,7 @@ add("Memory", ["writer:patchRecord#1"],
 add("usage-recording", ["alias-source:(databases as any).flair.Memory#1", "writer:writeBackCommittedRow#1"],
   "BOOKKEEPING: usageCount + 1 and commit marker on a row the caller can read, through the shared write-back helper (flair#2441); the rest of the row is the stored row.");
 add("auth-middleware", ["writer:writeBackCommittedRow#1"],
-  "BOOKKEEPING: the embedding backfill for the id of a Memory write that already succeeded (and so passed the decision), through the shared helper (flair#2354).");
+  "BOOKKEEPING: the embedding backfill for the id of a Memory write that already succeeded (and so passed the decision), through the shared helper (flair#2354), under the id's per-id Memory write lock (flair#2478).");
 add("MemoryReflect", ["writer:patchRecordSilent#1"],
   "BOOKKEEPING: lastReflected on the rows a reflection run read.");
 

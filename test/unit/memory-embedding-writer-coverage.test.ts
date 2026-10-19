@@ -138,7 +138,7 @@ add("hit-tracking", [
   "writer:table.delete#1",
 ], "OTHER_TABLE", "MemoryHitStat ledger and in-memory maps — not a Memory writer.");
 add("auth-middleware", ["writer:writeBackCommittedRow#1"], "LOCAL",
-  "Embedding backfill: an incremental update of embedding, embeddingModel and embeddedContentHash for a locally computed vector and getModelId() (flair#2470, flair#2573); noteWriteStamp after the commit.");
+  "Embedding backfill: an incremental update of embedding, embeddingModel and embeddedContentHash for a locally computed vector and getModelId() (flair#2470, flair#2573), under the id's per-id Memory write lock taken once after the vector is computed (flair#2478); noteWriteStamp after the commit.");
 
 // ── OTHER_TABLE: conservative sink-enumeration false-positives ──
 add("migrations/graph-heal", ["writer:table.put#1"], "OTHER_TABLE", "Graph-heal OrgEvent ledger.");

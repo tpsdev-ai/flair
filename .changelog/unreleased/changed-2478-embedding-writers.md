@@ -12,4 +12,11 @@
   row is the one it embedded, and reads the committed row back before the
   release. A re-embed request the migration delegates over HTTP that is refused
   `503` (`memory_busy`, `write_outcome_unknown`, `memory_provider_timeout`) is
-  logged and the row stays pending (#2478).
+  logged and the row stays pending.
+
+  The embedding backfill that follows a successful Memory write also computes
+  its vector first and takes the id's lock once; a held id or an id with an
+  unresolved write outcome is skipped and logged. Holding the lock, it writes
+  only if the committed row's text is the text it embedded, and it reads the
+  committed row back, text included, before the release. If the vector it
+  committed no longer matches the row's text, it re-embeds the current text (#2478).

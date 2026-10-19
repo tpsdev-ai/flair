@@ -112,7 +112,7 @@ add("hit-tracking", [
   "writer:table.delete#1",
 ], "MemoryHitStat ledger and in-memory maps — not a Memory/skill writer.");
 add("auth-middleware", ["writer:writeBackCommittedRow#1"],
-  "Auth bookkeeping (embedding backfill) — non-skill, through the shared write-back helper (flair#2354).");
+  "Auth bookkeeping (embedding backfill) — non-skill, through the shared write-back helper (flair#2354), under the id's per-id Memory write lock (flair#2478).");
 add("usage-recording", ["alias-source:(databases as any).flair.Memory#1", "writer:writeBackCommittedRow#1"],
   "usageCount increment and commit marker through the shared write-back helper (flair#2441) — non-skill.");
 add("promotion-stamp", ["writer:writeBackCommittedRow#1"],

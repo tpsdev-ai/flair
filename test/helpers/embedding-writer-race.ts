@@ -16,7 +16,7 @@
  */
 import { expect } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import nacl from "tweetnacl";
@@ -175,6 +175,32 @@ export class RaceHarness {
   /** Release without asserting (cleanup in a `finally`). */
   letGo(point: string): void {
     writeFileSync(join(this.pauseDir, `go.${point}`), "");
+  }
+
+  /** Harper's captured output and its log files: the server's own log lines. */
+  serverLog(): string {
+    let text = this.harper.getLog?.() ?? "";
+    const dir = join(this.harper.installDir, "log");
+    if (existsSync(dir)) for (const name of readdirSync(dir)) text += readFileSync(join(dir, name), "utf8");
+    return text;
+  }
+  /** Poll until the server log contains `line`; returns whether it did. */
+  async waitForLog(line: string, timeoutMs = 30_000): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (this.serverLog().includes(line)) return true;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return this.serverLog().includes(line);
+  }
+  /** Poll until a server log line matches `pattern`; returns whether one did. */
+  async waitForLogMatch(pattern: RegExp, timeoutMs = 30_000): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (pattern.test(this.serverLog())) return true;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return pattern.test(this.serverLog());
   }
 
   // ── the Memory write trace ──
