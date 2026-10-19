@@ -10,9 +10,9 @@
  * test/helpers/fetch-request-log-preload.ts, which records each request the
  * CLI sends, so a refusal can be shown to have sent nothing at all.
  *
- * The resolver tests are pure. The remote pair check and the REST transport's
+ * The resolver tests are pure. The non-loopback pair check and the REST transport's
  * redirect refusal run against real local HTTP servers with the real fetch:
- * the servers stand in for a remote target's two endpoints and for a redirect
+ * the servers stand in for a non-loopback target's two endpoints and for a redirect
  * destination, and record every request they receive.
  */
 import { afterEach, describe, expect, test } from "bun:test";
@@ -465,7 +465,7 @@ describe("flair#2708 — resolveRestoreTarget", () => {
   });
 });
 
-// ─── establishRestorePair: a remote target, against real local servers ──────
+// ─── establishRestorePair: a non-loopback target, against real local servers ─
 
 /** How one endpoint answers its `flair.Instance` read. */
 type IdentityAnswer =
@@ -499,7 +499,7 @@ function answer(a: IdentityAnswer, redirectTo: string): Response {
 }
 
 /**
- * Two real local HTTP servers acting as a remote target's HTTP endpoint and
+ * Two real local HTTP servers acting as a non-loopback target's HTTP endpoint and
  * operations endpoint, plus a redirect destination that answers the identity
  * `destinationId` reports. The operations endpoint always reports, through
  * `get_configuration`, exactly the two ports the target names, so matching
@@ -581,7 +581,7 @@ function expectNoRestoreTraffic(endpoints: RemoteEndpoints): void {
   expect(endpoints.httpCalls.every((c) => c.method === "GET" && c.path === "/Instance/")).toBe(true);
 }
 
-describe("flair#2708 — establishRestorePair on a remote target (real local servers)", () => {
+describe("flair#2708 — establishRestorePair for a non-loopback target (real local servers)", () => {
   test("passes when both endpoints report the same single instance identity", async () => {
     const { error, endpoints } = await remoteCheck({ rows: [instanceRow("instance-1")] }, { rows: [instanceRow("instance-1")] });
     expect(error).toBeNull();

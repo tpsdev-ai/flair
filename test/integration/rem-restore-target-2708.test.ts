@@ -18,8 +18,8 @@
  * FLAIR_OPS_PORT names A's operations port. Restore must refuse before any
  * listing, delete or write, and both instances keep every row.
  *
- * The third test runs the remote branch of the preflight pair check
- * (`establishRestorePair` with a target marked remote) against the two real
+ * The third test runs the non-loopback branch of the preflight pair check
+ * (`establishRestorePair` with a target marked non-loopback) against the two real
  * Harpers: it passes only when the HTTP endpoint and the operations endpoint
  * each report exactly one flair.Instance row with the same id, and refuses
  * with no row on a side or with A's HTTP endpoint and B's operations endpoint
@@ -221,7 +221,7 @@ describe("flair#2708 — rem restore on a real instance", () => {
     expect(await snapshotRows()).toEqual(before);
   }, 300_000);
 
-  test("the remote pair check passes only when both endpoints of real instances report the same single identity", async () => {
+  test("the non-loopback pair check passes only when both endpoints of real instances report the same single identity", async () => {
     if (!b) {
       b = await startHarper();
       assertOwnInstance(b);
