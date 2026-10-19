@@ -2,10 +2,11 @@
 //
 // An Agent PUT is an administrator operation. It reads the stored row, then
 // re-reads it inside its own write transaction and writes a full replacement
-// that carries the re-read row's createdAt, publicKey and server-maintained
-// federation fields; the other fields come from its body. A deletion or a key
-// rotation that commits after an administrator's PUT's first read and BEFORE
-// that re-read stands after the PUT:
+// that carries the re-read row's createdAt, publicKey, originatorInstanceId and
+// receiver federation fields, with updatedAt set by the handler, role and admin
+// reconciled and the id bound by the URL; every other field comes from its
+// body. A deletion or a key rotation that commits after an administrator's
+// PUT's first read and BEFORE that re-read stands after the PUT:
 //   (a) a deleted agent stays deleted (the PUT never re-creates it), and the
 //       PUT is refused with 404 `agent_put_requires_existing`;
 //   (b) the stored publicKey is the ROTATED key, never the one the first read

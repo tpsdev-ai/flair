@@ -89,9 +89,11 @@ class PrincipalWriteBackAborted extends Error {
  */
 export class Agent extends (databases as any).flair.Agent {
   // Self-authorize now that the global gate is non-rejecting. Verified agents read
-  // the principal table for discovery; an agent updates only its OWN record (put
-  // handler enforces ownership). Creating/deleting principals is admin-only
-  // (flair_agent grant: insert=false, delete=false). Anonymous denied throughout.
+  // the principal table for discovery. An agent that is not an administrator
+  // updates only its OWN record, with PATCH (the patch handler enforces
+  // ownership); an Agent PUT is an administrator operation (put() refuses any
+  // other caller). Creating/deleting principals is admin-only (flair_agent
+  // grant: insert=false, delete=false). Anonymous denied throughout.
   allowRead()   { return allowVerified((this as any).getContext?.()); }
   allowCreate() { return allowAdmin((this as any).getContext?.()); }
   allowUpdate() { return allowVerified((this as any).getContext?.()); }
@@ -236,12 +238,18 @@ export class Agent extends (databases as any).flair.Agent {
     if (idDenial) return idDenial;
 
     // An Agent PUT is an administrator operation (flair#2696). It is a full
-    // replacement: apart from the fields carried below, it stores the fields
-    // its body names, so a field the body omits (`status` and `role` included)
-    // is not kept. An agent that is not an administrator updates its own record
-    // with PATCH, which merges the body into the stored row. Only an
-    // administrator or a trusted internal call goes past this point; anonymous
-    // and unrecognized verdicts are refused by authorizePrincipalWrite (401).
+    // replacement. The server sets these fields, whatever the body says: the
+    // id is the URL's target; createdAt, publicKey, originatorInstanceId and
+    // the receiver federation fields (_originatorInstanceId, _syncedFrom,
+    // _syncedAt) are carried from the stored row; updatedAt is set here; and
+    // role and admin are reconciled (an admin role or `admin: true` sets both,
+    // otherwise admin is false). Every other field comes from the body, so an
+    // ordinary field the body omits (`status` and `role` included) is not kept.
+    // An agent that is not an administrator updates its own record with PATCH,
+    // which merges the body into the stored row. Only an administrator or a
+    // trusted internal call goes past this point; anonymous and unrecognized
+    // verdicts are refused (by Harper's allowUpdate()/allowCreate() checks or
+    // by authorizePrincipalWrite).
     if (admitPrincipalWrite(await resolveAgentAuth((this as any).getContext?.())) === "non-admin") {
       return new Response(JSON.stringify({
         error: "agent_put_admin_only",

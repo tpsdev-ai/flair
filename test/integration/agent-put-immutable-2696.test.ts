@@ -4,13 +4,17 @@
 // is not an administrator is refused 403 and writes nothing: with
 // `agent_put_admin_only` when the record exists, and by Harper's create check
 // (the resource's allowCreate(), administrators only) when it does not. An
-// anonymous PUT is refused. An administrator's PUT updates an EXISTING row: the
-// STORED createdAt and publicKey are carried into the replacement, ignoring any
-// value the body sends, and the other fields come from the body, so a field
-// the body omits (`status` included) is not kept. An administrator's PUT whose target id has
-// no stored row is refused with 404 `agent_put_requires_existing` (its message
-// names POST /AgentSeed, a creation path; POST /Agent/ also creates a row) and
-// writes nothing. PATCH keeps its merge behaviour. A deletion or a key rotation
+// anonymous PUT is refused. An administrator's PUT (a signed admin agent or
+// Admin Basic) updates an EXISTING row as a full replacement. The server sets
+// these fields whatever the body says: the id is the URL's; the STORED
+// createdAt, publicKey, originatorInstanceId and receiver federation fields
+// (_originatorInstanceId, _syncedFrom, _syncedAt) are carried, whether the body
+// supplies other values or omits them; updatedAt is set by the handler; role
+// and admin are reconciled. Every other field comes from the body, so an
+// ordinary field the body omits (`status` and `role` included) is not kept. An
+// administrator's PUT whose target id has no stored row is refused with 404
+// `agent_put_requires_existing` (its message names POST /AgentSeed, a creation
+// path; POST /Agent/ also creates a row) and writes nothing. PATCH keeps its merge behaviour. A deletion or a key rotation
 // committed after an administrator's PUT's first read and before its re-read
 // in the write transaction is covered by agent-put-race-2696.test.ts; the
 // non-admin PUT refusals on more row shapes and the PATCH admin-status guard,
@@ -82,6 +86,10 @@ describe("flair#2696 — an Agent PUT updates an existing row and carries its im
     return Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
   }
 
+  function adminBasic(): string {
+    return "Basic " + btoa(`${harper.admin.username}:${harper.admin.password}`);
+  }
+
   async function put(path: string, body: unknown, caller: TestAgent | null): Promise<{ status: number; text: string }> {
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     if (caller) headers.Authorization = ed25519Header(caller, "PUT", path);
@@ -148,6 +156,61 @@ describe("flair#2696 — an Agent PUT updates an existing row and carries its im
     expect(after?.runtime, "the PUT's runtime was not stored").toBe("put-runtime");
   }, 30_000);
 
+  test("an Admin Basic PUT succeeds, stores the changed field, and keeps the stored originatorInstanceId and federation fields whether the body supplies or omits them", async () => {
+    const id = `put2696-basic-${randomUUID().slice(0, 8)}`;
+    const STORED_FEDERATION = {
+      originatorInstanceId: "inst-home-2696",
+      _originatorInstanceId: "peer-origin-2696",
+      _syncedFrom: "peer-origin-2696",
+      _syncedAt: "2026-01-03T04:05:06.000Z",
+    };
+    const seedRes = await fetch(harper.opsURL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: adminBasic() },
+      body: JSON.stringify({ operation: "insert", database: "flair", table: "Agent", records: [{
+        id, name: id, role: "agent", admin: false, status: "active", displayName: "stored-name",
+        publicKey: "stored-basic-key", createdAt: STORED_CREATED_AT, ...STORED_FEDERATION,
+      }] }),
+    });
+    expect(seedRes.status, `seed returned ${seedRes.status}: ${await seedRes.text()}`).toBe(200);
+    const seeded = await rowIn(id);
+    for (const [field, value] of Object.entries(STORED_FEDERATION)) expect(seeded?.[field], `seeded ${field}`).toBe(value);
+
+    const path = `/Agent/${id}`;
+    const basicPut = async (body: Record<string, unknown>) => {
+      const res = await fetch(`${harper.httpURL}${path}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", Authorization: adminBasic() },
+        body: JSON.stringify(body),
+      });
+      return { status: res.status, text: await res.text() };
+    };
+    const base = { id, name: id, role: "agent", status: "active" };
+
+    // The body supplies different values for every carried field.
+    const supplied = await basicPut({
+      ...base, displayName: "basic-supplied",
+      originatorInstanceId: "inst-forged", _originatorInstanceId: "forged", _syncedFrom: "forged", _syncedAt: "1999-01-01T00:00:00.000Z",
+    });
+    expect(supplied.status, `Admin Basic PUT (supplied) returned ${supplied.status}: ${supplied.text}`).toBeLessThan(300);
+    const afterSupplied = await rowIn(id);
+    expect(afterSupplied?.displayName, "the PUT's displayName was not stored").toBe("basic-supplied");
+    for (const [field, value] of Object.entries(STORED_FEDERATION)) {
+      expect(afterSupplied?.[field], `a PUT that supplied ${field} replaced it`).toBe(value);
+    }
+    expect(afterSupplied?.publicKey).toBe("stored-basic-key");
+    expect(afterSupplied?.createdAt).toBe(STORED_CREATED_AT);
+
+    // The body omits every carried field.
+    const omitted = await basicPut({ ...base, displayName: "basic-omitted" });
+    expect(omitted.status, `Admin Basic PUT (omitted) returned ${omitted.status}: ${omitted.text}`).toBeLessThan(300);
+    const afterOmitted = await rowIn(id);
+    expect(afterOmitted?.displayName, "the PUT's displayName was not stored").toBe("basic-omitted");
+    for (const [field, value] of Object.entries(STORED_FEDERATION)) {
+      expect(afterOmitted?.[field], `a PUT that omitted ${field} dropped it`).toBe(value);
+    }
+  }, 30_000);
+
   test("an administrator's PUT to an id with no stored row is refused 404 and writes no row", async () => {
     const id = `put2696-new-${randomUUID()}`;
     const path = `/Agent/${id}`;
@@ -175,7 +238,7 @@ describe("flair#2696 — an Agent PUT updates an existing row and carries its im
     expect(await rowIn(id), "a refused PUT wrote a row").toBeNull();
   }, 30_000);
 
-  test("an administrator's PUT stores the fields its body names: a stored status it omits is not kept", async () => {
+  test("an administrator's PUT is a full replacement: a stored status and role its body omits are not kept", async () => {
     const target = mkAgent(`put2696-status-${randomUUID().slice(0, 8)}`);
     const seedRes = await fetch(harper.opsURL, {
       method: "POST",
