@@ -990,13 +990,15 @@ program
   .action(async (opts) => {
     // ── Fabric-upgrade branch ───────────────────────────────────────────────
     if (opts.target) {
-      // Every URL the Fabric upgrade uses is checked before anything is
-      // printed: a user name, password, query or fragment is refused.
+      // Every URL the Fabric upgrade takes is checked before anything is
+      // printed: a user name, password, query or fragment is refused. An
+      // operations API URL derived from a target that passes is scheme, host
+      // and port only (fabricUpgrade() and deploy() check it again).
       const refusal = deployUrlRefusal([
         [opts.target, "deploy target URL (--target)"],
         [opts.opsTarget ?? process.env.FLAIR_OPS_TARGET, "operations API URL (--ops-target / FLAIR_OPS_TARGET)"],
         [opts.mqttCheckUrl, "URL the MQTT check reaches (--mqtt-check-url)"],
-      ]) ?? deployUrlRefusal([[cli.resolveEffectiveOpsUrl({ target: opts.target, opsTarget: opts.opsTarget }), "operations API URL"]]);
+      ]);
       if (refusal) {
         console.error(`\x1b[31m${refusal}\x1b[0m`);
         process.exit(1);

@@ -100,8 +100,10 @@ program
     const yellow = (s: string) => `\x1b[33m${s}\x1b[0m`;
     const dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
 
-    // Every URL the deploy uses is checked before anything is printed: a user
-    // name, password, query or fragment is refused (src/mqtt-off-deploy.ts).
+    // Every URL the deploy takes is checked before anything is printed: a
+    // user name, password, query or fragment is refused (src/mqtt-off-deploy.ts).
+    // An operations API URL derived from a target that passes is scheme, host
+    // and port only (deploy() checks it again).
     {
       const fabricOrg = opts.fabricOrg ?? process.env.FABRIC_ORG;
       const fabricCluster = opts.fabricCluster ?? process.env.FABRIC_CLUSTER;
@@ -110,9 +112,7 @@ program
         [earlyTarget, "deploy target URL (--target)"],
         [opts.opsTarget ?? process.env.FLAIR_OPS_TARGET, "operations API URL (--ops-target / FLAIR_OPS_TARGET)"],
         [opts.mqttCheckUrl, "URL the MQTT check reaches (--mqtt-check-url)"],
-      ]) ?? (earlyTarget
-        ? deployUrlRefusal([[cli.resolveEffectiveOpsUrl({ target: earlyTarget, opsTarget: opts.opsTarget }), "operations API URL"]])
-        : null);
+      ]);
       if (refusal) {
         console.error(red(refusal));
         process.exit(1);
