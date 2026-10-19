@@ -5,9 +5,10 @@
  * no authorization code is written; every string is looked up, the empty string
  * included, as the consent page (GET) looks it up.
  *
- * The real-Harper behaviour of the same requests is covered by
- * test/integration/oauth-consent-post-client.test.ts; this file records the
- * lookups themselves, which an HTTP test cannot see.
+ * The real-Harper behaviour of the overlapping requests (an absent, `null` and
+ * array client_id) is covered by test/integration/oauth-consent-post-client.test.ts;
+ * the number, object and boolean values are covered only here. This file
+ * records the lookups themselves, which an HTTP test cannot see.
  *
  * Isolated lane: this file stubs `harper` for `databases`, so it must run
  * one-process-per-file — the shared `test/unit` process would let its stub
