@@ -10,6 +10,7 @@ import { Command } from "commander";
 import { detectWiredFlairMcp } from "../doctor-client.js";
 import { UPGRADE_SNAPSHOT_ROOT, fetchDeclaredHarperVersion, readInstalledHarperVersion } from "../engine-version.js";
 import { fabricUpgrade, type FabricUpgradeOptions } from "../fabric-upgrade.js";
+import { deployUrlRefusal, safeUrl } from "../mqtt-off-deploy.js";
 import { renderFleetSweepTable, sweepFleet } from "../fleet-verify.js";
 import { resolveNpmGlobalPrefix } from "../install/global-bin-path.js";
 import { defaultKeysDir } from "../lib/auth-resolve.js";
@@ -248,6 +249,7 @@ export function buildFabricUpgradeOptions(
     restart: opts.restart !== false,
     replicated: opts.replicated !== false,
     keepMqttConfig: opts.keepMqttConfig ?? false,
+    requireAllNodesVerified: opts.requireAllNodesVerified ?? false,
     opsUrl: resolveOpsUrl({ target: opts.target, opsTarget: opts.opsTarget }),
     mqttCheckUrl: opts.mqttCheckUrl,
     // flair#878 — previously unreachable from this command; see
@@ -296,7 +298,7 @@ async function runFabricUpgrade(opts: any): Promise<void> {
 
   const upgradeOpts = buildFabricUpgradeOptions(opts, { fabricUser, fabricPassword }, cli.resolveEffectiveOpsUrl);
 
-  console.log(`${green("→")} Upgrading Fabric Flair at ${upgradeOpts.target}`);
+  console.log(`${green("→")} Upgrading Fabric Flair at ${safeUrl(upgradeOpts.target)}`);
   if (check) console.log(dim("  (--check: plan only, no deploy)"));
 
   try {
@@ -308,7 +310,7 @@ async function runFabricUpgrade(opts: any): Promise<void> {
       const rl = createInterface({ input: process.stdin, output: process.stdout });
       const answer: string = await new Promise((res) =>
         rl.question(
-          `Deploy a fresh ${green("@tpsdev-ai/flair")} to ${upgradeOpts.target}? [y/N] `,
+          `Deploy a fresh ${green("@tpsdev-ai/flair")} to ${safeUrl(upgradeOpts.target)}? [y/N] `,
           (a) => { rl.close(); res(a); },
         ),
       );
@@ -972,6 +974,7 @@ program
   .option("--no-replicated", "Disable cluster-wide replication for --target (default: replicated=true)")
   .option("--keep-mqtt-config", "For --target: leave the target's MQTT configuration as it is (default: set every MQTT listener off before deploying and check it after the deploy's restart)")
   .option("--mqtt-check-url <url>", "For --target: URL that serves the target's HTTP port, for the post-restart MQTT-over-WebSocket check (default: --target)")
+  .option("--require-all-nodes-verified", "For --target: fail when a cluster node other than the one the target URL reaches cannot be verified MQTT-off (default: report it NOT VERIFIED with the check to run)")
   .option("--ops-target <url>", "For --target: operations API URL for the MQTT-off configuration and check (env: FLAIR_OPS_TARGET; default: derived from --target)")
   .option("--yes", "Skip the confirmation prompt for --target")
   .option("--install-hooks", "Consent to installing missing SessionStart hooks (claude-code / Codex) during upgrade. The hook executes at every session start — upgrade will not write it unprompted. Interactive runs prompt; non-interactive runs state the gap and withhold ✅ unless this flag is passed.")
@@ -987,6 +990,17 @@ program
   .action(async (opts) => {
     // ── Fabric-upgrade branch ───────────────────────────────────────────────
     if (opts.target) {
+      // Every URL the Fabric upgrade uses is checked before anything is
+      // printed: a user name, password, query or fragment is refused.
+      const refusal = deployUrlRefusal([
+        [opts.target, "deploy target URL (--target)"],
+        [opts.opsTarget ?? process.env.FLAIR_OPS_TARGET, "operations API URL (--ops-target / FLAIR_OPS_TARGET)"],
+        [opts.mqttCheckUrl, "URL the MQTT check reaches (--mqtt-check-url)"],
+      ]) ?? deployUrlRefusal([[cli.resolveEffectiveOpsUrl({ target: opts.target, opsTarget: opts.opsTarget }), "operations API URL"]]);
+      if (refusal) {
+        console.error(`\x1b[31m${refusal}\x1b[0m`);
+        process.exit(1);
+      }
       if (!opts.check) console.log("OAuth redirect migration is local-only; --target requires target-side OAuth environment configuration.");
       await runFabricUpgrade(opts);
       return;

@@ -51,8 +51,11 @@ Or edit `~/.flair/config.yaml` and restart.
 Flair runs Harper with MQTT off: no TCP or TLS MQTT listener and no MQTT over
 WebSocket. Every local start re-asserts it, and `flair doctor` reports an
 instance whose configuration starts an MQTT listener. For a component deployed
-with `flair deploy` or `flair upgrade --target` — which set MQTT off and check
-it after their restart, failing when they cannot confirm it — see
+with `flair deploy` or `flair upgrade --target` — which set MQTT off, check it
+after their restart on the node the target URL reaches (failing when they
+cannot confirm it there), and report every other cluster node NOT VERIFIED
+with the check to run on it (a completed restart job is not proof of a peer's
+restart; `--require-all-nodes-verified` fails instead) — see
 [deploying-on-fabric.md](deploying-on-fabric.md#mqtt-is-off), including how an
 operator turns MQTT on deliberately; table subscriptions, publishes and
 retained publishes over MQTT then follow the same policy as SSE and WebSocket

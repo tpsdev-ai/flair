@@ -12,7 +12,8 @@
  */
 import { describe, expect, test } from "bun:test";
 import { MQTT_DISABLED_CONFIG, mqttListenersOn } from "../../src/lib/mqtt-config.ts";
-import { MQTT_LISTENERS_OFF_LINE, describeMqttListenerFinding, readInstanceConfiguration } from "../../src/lib/mqtt-listener-doctor.ts";
+import { MQTT_LISTENERS_OFF_LINE, describeMqttListenerFinding, mqttListenerSection, readInstanceConfiguration } from "../../src/lib/mqtt-listener-doctor.ts";
+import { rootConfigurationProblem } from "../../src/lib/mqtt-config.ts";
 
 /** Harper's shipped defaults (static/defaultConfig.yaml). */
 const HARPER_DEFAULTS = { network: { port: 1883, securePort: 8883, mtls: false }, webSocket: true, requireAuthentication: true };
@@ -75,23 +76,52 @@ describe("describeMqttListenerFinding", () => {
   });
 });
 
-describe("readInstanceConfiguration", () => {
+describe("readInstanceConfiguration and the doctor's MQTT listeners section", () => {
   const args = (fetchImpl: any) => ({ opsUrl: "http://127.0.0.1:1/", authHeader: "Basic x", fetchImpl, timeoutMs: 1000 });
+  /** The sections every root configuration carries (a real get_configuration answer has these and more). */
+  const ROOT = { http: { port: 9926 }, operationsApi: { network: { port: 9925 } }, rootPath: "/var/harper" };
 
-  test("returns the configuration object get_configuration answers with", async () => {
+  test("returns the root configuration get_configuration answers with", async () => {
     let sent: any;
-    const config = await readInstanceConfiguration(args(async (_url: string, init: any) => {
+    const read = await readInstanceConfiguration(args(async (_url: string, init: any) => {
       sent = JSON.parse(init.body);
-      return Response.json({ mqtt: HARPER_DEFAULTS });
+      return Response.json({ ...ROOT, mqtt: HARPER_DEFAULTS });
     }));
     expect(sent).toEqual({ operation: "get_configuration" });
-    expect(config).toEqual({ mqtt: HARPER_DEFAULTS });
+    expect(read).toEqual({ kind: "ok", config: { ...ROOT, mqtt: HARPER_DEFAULTS } });
   });
 
-  test("a failed read is null, never an empty configuration", async () => {
-    expect(await readInstanceConfiguration(args(async () => new Response("no", { status: 401 })))).toBeNull();
-    expect(await readInstanceConfiguration(args(async () => Response.json([1, 2])))).toBeNull();
-    expect(await readInstanceConfiguration(args(async () => new Response("not json", { status: 200 })))).toBeNull();
-    expect(await readInstanceConfiguration(args(async () => { throw new Error("ECONNREFUSED"); }))).toBeNull();
+  test("a failed read, or an answer that is not a recognizable root configuration, is NOT RUN — never a pass", async () => {
+    const cases: Array<[string, any]> = [
+      ["HTTP 401", async () => new Response("no", { status: 401 })],
+      ["an array", async () => Response.json([1, 2])],
+      ["not JSON", async () => new Response("not json", { status: 200 })],
+      ["a transport failure", async () => { throw new Error("ECONNREFUSED"); }],
+      ["{}", async () => Response.json({})],
+      ["an mqtt section alone", async () => Response.json({ mqtt: { webSocket: false, network: { port: null, securePort: null } } })],
+      ["an error object", async () => Response.json({ error: "something" })],
+    ];
+    for (const [what, fetchImpl] of cases) {
+      const read = await readInstanceConfiguration(args(fetchImpl));
+      expect([what, read.kind]).toEqual([what, "not-run"]);
+      const section = mqttListenerSection(read);
+      expect([what, section.status]).toEqual([what, "not-run"]);
+      expect(section.line).toContain("MQTT listeners: NOT RUN");
+    }
+    const empty = await readInstanceConfiguration(args(async () => Response.json({})));
+    expect(empty).toEqual({ kind: "not-run", reason: "the answer is not a recognizable root configuration (it has no http, operationsApi, rootPath)" });
+  });
+
+  test("the section the doctor prints: the all-off line for MQTT off, the listeners and fix for MQTT on", () => {
+    expect(mqttListenerSection({ kind: "ok", config: { ...ROOT, mqtt: MQTT_DISABLED_CONFIG } })).toEqual({ status: "ok", line: MQTT_LISTENERS_OFF_LINE });
+    const on = mqttListenerSection({ kind: "ok", config: { ...ROOT, mqtt: HARPER_DEFAULTS } });
+    expect(on.status).toBe("issue");
+    expect(on.fix).toContain("set_configuration");
+  });
+
+  test("rootConfigurationProblem names what a partial answer lacks", () => {
+    expect(rootConfigurationProblem(ROOT)).toBeNull();
+    expect(rootConfigurationProblem({ ...ROOT, rootPath: "" })).toBe("it has no rootPath");
+    expect(rootConfigurationProblem(null)).toBe("the answer is not an object");
   });
 });

@@ -21,7 +21,7 @@ import { AGENT_ID_RULE } from "../lib/agent-id-rule.js";
 import { agentHomeEndpoint, readAgentHomeRows, resolveTargetInstanceIdentity } from "../lib/agent-home.js";
 import { describeInstructionEventImpostors, readInstructionEventTables } from "../lib/instruction-event-doctor.js";
 import { describeLiveSkillTombstones, readSkillTombstoneTables } from "../lib/skill-tombstone-doctor.js";
-import { MQTT_LISTENERS_OFF_LINE, describeMqttListenerFinding, readInstanceConfiguration } from "../lib/mqtt-listener-doctor.js";
+import { mqttListenerSection, readInstanceConfiguration } from "../lib/mqtt-listener-doctor.js";
 import { readAgentRoster } from "../lib/agent-roster.js";
 import { flairConfigYamlCandidates, readPortFromYamlFile, resolveFlairConfigYaml } from "../lib/doctor-config-path.js";
 import { collectFederationEnv, describeFederationDriverFinding, federationPeersConfigured, loadYamlDoc } from "../lib/doctor-federation-driver.js";
@@ -2504,7 +2504,8 @@ program
       // Harper with MQTT off; the read is the instance's own configuration,
       // through the same verified ops endpoint and admin credential as the
       // sections above. Read-only: nothing is changed. A configuration read
-      // that fails is NOT RUN and counted.
+      // that fails, or an answer that is not a recognizable root
+      // configuration (`{}` included), is NOT RUN and counted.
       console.log(`\n  ${render.wrap(render.c.bold, "MQTT listeners")}`);
       if (rosterNotRun) {
         issues++;
@@ -2522,19 +2523,10 @@ program
           authHeader: `Basic ${Buffer.from(`${resolveAdminUser()}:${rosterAdminPass}`).toString("base64")}`,
           timeoutMs: 5000,
         });
-        if (configuration === null) {
-          issues++;
-          console.log(`  ${render.icons.warn} Could not read the instance configuration, so the MQTT listener check did not run.`);
-        } else {
-          const finding = describeMqttListenerFinding(configuration);
-          if (!finding) {
-            console.log(`  ${render.icons.ok} ${MQTT_LISTENERS_OFF_LINE}`);
-          } else {
-            issues++;
-            console.log(`  ${render.icons.warn} ${finding.message}`);
-            console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${finding.fixHint}`);
-          }
-        }
+        const section = mqttListenerSection(configuration);
+        if (section.status !== "ok") issues++;
+        console.log(`  ${section.status === "ok" ? render.icons.ok : render.icons.warn} ${section.line}`);
+        if (section.fix) console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${section.fix}`);
       }
     }
 

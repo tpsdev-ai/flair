@@ -129,7 +129,7 @@ describe("verifyDeployedMcpDiscovery (real HTTP)", () => {
   // deploy() checks after its restart that the target no longer serves MQTT
   // over WebSocket (test/unit/deploy-mqtt-off.test.ts); these tests are about
   // discovery, so that check answers a definitive refusal with no network.
-  const notServingMqtt = async () => ({ outcome: "refused" as const, detail: "test: refused" });
+  const notServingMqtt = async () => ({ outcome: "off" as const, detail: "test: Harper's answer for a disabled MQTT-over-WebSocket path" });
   const temps: string[] = [];
 
   afterAll(() => {

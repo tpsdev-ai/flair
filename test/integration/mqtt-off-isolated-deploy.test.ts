@@ -12,7 +12,8 @@
  * (src/mqtt-off-deploy.ts ensureMqttListenersOff) reads the target's
  * configuration, sees the application is isolated, restarts the shared worker
  * threads through `restart_service`, follows Harper's job to completion, and
- * passes only when a real MQTT-over-WebSocket CONNECT is definitively refused.
+ * passes only when the authenticated MQTT-over-WebSocket check gets Harper's
+ * own answer for a disabled MQTT-over-WebSocket path ("off").
  *
  * The test-Harper runs with MQTT over WebSocket on, an HTTPS port and UDS
  * mirrors (what Harper requires before it admits an isolated application), and
@@ -29,7 +30,7 @@
  *      still served although the configuration is off.
  *   2. `isob` with the step on: deploy() restarts the shared workers (a new
  *      shared worker thread id appears) and the real check finds MQTT over
- *      WebSocket refused.
+ *      WebSocket off.
  *
  * Mutation check: skip the post-restart step in deploy() and step 2's
  * assertions go red.
@@ -150,11 +151,11 @@ afterAll(async () => {
 }, 60_000);
 
 describe("MQTT off when the deployed application is isolated (real Harper deploy_component)", () => {
-  test("Harper's deploy of an isolated application restarts only its worker and leaves MQTT served; deploy()'s post-restart step restarts the shared workers and the real check finds MQTT refused", async () => {
+  test("Harper's deploy of an isolated application restarts only its worker and leaves MQTT served; deploy()'s post-restart step restarts the shared workers and the real check finds MQTT over WebSocket off", async () => {
     const config = await op({ operation: "get_configuration" });
     expect(config?.isoa?.isolated).toBe(true);
     expect(config?.mqtt?.webSocket, "mqtt.webSocket before").toBe(true);
-    expect((await probeMqttOverWebSocket(harper.httpURL)).outcome, "MQTT over WebSocket is served before").toBe("served");
+    expect((await probeMqttOverWebSocket(harper.httpURL, { user: harper.admin.username, password: harper.admin.password })).outcome, "MQTT over WebSocket is served before").toBe("served");
     const before = sharedWorkerIds(await threads());
     expect(before.length, "a shared HTTP worker").toBeGreaterThan(0);
 
@@ -165,7 +166,7 @@ describe("MQTT off when the deployed application is isolated (real Harper deploy
     expect(afterFirst.some((t) => t.application === "isoa"), "Harper started a dedicated worker for isoa").toBe(true);
     expect(sharedWorkerIds(afterFirst), "Harper's deploy restarted no shared worker").toEqual(before);
     expect((await op({ operation: "get_configuration" }))?.mqtt?.webSocket, "the configuration is off").toBe(false);
-    expect((await probeMqttOverWebSocket(harper.httpURL)).outcome, "MQTT over WebSocket is still served after Harper's scoped restart").toBe("served");
+    expect((await probeMqttOverWebSocket(harper.httpURL, { user: harper.admin.username, password: harper.admin.password })).outcome, "MQTT over WebSocket is still served after Harper's scoped restart").toBe("served");
 
     // 2. The real deploy of another isolated application, with the step.
     const second: string[] = [];
@@ -177,7 +178,7 @@ describe("MQTT off when the deployed application is isolated (real Harper deploy
     const afterSecond = await threads();
     expect(afterSecond.some((t) => t.application === "isob"), "Harper started a dedicated worker for isob").toBe(true);
     expect(sharedWorkerIds(afterSecond).some((id) => !before.includes(id)), "a shared worker was replaced").toBe(true);
-    const finalCheck = await probeMqttOverWebSocket(harper.httpURL);
-    expect(finalCheck.outcome, `MQTT over WebSocket after deploy() (${finalCheck.detail})`).toBe("refused");
+    const finalCheck = await probeMqttOverWebSocket(harper.httpURL, { user: harper.admin.username, password: harper.admin.password });
+    expect(finalCheck.outcome, `MQTT over WebSocket after deploy() (${finalCheck.detail})`).toBe("off");
   }, 300_000);
 });

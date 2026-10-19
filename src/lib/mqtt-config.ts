@@ -21,8 +21,11 @@
  *     target's operations API before the deploy, and after the deploy's
  *     restart requires the configuration to show those values (mqttOffConfirmed),
  *     restarts the shared worker threads when the application is isolated,
- *     and checks MQTT over WebSocket, passing only on a definitive refusal. A component's own config.yaml cannot set it: `mqtt` is
- *     a section of the instance's root configuration, not of an application's.
+ *     and checks MQTT over WebSocket on the node the target URL reaches,
+ *     passing only on Harper's own answer for a disabled path; other cluster
+ *     nodes are reported NOT VERIFIED. A component's own config.yaml cannot
+ *     set it: `mqtt` is a section of the instance's root configuration, not of
+ *     an application's.
  * `flair doctor` reports an instance whose configuration starts an MQTT
  * listener (src/lib/mqtt-listener-doctor.ts).
  *
@@ -51,6 +54,23 @@ export const MQTT_DISABLED_SET_CONFIGURATION: Readonly<Record<string, null | boo
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/**
+ * Why `config` is not recognizable as an instance's root configuration (the
+ * operations API's `get_configuration` answer), or null when it is: an object
+ * with Harper's `http` and `operationsApi` sections and its `rootPath`, which
+ * every root configuration carries. An empty or partial answer (`{}`, an error
+ * object) is not one, so nothing is concluded from it.
+ */
+export function rootConfigurationProblem(config: unknown): string | null {
+  if (!isObject(config)) return "the answer is not an object";
+  const missing = [
+    isObject(config.http) ? null : "http",
+    isObject(config.operationsApi) ? null : "operationsApi",
+    typeof config.rootPath === "string" && config.rootPath !== "" ? null : "rootPath",
+  ].filter((m): m is string => m !== null);
+  return missing.length ? `it has no ${missing.join(", ")}` : null;
 }
 
 /**

@@ -418,11 +418,15 @@ stayed split for days after 0.30.0 was the incident this closes.
 
 Both `flair deploy` and `flair upgrade --target` set every MQTT listener off in
 the target's configuration before deploying, and after the deploy's restart
-check it — passing only when the configuration shows those values and an
-MQTT-over-WebSocket CONNECT is definitively refused, and failing with the
-restart and check to run otherwise (`--ops-target` / `FLAIR_OPS_TARGET` name
-the operations API for both); pass `--keep-mqtt-config` to leave an MQTT
-configuration you turned on deliberately
+check the node the target URL reaches — passing only when its configuration
+shows those values and an authenticated MQTT-over-WebSocket check gets
+Harper's own answer for a disabled path, and failing with the restart and
+check to run otherwise (`--ops-target` / `FLAIR_OPS_TARGET` name the
+operations API for both). Every other cluster node is reported NOT VERIFIED
+with the check to run on it (a completed restart job is not proof of a peer's
+restart); `--require-all-nodes-verified` turns that into a failure. Pass
+`--keep-mqtt-config` to leave an MQTT configuration you turned on
+deliberately
 ([deploying-on-fabric.md](deploying-on-fabric.md#mqtt-is-off)).
 
 As of flair#636, both `flair deploy` and `flair upgrade --target` automatically run a

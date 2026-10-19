@@ -326,15 +326,20 @@ only; an instance without replication is set on its own). If the target
 refuses it, or its answer names a cluster node that did not take it, nothing
 is deployed and the error names the node and what to run.
 
-**After the deploy's restart**, they read the target's configuration, which
-must show the values they set (`mqtt.network.port` and
-`mqtt.network.securePort` null, `mqtt.webSocket` false; an empty or malformed
-answer fails), and check MQTT over WebSocket with an MQTT CONNECT. Only a
-definitive refusal confirms it is off: an HTTP 4xx answer to the WebSocket
-upgrade, or a WebSocket close frame instead of an MQTT answer. A CONNACK means
-MQTT is still served; a connection error, an HTTP 5xx, a connection that ends
-without a close frame or no answer in time is inconclusive, and an
-inconclusive check fails the deploy.
+**After the deploy's restart**, they verify one node: the one the target URL
+(or `--mqtt-check-url`) reaches, through the target's operations API. They
+read its configuration, which must show the values they set
+(`mqtt.network.port` and `mqtt.network.securePort` null, `mqtt.webSocket`
+false; an empty or malformed answer fails), and check MQTT over WebSocket on
+that URL: a WebSocket upgrade with the `mqtt` subprotocol, authenticated with
+the deploy's admin credential and validated (101, the matching
+`Sec-WebSocket-Accept`, the `mqtt` subprotocol), followed by an MQTT CONNECT.
+Only Harper's own answer for a disabled MQTT-over-WebSocket path counts as off:
+the upgrade succeeds and the socket is closed with code 1011 and the reason
+`No resource was found to handle /`. A CONNACK means MQTT is still served.
+Anything else — an authentication denial, any other HTTP status (4xx
+included) or close, an upgrade that does not validate, a connection error, no
+answer in time — is inconclusive, and an inconclusive check fails the deploy.
 
 Harper applies the setting when the shared HTTP worker threads, which register
 the MQTT listeners, restart. The deploy's restart covers them, except when the
@@ -342,24 +347,32 @@ root configuration marks Flair `isolated: true`: Harper then restarts only
 Flair's own worker. In that case, and whenever the check still finds MQTT
 served, they restart the shared worker threads through the operations API
 (`restart_service`, `"service": "http_workers"`, `"scope": ""`, replicated with
-the deploy) and follow Harper's job: it must complete, and a replicated
-restart's result must list every cluster node's restart as completed (a node
-Harper could not restart fails the deploy, by name). Then they check again; if
-MQTT is still served, or the check is inconclusive, the deploy fails and names
-the restart and check to run.
-
-The check reaches the URL that serves the target's HTTP port — the target URL,
-or `--mqtt-check-url` — and so the node that URL routes to; the other nodes are
-covered by the replicated configuration and restart answers, which are
-inspected node by node. With `--no-verify` the check is skipped, and with
-`--no-restart` the setting takes effect at the next restart; both print the
+the deploy) and follow Harper's job, failing on a failure it reports: a job
+that does not complete, a completion message that is not Harper's, a
+replicated result without its node list, or a node recorded without a
+completed restart (named). A completed restart job is not proof of a peer's
+restart: Harper sends a node's restart-complete from a `finally` and does not
+carry the worker replacement's outcome. Then they check again; if MQTT is
+still served, or the check is inconclusive, the deploy fails and names the
 restart and check to run.
 
-The operations API URL is resolved as for every remote command:
-`--ops-target` / `FLAIR_OPS_TARGET`, else derived from the target. Both
-commands accept them. It must not carry a credential (a user name, a password,
-or a credential in its query); such a URL is refused before anything is sent,
-and URLs are printed without user name, password or query.
+**Other cluster nodes are not verified.** Every node the replicated
+configuration and restart answers name, other than the one checked, is
+reported `NOT VERIFIED` by name, with what to run on it: `flair doctor` on
+that node (its MQTT listeners section reports the listener state), or the
+worker restart and the same authenticated WebSocket check against that node.
+The deploy succeeds for the verified node; pass `--require-all-nodes-verified`
+(both commands) to fail it when any node is not verified. With `--no-verify`
+the check is skipped, and with `--no-restart` the setting takes effect at the
+next restart; both print the restart and check to run.
+
+**URLs.** The operations API URL is resolved as for every remote command:
+`--ops-target` / `FLAIR_OPS_TARGET`, else derived from the target. The target,
+the operations API URL and `--mqtt-check-url` must be scheme, host, port and
+path only: a user name, password, query or fragment is refused before either
+command prints or sends anything. Every URL they print shows scheme, host,
+port and path only, and their errors quote a remote's HTTP status code, never
+its body or a transport error's text.
 
 `flair doctor` (local instances; it takes no `--target`) reports an instance
 whose configuration starts an MQTT listener, and names the call that turns it

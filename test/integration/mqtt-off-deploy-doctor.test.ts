@@ -14,6 +14,12 @@
  *   3. restarting the worker threads, as the deploy's restart does, removes the
  *      MQTT-over-WebSocket path: an MQTT session that was accepted before is no
  *      longer served.
+ * Throughout, the deploy channel's own check (probeMqttOverWebSocket,
+ * authenticated with the administrator's credential) is pinned against this
+ * real Harper: "served" while MQTT over WebSocket is on, "off" — Harper's
+ * answer for a disabled MQTT-over-WebSocket path, the upgrade closed with
+ * code 1011 and "No resource was found to handle /" — after the restart, and
+ * "inconclusive" for a wrong password (Harper's login failure is not "off").
  * test/unit/deploy-mqtt-off.test.ts checks that deploy() sends that request,
  * before Harper deploys, at the HTTP boundary.
  *
@@ -31,6 +37,7 @@ import { nodeBin } from "../helpers/node-runtime";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 import { MQTT_REASON, MqttClient } from "../helpers/mqtt-client";
 import { applyMqttOffConfiguration } from "../../src/deploy";
+import { probeMqttOverWebSocket } from "../../src/mqtt-off-deploy";
 import { MQTT_LISTENERS_OFF_LINE } from "../../src/lib/mqtt-listener-doctor";
 
 const CLI = join(process.cwd(), "dist", "cli.js");
@@ -131,6 +138,8 @@ describe("MQTT off in a component deployment (real CLI + real spawned Harper)", 
     // The instance under test serves MQTT over WebSocket from its own configuration.
     expect((await mqttConfig())?.webSocket, "mqtt.webSocket before").toBe(true);
     expect(await mqttSession(), "an administrator's MQTT session before").toBe(MQTT_REASON.SUCCESS);
+    const creds = { user: harper.admin.username, password: harper.admin.password, timeoutMs: 5_000 };
+    expect((await probeMqttOverWebSocket(harper.httpURL, creds)).outcome, "the deploy channel's check before").toBe("served");
 
     // 1. doctor names the listener and counts it.
     const on = await runDoctor();
@@ -182,5 +191,13 @@ describe("MQTT off in a component deployment (real CLI + real spawned Harper)", 
     }
     expect(after, "an MQTT session is still served after the worker restart").not.toBe(MQTT_REASON.SUCCESS);
     expect(typeof after === "string", `no MQTT CONNACK at all (got ${after})`).toBe(true);
+    // The deploy channel's check reads Harper's own answer as off; a login failure is not off.
+    const offCheck = await probeMqttOverWebSocket(harper.httpURL, creds);
+    expect(offCheck, "the deploy channel's check after the restart").toEqual({
+      outcome: "off",
+      detail: "Harper closed the WebSocket with its answer for a disabled MQTT-over-WebSocket path (code 1011, no resource for the path)",
+    });
+    const wrongPassword = await probeMqttOverWebSocket(harper.httpURL, { ...creds, password: "wrong-not-a-secret" });
+    expect(wrongPassword.outcome, `a login failure (${wrongPassword.detail})`).toBe("inconclusive");
   }, 240_000);
 });

@@ -33,6 +33,7 @@ import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
 import { createRegistryNoticePrinter, fetchDeclaredDependencies, fetchLatestVersion } from "./lib/npm-registry.js";
 import type { DeployOptions, DeployResult } from "./deploy.js";
+import { assertSafeUrl, safeUrl } from "./mqtt-off-deploy.js";
 
 /**
  * Minimum harper version whose component packager works when the
@@ -225,6 +226,8 @@ export interface FabricUpgradeOptions {
   opsUrl?: string;
   /** The URL deploy()'s post-restart WebSocket check reaches (DeployOptions.mqttCheckUrl). */
   mqttCheckUrl?: string;
+  /** `--require-all-nodes-verified`: deploy() fails when a cluster node cannot be verified MQTT-off (DeployOptions.requireAllNodesVerified). */
+  requireAllNodesVerified?: boolean;
   /**
    * flair#878: these were reachable from `flair deploy` but NOT from
    * `flair upgrade --target` — this module built its deploy() options by hand
@@ -484,11 +487,16 @@ export async function fabricUpgrade(
 ): Promise<FabricUpgradeResult> {
   const deps: FabricUpgradeDeps = { ...defaultDeps(), ...injected };
   const log = deps.log ?? (() => {});
+  // Every URL the upgrade uses is scheme, host, port and path only; anything
+  // else is refused before anything is fetched or printed.
+  assertSafeUrl(opts.target, "deploy target URL");
+  if (opts.opsUrl !== undefined) assertSafeUrl(opts.opsUrl, "operations API URL");
+  if (opts.mqttCheckUrl !== undefined) assertSafeUrl(opts.mqttCheckUrl, "URL the MQTT check reaches");
 
   // Step 1 + diff.
   const plan = await planFabricUpgrade(opts, deps);
 
-  log(`Fabric:  ${plan.target}`);
+  log(`Fabric:  ${safeUrl(plan.target)}`);
   log(`Project: ${plan.project}`);
   log(
     `Version: ${plan.currentVersion ?? "(unknown)"} → ${plan.targetVersion}` +
@@ -532,7 +540,7 @@ export async function fabricUpgrade(
     const packageRoot = resolveStagedFlairRoot(stagingDir);
 
     // Step 3: REUSE deploy() — do not reimplement packaging/spawn.
-    log(`Deploying ${plan.project} ${plan.targetVersion} to ${plan.target} ...`);
+    log(`Deploying ${plan.project} ${plan.targetVersion} to ${safeUrl(plan.target)} ...`);
     const result = await deps.deploy({
       target: opts.target,
       project: plan.project,
@@ -542,6 +550,7 @@ export async function fabricUpgrade(
       restart: opts.restart,
       replicated: opts.replicated,
       keepMqttConfig: opts.keepMqttConfig,
+      requireAllNodesVerified: opts.requireAllNodesVerified,
       opsUrl: opts.opsUrl,
       mqttCheckUrl: opts.mqttCheckUrl,
       packageRoot,

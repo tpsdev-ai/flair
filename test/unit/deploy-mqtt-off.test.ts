@@ -8,14 +8,19 @@
  *   1. sends the MQTT-off configuration to the target's operations API
  *      (`set_configuration`) before anything is deployed — a refusal, or a
  *      cluster node the answer names as failed, stops it there;
- *   2. after the deploy's restart, reads the target's configuration (it must
- *      show the MQTT-off values), restarts the shared worker threads when the
- *      application is isolated (the job must prove every restart it asked
- *      for), and checks MQTT over WebSocket — passing only on a definitive
- *      refusal, and failing, with the restart and check to run, when MQTT is
- *      still served or the check is inconclusive.
- * The operations API URL must carry no credential; nothing is sent if it does,
- * and URLs are printed redacted.
+ *   2. after the deploy's restart, verifies the node the target URL reaches:
+ *      reads its configuration (it must show the MQTT-off values), restarts
+ *      the shared worker threads when the application is isolated (failing on
+ *      a failure the job reports — a completed restart job is not proof of a
+ *      peer's restart), and checks MQTT over WebSocket — passing only on
+ *      Harper's answer for a disabled path ("off"), and failing, with the
+ *      restart and check to run, when MQTT is still served or the check is
+ *      inconclusive. Every other cluster node the replicated answers name is
+ *      reported NOT VERIFIED with the check to run on it;
+ *      `requireAllNodesVerified` turns that into a failure.
+ * Every URL is scheme, host, port and path only: a user name, password, query
+ * or fragment is refused before anything is sent. Errors quote a remote's
+ * HTTP status, never its body, a job's message or a transport error's text.
  *
  * The whole deploy() path runs here against a REAL HTTP server standing in for
  * the target's operations API (the HTTP boundary), with a stub Harper binary
@@ -65,7 +70,7 @@ const defaults = (): Record<string, Handler> => ({
   restart_service: (body) => { lastRestartWasReplicated = body.replicated === true; return Response.json({ message: "Restarting http_workers", job_id: "job-1" }); },
   get_job: (body) => completedJob(body),
 });
-const REFUSED: MqttProbeOutcome = { outcome: "refused", detail: "test: closed with code 1011" };
+const OFF: MqttProbeOutcome = { outcome: "off", detail: "test: Harper's answer for a disabled MQTT-over-WebSocket path" };
 const SERVED: MqttProbeOutcome = { outcome: "served", detail: "test: CONNACK" };
 const INCONCLUSIVE: MqttProbeOutcome = { outcome: "inconclusive", detail: "test: no answer" };
 
@@ -128,7 +133,7 @@ function base(over: Partial<DeployOptions> = {}): DeployOptions {
     verify: false,
     mqttCheck: true,
     mqttCheckTimeoutMs: 200,
-    mqttProbe: async () => REFUSED,
+    mqttProbe: async () => OFF,
     ...over,
   };
 }
@@ -202,8 +207,13 @@ describe("step 1: deploy() sends the MQTT-off configuration before Harper deploy
 
   test("a target that cannot be reached fails the deploy by name, and Harper never runs", async () => {
     reset();
-    const unreachable = async () => { throw new Error("connect ECONNREFUSED"); };
-    await expect(deploy(base({ operationsFetch: unreachable as any }))).rejects.toThrow(/could not send the MQTT-off configuration .*ECONNREFUSED.*nothing was deployed/s);
+    const unreachable = async () => { throw Object.assign(new Error("connect ECONNREFUSED 10.0.0.9:9925 /private-path"), { code: "ECONNREFUSED" }); };
+    let thrown: Error | undefined;
+    try { await deploy(base({ operationsFetch: unreachable as any })); } catch (err) { thrown = err as Error; }
+    expect(thrown?.message).toMatch(/could not send the MQTT-off configuration .*\(the request failed \(ECONNREFUSED\)\).*nothing was deployed/s);
+    // The transport error's own text is never printed, only its code.
+    expect(thrown?.message).not.toContain("10.0.0.9");
+    expect(thrown?.message).not.toContain("private-path");
     expect(existsSync(harperRanMarker)).toBe(false);
   }, 60_000);
 
@@ -242,7 +252,7 @@ describe("step 2: after the deploy's restart, deploy() checks the MQTT listeners
   test("a shared application: the configuration is read and MQTT over WebSocket is checked at the target URL; no extra restart", async () => {
     reset();
     const probed: string[] = [];
-    await deploy(base({ mqttProbe: async (url) => { probed.push(url); return REFUSED; } }));
+    await deploy(base({ mqttProbe: async (url) => { probed.push(url); return OFF; } }));
     expect(ops()).toEqual(["set_configuration", "get_configuration"]);
     expect(received[1].harperHadRun, "the configuration was read after Harper deployed").toBe(true);
     expect(probed).toEqual([target]);
@@ -251,7 +261,7 @@ describe("step 2: after the deploy's restart, deploy() checks the MQTT listeners
   test("an isolated application: the shared worker threads are restarted (pool scope, replicated), the job is awaited, then MQTT over WebSocket is checked", async () => {
     reset({ get_configuration: () => Response.json({ mqtt: MQTT_OFF, flair: { isolated: true } }) });
     let probesAfterRestart = 0;
-    await deploy(base({ mqttProbe: async () => { if (ops().includes("restart_service")) probesAfterRestart++; return REFUSED; } }));
+    await deploy(base({ mqttProbe: async () => { if (ops().includes("restart_service")) probesAfterRestart++; return OFF; } }));
     expect(ops()).toEqual(["set_configuration", "get_configuration", "restart_service", "get_job"]);
     expect(received[2].body).toEqual({ operation: "restart_service", service: "http_workers", scope: "", replicated: true });
     expect(received[3].body).toEqual({ operation: "get_job", id: "job-1" });
@@ -275,7 +285,7 @@ describe("step 2: after the deploy's restart, deploy() checks the MQTT listeners
 
   test("MQTT over WebSocket still served after the deploy's restart: the shared workers are restarted once, and the deploy passes when it stops", async () => {
     reset();
-    await deploy(base({ mqttProbe: async () => (ops().includes("restart_service") ? REFUSED : SERVED) }));
+    await deploy(base({ mqttProbe: async () => (ops().includes("restart_service") ? OFF : SERVED) }));
     expect(ops()).toEqual(["set_configuration", "get_configuration", "restart_service", "get_job"]);
   }, 60_000);
 
@@ -305,7 +315,10 @@ describe("step 2: after the deploy's restart, deploy() checks the MQTT listeners
       get_configuration: () => Response.json({ mqtt: MQTT_OFF, flair: { isolated: true } }),
       get_job: () => Response.json([{ id: "job-1", status: "ERROR", message: "worker did not start" }]),
     });
-    await expect(deploy(base())).rejects.toThrow(/restarting the shared worker threads of .* is not proven \(the job ended ERROR: worker did not start\)/);
+    let thrown: Error | undefined;
+    try { await deploy(base()); } catch (err) { thrown = err as Error; }
+    expect(thrown?.message).toMatch(/restarting the shared worker threads of .* failed \(the job ended ERROR\)/);
+    expect(thrown?.message).not.toContain("worker did not start"); // the job's text is never printed
   }, 60_000);
 
   test("--no-verify skips the check and says what to run; --no-restart skips it and says the setting applies at the next restart", async () => {
@@ -330,7 +343,7 @@ describe("step 2 fails unless every restart and the check are proven", () => {
 
   test("a restart answered without a job id fails the deploy by name", async () => {
     reset({ get_configuration: isolatedConfig, restart_service: () => Response.json({ message: "Restarting http_workers" }) });
-    await expect(deploy(base())).rejects.toThrow(/is not proven \(the restart was answered without a job id/);
+    await expect(deploy(base())).rejects.toThrow(/failed \(the restart was answered without a job id/);
     expect(ops()).not.toContain("get_job");
   }, 60_000);
 
@@ -344,8 +357,9 @@ describe("step 2 fails unless every restart and the check are proven", () => {
     });
     let thrown: Error | undefined;
     try { await deploy(base()); } catch (err) { thrown = err as Error; }
-    expect(thrown?.message).toContain("these nodes did not restart: node-c (connect ECONNREFUSED 10.0.0.3:9925)");
-    expect(thrown?.message).not.toContain("node-b (");
+    expect(thrown?.message).toContain("the job records these nodes without a completed restart: node-c");
+    expect(thrown?.message).not.toContain("node-b,");
+    expect(thrown?.message).not.toContain("ECONNREFUSED"); // the node's error text is never printed
     expect(thrown?.message).toContain('"operation":"restart_service"');
   }, 60_000);
 
@@ -362,10 +376,13 @@ describe("step 2 fails unless every restart and the check are proven", () => {
       get_configuration: isolatedConfig,
       get_job: (body) => Response.json([{ id: body.id, status: "COMPLETE", message: "Unrecognized service: http_workers" }]),
     });
-    await expect(deploy(base({ replicated: false }))).rejects.toThrow(/completed with "Unrecognized service: http_workers" rather than a completed restart/);
+    let thrown: Error | undefined;
+    try { await deploy(base({ replicated: false })); } catch (err) { thrown = err as Error; }
+    expect(thrown?.message).toContain("the job completed with a message other than Harper's completed-job message");
+    expect(thrown?.message).not.toContain("Unrecognized service");
   }, 60_000);
 
-  test("an inconclusive WebSocket check (no definitive refusal before the deadline) fails the deploy, naming the restart and check to run", async () => {
+  test("an inconclusive WebSocket check (no off answer before the deadline) fails the deploy, naming the restart and check to run", async () => {
     reset();
     let thrown: Error | undefined;
     try { await deploy(base({ mqttProbe: async () => INCONCLUSIVE })); } catch (err) { thrown = err as Error; }
@@ -375,10 +392,10 @@ describe("step 2 fails unless every restart and the check are proven", () => {
     expect(ops()).not.toContain("restart_service"); // an inconclusive check is not taken for "served"
   }, 60_000);
 
-  test("an inconclusive check that turns into a definitive refusal within the deadline passes", async () => {
+  test("an inconclusive check that turns into the off answer within the deadline passes", async () => {
     reset();
     let calls = 0;
-    await deploy(base({ mqttCheckTimeoutMs: 10_000, mqttProbe: async () => (++calls < 2 ? INCONCLUSIVE : REFUSED) }));
+    await deploy(base({ mqttCheckTimeoutMs: 10_000, mqttProbe: async () => (++calls < 2 ? INCONCLUSIVE : OFF) }));
     expect(calls).toBe(2);
   }, 60_000);
 
@@ -397,8 +414,62 @@ describe("step 2 fails unless every restart and the check are proven", () => {
   test("the WebSocket check reaches --mqtt-check-url when given", async () => {
     reset();
     const probed: string[] = [];
-    await deploy(base({ mqttCheckUrl: "https://flair.example.invalid", mqttProbe: async (url) => { probed.push(url); return REFUSED; } }));
+    await deploy(base({ mqttCheckUrl: "https://flair.example.invalid", mqttProbe: async (url) => { probed.push(url); return OFF; } }));
     expect(probed).toEqual(["https://flair.example.invalid"]);
+  }, 60_000);
+});
+
+describe("only the node the target URL reaches is verified; every other cluster node is NOT VERIFIED", () => {
+  /** A replicated set_configuration answer naming two peer nodes that took the setting. */
+  const replicatedAnswer = () => Response.json({
+    message: "Configuration successfully set.",
+    replicated: [{ node: "node-b", message: "Configuration successfully set." }, { node: "node-c", message: "Configuration successfully set." }],
+  });
+
+  test("the peers the replicated configuration names are reported NOT VERIFIED by name, with the check and restart to run on each; the deploy succeeds", async () => {
+    reset({ set_configuration: replicatedAnswer });
+    const warn = captureWarn();
+    try { await deploy(base()); } finally { warn.restore(); }
+    const text = warn.lines.join("\n");
+    for (const node of ["node-b", "node-c"]) {
+      expect(text).toContain(`NOT VERIFIED: cluster node ${node}.`);
+      expect(text).toContain(`on ${node}, run flair doctor (its "MQTT listeners" section reports the listener state)`);
+      expect(text).toContain(`to http://${node}:${new URL(opsUrl).port} (Basic admin credential)`);
+    }
+    expect(text).toContain("a completed restart job is not proof of a peer's restart");
+    expect(text).toContain('"operation":"restart_service"');
+    expect(text).toContain("--require-all-nodes-verified");
+  }, 60_000);
+
+  test("the nodes an isolated application's restart job names are reported too", async () => {
+    reset({
+      set_configuration: () => Response.json({ message: "ok", replicated: [{ node: "node-b", message: "ok" }] }),
+      get_configuration: () => Response.json({ mqtt: MQTT_OFF, flair: { isolated: true } }),
+      get_job: (body) => completedJob(body, [
+        { node: "node-b", message: "Successfully completed job: peer-1" },
+        { node: "node-d", message: "Successfully completed job: peer-2" },
+      ]),
+    });
+    const warn = captureWarn();
+    try { await deploy(base()); } finally { warn.restore(); }
+    const lines = warn.lines.filter((l) => l.includes("NOT VERIFIED"));
+    expect(lines.map((l) => /cluster node (\S+)\./.exec(l)?.[1]).sort()).toEqual(["node-b", "node-d"]);
+  }, 60_000);
+
+  test("--require-all-nodes-verified fails the deploy when a peer is not verified, naming each and what to run", async () => {
+    reset({ set_configuration: replicatedAnswer });
+    let thrown: Error | undefined;
+    try { await deploy(base({ requireAllNodesVerified: true })); } catch (err) { thrown = err as Error; }
+    expect(thrown?.message).toContain("--require-all-nodes-verified: 2 cluster nodes were NOT VERIFIED: node-b, node-c");
+    expect(thrown?.message).toContain("a completed restart job is not proof of a peer's restart");
+    expect(thrown?.message).toContain("on node-b, run flair doctor");
+  }, 60_000);
+
+  test("a standalone target (no cluster nodes) is fully verified, with or without --require-all-nodes-verified", async () => {
+    reset();
+    const warn = captureWarn();
+    try { await deploy(base({ requireAllNodesVerified: true })); } finally { warn.restore(); }
+    expect(warn.lines.join("\n")).not.toContain("NOT VERIFIED");
   }, 60_000);
 });
 
@@ -417,32 +488,53 @@ describe("operations API URLs carry no credential and are printed redacted", () 
     expect(existsSync(harperRanMarker)).toBe(false);
   }, 60_000);
 
-  test("an operations URL whose query carries a credential is refused before any request, and the value is never printed", async () => {
-    reset();
-    let thrown: Error | undefined;
-    try { await deploy(base({ opsUrl: `${opsUrl}/?access_token=not-a-real-token` })); } catch (err) { thrown = err as Error; }
-    expect(thrown?.message).toContain("its query carries a credential parameter");
-    expect(thrown?.message).not.toContain("not-a-real-token");
-    expect(received).toEqual([]);
+  test("an operations URL with any query or fragment is refused before any request, and the value is never printed", async () => {
+    for (const suffix of ["/?access_token=not-a-real-token", "/?region=not-a-real-token", "/#not-a-real-token"]) {
+      reset();
+      let thrown: Error | undefined;
+      try { await deploy(base({ opsUrl: `${opsUrl}${suffix}` })); } catch (err) { thrown = err as Error; }
+      expect([suffix, thrown?.message.includes("Nothing was sent")]).toEqual([suffix, true]);
+      expect(thrown?.message).toMatch(/it carries a (query|fragment)/);
+      expect(thrown?.message).not.toContain("not-a-real-token");
+      expect(received).toEqual([]);
+    }
   }, 60_000);
 
-  test("errors, progress and restart instructions print the operations URL without its query", async () => {
-    reset({ set_configuration: () => new Response(JSON.stringify({ error: "nope" }), { status: 400 }) });
-    const progress: string[] = [];
-    let thrown: Error | undefined;
-    try { await deploy(base({ opsUrl: `${opsUrl}/?region=eu-west-9`, onProgress: (m) => progress.push(m) })); } catch (err) { thrown = err as Error; }
-    expect(thrown?.message).toContain(`${opsUrl}?…`);
-    expect(thrown?.message).not.toContain("eu-west-9");
-    expect(received.length).toBe(1); // a query that names no credential is allowed, and sent as given
-    reset();
-    const warn = captureWarn();
-    try {
-      await deploy(base({ opsUrl: `${opsUrl}/?region=eu-west-9`, restart: false, onProgress: (m) => progress.push(m) }));
-    } finally {
-      warn.restore();
+  test("a deploy target or MQTT check URL with a user name, password, query or fragment is refused before anything is sent", async () => {
+    for (const over of [
+      { target: "https://deploy-user:not-a-real-secret@flair.example.invalid" },
+      { target: "https://flair.example.invalid/?token=not-a-real-secret" },
+      { mqttCheckUrl: "https://flair.example.invalid/#not-a-real-secret" },
+    ] as Partial<DeployOptions>[]) {
+      reset();
+      const progress: string[] = [];
+      let thrown: Error | undefined;
+      try { await deploy(base({ ...over, opsUrl, onProgress: (m) => progress.push(m) })); } catch (err) { thrown = err as Error; }
+      expect([JSON.stringify(over), thrown?.message.includes("cannot be used")]).toEqual([JSON.stringify(over), true]);
+      expect(thrown?.message).not.toContain("not-a-real-secret");
+      expect(thrown?.message).not.toContain("deploy-user");
+      expect(progress).toEqual([]);
+      expect(received).toEqual([]);
+      expect(existsSync(harperRanMarker)).toBe(false);
     }
-    expect([...progress, ...warn.lines].join("\n")).not.toContain("eu-west-9");
-    expect(warn.lines.join("\n")).toContain(`${opsUrl}?…`);
   }, 60_000);
+
+  test("an error answer's body is never printed, even when it echoes a value", async () => {
+    const echoing = () => new Response(JSON.stringify({ error: "bad request for region=private-value" }), { status: 400 });
+    for (const over of [
+      { set_configuration: echoing },
+      { get_configuration: echoing },
+      { get_configuration: () => Response.json({ mqtt: MQTT_OFF, flair: { isolated: true } }), restart_service: echoing },
+    ] as Record<string, Handler>[]) {
+      reset(over);
+      const progress: string[] = [];
+      const warn = captureWarn();
+      let thrown: Error | undefined;
+      try { await deploy(base({ onProgress: (m) => progress.push(m) })); } catch (err) { thrown = err as Error; } finally { warn.restore(); }
+      expect([Object.keys(over).join(","), thrown?.message.includes("HTTP 400")]).toEqual([Object.keys(over).join(","), true]);
+      expect([thrown?.message ?? "", ...progress, ...warn.lines].join("\n")).not.toContain("private-value");
+    }
+  }, 60_000);
+
 });
 

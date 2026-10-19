@@ -2,7 +2,7 @@
 # Byte-identical gate for src/cli.ts modularization. Do not edit by hand.
 # Refresh: UPDATE_CLI_SURFACE_SNAPSHOT=1 bun test test/unit-isolated/cli-surface-snapshot.test.ts
 # helpWidth=80 (pinned; TTY columns must not affect this file)
-# commands=143 options=659
+# commands=143 options=661
 #
 # TREE is registration order: every command/subcommand + declared options/args.
 # HELP is each command's outputHelp() (--help, including addHelpText).
@@ -1676,6 +1676,9 @@ flair upgrade
     --mqtt-check-url <url>
       description: For --target: URL that serves the target's HTTP port, for the post-restart MQTT-over-WebSocket check (default: --target)
       attr: mqttCheckUrl
+    --require-all-nodes-verified
+      description: For --target: fail when a cluster node other than the one the target URL reaches cannot be verified MQTT-off (default: report it NOT VERIFIED with the check to run)
+      attr: requireAllNodesVerified
     --ops-target <url>
       description: For --target: operations API URL for the MQTT-off configuration and check (env: FLAIR_OPS_TARGET; default: derived from --target)
       attr: opsTarget
@@ -1818,6 +1821,9 @@ flair deploy
     --mqtt-check-url <url>
       description: URL that serves the target's HTTP port, for the post-restart MQTT-over-WebSocket check (default: the target URL)
       attr: mqttCheckUrl
+    --require-all-nodes-verified
+      description: Fail the deploy when a cluster node other than the one the target URL reaches cannot be verified MQTT-off (default: report it NOT VERIFIED with the check to run)
+      attr: requireAllNodesVerified
     --dry-run
       description: Resolve package, validate args, skip the deploy call
       attr: dryRun
@@ -4858,6 +4864,10 @@ Options:
   --mqtt-check-url <url>         For --target: URL that serves the target's HTTP
                                  port, for the post-restart MQTT-over-WebSocket
                                  check (default: --target)
+  --require-all-nodes-verified   For --target: fail when a cluster node other
+                                 than the one the target URL reaches cannot be
+                                 verified MQTT-off (default: report it NOT
+                                 VERIFIED with the check to run)
   --ops-target <url>             For --target: operations API URL for the
                                  MQTT-off configuration and check (env:
                                  FLAIR_OPS_TARGET; default: derived from
@@ -5009,6 +5019,10 @@ Options:
   --mqtt-check-url <url>         URL that serves the target's HTTP port, for the
                                  post-restart MQTT-over-WebSocket check
                                  (default: the target URL)
+  --require-all-nodes-verified   Fail the deploy when a cluster node other than
+                                 the one the target URL reaches cannot be
+                                 verified MQTT-off (default: report it NOT
+                                 VERIFIED with the check to run)
   --dry-run                      Resolve package, validate args, skip the deploy
                                  call
   --package-root <dir>           Override package root (mainly for testing)
