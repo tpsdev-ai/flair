@@ -22,12 +22,14 @@
 // per-id serialization is tracked in flair#2478.
 //
 // The tests run in file order against one Harper. Tests (a) to (c) each seed
-// five orphans; orphans a run must leave in place stay seeded, so every later
-// run also proves it left them unchanged. `outstanding` tracks them, and orphan
-// rows are compared with a snapshot read immediately before each run. The live
+// five orphans; orphans a run must leave in place stay seeded, so each later
+// run among (a) to (c) also proves it left them unchanged. `outstanding` tracks
+// them, and in (a) to (c) orphan rows are compared with a snapshot read
+// immediately before each run. The live
 // pointers and their Memory rows are compared with a snapshot taken at setup.
-// (d) seeds nothing and (e) seeds one orphan of its own; both first remove any
-// orphans an earlier failed test left behind.
+// (d) seeds nothing and (e) seeds one orphan of its own, with its own
+// assertions on the replacement row and the counts; both first remove any
+// orphans an earlier test left behind.
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import nacl from "tweetnacl";
 import { randomUUID } from "node:crypto";
