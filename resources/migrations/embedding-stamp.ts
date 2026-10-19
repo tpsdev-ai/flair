@@ -39,8 +39,8 @@
  * `updatedAt`. Edits committed after this migration's read and before the PATCH
  * handler's stored-row read are kept (flair#2275); the handler reads, embeds and
  * commits under the id's per-id write lock (flair#2478, below), and a text change
- * by a writer outside that lock is re-read and re-embedded before any vector is
- * stored.
+ * by a writer outside that lock is re-read and re-embedded before the request
+ * answers success.
  *
  * THIS IS LOAD-BEARING, confirmed empirically while building
  * test/integration/migrations-embedding-stamp-e2e.test.ts against real

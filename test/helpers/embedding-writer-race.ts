@@ -157,6 +157,9 @@ export class RaceHarness {
   async assertPaused(point: string, timeoutMs = 60_000): Promise<void> {
     expect(await waitForPath(join(this.pauseDir, `paused.${point}`), timeoutMs), `${point} was never paused`).toBe(true);
     expect(existsSync(join(this.pauseDir, `claimed.${point}`)), `${point} has no claimed marker`).toBe(true);
+    // The claimant writes its paused marker and then removes the arm file.
+    const deadline = Date.now() + 5_000;
+    while (existsSync(join(this.pauseDir, `arm.${point}`)) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10));
     expect(existsSync(join(this.pauseDir, `arm.${point}`)), `${point} is still armed`).toBe(false);
   }
   /** Write `go` and require that the release, not the pause's time limit, ended it. */

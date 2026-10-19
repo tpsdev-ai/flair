@@ -204,14 +204,16 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
     // shared with the owner verbs (resources/memory-write-lock.ts), taken once,
     // after the vector is computed: no provider call runs while the id is locked.
     // A held id, an id with an unresolved write outcome, or a store with no lock
-    // is skipped and logged, and nothing is written. Holding the lock, the helper's
-    // first read is the committed row: a row whose text changed, or that has a
-    // vector of more than 100 entries, is not written (a changed text is re-read
-    // and re-embedded after the lock is released). The update commits, and the
-    // committed row is read back (identity, the written fields, and the text the
-    // vector was computed for), before the lock is released. A background write
-    // whose read-back cannot confirm it is logged; it does not mark the id
-    // outcome-unknown.
+    // is skipped and logged, and nothing is written; a skipped backfill is not
+    // retried, and the id's next successful write starts another (a row with a
+    // stale or missing stamp is also re-embedded by the embedding-stamp
+    // migration). Holding the lock, the helper's first read is the committed
+    // row: a row whose text changed, or that has a vector of more than 100
+    // entries, is not written (a changed text is re-read and re-embedded after
+    // the lock is released). The update commits, and the committed row is read
+    // back (identity, the written fields, and the text the vector was computed
+    // for), before the lock is released. A background write whose read-back
+    // cannot confirm it is logged; it does not mark the id outcome-unknown.
     //
     // A row holding a vector of more than 100 entries is already embedded,
     // except one holding the vector an earlier attempt of this backfill

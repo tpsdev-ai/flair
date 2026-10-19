@@ -1,7 +1,12 @@
 /**
  * memory-write-lock.ts — the per-memory-id write serialization protocol
- * (flair#2478 slice 1). The ordinary owner PUT and PATCH (resources/Memory.ts)
- * run under it; the other Memory writers convert in part 2.
+ * (flair#2478 slice 1). The ordinary owner PUT and PATCH (resources/Memory.ts,
+ * the HTTP re-embed PATCH included) run under it, and so do the automatic
+ * writers converted so far: the visibility backfill and the promotion stamps
+ * (slice 2), and the embedding backfill that follows a Memory write
+ * (resources/auth-middleware.ts) and the embedding-stamp migration's
+ * `.content`-suffix fallback (slice 3). The other Memory writers convert in
+ * later parts.
  *
  * A writer that must make its read, decision and write on one committed basis
  * runs under one key per ID of `Memory.primaryStore`'s lock: `["memory", fullStoredId]`.
@@ -45,7 +50,10 @@
  *    row that already holds it as written. {@link markMemoryWriteOutcomeUnknown}
  *    records the marker; until a process restart clears it (the fencing step),
  *    PUT/PATCH check the addressed id; DELETE also checks the resolved skill
- *    head. POST and background/nested writers do not check the marker.
+ *    head. An automatic writer that takes the lock through
+ *    {@link withMemoryWriteLockOnce} writes nothing to a marked id; it does not
+ *    set the marker for its own unconfirmed write, which it reports or logs.
+ *    POST and the writers that take no per-id lock do not check the marker.
  *
  * The marker is module state, so it is per Harper worker thread. That covers
  * the whole instance only in the supported single-worker mode: flair refuses to
@@ -62,7 +70,8 @@
  * a call still pending when the timeout callback runs, or one that settles after
  * the bound, is refused with `503 memory_provider_timeout` and nothing is
  * written. An in-process timeout cannot preempt a provider that never yields the
- * event loop. A hold longer than
+ * event loop. The automatic embedding writers compute their vector before they
+ * take the lock, so they make no provider call while holding it. A hold longer than
  * {@link MEMORY_LOCK_HOLD_WATCHDOG_MS} is logged — the lock keys and the phase
  * named in {@link MemoryWriteLockOptions.phase}, and elapsed time — when the
  * timer runs or the callback settles. The watchdog never releases a key.
@@ -254,8 +263,11 @@ export async function withMemoryWriteLock<T>(
   return acquire(lockStore(store), normalizeIds(ids), MEMORY_LOCK_ATTEMPTS, MEMORY_LOCK_WAIT_MS, fn, options);
 }
 
-/** One attempt, no wait, used by visibility backfill and automatic promotion
- *  stamps. A held lock or a marker answers `busy`/`unknown`. */
+/** One attempt, no wait, used by the automatic writers: the visibility
+ *  backfill, the automatic promotion stamp, the embedding backfill and the
+ *  embedding-stamp migration's `.content`-suffix fallback. A held lock or a
+ *  marker answers `busy`/`unknown`; the writer skips the id and leaves it for a
+ *  later pass. */
 export async function withMemoryWriteLockOnce<T>(
   store: unknown,
   ids: readonly (string | number)[],
