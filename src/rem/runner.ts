@@ -249,18 +249,18 @@ export function formatPendingCandidates(count: PendingCandidateCount | undefined
 /**
  * The `Auto-promoted:` line run-once prints for the auto-promote step's
  * outcome. `skipped` is the server's `skipped` list. flair#2714: incomplete
- * promotions (Memory written and stamped, candidate update failed, candidate
- * read back pending) and unconfirmed ones (the same, but the candidate's state
- * could not be confirmed) are named on the line, never folded into the
- * promoted or skipped counts. A log row written before those fields existed
- * reads as 0.
+ * promotions (Memory written and stamped, candidate update threw, candidate
+ * read back pending) and unconfirmed ones (the same throw, but the read did
+ * not confirm the promotion on this row) are named on the line, never folded
+ * into the promoted or skipped counts. A log row written before those fields
+ * existed reads as 0.
  */
 export function formatAutoPromoted(outcome: { promoted: number; skipped: number; incomplete?: number; unconfirmed?: number }): string {
   let line = `Auto-promoted: ${outcome.promoted} to own memory (${outcome.skipped} skipped)`;
   const incomplete = outcome.incomplete ?? 0;
   const unconfirmed = outcome.unconfirmed ?? 0;
-  if (incomplete > 0) line += `; ${incomplete} incomplete (memory written, candidate update failed, candidate still pending)`;
-  if (unconfirmed > 0) line += `; ${unconfirmed} unconfirmed (memory written, candidate update failed, candidate state not confirmed)`;
+  if (incomplete > 0) line += `; ${incomplete} incomplete (memory written, candidate update threw, candidate read back pending)`;
+  if (unconfirmed > 0) line += `; ${unconfirmed} unconfirmed (memory written, candidate update threw, promotion on this row not confirmed)`;
   return line;
 }
 
@@ -372,21 +372,22 @@ export interface RunnerLogRow {
   /**
    * #1205b-2: outcome of the server-side ADK auto-promote step (POST
    * /AutoPromoteCandidates), populated only when this cycle ran it — i.e. a
-   * non-dry-run cycle for an ADK agentId (active adk: tags this cycle).
+   * non-dry-run cycle for an ADK agentId (active adk: tags this cycle) or one
+   * that distilled settled continuity sessions (flair#1257 slice 3).
    * `promoted` is the count of candidates auto-promoted to own memory this
    * cycle; `skipped` the length of the server's `skipped` list (candidates
-   * left pending by a fail-closed gate — absent scope tag, content-safety,
-   * already-decided — or for another reason the server names, such as a
-   * refused stamp or a recorded row that changed). flair#2714: `incomplete`
-   * counts promotions whose Memory row was written and stamped but whose
-   * candidate update failed, with the candidate read back pending;
-   * `unconfirmed` counts the same failure where the candidate's state could
-   * not be confirmed. Neither is counted in `promoted`. A later cycle
-   * re-sweeps a still-pending candidate and can adopt its recorded row without
-   * writing another one, when the row identity was recorded on the candidate
-   * and the row still carries the sweep's approval. Each is 0 when the
-   * server's response has no such list. Absent for dry-run / non-ADK cycles,
-   * exactly like `candidates`.
+   * left pending by a fail-closed gate — absent scope tag, content-safety —
+   * or for another reason the server names, such as a refused stamp or a
+   * recorded row that changed). flair#2714: `incomplete` counts promotions
+   * whose Memory row was written and stamped but whose candidate update
+   * threw, with the candidate read back pending; `unconfirmed` counts the
+   * same throw where the read did not confirm the promotion on this row.
+   * Neither is counted in `promoted`. A later cycle re-sweeps a candidate still
+   * pending and can adopt its recorded row without writing another one, when
+   * the row identity is recorded on the candidate and the row still passes
+   * the sweep's checks, approval included. Each is 0 when the server's
+   * response has no such list. Absent for dry-run cycles and cycles with
+   * neither, exactly like `candidates`.
    */
   autoPromoted?: {
     promoted: number;
@@ -1100,7 +1101,7 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
         } else {
           const promotedCount = typeof obj.count === "number" ? obj.count : asArray(obj.promoted).length;
           const skippedCount = asArray(obj.skipped).length;
-          // flair#2714: a promotion whose candidate update failed is reported
+          // flair#2714: a promotion whose candidate update threw is reported
           // apart from `promoted`; carry its counts instead of dropping them.
           const incompleteCount = asArray(obj.incomplete).length;
           const unconfirmedCount = asArray(obj.unconfirmed).length;

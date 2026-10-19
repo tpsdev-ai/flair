@@ -35,8 +35,8 @@ import { txnPausePoint } from "./txn-pause-point.js";
  *   agentId  string?  — whose candidates to sweep. A non-admin caller may only
  *                       sweep its OWN (resolveReflectActor); admin may name any.
  *   limit    number?  — per-call cap (default DEFAULT_MAX_AUTO_PROMOTE_PER_CYCLE)
- *                       on the candidates the sweep writes a Memory row for or
- *                       takes a recorded row for (see the cost ceiling below).
+ *                       on the candidates the sweep attempts a Memory write for
+ *                       or takes a recorded row for (see the cost ceiling below).
  *   target   string?  — MUST be absent or "memory". Any other value is refused
  *                       (the hard-lock made explicit + testable).
  *
@@ -45,16 +45,20 @@ import { txnPausePoint } from "./txn-pause-point.js";
  *     incomplete: {memoryId, candidateId, error}[],
  *     unconfirmed: {memoryId, candidateId, error, readBack}[], count, considered }
  *
- *   `promoted` lists the Memory id of every candidate this call marked
- *   `promoted`; `count` is its length. flair#2714: when the candidate update
- *   throws after the Memory row was written and stamped, a fresh read of the
- *   candidate decides the report. A candidate read back `pending` is listed
- *   under `incomplete`; one read back `promoted` with this row and reviewer is
- *   listed under `promoted`; any other read, or a read that fails, is listed
- *   under `unconfirmed` with what the read found (`readBack`). Neither list
- *   counts toward `count`. A later sweep can adopt the recorded row of a
- *   still-pending candidate (findRecordedPromotedRow below), only when the row
- *   identity was recorded on the candidate and the row still passes its checks.
+ *   `promoted` lists the Memory id of every candidate whose promoted update
+ *   this call wrote without a throw, or that the confirming read below found
+ *   promoted on this row; `count` is its length. flair#2714: when the
+ *   candidate update throws after the Memory row was written and stamped, the
+ *   throw does not say whether the update committed, so a fresh read of the
+ *   candidate decides the report. That read establishes only the candidate's
+ *   state now, not which write produced it: read back `pending` → listed under
+ *   `incomplete`; read back `promoted` with this row and reviewer → listed
+ *   under `promoted`; any other state, or a read that fails → listed under
+ *   `unconfirmed` (the promotion on this row was not confirmed) with what the
+ *   read found (`readBack`). Neither `incomplete` nor `unconfirmed` counts
+ *   toward `count`. A later sweep can adopt the recorded row of a candidate
+ *   still pending (findRecordedPromotedRow below), only when the row identity
+ *   is recorded on the candidate and the row still passes its checks.
  *
  * Thin orchestrator over the pure, tested policy in ./auto-promote-lib.ts.
  */
@@ -99,14 +103,15 @@ import {
  *     reviewer, a `promotionContentHash` that matches the row's content
  *     (promotionBindingMatches) and a nonempty `promotedAt` → "adoptable": an
  *     earlier sweep wrote and stamped this row and the candidate is still
- *     pending (for example, its candidate update failed, or a stamp reported
- *     unconfirmed had in fact landed). The sweep adopts the row as written:
- *     no Memory write, no stamp, only the candidate update, which records the
- *     row's `promotedAt` as `decidedAt`. Through Flair's resource write paths the
- *     verdict fields are server-written (no REST Memory write can set them, an
- *     administrator's included, and a content-changing write clears them), so
- *     this reviewer on the recorded incarnation came from an auto-promote
- *     stamp. The admin operations API writes rows directly and can set any
+ *     pending (for example, its candidate update threw before committing, or
+ *     a stamp reported unconfirmed had in fact landed). The sweep adopts the
+ *     row as written: no Memory write, no stamp, only the candidate update,
+ *     which records the row's `promotedAt` as `decidedAt`. Through Flair's
+ *     resource write paths the verdict fields are server-written (no REST
+ *     Memory write can set them, an administrator's included, and a
+ *     content-changing write clears them), so a verdict with this reviewer on
+ *     the recorded incarnation, written through those paths, came from an
+ *     auto-promote stamp. The admin operations API writes rows directly and can set any
  *     field; this check does not defend against it. The adoption re-runs this
  *     check on a fresh read under the per-id Memory lock and holds the lock
  *     through the candidate update (see the adoption below).
@@ -167,22 +172,25 @@ function errorMessage(err: any): string {
   return typeof err?.message === "string" ? err.message : String(err);
 }
 
-/** flair#2714: the outcome of marking a candidate promoted, confirmed by a
- *  fresh read when the update throws. */
+/** flair#2714: the outcome of marking a candidate promoted. When the update
+ *  throws, the outcome is the candidate's state at a fresh read. */
 type CandidateCommit =
   | { kind: "promoted" }
   | { kind: "pending"; error: string }
   | { kind: "unconfirmed"; error: string; readBack: string };
 
 /**
- * Write the candidate's promoted row in a transaction this call owns, so the
- * update has committed or aborted when it returns. A thrown update does not
- * say which: the commit may have landed before the error. So a throw is
- * followed by a fresh committed read of the candidate (an explicit `{}`
- * context, the confirmCommittedRow discipline in write-back.ts):
- *   - read back `pending` → "pending" (confirmed: the update did not land);
- *   - read back `promoted` with this Memory row and reviewer → "promoted";
- *   - anything else, or a read that fails → "unconfirmed", with what was read.
+ * Write the candidate's promoted row in a transaction this call owns, so an
+ * update that returns without a throw has committed. A thrown update does not
+ * say whether it committed: the commit may have landed before the error. So a
+ * throw is followed by a fresh committed read of the candidate (an explicit
+ * `{}` context, the confirmCommittedRow discipline in write-back.ts). The read
+ * establishes only the candidate's state now, not whether this update landed
+ * (another write may have changed it since):
+ *   - `pending` now → "pending";
+ *   - `promoted` now, with this Memory row and reviewer → "promoted";
+ *   - anything else, or a read that fails → "unconfirmed" (the promotion on
+ *     this row was not confirmed), with what was read.
  */
 async function commitCandidatePromotion(
   row: Record<string, any>, memId: string, reviewerId: string,
@@ -217,7 +225,7 @@ interface SkipRecord {
 }
 
 /** flair#2714: a promotion whose Memory row was written and stamped but whose
- *  candidate update threw, and a fresh read found the candidate pending. */
+ *  candidate update threw, and a fresh read then found the candidate pending. */
 interface IncompleteRecord {
   memoryId: string;
   candidateId: string;
@@ -225,7 +233,8 @@ interface IncompleteRecord {
 }
 
 /** flair#2714: as IncompleteRecord, but the fresh read failed or found the
- *  candidate neither pending nor promoted with this row; `readBack` says which. */
+ *  candidate neither pending nor promoted on this row, so the promotion on
+ *  this row was not confirmed; `readBack` says what the read found. */
 interface UnconfirmedRecord extends IncompleteRecord {
   readBack: string;
 }
@@ -287,12 +296,13 @@ export class AutoPromoteCandidates extends Resource {
     // decideAutoPromote re-checks status authoritatively.
     //
     // Cost ceiling (Kern; flair#2714): the `cap` bounds `handled`, the number of
-    // eligible candidates this call writes a Memory row for (the expensive
+    // eligible candidates this call attempts a Memory write for (the expensive
     // part — a Memory write + embedding each) or takes a recorded row for
-    // (a stamp, or an adoption with no write). Every Memory write counts,
-    // whatever its outcome: promoted, incomplete, unconfirmed, stamp refused, or
-    // a write that throws or is rejected. Overflow stays pending for a later
-    // cycle. `count` reports only the candidates marked promoted.
+    // (a stamp, or an adoption with no write). `handled` is counted before the
+    // attempt, so every Memory write attempt counts, whatever its outcome:
+    // promoted, incomplete, unconfirmed, stamp refused, or an attempt that is
+    // rejected or throws. Overflow stays pending for a later cycle. `count`
+    // reports only the candidates listed under `promoted`.
     const MemoryCls = (await import("./Memory.js")).Memory;
     const promoted: string[] = [];
     const skipped: SkipRecord[] = [];
@@ -335,17 +345,19 @@ export class AutoPromoteCandidates extends Resource {
 
       // ── Use this candidate's earlier row on a retry ───────────────────────
       // A sweep that leaves its candidate pending after writing a row — its
-      // stamp reported refused, or (flair#2714) its candidate update failed
-      // after the stamp — leaves that row behind. When that sweep's recording
-      // of the row's id and incarnation token was persisted (a failed
-      // recording is logged and ignored below) and the recorded row passes
-      // findRecordedPromotedRow, this sweep uses it instead of writing a
-      // second promoted row: an unstamped row is stamped; a row that already
-      // carries this sweep's approval, bound to its content, is adopted as is
-      // and only the candidate is updated. Otherwise it attempts a fresh write:
-      // without a persisted recording nothing is reused, and a recorded row
-      // with any other verdict is not reused. Memory's dedup gate only reports
-      // a near-duplicate and never suppresses the write.
+      // stamp reported refused, or (flair#2714) its candidate update threw
+      // after the stamp — may leave a reusable row behind (a refused stamp can
+      // also follow a replacement or deletion of the row). When that sweep's
+      // recording of the row's id and incarnation token is present on the
+      // candidate (a thrown recording is logged and ignored below) and the
+      // recorded row passes findRecordedPromotedRow, this sweep uses it instead
+      // of writing a second promoted row: an unstamped row is stamped; a row
+      // that already carries this sweep's approval, bound to its content, is
+      // adopted as is and only the candidate is updated. Otherwise it attempts a
+      // fresh write: with no recorded identity on the candidate nothing is
+      // reused, and a recorded row with any other verdict is not reused.
+      // Memory's dedup gate only reports a near-duplicate and never suppresses
+      // the write.
       const recorded = await findRecordedPromotedRow(
         agentId, c, promotedTags, promotedVisibility, promotedDurability, decision.reviewerId,
       );
@@ -355,7 +367,7 @@ export class AutoPromoteCandidates extends Resource {
           promoted.push(memoryId);
           return;
         }
-        logger.warn?.(`AutoPromoteCandidates: candidate row update failed for ${c.id} (Memory ${memoryId} written and stamped; candidate read back ${outcome.kind === "pending" ? "pending" : `unconfirmed: ${outcome.readBack}`}): ${outcome.error}`);
+        logger.warn?.(`AutoPromoteCandidates: candidate row update threw for ${c.id} (Memory ${memoryId} written and stamped; candidate read back ${outcome.kind === "pending" ? "pending" : `with the promotion on this row not confirmed: ${outcome.readBack}`}): ${outcome.error}`);
         if (outcome.kind === "pending") incomplete.push({ memoryId, candidateId: c.id, error: outcome.error });
         else unconfirmed.push({ memoryId, candidateId: c.id, error: outcome.error, readBack: outcome.readBack });
       };
@@ -368,11 +380,13 @@ export class AutoPromoteCandidates extends Resource {
       // lock through the candidate update. An owner edit that commits first
       // leaves a row that no longer qualifies: nothing is written and the
       // candidate stays pending (`recorded_row_changed`), to be swept again.
-      // An owner edit that waits for the lock commits after the candidate is
-      // marked promoted, so it clears the verdict on a row the candidate
-      // already points to — the same as an owner edit to any promoted Memory
-      // after its promotion. Writers that take no Memory lock (the admin
-      // operations API among them) are not serialized by this.
+      // An owner edit that waits for the lock commits after the candidate
+      // update. When that update is reported promoted, the edit clears the
+      // verdict on a row the candidate points to — the same as an owner edit to
+      // any promoted Memory after its promotion; when the update throws, the
+      // candidate is reported from the confirming read (commitCandidatePromotion).
+      // Writers that take no Memory lock (the admin operations API among them)
+      // are not serialized by this.
       if (recorded?.use === "adoptable") {
         const memId = String(recorded.row.id);
         // Test-only: inert unless the fault-injection opt-in is armed.
@@ -499,15 +513,16 @@ export class AutoPromoteCandidates extends Resource {
         };
 
         // Record the row this sweep wrote on the candidate before its stamp.
-        // When this write persists, a refused stamp (or a failed candidate
-        // update) leaves the identity behind for the next sweep; the status
-        // write below carries the same fields on success. A failed recording is
-        // logged and does not abort the promotion: the stamp still runs, but if
-        // the candidate stays pending the next sweep has no recorded row to use
-        // and attempts a new write. flair#2714: the recording commits in its own
-        // transaction, before the stamp, like the status write below, so both
-        // candidate writes have committed in order by the time the status write
-        // and its confirming read run.
+        // When this write persists, a refused stamp (or a candidate update that
+        // throws) leaves the identity behind for the next sweep; the status
+        // write below carries the same fields on success. A thrown recording is
+        // logged and does not abort the promotion: the stamp still runs. Whether
+        // a thrown recording committed is not checked (a commit can precede the
+        // throw); if the candidate stays pending and the identity is absent from
+        // it, the next sweep has no recorded row to use and attempts a new
+        // write. flair#2714: the recording runs in its own transaction, before
+        // the stamp, like the status write below, so when both return without a
+        // throw they have committed in that order.
         if (typeof writtenRow.instanceToken === "string" && writtenRow.instanceToken.length > 0) {
           recordedRowId = memId;
           recordedRowToken = writtenRow.instanceToken;
@@ -536,18 +551,18 @@ export class AutoPromoteCandidates extends Resource {
 
       // ── Mark the candidate promoted (commit point) ─────────────────────────
       // Ordered AFTER the Memory write and its verdict, matching the human
-      // promote path. A failure between them leaves a pending candidate whose
-      // Memory row is written and stamped; this handler does not mark a
-      // candidate promoted before its row is stamped (a concurrent Memory
-      // deletion after the stamp is still possible). In the refused-stamp case
-      // above the candidate stays pending; a later sweep stamps the recorded row
-      // only when the recording persisted and the row still passes
+      // promote path: this handler does not mark a candidate promoted before
+      // its row is stamped (a concurrent Memory deletion after the stamp is
+      // still possible). In the refused-stamp case above the candidate stays
+      // pending; a later sweep stamps the recorded row only when the recorded
+      // identity is present on the candidate and the row still passes
       // findRecordedPromotedRow, unstamped.
       //
-      // flair#2714: commitCandidatePromotion confirms a thrown update with a
-      // fresh read; `report` lists it under promoted, incomplete (read back
-      // pending) or unconfirmed. A later sweep can adopt the recorded row of a
-      // candidate still pending (above).
+      // flair#2714: when this update throws, commitCandidatePromotion reads the
+      // candidate back and `report` lists the promotion under promoted
+      // (promoted on this row now), incomplete (pending now) or unconfirmed.
+      // A later sweep can adopt the recorded row of a candidate still pending
+      // (above).
       report(await commitCandidatePromotion({
         ...c,
         status: "promoted",

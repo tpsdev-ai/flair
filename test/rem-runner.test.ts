@@ -868,9 +868,9 @@ describe("ADK auto-promote wiring (#1205b-2)", () => {
     expect(r.logRow.errors).toEqual([]);
   });
 
-  // flair#2714: a promotion whose candidate update failed is reported by the
+  // flair#2714: a promotion whose candidate update threw is reported by the
   // server under `incomplete` (candidate read back pending) or `unconfirmed`
-  // (state not confirmed), apart from `promoted`. The runner carries both
+  // (promotion on this row not confirmed), apart from `promoted`. The runner carries both
   // counts onto the audit row rather than dropping them, and adds neither to
   // the promoted or skipped counts.
   it("records the server's incomplete and unconfirmed promotions apart from the promoted count", async () => {
@@ -882,10 +882,10 @@ describe("ADK auto-promote wiring (#1205b-2)", () => {
         promoted: ["m-1"],
         skipped: [],
         incomplete: [
-          { memoryId: "m-2", candidateId: "c-2", error: "write failed" },
-          { memoryId: "m-3", candidateId: "c-3", error: "write failed" },
+          { memoryId: "m-2", candidateId: "c-2", error: "write threw" },
+          { memoryId: "m-3", candidateId: "c-3", error: "write threw" },
         ],
-        unconfirmed: [{ memoryId: "m-4", candidateId: "c-4", error: "write failed", readBack: "read failed: timeout" }],
+        unconfirmed: [{ memoryId: "m-4", candidateId: "c-4", error: "write threw", readBack: "status rejected, promotedRowId m-4, reviewerId someone" }],
         count: 1,
         considered: 4,
       }),
@@ -894,7 +894,7 @@ describe("ADK auto-promote wiring (#1205b-2)", () => {
     expect(r.status).toBe("completed");
     expect(r.logRow.autoPromoted).toEqual({ promoted: 1, skipped: 0, incomplete: 2, unconfirmed: 1 });
     expect(formatAutoPromoted(r.logRow.autoPromoted!)).toBe(
-      "Auto-promoted: 1 to own memory (0 skipped); 2 incomplete (memory written, candidate update failed, candidate still pending); 1 unconfirmed (memory written, candidate update failed, candidate state not confirmed)",
+      "Auto-promoted: 1 to own memory (0 skipped); 2 incomplete (memory written, candidate update threw, candidate read back pending); 1 unconfirmed (memory written, candidate update threw, promotion on this row not confirmed)",
     );
   });
 
@@ -903,10 +903,10 @@ describe("ADK auto-promote wiring (#1205b-2)", () => {
     // A log row written before `incomplete` and `unconfirmed` existed.
     expect(formatAutoPromoted({ promoted: 2, skipped: 1 })).toBe("Auto-promoted: 2 to own memory (1 skipped)");
     expect(formatAutoPromoted({ promoted: 0, skipped: 0, incomplete: 1 })).toBe(
-      "Auto-promoted: 0 to own memory (0 skipped); 1 incomplete (memory written, candidate update failed, candidate still pending)",
+      "Auto-promoted: 0 to own memory (0 skipped); 1 incomplete (memory written, candidate update threw, candidate read back pending)",
     );
     expect(formatAutoPromoted({ promoted: 0, skipped: 3, unconfirmed: 2 })).toBe(
-      "Auto-promoted: 0 to own memory (3 skipped); 2 unconfirmed (memory written, candidate update failed, candidate state not confirmed)",
+      "Auto-promoted: 0 to own memory (3 skipped); 2 unconfirmed (memory written, candidate update threw, promotion on this row not confirmed)",
     );
   });
 

@@ -1,19 +1,23 @@
-// flair#2714 — an auto-promotion whose candidate update fails is reported by
-// the candidate's confirmed state, and a later sweep can adopt the recorded row.
+// flair#2714 — an auto-promotion whose candidate update throws is reported from
+// the candidate's state at a fresh read, and a later sweep can adopt the
+// recorded row when its identity is present on the candidate and it passes the
+// sweep's checks.
 //
 // AutoPromoteCandidates writes the promoted Memory row, stamps it, and only
 // then marks the candidate `promoted`. When that last write throws, a fresh
-// read of the candidate decides the report: read back pending → `incomplete`;
-// read back promoted with this row → `promoted`; anything else, or a read that
-// fails → `unconfirmed`. These cases run against a real ephemeral Harper:
+// read of the candidate decides the report. The read establishes only the
+// candidate's state now: pending → `incomplete`; promoted on this row with this
+// reviewer → `promoted`; any other state, or a read that fails → `unconfirmed`
+// (the promotion on this row was not confirmed). These cases run against a
+// real ephemeral Harper:
 //
 //   (a) the candidate update throws before it reaches Harper: `incomplete`
 //       (memory id, candidate id, error), not `promoted`; one stamped Memory
 //       row; the candidate is still pending with that row recorded on it.
 //   (b) the next sweep, with no fault, adopts the recorded row: the candidate
 //       ends `promoted`, still one Memory row, reported under `promoted`.
-//   (c) the per-call cap counts every Memory write, whatever its outcome, and
-//       an adoption counts too.
+//   (c) the per-call cap counts every Memory write attempt, whatever its
+//       outcome, and an adoption counts too.
 //   (d) a recorded row whose approval is not this sweep's own (another
 //       reviewer, another status, a binding that does not match its content,
 //       or no promotedAt) is not adopted.
@@ -22,23 +26,34 @@
 //   (g) an owner edit between the adoption's selection and its lock: the
 //       candidate is not marked promoted pointing at the edited row.
 //   (h) an owner edit that arrives while the adoption holds the lock waits
-//       for it, then clears the verdict on the row the candidate points to.
+//       for it; the candidate update is reported promoted, and the edit then
+//       clears the verdict on the row the candidate points to.
+//   (i) the update throws after a different status was committed: the read
+//       finds that status, so the promotion is `unconfirmed` with the status in
+//       `readBack`.
 //
-// The faults come from a test-only module installed into a PRIVATE composed
-// copy of the built component (the componentWithRetryProbe pattern,
-// test/helpers/federation-retry-probe-component.ts). It wraps
-// MemoryCandidate.put for a write that sets `status: "promoted"` on a candidate
-// the test arms with a marker file under FLAIR_TEST_PAUSE_DIR (each arm file is
-// consumed when it fires):
-//   arm.candidate-update-fail.<id>            throw before Harper's put;
-//   arm.candidate-update-fail-unreadable.<id> the same, and the next
-//                                             MemoryCandidate.get for <id> throws;
-//   arm.candidate-update-commit-throw.<id>    commit Harper's put in its own
-//                                             transaction, then throw.
-// (g) and (h) use the handler's own txn pause points
-// (`auto-promote-adopt-selected`, `auto-promote-adopt-locked`), inert unless
-// FLAIR_ENABLE_TEST_FAULT_INJECTION=1. Nothing under resources/ or src/ gains a
-// fault switch.
+// Two separate test seams, both off unless the test turns them on:
+//
+//   - A TEST-ONLY module, installed into a PRIVATE composed copy of the built
+//     component (the componentWithRetryProbe pattern,
+//     test/helpers/federation-retry-probe-component.ts) and not part of the
+//     package. It wraps MemoryCandidate.put for a write that sets
+//     `status: "promoted"` on a candidate the test arms with a marker file
+//     under FLAIR_TEST_PAUSE_DIR (each arm file is consumed when it fires):
+//       arm.candidate-update-fail.<id>            throw before Harper's put;
+//       arm.candidate-update-fail-unreadable.<id> the same, and the next
+//                                                 MemoryCandidate.get for <id>
+//                                                 throws;
+//       arm.candidate-update-commit-throw.<id>    commit Harper's put in its
+//                                                 own transaction, then throw;
+//       arm.candidate-update-commit-other-throw.<id>
+//                                                 commit the record with status
+//                                                 "rejected" instead, then throw.
+//   - Two txn pause points this change adds to the resource itself
+//     (`auto-promote-adopt-selected`, `auto-promote-adopt-locked`, through
+//     resources/txn-pause-point.ts), used by (g) and (h). They are inert
+//     unless FLAIR_ENABLE_TEST_FAULT_INJECTION=1 and an arm file exists; they
+//     pause, they never fail a write.
 
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
@@ -81,6 +96,11 @@ table.put = async function (record, ...rest) {
     if (consume(dir, "candidate-update-commit-throw", id)) {
       // Commit the real write in a transaction of its own, then throw.
       await globalThis.transaction({}, () => put.call(this, record));
+      throw new Error(${JSON.stringify(FAULT_MESSAGE)});
+    }
+    if (consume(dir, "candidate-update-commit-other-throw", id)) {
+      // Commit a different status in a transaction of its own, then throw.
+      await globalThis.transaction({}, () => put.call(this, { ...record, status: "rejected" }));
       throw new Error(${JSON.stringify(FAULT_MESSAGE)});
     }
   }
@@ -227,6 +247,7 @@ function armed(kind: string, candidateId: string): boolean {
 const UPDATE_FAIL = "candidate-update-fail";
 const UPDATE_FAIL_UNREADABLE = "candidate-update-fail-unreadable";
 const COMMIT_THROW = "candidate-update-commit-throw";
+const COMMIT_OTHER_THROW = "candidate-update-commit-other-throw";
 
 /**
  * Arm the pause point `point`, start `trigger`, run `compete` once the trigger
@@ -286,7 +307,7 @@ afterAll(async () => {
   if (appDir) rmSync(appDir, { recursive: true, force: true });
 }, HARPER_STOP_BUDGET_MS);
 
-describe("flair#2714 — a failed candidate update is reported by its confirmed state and adopted next cycle (real Harper)", () => {
+describe("flair#2714 — a thrown candidate update is reported from the candidate's read-back state and adopted next cycle (real Harper)", () => {
   const agent = mkAgent("ap2714-agent-a");
   const candidateId = "ap2714-cand-a";
   const claim = "The team ships the weekly release notes every Thursday afternoon.";
@@ -300,7 +321,7 @@ describe("flair#2714 — a failed candidate update is reported by its confirmed 
     const body = await sweep(harper, agent);
 
     expect(fired(UPDATE_FAIL, candidateId), "the injected candidate update fault fired").toBe(true);
-    expect(body.promoted, "a promotion whose candidate update failed is not reported promoted").toEqual([]);
+    expect(body.promoted, "a promotion whose candidate update threw is not reported promoted").toEqual([]);
     expect(body.count).toBe(0);
     expect(body.considered).toBe(1);
     expect(body.skipped).toEqual([]);
@@ -358,7 +379,7 @@ describe("flair#2714 — a failed candidate update is reported by its confirmed 
     expect((await rowsWithClaim(harper, agent.id, claim)).length).toBe(1);
   }, 120_000);
 
-  it("(c1) every Memory write counts toward the cap, an incomplete one included", async () => {
+  it("(c1) every Memory write attempt counts toward the cap, an incomplete one included", async () => {
     const capAgent = mkAgent("ap2714-agent-cap-writes");
     await seedAgent(harper, capAgent);
     const claims: Record<string, string> = {
@@ -371,8 +392,9 @@ describe("flair#2714 — a failed candidate update is reported by its confirmed 
       arm(UPDATE_FAIL, id);
     }
 
-    // limit 2, every candidate update fails: each Memory write counts, so the
-    // sweep stops after two candidates and leaves the third untouched.
+    // limit 2, every candidate update throws: each Memory write attempt
+    // counts, so the sweep stops after two candidates and leaves the third
+    // untouched.
     const first = await sweep(harper, capAgent, { limit: 2 });
     expect(first.count).toBe(0);
     expect(first.promoted).toEqual([]);
@@ -562,7 +584,7 @@ describe("flair#2714 — a failed candidate update is reported by its confirmed 
     expect(after.promotedRowId).toBe(next.promoted[0]);
   }, 120_000);
 
-  it("(h) an owner edit that arrives while the adoption holds the lock waits for it, then clears the verdict on the adopted row", async () => {
+  it("(h) an owner edit that arrives while the adoption holds the lock waits for it; after the reported promotion it clears the verdict on the adopted row", async () => {
     const editAgent = mkAgent("ap2714-agent-edit-after");
     const cid = "ap2714-edit-after";
     const text = "Release candidates soak in staging for forty-eight hours.";
@@ -594,10 +616,35 @@ describe("flair#2714 — a failed candidate update is reported by its confirmed 
     const cand = await readCandidate(harper, cid);
     expect(cand.status).toBe("promoted");
     expect(cand.promotedRowId).toBe(recordedId);
-    // The edit landed after the candidate update: it cleared the verdict on the
-    // row the candidate points to, as an edit to any promoted Memory does.
+    // The candidate update was reported promoted and the edit committed after
+    // it: it cleared the verdict on the row the candidate points to, as an
+    // edit to any promoted Memory does.
     const edited = await readMemory(harper, recordedId);
     expect(edited.content).toBe(EDITED);
     expect(edited.promotionStatus ?? null).toBeNull();
+  }, 120_000);
+
+  it("(i) the update throws after a different status was committed: unconfirmed, with that status in readBack", async () => {
+    const otherAgent = mkAgent("ap2714-agent-other-status");
+    await seedAgent(harper, otherAgent);
+    const cid = "ap2714-other-status";
+    const text = "Vendor contracts are reviewed by legal before renewal.";
+    await seedCandidate(harper, otherAgent.id, cid, text);
+    arm(COMMIT_OTHER_THROW, cid);
+
+    const body = await sweep(harper, otherAgent);
+
+    expect(fired(COMMIT_OTHER_THROW, cid)).toBe(true);
+    expect(body.promoted).toEqual([]);
+    expect(body.count).toBe(0);
+    expect(body.incomplete, "a candidate read back rejected is not reported pending").toEqual([]);
+    expect(body.unconfirmed.length).toBe(1);
+    const entry = body.unconfirmed[0];
+    expect(entry.candidateId).toBe(cid);
+    expect(entry.error).toContain(FAULT_MESSAGE);
+    const rows = await rowsWithClaim(harper, otherAgent.id, text);
+    expect(rows.map((r) => r.id)).toEqual([entry.memoryId]);
+    expect(entry.readBack).toBe(`status rejected, promotedRowId ${entry.memoryId}, reviewerId ${MACHINE_REVIEWER_ADK_AUTO_PROMOTE}`);
+    expect((await readCandidate(harper, cid)).status).toBe("rejected");
   }, 120_000);
 });

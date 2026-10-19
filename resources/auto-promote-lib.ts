@@ -75,9 +75,10 @@ export const AUTO_PROMOTE_RATIONALE =
  * runs once per nightly cycle, not on every write, and each promotion is a
  * bounded DB write (plus at most one embedding compute on the Memory.put path),
  * so this caps the blast radius of a single cycle rather than throttling a hot
- * path. AutoPromoteCandidates counts every eligible candidate it writes a
- * Memory row for, whatever the outcome, plus those it takes a recorded row for
- * (flair#2714). Overflow stays `pending` and is swept on subsequent cycles.
+ * path. AutoPromoteCandidates counts every eligible candidate it attempts a
+ * Memory write for, whatever the outcome (a rejected or thrown attempt
+ * included), plus those it takes a recorded row for (flair#2714). Overflow
+ * stays `pending` and is swept on subsequent cycles.
  */
 export const DEFAULT_MAX_AUTO_PROMOTE_PER_CYCLE = 200;
 

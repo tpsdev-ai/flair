@@ -997,9 +997,11 @@ export function register(program: Command): void {
           console.log(`Distilled:  ${row.distill.gathered} memor${row.distill.gathered === 1 ? "y" : "ies"} (cap ${row.distill.maxMemories}; ${remaining} unreflected remaining)`);
           if (row.distill.aborted) console.log(`Aborted:    yes — in-flight distillation stopped (flair rem pause)`);
         }
-        // row.autoPromoted populates when step 5b (#1205b-2 ADK auto-promote) ran
-        // this cycle — i.e. a non-dry-run cycle for an ADK agentId. Incomplete
-        // and unconfirmed promotions are named on the line (flair#2714).
+        // row.autoPromoted populates when step 5b (#1205b-2 auto-promote) ran
+        // this cycle — i.e. a non-dry-run cycle for an ADK agentId or one that
+        // distilled settled continuity sessions (flair#1257 slice 3).
+        // Incomplete and unconfirmed promotions are named on the line
+        // (flair#2714).
         if (row.autoPromoted) {
           console.log(formatAutoPromoted(row.autoPromoted));
         }
