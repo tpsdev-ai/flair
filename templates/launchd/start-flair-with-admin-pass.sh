@@ -75,20 +75,25 @@ NL='
 # Harper passes to process.kill, where it names a process group that can be
 # alive), more digits than a pid has, a file containing a NUL byte (command
 # substitution drops NUL bytes, so the shell would not see what Harper reads),
-# and a file whose leading whitespace is not ASCII (a no-break space or a
-# byte-order mark, which parseInt also skips).
-harper_pid_file_pid() {
+# and a file with any non-ASCII byte before the digits. The parse runs in a
+# subshell with LC_ALL=C, so [:space:] is ASCII whitespace only whatever the
+# caller's locale (bash under a UTF-8 locale would otherwise also strip a
+# leading no-break space); a leading no-break space or byte-order mark, which
+# parseInt skips, therefore yields no pid here.
+harper_pid_file_pid() (
+  LC_ALL=C
+  export LC_ALL
   HP_BYTES="$(wc -c < "$1" 2>/dev/null | tr -cd '0-9')"
   HP_NONUL="$(tr -d '\000' < "$1" 2>/dev/null | wc -c | tr -cd '0-9')"
-  if [ -z "$HP_BYTES" ] || [ "$HP_BYTES" != "$HP_NONUL" ]; then return 0; fi
-  HP_RAW="$(cat "$1" 2>/dev/null)" || return 0
+  if [ -z "$HP_BYTES" ] || [ "$HP_BYTES" != "$HP_NONUL" ]; then exit 0; fi
+  HP_RAW="$(cat "$1" 2>/dev/null)" || exit 0
   HP_RAW="${HP_RAW#"${HP_RAW%%[![:space:]]*}"}"
   case "$HP_RAW" in +*) HP_RAW="${HP_RAW#+}" ;; esac
   HP_PID="${HP_RAW%%[!0-9]*}"
   HP_PID="${HP_PID#"${HP_PID%%[!0]*}"}"
-  case "$HP_PID" in ""|???????????*) return 0 ;; esac
+  case "$HP_PID" in ""|???????????*) exit 0 ;; esac
   printf '%s\n' "$HP_PID"
-}
+)
 
 # flair#2697: is pid "$1" alive the way Harper's isProcessRunning counts it?
 # `kill -0` succeeds, or it fails only because the process belongs to another
@@ -283,15 +288,20 @@ export HDB_ADMIN_PASSWORD="$ADMIN_PASS"
 # flair#2697: move hdb.pid aside (marked above) so Harper's own check does not
 # refuse on a live process that is not this instance. The copy is named
 # hdb.pid.stale-<epoch seconds>, or .<n> after it when that name is taken when
-# checked. The copy is made with `ln`, which never replaces an existing name: if
-# a file or symlink appears at that name meanwhile, `ln` fails; if a directory
+# checked. The copy is made with `ln -n -P`, which never replaces an existing
+# name: -P links hdb.pid itself if it is a symlink, and -n treats a symlink at
+# the chosen name as an existing file rather than following it (macOS ln(1):
+# "-n Same as -h", "-h If the target_file or target_dir is a symbolic link, do
+# not follow it"; GNU coreutils ln: "-n, --no-dereference treat LINK_NAME as a
+# normal file if it is a symbolic link to a directory"). So if a file or
+# symlink appears at that name meanwhile, `ln` fails. If a real directory
 # appears there, `ln` puts the link inside it, and the launcher removes that
 # link, checks the removal, and treats the move as failed. The original is
-# removed only after a link at the chosen name succeeded; if that removal fails,
-# the launcher removes the link again (checked) and treats the move as failed.
-# A failed move leaves hdb.pid in place and is reported on one line, which also
-# names any link the launcher could not remove; Harper then exits 4 if that pid
-# is still alive.
+# removed only after a link at the chosen name succeeded; if that removal
+# fails, the launcher removes the link again (checked) and treats the move as
+# failed. On a failed move the launcher does not remove hdb.pid; it prints one
+# line, which also names any link it could not remove, and execs Harper, whose
+# own check then decides from whatever hdb.pid is present when it starts.
 if [ "$MOVE_PID_FILE" = "1" ]; then
   PID_FILE="$ROOTPATH/hdb.pid"
   STALE_EPOCH="$(date +%s 2>/dev/null || true)"
@@ -305,7 +315,7 @@ if [ "$MOVE_PID_FILE" = "1" ]; then
   done
   MOVED=0
   LEFT_LINK=""
-  if [ -n "$STALE" ] && ln -P "$PID_FILE" "$STALE" 2>/dev/null; then
+  if [ -n "$STALE" ] && ln -n -P "$PID_FILE" "$STALE" 2>/dev/null; then
     if [ -d "$STALE" ]; then
       LINK="$STALE/hdb.pid"
     elif rm -f "$PID_FILE" 2>/dev/null; then
@@ -324,7 +334,7 @@ if [ "$MOVE_PID_FILE" = "1" ]; then
   else
     LEFT_NOTE=""
     if [ -n "$LEFT_LINK" ]; then LEFT_NOTE=" (the link it made at $LEFT_LINK could not be removed)"; fi
-    echo "start-flair-with-admin-pass: $PID_FILE names pid $LIVE_PID, a live process that is not this instance: $MOVE_WHY; could not move hdb.pid aside$LEFT_NOTE. Starting Harper, which exits 4 if pid $LIVE_PID is still alive; move $PID_FILE out of the way." >&2
+    echo "start-flair-with-admin-pass: $PID_FILE names pid $LIVE_PID, a live process that is not this instance: $MOVE_WHY; could not move hdb.pid aside$LEFT_NOTE. Starting Harper, whose own check decides from the hdb.pid present when it starts; if it reports Harper already running, move $PID_FILE out of the way." >&2
   fi
 fi
 

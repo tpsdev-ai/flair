@@ -23,25 +23,27 @@
 // recognised PID-1 init, and process.kill(pid, 0) succeeds or fails with EPERM
 // (harperRefusesOn below replicates this; a negative value tests a process
 // group). The launcher acts only on a positive pid read the same way, and
-// leaves every other file to Harper: no digits, zero, a negative value, or a
-// file containing a NUL byte. It moves hdb.pid aside only on positive evidence
+// leaves every other file to Harper: no digits, zero, a negative value, a
+// file containing a NUL byte, or a non-ASCII byte before the digits (the parse
+// runs with LC_ALL=C). It moves hdb.pid aside only on positive evidence
 // that the live pid is not this instance: the command line ps reports is not
 // Harper-shaped, is not empty, contains neither `harper` (any case) nor
 // ROOTPATH (as given or physical), and either the process runs as another uid,
 // or lsof is not installed, or lsof exits 0 with a listing that includes the
 // process's working directory and no open file under ROOTPATH. A failed,
 // killed or empty lsof listing is no evidence. The move happens after the
-// admin-pass checks pass, just before the exec: `ln` to
+// admin-pass checks pass, just before the exec: `ln -n -P` to
 // hdb.pid.stale-<epoch seconds> (a .<n> suffix when that name exists), then
-// removal of hdb.pid. `ln` never replaces a name: a file created there
-// meanwhile makes it fail; for a directory created there, `ln` puts the link
-// inside it, and the launcher removes that link, checks the removal and treats
-// the move as failed. One stderr line reports the move or its failure, naming
-// any link it could not remove. Every other case leaves the file in
-// place, including any Harper-shaped pid, with or without a disagreeing
-// sidecar. With an hdb.pid naming an unrelated live process and nothing
-// listening on the port, resolveInstanceServingPid returns null, so the doctor
-// plans no adopt (which would clean-stop that process).
+// removal of hdb.pid. `ln -n -P` never replaces a name: a file or symlink
+// created there meanwhile makes it fail; for a real directory created there,
+// `ln` puts the link inside it, and the launcher removes that link, checks the
+// removal and treats the move as failed. One stderr line reports the move or
+// its failure, naming any link it could not remove; after a failed move,
+// Harper decides from the hdb.pid present when it starts. In every other case
+// the launcher leaves the file in place, including any Harper-shaped pid, with
+// or without a disagreeing sidecar. With an hdb.pid naming an unrelated live
+// process and nothing listening on the port, resolveInstanceServingPid returns
+// null, so the doctor plans no adopt (which would clean-stop that process).
 //
 // Hermetic: the stub Harper the launcher execs only prints a marker (and, for
 // flair#2697, what hdb.pid holds when it runs). `ps`, `ln`, `mv`, `rm`, `lsof`
@@ -53,7 +55,7 @@
 // exits.
 import { shellScript } from "../helpers/shell-script.ts";
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
@@ -162,13 +164,15 @@ function expectMovedLine(stderr: string, pid: number, stalePath: string, clause:
 /**
  * Exactly one launcher line, saying hdb.pid naming `pid` could not be moved;
  * with `leftLink`, it also names that link as one the launcher could not remove.
+ * The line makes no claim about what Harper then does: Harper decides from the
+ * hdb.pid present when it starts.
  */
 function expectMoveFailedLine(stderr: string, pid: number, leftLink?: string): void {
   const lines = launcherLines(stderr);
   expect(lines.length).toBe(1);
   expect(lines[0]).toContain(notThisInstance(pid));
   const note = leftLink === undefined ? "" : ` (the link it made at ${leftLink} could not be removed)`;
-  expect(lines[0]).toContain(`; could not move hdb.pid aside${note}. Starting Harper, which exits 4 if pid ${pid} is still alive;`);
+  expect(lines[0]).toContain(`; could not move hdb.pid aside${note}. Starting Harper, whose own check decides from the hdb.pid present when it starts;`);
 }
 
 const HARPER_DIST = join(REPO_ROOT, "node_modules", "harper", "dist");
@@ -233,12 +237,15 @@ function fixedDateShim(root: string): string {
 
 /**
  * A PATH directory whose `name` (ln or mv) first creates its LAST argument when
- * it does not exist (a file holding `created-concurrently`, or an empty
- * directory), then runs the real command: a name taken by someone else between
- * the launcher's check and its move.
+ * it does not exist (a file holding `created-concurrently`, an empty directory,
+ * or a symlink to `symlinkTarget`), then runs the real command with the same
+ * arguments: a name taken by someone else between the launcher's check and its
+ * move. The stand-in only creates the race; the real command does the work.
  */
-function racingShim(root: string, name: "ln" | "mv", kind: "file" | "dir"): string {
-  const create = kind === "dir" ? `mkdir "$last"` : `printf 'created-concurrently\\n' > "$last"`;
+function racingShim(root: string, name: "ln" | "mv", kind: "file" | "dir" | "symlink", symlinkTarget?: string): string {
+  const create = kind === "dir" ? `mkdir "$last"`
+    : kind === "symlink" ? `"${which("ln")}" -s "${symlinkTarget}" "$last"`
+    : `printf 'created-concurrently\\n' > "$last"`;
   const dir = join(root, `shim-race-${name}`);
   mkdirSync(dir, { recursive: true });
   const p = join(dir, name);
@@ -1049,6 +1056,24 @@ describe("flair#2697 — the launcher moves aside an hdb.pid only on positive ev
     }
   }, 30_000);
 
+  test("a no-break space before the digits (parseInt skips it) -> no launcher pid under LC_ALL=C.UTF-8 or C; Harper's own check decides; hdb.pid untouched", async () => {
+    const live = startSleep();
+    await waitStarted(live);
+    for (const locale of ["C.UTF-8", "C"]) {
+      const root = mkRoot();
+      const content = `\u00a0${live}\n`;
+      writeFileSync(join(root, "hdb.pid"), content);
+      expect([...readFileSync(join(root, "hdb.pid")).subarray(0, 2)]).toEqual([0xc2, 0xa0]); // U+00A0 as UTF-8
+      expect(harperRefusesOn(join(root, "hdb.pid"))).toBe(live); // Harper reads the pid
+      const r = runLauncher(root, "node", stubHarperReportingPidFile(root), { LC_ALL: locale });
+      expect(r.status, `LC_ALL=${locale}`).toBe(0);
+      expect(r.stdout).toContain(MARKER);
+      expect(launcherLines(r.stderr)).toEqual([]);
+      expect(readFileSync(join(root, "hdb.pid"), "utf-8")).toBe(content);
+      expect(staleCopies(root)).toEqual([]);
+    }
+  }, 30_000);
+
   test("a pid Harper reads from leading whitespace, a +, leading zeros and trailing junk names the live process -> moved aside, content unchanged", async () => {
     const pid = startSleep();
     await waitStarted(pid);
@@ -1105,7 +1130,7 @@ describe("flair#2697 — the launcher moves aside an hdb.pid only on positive ev
 
   // A name created by someone else between the launcher's check and its move:
   // `ln` and `mv` stand-ins create it first, then run the real command.
-  test("a FILE created at the chosen name just before the move is not replaced -> the move fails; hdb.pid in place", async () => {
+  test("a FILE created at the chosen name just before the move is not replaced -> the move fails; the launcher does not remove hdb.pid", async () => {
     const root = mkRoot();
     const pid = startSleep();
     await waitStarted(pid);
@@ -1120,7 +1145,7 @@ describe("flair#2697 — the launcher moves aside an hdb.pid only on positive ev
     expectMoveFailedLine(r.stderr, pid);
   }, 30_000);
 
-  test("a DIRECTORY created at the chosen name just before the move: the link ln puts inside it is removed -> the move fails; hdb.pid in place", async () => {
+  test("a DIRECTORY created at the chosen name just before the move: the link ln puts inside it is removed -> the move fails; the launcher does not remove hdb.pid", async () => {
     const root = mkRoot();
     const pid = startSleep();
     await waitStarted(pid);
@@ -1135,7 +1160,31 @@ describe("flair#2697 — the launcher moves aside an hdb.pid only on positive ev
     expectMoveFailedLine(r.stderr, pid);
   }, 30_000);
 
-  test("a link the launcher cannot remove again (directory race; original not removable) is named in the failure line; hdb.pid in place", async () => {
+  // The real `ln` runs; the stand-in only creates the symlink first. With a
+  // failing `rm`, a link that `ln` had put inside the directory would stay
+  // there and be named in the line, so the case shows `ln` made none.
+  test("a SYMLINK to a directory created at the chosen name just before the move -> the real ln -n fails and links nothing into the directory; hdb.pid not removed by the launcher", async () => {
+    for (const failingRm of [false, true]) {
+      const root = mkRoot();
+      const target = join(mkRoot(), "elsewhere");
+      mkdirSync(target);
+      const pid = startSleep();
+      await waitStarted(pid);
+      writeFileSync(join(root, "hdb.pid"), `${pid}\n`);
+      const shims = [fixedDateShim(root), racingShim(root, "ln", "symlink", target), ...(failingRm ? [shimDir(root, "rm", "exit 1")] : [])];
+      const r = runLauncher(root, "node", stubHarperReportingPidFile(root), { PATH: shimPath(...shims) });
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain(MARKER);
+      const stale = join(root, `hdb.pid.stale-${FIXED_EPOCH}`);
+      expect(lstatSync(stale).isSymbolicLink()).toBe(true);
+      expect(readlinkSync(stale)).toBe(target);
+      expect(readdirSync(target)).toEqual([]);
+      expect(readFileSync(join(root, "hdb.pid"), "utf-8")).toBe(`${pid}\n`);
+      expectMoveFailedLine(r.stderr, pid);
+    }
+  }, 30_000);
+
+  test("a link the launcher cannot remove again (directory race; original not removable) is named in the failure line; the launcher does not remove hdb.pid", async () => {
     // Directory race with an `rm` that fails: the link inside the directory stays.
     {
       const root = mkRoot();
@@ -1211,7 +1260,7 @@ describe("flair#2697 — the launcher moves aside an hdb.pid only on positive ev
     }
   }, 30_000);
 
-  test("the link fails -> one line saying so, and Harper is exec'd anyway with hdb.pid in place", async () => {
+  test("the link fails -> one line saying so, and Harper is exec'd anyway; the launcher does not remove hdb.pid", async () => {
     const root = mkRoot();
     const pid = startSleep();
     await waitStarted(pid);
