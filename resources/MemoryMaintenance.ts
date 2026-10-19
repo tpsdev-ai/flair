@@ -259,11 +259,13 @@ export class MemoryMaintenance extends Resource {
             // Round 22: one orphan's failure must abort only THAT orphan, not
             // the whole sweep — catch it, count stats.errors, and continue (the
             // item loops above already work this way). Pinned by
-            // test/unit/memory-host-source.test.ts (r22-orphan-continues) — RED
+            // test/unit-isolated/memory-host-source.test.ts (r22-orphan-continues) — RED
             // if the try/catch is removed.
             //
-            // The confirmation reads and the delete run in ONE owned
-            // transaction. Harper has no compare-and-delete on a row's contents:
+            // The candidate re-reads and the staged delete run in ONE owned
+            // transaction (`c`); the confirmation reads run inside its callback
+            // but through fresh contexts, so they see committed state. Harper
+            // has no compare-and-delete on a row's contents:
             // the delete carries no condition on the pointer row it removes.
             // Harper stamps the transaction's writes with one time,
             // taken at its first read (the in-transaction Memory re-read below,
