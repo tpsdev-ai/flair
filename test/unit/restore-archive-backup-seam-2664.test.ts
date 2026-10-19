@@ -18,13 +18,22 @@
  *   with its four promotion fields cleared.
  * - "unchanged" returns stored rows as they are, as a server from before
  *   promotion bindings did; its archives carry verdicts with no hash.
+ *
+ * Slice 1b: each case's backup run publishes `<archive>.sha256` beside the
+ * archive. One case checks that the sidecar holds the SHA-256 of the file's
+ * exact bytes and that readBackupArtifact (the restore preflight) admits the
+ * pair; another runs the real `shasum -a 256 -c` on the pair and on a changed
+ * archive (skipped only where `shasum` is not installed; the checksum-tools
+ * test fails on Linux and macOS when it is missing).
  */
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { tempDir } from "../helpers/temp-dir.ts";
 import { parseRestoreArchive, validateRestoreSelection } from "../../src/lib/restore-archive.ts";
+import { readBackupArtifact } from "../../src/lib/backup-artifact.ts";
+import { findChecksumTools, runChecksumTool } from "../helpers/checksum-tools.ts";
 import { promotionContentHash } from "../../src/lib/promotion-content-hash.ts";
 import { applyPromotionBinding } from "../../resources/promotion-binding.ts";
 
@@ -108,6 +117,11 @@ catch (error) { console.error(error.message); process.exitCode = 1; }
 
 /** Run the real backup command against `memories`; return the published file's bytes. */
 async function backupBytes(memories: OwnedRow[]): Promise<Buffer> {
+  return (await backupArtifact(memories)).bytes;
+}
+
+/** Run the real backup command against `memories`; return the published files. */
+async function backupArtifact(memories: OwnedRow[]): Promise<{ output: string; bytes: Buffer; sidecar: string; stderr: string }> {
   const home = tempDir("flair-restore-seam-2664-");
   const output = join(home, "archive.json");
   const fixturePath = join(home, "fixture.json");
@@ -136,7 +150,7 @@ async function backupBytes(memories: OwnedRow[]): Promise<Buffer> {
   ]);
   if (exitCode !== 0) throw new Error(`backup exited ${exitCode}: ${stdout}${stderr}`);
   expect(stderr).toContain("Backup complete");
-  return readFileSync(output);
+  return { output, bytes: readFileSync(output), sidecar: readFileSync(`${output}.sha256`, "latin1"), stderr };
 }
 
 function kinds(result: ReturnType<typeof validateRestoreSelection>): Record<string, string> {
@@ -145,6 +159,29 @@ function kinds(result: ReturnType<typeof validateRestoreSelection>): Record<stri
 }
 
 describe("the real flair backup output passes through the restore validator", () => {
+  test("the sidecar beside the archive holds the SHA-256 of the file's exact bytes, and the restore preflight admits the pair", async () => {
+    const { output, bytes, sidecar, stderr } = await backupArtifact([...stored, stale]);
+    const digest = createHash("sha256").update(bytes).digest("hex");
+    expect(sidecar).toBe(`${digest}  archive.json\n`);
+    expect(stderr).toContain(`${digest} (${output}.sha256)`);
+    const verified = readBackupArtifact(output);
+    if (!verified.ok) throw new Error(`expected the published pair to verify: ${verified.reason}`);
+    expect(verified.sha256).toBe(digest);
+    expect(verified.archive).toEqual(JSON.parse(bytes.toString("utf8")));
+  }, 60_000);
+
+  const shasum = findChecksumTools().shasum;
+  test.skipIf(shasum === undefined)("the real shasum -a 256 -c accepts the published pair and rejects a changed archive", async () => {
+    const { output } = await backupArtifact([...stored, stale]);
+    const intact = runChecksumTool(shasum!, dirname(output), "archive.json.sha256");
+    expect(intact.status, intact.output).toBe(0);
+    expect(intact.output).toContain("archive.json: OK");
+    appendFileSync(output, "\n");
+    const changed = runChecksumTool(shasum!, dirname(output), "archive.json.sha256");
+    expect(changed.status, changed.output).not.toBe(0);
+    expect(changed.output).toContain("FAILED");
+  }, 60_000);
+
   test("served rows: the digest is the file's SHA-256 and each row keeps the verdict the archive carries", async () => {
     const served = [...stored, stale].map((row) => applyPromotionBinding(row));
     const bytes = await backupBytes(served);
