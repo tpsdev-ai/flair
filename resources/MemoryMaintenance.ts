@@ -220,7 +220,23 @@ export class MemoryMaintenance extends Resource {
         throw new Error("MemoryHostSource table unavailable (orphan sweep)");
       }
       if (pointerTable?.search && !dryRun) {
+        // Scope the sweep by the same rule as the Memory loop above: a
+        // non-admin run, and an admin run that names an agent, selects only
+        // pointer rows whose stamped author is that agent, before any
+        // orphan-derived read, count, error or delete. A pointer's owner is the
+        // `authorId` the write path stamped on the row; a pointer with an empty
+        // author has no owner and is outside an owner-targeted run. No target
+        // means fleet-wide admin maintenance, which sweeps every pointer row.
+        // The in-transaction re-reads below compare the WHOLE pointer row, so a
+        // pointer whose author changes after this selection is skipped.
+        const pointerInScope = (pointer: any): boolean => {
+          if (!targetAgent) return true;
+          const author = pointer?.authorId;
+          if (typeof author !== "string" || author.length === 0) return false;
+          return author === targetAgent;
+        };
         for await (const ptr of pointerTable.search()) {
+          if (!pointerInScope(ptr)) continue;
           const memoryId = ptr?.memoryId;
           if (typeof memoryId !== "string" || memoryId.length === 0) continue;
           try {
