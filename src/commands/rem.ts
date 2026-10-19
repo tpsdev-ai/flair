@@ -998,8 +998,9 @@ export function register(program: Command): void {
           if (row.distill.aborted) console.log(`Aborted:    yes — in-flight distillation stopped (flair rem pause)`);
         }
         // row.autoPromoted populates when step 5b (#1205b-2 auto-promote) ran
-        // this cycle — i.e. a non-dry-run cycle for an ADK agentId or one that
-        // distilled settled continuity sessions (flair#1257 slice 3).
+        // this cycle and the server answered — i.e. a non-aborted, non-dry-run
+        // cycle with active ADK tags or selected settled continuity sessions
+        // (flair#1257 slice 3); successful distillation is not required.
         // Incomplete and unconfirmed promotions are named on the line
         // (flair#2714).
         if (row.autoPromoted) {

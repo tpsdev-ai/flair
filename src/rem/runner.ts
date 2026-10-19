@@ -371,9 +371,10 @@ export interface RunnerLogRow {
   candidates?: string[];
   /**
    * #1205b-2: outcome of the server-side ADK auto-promote step (POST
-   * /AutoPromoteCandidates), populated only when this cycle ran it — i.e. a
-   * non-dry-run cycle for an ADK agentId (active adk: tags this cycle) or one
-   * that distilled settled continuity sessions (flair#1257 slice 3).
+   * /AutoPromoteCandidates), populated only when this cycle ran it and the
+   * server answered — i.e. a non-aborted, non-dry-run cycle with active adk:
+   * tags or selected settled continuity sessions (flair#1257 slice 3);
+   * successful distillation is not required.
    * `promoted` is the count of candidates auto-promoted to own memory this
    * cycle; `skipped` the length of the server's `skipped` list (candidates
    * left pending by a fail-closed gate — absent scope tag, content-safety —
@@ -387,7 +388,7 @@ export interface RunnerLogRow {
    * the row identity is recorded on the candidate and the row still passes
    * the sweep's checks, approval included. Each is 0 when the server's
    * response has no such list. Absent for dry-run cycles and cycles with
-   * neither, exactly like `candidates`.
+   * neither.
    */
   autoPromoted?: {
     promoted: number;
