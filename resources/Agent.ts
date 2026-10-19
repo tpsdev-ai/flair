@@ -202,16 +202,22 @@ export class Agent extends (databases as any).flair.Agent {
       });
     }
 
-    // 2. Only admin principals can change admin status. Compare the RESULTING
-    // status against the stored one so an ordinary self-update that simply
-    // doesn't mention either field is unaffected, and a no-op restatement of
-    // the caller's existing status is not a spurious denial.
+    // 2. Only admin principals can change admin status. Both sides of the
+    // comparison read the AUTHORITY, `role` (resources/agent-admin.ts), never
+    // the `admin` mirror: the stored role, against the role the record will
+    // have once the body is merged onto the stored row and reconciled
+    // (reconcileAdminFields turns `admin: true` into `role: "admin"`). The
+    // merged record is what a PATCH stores. A PUT stores its body's fields
+    // alone; whenever those reconcile to the admin role, so does the merged
+    // record, so a PUT that would store the admin role on a non-admin row is
+    // refused here too. An ordinary self-update that names neither field is
+    // unaffected, and a write whose reconciled role keeps the stored authority
+    // is admitted.
     const touchesPrivilegeFields =
       content != null && typeof content === "object" && ("role" in content || "admin" in content);
     if (touchesPrivilegeFields) {
-      const merged = { ...(existing ?? {}), ...content };
-      const wouldBeAdmin = agentRecordIsAdmin(merged) || merged.admin === true;
-      const isAdminNow = agentRecordIsAdmin(existing) || (existing?.admin === true);
+      const isAdminNow = agentRecordIsAdmin(existing);
+      const wouldBeAdmin = agentRecordIsAdmin(reconcileAdminFields({ ...(existing ?? {}), ...content }));
       if (wouldBeAdmin !== isAdminNow) {
         return new Response(JSON.stringify({ error: "only admin principals can change a principal's admin status" }), {
           status: 403, headers: { "content-type": "application/json" },
@@ -262,9 +268,11 @@ export class Agent extends (databases as any).flair.Agent {
     // to a row in the order of those times:
     //   - a deletion or rotation committed before the re-read is SEEN by it: a
     //     row the re-read finds absent is refused (the PUT never re-creates it),
-    //     and the immutable fields are taken from the re-read row;
-    //   - one committed after the re-read carries a later time, so Harper applies
-    //     it after this write (a deletion stays deleted, a rotated key stands).
+    //     and the immutable fields are taken from the re-read row
+    //     (test/integration/agent-put-race-2696.test.ts commits both here);
+    //   - one whose own transaction takes its time after the re-read carries a
+    //     later time, so Harper applies it after this write (a deletion stays
+    //     deleted, a rotated key stands).
     // Not covered: a write whose own transaction took its time before the
     // re-read and commits after it. There is no compare-and-set; per-id
     // serialization is tracked in flair#2478.

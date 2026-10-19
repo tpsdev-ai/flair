@@ -1,15 +1,19 @@
 // agent-put-race-2696.test.ts — flair#2696, against a REAL Harper.
 //
-// An Agent PUT reads the stored row and writes a full replacement that carries
-// the stored createdAt and publicKey. A deletion or a key rotation that commits
-// AFTER that read and BEFORE the write must not be undone by the PUT:
+// An Agent PUT reads the stored row, then re-reads it inside its own write
+// transaction and writes a full replacement that carries the re-read row's
+// createdAt and publicKey. A deletion or a key rotation that commits after the
+// PUT's first read and BEFORE that re-read is not undone by the PUT:
 //   (a) a deleted agent stays deleted (the PUT never re-creates it), and the
 //       PUT is refused with 404 `agent_put_requires_existing`;
-//   (b) the stored publicKey is the ROTATED key, never the one the PUT read,
-//       and the PUT's other fields are stored.
+//   (b) the stored publicKey is the ROTATED key, never the one the first read
+//       saw, and the PUT's other fields are stored.
+// A competing transaction whose time is taken before the re-read and that
+// commits after it is not exercised here; per-id serialization is tracked in
+// flair#2478.
 //
 // Each interleaving holds the PUT at its test-only pause point after the
-// stored-row read (`agent-put-pre` in resources/Agent.ts; resources/
+// first stored-row read (`agent-put-pre` in resources/Agent.ts; resources/
 // txn-pause-point.ts, enabled for THIS file's Harper only by
 // FLAIR_ENABLE_TEST_FAULT_INJECTION + FLAIR_TEST_PAUSE_DIR), commits the
 // competing write through the operations API — the same `delete` `flair agent
@@ -148,8 +152,8 @@ afterAll(async () => {
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
 }, HARPER_STOP_BUDGET_MS);
 
-describe("flair#2696 — a write committed between an Agent PUT's read and its write is not undone", () => {
-  test("(a) a deletion committed after the PUT's read leaves the agent deleted", async () => {
+describe("flair#2696 — a write committed between an Agent PUT's first read and its re-read is not undone", () => {
+  test("(a) a deletion committed after the PUT's first read and before its re-read leaves the agent deleted", async () => {
     const target = mkAgent(`put2696race-del-${randomUUID()}`);
     await seed({
       id: target.id, name: target.id, role: "agent", admin: false, status: "active",
@@ -167,13 +171,13 @@ describe("flair#2696 — a write committed between an Agent PUT's read and its w
       },
     );
 
-    expect(released, "the PUT never reached its pause after the stored-row read").toBe("go");
+    expect(released, "the PUT never reached its pause after the first stored-row read").toBe("go");
     expect(await rowIn(target.id), `the PUT (status ${result.status}: ${result.text}) re-created a deleted agent`).toBeNull();
     expect(result.status, `the PUT on a deleted agent answered ${result.status}: ${result.text}`).toBe(404);
     expect(JSON.parse(result.text).error).toBe("agent_put_requires_existing");
   }, 60_000);
 
-  test("(b) a key rotation committed after the PUT's read keeps the rotated publicKey", async () => {
+  test("(b) a key rotation committed after the PUT's first read and before its re-read keeps the rotated publicKey", async () => {
     const target = mkAgent(`put2696race-rot-${randomUUID()}`);
     const rotated = mkAgent(target.id);
     await seed({
@@ -195,7 +199,7 @@ describe("flair#2696 — a write committed between an Agent PUT's read and its w
       },
     );
 
-    expect(released, "the PUT never reached its pause after the stored-row read").toBe("go");
+    expect(released, "the PUT never reached its pause after the first stored-row read").toBe("go");
     const after = await rowIn(target.id);
     expect(after, `the agent row is gone after the PUT (status ${result.status}: ${result.text})`).not.toBeNull();
     expect(after?.publicKey, `the PUT (status ${result.status}: ${result.text}) restored the rotated-out publicKey`).toBe(rotated.publicKey);

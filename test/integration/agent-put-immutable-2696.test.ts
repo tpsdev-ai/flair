@@ -1,13 +1,16 @@
 // agent-put-immutable-2696.test.ts — flair#2696.
 //
 // An Agent PUT updates an EXISTING row: the STORED createdAt and publicKey are
-// carried into the replacement, ignoring any value the body sends. A PUT whose
-// target id has no stored row is refused with 404
+// carried into the replacement, ignoring any value the body sends. An otherwise
+// admissible PUT whose target id has no stored row is refused with 404
 // `agent_put_requires_existing` (its message names POST /AgentSeed, a creation
-// path; POST /Agent/ also creates a row) and writes nothing. Authorization is
-// unchanged, and PATCH keeps its merge behaviour. A deletion or a key rotation
-// committed between the PUT's read and its write is covered by
-// agent-put-race-2696.test.ts.
+// path; POST /Agent/ also creates a row) and writes nothing; the authorization
+// refusals come first (a signed non-admin PUT that includes `status`, for
+// example, is refused 403). PATCH keeps its merge behaviour. A deletion or a
+// key rotation committed after the PUT's first read and before its re-read in
+// the write transaction is covered by agent-put-race-2696.test.ts; a non-admin
+// write that would change an agent's authority, by
+// agent-authority-guard-2696.test.ts.
 //
 // Each case runs against a real Harper; the stored-row assertions use an
 // operations search_by_id in a separate request, so they read the committed
@@ -155,6 +158,13 @@ describe("flair#2696 — an Agent PUT updates an existing row and carries its im
     const body = JSON.parse(res.text);
     expect(body.error).toBe("agent_put_requires_existing");
     expect(String(body.message)).toContain("POST /AgentSeed");
+    expect(await rowIn(id), "a refused PUT wrote a row").toBeNull();
+  }, 30_000);
+
+  test("a signed non-admin PUT to a missing id that includes status is refused 403 before the existence check", async () => {
+    const id = `put2696-new-${randomUUID()}`;
+    const res = await put(`/Agent/${id}`, { id, name: id, status: "active" }, OTHER);
+    expect(res.status, `a non-admin PUT with status returned ${res.status}: ${res.text}`).toBe(403);
     expect(await rowIn(id), "a refused PUT wrote a row").toBeNull();
   }, 30_000);
 
