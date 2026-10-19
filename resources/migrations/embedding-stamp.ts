@@ -371,14 +371,15 @@ type ContentSuffixAttempt =
  * once; a held id, an unresolved-outcome marker or a store with no lock answers
  * `lock` and writes nothing. Holding it, the attempt re-reads the committed row:
  * a row that is not the one the vector was computed for (gone, or any field
- * changed) is `skipped` and nothing is written; a later scan re-reads it and
- * computes again.
+ * changed) is `skipped` and nothing is written; a later scan decides whether
+ * it is still stale, and if so computes again.
  *
  * Writes a usable vector in an owned transaction. It STAGES an incremental
  * `update` of only `embedding`, `embeddingModel`, `updatedAt` and
- * `embeddedContentHash` — the same field-only write Memory's own re-embed branch
+ * `embeddedContentHash` — the field-only write Memory's own re-embed branch
  * uses (flair#2465), never a full-row put — and the write touches no other field
- * of the committed row.
+ * of the committed row. (Memory's re-embed branch also gives a legacy row with
+ * no `instanceToken` one, flair#2478; this fallback writes no token.)
  * Then it CONFIRMS the committed row (an explicit fresh context) is still the
  * row this transaction read and embedded; a row gone or distinguishably changed
  * at confirmation aborts the owned transaction (`skipped`, nothing written).

@@ -26,8 +26,12 @@ import type { HarperInstance } from "./harper-lifecycle";
 
 export const TRACE_FILE = "memory-write-trace-2478.jsonl";
 
-/** The incremental field set every server-computed re-embed writes. */
+/** The incremental field set every server-computed re-embed writes. The HTTP
+ *  re-embed also writes `instanceToken` on a legacy row that has none
+ *  ({@link LEGACY_REEMBED_UPDATE_FIELDS}); the migration's fallback never does. */
 export const EMBEDDING_UPDATE_FIELDS = ["embedding", "embeddedContentHash", "embeddingModel", "updatedAt"];
+/** The HTTP re-embed's incremental field set on a legacy row with no `instanceToken`. */
+export const LEGACY_REEMBED_UPDATE_FIELDS = [...EMBEDDING_UPDATE_FIELDS, "instanceToken"];
 
 export interface TestAgent { id: string; publicKey: Uint8Array; secretKey: Uint8Array }
 export const newAgent = (id: string): TestAgent => ({ id, ...nacl.sign.keyPair() });

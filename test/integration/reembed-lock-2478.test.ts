@@ -6,8 +6,9 @@
  * The re-embed holds the id's per-id Memory write lock (phase `patch-reembed`)
  * from its first stored read through its owned transaction's commit and its
  * post-commit verification. It writes only `embedding`, `embeddingModel`,
- * `updatedAt` and `embeddedContentHash`, as an incremental update (asserted from
- * the real-Harper write trace). Each attempt re-reads the committed row inside
+ * `updatedAt` and `embeddedContentHash`, plus `instanceToken` on a legacy row
+ * that has none, as an incremental update (asserted from the real-Harper write
+ * trace, the legacy row included). Each attempt re-reads the committed row inside
  * its own transaction and embeds the stored text; a text change between the
  * plan and the write recomputes (or, after staging, refuses `409
  * stored_row_changed`), so a vector is stored only for the text it was computed
@@ -37,7 +38,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HARPER_STOP_BUDGET_MS, startHarper, stopHarper } from "../helpers/harper-lifecycle";
 import type { ProbeComponent } from "../helpers/component-with-replay-probe";
-import { RaceHarness, composeTracedComponent, cosine, expectRefused, newAgent } from "../helpers/embedding-writer-race";
+import { LEGACY_REEMBED_UPDATE_FIELDS, RaceHarness, composeTracedComponent, cosine, expectEmptyOwnerVector, expectRefused, newAgent } from "../helpers/embedding-writer-race";
 import { getModelId } from "../../resources/embeddings-provider.ts";
 import { stripEnginePrefix } from "../../resources/embedding-space-guard.ts";
 import { computeContentHash } from "../../resources/memory-feed-lib.ts";
@@ -141,6 +142,22 @@ describe("flair#2478 — the HTTP re-embed holds the id's lock through its commi
     expect(row.durability).toBe("standard");
     await expectBoundTo(row, ORIGINAL);
     h.expectIncrementalWrites(id, WRITER);
+    expect(h.writesBy(id, WRITER)).toHaveLength(1);
+  }, 120_000);
+
+  it("a legacy row with no instanceToken: the re-embed's one incremental update names the embedding fields and the token it gives the row", async () => {
+    const id = "rl2478-legacy-token";
+    await seed(id, { instanceToken: undefined });
+    expect((await h.readRow(id))?.instanceToken ?? null, "the seeded row carries a token").toBeNull();
+    const res = await reembed(id);
+    expect(res.status, await res.clone().text()).toBe(200);
+    const row = await h.readRow(id);
+    expect(await res.json()).toEqual({ id, updatedAt: row.updatedAt });
+    expect(typeof row.instanceToken === "string" && row.instanceToken.length > 0, "the legacy row was not given a token").toBe(true);
+    expect(row.content).toBe(ORIGINAL);
+    expect(row.visibility).toBe("shared");
+    await expectBoundTo(row, ORIGINAL);
+    h.expectIncrementalWrites(id, WRITER, LEGACY_REEMBED_UPDATE_FIELDS);
     expect(h.writesBy(id, WRITER)).toHaveLength(1);
   }, 120_000);
 
@@ -365,6 +382,29 @@ describe("flair#2478 — the re-embed stores a vector only for the text it was c
     const stored = await h.readRow(id);
     expect(stored.content).toBe(EDITED);
     await expectBoundTo(stored, EDITED, ORIGINAL);
+    h.expectIncrementalWrites(id, WRITER);
+  }, 120_000);
+
+  it("a row with an empty owner, text changed between the re-embed's confirmation and its commit: the answered vector is the new text's", async () => {
+    // An empty owner stores no text hash; the re-embed binds its vector by the
+    // stored text it re-reads, never by that hash. An administrator re-embeds it.
+    const id = "rl2478-drift-gap-no-owner";
+    await seed(id, { agentId: "" });
+    h.arm(CONFIRMED);
+    const pending = h.admin("PATCH", memPath(id), { embedding: null, embeddingModel: null });
+    try {
+      await h.assertPaused(CONFIRMED);
+      await h.rawUpdate(id, { content: EDITED });
+      await h.release(CONFIRMED);
+    } finally {
+      h.letGo(CONFIRMED);
+    }
+    const res = await pending;
+    expect(res.status, await res.clone().text()).toBe(200);
+    const stored = await h.readRow(id);
+    expect(await res.json()).toEqual({ id, updatedAt: stored.updatedAt });
+    expect(stored.content).toBe(EDITED);
+    expectEmptyOwnerVector(stored, CURRENT_MODEL_ID, await vectorOf(EDITED), await vectorOf(ORIGINAL));
     h.expectIncrementalWrites(id, WRITER);
   }, 120_000);
 });
