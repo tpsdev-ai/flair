@@ -42,7 +42,9 @@
  *
  * Approval writes a record only after the archive copy is published and read
  * back to the approved digest. So a fresh approval that fails or is
- * interrupted publishes no record, and a failed re-approval does not publish
+ * interrupted before the record is published leaves no new record (once the
+ * record rename succeeds, a process killed before reporting success leaves a
+ * valid approval without a success message), and a failed re-approval does not publish
  * a new one: a record that was already there stays as it was (and use still
  * rechecks its stored copy).
  *

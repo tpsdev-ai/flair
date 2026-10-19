@@ -43,7 +43,8 @@
  * no sidecar (step 7), or the new pair. Only the fourth starting state is
  * inconsistent, and step 5 removes its sidecar before anything is published.
  * A sidecar this backup writes never sits beside bytes it does not describe,
- * and restore refuses an archive with no sidecar. A process crash needs no
+ * and restore refuses an archive with no sidecar unless this host holds a
+ * valid approval for those exact bytes. A process crash needs no
  * fsync for this, because each step is one rename or unlink applied in order.
  * Surviving power loss in this order relies on the directory fsync, which is
  * best-effort (atomic-write.ts fsyncDir): on a filesystem that cannot fsync a
@@ -273,7 +274,7 @@ export function publishBackupArtifact(options: BackupPublishOptions, hooks: Back
     const cause = errorMessage(error);
     const state = publishedArchive
       ? `${outputPath} holds the new archive but its digest sidecar ${digestPath} was not written, ` +
-        "and restore refuses the archive without it; run the backup again"
+        "and restore refuses the archive without it unless this host holds a valid approval for these exact bytes; run the backup again"
       : removedOldDigest
         ? `the previous digest sidecar ${digestPath} was removed and ${outputPath} was not replaced, ` +
           "so a previous archive there no longer has a sidecar"
@@ -413,7 +414,7 @@ export function readBackupArtifact(archivePath: string, hooks: BackupArtifactRea
       reason:
         `archive ${archivePath} does not match its digest sidecar: its bytes hash to SHA-256 ${sha256}, ` +
         `and ${digestPath} records ${recorded.sha256}; ${stopped}. Use a copy of the archive and sidecar that ` +
-        "match each other (from the archive's directory, shasum -a 256 -c checks a pair), or take a new backup.",
+        "match each other (from the archive's directory, shasum -a 256 -c checks a pair; for a file name containing a carriage return use GNU sha256sum -c), or take a new backup.",
     };
   }
 

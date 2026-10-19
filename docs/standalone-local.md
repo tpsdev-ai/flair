@@ -209,7 +209,7 @@ See [upgrade.md](upgrade.md) for the full walkthrough including re-embedding, ro
 # flair-backup-YYYYMMDD.json.sha256
 flair backup --output ~/flair-backup-$(date +%Y%m%d).json
 
-# Restore an archive (the .sha256 sidecar must sit beside it)
+# Restore an archive (its .sha256 sidecar sits beside it, unless the archive is approved on this host; see below)
 flair restore ~/flair-backup-20260405.json
 ```
 
@@ -217,7 +217,7 @@ Always backup before upgrades. `flair backup` excludes private keys.
 
 Restoring Agent rows currently fails ([flair#2703](https://github.com/tpsdev-ai/flair/issues/2703)): restore reports each archived Agent row as failed (HTTP 400) and exits non-zero, so a full restore into a fresh instance does not complete at this release. Soul and Memory rows are still written, and restore reports any that do not read back as archived. Archived promotion verdicts are not restored either: restore reports a Memory row that carries one as failed (HTTP 403) unless the stored row already carries the same verdict.
 
-`flair backup` writes two files: the archive and `<archive>.sha256`, the SHA-256 of the archive's exact bytes in `sha256sum` format (from the archive's directory, `shasum -a 256 -c <archive>.sha256` or GNU `sha256sum -c <archive>.sha256` checks it). Keep and move the two files together. `flair restore` verifies the pair before it sends any request, `--dry-run` included. It refuses an archive whose sidecar does not match, and an archive with no sidecar unless that archive is approved on this host (below). The sidecar detects a damaged, truncated or mismatched file; it does not prove who wrote the archive.
+`flair backup` writes two files: the archive and `<archive>.sha256`, the SHA-256 of the archive's exact bytes in `sha256sum` format (from the archive's directory, `shasum -a 256 -c <archive>.sha256` or GNU `sha256sum -c <archive>.sha256` checks it; for a file name containing a carriage return, use GNU `sha256sum`). Keep and move the two files together. `flair restore` verifies the pair before it sends any request, `--dry-run` included. It refuses an archive whose sidecar does not match, and an archive with no sidecar unless that archive is approved on this host (below). The sidecar detects a damaged, truncated or mismatched file; it does not prove who wrote the archive.
 
 ### Restoring an archive written before digest sidecars
 

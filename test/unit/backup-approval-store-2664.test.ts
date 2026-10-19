@@ -12,7 +12,8 @@
  * symbolic links and unsafe import paths; a stored copy changed, removed or
  * swapped for a link after approval, caught on use; invalid records;
  * revocation and re-approval; and approval that fails or is killed (SIGKILL)
- * at each step: a fresh approval publishes no record, and a failed
+ * before each step: a fresh approval killed before record publication leaves
+ * no record, and a failed
  * re-approval of a revoked digest leaves it revoked.
  */
 import { describe, expect, test } from "bun:test";
