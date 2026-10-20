@@ -505,11 +505,13 @@ export class a2a extends A2AAdapter {}
  * Harper's REST layer dispatches a request whose `Accept` header is exactly
  * `text/event-stream` as CONNECT, not POST (#2717), so a spec-shaped A2A
  * client's `message/stream` POST reaches the resource's static connect instead
- * of the post dispatch. A POST that carries a JSON-RPC request is handed to the
- * same static post dispatch, which applies the same authentication, caller-match
- * and params checks and returns the same SSE response as without the header.
- * Any other request (another method, or a POST body that is not a JSON-RPC
- * request) keeps the resource's default connect handling.
+ * of the post dispatch. The connect override forwards ANY POST whose body is a
+ * non-array object with string `jsonrpc` and `method` fields to the same static
+ * post dispatch (including `"jsonrpc": "1.0"`), which applies its
+ * authentication, caller-match and params checks; every other request keeps the
+ * default connect handling. post's answer is returned as post gives it: an SSE
+ * stream for an admitted message/stream, JSON-RPC objects for other methods and
+ * for refusals.
  *
  * Assigned after the class because Harper's typings describe the base static
  * verb dispatch, not a subclass override.
