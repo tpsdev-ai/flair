@@ -46,13 +46,24 @@
 //       for an administrator's CONNECT credentials, a non-admin Harper user and
 //       an unauthenticated session (or the session is refused at CONNECT), and
 //       the rows read back unchanged.
+//   (g) An administrator already holds a row's by-id topic: for Memory,
+//       MemoryUsage, OrgSkillAssignment, Relationship and Soul (which the
+//       schema does not export; each is served only by a flair resource class
+//       that extends the table class) and Agent (which the schema also exports,
+//       and whose resource class lets any verified agent read, so the policy is
+//       what refuses a non-admin there), an administrator subscribes to
+//       `<Table>/<id>` first; a verified non-admin's SUBSCRIBE to the same
+//       topic is then refused (SUBACK 0x87); an authorized change committed to
+//       the row reaches the administrator and nothing reaches the non-admin;
+//       an anonymous retained PUBLISH to the topic is refused (or the session
+//       is refused at CONNECT) and the stored row reads back byte-identical.
 //
 // As in the SSE/WebSocket file, each Harper is checked twice: before the
 // least-privilege `flair-agent` Harper user is provisioned (verified agents
 // then resolve to the shared admin Harper user) and after; and on two Harpers,
 // one per `authentication.authorizeLocal` setting.
 //
-// Mutation checks: remove the subscribe() guard and (a)/(b) go red; remove the
+// Mutation checks: remove the subscribe() guard and (a)/(b)/(g) go red; remove the
 // publish() guard and (a)/(d) go red; remove the retained put()/delete() guard
 // and (a)/(f) go red; treat a protocol-layer call without an HTTP request as
 // internal and (e) goes red.
@@ -162,6 +173,17 @@ const NOT_TABLE_ROUTES = new Set(["AgentReadPosition", "OAuthToken"]);
 
 /** The policy's refusal of a table publish to a verified non-admin agent (resources/table-subscription-policy.ts). */
 const POLICY_PUBLISH_REFUSAL = "table publishes are for administrators";
+
+/**
+ * The tables (g) holds an administrator's subscription on before a refused
+ * caller acts: five the schema does not export, each served only by a flair
+ * resource class that extends the table class (resources/Memory.ts,
+ * MemoryUsage.ts, OrgSkillAssignment.ts, Relationship.ts, Soul.ts), and Agent,
+ * which the schema also exports (@export) and whose resource class
+ * (resources/Agent.ts) lets any verified agent read: there the policy, not a
+ * read rule, is what refuses a non-admin's subscription.
+ */
+const ADMIN_FIRST_TABLES = ["Memory", "MemoryUsage", "OrgSkillAssignment", "Relationship", "Soul", "Agent"] as const;
 
 const HARPERS = [
   { name: "authorizeLocal on (harness default)", authorizeLocal: undefined },
@@ -526,6 +548,74 @@ for (const config of HARPERS) {
         expect(await admin.publishRetained(`Memory/${adminRow}`, null)).toEqual({ kind: "answered", value: MQTT_REASON.SUCCESS });
         expect(await read("Memory", adminRow), "the administrator's retained delete removed the row").toBeUndefined();
       }, 60_000);
+
+      for (const table of ADMIN_FIRST_TABLES) {
+        test(`(g) ${table}: with an administrator already subscribed to a row's topic, a non-admin's SUBSCRIBE to it is refused and receives nothing of a change the administrator receives; an anonymous retained PUBLISH to it is refused and the stored row reads back byte-identical`, async () => {
+          const schema = await flairTables();
+          const shape = schema.get(table);
+          expect(shape, `${table} is a table in the flair database`).toBeDefined();
+          const { primaryKey } = shape!;
+          const key = `${p}-g-${table}-${randomUUID().slice(0, 8)}`;
+          const topic = `${table}/${key}`;
+          const row = await insertMarkerRow(table, shape!, key);
+          const clients: MqttClient[] = [];
+          try {
+            // 1. The administrator subscribes to the row's topic first and
+            //    stays subscribed for the rest of the test.
+            const { client: admin, connack: adminAck } = await mqttAs("basic");
+            clients.push(admin);
+            expect(adminAck, "administrator CONNACK").toBe(MQTT_REASON.SUCCESS);
+            expect(await suback(admin, [topic]), `administrator SUBSCRIBE ${topic}`).toEqual([MQTT_REASON.SUCCESS]);
+
+            // 2. A verified non-admin then subscribes to the same topic.
+            const { client: nonAdmin, connack } = await mqttAs(B);
+            clients.push(nonAdmin);
+            expect(connack, "a verified agent's MQTT session is accepted").toBe(MQTT_REASON.SUCCESS);
+            expect(await suback(nonAdmin, [topic]), `non-admin SUBSCRIBE ${topic} while an administrator holds it`).toEqual([MQTT_REASON.NOT_AUTHORIZED]);
+
+            // 3. An authorized change committed to the row reaches the
+            //    administrator (the positive control: the topic is live and
+            //    delivers), and nothing reaches the non-admin.
+            const changed = `${key}-v2`;
+            const next = variant(row, primaryKey, key, changed, key);
+            await adminInsert(table, next);
+            expect(
+              await admin.waitForPublish((m) => m.topic === topic && m.text.includes(changed), 10_000),
+              `the administrator's ${topic} subscription receives the committed change`,
+            ).toBeDefined();
+            await new Promise((r) => setTimeout(r, 500));
+            expect(nonAdmin.receivedText.includes(key), `bytes of the ${table} row reached the refused non-admin session`).toBe(false);
+            expect(nonAdmin.publishes.map((m) => m.topic), `messages delivered to the refused non-admin session`).toEqual([]);
+
+            // 4. An anonymous retained PUBLISH to the row's topic is refused,
+            //    and the stored row reads back byte-identical.
+            const before = await storedRow(table, primaryKey, key);
+            expect(before, `the ${table} row is stored`).toBeDefined();
+            expect(JSON.stringify(before), `the stored ${table} row carries the committed change`).toContain(changed);
+            const anonMarker = `${key}-anon`;
+            const anon = await mqttAs("anonymous");
+            clients.push(anon.client);
+            if (anon.connack === MQTT_REASON.SUCCESS) {
+              // authorizeLocal admits the loopback session; the policy still
+              // refuses the write as one without a valid credential.
+              expect(
+                await anon.client.publishRetained(topic, variant(next, primaryKey, changed, anonMarker, key)),
+                `anonymous retained PUBLISH ${topic}`,
+              ).toEqual({ kind: "answered", value: MQTT_REASON.UNSPECIFIED_ERROR });
+            } else {
+              expect(typeof anon.connack === "number" && anon.connack !== MQTT_REASON.SUCCESS, `anonymous CONNACK ${anon.connack}`).toBe(true);
+            }
+            const after = await storedRow(table, primaryKey, key);
+            expect(JSON.stringify(after), `the stored ${table} row after the anonymous retained PUBLISH`).toBe(JSON.stringify(before));
+            await new Promise((r) => setTimeout(r, 300));
+            expect(admin.receivedText.includes(anonMarker), `the anonymous retained PUBLISH reached the administrator's subscription`).toBe(false);
+            expect(nonAdmin.publishes.map((m) => m.topic), `messages delivered to the refused non-admin session`).toEqual([]);
+          } finally {
+            await Promise.all(clients.map((c) => c.close()));
+            await adminOp({ operation: "delete", database: "flair", table, ids: [row[primaryKey]] }).then((r) => r.arrayBuffer());
+          }
+        }, 60_000);
+      }
     }
 
     beforeAll(async () => {
