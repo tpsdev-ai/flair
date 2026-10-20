@@ -7,7 +7,8 @@ import { pathToFileURL } from "node:url";
 import { tempDir } from "../../../test/helpers/temp-dir.ts";
 
 /**
- * node-llama-cpp's own simple-git call paths, run offline against the simple-git
+ * node-llama-cpp's own simple-git call paths, run against local repositories and
+ * the bundle node-llama-cpp ships, with the simple-git
  * that node-llama-cpp resolves in this workspace (#2726 review).
  *
  * node-llama-cpp 3.18.1 declares simple-git ^3.33.0. The root `overrides` move
@@ -31,9 +32,11 @@ import { tempDir } from "../../../test/helpers/temp-dir.ts";
  * through a node_modules symlink to the directory that holds the real package.
  * The test sets its own HOME and uses its own temp dirs.
  *
- * Skipped only when git is not on PATH (ENOENT). A git that is on PATH but does
- * not answer `git --version` (a nonzero exit, a timeout, unexpected output)
- * fails both git cases with the probe's reason. Nothing here reaches the network.
+ * Skipped only when spawning `git --version` fails with ENOENT (no git could be
+ * spawned). Any other probe failure (a nonzero exit, a timeout, unexpected
+ * output) fails both git cases with the probe's reason. The GitHub URL that
+ * node-llama-cpp builds is rewritten to a local path through the test's own
+ * HOME .gitconfig; the system git configuration is not isolated.
  */
 
 const GIT_TIMEOUT_MS = 20_000;
@@ -62,7 +65,7 @@ const readVersion = (dir: string): string => JSON.parse(readFileSync(join(dir, "
 type GitProbe = { state: "present" } | { state: "missing" } | { state: "broken"; reason: string };
 
 /**
- * Classify `git --version`. Only ENOENT (no git on PATH) is "missing"; any other
+ * Classify `git --version`. Only ENOENT (no git could be spawned) is "missing"; any other
  * spawn error (a timeout included), a signal, a nonzero exit or output that does
  * not start with "git version" is "broken", which fails the git cases.
  */
@@ -87,7 +90,7 @@ function probeGit(env: NodeJS.ProcessEnv = process.env, timeoutMs = GIT_TIMEOUT_
 
 const gitProbe = probeGit();
 const gitMissing = gitProbe.state === "missing";
-const skipNote = gitMissing ? " [skipped: git is not on PATH]" : "";
+const skipNote = gitMissing ? " [skipped: git could not be spawned]" : "";
 
 /** Fail a git case, by name and reason, when git is on PATH but unusable. */
 function requireUsableGit(): void {
@@ -124,7 +127,7 @@ function git(args: string[], cwd: string, home: string): string {
   }).trim();
 }
 
-/** Point https://github.com/ at `target` for every git child that reads this HOME. */
+/** Point https://github.com/ at `target` in this HOME's .gitconfig (system git configuration still applies). */
 function writeGitconfig(home: string, target: string): void {
   writeFileSync(
     join(home, ".gitconfig"),
@@ -195,9 +198,9 @@ function gitStubDir(body: string): string {
   return dir;
 }
 
-describe("the git probe skips only when git is not on PATH", () => {
+describe("the git probe skips only when spawning git fails with ENOENT", () => {
   test(
-    "no git on PATH (ENOENT) is missing",
+    "spawning git failing with ENOENT is missing",
     () => {
       expect(probeGit({ ...process.env, PATH: tempDir("flair-bench-no-git-") })).toEqual({ state: "missing" });
     },
