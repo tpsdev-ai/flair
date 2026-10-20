@@ -114,8 +114,9 @@ import {
  *     content-changing write clears them), so a verdict with this reviewer on
  *     the recorded incarnation, written through those paths, came from an
  *     auto-promote stamp. That is enforced by AUTHORITY_FIELDS.Memory in
- *     resources/authority-field-guard.ts, pinned by
- *     test/integration/memory-authority-fields.test.ts.
+ *     resources/authority-field-guard.ts; test/integration/
+ *     memory-authority-fields.test.ts pins it for promotionStatus, promotedAt
+ *     and promotedBy (not promotionContentHash).
  *     The admin operations API writes rows directly and can set any
  *     field; this check does not defend against it. The adoption re-runs this
  *     check on a fresh read under the per-id Memory lock and holds the lock
