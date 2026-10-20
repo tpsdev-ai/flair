@@ -113,20 +113,7 @@ describe("MemoryDedupStats consults the guard against a real Harper (flair#2559)
   beforeAll(async () => {
     pauseDir = mkdtempSync(join(tmpdir(), "flair-2559-dedup-pause-"));
     writeFileSync(join(pauseDir, `arm.${POINT}`), ""); // armed before Harper starts
-    const saved: Record<string, string | undefined> = {
-      [TEST_FAULT_INJECTION_ENV]: process.env[TEST_FAULT_INJECTION_ENV],
-      [TEST_PAUSE_DIR_ENV]: process.env[TEST_PAUSE_DIR_ENV],
-    };
-    process.env[TEST_FAULT_INJECTION_ENV] = "1";
-    process.env[TEST_PAUSE_DIR_ENV] = pauseDir;
-    try {
-      h = await startHarper();
-    } finally {
-      for (const [key, value] of Object.entries(saved)) {
-        if (value === undefined) delete process.env[key];
-        else process.env[key] = value;
-      }
-    }
+    h = await startHarper({ serverEnv: { [TEST_FAULT_INJECTION_ENV]: "1", [TEST_PAUSE_DIR_ENV]: pauseDir } });
     expect(h.external).toBe(false);
     expect(h.ownsInstallDir).toBe(true);
     // One row to PATCH later. Its vector carries the current model stamp (the
@@ -224,20 +211,7 @@ gate("MemoryBootstrap's task-relevant selection consults the guard against a rea
   beforeAll(async () => {
     pauseDir = mkdtempSync(join(tmpdir(), "flair-2559-boot-pause-"));
     writeFileSync(join(pauseDir, `arm.${POINT}`), "");
-    const saved: Record<string, string | undefined> = {
-      [TEST_FAULT_INJECTION_ENV]: process.env[TEST_FAULT_INJECTION_ENV],
-      [TEST_PAUSE_DIR_ENV]: process.env[TEST_PAUSE_DIR_ENV],
-    };
-    process.env[TEST_FAULT_INJECTION_ENV] = "1";
-    process.env[TEST_PAUSE_DIR_ENV] = pauseDir;
-    try {
-      h = await startHarper({ env: { FLAIR_RETRIEVAL_MODE: "vector-only" } });
-    } finally {
-      for (const [key, value] of Object.entries(saved)) {
-        if (value === undefined) delete process.env[key];
-        else process.env[key] = value;
-      }
-    }
+    h = await startHarper({ serverEnv: { [TEST_FAULT_INJECTION_ENV]: "1", [TEST_PAUSE_DIR_ENV]: pauseDir }, env: { FLAIR_RETRIEVAL_MODE: "vector-only" } });
     expect(h.external).toBe(false);
     expect(h.ownsInstallDir).toBe(true);
     await adminOp(h, {

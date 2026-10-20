@@ -110,19 +110,9 @@ function assertOwnInstance(h: HarperInstance): void {
   }
 }
 
-/** Start an isolated Harper with `env` set in this process only for the spawn, then restored. */
+/** Start an isolated Harper with the server-side `env` values declared on the spawn. */
 async function startTarget(homeDir: string, env: Record<string, string>): Promise<Target> {
-  const saved = Object.fromEntries(Object.keys(env).map((k) => [k, process.env[k]]));
-  Object.assign(process.env, env);
-  let harper: HarperInstance;
-  try {
-    harper = await startHarper({ homeDir });
-  } finally {
-    for (const [key, value] of Object.entries(saved)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  }
+  const harper = await startHarper({ homeDir, serverEnv: env });
   assertOwnInstance(harper);
   return { harper, auth: "Basic " + Buffer.from(`${harper.admin.username}:${harper.admin.password}`).toString("base64") };
 }
