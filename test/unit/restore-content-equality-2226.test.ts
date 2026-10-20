@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,7 +19,10 @@ type Fault = { method: string; path: string; status?: number; body?: unknown; ra
 async function run(backup: unknown, faults: Fault[] = [], flags: string[] = []) {
   const dir = mkdtempSync(join(tmpdir(), "restore-2226-"));
   try {
-    writeFileSync(join(dir, "archive.json"), JSON.stringify(backup));
+    const bytes = Buffer.from(JSON.stringify(backup));
+    writeFileSync(join(dir, "archive.json"), bytes);
+    // The detached digest flair backup publishes beside the archive (#2664).
+    writeFileSync(join(dir, "archive.json.sha256"), `${createHash("sha256").update(bytes).digest("hex")}  archive.json\n`);
     writeFileSync(join(dir, "driver.ts"), `
       import { Command } from ${JSON.stringify(commanderPath)};
       import { bindCli, register } from ${JSON.stringify(commandPath)};

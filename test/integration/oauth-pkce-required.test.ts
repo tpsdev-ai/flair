@@ -4,7 +4,7 @@
 //
 // After the earlier request, scope and client checks pass, GET /OAuthAuthorize
 // (the consent page) and POST /OAuthAuthorize (its Approve) refuse a request
-// whose code_challenge is absent, empty, not a string, or not 43-128 base64url
+// whose code_challenge is absent, empty, not a string, or not exactly 43 base64url
 // characters, or whose code_challenge_method is not exactly "S256", with 400
 // invalid_request and the same body: GET before rendering the form, POST before
 // authentication and before any authorization code is stored. The order on both
@@ -378,9 +378,32 @@ describe("S256 PKCE is required at the authorization endpoints and the token exc
     expect(await authCodeCount()).toBe(before);
   }, 30_000);
 
-  test("a code_challenge of 128 base64url characters (the RFC 7636 maximum) is accepted: the page renders it and the approve stores it", async () => {
-    const challenge = randomBytes(96).toString("base64url");
-    expect(challenge.length).toBe(128);
+  test("a code_challenge longer than 43 base64url characters (44, and 128) is refused 400 invalid_request at the consent page and the approve, and stores no code", async () => {
+    const state = randomUUID();
+    const before = await authCodeCount();
+    for (const len of [44, 128]) {
+      const challenge = randomBytes(96).toString("base64url").slice(0, len);
+      expect(challenge.length).toBe(len);
+      const page = await getConsent({
+        client_id: flowClient, redirect_uri: ALLOWED_REDIRECT_URI, scope: "memory:read",
+        state, code_challenge: challenge, code_challenge_method: "S256",
+      });
+      expect(page.status).toBe(400);
+      const pageBody = await page.json();
+      expect(pageBody.error).toBe("invalid_request");
+      const res = await postConsent({ action: "approve", client_id: flowClient, redirect_uri: ALLOWED_REDIRECT_URI, scope: "memory:read",
+        state, code_challenge: challenge, code_challenge_method: "S256",
+      });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual(pageBody);
+    }
+    expect(await authCodeCount()).toBe(before);
+  }, 30_000);
+
+  test("a 43-character S256 challenge computed from a verifier is accepted and the approve stores it", async () => {
+    const verifier = randomBytes(32).toString("base64url");
+    const challenge = createHash("sha256").update(verifier).digest("base64url");
+    expect(challenge.length).toBe(43);
     const state = randomUUID();
     const page = await getConsent({
       client_id: flowClient, redirect_uri: ALLOWED_REDIRECT_URI, scope: "memory:read",
@@ -390,7 +413,6 @@ describe("S256 PKCE is required at the authorization endpoints and the token exc
     const fields = new Map(formFields(await page.text()));
     expect(fields.get("code_challenge") === challenge).toBe(true);
     expect(fields.get("code_challenge_method")).toBe("S256");
-
     const res = await postConsent({
       action: "approve", client_id: flowClient, redirect_uri: ALLOWED_REDIRECT_URI, scope: "memory:read",
       state, code_challenge: challenge, code_challenge_method: "S256",
