@@ -18,9 +18,11 @@
 //       ends `promoted`, still one Memory row, reported under `promoted`.
 //   (c) the per-call cap counts every Memory write attempt, whatever its
 //       outcome, and an adoption counts too.
-//   (d) a recorded row whose approval is not this sweep's own (another
-//       reviewer, another status, a binding that does not match its content,
-//       or no promotedAt) is not adopted.
+//   (d) a recorded row that is no longer the row the sweep wrote (another
+//       owner, another incarnation token, archived, other content, another
+//       visibility, durability or tag set, or deleted) or whose approval is
+//       not this sweep's own (another reviewer, another status, a binding that
+//       does not match its content, or no promotedAt) is not adopted.
 //   (e) the candidate update commits and then throws: reported `promoted`.
 //   (f) the update throws and the confirming read fails: `unconfirmed`.
 //   (g) an owner edit between the adoption's selection and its lock: the
@@ -456,41 +458,74 @@ describe("flair#2714 — a thrown candidate update is reported from the candidat
     }
   }, 180_000);
 
-  // (d) The adoption gate: only a row carrying this sweep's own approval, bound
-  // to its current content and with a promotedAt, is adopted. Each tamper below
-  // is applied through the admin operations API (it bypasses the resource
-  // layer, so it leaves the row's incarnation token unchanged) to the recorded
-  // row of an incomplete promotion; the next sweep must not adopt it.
-  const tampers: { slug: string; fields: Record<string, unknown> }[] = [
-    { slug: "reviewer", fields: { promotedBy: "someone-else" } },
-    { slug: "status", fields: { promotionStatus: "rejected" } },
-    { slug: "binding", fields: { promotionContentHash: "0".repeat(64) } },
-    { slug: "promotedat", fields: { promotedAt: null } },
+  // (d) The adoption gate (recordedRowUse): the recorded row is adopted only
+  // when it is still the row the sweep wrote — the sweeping agent's, the
+  // recorded incarnation token, not archived, the candidate's claim, the
+  // sweep's visibility, durability and tags — and carries this sweep's own
+  // approval, bound to its current content and with a promotedAt. Each case
+  // below breaks exactly one of those conditions on the recorded row of an
+  // incomplete promotion, through the admin operations API (it bypasses the
+  // resource layer, so an update leaves every other field, the incarnation
+  // token included, unchanged), or deletes the row. The next sweep must not
+  // adopt it: it writes and stamps its own row for the sweeping agent.
+  const OTHER_CONTENT = "A different claim the recorded row now carries.";
+  const tampers: { slug: string; what: string; fields?: (before: any) => Record<string, unknown>; remove?: true }[] = [
+    { slug: "reviewer", what: "with another reviewer on its verdict", fields: () => ({ promotedBy: "someone-else" }) },
+    { slug: "status", what: "with another status on its verdict", fields: () => ({ promotionStatus: "rejected" }) },
+    { slug: "binding", what: "with a content hash that does not match its content", fields: () => ({ promotionContentHash: "0".repeat(64) }) },
+    { slug: "promotedat", what: "with no promotedAt", fields: () => ({ promotedAt: null }) },
+    { slug: "agentid", what: "with another agent as its owner", fields: () => ({ agentId: "ap2714-agent-gate-owner-b" }) },
+    { slug: "token", what: "with another incarnation token", fields: () => ({ instanceToken: randomUUID() }) },
+    { slug: "archived", what: "with archived set", fields: () => ({ archived: true }) },
+    // The hash is rebound to the new content, so only the content check differs.
+    { slug: "content", what: "with content other than the claim (hash rebound)", fields: () => ({ content: OTHER_CONTENT, promotionContentHash: promotionContentHash(OTHER_CONTENT) }) },
+    { slug: "visibility", what: "with another visibility", fields: () => ({ visibility: "shared" }) },
+    { slug: "durability", what: "with another durability", fields: () => ({ durability: "standard" }) },
+    { slug: "tags", what: "with a promotion tag missing", fields: (before) => ({ tags: (before.tags as string[]).filter((t) => !t.startsWith("from:")) }) },
+    { slug: "deleted", what: "that was deleted", remove: true },
   ];
-  for (const tamper of tampers) {
-    it(`(d) a recorded row with another ${tamper.slug} on its verdict is not adopted`, async () => {
+  tampers.forEach((tamper, index) => {
+    it(`(d) a recorded row ${tamper.what} is not adopted`, async () => {
       const gateAgent = mkAgent(`ap2714-agent-gate-${tamper.slug}`);
       const cid = `ap2714-gate-${tamper.slug}`;
-      const text = `Gate case ${tamper.slug}: the archive job runs nightly at two.`;
+      // Plain text: a claim the content-safety redaction rewrites would not be
+      // stored as the claim, and the row would fail the content check anyway.
+      const text = `Gate case number ${index + 1}: the archive job runs nightly at two.`;
       const recordedId = await seedIncomplete(gateAgent, cid, text);
       const before = await readMemory(harper, recordedId);
-      const res = await adminOp(harper, { operation: "update", database: "flair", table: "Memory", records: [{ id: recordedId, ...tamper.fields }] });
-      expect(res.status, `tamper update returned ${res.status}`).toBe(200);
-      const tampered = await readMemory(harper, recordedId);
-      expect(tampered.instanceToken, "the tamper keeps the incarnation token").toBe(before.instanceToken);
-      for (const [field, value] of Object.entries(tamper.fields)) expect(tampered[field] ?? null).toBe(value);
+      expect(before.agentId).toBe(gateAgent.id);
+      expect(before.content, "the recorded row stores the claim unchanged").toBe(text);
+      if (tamper.remove) {
+        const res = await adminOp(harper, { operation: "delete", database: "flair", table: "Memory", hash_values: [recordedId] });
+        expect(res.status, `tamper delete returned ${res.status}`).toBe(200);
+        expect(await readMemory(harper, recordedId), "the recorded row is gone").toBeNull();
+      } else {
+        const fields = tamper.fields!(before);
+        const res = await adminOp(harper, { operation: "update", database: "flair", table: "Memory", records: [{ id: recordedId, ...fields }] });
+        expect(res.status, `tamper update returned ${res.status}`).toBe(200);
+        const tampered = await readMemory(harper, recordedId);
+        for (const [field, value] of Object.entries(fields)) expect(tampered[field] ?? null, field).toEqual(value);
+        if (!("instanceToken" in fields)) {
+          expect(tampered.instanceToken, "the tamper keeps the incarnation token").toBe(before.instanceToken);
+        }
+      }
 
       const second = await sweep(harper, gateAgent);
       expect(second.incomplete).toEqual([]);
+      expect(second.unconfirmed).toEqual([]);
       expect(second.promoted.length).toBe(1);
       expect(second.promoted[0], "the tampered row is not adopted").not.toBe(recordedId);
-      const rows = await rowsWithClaim(harper, gateAgent.id, text);
-      expect(rows.length, "the sweep wrote its own row").toBe(2);
+      const fresh = await readMemory(harper, second.promoted[0]);
+      expect(fresh.agentId, "the fresh row belongs to the sweeping agent").toBe(gateAgent.id);
+      expect(fresh.content).toBe(text);
+      expect(fresh.promotionStatus).toBe("approved");
+      const others = (await rowsWithClaim(harper, gateAgent.id, text)).filter((r) => r.id !== recordedId);
+      expect(others.map((r) => r.id), "the sweep wrote exactly one row of its own").toEqual([second.promoted[0]]);
       const cand = await readCandidate(harper, cid);
       expect(cand.status).toBe("promoted");
-      expect(cand.promotedRowId).toBe(second.promoted[0]);
+      expect(cand.promotedRowId, "the candidate points at the fresh row, not the tampered one").toBe(second.promoted[0]);
     }, 120_000);
-  }
+  });
 
   it("(e) the candidate update commits and then throws: the confirming read reports it promoted", async () => {
     const commitAgent = mkAgent("ap2714-agent-commit-throw");
