@@ -150,6 +150,11 @@ for (const [file, alias] of [
   ["health", "alias-source:db.flair?.Memory#1"],
   ["migration-boot", "alias-source:flair?.Memory#1"],
   ["bm25-index-service", "alias-source:(databases as any).flair?.Memory#1"],
+  // subscribeInProcess (resources/table-subscription-policy.ts) calls only the
+  // table's subscribe(): the BM25 feed and FeedMemories' two subscriptions.
+  ["bm25-index-service", "alias-source:(databases as any).flair.Memory#1"],
+  ["MemoryFeed", "alias-source:(databases as any).flair.Memory#2"],
+  ["MemoryFeed", "alias-source:(databases as any).flair.Memory#3"],
   ["MemoryPurge", "alias-source:(databases as any).flair?.Memory#1"],
   ["embedding-space-guard", "alias-source:(databases as unknown as { flair: { Memory: MemoryTableLike } }).flair.Memory#1"],
   ["migrations/embedding-stamp", "alias-source:(databases as unknown as { flair: { Memory: MemoryTableLike } }).flair.Memory#1"],
