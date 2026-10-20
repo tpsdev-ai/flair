@@ -1,5 +1,6 @@
 // Server environment declared by a suite, and what happens to it in external
-// mode. A local spawn receives the values; an external service cannot be given
+// mode. A local spawn merges the values (before secret stripping and the
+// helper's own overrides); an external service cannot be given
 // them, so startHarper refuses rather than silently running against a service
 // configured some other way.
 import { afterAll, describe, expect, test } from "bun:test";
@@ -43,7 +44,7 @@ function runScript(
 }
 
 describe("buildHarperServerEnv", () => {
-  test("declared serverEnv values reach the spawned environment over the inherited one", () => {
+  test("declared serverEnv values override inherited values in the merge result", () => {
     const env = buildHarperServerEnv(
       { INHERITED: "kept", FLAIR_OAUTH_RATE_LIMIT: "30" },
       { env: { FROM_ENV: "yes" }, serverEnv: { FLAIR_OAUTH_RATE_LIMIT: "1000", FLAIR_TRUSTED_PROXY: "1" } },

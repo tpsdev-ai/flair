@@ -350,7 +350,8 @@ function harperBinPath(harperBinDir: string): string {
 //
 // A suite that needs server behaviour configured by an environment variable (a
 // raised rate limit, a trusted-proxy hop, fault injection) declares it through
-// StartHarperOptions.serverEnv. A local spawn receives those values; in external
+// StartHarperOptions.serverEnv. For a local spawn the values are merged after
+// `env`, before secret stripping and the helper's own overrides; in external
 // mode a non-empty serverEnv is REFUSED, naming every variable and value the
 // external service must have been started with. Refusing rather than skipping is
 // deliberate: a skipped security-relevant suite reads as green.
@@ -915,9 +916,13 @@ export interface StartHarperOptions {
   /**
    * Server environment this suite needs the spawned Harper to run with — e.g.
    * `{ FLAIR_OAUTH_RATE_LIMIT: "1000" }` for a suite that sends more requests
-   * than the default budget. Applied to the install and run children after
-   * `env`, over the inherited environment; helper-owned variables (ROOTPATH,
-   * HOME, ports) are set afterwards and take precedence.
+   * than the default budget. Merged after `env`, over the inherited
+   * environment, and before secret stripping (GITHUB_TOKEN and NPM_TOKEN are
+   * removed even if declared) and the helper's own variables (ROOTPATH, HOME),
+   * which take precedence. The merged environment feeds both the install and
+   * run children; the HTTP and operations ports are replaced with the
+   * generated ports for the run child only, so the install child keeps any
+   * port values the merge carries.
    *
    * In external mode (`HARPER_HTTP_URL` set) a non-empty serverEnv is refused
    * with an error naming each variable and value the external service must have
@@ -962,8 +967,8 @@ export function applyMultiWorkerUnsafeSpawnOption(
 
 /**
  * The inherited environment with the suite's declared overrides applied:
- * `env` first, then `serverEnv`. Helper-owned variables are added after this
- * merge, so they cannot be replaced by a suite.
+ * `env` first, then `serverEnv`. Secret stripping and the helper's own
+ * variables are applied after this merge and take precedence over it.
  */
 export function buildHarperServerEnv(
   inherited: Record<string, string>,
