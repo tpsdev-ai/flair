@@ -113,7 +113,7 @@ program
       const earlyTarget: string | undefined = opts.target ?? (fabricOrg && fabricCluster ? buildDeployUrl({ fabricOrg, fabricCluster } as any) : undefined);
       const refusal = deployUrlRefusal([
         [earlyTarget, "deploy target URL (--target)"],
-        [opts.opsTarget ?? process.env.FLAIR_OPS_TARGET, "operations API URL (--ops-target / FLAIR_OPS_TARGET)"],
+        [opts.opsTarget || process.env.FLAIR_OPS_TARGET, "operations API URL (--ops-target / FLAIR_OPS_TARGET)"],
       ]);
       if (refusal) {
         console.error(red(refusal));

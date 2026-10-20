@@ -64,6 +64,8 @@ describe("flair deploy / flair upgrade --target refuse an unsafe URL before prin
     ["upgrade: a target with an empty user name and password", ["upgrade", "--target", "https://:@example.invalid/flair", "--yes"]],
     ["upgrade: a file: target", ["upgrade", "--target", `file:///tmp/${SECRET}`, "--yes"]],
     ["upgrade: a javascript: --ops-target", ["upgrade", "--target", "https://flair.example.invalid", "--ops-target", `javascript:${SECRET}`, "--yes"]],
+    ["deploy: an empty --ops-target with FLAIR_OPS_TARGET carrying a query", ["deploy", "--target", "https://flair.example.invalid", "--ops-target", "", "--fabric-user", "u", "--fabric-password", "p"], { FLAIR_OPS_TARGET: `https://flair.example.invalid:9925/?key=${SECRET}` }],
+    ["upgrade: an empty --ops-target with FLAIR_OPS_TARGET carrying a query", ["upgrade", "--target", "https://flair.example.invalid", "--ops-target", "", "--yes"], { FLAIR_OPS_TARGET: `https://flair.example.invalid:9925/?key=${SECRET}` }],
   ];
   for (const [what, args, env] of cases) {
     test(what, () => {

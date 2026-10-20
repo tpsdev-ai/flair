@@ -996,7 +996,7 @@ program
       // check it again).
       const refusal = deployUrlRefusal([
         [opts.target, "deploy target URL (--target)"],
-        [opts.opsTarget ?? process.env.FLAIR_OPS_TARGET, "operations API URL (--ops-target / FLAIR_OPS_TARGET)"],
+        [opts.opsTarget || process.env.FLAIR_OPS_TARGET, "operations API URL (--ops-target / FLAIR_OPS_TARGET)"],
       ]);
       if (refusal) {
         console.error(`\x1b[31m${refusal}\x1b[0m`);
