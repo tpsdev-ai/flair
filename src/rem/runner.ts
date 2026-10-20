@@ -389,13 +389,14 @@ export interface RunnerLogRow {
    * the row identity is recorded on the candidate and the row still passes
    * the sweep's checks, approval included. Each is 0 when the server's
    * response has no such list. Absent for dry-run cycles and cycles with
-   * neither.
+   * neither. Rows written before flair#2714 have neither count, so both read
+   * as 0 there.
    */
   autoPromoted?: {
     promoted: number;
     skipped: number;
-    incomplete: number;
-    unconfirmed: number;
+    incomplete?: number;
+    unconfirmed?: number;
   };
   /**
    * flair#1257 slice 3: count of SETTLED continuity sessions distilled this

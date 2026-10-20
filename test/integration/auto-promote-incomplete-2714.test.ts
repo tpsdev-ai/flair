@@ -331,6 +331,7 @@ describe("flair#2714 — a thrown candidate update is reported from the candidat
     expect(Array.isArray(body.incomplete)).toBe(true);
     expect(body.incomplete.length).toBe(1);
     const entry = body.incomplete[0];
+    expect(Object.keys(entry).sort()).toEqual(["candidateId", "error", "memoryId"]);
     expect(entry.candidateId).toBe(candidateId);
     expect(typeof entry.memoryId).toBe("string");
     expect(entry.error).toContain(FAULT_MESSAGE);
