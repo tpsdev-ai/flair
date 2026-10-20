@@ -24,6 +24,7 @@ import {
   DEFAULT_HEALTH_PREFLIGHT_MS,
   PENDING_NO_ADMIN_REASON,
   formatPendingCandidates,
+  formatAutoPromoted,
   type ApiCall,
   type RunnerOpts,
 } from "../src/rem/runner.ts";
@@ -863,8 +864,50 @@ describe("ADK auto-promote wiring (#1205b-2)", () => {
     expect(typeof autoPromoteCalls[0].limit).toBe("number");
     expect(autoPromoteCalls[0].limit).toBeGreaterThan(0);
     // outcome recorded on the audit row.
-    expect(r.logRow.autoPromoted).toEqual({ promoted: 2, skipped: 1 });
+    expect(r.logRow.autoPromoted).toEqual({ promoted: 2, skipped: 1, incomplete: 0, unconfirmed: 0 });
     expect(r.logRow.errors).toEqual([]);
+  });
+
+  // flair#2714: a promotion whose candidate update threw is reported by the
+  // server under `incomplete` (candidate read back pending) or `unconfirmed`
+  // (promotion on this row not confirmed), apart from `promoted`. The runner carries both
+  // counts onto the audit row rather than dropping them, and adds neither to
+  // the promoted or skipped counts.
+  it("records the server's incomplete and unconfirmed promotions apart from the promoted count", async () => {
+    const { api } = makeTagAwareApi({
+      activeTags: ["adk:app:alice"],
+      reflect: () => ({ candidates: [{ id: "cand_alice" }], count: 1, model: "default", gathered: 1, unreflected: 1 }),
+      autoPromote: () => ({
+        agentId: "test-agent",
+        promoted: ["m-1"],
+        skipped: [],
+        incomplete: [
+          { memoryId: "m-2", candidateId: "c-2", error: "write threw" },
+          { memoryId: "m-3", candidateId: "c-3", error: "write threw" },
+        ],
+        unconfirmed: [{ memoryId: "m-4", candidateId: "c-4", error: "write threw", readBack: "status rejected, promotedRowId m-4, reviewerId someone" }],
+        count: 1,
+        considered: 4,
+      }),
+    });
+    const r = await runNightlyCycle(baseOpts({ apiCall: api }));
+    expect(r.status).toBe("completed");
+    expect(r.logRow.autoPromoted).toEqual({ promoted: 1, skipped: 0, incomplete: 2, unconfirmed: 1 });
+    expect(formatAutoPromoted(r.logRow.autoPromoted!)).toBe(
+      "Auto-promoted: 1 to own memory (0 skipped); 2 incomplete (memory written, candidate update threw, candidate read back pending); 1 unconfirmed (memory written, candidate update threw, promotion on this row not confirmed)",
+    );
+  });
+
+  it("formats the run-once auto-promote line, naming incomplete and unconfirmed promotions only when there are any", () => {
+    expect(formatAutoPromoted({ promoted: 2, skipped: 1, incomplete: 0, unconfirmed: 0 })).toBe("Auto-promoted: 2 to own memory (1 skipped)");
+    // A log row written before `incomplete` and `unconfirmed` existed.
+    expect(formatAutoPromoted({ promoted: 2, skipped: 1 })).toBe("Auto-promoted: 2 to own memory (1 skipped)");
+    expect(formatAutoPromoted({ promoted: 0, skipped: 0, incomplete: 1 })).toBe(
+      "Auto-promoted: 0 to own memory (0 skipped); 1 incomplete (memory written, candidate update threw, candidate read back pending)",
+    );
+    expect(formatAutoPromoted({ promoted: 0, skipped: 3, unconfirmed: 2 })).toBe(
+      "Auto-promoted: 0 to own memory (3 skipped); 2 unconfirmed (memory written, candidate update threw, promotion on this row not confirmed)",
+    );
   });
 
   it("does NOT call /AutoPromoteCandidates for a NON-ADK agent (no adk tags)", async () => {

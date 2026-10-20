@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { buildHarperServerEnv, startHarper, stopHarper } from "../helpers/harper-lifecycle.js";
+import { replicatedPairUnsupportedReason } from "../helpers/replicated-nodes.js";
 
 const HELPER = pathToFileURL(join(import.meta.dir, "..", "helpers", "harper-lifecycle.ts")).href;
 const REPLICATED_NODES = pathToFileURL(
@@ -78,7 +79,11 @@ describe("buildHarperServerEnv", () => {
 });
 
 describe("startReplicatedPair", () => {
-  test("passes serverEnv to both node spawns", async () => {
+  // startReplicatedPair refuses before any spawn where a replicated pair cannot
+  // start (replicatedPairUnsupportedReason: non-Linux hosts), so this case runs
+  // only where it can reach the spawns.
+  const pairUnsupported = replicatedPairUnsupportedReason();
+  test.skipIf(pairUnsupported !== null)(`passes serverEnv to both node spawns${pairUnsupported ? ` [skipped: ${pairUnsupported}]` : ""}`, async () => {
     const { status, stdout, stderr } = await runScript(
       "pair",
       `import { mock } from "bun:test";
