@@ -35,9 +35,8 @@
  *
  * Build prerequisite: dist/cli.js and dist/resources/*.js. Run
  * `bun run build && bun run build:cli`: `bun run build` alone leaves
- * dist/cli.js absent, and each case then fails at its first `flair` call
- * with "Cannot find module .../dist/cli.js". The file checks for the CLI
- * before starting Harper and stops with that remedy in one error.
+ * dist/cli.js absent. If `dist/cli.js` is absent, `beforeAll` fails before
+ * starting Harper and tells the operator to run `bun run build:cli`.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
