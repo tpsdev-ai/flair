@@ -84,6 +84,10 @@ add("Memory", ["alias-source:(databases as any).flair.Memory#1", "alias-source:(
 // ── Non-skill writers in other modules ──
 add("MemoryFeed", ["alias-source:(databases as any).flair.Memory#1", "writer:writeBackCommittedRow#1", "writer:table.put#1"],
   "Non-skill feed write through the shared write-back helper (flair#2354); a skill-tagged feed write returns earlier through the skill version writer (FeedMemories.post's isSkillWrite branch).");
+add("MemoryFeed", ["alias-source:(databases as any).flair.Memory#2", "alias-source:(databases as any).flair.Memory#3"],
+  "Read-only: the table handle is handed to subscribeInProcess (resources/table-subscription-policy.ts), which calls only the table's subscribe() to read its changes.");
+add("bm25-index-service", ["alias-source:(databases as any).flair.Memory#1"],
+  "Read-only: the table handle is handed to subscribeInProcess (resources/table-subscription-policy.ts), which calls only the table's subscribe() to read its changes.");
 add("MemoryMaintenance", ["writer:(databases as any).flair.Memory.delete#1", "writer:(databases as any).flair.Memory.update#1"],
   "Maintenance (archive/expiry) — non-skill.");
 add("MemoryMaintenance", ["writer:table.delete#1"],
