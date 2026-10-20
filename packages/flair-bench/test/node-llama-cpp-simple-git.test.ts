@@ -13,15 +13,17 @@ import { tempDir } from "../../../test/helpers/temp-dir.ts";
  *
  * node-llama-cpp 3.18.1 declares simple-git ^3.33.0. The root `overrides` move
  * it to simple-git 4, whose major release removed the default export, rejects
- * abbreviated long options and filters GIT_* variables out of git's environment.
+ * abbreviated long options and filters ambient GIT_* variables out of git's
+ * environment.
  * This test runs node-llama-cpp's real modules (dist/bindings/utils/
  * cloneLlamaCppRepo.js and dist/utils/gitReleaseBundles.js) against that copy:
  *
  *   - the bundle path: the source-build clone from the llama.cpp bundle
- *     node-llama-cpp ships, with GitHub made unreachable so a fallback fails;
+ *     node-llama-cpp ships, with the test's .gitconfig rewriting GitHub to a
+ *     missing local path;
  *   - the GitHub path: a `--depth 1 --branch <tag>` clone, with
  *     https://github.com/ rewritten to a local bare repo through an isolated
- *     HOME's .gitconfig (simple-git 4 strips GIT_CONFIG_* but keeps HOME);
+ *     HOME's .gitconfig;
  *   - the CI bundle path (unshallow, squash, re-tag, `git bundle create`) and a
  *     clone from the bundle it writes.
  *
@@ -92,10 +94,10 @@ const gitProbe = probeGit();
 const gitMissing = gitProbe.state === "missing";
 const skipNote = gitMissing ? " [skipped: git could not be spawned]" : "";
 
-/** Fail a git case, by name and reason, when git is on PATH but unusable. */
+/** Fail a git case, by name and reason, when the git probe failed other than with ENOENT. */
 function requireUsableGit(): void {
   if (gitProbe.state === "broken") {
-    throw new Error(`git is on PATH but unusable, so node-llama-cpp's clone paths cannot be checked: ${gitProbe.reason}`);
+    throw new Error(`git is unusable, so node-llama-cpp's clone paths cannot be checked: ${gitProbe.reason}`);
   }
 }
 
@@ -270,7 +272,7 @@ describe("node-llama-cpp's simple-git call paths against the resolved simple-git
       const work = tempDir("flair-bench-nlc-bundle-");
       const nlc = isolatedNodeLlamaCpp(work, release, true);
       expect(realpathSync(resolveFrom(nlc.root, "simple-git"))).toBe(realpathSync(resolveFrom(nlcRoot, "simple-git")));
-      // A failed bundle clone falls back to GitHub; point GitHub at a path that does not exist.
+      // A failed bundle clone falls back to GitHub; the test's .gitconfig rewrites it to a missing local path.
       writeGitconfig(nlc.home, pathToFileURL(join(work, "no-network")).href + "/");
 
       await withHome(nlc.home, async () => {
