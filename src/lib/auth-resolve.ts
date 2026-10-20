@@ -719,10 +719,13 @@ export interface AuthedRequestOptions {
    */
   signedOnly?: boolean;
   /**
-   * Refuse a redirect instead of following it (flair#2708). A 3xx answer
-   * throws `ApiHttpError` with that status, and the location it names receives
-   * no request. Unset, a redirect is followed (fetch's default), as for every
-   * caller that does not pass this.
+   * Refuse a redirect instead of following it (flair#2708): the location a 3xx
+   * names receives no request, and that attempt throws `ApiHttpError` with its
+   * status. When the request falls back across agent keys (no resolved
+   * credential), the fallback loop catches that error like any other attempt's,
+   * so the caller can receive an earlier attempt's answer or a later key's
+   * success instead. Unset, a redirect is followed (fetch's default), as for
+   * every caller that does not pass this.
    */
   refuseRedirects?: boolean;
 }
