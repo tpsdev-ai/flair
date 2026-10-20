@@ -144,12 +144,12 @@ export function buildOpsSearch(
 /**
  * The two endpoints a restore uses (flair#2708): the base URL its reads and
  * writes go to and the operations URL its candidate listing goes to, on the
- * same host (for a loopback target, localhost or [::1] included, the
- * operations URL is on 127.0.0.1). Resolving them proves nothing about the instance behind them;
+ * same host (for a loopback target, both are on 127.0.0.1, whichever loopback
+ * name the target URL uses). Resolving them proves nothing about the instance behind them;
  * {@link establishRestorePair} is the preflight check.
  */
 export interface RestoreTarget {
-  /** Base URL of the restore's reads and writes. */
+  /** Base URL of the restore's reads and writes (on 127.0.0.1 for a loopback target). */
   baseUrl: string;
   /** Operations API URL of the candidate listing. */
   opsUrl: string;
@@ -349,9 +349,11 @@ function resolveUrlRestoreTarget(
           + `Set FLAIR_OPS_PORT to the operations port of the instance serving HTTP port ${httpPort}, or unset it to derive the operations port from FLAIR_URL.`,
       );
     }
-    // The endpoint the OS listener check proves (src/lib/local-instance-pair.ts),
-    // as on the local delete paths.
-    return { baseUrl: base, opsUrl: `http://127.0.0.1:${opsPort}`, httpPort, opsPort, loopback };
+    // Both endpoints on 127.0.0.1, the address the OS listener check proves
+    // (src/lib/local-instance-pair.ts), whichever loopback name the URL uses.
+    const pinned = new URL(base);
+    pinned.hostname = "127.0.0.1";
+    return { baseUrl: pinned.toString().replace(/\/$/, ""), opsUrl: `http://127.0.0.1:${opsPort}`, httpPort, opsPort, loopback };
   }
 
   const ops = new URL(base);

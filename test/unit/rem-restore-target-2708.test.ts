@@ -465,6 +465,7 @@ describe("flair#2708 — resolveRestoreTarget", () => {
       );
       expect(target.loopback).toBe(true);
       expect(target.opsUrl).toBe("http://127.0.0.1:19925");
+      expect(target.baseUrl).toBe("http://127.0.0.1:19926");
       expect(calls).toEqual([{ port: 19926, opsPort: 19925 }]);
     }
     const calls: PairCall[] = [];

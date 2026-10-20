@@ -1,6 +1,6 @@
-- **`flair rem restore --apply` lists candidates through the operations API on its target's host, after a preflight check of that pair.** For a loopback target URL (`localhost` or `[::1]` included) that operations API is reached on 127.0.0.1.
+- **`flair rem restore --apply` lists candidates through the operations API on its target's host, after a preflight check of that pair.** For a loopback target URL (`localhost` or `[::1]` included), that operations API and the restore's reads and writes are reached on 127.0.0.1.
 
-  The writes go to `FLAIR_URL`, or to the local instance when it is unset. The
+  The writes go to `FLAIR_URL` (on 127.0.0.1 for a loopback URL), or to the local instance when it is unset. The
   candidate listing goes to the operations API on that same host, at
   `FLAIR_OPS_PORT` when it is set and otherwise at the port derived from
   `FLAIR_URL`; a target URL without a port has HTTP port 80 or 443. Before any
