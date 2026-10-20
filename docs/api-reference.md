@@ -257,7 +257,7 @@ stored owner/visibility check and its subject's current-authority check: a
 readable live skill referenced by a matching create/update head, or a readable
 delete head with `memoryId: null`. Missing, invalid or unreadable authority
 denies the payload even to its owner: by-id reads return 404 and collection
-reads omit it. Administrator and trusted internal reads bypass this additional
+reads omit it. Administrator and trusted internal reads are not subject to this additional
 check.
 
 Superseding a skill closes its predecessor with `validTo`; deleting a

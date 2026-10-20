@@ -299,7 +299,7 @@ Clients on this page talk to the stdio server `@tpsdev-ai/flair-mcp`. Its `tools
 | `memory_store` | Save a memory (type, durability, tags, visibility), under the configured agent ID, subject to server authorization. Optional `usedMemoryIds` cites memories that informed the write |
 | `skill_store` | Write a skill-tagged memory. `trigger` is the recall text; `content` is the procedure. Durability is forced to persistent, and SkillScan rejects a dangerous payload before embed |
 | `skill_search` | Rank skills by their trigger against a task. Returns a catalog (id, name, trigger, description, tags, agentId), not the procedure |
-| `skill_get` | Fetch one skill's full procedure by id. Non-admin callers use Memory's owner/visibility scope and, for retained closed skills, its current-authority check; administrators bypass those restrictions |
+| `skill_get` | Fetch one skill's full procedure by id. Non-admin callers use Memory's owner/visibility scope and, for retained closed skills, its current-authority check; administrators are not subject to those restrictions |
 | `memory_update` | Update a memory by id. Overwrites in place, or pass `preserveHistory` to write a superseding version. Optional `usedMemoryIds` |
 | `memory_get` | Fetch a specific memory by ID |
 | `memory_delete` | Delete a memory by ID. Non-admin callers can delete only their own memories; administrators can also delete other agents' memories |
