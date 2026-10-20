@@ -34,33 +34,19 @@ import {
   waitUntil,
 } from "../helpers/replicated-nodes.js";
 
-// ── MCP enablement env, staged for every boot in this file ──────────────────
-const MCP_ENV_KEYS = [
-  "FLAIR_MCP_OAUTH",
-  "FLAIR_MCP_ISSUER",
-  "FLAIR_MCP_SIGNING_KEY_PEM",
-  "OAUTH_GITHUB_CLIENT_ID",
-  "OAUTH_GITHUB_CLIENT_SECRET",
-  "OAUTH_GITHUB_REDIRECT_URI",
-] as const;
-let savedEnv: Record<(typeof MCP_ENV_KEYS)[number], string | undefined> | undefined;
-
-/** Whole-token env ref staged ON by `flair mcp enable`; the component accepts
- *  only "true"/"false" (flair#1152). */
-function setMcpEnv(): void {
-  savedEnv ??= Object.fromEntries(MCP_ENV_KEYS.map((k) => [k, process.env[k]])) as Record<
-    (typeof MCP_ENV_KEYS)[number],
-    string | undefined
-  >;
-  process.env.FLAIR_MCP_OAUTH = "true";
-  process.env.FLAIR_MCP_ISSUER = `https://${ISSUER_HOST}`;
-  process.env.OAUTH_GITHUB_CLIENT_ID = "host-a-client-id";
-  process.env.OAUTH_GITHUB_CLIENT_SECRET = "host-a-client-secret";
-  process.env.OAUTH_GITHUB_REDIRECT_URI = `https://${ISSUER_HOST}/oauth`;
-}
-
 // Neutral fixture host name — never a real fleet host.
 const ISSUER_HOST = "node-a.flair.test";
+
+/** MCP enablement declared for every boot in this file. No signing key: each
+ *  boot starts without a pin, so the component generates one on first mint. */
+const MCP_SERVER_ENV: Record<string, string | undefined> = {
+  FLAIR_MCP_OAUTH: "true",
+  FLAIR_MCP_ISSUER: `https://${ISSUER_HOST}`,
+  FLAIR_MCP_SIGNING_KEY_PEM: undefined,
+  OAUTH_GITHUB_CLIENT_ID: "host-a-client-id",
+  OAUTH_GITHUB_CLIENT_SECRET: "host-a-client-secret",
+  OAUTH_GITHUB_REDIRECT_URI: `https://${ISSUER_HOST}/oauth`,
+};
 // The shipped config carries NO `resource` key, so the component derives
 // `<issuer>/mcp` at request time (flair#1180).
 const RESOURCE = `https://${ISSUER_HOST}/mcp`;
@@ -82,16 +68,6 @@ if (!PRO_INSTALL_DIR) {
       "(and NODE_BIN at a Node version that build supports) to run it.",
   );
 }
-
-afterAll(async () => {
-  if (savedEnv) {
-    for (const k of MCP_ENV_KEYS) {
-      const v = savedEnv[k];
-      if (v === undefined) delete process.env[k];
-      else process.env[k] = v;
-    }
-  }
-});
 
 // ── MCP mint/verify helpers (the component's real endpoints) ────────────────
 
@@ -207,10 +183,7 @@ describe(
     test.skipIf(!PRO_INSTALL_DIR || PAIR_UNSUPPORTED !== null)(
       "tokens minted on each node verify on the other after a measured wait",
       async () => {
-        setMcpEnv();
-        delete process.env.FLAIR_MCP_SIGNING_KEY_PEM; // NO pin, on purpose.
-
-        const pair = await startReplicatedPair();
+        const pair = await startReplicatedPair({ serverEnv: MCP_SERVER_ENV });
         stopPair = pair.stop;
         try {
           assertOwnedInstance(pair.a, "node-a");
@@ -276,7 +249,6 @@ describe("flair#2208 key isolation: a token verifies only where the signing key 
   test(
     "two nodes with different pinned keys: node-a's token is 200 on node-a and 401 on node-b",
     async () => {
-      setMcpEnv();
       const keyA = generateKeyPairSync("rsa", {
         modulusLength: 2048,
         publicKeyEncoding: { type: "spki", format: "pem" },
@@ -295,16 +267,24 @@ describe("flair#2208 key isolation: a token verifies only where the signing key 
           "    enabled: ${FLAIR_MCP_OAUTH}\n    signingKeyPem: ${FLAIR_MCP_SIGNING_KEY_PEM}",
         );
 
-      process.env.FLAIR_MCP_SIGNING_KEY_PEM = keyA;
       const dirA = makeNodeWorkDir("flair-test-2208-keyiso-a-", pinConfig);
       tempDirs.push(dirA);
-      const nodeA = await startHarper({ cwd: dirA, harperBinDir: REPO_ROOT, multiWorkerUnsafe: false });
+      const nodeA = await startHarper({
+        cwd: dirA,
+        harperBinDir: REPO_ROOT,
+        multiWorkerUnsafe: false,
+        serverEnv: { ...MCP_SERVER_ENV, FLAIR_MCP_SIGNING_KEY_PEM: keyA },
+      });
       instances.push(nodeA);
 
-      process.env.FLAIR_MCP_SIGNING_KEY_PEM = keyB;
       const dirB = makeNodeWorkDir("flair-test-2208-keyiso-b-", pinConfig);
       tempDirs.push(dirB);
-      const nodeB = await startHarper({ cwd: dirB, harperBinDir: REPO_ROOT, multiWorkerUnsafe: false });
+      const nodeB = await startHarper({
+        cwd: dirB,
+        harperBinDir: REPO_ROOT,
+        multiWorkerUnsafe: false,
+        serverEnv: { ...MCP_SERVER_ENV, FLAIR_MCP_SIGNING_KEY_PEM: keyB },
+      });
       instances.push(nodeB);
 
       assertOwnedInstance(nodeA, "node-a");

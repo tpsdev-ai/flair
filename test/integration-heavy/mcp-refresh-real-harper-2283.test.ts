@@ -34,7 +34,7 @@
  * A fetch that broke the ops route (rejecting every ops request) would leave no such
  * exchange and no refusal text, and would fail this file.
  */
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, copyFileSync, cpSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -47,23 +47,23 @@ const SHIPPED_CONFIG = join(REPO_ROOT, "config.yaml");
 let instances: HarperInstance[] = [];
 let tempDirs: string[] = [];
 
-const MCP_ENV_KEYS = [
-  "FLAIR_MCP_OAUTH",
-  "FLAIR_MCP_ISSUER",
-  "FLAIR_PUBLIC_URL",
-  "OAUTH_GITHUB_CLIENT_ID",
-  "OAUTH_GITHUB_CLIENT_SECRET",
-  "OAUTH_GITHUB_REDIRECT_URI",
-] as const;
-const savedEnv: Record<string, string | undefined> = {};
-beforeAll(() => {
-  for (const k of MCP_ENV_KEYS) savedEnv[k] = process.env[k];
-});
+// ── Server env: each boot declares the whole FLAIR_MCP_* set ────────────────
+// The shipped config references the environment, so an ambient value on the
+// runner would change what this boot sees. An `undefined` value removes an
+// inherited one.
+function mcpServerEnv(values: Record<string, string | undefined> = {}): Record<string, string | undefined> {
+  return {
+    FLAIR_MCP_OAUTH: undefined,
+    FLAIR_MCP_ISSUER: undefined,
+    FLAIR_PUBLIC_URL: undefined,
+    OAUTH_GITHUB_CLIENT_ID: undefined,
+    OAUTH_GITHUB_CLIENT_SECRET: undefined,
+    OAUTH_GITHUB_REDIRECT_URI: undefined,
+    ...values,
+  };
+}
+
 afterAll(async () => {
-  for (const k of MCP_ENV_KEYS) {
-    if (savedEnv[k] === undefined) delete process.env[k];
-    else process.env[k] = savedEnv[k]!;
-  }
   // flair#2568: every instance this file started, stopped concurrently (one
   // stop deadline for the set, not one per instance); best effort, as before.
   await stopHarpers(instances).catch(() => { /* best effort */ });
@@ -125,13 +125,16 @@ describe("flair#2283 — refreshMcpOAuthFlag against the real Harper harness", (
   test(
     "the target's real capability decides the branch: push+marker+restart+discovery, or the staged 0600 file and { ok: false }",
     async () => {
-      for (const k of MCP_ENV_KEYS) delete process.env[k];
-      // The migration's starting state: the legacy value that leaves the component AS disabled.
-      process.env.FLAIR_MCP_OAUTH = "1";
-      process.env.FLAIR_MCP_ISSUER = "https://refresh-2283.test";
-
       const workDir = makeWorkDir("flair-2283-refresh-real-");
-      const harper = await startHarper({ cwd: workDir, harperBinDir: REPO_ROOT });
+      const harper = await startHarper({
+        cwd: workDir,
+        harperBinDir: REPO_ROOT,
+        // The migration's starting state: the legacy value that leaves the component AS disabled.
+        serverEnv: mcpServerEnv({
+          FLAIR_MCP_OAUTH: "1",
+          FLAIR_MCP_ISSUER: "https://refresh-2283.test",
+        }),
+      });
       instances.push(harper);
 
       const stagedPath = join(workDir, "refresh.env");

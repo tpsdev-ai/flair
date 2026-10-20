@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeAll, afterEach, afterAll } from "bun:test";
+import { describe, test, expect, afterAll } from "bun:test";
 import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, copyFileSync, cpSync, existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import nacl from "tweetnacl";
@@ -17,27 +17,28 @@ const REDIRECT = "OAUTH_GITHUB_REDIRECT_URI";
 let instances: HarperInstance[] = [];
 let tempDirs: string[] = [];
 
-const MCP_ENV_KEYS = [
-  "FLAIR_MCP_OAUTH",
-  "FLAIR_MCP_ISSUER",
-  "FLAIR_PUBLIC_URL",
-  "OAUTH_GITHUB_CLIENT_ID",
-  "OAUTH_GITHUB_CLIENT_SECRET",
-  REDIRECT,
-] as const;
-const savedEnv: Record<string, string | undefined> = {};
-beforeAll(() => {
-  for (const k of MCP_ENV_KEYS) savedEnv[k] = process.env[k];
-});
-afterEach(() => {
-  for (const k of MCP_ENV_KEYS) {
-    if (savedEnv[k] === undefined) delete process.env[k];
-    else process.env[k] = savedEnv[k]!;
-  }
-});
-function clearMcpEnv(): void {
-  for (const k of MCP_ENV_KEYS) delete process.env[k];
+// ── Server env: each boot declares the whole FLAIR_MCP_* set ────────────────
+// The shipped config references the environment, so an ambient value on the
+// runner would change what these tests boot. An `undefined` value removes an
+// inherited one. The same object feeds the in-process redirect planner.
+function mcpServerEnv(values: Record<string, string | undefined> = {}): Record<string, string | undefined> {
+  return {
+    FLAIR_MCP_OAUTH: undefined,
+    FLAIR_MCP_ISSUER: undefined,
+    FLAIR_PUBLIC_URL: undefined,
+    OAUTH_GITHUB_CLIENT_ID: undefined,
+    OAUTH_GITHUB_CLIENT_SECRET: undefined,
+    OAUTH_GITHUB_REDIRECT_URI: undefined,
+    ...values,
+  };
 }
+
+const STAGED_ENV: Record<string, string | undefined> = {
+  FLAIR_MCP_OAUTH: "true",
+  FLAIR_MCP_ISSUER: ISSUER,
+  OAUTH_GITHUB_CLIENT_ID: "upgrade-2270-client",
+  OAUTH_GITHUB_CLIENT_SECRET: "upgrade-2270-secret",
+};
 afterAll(async () => {
   // flair#2568: every instance this file started, stopped concurrently (one
   // stop deadline for the set, not one per instance); best effort, as before.
@@ -66,20 +67,15 @@ function makeWorkDir(prefix: string): string {
   return workDir;
 }
 
-function stageOldInstallEnv(): void {
-  process.env.FLAIR_MCP_OAUTH = "true";
-  process.env.FLAIR_MCP_ISSUER = ISSUER;
-  process.env.OAUTH_GITHUB_CLIENT_ID = "upgrade-2270-client";
-  process.env.OAUTH_GITHUB_CLIENT_SECRET = "upgrade-2270-secret";
-}
-
 
 describe("flair#2270 degraded start: credentials staged, redirect missing", () => {
   test("doctor --agent reports the missing redirect with an unusable ambient credential", async () => {
-    clearMcpEnv();
-    stageOldInstallEnv();
     const workDir = makeWorkDir("flair-2270-doctor-");
-    const harper = await startHarper({ cwd: workDir, harperBinDir: REPO_ROOT });
+    const harper = await startHarper({
+      cwd: workDir,
+      harperBinDir: REPO_ROOT,
+      serverEnv: mcpServerEnv(STAGED_ENV),
+    });
     instances.push(harper);
     expect(harper.external).toBe(false);
     expect(harper.ownsInstallDir).toBe(true);
@@ -88,7 +84,6 @@ describe("flair#2270 degraded start: credentials staged, redirect missing", () =
       expect(new URL(url).hostname).toBe("127.0.0.1");
       expect(["9925", "9926"]).not.toContain(new URL(url).port);
     }
-    clearMcpEnv();
 
     const cliHome = mkdtempSync(join(tmpdir(), "flair-2270-doctor-home-"));
     tempDirs.push(cliHome);
@@ -148,10 +143,12 @@ describe("flair#2270 degraded start: credentials staged, redirect missing", () =
   test(
     "missing redirect disables the provider and MCP route",
     async () => {
-      clearMcpEnv();
-      stageOldInstallEnv();
       const workDir = makeWorkDir("flair-2270-degraded-");
-      const harper = await startHarper({ cwd: workDir, harperBinDir: REPO_ROOT });
+      const harper = await startHarper({
+        cwd: workDir,
+        harperBinDir: REPO_ROOT,
+        serverEnv: mcpServerEnv(STAGED_ENV),
+      });
       instances.push(harper);
 
       const health = await fetch(`${harper.httpURL}/health`, { signal: AbortSignal.timeout(10_000) });
@@ -173,20 +170,22 @@ describe("flair#2270 redirect staging and Harper loadEnv", () => {
   test(
     "staged redirect reaches the provider through loadEnv",
     async () => {
-      clearMcpEnv();
-      stageOldInstallEnv();
       const workDir = makeWorkDir("flair-2270-migrated-");
 
       const result = planRedirectMigration({
         configPath: join(workDir, "config.yaml"),
-        env: process.env as Record<string, string | undefined>,
+        env: STAGED_ENV,
       });
       expect(result.action).toBe("staged");
       expect(existsSync(join(workDir, ".env"))).toBe(true);
       const dotenv = readFileSync(join(workDir, ".env"), "utf-8");
       expect(dotenv).toContain(`${REDIRECT}=${ISSUER}/oauth`);
 
-      const harper = await startHarper({ cwd: workDir, harperBinDir: REPO_ROOT });
+      const harper = await startHarper({
+        cwd: workDir,
+        harperBinDir: REPO_ROOT,
+        serverEnv: mcpServerEnv(STAGED_ENV),
+      });
       instances.push(harper);
 
       const health = await fetch(`${harper.httpURL}/health`, { signal: AbortSignal.timeout(10_000) });
@@ -208,14 +207,12 @@ describe("flair#2270 redirect staging and Harper loadEnv", () => {
   test(
     "an operator redirect is retained",
     async () => {
-      clearMcpEnv();
-      stageOldInstallEnv();
       const workDir = makeWorkDir("flair-2270-idempotent-");
       writeFileSync(join(workDir, ".env"), `${REDIRECT}=https://kept.example.com/oauth\n`, { mode: 0o600 });
 
       const result = planRedirectMigration({
         configPath: join(workDir, "config.yaml"),
-        env: process.env as Record<string, string | undefined>,
+        env: STAGED_ENV,
       });
       expect(result.action).toBe("already-set");
       expect(readFileSync(join(workDir, ".env"), "utf-8")).toContain("https://kept.example.com/oauth");
@@ -229,9 +226,12 @@ describe("flair#2270 fresh install", () => {
   test(
     "no MCP environment leaves the MCP route absent",
     async () => {
-      clearMcpEnv();
       const workDir = makeWorkDir("flair-2270-fresh-");
-      const harper = await startHarper({ cwd: workDir, harperBinDir: REPO_ROOT });
+      const harper = await startHarper({
+        cwd: workDir,
+        harperBinDir: REPO_ROOT,
+        serverEnv: mcpServerEnv(),
+      });
       instances.push(harper);
 
       const health = await fetch(`${harper.httpURL}/health`, { signal: AbortSignal.timeout(10_000) });
@@ -247,13 +247,13 @@ describe("flair#2270 fresh install", () => {
 
 describe("flair#2270 provider with MCP disabled", () => {
   test("credentials without redirect boot and report missing target configuration", async () => {
-    clearMcpEnv();
-    stageOldInstallEnv();
-    process.env.FLAIR_MCP_OAUTH = "false";
     const workDir = makeWorkDir("flair-2270-off-");
-    const harper = await startHarper({ cwd: workDir, harperBinDir: REPO_ROOT });
+    const harper = await startHarper({
+      cwd: workDir,
+      harperBinDir: REPO_ROOT,
+      serverEnv: mcpServerEnv({ ...STAGED_ENV, FLAIR_MCP_OAUTH: "false" }),
+    });
     instances.push(harper);
-    clearMcpEnv();
     const health = await fetch(`${harper.httpURL}/health`, { signal: AbortSignal.timeout(10_000) });
     expect(health.status).not.toBe(500);
     expect(harper.getLog?.()).not.toContain("Could not load component");
