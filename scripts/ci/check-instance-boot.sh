@@ -43,7 +43,11 @@
 #                 init leaves doctor with a legitimate "keys directory missing".
 #   PORT          Harper HTTP port (default 19926, the current default)
 #   OPS_PORT      operations API port (default 19925)
-#   PASS_FILE     admin-pass file (default $HOME/.flair/admin-pass)
+#   PASS_FILE     admin-pass input file handed to `flair init --admin-pass-file`
+#                 (default: a new 0600 file in a private temp directory, removed on
+#                 exit). It is kept apart from $HOME/.flair/admin-pass, which init
+#                 itself writes: init refuses to replace an existing admin-pass it
+#                 cannot verify against a running instance.
 #   LOG_DIR       command-log directory (default $PWD/instance-boot-logs)
 #   HEALTH_TIMEOUT        seconds to wait for /Health (default 180)
 #   LISTENER_TIMEOUT      seconds to wait for the supervised pid to bind (default 120)
@@ -64,7 +68,11 @@ FLAIR_BIN="${FLAIR_BIN:-flair}"
 PORT="${PORT:-19926}"
 OPS_PORT="${OPS_PORT:-19925}"
 FLAIR_AGENT_ID="${FLAIR_AGENT_ID:-canary}"
-PASS_FILE="${PASS_FILE:-$HOME/.flair/admin-pass}"
+PASS_TMP=""
+if [ -z "${PASS_FILE:-}" ]; then
+  PASS_TMP="$(mktemp -d)"
+  PASS_FILE="$PASS_TMP/admin-pass-input"
+fi
 LOG_DIR="${LOG_DIR:-$PWD/instance-boot-logs}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-180}"
 LISTENER_TIMEOUT="${LISTENER_TIMEOUT:-120}"
@@ -80,6 +88,10 @@ OS="$(uname -s)"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 mkdir -p "$LOG_DIR" "$(dirname "$PASS_FILE")"
+# The generated input file holds the admin password: remove it on exit.
+if [ -n "$PASS_TMP" ]; then
+  trap 'rm -rf "${PASS_TMP:?}"' EXIT
+fi
 
 log() { printf '\n=== %s ===\n' "$*"; }
 fail() { echo "::error::check-instance-boot: $*" >&2; exit 1; }
