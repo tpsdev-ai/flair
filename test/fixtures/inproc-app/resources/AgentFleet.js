@@ -375,6 +375,24 @@ async function recallWithRawMissingId() {
   return collect(await flair("Memory").search({ conditions: [] }, forgotten));
 }
 
+// ─── flair#2084 — memory maintenance called in-process with admin authority ──
+//
+// The direct resource call a Harper application makes with no HTTP hop. JSON
+// cannot carry an `undefined` value, so each key named in `undefinedKeys` is
+// added to the request body as an OWN property whose value is `undefined`. The
+// reply carries the body's own keys and which of them hold `undefined`, so the
+// test can check what was sent as well as what came back.
+async function maintainAsAdmin(agentId, body, undefinedKeys) {
+  const request = { ...(body ?? {}) };
+  for (const key of undefinedKeys ?? []) request[key] = undefined;
+  const sent = {
+    ownKeys: Object.keys(request),
+    undefinedKeys: Object.keys(request).filter((key) => request[key] === undefined),
+  };
+  const h = await collectionResource(flair("MemoryMaintenance"), adminContext(agentId));
+  return { sent, reply: await run(() => h.post(request)) };
+}
+
 const summarise = (r) => ({ id: r?.id, agentId: r?.agentId, visibility: r?.visibility, content: r?.content });
 
 async function collect(rows) {
@@ -456,6 +474,8 @@ export class AgentFleet extends Resource {
         return run(() => createWithNoContext());
       case "recallWithRawMissingId":
         return run(() => recallWithRawMissingId());
+      case "maintainAsAdmin":
+        return run(() => maintainAsAdmin(body.agentId, body.body, body.undefinedKeys));
       default:
         return new Response(JSON.stringify({ error: `unknown op '${op}'` }), { status: 400 });
     }

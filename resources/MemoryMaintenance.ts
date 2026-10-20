@@ -48,10 +48,22 @@ type RequestedAgent =
   | { kind: "named"; agentId: string }
   | { kind: "invalid" };
 
-function parseRequestedAgent(value: unknown): RequestedAgent {
-  if (value === undefined) return { kind: "absent" };
+/** An agent id is a non-blank string; any other value names no agent. */
+function parseAgentIdValue(value: unknown): Exclude<RequestedAgent, { kind: "absent" }> {
   if (typeof value !== "string" || value.trim().length === 0) return { kind: "invalid" };
   return { kind: "named", agentId: value };
+}
+
+/** Classify a request body's `agentId`. Presence is decided on the body itself,
+ *  before its value is parsed: the field is absent only when the body has no own
+ *  `agentId` property and reading `agentId` yields `undefined`. A present field
+ *  is parsed by value, so a supplied `undefined`, `null`, non-string, empty or
+ *  blank value is invalid rather than read as absent. */
+function parseRequestedAgent(body: unknown): RequestedAgent {
+  const present = body != null && Object.prototype.hasOwnProperty.call(body, "agentId");
+  const value = body == null ? undefined : (body as any).agentId;
+  if (!present && value === undefined) return { kind: "absent" };
+  return parseAgentIdValue(value);
 }
 
 export class MemoryMaintenance extends Resource {
@@ -63,7 +75,8 @@ export class MemoryMaintenance extends Resource {
   }
 
   async post(data: any) {
-    const { dryRun = false, agentId: bodyAgentId } = data || {};
+    const body = data || {};
+    const { dryRun = false } = body;
 
     const ctx = (this as any).getContext?.();
     const request = ctx?.request ?? ctx;
@@ -72,14 +85,15 @@ export class MemoryMaintenance extends Resource {
       || (await annotatedCallerIsAdmin(request));
 
     // Scope rules:
-    //   - Admin can pass agentId to maintain a specific agent (or omit it
-    //     for fleet-wide maintenance). An admin-supplied agentId that is not a
-    //     non-blank string is refused.
-    //   - Non-admin agents are scoped to their own memories — bodyAgentId
+    //   - Admin can pass agentId to maintain a specific agent (or omit the
+    //     field for fleet-wide maintenance). An admin request whose body has
+    //     the field with a value that is not a non-blank string — `undefined`
+    //     included — is refused.
+    //   - Non-admin agents are scoped to their own memories — a body agentId
     //     either matches the authenticated agent or is ignored.
-    const requestedAgent = parseRequestedAgent(bodyAgentId);
+    const requestedAgent = parseRequestedAgent(body);
     if (callerIsAdmin && requestedAgent.kind === "invalid") {
-      return new Response(JSON.stringify({ error: "agentId must be a non-empty string" }), {
+      return new Response(JSON.stringify({ error: "agentId must be a non-blank string" }), {
         status: 400,
         headers: { "content-type": "application/json" },
       });
@@ -255,7 +269,7 @@ export class MemoryMaintenance extends Resource {
         // on that, is stated at the owned transaction below.
         const pointerInScope = (pointer: any): boolean => {
           if (!targetAgent) return true;
-          const author = parseRequestedAgent(pointer?.authorId);
+          const author = parseAgentIdValue(pointer?.authorId);
           return author.kind === "named" && author.agentId === targetAgent;
         };
         // A scoped run's pointer search reads only the target agent's rows:

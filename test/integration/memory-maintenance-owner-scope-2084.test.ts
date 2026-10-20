@@ -374,7 +374,7 @@ describe("MemoryMaintenance orphan sweep is scoped to the run's owner (real Harp
       });
       const text = await res.text();
       expect(res.status, `agentId=${JSON.stringify(agentId)}: ${text.slice(0, 300)}`).toBe(400);
-      expect(text, `agentId=${JSON.stringify(agentId)}: ${text.slice(0, 300)}`).toContain("agentId");
+      expect(JSON.parse(text), `agentId=${JSON.stringify(agentId)}: ${text.slice(0, 300)}`).toEqual({ error: "agentId must be a non-blank string" }); // assertion: the refusal names the field and the rule
       for (const [id, o] of before) {
         expect(await readPointer(id), `agentId=${JSON.stringify(agentId)}: ${id} pointer changed`).toBe(o.pointer);
         expect(await readMemory(id), `agentId=${JSON.stringify(agentId)}: ${id} Memory row changed`).toBe(o.memory);
