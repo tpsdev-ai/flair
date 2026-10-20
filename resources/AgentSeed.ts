@@ -30,7 +30,7 @@ import { randomUUID } from "node:crypto";
  */
 
 import { Resource, databases } from "harper";
-import { allowAdmin, invalidateAdminCache } from "./agent-auth.js";
+import { allowAdmin } from "./agent-auth.js";
 import { authorizeSoulWrite, refuseSoulWriteContent, soulProvenance } from "./soul-write-policy.js";
 import { reconcileAdminFields } from "./agent-admin.js";
 import { noteMemoryUpsert } from "./bm25-index-service.js";
@@ -263,7 +263,6 @@ export class AgentSeed extends Resource {
       return { agent, soulAttempts, memories };
     });
 
-    if (agentWritten) invalidateAdminCache();
     if (outcome instanceof Response) return outcome;
     const { agent: seededAgent, soulAttempts, memories } = outcome;
 

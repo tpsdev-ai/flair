@@ -133,13 +133,30 @@ rather than registration.
 
 ### Authorization Code Flow with PKCE
 
-Standard OAuth 2.1 authorization code flow:
+Standard OAuth 2.1 authorization code flow. The authorization endpoints and the
+authorization-code exchange require PKCE with the `S256` method only; the
+metadata's `code_challenge_methods_supported` lists `["S256"]` as the supported method:
 
-1. Client generates PKCE `code_verifier` and `code_challenge`
-2. Client redirects user to `GET /OAuthAuthorize?client_id=...&code_challenge=...&redirect_uri=...`
-3. User approves (or auto-approves for trusted clients)
-4. Flair redirects back with authorization code
-5. Client exchanges code for access token at `POST /OAuthToken`
+1. Client generates a PKCE `code_verifier` and its `S256` `code_challenge`
+   (`BASE64URL(SHA256(code_verifier))`, RFC 7636)
+2. Client redirects user to `GET /OAuthAuthorize?response_type=code&client_id=...&redirect_uri=...&code_challenge=...&code_challenge_method=S256`
+3. User approves or denies on the consent page
+4. Flair redirects back with an authorization code on approve, or with `error=access_denied` on deny
+5. Client exchanges code and `code_verifier` for access token at `POST /OAuthToken`
+
+After the earlier request, scope and client checks pass, `GET /OAuthAuthorize`
+(the consent page) and its Approve (`POST /OAuthAuthorize`) answer
+`400 invalid_request` when `code_challenge` is missing, empty or not exactly 43
+base64url characters, or when `code_challenge_method` is anything other than
+`S256`. The consent page is not rendered and no authorization code is stored. A
+Deny needs no PKCE fields: after redirect-URI validation passes, it redirects with `access_denied` and issues nothing (an invalid `redirect_uri` is refused with `400 invalid_redirect_uri` first).
+
+The authorization-code exchange at `POST /OAuthToken` redeems a code only with a
+`code_verifier` whose S256 hash equals the challenge stored with the code. A code
+stored without an S256 challenge is `400 invalid_grant`. For an otherwise valid,
+unused code carrying an S256 challenge, a missing verifier is
+`400 invalid_request` and a verifier that does not match is `400 invalid_grant`.
+A PKCE refusal does not redeem the code.
 
 ### Endpoints
 
@@ -288,6 +305,8 @@ flair principal add <principal-id> --admin
 ```
 
 `add` upserts the Agent row. If `~/.flair/keys/<principal-id>.key` already exists, that key is reused and is not regenerated. The upsert writes the record this command builds, including `role: admin` and `admin: true` when `--admin` is set. With `--admin` and no `--trust`, the trust tier written is `endorsed`.
+
+For a request signed with an agent key, the admin decision uses the Agent row the signature is verified against: the caller is an admin when that row has `role: admin`, or when its id is listed in the instance's `FLAIR_ADMIN_AGENTS` (comma-separated). The decision is made on every request and nothing is kept between requests, so a role change, a removed row, or a new row under the same id applies to the next request on every worker thread.
 
 ### CLI Reference
 

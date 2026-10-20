@@ -33,7 +33,7 @@ async function deletePointerRowOrThrow(memoryId: string, ctx: any): Promise<void
   }
   await table.delete(memoryId, ctx);
 }
-import { isAdmin } from "./agent-auth.js";
+import { annotatedCallerIsAdmin } from "./agent-auth.js";
 import { noteMemoryUpsert, noteMemoryDelete } from "./bm25-index-service.js";
 import { stripUndeclaredMemoryAttributes } from "./memory-declared-attributes.js";
 import { withOwnedTransaction } from "./request-transaction.js";
@@ -55,7 +55,7 @@ export class MemoryMaintenance extends Resource {
     const request = ctx?.request ?? ctx;
     const actorId: string | undefined = request?.tpsAgent;
     const callerIsAdmin: boolean = request?.tpsAgentIsAdmin === true
-      || (actorId ? await isAdmin(actorId) : false);
+      || (await annotatedCallerIsAdmin(request));
 
     // Scope rules:
     //   - Admin can pass agentId to maintain a specific agent (or omit it
@@ -214,13 +214,31 @@ export class MemoryMaintenance extends Resource {
       // INTO Memory results), but it should not be left behind either. A
       // failed row read or delete is counted and the sweep continues; the
       // incomplete run is reported below (HTTP 500), never silently ignored.
+      // A dry run skips the sweep entirely and reports no orphans.
       const pointerTable = (databases as any).flair?.[MEMORY_HOST_SOURCE_TABLE];
       if (!dryRun && !pointerTable?.search) {
         // Hygiene: a missing sweep table is REPORTED, never silently skipped.
         throw new Error("MemoryHostSource table unavailable (orphan sweep)");
       }
       if (pointerTable?.search && !dryRun) {
+        // Scope the sweep by the same rule as the Memory loop above. The
+        // table-wide pointer search supplies each row; a non-admin run, and an
+        // admin run that names an agent, then keeps only pointer rows whose
+        // stamped author is that agent, before the pointed Memory read and every
+        // later per-row effect (count, error, delete). A pointer's owner is the
+        // `authorId` the write path stamped on the row; a pointer with an empty
+        // author has no owner and is outside an owner-targeted run. No target
+        // means fleet-wide admin maintenance, which considers every pointer row.
+        // How a pointer replaced after this selection is handled, and the bound
+        // on that, is stated at the owned transaction below.
+        const pointerInScope = (pointer: any): boolean => {
+          if (!targetAgent) return true;
+          const author = pointer?.authorId;
+          if (typeof author !== "string" || author.length === 0) return false;
+          return author === targetAgent;
+        };
         for await (const ptr of pointerTable.search()) {
+          if (!pointerInScope(ptr)) continue;
           const memoryId = ptr?.memoryId;
           if (typeof memoryId !== "string" || memoryId.length === 0) continue;
           try {
@@ -240,10 +258,35 @@ export class MemoryMaintenance extends Resource {
             //
             // Round 22: one orphan's failure must abort only THAT orphan, not
             // the whole sweep — catch it, count stats.errors, and continue (the
-            // item loops above already work this way). stats.orphans counts a
-            // row only AFTER its owned transaction COMMITS (the count moves out
-            // of the callback). Pinned by test/unit/memory-host-source.test.ts
-            // (r22-orphan-continues) — RED if the try/catch is removed.
+            // item loops above already work this way). Pinned by
+            // test/unit-isolated/memory-host-source.test.ts (r22-orphan-continues) — RED
+            // if the try/catch is removed.
+            //
+            // The candidate re-reads and the staged delete run in ONE owned
+            // transaction (`c`); the confirmation reads run inside its callback
+            // but through fresh contexts, so they see committed state. Harper
+            // has no compare-and-delete on a row's contents:
+            // the delete carries no condition on the pointer row it removes.
+            // Harper stamps the transaction's writes with one time,
+            // taken at its first read (the in-transaction Memory re-read below,
+            // before the confirmation reads), and applies a row's writes in the
+            // order of those times:
+            //   - a replacement committed before the confirmation read is SEEN
+            //     by it, and the pointer is skipped;
+            //   - a replacement whose own transaction takes its time after this
+            //     transaction's first read carries a later time, so Harper
+            //     applies it after this delete and it stays stored
+            //     (test/integration/memory-maintenance-owner-scope-2084.test.ts
+            //     commits one at the `maintenance-orphan-commit` pause).
+            // Not covered: a write whose own transaction took its time before
+            // this transaction's first read and commits after the confirmation
+            // read. There is no compare-and-set; per-id serialization is
+            // tracked in flair#2478.
+            //
+            // Harper can skip a staged delete at commit (a newer write wins), so
+            // stats.orphans counts a pointer only when a read AFTER the commit
+            // finds no row for its memoryId; a row found there is counted as
+            // skipped, never as removed.
             let committed = false;
             let skipped = false;
             await withOwnedTransaction(ctx, async (c) => {
@@ -258,10 +301,17 @@ export class MemoryMaintenance extends Resource {
               const ptrConfirmed = await pointerTable.get(memoryId, {});
               if (!isDeepStrictEqual(ptrConfirmed, ptrAgain)) { skipped = true; return; }
               await deletePointerRowOrThrow(memoryId, c);
+              // Held after the final confirmation and the staged delete, before
+              // the commit, so a replacement can commit in that window.
+              const beforeCommit = txnPausePoint("maintenance-orphan-commit");
+              if (beforeCommit) await beforeCommit;
               committed = true;
             });
-            if (committed) stats.orphans++;
-            else if (skipped) stats.skipped++;
+            if (committed) {
+              const afterCommit = await pointerTable.get(memoryId, {});
+              if (afterCommit == null) stats.orphans++;
+              else stats.skipped++;
+            } else if (skipped) stats.skipped++;
           } catch (err) {
             stats.errors++;
             console.error("MemoryMaintenance: orphan sweep failed (continuing)", err);

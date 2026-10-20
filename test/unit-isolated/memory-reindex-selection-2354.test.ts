@@ -32,7 +32,7 @@ mock.module("harper", () => ({
     },
   },
 }));
-mock.module("../../resources/agent-auth.ts", () => ({ isAdmin: async () => true, allowAdmin: async () => true }));
+mock.module("../../resources/agent-auth.ts", () => ({ annotatedCallerIsAdmin: async () => true, allowAdmin: async () => true }));
 mock.module("../../resources/Memory.ts", () => ({ buildReindexRow: (content: any) => ({ row: content }) }));
 mock.module("../../resources/write-back.ts", () => ({
   WriteBackConflictError: class extends Error {

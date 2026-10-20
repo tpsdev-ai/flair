@@ -452,6 +452,10 @@ import {
   register as registerRestore,
 } from "./commands/restore.js";
 import {
+  bindCli as bindBackupApprovalCli,
+  register as registerBackupApproval,
+} from "./commands/backup-approval.js";
+import {
   bindCli as bindExportCli,
   register as registerExport,
 } from "./commands/export.js";
@@ -9113,6 +9117,16 @@ bindRestoreCli({
   resolveHttpPort,
 });
 registerRestore(program);
+
+// ─── flair backup-approval ───────────────────────────────────────────────────
+// Command registration lives in src/commands/backup-approval.ts (flair#2664).
+// Bind shared cli-locals first so the extracted module never imports this file.
+bindBackupApprovalCli({
+  addSharedCredentialOptions,
+  applyAdminPassFile,
+  resolveOpsPort,
+});
+registerBackupApproval(program);
 
 // ─── flair export ────────────────────────────────────────────────────────────
 // Command registration lives in src/commands/export.ts (flair#1636).

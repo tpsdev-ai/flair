@@ -131,6 +131,7 @@ function expectFailure(result: Awaited<ReturnType<typeof runBackup>>, context: s
   expect(result.stdout + result.stderr).not.toContain("Backup complete");
   expect(result.stderr).toContain(context);
   expect(existsSync(result.output)).toBe(false);
+  expect(existsSync(`${result.output}.sha256`)).toBe(false);
   expect(readdirSync(result.home).filter(n => n.startsWith(".flair-backup-")).length).toBe(0);
   expect(existsSync(join(result.home, ".flair", "backups"))).toBe(false);
 }
@@ -260,8 +261,10 @@ describe("backup fails closed (flair#2214)", () => {
     const result = await runBackup({}, { defaultOutput: true });
     expect(result.exitCode).toBe(0);
     const dir = join(result.home, ".flair", "backups");
-    const files = readdirSync(dir);
-    expect(files.length).toBe(1);
+    // Exactly one archive and its digest sidecar (#2664).
+    const files = readdirSync(dir).sort();
+    expect(files.length).toBe(2);
+    expect(files[1]).toBe(`${files[0]}.sha256`);
     expect(JSON.parse(readFileSync(join(dir, files[0]), "utf-8"))).toMatchObject({ agents, memories, souls });
   });
 });
