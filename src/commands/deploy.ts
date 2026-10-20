@@ -43,13 +43,17 @@ function shellSingleQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-/** Print the same next steps after a successful deploy and in the CLI example test. */
+/**
+ * Print the same next steps after a successful deploy and in the CLI example
+ * test. The target is printed through safeUrl (scheme, host, port and path
+ * only), then shell-quoted.
+ */
 export function printDeployNextSteps(url: string): void {
   const dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
   console.log(`\nNext steps:`);
   console.log(dim(`  1. Set an admin password in Fabric Studio (Cluster Settings → Admin)`));
   console.log(dim(`  2. Save that password in an owner-only file (chmod 600), then seed your first agent:`));
-  console.log(`     flair agent add my-agent --target ${shellSingleQuote(url)} --admin-pass-file /path/to/admin-password`);
+  console.log(`     flair agent add my-agent --target ${shellSingleQuote(safeUrl(url))} --admin-pass-file /path/to/admin-password`);
 }
 
 export function register(program: Command): void {
@@ -77,7 +81,7 @@ program
   .option("--pkg-version <semver>", "Override version label (default: installed package version)")
   .option("--no-replicated", "Disable cluster-wide replication (default: replicated=true)")
   .option("--no-restart", "Do not restart the component after deploy (default: restart=true)")
-  .option("--keep-mqtt-config", "Leave the target's MQTT configuration as it is (default: set every MQTT listener off in the target's configuration before deploying, request the shared workers' restart for an isolated application, and read the saved configuration back after the deploy's restart; the listeners are not probed)")
+  .option("--keep-mqtt-config", "Leave the target's MQTT configuration as it is (default: set every MQTT listener off in the target's configuration before deploying, then, after the deploy's restart, request the shared workers' restart for an isolated application and read the saved configuration back; --no-restart and --no-verify skip those two; the listeners are not probed)")
   .option("--dry-run", "Resolve package, validate args, skip the deploy call")
   .option("--package-root <dir>", "Override package root (mainly for testing)")
   .option("--deployment-timeout <ms>", "Milliseconds harper waits for cluster-wide peer replication (env: FABRIC_DEPLOYMENT_TIMEOUT; default: 600000 — harper's own 120s default is too short for Fabric)")

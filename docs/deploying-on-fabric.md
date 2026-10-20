@@ -305,16 +305,18 @@ without this re-flip will appear healthy (`/Health` green) while its MCP tools a
 dark to every connected client. If you rely on MCP, add the re-flip to your upgrade
 runbook.
 
-### MQTT is off
+### MQTT configuration
 
-Flair does not use MQTT, and runs Harper with every MQTT listener off: the TCP
-and TLS listeners (`mqtt.network.port`, `mqtt.network.securePort`) and MQTT
-over WebSocket on the HTTP port (`mqtt.webSocket`). Flair's local spawns set
-this on every start. A component deployment does not go through those spawns,
-and a component's `config.yaml` cannot set it (`mqtt` belongs to the instance's
-root configuration), so `flair deploy` and `flair upgrade --target` set it in
-the target's configuration through its operations API and request the worker
-restart that applies it.
+Flair does not use MQTT. Its local starts run Harper with every MQTT listener
+off: the TCP and TLS listeners (`mqtt.network.port`,
+`mqtt.network.securePort`) and MQTT over WebSocket on the HTTP port
+(`mqtt.webSocket`), set on every start. A component deployment does not go
+through those starts, and a component's `config.yaml` cannot set it (`mqtt`
+belongs to the instance's root configuration). So, by default, `flair deploy`
+and `flair upgrade --target` set those listeners off in the target's
+configuration through its operations API and request the worker restart that
+applies it; they do not confirm the listeners' live state. `--keep-mqtt-config`,
+`--no-restart` and `--no-verify` change these steps (below).
 
 **Before deploying**, they send:
 
@@ -345,11 +347,13 @@ worker). For an isolated Flair they therefore also request the shared worker
 threads' restart through the operations API (`restart_service`, `"service":
 "http_workers"`, `"scope": ""`, replicated with the deploy; a standalone
 instance, which refuses the replicated request, gets it on its own) and follow
-Harper's job, failing on: a job read that does not succeed (refused before its
-answer is read), a job that does not complete, a completion message that is
-not exactly Harper's for that job, a replicated result without its node list,
-or a node recorded without a completed restart (each named, with the request
-to send to it). A completed job is not proof that a node's workers
+Harper's job, failing on exactly these: a job read that does not succeed
+(refused before its body is parsed), a job that does not complete, a completion
+message that is not exactly Harper's for that job, a replicated result without
+its node list, or a node the result lists without Harper's completed-job
+message (each named, with the request to send to it). Nodes are judged as the
+job's result lists them: that list is not compared with the nodes the
+configuration answer named. A completed job is not proof that a node's workers
 restarted: Harper sends a node's restart-complete from a `finally` and does
 not carry the worker replacement's outcome.
 
@@ -366,9 +370,9 @@ HTTP port.
 
 With `--no-verify` (both commands) the post-restart step is skipped (the saved
 configuration is not read back, and no restart is requested for an isolated
-application),
-and with `--no-restart` the setting takes effect at the next restart; both
-print the restart request to send.
+application), and with `--no-restart` the setting takes effect at the next
+restart; both print the restart request to send. With `--keep-mqtt-config`
+neither step runs.
 
 **URLs.** The operations API URL is resolved as for every remote command:
 `--ops-target` / `FLAIR_OPS_TARGET`, else derived from the target. The target
@@ -376,10 +380,11 @@ and the operations API URL must be http or https URLs with a host, and nothing
 but scheme, host, port and path: any other scheme (such as `file:` or
 `javascript:`), a URL without a host, a user name, password, query or fragment
 is refused before either command prints or sends anything. The operations API
-calls follow no redirect. Every URL they print shows scheme, host, port and
-path only, including the operations API URL they name for a cluster node,
-which they build only from a node name that is a valid host name or IP
-address.
+calls follow no redirect. Every URL the MQTT-off steps print, and the target
+URL in the commands' own deploy lines (`flair deploy`'s next-steps example
+included), shows scheme, host, port and path only; that includes the
+operations API URL they name for a cluster node, which they build only from a
+node name that is a valid host name or IP address.
 
 **Output.** The errors and progress lines of these MQTT-off steps quote a
 remote answer's HTTP status code, a restart job's id (when it is a plain
@@ -391,10 +396,12 @@ streamed as it comes.
 
 `flair doctor` (local instances; it takes no `--target`) reports an instance
 whose saved configuration starts an MQTT listener, and names the call that
-turns it off. It reads the configuration, not the running listeners: worker
-threads that have not restarted since the configuration changed keep serving
-MQTT, and doctor says so on every path, including when it cannot read the
-configuration.
+sets the listeners off in the configuration. It reads the configuration, not
+the running listeners: worker threads that have not restarted since the
+configuration changed may still serve their previous listener configuration,
+and doctor says so on every path, including when it cannot read the
+configuration. It follows no redirect: a redirected configuration read is NOT
+RUN.
 
 **Turning MQTT on deliberately.** Send `set_configuration` with the listeners
 you want (for example `"mqtt_webSocket": true`), then restart the worker threads

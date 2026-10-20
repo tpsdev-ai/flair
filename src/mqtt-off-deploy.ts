@@ -41,10 +41,13 @@
  *          threads' restart through `restart_service` (`scope: ""`, Harper's
  *          pool scope; replicated when the deploy is) and follows Harper's job:
  *          a job read that does not succeed is refused before its body is
- *          read, only Harper's exact completed-job message for the requested
+ *          parsed, only Harper's exact completed-job message for the requested
  *          job id counts as completed (isCompletedJobMessage), and any other
- *          failure the job reports fails the step, with every node it names
- *          as failed (reportedRestartFailure). A completed job is not proof that
+ *          failure the job reports fails the step, with every node its result
+ *          lists without Harper's completed-job message
+ *          (reportedRestartFailure); nodes are judged as that result lists
+ *          them, not compared with the nodes the configuration answer named.
+ *          A completed job is not proof that
  *          a node's workers restarted: Harper sends a node's restart-complete
  *          from a `finally` (bin/restart.ts) and drops the worker
  *          replacement's outcome;
@@ -58,8 +61,8 @@
  * URLs: the deploy target and its operations API URL must be http or https
  * URLs with a host, and nothing but scheme, host, port and path — any other
  * scheme, a URL without a host, a user name, password, query or fragment is
- * refused before anything is sent or printed (assertSafeUrl). Every URL the
- * channel prints goes through safeUrl, including the operations API URL it
+ * refused before anything is sent or printed (assertSafeUrl). Every URL these
+ * MQTT-off steps print goes through safeUrl, including the operations API URL it
  * names for a cluster node (peerOpsUrl), which it builds only for a node name
  * that is a valid host name or IP address. The operations API calls follow no
  * redirect: a 3xx answer fails by its status.
@@ -401,10 +404,10 @@ export function reportedRestartFailure(job: { status?: unknown; message?: unknow
   const nodes = (job.result as { replicated?: unknown } | null | undefined)?.replicated;
   if (!Array.isArray(nodes)) return "the replicated job's result lists no cluster nodes";
   const failed = restartFailedNodes(job);
-  return failed.length ? `the job records these nodes without a completed restart: ${failed.join(", ")}` : null;
+  return failed.length ? `the job records these nodes without Harper's completed-job message: ${failed.join(", ")}` : null;
 }
 
-/** The cluster nodes a replicated restart job records without a completed restart, as printed. */
+/** The cluster nodes a replicated restart job's result lists without Harper's completed-job message, as printed. */
 function restartFailedNodes(job: { result?: unknown }): string[] {
   const nodes = (job.result as { replicated?: unknown } | null | undefined)?.replicated;
   if (!Array.isArray(nodes)) return [];
@@ -463,7 +466,7 @@ export async function restartSharedWorkers(o: OpsTarget & {
         return { kind: "failed", message: transportFailure(err) };
       }
       // A job read that did not succeed establishes nothing about the job: it
-      // is refused before its body is read, whatever the body says.
+      // is refused before its body is parsed, whatever the body says.
       if (!job.ok) return { kind: "failed", message: `the job's status read was answered ${httpAnswer(job.status)}` };
       const rows = parseJson(job.text);
       const row = (Array.isArray(rows) ? rows[0] : rows) as { status?: unknown; message?: unknown; result?: unknown } | null;
@@ -493,7 +496,7 @@ export async function restartSharedWorkers(o: OpsTarget & {
     const peers = (outcome.failedNodes ?? []).map((n) => peerOpsUrl(o.url, n));
     throw new Error(
       `flair deploy: the restart of the shared worker threads of ${shown} failed (${outcome.message}). The MQTT-off configuration is set, and the listeners' live state is unconfirmed: ` +
-        `unless the deploy's own restart covered the shared workers (Harper restarts every worker only for an application it finds already active), they keep running until those workers restart. ` +
+        `unless the deploy's own restart covered the shared workers (Harper restarts every worker only for an application it finds already active), workers that have not restarted may still serve their previous listener configuration. ` +
         `Deployed; ${sharedWorkerRestartInstruction(o.url)}${peers.length ? `, and the same request to ${peers.join(", ")}` : ""}.`,
     );
   }

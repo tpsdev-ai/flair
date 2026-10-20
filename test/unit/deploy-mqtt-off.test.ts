@@ -417,7 +417,7 @@ describe("step 2 fails on every failure Harper's restart job reports", () => {
     });
     let thrown: Error | undefined;
     try { await deploy(base()); } catch (err) { thrown = err as Error; }
-    expect(thrown?.message).toContain("the job records these nodes without a completed restart: node-c");
+    expect(thrown?.message).toContain("the job records these nodes without Harper's completed-job message: node-c");
     expect(thrown?.message).toContain(`and the same request to http://node-c:${server.port}`);
     expect(thrown?.message).not.toContain("node-b,");
     expect(thrown?.message).not.toContain("ECONNREFUSED"); // the node's error text is never printed
@@ -443,7 +443,7 @@ describe("step 2 fails on every failure Harper's restart job reports", () => {
     expect(thrown?.message).not.toContain("Unrecognized service");
   }, 60_000);
 
-  test("a job status read that does not succeed is refused before its body is read, even when the body carries a completed job", async () => {
+  test("a job status read that does not succeed is refused, even when its body carries a completed job, and no report is printed", async () => {
     for (const status of [500, 401, 404, 307]) {
       reset({
         get_configuration: isolatedConfig,

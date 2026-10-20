@@ -973,7 +973,7 @@ program
   .option("--harper-version <semver>", "Pin harper to this version for --target (default: registry latest, floored at the flair#513 fix)")
   .option("--project <name>", "Fabric component name for --target", "flair")
   .option("--no-replicated", "Disable cluster-wide replication for --target (default: replicated=true)")
-  .option("--keep-mqtt-config", "For --target: leave the target's MQTT configuration as it is (default: set every MQTT listener off in the target's configuration before deploying, request the shared workers' restart for an isolated application, and read the saved configuration back after the deploy's restart; the listeners are not probed)")
+  .option("--keep-mqtt-config", "For --target: leave the target's MQTT configuration as it is (default: set every MQTT listener off in the target's configuration before deploying, then, after the deploy's restart, request the shared workers' restart for an isolated application and read the saved configuration back; --no-restart and --no-verify skip those two; the listeners are not probed)")
   .option("--ops-target <url>", "For --target: operations API URL for the MQTT-off configuration, restart and read-back (env: FLAIR_OPS_TARGET; default: derived from --target)")
   .option("--yes", "Skip the confirmation prompt for --target")
   .option("--install-hooks", "Consent to installing missing SessionStart hooks (claude-code / Codex) during upgrade. The hook executes at every session start — upgrade will not write it unprompted. Interactive runs prompt; non-interactive runs state the gap and withhold ✅ unless this flag is passed.")

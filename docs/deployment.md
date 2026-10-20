@@ -52,10 +52,13 @@ Flair runs Harper with MQTT off in local installs: no TCP or TLS MQTT listener
 and no MQTT over WebSocket. Every local start re-asserts it, and `flair doctor`
 reports an instance whose saved configuration starts an MQTT listener (it reads
 the configuration, not the running listeners). For a component deployed with
-`flair deploy` or `flair upgrade --target` — which set MQTT off in the target's
-configuration, request the shared worker threads' restart that applies it,
-and read the saved configuration back, without probing the listeners — see
-[deploying-on-fabric.md](deploying-on-fabric.md#mqtt-is-off), including how an
+`flair deploy` or `flair upgrade --target` — which by default set MQTT off in
+the target's configuration, request the shared worker threads' restart that
+applies it for an isolated application, and read the saved configuration back
+after the deploy's restart, without probing the listeners (`--keep-mqtt-config`
+skips all of it, `--no-restart` and `--no-verify` skip the restart request and
+the read-back) — see
+[deploying-on-fabric.md](deploying-on-fabric.md#mqtt-configuration), including how an
 operator turns MQTT on deliberately; table subscriptions, publishes and
 retained publishes over MQTT then follow the same policy as SSE and WebSocket
 subscriptions.

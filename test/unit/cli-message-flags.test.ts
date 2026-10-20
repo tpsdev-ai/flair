@@ -726,11 +726,13 @@ describe("flair#2116 — flags named in src/ literals are declared by the comman
 
   // flair#2124: capture the same next-steps printer the deploy action calls.
   // Execute its example through a POSIX shell and the real commander entry point
-  // with an owner-only password file. The URL includes shell metacharacters and
-  // an embedded quote; reaching the Agent read path proves --target stayed one
-  // value through shell parsing and passed the remote credential guard.
+  // with an owner-only password file. The URL's path includes shell
+  // metacharacters and an embedded quote (the printer shows a target as
+  // scheme, host, port and path, so a query would not be printed); reaching the
+  // Agent read path proves --target stayed one value through shell parsing and
+  // passed the remote credential guard.
   test("flair#2124: the emitted deploy example reaches the Agent read path", async () => {
-    const target = "http://127.0.0.1:2/path?owner=O'Brien&mode=deploy";
+    const target = "http://127.0.0.1:2/path/O'Brien&mode=deploy";
     const output: string[] = [];
     const log = spyOn(console, "log").mockImplementation((line: unknown) => { output.push(String(line)); });
     try {
@@ -740,7 +742,7 @@ describe("flair#2116 — flags named in src/ literals are declared by the comman
     }
     const line = output.find((l) => l.trim().startsWith("flair agent add "));
     expect(line).toBeTruthy();
-    expect(line).toContain(`--target 'http://127.0.0.1:2/path?owner=O'\\''Brien&mode=deploy'`);
+    expect(line).toContain(`--target 'http://127.0.0.1:2/path/O'\\''Brien&mode=deploy'`);
     const accepted = registry.get("agent add");
     expect(accepted).toBeTruthy();
     for (const flag of line!.match(FLAG_TOKEN) ?? []) expect(accepted!.has(flag)).toBe(true);
@@ -774,6 +776,20 @@ describe("flair#2116 — flags named in src/ literals are declared by the comman
       rmSync(home, { recursive: true, force: true });
     }
   }, 30_000);
+
+  test("the deploy next-steps line prints the target as scheme, host, port and path only", () => {
+    const output: string[] = [];
+    const log = spyOn(console, "log").mockImplementation((line: unknown) => { output.push(String(line)); });
+    try {
+      printDeployNextSteps("https://deployer:not-a-real-secret@flair.example.invalid/flair?token=not-a-real-secret#not-a-real-secret");
+    } finally {
+      log.mockRestore();
+    }
+    const line = output.find((l) => l.trim().startsWith("flair agent add "));
+    expect(line).toContain("--target 'https://flair.example.invalid/flair'");
+    expect(output.join("\n")).not.toContain("not-a-real-secret");
+    expect(output.join("\n")).not.toContain("deployer");
+  });
 
   // A mutation run against the real sources: one bogus flag put back into one
   // message must be found, in the command it belongs to; the unmutated file is

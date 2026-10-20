@@ -416,19 +416,19 @@ stayed split for days after 0.30.0 was the incident this closes.
 
 ### Post-deploy fleet verify
 
-Both `flair deploy` and `flair upgrade --target` set every MQTT listener off in
-the target's configuration before deploying, request the shared worker
-threads' restart that applies it when Flair is an isolated application (a
-fresh isolated deploy restarts only Flair's own worker; otherwise the deploy's
-own restart covers the shared workers), and after the deploy's restart read
-the saved configuration back, failing when it does not read off
-(`--ops-target` / `FLAIR_OPS_TARGET` name the operations API for both;
-`--no-verify` skips the restart request and the read-back). They report what
-they set and requested; they do not probe the listeners, which stop when each
-node's workers restart. Pass
-`--keep-mqtt-config` to leave an MQTT configuration you turned on
-deliberately
-([deploying-on-fabric.md](deploying-on-fabric.md#mqtt-is-off)).
+By default, both `flair deploy` and `flair upgrade --target` set every MQTT
+listener off in the target's configuration before deploying, then, after the
+deploy's restart, request the shared worker threads' restart that applies it
+when Flair is an isolated application (a fresh isolated deploy restarts only
+Flair's own worker; otherwise the deploy's own restart covers the shared
+workers) and read the saved configuration back, failing when it does not read
+off (`--ops-target` / `FLAIR_OPS_TARGET` name the operations API for both;
+`--no-restart` and `--no-verify` skip the restart request and the read-back).
+They report what they set and requested; they do not probe the listeners,
+and workers that have not restarted may still serve their previous listener
+configuration. Pass `--keep-mqtt-config` to skip all of it and leave an MQTT
+configuration you turned on deliberately
+([deploying-on-fabric.md](deploying-on-fabric.md#mqtt-configuration)).
 
 As of flair#636, both `flair deploy` and `flair upgrade --target` automatically run a
 fleet convergence sweep after a successful deploy — Harper's own "Successfully

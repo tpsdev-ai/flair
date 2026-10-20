@@ -158,7 +158,7 @@ describe("reportedRestartFailure and isCompletedJobMessage", () => {
       status: "COMPLETE",
       message: done("j1"),
       result: { replicated: [{ node: "node-b", message: done("p1") }, { node: "node-c", message: "Successfully completed job but restart failed" }] },
-    }, true, "j1")).toBe("the job records these nodes without a completed restart: node-c");
+    }, true, "j1")).toBe("the job records these nodes without Harper's completed-job message: node-c");
   });
   test("names every reported failure, never echoing the job's text", () => {
     expect(reportedRestartFailure({ status: "ERROR", message: "private-value" }, false, "j1")).toBe("the job ended ERROR");
@@ -170,7 +170,7 @@ describe("reportedRestartFailure and isCompletedJobMessage", () => {
       message: done("j1"),
       result: { replicated: [{ node: "node-b", message: done("p1") }, { node: "node-c", message: "private-value" }, { node: ":", message: "x" }] },
     }, true, "j1");
-    expect(failed).toBe("the job records these nodes without a completed restart: node-c, (a node whose name is not a host name or address)");
+    expect(failed).toBe("the job records these nodes without Harper's completed-job message: node-c, (a node whose name is not a host name or address)");
     expect(failed).not.toContain("private-value");
   });
 });

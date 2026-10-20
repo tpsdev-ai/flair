@@ -1671,7 +1671,7 @@ flair upgrade
       attr: replicated
       negate: true
     --keep-mqtt-config
-      description: For --target: leave the target's MQTT configuration as it is (default: set every MQTT listener off in the target's configuration before deploying, request the shared workers' restart for an isolated application, and read the saved configuration back after the deploy's restart; the listeners are not probed)
+      description: For --target: leave the target's MQTT configuration as it is (default: set every MQTT listener off in the target's configuration before deploying, then, after the deploy's restart, request the shared workers' restart for an isolated application and read the saved configuration back; --no-restart and --no-verify skip those two; the listeners are not probed)
       attr: keepMqttConfig
     --ops-target <url>
       description: For --target: operations API URL for the MQTT-off configuration, restart and read-back (env: FLAIR_OPS_TARGET; default: derived from --target)
@@ -1810,7 +1810,7 @@ flair deploy
       attr: restart
       negate: true
     --keep-mqtt-config
-      description: Leave the target's MQTT configuration as it is (default: set every MQTT listener off in the target's configuration before deploying, request the shared workers' restart for an isolated application, and read the saved configuration back after the deploy's restart; the listeners are not probed)
+      description: Leave the target's MQTT configuration as it is (default: set every MQTT listener off in the target's configuration before deploying, then, after the deploy's restart, request the shared workers' restart for an isolated application and read the saved configuration back; --no-restart and --no-verify skip those two; the listeners are not probed)
       attr: keepMqttConfig
     --dry-run
       description: Resolve package, validate args, skip the deploy call
@@ -4850,10 +4850,12 @@ Options:
   --keep-mqtt-config             For --target: leave the target's MQTT
                                  configuration as it is (default: set every MQTT
                                  listener off in the target's configuration
-                                 before deploying, request the shared workers'
-                                 restart for an isolated application, and read
-                                 the saved configuration back after the deploy's
-                                 restart; the listeners are not probed)
+                                 before deploying, then, after the deploy's
+                                 restart, request the shared workers' restart
+                                 for an isolated application and read the saved
+                                 configuration back; --no-restart and
+                                 --no-verify skip those two; the listeners are
+                                 not probed)
   --ops-target <url>             For --target: operations API URL for the
                                  MQTT-off configuration, restart and read-back
                                  (env: FLAIR_OPS_TARGET; default: derived from
@@ -5000,10 +5002,11 @@ Options:
                                  (default: restart=true)
   --keep-mqtt-config             Leave the target's MQTT configuration as it is
                                  (default: set every MQTT listener off in the
-                                 target's configuration before deploying,
-                                 request the shared workers' restart for an
-                                 isolated application, and read the saved
-                                 configuration back after the deploy's restart;
+                                 target's configuration before deploying, then,
+                                 after the deploy's restart, request the shared
+                                 workers' restart for an isolated application
+                                 and read the saved configuration back;
+                                 --no-restart and --no-verify skip those two;
                                  the listeners are not probed)
   --dry-run                      Resolve package, validate args, skip the deploy
                                  call

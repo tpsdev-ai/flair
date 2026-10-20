@@ -129,7 +129,7 @@ describe("readInstanceConfiguration and the doctor's MQTT listeners section", ()
 
   test("the configuration note says the check reads the saved configuration, not the running listeners, and how to confirm on a node", () => {
     expect(MQTT_CONFIGURATION_NOTE).toBe(
-      "This reads the saved configuration, not the running listeners: worker threads that have not restarted since it changed keep serving MQTT. " +
+      "This reads the saved configuration, not the running listeners: worker threads that have not restarted since it changed may still serve their previous listener configuration. " +
         "To confirm on a node, connect an MQTT client to its MQTT ports or WebSocket path.",
     );
   });
@@ -139,6 +139,34 @@ describe("readInstanceConfiguration and the doctor's MQTT listeners section", ()
       "MQTT on TCP port (mqtt.network.port)",
       "MQTT on TLS port 8883 (mqtt.network.securePort)",
     ]);
+  });
+
+  test("a redirect is not followed (real HTTP): the read is NOT RUN, named by its status, and the location receives nothing", async () => {
+    const offRoot = { ...ROOT, mqtt: MQTT_DISABLED_CONFIG };
+    const reachedSecond: string[] = [];
+    const second = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) { reachedSecond.push(await req.text()); return Response.json(offRoot); } });
+    try {
+      for (const status of [307, 308]) {
+        const first = Bun.serve({
+          port: 0,
+          hostname: "127.0.0.1",
+          fetch() { return new Response(null, { status, headers: { location: `http://127.0.0.1:${second.port}/` } }); },
+        });
+        try {
+          const read = await readInstanceConfiguration({ opsUrl: `http://127.0.0.1:${first.port}/`, authHeader: "Basic dGVzdDp0ZXN0", timeoutMs: 5000 });
+          expect(read).toEqual({ kind: "not-run", reason: `the configuration read was answered with a redirect (HTTP ${status}), which is not followed` });
+          const section = mqttListenerSection(read);
+          expect(section.status).toBe("not-run");
+          expect(section.line).not.toContain(String(second.port));
+          expect(section.line).not.toContain(MQTT_LISTENERS_OFF_LINE);
+        } finally {
+          first.stop(true);
+        }
+      }
+      expect(reachedSecond, "the redirect's location received no request").toEqual([]);
+    } finally {
+      second.stop(true);
+    }
   });
 
   test("rootConfigurationProblem checks only http, operationsApi and rootPath: an answer missing one is refused, any object with all three is accepted", () => {

@@ -13,8 +13,8 @@
  *
  * It reads the CONFIGURATION, not the running listeners: Harper applies a
  * changed `mqtt` section when the HTTP worker threads restart, so worker
- * threads that have not restarted since it changed keep serving what they
- * started with. The section says so on every path, including the NOT RUN
+ * threads that have not restarted since it changed may still serve their
+ * previous listener configuration. The section says so on every path, including the NOT RUN
  * ones doctor prints itself (src/commands/doctor.ts), and names how to
  * confirm on a node: connect an MQTT client to its MQTT ports or WebSocket
  * path. Flair does not probe the listeners.
@@ -34,7 +34,7 @@ export const MQTT_LISTENERS_OFF_LINE = "No MQTT listener is configured on this i
 
 /** What every MQTT line adds: the check reads the saved configuration, not the running listeners, and how to confirm on a node. */
 export const MQTT_CONFIGURATION_NOTE =
-  "This reads the saved configuration, not the running listeners: worker threads that have not restarted since it changed keep serving MQTT. " +
+  "This reads the saved configuration, not the running listeners: worker threads that have not restarted since it changed may still serve their previous listener configuration. " +
   "To confirm on a node, connect an MQTT client to its MQTT ports or WebSocket path.";
 
 /** The set_configuration call that sets every MQTT listener off in the configuration, as an operator would send it. */
@@ -59,7 +59,12 @@ export type InstanceConfigurationRead =
   | { kind: "ok"; config: Record<string, unknown> }
   | { kind: "not-run"; reason: string };
 
-/** Read the instance's root configuration through the operations API. */
+/**
+ * Read the instance's root configuration through the operations API. A
+ * redirect is not followed: any 3xx answer is NOT RUN (named by its status;
+ * the location it names is not printed and receives nothing), so the check
+ * reads only the endpoint it was given.
+ */
 export async function readInstanceConfiguration(args: {
   opsUrl: string;
   authHeader: string;
@@ -74,9 +79,13 @@ export async function readInstanceConfiguration(args: {
       headers: { "Content-Type": "application/json", Authorization: args.authHeader },
       body: JSON.stringify({ operation: "get_configuration" }),
       signal: AbortSignal.timeout(args.timeoutMs ?? 5000),
+      redirect: "manual",
     });
   } catch {
     return { kind: "not-run", reason: "the configuration read failed" };
+  }
+  if (res.status >= 300 && res.status < 400) {
+    return { kind: "not-run", reason: `the configuration read was answered with a redirect (HTTP ${res.status}), which is not followed` };
   }
   if (!res.ok) return { kind: "not-run", reason: `the configuration read was answered HTTP ${res.status}` };
   let data: unknown;
