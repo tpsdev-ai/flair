@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { execFileSync, spawnSync } from "node:child_process";
-import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -24,17 +24,21 @@ import { tempDir } from "../../../test/helpers/temp-dir.ts";
  *   - the CI bundle path (unshallow, squash, re-tag, `git bundle create`) and a
  *     clone from the bundle it writes.
  *
- * node-llama-cpp derives every path it writes from its own install directory
- * (dist/config.js: llamaDirectory = <package>/llama), so each case runs a COPY
- * of its dist/ in a temp dir. The copy resolves its dependencies (simple-git
- * included) through a node_modules symlink to the directory that holds the real
- * package, so the installed package is never written to.
+ * The clone and bundle operations exercised here write under node-llama-cpp's
+ * install directory (dist/config.js puts llama.cpp/, llama.cpp.info.json and
+ * gitRelease.bundle under <package>/llama), so each case runs a COPY of its
+ * dist/ in a temp dir. The copy resolves its dependencies (simple-git included)
+ * through a node_modules symlink to the directory that holds the real package.
+ * The test sets its own HOME and uses its own temp dirs.
  *
- * Skipped only when git is not on PATH. Nothing here reaches the network.
+ * Skipped only when git is not on PATH (ENOENT). A git that is on PATH but does
+ * not answer `git --version` (a nonzero exit, a timeout, unexpected output)
+ * fails both git cases with the probe's reason. Nothing here reaches the network.
  */
 
 const GIT_TIMEOUT_MS = 20_000;
 const CASE_BUDGET_MS = 60_000;
+const EXACT_VERSION = /^\d+\.\d+\.\d+$/;
 
 const requireHere = createRequire(import.meta.url);
 
@@ -51,13 +55,46 @@ function packageRoot(entryFile: string, name: string): string {
 }
 
 const nlcRoot = packageRoot(requireHere.resolve("node-llama-cpp"), "node-llama-cpp");
-const simpleGitRootFrom = (fromDir: string) =>
-  packageRoot(createRequire(join(fromDir, "package.json")).resolve("simple-git"), "simple-git");
+const resolveFrom = (fromDir: string, name: string) =>
+  packageRoot(createRequire(join(fromDir, "package.json")).resolve(name), name);
 const readVersion = (dir: string): string => JSON.parse(readFileSync(join(dir, "package.json"), "utf8")).version;
 
-const gitProbe = spawnSync("git", ["--version"], { encoding: "utf8", timeout: GIT_TIMEOUT_MS });
-const gitMissing = gitProbe.error !== undefined || gitProbe.status !== 0;
+type GitProbe = { state: "present" } | { state: "missing" } | { state: "broken"; reason: string };
+
+/**
+ * Classify `git --version`. Only ENOENT (no git on PATH) is "missing"; any other
+ * spawn error (a timeout included), a signal, a nonzero exit or output that does
+ * not start with "git version" is "broken", which fails the git cases.
+ */
+function probeGit(env: NodeJS.ProcessEnv = process.env, timeoutMs = GIT_TIMEOUT_MS): GitProbe {
+  const res = spawnSync("git", ["--version"], { encoding: "utf8", env, timeout: timeoutMs });
+  if (res.error) {
+    const code = (res.error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return { state: "missing" };
+    if (code === "ETIMEDOUT") return { state: "broken", reason: `\`git --version\` did not finish within ${timeoutMs} ms` };
+    return { state: "broken", reason: `\`git --version\` could not run (${code ?? res.error.message})` };
+  }
+  if (res.status !== 0) {
+    const how = res.status === null ? `was killed by ${res.signal}` : `exited ${res.status}`;
+    const stderr = (res.stderr ?? "").trim().split("\n")[0];
+    return { state: "broken", reason: `\`git --version\` ${how}${stderr ? `: ${stderr}` : ""}` };
+  }
+  if (!(res.stdout ?? "").startsWith("git version ")) {
+    return { state: "broken", reason: `\`git --version\` printed ${JSON.stringify((res.stdout ?? "").slice(0, 80))}, not "git version ..."` };
+  }
+  return { state: "present" };
+}
+
+const gitProbe = probeGit();
+const gitMissing = gitProbe.state === "missing";
 const skipNote = gitMissing ? " [skipped: git is not on PATH]" : "";
+
+/** Fail a git case, by name and reason, when git is on PATH but unusable. */
+function requireUsableGit(): void {
+  if (gitProbe.state === "broken") {
+    throw new Error(`git is on PATH but unusable, so node-llama-cpp's clone paths cannot be checked: ${gitProbe.reason}`);
+  }
+}
 
 /** The environment for this file's own git calls: no ambient GIT_* (a hook's GIT_DIR, say), an isolated HOME. */
 function setupEnv(home: string): NodeJS.ProcessEnv {
@@ -149,24 +186,87 @@ async function withHome<T>(home: string, fn: () => Promise<T>): Promise<T> {
   }
 }
 
+/** A directory holding only an executable `git` shell script with `body`. */
+function gitStubDir(body: string): string {
+  const dir = tempDir("flair-bench-git-stub-");
+  const stub = join(dir, "git");
+  writeFileSync(stub, `#!/bin/sh\n${body}\n`);
+  chmodSync(stub, 0o755);
+  return dir;
+}
+
+describe("the git probe skips only when git is not on PATH", () => {
+  test(
+    "no git on PATH (ENOENT) is missing",
+    () => {
+      expect(probeGit({ ...process.env, PATH: tempDir("flair-bench-no-git-") })).toEqual({ state: "missing" });
+    },
+    CASE_BUDGET_MS,
+  );
+
+  test(
+    "a git that exits nonzero is broken, with its exit code and stderr",
+    () => {
+      const probe = probeGit({ ...process.env, PATH: gitStubDir('echo "fatal: stub failure" >&2\nexit 1') });
+      expect(probe).toEqual({ state: "broken", reason: "`git --version` exited 1: fatal: stub failure" });
+    },
+    CASE_BUDGET_MS,
+  );
+
+  test(
+    "a git that does not finish within the timeout is broken",
+    () => {
+      const probe = probeGit({ ...process.env, PATH: gitStubDir("while :; do :; done") }, 300);
+      expect(probe).toEqual({ state: "broken", reason: "`git --version` did not finish within 300 ms" });
+    },
+    CASE_BUDGET_MS,
+  );
+
+  test(
+    'a git whose output does not start with "git version" is broken',
+    () => {
+      const probe = probeGit({ ...process.env, PATH: gitStubDir("echo hello") });
+      expect(probe.state).toBe("broken");
+    },
+    CASE_BUDGET_MS,
+  );
+});
+
 describe("node-llama-cpp's simple-git call paths against the resolved simple-git", () => {
-  test("node-llama-cpp resolves the simple-git the root override pins", () => {
-    const resolved = readVersion(simpleGitRootFrom(nlcRoot));
-    const rootManifest = JSON.parse(readFileSync(join(import.meta.dir, "..", "..", "..", "package.json"), "utf8"));
-    const pinned: string | undefined = rootManifest.overrides?.["simple-git"];
-    if (pinned !== undefined) expect(resolved).toBe(pinned);
-    expect(Number(resolved.split(".")[0])).toBeGreaterThanOrEqual(4);
-  });
+  test(
+    "node-llama-cpp resolves the simple-git and @simple-git/argv-parser versions the root overrides pin",
+    () => {
+      const rootManifest = JSON.parse(readFileSync(join(import.meta.dir, "..", "..", "..", "package.json"), "utf8"));
+      const overrides: Record<string, unknown> = rootManifest.overrides ?? {};
+      const pins: Record<string, string> = {};
+      for (const name of ["simple-git", "@simple-git/argv-parser"]) {
+        const pin = overrides[name];
+        if (typeof pin !== "string" || !EXACT_VERSION.test(pin)) {
+          throw new Error(
+            `the root package.json must pin overrides["${name}"] to an exact version (found ${JSON.stringify(pin)}); ` +
+              "this test checks node-llama-cpp's clone paths against that pinned simple-git",
+          );
+        }
+        pins[name] = pin;
+      }
+      const simpleGitDir = resolveFrom(nlcRoot, "simple-git");
+      expect(readVersion(simpleGitDir)).toBe(pins["simple-git"]);
+      expect(readVersion(resolveFrom(simpleGitDir, "@simple-git/argv-parser"))).toBe(pins["@simple-git/argv-parser"]);
+      expect(Number(pins["simple-git"].split(".")[0])).toBeGreaterThanOrEqual(4);
+    },
+    CASE_BUDGET_MS,
+  );
 
   test.skipIf(gitMissing)(
     `bundle path: clones the llama.cpp bundle node-llama-cpp ships, with no GitHub fallback${skipNote}`,
     async () => {
+      requireUsableGit();
       const release: string = JSON.parse(readFileSync(join(nlcRoot, "llama", "binariesGithubRelease.json"), "utf8")).release;
       const shipped = join(nlcRoot, "llama", "gitRelease.bundle");
       expect(existsSync(shipped)).toBe(true);
       const work = tempDir("flair-bench-nlc-bundle-");
       const nlc = isolatedNodeLlamaCpp(work, release, true);
-      expect(realpathSync(simpleGitRootFrom(nlc.root))).toBe(realpathSync(simpleGitRootFrom(nlcRoot)));
+      expect(realpathSync(resolveFrom(nlc.root, "simple-git"))).toBe(realpathSync(resolveFrom(nlcRoot, "simple-git")));
       // A failed bundle clone falls back to GitHub; point GitHub at a path that does not exist.
       writeGitconfig(nlc.home, pathToFileURL(join(work, "no-network")).href + "/");
 
@@ -187,10 +287,11 @@ describe("node-llama-cpp's simple-git call paths against the resolved simple-git
   test.skipIf(gitMissing)(
     `GitHub path, CI bundle path, then a clone from that bundle, against a local bare repo${skipNote}`,
     async () => {
+      requireUsableGit();
       const tag = "b9999";
       const work = tempDir("flair-bench-nlc-github-");
       const nlc = isolatedNodeLlamaCpp(work, tag, false);
-      expect(realpathSync(simpleGitRootFrom(nlc.root))).toBe(realpathSync(simpleGitRootFrom(nlcRoot)));
+      expect(realpathSync(resolveFrom(nlc.root, "simple-git"))).toBe(realpathSync(resolveFrom(nlcRoot, "simple-git")));
 
       // A two-commit source with the release tag, served as https://github.com/ggml-org/llama.cpp.git.
       const src = join(work, "src");
