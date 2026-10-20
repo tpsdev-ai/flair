@@ -121,12 +121,21 @@ interface RpcStream {
 
 let rpcSeq = 0;
 
-async function postA2A(agent: TestAgent | null, method: string, params: Record<string, unknown>): Promise<{ rpcId: number; stream: RpcStream }> {
+/** Both registrations of the A2A adapter (the class name and the lowercase alias). */
+const A2A_PATHS = ["/a2a", "/A2AAdapter"] as const;
+
+async function postA2A(
+  agent: TestAgent | null,
+  method: string,
+  params: Record<string, unknown>,
+  opts: { accept?: string; path?: string } = {},
+): Promise<{ rpcId: number; stream: RpcStream }> {
   const rpcId = ++rpcSeq;
+  const path = opts.path ?? "/a2a";
   const ctrl = new AbortController();
-  const headers: Record<string, string> = { "Content-Type": "application/json", Accept: "application/json" };
-  if (agent) headers.Authorization = ed25519Header(agent, "POST", "/a2a");
-  const res = await fetch(`${harper.httpURL}/a2a`, {
+  const headers: Record<string, string> = { "Content-Type": "application/json", Accept: opts.accept ?? "application/json" };
+  if (agent) headers.Authorization = ed25519Header(agent, "POST", path);
+  const res = await fetch(`${harper.httpURL}${path}`, {
     method: "POST",
     headers,
     body: JSON.stringify({ jsonrpc: "2.0", id: rpcId, method, params }),
@@ -399,4 +408,95 @@ describe("A2A message/stream delivers the OrgEvents for the named agent", () => 
     const logAfter = (harper.getLog?.() ?? "").slice(logAtClose);
     expect(logAfter).not.toMatch(/\[error\]|ERR_INVALID_STATE|Invalid state|uncaught|unhandled/i);
   }, 40_000);
+});
+
+/** The JSON-RPC answer in a settled response: a plain JSON body, or the `data:` line an SSE-negotiated refusal is serialized into. */
+function rpcAnswers(stream: RpcStream): any[] {
+  const framed = stream.frames().map((f) => f.data).filter((d) => d && d.jsonrpc === "2.0");
+  if (framed.length > 0) return framed;
+  const body = stream.raw().trim();
+  if (!body) return [];
+  try { return [JSON.parse(body)]; } catch { return []; }
+}
+
+describe("A2A message/stream accepts Accept: text/event-stream (#2717)", () => {
+  for (const path of A2A_PATHS) {
+    it(`${path}: opens the caller's stream and delivers an event published after open`, async () => {
+      const { rpcId, stream } = await postA2A(A, "message/stream", { agentId: A.id }, { accept: "text/event-stream", path });
+      try {
+        expect(stream.status).toBe(200);
+        expect(stream.contentType).toStartWith("text/event-stream");
+
+        const eventId = `a2717-for-a-${randomUUID()}`;
+        const marker = `marker-2717-${randomUUID()}`;
+        await publishEvent(P, { id: eventId, targetIds: [A.id], summary: `note ${marker}` });
+
+        const frame = await stream.waitFor(
+          (f) => f.event === "org.event" && f.data?.result?.event?.id === eventId,
+          `the org.event frame for ${eventId} on ${path}`,
+        );
+        expect(frame.data.jsonrpc).toBe("2.0");
+        expect(frame.data.id).toBe(rpcId);
+        expect(frame.data.result.type).toBe("event");
+        expect(frame.data.result.event.summary).toBe(`note ${marker}`);
+      } finally {
+        await stream.close();
+      }
+    }, 40_000);
+
+    it(`${path}: a non-admin caller naming another agent is refused before any catch-up read`, async () => {
+      const markerB = `marker-2717-refused-${randomUUID()}`;
+      await publishEvent(P, { id: `a2717-refused-${randomUUID()}`, targetIds: [B.id], summary: `note ${markerB}` });
+      const readsBefore = readsFor(B.id).length;
+
+      const { rpcId, stream } = await postA2A(A, "message/stream", { agentId: B.id }, { accept: "text/event-stream", path });
+      try {
+        await settle(stream);
+        const answers = rpcAnswers(stream);
+        expect(answers.length).toBe(1);
+        expect(answers[0]).toEqual({
+          jsonrpc: "2.0",
+          id: rpcId,
+          error: { code: -32001, message: "Forbidden", data: { detail: `caller ${A.id} cannot stream as ${B.id}` } },
+        });
+        expect(stream.frames().some((f) => f.event === "org.event")).toBe(false);
+        expect(carriesMarker(stream.raw(), markerB)).toBe(false);
+      } finally {
+        await stream.close();
+      }
+
+      await sleep(POLL_MS + 500);
+      expect(readsFor(B.id).length).toBe(readsBefore);
+    }, 40_000);
+
+    it(`${path}: a request without agentId keeps its -32602 refusal`, async () => {
+      const { rpcId, stream } = await postA2A(A, "message/stream", {}, { accept: "text/event-stream", path });
+      try {
+        await settle(stream);
+        const answers = rpcAnswers(stream);
+        expect(answers.length).toBe(1);
+        expect(answers[0]).toEqual({
+          jsonrpc: "2.0", id: rpcId, error: { code: -32602, message: "Invalid params: agentId is required" },
+        });
+      } finally {
+        await stream.close();
+      }
+    }, 20_000);
+
+    it(`${path}: a GET with the header keeps the subscription path`, async () => {
+      const ctrl = new AbortController();
+      const pending = fetch(`${harper.httpURL}${path}`, {
+        headers: { Accept: "text/event-stream" },
+        signal: ctrl.signal,
+      }).catch(() => null);
+      try {
+        // The subscription path stays open: no response headers and no frame.
+        const raced = await Promise.race([pending.then((res) => ({ res })), sleep(500).then(() => ({ open: true as const }))]);
+        expect("open" in raced).toBe(true);
+      } finally {
+        ctrl.abort();
+        await pending;
+      }
+    }, 20_000);
+  }
 });
