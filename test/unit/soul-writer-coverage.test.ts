@@ -15,6 +15,7 @@ add("instruction-version-record", ["writer:table.create#1", "writer:table.create
 add("instruction-version-record", ["writer:events.create#1", "writer:events.delete#1"], "Instruction events appended and removed with their version record, included by conservative sink enumeration.");
 add("AgentSeed", ["writer:(databases as any).flair.Soul.put#1"], "Provisioning: source authorization and whole-template content validation precede mutations.");
 add("AgentSeed", ["writer:(databases as any).flair.Agent.put#1", "writer:(databases as any).flair.Memory.put#1"], "Other tables in the provisioning module, included by conservative sink enumeration.");
+add("SoulFeed", ["alias-source:(databases as any).flair.Soul#1"], "Read-only: the table handle is handed to subscribeInProcess (resources/table-subscription-policy.ts), which calls only the table's subscribe() to read its changes.");
 add("Federation", ["alias-source:(databases as any).flair.Soul#1"], "Explicit replication path: authenticated pinned instance keys and federation classification; preserve originating provenance.");
 add("Federation", ["writer:writeBackCommittedRow#1"], "The Presence receipt branch (flair#2578 slice 1): it hands the shared write-back helper the Presence table, so it writes no Soul row, included by conservative sink enumeration of the resolved table handle.");
 add("Federation", ["writer:writeBackCommittedRow#2"], "The federation merge, every synced table (flair#2450), included by conservative sink enumeration of the resolved table handle.");

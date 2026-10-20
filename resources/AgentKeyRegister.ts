@@ -8,8 +8,9 @@
  * row (resources/agent-auth.ts), and a pending row's stored value is the literal
  * string `pending`, which can never verify — so a pending agent cannot
  * authenticate as itself. The Agent resource's `allowUpdate()` admits a Basic
- * admin, but its PUT and PATCH handlers strip `publicKey` from the body
- * (resources/Agent.ts), so neither verb writes the key. Here
+ * admin, but its PUT handler carries the STORED `publicKey` into the
+ * replacement and its PATCH handler strips `publicKey` from the body
+ * (resources/Agent.ts), so neither verb writes a key the body supplies. Here
  * `allowCreate()` returns true and the handler
  * decides: it admits only an admin and re-reads the row, failing closed on
  * absent evidence.

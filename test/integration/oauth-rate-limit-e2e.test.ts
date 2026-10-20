@@ -51,7 +51,6 @@ async function postToken(harper: HarperInstance, body: Record<string, string>, h
 }
 
 let harper: HarperInstance;
-const savedEnv: Record<string, string | undefined> = {};
 const clientId = `flair_cl_ratelimit_${randomUUID()}`;
 const validCode = `code_${randomUUID()}`;
 // Authorization-code exchange requires the stored S256 challenge and a matching verifier.
@@ -60,23 +59,21 @@ const validChallenge = createHash("sha256").update(validVerifier).digest("base64
 
 describe("OAuth rate limiting (real Harper, real HTTP)", () => {
   beforeAll(async () => {
-    // Set BEFORE the spawn — startHarper hands its own process.env to the child.
-    for (const k of ["FLAIR_OAUTH_RATE_LIMIT", "FLAIR_OAUTH_REGISTER_RATE_LIMIT", "FLAIR_RATE_LIMIT", "FLAIR_TRUSTED_PROXY", "FLAIR_OAUTH_DCR_TOKEN"]) {
-      savedEnv[k] = process.env[k];
-    }
-    process.env.FLAIR_OAUTH_RATE_LIMIT = String(OAUTH_LIMIT);
-    process.env.FLAIR_OAUTH_REGISTER_RATE_LIMIT = String(REGISTER_LIMIT);
-    delete process.env.FLAIR_RATE_LIMIT;
-    delete process.env.FLAIR_TRUSTED_PROXY;
     // Registration is closed unless an operator opts in, so this instance opts
     // in. Without it every registration below is refused 403 by the DCR gate,
     // and a test asking "did registration survive the token bucket being spent"
     // could no longer tell a SEPARATE BUCKET from a CLOSED ENDPOINT — both
     // answer non-429. The budget has to be reachable for a claim about the
     // budget to mean anything.
-    process.env.FLAIR_OAUTH_DCR_TOKEN = DCR_TOKEN;
-
-    harper = await startHarper();
+    harper = await startHarper({
+      serverEnv: {
+        FLAIR_OAUTH_RATE_LIMIT: String(OAUTH_LIMIT),
+        FLAIR_OAUTH_REGISTER_RATE_LIMIT: String(REGISTER_LIMIT),
+        FLAIR_RATE_LIMIT: "",
+        FLAIR_TRUSTED_PROXY: "",
+        FLAIR_OAUTH_DCR_TOKEN: DCR_TOKEN,
+      },
+    });
 
     // A registered client and a genuinely valid, unused authorization code.
     // Inserted through the admin ops API rather than run through the consent
@@ -106,10 +103,6 @@ describe("OAuth rate limiting (real Harper, real HTTP)", () => {
 
   afterAll(async () => {
     if (harper) await stopHarper(harper);
-    for (const [k, v] of Object.entries(savedEnv)) {
-      if (v === undefined) delete process.env[k];
-      else process.env[k] = v;
-    }
   }, HARPER_STOP_BUDGET_MS);
 
   // ── POSITIVE CONTROL ──────────────────────────────────────────────────────
@@ -270,21 +263,15 @@ describe("OAuth rate limiting (real Harper, real HTTP)", () => {
 
 describe("OAuth rate limiting keys per caller (trusted-proxy mode, real Harper)", () => {
   let proxied: HarperInstance;
-  const saved: Record<string, string | undefined> = {};
 
   beforeAll(async () => {
-    for (const k of ["FLAIR_OAUTH_RATE_LIMIT", "FLAIR_TRUSTED_PROXY"]) saved[k] = process.env[k];
-    process.env.FLAIR_OAUTH_RATE_LIMIT = String(OAUTH_LIMIT);
-    process.env.FLAIR_TRUSTED_PROXY = "1";
-    proxied = await startHarper();
+    proxied = await startHarper({
+      serverEnv: { FLAIR_OAUTH_RATE_LIMIT: String(OAUTH_LIMIT), FLAIR_TRUSTED_PROXY: "1" },
+    });
   }, 180_000);
 
   afterAll(async () => {
     if (proxied) await stopHarper(proxied);
-    for (const [k, v] of Object.entries(saved)) {
-      if (v === undefined) delete process.env[k];
-      else process.env[k] = v;
-    }
   }, HARPER_STOP_BUDGET_MS);
 
   test("one caller's exhausted budget does not limit a DIFFERENT caller", async () => {
