@@ -35,6 +35,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deploy, REQUIRED_PACKAGE_FILES } from "../../src/deploy.ts";
+import { applyMqttOffConfiguration } from "../../src/mqtt-off-deploy.ts";
 import { MQTT_DISABLED_SET_CONFIGURATION } from "../../src/lib/mqtt-config.ts";
 import type { DeployOptions } from "../../src/deploy.ts";
 import { MQTT_OFF_REPORT_LIMIT } from "../../src/mqtt-off-deploy.ts";
@@ -257,6 +258,34 @@ describe("step 1: deploy() sends the MQTT-off configuration before Harper deploy
     await deploy(base({ dryRun: true }));
     expect(received).toEqual([]);
   }, 60_000);
+});
+
+describe("step 1: the progress line and the final report agree on the answer's cluster nodes", () => {
+  async function apply(answer: unknown): Promise<{ peers: string[]; progress: string[] }> {
+    reset({ set_configuration: () => Response.json(answer) });
+    const progress: string[] = [];
+    const { peers } = await applyMqttOffConfiguration({
+      url: opsUrl,
+      fabricUser: "deploy-admin",
+      fabricPassword: "not-a-real-password",
+      replicated: true,
+      onProgress: (m) => progress.push(m),
+    });
+    return { peers, progress };
+  }
+
+  test("a replicated answer that lists cluster nodes adds the cluster phrase to the progress line and reports those peers", async () => {
+    const { peers, progress } = await apply({ message: "ok", replicated: [{ node: "node-b" }, { node: "node-c" }] });
+    expect(peers).toEqual(["node-b", "node-c"]);
+    expect(progress).toContain(`MQTT listeners set off in the configuration of ${opsUrl} and its cluster nodes`);
+  });
+
+  test("a replicated answer without a node list names only the origin in the progress line, and the report has no peers", async () => {
+    const { peers, progress } = await apply({ message: "ok" });
+    expect(peers).toEqual([]);
+    expect(progress).toContain(`MQTT listeners set off in the configuration of ${opsUrl}`);
+    expect(progress.join("\n")).not.toContain("and its cluster nodes");
+  });
 });
 
 describe("step 2: after the deploy's restart, the saved configuration is read back and the restart requested", () => {
