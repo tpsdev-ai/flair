@@ -278,11 +278,11 @@ export class A2AAdapter extends Resource {
   // public so other agents/clients can discover this Flair as a memory
   // peer. POST is JSON-RPC for actions (message/send writes OrgEvents,
   // tasks/list reads the instance's Beads task board, message/stream
-  // streams the OrgEvents for params.agentId) and is auth-gated upstream by
-  // auth-middleware's narrowed allow-list (GET /a2a passes through;
-  // POST /a2a must carry TPS-Ed25519 or admin Basic). The post() handler
-  // below additionally applies the caller-match rule to message/send and
-  // message/stream (actAsRefusal): a non-admin caller may name only its own
+  // streams the OrgEvents for params.agentId). The middleware verifies and
+  // annotates callers; post() refuses a caller without a verified agent or
+  // administrator annotation with JSON-RPC error `-32001 Unauthorized`. The
+  // post() handler below additionally applies the caller-match rule to
+  // message/send and message/stream (actAsRefusal): a non-admin caller may name only its own
   // agent id there; an admin caller may name another agent. message/send
   // routes a DIRECTED handoff to params.toAgentId (the recipient) by
   // setting the OrgEvent's targetIds = [toAgentId]; OrgEventCatchup filters
@@ -342,11 +342,9 @@ export class A2AAdapter extends Resource {
     const id = body.id ?? null;
     const params = body.params ?? {};
 
-    // Defense-in-depth: auth-middleware narrows the /a2a allow-list so
-    // POSTs only reach here after TPS-Ed25519 or admin Basic succeeds,
-    // which sets request.tpsAgent / tpsAgentIsAdmin. If middleware was
-    // misconfigured or someone added a back-door allow-list entry, fail
-    // closed here. Pattern matches WorkspaceState/Memory/etc.
+    // The middleware verifies and annotates callers (request.tpsAgent /
+    // tpsAgentIsAdmin); post() refuses a caller without a verified agent or
+    // administrator annotation with JSON-RPC error `-32001 Unauthorized`.
     const ctx = (this as any).getContext?.() ?? _context ?? {};
     const ctxRequest = ctx.request ?? ctx;
     const callerAgent: string | undefined = ctxRequest?.tpsAgent;

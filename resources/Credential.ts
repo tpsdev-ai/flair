@@ -53,9 +53,9 @@ function isRecordBody(content: unknown): content is Record<string, unknown> {
  * Ed25519 signing keys, and IdP links. This resource manages the
  * credential lifecycle: creation, revocation, and lookup.
  *
- * Only admin principals can create/revoke credentials for other principals.
- * Non-admin principals can only view their own credentials (token hashes
- * are never returned in responses).
+ * Administrators and trusted internal callers may manage credentials for other
+ * principals. Non-admin callers can read only their own credentials; by-id
+ * get() removes `tokenHash`, while search() does not remove it.
  *
  * On POST, PUT and PATCH, only an admin or the server creates an IdP identity
  * mapping (kind "idp"), changes its kind or identity fields, or reactivates it
@@ -113,10 +113,9 @@ export class Credential extends (databases as any).flair.Credential {
   allowRead() { return allowVerified((this as any).getContext?.()); }
 
   /**
-   * Self-authorize creation (same posture as allowRead).  Without this gate
-   * Harper routes POST /Credential to the base class's post() — which has
-   * no cross-principal check — letting an unauthenticated caller create
-   * credentials for any principal.
+   * Self-authorize creation (same posture as allowRead). allowCreate() admits
+   * verified and trusted internal callers; post() independently rejects
+   * anonymous callers and applies principal attribution and creation rules.
    */
   allowCreate() { return allowVerified((this as any).getContext?.()); }
 
@@ -256,7 +255,7 @@ export class Credential extends (databases as any).flair.Credential {
       });
     }
 
-    // Only admins can update credentials for other principals
+    // Administrators and trusted internal callers may manage credentials for other principals.
     if (auth.kind === "agent" && !auth.isAdmin && content.principalId && content.principalId !== auth.agentId) {
       return new Response(JSON.stringify({ error: "only admin principals can manage other principals' credentials" }), {
         status: 403, headers: { "content-type": "application/json" },

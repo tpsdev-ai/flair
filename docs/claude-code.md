@@ -191,7 +191,7 @@ Each project's `CLAUDE.md` uses its own agent ID. Writes carry an `agentId` fiel
 Claude Code subagents (spawned via `/run` or background tasks) can share the parent's memory:
 
     ### Subagents
-    Subagents share memory with the parent session when they use the same agent ID (to share, set `FLAIR_AGENT_ID=my-project`). A subagent with its own agent ID owns what it writes, but this is not isolation: only its private records are hidden from other agents, and it can still read other agents' non-private records. Writes without an explicit visibility default by durability: persistent and permanent are shared, standard and ephemeral are private.
+    Subagents share memory with the parent session when they use the same agent ID (to share, set `FLAIR_AGENT_ID=my-project`). A subagent with its own agent ID owns its writes; memory reads use owner/visibility scope, with an additional current-authority check for non-admin by-id and collection reads of retained closed skills. Writes without an explicit visibility default by durability: persistent and permanent are shared, standard and ephemeral are private.
 
     When spawning subagents, pass the agent ID so they can access shared context.
 
