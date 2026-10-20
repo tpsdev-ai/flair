@@ -140,6 +140,20 @@ export const MQTT_OFF_REPORT_LIMIT =
  * must name a host; and it may carry no user name or password, no query and no
  * fragment. The deploy's credential goes in its Basic header, never in a URL.
  */
+/**
+ * Whether the authority of `url` as written — after the scheme's colon and any
+ * slashes or backslashes, up to the next "/", "\\", "?", "#" or the end, with
+ * the tabs and newlines and the leading spaces and control characters the URL
+ * parser drops removed first — contains an "@". The parser normalizes an empty
+ * user name and password away (`https://@host`, `https://:@host`), so the
+ * parsed URL alone cannot show that one was given.
+ */
+function rawAuthorityHasUserinfo(url: string): boolean {
+  const cleaned = url.replace(/[\t\n\r]/g, "").replace(/^[\u0000-\u0020]+/, "");
+  const match = /^[A-Za-z][A-Za-z0-9+.-]*:[\/\\]*([^\/\\?#]*)/.exec(cleaned);
+  return match !== null && match[1].includes("@");
+}
+
 export function unsafeUrlProblem(url: string): string | null {
   let parsed: URL;
   try {
@@ -148,6 +162,7 @@ export function unsafeUrlProblem(url: string): string | null {
     return "it is not a valid URL";
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "its scheme is not http or https";
+  if (rawAuthorityHasUserinfo(url)) return "it carries a user name or password";
   // The URL parser already refuses an http or https URL without a host
   // ("it is not a valid URL" above); this keeps the rule explicit here.
   if (!parsed.hostname) return "it names no host";
@@ -246,6 +261,9 @@ export function peerOpsUrl(opsUrl: string, node: string): string {
   if (!isNodeHost(node)) return "that node's operations API";
   try {
     const parsed = new URL(opsUrl);
+    // A node's address is built from the scheme and port only; an operations
+    // URL with a path would lose it, so none is built.
+    if (parsed.pathname !== "/" && parsed.pathname !== "") return "that node's operations API";
     const host = isIP(node) === 6 ? `[${node}]` : node;
     return safeUrl(`${parsed.protocol}//${host}${parsed.port ? `:${parsed.port}` : ""}`);
   } catch {

@@ -59,6 +59,9 @@ describe("flair deploy / flair upgrade --target refuse an unsafe URL before prin
     ["deploy: a javascript: target", ["deploy", "--target", `javascript:${SECRET}`, "--fabric-user", "u", "--fabric-password", "p"]],
     ["deploy: a javascript: --ops-target", ["deploy", "--target", "https://flair.example.invalid", "--ops-target", `javascript:${SECRET}`, "--fabric-user", "u", "--fabric-password", "p"]],
     ["deploy: a ws: --ops-target", ["deploy", "--target", "https://flair.example.invalid", "--ops-target", "ws://flair.example.invalid:9925", "--fabric-user", "u", "--fabric-password", "p"]],
+    ["deploy: a target with an empty user name", ["deploy", "--target", "https://@example.invalid/flair", "--fabric-user", "u", "--fabric-password", "p"]],
+    ["deploy: an --ops-target with an empty user name and password", ["deploy", "--target", "https://flair.example.invalid", "--ops-target", "https://:@example.invalid/flair", "--fabric-user", "u", "--fabric-password", "p"]],
+    ["upgrade: a target with an empty user name and password", ["upgrade", "--target", "https://:@example.invalid/flair", "--yes"]],
     ["upgrade: a file: target", ["upgrade", "--target", `file:///tmp/${SECRET}`, "--yes"]],
     ["upgrade: a javascript: --ops-target", ["upgrade", "--target", "https://flair.example.invalid", "--ops-target", `javascript:${SECRET}`, "--yes"]],
   ];

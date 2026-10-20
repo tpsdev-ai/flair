@@ -60,6 +60,12 @@ describe("URL rules", () => {
   test("a URL carrying a user name or password, any query or any fragment is refused", () => {
     expect(unsafeUrlProblem("https://user:pw@host.example:9925")).toBe("it carries a user name or password");
     expect(unsafeUrlProblem("https://user@host.example:9925")).toBe("it carries a user name or password");
+    // An empty user name or password, which the URL parser drops, is refused from the URL as written.
+    for (const url of ["https://@example.invalid/flair", "https://:@example.invalid/flair", "https:@example.invalid/flair", " https://@example.invalid", "https://\t@example.invalid/flair"]) {
+      expect([url, unsafeUrlProblem(url)]).toEqual([url, "it carries a user name or password"]);
+    }
+    // An "@" after the authority (in the path) is not a user name.
+    expect(unsafeUrlProblem("https://example.invalid/p@q")).toBeNull();
     for (const q of ["token=x", "value=mysecret", "region=eu", "x"]) {
       expect([q, unsafeUrlProblem(`https://host.example:9925/?${q}`)]).toEqual([q, "it carries a query"]);
     }
@@ -120,6 +126,8 @@ describe("cluster node names", () => {
     expect(peerOpsUrl("http://127.0.0.1:19925/", "10.0.0.5")).toBe("http://10.0.0.5:19925");
     expect(peerOpsUrl("http://127.0.0.1:19925", "fe80::1")).toBe("http://[fe80::1]:19925");
     expect(peerOpsUrl("https://flair.example", "node-b")).toBe("https://node-b");
+    // An operations URL with a path: no node URL is built from it.
+    expect(peerOpsUrl("https://flair.example:9925/ops", "node-b")).toBe("that node's operations API");
     for (const bad of [":", "node-b:9925", "x@evil.example", "node-b/path?q=1", "(a node whose name is not a host name or address)"]) {
       expect([bad, peerOpsUrl("https://flair.example:9925", bad)]).toEqual([bad, "that node's operations API"]);
     }
