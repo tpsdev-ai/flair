@@ -241,24 +241,7 @@ async function withPaused<T>(point: string, trigger: () => Promise<Response>, co
 
 beforeAll(async () => {
   pauseDir = mkdtempSync(join(tmpdir(), "flair-2333-s3-pause-"));
-  const saved = {
-    FLAIR_ENABLE_TEST_FAULT_INJECTION: process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION,
-    FLAIR_TEST_PAUSE_DIR: process.env.FLAIR_TEST_PAUSE_DIR,
-    FLAIR_RELAY_PER_SENDER_CAP: process.env.FLAIR_RELAY_PER_SENDER_CAP,
-    FLAIR_RELAY_INBOX_CAP: process.env.FLAIR_RELAY_INBOX_CAP,
-  };
-  process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION = "1";
-  process.env.FLAIR_TEST_PAUSE_DIR = pauseDir;
-  process.env.FLAIR_RELAY_PER_SENDER_CAP = "1";
-  process.env.FLAIR_RELAY_INBOX_CAP = "10";
-  try {
-    harper = await startHarper();
-  } finally {
-    for (const [key, value] of Object.entries(saved)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  }
+  harper = await startHarper({ serverEnv: { FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_TEST_PAUSE_DIR: pauseDir, FLAIR_RELAY_PER_SENDER_CAP: "1", FLAIR_RELAY_INBOX_CAP: "10" } });
   assertOwnInstance(harper);
 
   await ensureFlairAgentRole(harper.opsURL, harper.admin.username, harper.admin.password);
