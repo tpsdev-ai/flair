@@ -439,8 +439,39 @@ describe("step 2 fails on every failure Harper's restart job reports", () => {
     });
     let thrown: Error | undefined;
     try { await deploy(base({ replicated: false })); } catch (err) { thrown = err as Error; }
-    expect(thrown?.message).toContain("the job completed with a message other than Harper's completed-job message");
+    expect(thrown?.message).toContain("the job completed with a message other than Harper's completed-job message for this job");
     expect(thrown?.message).not.toContain("Unrecognized service");
+  }, 60_000);
+
+  test("a job status read that does not succeed is refused before its body is read, even when the body carries a completed job", async () => {
+    for (const status of [500, 401, 404, 307]) {
+      reset({
+        get_configuration: isolatedConfig,
+        get_job: (body) => new Response(JSON.stringify([{ id: body.id, status: "COMPLETE", message: `Successfully completed job: ${body.id}`, result: { replicated: [] } }]), {
+          status,
+          headers: { "content-type": "application/json", ...(status === 307 ? { location: "http://127.0.0.1:1/" } : {}) },
+        }),
+      });
+      const progress: string[] = [];
+      let thrown: Error | undefined;
+      try { await deploy(base({ onProgress: (m) => progress.push(m) })); } catch (err) { thrown = err as Error; }
+      expect([status, thrown?.message.includes(`failed (the job's status read was answered HTTP ${status})`)]).toEqual([status, true]);
+      expect(progress.join("\n")).not.toContain("MQTT listeners configured off on");
+    }
+  }, 60_000);
+
+  test("a completed job whose message is not exactly Harper's for the requested job fails the deploy", async () => {
+    for (const message of ["Successfully completed job but restart failed", "Successfully completed job: job-1 but restart failed", "Successfully completed job: another-job"]) {
+      reset({
+        get_configuration: isolatedConfig,
+        get_job: (body) => Response.json([{ id: body.id, status: "COMPLETE", message }]),
+      });
+      const progress: string[] = [];
+      let thrown: Error | undefined;
+      try { await deploy(base({ replicated: false, onProgress: (m) => progress.push(m) })); } catch (err) { thrown = err as Error; }
+      expect([message, thrown?.message.includes("the job completed with a message other than Harper's completed-job message for this job")]).toEqual([message, true]);
+      expect(progress.join("\n")).not.toContain("MQTT listeners configured off on");
+    }
   }, 60_000);
 
   test("a job id that is not a plain token is not printed", async () => {

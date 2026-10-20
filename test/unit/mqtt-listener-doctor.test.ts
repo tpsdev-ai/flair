@@ -60,7 +60,7 @@ describe("describeMqttListenerFinding", () => {
     expect(MQTT_LISTENERS_OFF_LINE).toContain("No MQTT listener is configured");
   });
 
-  test("names every listener that is on and the set_configuration call that turns them off", () => {
+  test("names every listener that is on and the set_configuration call that sets them off in the configuration", () => {
     const finding = describeMqttListenerFinding({ mqtt: HARPER_DEFAULTS })!;
     expect(finding.message).toContain("3 MQTT listeners");
     expect(finding.message).toContain("MQTT on TCP port 1883");
@@ -72,7 +72,9 @@ describe("describeMqttListenerFinding", () => {
       mqtt_network_securePort: null,
       mqtt_webSocket: false,
     }));
-    expect(finding.fixHint).toContain("restart");
+    expect(finding.fixHint).toContain("it sets every MQTT listener off in the configuration, as Flair does by default");
+    expect(finding.fixHint).toContain("The listeners stop when Harper's worker threads restart");
+    expect(finding.message).toContain("Flair sets MQTT off in Harper's configuration by default.");
   });
 
   test("one listener reads as one", () => {

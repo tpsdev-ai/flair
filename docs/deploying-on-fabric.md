@@ -337,15 +337,19 @@ as `mqtt.webSocket is not false`. Either failure fails the command after the
 deploy, with the request to send.
 
 Harper applies the setting when the shared HTTP worker threads, which start
-the MQTT listeners, restart. The deploy's own restart covers them, except when
-the root configuration marks Flair `isolated: true`: Harper then restarts only
-Flair's own worker. In that case they also request the shared worker threads'
-restart through the operations API (`restart_service`, `"service":
-"http_workers"`, `"scope": ""`, replicated with the deploy) and follow Harper's
-job, failing on a failure it reports: a job that does not complete, a
-completion message that is not Harper's, a replicated result without its node
-list, or a node recorded without a completed restart (each named, with the
-request to send to it). A completed job is not proof that a node's workers
+the MQTT listeners, restart. The deploy's own restart covers them, except for a
+fresh isolated deploy: when the root configuration marks Flair `isolated: true`
+and Harper does not find it already active, Harper restarts only Flair's own
+worker (for an application it finds already active, it restarts every
+worker). For an isolated Flair they therefore also request the shared worker
+threads' restart through the operations API (`restart_service`, `"service":
+"http_workers"`, `"scope": ""`, replicated with the deploy; a standalone
+instance, which refuses the replicated request, gets it on its own) and follow
+Harper's job, failing on: a job read that does not succeed (refused before its
+answer is read), a job that does not complete, a completion message that is
+not exactly Harper's for that job, a replicated result without its node list,
+or a node recorded without a completed restart (each named, with the request
+to send to it). A completed job is not proof that a node's workers
 restarted: Harper sends a node's restart-complete from a `finally` and does
 not carry the worker replacement's outcome.
 
@@ -360,8 +364,9 @@ serving MQTT after its workers restarted, connect an MQTT client to that node's
 MQTT ports (1883 and 8883 by default) or to its MQTT-over-WebSocket path on the
 HTTP port.
 
-With `--no-verify` the post-restart step is skipped (the saved configuration
-is not read back, and no restart is requested for an isolated application),
+With `--no-verify` (both commands) the post-restart step is skipped (the saved
+configuration is not read back, and no restart is requested for an isolated
+application),
 and with `--no-restart` the setting takes effect at the next restart; both
 print the restart request to send.
 

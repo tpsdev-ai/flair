@@ -20,8 +20,13 @@
  * would derive another port from the target (port-1), reach no Harper, and
  * fail before deploying.
  *
- * Mutation check: drop the operations API URL from what fabricUpgrade() passes
- * to deploy() and this file goes red.
+ * A second run passes `verify: false` (`flair upgrade --target --no-verify`):
+ * it reaches deploy(), which then skips its post-restart MQTT step and says so
+ * (its served-API verification is skipped too). That run adds only the node
+ * runtime to what fabricUpgrade() passes.
+ *
+ * Mutation checks: drop the operations API URL, or `verify`, from what
+ * fabricUpgrade() passes to deploy() and this file goes red.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -133,5 +138,44 @@ describe("fabricUpgrade() into the real deploy() (local staging, real Harper)", 
       `MQTT listeners configured off on ${opsHost}; shared workers restart requested (with the deploy's own restart); ` +
         `the saved configuration on ${opsHost} reads off. ${MQTT_OFF_REPORT_LIMIT}`,
     );
+  }, 300_000);
+
+  test("verify: false (flair upgrade --target --no-verify) reaches deploy(), which skips its post-restart MQTT step and says so", async () => {
+    const deployCalls: DeployOptions[] = [];
+    const log: string[] = [];
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
+    let result: Awaited<ReturnType<typeof fabricUpgrade>>;
+    try {
+      result = await fabricUpgrade(
+        {
+          target: harper.opsURL,
+          opsUrl: harper.opsURL,
+          project: "composedflair",
+          fabricUser: harper.admin.username,
+          fabricPassword: harper.admin.password,
+          replicated: false,
+          verify: false,
+        },
+        {
+          fetchLatestFlairVersion: async () => "9.9.9",
+          fetchDeclaredHarperVersion: async () => "5.3.1",
+          fetchDeployedVersion: async () => null,
+          npmInstall: (dir: string) => { stagingDirs.push(dir); stageInto(dir); },
+          deploy: (opts: DeployOptions) => {
+            deployCalls.push(opts);
+            return deploy({ ...opts, harperRuntime: nodeBin() });
+          },
+          log: (m: string) => log.push(m),
+        },
+      );
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(result!.deployed, log.join("\n")).toBe(true);
+    expect(deployCalls[0].verify, "fabricUpgrade() passed verify: false").toBe(false);
+    expect(warnings.join("\n")).toContain("the post-restart MQTT step did not run (--no-verify)");
+    expect(log.join("\n")).not.toContain("MQTT listeners configured off on");
   }, 300_000);
 });

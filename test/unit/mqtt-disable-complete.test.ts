@@ -1,6 +1,8 @@
-// flair#1586 — MQTT must be fully off on every Harper spawn path and on the
-// component-deployment channel, and test-Harpers must not bind the shared
-// inspector port a live Flair holds.
+// flair#1586 — MQTT must be fully off on every Harper spawn path, the
+// component-deployment channel must set every MQTT listener off in the
+// instance's configuration (it sets the configuration and requests the restart
+// that applies it; it does not confirm the listeners' live state), and
+// test-Harpers must not bind the shared inspector port a live Flair holds.
 //
 // The previous disable nulled only `mqtt.network.port`. Harper's mqtt
 // component binds whenever `if (port || securePort)`, so the TLS listener
@@ -14,7 +16,8 @@
 // channel's requests are also checked at the HTTP boundary
 // (test/unit/deploy-mqtt-off.test.ts) and against real Harpers
 // (test/integration/mqtt-off-deploy-doctor.test.ts,
-// test/integration/mqtt-off-isolated-deploy.test.ts).
+// test/integration/mqtt-off-isolated-deploy.test.ts,
+// test/integration/mqtt-off-fabric-upgrade.test.ts).
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -48,7 +51,7 @@ describe("MQTT is fully disabled on every production spawn path (flair#1586)", (
     expect(cliSrc).not.toMatch(/const MQTT_DISABLED_CONFIG\s*=/);
   });
 
-  test("the deploy channel sends the same configuration as set_configuration parameters", () => {
+  test("the deploy channel sets the same configuration with set_configuration parameters", () => {
     expect(MQTT_DISABLED_SET_CONFIGURATION).toEqual({
       mqtt_network_port: null,
       mqtt_network_securePort: null,

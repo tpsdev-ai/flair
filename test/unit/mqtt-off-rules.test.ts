@@ -10,13 +10,16 @@
  *   - cluster node names (isNodeHost, peerOpsUrl): a node's operations API URL
  *     is built only for a valid host name or IP address, and printed through
  *     safeUrl;
- *   - restart-job outcomes (reportedRestartFailure);
+ *   - restart-job outcomes (reportedRestartFailure, isCompletedJobMessage):
+ *     only Harper's exact completed-job message for the requested job id
+ *     counts;
  *   - the report's closing sentences (MQTT_OFF_REPORT_LIMIT).
  */
 import { describe, expect, test } from "bun:test";
 import {
   MQTT_OFF_REPORT_LIMIT,
   deployUrlRefusal,
+  isCompletedJobMessage,
   isNodeHost,
   peerOpsUrl,
   reportedRestartFailure,
@@ -64,9 +67,14 @@ describe("URL rules", () => {
     expect(unsafeUrlProblem("https://host.example:9925/#anything")).toBe("it carries a fragment");
     expect(unsafeUrlProblem("not a url")).toBe("it is not a valid URL");
   });
-  test("a scheme other than http or https, or a URL without a host, is refused", () => {
+  test("a scheme other than http or https is refused", () => {
     for (const url of ["file:///tmp/private-value", "javascript:private-value", "ftp://host.example/", "data:text/plain,private-value", "mailto:someone@host.example", "ws://host.example:9926", "wss://host.example:9926"]) {
       expect([url, unsafeUrlProblem(url)]).toEqual([url, "its scheme is not http or https"]);
+    }
+  });
+  test("an http or https URL without a host does not parse, so it is refused as not a valid URL", () => {
+    for (const url of ["http://", "https:///", "http://:9925", "http://@/", "https://[]/"]) {
+      expect([url, unsafeUrlProblem(url)]).toEqual([url, "it is not a valid URL"]);
     }
   });
   test("an http or https URL with a host, and scheme, host, port and path only, is allowed", () => {
@@ -118,22 +126,50 @@ describe("cluster node names", () => {
   });
 });
 
-describe("reportedRestartFailure", () => {
+describe("reportedRestartFailure and isCompletedJobMessage", () => {
   const done = (id: string) => `Successfully completed job: ${id}`;
   test("a completed job passes; a standalone job needs no node list", () => {
-    expect(reportedRestartFailure({ status: "COMPLETE", message: done("j1") }, false)).toBeNull();
-    expect(reportedRestartFailure({ status: "COMPLETE", message: done("j1"), result: { replicated: [{ node: "node-b", message: done("p1") }] } }, true)).toBeNull();
+    expect(reportedRestartFailure({ status: "COMPLETE", message: done("j1") }, false, "j1")).toBeNull();
+    expect(reportedRestartFailure({ status: "COMPLETE", message: done("j1"), result: { replicated: [{ node: "node-b", message: done("p1") }] } }, true, "j1")).toBeNull();
+  });
+  test("only Harper's completed-job message for the requested job id counts as completed", () => {
+    expect(isCompletedJobMessage(done("j1"), "j1")).toBe(true);
+    for (const message of [
+      "Successfully completed job but restart failed",
+      "Successfully completed job: j1 but restart failed",
+      "Successfully completed job: j2",
+      "Successfully completed job:j1",
+      "successfully completed job: j1",
+      " Successfully completed job: j1",
+      "Successfully completed job: ",
+      42,
+      undefined,
+    ]) {
+      expect([message, isCompletedJobMessage(message, "j1")]).toEqual([message, false]);
+      expect([message, reportedRestartFailure({ status: "COMPLETE", message }, false, "j1")]).toEqual([message, "the job completed with a message other than Harper's completed-job message for this job"]);
+    }
+  });
+  test("a cluster node's own job counts as completed only with Harper's message and a plain-token id", () => {
+    expect(isCompletedJobMessage(done("peer-job_1.2"))).toBe(true);
+    for (const message of ["Successfully completed job but restart failed", "Successfully completed job: p1 but restart failed", "Successfully completed job: ", "connect ECONNREFUSED"]) {
+      expect([message, isCompletedJobMessage(message)]).toEqual([message, false]);
+    }
+    expect(reportedRestartFailure({
+      status: "COMPLETE",
+      message: done("j1"),
+      result: { replicated: [{ node: "node-b", message: done("p1") }, { node: "node-c", message: "Successfully completed job but restart failed" }] },
+    }, true, "j1")).toBe("the job records these nodes without a completed restart: node-c");
   });
   test("names every reported failure, never echoing the job's text", () => {
-    expect(reportedRestartFailure({ status: "ERROR", message: "private-value" }, false)).toBe("the job ended ERROR");
-    expect(reportedRestartFailure({ status: "private-value" }, false)).toBe("the job ended with an unrecognized status");
-    expect(reportedRestartFailure({ status: "COMPLETE", message: "private-value" }, false)).toBe("the job completed with a message other than Harper's completed-job message");
-    expect(reportedRestartFailure({ status: "COMPLETE", message: done("j1") }, true)).toBe("the replicated job's result lists no cluster nodes");
+    expect(reportedRestartFailure({ status: "ERROR", message: "private-value" }, false, "j1")).toBe("the job ended ERROR");
+    expect(reportedRestartFailure({ status: "private-value" }, false, "j1")).toBe("the job ended with an unrecognized status");
+    expect(reportedRestartFailure({ status: "COMPLETE", message: "private-value" }, false, "j1")).toBe("the job completed with a message other than Harper's completed-job message for this job");
+    expect(reportedRestartFailure({ status: "COMPLETE", message: done("j1") }, true, "j1")).toBe("the replicated job's result lists no cluster nodes");
     const failed = reportedRestartFailure({
       status: "COMPLETE",
       message: done("j1"),
       result: { replicated: [{ node: "node-b", message: done("p1") }, { node: "node-c", message: "private-value" }, { node: ":", message: "x" }] },
-    }, true);
+    }, true, "j1");
     expect(failed).toBe("the job records these nodes without a completed restart: node-c, (a node whose name is not a host name or address)");
     expect(failed).not.toContain("private-value");
   });

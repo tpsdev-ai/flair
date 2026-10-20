@@ -249,6 +249,9 @@ export function buildFabricUpgradeOptions(
     restart: opts.restart !== false,
     replicated: opts.replicated !== false,
     keepMqttConfig: opts.keepMqttConfig ?? false,
+    // --no-verify reaches deploy(): it skips the served-API verification and
+    // the post-restart MQTT step there too.
+    verify: opts.verify !== false,
     opsUrl: resolveOpsUrl({ target: opts.target, opsTarget: opts.opsTarget }),
     // flair#878 — previously unreachable from this command; see
     // FabricUpgradeOptions.
@@ -947,7 +950,7 @@ program
   .option("--tree <dir>", "Upgrade this extracted package tree in place (npm pack / plain-tree lane). Default: the serving instance's packed tree when that is not the npm-global install")
   .option("--restart", "[deprecated] no-op — restart now happens automatically after upgrade; use --no-restart to opt out")
   .option("--no-restart", "Skip the restart after upgrade (stage new packages now, restart later)")
-  .option("--no-verify", "Skip post-restart health/version/auth verification (default: verify — so a broken upgrade can't report success; see flair#635)")
+  .option("--no-verify", "Skip post-restart health/version/auth verification (default: verify — so a broken upgrade can't report success; see flair#635); with --target, also skips deploy()'s served-API verification and its post-restart MQTT step")
   .option("--snapshot", "Take a pre-upgrade ~/.flair/data snapshot before the package swap, keep-last-3 retention (default: off — see `flair snapshot create` to take one by hand, or `flair backup` for a logical export; flair#637)")
   .option("--no-engine-snapshot", "Skip the pre-upgrade snapshot even when the Harper engine version is changing (flair#1047). The snapshot is automatic on engine-version changes because the tested-downgrade guarantee does not hold across engine boundaries. Opting out prints what is being given up.")
   .option("--all", "Show transitive packages (e.g. flair-client) in the listing — verbose mode for debugging dep versions")

@@ -3,7 +3,7 @@
  * (`flair deploy`, `flair upgrade --target`; called by deploy() in
  * src/deploy.ts).
  *
- * A component's config.yaml cannot turn Harper's MQTT listeners off: `mqtt` is
+ * A component's config.yaml cannot set Harper's MQTT listeners off: `mqtt` is
  * a section of the instance's ROOT configuration (config-root.schema.json),
  * not of an application's (config-app.schema.json), and an application that
  * lists `mqtt` only adds a handler of its own. Flair's local spawns set the
@@ -23,12 +23,15 @@
  *
  *   2. After the deploy's restart — completeMqttOff. Harper applies a changed
  *      `mqtt` section when the HTTP worker threads that start the MQTT
- *      listeners restart. The deploy's own restart covers them, except when
- *      the root configuration marks the application `isolated`: Harper then
- *      restarts only that application's dedicated worker
+ *      listeners restart. The deploy's own restart covers them, except for a
+ *      fresh isolated deploy: when the root configuration marks the
+ *      application `isolated` and Harper does not find it already active,
+ *      Harper restarts only that application's dedicated worker
  *      (components/operations.js `restartScope`;
  *      server/threads/manageThreads.js `restartWorkers` skips the shared
- *      workers). This step:
+ *      workers); for an application it finds already active it restarts every
+ *      worker. The step cannot tell which happened, so it requests the shared
+ *      workers' restart for every isolated application. This step:
  *        - reads the target's configuration through its operations API: an
  *          answer that is not a recognizable root configuration
  *          (rootConfigurationProblem) is reported as not confirmed, never as
@@ -36,9 +39,12 @@
  *          (mqttOffConfirmed, mismatches by field name and category);
  *        - when the application is isolated, requests the shared worker
  *          threads' restart through `restart_service` (`scope: ""`, Harper's
- *          pool scope; replicated when the deploy is) and follows Harper's job,
- *          failing on a failure the job reports, with every node it names as
- *          failed (reportedRestartFailure). A completed job is not proof that
+ *          pool scope; replicated when the deploy is) and follows Harper's job:
+ *          a job read that does not succeed is refused before its body is
+ *          read, only Harper's exact completed-job message for the requested
+ *          job id counts as completed (isCompletedJobMessage), and any other
+ *          failure the job reports fails the step, with every node it names
+ *          as failed (reportedRestartFailure). A completed job is not proof that
  *          a node's workers restarted: Harper sends a node's restart-complete
  *          from a `finally` (bin/restart.ts) and drops the worker
  *          replacement's outcome;
@@ -96,8 +102,27 @@ export function buildSharedWorkerRestartOperation(replicated: boolean): Record<s
  */
 export const REPLICATION_NOT_IMPLEMENTED = "Replication not implemented";
 
-/** The message Harper's job runner gives a job that completed (server/jobs/jobProcess.ts). */
-const JOB_COMPLETED_MESSAGE = /^Successfully completed job\b/;
+/**
+ * The message Harper's job runner gives a job that completed
+ * (server/jobs/jobProcess.ts: `'Successfully completed job: ' + JOB_ID`), and
+ * nothing else: exactly that text, then the job's id and nothing after it.
+ */
+const JOB_COMPLETED_PREFIX = "Successfully completed job: ";
+
+/** A Harper job id as a cluster node's job record carries it: a plain token. */
+const JOB_ID_TOKEN = /^[A-Za-z0-9._-]{1,64}$/;
+
+/**
+ * Whether `message` is Harper's completed-job message: for the requested job,
+ * exactly `Successfully completed job: <jobId>`; for a cluster node's own job
+ * (whose id the origin does not know), that text followed by a plain-token id
+ * and nothing else.
+ */
+export function isCompletedJobMessage(message: unknown, jobId?: string): boolean {
+  if (typeof message !== "string" || !message.startsWith(JOB_COMPLETED_PREFIX)) return false;
+  const id = message.slice(JOB_COMPLETED_PREFIX.length);
+  return jobId !== undefined ? id === jobId : JOB_ID_TOKEN.test(id);
+}
 
 /** The closing sentences of every report: what flair does not do, and how to confirm. */
 export const MQTT_OFF_REPORT_LIMIT =
@@ -120,6 +145,8 @@ export function unsafeUrlProblem(url: string): string | null {
     return "it is not a valid URL";
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "its scheme is not http or https";
+  // The URL parser already refuses an http or https URL without a host
+  // ("it is not a valid URL" above); this keeps the rule explicit here.
   if (!parsed.hostname) return "it names no host";
   if (parsed.username || parsed.password) return "it carries a user name or password";
   if (parsed.search || url.includes("?")) return "it carries a query";
@@ -357,17 +384,18 @@ export function sharedWorkerRestartInstruction(opsUrl: string): string {
  * A completed restart job is not proof of a node's restart: Harper sends a
  * node's restart-complete from a `finally` and does not carry the worker
  * replacement's outcome, so this catches only the failures Harper reports — a
- * job that did not complete, a completion message that is not Harper's, a
- * replicated result without its node list, and a node recorded without a
- * completed restart (each named). It never echoes the job's text.
+ * job that did not complete, a completion message that is not exactly
+ * Harper's for `jobId` (isCompletedJobMessage), a replicated result without
+ * its node list, and a node recorded without Harper's completed-job message
+ * (each named). It never echoes the job's text.
  */
-export function reportedRestartFailure(job: { status?: unknown; message?: unknown; result?: unknown }, replicated: boolean): string | null {
+export function reportedRestartFailure(job: { status?: unknown; message?: unknown; result?: unknown }, replicated: boolean, jobId: string): string | null {
   if (job.status !== "COMPLETE") {
     const status = job.status === "ERROR" || job.status === "PENDING" || job.status === "IN_PROGRESS" ? job.status : "with an unrecognized status";
     return `the job ended ${status}`;
   }
-  if (typeof job.message !== "string" || !JOB_COMPLETED_MESSAGE.test(job.message)) {
-    return "the job completed with a message other than Harper's completed-job message";
+  if (!isCompletedJobMessage(job.message, jobId)) {
+    return "the job completed with a message other than Harper's completed-job message for this job";
   }
   if (!replicated) return null;
   const nodes = (job.result as { replicated?: unknown } | null | undefined)?.replicated;
@@ -383,7 +411,7 @@ function restartFailedNodes(job: { result?: unknown }): string[] {
   const failed: string[] = [];
   for (const entry of nodes) {
     const e = (entry ?? {}) as { node?: unknown; message?: unknown };
-    if (typeof e.message !== "string" || !JOB_COMPLETED_MESSAGE.test(e.message)) failed.push(nodeName(e.node));
+    if (!isCompletedJobMessage(e.message)) failed.push(nodeName(e.node));
   }
   return failed;
 }
@@ -434,10 +462,13 @@ export async function restartSharedWorkers(o: OpsTarget & {
       } catch (err) {
         return { kind: "failed", message: transportFailure(err) };
       }
+      // A job read that did not succeed establishes nothing about the job: it
+      // is refused before its body is read, whatever the body says.
+      if (!job.ok) return { kind: "failed", message: `the job's status read was answered ${httpAnswer(job.status)}` };
       const rows = parseJson(job.text);
       const row = (Array.isArray(rows) ? rows[0] : rows) as { status?: unknown; message?: unknown; result?: unknown } | null;
       if (row?.status === "COMPLETE" || row?.status === "ERROR") {
-        const problem = reportedRestartFailure(row, replicated);
+        const problem = reportedRestartFailure(row, replicated, jobId);
         if (problem) {
           return {
             kind: "failed",
@@ -461,7 +492,8 @@ export async function restartSharedWorkers(o: OpsTarget & {
   if (outcome.kind === "failed") {
     const peers = (outcome.failedNodes ?? []).map((n) => peerOpsUrl(o.url, n));
     throw new Error(
-      `flair deploy: the restart of the shared worker threads of ${shown} failed (${outcome.message}); the MQTT-off configuration is set but its listeners keep running until those workers restart. ` +
+      `flair deploy: the restart of the shared worker threads of ${shown} failed (${outcome.message}). The MQTT-off configuration is set, and the listeners' live state is unconfirmed: ` +
+        `unless the deploy's own restart covered the shared workers (Harper restarts every worker only for an application it finds already active), they keep running until those workers restart. ` +
         `Deployed; ${sharedWorkerRestartInstruction(o.url)}${peers.length ? `, and the same request to ${peers.join(", ")}` : ""}.`,
     );
   }
@@ -525,7 +557,7 @@ export async function completeMqttOff(o: OpsTarget & {
   const isolated = entry !== null && typeof entry === "object" && (entry as { isolated?: unknown }).isolated === true;
   let restartPart: string;
   if (isolated) {
-    o.onProgress?.(`${o.project} is an isolated application on ${shown}: the deploy's restart covered only its own worker`);
+    o.onProgress?.(`${o.project} is an isolated application on ${shown}: unless Harper found it already active, the deploy's restart covered only its own worker`);
     const restart = await restartSharedWorkers({ ...o, onProgress: o.onProgress });
     restartPart = `job ${restart.jobId}: ${restart.outcomes.join(", ")}`;
   } else {

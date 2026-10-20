@@ -4,11 +4,13 @@
  * ISOLATED, through Harper's real deploy_component, against a REAL Harper.
  *
  * When the root configuration marks an application `isolated: true`, Harper
- * runs it in a dedicated worker, and its deploy_component of that application
- * restarts only that worker (components/operations.js `restartScope`;
- * server/threads/manageThreads.js `restartWorkers` skips the shared workers).
- * The shared HTTP workers register the MQTT listeners, so the deploy's own
- * restart leaves them as they were. deploy()'s post-restart step
+ * runs it in a dedicated worker, and its deploy_component of a FRESH isolated
+ * application (one Harper does not find already active) restarts only that
+ * worker (components/operations.js `restartScope`;
+ * server/threads/manageThreads.js `restartWorkers` skips the shared workers);
+ * for an application it finds already active, Harper restarts every worker.
+ * The shared HTTP workers start the MQTT listeners, so a fresh isolated
+ * deploy's own restart leaves them as they were. deploy()'s post-restart step
  * (src/mqtt-off-deploy.ts completeMqttOff) reads the target's configuration,
  * sees the application is isolated, requests the shared worker threads'
  * restart through `restart_service`, follows Harper's job to completion, and
@@ -17,8 +19,8 @@
  *
  * The test-Harper runs with MQTT over WebSocket on, an HTTPS port and UDS
  * mirrors (what Harper requires before it admits an isolated application), and
- * a root configuration that marks two test components, `isoa` and `isob`,
- * isolated. Each is deployed by the whole deploy() path, which runs the real
+ * a root configuration that marks three test components, `isoa`, `isob` and
+ * `isoc`, isolated. Each is deployed by the whole deploy() path, which runs the real
  * Harper CLI (`harper deploy`) against this Harper's operations API, so Harper's
  * own deploy_component chooses the restart scope. The test components have no
  * dependencies; their install entry (the `node dist/fabric-npm-install.js`
@@ -32,10 +34,20 @@
  *      (a new shared worker thread id appears), and its report names the
  *      configuration it set, the job and the saved configuration it read back
  *      off, and says it does not probe the listeners.
+ *   3. The standalone fallback: `isoc` is deployed with the step off (a fresh
+ *      isolated deploy: no shared worker restarted), then the post-restart step
+ *      (completeMqttOff) runs against this Harper with `replicated: true`, as
+ *      a replicated deploy would run it. It is called directly because a
+ *      replicated Harper deploy is itself refused by a standalone Harper. The
+ *      operations requests it sends are recorded: the replicated
+ *      restart_service, Harper's refusal of it ("Replication not
+ *      implemented"), the local restart_service, and the get_job reads of that
+ *      local job until it completes; a shared worker is replaced; and the
+ *      report is exact.
  *
  * Mutation checks: skip the post-restart step in deploy(), or skip the shared
  * workers' restart for an isolated application, and step 2's assertions go
- * red.
+ * red; drop the standalone fallback and step 3's go red.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -45,7 +57,7 @@ import { join } from "node:path";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 import { nodeBin } from "../helpers/node-runtime";
 import { REQUIRED_PACKAGE_FILES, deploy } from "../../src/deploy";
-import { MQTT_OFF_REPORT_LIMIT } from "../../src/mqtt-off-deploy";
+import { MQTT_OFF_REPORT_LIMIT, completeMqttOff } from "../../src/mqtt-off-deploy";
 
 let harper: HarperInstance;
 // Harper's UDS mirror path for an isolated worker lives under the instance's
@@ -120,8 +132,6 @@ async function deployComponent(name: string, mqttCheck: boolean, progress: strin
   await deploy({
     target: harper.opsURL, // the Harper CLI sends deploy_component here
     opsUrl: harper.opsURL,
-    // No check URL: the check goes to the operations API URL's host on the
-    // HTTP port this Harper's configuration names (MQTT over WebSocket shares it).
     project: name,
     fabricUser: harper.admin.username,
     fabricPassword: harper.admin.password,
@@ -141,7 +151,7 @@ beforeAll(async () => {
     installDir: instanceRoot,
     mqttWebSocket: true,
     env: { HTTP_SECUREPORT: `127.0.0.1:${securePort}`, TLS_UNIXDOMAINSOCKETS: "true" },
-    appendRootConfigYaml: "isoa:\n  isolated: true\nisob:\n  isolated: true\n",
+    appendRootConfigYaml: "isoa:\n  isolated: true\nisob:\n  isolated: true\nisoc:\n  isolated: true\n",
   });
   assertOwnInstance(harper);
 }, 180_000);
@@ -188,5 +198,72 @@ describe("MQTT off when the deployed application is isolated (real Harper deploy
     ));
     expect(report!.endsWith(MQTT_OFF_REPORT_LIMIT)).toBe(true);
     expect(log).not.toMatch(/verified|is off on|listeners are off/i);
+  }, 300_000);
+
+  test("the standalone fallback: a replicated restart request is refused by this standalone Harper, the local restart is requested and its job followed, a shared worker is replaced, and the report is exact", async () => {
+    // A fresh isolated deploy of isoc, without the post-restart step.
+    const first: string[] = [];
+    await deployComponent("isoc", false, first);
+    const before = sharedWorkerIds(await threads());
+    expect(before.length, "a shared HTTP worker").toBeGreaterThan(0);
+
+    // The post-restart step as a replicated deploy runs it, with every
+    // operations request and its answer recorded.
+    const exchanges: Array<{ body: any; status: number; text: string }> = [];
+    const recordingFetch = (async (input: any, init?: any) => {
+      const res = await fetch(input, init);
+      const text = await res.clone().text();
+      exchanges.push({ body: JSON.parse(String(init?.body ?? "null")), status: res.status, text });
+      return res;
+    }) as unknown as typeof fetch;
+    const progress: string[] = [];
+    const { report } = await completeMqttOff({
+      url: harper.opsURL,
+      project: "isoc",
+      fabricUser: harper.admin.username,
+      fabricPassword: harper.admin.password,
+      replicated: true,
+      peers: [],
+      fetchImpl: recordingFetch,
+      onProgress: (m) => progress.push(m),
+    });
+
+    const restarts = exchanges.filter((e) => e.body?.operation === "restart_service");
+    expect(restarts.map((e) => e.body), "a replicated restart request, then a local one").toEqual([
+      { operation: "restart_service", service: "http_workers", scope: "", replicated: true },
+      { operation: "restart_service", service: "http_workers", scope: "" },
+    ]);
+    // Harper accepts the replicated request as a job and refuses it there: the
+    // job ends ERROR with "Replication not implemented." (bin/restart.ts asks
+    // the standalone replication for the cluster's nodes before restarting).
+    const replicatedAt = exchanges.indexOf(restarts[0]);
+    const localAt = exchanges.indexOf(restarts[1]);
+    const replicatedJobId = JSON.parse(restarts[0].text).job_id as string;
+    expect(typeof replicatedJobId, "the replicated request was answered with a job").toBe("string");
+    const replicatedReads = exchanges.slice(replicatedAt + 1, localAt).filter((e) => e.body?.operation === "get_job");
+    expect(replicatedReads.length).toBeGreaterThan(0);
+    expect(replicatedReads.every((e) => e.body.id === replicatedJobId)).toBe(true);
+    const lastReplicatedRead = JSON.parse(replicatedReads.at(-1)!.text);
+    const replicatedJob = Array.isArray(lastReplicatedRead) ? lastReplicatedRead[0] : lastReplicatedRead;
+    expect(replicatedJob?.status).toBe("ERROR");
+    expect(String(replicatedJob?.message)).toContain("Replication not implemented");
+    expect(progress.join("\n")).toContain("has no replication; requesting the restart of that instance's shared workers alone");
+    // The local job was read until it completed.
+    const localJobId = JSON.parse(restarts[1].text).job_id as string;
+    expect(typeof localJobId).toBe("string");
+    const jobReads = exchanges.slice(localAt + 1).filter((e) => e.body?.operation === "get_job");
+    expect(jobReads.length).toBeGreaterThan(0);
+    expect(jobReads.every((e) => e.body.id === localJobId && e.status === 200)).toBe(true);
+    expect(jobReads.at(-1)!.text).toContain(`Successfully completed job: ${localJobId}`);
+
+    // A shared worker was replaced.
+    expect(sharedWorkerIds(await threads()).some((id) => !before.includes(id)), "a shared worker was replaced").toBe(true);
+
+    // The exact report.
+    const opsHost = new URL(harper.opsURL).host;
+    expect(report).toBe(
+      `MQTT listeners configured off on ${opsHost}; shared workers restart requested (job ${localJobId}: ${opsHost} completed); ` +
+        `the saved configuration on ${opsHost} reads off. ${MQTT_OFF_REPORT_LIMIT}`,
+    );
   }, 300_000);
 });

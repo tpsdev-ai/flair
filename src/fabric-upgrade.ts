@@ -222,6 +222,8 @@ export interface FabricUpgradeOptions {
   replicated?: boolean;
   /** `--keep-mqtt-config`: deploy() leaves the target's MQTT configuration as it is (DeployOptions.keepMqttConfig). */
   keepMqttConfig?: boolean;
+  /** `--no-verify` (`false`): deploy() skips its served-API verification and its post-restart MQTT step (DeployOptions.verify). */
+  verify?: boolean;
   /** The target's operations API URL for deploy()'s MQTT-off configuration, restart and read-back (DeployOptions.opsUrl). */
   opsUrl?: string;
   /**
@@ -544,6 +546,7 @@ export async function fabricUpgrade(
       fabricUser: opts.fabricUser,
       fabricPassword: opts.fabricPassword,
       restart: opts.restart,
+      verify: opts.verify,
       replicated: opts.replicated,
       keepMqttConfig: opts.keepMqttConfig,
       opsUrl: opts.opsUrl,

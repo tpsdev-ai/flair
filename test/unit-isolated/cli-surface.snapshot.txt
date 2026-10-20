@@ -1631,7 +1631,7 @@ flair upgrade
       attr: restart
       negate: true
     --no-verify
-      description: Skip post-restart health/version/auth verification (default: verify — so a broken upgrade can't report success; see flair#635)
+      description: Skip post-restart health/version/auth verification (default: verify — so a broken upgrade can't report success; see flair#635); with --target, also skips deploy()'s served-API verification and its post-restart MQTT step
       attr: verify
       negate: true
     --snapshot
@@ -4810,7 +4810,9 @@ Options:
                                  packages now, restart later)
   --no-verify                    Skip post-restart health/version/auth
                                  verification (default: verify — so a broken
-                                 upgrade can't report success; see flair#635)
+                                 upgrade can't report success; see flair#635);
+                                 with --target, also skips deploy()'s served-API
+                                 verification and its post-restart MQTT step
   --snapshot                     Take a pre-upgrade ~/.flair/data snapshot
                                  before the package swap, keep-last-3 retention
                                  (default: off — see `flair snapshot create` to

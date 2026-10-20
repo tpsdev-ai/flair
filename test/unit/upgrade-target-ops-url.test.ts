@@ -39,6 +39,13 @@ describe("flair upgrade --target: the operations API URL handed to fabricUpgrade
       .toBe("http://127.0.0.1:19925");
   });
 
+  test("--no-verify is carried to fabricUpgrade() as verify: false; without it, verify: true", () => {
+    delete process.env.FLAIR_OPS_TARGET;
+    expect(buildFabricUpgradeOptions({ target: "https://t.example.invalid", verify: false }, creds, resolveEffectiveOpsUrl).verify).toBe(false);
+    expect(buildFabricUpgradeOptions({ target: "https://t.example.invalid", verify: true }, creds, resolveEffectiveOpsUrl).verify).toBe(true);
+    expect(buildFabricUpgradeOptions({ target: "https://t.example.invalid" }, creds, resolveEffectiveOpsUrl).verify).toBe(true);
+  });
+
   test("the other options are carried as the command sets them", () => {
     delete process.env.FLAIR_OPS_TARGET;
     const o = buildFabricUpgradeOptions({ target: "https://t.example.invalid", keepMqttConfig: true, restart: false, replicated: false, check: true }, creds, resolveEffectiveOpsUrl);
