@@ -5,7 +5,7 @@ import { getEmbedding, getModelId } from "./embeddings-provider.js";
 import { noteWriteStamp } from "./embedding-space-guard.js";
 import { hashEmbeddedText } from "./memory-embed-hash.js";
 import { MEMORY_EMBEDDING_INPUT_FIELDS, skillEmbedText } from "./skill-write.js";
-import { isAdmin, isPrincipalDeactivated, FLAIR_AGENT_USERNAME, readCredentialedPrincipal, AGENT_LOOKUP_FAILED } from "./agent-auth.js";
+import { agentIsAdmin, isPrincipalDeactivated, FLAIR_AGENT_USERNAME, readCredentialedPrincipal, AGENT_LOOKUP_FAILED } from "./agent-auth.js";
 import { WINDOW_MS, importEd25519Key, b64ToArrayBuffer, parseTpsEd25519Header } from "./ed25519-auth.js";
 import { isKnownAgentReplay, claimAgentNonce } from "./replay-store.js";
 import { isForbiddenOwnerMutation, ownerMutationRefusal, resolveGuardedRecord, resolveGuardedRecordById } from "./record-owner-guard.js";
@@ -168,10 +168,10 @@ function getAdminPass(): string | null {
 }
 
 // ─── Admin resolution ─────────────────────────────────────────────────────────
-// `isAdmin` (FLAIR_ADMIN_AGENTS env + Agent role==="admin", 60s-cached) now lives
-// in agent-auth.ts as the single source of truth, imported above. During the
-// auth reshape this gate and the per-resource allow* helpers must agree on who's
-// an admin — one implementation guarantees they can't diverge.
+// `agentIsAdmin` (FLAIR_ADMIN_AGENTS env + the Agent row's role === "admin")
+// lives in agent-auth.ts as the single source of truth, imported above. This
+// gate passes it the Agent row it verifies the signature against, exactly as
+// agent-auth.ts's own verifier does, so the two cannot diverge.
 
 // ─── Crypto + replay-guard helpers ────────────────────────────────────────────
 // WINDOW_MS and importEd25519Key live in ./ed25519-auth.ts, and the replay
@@ -704,7 +704,12 @@ server.http(async (request: any, nextLayer: any) => {
 
   request.tpsAgent = agentId;
   (request as any)._tpsAuthVerified = true;
-  request.tpsAgentIsAdmin = await isAdmin(agentId);
+  // The admin decision uses the Agent row the signature was just verified
+  // against, plus the configured admin ids. The marker tells a handler that
+  // tpsAgentIsAdmin already is that decision (agent-auth.ts
+  // annotatedCallerIsAdmin), so no handler re-decides it from another read.
+  request.tpsAgentIsAdmin = agentIsAdmin(agentId, agent);
+  (request as any).tpsAgentAdminFromVerifiedRow = true;
 
   // RESHAPE (auth-rbac) — THE FLIP: per-agent DE-ELEVATION. A cryptographically-
   // verified NON-admin agent resolves to the least-privilege `flair-agent` user,

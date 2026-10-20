@@ -9,8 +9,9 @@
  * MemoryGrant, WorkspaceState, MemoryCandidate and Relationship confirm through
  * resources/owner-delete-recheck.ts, while a transaction the delete owns is
  * open. Memory's ordinary-row check is inline in resources/Memory.ts (through
- * withSharedWriteTransaction, which JOINS a request-owned transaction when one
- * exists); its skill-tagged check is inline in the same file's version writer.
+ * withOwnedTransaction, which detaches any request transaction, commits its own
+ * and restores the request's afterwards); its skill-tagged check is inline in
+ * the same file's version writer.
  * These cases change a row's owner around that transaction (a raw table update,
  * as an operator would make); one skill case removes the head instead:
  *

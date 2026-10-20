@@ -146,7 +146,7 @@ metadata's `code_challenge_methods_supported` lists `["S256"]` as the supported 
 
 After the earlier request, scope and client checks pass, `GET /OAuthAuthorize`
 (the consent page) and its Approve (`POST /OAuthAuthorize`) answer
-`400 invalid_request` when `code_challenge` is missing, empty or not 43-128
+`400 invalid_request` when `code_challenge` is missing, empty or not exactly 43
 base64url characters, or when `code_challenge_method` is anything other than
 `S256`. The consent page is not rendered and no authorization code is stored. A
 Deny needs no PKCE fields: after redirect-URI validation passes, it redirects with `access_denied` and issues nothing (an invalid `redirect_uri` is refused with `400 invalid_redirect_uri` first).
@@ -305,6 +305,8 @@ flair principal add <principal-id> --admin
 ```
 
 `add` upserts the Agent row. If `~/.flair/keys/<principal-id>.key` already exists, that key is reused and is not regenerated. The upsert writes the record this command builds, including `role: admin` and `admin: true` when `--admin` is set. With `--admin` and no `--trust`, the trust tier written is `endorsed`.
+
+For a request signed with an agent key, the admin decision uses the Agent row the signature is verified against: the caller is an admin when that row has `role: admin`, or when its id is listed in the instance's `FLAIR_ADMIN_AGENTS` (comma-separated). The decision is made on every request and nothing is kept between requests, so a role change, a removed row, or a new row under the same id applies to the next request on every worker thread.
 
 ### CLI Reference
 

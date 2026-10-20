@@ -477,7 +477,7 @@ export function agentIdentityRefusal(
  * flair#2665: the refusal for an inbound Agent record that would create a row
  * (`local` is null) whose id is in `configuredAdminIds`, else null. The caller
  * passes resources/agent-admin.ts's configuredAdminAgentIds(), the set
- * isAdmin() grants by id.
+ * resources/agent-auth.ts's agentIsAdmin() admits by id.
  */
 export function agentAdminIdCreateRefusal(
   record: SyncRecord,

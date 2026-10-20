@@ -194,10 +194,10 @@ async function checkConsentClient(clientId: unknown): Promise<ConsentCheck<{ cli
 }
 
 /**
- * An S256 `code_challenge` (RFC 7636 §4.2): 43 to 128 characters of the
- * base64url alphabet. BASE64URL(SHA256(verifier)) is always 43 of them.
+ * An S256 `code_challenge` is BASE64URL(SHA256(verifier)) (RFC 7636 §4.2): exactly 43 characters of the
+ * base64url alphabet, without padding.
  */
-const S256_CODE_CHALLENGE = /^[A-Za-z0-9_-]{43,128}$/;
+const S256_CODE_CHALLENGE = /^[A-Za-z0-9_-]{43}$/;
 
 /**
  * The handlers require PKCE, S256 only; the metadata lists S256 as the
@@ -216,7 +216,7 @@ function checkConsentPkce(codeChallenge: unknown, codeChallengeMethod: unknown):
     }),
   });
   if (typeof codeChallenge !== "string" || !S256_CODE_CHALLENGE.test(codeChallenge)) {
-    return refuse("PKCE is required: code_challenge must be an S256 challenge of 43-128 base64url characters");
+    return refuse("PKCE is required: code_challenge must be an S256 challenge of 43 base64url characters");
   }
   if (codeChallengeMethod !== "S256") {
     return refuse("PKCE is required: code_challenge_method must be S256");
