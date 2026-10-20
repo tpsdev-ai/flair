@@ -232,7 +232,8 @@ function withoutPairRemedy(message: string): string {
  *   from the paired resolver (`resolveAgentHomeTarget`, flair#2474), which
  *   refuses FLAIR_OPS_PORT when no complete configured pair can show which
  *   HTTP port it belongs with.
- * - With FLAIR_URL, the writes go to that URL. Its HTTP port is the URL's port,
+ * - With FLAIR_URL, the writes go to the resolved base URL (the URL's scheme,
+ *   port and path, with a loopback host pinned to 127.0.0.1). Its HTTP port is the URL's port,
  *   or 80/443 when it names none. The operations port is FLAIR_OPS_PORT when
  *   set, else the conventional derivation from the target URL
  *   (`resolveOpsUrlFromTarget`); a target with no derivable operations port
