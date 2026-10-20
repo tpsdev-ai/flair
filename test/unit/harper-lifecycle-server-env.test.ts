@@ -131,33 +131,53 @@ await pair.stop();
 });
 
 // A real Harper proves the removal reaches the child, not just the merge
-// result: the shipped config's mcp.enabled references FLAIR_MCP_OAUTH, so an
-// ambient "true" that survived the spawn would degrade this boot (no issuer)
-// and /mcp would answer 500; removed, the MCP route is absent.
+// result. Both boots inherit an ambient FLAIR_MCP_OAUTH="true" and declare the
+// same fixture: an issuer, the github client id, secret and redirect (so the
+// degraded-start guard keeps the provider configured), and no
+// FLAIR_MCP_NO_AUTOSTART (so route registration runs), so an inherited value
+// of any of those cannot keep /mcp from mounting while the flag is present.
+// The positive control keeps the flag and /mcp mounts (401 without a token);
+// the removal boot differs only by the undefined entry, and /mcp is absent
+// (404).
 describe("serverEnv removal in a spawned Harper", () => {
-  test("a variable removed through an undefined entry is absent in the child", async () => {
+  const MOUNT_FIXTURE: Record<string, string | undefined> = {
+    FLAIR_MCP_ISSUER: "https://removal.flair.test",
+    OAUTH_GITHUB_CLIENT_ID: "removal-client-id",
+    OAUTH_GITHUB_CLIENT_SECRET: "removal-client-secret",
+    OAUTH_GITHUB_REDIRECT_URI: "https://removal.flair.test/oauth",
+    FLAIR_MCP_NO_AUTOSTART: undefined,
+  };
+
+  /** Boot the shipped config with an ambient FLAIR_MCP_OAUTH="true" and return the /mcp status. */
+  async function mcpStatusWithAmbientFlag(prefix: string, serverEnv: Record<string, string | undefined>): Promise<number> {
     const prior = process.env.FLAIR_MCP_OAUTH;
     process.env.FLAIR_MCP_OAUTH = "true";
-    const workDir = mkdtempSync(join(tmpdir(), "flair-2710-removed-"));
+    const workDir = mkdtempSync(join(tmpdir(), prefix));
     symlinkSync(join(REPO_ROOT, "node_modules"), join(workDir, "node_modules"));
     symlinkSync(join(REPO_ROOT, "dist"), join(workDir, "dist"));
     cpSync(join(REPO_ROOT, "schemas"), join(workDir, "schemas"), { recursive: true });
     copyFileSync(join(REPO_ROOT, "config.yaml"), join(workDir, "config.yaml"));
     let harper: Awaited<ReturnType<typeof startHarper>> | undefined;
     try {
-      harper = await startHarper({
-        cwd: workDir,
-        harperBinDir: REPO_ROOT,
-        serverEnv: { FLAIR_MCP_OAUTH: undefined },
-      });
+      harper = await startHarper({ cwd: workDir, harperBinDir: REPO_ROOT, serverEnv });
       const res = await fetch(`${harper.httpURL}/mcp`, { signal: AbortSignal.timeout(10_000) });
-      expect(res.status).toBe(404);
+      return res.status;
     } finally {
       if (prior === undefined) delete process.env.FLAIR_MCP_OAUTH;
       else process.env.FLAIR_MCP_OAUTH = prior;
       if (harper) await stopHarper(harper);
       rmSync(workDir, { recursive: true, force: true });
     }
+  }
+
+  test("positive control: with the inherited flag kept, /mcp mounts", async () => {
+    expect(await mcpStatusWithAmbientFlag("flair-2710-kept-", MOUNT_FIXTURE)).toBe(401);
+  }, 180_000);
+
+  test("a variable removed through an undefined entry is absent in the child", async () => {
+    expect(
+      await mcpStatusWithAmbientFlag("flair-2710-removed-", { ...MOUNT_FIXTURE, FLAIR_MCP_OAUTH: undefined }),
+    ).toBe(404);
   }, 180_000);
 });
 

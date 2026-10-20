@@ -37,8 +37,9 @@ import {
 // Neutral fixture host name — never a real fleet host.
 const ISSUER_HOST = "node-a.flair.test";
 
-/** MCP enablement declared for every boot in this file. No signing key: each
- *  boot starts without a pin, so the component generates one on first mint. */
+/** The default unpinned MCP enablement environment for this file's boots: no
+ *  signing key, so the component generates one on first mint. The key
+ *  isolation case overrides the pin, with a different key for each node. */
 const MCP_SERVER_ENV: Record<string, string | undefined> = {
   FLAIR_MCP_OAUTH: "true",
   FLAIR_MCP_ISSUER: `https://${ISSUER_HOST}`,

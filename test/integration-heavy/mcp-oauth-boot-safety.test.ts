@@ -88,10 +88,10 @@ const ENABLED_ENV_REFERENCE = "${FLAIR_MCP_OAUTH}";
 let instances: HarperInstance[] = [];
 let tempDirs: string[] = [];
 
-// ── Server env: every boot in this file must control the FLAIR_MCP_* env ──
+// ── Server env: each boot declares the listed MCP/OAuth fixture variables ──
 // The shipped config REFERENCES the environment, so an ambient FLAIR_MCP_OAUTH
-// leaking in from the runner would change what these tests boot. Each boot
-// declares the whole set; an `undefined` value removes an inherited one.
+// leaking in from the runner would change what these tests boot. An
+// `undefined` value removes an inherited one.
 function mcpServerEnv(values: Record<string, string> = {}): Record<string, string | undefined> {
   return {
     FLAIR_MCP_OAUTH: undefined,

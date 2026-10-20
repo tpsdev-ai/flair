@@ -47,7 +47,7 @@ const SHIPPED_CONFIG = join(REPO_ROOT, "config.yaml");
 let instances: HarperInstance[] = [];
 let tempDirs: string[] = [];
 
-// ── Server env: each boot declares the whole FLAIR_MCP_* set ────────────────
+// ── Server env: each boot declares the listed MCP/OAuth fixture variables ──
 // The shipped config references the environment, so an ambient value on the
 // runner would change what this boot sees. An `undefined` value removes an
 // inherited one.

@@ -17,10 +17,12 @@ const REDIRECT = "OAUTH_GITHUB_REDIRECT_URI";
 let instances: HarperInstance[] = [];
 let tempDirs: string[] = [];
 
-// ── Server env: each boot declares the whole FLAIR_MCP_* set ────────────────
+// ── Server env: each boot declares the listed MCP/OAuth fixture variables ──
 // The shipped config references the environment, so an ambient value on the
 // runner would change what these tests boot. An `undefined` value removes an
-// inherited one. The same object feeds the in-process redirect planner.
+// inherited one. STAGED_ENV supplies shared values to the in-process redirect
+// planner and to this server declaration; Harper receives the newly built
+// removal map, not the STAGED_ENV object itself.
 function mcpServerEnv(values: Record<string, string | undefined> = {}): Record<string, string | undefined> {
   return {
     FLAIR_MCP_OAUTH: undefined,
