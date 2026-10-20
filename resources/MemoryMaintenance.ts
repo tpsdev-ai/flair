@@ -40,9 +40,11 @@ import { withOwnedTransaction } from "./request-transaction.js";
 import { recordMemoryDeletion } from "./memory-deletion-history.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 
-/** What a request's `agentId` says about the run's target. A run names an agent
- *  only when the field is a non-blank string; an ABSENT field is a fleet-wide
- *  admin run, and any other supplied value is invalid. */
+/** What a request's `agentId` says about the run's target, for an ADMIN
+ *  request: it names an agent only when the field is a non-blank string, an
+ *  ABSENT field is a fleet-wide run, and any other supplied value is refused
+ *  (400). A non-admin run ignores the field and targets the authenticated
+ *  caller. */
 type RequestedAgent =
   | { kind: "absent" }
   | { kind: "named"; agentId: string }
