@@ -347,7 +347,8 @@ worker). For an isolated Flair they therefore also request the shared worker
 threads' restart through the operations API (`restart_service`, `"service":
 "http_workers"`, `"scope": ""`, replicated with the deploy; a standalone
 instance, which refuses the replicated request, gets it on its own) and follow
-Harper's job, failing on exactly these: a job read that does not succeed
+Harper's job. The command fails when the restart request fails or is answered
+without a job id, and on these job outcomes: a job read that does not succeed
 (refused before its body is parsed), a job that does not complete, a completion
 message that is not exactly Harper's for that job, a replicated result without
 its node list, or a node the result lists without Harper's completed-job

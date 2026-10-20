@@ -991,8 +991,9 @@ program
     if (opts.target) {
       // Every URL the Fabric upgrade takes is checked before anything is
       // printed: a user name, password, query or fragment is refused. An
-      // operations API URL derived from a target that passes is scheme, host
-      // and port only (fabricUpgrade() and deploy() check it again).
+      // operations API URL derived from a target that passes keeps its scheme,
+      // host and path with the operations port (fabricUpgrade() and deploy()
+      // check it again).
       const refusal = deployUrlRefusal([
         [opts.target, "deploy target URL (--target)"],
         [opts.opsTarget ?? process.env.FLAIR_OPS_TARGET, "operations API URL (--ops-target / FLAIR_OPS_TARGET)"],

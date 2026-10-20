@@ -254,8 +254,9 @@ function nodeName(value: unknown): string {
 
 /**
  * The operations API URL of cluster node `node`, assuming the target's
- * operations scheme and port, printed through safeUrl; for a node name that is
- * not a valid host name or IP address, a fixed phrase instead.
+ * operations scheme and port, printed through safeUrl. A fixed phrase instead
+ * when the node name is not a valid host name or IP address, or when the
+ * operations URL has a path.
  */
 export function peerOpsUrl(opsUrl: string, node: string): string {
   if (!isNodeHost(node)) return "that node's operations API";

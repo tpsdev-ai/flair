@@ -105,8 +105,8 @@ program
     // Every URL the deploy takes is checked before anything is printed: it
     // needs an allowed scheme and a host, and a user name, password, query or
     // fragment is refused (src/mqtt-off-deploy.ts). An operations API URL
-    // derived from a target that passes is scheme, host and port only
-    // (deploy() checks it again).
+    // derived from a target that passes keeps its scheme, host and path with
+    // the operations port (deploy() checks it again).
     {
       const fabricOrg = opts.fabricOrg ?? process.env.FABRIC_ORG;
       const fabricCluster = opts.fabricCluster ?? process.env.FABRIC_CLUSTER;
