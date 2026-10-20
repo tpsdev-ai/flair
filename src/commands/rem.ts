@@ -316,7 +316,7 @@ function resolveUrlRestoreTarget(
   if (carried.length > 0) {
     throw new Error(
       `FLAIR_URL ${shown} carries ${carried.join(" and ")}. Restore refuses a target URL that carries user info, a query or a fragment, and prints none of their values. `
-        + "Set FLAIR_URL to the instance's base URL (scheme, host and port), and pass the admin credential with --admin-pass-file or FLAIR_ADMIN_PASS.",
+        + "Set FLAIR_URL to the instance's base URL (scheme, host and port), and pass the admin credential with --admin-pass or --admin-pass-file (FLAIR_ADMIN_PASS is read only for a loopback target).",
     );
   }
 
@@ -426,7 +426,7 @@ export type RestorePairDeps = LocalInstancePairDeps;
 
 /** The remedy for a refused admin credential. */
 const RESTORE_CREDENTIAL_REMEDY =
-  "Check that the admin credential restore uses (--admin-pass, --admin-pass-file or FLAIR_ADMIN_PASS) is the target instance's.";
+  "Check that the admin credential restore uses (--admin-pass, --admin-pass-file, or for a loopback target FLAIR_ADMIN_PASS or the local admin-password file) is the target instance's.";
 
 /** The remedy for a loopback pair check that answered without naming one. */
 function restorePairRemedy(target: RestoreTarget, status: number | null): string {
@@ -1627,7 +1627,9 @@ export function register(program: Command): void {
         }
         if (!opts.dryRun && !adminPass) {
           console.error(
-            "Error: --admin-pass, --admin-pass-file, or FLAIR_ADMIN_PASS required for rem restore --apply " +
+            (isLocalBase(restoreTarget.baseUrl)
+              ? "Error: --admin-pass, --admin-pass-file, FLAIR_ADMIN_PASS or the local admin-password file required for rem restore --apply "
+              : "Error: --admin-pass or --admin-pass-file required for rem restore --apply to a non-loopback target (FLAIR_ADMIN_PASS and the local admin-password file are read only for a loopback target) ") +
               "(Soul rewrite is operator-only; an agent key is refused).",
           );
           process.exit(1);
