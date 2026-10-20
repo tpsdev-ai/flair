@@ -96,7 +96,7 @@ describe("URL rules", () => {
       expect([url, safeUrl(url)]).toEqual([url, "(a URL that is not http or https with a host)"]);
     }
   });
-  test("deployUrlRefusal names the first URL that may not be used, and never prints a refused URL's text", () => {
+  test("deployUrlRefusal names the first URL that may not be used; it prints that URL's scheme, host, port and path, never its userinfo, query or fragment", () => {
     const refusal = deployUrlRefusal([
       ["https://host.example:9925", "deploy target URL (--target)"],
       [undefined, "skipped"],
