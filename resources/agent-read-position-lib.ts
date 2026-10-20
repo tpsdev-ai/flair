@@ -36,7 +36,10 @@ export function recordPosition(record: { createdAt?: string | null; id?: string 
   return `${record.createdAt ?? ""}${POSITION_SEP}${record.id ?? ""}`;
 }
 
-/** Exclusive cursor just after every record at-or-before this ISO timestamp. */
+/**
+ * Exclusive cursor after every record created before this ISO timestamp. A
+ * record created at exactly this timestamp (non-empty id) sorts after it.
+ */
 export function positionAfterTimestamp(iso: string): string {
   return `${iso}${POSITION_SEP}`;
 }
