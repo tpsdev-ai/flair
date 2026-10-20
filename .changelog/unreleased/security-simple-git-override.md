@@ -5,4 +5,7 @@
   the published `@tpsdev-ai/flair` package do not include simple-git. Installs of the
   separately published `@tpsdev-ai/flair-bench` package are not changed: package
   managers apply `overrides` only from the installing project's root, and
-  node-llama-cpp 3.18.1 still declares simple-git ^3.33.0. Nothing to do on upgrade.
+  node-llama-cpp 3.18.1 still declares simple-git ^3.33.0, so a project that installs
+  flair-bench needs its own root override of simple-git until a flair-bench release moves
+  to a node-llama-cpp that declares simple-git 4. Nothing to do on upgrade for
+  `@tpsdev-ai/flair` installs.
