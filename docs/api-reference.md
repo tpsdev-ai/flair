@@ -84,8 +84,8 @@ caller, as a caller without a valid credential, administrators included.
 
 Flair's local installs run Harper with MQTT off. For a component deployment,
 `flair deploy` and `flair upgrade --target` set MQTT off in the target's
-configuration and verify it on the node at the operations API URL's host;
-other cluster nodes are reported NOT VERIFIED
+configuration, request the shared worker threads' restart that applies it,
+and read the saved configuration back; they do not probe the listeners
 ([deploying-on-fabric.md](deploying-on-fabric.md#mqtt-is-off)). When an
 operator turns MQTT on, an exported table's path is also an MQTT topic (`<Table>/#`,
 `<Table>/<id>`) — except a path that a resource other than the table serves

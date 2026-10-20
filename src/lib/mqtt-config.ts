@@ -18,16 +18,13 @@
  *     environment and launchd plist re-assert it with MQTT_* variables;
  *   - a component deployment (`flair deploy`, `flair upgrade --target`):
  *     src/mqtt-off-deploy.ts sends MQTT_DISABLED_SET_CONFIGURATION to the
- *     target's operations API before the deploy, and after the deploy's
- *     restart verifies the node at the operations API URL's host: its
- *     configuration must show those values (mqttOffConfirmed), the shared
- *     worker threads are restarted when the application is isolated, and the
- *     authenticated MQTT-over-WebSocket check sent to that host, on the HTTP
- *     port its configuration names, must get Harper's own answer for a
- *     disabled path; other cluster nodes are reported NOT VERIFIED. `flair
- *     deploy --verify-mqtt-only` runs that check for one node. A component's
- *     own config.yaml cannot set it: `mqtt` is a section of the instance's
- *     root configuration, not of an application's.
+ *     target's operations API before the deploy, requests the shared worker
+ *     threads' restart when the application is isolated, and after the
+ *     deploy's restart reads the saved configuration back, which must be a
+ *     recognizable root configuration (rootConfigurationProblem) showing
+ *     those values (mqttOffConfirmed). It does not probe the listeners. A
+ *     component's own config.yaml cannot set it: `mqtt` is a section of the
+ *     instance's root configuration, not of an application's.
  * `flair doctor` reports an instance whose saved configuration starts an MQTT
  * listener (src/lib/mqtt-listener-doctor.ts); it reads the configuration, not
  * the running listeners.

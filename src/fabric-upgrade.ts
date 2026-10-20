@@ -33,7 +33,7 @@ import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
 import { createRegistryNoticePrinter, fetchDeclaredDependencies, fetchLatestVersion } from "./lib/npm-registry.js";
 import type { DeployOptions, DeployResult } from "./deploy.js";
-import { assertSafeUrl, requireAllNodesVerifiedConflict, safeUrl } from "./mqtt-off-deploy.js";
+import { assertSafeUrl, safeUrl } from "./mqtt-off-deploy.js";
 
 /**
  * Minimum harper version whose component packager works when the
@@ -222,12 +222,8 @@ export interface FabricUpgradeOptions {
   replicated?: boolean;
   /** `--keep-mqtt-config`: deploy() leaves the target's MQTT configuration as it is (DeployOptions.keepMqttConfig). */
   keepMqttConfig?: boolean;
-  /** The target's operations API URL for deploy()'s MQTT-off configuration and check (DeployOptions.opsUrl). */
+  /** The target's operations API URL for deploy()'s MQTT-off configuration, restart and read-back (DeployOptions.opsUrl). */
   opsUrl?: string;
-  /** Confirms the address of deploy()'s post-restart WebSocket check (DeployOptions.mqttCheckUrl): the operations API URL's host and an HTTP port its configuration names. */
-  mqttCheckUrl?: string;
-  /** `--require-all-nodes-verified`: deploy() fails when a cluster node cannot be verified MQTT-off (DeployOptions.requireAllNodesVerified); refused with `restart: false` or `keepMqttConfig`. */
-  requireAllNodesVerified?: boolean;
   /**
    * flair#878: these were reachable from `flair deploy` but NOT from
    * `flair upgrade --target` — this module built its deploy() options by hand
@@ -492,14 +488,6 @@ export async function fabricUpgrade(
   // anything is fetched or printed.
   assertSafeUrl(opts.target, "deploy target URL");
   if (opts.opsUrl !== undefined) assertSafeUrl(opts.opsUrl, "operations API URL");
-  if (opts.mqttCheckUrl !== undefined) assertSafeUrl(opts.mqttCheckUrl, "URL the MQTT check reaches", "check");
-  // deploy() refuses these too; refusing here keeps it before anything is staged.
-  const conflict = requireAllNodesVerifiedConflict({
-    requireAllNodesVerified: opts.requireAllNodesVerified,
-    restart: opts.restart,
-    keepMqttConfig: opts.keepMqttConfig,
-  });
-  if (conflict) throw new Error(conflict);
 
   // Step 1 + diff.
   const plan = await planFabricUpgrade(opts, deps);
@@ -558,9 +546,7 @@ export async function fabricUpgrade(
       restart: opts.restart,
       replicated: opts.replicated,
       keepMqttConfig: opts.keepMqttConfig,
-      requireAllNodesVerified: opts.requireAllNodesVerified,
       opsUrl: opts.opsUrl,
-      mqttCheckUrl: opts.mqttCheckUrl,
       packageRoot,
       // flair#878 — see FabricUpgradeOptions: these used to stop at this
       // boundary, which is why the upgrade path could not act on harper's own

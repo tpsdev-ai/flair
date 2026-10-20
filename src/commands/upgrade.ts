@@ -10,7 +10,7 @@ import { Command } from "commander";
 import { detectWiredFlairMcp } from "../doctor-client.js";
 import { UPGRADE_SNAPSHOT_ROOT, fetchDeclaredHarperVersion, readInstalledHarperVersion } from "../engine-version.js";
 import { fabricUpgrade, type FabricUpgradeOptions } from "../fabric-upgrade.js";
-import { deployUrlRefusal, requireAllNodesVerifiedConflict, safeUrl } from "../mqtt-off-deploy.js";
+import { deployUrlRefusal, safeUrl } from "../mqtt-off-deploy.js";
 import { renderFleetSweepTable, sweepFleet } from "../fleet-verify.js";
 import { resolveNpmGlobalPrefix } from "../install/global-bin-path.js";
 import { defaultKeysDir } from "../lib/auth-resolve.js";
@@ -228,7 +228,7 @@ function verifyAuthedGet(...args: any[]): any {
  * The options `flair upgrade --target` hands fabricUpgrade(), from the
  * command's options and resolved credentials. `opsUrl` is what every remote
  * command resolves (`resolveOpsUrl`: --ops-target / FLAIR_OPS_TARGET, else
- * derived from --target); deploy() sends the MQTT-off configuration and check
+ * derived from --target); deploy() sends the MQTT-off configuration, restart and read-back
  * there.
  */
 export function buildFabricUpgradeOptions(
@@ -249,9 +249,7 @@ export function buildFabricUpgradeOptions(
     restart: opts.restart !== false,
     replicated: opts.replicated !== false,
     keepMqttConfig: opts.keepMqttConfig ?? false,
-    requireAllNodesVerified: opts.requireAllNodesVerified ?? false,
     opsUrl: resolveOpsUrl({ target: opts.target, opsTarget: opts.opsTarget }),
-    mqttCheckUrl: opts.mqttCheckUrl,
     // flair#878 — previously unreachable from this command; see
     // FabricUpgradeOptions.
     deployRetries: Number(opts.deployRetries ?? 0),
@@ -972,10 +970,8 @@ program
   .option("--harper-version <semver>", "Pin harper to this version for --target (default: registry latest, floored at the flair#513 fix)")
   .option("--project <name>", "Fabric component name for --target", "flair")
   .option("--no-replicated", "Disable cluster-wide replication for --target (default: replicated=true)")
-  .option("--keep-mqtt-config", "For --target: leave the target's MQTT configuration as it is (default: set every MQTT listener off before deploying and, after the deploy's restart, verify the node at the operations API URL's host)")
-  .option("--mqtt-check-url <url>", "For --target: confirm the address of the post-restart MQTT-over-WebSocket check, and choose its scheme: it must name the operations API URL's host and an HTTP port that host's configuration names, or it is refused (default: that host on its configured HTTP port)")
-  .option("--require-all-nodes-verified", "For --target: fail when a cluster node other than the one at the operations API URL's host cannot be verified MQTT-off (default: report it NOT VERIFIED with the check to run); refused with --no-restart or --keep-mqtt-config")
-  .option("--ops-target <url>", "For --target: operations API URL for the MQTT-off configuration and check (env: FLAIR_OPS_TARGET; default: derived from --target)")
+  .option("--keep-mqtt-config", "For --target: leave the target's MQTT configuration as it is (default: set every MQTT listener off in the target's configuration before deploying, request the shared workers' restart for an isolated application, and read the saved configuration back after the deploy's restart; the listeners are not probed)")
+  .option("--ops-target <url>", "For --target: operations API URL for the MQTT-off configuration, restart and read-back (env: FLAIR_OPS_TARGET; default: derived from --target)")
   .option("--yes", "Skip the confirmation prompt for --target")
   .option("--install-hooks", "Consent to installing missing SessionStart hooks (claude-code / Codex) during upgrade. The hook executes at every session start — upgrade will not write it unprompted. Interactive runs prompt; non-interactive runs state the gap and withhold ✅ unless this flag is passed.")
   .option("--no-fleet-verify", "Skip the automatic post-upgrade fleet convergence sweep for --target (default: sweep runs — see flair#636)")
@@ -997,21 +993,9 @@ program
       const refusal = deployUrlRefusal([
         [opts.target, "deploy target URL (--target)"],
         [opts.opsTarget ?? process.env.FLAIR_OPS_TARGET, "operations API URL (--ops-target / FLAIR_OPS_TARGET)"],
-        [opts.mqttCheckUrl, "URL the MQTT check reaches (--mqtt-check-url)", "check"],
       ]);
       if (refusal) {
         console.error(`\x1b[31m${refusal}\x1b[0m`);
-        process.exit(1);
-      }
-      // --require-all-nodes-verified needs deploy()'s post-restart check:
-      // refused with an option that skips it, before anything is staged.
-      const conflict = requireAllNodesVerifiedConflict({
-        requireAllNodesVerified: opts.requireAllNodesVerified,
-        restart: opts.restart,
-        keepMqttConfig: opts.keepMqttConfig,
-      });
-      if (conflict) {
-        console.error(`\x1b[31m${conflict}\x1b[0m`);
         process.exit(1);
       }
       if (!opts.check) console.log("OAuth redirect migration is local-only; --target requires target-side OAuth environment configuration.");

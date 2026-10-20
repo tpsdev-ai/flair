@@ -28,6 +28,7 @@ import { join } from "node:path";
 import { childOverranDeadline, cliLeg } from "../helpers/child-deadline";
 import { nodeBin } from "../helpers/node-runtime";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import { MQTT_CONFIGURATION_NOTE } from "../../src/lib/mqtt-listener-doctor";
 
 const CLI = join(process.cwd(), "dist", "cli.js");
 const ADMIN_PASS = "test123"; // matches harper-lifecycle's seeded admin pass
@@ -159,6 +160,8 @@ describe("flair doctor — the Agent IDs section (flair#2359, real CLI + real sp
     expect(unreadable.stdout).toContain("Instruction events: NOT RUN");
     expect(unreadable.stdout).toContain("Skill tombstones: NOT RUN");
     expect(unreadable.stdout).toContain("MQTT listeners: NOT RUN");
+    // The MQTT section's saved-configuration note is printed on this NOT RUN path too.
+    expect(unreadable.stdout.replace(/\s+/g, " ")).toContain(MQTT_CONFIGURATION_NOTE);
     expect(unreadable.stdout).not.toContain("No stored agent id is outside");
     expect(issueCount(unreadable.stdout), "the unrun checks left the summary clean").toBe(baseCount + 7);
 
@@ -171,6 +174,7 @@ describe("flair doctor — the Agent IDs section (flair#2359, real CLI + real sp
     expect(noCred.stdout).toContain("Agent homes check skipped (no admin credential)");
     expect(noCred.stdout).toContain("Skill tombstones: NOT RUN");
     expect(noCred.stdout).toContain("MQTT listeners: NOT RUN");
+    expect(noCred.stdout.replace(/\s+/g, " ")).toContain(MQTT_CONFIGURATION_NOTE);
     expect(issueCount(noCred.stdout), "the skipped check left the summary clean").toBe(baseCount + 3);
   }, 120_000);
 

@@ -21,7 +21,7 @@ import { AGENT_ID_RULE } from "../lib/agent-id-rule.js";
 import { agentHomeEndpoint, readAgentHomeRows, resolveTargetInstanceIdentity } from "../lib/agent-home.js";
 import { describeInstructionEventImpostors, readInstructionEventTables } from "../lib/instruction-event-doctor.js";
 import { describeLiveSkillTombstones, readSkillTombstoneTables } from "../lib/skill-tombstone-doctor.js";
-import { mqttListenerSection, readInstanceConfiguration } from "../lib/mqtt-listener-doctor.js";
+import { MQTT_CONFIGURATION_NOTE, mqttListenerSection, readInstanceConfiguration } from "../lib/mqtt-listener-doctor.js";
 import { readAgentRoster } from "../lib/agent-roster.js";
 import { flairConfigYamlCandidates, readPortFromYamlFile, resolveFlairConfigYaml } from "../lib/doctor-config-path.js";
 import { collectFederationEnv, describeFederationDriverFinding, federationPeersConfigured, loadYamlDoc } from "../lib/doctor-federation-driver.js";
@@ -2506,12 +2506,13 @@ program
       // sections above. Read-only: nothing is changed. A configuration read
       // that fails, or an answer that is not a recognizable root
       // configuration (`{}` included), is NOT RUN and counted. It reports the
-      // saved configuration, not the running listeners, and says so on every
-      // line (`flair deploy --verify-mqtt-only` checks a node live).
+      // saved configuration, not the running listeners, and prints that note
+      // on every path below, the two NOT RUN paths included.
       console.log(`\n  ${render.wrap(render.c.bold, "MQTT listeners (configuration)")}`);
       if (rosterNotRun) {
         issues++;
         console.log(`  ${render.icons.warn} MQTT listeners: NOT RUN — ${rosterNotRun.reason}`);
+        console.log(`     ${render.wrap(render.c.dim, MQTT_CONFIGURATION_NOTE)}`);
         console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${rosterNotRun.remedy}`);
       } else if (!rosterAdminPass || rosterOpsPort === null) {
         issues++;
@@ -2519,6 +2520,7 @@ program
           ? `the admin credential could not be resolved (${rosterProbe.credIssue})`
           : rosterAdminPass ? "the ops endpoint was not verified" : "no admin credentials to read the instance configuration";
         console.log(`  ${render.icons.warn} MQTT listeners: NOT RUN — ${reason}.`);
+        console.log(`     ${render.wrap(render.c.dim, MQTT_CONFIGURATION_NOTE)}`);
       } else {
         const configuration = await readInstanceConfiguration({
           opsUrl: `http://127.0.0.1:${rosterOpsPort}/`,

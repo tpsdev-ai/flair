@@ -53,11 +53,8 @@ and no MQTT over WebSocket. Every local start re-asserts it, and `flair doctor`
 reports an instance whose saved configuration starts an MQTT listener (it reads
 the configuration, not the running listeners). For a component deployed with
 `flair deploy` or `flair upgrade --target` — which set MQTT off in the target's
-configuration, verify it after their restart on the node at the operations API
-URL's host (its configuration plus an authenticated WebSocket check sent to
-that host; failing when they cannot confirm it there), and report every other
-cluster node NOT VERIFIED with the live check to run on it (`flair deploy
---verify-mqtt-only`; `--require-all-nodes-verified` fails instead) — see
+configuration, request the shared worker threads' restart that applies it,
+and read the saved configuration back, without probing the listeners — see
 [deploying-on-fabric.md](deploying-on-fabric.md#mqtt-is-off), including how an
 operator turns MQTT on deliberately; table subscriptions, publishes and
 retained publishes over MQTT then follow the same policy as SSE and WebSocket

@@ -3,7 +3,8 @@
  * target's operations API URL the way every remote command does
  * (--ops-target, else FLAIR_OPS_TARGET, else derived from --target) and hands
  * it to fabricUpgrade(), which passes it to deploy() for the MQTT-off
- * configuration and check (test/unit/fabric-upgrade.test.ts checks that hop).
+ * configuration, restart and read-back (test/unit/fabric-upgrade.test.ts and
+ * test/integration/mqtt-off-fabric-upgrade.test.ts check that hop).
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { buildFabricUpgradeOptions } from "../../src/commands/upgrade.ts";
@@ -40,7 +41,7 @@ describe("flair upgrade --target: the operations API URL handed to fabricUpgrade
 
   test("the other options are carried as the command sets them", () => {
     delete process.env.FLAIR_OPS_TARGET;
-    const o = buildFabricUpgradeOptions({ target: "https://t.example.invalid", keepMqttConfig: true, restart: false, replicated: false, check: true, mqttCheckUrl: "https://http.example.invalid" }, creds, resolveEffectiveOpsUrl);
-    expect(o).toMatchObject({ target: "https://t.example.invalid", keepMqttConfig: true, restart: false, replicated: false, check: true, fabricUser: "admin", mqttCheckUrl: "https://http.example.invalid" });
+    const o = buildFabricUpgradeOptions({ target: "https://t.example.invalid", keepMqttConfig: true, restart: false, replicated: false, check: true }, creds, resolveEffectiveOpsUrl);
+    expect(o).toMatchObject({ target: "https://t.example.invalid", keepMqttConfig: true, restart: false, replicated: false, check: true, fabricUser: "admin" });
   });
 });

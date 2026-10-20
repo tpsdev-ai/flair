@@ -2,7 +2,7 @@
 # Byte-identical gate for src/cli.ts modularization. Do not edit by hand.
 # Refresh: UPDATE_CLI_SURFACE_SNAPSHOT=1 bun test test/unit-isolated/cli-surface-snapshot.test.ts
 # helpWidth=80 (pinned; TTY columns must not affect this file)
-# commands=143 options=662
+# commands=143 options=657
 #
 # TREE is registration order: every command/subcommand + declared options/args.
 # HELP is each command's outputHelp() (--help, including addHelpText).
@@ -1671,16 +1671,10 @@ flair upgrade
       attr: replicated
       negate: true
     --keep-mqtt-config
-      description: For --target: leave the target's MQTT configuration as it is (default: set every MQTT listener off before deploying and, after the deploy's restart, verify the node at the operations API URL's host)
+      description: For --target: leave the target's MQTT configuration as it is (default: set every MQTT listener off in the target's configuration before deploying, request the shared workers' restart for an isolated application, and read the saved configuration back after the deploy's restart; the listeners are not probed)
       attr: keepMqttConfig
-    --mqtt-check-url <url>
-      description: For --target: confirm the address of the post-restart MQTT-over-WebSocket check, and choose its scheme: it must name the operations API URL's host and an HTTP port that host's configuration names, or it is refused (default: that host on its configured HTTP port)
-      attr: mqttCheckUrl
-    --require-all-nodes-verified
-      description: For --target: fail when a cluster node other than the one at the operations API URL's host cannot be verified MQTT-off (default: report it NOT VERIFIED with the check to run); refused with --no-restart or --keep-mqtt-config
-      attr: requireAllNodesVerified
     --ops-target <url>
-      description: For --target: operations API URL for the MQTT-off configuration and check (env: FLAIR_OPS_TARGET; default: derived from --target)
+      description: For --target: operations API URL for the MQTT-off configuration, restart and read-back (env: FLAIR_OPS_TARGET; default: derived from --target)
       attr: opsTarget
     --yes
       description: Skip the confirmation prompt for --target
@@ -1816,17 +1810,8 @@ flair deploy
       attr: restart
       negate: true
     --keep-mqtt-config
-      description: Leave the target's MQTT configuration as it is (default: set every MQTT listener off before deploying and, after the deploy's restart, verify the node at the operations API URL's host)
+      description: Leave the target's MQTT configuration as it is (default: set every MQTT listener off in the target's configuration before deploying, request the shared workers' restart for an isolated application, and read the saved configuration back after the deploy's restart; the listeners are not probed)
       attr: keepMqttConfig
-    --mqtt-check-url <url>
-      description: Confirm the address of the post-restart MQTT-over-WebSocket check, and choose its scheme: it must name the operations API URL's host and an HTTP port that host's configuration names, or it is refused (default: that host on its configured HTTP port)
-      attr: mqttCheckUrl
-    --require-all-nodes-verified
-      description: Fail the deploy when a cluster node other than the one at the operations API URL's host cannot be verified MQTT-off (default: report it NOT VERIFIED with the check to run); refused with --no-verify, --no-restart, --keep-mqtt-config or --verify-mqtt-only
-      attr: requireAllNodesVerified
-    --verify-mqtt-only
-      description: Deploy nothing: check the MQTT listeners of the node at the operations API URL's host (--ops-target, or derived from the target) — its configuration, and an authenticated MQTT-over-WebSocket check sent to that host on the HTTP port its configuration names — and exit 0 only when both show MQTT off
-      attr: verifyMqttOnly
     --dry-run
       description: Resolve package, validate args, skip the deploy call
       attr: dryRun
@@ -1851,7 +1836,7 @@ flair deploy
       attr: verifyResource
       default: []
     --ops-target <url>
-      description: Operations API URL override for the MQTT-off configuration and check and the Memory checkpoint report (env: FLAIR_OPS_TARGET)
+      description: Operations API URL override for the MQTT-off configuration, restart and read-back and the Memory checkpoint report (env: FLAIR_OPS_TARGET)
       attr: opsTarget
     --memory-checkpoint <path>
       description: After deploy, verify this instance's Memory ids against a `flair memory checkpoint` file and add a Memory id/tier check line to the report
@@ -4862,23 +4847,14 @@ Options:
                                  (default: replicated=true)
   --keep-mqtt-config             For --target: leave the target's MQTT
                                  configuration as it is (default: set every MQTT
-                                 listener off before deploying and, after the
-                                 deploy's restart, verify the node at the
-                                 operations API URL's host)
-  --mqtt-check-url <url>         For --target: confirm the address of the
-                                 post-restart MQTT-over-WebSocket check, and
-                                 choose its scheme: it must name the operations
-                                 API URL's host and an HTTP port that host's
-                                 configuration names, or it is refused (default:
-                                 that host on its configured HTTP port)
-  --require-all-nodes-verified   For --target: fail when a cluster node other
-                                 than the one at the operations API URL's host
-                                 cannot be verified MQTT-off (default: report it
-                                 NOT VERIFIED with the check to run); refused
-                                 with --no-restart or --keep-mqtt-config
+                                 listener off in the target's configuration
+                                 before deploying, request the shared workers'
+                                 restart for an isolated application, and read
+                                 the saved configuration back after the deploy's
+                                 restart; the listeners are not probed)
   --ops-target <url>             For --target: operations API URL for the
-                                 MQTT-off configuration and check (env:
-                                 FLAIR_OPS_TARGET; default: derived from
+                                 MQTT-off configuration, restart and read-back
+                                 (env: FLAIR_OPS_TARGET; default: derived from
                                  --target)
   --yes                          Skip the confirmation prompt for --target
   --install-hooks                Consent to installing missing SessionStart
@@ -5021,29 +4997,12 @@ Options:
   --no-restart                   Do not restart the component after deploy
                                  (default: restart=true)
   --keep-mqtt-config             Leave the target's MQTT configuration as it is
-                                 (default: set every MQTT listener off before
-                                 deploying and, after the deploy's restart,
-                                 verify the node at the operations API URL's
-                                 host)
-  --mqtt-check-url <url>         Confirm the address of the post-restart
-                                 MQTT-over-WebSocket check, and choose its
-                                 scheme: it must name the operations API URL's
-                                 host and an HTTP port that host's configuration
-                                 names, or it is refused (default: that host on
-                                 its configured HTTP port)
-  --require-all-nodes-verified   Fail the deploy when a cluster node other than
-                                 the one at the operations API URL's host cannot
-                                 be verified MQTT-off (default: report it NOT
-                                 VERIFIED with the check to run); refused with
-                                 --no-verify, --no-restart, --keep-mqtt-config
-                                 or --verify-mqtt-only
-  --verify-mqtt-only             Deploy nothing: check the MQTT listeners of the
-                                 node at the operations API URL's host
-                                 (--ops-target, or derived from the target) —
-                                 its configuration, and an authenticated
-                                 MQTT-over-WebSocket check sent to that host on
-                                 the HTTP port its configuration names — and
-                                 exit 0 only when both show MQTT off
+                                 (default: set every MQTT listener off in the
+                                 target's configuration before deploying,
+                                 request the shared workers' restart for an
+                                 isolated application, and read the saved
+                                 configuration back after the deploy's restart;
+                                 the listeners are not probed)
   --dry-run                      Resolve package, validate args, skip the deploy
                                  call
   --package-root <dir>           Override package root (mainly for testing)
@@ -5063,8 +5022,9 @@ Options:
                                  (repeatable; default: derived from the deployed
                                  package's dist/resources) (default: [])
   --ops-target <url>             Operations API URL override for the MQTT-off
-                                 configuration and check and the Memory
-                                 checkpoint report (env: FLAIR_OPS_TARGET)
+                                 configuration, restart and read-back and the
+                                 Memory checkpoint report (env:
+                                 FLAIR_OPS_TARGET)
   --memory-checkpoint <path>     After deploy, verify this instance's Memory ids
                                  against a `flair memory checkpoint` file and
                                  add a Memory id/tier check line to the report

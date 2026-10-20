@@ -312,8 +312,9 @@ and TLS listeners (`mqtt.network.port`, `mqtt.network.securePort`) and MQTT
 over WebSocket on the HTTP port (`mqtt.webSocket`). Flair's local spawns set
 this on every start. A component deployment does not go through those spawns,
 and a component's `config.yaml` cannot set it (`mqtt` belongs to the instance's
-root configuration), so `flair deploy` and `flair upgrade --target` set it
-through the target's operations API, in two steps.
+root configuration), so `flair deploy` and `flair upgrade --target` set it in
+the target's configuration through its operations API and request the worker
+restart that applies it.
 
 **Before deploying**, they send:
 
@@ -324,96 +325,71 @@ through the target's operations API, in two steps.
 `replicated` follows the deploy (`--no-replicated` sends it to the origin
 only; an instance without replication is set on its own). If the target
 refuses it, or its answer names a cluster node that did not take it, nothing
-is deployed and the error names the node and what to run.
+is deployed, and the error names the node and the request to send to it.
 
-**After the deploy's restart**, they verify one node: the node at the
-operations API URL's host. They read that host's configuration through its
-operations API, which must show the values they set (`mqtt.network.port` and
-`mqtt.network.securePort` null, `mqtt.webSocket` false; an empty or malformed
-answer fails). They take the address of the MQTT check from that same answer:
-the operations API URL's host, on the HTTP port the configuration names
-(`http.port` over http, `http.securePort` over https; when both are set, the
-one matching the operations API URL's scheme). `--mqtt-check-url` is an
-explicit confirmation of that address, which can choose the scheme (http,
-https, ws or wss): it is refused, before any check is sent, unless it names
-that host and one of those ports. The check is a WebSocket upgrade with the
-`mqtt` subprotocol, authenticated with the deploy's admin credential and
-validated (101, the matching `Sec-WebSocket-Accept`, the `mqtt` subprotocol),
-followed by an MQTT CONNECT. Only Harper's own answer for a disabled
-MQTT-over-WebSocket path counts as off: the upgrade succeeds and the socket is
-closed with code 1011 and the reason `No resource was found to handle /`. A
-CONNACK means MQTT is still served. Anything else — an authentication denial,
-any other HTTP status (4xx included) or close, an upgrade that does not
-validate, a connection error, no answer in time — is inconclusive, and an
-inconclusive check fails the deploy.
+**After the deploy's restart**, they read the target's configuration back
+through its operations API. An answer that is not a recognizable root
+configuration (it must carry Harper's `http` and `operationsApi` sections and
+its `rootPath`) is reported as not confirmed, never as off, and the saved
+`mqtt` section must read off (`mqtt.network.port` and `mqtt.network.securePort`
+null, `mqtt.webSocket` false); a mismatch is named by field and category, such
+as `mqtt.webSocket is not false`. Either failure fails the command after the
+deploy, with the request to send.
 
-What a deploy reports as verified is exactly this: **verified on the node at
-`<host>`** — the configuration read from its operations API plus the
-authenticated WebSocket check sent to that host. A host name that
-load-balances across nodes is not separated: the configuration read and the
-check may reach different nodes behind it. Give the operations API URL of one
-node (`--ops-target`) to verify that node.
+Harper applies the setting when the shared HTTP worker threads, which start
+the MQTT listeners, restart. The deploy's own restart covers them, except when
+the root configuration marks Flair `isolated: true`: Harper then restarts only
+Flair's own worker. In that case they also request the shared worker threads'
+restart through the operations API (`restart_service`, `"service":
+"http_workers"`, `"scope": ""`, replicated with the deploy) and follow Harper's
+job, failing on a failure it reports: a job that does not complete, a
+completion message that is not Harper's, a replicated result without its node
+list, or a node recorded without a completed restart (each named, with the
+request to send to it). A completed job is not proof that a node's workers
+restarted: Harper sends a node's restart-complete from a `finally` and does
+not carry the worker replacement's outcome.
 
-Harper applies the setting when the shared HTTP worker threads, which register
-the MQTT listeners, restart. The deploy's restart covers them, except when the
-root configuration marks Flair `isolated: true`: Harper then restarts only
-Flair's own worker. In that case, and whenever the check still finds MQTT
-served, they restart the shared worker threads through the operations API
-(`restart_service`, `"service": "http_workers"`, `"scope": ""`, replicated with
-the deploy) and follow Harper's job, failing on a failure it reports: a job
-that does not complete, a completion message that is not Harper's, a
-replicated result without its node list, or a node recorded without a
-completed restart (named). A completed restart job is not proof of a peer's
-restart: Harper sends a node's restart-complete from a `finally` and does not
-carry the worker replacement's outcome. Then they check again; if MQTT is
-still served, or the check is inconclusive, the deploy fails and names the
-restart and check to run.
+**What they report.** Exactly this, and nothing more:
 
-**Other cluster nodes stay `NOT VERIFIED`.** Every node the replicated
-configuration and restart answers name, other than the one checked, is
-reported `NOT VERIFIED` by name, with the live check to run on it:
-
-```bash
-FABRIC_USER=... FABRIC_PASSWORD=... flair deploy --verify-mqtt-only --ops-target https://<node>:<ops port>
+```
+MQTT listeners configured off on <the target and the nodes the replicated answer named>; shared workers restart requested (job <id>: <each node's outcome>, or: with the deploy's own restart); the saved configuration on <the target's operations host> reads off. Listeners stop when each node's workers restart; flair does not probe them. To confirm on a node, connect an MQTT client to its MQTT ports or WebSocket path.
 ```
 
-`--verify-mqtt-only` deploys, sets and restarts nothing: it reads that node's
-configuration and sends the authenticated WebSocket check to that host on the
-HTTP port its configuration names, by the same rules as above, and exits 0
-only when both show MQTT off. It reports MQTT still served when the worker
-threads have not applied a changed configuration, and then names the worker
-restart to send. The deploy succeeds for the verified node; pass
-`--require-all-nodes-verified` (both commands) to fail it when any node is
-not verified. `--require-all-nodes-verified` is refused, before anything is
-deployed or sent, together with `--no-verify`, `--no-restart`,
-`--keep-mqtt-config` (they skip the check) or `--verify-mqtt-only` (it checks
-one node). Without it, `--no-verify` skips the check and `--no-restart`
-leaves the setting to take effect at the next restart; both print the restart
-and check to run.
+Flair does not connect to the MQTT listeners. To confirm that a node stopped
+serving MQTT after its workers restarted, connect an MQTT client to that node's
+MQTT ports (1883 and 8883 by default) or to its MQTT-over-WebSocket path on the
+HTTP port.
+
+With `--no-verify` the post-restart step is skipped (the saved configuration
+is not read back, and no restart is requested for an isolated application),
+and with `--no-restart` the setting takes effect at the next restart; both
+print the restart request to send.
 
 **URLs.** The operations API URL is resolved as for every remote command:
 `--ops-target` / `FLAIR_OPS_TARGET`, else derived from the target. The target
-and the operations API URL must be http or https URLs, and `--mqtt-check-url`
-an http, https, ws or wss URL, each with a host and nothing but scheme, host,
-port and path: any other scheme (such as `file:` or `javascript:`), a URL
-without a host, a user name, password, query or fragment is refused before
-either command prints or sends anything. A redirect from the operations API is
-not followed. Every URL they print shows scheme, host, port and path only.
+and the operations API URL must be http or https URLs with a host, and nothing
+but scheme, host, port and path: any other scheme (such as `file:` or
+`javascript:`), a URL without a host, a user name, password, query or fragment
+is refused before either command prints or sends anything. The operations API
+calls follow no redirect. Every URL they print shows scheme, host, port and
+path only, including the operations API URL they name for a cluster node,
+which they build only from a node name that is a valid host name or IP
+address.
 
 **Output.** The errors and progress lines of these MQTT-off steps quote a
-remote answer's HTTP status code, cluster node names as its answers give them
-(when shaped as a host name or address) and the HTTP port its configuration
-names; never its body, other configuration values or a transport error's text.
-A configuration mismatch is reported by field name and category, such as
-`mqtt.webSocket is not false`. This covers only the MQTT-off steps: the
-Harper deploy between them runs Harper's CLI, whose output is streamed as it
-comes.
+remote answer's HTTP status code, a restart job's id (when it is a plain
+token) and state, and cluster node names as its answers give them (when they
+are valid host names or IP addresses); never its body, a job's message, a
+configuration value or a transport error's text. This covers only these
+steps: the Harper deploy between them runs Harper's CLI, whose output is
+streamed as it comes.
 
 `flair doctor` (local instances; it takes no `--target`) reports an instance
 whose saved configuration starts an MQTT listener, and names the call that
 turns it off. It reads the configuration, not the running listeners: worker
 threads that have not restarted since the configuration changed keep serving
-MQTT, and doctor says so. `flair deploy --verify-mqtt-only` checks a node live.
+MQTT, and doctor says so on every path, including when it cannot read the
+configuration.
 
 **Turning MQTT on deliberately.** Send `set_configuration` with the listeners
 you want (for example `"mqtt_webSocket": true`), then restart the worker threads

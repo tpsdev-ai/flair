@@ -10,7 +10,7 @@ import { Command } from "commander";
 import { buildTargetUrl as buildDeployUrl, deploy as deployToFabric, validateOptions as validateDeployOptions } from "../deploy.js";
 import { renderFleetSweepTable, sweepFleet } from "../fleet-verify.js";
 import { readCheckpointFile, verifyCheckpoint } from "../memory-id-checkpoint.js";
-import { deployUrlRefusal, requireAllNodesVerifiedConflict, safeUrl, verifyNodeMqttListenersOff } from "../mqtt-off-deploy.js";
+import { deployUrlRefusal, safeUrl } from "../mqtt-off-deploy.js";
 
 export type DeployCli = {
   fleetSweepCallerExitMessage: (...args: any[]) => any;
@@ -77,10 +77,7 @@ program
   .option("--pkg-version <semver>", "Override version label (default: installed package version)")
   .option("--no-replicated", "Disable cluster-wide replication (default: replicated=true)")
   .option("--no-restart", "Do not restart the component after deploy (default: restart=true)")
-  .option("--keep-mqtt-config", "Leave the target's MQTT configuration as it is (default: set every MQTT listener off before deploying and, after the deploy's restart, verify the node at the operations API URL's host)")
-  .option("--mqtt-check-url <url>", "Confirm the address of the post-restart MQTT-over-WebSocket check, and choose its scheme: it must name the operations API URL's host and an HTTP port that host's configuration names, or it is refused (default: that host on its configured HTTP port)")
-  .option("--require-all-nodes-verified", "Fail the deploy when a cluster node other than the one at the operations API URL's host cannot be verified MQTT-off (default: report it NOT VERIFIED with the check to run); refused with --no-verify, --no-restart, --keep-mqtt-config or --verify-mqtt-only")
-  .option("--verify-mqtt-only", "Deploy nothing: check the MQTT listeners of the node at the operations API URL's host (--ops-target, or derived from the target) — its configuration, and an authenticated MQTT-over-WebSocket check sent to that host on the HTTP port its configuration names — and exit 0 only when both show MQTT off")
+  .option("--keep-mqtt-config", "Leave the target's MQTT configuration as it is (default: set every MQTT listener off in the target's configuration before deploying, request the shared workers' restart for an isolated application, and read the saved configuration back after the deploy's restart; the listeners are not probed)")
   .option("--dry-run", "Resolve package, validate args, skip the deploy call")
   .option("--package-root <dir>", "Override package root (mainly for testing)")
   .option("--deployment-timeout <ms>", "Milliseconds harper waits for cluster-wide peer replication (env: FABRIC_DEPLOYMENT_TIMEOUT; default: 600000 — harper's own 120s default is too short for Fabric)")
@@ -88,7 +85,7 @@ program
   .option("--no-verify", "Skip post-deploy served-API verification (default: verify — on by design, so the CLI can't report success on an empty/broken deploy)")
   .option("--verify-timeout <ms>", "Milliseconds to wait for the served API to settle after harper's post-deploy restart before verifying (default: 300000)")
   .option("--verify-resource <name>", "Resource to verify is serving after deploy (repeatable; default: derived from the deployed package's dist/resources)", (val: string, prev: string[]) => [...prev, val], [] as string[])
-  .option("--ops-target <url>", "Operations API URL override for the MQTT-off configuration and check and the Memory checkpoint report (env: FLAIR_OPS_TARGET)")
+  .option("--ops-target <url>", "Operations API URL override for the MQTT-off configuration, restart and read-back and the Memory checkpoint report (env: FLAIR_OPS_TARGET)")
   .option("--memory-checkpoint <path>", "After deploy, verify this instance's Memory ids against a `flair memory checkpoint` file and add a Memory id/tier check line to the report")
   .option("--deploy-retries <n>", "Retry the full harper deploy this many times, ONLY when peer replication is positively observed not to converge (default: 0 — retrying re-runs harper's component install and can escalate a transient replication warning into a hard ENOTEMPTY install failure; see flair#878)", "0")
   .option("--ignore-replication-errors", "If peer replication still hasn't converged, treat it as a non-fatal warning and succeed with an origin-only deploy (the peer catches up via federation sync or a later deploy)")
@@ -113,59 +110,10 @@ program
       const refusal = deployUrlRefusal([
         [earlyTarget, "deploy target URL (--target)"],
         [opts.opsTarget ?? process.env.FLAIR_OPS_TARGET, "operations API URL (--ops-target / FLAIR_OPS_TARGET)"],
-        [opts.mqttCheckUrl, "URL the MQTT check reaches (--mqtt-check-url)", "check"],
       ]);
       if (refusal) {
         console.error(red(refusal));
         process.exit(1);
-      }
-      // --require-all-nodes-verified needs the post-restart check: refused
-      // with an option that skips it, before anything is deployed or sent.
-      const conflict = requireAllNodesVerifiedConflict({
-        requireAllNodesVerified: opts.requireAllNodesVerified,
-        verify: opts.verify,
-        restart: opts.restart,
-        keepMqttConfig: opts.keepMqttConfig,
-        verifyMqttOnly: opts.verifyMqttOnly,
-      });
-      if (conflict) {
-        console.error(red(conflict));
-        process.exit(1);
-      }
-
-      // --verify-mqtt-only: the post-restart check for one node, and nothing else.
-      if (opts.verifyMqttOnly) {
-        let creds: { fabricUser?: string; fabricPassword?: string };
-        try {
-          creds = resolveFabricCredentials(opts);
-        } catch (err: any) {
-          console.error(red(`Error: ${err.message}`));
-          process.exit(1);
-        }
-        if (!creds.fabricUser || !creds.fabricPassword) {
-          console.error(red("flair deploy --verify-mqtt-only: needs the admin credential (FABRIC_USER and FABRIC_PASSWORD, or --fabric-user and --fabric-password-file). Nothing was sent."));
-          process.exit(1);
-        }
-        const opsUrl = cli.resolveEffectiveOpsUrl({ target: earlyTarget, opsTarget: opts.opsTarget });
-        if (!opsUrl) {
-          console.error(red("flair deploy --verify-mqtt-only: needs the node's operations API URL (--ops-target or FLAIR_OPS_TARGET), or a target to derive it from (--target, or --fabric-org and --fabric-cluster). Nothing was sent."));
-          process.exit(1);
-        }
-        console.log(`${green("→")} Checking the MQTT listeners of the node at ${safeUrl(opsUrl)} (nothing is deployed, set or restarted)`);
-        try {
-          const { verified } = await verifyNodeMqttListenersOff({
-            url: opsUrl,
-            fabricUser: creds.fabricUser,
-            fabricPassword: creds.fabricPassword,
-            checkUrl: opts.mqttCheckUrl,
-          });
-          console.log(`${green("✓")} ${verified}`);
-          console.log(dim("  Other cluster nodes are not checked: run this against each node's operations API URL."));
-          return;
-        } catch (err: any) {
-          console.error(red(`✗ ${err.message}`));
-          process.exit(1);
-        }
       }
     }
 
@@ -191,7 +139,6 @@ program
       replicated: opts.replicated !== false,
       restart: opts.restart !== false,
       keepMqttConfig: opts.keepMqttConfig ?? false,
-      requireAllNodesVerified: opts.requireAllNodesVerified ?? false,
       dryRun: opts.dryRun ?? false,
       packageRoot: opts.packageRoot,
       deploymentTimeoutMs: Number(opts.deploymentTimeout ?? process.env.FABRIC_DEPLOYMENT_TIMEOUT ?? 600_000),
@@ -227,7 +174,6 @@ program
         // The target's operations API, resolved as for every remote command
         // (--ops-target / FLAIR_OPS_TARGET, else derived from the target).
         opsUrl: cli.resolveEffectiveOpsUrl({ target: url, opsTarget: opts.opsTarget }),
-        mqttCheckUrl: opts.mqttCheckUrl,
       });
       if (result.dryRun) {
         console.log(`${green("✓")} dry-run OK: ${result.project} ${result.version} ready to deploy to ${safeUrl(result.url)}`);

@@ -8,8 +8,8 @@
  * `mqtt.webSocket` is truthy, a TCP listener when `mqtt.network.port` is, a TLS
  * listener when `mqtt.network.securePort` is, and nothing when there is no
  * `mqtt` section. It reads the saved configuration, not the running
- * listeners, and every line it prints says so and names the live check
- * (`flair deploy --verify-mqtt-only`).
+ * listeners: the section it returns carries a note saying so on every status,
+ * and doctor prints that note on its own two NOT RUN paths too.
  * test/integration/mqtt-off-deploy-doctor.test.ts runs it through the real CLI
  * against a real Harper, including one whose configuration is off while its
  * worker threads still serve MQTT.
@@ -122,14 +122,14 @@ describe("readInstanceConfiguration and the doctor's MQTT listeners section", ()
     expect(on.status).toBe("issue");
     expect(on.note).toBe(MQTT_CONFIGURATION_NOTE);
     expect(on.fix).toContain("set_configuration");
-    expect(on.fix).toContain("flair deploy --verify-mqtt-only");
     expect(mqttListenerSection({ kind: "not-run", reason: "x" }).note).toBe(MQTT_CONFIGURATION_NOTE);
   });
 
-  test("the configuration note says the check reads the saved configuration, not the running listeners, and names the live check", () => {
-    expect(MQTT_CONFIGURATION_NOTE).toContain("This reads the saved configuration, not the running listeners");
-    expect(MQTT_CONFIGURATION_NOTE).toContain("worker threads that have not restarted since it changed keep serving MQTT");
-    expect(MQTT_CONFIGURATION_NOTE).toContain("flair deploy --verify-mqtt-only");
+  test("the configuration note says the check reads the saved configuration, not the running listeners, and how to confirm on a node", () => {
+    expect(MQTT_CONFIGURATION_NOTE).toBe(
+      "This reads the saved configuration, not the running listeners: worker threads that have not restarted since it changed keep serving MQTT. " +
+        "To confirm on a node, connect an MQTT client to its MQTT ports or WebSocket path.",
+    );
   });
 
   test("a configured port is printed only as the integer it parses to", () => {

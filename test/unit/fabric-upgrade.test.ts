@@ -325,9 +325,8 @@ describe("fabricUpgrade (deploy path)", () => {
 
   test("passes the resolved operations API URL through to deploy()", async () => {
     const { deps, calls } = mockDeps();
-    await fabricUpgrade({ target: "https://fabric", fabricUser: "admin", fabricPassword: "pw", opsUrl: "https://ops.fabric:9925", mqttCheckUrl: "https://http.fabric" }, deps);
+    await fabricUpgrade({ target: "https://fabric", fabricUser: "admin", fabricPassword: "pw", opsUrl: "https://ops.fabric:9925" }, deps);
     expect(calls.deploy[0].opsUrl).toBe("https://ops.fabric:9925");
-    expect(calls.deploy[0].mqttCheckUrl).toBe("https://http.fabric");
   });
 
   test("stages, confirms Harper fix version, then calls deploy() with packageRoot", async () => {

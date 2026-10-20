@@ -4,7 +4,7 @@
  *
  * Flair runs Harper with MQTT off (src/lib/mqtt-config.ts): its local spawns
  * assert it, and `flair deploy` / `flair upgrade --target` set it on a
- * component deployment and check it after their restart. This check reads the
+ * component deployment and request the restart that applies it. This check reads the
  * instance's root configuration through the operations API
  * (`get_configuration`) and names each MQTT listener that configuration starts
  * — the TCP and TLS listeners and the WebSocket path — with the change that
@@ -13,8 +13,10 @@
  * It reads the CONFIGURATION, not the running listeners: Harper applies a
  * changed `mqtt` section when the HTTP worker threads restart, so worker
  * threads that have not restarted since it changed keep serving what they
- * started with. Every line says so, and points to `flair deploy
- * --verify-mqtt-only`, which checks a node live (src/mqtt-off-deploy.ts).
+ * started with. The section says so on every path, including the NOT RUN
+ * ones doctor prints itself (src/commands/doctor.ts), and names how to
+ * confirm on a node: connect an MQTT client to its MQTT ports or WebSocket
+ * path. Flair does not probe the listeners.
  *
  * The read answers "not run" when it fails or when the answer is not a
  * recognizable root configuration (rootConfigurationProblem: `{}` or a partial
@@ -29,7 +31,7 @@ export const MQTT_LISTENERS_OFF_LINE = "No MQTT listener is configured on this i
 /** What every MQTT line adds: the check reads the configuration; the live check is a separate command. */
 export const MQTT_CONFIGURATION_NOTE =
   "This reads the saved configuration, not the running listeners: worker threads that have not restarted since it changed keep serving MQTT. " +
-  "flair deploy --verify-mqtt-only --ops-target <operations API URL> checks a node live.";
+  "To confirm on a node, connect an MQTT client to its MQTT ports or WebSocket path.";
 
 /** The set_configuration call that turns every MQTT listener off, as an operator would send it. */
 export function mqttOffOperation(): string {
@@ -43,8 +45,8 @@ export function describeMqttListenerFinding(config: unknown): { message: string;
   return {
     message: `This instance's configuration starts ${listeners.length === 1 ? "an MQTT listener" : `${listeners.length} MQTT listeners`}: ${listeners.join("; ")}. Flair runs Harper with MQTT off.`,
     fixHint:
-      `send ${mqttOffOperation()} to the operations API, then restart Harper's worker threads and check the node live with flair deploy --verify-mqtt-only ` +
-      "(flair deploy and flair upgrade --target set this for a component deployment and, after their restart, verify the node at the operations API URL's host, failing when they cannot confirm it there and reporting other cluster nodes NOT VERIFIED; flair's local spawns set it on every start).",
+      `send ${mqttOffOperation()} to the operations API, then restart Harper's worker threads ` +
+      "(flair deploy and flair upgrade --target set this for a component deployment, request the shared workers' restart and read the saved configuration back; flair's local spawns set it on every start).",
   };
 }
 

@@ -1,7 +1,7 @@
 /**
- * mqtt-off-isolated-deploy.test.ts — the deploy channel turns MQTT off when the
- * deployed application is ISOLATED, through Harper's real deploy_component,
- * against a REAL Harper.
+ * mqtt-off-isolated-deploy.test.ts — the deploy channel sets MQTT off and
+ * requests the shared worker threads' restart when the deployed application is
+ * ISOLATED, through Harper's real deploy_component, against a REAL Harper.
  *
  * When the root configuration marks an application `isolated: true`, Harper
  * runs it in a dedicated worker, and its deploy_component of that application
@@ -9,13 +9,11 @@
  * server/threads/manageThreads.js `restartWorkers` skips the shared workers).
  * The shared HTTP workers register the MQTT listeners, so the deploy's own
  * restart leaves them as they were. deploy()'s post-restart step
- * (src/mqtt-off-deploy.ts ensureMqttListenersOff) reads the target's
- * configuration, sees the application is isolated, restarts the shared worker
- * threads through `restart_service`, follows Harper's job to completion, and
- * passes only when the authenticated MQTT-over-WebSocket check — sent to the
- * operations API URL's host on the HTTP port this Harper's configuration
- * names, with no check URL given — gets Harper's own answer for a disabled
- * MQTT-over-WebSocket path ("off").
+ * (src/mqtt-off-deploy.ts completeMqttOff) reads the target's configuration,
+ * sees the application is isolated, requests the shared worker threads'
+ * restart through `restart_service`, follows Harper's job to completion, and
+ * reports the configuration it set, the job and the saved configuration it
+ * read back. It does not probe the listeners.
  *
  * The test-Harper runs with MQTT over WebSocket on, an HTTPS port and UDS
  * mirrors (what Harper requires before it admits an isolated application), and
@@ -26,16 +24,18 @@
  * dependencies; their install entry (the `node dist/fabric-npm-install.js`
  * command flair's deploy passes Harper) does nothing.
  *
- *   1. `isoa` with the post-restart step off: Harper starts a dedicated worker
- *      for it and restarts no shared worker (system_information's thread list:
- *      the shared worker thread ids are unchanged), so MQTT over WebSocket is
- *      still served although the configuration is off.
- *   2. `isob` with the step on: deploy() restarts the shared workers (a new
- *      shared worker thread id appears) and the real check finds MQTT over
- *      WebSocket off.
+ *   1. `isoa` with the post-restart step off: the configuration is written
+ *      off (step 1), Harper starts a dedicated worker for it and restarts no
+ *      shared worker (system_information's thread list: the shared worker
+ *      thread ids are unchanged).
+ *   2. `isob` with the step on: deploy() requests the shared workers' restart
+ *      (a new shared worker thread id appears), and its report names the
+ *      configuration it set, the job and the saved configuration it read back
+ *      off, and says it does not probe the listeners.
  *
- * Mutation check: skip the post-restart step in deploy() and step 2's
- * assertions go red.
+ * Mutation checks: skip the post-restart step in deploy(), or skip the shared
+ * workers' restart for an isolated application, and step 2's assertions go
+ * red.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -45,7 +45,7 @@ import { join } from "node:path";
 import { startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
 import { nodeBin } from "../helpers/node-runtime";
 import { REQUIRED_PACKAGE_FILES, deploy } from "../../src/deploy";
-import { probeMqttOverWebSocket } from "../../src/mqtt-off-deploy";
+import { MQTT_OFF_REPORT_LIMIT } from "../../src/mqtt-off-deploy";
 
 let harper: HarperInstance;
 // Harper's UDS mirror path for an isolated worker lives under the instance's
@@ -129,7 +129,6 @@ async function deployComponent(name: string, mqttCheck: boolean, progress: strin
     replicated: false,
     verify: false,
     mqttCheck,
-    mqttCheckTimeoutMs: 30_000,
     harperRuntime: nodeBin(),
     onProgress: (m) => progress.push(m),
   });
@@ -154,11 +153,10 @@ afterAll(async () => {
 }, 60_000);
 
 describe("MQTT off when the deployed application is isolated (real Harper deploy_component)", () => {
-  test("Harper's deploy of an isolated application restarts only its worker and leaves MQTT served; deploy()'s post-restart step restarts the shared workers and the real check finds MQTT over WebSocket off", async () => {
+  test("Harper's deploy of an isolated application restarts only its worker; deploy()'s post-restart step requests the shared workers' restart and reports the configuration it set and read back", async () => {
     const config = await op({ operation: "get_configuration" });
     expect(config?.isoa?.isolated).toBe(true);
     expect(config?.mqtt?.webSocket, "mqtt.webSocket before").toBe(true);
-    expect((await probeMqttOverWebSocket(harper.httpURL, { user: harper.admin.username, password: harper.admin.password })).outcome, "MQTT over WebSocket is served before").toBe("served");
     const before = sharedWorkerIds(await threads());
     expect(before.length, "a shared HTTP worker").toBeGreaterThan(0);
 
@@ -168,21 +166,27 @@ describe("MQTT off when the deployed application is isolated (real Harper deploy
     const afterFirst = await threads();
     expect(afterFirst.some((t) => t.application === "isoa"), "Harper started a dedicated worker for isoa").toBe(true);
     expect(sharedWorkerIds(afterFirst), "Harper's deploy restarted no shared worker").toEqual(before);
-    expect((await op({ operation: "get_configuration" }))?.mqtt?.webSocket, "the configuration is off").toBe(false);
-    expect((await probeMqttOverWebSocket(harper.httpURL, { user: harper.admin.username, password: harper.admin.password })).outcome, "MQTT over WebSocket is still served after Harper's scoped restart").toBe("served");
+    const written = (await op({ operation: "get_configuration" }))?.mqtt;
+    expect(written?.webSocket, "step 1 wrote mqtt.webSocket off").toBe(false);
+    expect(written?.network?.port ?? null, "step 1 wrote mqtt.network.port off").toBeNull();
+    expect(written?.network?.securePort ?? null, "step 1 wrote mqtt.network.securePort off").toBeNull();
 
     // 2. The real deploy of another isolated application, with the step.
     const second: string[] = [];
     await deployComponent("isob", true, second);
     const log = second.join("\n");
     expect(log).toContain("isob is an isolated application");
-    expect(log).toContain("restarting the shared HTTP worker threads");
-    expect(log).toContain(`MQTT listeners verified off on the node at 127.0.0.1: the configuration read from its operations API (${harper.opsURL.replace(/\/$/, "")})`);
-    expect(log).toContain(`the authenticated MQTT-over-WebSocket check sent to http://127.0.0.1:${new URL(harper.httpURL).port} found it off`);
+    expect(log).toContain("requesting a restart of the shared HTTP worker threads");
     const afterSecond = await threads();
     expect(afterSecond.some((t) => t.application === "isob"), "Harper started a dedicated worker for isob").toBe(true);
     expect(sharedWorkerIds(afterSecond).some((id) => !before.includes(id)), "a shared worker was replaced").toBe(true);
-    const finalCheck = await probeMqttOverWebSocket(harper.httpURL, { user: harper.admin.username, password: harper.admin.password });
-    expect(finalCheck.outcome, `MQTT over WebSocket after deploy() (${finalCheck.detail})`).toBe("off");
+    const opsHost = new URL(harper.opsURL).host;
+    const report = second.find((m) => m.startsWith("MQTT listeners configured off on"));
+    expect(report, log).toMatch(new RegExp(
+      `^MQTT listeners configured off on ${opsHost.replace(/\./g, "\\.")}; shared workers restart requested \\(job [A-Za-z0-9._-]+: ${opsHost.replace(/\./g, "\\.")} completed\\); ` +
+        `the saved configuration on ${opsHost.replace(/\./g, "\\.")} reads off\\. `,
+    ));
+    expect(report!.endsWith(MQTT_OFF_REPORT_LIMIT)).toBe(true);
+    expect(log).not.toMatch(/verified|is off on|listeners are off/i);
   }, 300_000);
 });
