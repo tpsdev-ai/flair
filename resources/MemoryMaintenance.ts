@@ -41,18 +41,20 @@ import { recordMemoryDeletion } from "./memory-deletion-history.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 
 /** What a request's `agentId` says about the run's target, for an ADMIN
- *  request: it names an agent only when the field is a non-blank string, an
- *  ABSENT field is a fleet-wide run, and any other supplied value is refused
- *  (400). A non-admin run ignores the field and targets the authenticated
- *  caller. */
+ *  request: it names an agent only when the field is a non-blank string with no
+ *  leading or trailing whitespace, an ABSENT field is a fleet-wide run, and any
+ *  other supplied value is refused (400). A non-admin run ignores the field and
+ *  targets the authenticated caller. */
 type RequestedAgent =
   | { kind: "absent" }
   | { kind: "named"; agentId: string }
   | { kind: "invalid" };
 
-/** An agent id is a non-blank string; any other value names no agent. */
+/** An agent id is a non-blank string with no leading or trailing whitespace;
+ *  any other value names no agent. */
 function parseAgentIdValue(value: unknown): Exclude<RequestedAgent, { kind: "absent" }> {
   if (typeof value !== "string" || value.trim().length === 0) return { kind: "invalid" };
+  if (value !== value.trim()) return { kind: "invalid" };
   return { kind: "named", agentId: value };
 }
 
@@ -115,7 +117,15 @@ export class MemoryMaintenance extends Resource {
     const stats = { expired: 0, archived: 0, total: 0, errors: 0, orphans: 0, skipped: 0, agent: targetAgent || "all" };
 
     try {
-      for await (const record of (databases as any).flair.Memory.search()) {
+      // A scoped run supplies the target agent as an indexed agentId condition
+      // (agentId is @indexed in schemas/memory.graphql), rather than scanning
+      // the whole table and filtering in process. The per-row check below still
+      // decides every row. No target means fleet-wide admin maintenance, which
+      // scans every row.
+      const memorySearch = targetAgent
+        ? (databases as any).flair.Memory.search({ conditions: [{ attribute: "agentId", comparator: "equals", value: targetAgent }] })
+        : (databases as any).flair.Memory.search();
+      for await (const record of memorySearch) {
         // Skip records not belonging to target agent (unless admin running fleet-wide).
         if (targetAgent && record.agentId !== targetAgent) continue;
         stats.total++;
