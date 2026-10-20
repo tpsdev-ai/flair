@@ -163,7 +163,7 @@ afterAll(async () => {
 }, 60_000);
 
 describe("MQTT off when the deployed application is isolated (real Harper deploy_component)", () => {
-  test("Harper's deploy of an isolated application restarts only its worker; deploy()'s post-restart step requests the shared workers' restart and reports the configuration it set and read back", async () => {
+  test("Harper's deploy of a fresh isolated application restarts only its worker; deploy()'s post-restart step requests the shared workers' restart and reports the configuration it set and read back", async () => {
     const config = await op({ operation: "get_configuration" });
     expect(config?.isoa?.isolated).toBe(true);
     expect(config?.mqtt?.webSocket, "mqtt.webSocket before").toBe(true);
