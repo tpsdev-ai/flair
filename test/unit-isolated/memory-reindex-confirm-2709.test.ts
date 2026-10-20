@@ -11,10 +11,11 @@ let rows: any[] = [];
 let missingFromIndex = new Set<string>();
 let indexVisits = 0;
 let countIndexVisits = false;
+let indexQueries: Array<{ conditions: any[]; confirmation: boolean }> = [];
 
-function makeRows(count: number): any[] {
+function makeRows(count: number, agentId = "agent-a", prefix = "r"): any[] {
   return Array.from({ length: count }, (_, i) => ({
-    id: `r${i}`, agentId: "agent-a", content: `row ${i}`,
+    id: `${prefix}${i}`, agentId, content: `row ${i}`,
     contentHash: `h${i}`, createdAt: "2026-01-01T00:00:00.000Z",
     instanceToken: `t${i}`, embedding: [0.1, 0.2], embeddingModel: "model-a",
   }));
@@ -25,6 +26,7 @@ beforeEach(() => {
   missingFromIndex = new Set();
   indexVisits = 0;
   countIndexVisits = false;
+  indexQueries = [];
 });
 
 mock.module("harper", () => ({
@@ -32,8 +34,9 @@ mock.module("harper", () => ({
   databases: {
     flair: {
       Memory: {
-        search: (query?: any) => (async function* () {
+        search: (query?: any, options?: any) => (async function* () {
           const agentCondition = query?.conditions?.find((condition: any) => condition.attribute === "agentId");
+          if (query?.conditions) indexQueries.push({ conditions: query.conditions, confirmation: options !== undefined });
           const selected = agentCondition
             ? rows.filter((row) => row.agentId === agentCondition.value && !missingFromIndex.has(row.id))
             : rows;
@@ -80,6 +83,27 @@ test("reports a written row that the committed agentId index does not list", asy
     message: "MemoryReindex: row r1 was confirmed after commit but is now absent from the agentId index query (index unconfirmed)",
     outcome: "unconfirmed",
   });
+});
+
+test("confirms each agent's rows with a scan scoped to that agent", async () => {
+  rows = [...makeRows(2, "agent-a", "a"), ...makeRows(2, "agent-b", "b")];
+  missingFromIndex = new Set(["b1"]);
+  const result = await reindexer().post({ batchSize: 10 });
+  expect(result.stats.reindexed).toBe(3);
+  expect(result.stats.errors).toBe(1);
+  expect(result.stats.errorSamples).toHaveLength(1);
+  expect(result.stats.errorSamples[0]).toEqual({
+    id: "b1",
+    message: "MemoryReindex: row b1 was confirmed after commit but is now absent from the agentId index query (index unconfirmed)",
+    outcome: "unconfirmed",
+  });
+  const confirmations = indexQueries.filter((query) => query.confirmation);
+  expect(confirmations).toHaveLength(2);
+  for (const query of confirmations) {
+    expect(query.conditions).toHaveLength(1);
+    expect(query.conditions[0]).toMatchObject({ attribute: "agentId", comparator: "equals" });
+  }
+  expect(confirmations.map((query) => query.conditions[0].value).sort()).toEqual(["agent-a", "agent-b"]);
 });
 
 for (const count of [50, 200]) {

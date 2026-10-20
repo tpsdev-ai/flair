@@ -39,10 +39,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getModelId } from "../../resources/embeddings-provider.ts";
 import { startHarper, stopHarper, HARPER_STOP_BUDGET_MS, type HarperInstance } from "../helpers/harper-lifecycle";
+import { componentWithReplayProbe, type ProbeComponent, type ProbeFiles } from "../helpers/component-with-replay-probe";
 
 const SFX = Date.now().toString(36);
 const PAST = "2000-01-01T00:00:00.000Z";
 const POINTER = { v: 1, host: "host-a", kind: "run", id: "run-aaaaaaaa" };
+const READ_PROBE: ProbeFiles = {
+  source: join("test", "fixtures", "maintenance-read-probe-2084", "probe.js"),
+  target: join("dist", "resources", "zz-maintenance-read-probe-2084.js"),
+  out: "maintenance-read-probe-2084",
+};
+const READ_PROBE_LOG = "maintenance-read-probe-2084.jsonl";
 
 interface TestAgent {
   id: string;
@@ -70,6 +77,7 @@ function assertOwnInstance(harper: HarperInstance): void {
 }
 
 let harper: HarperInstance;
+let composed: ProbeComponent | undefined;
 let pauseDir = "";
 const agentA = makeAgent(`mm-scope-a-${SFX}`);
 const agentB = makeAgent(`mm-scope-b-${SFX}`);
@@ -187,6 +195,16 @@ async function seedOrphans(tag: string): Promise<void> {
   }
 }
 
+async function seedOtherAgentOrphans(tag: string, count: number): Promise<void> {
+  const rows: Record<string, unknown>[] = [];
+  for (let i = 0; i < count; i++) {
+    const id = `mm-${tag}-other-${i}-${SFX}`;
+    rows.push(pointerRow(id, agentB.id));
+    outstanding.set(id, agentB.id);
+  }
+  await insertRows("MemoryHostSource", rows);
+}
+
 /** Remove orphans an earlier failed test left stored, so a test can start
  *  from the live pointers alone. */
 async function clearLeftoverOrphans(): Promise<void> {
@@ -258,9 +276,20 @@ async function waitForFile(path: string, timeoutMs: number): Promise<boolean> {
   return false;
 }
 
+/** The probe's per-search lines, in the order the searches completed. */
+function readProbeLog(): Array<{ conditions: unknown; rows: number }> {
+  const text = readFileSync(join(harper.installDir, READ_PROBE_LOG), "utf8").trim();
+  return text.length === 0 ? [] : text.split("\n").map((line) => JSON.parse(line));
+}
+
 beforeAll(async () => {
   pauseDir = mkdtempSync(join(tmpdir(), "flair-mm-scope-pause-"));
-  harper = await startHarper({ serverEnv: { FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_TEST_PAUSE_DIR: pauseDir } });
+  composed = componentWithReplayProbe({ probe: READ_PROBE });
+  harper = await startHarper({
+    cwd: composed.dir,
+    harperBinDir: composed.sourceRoot,
+    serverEnv: { FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_TEST_PAUSE_DIR: pauseDir },
+  });
   assertOwnInstance(harper);
   const now = new Date().toISOString();
   await insertRows("Agent", [
@@ -279,6 +308,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (harper) await stopHarper(harper);
+  if (composed) composed.cleanup();
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
 }, HARPER_STOP_BUDGET_MS);
 
@@ -321,6 +351,60 @@ describe("MemoryMaintenance orphan sweep is scoped to the run's owner (real Harp
     expect(outstanding.size).toBe(0);
     await expectLiveUnchanged("fleet-wide admin run");
   }, 60_000);
+
+  it("(a) an admin run refuses a supplied agentId that is not a non-blank string", async () => {
+    await seedOrphans("bad");
+    const before = await snapshotOrphans();
+    for (const agentId of ["", " ", 42, null, true, {}, []]) {
+      const res = await fetch(`${harper.httpURL}/MemoryMaintenance`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: basicHeader() },
+        body: JSON.stringify({ agentId }),
+        signal: AbortSignal.timeout(60_000),
+      });
+      const text = await res.text();
+      expect(res.status, `agentId=${JSON.stringify(agentId)}: ${text.slice(0, 300)}`).toBe(400);
+      expect(JSON.parse(text), `agentId=${JSON.stringify(agentId)}: ${text.slice(0, 300)}`).toEqual({ error: "agentId must be a non-blank string" }); // assertion: the refusal names the field and the rule
+      for (const [id, o] of before) {
+        expect(await readPointer(id), `agentId=${JSON.stringify(agentId)}: ${id} pointer changed`).toBe(o.pointer);
+        expect(await readMemory(id), `agentId=${JSON.stringify(agentId)}: ${id} Memory row changed`).toBe(o.memory);
+      }
+    }
+    const body = await maintain({ kind: "admin", body: {} });
+    expect(body.stats?.agent).toBe("all"); // control: an absent agentId is fleet-wide
+    await expectSweptOnly(null, body, before);
+  }, 90_000);
+
+  it("(b) an admin run naming an agent reads only that agent's pointer rows", async () => {
+    await clearLeftoverOrphans();
+    await seedOrphans("read");
+    await seedOtherAgentOrphans("read", 25);
+    const before = await snapshotOrphans();
+    const targetIds = [...before].filter(([, o]) => o.author === agentA.id).map(([id]) => id);
+    const otherCount = before.size - targetIds.length;
+    const agentARows = targetIds.length + LIVE.filter((l) => l.author === agentA.id).length;
+    expect(targetIds.length).toBe(2); // control: the target agent has two orphans
+    expect(otherCount).toBe(28); // control: the other-agent and unattributed orphans are stored
+    expect(agentARows).toBe(3); // control: the target agent has three pointer rows including its live one
+
+    rmSync(join(harper.installDir, READ_PROBE_LOG), { force: true });
+    const body = await maintain({ kind: "admin", body: { agentId: agentA.id } });
+    const reads = readProbeLog();
+    expect(reads.length, JSON.stringify(reads)).toBe(1); // control: the sweep ran one pointer search
+    expect(reads[0].conditions).toEqual([{ attribute: "authorId", comparator: "equals", value: agentA.id }]); // assertion: the scoped read is an indexed authorId condition
+    expect(reads[0].rows, JSON.stringify(reads[0])).toBe(agentARows); // assertion: the scoped read yielded only the target agent's rows
+    await expectSweptOnly(agentA.id, body, before);
+
+    const fleetBefore = await snapshotOrphans();
+    rmSync(join(harper.installDir, READ_PROBE_LOG), { force: true });
+    const fleet = await maintain({ kind: "admin", body: {} });
+    const fleetReads = readProbeLog();
+    expect(fleet.stats?.agent).toBe("all"); // control: an absent agentId is fleet-wide
+    expect(fleetReads.length, JSON.stringify(fleetReads)).toBe(1); // control: the sweep ran one pointer search
+    expect(fleetReads[0].conditions).toBeNull(); // assertion: the fleet-wide read carries no owner condition
+    expect(fleetReads[0].rows, JSON.stringify(fleetReads[0])).toBe(otherCount + LIVE.length); // assertion: the fleet-wide read yielded every remaining row
+    await expectSweptOnly(null, fleet, fleetBefore);
+  }, 120_000);
 
   it("(d) with no concurrent writer, a pointer whose Memory row is live is not counted or removed in any mode", async () => {
     // Only the live pointers are stored, so every run here must count zero.

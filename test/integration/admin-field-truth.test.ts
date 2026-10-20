@@ -172,9 +172,7 @@ describe("flair#941 — one meaning, one answer, on every surface", () => {
   // The per-record rules for this table were written in put(), and Harper routes
   // PATCH to update(), which had no override — so allowUpdate()=allowVerified
   // was the only check a PATCH ever met. Both verbs now share one authorization
-  // helper. These use PATCH deliberately: PUT is not a substitute, because
-  // put() strips the schema-required publicKey/createdAt and so rejects every
-  // request it receives (see the separate note in the PR).
+  // helper.
   describe("changing admin status is refused for a non-admin", () => {
     test("a non-admin patching role:\"admin\" onto its OWN record is refused, and the record is unchanged", async () => {
       const path = `/Agent/${plain.id}`;

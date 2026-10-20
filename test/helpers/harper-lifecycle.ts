@@ -952,6 +952,17 @@ export interface StartHarperOptions {
    * Default true: production startHarper always injects the preload.
    */
   orphanExitPreload?: boolean;
+  /**
+   * Leave Harper's MQTT-over-WebSocket path ON for this instance. Default
+   * false: like every production spawn, a test-Harper runs with MQTT fully off.
+   * When true, this helper does not set `MQTT_WEBSOCKET`, so the instance keeps
+   * Harper's installed default (`mqtt.webSocket: true`) in its own config file
+   * — the state of an instance whose configuration nobody has changed — and an
+   * operations-API `set_configuration` plus a worker restart can turn it off.
+   * MQTT over WebSocket shares this instance's ephemeral HTTP port; the TCP and
+   * TLS MQTT listeners (1883/8883, shared ports) stay off either way.
+   */
+  mqttWebSocket?: boolean;
 }
 
 export function applyMultiWorkerUnsafeSpawnOption(
@@ -1091,6 +1102,9 @@ export async function startHarper(opts: StartHarperOptions = {}): Promise<Harper
     MQTT_WEBSOCKET: "false",
     THREADS_DEBUG: "false",
   };
+  // StartHarperOptions.mqttWebSocket: keep Harper's installed MQTT-over-
+  // WebSocket default instead of forcing it off. The TCP/TLS ports stay null.
+  if (opts.mqttWebSocket === true) delete baseEnv.MQTT_WEBSOCKET;
   applyMultiWorkerUnsafeSpawnOption(baseEnv, opts);
   // flair#1450: the child must exit when this process dies. The exit hook
   // above cannot cover SIGKILL of the harness (and we cannot install signal

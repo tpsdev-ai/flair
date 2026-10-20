@@ -74,7 +74,48 @@ or an admin agent) and trusted internal callers only. A verified non-admin
 agent is refused with **403** (WebSocket close code 3003), and a caller without
 a valid credential with **401** (close code 3000). Verified agents receive
 changes to the memories they can read through `/FeedMemories`, and soul changes
-through `/FeedSouls`; neither is a table.
+through `/FeedSouls`; neither is a table. Harper's native MCP
+`resources/subscribe`, available only when an operator configures Harper's MCP
+component, refuses every table subscription, administrators included: flair
+does not yet verify the Harper user of an MCP session as a flair caller. For
+the same reason, that component's application tools (`get_`, `search_`,
+`create_`, `update_`, `delete_`) are resolved, wherever flair resolves a
+caller, as a caller without a valid credential, administrators included.
+
+Flair's local installs run Harper with MQTT off. When an operator turns MQTT
+on, an exported table's path is also an MQTT topic (`<Table>/#`,
+`<Table>/<id>`) — except a path that a resource other than the table serves
+(`AgentReadPosition`, `OAuthToken`), which follows that resource's own rules.
+On a table topic, these MQTT actions are served to administrators and trusted
+internal callers only: SUBSCRIBE; PUBLISH; a retained PUBLISH (which writes
+the row, or with an empty payload deletes it); and a session's last-will when
+Harper publishes it. UNSUBSCRIBE is not guarded: it only ends a subscription
+the session already holds. CONNECT is Harper's own authentication.
+
+Over MQTT 5, a refused SUBSCRIBE gets SUBACK reason code `0x87` (not
+authorized) for a verified non-admin agent and `0x80` for a caller without a
+valid credential whose session Harper admits (Harper may instead refuse that
+caller at CONNECT). A refused PUBLISH is answered only when it asks for an
+acknowledgment: at QoS 1 (PUBACK) or QoS 2 (PUBREC) it gets the same codes, and
+a verified non-admin agent's also carries the refusal as a reason string unless
+the client turned problem information off or the string would exceed its
+maximum packet size. A refused QoS 0 PUBLISH gets no answer. Over MQTT 3.1.1, a
+refused SUBSCRIBE gets SUBACK `0x80`, and a PUBACK carries no reason code, so a
+PUBACK alone cannot tell a refused PUBLISH from an accepted one. A refused
+publish reaches no subscriber, and a refused retained publish leaves the row as
+it was.
+
+A session's last-will message is decided when Harper publishes it: when the
+session drops without DISCONNECT, as that session's own publish; and when
+Harper replays the eligible wills it still holds as its first worker starts,
+as a caller without a valid credential, so a replayed will on a table topic is
+refused, an administrator's included. Harper drops an expired scoped-token
+will before this check, on replay and when a session drops. Over MQTT on
+WebSocket the credential is
+the one on the WebSocket upgrade request, as for SSE and WebSocket. An MQTT
+connection on Harper's TCP or TLS listener carries no HTTP request, so flair
+resolves the caller of each of its actions as one without a valid credential,
+whatever it sent in CONNECT.
 
 Every Ed25519-signed request and federation body carries a nonce, recorded
 once per instance in the `ReplayNonce` table before the request takes effect.
@@ -154,7 +195,8 @@ does not apply this rule: its `params.agentId` is only an assignee filter.
 |--------|------|------|--------------|
 | GET | `/Agent`, `/Agent/<id>` | Ed25519 | Any verified agent may read principals (discovery). |
 | POST | `/Agent` | Admin Basic | Create principal. Also `POST /AgentSeed` (operator/internal only — not an admin-agent key). |
-| PUT / PATCH | `/Agent/<id>` | Ed25519 | An agent updates **only its own** record. |
+| PUT | `/Agent/<id>` | Ed25519 admin / Admin Basic | An administrator operation. An administrator (an Ed25519 agent whose record has `role: "admin"` or whose id `FLAIR_ADMIN_AGENTS` names, or Admin Basic) may PUT any existing record. For a request that reaches `Agent.put()`, the target id is checked first: an id outside the agent-id rule is refused 400 before the handler's authorization and existence checks. Authentication, routing and Harper's resource admission (for a missing target, `allowCreate()`, administrators only) can refuse earlier. For a valid id, a PUT from any other verified agent is refused 403: `agent_put_admin_only` when the record exists, Harper's create check (`allowCreate()`, administrators only) when it does not; such an agent updates its own record with PATCH. An unauthenticated request is refused. The PUT is a full replacement of an existing record. The server sets these fields whatever the body says: the id is the URL's; `createdAt`, `publicKey`, `originatorInstanceId` and the receiver federation fields (`_originatorInstanceId`, `_syncedFrom`, `_syncedAt`) are kept from the stored record; `updatedAt` is set by the handler; `role` and `admin` are reconciled (an admin role or `admin: true` sets both, otherwise `admin` is false). Every other field comes from the body, so an ordinary field the body omits (`status` and `role` included) is not kept, and an absent `status` reads as active. An administrator's PUT to a valid id with no record is refused 404 `agent_put_requires_existing` (a body `id` that disagrees with the URL's is refused instead). |
+| PATCH | `/Agent/<id>` | Ed25519 / Admin Basic | Merges the body into the stored record. A verified agent that is not an administrator may PATCH only its own record, may not write `status`, and may not change the record's admin status (403); the admin-status decision compares the `role` of the row it reads with the role that row would have once the body is merged and reconciled. An administrator may PATCH any record. An unauthenticated request is refused. |
 | DELETE | `/Agent/<id>` | Admin Basic | Deprovision. |
 | POST | `/AgentKeyRegister` | Basic admin / Ed25519 agent with the admin annotation | Register an agent key. Under Flair's per-agent registration lock, reads a fresh local, non-deactivated row with `publicKey: "pending"` and, at the confirmation read, requires the committed row to equal the fresh-read snapshot and still be `pending` before commit. The lock serializes registrations for that agent within one Harper process; raw operations-API writes and other processes do not take it. The post-commit read-back detects surviving differences in compared fields or identity and reports the registered key only when the committed row still has the registered key's identity and the staged `publicKey` and `updatedAt`, and the `AgentKeyRegistration` row this attempt wrote under its `registrationId` is present; otherwise it refuses 503 `registration_unavailable` with outcome `unconfirmed`. A change restored before the confirmation read is not observed; a commit-time pending check is a follow-up. Unsupported schemes that reach the handler receive 401 before Flair's `resolveAgentAuth`, body validation and table reads. Harper handles some Authorization values upstream: a Bearer refresh token receives Harper's 404 before any resource runs. Refuses 409 `agent_key_not_pending` (a non-`pending` row points to key rotation), 403 `agent_not_local` / `agent_inactive`, 404 `agent_not_found`, 400 `registration_request_invalid`, 409 `registration_conflict`, 503 `registration_unavailable`. Writes an `AgentKeyRegistration` audit row and an `agent_key_registered` OrgEvent. The audit `keyFingerprint` and the event `detail` carry the key fingerprint, not the key; the audit `agentId` and the event `refId` carry the target agent's id, which the event `summary` names in text. |
 | GET | `/Presence` | Verified reader | Roster. Requires a valid `TPS-Ed25519` agent signature or the admin credential; an anonymous request gets 401. An instance may opt in to a public roster with `PRESENCE_PUBLIC_ROSTER=true`, in which case an unverified reader gets the allowlisted roster with `currentTask`, `flairVersion`, and `harperVersion` as null. Thresholds: [Presence for API consumers](#presence-for-api-consumers). |
@@ -190,7 +232,7 @@ registrations; its key field is the fingerprint, not the key.
 | GET / write | `/Asset` | Ed25519 | Owner-only blobs linked by `memoryId`. No MCP and no federation in this slice. |
 | GET / write | `/MemoryCandidate` | Ed25519 | Owner-only REM drafts. Never auto-promoted except the narrow ADK path. |
 | POST | `/PromoteMemoryCandidate` | Ed25519 | Promote/reject with required rationale. |
-| POST | `/AutoPromoteCandidates` | Ed25519 | ADK per-user auto-promote only. |
+| POST | `/AutoPromoteCandidates` | Ed25519 | Auto-promote of eligible per-user ADK and continuity candidates. Answers `promoted` (memory ids), `skipped` (`{ id, reason }`), `incomplete` (`{ memoryId, candidateId, error }`: memory written and stamped, candidate update threw, candidate read back `pending`), `unconfirmed` (the same throw where the read-back did not confirm the promotion on this memory, plus `readBack` with what it found), `count` (`promoted` only) and `considered`. A later sweep can adopt the recorded memory of a candidate still pending, without a second memory, only when the memory's identity is present on the candidate and the memory still passes the sweep's checks. See [docs/rem.md](rem.md#auto-promote-adk-only). |
 | POST | `/FeedMemories` | Ed25519 | Ingest path; `agentId` stamped from the caller (`stamp-strict`). |
 | POST | `/MemoryArchive` | Ed25519 | Basement / restore (`memory_basement` / `memory_restore` on `/mcp`). |
 | POST | `/MemoryMaintenance` | Ed25519 or admin | Hygiene: expire ephemeral, archive old standard. Agent-scoped unless admin. |

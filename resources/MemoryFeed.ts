@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { Resource, databases } from "harper";
 import { allowVerified, resolveAgentAuth } from "./agent-auth.js";
+import { subscribeInProcess } from "./table-subscription-policy.js";
 import { computeContentHash, findExistingMemoryByContentHash } from "./memory-feed-lib.js";
 import { FORBIDDEN, UNAUTH, stampAttribution } from "./record-type-kit.js";
 import { guardAuthorityFields, stripAuthorityFields } from "./authority-field-guard.js";
@@ -461,7 +462,7 @@ export class FeedMemories extends Resource {
     }
 
     if (auth.kind === "internal" || auth.isAdmin) {
-      const subscription = await (databases as any).flair.Memory.subscribe(target);
+      const subscription = await subscribeInProcess((databases as any).flair.Memory, target);
 
       if (!incomingMessages) {
         return subscription;
@@ -479,7 +480,7 @@ export class FeedMemories extends Resource {
     // Harper's own Resource.connect() makes.
     const callerRequest = (this.constructor as any).loadAsInstance === false ? target : incomingMessages;
     const request = scopedSubscriptionRequest(callerRequest, (record: any) => scope.isAllowed(record));
-    const subscription = await (databases as any).flair.Memory.subscribe(request);
+    const subscription = await subscribeInProcess((databases as any).flair.Memory, request);
     const readStored = (id: any) => (databases as any).flair.Memory.get(id);
     const replaysHistory = request.startTime !== undefined || request.previousCount !== undefined;
     for await (const event of subscription) {

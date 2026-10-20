@@ -81,6 +81,7 @@
 import { threadId } from "node:worker_threads";
 import { databases } from "harper";
 import { withDetachedTxn } from "./table-helpers.js";
+import { subscribeInProcess } from "./table-subscription-policy.js";
 import { Bm25Index, INDEX_SELECT, type IndexRecord, type RankParams } from "./bm25-index.js";
 import { BM25_BOOT_WARM_SKIPPED_PREFIX, formatBm25IndexSummary, readThreadsCount, type Bm25IndexState } from "./bm25-status.js";
 import { retrievalMode } from "./bm25.js";
@@ -284,7 +285,7 @@ async function startFeed(ctx: any): Promise<void> {
   if (feedStarted) return;
   feedStarted = true;
   const subscription = await withDetachedTxn(ctx, () =>
-    (databases as any).flair.Memory.subscribe({ omitCurrent: true }),
+    subscribeInProcess((databases as any).flair.Memory, { omitCurrent: true }),
   );
   // Deliberately not awaited: the consumer runs for the life of the process.
   (async () => {
