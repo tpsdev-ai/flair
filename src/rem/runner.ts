@@ -813,8 +813,8 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
   let sliceLabel: RunnerLogRow["slice"] = "2-maintenance";
 
   try {
-    // An empty or absent agentId is omitted: the endpoint refuses a supplied
-    // empty value (400).
+    // Only an id is sent: an empty or absent agentId is omitted rather than
+    // sent as an empty string.
     const maintBody: Record<string, unknown> = { dryRun: opts.dryRun ?? false };
     if (opts.agentId) maintBody.agentId = opts.agentId;
     const maintRaw = await opts.apiCall("POST", "/MemoryMaintenance", maintBody);
