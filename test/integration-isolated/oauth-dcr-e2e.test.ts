@@ -187,7 +187,8 @@ describe("the registration rate limiter runs BEFORE the DCR gate (real Harper)",
   const LIMIT = 3;
 
   beforeAll(async () => {
-    // Closed: every attempt is gate-refused (an empty token reads as absent).
+    // DCR is closed (an empty token reads as absent): attempts within the rate
+    // budget are gate-refused; later attempts are rate-limited.
     harper = await startHarper({
       serverEnv: { FLAIR_OAUTH_DCR_TOKEN: "", FLAIR_OAUTH_REGISTER_RATE_LIMIT: String(LIMIT) },
     });
