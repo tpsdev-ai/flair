@@ -59,7 +59,9 @@ OrgEventCatchup.prototype.get = function probedCatchupGet(pathInfo, ...rest) {
 const originalConnect = Resource.prototype.connect;
 
 Resource.prototype.connect = function probedDefaultConnect(target, incomingMessages) {
-  if (OUT) {
+  // Record only the A2A adapter's own dispatches; other resources inherit this
+  // default connect too.
+  if (OUT && this instanceof A2AAdapter) {
     const request = requestOf(this);
     record("dispatch.jsonl", {
       kind: "connect",
