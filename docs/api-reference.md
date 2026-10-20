@@ -58,7 +58,7 @@ the schema section so the catalog is complete.
 
 Anonymous HTTP is denied on every agent-facing table (and on `GET /Presence`, which needs a verified reader unless the instance enables the public-roster opt-in). By-id refusal
 status is resource-specific: Memory returns **404** for missing or unreadable rows, while Credential
-returns **403** when a non-admin requests another principal's existing credential.
+refuses a non-admin's by-id read of another principal's credential.
 
 **PATCH updates existing rows.** On every table, a PATCH from a caller that is
 not an administrator or a trusted internal call does not create or modify its
@@ -208,10 +208,9 @@ does not apply this rule: its `params.agentId` is only an assignee filter.
 | POST | `/FeedSouls` | Ed25519 | Soul change feed (verified). |
 
 `Credential` (extra credentials for a principal) requires authenticated HTTP
-access: non-admin reads, lists and writes are limited to the caller's
+access: non-admin by-id reads and writes are limited to the caller's
 `principalId`, while administrators and trusted internal callers may access
-other principals' credentials; by-id GET removes `tokenHash`, but list/search
-does not. Through this resource only an administrator or the server creates a
+other principals' credentials. Through this resource only an administrator or the server creates a
 `kind: "idp"` credential, changes its kind or identity fields, or reactivates
 it, and its owner may relabel, revoke or delete it (see
 [Who writes a mapping](access-control.md#who-writes-a-mapping)). `Credential`

@@ -54,8 +54,7 @@ function isRecordBody(content: unknown): content is Record<string, unknown> {
  * credential lifecycle: creation, revocation, and lookup.
  *
  * Administrators and trusted internal callers may manage credentials for other
- * principals. Non-admin callers can read only their own credentials; by-id
- * get() removes `tokenHash`, while search() does not remove it.
+ * principals. Non-admin callers can read only their own credentials.
  *
  * On POST, PUT and PATCH, only an admin or the server creates an IdP identity
  * mapping (kind "idp"), changes its kind or identity fields, or reactivates it

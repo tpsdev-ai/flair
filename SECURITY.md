@@ -118,10 +118,9 @@ its own ownership rule.
 The guard exempts administrator and in-process calls. OrgEvent POST id
 selection also applies to administrator and in-process calls.
 
-Credential records are owner-scoped by `principalId`: non-admin callers read,
-list and modify only their own records, and administrators and trusted internal
-callers are unscoped. By-id GET removes `tokenHash`; list/search does not remove
-it. Anonymous HTTP access is refused.
+Credential records are owner-scoped by `principalId`: non-admin callers read and
+modify only their own records, and administrators and trusted internal callers
+are unscoped. Anonymous HTTP access is refused.
 
 ### Cross-Agent Access (within an org)
 

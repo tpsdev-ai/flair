@@ -279,8 +279,9 @@ export class A2AAdapter extends Resource {
   // peer. POST is JSON-RPC for actions (message/send writes OrgEvents,
   // tasks/list reads the instance's Beads task board, message/stream
   // streams the OrgEvents for params.agentId). The middleware verifies and
-  // annotates callers; post() refuses a caller without a verified agent or
-  // administrator annotation with JSON-RPC error `-32001 Unauthorized`. The
+  // annotates callers; for a valid JSON-RPC request, post() refuses a caller
+  // without a verified agent or administrator annotation with JSON-RPC error
+  // `-32001 Unauthorized`. The
   // post() handler below additionally applies the caller-match rule to
   // message/send and message/stream (actAsRefusal): a non-admin caller may name only its own
   // agent id there; an admin caller may name another agent. message/send
@@ -343,8 +344,9 @@ export class A2AAdapter extends Resource {
     const params = body.params ?? {};
 
     // The middleware verifies and annotates callers (request.tpsAgent /
-    // tpsAgentIsAdmin); post() refuses a caller without a verified agent or
-    // administrator annotation with JSON-RPC error `-32001 Unauthorized`.
+    // tpsAgentIsAdmin); for a valid JSON-RPC request, post() refuses a caller
+    // without a verified agent or administrator annotation with JSON-RPC error
+    // `-32001 Unauthorized`.
     const ctx = (this as any).getContext?.() ?? _context ?? {};
     const ctxRequest = ctx.request ?? ctx;
     const callerAgent: string | undefined = ctxRequest?.tpsAgent;
