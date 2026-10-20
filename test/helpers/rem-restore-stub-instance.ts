@@ -15,9 +15,9 @@
  * answers every PUT and DELETE with a 307 when `redirectWritesTo` is seeded.
  *
  * Every request either port receives is appended to a log file that
- * `requests()` reads, before anything else is done with it: the body is read
- * as text and parsed by a step that cannot throw, so a malformed body is
- * logged too. After logging, a request without the admin credential
+ * `requests()` reads: each handler first reads the body as text (the
+ * operations handler also parses it, by a step that cannot throw), then logs
+ * the request, so a malformed body is logged too. After logging, a request without the admin credential
  * (`Authorization: Basic admin:<adminPass>`, default {@link STUB_ADMIN_PASS})
  * is answered 401, so a client that omits the credential fails as it would
  * against a real instance.

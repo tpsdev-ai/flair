@@ -144,7 +144,8 @@ export function buildOpsSearch(
 /**
  * The two endpoints a restore uses (flair#2708): the base URL its reads and
  * writes go to and the operations URL its candidate listing goes to, on the
- * same host. Resolving them proves nothing about the instance behind them;
+ * same host (for a loopback target, localhost or [::1] included, the
+ * operations URL is on 127.0.0.1). Resolving them proves nothing about the instance behind them;
  * {@link establishRestorePair} is the preflight check.
  */
 export interface RestoreTarget {
@@ -1638,8 +1639,9 @@ export function register(program: Command): void {
             process.exit(1);
           }
         }
-        // With a resolved admin credential (always on --apply), every Memory,
-        // Soul and MemoryCandidate read, delete and write sends it explicitly:
+        // With a resolved admin credential (a live replay always has one; an
+        // --apply --dry-run may not), every Memory, Soul and MemoryCandidate
+        // read, delete and write sends it explicitly:
         // --admin-pass, --admin-pass-file, or the default resolveLocalAdminPass
         // fell back to. A dry run without one reads through the shared
         // resolver's own tiers.

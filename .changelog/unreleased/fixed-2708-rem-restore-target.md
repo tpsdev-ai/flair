@@ -1,4 +1,4 @@
-- **`flair rem restore --apply` lists candidates through the operations API on its target's host, after a preflight check of that pair.**
+- **`flair rem restore --apply` lists candidates through the operations API on its target's host, after a preflight check of that pair.** For a loopback target URL (`localhost` or `[::1]` included) that operations API is reached on 127.0.0.1.
 
   The writes go to `FLAIR_URL`, or to the local instance when it is unset. The
   candidate listing goes to the operations API on that same host, at
@@ -16,8 +16,8 @@
   the same id; a missing, unreadable or redirected identity read refuses. The
   check covers the endpoints as they answer it, not a process that takes one
   over after it passes. Restore's REST calls do not follow redirects, and each
-  Memory, Soul and candidate read, delete and write carries the admin
-  credential restore resolved (`--admin-pass`, `--admin-pass-file`, or the
+  Memory, Soul and candidate read, delete and write of a live replay carries
+  the admin credential restore resolved (`--admin-pass`, `--admin-pass-file`, or the
   default), so no local admin-password file is needed when a flag gives one. A
   `FLAIR_OPS_TARGET` does not select the listing endpoint: restore refuses
   while it is set to anything but that endpoint's root URL, a value of only
