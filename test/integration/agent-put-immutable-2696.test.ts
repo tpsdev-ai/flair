@@ -31,6 +31,7 @@
 // row rather than the write's response.
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import nacl from "tweetnacl";
+import { rmSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { startHarper, stopHarper, HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 
@@ -305,4 +306,81 @@ describe("flair#2696 — an Agent PUT updates an existing row and carries its im
     expect(after?.createdAt, "PATCH changed createdAt").toBe(before?.createdAt);
     expect(after?.publicKey, "PATCH changed publicKey").toBe(before?.publicKey);
   }, 30_000);
+});
+
+describe("flair#2696 — an administrator's PUT to a stored row without createdAt or publicKey", () => {
+  let harper: HarperInstance;
+  let installDir = "";
+  const TARGET_ID = "put2696-incomplete-target";
+
+  const basicAuth = () => "Basic " + btoa(`${harper?.admin.username}:${harper?.admin.password}`);
+
+  async function ops(op: Record<string, unknown>): Promise<any> {
+    const res = await fetch(harper.opsURL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: basicAuth() },
+      body: JSON.stringify(op),
+    });
+    const text = await res.text();
+    expect(res.status, `${op.operation} returned ${res.status}: ${text.slice(0, 200)}`).toBe(200);
+    return text.length > 0 ? JSON.parse(text) : undefined;
+  }
+
+  async function rowIn(id: string): Promise<any | null> {
+    const rows = await ops({ operation: "search_by_id", database: "flair", table: "Agent", ids: [id], get_attributes: ["*"] });
+    return Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
+  }
+
+  beforeAll(async () => {
+    harper = await startHarper();
+    installDir = harper.installDir;
+    assertOwnInstance(harper);
+  }, 180_000);
+
+  afterAll(async () => {
+    if (harper) await stopHarper(harper);
+    // The restarted instance (startHarper with an installDir) does not own the
+    // directory; remove the one this file created.
+    if (installDir) rmSync(installDir, { recursive: true, force: true });
+  }, HARPER_STOP_BUDGET_MS);
+
+  test("a seeded row without either field is refused 400 ValidationError and left unchanged", async () => {
+    // Seed through the operations API: with both attributes dropped from the
+    // table, an Agent row that carries neither field can be inserted.
+    for (const attribute of ["createdAt", "publicKey"]) {
+      await ops({ operation: "drop_attribute", database: "flair", table: "Agent", attribute });
+    }
+    await ops({
+      operation: "insert", database: "flair", table: "Agent",
+      records: [{ id: TARGET_ID, name: TARGET_ID, role: "agent", admin: false, status: "active", displayName: "stored-name" }],
+    });
+
+    // A restart re-declares the table from the component's schema, so both
+    // attributes are required again while the stored row still lacks them.
+    const dir = harper.installDir;
+    await stopHarper(harper, { keepInstallDir: true });
+    harper = await startHarper({ installDir: dir });
+    assertOwnInstance(harper);
+
+    const before = await rowIn(TARGET_ID);
+    expect(before).not.toBeNull();
+    expect(Object.hasOwn(before, "createdAt"), "the seeded row carries createdAt").toBe(false);
+    expect(Object.hasOwn(before, "publicKey"), "the seeded row carries publicKey").toBe(false);
+
+    // put() carries the stored values, which are undefined here, and the
+    // schema's required attributes refuse the write.
+    const path = `/Agent/${TARGET_ID}`;
+    const res = await fetch(`${harper.httpURL}${path}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Authorization: basicAuth() },
+      body: JSON.stringify({ id: TARGET_ID, name: TARGET_ID, displayName: "put-name" }),
+    });
+    const text = await res.text();
+    expect(res.status, `admin PUT returned ${res.status}: ${text.slice(0, 300)}`).toBe(400);
+    const body = JSON.parse(text);
+    expect(body.code).toBe("ValidationError");
+    expect(body.detail.map((d: { path: string }) => d.path).sort()).toEqual(["createdAt", "publicKey"]);
+
+    expect(await rowIn(TARGET_ID), "a refused PUT changed the row").toEqual(before);
+  }, 180_000);
 });
