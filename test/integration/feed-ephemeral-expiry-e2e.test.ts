@@ -8,6 +8,7 @@ import { stampEphemeralExpiry } from "../../resources/memory-durability.ts";
 // A small, non-default TTL so a tier-stamped row can be reaped inside the test.
 const TTL_HOURS = "0.001"; // 3.6s
 const PRIOR_TTL = process.env.FLAIR_EPHEMERAL_TTL_HOURS;
+// Kept in process.env: this process calls stampEphemeralExpiry() in-process below.
 process.env.FLAIR_EPHEMERAL_TTL_HOURS = TTL_HOURS;
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
@@ -73,7 +74,7 @@ let harper: HarperInstance;
 const agent = mkAgent("eph-feed-owner");
 
 beforeAll(async () => {
-  harper = await startHarper();
+  harper = await startHarper({ serverEnv: { FLAIR_EPHEMERAL_TTL_HOURS: TTL_HOURS } });
   await seedAgent(harper, agent);
 }, 180_000);
 

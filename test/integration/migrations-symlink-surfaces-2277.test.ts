@@ -35,11 +35,10 @@ for (const childLink of [false, true]) {
       symlinkSync(target, link);
     }
     let harper: HarperInstance | undefined;
-    const original = { override: process.env.FLAIR_MIGRATION_DATA_DIR, legacy: process.env.HDB_ROOT };
-    process.env.FLAIR_MIGRATION_DATA_DIR = installDir;
-    delete process.env.HDB_ROOT;
+    // HDB_ROOT is cleared for the spawned server (an empty value reads as unset).
+    const serverEnv = { FLAIR_MIGRATION_DATA_DIR: installDir, HDB_ROOT: "" };
     try {
-      harper = await startHarper({ installDir, homeDir: home });
+      harper = await startHarper({ installDir, homeDir: home, serverEnv });
       const basic = "Basic " + Buffer.from(`${harper.admin.username}:${harper.admin.password}`).toString("base64");
       await ensureFlairAgentRole(harper.opsURL, harper.admin.username, harper.admin.password);
       await ensureFlairAgentUser(harper.opsURL, harper.admin.username, harper.admin.password);
@@ -109,10 +108,6 @@ for (const childLink of [false, true]) {
       }
     } finally {
       if (harper) await stopHarper(harper);
-      if (original.override === undefined) delete process.env.FLAIR_MIGRATION_DATA_DIR;
-      else process.env.FLAIR_MIGRATION_DATA_DIR = original.override;
-      if (original.legacy === undefined) delete process.env.HDB_ROOT;
-      else process.env.HDB_ROOT = original.legacy;
     }
   }, 180_000);
 }

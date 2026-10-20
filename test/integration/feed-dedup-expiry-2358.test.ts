@@ -10,8 +10,6 @@ import { SEED_SKILL_ROW_ID } from "../../resources/seed-ids.js";
 
 // A small, non-default TTL so the repaired row can be reaped inside the test.
 const TTL_HOURS = "0.001"; // 3.6s
-const PRIOR_TTL = process.env.FLAIR_EPHEMERAL_TTL_HOURS;
-process.env.FLAIR_EPHEMERAL_TTL_HOURS = TTL_HOURS;
 
 // The test-only pause inside the repair's owned transaction
 // (resources/txn-pause-point.ts), between its read and its write.
@@ -136,21 +134,13 @@ const other = mkAgent("dedup-eph-other");
 
 beforeAll(async () => {
   pauseDir = mkdtempSync(join(tmpdir(), "flair-dedup-pause-"));
-  const saved = {
-    FLAIR_ENABLE_TEST_FAULT_INJECTION: process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION,
-    FLAIR_TEST_PAUSE_DIR: process.env.FLAIR_TEST_PAUSE_DIR,
-  };
-  process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION = "1";
-  process.env.FLAIR_TEST_PAUSE_DIR = pauseDir;
-  try {
-    harper = await startHarper();
-  } finally {
-    // The spawned Harper has its copy; no later Harper in this process inherits it.
-    for (const [key, value] of Object.entries(saved)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  }
+  harper = await startHarper({
+    serverEnv: {
+      FLAIR_ENABLE_TEST_FAULT_INJECTION: "1",
+      FLAIR_TEST_PAUSE_DIR: pauseDir,
+      FLAIR_EPHEMERAL_TTL_HOURS: TTL_HOURS,
+    },
+  });
   assertOwnInstance(harper);
   await seedAgent(harper, agent);
   await seedAgent(harper, other);
@@ -159,8 +149,6 @@ beforeAll(async () => {
 afterAll(async () => {
   if (harper) await stopHarper(harper);
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
-  if (PRIOR_TTL === undefined) delete process.env.FLAIR_EPHEMERAL_TTL_HOURS;
-  else process.env.FLAIR_EPHEMERAL_TTL_HOURS = PRIOR_TTL;
 }, HARPER_STOP_BUDGET_MS);
 
 describe("deduplicated ephemeral feed expiry (flair#2358)", () => {

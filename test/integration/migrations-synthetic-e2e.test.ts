@@ -78,11 +78,11 @@ describe("zero-touch migrations — synthetic CI variant end-to-end (real Harper
   // seeded rows, which is also exactly the real-world shape (write data,
   // then a later restart/upgrade is what runs the migration).
   beforeAll(async () => {
-    process.env.FLAIR_ENABLE_TEST_MIGRATIONS = "1";
+    const serverEnv = { FLAIR_ENABLE_TEST_MIGRATIONS: "1" };
     homeDir = mkdtempSync(join(tmpdir(), "flair-test-default-"));
     const dataDir = join(homeDir, ".flair", "data");
     mkdirSync(dataDir, { recursive: true });
-    const first = await startHarper({ installDir: dataDir, homeDir });
+    const first = await startHarper({ installDir: dataDir, homeDir, serverEnv });
     authHeader = "Basic " + Buffer.from(`${first.admin.username}:${first.admin.password}`).toString("base64");
     harper = first;
 
@@ -106,11 +106,10 @@ describe("zero-touch migrations — synthetic CI variant end-to-end (real Harper
     }
 
     await stopHarper(first, { keepInstallDir: true });
-    harper = await startHarper({ installDir: first.installDir, homeDir });
+    harper = await startHarper({ installDir: first.installDir, homeDir, serverEnv });
   }, 180_000);
 
   afterAll(async () => {
-    delete process.env.FLAIR_ENABLE_TEST_MIGRATIONS;
     if (harper) await stopHarper(harper);
     if (homeDir) {
       const { rm } = await import("node:fs/promises");

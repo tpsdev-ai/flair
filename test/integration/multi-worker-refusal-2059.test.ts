@@ -2,32 +2,14 @@ import { describe, test, beforeAll, afterAll, expect } from "bun:test";
 import { startHarper, stopHarper, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { probeFlairHealth } from "../../src/lib/doctor-run.js";
 
-const priorOAuth = {
-  flag: process.env.FLAIR_MCP_OAUTH,
-  issuer: process.env.FLAIR_MCP_ISSUER,
-  clientId: process.env.OAUTH_GITHUB_CLIENT_ID,
-  clientSecret: process.env.OAUTH_GITHUB_CLIENT_SECRET,
-  redirectUri: process.env.OAUTH_GITHUB_REDIRECT_URI,
-};
-beforeAll(() => {
-  process.env.FLAIR_MCP_OAUTH = "true";
-  process.env.FLAIR_MCP_ISSUER = "https://multi-worker-2059.flair.test";
+const serverEnv = {
+  FLAIR_MCP_OAUTH: "true",
+  FLAIR_MCP_ISSUER: "https://multi-worker-2059.flair.test",
   // This fixture configures a provider so protected-resource discovery is available.
-  process.env.OAUTH_GITHUB_CLIENT_ID = "multi-worker-2059-client";
-  process.env.OAUTH_GITHUB_CLIENT_SECRET = "multi-worker-2059-secret";
-  process.env.OAUTH_GITHUB_REDIRECT_URI = "https://multi-worker-2059.flair.test/oauth";
-});
-afterAll(() => {
-  const restore = (key: string, prior: string | undefined) => {
-    if (prior === undefined) delete process.env[key];
-    else process.env[key] = prior;
-  };
-  restore("FLAIR_MCP_OAUTH", priorOAuth.flag);
-  restore("FLAIR_MCP_ISSUER", priorOAuth.issuer);
-  restore("OAUTH_GITHUB_CLIENT_ID", priorOAuth.clientId);
-  restore("OAUTH_GITHUB_CLIENT_SECRET", priorOAuth.clientSecret);
-  restore("OAUTH_GITHUB_REDIRECT_URI", priorOAuth.redirectUri);
-});
+  OAUTH_GITHUB_CLIENT_ID: "multi-worker-2059-client",
+  OAUTH_GITHUB_CLIENT_SECRET: "multi-worker-2059-secret",
+  OAUTH_GITHUB_REDIRECT_URI: "https://multi-worker-2059.flair.test/oauth",
+};
 
 function basicHeader(harper: HarperInstance): string {
   return "Basic " + Buffer.from(`${harper.admin.username}:${harper.admin.password}`).toString("base64");
@@ -36,7 +18,7 @@ function basicHeader(harper: HarperInstance): string {
 describe("single-worker control", () => {
   let harper: HarperInstance;
   beforeAll(async () => {
-    harper = await startHarper();
+    harper = await startHarper({ serverEnv });
   }, 240_000);
   afterAll(async () => {
     if (harper) await stopHarper(harper);
@@ -62,7 +44,7 @@ describe("single-worker control", () => {
 describe("multi-worker refusal", () => {
   let harper: HarperInstance;
   beforeAll(async () => {
-    harper = await startHarper({ threads: 2, multiWorkerUnsafe: false });
+    harper = await startHarper({ threads: 2, multiWorkerUnsafe: false, serverEnv });
   }, 240_000);
   afterAll(async () => {
     if (harper) await stopHarper(harper);

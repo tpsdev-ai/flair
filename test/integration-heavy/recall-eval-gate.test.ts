@@ -47,14 +47,7 @@ gate("deterministic recall-quality gate (#1216-a / #17)", () => {
   let curated: Awaited<ReturnType<typeof runRecallEval>>;
 
   beforeAll(async () => {
-    const prev = process.env.FLAIR_HYBRID_RETRIEVAL;
-    process.env.FLAIR_HYBRID_RETRIEVAL = "true"; // documented default
-    try {
-      harper = await startHarper();
-    } finally {
-      if (prev === undefined) delete process.env.FLAIR_HYBRID_RETRIEVAL;
-      else process.env.FLAIR_HYBRID_RETRIEVAL = prev;
-    }
+    harper = await startHarper({ serverEnv: { FLAIR_HYBRID_RETRIEVAL: "true" } });
     const agent = mkAgent(AGENT_ID);
     await registerAgent(harper, agent);
     client = { harper, agent };
