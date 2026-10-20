@@ -91,7 +91,9 @@ import {
  * include every tag this sweep writes. No other field is compared, and an
  * ordinary same-id Memory write keeps the row's incarnation token (Memory.ts
  * stampInstanceToken), so a match identifies the incarnation, not an unedited
- * row. A row that fails any check falls through to a fresh write attempt.
+ * row. A row that fails any check at the sweep's first read falls through to
+ * a fresh write attempt; an adoptable row that fails the re-check under the
+ * Memory lock leaves the candidate pending (`recorded_row_changed`).
  *
  * Its verdict then decides how it is used:
  *   - `promotionStatus` unset → "unstamped": the sweep stamps it. The stamp
