@@ -3,7 +3,7 @@
  * with seeded Memory and Soul rows prints the exact counts (flair#2684).
  *
  * The instance is ephemeral and every HTTP/ops target is asserted to be this
- * test's own instance before the first call.
+ * test's own instance before this test's seeding and CLI calls.
  */
 import nacl from "tweetnacl";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
