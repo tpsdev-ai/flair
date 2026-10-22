@@ -143,6 +143,19 @@ async function waitForCycleDone(timeoutMs: number): Promise<boolean> {
   }
   return false;
 }
+/** Poll until the embedding-stamp migration is reported halted with a reason containing `reason`. */
+async function waitForHalt(reason: string, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const res = await h.admin("GET", "/HealthDetail");
+    if (res.ok) {
+      const ms = (await res.json() as any)?.migrations?.migrations;
+      if (Array.isArray(ms) && ms.some((m: any) => m?.id === "embedding-stamp" && m?.state === "halted" && String(m?.reason ?? "").includes(reason))) return true;
+    }
+    await Bun.sleep(100);
+  }
+  return false;
+}
 async function waitForRun(predicate: (run: { processed: number; touchedIds: string[] }) => boolean, timeoutMs = 60_000): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -498,6 +511,36 @@ describe("flair#2478 — the migration's `.content`-suffix fallback writes under
     expect(touched(f1), `${f1} was not counted exactly once`).toBe(1);
     h.expectIncrementalWrites(f1, SUFFIX_WRITER);
     expect(h.writesBy(f1, SUFFIX_WRITER)).toHaveLength(2);
+  }, 300_000);
+
+  it("after an attempt committed and its read-back did not show the write, a retry whose fresh read throws logs the unconfirmed outcome once, and the error still halts the migration", async () => {
+    // Attempt 1 commits after the text changed in its confirmation-to-commit
+    // window and reads its row back (a readable mismatch) while still holding
+    // the lock. The retry's fresh read of the row is armed to throw.
+    const f2 = "esl-f2.content";
+    const readFault = join(pauseDir, `arm.memory-get-fail.${f2}`);
+    await seedAndReboot([staleRow(f2)], S_CONFIRMED);
+    try {
+      await h.assertPaused(S_CONFIRMED);
+      await h.rawUpdate(f2, { content: EDITED });
+      await handOff(S_CONFIRMED, S_COMMITTED);
+      await h.assertPaused(S_COMMITTED);
+      writeFileSync(readFault, "");
+      await h.release(S_COMMITTED);
+      // The read failure propagates as before: run() throws and the runner halts the migration.
+      expect(await waitForHalt("run() threw mid-batch: test component: forced Memory read failure", 60_000), "the migration did not halt on the retry's read failure").toBe(true);
+      expect(existsSync(readFault), "the retry's fresh read was not attempted").toBe(false);
+    } finally {
+      h.letGo(S_CONFIRMED);
+      h.letGo(S_COMMITTED);
+      rmSync(readFault, { force: true });
+    }
+    const line = `[embedding-stamp] ${f2}: the content-suffix re-embed did not confirm its committed row; outcome: unconfirmed`;
+    expect(serverLog().split(line).length - 1, "the unconfirmed outcome was not logged exactly once").toBe(1);
+    expect(h.writesBy(f2, SUFFIX_WRITER)).toHaveLength(1);
+    expect(touched(f2), `${f2} was counted`).toBe(0);
+    // The halted row is not left for the next case's boot.
+    await h.ops({ operation: "delete", database: "flair", table: "Memory", ids: [f2] });
   }, 300_000);
 });
 

@@ -637,45 +637,53 @@ export function createEmbeddingStampMigration(
           let unconfirmed = false;
           // The vector and text of this row's last unconfirmed attempt.
           let ownUnconfirmed: StagedVector | undefined;
-          for (let attempt = 1; attempt <= CONTENT_SUFFIX_REGEN_ATTEMPTS; attempt++) {
-            const rowNow = attempt === 1 ? existing : await table.get(id);
-            if (!rowNow) break;
-            // A row another writer already made current is not this migration's
-            // write. Leave it uncounted; a later scan decides whether anything
-            // still needs re-embedding. A row whose stored vector matches the
-            // vector this loop's last unconfirmed attempt staged (within a
-            // float32 tolerance, holdsOwnStaleVector) while its text changed is
-            // not current, whatever its stored hash says: a row with an empty
-            // owner stores a null hash, which passes the hash comparison for any
-            // text (flair#2478). Who stored a matching vector is not known.
-            if (attempt > 1 && rowEmbeddingCurrent(rowNow as Record<string, unknown>, current) &&
-                !holdsOwnStaleVector(rowNow as Record<string, unknown>, ownUnconfirmed)) break;
-            const attemptResult = await regenContentSuffixRow(table, id, rowNow as Record<string, unknown>, current, contentSuffixRegen);
-            if (attemptResult.kind === "lock") {
-              // This attempt wrote nothing. After an earlier unconfirmed attempt
-              // of this loop the row may hold that attempt's write, so the line
-              // says the outcome is unknown (the unconfirmed line below follows).
-              console.warn(unconfirmed
-                ? `[embedding-stamp] ${id}: the per-id write lock answered ${attemptResult.outcome}; this attempt wrote nothing, but an earlier attempt's write was not confirmed, so the outcome is unknown; the row is uncounted and the next scan decides whether it is still stale`
-                : `[embedding-stamp] ${id}: the per-id write lock answered ${attemptResult.outcome}; nothing was written; the row is uncounted and the next scan decides whether it is still stale`);
-              break;
+          // One guard over the whole retry loop (flair#2478): once an attempt's
+          // committed write is unconfirmed, the unconfirmed outcome is logged
+          // exactly once on every exit of this row's loop, a break, a refusal
+          // or a thrown error (a retry's fresh read, for instance); a thrown
+          // error still propagates to the runner after the line is logged.
+          try {
+            for (let attempt = 1; attempt <= CONTENT_SUFFIX_REGEN_ATTEMPTS; attempt++) {
+              const rowNow = attempt === 1 ? existing : await table.get(id);
+              if (!rowNow) break;
+              // A row another writer already made current is not this migration's
+              // write. Leave it uncounted; a later scan decides whether anything
+              // still needs re-embedding. A row whose stored vector matches the
+              // vector this loop's last unconfirmed attempt staged (within a
+              // float32 tolerance, holdsOwnStaleVector) while its text changed is
+              // not current, whatever its stored hash says: a row with an empty
+              // owner stores a null hash, which passes the hash comparison for any
+              // text (flair#2478). Who stored a matching vector is not known.
+              if (attempt > 1 && rowEmbeddingCurrent(rowNow as Record<string, unknown>, current) &&
+                  !holdsOwnStaleVector(rowNow as Record<string, unknown>, ownUnconfirmed)) break;
+              const attemptResult = await regenContentSuffixRow(table, id, rowNow as Record<string, unknown>, current, contentSuffixRegen);
+              if (attemptResult.kind === "lock") {
+                // This attempt wrote nothing. After an earlier unconfirmed attempt
+                // of this loop the row may hold that attempt's write, so the line
+                // says the outcome is unknown (the unconfirmed line below follows).
+                console.warn(unconfirmed
+                  ? `[embedding-stamp] ${id}: the per-id write lock answered ${attemptResult.outcome}; this attempt wrote nothing, but an earlier attempt's write was not confirmed, so the outcome is unknown; the row is uncounted and the next scan decides whether it is still stale`
+                  : `[embedding-stamp] ${id}: the per-id write lock answered ${attemptResult.outcome}; nothing was written; the row is uncounted and the next scan decides whether it is still stale`);
+                break;
+              }
+              if (attemptResult.kind === "skipped") break;
+              // Safe to retry from a fresh read: the same text yields the same
+              // vector and hash, and a retry restages `updatedAt`. A readable
+              // post-commit mismatch retries from a fresh read (and a new vector,
+              // computed before the lock) within CONTENT_SUFFIX_REGEN_ATTEMPTS; an
+              // unreadable verification stops without a retry.
+              if (attemptResult.verdict === "shown") {
+                ok = true;
+                break;
+              }
+              unconfirmed = true;
+              ownUnconfirmed = attemptResult.staged;
+              if (attemptResult.verdict === "unreadable") break;
             }
-            if (attemptResult.kind === "skipped") break;
-            // Safe to retry from a fresh read: the same text yields the same
-            // vector and hash, and a retry restages `updatedAt`. A readable
-            // post-commit mismatch retries from a fresh read (and a new vector,
-            // computed before the lock) within CONTENT_SUFFIX_REGEN_ATTEMPTS; an
-            // unreadable verification stops without a retry.
-            if (attemptResult.verdict === "shown") {
-              ok = true;
-              break;
+          } finally {
+            if (!ok && unconfirmed) {
+              console.warn(`[embedding-stamp] ${id}: the content-suffix re-embed did not confirm its committed row; outcome: unconfirmed, the row is uncounted and a later scan decides pending state`);
             }
-            unconfirmed = true;
-            ownUnconfirmed = attemptResult.staged;
-            if (attemptResult.verdict === "unreadable") break;
-          }
-          if (!ok && unconfirmed) {
-            console.warn(`[embedding-stamp] ${id}: the content-suffix re-embed did not confirm its committed row; outcome: unconfirmed, the row is uncounted and a later scan decides pending state`);
           }
         } else {
           // Test-only: inert unless the fault-injection env opt-in is set and armed.
