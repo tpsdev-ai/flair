@@ -66,6 +66,10 @@ export interface WriteBackOptions {
    *  the interleaving where this write's transaction opens first. Named at
    *  the call site, like `pausePre`. */
   pausePoint?: WriteBackPause;
+  /** Test-only pause after the write is staged and before the committed-row
+   *  confirmation — the interleaving where another writer commits after this
+   *  write is staged. Named at the call site, like `pausePoint` (flair#2478). */
+  pauseAfterStage?: WriteBackPause;
   /** Test-only pause after the committed-row confirmation and before this
    *  transaction commits — the interleaving where another writer commits
    *  between the confirmation and this write's commit. Named at the call
@@ -78,6 +82,13 @@ export interface WriteBackOptions {
   pauseBeforeCommit?: WriteBackPause;
   /** Test-only pause after commit, before reading the staged values. */
   pauseBeforeVerify?: WriteBackPause;
+  /**
+   * A fact the plan depended on that is not one of the written fields (an
+   * embedding's text, for instance), re-checked on the committed row after the
+   * commit with the written fields (flair#2478). A committed row that fails it
+   * is unconfirmed, as a row that does not show the staged values is.
+   */
+  verifyAlso?: (committed: any) => boolean;
 }
 
 /** The fields of `expectedRow` (or of the helper's own first read) it compares
@@ -343,6 +354,10 @@ export async function writeBackCommittedRow(
         }
         if ("update" in decision) await applyFieldUpdate(table, id, values, c);
         else await table.put(values, c);
+        if (opts.pauseAfterStage) {
+          const staged = opts.pauseAfterStage();
+          if (staged) await staged;
+        }
         await confirmCommittedRow(table, id, (committed) => isDeepStrictEqual(committed, row));
         if (opts.confirmPoint) {
           const confirmed = opts.confirmPoint();
@@ -383,7 +398,7 @@ export async function writeBackCommittedRow(
       if (!decision.idempotent) throw new WriteBackConflictError(opts.label, id, attempt, "unconfirmed");
       throw err;
     }
-    if (!committedShowsWrite(committed, basis, decision, writeId)) {
+    if (!committedShowsWrite(committed, basis, decision, writeId) || (opts.verifyAlso !== undefined && !opts.verifyAlso(committed))) {
       opts.onUnconfirmed?.();
       noteTestAttempt(opts.label, id, attempt, "unconfirmed");
       if (!decision.idempotent) throw new WriteBackConflictError(opts.label, id, attempt, "unconfirmed");

@@ -26,7 +26,7 @@
 
 import { databases } from "harper";
 import { randomBytes } from "node:crypto";
-import { TOOLS, listToolDefs, type ResolvedAgent } from "./mcp-tools.js";
+import { TOOLS, listToolDefs, type McpToolDef, type ResolvedAgent } from "./mcp-tools.js";
 import { checkToolArguments, withoutNullArguments } from "./mcp-tool-arguments.js";
 import { agentRecordIsAdmin } from "./agent-admin.js";
 import { isPrincipalDeactivated } from "./agent-auth.js";
@@ -195,6 +195,10 @@ function jitProvisionEnabled(): boolean {
  * `undefined` — so existing callers/tests that don't pass one see the exact
  * same `{ agentId, isAdmin }` shape as before this field existed.
  *
+ * `allowJitProvision` (default true) is false for a read-only caller such as
+ * `tools/list`: a subject with no matching credential resolves to null instead
+ * of creating a principal.
+ *
  * When a Credential maps the sub, the mapped principal must exist and be
  * active — the rule the Ed25519 path applies (resources/agent-auth.ts,
  * `isPrincipalDeactivated`) — and its record is read on every resolution, so a
@@ -222,8 +226,8 @@ function jitProvisionEnabled(): boolean {
  * the mapped principal is deactivated or missing, or when the credential or
  * principal could not be read.
  */
-export async function resolveAgentFromSub(sub: string, clientId?: string): Promise<ResolvedAgent | null> {
-  return (await resolveMapping(sub, clientId))?.agent ?? null;
+export async function resolveAgentFromSub(sub: string, clientId?: string, allowJitProvision = true): Promise<ResolvedAgent | null> {
+  return (await resolveMapping(sub, clientId, allowJitProvision))?.agent ?? null;
 }
 
 /**
@@ -236,7 +240,7 @@ interface SubMapping {
   credential: any | null;
 }
 
-async function resolveMapping(sub: string, clientId?: string): Promise<SubMapping | null> {
+async function resolveMapping(sub: string, clientId?: string, allowJitProvision = true): Promise<SubMapping | null> {
   if (!sub) return null;
 
   // 1. Existing IdP credential → its principalId is the Agent id.
@@ -287,8 +291,10 @@ async function resolveMapping(sub: string, clientId?: string): Promise<SubMappin
   }
 
   // 2. No matching Credential(kind:"idp", idpSubject:sub) row. JIT-provision
-  //    only behind the explicit trust anchor.
-  if (!jitProvisionEnabled()) return null;
+  //    only behind the explicit trust anchor, and only for a caller that may
+  //    create a principal — `tools/list` passes allowJitProvision:false, since
+  //    a listing must not write.
+  if (!allowJitProvision || !jitProvisionEnabled()) return null;
 
   try {
     const { principalId, credential } = await jitProvisionPrincipal(sub);
@@ -461,7 +467,7 @@ export async function mcpHandler(request: any): Promise<any> {
       return rpcResult(id, {});
 
     case "tools/list":
-      return rpcResult(id, { tools: listToolDefs() });
+      return rpcResult(id, { tools: await listToolsFor(request) });
 
     case "tools/call":
       return handleToolCall(request, id, params);
@@ -469,6 +475,32 @@ export async function mcpHandler(request: any): Promise<any> {
     default:
       return rpcError(id, -32601, `method not found: ${rpcMethod}`);
   }
+}
+
+/**
+ * The tools `tools/list` advertises to this request's caller. The caller is
+ * resolved the way handleToolCall resolves it (same sub lookup, same
+ * active-principal rule), except that listing never JIT-provisions: for a
+ * mapped subject each tool's `tools/list` gate is decided for the agent the
+ * call would run as, while an unmapped subject lists with no principal even
+ * when JIT provisioning is on (a call by it may provision one). A subject that
+ * resolves to no principal — or whose resolution is refused — gets no gated
+ * tool.
+ *
+ * JIT provisioning is off here: a listing is a read and must not create a
+ * principal.
+ */
+async function listToolsFor(request: any): Promise<McpToolDef[]> {
+  const clientId = typeof request?.mcp?.client_id === "string" ? request.mcp.client_id : undefined;
+  let agent: ResolvedAgent | null = null;
+  try {
+    agent = await resolveAgentFromSub(String(request?.mcp?.sub ?? ""), clientId, false);
+  } catch {
+    // A refused principal (deactivated, unreadable credential) is advertised no
+    // gated tool; the refusal itself is reported by tools/call, as before.
+    agent = null;
+  }
+  return listToolDefs(agent);
 }
 
 /**

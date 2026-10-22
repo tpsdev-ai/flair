@@ -219,6 +219,30 @@ describe("flair#2708 — rem restore target (CLI)", () => {
     expect(b.requests().some((r) => r.endpoint === "ops")).toBe(false);
   }, 60_000);
 
+  test("flair#2749: the same dry run with no agent key names the agent's key, not FLAIR_ADMIN_PASS", async () => {
+    const b = await startInstance({ ...driftedSeed(), auth: "signed" });
+    const { home, date } = await makeHome();
+
+    const result = await runRestore({
+      home,
+      date,
+      dryRun: true,
+      credential: [],
+      env: { FLAIR_URL: `http://0.0.0.0:${b.httpPort}`, FLAIR_OPS_PORT: String(b.opsPort), FLAIR_ADMIN_PASS: STUB_ADMIN_PASS, FLAIR_KEY_DIR: undefined },
+    });
+
+    const output = result.stdout + result.stderr;
+    expect(result.code, output).toBe(1);
+    expect(output).toContain(
+      "HTTP 403: no credentials sent. This request can send only an Ed25519 agent signature; the admin password is not sent on this path. " +
+        `Provide the key of agent '${AGENT_ID}' at ${join(home, ".flair", "keys", `${AGENT_ID}.key`)} (or set FLAIR_KEY_DIR to a directory containing ${AGENT_ID}.key).`,
+    );
+    expect(output).not.toContain("FLAIR_ADMIN_PASS");
+    expect(b.requests().length).toBeGreaterThan(0);
+    // No request carried any Authorization header.
+    expect(b.requests().filter((r) => r.auth !== undefined)).toEqual([]);
+  }, 60_000);
+
   test("the same --apply dry run on a loopback target sends the admin credential from FLAIR_ADMIN_PASS", async () => {
     const b = await startInstance();
     const { home, date } = await makeHome();
