@@ -6,7 +6,10 @@
  * When a `signedOnly` request goes out with no Authorization header, the
  * instance answers 403, and the agent-key fallback gets no successful answer,
  * the error's hint names where the agent key goes instead of FLAIR_ADMIN_PASS.
- * The other hints are unchanged. Every case runs twice: against a 403 with a
+ * The wording of the other hints is unchanged. A zero-length 403 to a request
+ * that sent no Authorization header, signed-only or not, now gets the same hint
+ * as a 403 with a body when the fallback gets no successful answer; 0.62.0
+ * reported it as a bare `HTTP 403`. Every case runs twice: against a 403 with a
  * JSON body and against a zero-length 403. A local listener answers 403 to a
  * request with no Authorization header, 200 to a `TPS-Ed25519` request while
  * `acceptSigned` is set, and 401 otherwise. Each test runs in its own HOME,
