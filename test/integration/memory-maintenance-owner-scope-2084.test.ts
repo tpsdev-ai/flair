@@ -408,7 +408,7 @@ describe("MemoryMaintenance orphan sweep is scoped to the run's owner (real Harp
     await expectSweptOnly(agentA.id, body, before);
   }, 90_000);
 
-  it("(a) an admin dry run refuses an invalid agentId the same way a non-dry run does", async () => {
+  it("(a) an admin dry run refuses a present agentId that is not a string, is blank when trimmed, or differs from its trimmed form, the same way a non-dry run does", async () => {
     for (const agentId of ["", " ", ` ${agentA.id}`, `${agentA.id} `, 42, null]) {
       const res = await fetch(`${harper.httpURL}/MemoryMaintenance`, {
         method: "POST",
@@ -417,7 +417,7 @@ describe("MemoryMaintenance orphan sweep is scoped to the run's owner (real Harp
         signal: AbortSignal.timeout(60_000),
       });
       const text = await res.text();
-      expect(res.status, `dryRun agentId=${JSON.stringify(agentId)}: ${text.slice(0, 300)}`).toBe(400); // assertion: a dry run refuses an invalid agentId
+      expect(res.status, `dryRun agentId=${JSON.stringify(agentId)}: ${text.slice(0, 300)}`).toBe(400); // assertion: a dry run refuses a present agentId that is not a string, is blank when trimmed, or differs from its trimmed form
       expect(JSON.parse(text), `dryRun agentId=${JSON.stringify(agentId)}: ${text.slice(0, 300)}`).toEqual({ error: "agentId must be a non-blank string" });
     }
   }, 60_000);
