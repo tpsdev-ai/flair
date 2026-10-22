@@ -5,9 +5,9 @@
 // the built component, the same shape as component-with-replay-probe: nothing
 // under resources/ references it and it is never packed or shipped.
 //
-// It wraps the exported `defaultSkillHooks.closePredecessor`, which Memory's own
-// hooks spread into every skill write, so a superseding write runs the caller
-// hook inside its transaction. When armed for a predecessor id, the hook writes
+// It wraps the exported `defaultSkillHooks.closePredecessor`, which Memory's
+// versioned create/update path spreads into its hooks, so a superseding write
+// runs the caller hook inside its transaction. When armed for a predecessor id, the hook writes
 // one row to a second database through the same context. That write makes
 // Harper create a real `transaction.next` link, which the write journal has to
 // capture for compensation to undo it.
