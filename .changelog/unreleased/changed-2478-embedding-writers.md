@@ -5,7 +5,11 @@
   hold-warning phase name, `patch-reembed`. As before, it writes only the
   embedding fields (`embedding`, `embeddingModel`, `embeddedContentHash`,
   `updatedAt`), and gives a legacy row that has no `instanceToken` one in the
-  same update.
+  same update. Once one of its attempts has committed without its read-back
+  showing the write, any later failure of the same request (a provider
+  timeout, a refusal, a changed row) answers `503 write_outcome_unknown` and
+  fences the id, instead of an answer that says nothing was written; a retry
+  that finds the row gone answers 404.
 
   The embedding-stamp migration's `.content`-suffix fallback computes its
   vector first, then takes the id's lock with one non-waiting acquisition

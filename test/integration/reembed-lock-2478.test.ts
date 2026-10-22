@@ -17,8 +17,12 @@
  * read-back, which on a readable mismatch retries from a fresh read within the
  * same 3 attempts (recomputing for the changed text) and on the last attempt
  * answers `503 write_outcome_unknown`; an unreadable read-back answers `503
- * write_outcome_unknown`. A `200` answer means the read-back showed the vector
- * beside the text it was computed from.
+ * write_outcome_unknown`. Once an attempt has committed without its read-back
+ * showing the write, every later exit of the request answers `503
+ * write_outcome_unknown` and fences the id (a provider timeout on the retry
+ * included), except a retry that finds the row gone, which answers 404. A `200`
+ * answer means the read-back showed the vector beside the text it was computed
+ * from.
  *
  * The matrix:
  *  - re-embed first, held after staging, after its confirmation, and after its
@@ -32,8 +36,10 @@
  *    read the row first: no row remains;
  *  - text drift before the vector, after staging and in the confirmation-to-
  *    commit window; an uncontended positive control; an unreadable post-commit
- *    read (`503 write_outcome_unknown`, the id is fenced); a provider call that
- *    outlasts its bound (`503 memory_provider_timeout`, nothing written).
+ *    read (`503 write_outcome_unknown`, the id is fenced); a retry's provider
+ *    call that outlasts its bound after an attempt committed unconfirmed (`503
+ *    write_outcome_unknown`, the id is fenced); a provider call that outlasts its
+ *    bound on the first attempt (`503 memory_provider_timeout`, nothing written).
  *
  * Seeded rows carry an explicit visibility, an incarnation token and the
  * current model's bare stamp, so the boot migrations leave them alone.
@@ -445,6 +451,49 @@ describe("flair#2478 — the re-embed's unknown and bounded outcomes (real Harpe
     }
     expect((await h.readRow(id)).content).toBe(ORIGINAL);
   }, 120_000);
+
+  it("after an attempt committed and its read-back did not show the write, a provider timeout on the retry answers write_outcome_unknown and fences the id", async () => {
+    // Attempt 1 commits after the text changed in its confirmation-to-commit
+    // window, so its read-back is readable but does not show the write. The
+    // retry recomputes for the new text, and that provider call is held inside
+    // its bound (the default bound, under the suite's boot) until it is refused.
+    const id = "rl2478-unknown-after-timeout";
+    const recompute = "memory-reembed-recompute";
+    await seed(id);
+    h.arm(CONFIRMED);
+    h.arm(recompute);
+    const pending = reembed(id);
+    try {
+      await h.assertPaused(CONFIRMED);
+      await h.rawUpdate(id, { content: EDITED });
+      await h.release(CONFIRMED);
+      await h.assertPaused(recompute);
+      const res = await pending;
+      const text = await res.text();
+      expect(res.status, text).toBe(503);
+      // The same body the last attempt's unconfirmed outcome answers.
+      expect(JSON.parse(text)).toEqual({
+        error: "write_outcome_unknown",
+        outcome: "unconfirmed",
+        message: "the write outcome is unknown. Read the affected row before writing again.",
+      });
+    } finally {
+      h.letGo(CONFIRMED);
+      h.letGo(recompute);
+    }
+    expect(h.serverLog()).toContain(`[reembed] ${id}: an earlier attempt committed and its read-back did not show the write; this attempt ended with memory_provider_timeout; outcome: unconfirmed`);
+    // Attempt 1's write landed: the row holds the old text's vector beside the new text.
+    const stored = await h.readRow(id);
+    expect(stored.content).toBe(EDITED);
+    await expectBoundTo(stored, ORIGINAL, EDITED);
+    h.expectIncrementalWrites(id, WRITER);
+    expect(h.writesBy(id, WRITER)).toHaveLength(1);
+    // The id is fenced, as after any unconfirmed outcome.
+    const res = await ownerWrite("PUT", id, OWNER_TEXT);
+    const body = await res.text();
+    expect(res.status, body).toBe(503);
+    expect(JSON.parse(body).error).toBe("write_outcome_unknown");
+  }, 150_000);
 
   it("a provider call that outlasts its bound under the lock is refused memory_provider_timeout and writes nothing", async () => {
     const installDir = h.harper.installDir;
