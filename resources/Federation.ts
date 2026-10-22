@@ -690,6 +690,13 @@ export class FederationPair extends Resource {
                 throw new PeerWriteFailedError(err);
               }
               if (stagedFirstPeer) await confirmFirstPairBeforeCommit(instanceId);
+              // Test-only: inert unless the fault-injection env opt-in is set and
+              // armed. Holds the existing-Peer re-pair after its in-transaction
+              // confirmation and Peer write, before the owned transaction
+              // commits, so a competing write to the same Peer can commit in
+              // between (flair#2691).
+              const beforeCommit = txnPausePoint("federation-pair-repair-token-before-commit");
+              if (beforeCommit) await beforeCommit;
               return claim;
             }),
           );
@@ -750,6 +757,13 @@ export class FederationPair extends Resource {
           if (current.status === "revoked") return peerRevokedRefusal();
           stagedPeer = { ...rePairedRow(current), pairAttemptWriteId: randomUUID() };
           await writePeerRow(owned, stagedPeer);
+          // Test-only: inert unless the fault-injection env opt-in is set and
+          // armed. Holds the no-token re-pair after its in-transaction
+          // confirmation and Peer write, before the owned transaction commits,
+          // so a competing write to the same Peer can commit in between
+          // (flair#2691).
+          const beforeCommit = txnPausePoint("federation-pair-repair-before-commit");
+          if (beforeCommit) await beforeCommit;
           return undefined;
         });
         if (refusal) return refusal;

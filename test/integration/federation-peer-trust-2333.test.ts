@@ -1290,3 +1290,37 @@ describe("flair#2656 — re-pair post-commit confirmation (real Harper)", () => 
     }
   }
 });
+
+describe("flair#2691 — a re-pair write dropped in the confirmation-to-commit window (real Harper)", () => {
+  for (const withToken of [true, false]) {
+    it(`${withToken ? "token" : "no-token"} re-pair refuses a Peer write dropped before its commit`, async () => {
+      const token = `pt-2691-${withToken}-${sfx}`;
+      const k = nacl.sign.keyPair();
+      const competitor = nacl.sign.keyPair();
+      const peer = `f2691-${withToken}-${sfx}`;
+      const pub = b64url(k.publicKey);
+      const competitorKey = b64url(competitor.publicKey);
+      await seedPeer(peer, pub);
+      if (withToken) await seedToken(token);
+      const { response, competed, released, paused } = await withPaused(
+        withToken ? "federation-pair-repair-token-before-commit" : "federation-pair-repair-before-commit",
+        () => pairRequest(pairBody(peer, pub, k.secretKey, withToken ? token : undefined)),
+        async () => {
+          // The re-pair has written its row in its owned transaction but not
+          // committed. A competing direct write for the same Peer commits here.
+          return updatePeer(peer, { publicKey: competitorKey });
+        },
+      );
+      expect(paused, "the re-pair was not paused before its owned transaction committed").toBe(true);
+      expect(released, "the re-pair was not released by this test").toBe("go");
+      expect(competed?.status, "the competing write committed").toBe(200);
+      expect(competed?.row?.publicKey, "the competing write holds its own key").toBe(competitorKey);
+      const body = await response.json() as any;
+      expect(response.status, JSON.stringify(body)).toBe(withToken ? 409 : 503);
+      expect(body.error).toBe(withToken ? "peer_pair_unconfirmed" : "write_outcome_unknown");
+      expect(body.outcome).toBe("unconfirmed");
+      expect(body.paired, "this request's write did not commit, so it does not report paired").toBeUndefined();
+      expect((await readPeer(peer))?.publicKey, "the committed row is the competitor's").toBe(competitorKey);
+    }, 90_000);
+  }
+});
