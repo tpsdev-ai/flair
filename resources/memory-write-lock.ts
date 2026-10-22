@@ -5,7 +5,10 @@
  * writers converted so far: the visibility backfill and the promotion stamps
  * (slice 2), and the embedding backfill that follows a Memory write signed by
  * a verified Ed25519 agent (resources/auth-middleware.ts) and the
- * embedding-stamp migration's `.content`-suffix fallback (slice 3). The other
+ * embedding-stamp migration's `.content`-suffix fallback (slice 3); the feed
+ * ingest and dedup repair (resources/MemoryFeed.ts) and both `lastReflected`
+ * stamps (resources/Memory.ts's derivedFrom sources and
+ * resources/MemoryReflect.ts's gathered sources) (slice 3b part 2). The other
  * Memory writers convert in later parts.
  *
  * A writer that must make its read, decision and write on one committed basis
@@ -265,8 +268,9 @@ export async function withMemoryWriteLock<T>(
 
 /** One attempt, no wait, per call; a writer that retries calls it again and
  *  acquires again. Used by the automatic writers: the visibility
- *  backfill, the automatic promotion stamp, the embedding backfill and the
- *  embedding-stamp migration's `.content`-suffix fallback. A held lock or a
+ *  backfill, the automatic promotion stamp, the embedding backfill, the
+ *  embedding-stamp migration's `.content`-suffix fallback, the feed dedup
+ *  repair and both `lastReflected` stamps. A held lock or a
  *  marker answers `busy`/`unknown`; that attempt of the writer writes nothing
  *  (an earlier attempt of the same call may have; each writer logs that).
  *  Whether the id is visited again is each writer's own rule (a later scan

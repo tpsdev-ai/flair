@@ -53,7 +53,14 @@ import { resolve } from "node:path";
 import { homedir } from "node:os";
 import { setImmediate as yieldToRequests } from "node:timers/promises";
 import { annotatedCallerIsAdmin, allowVerified } from "./agent-auth.js";
-import { patchRecordSilent } from "./table-helpers.js";
+import { patchRecord } from "./table-helpers.js";
+import { withMemoryWriteLockOnce } from "./memory-write-lock.js";
+import { verifyCommittedFields } from "./write-back.js";
+
+/** The per-id Memory write-lock store (flair#2478). */
+function memoryLockStore(): unknown {
+  return (databases as any)?.flair?.Memory?.primaryStore;
+}
 import { txnPausePoint } from "./txn-pause-point.js";
 import {
   buildReflectionPrompt,
@@ -343,15 +350,54 @@ export class ReflectMemories extends Resource {
         // Stamp after a successful generate on execute runs only. Prompt-only
         // and 502/503/abort leave lastReflected unset so the next night retries
         // the same sources instead of permanently skipping them (#1515 Bugbot).
+        //
+        // flair#2478 slice 3b: each source stamp takes that id's per-id Memory
+        // write lock, once and without waiting, and reads the committed row
+        // under it. A held id, an outcome-unknown marker or a store with no
+        // lock skips that source and reports it; a stamp is an automatic
+        // writer and never overwrites an owner's write. The patch is an
+        // incremental update of `lastReflected`, and its committed row is
+        // confirmed before the lock is released. A stamp failure cannot fail
+        // the request.
         if (shouldStampLastReflected({ execute, generateSucceeded: true })) {
           const now = new Date().toISOString();
+          const table = (databases as any).flair.Memory;
           for (const memory of memories) {
             const reflectPatch = { lastReflected: now };
             stripUndeclaredMemoryAttributes(reflectPatch);
-            patchRecordSilent((databases as any).flair.Memory, memory.id, reflectPatch, {
-              pausePre: () => txnPausePoint("reflect-sources-pre"), pausePoint: () => txnPausePoint("reflect-sources"), expectedRow: memory,
-              matches: (row) => row != null && GATHER_SELECT.every((key) => isDeepStrictEqual(row[key], memory[key])),
-            });
+            try {
+              const outcome = await withMemoryWriteLockOnce(memoryLockStore(), [String(memory.id)], async () => {
+                const stored = await table.get(String(memory.id), {});
+                if (stored == null) return { kind: "gone" as const };
+                try {
+                  await patchRecord((databases as any).flair.Memory, String(memory.id), reflectPatch, {
+                    pausePre: () => txnPausePoint("reflect-sources-pre"),
+                    pausePoint: () => txnPausePoint("reflect-sources"),
+                    pauseAfterStage: () => txnPausePoint("reflect-sources-staged"),
+                    pauseBeforeCommit: () => txnPausePoint("reflect-sources-commit"),
+                    expectedRow: stored,
+                    matches: (row) => row != null && GATHER_SELECT.every((key) => isDeepStrictEqual(row[key], memory[key])),
+                  });
+                } catch (err) {
+                  logger.warn?.(`MemoryReflect: lastReflected stamp skipped for ${memory.id} (write-back refused: ${(err as Error)?.name ?? "error"})`);
+                  return { kind: "failed" as const };
+                }
+                const verdict = await verifyCommittedFields(table, String(memory.id), stored, reflectPatch);
+                if (verdict !== "shown") {
+                  logger.warn?.(`MemoryReflect: lastReflected stamp skipped for ${memory.id} (unconfirmed: ${verdict})`);
+                  return { kind: "unconfirmed" as const };
+                }
+                // Test-only: the update committed and the lock is still held.
+                const committed = txnPausePoint("reflect-sources-committed");
+                if (committed) await committed;
+                return { kind: "stamped" as const };
+              }, { phase: "reflect-sources" });
+              if (outcome.kind !== "done") {
+                logger.warn?.(`MemoryReflect: lastReflected stamp skipped for ${memory.id} (${outcome.kind})`);
+              }
+            } catch (err) {
+              logger.warn?.(`MemoryReflect: lastReflected stamp skipped for ${memory.id} (${(err as Error)?.name ?? "error"})`);
+            }
           }
         }
 
