@@ -35,12 +35,17 @@
  *
  * The request is the re-embed PATCH (flair#2296): body
  * `{"embedding": null, "embeddingModel": null}`. Memory.patch() embeds the row
- * the PATCH handler reads and writes `embedding`, `embeddingModel` and
- * `updatedAt`. Edits committed after this migration's read and before the PATCH
- * handler's stored-row read are kept (flair#2275); the handler reads, embeds and
- * commits under the id's per-id write lock (flair#2478, below), and a text change
- * by a writer outside that lock is re-read and re-embedded before the request
- * answers success.
+ * the PATCH handler reads and writes `embedding`, `embeddingModel`, `updatedAt`
+ * and `embeddedContentHash` (and `instanceToken` on a legacy row that has none).
+ * Edits committed after this migration's read and before the PATCH handler's
+ * stored-row read are kept (flair#2275); the handler reads, embeds and commits
+ * under the id's per-id write lock (flair#2478, below). A text change by a
+ * writer outside that lock is detected only up to and including the request's
+ * final post-commit read-back: seen at an attempt's fresh read it is
+ * re-embedded; seen at the confirmation or a read-back, the attempt retries
+ * within its bound or the request refuses, as Memory.patch documents. A
+ * lock-bypassing write committed after that final read-back is not detected by
+ * this request.
  *
  * THIS IS LOAD-BEARING, confirmed empirically while building
  * test/integration/migrations-embedding-stamp-e2e.test.ts against real

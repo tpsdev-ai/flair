@@ -26,7 +26,8 @@
  * notifier's after a later commit, except a retry that finds the row gone,
  * which answers 404. A `200`
  * answer means the read-back showed the vector beside the text it was computed
- * from.
+ * from; a lock-bypassing write committed after that final read-back is not seen
+ * by the request.
  *
  * The matrix:
  *  - re-embed first, held after staging, after its confirmation, and after its
