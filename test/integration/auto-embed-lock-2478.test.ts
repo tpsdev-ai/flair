@@ -12,7 +12,7 @@
  * Holding the lock, the shared write-back helper's first read is the committed
  * row: a missing or short vector (at most 100 entries) is written; a row that
  * already holds a longer vector is not written, except one holding, within a
- * relative tolerance that accepts a float32 round trip, the vector an earlier unconfirmed attempt of the same
+ * relative tolerance that accepts a float32 copy of an in-range component, the vector an earlier unconfirmed attempt of the same
  * backfill staged beside changed text; and a row whose
  * text changed is not written (the backfill releases the lock, re-reads and
  * re-embeds, at most 3 attempts). It stages an incremental update of `embedding`,

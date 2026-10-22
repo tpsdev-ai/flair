@@ -188,10 +188,11 @@
  * attempts exhausted, is logged as unconfirmed and leaves the row uncounted
  * for the next scan. A retry after an unconfirmed attempt compares the row's
  * stored vector with the vector that attempt staged (within a relative
- * tolerance that accepts a float32 round trip), not the stored text hash (null for a row with an empty owner): a
- * match beside a changed text is not treated as current, so the retry
- * re-embeds the current text. A row whose stamp is not current or whose stored
- * hash does not match its text is re-embedded whatever vector it holds; the
+ * tolerance that accepts a float32 copy of an in-range component; a non-finite
+ * component never matches), not the stored text hash (null for a row with an
+ * empty owner): a match beside a changed text is not treated as current, so the
+ * retry re-embeds the current text. A row whose stamp is not current or whose
+ * stored hash does not match its text is re-embedded whatever vector it holds; the
  * staged-vector comparison only decides, on a retry, whether a row that
  * otherwise counts as current (a null hash passes for any text) is re-embedded.
  */

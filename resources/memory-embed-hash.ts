@@ -99,15 +99,23 @@ export interface StagedVector {
 /** Relative element-wise tolerance for {@link holdsOwnStaleVector}. The staged
  *  vector is the embedding provider's output as `getEmbedding` returns it; no
  *  code here bounds or normalizes its components, so the comparison scales
- *  with magnitude. Rounding a finite value inside float32 range to float32
- *  changes it by at most 2^-24 (about 6e-8) of its magnitude, so
- *  `|stored - staged| <= 1e-6 * max(1, |stored|, |staged|)` accepts a stored
- *  copy that went through float32 at any such magnitude (the floor of 1 covers
- *  values near zero). */
+ *  with magnitude: two finite components match when
+ *  `|stored - staged| <= 1e-6 * max(1, |stored|, |staged|)`.
+ *  - At magnitude 1 and above the relative term applies. Rounding a
+ *    normal-range float32 value changes it by at most 2^-24 (about 6e-8) of
+ *    its magnitude, so a stored copy that went through float32 matches.
+ *  - Below magnitude 1 the absolute floor of 1e-6 applies, and that floor is
+ *    what accepts the round trip there: a subnormal float32 value such as
+ *    1e-45 rounds with a large relative error (about 40%) but an absolute
+ *    error far inside 1e-6.
+ *  - A non-finite component on either side never matches: a value beyond
+ *    float32 range rounds to Infinity, and NaN equals nothing. */
 const STAGED_VECTOR_RELATIVE_TOLERANCE = 1e-6;
 
-/** One component of {@link holdsOwnStaleVector}'s comparison. */
+/** One component of {@link holdsOwnStaleVector}'s comparison: both components
+ *  finite, and within the tolerance above. */
 function matchesStagedComponent(stored: number, staged: number): boolean {
+  if (!Number.isFinite(stored) || !Number.isFinite(staged)) return false;
   return Math.abs(stored - staged) <= STAGED_VECTOR_RELATIVE_TOLERANCE * Math.max(1, Math.abs(stored), Math.abs(staged));
 }
 

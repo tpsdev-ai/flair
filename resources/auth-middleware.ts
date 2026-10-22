@@ -244,7 +244,8 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
     // The backfill writes a row whose vector is missing or has at most 100
     // entries, whatever stored it. A row holding a longer vector counts as
     // already embedded and is skipped, except one whose stored vector matches,
-    // within a relative tolerance that accepts a float32 round trip, the
+    // within a relative tolerance that accepts a float32 copy of an in-range
+    // component (a non-finite component never matches), the
     // vector an earlier unconfirmed attempt of this call staged, while its text
     // is no longer the text that vector was computed from (holdsOwnStaleVector):
     // the row holds a vector equal to this call's computation for a text it no

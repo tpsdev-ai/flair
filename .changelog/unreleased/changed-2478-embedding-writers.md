@@ -37,10 +37,11 @@
   writes only if the committed row's text is the text it embedded, and it
   reads the committed row back, text included, before the release. If that
   read-back is readable and finds the text changed, its retry compares the
-  row's stored vector with the vector it staged, within a relative
-  tolerance that accepts a float32 round trip at any magnitude, instead of
-  the stored text hash, which a row with an empty
-  owner does not have; on a match beside the changed text it re-embeds the
+  row's stored vector with the vector it staged, component by component:
+  both finite and within 1e-6 of the larger magnitude, or of 1 below
+  magnitude 1, which accepts a float32 copy of a component in float32 range
+  (a non-finite component never matches). It does not use the stored text
+  hash, which a row with an empty owner does not have; on a match beside the changed text it re-embeds the
   current text, within at most 3 attempts. An unreadable read-back, or the
   attempts exhausted, leaves the outcome logged as unconfirmed. The
   migration's fallback does the same, leaving such a row uncounted for the
