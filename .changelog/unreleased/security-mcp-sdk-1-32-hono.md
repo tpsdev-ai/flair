@@ -4,6 +4,7 @@
   and type modules. The root `overrides` entry moves the SDK copies that other workspace
   dependencies pull in to the same release. The root `hono` override, now exact at 4.13.11,
   resolves the fixed release for GHSA-5r4p-p66f-jhc7 in the workspace, where `hono` arrives
-  only through the SDK. A fresh install of the published flair-mcp package resolves a fixed
-  `hono` from the SDK's own range, and an install of the published `@tpsdev-ai/flair` package
+  only through the SDK. Once this release is published, a fresh install of flair-mcp resolves
+  SDK 1.32.0 and a fixed `hono` from the SDK's own range, as an install of the flair-mcp
+  package packed from this change does. An install of the `@tpsdev-ai/flair` package
   includes neither package. Nothing to do on upgrade.
