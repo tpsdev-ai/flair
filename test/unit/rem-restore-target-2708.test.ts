@@ -192,10 +192,10 @@ describe("flair#2708 — rem restore target (CLI)", () => {
   }, 60_000);
 
   test("an --apply dry run to a non-loopback target sends no Basic credential even with FLAIR_ADMIN_PASS set, and reads with the signed request", async () => {
-    // 127.0.0.2 is a local address but not a loopback host restore pins; the
-    // stub binds it explicitly, so the target is non-loopback while no request
-    // leaves this machine.
-    const b = await startInstance({ ...driftedSeed(), hostname: "127.0.0.2", auth: "signed" });
+    // 0.0.0.0 is not a loopback host restore pins, and on Linux and macOS a
+    // connection to it reaches the stub's 127.0.0.1 listener, so the target is
+    // non-loopback while no request leaves this machine.
+    const b = await startInstance({ ...driftedSeed(), auth: "signed" });
     const { home, date } = await makeHome();
     writeAgentKey(home, AGENT_ID);
 
@@ -204,7 +204,7 @@ describe("flair#2708 — rem restore target (CLI)", () => {
       date,
       dryRun: true,
       credential: [],
-      env: { FLAIR_URL: `http://127.0.0.2:${b.httpPort}`, FLAIR_OPS_PORT: String(b.opsPort), FLAIR_ADMIN_PASS: STUB_ADMIN_PASS },
+      env: { FLAIR_URL: `http://0.0.0.0:${b.httpPort}`, FLAIR_OPS_PORT: String(b.opsPort), FLAIR_ADMIN_PASS: STUB_ADMIN_PASS },
     });
 
     // The stub accepts the signed request, so a dry-run status means the reads
