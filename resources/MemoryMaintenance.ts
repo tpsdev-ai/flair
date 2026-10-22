@@ -41,17 +41,19 @@ import { recordMemoryDeletion } from "./memory-deletion-history.js";
 import { txnPausePoint } from "./txn-pause-point.js";
 
 /** What a request's `agentId` says about the run's target, for an ADMIN
- *  request: it names an agent only when the field is a non-blank string with no
- *  leading or trailing whitespace, an ABSENT field is a fleet-wide run, and any
- *  other supplied value is refused (400). A non-admin run ignores the field and
- *  targets the authenticated caller. */
+ *  request: it is a named target only when the field is a string that is
+ *  non-blank when trimmed and equal to its trimmed form; it is absent only when
+ *  the body has no own `agentId` property and reading it yields `undefined`;
+ *  every other present value (a present `undefined`, `null`, non-string or
+ *  blank value included) is refused (400). A non-admin run ignores the field
+ *  and targets the authenticated caller. */
 type RequestedAgent =
   | { kind: "absent" }
   | { kind: "named"; agentId: string }
   | { kind: "invalid" };
 
-/** An agent id is a non-blank string with no leading or trailing whitespace;
- *  any other value names no agent. */
+/** This parser accepts only a non-blank string that equals its trimmed form;
+ *  any other value names no target. */
 function parseAgentIdValue(value: unknown): Exclude<RequestedAgent, { kind: "absent" }> {
   if (typeof value !== "string" || value.trim().length === 0) return { kind: "invalid" };
   if (value !== value.trim()) return { kind: "invalid" };

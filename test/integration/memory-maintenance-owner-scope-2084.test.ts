@@ -284,7 +284,7 @@ function readProbeLog(): Array<{ conditions: unknown; rows: number }> {
 }
 
 /** The probe's per-search Memory lines, in the order the searches completed. */
-function readMemoryProbeLog(): Array<{ conditions: unknown; rows: number }> {
+function readMemoryProbeLog(): Array<{ conditions: unknown; rows: number; ids: string[] }> {
   const path = join(harper.installDir, MEMORY_READ_PROBE_LOG);
   if (!existsSync(path)) return [];
   const text = readFileSync(path, "utf8").trim();
@@ -458,6 +458,13 @@ describe("MemoryMaintenance orphan sweep is scoped to the run's owner (real Harp
     const lower = `mm-case-${SFX}`;
     const upper = lower.toUpperCase();
     expect(upper).not.toBe(lower); // control: the two ids differ only by case
+    const now = new Date().toISOString();
+    await insertRows("Agent", [
+      { id: lower, name: lower, role: "agent", publicKey: makeAgent(lower).publicKey, createdAt: now },
+      { id: upper, name: upper, role: "agent", publicKey: makeAgent(upper).publicKey, createdAt: now },
+    ]);
+    expect((JSON.parse(await readRows("Agent", "id", lower)) as unknown[]).length, "the named agent row was seeded").toBe(1);
+    expect((JSON.parse(await readRows("Agent", "id", upper)) as unknown[]).length, "the case-variant agent row was seeded").toBe(1);
     const lowerId = `${lower}-orphan`;
     const upperId = `${upper}-orphan`;
     await insertRows("MemoryHostSource", [pointerRow(lowerId, lower), pointerRow(upperId, upper)]);
@@ -490,8 +497,10 @@ describe("MemoryMaintenance orphan sweep is scoped to the run's owner (real Harp
     expect(body.stats?.agent).toBe(agentA.id); // control: the run is scoped to the named agent
     const scoped = readMemoryProbeLog();
     expect(scoped.length, JSON.stringify(scoped)).toBe(1); // control: the item loop ran one Memory search
+    const agentAIds = (JSON.parse(await readRows("Memory", "agentId", agentA.id)) as Array<{ id: string }>).map((r) => r.id);
+    expect([...scoped[0].ids].sort(), JSON.stringify(scoped[0])).toEqual([...agentAIds].sort()); // assertion: the yielded ids are exactly the target agent's rows
     expect(scoped[0].conditions).toEqual([{ attribute: "agentId", comparator: "equals", value: agentA.id }]); // assertion: the scoped read is an indexed agentId condition
-    expect(scoped[0].rows, JSON.stringify(scoped[0])).toBe(agentARows); // assertion: the scoped read yielded only the target agent's rows
+    expect(scoped[0].rows, JSON.stringify(scoped[0])).toBe(agentARows); // assertion: the scoped read yielded as many rows as the target agent has
 
     rmSync(join(harper.installDir, MEMORY_READ_PROBE_LOG), { force: true });
     const fleet = await maintain({ kind: "admin", body: {} });
