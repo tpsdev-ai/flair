@@ -345,7 +345,8 @@ export function flattenAdvisories(auditJson) {
  * Install-from-tarball lane produces. This is the installed-tree observation:
  * it reports the advisories a real `npm install -g @tpsdev-ai/flair` would see,
  * which the lockfile observation (`bun audit`) cannot — harper's
- * npm-shrinkwrap pins versions the root overrides never reach under npm.
+ * npm-shrinkwrap or bundled dependency tree pins versions the root overrides
+ * never reach under npm.
  *
  * Refused: no stdout, stdout that is not valid JSON, the checks in
  * `npmAuditReportRefusal`, and the exit-status and stderr checks in
@@ -562,9 +563,126 @@ function harperNodeRoot(node, pkg) {
 }
 
 /**
+ * The package name at the top of harper's node_modules tree for a reported node.
+ * `node_modules/harper/node_modules/@scope/name/node_modules/x` starts at
+ * `@scope/name`; a hoisted leaf such as `.../fast-uri` starts at `fast-uri`.
+ */
+function topLevelPackageUnderHarper(node, harperRoot) {
+  const prefix = `${harperRoot}/node_modules/`;
+  if (!node.startsWith(prefix)) return null;
+  const parts = node.slice(prefix.length).split("/");
+  if (!parts[0]) return null;
+  if (!parts[0].startsWith("@")) return parts[0];
+  return parts[1] ? `${parts[0]}/${parts[1]}` : null;
+}
+
+/** Resolve a dependency inside harper's installed tree; never outside it. */
+function resolveHarperDependency(fromDir, harperRoot, name) {
+  let dir = fromDir;
+  while (true) {
+    const candidate = join(dir, "node_modules", name);
+    if (existsSync(join(candidate, "package.json"))) return candidate;
+    if (dir === harperRoot) return null;
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+/**
+ * Whether `target` is one of harper's bundled packages or a dependency of one.
+ * `bundleDependencies` names harper's direct bundled packages; npm ships each
+ * named package's dependency closure inside the tarball too, and installs that
+ * closure at the top level of harper's tree (for example fast-uri through
+ * fastify). Missing dependencies are skipped — they cannot be the node under
+ * examination, and their absence does not enlarge the bundled set. The walk is
+ * bounded independently of its input.
+ */
+function harperBundleIncludes(harperRoot, declared, target, limit = 5000) {
+  const seen = new Set();
+  const queue = [];
+  for (const name of declared) {
+    seen.add(name);
+    queue.push({ name, from: harperRoot });
+  }
+  let steps = 0;
+  while (queue.length) {
+    if (++steps > limit) {
+      throw new Error(`dependency closure for harper's bundled packages exceeded ${limit} entries`);
+    }
+    const { name, from } = queue.shift();
+    if (name === target) return true;
+    const dir = resolveHarperDependency(from, harperRoot, name);
+    if (!dir) continue;
+    const manifest = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
+    for (const dep of Object.keys({ ...manifest.optionalDependencies, ...manifest.dependencies })) {
+      if (!seen.has(dep)) {
+        seen.add(dep);
+        queue.push({ name: dep, from: dir });
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Evidence that harper shipped a node, from the release's own manifest set.
+ * Releases that ship npm-shrinkwrap.json are checked against its pin, unchanged.
+ * A release without one is checked against the consumer install's package-lock
+ * (`inBundle: true` plus the recorded version) and harper's installed
+ * package.json `bundleDependencies` (or `bundledDependencies`; `true` means all
+ * of harper's dependencies). Anything else throws, and the caller blocks.
+ */
+function harperShippedVersion(npmPrefix, harperRoot, node) {
+  const pinKey = node.slice(harperRoot.length + 1);
+  let shrinkwrapText = null;
+  try {
+    shrinkwrapText = readFileSync(join(npmPrefix, harperRoot, "npm-shrinkwrap.json"), "utf8");
+  } catch (e) {
+    if (e.code !== "ENOENT") throw e;
+  }
+  if (shrinkwrapText !== null) {
+    const shrinkwrap = JSON.parse(shrinkwrapText);
+    const pinned = shrinkwrap?.packages?.[pinKey]?.version;
+    if (typeof pinned !== "string" || !pinned) throw new Error(`missing or invalid version for ${pinKey}`);
+    return { version: pinned, label: "harper's shrinkwrap pins" };
+  }
+
+  const lock = JSON.parse(readFileSync(join(npmPrefix, "package-lock.json"), "utf8"));
+  const entry = lock?.packages?.[node];
+  if (!entry || typeof entry !== "object") {
+    throw new Error(`the consumer package-lock has no entry for ${pinKey}`);
+  }
+  if (entry.inBundle !== true) {
+    throw new Error(`the consumer package-lock does not mark ${pinKey} as inBundle`);
+  }
+  const recorded = entry.version;
+  if (typeof recorded !== "string" || !recorded) throw new Error(`missing or invalid version for ${pinKey}`);
+
+  const harperManifest = JSON.parse(readFileSync(join(npmPrefix, harperRoot, "package.json"), "utf8"));
+  const declared = harperManifest?.bundleDependencies ?? harperManifest?.bundledDependencies;
+  const topLevel = topLevelPackageUnderHarper(node, harperRoot);
+  if (!topLevel) throw new Error(`cannot identify the top-level package under harper for ${pinKey}`);
+  if (declared !== true) {
+    if (!Array.isArray(declared)) {
+      throw new Error("harper's package.json declares no bundleDependencies");
+    }
+    const named = declared.filter((name) => typeof name === "string" && name);
+    if (!named.includes(topLevel) && !harperBundleIncludes(join(npmPrefix, harperRoot), named, topLevel)) {
+      throw new Error(
+        `${JSON.stringify(topLevel)} is not listed in harper's bundleDependencies and is not a dependency of a bundled package`,
+      );
+    }
+  }
+  return { version: recorded, label: "the consumer package-lock records" };
+}
+
+/**
  * For a vendor-pinned exception, reject any npm-audit-reported node path outside
  * harper. When all reported paths are under harper, compare each installed version
- * and any audit-reported version with harper's shrinkwrap pin. Empty node lists,
+ * and any audit-reported version with the version harper shipped it at: the
+ * shrinkwrap pin for releases that carry one, otherwise the bundle evidence in the
+ * consumer install's package-lock and harper's package.json. Empty node lists,
  * unreadable required metadata, and version mismatches block the gate; errors
  * name a node when one was reported.
  */
@@ -585,23 +703,22 @@ export function vendorPinnedNodeProblems(adv, npmPrefix) {
     const harperRoot = harperNodeRoot(node, adv.package);
     const pinKey = node.slice(harperRoot.length + 1);
     try {
-      const shrinkwrap = JSON.parse(readFileSync(join(npmPrefix, harperRoot, "npm-shrinkwrap.json"), "utf8"));
-      const pinned = shrinkwrap?.packages?.[pinKey]?.version;
       const installed = JSON.parse(readFileSync(join(npmPrefix, node, "package.json"), "utf8"))?.version;
       const reported = adv.nodeVersions?.[node];
-      if (typeof pinned !== "string" || !pinned || typeof installed !== "string" || !installed ||
+      if (typeof installed !== "string" || !installed ||
           (reported !== undefined && (typeof reported !== "string" || !reported))) {
         throw new Error(`missing or invalid version for ${pinKey}`);
       }
-      if (installed !== pinned || (reported !== undefined && reported !== pinned)) {
+      const shipped = harperShippedVersion(npmPrefix, harperRoot, node);
+      if (installed !== shipped.version || (reported !== undefined && reported !== shipped.version)) {
         problems.push(
           `${adv.ghsa} (${adv.package}): node ${JSON.stringify(node)} has installed version ${installed}` +
-            `${reported === undefined ? "" : `, audit version ${reported}`}, but harper's shrinkwrap pins ${pinned}. Fix the dependency, or extend the allowlist schema and add a separate, justified entry scoped to that node.`,
+            `${reported === undefined ? "" : `, audit version ${reported}`}, but ${shipped.label} ${shipped.version}. Fix the dependency, or extend the allowlist schema and add a separate, justified entry scoped to that node.`,
         );
       }
     } catch (e) {
       problems.push(
-        `${adv.ghsa} (${adv.package}): cannot verify node ${JSON.stringify(node)} against harper's shrinkwrap: ${e.message}. Restore readable package and shrinkwrap evidence, then rerun the gate.`,
+        `${adv.ghsa} (${adv.package}): cannot verify node ${JSON.stringify(node)} against harper's npm-shrinkwrap.json or its bundleDependencies listing: ${e.message}. Restore readable package and shrinkwrap evidence, or a consumer package-lock that marks the node inBundle and a harper package.json that lists it as bundled, then rerun the gate.`,
       );
     }
   }
@@ -812,9 +929,9 @@ async function main() {
       }
     }
 
-    // Classification — vendor-pinned (harper npm-shrinkwrap). An advisory the
-    // npm observation reports under node_modules/harper/ is pinned by harper's
-    // shrinkwrap, not by flair's own overrides. Such an entry must say so. The
+    // Classification — vendor-pinned (harper's shrinkwrap or bundled tree). An
+    // advisory the npm observation reports under node_modules/harper/ is pinned
+    // by harper, not by flair's own overrides. Such an entry must say so. The
     // label is DERIVED from the nodes, not a typed class: the entry's `class`
     // stays whatever it is (vendor-pinned for a patched-but-pinned leaf,
     // no-patch-published for an unmaintained one like validate.js).
@@ -887,7 +1004,7 @@ async function main() {
 
   // FIXED-FOR-BUN-ONLY — advisories the bun lockfile observation no longer
   // reports (the override fixed them) but the npm-install tree still carries
-  // under harper's shrinkwrap pin.
+  // at harper's shipped version.
   const fixedForBunOnly = [];
   for (const entry of allowlist.entries) {
     if (!entry?.ghsa) continue;
@@ -965,7 +1082,7 @@ async function main() {
 
   for (const { entry } of fixedForBunOnly) {
     console.log(
-      `  FIXED-FOR-BUN-ONLY: ${entry.ghsa} ${entry.package} — npm installs carry harper's pin until ${entry.removeWhen}`,
+      `  FIXED-FOR-BUN-ONLY: ${entry.ghsa} ${entry.package} — npm installs carry harper's shipped version until ${entry.removeWhen}`,
     );
   }
   if (fixedForBunOnly.length) console.log("");
