@@ -243,6 +243,8 @@ An otherwise valid re-pair of a non-revoked peer (same instance ID, signed with 
 - **Token re-pair of an existing Peer:** the same comparison, except that its staged Peer row is a copy of the re-read row, so Harper's `__createdtime__` and `__updatedtime__` are left out. A mismatch or a failed read is refused 409 `peer_pair_unconfirmed`.
 - **Re-pair without a token:** the committed Peer row must show this attempt's marker and its staged fields, again without Harper's timestamps. A mismatch or a failed read answers 503 `write_outcome_unknown` with outcome `unconfirmed`; no token was spent, so the request may be sent again.
 
+On both re-pair routes, `pairAttemptWriteId` is written by a pairing attempt as the id of its write. A field-level competing update that leaves this field alone merges around it, so a refused attempt's id can remain on the committed row next to the competing update's fields. The post-commit comparison uses it as the id of the staged write; it is not a confirmation of the attempt.
+
 ### Originator enforcement
 
 Spoke instances can only push records they originated. A spoke cannot overwrite records from another spoke or from the hub. The hub can accept a pushed record that originated on any instance. That is receive-side originator policy on a push, not a hub-to-spoke delivery path.
