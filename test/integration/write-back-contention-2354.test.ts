@@ -161,38 +161,26 @@ const admin = mkAgent("wbc-admin");
 
 beforeAll(async () => {
   pauseDir = mkdtempSync(join(tmpdir(), "flair-wbc-pause-"));
-  const saved = {
-    FLAIR_ENABLE_TEST_FAULT_INJECTION: process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION,
-    FLAIR_TEST_PAUSE_DIR: process.env.FLAIR_TEST_PAUSE_DIR,
-  };
-  process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION = "1";
-  process.env.FLAIR_TEST_PAUSE_DIR = pauseDir;
-  try {
-    stubDir = mkdtempSync(join(tmpdir(), "flair-wbc-stub-"));
-    writeFileSync(join(stubDir, "generate-response.json"), JSON.stringify({ candidates: [] }));
-    appDir = mkdtempSync(join(tmpdir(), "flair-wbc-app-"));
-    for (const name of ["dist", "schemas", "config.yaml"]) cpSync(resolve(name), join(appDir, name), { recursive: true });
-    for (const name of ["WriteBackIndexProbe.js", "WriteBackTrace.js"]) {
-      cpSync(resolve(`test/fixtures/write-back-app/${name}`), join(appDir, `dist/resources/${name}`));
-    }
-    symlinkSync(resolve("node_modules"), join(appDir, "node_modules"), "dir");
-    harper = await startHarper({
-      cwd: appDir,
-      harperBinDir: process.cwd(),
-      appendRootConfigYaml: [
-        "models:",
-        "  generative:",
-        "    default:",
-        `      backend: ${resolve(process.cwd(), "test/fixtures/stub-generative-backend.mjs")}`,
-        `      responseFile: ${join(stubDir, "generate-response.json")}`,
-      ].join("\n"),
-    });
-  } finally {
-    for (const [key, value] of Object.entries(saved)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
+  stubDir = mkdtempSync(join(tmpdir(), "flair-wbc-stub-"));
+  writeFileSync(join(stubDir, "generate-response.json"), JSON.stringify({ candidates: [] }));
+  appDir = mkdtempSync(join(tmpdir(), "flair-wbc-app-"));
+  for (const name of ["dist", "schemas", "config.yaml"]) cpSync(resolve(name), join(appDir, name), { recursive: true });
+  for (const name of ["WriteBackIndexProbe.js", "WriteBackTrace.js"]) {
+    cpSync(resolve(`test/fixtures/write-back-app/${name}`), join(appDir, `dist/resources/${name}`));
   }
+  symlinkSync(resolve("node_modules"), join(appDir, "node_modules"), "dir");
+  harper = await startHarper({
+    serverEnv: { FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_TEST_PAUSE_DIR: pauseDir },
+    cwd: appDir,
+    harperBinDir: process.cwd(),
+    appendRootConfigYaml: [
+      "models:",
+      "  generative:",
+      "    default:",
+      `      backend: ${resolve(process.cwd(), "test/fixtures/stub-generative-backend.mjs")}`,
+      `      responseFile: ${join(stubDir, "generate-response.json")}`,
+    ].join("\n"),
+  });
   assertOwnInstance(harper);
   await seedAgent(harper, feedAgent);
   await seedAgent(harper, reflectAgent);

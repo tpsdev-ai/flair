@@ -99,15 +99,8 @@ function probe(body: Record<string, unknown>, auth = true): Promise<Response> {
 describe("flair#2455 — retry transition is atomic and fail-closed (real Harper)", () => {
   beforeAll(async () => {
     pauseDir = mkdtempSync(join(tmpdir(), "flair-2455-pause-"));
-    const saved = process.env.FLAIR_TEST_PAUSE_DIR;
-    process.env.FLAIR_TEST_PAUSE_DIR = pauseDir;
-    try {
-      component = componentWithRetryProbe();
-      harper = await startHarper({ cwd: component.dir });
-    } finally {
-      if (saved === undefined) delete process.env.FLAIR_TEST_PAUSE_DIR;
-      else process.env.FLAIR_TEST_PAUSE_DIR = saved;
-    }
+    component = componentWithRetryProbe();
+    harper = await startHarper({ serverEnv: { FLAIR_TEST_PAUSE_DIR: pauseDir }, cwd: component.dir });
     assertOwnInstance(harper);
   }, 240_000);
 
