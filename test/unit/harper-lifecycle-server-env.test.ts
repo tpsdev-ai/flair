@@ -182,7 +182,7 @@ describe("serverEnv removal in a spawned Harper", () => {
 });
 
 describe("external mode", () => {
-  test("a non-empty serverEnv refuses and names every variable and value", async () => {
+  test("a non-empty serverEnv refuses and names every variable without its value", async () => {
     const { status, stderr } = await runScript(
       "refuse",
       `import { startHarper } from ${JSON.stringify(HELPER)};
@@ -197,9 +197,31 @@ try {
       { HARPER_HTTP_URL: "http://127.0.0.1:1" },
     );
     expect(status).toBe(3);
-    expect(stderr).toContain("FLAIR_OAUTH_RATE_LIMIT=1000");
-    expect(stderr).toContain("FLAIR_TRUSTED_PROXY=1");
+    expect(stderr).toContain("FLAIR_OAUTH_RATE_LIMIT");
+    expect(stderr).toContain("FLAIR_TRUSTED_PROXY");
+    expect(stderr).not.toContain("FLAIR_OAUTH_RATE_LIMIT=");
+    expect(stderr).not.toContain("FLAIR_TRUSTED_PROXY=");
     expect(stderr).toContain("HARPER_HTTP_URL");
+  }, 15_000);
+
+  test("a declared value never appears in the refusal, only the variable name", async () => {
+    const secret = "fixture-secret-3c9a";
+    const { status, stderr } = await runScript(
+      "refuse-secret",
+      `import { startHarper } from ${JSON.stringify(HELPER)};
+try {
+  await startHarper({ serverEnv: { FLAIR_MCP_SIGNING_KEY_PEM: ${JSON.stringify(secret)} } });
+  console.log("STARTED");
+} catch (err) {
+  console.error(err.message);
+  process.exit(3);
+}
+`,
+      { HARPER_HTTP_URL: "http://127.0.0.1:1" },
+    );
+    expect(status).toBe(3);
+    expect(stderr).toContain("FLAIR_MCP_SIGNING_KEY_PEM");
+    expect(stderr).not.toContain(secret);
   }, 15_000);
 
   test("an undefined entry refuses in external mode and is named", async () => {

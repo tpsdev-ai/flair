@@ -198,7 +198,7 @@ beforeAll(async () => {
     source: "test/fixtures/orgevent-hook-2139/probe.js",
     target: "dist/resources/zz-orgevent-hook-2139.js", out: "orgevent-hook-2139",
   } });
-  harper = await startHarper({ cwd: component.dir, harperBinDir: component.sourceRoot, env: {
+  harper = await startHarper({ cwd: component.dir, harperBinDir: component.sourceRoot, serverEnv: {
     FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_TEST_PAUSE_DIR: pauseDir,
   } });
   assertOwnInstance(harper);

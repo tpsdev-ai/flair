@@ -210,6 +210,32 @@ describe("happy path", () => {
     expect(r.logRow.archived).toBe(7);
     expect(r.logRow.expired).toBe(2);
   });
+
+  it("sends agentId to /MemoryMaintenance only when the runner has one", async () => {
+    const cases: Array<{ agentId: string | undefined; expected: Record<string, unknown> }> = [
+      { agentId: "", expected: { dryRun: true } },
+      { agentId: undefined, expected: { dryRun: true } },
+      { agentId: "test-agent", expected: { agentId: "test-agent", dryRun: true } },
+    ];
+    for (const c of cases) {
+      let received: unknown;
+      const r = await runNightlyCycle(baseOpts({
+        agentId: c.agentId as any,
+        dryRun: true,
+        apiCall: async (method, path, body) => {
+          if (method === "POST" && path === "/MemoryMaintenance") {
+            received = body;
+            return { expired: 0, archived: 0, total: 0, errors: 0 };
+          }
+          if (method === "GET" && path.startsWith("/Memory?")) return sampleMemories;
+          if (method === "GET" && path.startsWith("/Soul?")) return [sampleSoul];
+          throw new Error(`unexpected api: ${method}:${path}`);
+        },
+      }));
+      expect(r.status, `agentId=${JSON.stringify(c.agentId)}`).toBe("dry-run");
+      expect(received, `agentId=${JSON.stringify(c.agentId)}`).toEqual(c.expected); // assertion: an empty or absent id is omitted, not sent as ""
+    }
+  });
 });
 
 describe("step 5: distillation", () => {

@@ -8,7 +8,7 @@ import { stampEphemeralExpiry } from "../../resources/memory-durability.ts";
 // A small, non-default TTL so a tier-stamped row can be reaped inside the test.
 const TTL_HOURS = "0.001"; // 3.6s
 const PRIOR_TTL = process.env.FLAIR_EPHEMERAL_TTL_HOURS;
-// Kept in process.env: this process calls stampEphemeralExpiry() in-process below.
+// Kept in process.env: this process's stampEphemeralExpiry() call reads it (the Harper below gets it via serverEnv).
 process.env.FLAIR_EPHEMERAL_TTL_HOURS = TTL_HOURS;
 
 interface TestAgent { id: string; publicKey: string; secretKey: Uint8Array; }
