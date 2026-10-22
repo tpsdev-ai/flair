@@ -206,7 +206,10 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
     // attempt's vector is computed, so no provider call runs while the id is
     // locked; a retry acquires it again.
     // A held id, an id with an unresolved write outcome, or a store with no lock
-    // is skipped and logged, and nothing is written. A skipped backfill is not
+    // is skipped and logged, and that attempt writes nothing. After an earlier
+    // attempt of this call committed unconfirmed, every terminal exit (a lock
+    // miss, a row now gone or already embedded, a provider that returned no
+    // vector) logs the outcome as unconfirmed instead. A skipped backfill is not
     // retried by this call. The backfill starts only from the post-response hook
     // at the end of this middleware (the "Embedding backfill" block below),
     // which a successful HTTP Memory POST, PUT or PATCH reaches when a verified
@@ -250,13 +253,28 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
     // it.
     let ownUnconfirmed: StagedVector | undefined;
     const alreadyEmbedded = (row: any): boolean => row.embedding?.length > 100 && !holdsOwnStaleVector(row, ownUnconfirmed);
+    // After an earlier attempt of this call committed and its read-back did not
+    // confirm it, every terminal exit logs the outcome as unconfirmed; an exit
+    // that wrote nothing says so for its own attempt only (flair#2478).
+    const endAfterUnconfirmed = (ended: string): void => {
+      if (unconfirmed) console.warn(`[auto-embed] ${memoryId}: ${ended}; an earlier attempt's vector was not confirmed on the committed row; outcome: unconfirmed`, { outcome: "unconfirmed" });
+    };
     for (let attempt = 1; attempt <= WRITE_BACK_ATTEMPTS; attempt++) {
       const record = await table.get(memoryId, {});
       const text = record ? skillEmbedText(record) : undefined;
-      if (typeof text !== "string" || text.length === 0) return;
-      if (alreadyEmbedded(record)) return;
+      if (typeof text !== "string" || text.length === 0) {
+        endAfterUnconfirmed("the row is gone or has no text, so this attempt wrote nothing");
+        return;
+      }
+      if (alreadyEmbedded(record)) {
+        endAfterUnconfirmed("the row now counts as already embedded, so this attempt wrote nothing");
+        return;
+      }
       const embedding = await getEmbedding(text, "document");
-      if (!Array.isArray(embedding) || embedding.length === 0) return;
+      if (!Array.isArray(embedding) || embedding.length === 0) {
+        endAfterUnconfirmed("the provider returned no vector, so this attempt wrote nothing");
+        return;
+      }
       const model = getModelId();
       // Test-only: inert unless the fault-injection opt-in is armed. The vector
       // is computed and the id's lock is not yet taken.
@@ -303,7 +321,8 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
           return written;
         }, { phase: "auto-embed" });
         if (locked.kind !== "done") {
-          console.warn(`[auto-embed] ${memoryId}: skipped; the per-id write lock answered ${locked.kind}, so nothing was written`);
+          if (unconfirmed) endAfterUnconfirmed(`skipped; the per-id write lock answered ${locked.kind}, so this attempt wrote nothing`);
+          else console.warn(`[auto-embed] ${memoryId}: skipped; the per-id write lock answered ${locked.kind}, so nothing was written`);
           return;
         }
         const outcome = locked.value;

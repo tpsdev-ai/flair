@@ -173,10 +173,12 @@
  * fields (and gives a legacy row with no `instanceToken` one) and commits before
  * the lock is released. The `.content`-suffix fallback computes its vector
  * first, then takes the id's lock (phase `embedding-stamp-content-suffix`) with
- * one non-waiting acquisition per attempt; a retry acquires it again. A held
- * id, an id with an unresolved write outcome, or a store with no lock is
- * logged, written nothing, and left uncounted; the next scan decides whether it
- * is still stale. Under the lock it re-reads the committed row, writes only when
+ * one non-waiting acquisition per attempt; a retry acquires it again. On a
+ * held id, an id with an unresolved write outcome, or a store with no lock,
+ * that attempt writes nothing and is logged, and the row is left uncounted;
+ * the next scan decides whether it is still stale. After an earlier attempt
+ * for the same row committed unconfirmed, that line says the outcome is
+ * unknown, and the unconfirmed outcome is logged as well. Under the lock it re-reads the committed row, writes only when
  * that row is the one it embedded, and commits and verifies the committed row
  * before the release. A row changed at that in-lock read, or a change visible
  * at the confirmation (which aborts the transaction), writes nothing and leaves
@@ -308,9 +310,12 @@ async function regenViaHttpPatch(
 
 /** A 503 from the re-embed request (flair#2478). `memory_busy` (the id stayed
  *  held through the request's wait budget) and `memory_provider_timeout` (the
- *  locked-provider bound) wrote nothing. `write_outcome_unknown` means the id
- *  has an unresolved write, which can be this request's own re-embed whose
- *  committed row could not be read back, so that write may have committed. The
+ *  locked-provider bound) mean the request wrote nothing: a provider timeout
+ *  after an earlier attempt of the same request committed unconfirmed answers
+ *  `write_outcome_unknown` instead. `write_outcome_unknown` means the id has an
+ *  unresolved write, which can be this request's own re-embed (a committed row
+ *  it could not read back, or one whose read-back did not show the write before
+ *  a later attempt failed), so that write may have committed. The
  *  row is uncounted; the next scan decides whether it is still stale. Logs the
  *  refusal's code. */
 async function logRegenRefusal(id: string, res: Response): Promise<void> {
@@ -644,7 +649,12 @@ export function createEmbeddingStampMigration(
                 !holdsOwnStaleVector(rowNow as Record<string, unknown>, ownUnconfirmed)) break;
             const attemptResult = await regenContentSuffixRow(table, id, rowNow as Record<string, unknown>, current, contentSuffixRegen);
             if (attemptResult.kind === "lock") {
-              console.warn(`[embedding-stamp] ${id}: the per-id write lock answered ${attemptResult.outcome}; nothing was written; the row is uncounted and the next scan decides whether it is still stale`);
+              // This attempt wrote nothing. After an earlier unconfirmed attempt
+              // of this loop the row may hold that attempt's write, so the line
+              // says the outcome is unknown (the unconfirmed line below follows).
+              console.warn(unconfirmed
+                ? `[embedding-stamp] ${id}: the per-id write lock answered ${attemptResult.outcome}; this attempt wrote nothing, but an earlier attempt's write was not confirmed, so the outcome is unknown; the row is uncounted and the next scan decides whether it is still stale`
+                : `[embedding-stamp] ${id}: the per-id write lock answered ${attemptResult.outcome}; nothing was written; the row is uncounted and the next scan decides whether it is still stale`);
               break;
             }
             if (attemptResult.kind === "skipped") break;

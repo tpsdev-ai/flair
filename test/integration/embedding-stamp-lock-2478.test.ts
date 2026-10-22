@@ -15,9 +15,10 @@
  *  - The `.content`-suffix fallback: for an id the by-id PATCH cannot address,
  *    the migration computes the vector first, then takes the id's lock
  *    (phase `embedding-stamp-content-suffix`) with one non-waiting
- *    acquisition per attempt; a retry acquires it again. A held id or an outcome-unknown
- *    marker is written nothing and left uncounted; the next scan decides
- *    whether it is still stale. Under the lock it re-reads the committed row
+ *    acquisition per attempt; a retry acquires it again. On a held id or an
+ *    outcome-unknown marker that attempt writes nothing and the row is left
+ *    uncounted (after an earlier unconfirmed attempt for the row, the log says
+ *    the outcome is unknown); the next scan decides whether it is still stale. Under the lock it re-reads the committed row
  *    and writes only if the row is the one it embedded; it stages an
  *    incremental update of the four embedding fields, confirms the committed
  *    row, commits, and verifies the committed row before the release. After a
@@ -455,6 +456,48 @@ describe("flair#2478 — the migration's `.content`-suffix fallback writes under
     expect(touched(e1), `${e1} was not counted exactly once`).toBe(1);
     h.expectIncrementalWrites(e1, SUFFIX_WRITER);
     expect(h.writesBy(e1, SUFFIX_WRITER), "the fallback did not write the new text's vector after its own").toHaveLength(2);
+  }, 300_000);
+
+  it("after an attempt committed and its read-back did not show the write, a held id on the retry is logged as an unknown outcome, not as nothing written", async () => {
+    // Attempt 1 commits after the text changed in its confirmation-to-commit
+    // window, so its read-back is readable but does not show the write. The
+    // retry computes the new text's vector; a write naming the id then holds it
+    // when the retry tries its lock.
+    const f1 = "esl-f1.content";
+    const holderPoint = "memory-patch-entry";
+    await seedAndReboot([staleRow(f1)], S_CONFIRMED);
+    let holder: Promise<Response> | undefined;
+    try {
+      await h.assertPaused(S_CONFIRMED);
+      await h.rawUpdate(f1, { content: EDITED });
+      // Attempt 1 has passed the pre-lock point; this arms the retry's.
+      h.arm(S_GATE);
+      await h.release(S_CONFIRMED);
+      await h.assertPaused(S_GATE);
+      h.arm(holderPoint);
+      holder = suffixWrite("PATCH", f1);
+      await h.assertPaused(holderPoint);
+      await h.release(S_GATE);
+      const line = `[embedding-stamp] ${f1}: the per-id write lock answered busy; this attempt wrote nothing, but an earlier attempt's write was not confirmed, so the outcome is unknown`;
+      expect(await h.waitForLog(line), "the held retry was not logged as an unknown outcome").toBe(true);
+      expect(serverLog()).toContain(`[embedding-stamp] ${f1}: the content-suffix re-embed did not confirm its committed row; outcome: unconfirmed`);
+      expect(serverLog()).not.toContain(`[embedding-stamp] ${f1}: the per-id write lock answered busy; nothing was written`);
+      // Only attempt 1 wrote, and the row was not counted.
+      expect(h.writesBy(f1, SUFFIX_WRITER)).toHaveLength(1);
+      await h.release(holderPoint);
+    } finally {
+      h.letGo(S_CONFIRMED);
+      h.letGo(S_GATE);
+      h.letGo(holderPoint);
+    }
+    expect((await holder!).status).toBe(400);
+    // The row is still stale (the old text's hash beside the new text); a later
+    // batch of the cycle re-embeds and counts it.
+    expect(await waitForCycleDone(90_000), "the cycle did not finish").toBe(true);
+    await expectBoundTo(await h.readRow(f1), EDITED, ORIGINAL);
+    expect(touched(f1), `${f1} was not counted exactly once`).toBe(1);
+    h.expectIncrementalWrites(f1, SUFFIX_WRITER);
+    expect(h.writesBy(f1, SUFFIX_WRITER)).toHaveLength(2);
   }, 300_000);
 });
 

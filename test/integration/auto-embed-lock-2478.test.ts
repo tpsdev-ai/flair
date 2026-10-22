@@ -27,8 +27,10 @@
  * the row first (no row remains); text drift before the lock, after staging and
  * in the confirmation-to-commit window (only the current text's vector is
  * stored); an uncontended control; an unreadable read-back (logged; the id is
- * not fenced); an id fenced by an owner write's unknown outcome (skipped); the
- * locked-provider bound (the backfill computes its vector before the lock).
+ * not fenced); an id fenced by an owner write's unknown outcome (skipped); an
+ * attempt that committed unconfirmed followed by a held id on the retry (logged
+ * as an unconfirmed outcome); the locked-provider bound (the backfill computes
+ * its vector before the lock).
  *
  * The backfill is triggered by a metadata-only owner PATCH (no text change, so
  * the PATCH itself embeds nothing) on a row whose stored vector is short. A
@@ -470,6 +472,48 @@ describe("flair#2478 — the backfill's unknown outcomes and the fence (real Har
       h.letGo("memory-put-verify");
     }
     expect(h.writesBy(id, WRITER), "the backfill wrote a fenced id").toEqual([]);
+  }, 120_000);
+
+  it("after an attempt committed and its read-back did not show the write, a held id on the retry is logged as an unconfirmed outcome, not as nothing written", async () => {
+    // Attempt 1 commits after the text changed in its confirmation-to-commit
+    // window, so its read-back is readable but does not show the write. The
+    // retry computes the new text's vector; an owner PATCH then holds the id
+    // when the retry tries its lock.
+    const id = "ael-unconfirmed-then-busy";
+    const ownerPoint = "memory-patch";
+    await seed(id);
+    h.arm(CONFIRMED);
+    await trigger(id);
+    let pendingOwner: Promise<Response> | undefined;
+    try {
+      await h.assertPaused(CONFIRMED);
+      await h.rawUpdate(id, { content: EDITED });
+      // Attempt 1 has passed the entry point; this arms the retry's.
+      h.arm(ENTRY);
+      await h.release(CONFIRMED);
+      await h.assertPaused(ENTRY);
+      h.arm(ownerPoint);
+      pendingOwner = ownerWrite("PATCH", id, OWNER_TEXT);
+      await h.assertPaused(ownerPoint);
+      await h.release(ENTRY);
+      expect(
+        await h.waitForLog(`[auto-embed] ${id}: skipped; the per-id write lock answered busy, so this attempt wrote nothing; an earlier attempt's vector was not confirmed on the committed row; outcome: unconfirmed`),
+        "the held retry was not logged as an unconfirmed outcome",
+      ).toBe(true);
+      expect(h.serverLog()).not.toContain(`[auto-embed] ${id}: skipped; the per-id write lock answered busy, so nothing was written`);
+      // Only attempt 1 wrote.
+      expect(h.writesBy(id, WRITER)).toHaveLength(1);
+      await h.release(ownerPoint);
+    } finally {
+      h.letGo(CONFIRMED);
+      h.letGo(ENTRY);
+      h.letGo(ownerPoint);
+    }
+    const res = await pendingOwner!;
+    expect(res.status, await res.clone().text()).toBe(204);
+    const stored = await h.readRow(id);
+    expect(stored.content).toBe(OWNER_TEXT);
+    expect(stored.visibility).toBe("private");
   }, 120_000);
 
   it("under a 1 ms locked-provider bound the backfill still stores its vector: it is computed before the lock", async () => {

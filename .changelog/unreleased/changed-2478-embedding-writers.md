@@ -13,9 +13,11 @@
 
   The embedding-stamp migration's `.content`-suffix fallback computes its
   vector first, then takes the id's lock with one non-waiting acquisition
-  per attempt (a retry acquires it again). A held id, an id with an
-  unresolved write outcome, or a store with no lock is logged, written nothing
-  and left uncounted; the next scan decides whether the row is still stale.
+  per attempt (a retry acquires it again). On a held id, an id with an
+  unresolved write outcome, or a store with no lock, that attempt writes
+  nothing and is logged, and the row is left uncounted; the next scan decides
+  whether it is still stale. After an earlier attempt for the same row
+  committed unconfirmed, the log says the outcome is unknown.
   Holding the lock, it writes only if the committed row is the one it
   embedded, and reads the committed row back before the release. A re-embed
   request the migration delegates over HTTP that is refused `503`
@@ -28,7 +30,9 @@
   middleware before that step and starts none) also computes its vector
   first and takes the id's lock with one non-waiting acquisition per
   attempt (a retry acquires it again); a held id or an id with an
-  unresolved write outcome is skipped and logged. Holding the lock, it
+  unresolved write outcome is skipped and logged, and after an earlier
+  unconfirmed attempt of the same backfill the log says the outcome is
+  unconfirmed. Holding the lock, it
   writes only if the committed row's text is the text it embedded, and it
   reads the committed row back, text included, before the release. If that
   read-back is readable and finds the text changed, its retry compares the
