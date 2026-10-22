@@ -9,7 +9,7 @@
  *   - errors mid-flight produce status="failed" with preRestoreSnapshotPath
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, jest } from "bun:test";
 import { mkdirSync, rmSync, readFileSync, writeFileSync, existsSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -654,6 +654,67 @@ describe("applySnapshot — provider-timeout retry (flair#2769)", () => {
     expect(r.retried.memories).toEqual(["m1"]);
     expect(r.errors.some((e) => e.startsWith("put-memory m1:") && e.includes("memory_provider_timeout"))).toBe(true);
     expect(calls.filter((c) => c.method === "PUT" && c.path.startsWith("/Memory/")).length).toBe(3);
+  }, 20_000);
+
+  it("waits for the retry's own answer: a retry answered after 30 s of faked time is restored, not recorded failed", async () => {
+    const snapshotPath = await makeTestSnapshot();
+    const target = retryingTarget([providerTimeout()]);
+    let answerRetry!: () => void;
+    const retryAnswered = new Promise<void>((resolve) => (answerRetry = resolve));
+    let firstPutSeen!: () => void;
+    const firstPut = new Promise<void>((resolve) => (firstPutSeen = resolve));
+    let memoryPuts = 0;
+    const api: ApiCall = async (method, path, body) => {
+      if (method === "PUT" && path.startsWith("/Memory/")) {
+        memoryPuts++;
+        // The clock is faked from the first memory PUT on, so the snapshot
+        // IO before it runs on real timers.
+        if (memoryPuts === 1) {
+          jest.useFakeTimers();
+          firstPutSeen();
+        }
+        if (memoryPuts === 2) await retryAnswered;
+      }
+      return target.api(method, path, body);
+    };
+    const settleTicks = async () => {
+      for (let i = 0; i < 200; i++) await Promise.resolve();
+    };
+
+    try {
+      let settled = false;
+      const run = applySnapshot({
+        agentId: "test-agent",
+        snapshotPath,
+        flairVersion: "0.0.0-test",
+        apiCall: api,
+        preRestoreSnapshotRoot: snapshotRoot,
+        tmpRootOverride: testRoot,
+      }).finally(() => (settled = true));
+
+      await firstPut;
+      await settleTicks();
+      jest.advanceTimersByTime(1_000);
+      await settleTicks();
+      expect(memoryPuts).toBe(2);
+
+      jest.advanceTimersByTime(30_000);
+      await settleTicks();
+      expect(settled).toBe(false);
+
+      answerRetry();
+      jest.useRealTimers();
+      const r = await run;
+
+      expect(r.status).toBe("completed");
+      expect(r.errors).toEqual([]);
+      expect(r.restored.memories).toBe(2);
+      expect(r.retried.memories).toEqual(["m1"]);
+      expect(target.state.memories.get("m1")).toBeDefined();
+      expect(memoryPuts).toBe(3);
+    } finally {
+      jest.useRealTimers();
+    }
   }, 20_000);
 
   it("does not retry a 503 with a different error code", async () => {

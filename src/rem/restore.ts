@@ -33,11 +33,6 @@ export type ApiCall = (method: string, path: string, body?: unknown) => Promise<
 
 /** How long a memory write refused with `503 memory_provider_timeout` waits before its single retry. */
 const RESTORE_PROVIDER_RETRY_DELAY_MS = 1_000;
-/**
- * The retry's own bound, separate from the first attempt: a retry that never
- * answers is recorded as a failed row instead of holding the run open.
- */
-const RESTORE_PROVIDER_RETRY_BOUND_MS = 25_000;
 
 /**
  * The server's `error` code on an `ApiHttpError`, parsed from the response body
@@ -61,21 +56,6 @@ function isProviderTimeoutRefusal(err: unknown): boolean {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/** Run one call bounded by `ms`; a call that has not settled by then rejects. */
-async function boundedRetry<T>(call: () => Promise<T>, ms: number, label: string): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    return await Promise.race([
-      call(),
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`${label} did not answer within ${ms}ms`)), ms);
-      }),
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
 }
 
 /**
@@ -149,7 +129,8 @@ export interface RestoreResult {
    * (default). `missing*` IDs were in the snapshot but absent from Harper
    * afterwards (silent PUT failure). `extra*` IDs were present afterwards
    * but not in the snapshot (silent DELETE failure / lingering rows).
-   * Both fields being empty means the restore is byte-clean.
+   * Both fields being empty means the agent's memory and soul ids match the
+   * snapshot's; row content is not compared.
    */
   verified?: {
     expectedMemoryIds: string[];
@@ -391,11 +372,9 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
         if (!isProviderTimeoutRefusal(err)) throw err;
         result.retried.memories.push(id);
         await delay(RESTORE_PROVIDER_RETRY_DELAY_MS);
-        await boundedRetry(
-          () => opts.apiCall("PUT", `/Memory/${encodeRecordId(id)}`, m),
-          RESTORE_PROVIDER_RETRY_BOUND_MS,
-          `put-memory ${id} retry`,
-        );
+        // No client-side timeout: a request abandoned at a client deadline
+        // could still commit after this row was recorded failed.
+        await opts.apiCall("PUT", `/Memory/${encodeRecordId(id)}`, m);
       }
       result.restored.memories++;
     } catch (err: any) {

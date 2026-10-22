@@ -7,8 +7,9 @@
  * test-only provider delay above that bound, both under the fault-injection
  * gate. The delay matches only the snapshot row's text, so the first PUT is
  * refused `503 memory_provider_timeout` with nothing written; the restore
- * retries it once, the second call is not delayed, and the row is restored,
- * reported as retried, and confirmed by the post-restore verification.
+ * retries it once, the second call is not delayed, and the row is restored
+ * and reported as retried. The post-restore verification compares ids only
+ * (expected and unexpected); the test reads the row's content separately.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";

@@ -123,8 +123,8 @@ export type EmbedInputType = "document" | "query";
 /**
  * Test-only provider delay: the first call in this process whose text contains
  * `FLAIR_TEST_EMBED_PROVIDER_DELAY_MATCH` waits
- * `FLAIR_TEST_EMBED_PROVIDER_DELAY_MS` before reaching the backend. Both are
- * read only under the fault-injection gate, so a real instance never delays.
+ * `FLAIR_TEST_EMBED_PROVIDER_DELAY_MS` before reaching the backend. The delay
+ * happens only when `FLAIR_ENABLE_TEST_FAULT_INJECTION=1` and both settings are set.
  */
 const TEST_EMBED_DELAY_MS_ENV = "FLAIR_TEST_EMBED_PROVIDER_DELAY_MS";
 const TEST_EMBED_DELAY_MATCH_ENV = "FLAIR_TEST_EMBED_PROVIDER_DELAY_MATCH";
