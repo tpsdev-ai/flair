@@ -146,10 +146,16 @@ add("AdminMemory", ["alias-source:(databases as any).flair.Memory#1"],
   "Read-only admin alias.");
 add("Federation", ["alias-source:(databases as any).flair.Memory#1"],
   "Read-only alias (merge reads the source record).");
+add("Federation", ["alias-source:(databases as any)?.flair?.Memory#1"],
+  "Read-only alias for the per-id write-lock store (flair#2478 slice 3c).");
 add("MemoryReflect", ["alias-source:(databases as any).flair.Memory#1"],
   "Read-only alias (reflect reads source memories).");
 add("MemoryReindex", ["alias-source:(databases as any).flair.Memory#1"],
   "Read-only alias (reindex reads rows to re-embed).");
+add("MemoryReindex", ["alias-source:(databases as any)?.flair?.Memory#1"],
+  "Read-only alias for the per-id write-lock store (flair#2478 slice 3c).");
+add("Memory", ["alias-source:(databases as any).flair.Memory#13"],
+  "Read-only alias for the reindex post-commit confirmation (flair#2478 slice 3c).");
 add("auth-middleware", ["alias-source:(databases as any).flair.Memory#1"],
   "Read-only alias (auth reads rows).");
 add("promotion-stamp", ["alias-source:(databases as any).flair.Memory#1", "alias-source:(databases as any)?.flair?.Memory#1"],

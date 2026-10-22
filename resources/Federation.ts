@@ -1554,7 +1554,7 @@ export class FederationSync extends Resource {
         let outcome: any;
         writeBackStarted = true;
         try {
-          const writeMerge = () => writeBackCommittedRow(
+          const writeMerge = async () => await writeBackCommittedRow(
             table,
             record.id,
             (row) => {
