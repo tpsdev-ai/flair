@@ -24,9 +24,11 @@
   middleware before that step and starts none) also computes its vector
   first and takes the id's lock with one non-waiting acquisition per
   attempt (a retry acquires it again); a held id or an id with an
-  unresolved write outcome is skipped and logged. Holding the lock, it writes only if the committed row's text is the
-  text it embedded, and it reads the committed row back, text included, before
-  the release. If the vector it committed no longer matches the row's text, its
-  retry recognises that vector by the vector itself and re-embeds the current
-  text, also for a row with an empty owner, which stores no text hash; the
+  unresolved write outcome is skipped and logged. Holding the lock, it
+  writes only if the committed row's text is the text it embedded, and it
+  reads the committed row back, text included, before the release. If that
+  read-back finds the text changed, its retry compares the row's stored
+  vector with the vector it staged, within a float32 tolerance, instead of
+  the stored text hash, which a row with an empty owner does not have; on a
+  match beside the changed text it re-embeds the current text. The
   migration's fallback does the same (#2478).

@@ -178,9 +178,11 @@
  * logged, written nothing, and left uncounted; the next scan decides whether it
  * is still stale. Under the lock it re-reads the committed row, writes only when
  * that row is the one it embedded, and commits and verifies the committed row
- * before the release. A retry after its own unconfirmed attempt recognises that
- * attempt's vector by the vector itself, not by the stored text hash (null for a
- * row with an empty owner), so a text change re-embeds the current text.
+ * before the release. A retry after an unconfirmed attempt compares the row's
+ * stored vector with the vector that attempt staged (within a float32
+ * tolerance), not the stored text hash (null for a row with an empty owner): a
+ * match beside a changed text is not treated as current, so the retry
+ * re-embeds the current text.
  */
 import { databases } from "harper";
 import { appendFileSync } from "node:fs";
@@ -626,10 +628,12 @@ export function createEmbeddingStampMigration(
             if (!rowNow) break;
             // A row another writer already made current is not this migration's
             // write. Leave it uncounted; a later scan decides whether anything
-            // still needs re-embedding. A row still holding this loop's own
-            // unconfirmed vector while its text changed is not current, whatever
-            // its stored hash says: a row with an empty owner stores a null hash,
-            // which passes the hash comparison for any text (flair#2478).
+            // still needs re-embedding. A row whose stored vector matches the
+            // vector this loop's last unconfirmed attempt staged (within a
+            // float32 tolerance, holdsOwnStaleVector) while its text changed is
+            // not current, whatever its stored hash says: a row with an empty
+            // owner stores a null hash, which passes the hash comparison for any
+            // text (flair#2478). Who stored a matching vector is not known.
             if (attempt > 1 && rowEmbeddingCurrent(rowNow as Record<string, unknown>, current) &&
                 !holdsOwnStaleVector(rowNow as Record<string, unknown>, ownUnconfirmed)) break;
             const attemptResult = await regenContentSuffixRow(table, id, rowNow as Record<string, unknown>, current, contentSuffixRegen);

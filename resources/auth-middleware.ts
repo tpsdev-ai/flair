@@ -228,13 +228,15 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
     // outcome-unknown.
     //
     // A row holding a vector of more than 100 entries is already embedded,
-    // except one still holding the exact vector an earlier attempt of this call
-    // staged while its text is no longer the text that vector was computed from
-    // (holdsOwnStaleVector): that attempt's own vector for text the row no
-    // longer has. That row is re-read and re-embedded, so the backfill does not
-    // end on a vector for text the row no longer holds. The identity is the
-    // vector, not the stored text hash: a row with an empty owner stores a null
-    // hash, which would match any text.
+    // except one whose stored vector matches, within a float32 tolerance, the
+    // vector an earlier unconfirmed attempt of this call staged, while its text
+    // is no longer the text that vector was computed from (holdsOwnStaleVector):
+    // the row holds a vector equal to this call's computation for a text it no
+    // longer has, whoever stored it. That row is re-read and re-embedded. The
+    // check compares vectors, not the stored text hash: a row with an empty
+    // owner stores a null hash, which would match any text. A stored vector that
+    // does not match is left as it is; the check says nothing about who stored
+    // it.
     let ownUnconfirmed: StagedVector | undefined;
     const alreadyEmbedded = (row: any): boolean => row.embedding?.length > 100 && !holdsOwnStaleVector(row, ownUnconfirmed);
     for (let attempt = 1; attempt <= WRITE_BACK_ATTEMPTS; attempt++) {

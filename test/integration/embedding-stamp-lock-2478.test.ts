@@ -21,8 +21,9 @@
  *    and writes only if the row is the one it embedded; it stages an
  *    incremental update of the four embedding fields, confirms the committed
  *    row, commits, and verifies the committed row before the release. A retry
- *    after its own unconfirmed attempt re-embeds a changed text even for a row
- *    with an empty owner (whose stored text hash is null).
+ *    after an unconfirmed attempt, finding the vector that attempt staged
+ *    (a float32-tolerance match) beside a changed text, re-embeds the current
+ *    text, also for a row with an empty owner (whose stored text hash is null).
  *
  * Owner PUT/PATCH/DELETE refuse a `.content`-suffixed id, so the fallback's
  * owner cases name the id in the body of a PUT or PATCH: while the fallback
@@ -438,8 +439,9 @@ describe("flair#2478 — the migration's `.content`-suffix fallback writes under
 
   it("a row with an empty owner, text changed between the fallback's confirmation and its commit: its retry stores the new text's vector, never the old", async () => {
     // An empty owner stores a null text hash, which passes the migration's hash
-    // comparison for any text: the retry recognises its own committed vector by
-    // the vector itself and re-embeds the current text.
+    // comparison for any text: the retry compares the stored vector with the one
+    // its unconfirmed attempt staged and, on a match beside the changed text,
+    // re-embeds the current text.
     const e1 = "esl-e1.content";
     await seedAndReboot([staleRow(e1, { agentId: "" })], S_CONFIRMED);
     await h.assertPaused(S_CONFIRMED);

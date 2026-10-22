@@ -396,7 +396,8 @@ describe("flair#2478 — the backfill stores a vector only for the text it was c
 
   it("a row with an empty owner, text changed between its confirmation and its commit: the stored vector is the new text's, never the old", async () => {
     // An empty owner stores a null text hash, which would match any text: the
-    // backfill recognises its own committed vector by the vector itself. No
+    // backfill's retry compares the stored vector with the one its unconfirmed
+    // attempt staged. No
     // agent owns the row, so an administrator agent's metadata-only PATCH
     // starts the backfill.
     const id = "ael-drift-gap-no-owner";
@@ -408,8 +409,9 @@ describe("flair#2478 — the backfill stores a vector only for the text it was c
       await h.assertPaused(CONFIRMED);
       await h.rawUpdate(id, { content: EDITED });
       await handOff(CONFIRMED, COMMITTED);
-      // The read-back finds the text changed; the retry re-reads the row,
-      // recognises its own vector for the old text, and re-embeds the new text.
+      // The read-back finds the text changed; the retry re-reads the row, finds
+      // the vector it staged for the old text beside the new text, and re-embeds
+      // the new text.
       await h.assertPaused(COMMITTED);
       const row = await h.readRow(id);
       expect(row.content).toBe(EDITED);

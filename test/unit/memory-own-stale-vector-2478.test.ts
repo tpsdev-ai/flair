@@ -1,14 +1,15 @@
 /**
- * memory-own-stale-vector-2478.test.ts — flair#2478 slice 3: the attempt-scoped
- * identity the embedding backfill and the embedding-stamp migration's
- * `.content`-suffix fallback keep for their own unconfirmed write
- * (resources/memory-embed-hash.ts `holdsOwnStaleVector`).
+ * memory-own-stale-vector-2478.test.ts — flair#2478 slice 3: the check the
+ * embedding backfill and the embedding-stamp migration's `.content`-suffix
+ * fallback run on retry with the vector and text their unconfirmed attempt
+ * staged (resources/memory-embed-hash.ts `holdsOwnStaleVector`).
  *
- * A row that still holds the exact vector an attempt staged, while its text is
- * no longer the text that vector was computed from, holds that attempt's own
- * vector for text the row no longer has. The identity is the vector, not the
- * stored text hash: a row with an empty owner stores a null hash, which the
- * hash comparison accepts for any text.
+ * It matches when the row's stored vector equals the staged vector element by
+ * element within a float32 tolerance while the row's text is no longer the
+ * staged text: the row holds a vector equal to the writer's computation for a
+ * text it no longer has. A match does not say which writer stored the vector.
+ * The check compares vectors, not the stored text hash: a row with an empty
+ * owner stores a null hash, which the hash comparison accepts for any text.
  */
 import { describe, expect, it } from "bun:test";
 import { embeddedHashMatches, holdsOwnStaleVector } from "../../resources/memory-embed-hash.ts";
@@ -18,30 +19,30 @@ const NEW = "a text written after the attempt's confirmation";
 const vector = (seed: number) => Array.from({ length: 768 }, (_, i) => Math.sin(seed * 1000 + i) / 10);
 const STAGED = { embedding: vector(1), text: OLD };
 
-describe("flair#2478 — holdsOwnStaleVector identifies a writer's own vector for text the row no longer has", () => {
-  it("an empty-owner row (null hash) with the staged vector and a changed text is the writer's stale vector", () => {
+describe("flair#2478 — holdsOwnStaleVector matches a row's stored vector to the vector a writer staged for a text the row no longer has", () => {
+  it("an empty-owner row (null hash) holding the staged vector beside a changed text matches", () => {
     const row = { id: "m1", agentId: "", content: NEW, embedding: [...STAGED.embedding], embeddedContentHash: null };
-    // The hash comparison accepts it for any text: it cannot be the identity.
+    // The hash comparison accepts it for any text, so it cannot decide the case.
     expect(embeddedHashMatches(row)).toBe(true);
     expect(holdsOwnStaleVector(row, STAGED)).toBe(true);
   });
 
-  it("an owned row with the staged vector and a changed text is the writer's stale vector", () => {
+  it("an owned row holding the staged vector beside a changed text matches", () => {
     const row = { id: "m2", agentId: "agent-a", content: NEW, embedding: [...STAGED.embedding], embeddedContentHash: "stale-hash" };
     expect(holdsOwnStaleVector(row, STAGED)).toBe(true);
   });
 
-  it("the staged vector beside the staged text is not stale", () => {
+  it("the staged vector beside the unchanged staged text does not match", () => {
     const row = { id: "m3", agentId: "", content: OLD, embedding: [...STAGED.embedding], embeddedContentHash: null };
     expect(holdsOwnStaleVector(row, STAGED)).toBe(false);
   });
 
-  it("a different vector (another writer's) beside a changed text is not this writer's", () => {
+  it("a vector that differs from the staged one beside a changed text does not match; its provenance is unknown", () => {
     const row = { id: "m4", agentId: "", content: NEW, embedding: vector(2), embeddedContentHash: null };
     expect(holdsOwnStaleVector(row, STAGED)).toBe(false);
   });
 
-  it("nothing staged, no row, no vector, or a vector of another length is not stale", () => {
+  it("nothing staged, no row, no vector, or a vector of another length does not match", () => {
     const row = { id: "m5", agentId: "", content: NEW, embedding: [...STAGED.embedding] };
     expect(holdsOwnStaleVector(row, undefined)).toBe(false);
     expect(holdsOwnStaleVector(null, STAGED)).toBe(false);
@@ -50,7 +51,7 @@ describe("flair#2478 — holdsOwnStaleVector identifies a writer's own vector fo
     expect(holdsOwnStaleVector({ ...row, embedding: [0.1, 0.1, 0.1] }, STAGED)).toBe(false);
   });
 
-  it("the staged vector stored at float32 precision is still recognised", () => {
+  it("the staged vector stored at float32 precision still matches", () => {
     const row = { id: "m6", agentId: "", content: NEW, embedding: Float32Array.from(STAGED.embedding), embeddedContentHash: null };
     expect(holdsOwnStaleVector(row, STAGED)).toBe(true);
   });

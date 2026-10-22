@@ -87,9 +87,9 @@ export function embeddedHashMatches(row: Record<string, any> | null | undefined)
 }
 
 /**
- * The vector one write attempt staged and the text it was computed from: the
- * attempt-scoped identity a writer keeps for its own write whose committed row
- * it could not confirm (flair#2478).
+ * The vector one write attempt staged and the text it was computed from, kept
+ * by a writer whose committed row that attempt could not confirm, so its retry
+ * can check whether the row still holds that vector (flair#2478).
  */
 export interface StagedVector {
   embedding: readonly number[];
@@ -97,18 +97,22 @@ export interface StagedVector {
 }
 
 /** Element-wise tolerance for {@link holdsOwnStaleVector}: wide enough for a
- *  float32 round-trip of a stored value, far below the distance between the
- *  vectors of two different texts. */
+ *  float32 round-trip of a stored value. */
 const STAGED_VECTOR_TOLERANCE = 1e-6;
 
 /**
- * True when `row` still holds the vector `staged` describes while the row's
- * current embedding text (`skillEmbedText`) is not the text that vector was
- * computed from: the writer's own vector, now bound to text the row no longer
- * has. The vector itself is the identity (compared element-wise), never the
- * stored `embeddedContentHash`, which is null for a row with an empty owner and
- * so would match any text. Returns false when nothing was staged, when the row
- * holds a different vector, or when its text is still the staged text.
+ * True when the row's stored vector matches `staged.embedding` element by
+ * element within {@link STAGED_VECTOR_TOLERANCE} while the row's current
+ * embedding text (`skillEmbedText`) is not `staged.text`. A match means the row
+ * holds a vector equal, within that tolerance, to the one this writer computed
+ * for `staged.text`, a text the row no longer has, so the caller re-embeds the
+ * current text. It is evidence that the stored vector matches this writer's
+ * computation, not proof of which writer stored it, and it assumes nothing
+ * about how far apart the vectors of different texts are. The stored
+ * `embeddedContentHash` is not consulted: it is null for a row with an empty
+ * owner and so would match any text. Returns false when nothing was staged,
+ * when the row's text is still `staged.text`, or when the stored vector does
+ * not match (its provenance is then unknown, and the caller leaves it as it is).
  */
 export function holdsOwnStaleVector(row: Record<string, any> | null | undefined, staged: StagedVector | undefined): boolean {
   if (!staged || !row || typeof row !== "object") return false;
