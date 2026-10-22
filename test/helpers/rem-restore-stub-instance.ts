@@ -17,10 +17,13 @@
  * Every request either port receives is appended to a log file that
  * `requests()` reads: each handler first reads the body as text (the
  * operations handler also parses it, by a step that cannot throw), then logs
- * the request, so a malformed body is logged too. After logging, a request without the admin credential
- * (`Authorization: Basic admin:<adminPass>`, default {@link STUB_ADMIN_PASS})
- * is answered 401, so a client that omits the credential fails as it would
- * against a real instance.
+ * the request, so a malformed body is logged too. After logging, the request
+ * is authorized by the seed's {@link StubSeed.auth} mode. `admin-basic`
+ * (default) accepts only the admin credential (`Authorization: Basic
+ * admin:<adminPass>`, default {@link STUB_ADMIN_PASS}) and answers 401 to any
+ * other request. `signed` also accepts an `Authorization` header that starts
+ * with `TPS-Ed25519 `, answers 403 to a request with no `Authorization`
+ * header, and 401 to any other request.
  */
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -45,7 +48,7 @@ export interface StubSeed {
   candidates?: Array<Record<string, unknown>>;
   /** When set, every PUT and DELETE on the HTTP port answers 307 to this base URL plus the request path. */
   redirectWritesTo?: string;
-  /** The admin password every request must carry as `Basic admin:<adminPass>`; default {@link STUB_ADMIN_PASS}. */
+  /** The admin password both modes accept as `Basic admin:<adminPass>`; default {@link STUB_ADMIN_PASS}. */
   adminPass?: string;
   /** Address both ports bind on; default `127.0.0.1`. */
   hostname?: string;

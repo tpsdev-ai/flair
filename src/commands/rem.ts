@@ -1615,9 +1615,11 @@ export function register(program: Command): void {
         }
         // Candidates are only reachable through the operations API (Harper
         // has no REST search_by_conditions route), so the dry-run candidate
-        // count needs admin creds too. Dry-run treats credential resolution as
-        // best-effort — a plan-only command must not fail on a bad credential
-        // file — while --apply requires creds (Soul rewrite) and fails loudly.
+        // count needs admin creds too. Dry-run treats reading the ambient
+        // local admin-password file as best-effort (an unusable file leaves
+        // it without an admin credential), while --apply requires creds (Soul
+        // rewrite) and fails loudly. A bad --admin-pass-file given explicitly
+        // is refused earlier, by applyAdminPassFile, dry run or not.
         let adminPass: string | undefined;
         try {
           adminPass = resolveLocalAdminPass(opts.adminPass, !isLocalBase(restoreTarget.baseUrl));

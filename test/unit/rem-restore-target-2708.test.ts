@@ -181,8 +181,9 @@ describe("flair#2708 — rem restore target (CLI)", () => {
 
     const result = await runRestore({ home, date, env: { FLAIR_URL: b.httpUrl }, credential: ["--admin-pass-file", passFile] });
 
-    // The stub answers 401 to any request without the credential, so a
-    // completed restore means the reads, deletes and writes all carried it.
+    // This admin-basic stub answers 401 to any request without the
+    // credential, so a completed restore means the reads, deletes and writes
+    // all carried it.
     expect(result.code, result.stderr).toBe(0);
     expect(result.stdout).toContain("Status:       completed");
     expect(result.stdout).toContain("Deleted:      2 memories, 1 souls, 1 candidates");
