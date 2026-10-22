@@ -173,9 +173,12 @@ describe("flair#2475 — the Memory merge confirms the stored row (real Harper)"
     const id = `fmm-pre-${Date.now()}`;
     await insertRow("Memory", seed(id));
 
+    // The competitor writes through the operations API, which takes no per-id
+    // lock: an owner HTTP PATCH would be refused `memory_busy` while the merge
+    // holds the lock (covered by federation-reindex-lock-2478.test.ts). This
+    // case keeps the whole-row skip coverage for a lock-bypassing writer.
     const { response, released, paused } = await withPaused("federation-merge-pre", () => push(id), async () => {
-      const patch = await ownerPatch(id, { visibility: "private" });
-      expect(patch.status, `owner PATCH: ${(await patch.clone().text()).slice(0, 300)}`).toBeLessThan(300);
+      await ops({ operation: "update", database: "flair", table: "Memory", records: [{ id, visibility: "private" }] });
     });
 
     // Behaviour first: a run that never reached the pre-window pause still

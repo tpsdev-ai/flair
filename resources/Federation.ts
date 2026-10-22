@@ -35,7 +35,8 @@ import { CommittedRowChanged, confirmCommittedRow, verifyCommittedFields, withou
 import { withKeyLock } from "./key-lock.js";
 import { withOwnedTransaction } from "./request-transaction.js";
 import { txnPausePoint } from "./txn-pause-point.js";
-import { writeOutcomeUnknownResponse } from "./memory-write-lock.js";
+import { withMemoryWriteLockOnce, writeOutcomeUnknownResponse } from "./memory-write-lock.js";
+import { isDeepStrictEqual } from "node:util";
 import { retryRowProblem } from "./federation-retry-lib.js";
 import {
   classifyRecord,
@@ -1279,6 +1280,9 @@ export class FederationSync extends Resource {
 
     type MergeOutcome = { reason: SkipReason } | { merged: true } | { indeterminate: true };
 
+    /** The per-id Memory write lock store (flair#2478 slice 3c). */
+    const memoryLockStore = (): unknown => (databases as any)?.flair?.Memory?.primaryStore;
+
     /** Read the local Agent row for an id, or null when there is none.
      *  Read failures throw: before write-back starts they become retryable
      *  `merge_error`; after it starts they are indeterminate. */
@@ -1550,7 +1554,7 @@ export class FederationSync extends Resource {
         let outcome: any;
         writeBackStarted = true;
         try {
-          outcome = await writeBackCommittedRow(
+          const writeMerge = () => writeBackCommittedRow(
             table,
             record.id,
             (row) => {
@@ -1600,7 +1604,19 @@ export class FederationSync extends Resource {
                   mergedData.consumedAt = row?.consumedAt ?? mergedData.consumedAt ?? null;
                 }
               }
-              if (record.table === "Memory") normalizeEmptyEmbedding(mergedData);
+              if (record.table === "Memory") {
+                normalizeEmptyEmbedding(mergedData);
+                // flair#2478 slice 3c: the Memory merge writes only the fields
+                // this merge selected, never the whole row it read. Under the
+                // id's lock the in-transaction row is the committed row, so the
+                // update cannot carry back a field another writer changed.
+                if (row == null) return { idempotent: true, write: mergedData };
+                const patch: Record<string, unknown> = {};
+                for (const [field, value] of Object.entries(mergedData)) {
+                  if (!isDeepStrictEqual(row[field], value)) patch[field] = value;
+                }
+                return { idempotent: true, update: patch };
+              }
               return { idempotent: true, write: mergedData };
             },
             {
@@ -1615,8 +1631,23 @@ export class FederationSync extends Resource {
               wholeRow: true,
               pausePre: () => txnPausePoint("federation-merge-pre"),
               pausePoint: () => txnPausePoint("federation-merge"),
+              pauseAfterStage: () => txnPausePoint("federation-merge-staged"),
+              pauseBeforeCommit: () => txnPausePoint("federation-merge-commit"),
             },
           );
+          if (record.table === "Memory") {
+            // flair#2478 slice 3c: the merge takes the id's per-id Memory write
+            // lock, once and without waiting: an automatic writer never
+            // overwrites an owner's write. A held id, an unresolved earlier
+            // write or a store with no lock writes nothing for the record and is
+            // reported as merge_target_busy (a retryable skip reason, so the
+            // SyncLog row records it and a later re-offer can merge it).
+            const locked = await withMemoryWriteLockOnce(memoryLockStore(), [record.id], writeMerge, { phase: "federation-merge" });
+            if (locked.kind !== "done") return { reason: "merge_target_busy" };
+            outcome = locked.value;
+          } else {
+            outcome = await writeMerge();
+          }
         } catch (err) {
           if (err instanceof WriteBackConflictError) {
             return err.outcome === "conflict" ? { reason: "merge_target_changed" } : { indeterminate: true };
