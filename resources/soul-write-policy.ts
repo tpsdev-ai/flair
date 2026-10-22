@@ -26,6 +26,16 @@ export async function authorizeSoulWrite(context: any) {
   return { auth, source, denied };
 }
 
+/**
+ * Whether this context's soul write would pass source authorization: the
+ * decision {@link authorizeSoulWrite} returns, so a surface that must decide
+ * BEFORE a write (the /mcp `tools/list` gate) asks the write's
+ * source-authorization question instead of restating the rule.
+ */
+export async function soulWriteAllowed(context: any): Promise<boolean> {
+  return (await authorizeSoulWrite(context)).denied === null;
+}
+
 export function soulProvenance(auth: AgentAuthVerdict, source: SoulWriteSource, now: string): string {
   const provenance = JSON.parse(buildProvenance(auth, now, {}));
   provenance.verified.sourceClass = source;

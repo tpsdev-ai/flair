@@ -19,12 +19,16 @@
  */
 import { beforeEach, describe, expect, it, mock } from "bun:test";
 import { hashEmbeddedText } from "../../resources/memory-embed-hash.ts";
+import { memoryLockDouble } from "../helpers/memory-lock-double.ts";
 
 const CURRENT = "current-model";
 let embedImpl: (text: string) => Promise<unknown> = async () => [0.5, 0.25, 0.125];
 let embedded: string[] = [];
 
-mock.module("harper", () => ({ server: { http: () => {}, getUser: async () => null }, databases: {}, Resource: class {} }));
+// The fallback writes under the per-id Memory lock (flair#2478): the mock table
+// supplies one on its primaryStore, as Harper's table does.
+const memoryLock = memoryLockDouble();
+mock.module("harper", () => ({ server: { http: () => {}, getUser: async () => null }, databases: { flair: { Memory: { primaryStore: memoryLock } } }, Resource: class {} }));
 mock.module("../../resources/embeddings-provider.ts", () => ({
   getEmbedding: (text: string) => {
     embedded.push(text);
@@ -154,6 +158,36 @@ describe("flair#2307 — the content-suffix re-embed validates the vector and co
     // fields and fail this assertion; a full-row put would fail the method check.
     expect(writeCalls).toEqual([{ method: "update", id: LEGACY_ID, fields: ["embeddedContentHash", "embedding", "embeddingModel", "updatedAt"] }]);
     expect(await migration().countPending()).toBe(0);
+  });
+
+  it("flair#2478: the vector is computed before the id's lock is taken, and the commit and its read-back run while it is held", async () => {
+    const key = JSON.stringify(["memory", LEGACY_ID]);
+    const heldDuringEmbed: boolean[] = [];
+    embedImpl = async () => {
+      heldDuringEmbed.push(memoryLock.held.has(key));
+      return [0.5, 0.25, 0.125];
+    };
+    let heldAtCommit = false;
+    afterCommit = () => { heldAtCommit = memoryLock.held.has(key); };
+    const result = await migration().run(10);
+    expect(result).toEqual({ processed: 1, touchedIds: [LEGACY_ID] });
+    expect(heldDuringEmbed).toEqual([false]);
+    expect(heldAtCommit, "the transaction committed after the lock was released").toBe(true);
+    expect(memoryLock.held.has(key), "the lock was not released").toBe(false);
+  });
+
+  it("flair#2478: a held id is not written and not counted, and is written once it is free", async () => {
+    const key = ["memory", LEGACY_ID];
+    expect(memoryLock.tryLock(key)).toBe(true);
+    try {
+      const result = await migration().run(10);
+      expect(result.processed).toBe(0);
+      expect(writeCalls).toEqual([]);
+      expect(store.get(LEGACY_ID)).toMatchObject(STALE);
+    } finally {
+      memoryLock.unlock(key);
+    }
+    expect(await migration().run(10)).toEqual({ processed: 1, touchedIds: [LEGACY_ID] });
   });
 
   it("a write the commit drops after confirmation is retried and lands, not reported success while missing", async () => {

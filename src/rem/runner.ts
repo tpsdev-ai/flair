@@ -233,17 +233,25 @@ export type ApiCall = (method: string, path: string, body?: unknown) => Promise<
 export type OpsSearch = (table: string, conditions: any[], getAttributes: string[]) => Promise<any[]>;
 
 /**
- * flair#2680: the cycle's pending-candidate count. A number is the exact count
- * from a successful ops-API query; the object says why no count was taken.
+ * flair#2680: a count the cycle prints. A number is the exact count from a
+ * successful read; the object says why no count was taken.
  */
-export type PendingCandidateCount = number | { state: "unknown"; reason: string };
+export type CountResult = number | { state: "unknown"; reason: string };
+
+/** The cycle's pending-candidate count (flair#2680). */
+export type PendingCandidateCount = CountResult;
 
 export const PENDING_NO_ADMIN_REASON = "no admin credential for the operations API";
 
-/** The `Pending:` value run-once prints: the count, `unknown (<reason>)`, or `—` when not reached. */
-export function formatPendingCandidates(count: PendingCandidateCount | undefined): string {
+/** A count line's value: the count, `unknown (<reason>)`, or `—` when not reached. */
+export function formatCount(count: CountResult | undefined): string {
   if (count === undefined) return "—";
   return typeof count === "number" ? String(count) : `unknown (${count.reason})`;
+}
+
+/** The `Pending:` value run-once prints. */
+export function formatPendingCandidates(count: PendingCandidateCount | undefined): string {
+  return formatCount(count);
 }
 
 /**
@@ -354,8 +362,8 @@ export interface RunnerLogRow {
   status: RunnerStatus;
   dryRun?: boolean;
   snapshotPath?: string;
-  memoryCount?: number;
-  soulCount?: number;
+  memoryCount?: CountResult;
+  soulCount?: CountResult;
   /** Absent when the cycle stopped before counting; see `PendingCandidateCount`. */
   pendingCandidates?: PendingCandidateCount;
   durationMs: number;
@@ -481,6 +489,20 @@ function asArray(raw: unknown): any[] {
     if (Array.isArray(obj.items)) return obj.items as any[];
   }
   return [];
+}
+
+/**
+ * A Memory or Soul read's rows. An unrecognised body is a failed read, not an
+ * empty result: `asArray` would report it as 0, which reads as an empty store.
+ */
+function rowsFromRead(raw: unknown, label: string): any[] {
+  if (Array.isArray(raw)) return raw;
+  if (raw && typeof raw === "object") {
+    const obj = raw as Record<string, unknown>;
+    if (Array.isArray(obj.results)) return obj.results as any[];
+    if (Array.isArray(obj.items)) return obj.items as any[];
+  }
+  throw new Error(`${label} returned an unexpected response shape`);
 }
 
 /**
@@ -745,51 +767,79 @@ export async function runNightlyCycle(opts: RunnerOpts): Promise<RunnerResult> {
 
   // Step 2: snapshot
   let snapshotPath: string | undefined;
-  let memoryCount = 0;
-  let soulCount = 0;
+  let memoryCount: CountResult = 0;
+  let soulCount: CountResult = 0;
   let pendingCandidates: PendingCandidateCount | undefined;
   // #1205b-1: the memories fetched here (for the snapshot) are reused by the
   // step-5 tag enumeration — no second fetch. Hoisted so step 5 can read them.
   let fetchedMemories: any[] = [];
+  let memories: any[] | undefined;
+  let souls: any[] | undefined;
+  let readOrSnapshotFailed = false;
 
+  // The two reads are independent: when one fails the other still reports its
+  // exact count, and each failed read is named under `Errors:`.
   try {
-    // Fetch agent data
-    const memoriesRaw = await opts.apiCall("GET", `/Memory?agentId=${encodeURIComponent(opts.agentId)}`);
-    const memories = asArray(memoriesRaw);
-    fetchedMemories = memories;
+    memories = rowsFromRead(
+      await opts.apiCall("GET", `/Memory?agentId=${encodeURIComponent(opts.agentId)}`),
+      "GET /Memory",
+    );
     memoryCount = memories.length;
-
-    const soulRaw = await opts.apiCall("GET", `/Soul?agentId=${encodeURIComponent(opts.agentId)}`);
-    const souls = asArray(soulRaw);
-    soulCount = souls.length;
-    // For the snapshot's soul.json: keep the full multi-row shape if there
-    // are multiple souls (different keys), or unwrap a single-row response.
-    const soulForSnapshot = souls.length === 1 ? souls[0] : souls.length > 1 ? souls : null;
-
-    // flair#2680: a failed count is a failed check (an `errors` entry), not 0.
-    // With no admin credential no query runs; when the cycle reaches this step
-    // the count is reported unknown.
-    if (opts.opsSearch) {
-      pendingCandidates = await fetchPendingCandidateCount(opts.opsSearch, opts.agentId);
-      if (typeof pendingCandidates !== "number") errors.push(`pending-count: ${pendingCandidates.reason}`);
-    } else {
-      pendingCandidates = { state: "unknown", reason: PENDING_NO_ADMIN_REASON };
-    }
-
-    if (!opts.dryRun) {
-      const created = await createSnapshot({
-        agentId: opts.agentId,
-        flairVersion: opts.flairVersion,
-        memories,
-        soul: soulForSnapshot as Record<string, unknown> | null,
-        pendingCandidateCount: typeof pendingCandidates === "number" ? pendingCandidates : null,
-        rootOverride: opts.snapshotRoot,
-        nowOverride: opts.nowOverride,
-      });
-      snapshotPath = created.path;
-    }
   } catch (err: any) {
-    errors.push(`snapshot: ${err?.message ?? String(err)}`);
+    const reason = err?.message ?? String(err);
+    memoryCount = { state: "unknown", reason };
+    errors.push(`memory-count: ${reason}`);
+    readOrSnapshotFailed = true;
+  }
+  try {
+    souls = rowsFromRead(
+      await opts.apiCall("GET", `/Soul?agentId=${encodeURIComponent(opts.agentId)}`),
+      "GET /Soul",
+    );
+    soulCount = souls.length;
+  } catch (err: any) {
+    const reason = err?.message ?? String(err);
+    soulCount = { state: "unknown", reason };
+    errors.push(`soul-count: ${reason}`);
+    readOrSnapshotFailed = true;
+  }
+  fetchedMemories = memories ?? [];
+
+  if (memories && souls) {
+    try {
+      // For the snapshot's soul.json: keep the full multi-row shape if there
+      // are multiple souls (different keys), or unwrap a single-row response.
+      const soulForSnapshot = souls.length === 1 ? souls[0] : souls.length > 1 ? souls : null;
+
+      // flair#2680: a failed count is a failed check (an `errors` entry), not 0.
+      // With no admin credential no query runs; when the cycle reaches this step
+      // the count is reported unknown.
+      if (opts.opsSearch) {
+        pendingCandidates = await fetchPendingCandidateCount(opts.opsSearch, opts.agentId);
+        if (typeof pendingCandidates !== "number") errors.push(`pending-count: ${pendingCandidates.reason}`);
+      } else {
+        pendingCandidates = { state: "unknown", reason: PENDING_NO_ADMIN_REASON };
+      }
+
+      if (!opts.dryRun) {
+        const created = await createSnapshot({
+          agentId: opts.agentId,
+          flairVersion: opts.flairVersion,
+          memories,
+          soul: soulForSnapshot as Record<string, unknown> | null,
+          pendingCandidateCount: typeof pendingCandidates === "number" ? pendingCandidates : null,
+          rootOverride: opts.snapshotRoot,
+          nowOverride: opts.nowOverride,
+        });
+        snapshotPath = created.path;
+      }
+    } catch (err: any) {
+      errors.push(`snapshot: ${err?.message ?? String(err)}`);
+      readOrSnapshotFailed = true;
+    }
+  }
+
+  if (readOrSnapshotFailed) {
     const row: RunnerLogRow = {
       ...baseRow,
       status: "failed",

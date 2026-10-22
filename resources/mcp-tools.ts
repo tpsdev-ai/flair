@@ -1616,7 +1616,38 @@ export const TOOLS: Record<string, ToolEntry> = bindNativeTools({
   },
 });
 
-/** The tool definitions for a tools/list response (exactly the 18 curated tools). */
-export function listToolDefs(): McpToolDef[] {
-  return Object.values(TOOLS).map((t) => t.def);
+/**
+ * `tools/list` gates: a tool named here is advertised only to a caller this
+ * predicate admits. `soul_set`'s predicate is the soul write policy's
+ * source-authorization step (resources/soul-write-policy.ts), evaluated on the
+ * same delegation context `soulSet` builds; `Soul.post` applies its content
+ * guards after that step. The policy module links harper's `databases` at module
+ * top, so it is imported lazily — same reason as the handlers above.
+ */
+const LIST_GATES: Record<string, (agent: ResolvedAgent) => Promise<boolean>> = {
+  soul_set: async (agent) => {
+    const { soulWriteAllowed } = await import("./soul-write-policy.js");
+    return soulWriteAllowed(delegationContext(agent));
+  },
+};
+
+for (const name of Object.keys(LIST_GATES)) {
+  if (!Object.prototype.hasOwnProperty.call(TOOLS, name)) {
+    throw new Error(`tools/list gate names a tool that is not in TOOLS: ${name}`);
+  }
+}
+
+/**
+ * The tool defs `tools/list` returns for `agent`: every `TOOLS` entry whose gate
+ * (if any) admits this caller. `agent` is null for a caller whose token subject
+ * resolved to no principal; that caller gets no gated tool.
+ */
+export async function listToolDefs(agent: ResolvedAgent | null): Promise<McpToolDef[]> {
+  const defs: McpToolDef[] = [];
+  for (const [name, entry] of Object.entries(TOOLS)) {
+    const gate = LIST_GATES[name];
+    if (gate && !(agent && (await gate(agent)))) continue;
+    defs.push(entry.def);
+  }
+  return defs;
 }

@@ -32,13 +32,14 @@ import { DECLARED_MEMORY_ATTRIBUTES, stripUndeclaredMemoryAttributes, stripServe
 import { composesCallerWrite, isJoinableTransaction, withOwnedTransaction, withSharedWriteTransaction } from "./request-transaction.js";
 import { PredecessorVisibilityChanged, applyGrantedVisibility, committedVisibilityDiffers, predecessorVisibilityChangedRefusal } from "./grant-visibility.js";
 import { CommittedRowChanged, GrantedCloseRevoked, confirmCommittedRow, grantedCloseRevokedRefusal, sameStoredRow, storedRowChangedRefusal, verifyCommittedFields, writeGrantHeld } from "./write-back.js";
-import { txnPausePoint } from "./txn-pause-point.js";
+import { PAUSE_LIMIT_MS, txnPausePoint } from "./txn-pause-point.js";
 import {
   markMemoryWriteOutcomeUnknown,
   memoryWriteOutcomeUnknown,
   memoryBusyResponse,
   memoryLockUnavailableResponse,
   boundLockedProviderCall,
+  memoryLockedProviderTimeoutMs,
   MemoryProviderTimeout,
   memoryProviderTimeoutResponse,
   withMemoryWriteLock,
@@ -456,9 +457,18 @@ function writeOutcomeUnknownFor(id: any): Response {
   return writeOutcomeUnknownResponse();
 }
 
-/** Refuse a provider call still pending when the timeout callback runs, or settling after the bound. */
-function embedUnderLock(text: string): Promise<number[] | null> {
-  return boundLockedProviderCall(() => getEmbedding(text, "document"));
+/** Refuse a provider call still pending when the timeout callback runs, or settling after the bound.
+ *  `pausePoint` (test-only, inert unless the fault-injection opt-in is set and
+ *  armed) holds the provider call inside its bound; the pause's own limit
+ *  outlasts the bound, so an armed pause ends in the bound's refusal. */
+function embedUnderLock(text: string, pausePoint?: (limitMs: number) => Promise<void> | undefined): Promise<number[] | null> {
+  return boundLockedProviderCall(async () => {
+    if (pausePoint) {
+      const pause = pausePoint(memoryLockedProviderTimeoutMs() + PAUSE_LIMIT_MS);
+      if (pause) await pause;
+    }
+    return getEmbedding(text, "document");
+  });
 }
 
 /**
@@ -1795,7 +1805,8 @@ function storedInstanceToken(row: any): string | null {
  * If the stored text is no longer the text the vector was computed from, this
  * recomputes from the stored text (at most REEMBED_WRITE_ATTEMPTS times).
  * If the text keeps changing across the REEMBED_WRITE_ATTEMPTS attempts, it returns
- * reembed_row_changed (409) and writes nothing. A row absent at the attempt's
+ * reembed_row_changed (409) and writes nothing, when no attempt has committed
+ * (otherwise 503 write_outcome_unknown, see flair#2478 below). A row absent at the attempt's
  * own re-read, a row with no text, or a caller no longer authorized for the row
  * is refused the same way the first read refused it.
  *
@@ -1805,7 +1816,8 @@ function storedInstanceToken(row: any): string | null {
  * instanceToken, contentHash, createdAt) and the same embedding text, compared
  * as text. A row gone or changed in either at confirmation aborts the owned
  * transaction (the staged write is discarded) and the caller answers
- * stored_row_changed (409). A same-id replacement with the same identity and
+ * stored_row_changed (409) when no earlier attempt has committed, otherwise
+ * 503 write_outcome_unknown (flair#2478 below). A same-id replacement with the same identity and
  * text passes. Post-commit verification retries surviving differences in
  * compared fields, identity or text from a fresh read within the attempt bound.
  *
@@ -1818,6 +1830,17 @@ function storedInstanceToken(row: any): string | null {
  * calling PATCH can confirm after the commit that the row is still that one.
  * The calling PATCH holds the row's per-id write lock across this write and its
  * commit.
+ *
+ * flair#2478: once an attempt's commit has resolved and no read-back has shown
+ * its write (the read-back mismatched, or a step after the commit, such as the
+ * write-stamp notifier, threw before it), the row may hold that write. Every
+ * exit of the call from then on, other than a later verified success, answers
+ * `503 write_outcome_unknown` and marks the id outcome-unknown: a refusal, a
+ * 409 (exhausted text changes or a change seen at a confirmation), a provider
+ * timeout, an unusable vector, the final attempt's mismatch, or any thrown
+ * error. The one exception is a later attempt whose fresh read finds no row:
+ * no write of this call remains on one, so it answers 404 as before and does
+ * not fence the id.
  */
 async function reembedStoredRow(
   id: string,
@@ -1826,8 +1849,42 @@ async function reembedStoredRow(
   auth: AgentAuthVerdict,
   ctx: any,
 ): Promise<ReembedResult> {
+  // flair#2478: one guard over every attempt. Once an attempt's commit has
+  // resolved and no read-back has shown its write, the call answers either the
+  // verified success, the deleted-row 404, or write_outcome_unknown (marking
+  // the id): the attempts settle their refusals through `settle`, and any
+  // thrown error, the write-stamp notifier after a commit included, lands here.
+  const state = { committedUnconfirmed: false };
+  try {
+    return await reembedAttempts(id, preRead, vector, auth, ctx, state);
+  } catch (err) {
+    if (!state.committedUnconfirmed) throw err;
+    console.warn("[reembed] %s: a committed attempt's write is not confirmed; the call ended with an error (%s); outcome: unconfirmed", id, (err as Error)?.name ?? "unknown");
+    return { response: writeOutcomeUnknownFor(id) };
+  }
+}
+
+/** The attempts of {@link reembedStoredRow}. `state.committedUnconfirmed` is set
+ *  when an attempt's commit resolves, before anything else runs, and stays set
+ *  unless that attempt's read-back shows the write (which answers success). */
+async function reembedAttempts(
+  id: string,
+  preRead: Record<string, any>,
+  vector: number[],
+  auth: AgentAuthVerdict,
+  ctx: any,
+  state: { committedUnconfirmed: boolean },
+): Promise<ReembedResult> {
   let textToEmbed = skillEmbedText(preRead);
   let embedding = vector;
+  // Every refusal of a later attempt, once a committed write is unconfirmed,
+  // answers write_outcome_unknown and marks the id, never a refusal that says
+  // nothing was written.
+  const settle = (response: Response, ended: string): ReembedResult => {
+    if (!state.committedUnconfirmed) return { response };
+    console.warn("[reembed] %s: a committed attempt's write is not confirmed; this attempt ended with %s; outcome: unconfirmed", id, ended);
+    return { response: writeOutcomeUnknownFor(id) };
+  };
   for (let attempt = 1; attempt <= REEMBED_WRITE_ATTEMPTS; attempt++) {
     let outcome: ReembedOutcome;
     try {
@@ -1869,7 +1926,8 @@ async function reembedStoredRow(
         // the vector was computed from (`textToEmbed`). The text check catches an
         // edit that changed the text but no identity field. A row gone or changed
         // at confirmation aborts this owned transaction, discarding the staged
-        // write; the caller answers stored_row_changed (409). Only a text change
+        // write; the caller answers stored_row_changed (409), or write_outcome_unknown
+        // when an earlier attempt committed unconfirmed. Only a text change
         // is logged. Neither the staged vector, its hash, nor a staged legacy
         // token is written. Post-commit verification retries surviving
         // differences in compared fields, identity or text from a fresh read.
@@ -1892,34 +1950,46 @@ async function reembedStoredRow(
         return { kind: "written" as const, model, updatedAt, token, identity: { ...stored, instanceToken: token }, fields: reembedUpdate };
       });
     } catch (err) {
-      // The owned transaction was aborted by the throw; nothing was written.
-      if (err instanceof CommittedRowChanged) return { response: storedRowChangedRefusal("Memory") };
+      // The owned transaction was aborted by the throw; this attempt wrote
+      // nothing (an earlier unconfirmed attempt may have; settle answers that).
+      if (err instanceof CommittedRowChanged) return settle(storedRowChangedRefusal("Memory"), "stored_row_changed");
       throw err;
     }
-    if (outcome.kind === "withheld") return { response: outcome.response };
-    if (outcome.kind === "not_found") return { response: NOT_FOUND() };
-    if (outcome.kind === "forbidden") return { response: FORBIDDEN("forbidden: cannot write memory owned by another agent") };
+    if (outcome.kind === "withheld") return settle(outcome.response, "a withheld storage result");
+    if (outcome.kind === "not_found") {
+      // The fresh read finds no row, so no write of this call remains on one:
+      // 404 states that even after an earlier unconfirmed attempt, and the id is
+      // not fenced (an outcome-unknown mark lasts until restart).
+      if (state.committedUnconfirmed) console.warn("[reembed] %s: a committed attempt's write is not confirmed, but the row is now absent, so no write of this call remains on it; answered not_found", id);
+      return { response: NOT_FOUND() };
+    }
+    if (outcome.kind === "forbidden") return settle(FORBIDDEN("forbidden: cannot write memory owned by another agent"), "forbidden");
     if (outcome.kind === "no_text") {
-      return { response: Response.json({ error: "reembed_no_text", message: "the stored row has no text to embed" }, { status: 422 }) };
+      return settle(Response.json({ error: "reembed_no_text", message: "the stored row has no text to embed" }, { status: 422 }), "reembed_no_text");
     }
     if (outcome.kind === "recompute") {
       if (attempt === REEMBED_WRITE_ATTEMPTS) {
-        return { response: Response.json({ error: "reembed_row_changed", message: "the stored text changed during each re-embed attempt; retry" }, { status: 409 }) };
+        return settle(Response.json({ error: "reembed_row_changed", message: "the stored text changed during each re-embed attempt; retry" }, { status: 409 }), "reembed_row_changed");
       }
       textToEmbed = outcome.text;
       let recomputed: number[] | null;
       try {
-        recomputed = await embedUnderLock(textToEmbed);
+        // Test-only pause point: inert unless the fault-injection opt-in is set
+        // and armed; it holds this provider call inside its bound.
+        recomputed = await embedUnderLock(textToEmbed, (limitMs) => txnPausePoint("memory-reembed-recompute", process.env, limitMs));
       } catch (err) {
-        if (err instanceof MemoryProviderTimeout) return { response: memoryProviderTimeoutResponse() };
+        if (err instanceof MemoryProviderTimeout) return settle(memoryProviderTimeoutResponse(), "memory_provider_timeout");
         throw err;
       }
       if (!isUsableEmbeddingVector(recomputed)) {
-        return { response: Response.json({ error: "embedding_unavailable", message: "the embedding engine returned no vector; the stored row is unchanged, retry" }, { status: 503 }) };
+        return settle(Response.json({ error: "embedding_unavailable", message: "the embedding engine returned no vector; the stored row is unchanged, retry" }, { status: 503 }), "embedding_unavailable");
       }
       embedding = recomputed;
       continue;
     }
+    // The commit has resolved: until a read-back shows the write, every exit of
+    // the call is settled as unknown (the notifier below included).
+    state.committedUnconfirmed = true;
     noteWriteStamp(outcome.model, preRead);
     const verifyPause = txnPausePoint("memory-reembed-verify");
     if (verifyPause) await verifyPause;
@@ -1945,8 +2015,11 @@ async function reembedStoredRow(
       // still lacks one), so a post-commit mismatch retries from the next
       // attempt's fresh read. A post-commit mismatch on the final attempt is an
       // unconfirmed outcome (the commit resolved, so nothing here proves no
-      // write landed); text changes that exhaust the attempts through
-      // recomputation can still answer 409 reembed_row_changed.
+      // write landed). state.committedUnconfirmed stays set, so every later
+      // exit of this call is settled as unknown: a later refusal, provider
+      // timeout or error answers write_outcome_unknown and marks the id. Text
+      // changes that exhaust the attempts through recomputation, and a change
+      // seen at a confirmation, answer 409 only when no attempt has committed.
       if (attempt === REEMBED_WRITE_ATTEMPTS) {
         console.warn(`[reembed] ${id}: the committed vector was not confirmed after ${REEMBED_WRITE_ATTEMPTS} attempts; outcome: unconfirmed`);
         return { response: writeOutcomeUnknownFor(id) };
@@ -1959,12 +2032,13 @@ async function reembedStoredRow(
     const body = buildFromAllowlist({ id, updatedAt: outcome.updatedAt }, REEMBED_RESPONSE_RULES);
     return { response: body instanceof Response ? body : Response.json(body), token: outcome.token };
   }
-  return {
-    response: new Response(
+  return settle(
+    new Response(
       JSON.stringify({ error: "reembed_row_changed", message: "the stored text changed during each re-embed attempt; retry" }),
       { status: 409, headers: { "content-type": "application/json" } },
     ),
-  };
+    "reembed_row_changed",
+  );
 }
 
 export class Memory extends (databases as any).flair.Memory {
@@ -2648,10 +2722,13 @@ export class Memory extends (databases as any).flair.Memory {
   // via the one shared delegate. (Admin/internal — including the _reindex
   // path in put() — pass through the delegate untouched.)
   /** PATCH requires a target id and lock before its body runs. Ordinary and
-   *  re-embed owned writes commit before releasing the lock. */
+   *  re-embed owned writes commit before releasing the lock. A re-embed body
+   *  (flair#2296) holds the lock under its own phase name, `patch-reembed`, so
+   *  a hold warning names the re-embed (flair#2478 slice 3). */
   async patch(content: any, query?: any) {
     const ids = putLockIds(this, content);
     if (ids.length === 0) return memoryIdRequiredResponse();
+    const phase = isReembedPatch(content) ? "patch-reembed" : "patch";
     const outcome = await withMemoryWriteLock(memoryWriteLockStore(), ids, async () => {
       const result = await this.patchLocked(content, query);
       // Test-only: the verb body has returned and the lock is still held. A body
@@ -2660,7 +2737,7 @@ export class Memory extends (databases as any).flair.Memory {
       const committed = txnPausePoint("memory-patch-committed");
       if (committed) await committed;
       return result;
-    }, { phase: "patch" });
+    }, { phase });
     if (outcome.kind === "done") return outcome.value;
     return memoryLockRefusal(outcome, memoryLockCallerId(this))!;
   }
