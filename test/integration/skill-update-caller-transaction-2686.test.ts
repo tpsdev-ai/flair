@@ -4,13 +4,14 @@
  *
  * The write journal captures the writes a skill update stages, including those
  * its caller hooks stage, and intercepts Harper's `transaction.next` so a write
- * on a chained transaction is journaled too. The unit cases for #2650 pin both
- * shapes against a fake transaction:
- * `test/unit-isolated/skill-update-confirmation-2645.test.ts` — "journal
- * captures a caller write on a chained transaction" and "a refused outer
- * transaction compensates a caller hook's committed inner write". No current
- * caller hook creates a chained write, so these cases install one on the
- * exported `defaultSkillHooks` in a composed copy of the built component and
+ * on a chained transaction is journaled too. The caller-transaction shapes are
+ * covered against fake transactions by
+ * `test/unit-isolated/skill-update-confirmation-2645.test.ts` ("journal captures
+ * a caller write on a chained transaction") and
+ * `test/unit-isolated/skill-version-write-2139.test.ts` ("the successor and
+ * version follow the caller's abort"). No current caller hook creates a chained
+ * write, so these real-Harper cases install one on the exported
+ * `defaultSkillHooks` in a composed copy of the built component and
  * run it through the in-process caller fixture
  * (test/fixtures/inproc-app, which opens and aborts a caller-owned transaction).
  * A second database in that copy makes Harper create a real `transaction.next`
