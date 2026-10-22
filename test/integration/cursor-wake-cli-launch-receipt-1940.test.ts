@@ -91,7 +91,7 @@ async function seedEvent(record: Record<string, unknown>): Promise<void> {
 /** Point the CLI env at this Harper and the loopback Cursor fixture; return a restore fn. */
 function setCliEnv(agent: TestAgent): () => void {
   const saved = { ...process.env };
-  // Kept in process.env: the CLI child (cursor-wake-runner config/client) reads these three.
+  // Kept in process.env: the in-process cursor-wake CLI configuration reader reads these three.
   process.env.FLAIR_AGENT_ID = agent.id;
   process.env.FLAIR_URL = harper.httpURL;
   process.env.FLAIR_KEY_PATH = keyPathFor(agent);

@@ -352,8 +352,8 @@ function harperBinPath(harperBinDir: string): string {
 // raised rate limit, a trusted-proxy hop, fault injection) declares it through
 // StartHarperOptions.serverEnv. For a local spawn the values are merged after
 // `env`, before secret stripping and the helper's own overrides; in external
-// mode a non-empty serverEnv is REFUSED, naming every variable and value the
-// external service must have been started with. Refusing rather than skipping is
+// mode a non-empty serverEnv is REFUSED, naming every variable (never its value)
+// the external service must have been started with. Refusing rather than skipping is
 // deliberate: a skipped security-relevant suite reads as green.
 const HARPER_HTTP_URL = process.env.HARPER_HTTP_URL;
 const HARPER_OPS_URL_ENV = process.env.HARPER_OPS_URL;
