@@ -269,7 +269,8 @@ export async function withMemoryWriteLock<T>(
  *  marker answers `busy`/`unknown`; the writer skips the id and writes nothing.
  *  Whether the id is visited again is each writer's own rule (a later scan
  *  decides whether a migration row is still stale; the embedding backfill runs
- *  again only after the id's next successful HTTP Memory write). */
+ *  again only after the id's next successful HTTP Memory POST, PUT or PATCH
+ *  through the auth middleware). */
 export async function withMemoryWriteLockOnce<T>(
   store: unknown,
   ids: readonly (string | number)[],
