@@ -313,7 +313,7 @@ Clients on this page talk to the stdio server `@tpsdev-ai/flair-mcp`. Its `tools
 | `team_directory` | List active agents with published tps-mail contacts. Filter by `id` or `name`; page with `cursor`/`limit` |
 | `record_usage` | Report that recalled memories were actually used (`memoryId` or `memoryIds`, plus optional `attribution`). Drives `usageCount` / `usageBoost` |
 
-On the embedded `/mcp` handler, `soul_set` is listed only for a caller the soul write policy admits. That route authenticates callers with OAuth bearer tokens, which act as agent principals; the policy refuses an agent principal, so an agent's `tools/list` does not include `soul_set`. An agent's soul is changed by the operator, on the agent's behalf (`flair soul set`).
+On the embedded `/mcp` handler, `soul_set` is listed only for a caller the soul write policy's source-authorization step admits (`Soul.post` applies its content guards after that step). That route authenticates callers with OAuth bearer tokens: a token subject mapped to an Agent acts as an agent principal, and the policy refuses an agent principal, so an agent's `tools/list` does not include `soul_set`. Listing resolves the caller the way a call does, except that it never JIT-provisions. An agent's soul is changed by the operator, on the agent's behalf (`flair soul set`).
 
 For ordinary signed agents, Flair enforces write ownership server-side: they can write only under their authenticated agent ID. Administrator credentials and administrator agent roles have broader authority. Reads are more open by design: any agent on the same Flair instance can read any other agent's **non-private** memories, with no grant to set up (open-within-org read; see [SECURITY.md](../SECURITY.md)).
 

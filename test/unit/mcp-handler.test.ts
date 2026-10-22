@@ -283,7 +283,7 @@ afterAll(() => {
 });
 
 // ─── tools/list ──────────────────────────────────────────────────────────────
-describe("tools/list — the curated tools a caller can use", () => {
+describe("tools/list — the advertised tool definitions", () => {
   it("returns the pinned tool names for a token subject with no principal", async () => {
     const res = await mcpHandler(post({ jsonrpc: "2.0", id: 1, method: "tools/list" }, { sub: "s" }));
     const body = await parse(res);

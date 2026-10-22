@@ -2,12 +2,20 @@
  * mcp-soul-set-listing-2689.test.ts — flair#2689.
  *
  * The native /mcp surface advertises `soul_set` only to a caller the soul write
- * policy admits. Its callers authenticate with OAuth bearer tokens, which
- * resolve to agent principals; the delegated tool context carries no operator
- * credentials, so the policy refuses those principals. On that surface:
+ * policy's source-authorization step admits (resources/soul-write-policy.ts;
+ * `Soul.post` applies its content guards after that step). The list is the
+ * advertised tool definitions. It resolves the caller the way a call does — a
+ * token subject mapped to an Agent acts as an agent principal, and a valid
+ * token with no mapping reaches the list with no principal — except that
+ * listing never JIT-provisions. The delegated tool context carries no operator
+ * credentials, so the policy refuses an agent principal. On that surface:
  *
  *   - `tools/list` returns every other curated tool and does not return
- *     `soul_set`, for a non-admin agent and for an admin agent;
+ *     `soul_set`, for a non-admin agent and for an admin agent, and returns the
+ *     no-principal set for an unmapped subject with JIT provisioning on;
+ *   - that unmapped subject's `tools/list` creates no Agent or Credential row.
+ *     A `tools/call` by a subject with JIT on is a different path: handleToolCall
+ *     resolves with provisioning allowed, so a call can create a principal;
  *   - `tools/call soul_set` still answers 403 `soul_write_requires_operator`
  *     and stores no Soul row.
  *
@@ -36,6 +44,8 @@ const AGENT = `mcp-soul-agent-${sfx}`;
 const ADMIN_AGENT = `mcp-soul-admin-${sfx}`;
 const AGENT_SUB = `mcp-soul-sub-${sfx}`;
 const ADMIN_SUB = `mcp-soul-admin-sub-${sfx}`;
+const UNMAPPED_SUB = `mcp-soul-unmapped-${sfx}`;
+const SEEDED_AGENT = `mcp-soul-seeded-${sfx}`;
 
 /** Every tool name the registry declares. */
 const ALL_TOOLS = Object.keys(TOOLS).sort();
@@ -92,15 +102,32 @@ async function toolNames(token: string): Promise<string[]> {
 const callTool = (token: string, name: string, args: Record<string, unknown>) =>
   mcp(token, "tools/call", { name, arguments: args });
 
-/** A subject's Soul rows, read straight out of storage. */
-async function soulRows(agentId: string): Promise<any[]> {
+/**
+ * Rows for one search_by_value query, read straight out of storage. Only an
+ * HTTP 2xx with an array body is an answer: a failed read or an unparsable body
+ * fails the test, so an empty result is never a fallback for an error.
+ */
+async function checkedRows(table: string, attribute: string, value: string): Promise<any[]> {
   assertOwnInstance(harper);
   const res = await adminOp({
-    operation: "search_by_value", database: "flair", table: "Soul",
-    search_attribute: "agentId", search_value: agentId, get_attributes: ["*"],
+    operation: "search_by_value", database: "flair", table,
+    search_attribute: attribute, search_value: value, get_attributes: ["*"],
   });
-  const body = await res.json().catch(() => []);
-  return Array.isArray(body) ? body : [];
+  const text = await res.text();
+  expect(res.status, `${table} read returned ${res.status}: ${text.slice(0, 300)}`).toBe(200);
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    throw new Error(`${table} read returned a body that is not JSON: ${text.slice(0, 300)}`);
+  }
+  expect(Array.isArray(body), `${table} read returned a non-array body: ${text.slice(0, 300)}`).toBe(true);
+  return body as any[];
+}
+
+/** A subject's Soul rows. */
+async function soulRows(agentId: string): Promise<any[]> {
+  return checkedRows("Soul", "agentId", agentId);
 }
 
 describe("the /mcp tool list omits soul_set for an agent principal (flair#2689)", () => {
@@ -120,6 +147,7 @@ describe("the /mcp tool list omits soul_set for an agent principal (flair#2689)"
         OAUTH_GITHUB_CLIENT_ID: "mcp-soul-listing-client",
         OAUTH_GITHUB_CLIENT_SECRET: "mcp-soul-listing-secret",
         OAUTH_GITHUB_REDIRECT_URI: `${ISSUER}/oauth`,
+        FLAIR_MCP_JIT_PROVISION: "1",
       },
     });
     assertOwnInstance(harper);
@@ -155,6 +183,34 @@ describe("the /mcp tool list omits soul_set for an agent principal (flair#2689)"
     if (harper) await stopHarper(harper);
   }, 30_000);
 
+  test("the storage read used by the no-row checks finds an operator-seeded Soul row", async () => {
+    const now = new Date().toISOString();
+    const seededAgent = await adminOp({
+      operation: "insert", database: "flair", table: "Agent",
+      records: [{ id: SEEDED_AGENT, name: SEEDED_AGENT, kind: "agent", type: "agent", role: "agent", status: "active", publicKey: "mcp-oauth:seeded", createdAt: now, updatedAt: now }],
+    });
+    expect(seededAgent.status, await seededAgent.clone().text()).toBe(200);
+
+    const written = await fetch(`${harper.httpURL}/Soul/`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: basicHeader() },
+      body: JSON.stringify({ id: `soul-${sfx}`, agentId: SEEDED_AGENT, key: "voice", value: "operator-authored", durability: "permanent" }),
+    });
+    expect(written.status, await written.clone().text()).toBeLessThan(300);
+
+    const rows = await soulRows(SEEDED_AGENT);
+    expect(rows.length).toBe(1);
+    expect(rows[0].value).toBe("operator-authored");
+  }, 60_000);
+
+  test("an unmapped subject's tools/list is the no-principal set and creates no Agent or Credential row", async () => {
+    const token = await mintToken(UNMAPPED_SUB);
+    const names = (await toolNames(token)).sort();
+    expect(names).toEqual(ALL_TOOLS.filter((name) => name !== "soul_set"));
+    expect(await checkedRows("Agent", "publicKey", `mcp-oauth:${UNMAPPED_SUB}`)).toEqual([]);
+    expect(await checkedRows("Credential", "idpSubject", UNMAPPED_SUB)).toEqual([]);
+  }, 60_000);
+
   test("a non-admin agent's tools/list has every tool except soul_set", async () => {
     const names = (await toolNames(agentToken)).sort();
     expect(names).not.toContain("soul_set");
@@ -178,7 +234,7 @@ describe("the /mcp tool list omits soul_set for an agent principal (flair#2689)"
     expect(await soulRows(AGENT)).toEqual([]);
   }, 60_000);
 
-  test("the admin agent's soul_set call is refused the same way, so no admin agent is shown a tool it cannot use", async () => {
+  test("the admin agent's soul_set call is refused the same way", async () => {
     const reply = await callTool(adminToken, "soul_set", { key: "voice", value: `mcp soul listing admin ${sfx}` });
     expect(reply.error, JSON.stringify(reply.error)).toBeUndefined();
     const result = reply.result;
