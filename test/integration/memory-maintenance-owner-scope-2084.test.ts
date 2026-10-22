@@ -293,22 +293,12 @@ function readMemoryProbeLog(): Array<{ conditions: unknown; rows: number }> {
 
 beforeAll(async () => {
   pauseDir = mkdtempSync(join(tmpdir(), "flair-mm-scope-pause-"));
-  const saved = {
-    FLAIR_ENABLE_TEST_FAULT_INJECTION: process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION,
-    FLAIR_TEST_PAUSE_DIR: process.env.FLAIR_TEST_PAUSE_DIR,
-  };
-  process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION = "1";
-  process.env.FLAIR_TEST_PAUSE_DIR = pauseDir;
-  try {
-    composed = componentWithReplayProbe({ probe: READ_PROBE });
-    harper = await startHarper({ cwd: composed.dir, harperBinDir: composed.sourceRoot });
-  } finally {
-    // The spawned Harper has its copy; no later Harper in this process inherits it.
-    for (const [key, value] of Object.entries(saved)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  }
+  composed = componentWithReplayProbe({ probe: READ_PROBE });
+  harper = await startHarper({
+    cwd: composed.dir,
+    harperBinDir: composed.sourceRoot,
+    serverEnv: { FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_TEST_PAUSE_DIR: pauseDir },
+  });
   assertOwnInstance(harper);
   const now = new Date().toISOString();
   await insertRows("Agent", [

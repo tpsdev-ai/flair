@@ -95,20 +95,7 @@ async function waitForRunTouching(id: string, timeoutMs: number) {
 
 beforeAll(async () => {
   pauseDir = mkdtempSync(join(tmpdir(), "flair-esc-gap-pause-"));
-  const saved = {
-    FLAIR_ENABLE_TEST_FAULT_INJECTION: process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION,
-    FLAIR_TEST_PAUSE_DIR: process.env.FLAIR_TEST_PAUSE_DIR,
-  };
-  process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION = "1";
-  process.env.FLAIR_TEST_PAUSE_DIR = pauseDir;
-  try {
-    harper = await startHarper();
-  } finally {
-    for (const [key, value] of Object.entries(saved)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  }
+  harper = await startHarper({ serverEnv: { FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_TEST_PAUSE_DIR: pauseDir } });
   authHeader = "Basic " + Buffer.from(`${harper.admin.username}:${harper.admin.password}`).toString("base64");
 }, 180_000);
 
@@ -207,7 +194,7 @@ describe("flair#2656 — the `.content`-suffix re-embed under a write committed 
     await stopHarper(harper, { keepInstallDir: true });
     harper = await startHarper({
       installDir,
-      env: { FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_TEST_PAUSE_DIR: pauseDir },
+      serverEnv: { FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_TEST_PAUSE_DIR: pauseDir },
     });
     expect(await waitFor(join(pauseDir, `paused.${VERIFY_POINT}`), 150_000), "no migration cycle paused before read-back").toBe(true);
     let deletedId = "";

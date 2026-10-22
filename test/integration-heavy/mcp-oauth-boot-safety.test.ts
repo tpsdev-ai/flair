@@ -69,7 +69,7 @@
  *      discriminating boot test for the divergence itself.
  */
 
-import { describe, test, expect, beforeAll, afterEach, afterAll } from "bun:test";
+import { describe, test, expect, afterAll } from "bun:test";
 import { readFileSync, writeFileSync, mkdtempSync, rmSync, symlinkSync, copyFileSync, cpSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -88,31 +88,21 @@ const ENABLED_ENV_REFERENCE = "${FLAIR_MCP_OAUTH}";
 let instances: HarperInstance[] = [];
 let tempDirs: string[] = [];
 
-// ── Env hygiene: every boot in this file must control the FLAIR_MCP_* env ──
-// The shipped config now REFERENCES the environment, so an ambient
-// FLAIR_MCP_OAUTH leaking in from the runner would change what these tests
-// boot. Save once, restore after every test.
-const MCP_ENV_KEYS = [
-  "FLAIR_MCP_OAUTH",
-  "FLAIR_MCP_ISSUER",
-  "FLAIR_PUBLIC_URL",
-  "FLAIR_MCP_SIGNING_KEY_PEM",
-  "OAUTH_GITHUB_CLIENT_ID",
-  "OAUTH_GITHUB_CLIENT_SECRET",
-  "OAUTH_GITHUB_REDIRECT_URI",
-] as const;
-const savedEnv: Record<string, string | undefined> = {};
-beforeAll(() => {
-  for (const k of MCP_ENV_KEYS) savedEnv[k] = process.env[k];
-});
-afterEach(() => {
-  for (const k of MCP_ENV_KEYS) {
-    if (savedEnv[k] === undefined) delete process.env[k];
-    else process.env[k] = savedEnv[k]!;
-  }
-});
-function clearMcpEnv(): void {
-  for (const k of MCP_ENV_KEYS) delete process.env[k];
+// ── Server env: each boot declares the listed MCP/OAuth fixture variables ──
+// The shipped config REFERENCES the environment, so an ambient FLAIR_MCP_OAUTH
+// leaking in from the runner would change what these tests boot. An
+// `undefined` value removes an inherited one.
+function mcpServerEnv(values: Record<string, string> = {}): Record<string, string | undefined> {
+  return {
+    FLAIR_MCP_OAUTH: undefined,
+    FLAIR_MCP_ISSUER: undefined,
+    FLAIR_PUBLIC_URL: undefined,
+    FLAIR_MCP_SIGNING_KEY_PEM: undefined,
+    OAUTH_GITHUB_CLIENT_ID: undefined,
+    OAUTH_GITHUB_CLIENT_SECRET: undefined,
+    OAUTH_GITHUB_REDIRECT_URI: undefined,
+    ...values,
+  };
 }
 
 afterAll(async () => {
@@ -218,12 +208,12 @@ describe("flair#1136/#1152 boot-safety: shipped config with env-referenced mcp.e
       // boot degrades, and /mcp answers 500, so this test goes RED alongside
       // the version assertion. That red is the drift speaking — a positive
       // control, not a flake.
-      clearMcpEnv();
       const workDir = makeWorkDirWithShippedConfig("flair-boot-safety-");
 
       const harper = await startHarper({
         cwd: workDir,
         harperBinDir: REPO_ROOT,
+        serverEnv: mcpServerEnv(),
       });
       instances.push(harper);
 
@@ -266,17 +256,17 @@ describe("flair#2194 boot-safety: shipped config with MCP on and no signing key"
   test(
     "configured provider and no signing key boots clean",
     async () => {
-      clearMcpEnv();
-      process.env.FLAIR_MCP_OAUTH = "true";
-      process.env.FLAIR_MCP_ISSUER = "https://test.example.com";
-      process.env.OAUTH_GITHUB_CLIENT_ID = "no-signing-key-client";
-      process.env.OAUTH_GITHUB_CLIENT_SECRET = "no-signing-key-secret";
-      process.env.OAUTH_GITHUB_REDIRECT_URI = "https://test.example.com/oauth";
-
       const workDir = makeWorkDirWithShippedConfig("flair-no-signing-key-");
       const harper = await startHarper({
         cwd: workDir,
         harperBinDir: REPO_ROOT,
+        serverEnv: mcpServerEnv({
+          FLAIR_MCP_OAUTH: "true",
+          FLAIR_MCP_ISSUER: "https://test.example.com",
+          OAUTH_GITHUB_CLIENT_ID: "no-signing-key-client",
+          OAUTH_GITHUB_CLIENT_SECRET: "no-signing-key-secret",
+          OAUTH_GITHUB_REDIRECT_URI: "https://test.example.com/oauth",
+        }),
       });
       instances.push(harper);
 
@@ -304,16 +294,20 @@ describe("flair#2194: a declared signingKeyPem with an unset variable still fail
   test(
     "mcp.signingKeyPem declared with `${FLAIR_MCP_SIGNING_KEY_PEM}` unset: the plugin load is refused, naming the variable",
     async () => {
-      clearMcpEnv();
-      process.env.FLAIR_MCP_OAUTH = "true";
-      process.env.FLAIR_MCP_ISSUER = "https://test.example.com";
-      process.env.OAUTH_GITHUB_CLIENT_ID = "declared-pin-client";
-      process.env.OAUTH_GITHUB_CLIENT_SECRET = "declared-pin-secret";
-      process.env.OAUTH_GITHUB_REDIRECT_URI = "https://test.example.com/oauth";
       const workDir = makeWorkDirWithShippedConfig("flair-declared-pin-", (shipped) =>
         shipped.replace("    enabled: ${FLAIR_MCP_OAUTH}", "    enabled: ${FLAIR_MCP_OAUTH}\n    signingKeyPem: ${FLAIR_MCP_SIGNING_KEY_PEM}"),
       );
-      const harper = await startHarper({ cwd: workDir, harperBinDir: REPO_ROOT });
+      const harper = await startHarper({
+        cwd: workDir,
+        harperBinDir: REPO_ROOT,
+        serverEnv: mcpServerEnv({
+          FLAIR_MCP_OAUTH: "true",
+          FLAIR_MCP_ISSUER: "https://test.example.com",
+          OAUTH_GITHUB_CLIENT_ID: "declared-pin-client",
+          OAUTH_GITHUB_CLIENT_SECRET: "declared-pin-secret",
+          OAUTH_GITHUB_REDIRECT_URI: "https://test.example.com/oauth",
+        }),
+      });
       instances.push(harper);
 
       // The library's hard check is intact: a DECLARED, unresolved pin degrades the boot.
@@ -330,15 +324,19 @@ describe("flair#2194: a declared signingKeyPem with an unset variable still fail
 
 describe("flair#2194: MCP on with NO provider configured — fail-closed discovery", () => {
   test("a token minted with a provider returns 401 after provider removal and restart", async () => {
-    clearMcpEnv();
     const issuer = "https://provider-removal.flair.test";
-    process.env.FLAIR_MCP_OAUTH = "true";
-    process.env.FLAIR_MCP_ISSUER = issuer;
-    process.env.OAUTH_GITHUB_CLIENT_ID = "provider-removal-client";
-    process.env.OAUTH_GITHUB_CLIENT_SECRET = "provider-removal-secret";
-    process.env.OAUTH_GITHUB_REDIRECT_URI = `${issuer}/oauth`;
     const workDir = makeWorkDirWithShippedConfig("flair-provider-removal-");
-    let harper = await startHarper({ cwd: workDir, harperBinDir: REPO_ROOT });
+    let harper = await startHarper({
+      cwd: workDir,
+      harperBinDir: REPO_ROOT,
+      serverEnv: mcpServerEnv({
+        FLAIR_MCP_OAUTH: "true",
+        FLAIR_MCP_ISSUER: issuer,
+        OAUTH_GITHUB_CLIENT_ID: "provider-removal-client",
+        OAUTH_GITHUB_CLIENT_SECRET: "provider-removal-secret",
+        OAUTH_GITHUB_REDIRECT_URI: `${issuer}/oauth`,
+      }),
+    });
     instances.push(harper);
     const verifier = randomBytes(32).toString("base64url");
     const clientId = "provider-removal-client";
@@ -380,10 +378,12 @@ describe("flair#2194: MCP on with NO provider configured — fail-closed discove
     expect((await postMcp()).status).toBe(200);
     const installDir = harper.installDir;
     await stopHarper(harper, { keepInstallDir: true });
-    delete process.env.OAUTH_GITHUB_CLIENT_ID;
-    delete process.env.OAUTH_GITHUB_CLIENT_SECRET;
-    delete process.env.OAUTH_GITHUB_REDIRECT_URI;
-    harper = await startHarper({ cwd: workDir, harperBinDir: REPO_ROOT, installDir });
+    harper = await startHarper({
+      cwd: workDir,
+      harperBinDir: REPO_ROOT,
+      installDir,
+      serverEnv: mcpServerEnv({ FLAIR_MCP_OAUTH: "true", FLAIR_MCP_ISSUER: issuer }),
+    });
     instances.push(harper);
     expect((await fetch(harper.opsURL, { signal: AbortSignal.timeout(10_000) })).status).toBe(200);
     expect(harper.getLog?.() ?? "").toContain("OAuth provider 'github' not configured. Missing: clientId, clientSecret");
@@ -406,11 +406,12 @@ describe("flair#2194: MCP on with NO provider configured — fail-closed discove
   test(
     "no OAUTH_GITHUB_* set: boots clean, both protected-resource forms 404 and unauthenticated /mcp returns 401",
     async () => {
-      clearMcpEnv();
-      process.env.FLAIR_MCP_OAUTH = "true";
-      process.env.FLAIR_MCP_ISSUER = "https://test.example.com";
       const workDir = makeWorkDirWithShippedConfig("flair-no-provider-");
-      const harper = await startHarper({ cwd: workDir, harperBinDir: REPO_ROOT });
+      const harper = await startHarper({
+        cwd: workDir,
+        harperBinDir: REPO_ROOT,
+        serverEnv: mcpServerEnv({ FLAIR_MCP_OAUTH: "true", FLAIR_MCP_ISSUER: "https://test.example.com" }),
+      });
       instances.push(harper);
 
       const opsRes = await fetch(harper.opsURL, { signal: AbortSignal.timeout(10_000) });
@@ -436,7 +437,6 @@ describe("flair#1136 mutation-prove: mcp.enabled: true with env unset", () => {
   test(
     "literal true: Harper boots DEGRADED when mcp.enabled is true but FLAIR_MCP_* env is unset",
     async () => {
-      clearMcpEnv();
       const shipped = readFileSync(SHIPPED_CONFIG, "utf-8");
       const mutated = shipped.replace(`enabled: ${ENABLED_ENV_REFERENCE}`, "enabled: true");
       // The mutation must actually land — if the shipped enabled line ever
@@ -454,6 +454,7 @@ describe("flair#1136 mutation-prove: mcp.enabled: true with env unset", () => {
       const harper = await startHarper({
         cwd: workDir,
         harperBinDir: REPO_ROOT,
+        serverEnv: mcpServerEnv(),
       });
       instances.push(harper);
 
@@ -481,16 +482,20 @@ describe("flair#1136 mutation-prove: mcp.enabled: true with env unset", () => {
 
 describe("flair#1152 garbage value: FLAIR_MCP_OAUTH=maybe", () => {
   test("flair's strict mcpOAuthEnabled() stays false for a garbage value (in-process divergence)", () => {
-    // The asymmetry that keeps the garbage case inert, asserted at its
-    // source: the component treats any non-empty resolved string as truthy;
-    // this function does not.
-    clearMcpEnv();
+    // The value is read IN-PROCESS by mcpOAuthEnabled(), not by a spawned
+    // Harper, so this one stays in process.env.
+    const priorFlag = process.env.FLAIR_MCP_OAUTH;
     process.env.FLAIR_MCP_OAUTH = "maybe";
-    expect(mcpOAuthEnabled()).toBe(false);
-    // Positive control — the same code path DOES accept the real values, so
-    // a broken import/allowlist can't fake the assertion above.
-    process.env.FLAIR_MCP_OAUTH = "1";
-    expect(mcpOAuthEnabled()).toBe(true);
+    try {
+      expect(mcpOAuthEnabled()).toBe(false);
+      // Positive control — the same code path DOES accept the real values, so
+      // a broken import/allowlist can't fake the assertion above.
+      process.env.FLAIR_MCP_OAUTH = "1";
+      expect(mcpOAuthEnabled()).toBe(true);
+    } finally {
+      if (priorFlag === undefined) delete process.env.FLAIR_MCP_OAUTH;
+      else process.env.FLAIR_MCP_OAUTH = priorFlag;
+    }
   });
 
   test(
@@ -508,17 +513,17 @@ describe("flair#1152 garbage value: FLAIR_MCP_OAUTH=maybe", () => {
       // never validates the issuer). If either reader's vocabulary changes,
       // an assertion below flips — re-derive the whole table before shipping
       // that change.
-      clearMcpEnv();
-      process.env.FLAIR_MCP_OAUTH = "maybe";
-      process.env.FLAIR_MCP_ISSUER = "https://test.example.com";
-      process.env.OAUTH_GITHUB_CLIENT_ID = "test-client-id";
-      process.env.OAUTH_GITHUB_CLIENT_SECRET = "test-client-secret";
-      process.env.OAUTH_GITHUB_REDIRECT_URI = "https://test.example.com/oauth";
-
       const workDir = makeWorkDirWithShippedConfig("flair-garbage-value-");
       const harper = await startHarper({
         cwd: workDir,
         harperBinDir: REPO_ROOT,
+        serverEnv: mcpServerEnv({
+          FLAIR_MCP_OAUTH: "maybe",
+          FLAIR_MCP_ISSUER: "https://test.example.com",
+          OAUTH_GITHUB_CLIENT_ID: "test-client-id",
+          OAUTH_GITHUB_CLIENT_SECRET: "test-client-secret",
+          OAUTH_GITHUB_REDIRECT_URI: "https://test.example.com/oauth",
+        }),
       });
       instances.push(harper);
 
@@ -582,17 +587,17 @@ describe("flair#1152 enabled path: shipped config verbatim + env set", () => {
       // 1/true/yes/on — so "true" is the one value that enables BOTH sides
       // (and it is what buildSecretsBundle stages). With "1" this test fails:
       // /mcp is guarded (flair on) but the AS metadata 404s (component off).
-      clearMcpEnv();
-      process.env.FLAIR_MCP_OAUTH = "true";
-      process.env.FLAIR_MCP_ISSUER = "https://test.example.com";
-      process.env.OAUTH_GITHUB_CLIENT_ID = "test-client-id";
-      process.env.OAUTH_GITHUB_CLIENT_SECRET = "test-client-secret";
-      process.env.OAUTH_GITHUB_REDIRECT_URI = "https://test.example.com/oauth";
-
       const workDir = makeWorkDirWithShippedConfig("flair-enabled-");
       const harper = await startHarper({
         cwd: workDir,
         harperBinDir: REPO_ROOT,
+        serverEnv: mcpServerEnv({
+          FLAIR_MCP_OAUTH: "true",
+          FLAIR_MCP_ISSUER: "https://test.example.com",
+          OAUTH_GITHUB_CLIENT_ID: "test-client-id",
+          OAUTH_GITHUB_CLIENT_SECRET: "test-client-secret",
+          OAUTH_GITHUB_REDIRECT_URI: "https://test.example.com/oauth",
+        }),
       });
       instances.push(harper);
 
@@ -653,17 +658,17 @@ describe("flair#1285 vocabulary-asymmetry broken-on: FLAIR_MCP_OAUTH=1", () => {
       // authorization server for the client to satisfy the challenge against.
       // Fail-closed (no unauthenticated data path), but broken; case 5 pins
       // the one spelling that works, this pins the divergence itself.
-      clearMcpEnv();
-      process.env.FLAIR_MCP_OAUTH = "1";
-      process.env.FLAIR_MCP_ISSUER = "https://test.example.com";
-      process.env.OAUTH_GITHUB_CLIENT_ID = "test-client-id";
-      process.env.OAUTH_GITHUB_CLIENT_SECRET = "test-client-secret";
-      process.env.OAUTH_GITHUB_REDIRECT_URI = "https://test.example.com/oauth";
-
       const workDir = makeWorkDirWithShippedConfig("flair-broken-on-");
       const harper = await startHarper({
         cwd: workDir,
         harperBinDir: REPO_ROOT,
+        serverEnv: mcpServerEnv({
+          FLAIR_MCP_OAUTH: "1",
+          FLAIR_MCP_ISSUER: "https://test.example.com",
+          OAUTH_GITHUB_CLIENT_ID: "test-client-id",
+          OAUTH_GITHUB_CLIENT_SECRET: "test-client-secret",
+          OAUTH_GITHUB_REDIRECT_URI: "https://test.example.com/oauth",
+        }),
       });
       instances.push(harper);
 

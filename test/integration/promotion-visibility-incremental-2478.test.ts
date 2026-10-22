@@ -304,20 +304,7 @@ async function bootFirst(): Promise<void> {
 async function bootWithFaultInjection(point?: string): Promise<void> {
   rmSync(join(installDir, "memory-write-trace-2478.jsonl"), { force: true });
   if (point) arm(point);
-  const saved = {
-    FLAIR_ENABLE_TEST_FAULT_INJECTION: process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION,
-    FLAIR_TEST_PAUSE_DIR: process.env.FLAIR_TEST_PAUSE_DIR,
-  };
-  process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION = "1";
-  process.env.FLAIR_TEST_PAUSE_DIR = pauseDir;
-  try {
-    harper = await startHarper({ installDir, homeDir: home, cwd: component.dir, harperBinDir: component.sourceRoot });
-  } finally {
-    for (const [key, value] of Object.entries(saved)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  }
+  harper = await startHarper({ serverEnv: { FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_TEST_PAUSE_DIR: pauseDir }, installDir, homeDir: home, cwd: component.dir, harperBinDir: component.sourceRoot });
   authHeader = "Basic " + Buffer.from(`${harper.admin.username}:${harper.admin.password}`).toString("base64");
   assertOwnInstance();
   faultInjectionBooted = true;

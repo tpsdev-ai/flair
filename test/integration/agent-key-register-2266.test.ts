@@ -186,16 +186,7 @@ describe("flair#2266 — admin key registration on a pending Agent row", () => {
 
   beforeAll(async () => {
     pauseDir = mkdtempSync(join(tmpdir(), "flair-2266-pause-"));
-    const savedFault = process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION;
-    const savedPause = process.env.FLAIR_TEST_PAUSE_DIR;
-    process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION = "1";
-    process.env.FLAIR_TEST_PAUSE_DIR = pauseDir;
-    try {
-      harper = await startHarper();
-    } finally {
-      if (savedFault === undefined) delete process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION; else process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION = savedFault;
-      if (savedPause === undefined) delete process.env.FLAIR_TEST_PAUSE_DIR; else process.env.FLAIR_TEST_PAUSE_DIR = savedPause;
-    }
+    harper = await startHarper({ serverEnv: { FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_TEST_PAUSE_DIR: pauseDir } });
     assertOwnInstance(harper);
 
     // One Instance row, so this instance has a canonical identity.
