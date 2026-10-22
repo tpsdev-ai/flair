@@ -41,6 +41,20 @@ import { createSnapshot } from "../../src/rem/snapshot.ts";
 import { establishRestorePair, type RestoreTarget } from "../../src/commands/rem.ts";
 
 const CLI = join(process.cwd(), "dist", "cli.js");
+/**
+ * This suite tests restore targeting, not how long an embedding call takes.
+ * The write path bounds an embedding call made under the memory write lock at
+ * MEMORY_LOCKED_PROVIDER_TIMEOUT_MS (20 s), and on a shared test host a slow
+ * provider can outlast that bound and report `memory_provider_timeout`, which
+ * reads like a targeting failure. These instances declare a wider bound; the
+ * override is read only under the fault-injection gate.
+ */
+const PROVIDER_BOUND_ENV = {
+  FLAIR_ENABLE_TEST_FAULT_INJECTION: "1",
+  FLAIR_MEMORY_LOCK_PROVIDER_TIMEOUT_MS: "60000",
+};
+/** The restore child's budget, above the provider bound so a refusal is reported by the write rather than by the spawn. */
+const RESTORE_CHILD_TIMEOUT_MS = 90_000;
 const AGENT_ID = "agent-a";
 const MEMORY_ID = "m-restored";
 const EXTRA_MEMORY_ID = "m-extra";
@@ -122,7 +136,7 @@ function runRestore(env: Record<string, string | undefined>, credential: string[
   for (const [key, value] of Object.entries(childEnv)) if (value === undefined) delete childEnv[key];
   const child = Bun.spawn(
     [nodeBin({ env: childEnv as Record<string, string> }), CLI, "rem", "restore", date, "--agent", AGENT_ID, "--apply", ...credential],
-    { env: childEnv as Record<string, string>, timeout: 60_000, stdout: "pipe", stderr: "pipe" },
+    { env: childEnv as Record<string, string>, timeout: RESTORE_CHILD_TIMEOUT_MS, stdout: "pipe", stderr: "pipe" },
   );
   return (async () => {
     const stdout = await new Response(child.stdout).text();
@@ -132,8 +146,16 @@ function runRestore(env: Record<string, string | undefined>, credential: string[
   })();
 }
 
+/** stdio for a failed restore, calling out a provider timeout when the output carries one. */
+function restoreFailure(result: { stdout: string; stderr: string }): string {
+  const output = `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`;
+  return /memory_provider_timeout/.test(output)
+    ? `${output}\nprovider timeout: a memory write was refused with memory_provider_timeout (the instance's embedding provider bound), not a restore-targeting failure`
+    : output;
+}
+
 beforeAll(async () => {
-  a = await startHarper();
+  a = await startHarper({ serverEnv: { ...PROVIDER_BOUND_ENV } });
   assertOwnInstance(a);
   home = mkdtempSync(join(tmpdir(), "flair-2708-real-"));
   mkdirSync(join(home, ".flair"), { recursive: true });
@@ -188,7 +210,7 @@ describe("flair#2708 — rem restore on a real instance", () => {
       snapshotStem,
     );
 
-    expect(result.code, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`).toBe(0);
+    expect(result.code, restoreFailure(result)).toBe(0);
     expect(result.stdout).toContain("Status:       completed");
     expect(result.stdout).toContain("Deleted:      2 memories, 1 souls, 1 candidates");
     expect(result.stdout).toContain("Restored:     1 memories, 1 souls");
@@ -220,7 +242,7 @@ describe("flair#2708 — rem restore on a real instance", () => {
       snapshotStem,
     );
 
-    expect(result.code, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`).toBe(0);
+    expect(result.code, restoreFailure(result)).toBe(0);
     expect(result.stdout).toContain("Status:       completed");
     expect(result.stdout).toMatch(/Deleted: +\d+ memories, 1 souls, \d+ candidates/);
     expect(await agentRows(a, "Memory", ["id", "content"])).toEqual([{ id: MEMORY_ID, content: "restored memory" }]);
@@ -228,7 +250,7 @@ describe("flair#2708 — rem restore on a real instance", () => {
   }, 120_000);
 
   test("with no configured pair, refuses FLAIR_URL at one instance and FLAIR_OPS_PORT at another before any listing or write", async () => {
-    b = await startHarper();
+    b = await startHarper({ serverEnv: { ...PROVIDER_BOUND_ENV } });
     assertOwnInstance(b);
     expect(existsSync(join(home, ".flair", "config.yaml"))).toBe(false);
 
@@ -267,7 +289,7 @@ describe("flair#2708 — rem restore on a real instance", () => {
 
   test("the non-loopback pair check passes only when both endpoints of real instances report the same single identity", async () => {
     if (!b) {
-      b = await startHarper();
+      b = await startHarper({ serverEnv: { ...PROVIDER_BOUND_ENV } });
       assertOwnInstance(b);
     }
     const second = b;
