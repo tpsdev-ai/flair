@@ -55,7 +55,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, relative, resolve } from "node:path";
 
@@ -78,23 +78,28 @@ const REQUIRED_ENTRY_FIELDS = [
 ];
 
 /**
- * The consumer-install observations. Each is one published package, packed and
- * installed with npm --omit=dev outside this repo (so without its overrides),
- * then audited with `npm audit --omit=dev --json`. npm overrides in a package
- * do not apply to its consumers, so the workspace's bun lockfile does not show
- * what a consumer of each package resolves (flair#1498, flair#2398,
- * flair#2757). Every input is MANDATORY: the gate refuses to run without each
- * flag. `source` is the name an allowlist entry's
- * `sources` uses for that tree. `vendor`, when set, is the only direct
- * dependency a vendor-pinned entry's chain may name second.
+ * The consumer-install observations. Each is one published package, packed
+ * from its workspace directory `dir` and installed with npm --omit=dev outside
+ * this repo (so without its overrides), then audited with `npm audit
+ * --omit=dev --json`. npm overrides in a package do not apply to its consumers,
+ * so the workspace's bun lockfile does not show what a consumer of each package
+ * resolves (flair#1498, flair#2398, flair#2757).
+ *
+ * Each input is a mandatory flag naming an install prefix. Before any audit
+ * runs, the gate refuses a missing flag, two flags naming one prefix, and a
+ * prefix that is not an npm install of that package at the version of the
+ * workspace manifest the job packs (see `prefixIdentityProblems`). `source` is
+ * the name an allowlist entry's `sources` uses for that tree. `vendor`, when
+ * set, is the only direct dependency a vendor-pinned entry's chain may name
+ * second.
  */
 export const CONSUMER_INSTALLS = [
-  { flag: "--npm-install-prefix", source: "npm-install", package: "@tpsdev-ai/flair" },
-  { flag: "--adk-npm-install-prefix", source: "npm-install-adk", package: "@tpsdev-ai/adk-flair", vendor: "@google/adk" },
-  { flag: "--mcp-npm-install-prefix", source: "npm-install-mcp", package: "@tpsdev-ai/flair-mcp" },
-  { flag: "--openclaw-npm-install-prefix", source: "npm-install-openclaw", package: "@tpsdev-ai/openclaw-flair" },
-  { flag: "--pi-npm-install-prefix", source: "npm-install-pi", package: "@tpsdev-ai/pi-flair" },
-  { flag: "--n8n-npm-install-prefix", source: "npm-install-n8n", package: "@tpsdev-ai/n8n-nodes-flair" },
+  { flag: "--npm-install-prefix", source: "npm-install", package: "@tpsdev-ai/flair", dir: "." },
+  { flag: "--adk-npm-install-prefix", source: "npm-install-adk", package: "@tpsdev-ai/adk-flair", dir: "packages/adk-flair-js", vendor: "@google/adk" },
+  { flag: "--mcp-npm-install-prefix", source: "npm-install-mcp", package: "@tpsdev-ai/flair-mcp", dir: "packages/flair-mcp" },
+  { flag: "--openclaw-npm-install-prefix", source: "npm-install-openclaw", package: "@tpsdev-ai/openclaw-flair", dir: "packages/openclaw-flair" },
+  { flag: "--pi-npm-install-prefix", source: "npm-install-pi", package: "@tpsdev-ai/pi-flair", dir: "packages/pi-flair" },
+  { flag: "--n8n-npm-install-prefix", source: "npm-install-n8n", package: "@tpsdev-ai/n8n-nodes-flair", dir: "packages/n8n-nodes-flair" },
 ];
 
 // The observations the gate runs. `bun` is the lockfile observation (`bun
@@ -513,7 +518,7 @@ export function validateAllowlist(allowlist, today) {
       );
     }
     if (!Array.isArray(entry.sources) || entry.sources.length === 0) {
-      problems.push(`${where}: "sources" must be a non-empty array of "bun" and/or "npm-install"`);
+      problems.push(`${where}: "sources" must be a non-empty array of ${[...VALID_SOURCES].map((v) => `"${v}"`).join(", ")}`);
     } else {
       for (const s of entry.sources) {
         if (!VALID_SOURCES.has(s)) {
@@ -703,6 +708,93 @@ async function latestPublishedVersion(pkg) {
 }
 
 /* ------------------------------------------------------------------ *
+ * Consumer-install prefix identity                                    *
+ * ------------------------------------------------------------------ */
+
+/**
+ * The version of the workspace manifest the job packs for `input`
+ * (`<repo>/<dir>/package.json`, the file `npm pack` reads). Throws when that
+ * manifest cannot be read, names a different package or has no version.
+ */
+export function packedManifestVersion(repoRoot, input) {
+  const rel = join(input.dir, "package.json");
+  let manifest;
+  try {
+    manifest = JSON.parse(readFileSync(join(repoRoot, rel), "utf8"));
+  } catch (e) {
+    throw new Error(`cannot read the workspace manifest ${rel} the job packs for ${input.flag}: ${e.message}`);
+  }
+  if (manifest?.name !== input.package) {
+    throw new Error(`the workspace manifest ${rel} names ${JSON.stringify(manifest?.name)}, expected ${input.package}`);
+  }
+  if (typeof manifest.version !== "string" || !manifest.version) {
+    throw new Error(`the workspace manifest ${rel} has no version`);
+  }
+  return manifest.version;
+}
+
+/** The prefix's direct dependencies as its package-lock.json records them, for refusal messages. */
+function directDependencies(lock) {
+  const deps = Object.keys(lock?.packages?.[""]?.dependencies ?? {});
+  return deps.length ? `direct dependencies ${deps.join(", ")}` : "no direct dependencies";
+}
+
+/**
+ * What is wrong with `prefix` as an npm install of the packed tarball of
+ * `name`@`version`, as a list (empty when nothing is). The prefix must hold
+ * `node_modules/<name>/package.json` with that name and version, and its
+ * package-lock.json (the tree `npm audit` reads) must record
+ * `node_modules/<name>` at that version, resolved from a local `.tgz`. An
+ * unreadable or unparseable file is a problem, never a pass.
+ */
+export function prefixIdentityProblems(prefix, name, version) {
+  const problems = [];
+  let lock;
+  try {
+    lock = JSON.parse(readFileSync(join(prefix, "package-lock.json"), "utf8"));
+  } catch (e) {
+    problems.push(`no readable package-lock.json (${e.code ?? e.message})`);
+  }
+  let installed;
+  try {
+    installed = JSON.parse(readFileSync(join(prefix, "node_modules", name, "package.json"), "utf8"));
+  } catch (e) {
+    problems.push(`no readable node_modules/${name}/package.json (${e.code ?? e.message})`);
+  }
+  if (installed !== undefined) {
+    if (installed?.name !== name) {
+      problems.push(`node_modules/${name}/package.json names ${JSON.stringify(installed?.name)}`);
+    }
+    if (installed?.version !== version) {
+      problems.push(`node_modules/${name}/package.json has version ${JSON.stringify(installed?.version)}`);
+    }
+  }
+  if (lock !== undefined) {
+    const row = lock?.packages?.[`node_modules/${name}`];
+    if (!row || typeof row !== "object") {
+      problems.push(`package-lock.json has no "node_modules/${name}" entry; found ${directDependencies(lock)}`);
+    } else {
+      if (row.version !== version) {
+        problems.push(`package-lock.json records version ${JSON.stringify(row.version)}`);
+      }
+      if (typeof row.resolved !== "string" || !row.resolved.startsWith("file:") || !row.resolved.endsWith(".tgz")) {
+        problems.push(`package-lock.json resolves it from ${JSON.stringify(row.resolved ?? null)}, not a local .tgz`);
+      }
+    }
+  }
+  return problems;
+}
+
+/** A prefix's real path, or its resolved path when it does not exist (it then fails the identity check). */
+function canonicalPrefix(prefix) {
+  try {
+    return realpathSync(prefix);
+  } catch {
+    return resolve(prefix);
+  }
+}
+
+/* ------------------------------------------------------------------ *
  * Main                                                                *
  * ------------------------------------------------------------------ */
 
@@ -716,7 +808,7 @@ async function main() {
   }
   const todayStr = today.toISOString().slice(0, 10);
 
-  // Every consumer-install observation is MANDATORY. The gate refuses to run
+  // Every consumer-install input is a MANDATORY flag. The gate refuses to run
   // without each one: a PR whose tarball lane is skipped or optional would merge
   // with that observation never made, and a check that can be skipped is not a
   // check.
@@ -736,6 +828,39 @@ async function main() {
     );
   }
   if (missing.length) process.exit(2);
+
+  // Each prefix must be its own npm install of the package its flag names, at
+  // the version the job packed, so a clean prefix of another package (or one
+  // prefix passed twice) cannot stand in for an observation. Checked before
+  // any audit runs.
+  const identityProblems = [];
+  const prefixOwner = new Map();
+  for (const input of CONSUMER_INSTALLS) {
+    const prefix = prefixes.get(input.source);
+    const key = canonicalPrefix(prefix);
+    if (prefixOwner.has(key)) {
+      identityProblems.push(
+        `${prefixOwner.get(key)} and ${input.flag} name the same prefix ${prefix}; each consumer-install input needs its own install.`,
+      );
+      continue;
+    }
+    prefixOwner.set(key, input.flag);
+    let version;
+    try {
+      version = packedManifestVersion(REPO_ROOT, input);
+    } catch (e) {
+      identityProblems.push(`${e.message}.`);
+      continue;
+    }
+    const found = prefixIdentityProblems(prefix, input.package, version);
+    if (found.length) {
+      identityProblems.push(
+        `${input.flag} ${prefix} is not an npm install of the packed ${input.package}@${version}: ${found.join("; ")}.`,
+      );
+    }
+  }
+  for (const problem of identityProblems) console.error(`DEPENDENCY AUDIT GATE: ${problem}`);
+  if (identityProblems.length) process.exit(2);
 
   let allowlist;
   let advisories;
@@ -875,10 +1000,11 @@ async function main() {
 
   // Check 6 — staleness + sources mismatch.
   //
-  // The gate always runs BOTH observations (bun lockfile + npm-install tree), so
-  // every declared source is observed in every invocation. An entry is STALE when
-  // its advisory appears in no source at all; a SOURCES MISMATCH when the observed
-  // sources and the declared sources do not agree in either direction.
+  // A run that reaches this point has run every observation (the bun lockfile
+  // and each consumer install), so every declared source was observed. An
+  // entry is STALE when its advisory appears in no source at all; a SOURCES
+  // MISMATCH when the observed sources and the declared sources do not agree
+  // in either direction.
   const matchedGhsa = new Set(matchedBySource.keys());
   for (const entry of allowlist.entries) {
     if (!entry?.ghsa) continue;

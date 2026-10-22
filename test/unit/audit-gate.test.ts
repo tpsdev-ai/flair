@@ -22,14 +22,66 @@ const ALLOWLIST = JSON.parse(
   readFileSync(join(REPO_ROOT, ".github", "audit-allowlist.json"), "utf8"),
 );
 const TEST_YML = readFileSync(join(REPO_ROOT, ".github", "workflows", "test.yml"), "utf8");
-/** The consumer-install inputs flair#2757 added. Fixtures that test other inputs pass them too. */
-const ADDED_CONSUMER_FLAGS = [
-  "--mcp-npm-install-prefix",
-  "--openclaw-npm-install-prefix",
-  "--pi-npm-install-prefix",
-  "--n8n-npm-install-prefix",
+/**
+ * The six consumer-install inputs: the flag, the allowlist source, the package
+ * the flag's prefix must hold, and the workspace directory the job packs it
+ * from. Listed here, not imported from the gate, so dropping or changing an
+ * input in the gate fails a case below.
+ */
+const CONSUMER_INPUTS = [
+  { flag: "--npm-install-prefix", source: "npm-install", pkg: "@tpsdev-ai/flair", dir: "." },
+  { flag: "--adk-npm-install-prefix", source: "npm-install-adk", pkg: "@tpsdev-ai/adk-flair", dir: "packages/adk-flair-js" },
+  { flag: "--mcp-npm-install-prefix", source: "npm-install-mcp", pkg: "@tpsdev-ai/flair-mcp", dir: "packages/flair-mcp" },
+  { flag: "--openclaw-npm-install-prefix", source: "npm-install-openclaw", pkg: "@tpsdev-ai/openclaw-flair", dir: "packages/openclaw-flair" },
+  { flag: "--pi-npm-install-prefix", source: "npm-install-pi", pkg: "@tpsdev-ai/pi-flair", dir: "packages/pi-flair" },
+  { flag: "--n8n-npm-install-prefix", source: "npm-install-n8n", pkg: "@tpsdev-ai/n8n-nodes-flair", dir: "packages/n8n-nodes-flair" },
 ];
-const addedConsumerArgs = (prefix: string) => ADDED_CONSUMER_FLAGS.flatMap((flag) => [flag, prefix]);
+/** The version every fixture workspace manifest and install record carries. */
+const FIXTURE_VERSION = "1.0.0";
+
+/** Parsed JSON at `path`, or `fallback` when the file cannot be read or parsed. */
+function readJson(path: string, fallback: Record<string, any>): Record<string, any> {
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return fallback;
+  }
+}
+
+/**
+ * Writes the two files the gate's identity check reads from an npm install of
+ * the packed tarball of `pkg` into `prefix`: the installed manifest (merged
+ * into any already there) and a package-lock.json row resolved from a local
+ * .tgz, in the shape npm writes (audit-gate-real-tools.test.ts checks real npm).
+ */
+function writeInstallRecord(prefix: string, pkg: string, version = FIXTURE_VERSION) {
+  const dir = join(prefix, "node_modules", pkg);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ ...readJson(join(dir, "package.json"), {}), name: pkg, version }));
+  const lock = readJson(join(prefix, "package-lock.json"), { lockfileVersion: 3 });
+  const tgz = `file:../packed/${pkg.replace(/^@/, "").replace("/", "-")}-${version}.tgz`;
+  const packages = lock.packages ?? {};
+  packages[""] = { ...packages[""], dependencies: { ...packages[""]?.dependencies, [pkg]: tgz } };
+  packages[`node_modules/${pkg}`] = { ...packages[`node_modules/${pkg}`], version, resolved: tgz };
+  writeFileSync(join(prefix, "package-lock.json"), JSON.stringify({ ...lock, packages }));
+}
+
+/**
+ * Makes `root` a fixture repo holding the workspace manifest the job packs for
+ * each input, and writes each input's install record into its own prefix.
+ */
+function writeIdentities(root: string, prefixOf: (source: string) => string) {
+  for (const input of CONSUMER_INPUTS) {
+    mkdirSync(join(root, input.dir), { recursive: true });
+    const manifest = join(root, input.dir, "package.json");
+    writeFileSync(manifest, JSON.stringify({ ...readJson(manifest, {}), name: input.pkg, version: FIXTURE_VERSION }));
+    writeInstallRecord(prefixOf(input.source), input.pkg);
+  }
+}
+
+/** Every input's flag followed by its prefix. */
+const prefixArgs = (prefixOf: (source: string) => string) =>
+  CONSUMER_INPUTS.flatMap((input) => [input.flag, prefixOf(input.source)]);
 
 /**
  * These tests exist because the audit step's original defect was not a wrong
@@ -106,22 +158,10 @@ describe("the gate refuses to run bun-only", () => {
   }, 6_000);
 });
 
-// ─── The other published packages' consumer installs (flair#2757) ────────────
+// ─── The four added consumer-install inputs (flair#2757) ─────────────────────
 
-describe("the consumer installs of the other published packages (flair#2757)", () => {
-  // Listed here, not imported from the gate, so dropping one from the gate's
-  // required inputs fails the missing-input case below.
-  const INPUTS = [
-    { flag: "--mcp-npm-install-prefix", source: "npm-install-mcp", pkg: "@tpsdev-ai/flair-mcp" },
-    { flag: "--openclaw-npm-install-prefix", source: "npm-install-openclaw", pkg: "@tpsdev-ai/openclaw-flair" },
-    { flag: "--pi-npm-install-prefix", source: "npm-install-pi", pkg: "@tpsdev-ai/pi-flair" },
-    { flag: "--n8n-npm-install-prefix", source: "npm-install-n8n", pkg: "@tpsdev-ai/n8n-nodes-flair" },
-  ];
-  const ALL = [
-    { flag: "--npm-install-prefix", source: "npm-install" },
-    { flag: "--adk-npm-install-prefix", source: "npm-install-adk" },
-    ...INPUTS,
-  ];
+describe("the four added consumer-install inputs, stand-in tools (flair#2757)", () => {
+  const INPUTS = CONSUMER_INPUTS.slice(2);
   const GHSA = "GHSA-0000-0000-2757";
   const report = (nodes = ["node_modules/hono"]) => ({
     vulnerabilities: { hono: { nodes, via: [{
@@ -136,15 +176,19 @@ describe("the consumer installs of the other published packages (flair#2757)", (
   });
 
   /**
-   * The real gate with stand-in tools: `bun` reports nothing, and `npm` prints
-   * `reports[source]` in that input's prefix and an empty report in every other
-   * prefix. `omit` leaves that flag off the command line.
+   * The real gate in a fixture repo with stand-in tools. Each input has its own
+   * prefix holding that input's install record (writeIdentities); `setup` runs
+   * after that. `bun` reports nothing, and `npm` prints `reports[source]` in
+   * that input's prefix and an empty report in every other prefix. `omit`
+   * leaves a flag off the command line; `reuse` maps a flag to the source whose
+   * prefix it is given instead of its own.
    */
   function runGate(opts: {
     omit?: string;
+    reuse?: Record<string, string>;
     reports?: Record<string, object>;
     entries?: object[];
-    setup?: (prefixes: Record<string, string>) => void;
+    setup?: (prefixes: Record<string, string>, root: string) => void;
   } = {}) {
     const root = mkdtempSync(join(tmpdir(), "flair-audit-consumers-"));
     try {
@@ -153,12 +197,11 @@ describe("the consumer installs of the other published packages (flair#2757)", (
       writeFileSync(join(root, ".github/audit-allowlist.json"), JSON.stringify({
         policy: ALLOWLIST.policy, entries: opts.entries ?? [],
       }));
-      const prefixes: Record<string, string> = {};
-      for (const { source } of ALL) {
-        prefixes[source] = join(root, `prefix-${source}`);
-        mkdirSync(prefixes[source]!);
-      }
-      opts.setup?.(prefixes);
+      const prefixes: Record<string, string> = Object.fromEntries(
+        CONSUMER_INPUTS.map(({ source }) => [source, join(root, `prefix-${source}`)]),
+      );
+      writeIdentities(root, (source) => prefixes[source]!);
+      opts.setup?.(prefixes, root);
       const cases = Object.entries(opts.reports ?? {})
         .map(([source, body]) => `  */prefix-${source}) printf '%s\\n' '${JSON.stringify(body)}' ;;\n`)
         .join("");
@@ -168,7 +211,8 @@ describe("the consumer installs of the other published packages (flair#2757)", (
       chmodSync(join(root, "bin/npm"), 0o755);
       chmodSync(join(root, "bin/bun"), 0o755);
       writeFileSync(join(root, "offline.mjs"), "globalThis.fetch = async () => { throw new Error('fixture offline'); };\n");
-      const args = ALL.flatMap(({ flag, source }) => (flag === opts.omit ? [] : [flag, prefixes[source]!]));
+      const args = CONSUMER_INPUTS.flatMap(({ flag, source }) =>
+        flag === opts.omit ? [] : [flag, prefixes[opts.reuse?.[flag] ?? source]!]);
       return spawnSync(
         process.execPath,
         ["--import", join(root, "offline.mjs"), join(root, "scripts/audit-gate.mjs"), ...args],
@@ -189,7 +233,15 @@ describe("the consumer installs of the other published packages (flair#2757)", (
     }
   }
 
-  it("passes when every consumer install reports nothing", () => {
+  /** The identity refusal: exit 2, the stderr lines asked for, and no audit report on stdout. */
+  function expectIdentityRefusal(res: ReturnType<typeof runGate>, ...lines: string[]) {
+    expect(res.error).toBeUndefined();
+    expect(res.status).toBe(2);
+    for (const line of lines) expect(res.stderr).toContain(line);
+    expect(res.stdout).toBe("");
+  }
+
+  it("passes when every prefix holds its package and the stand-in npm reports nothing", () => {
     const res = runGate();
     expect(res.error).toBeUndefined();
     expect(res.status).toBe(0);
@@ -197,16 +249,16 @@ describe("the consumer installs of the other published packages (flair#2757)", (
   }, 12_000);
 
   for (const input of INPUTS) {
-    it(`exits non-zero naming ${input.flag} when it is absent`, () => {
+    it(`exits 2 naming ${input.flag} when that mandatory input is absent`, () => {
       const res = runGate({ omit: input.flag });
       expect(res.error).toBeUndefined();
       expect(res.status).toBe(2);
       expect(res.stderr).toContain(`missing ${input.flag} <dir>`);
       expect(res.stderr).toContain(input.pkg);
-      expect(res.stdout).not.toContain("PASS —");
+      expect(res.stdout).toBe("");
     }, 12_000);
 
-    it(`fails the gate on an advisory that only ${input.pkg}'s consumer install reports`, () => {
+    it(`fails the gate on an advisory only the ${input.flag} prefix's stand-in report lists`, () => {
       const res = runGate({ reports: { [input.source]: report() } });
       expect(res.error).toBeUndefined();
       expect(res.status).toBe(1);
@@ -227,13 +279,91 @@ describe("the consumer installs of the other published packages (flair#2757)", (
     }, 24_000);
   }
 
+  describe("the identity check: each prefix holds its input's package at the packed version", () => {
+    const mcp = CONSUMER_INPUTS.find((input) => input.source === "npm-install-mcp")!;
+
+    for (const input of CONSUMER_INPUTS) {
+      it(`exits 2 naming ${input.flag} when its prefix holds another package instead of ${input.pkg}`, () => {
+        const res = runGate({
+          setup: (prefixes) => {
+            rmSync(prefixes[input.source]!, { recursive: true, force: true });
+            writeInstallRecord(prefixes[input.source]!, "clean-fixture");
+          },
+        });
+        expectIdentityRefusal(
+          res,
+          `${input.flag} `,
+          `is not an npm install of the packed ${input.pkg}@${FIXTURE_VERSION}`,
+          `no readable node_modules/${input.pkg}/package.json`,
+          "found direct dependencies clean-fixture",
+        );
+      }, 12_000);
+    }
+
+    it("exits 2 when the installed package's version differs from the workspace manifest's", () => {
+      const res = runGate({ setup: (prefixes) => writeInstallRecord(prefixes[mcp.source]!, mcp.pkg, "0.9.0") });
+      expectIdentityRefusal(
+        res,
+        `${mcp.flag} `,
+        `node_modules/${mcp.pkg}/package.json has version "0.9.0"`,
+        'package-lock.json records version "0.9.0"',
+      );
+    }, 12_000);
+
+    it("exits 2 when package-lock.json resolves the package from the registry, not a local .tgz", () => {
+      const res = runGate({
+        setup: (prefixes) => {
+          const lockPath = join(prefixes[mcp.source]!, "package-lock.json");
+          const lock = readJson(lockPath, {});
+          lock.packages[`node_modules/${mcp.pkg}`].resolved = "https://registry.npmjs.org/@tpsdev-ai/flair-mcp/-/flair-mcp-1.0.0.tgz";
+          writeFileSync(lockPath, JSON.stringify(lock));
+        },
+      });
+      expectIdentityRefusal(res, `${mcp.flag} `, "not a local .tgz");
+    }, 12_000);
+
+    for (const [name, contents] of [["missing", null], ["unparseable", "{invalid"]] as const) {
+      it(`exits 2 when the prefix's package-lock.json is ${name}`, () => {
+        const res = runGate({
+          setup: (prefixes) => {
+            const lockPath = join(prefixes[mcp.source]!, "package-lock.json");
+            if (contents === null) rmSync(lockPath);
+            else writeFileSync(lockPath, contents);
+          },
+        });
+        expectIdentityRefusal(res, `${mcp.flag} `, "no readable package-lock.json");
+      }, 12_000);
+    }
+
+    it("exits 2 when two flags name the same prefix", () => {
+      const res = runGate({ reuse: { "--pi-npm-install-prefix": mcp.source } });
+      expectIdentityRefusal(res, "--mcp-npm-install-prefix and --pi-npm-install-prefix name the same prefix");
+    }, 12_000);
+
+    it("exits 2 when the workspace manifest the job packs names another package or is missing", () => {
+      const renamed = runGate({
+        setup: (_prefixes, root) =>
+          writeFileSync(join(root, mcp.dir, "package.json"), JSON.stringify({ name: "other", version: FIXTURE_VERSION })),
+      });
+      expectIdentityRefusal(
+        renamed,
+        `the workspace manifest ${mcp.dir}/package.json names "other", expected ${mcp.pkg}`,
+      );
+      const missing = runGate({ setup: (_prefixes, root) => rmSync(join(root, mcp.dir, "package.json")) });
+      expectIdentityRefusal(
+        missing,
+        `cannot read the workspace manifest ${mcp.dir}/package.json the job packs for ${mcp.flag}`,
+      );
+    }, 24_000);
+  });
+
   describe("a vendor-pinned entry on one of these sources", () => {
     const vendorEntry = (introducedBy = "@tpsdev-ai/flair-mcp -> @modelcontextprotocol/sdk -> hono") =>
       entry(["npm-install-mcp"], { class: "vendor-pinned", version: "4.0.0", introducedBy });
     const installChain = (prefixes: Record<string, string>) => {
       const rows: [string, object][] = [
         ["node_modules/@tpsdev-ai/flair-mcp", {
-          name: "@tpsdev-ai/flair-mcp", version: "1.0.0", dependencies: { "@modelcontextprotocol/sdk": "1.0.0" },
+          name: "@tpsdev-ai/flair-mcp", version: FIXTURE_VERSION, dependencies: { "@modelcontextprotocol/sdk": "1.0.0" },
         }],
         ["node_modules/@modelcontextprotocol/sdk", {
           name: "@modelcontextprotocol/sdk", version: "1.0.0", dependencies: { hono: "4.0.0" },
@@ -428,9 +558,16 @@ describe("vendor-pinned npm-install nodes", () => {
       }] } } };
       const empty = JSON.stringify({ vulnerabilities: {} });
       mkdirSync(join(root, "adk-prefix"));
+      // The root and ADK inputs share these two directories (which one gets
+      // the report depends on `adk`); every other input gets a clean-* prefix.
+      const prefixOf = (source: string) =>
+        source === "npm-install" ? (adk ? join(root, "adk-prefix") : root)
+          : source === "npm-install-adk" ? (adk ? root : join(root, "adk-prefix"))
+            : join(root, `clean-${source}`);
+      writeIdentities(root, prefixOf);
       writeFileSync(join(root, "bin/npm"), `#!/bin/sh
 case "$PWD" in
-  */adk-prefix) printf '%s\\n' '${empty}' ;;
+  */adk-prefix|*/clean-*) printf '%s\\n' '${empty}' ;;
   *) printf '%s\\n' '${JSON.stringify(report)}' ;;
 esac
 `);
@@ -442,7 +579,7 @@ esac
         return [name, statSync(path).isFile() ? readFileSync(path).toString("base64") : "<dir>"];
       });
       const before = snapshot();
-      const res = spawnSync(process.execPath, ["--import", join(root, "offline.mjs"), join(root, "scripts/audit-gate.mjs"), "--npm-install-prefix", adk ? join(root, "adk-prefix") : root, "--adk-npm-install-prefix", adk ? root : join(root, "adk-prefix"), ...addedConsumerArgs(join(root, "adk-prefix"))], {
+      const res = spawnSync(process.execPath, ["--import", join(root, "offline.mjs"), join(root, "scripts/audit-gate.mjs"), ...prefixArgs(prefixOf)], {
         encoding: "utf8",
         timeout: 10_000,
         env: { ...process.env, PATH: `${join(root, "bin")}:${process.env.PATH}`, HOME: join(root, "home"), TMPDIR: join(root, "tmp"), AUDIT_GATE_TODAY: "2026-10-01" },
@@ -973,9 +1110,11 @@ describe("the gate fails closed on a refused stage answer, stand-in tools (flair
       writeFileSync(join(root, "bin/npm"), `#!/bin/sh\nprintf '%s\\n' '${npmOut}'\n`);
       chmodSync(join(root, "bin/bun"), 0o755);
       chmodSync(join(root, "bin/npm"), 0o755);
+      const prefixOf = (source: string) => join(root, `prefix-${source}`);
+      writeIdentities(root, prefixOf);
       return spawnSync(
         process.execPath,
-        [join(root, "scripts", "audit-gate.mjs"), "--npm-install-prefix", root, "--adk-npm-install-prefix", root, ...addedConsumerArgs(root)],
+        [join(root, "scripts", "audit-gate.mjs"), ...prefixArgs(prefixOf)],
         {
           encoding: "utf8",
           timeout: 10_000,
