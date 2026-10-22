@@ -38,7 +38,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getModelId } from "../../resources/embeddings-provider.ts";
-import { AGENT_ID_RULE } from "../../src/lib/agent-id-rule.ts";
+import { AGENT_ID_RULE, isValidAgentId } from "../../src/lib/agent-id-rule.ts";
 import { startHarper, stopHarper, HARPER_STOP_BUDGET_MS, type HarperInstance } from "../helpers/harper-lifecycle";
 import { componentWithReplayProbe, type ProbeComponent, type ProbeFiles } from "../helpers/component-with-replay-probe";
 
@@ -490,6 +490,37 @@ describe("MemoryMaintenance orphan sweep is scoped to the run's owner (real Harp
     const fleet = await maintain({ kind: "admin", body: {} });
     expect(fleet.stats?.agent).toBe("all"); // control: an absent agentId is fleet-wide
     await expectSweptOnly(null, fleet, before);
+  }, 120_000);
+
+  it("(a) a non-admin run by an agent whose stored id is outside the agent-id rule removes its own orphan pointers", async () => {
+    // The Agent row and its pointers are seeded through the operations API,
+    // which does not apply the agent-id rule.
+    const legacy = makeAgent(`mm-legacy.${SFX}`);
+    expect(isValidAgentId(legacy.id)).toBe(false); // control: the stored id is outside the rule
+    await insertRows("Agent", [
+      { id: legacy.id, name: legacy.id, role: "agent", publicKey: legacy.publicKey, createdAt: new Date().toISOString() },
+    ]);
+    expect((JSON.parse(await readRows("Agent", "id", legacy.id)) as unknown[]).length, "the legacy agent row was seeded").toBe(1);
+    await seedOrphans("legacy");
+    const legacyRows: Record<string, unknown>[] = [];
+    for (let i = 0; i < 2; i++) {
+      const id = `mm-legacy-orphan-${i}-${SFX}`;
+      legacyRows.push(pointerRow(id, legacy.id));
+      outstanding.set(id, legacy.id);
+    }
+    await insertRows("MemoryHostSource", legacyRows);
+    const before = await snapshotOrphans();
+    expect([...before.values()].filter((o) => o.author === legacy.id).length).toBe(2); // control: the legacy agent's orphans are stored
+
+    const body = await maintain({ kind: "agent", agent: legacy, body: {} });
+    expect(body.stats?.agent).toBe(legacy.id); // control: the run is scoped to the caller
+    await expectSweptOnly(legacy.id, body, before); // assertion: its orphan pointers are counted and removed, every other orphan unchanged
+    await expectLiveUnchanged("legacy-id non-admin run");
+
+    const rest = await snapshotOrphans();
+    const fleet = await maintain({ kind: "admin", body: {} });
+    expect(fleet.stats?.agent).toBe("all"); // control: an absent agentId is fleet-wide
+    await expectSweptOnly(null, fleet, rest);
   }, 120_000);
 
   it("(b) an admin run naming an agent reads only that agent's pointer rows", async () => {
