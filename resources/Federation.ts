@@ -681,6 +681,9 @@ export class FederationPair extends Resource {
               // no field of the deleted row survives.
               if (!current) stagedFirstPeer = { ...firstPairPeerRow(instanceId, publicKey, role, endpoint), pairAttemptWriteId: claim.pairAttemptWriteId };
               try {
+                // The marker is this attempt's last-writer id for the field (see
+                // StagedPairPeer): a field-level competitor merged in this window
+                // can leave it on the committed row alongside its own fields.
                 stagedPeer = current ? { ...rePairedRow(current), pairAttemptWriteId: claim.pairAttemptWriteId } : stagedFirstPeer;
                 await writePeerRow(owned, stagedPeer);
               } catch (err) {
@@ -754,6 +757,7 @@ export class FederationPair extends Resource {
           if (!current) return pairingTokenRequiredRefusal();
           if (current.publicKey !== publicKey) return publicKeyMismatchRefusal();
           if (current.status === "revoked") return peerRevokedRefusal();
+          // Same last-writer marker as the token route (see StagedPairPeer).
           stagedPeer = { ...rePairedRow(current), pairAttemptWriteId: randomUUID() };
           await writePeerRow(owned, stagedPeer);
           // Test-only: inert unless the fault-injection env opt-in is set and
@@ -903,6 +907,15 @@ function firstPairPeerRow(instanceId: string, publicKey: string, role: unknown, 
 
 type StagedPairingToken = { consumedBy: string; consumedAt: string; pairAttemptWriteId: string };
 
+/**
+ * A staged Peer row. `pairAttemptWriteId` is the id of the pairing attempt that
+ * last wrote this field: a LAST-WRITER marker for the field, not a
+ * last-confirmed marker for the row. Harper merges a field-level competing
+ * update with a staged write that commits around it, so a refused attempt's id
+ * can remain on a row whose other fields are the competitor's. The post-commit
+ * check in confirmTokenPairAfterCommit reads it as the id of this attempt's
+ * staged write; its presence does not report the attempt as confirmed.
+ */
 type StagedPairPeer = { id: string; pairAttemptWriteId: string } & Record<string, unknown>;
 
 async function confirmFirstPairBeforeCommit(instanceId: string): Promise<void> {
