@@ -12,6 +12,7 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import ts from "typescript";
 import {
   runGate,
   scanTree,
@@ -571,6 +572,112 @@ describe("comments and literal text in a spawn's options (flair#2774)", () => {
     const [call] = findSpawnCalls(src).calls;
     expect(call.timeoutMs).toBeNull();
     expect(spawnNoTimeout(src)).toBe(true);
+  });
+});
+
+describe("comments and literals inside a template's ${…} in a spawn's options (flair#2774)", () => {
+  function offendersFor(src: string) {
+    const dir = mkdtempSync(join(tmpdir(), "spawn-scan-2774-"));
+    repos.push(dir);
+    writeTree(dir, { "test/x.test.ts": src });
+    return scanTree(dir);
+  }
+  const spawnNoTimeout = (src: string) => offendersFor(src).spawnOffenders.some((o: any) => o.kind === "spawn-no-timeout");
+
+  /**
+   * What a real JavaScript parser (TypeScript's) says the one spawn call's
+   * options carry: the numeric `timeout` property of the options object literal,
+   * or of the initializer of the identifier passed as options; null when the
+   * object has no such property.
+   */
+  function parsedTimeout(src: string): number | null {
+    const syntax = ts.transpileModule(src, { reportDiagnostics: true, compilerOptions: { target: ts.ScriptTarget.ES2022 } });
+    expect(syntax.diagnostics ?? []).toEqual([]);
+    const sf = ts.createSourceFile("x.test.ts", src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+    const inits = new Map<string, ts.Expression>();
+    const spawns: ts.CallExpression[] = [];
+    const visit = (n: ts.Node): void => {
+      if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.initializer) inits.set(n.name.text, n.initializer);
+      if (ts.isCallExpression(n) && ["Bun.spawn", "spawnSync"].includes(n.expression.getText(sf))) spawns.push(n);
+      ts.forEachChild(n, visit);
+    };
+    visit(sf);
+    expect(spawns.length).toBe(1);
+    const call = spawns[0];
+    let opts: ts.Expression | undefined = call.arguments[call.expression.getText(sf) === "Bun.spawn" ? 1 : 2];
+    if (opts && ts.isIdentifier(opts)) opts = inits.get(opts.text);
+    if (!opts || !ts.isObjectLiteralExpression(opts)) return null;
+    for (const p of opts.properties) {
+      if (ts.isPropertyAssignment(p) && p.name.getText(sf) === "timeout" && ts.isNumericLiteral(p.initializer)) return Number(p.initializer.text);
+    }
+    return null;
+  }
+
+  const ARGV = '["bun", "src/cli.ts", "status"]';
+  const forms = (opts: string): Record<string, string> => ({
+    "Bun.spawn, options literal": `test("t", () => {\n  Bun.spawn(${ARGV}, ${opts});\n}, 120_000);\n`,
+    "spawnSync, options literal": `test("t", () => {\n  spawnSync("bun", ${ARGV.replace('"bun", ', "")}, ${opts});\n}, 120_000);\n`,
+    "Bun.spawn, options identifier": `const opts = ${opts};\ntest("t", () => {\n  Bun.spawn(${ARGV}, opts);\n}, 120_000);\n`,
+    "spawnSync, options identifier": `const opts = ${opts};\ntest("t", () => {\n  spawnSync("bun", ${ARGV.replace('"bun", ', "")}, opts);\n}, 120_000);\n`,
+  });
+
+  /** The parser's answer, then findSpawnCalls and scanTree must both give it. */
+  function expectGateAgreesWithParser(src: string, expected: number | null) {
+    expect(parsedTimeout(src)).toBe(expected);
+    const { calls } = findSpawnCalls(src);
+    expect(calls.length).toBe(1);
+    expect(calls[0].isCliEntry).toBe(true);
+    expect(calls[0].timeoutMs ?? null).toBe(expected);
+    expect(calls[0].hasTimeout).toBe(expected !== null);
+    expect(spawnNoTimeout(src)).toBe(expected === null);
+  }
+
+  const CASES: Array<{ name: string; opts: string; expected: number | null; oneLine: boolean }> = [
+    { name: "a block comment inside ${…}", opts: "{ env: { X: `${/* timeout: 5000 */ 1}` } }", expected: null, oneLine: true },
+    { name: "a line comment inside ${…}", opts: "{ env: { X: `${1 // timeout: 5000 ms\n}` } }", expected: null, oneLine: false },
+    { name: "a string inside ${…}", opts: '{ env: { X: `${"timeout: 5000 ms"}` } }', expected: null, oneLine: true },
+    { name: "a nested template inside ${…}", opts: "{ env: { X: `${`timeout: 5000 ms`}` } }", expected: null, oneLine: true },
+    { name: "a comment in a nested template's own ${…}", opts: "{ env: { X: `${`a${/* timeout: 5000 */ 1}b`}` } }", expected: null, oneLine: true },
+    { name: "a regex literal inside ${…}", opts: "{ env: { X: `${String(/timeout: 5000 ms/)}` } }", expected: null, oneLine: true },
+    { name: "template text after a `{` inside a string in ${…}", opts: '{ env: { X: `${"{"} timeout: 5000 ms` } }', expected: null, oneLine: true },
+    { name: "control: a real options timeout after a ${…} holding a commented one", opts: "{ env: { X: `${/* timeout: 1 */ 1}` }, timeout: 90_000 }", expected: 90000, oneLine: true },
+  ];
+
+  for (const c of CASES) {
+    it(`${c.name}: the gate reads ${c.expected === null ? "no deadline" : c.expected}, as the parser does`, () => {
+      for (const [form, src] of Object.entries(forms(c.opts))) {
+        if (!c.oneLine && form.endsWith("identifier")) continue; // the gate reads a ONE-LINE initializer only
+        expectGateAgreesWithParser(src, c.expected);
+      }
+    });
+  }
+
+  it("control: a spawn written inside ${…} keeps its real options timeout, and a commented one there is no deadline", () => {
+    const inTemplate = (call: string) => `test("t", () => {\n  const s = \`pid \${${call}.pid}\`;\n}, 120_000);\n`;
+    for (const [opts, expected] of [
+      ["{ timeout: 5000 }", 5000],
+      ["{ env: {}, /* timeout: 5000 */ }", null],
+    ] as const) {
+      expectGateAgreesWithParser(inTemplate(`Bun.spawn(${ARGV}, ${opts})`), expected);
+      expectGateAgreesWithParser(inTemplate(`spawnSync("bun", ${ARGV.replace('"bun", ', "")}, ${opts})`), expected);
+      expectGateAgreesWithParser(`const opts = ${opts};\n${inTemplate(`Bun.spawn(${ARGV}, opts)`)}`, expected);
+      expectGateAgreesWithParser(`const opts = ${opts};\n${inTemplate(`spawnSync("bun", ${ARGV.replace('"bun", ', "")}, opts)`)}`, expected);
+    }
+  });
+
+  it("the timeout matcher reads a `timeout` key at ANY depth of the options code, not only a top-level key", () => {
+    // A real `timeout:` in an object written inside ${…} is code, so it stays
+    // readable. The gate counts it as the spawn's deadline, as it counts a
+    // nested object's key outside any template; the parser shows the options
+    // object itself carries no `timeout` in either case.
+    for (const opts of ["{ env: { X: `${JSON.stringify({ timeout: 5000 })}` } }", "{ env: { timeout: 5000 } }"]) {
+      for (const src of Object.values(forms(opts))) {
+        expect(parsedTimeout(src)).toBeNull();
+        const [call] = findSpawnCalls(src).calls;
+        expect(call.timeoutMs).toBe(5000);
+        expect(spawnNoTimeout(src)).toBe(false);
+      }
+    }
   });
 });
 

@@ -77,11 +77,11 @@ import { isUnitTestFile } from "./test-files.mjs";
 export const BASELINE_PATH = join(dirname(fileURLToPath(import.meta.url)), "cli-spawn-budgets.baseline.json");
 
 /**
- * The ONE commit whose base legitimately has no baseline file: the origin/main
- * sha this gate's baseline was introduced from (flair#1825). The seed path is
- * taken ONLY when the base ref resolves to exactly this sha. Any OTHER base with
- * no baseline file is a hard failure — a base ref repointed at any pre-baseline
- * commit must not be enough. Full 40-char sha, read with `git merge-base`.
+ * The seed-introduction anchor: the origin/main sha this gate's baseline was
+ * introduced from (flair#1825). The seed path is taken ONLY when the base ref
+ * resolves to this sha or to a commit that descends from it. Any OTHER base with
+ * no baseline file is a hard failure — a base ref repointed at a commit outside
+ * that history must not be enough. Full 40-char sha, read with `git merge-base`.
  */
 export const SEED_INTRODUCTION_BASE = "4904699d80b55d9f299fe8e061aa80e4de8e9edc";
 
@@ -161,8 +161,9 @@ function skipRegex(src, i) {
  * Like maskComments, but ALSO blanks the CONTENTS of string / regex literals and
  * the literal TEXT of template literals (same length). Used for spawn-CALL
  * matching, so a `Bun.spawn(...)` mentioned inside a plain string is not
- * mistaken for a call. A template's `${…}` EXPRESSIONS are left as CODE — a
- * `Bun.spawn(...)` of the CLI entry there IS a real call (flair#1825). The
+ * mistaken for a call. A template's `${…}` EXPRESSIONS are read as CODE — a
+ * `Bun.spawn(...)` of the CLI entry there IS a real call (flair#1825) — and the
+ * comments and literals inside them are masked as at top level (flair#2774). The
  * argv/options TEXT a call reports is sliced from the ORIGINAL source, so the
  * CLI-entry check still reads real literal text. A spawn's `timeout` is read
  * from THIS text (flair#2774).
@@ -172,9 +173,44 @@ function maskLiteralsAndComments(src) {
   const blank = (from, to) => {
     for (let j = from; j < to && j < src.length; j++) if (src[j] !== "\n") out[j] = " ";
   };
+  // Open template contexts, innermost last: TEMPLATE_TEXT while reading a
+  // template's literal text, or a number — the `{` depth — while reading one of
+  // its `${…}` expressions as code. The file's top level is code and is not on
+  // the stack. Every iteration advances `i`, so the loop ends within src.length.
+  const TEMPLATE_TEXT = "text";
+  const stack = [];
   let i = 0;
   while (i < src.length) {
     const ch = src[i];
+    const top = stack.length > 0 ? stack[stack.length - 1] : null;
+    if (top === TEMPLATE_TEXT) {
+      if (ch === "\\") {
+        blank(i, i + 2);
+        i += 2;
+      } else if (ch === "`") {
+        out[i] = " "; // closing backtick
+        stack.pop();
+        i++;
+      } else if (ch === "$" && src[i + 1] === "{") {
+        stack.push(0); // `${` is kept: the expression is code
+        i += 2;
+      } else {
+        if (ch !== "\n") out[i] = " ";
+        i++;
+      }
+      continue;
+    }
+    if (top !== null && ch === "{") {
+      stack[stack.length - 1] = top + 1;
+      i++;
+      continue;
+    }
+    if (top !== null && ch === "}") {
+      if (top === 0) stack.pop(); // the `}` closing `${…}` is kept; template text resumes
+      else stack[stack.length - 1] = top - 1;
+      i++;
+      continue;
+    }
     if (ch === '"' || ch === "'") {
       const end = skipNonCode(src, i);
       blank(i, end);
@@ -182,40 +218,9 @@ function maskLiteralsAndComments(src) {
       continue;
     }
     if (ch === "`") {
-      // Template: blank the literal TEXT, but leave `${…}` expressions as code.
       out[i] = " "; // opening backtick
-      let j = i + 1;
-      while (j < src.length) {
-        if (src[j] === "\\") {
-          blank(j, j + 2);
-          j += 2;
-          continue;
-        }
-        if (src[j] === "`") {
-          out[j] = " "; // closing backtick
-          j++;
-          break;
-        }
-        if (src[j] === "$" && src[j + 1] === "{") {
-          j += 2;
-          let depth = 1;
-          while (j < src.length && depth > 0) {
-            if (src[j] === "{") depth++;
-            else if (src[j] === "}") {
-              depth--;
-              if (depth === 0) {
-                j++;
-                break;
-              }
-            }
-            j++;
-          }
-          continue;
-        }
-        if (src[j] !== "\n") out[j] = " ";
-        j++;
-      }
-      i = j;
+      stack.push(TEMPLATE_TEXT);
+      i++;
       continue;
     }
     if (ch === "/" && src[i + 1] === "/") {
