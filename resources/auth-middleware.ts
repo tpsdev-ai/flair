@@ -239,8 +239,9 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
     // (unreadable, or the attempts exhausted) is logged as unconfirmed; it does
     // not mark the id outcome-unknown.
     //
-    // A row holding a vector of more than 100 entries is already embedded,
-    // except one whose stored vector matches, within a float32 tolerance, the
+    // The backfill writes a row whose vector is missing or has at most 100
+    // entries, whatever stored it. A row holding a longer vector counts as
+    // already embedded and is skipped, except one whose stored vector matches, within a float32 tolerance, the
     // vector an earlier unconfirmed attempt of this call staged, while its text
     // is no longer the text that vector was computed from (holdsOwnStaleVector):
     // the row holds a vector equal to this call's computation for a text it no
@@ -248,9 +249,9 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
     // next attempt of the loop below while one remains, which needs the
     // read-back that found the mismatch to have been readable. The check
     // compares vectors, not the stored text hash: a row with an empty
-    // owner stores a null hash, which would match any text. A stored vector that
-    // does not match is left as it is; the check says nothing about who stored
-    // it.
+    // owner stores a null hash, which would match any text. A longer stored
+    // vector that does not match the staged one is skipped like any other
+    // already-embedded row; a non-match says nothing about who stored it.
     let ownUnconfirmed: StagedVector | undefined;
     const alreadyEmbedded = (row: any): boolean => row.embedding?.length > 100 && !holdsOwnStaleVector(row, ownUnconfirmed);
     // After an earlier attempt of this call committed and its read-back did not

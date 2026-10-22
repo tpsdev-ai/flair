@@ -112,7 +112,12 @@ const STAGED_VECTOR_TOLERANCE = 1e-6;
  * `embeddedContentHash` is not consulted: it is null for a row with an empty
  * owner and so would match any text. Returns false when nothing was staged,
  * when the row's text is still `staged.text`, or when the stored vector does
- * not match (its provenance is then unknown, and the caller leaves it as it is).
+ * not match. A non-match says nothing about the vector's provenance; it only
+ * means this staged-vector exception does not apply, and the caller's normal
+ * eligibility decides whether the row is written: the embedding backfill writes
+ * a missing vector or one of at most 100 entries and skips a longer one; the
+ * embedding-stamp migration re-embeds a row whose stamp is not current or whose
+ * stored hash does not match its text, whatever vector it holds.
  */
 export function holdsOwnStaleVector(row: Record<string, any> | null | undefined, staged: StagedVector | undefined): boolean {
   if (!staged || !row || typeof row !== "object") return false;

@@ -190,7 +190,10 @@
  * stored vector with the vector that attempt staged (within a float32
  * tolerance), not the stored text hash (null for a row with an empty owner): a
  * match beside a changed text is not treated as current, so the retry
- * re-embeds the current text.
+ * re-embeds the current text. A row whose stamp is not current or whose stored
+ * hash does not match its text is re-embedded whatever vector it holds; the
+ * staged-vector comparison only decides, on a retry, whether a row that
+ * otherwise counts as current (a null hash passes for any text) is re-embedded.
  */
 import { databases } from "harper";
 import { appendFileSync } from "node:fs";

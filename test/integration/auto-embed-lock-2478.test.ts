@@ -10,7 +10,10 @@
  * non-waiting acquisition per attempt, and a retry acquires it again. A held
  * id, or an id with an unresolved write outcome, is skipped and logged.
  * Holding the lock, the shared write-back helper's first read is the committed
- * row: a row that already holds a full vector is not written, and a row whose
+ * row: a missing or short vector (at most 100 entries) is written; a row that
+ * already holds a longer vector is not written, except one holding, within a
+ * float32 tolerance, the vector an earlier unconfirmed attempt of the same
+ * backfill staged beside changed text; and a row whose
  * text changed is not written (the backfill releases the lock, re-reads and
  * re-embeds, at most 3 attempts). It stages an incremental update of `embedding`,
  * `embeddingModel` and `embeddedContentHash` (asserted from the real-Harper
