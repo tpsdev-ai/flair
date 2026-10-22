@@ -164,7 +164,8 @@ function skipRegex(src, i) {
  * mistaken for a call. A template's `${…}` EXPRESSIONS are left as CODE — a
  * `Bun.spawn(...)` of the CLI entry there IS a real call (flair#1825). The
  * argv/options TEXT a call reports is sliced from the ORIGINAL source, so the
- * CLI-entry and timeout checks still read real literal text.
+ * CLI-entry check still reads real literal text. A spawn's `timeout` is read
+ * from THIS text (flair#2774).
  */
 function maskLiteralsAndComments(src) {
   const out = src.split("");
@@ -537,9 +538,6 @@ function textNamesCliEntry(text, ids) {
 /** All spawn-family calls in the file (node forms + Bun forms), with CLI-entry targeting. */
 export function findSpawnCalls(source) {
   const scan = maskLiteralsAndComments(source);
-  // Same indices as `source`, comment bodies blanked; the `timeout` is read from
-  // this (flair#2774).
-  const code = maskComments(source);
   const ids = cliEntryIdentifiers(source);
   const aliases = aliasedSpawnFns(source);
   const constDecls = new Map();
@@ -566,14 +564,15 @@ export function findSpawnCalls(source) {
     const argvText = BUN_ARGV_ARG_INDICES.map((i) => textAt(args.spans[i])).join(" ");
     const optSpan = resolveOptSpan(args.spans[BUN_OPTIONS_ARG_INDEX]);
     const optText = textAt(optSpan);
-    const optCode = optSpan ? code.slice(optSpan.start, optSpan.end) : "";
+    const optCode = optSpan ? scan.slice(optSpan.start, optSpan.end) : "";
     calls.push({
       fn,
       index: m.index,
       line: lineOf(m.index),
       text: `${argvText} ; ${optText}`,
-      // The OPTIONS text is kept separately, comments masked (flair#2774): a
-      // `timeout` is read from HERE only, never from argv (round 9 item 2).
+      // The OPTIONS text is kept separately, sliced from the call-matching mask
+      // (flair#2774): a `timeout` is read from HERE only, never from argv
+      // (round 9 item 2).
       optCode,
       isCliEntry: textNamesCliEntry(argvText, ids),
       hasTimeout: /(^|[^\w$.])timeout\s*[:=]/.test(optCode),
@@ -590,7 +589,7 @@ export function findSpawnCalls(source) {
     const argvText = (ARGV_ARG_INDICES.get(fn) ?? [0, 1]).map((i) => textAt(args.spans[i])).join(" ");
     const optSpan = resolveOptSpan(args.spans[OPTIONS_ARG_INDEX.get(fn)]);
     const optText = textAt(optSpan);
-    const optCode = optSpan ? code.slice(optSpan.start, optSpan.end) : "";
+    const optCode = optSpan ? scan.slice(optSpan.start, optSpan.end) : "";
     calls.push({
       fn: raw,
       index: m.index,

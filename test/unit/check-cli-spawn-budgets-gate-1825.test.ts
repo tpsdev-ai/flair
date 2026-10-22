@@ -491,7 +491,7 @@ describe("round 9: post-separator digit cap + options-only timeout (flair#1825)"
   });
 });
 
-describe("a timeout written in a comment does not decide the deadline (flair#2774)", () => {
+describe("comments and literal text in a spawn's options (flair#2774)", () => {
   function offendersFor(src: string) {
     const dir = mkdtempSync(join(tmpdir(), "spawn-scan-2774-"));
     repos.push(dir);
@@ -531,6 +531,40 @@ describe("a timeout written in a comment does not decide the deadline (flair#277
       }
     });
   }
+
+  const noDeadline = (opts: string) => {
+    for (const src of [bunSrc(opts), nodeSrc(opts)]) {
+      const [call] = findSpawnCalls(src).calls;
+      expect(call.isCliEntry).toBe(true);
+      expect(call.hasTimeout).toBe(false);
+      expect(call.timeoutMs).toBeNull();
+      expect(spawnNoTimeout(src)).toBe(true);
+    }
+  };
+
+  it("a timeout inside a string's contents is no deadline", () => {
+    noDeadline('{ env: { X: "timeout: 5000 ms" } }');
+    noDeadline('{ env: { X: "timeout: 5000" } }');
+  });
+
+  it("a timeout inside a template literal's or a regex literal's text is no deadline", () => {
+    noDeadline("{ env: { X: `timeout: 5000 ms` } }");
+    noDeadline("{ env, re: /timeout: 5000 ms/ }");
+  });
+
+  it("a quoted timeout value is no deadline", () => {
+    noDeadline('{ timeout: "5000" }');
+  });
+
+  it("a real timeout after a string containing another is accepted with the real value", () => {
+    const opts = '{ env: { X: "timeout: 1" }, timeout: 90_000 }';
+    for (const src of [bunSrc(opts), nodeSrc(opts)]) {
+      const [call] = findSpawnCalls(src).calls;
+      expect(call.hasTimeout).toBe(true);
+      expect(call.timeoutMs).toBe(90000);
+      expect(spawnNoTimeout(src)).toBe(false);
+    }
+  });
 
   it("an options identifier whose one-line initializer carries only a commented-out timeout is no deadline", () => {
     const src = `const opts = { env }; // timeout: 5000\ntest("t", () => {\n  Bun.spawn(["bun", "src/cli.ts"], opts);\n}, 120_000);\n`;
