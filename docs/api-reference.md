@@ -269,8 +269,8 @@ check.
 Superseding a skill closes its predecessor with `validTo`; deleting a
 non-reserved skill closes its live head and appends a delete version while
 retaining the Memory row. Skill writes through Memory POST/PUT and
-`FeedMemories` that supply `archived` other than `false` or a nonempty
-`validTo` are refused with `400 skill_state_requires_delete`, so basementing a
+`FeedMemories` that supply a non-null `archived` value other than `false` or a
+nonempty `validTo` are refused with `400 skill_state_requires_delete`, so basementing a
 skill is refused.
 
 #### Client version gate (HTTP 426 `stale_flair_client`)
