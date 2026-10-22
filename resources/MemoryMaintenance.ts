@@ -39,10 +39,25 @@ import { stripUndeclaredMemoryAttributes } from "./memory-declared-attributes.js
 import { withOwnedTransaction } from "./request-transaction.js";
 import { recordMemoryDeletion } from "./memory-deletion-history.js";
 import { txnPausePoint } from "./txn-pause-point.js";
+import { withMemoryWriteLockOnce } from "./memory-write-lock.js";
+import { verifyCommittedFields } from "./write-back.js";
 import { AGENT_ID_RULE, isValidAgentId } from "../src/lib/agent-id-rule.js";
 
 /** The 400 an admin run's refused `agentId` is answered with. */
 const INVALID_AGENT_ID_ERROR = `agentId must be a string matching ${AGENT_ID_RULE}`;
+
+/** The per-id Memory write lock store (flair#2478 slice 3b). */
+function memoryLockStore(): unknown {
+  return (databases as any)?.flair?.Memory?.primaryStore;
+}
+
+/** Report a per-row action this run did not apply, and why. An automatic
+ *  writer's lock miss is a skip that is reported, never a row written
+ *  unserialized over an owner's write. */
+function noteSkipped(stats: { skipped: number }, id: unknown, reason: string): void {
+  stats.skipped++;
+  console.warn("[MemoryMaintenance] row skipped: %s (id %s)", reason, String(id));
+}
 
 /** What a request's `agentId` says about the run's target, for an ADMIN
  *  request: it is a named target only when the field is a string that is
@@ -165,31 +180,68 @@ export class MemoryMaintenance extends Resource {
               // re-read or the confirmation read below is a SKIP (recorded as
               // skipped); a change committed between the confirmation read and
               // the commit is not checked.
-              let deleted = false;
-              await withOwnedTransaction(ctx, async (c) => {
-                const stored = await (databases as any).flair.Memory.get(record.id, c);
-                if (!isDeepStrictEqual(stored, record)) return;
-                // The transaction pauses here, between its read and its act.
-                const pause = txnPausePoint("maintenance-expiry");
-                if (pause) await pause;
-                // Confirmation read: the committed row in an EXPLICIT fresh
-                // context (never contextless — a contextless read joins the
-                // request transaction and sees its old snapshot).
-                const confirmed = await (databases as any).flair.Memory.get(record.id, {});
-                if (!isDeepStrictEqual(confirmed, stored)) return;
-                const result = await (databases as any).flair.Memory.delete(record.id, c);
-                if (result !== true) throw new Error("Memory row delete was not confirmed");
-                await deletePointerRowOrThrow(record.id, c);
-                await recordMemoryDeletion({
-                  memoryId: record.id,
-                  memoryInstanceToken: stored.instanceToken ?? null,
-                  durability: stored.durability ?? null,
-                  actor: actorId ?? null,
-                  sourceClass: callerIsAdmin ? "admin" : "agent",
-                }, c);
-                deleted = true;
-              });
-              if (!deleted) { stats.skipped++; continue; }
+              // flair#2478 slice 3b: the whole read-decide-write runs under the
+              // id's per-id Memory write lock, taken once with no wait. A held
+              // id (or one carrying an outcome-unknown marker) is skipped and
+              // reported, never deleted over an owner's write.
+              const outcome = await withMemoryWriteLockOnce(memoryLockStore(), [record.id], async () => {
+                let deleted = false;
+                await withOwnedTransaction(ctx, async (c) => {
+                  const stored = await (databases as any).flair.Memory.get(record.id, c);
+                  if (!isDeepStrictEqual(stored, record)) return;
+                  // The transaction pauses here, between its read and its act.
+                  const pause = txnPausePoint("maintenance-expiry");
+                  if (pause) await pause;
+                  // Confirmation read: the committed row in an EXPLICIT fresh
+                  // context (never contextless — a contextless read joins the
+                  // request transaction and sees its old snapshot).
+                  const confirmed = await (databases as any).flair.Memory.get(record.id, {});
+                  if (!isDeepStrictEqual(confirmed, stored)) return;
+                  const result = await (databases as any).flair.Memory.delete(record.id, c);
+                  if (result !== true) throw new Error("Memory row delete was not confirmed");
+                  await deletePointerRowOrThrow(record.id, c);
+                  await recordMemoryDeletion({
+                    memoryId: record.id,
+                    memoryInstanceToken: stored.instanceToken ?? null,
+                    durability: stored.durability ?? null,
+                    actor: actorId ?? null,
+                    sourceClass: callerIsAdmin ? "admin" : "agent",
+                  }, c);
+                  // Test-only: the delete is staged and the lock is still held.
+                  const staged = txnPausePoint("maintenance-expiry-staged");
+                  if (staged) await staged;
+                  // Test-only: the last confirmation has passed and the
+                  // transaction has not committed yet.
+                  const commitPoint = txnPausePoint("maintenance-expiry-commit");
+                  if (commitPoint) await commitPoint;
+                  deleted = true;
+                });
+                if (!deleted) return { kind: "skipped" as const };
+                // Test-only: the delete committed and the lock is still held.
+                const committed = txnPausePoint("maintenance-expiry-committed");
+                if (committed) await committed;
+                return { kind: "deleted" as const };
+              }, { phase: "maintenance-expiry" });
+              if (outcome.kind !== "done") {
+                noteSkipped(stats, record.id, outcome.kind);
+                continue;
+              }
+              if (outcome.value.kind !== "deleted") { stats.skipped++; continue; }
+              // The committed row must be gone: a delete whose commit did not
+              // land is not counted as expired. An unreadable read is reported
+              // as a failed item, never as a success.
+              let after: any;
+              try {
+                after = await (databases as any).flair.Memory.get(record.id, {});
+              } catch (err) {
+                stats.errors++;
+                console.error("MemoryMaintenance: expiry outcome unconfirmed (committed row unreadable)", err);
+                continue;
+              }
+              if (after != null) {
+                noteSkipped(stats, record.id, "unconfirmed_delete");
+                continue;
+              }
               // flair#1357 — ephemeral expiry removes the row from what the
               // lexical leg may score.
               noteMemoryDelete(record.id);
@@ -226,32 +278,77 @@ export class MemoryMaintenance extends Resource {
               // selected. A change seen by that read or the confirmation read is
               // a SKIP; a change committed between the confirmation read and the
               // commit is not checked.
+              // flair#2478 slice 3b: the whole read-decide-write runs under the
+              // id's per-id Memory write lock, taken once with no wait. A held
+              // id (or one carrying an outcome-unknown marker) is skipped and
+              // reported, never archived over an owner's write.
               let archivedRow: any;
-              await withOwnedTransaction(ctx, async (c) => {
-                const stored = await (databases as any).flair.Memory.get(record.id, c);
-                if (!isDeepStrictEqual(stored, record)) return;
-                const pause = txnPausePoint("maintenance-archive");
-                if (pause) await pause;
-                const confirmed = await (databases as any).flair.Memory.get(record.id, {});
-                if (!isDeepStrictEqual(confirmed, stored)) return;
-                // flair#2470: the archive flip is written as an INCREMENTAL update of
-                // exactly `archived` and
-                // `archivedAt` — never a full-row put of the row read above. A
-                // full-row write would carry every field the read saw and could
-                // revert an owner PUT that started earlier and commits after this
-                // one (Harper orders the two by transaction timestamp) while that
-                // PUT still answered 200. The merged row marks a non-skipped
-                // operation and supplies the lexical-index note below.
-                const archivePatch = { archived: true, archivedAt: now.toISOString() };
-                archivedRow = { ...stored, ...archivePatch };
-                stripUndeclaredMemoryAttributes(archivedRow);
-                // A1'' item 2 (0c): the archive write and its pointer delete
-                // share ONE OWNED transaction; a failed pointer delete cannot
-                // still commit the archived row.
-                await (databases as any).flair.Memory.update(record.id, archivePatch, c);
-                await deletePointerRowOrThrow(record.id, c);
-              });
-              if (!archivedRow) { stats.skipped++; continue; }
+              let archiveBasis: any;
+              let archivePatch: Record<string, unknown> | undefined;
+              const outcome = await withMemoryWriteLockOnce(memoryLockStore(), [record.id], async () => {
+                await withOwnedTransaction(ctx, async (c) => {
+                  const stored = await (databases as any).flair.Memory.get(record.id, c);
+                  if (!isDeepStrictEqual(stored, record)) return;
+                  const pause = txnPausePoint("maintenance-archive");
+                  if (pause) await pause;
+                  const confirmed = await (databases as any).flair.Memory.get(record.id, {});
+                  if (!isDeepStrictEqual(confirmed, stored)) return;
+                  // flair#2470: the archive flip is written as an INCREMENTAL update of
+                  // exactly `archived` and
+                  // `archivedAt` — never a full-row put of the row read above. A
+                  // full-row write would carry every field the read saw and could
+                  // revert an owner PUT that started earlier and commits after this
+                  // one (Harper orders the two by transaction timestamp) while that
+                  // PUT still answered 200. The merged row marks a non-skipped
+                  // operation and supplies the lexical-index note below.
+                  archivePatch = { archived: true, archivedAt: now.toISOString() };
+                  archivedRow = { ...stored, ...archivePatch };
+                  stripUndeclaredMemoryAttributes(archivedRow);
+                  // A1'' item 2 (0c): the archive write and its pointer delete
+                  // share ONE OWNED transaction; a failed pointer delete cannot
+                  // still commit the archived row.
+                  await (databases as any).flair.Memory.update(record.id, archivePatch, c);
+                  await deletePointerRowOrThrow(record.id, c);
+                  archiveBasis = stored;
+                  // Test-only: the update and its pointer delete are staged and
+                  // the lock is still held.
+                  const staged = txnPausePoint("maintenance-archive-staged");
+                  if (staged) await staged;
+                  // Test-only: the last confirmation has passed and the
+                  // transaction has not committed yet.
+                  const commitPoint = txnPausePoint("maintenance-archive-commit");
+                  if (commitPoint) await commitPoint;
+                });
+                if (!archivedRow) return { kind: "skipped" as const };
+                // Test-only: the archive committed and the lock is still held.
+                const committed = txnPausePoint("maintenance-archive-committed");
+                if (committed) await committed;
+                return { kind: "archived" as const };
+              }, { phase: "maintenance-archive" });
+              if (outcome.kind !== "done") {
+                noteSkipped(stats, record.id, outcome.kind);
+                continue;
+              }
+              if (outcome.value.kind !== "archived") { stats.skipped++; continue; }
+              // The committed row must still show the staged archive fields. A
+              // mismatch means another writer's write is the stored one: the
+              // row was not archived by this run, and it is reported as
+              // skipped. An unreadable read is reported as a failed item.
+              const verdict = await verifyCommittedFields(
+                (databases as any).flair.Memory,
+                record.id,
+                archiveBasis,
+                archivePatch ?? {},
+              );
+              if (verdict === "unreadable") {
+                stats.errors++;
+                console.error("MemoryMaintenance: archive outcome unconfirmed (committed row unreadable)");
+                continue;
+              }
+              if (verdict === "mismatch") {
+                noteSkipped(stats, record.id, "unconfirmed_archive");
+                continue;
+              }
               // flair#1357 — an `archived` flip changes what the retrieval
               // conditions (`archived not_equal true`) admit, so the lexical
               // index has to see it, not just content writes.

@@ -5,8 +5,10 @@
  * writers converted so far: the visibility backfill and the promotion stamps
  * (slice 2), and the embedding backfill that follows a Memory write signed by
  * a verified Ed25519 agent (resources/auth-middleware.ts) and the
- * embedding-stamp migration's `.content`-suffix fallback (slice 3). The other
- * Memory writers convert in later parts.
+ * embedding-stamp migration's `.content`-suffix fallback (slice 3); the
+ * maintenance archive/expiry action (resources/MemoryMaintenance.ts) and the
+ * usage-count writer (resources/usage-recording.ts) (slice 3b part 1). The
+ * other Memory writers convert in later parts.
  *
  * A writer that must make its read, decision and write on one committed basis
  * runs under one key per ID of `Memory.primaryStore`'s lock: `["memory", fullStoredId]`.
