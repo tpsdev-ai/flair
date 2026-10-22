@@ -20,7 +20,8 @@
  *    whether it is still stale. Under the lock it re-reads the committed row
  *    and writes only if the row is the one it embedded; it stages an
  *    incremental update of the four embedding fields, confirms the committed
- *    row, commits, and verifies the committed row before the release. A retry
+ *    row, commits, and verifies the committed row before the release. After a
+ *    readable read-back mismatch it retries, at most 3 attempts; a retry
  *    after an unconfirmed attempt, finding the vector that attempt staged
  *    (a float32-tolerance match) beside a changed text, re-embeds the current
  *    text, also for a row with an empty owner (whose stored text hash is null).

@@ -9,17 +9,24 @@
  * `updatedAt` and `embeddedContentHash`, plus `instanceToken` on a legacy row
  * that has none, as an incremental update (asserted from the real-Harper write
  * trace, the legacy row included). Each attempt re-reads the committed row inside
- * its own transaction and embeds the stored text; a text change between the
- * plan and the write recomputes (or, after staging, refuses `409
- * stored_row_changed`), so a vector is stored only for the text it was computed
- * from.
+ * its own transaction and embeds the stored text. A text change seen at that
+ * read recomputes the vector (at most 3 attempts in all, then `409
+ * reembed_row_changed`); a change visible at the confirmation after staging
+ * aborts with `409 stored_row_changed` and writes nothing; a change committed
+ * after that confirmation, before the commit, is seen only by the post-commit
+ * read-back, which on a readable mismatch retries from a fresh read within the
+ * same 3 attempts (recomputing for the changed text) and on the last attempt
+ * answers `503 write_outcome_unknown`; an unreadable read-back answers `503
+ * write_outcome_unknown`. A `200` answer means the read-back showed the vector
+ * beside the text it was computed from.
  *
  * The matrix:
  *  - re-embed first, held after staging, after its confirmation, and after its
  *    commit while still locked: an owner PUT and PATCH are refused `503
  *    memory_busy`; after release the owner's content and visibility are stored;
  *  - owner first (PUT, PATCH): the re-embed is refused `503 memory_busy` while
- *    the owner holds the id; a re-embed that waits inside its budget plans from
+ *    the owner holds the id through the re-embed's wait budget (the owner is
+ *    held at a pause point); a re-embed that waits inside its budget plans from
  *    the owner's committed row;
  *  - an owner DELETE racing the re-embed at each held point, and a DELETE that
  *    read the row first: no row remains;

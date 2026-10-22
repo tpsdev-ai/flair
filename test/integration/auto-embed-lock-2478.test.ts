@@ -12,7 +12,7 @@
  * Holding the lock, the shared write-back helper's first read is the committed
  * row: a row that already holds a full vector is not written, and a row whose
  * text changed is not written (the backfill releases the lock, re-reads and
- * re-embeds). It stages an incremental update of `embedding`,
+ * re-embeds, at most 3 attempts). It stages an incremental update of `embedding`,
  * `embeddingModel` and `embeddedContentHash` (asserted from the real-Harper
  * write trace), confirms the committed row, commits, and reads the committed
  * row back (identity, the written fields, and the text the vector was computed

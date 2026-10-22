@@ -178,7 +178,13 @@
  * logged, written nothing, and left uncounted; the next scan decides whether it
  * is still stale. Under the lock it re-reads the committed row, writes only when
  * that row is the one it embedded, and commits and verifies the committed row
- * before the release. A retry after an unconfirmed attempt compares the row's
+ * before the release. A row changed at that in-lock read, or a change visible
+ * at the confirmation (which aborts the transaction), writes nothing and leaves
+ * the row uncounted. A readable read-back mismatch retries with a fresh read, a
+ * vector computed before the lock and a new acquisition, at most
+ * CONTENT_SUFFIX_REGEN_ATTEMPTS (3) attempts; an unreadable read-back, or the
+ * attempts exhausted, is logged as unconfirmed and leaves the row uncounted
+ * for the next scan. A retry after an unconfirmed attempt compares the row's
  * stored vector with the vector that attempt staged (within a float32
  * tolerance), not the stored text hash (null for a row with an empty owner): a
  * match beside a changed text is not treated as current, so the retry

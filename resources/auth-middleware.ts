@@ -214,26 +214,37 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
     // (the super_user and Basic branches call nextLayer directly) and starts
     // none, and neither does a raw or direct table write. So the id's next such
     // signed write starts another, and a row with a stale or missing stamp is
-    // re-embedded by the embedding-stamp migration. Holding the lock, the helper's first read
-    // is the committed row: a row whose text changed, or that has a vector of
-    // more than 100 entries, is not written (a changed text is re-read and
-    // re-embedded after the lock is released). The update commits, and the
-    // committed row is read back (identity, the written fields, and the text the
-    // vector was computed for) before the lock is released. A read-back that
-    // does not show them retries from a fresh read, bounded by
-    // WRITE_BACK_ATTEMPTS (3); the read-back checks only the final committed
-    // state of those fields, so a lock-bypassing write committed and then
-    // overwritten inside this write's window is not detected. A background write whose
-    // read-back cannot confirm it is logged; it does not mark the id
-    // outcome-unknown.
+    // re-embedded by the embedding-stamp migration.
+    //
+    // Holding the lock, the helper's first read is the committed row: a row
+    // whose text changed, or that has a vector of more than 100 entries, is not
+    // written (a changed text ends this attempt; the next attempt of the loop
+    // below re-reads and re-embeds after the lock is released). The helper
+    // stages the update and confirms the committed row: a change visible at
+    // that confirmation aborts the transaction, writes nothing, and the helper
+    // retries from a fresh read under the same lock. Then it commits and reads
+    // the committed row back (identity, the written fields, and the text the
+    // vector was computed for) before the lock is released. A readable
+    // read-back that does not show them retries from a fresh read: within the
+    // helper's own bound (WRITE_BACK_ATTEMPTS, 3) under the same lock, and,
+    // when that retry finds the text changed, through the next attempt of the
+    // loop below (at most WRITE_BACK_ATTEMPTS attempts, each with its own
+    // acquisition). An unreadable read-back stops without a retry. The
+    // read-back checks only the final committed state of those fields, so a
+    // lock-bypassing write committed and then overwritten inside this write's
+    // window is not detected. An outcome the read-back did not confirm
+    // (unreadable, or the attempts exhausted) is logged as unconfirmed; it does
+    // not mark the id outcome-unknown.
     //
     // A row holding a vector of more than 100 entries is already embedded,
     // except one whose stored vector matches, within a float32 tolerance, the
     // vector an earlier unconfirmed attempt of this call staged, while its text
     // is no longer the text that vector was computed from (holdsOwnStaleVector):
     // the row holds a vector equal to this call's computation for a text it no
-    // longer has, whoever stored it. That row is re-read and re-embedded. The
-    // check compares vectors, not the stored text hash: a row with an empty
+    // longer has, whoever stored it. That row is re-read and re-embedded by the
+    // next attempt of the loop below while one remains, which needs the
+    // read-back that found the mismatch to have been readable. The check
+    // compares vectors, not the stored text hash: a row with an empty
     // owner stores a null hash, which would match any text. A stored vector that
     // does not match is left as it is; the check says nothing about who stored
     // it.
