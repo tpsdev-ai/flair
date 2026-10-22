@@ -286,6 +286,7 @@ describe("flair#2686 part 2 — a follow-on delete version inserted directly", (
       const text = await response.text();
       expect(response.status, text.slice(0, 300)).toBe(500);
       expect(JSON.parse(text).error).toBe("skill_update_compensation_failed");
+      expect(JSON.parse(text).message).toBe("the skill update's confirmation failed and the update could not be undone; check its outcome, because its version and event may persist");
 
       const predecessor = await memoryRow(predecessorId);
       const successor = await memoryRow(successorId);

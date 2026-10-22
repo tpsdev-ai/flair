@@ -447,7 +447,7 @@ async function compensateUnlandedSkillUpdate(args: {
   } catch (err) {
     console.error("skill-version-write: update undo could not be confirmed", err);
   }
-  return skillUpdateCompensationFailure("the undo of a close that did not land could not be confirmed" +
+  return skillUpdateCompensationFailure("the skill update's confirmation failed and the update could not be undone; check its outcome, because its version and event may persist" +
     (args.journal.pointerChanged ? "; a different host-pointer row was left in place" : ""));
 }
 

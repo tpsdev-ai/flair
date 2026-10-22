@@ -427,7 +427,7 @@ for (const failure of ["version", "successor"] as const) {
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("expected refusal");
     expect(result.response.status).toBe(500);
-    expect(await result.response.json()).toEqual({ error: "skill_update_compensation_failed", message: "the undo of a close that did not land could not be confirmed" });
+    expect(await result.response.json()).toEqual({ error: "skill_update_compensation_failed", message: "the skill update's confirmation failed and the update could not be undone; check its outcome, because its version and event may persist" });
   });
 }
 
@@ -453,7 +453,7 @@ for (const failure of ["commit", "read"] as const) {
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("expected refusal");
     expect(result.response.status).toBe(500);
-    expect(await result.response.json()).toEqual({ error: "skill_update_compensation_failed", message: "the undo of a close that did not land could not be confirmed" });
+    expect(await result.response.json()).toEqual({ error: "skill_update_compensation_failed", message: "the skill update's confirmation failed and the update could not be undone; check its outcome, because its version and event may persist" });
   });
 }
 
@@ -466,7 +466,7 @@ for (const timing of ["before", "during"] as const) {
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("expected refusal");
     expect(result.response.status).toBe(500);
-    expect(await result.response.json()).toEqual({ error: "skill_update_compensation_failed", message: "the undo of a close that did not land could not be confirmed; a different host-pointer row was left in place" });
+    expect(await result.response.json()).toEqual({ error: "skill_update_compensation_failed", message: "the skill update's confirmation failed and the update could not be undone; check its outcome, because its version and event may persist; a different host-pointer row was left in place" });
     expect(pointers.get("predecessor")).toEqual(replacementPointer);
     expect(pointerConfirmationRead).toBe(true);
   });
