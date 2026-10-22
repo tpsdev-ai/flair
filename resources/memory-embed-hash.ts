@@ -96,13 +96,24 @@ export interface StagedVector {
   text: string;
 }
 
-/** Element-wise tolerance for {@link holdsOwnStaleVector}: wide enough for a
- *  float32 round-trip of a stored value. */
-const STAGED_VECTOR_TOLERANCE = 1e-6;
+/** Relative element-wise tolerance for {@link holdsOwnStaleVector}. The staged
+ *  vector is the embedding provider's output as `getEmbedding` returns it; no
+ *  code here bounds or normalizes its components, so the comparison scales
+ *  with magnitude. Rounding a finite value inside float32 range to float32
+ *  changes it by at most 2^-24 (about 6e-8) of its magnitude, so
+ *  `|stored - staged| <= 1e-6 * max(1, |stored|, |staged|)` accepts a stored
+ *  copy that went through float32 at any such magnitude (the floor of 1 covers
+ *  values near zero). */
+const STAGED_VECTOR_RELATIVE_TOLERANCE = 1e-6;
+
+/** One component of {@link holdsOwnStaleVector}'s comparison. */
+function matchesStagedComponent(stored: number, staged: number): boolean {
+  return Math.abs(stored - staged) <= STAGED_VECTOR_RELATIVE_TOLERANCE * Math.max(1, Math.abs(stored), Math.abs(staged));
+}
 
 /**
  * True when the row's stored vector matches `staged.embedding` element by
- * element within {@link STAGED_VECTOR_TOLERANCE} while the row's current
+ * element within {@link STAGED_VECTOR_RELATIVE_TOLERANCE} while the row's current
  * embedding text (`skillEmbedText`) is not `staged.text`. A match means the row
  * holds a vector equal, within that tolerance, to the one this writer computed
  * for `staged.text`, a text the row no longer has, so the caller re-embeds the
@@ -126,7 +137,7 @@ export function holdsOwnStaleVector(row: Record<string, any> | null | undefined,
   if (stored == null || typeof stored.length !== "number" || stored.length !== staged.embedding.length) return false;
   for (let i = 0; i < staged.embedding.length; i++) {
     const value = stored[i];
-    if (typeof value !== "number" || !(Math.abs(value - staged.embedding[i]) <= STAGED_VECTOR_TOLERANCE)) return false;
+    if (typeof value !== "number" || !matchesStagedComponent(value, staged.embedding[i])) return false;
   }
   return true;
 }

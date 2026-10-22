@@ -56,6 +56,24 @@ describe("flair#2478 — holdsOwnStaleVector matches a row's stored vector to th
     expect(holdsOwnStaleVector(row, STAGED)).toBe(true);
   });
 
+  it("large-magnitude components stored at float32 precision still match: the tolerance is relative", () => {
+    // No code bounds the provider's components, so the comparison must hold at
+    // any magnitude: a float32 round trip moves these by far more than 1e-6.
+    const staged = { embedding: [100.123456, -12345.678901, 3.4e30, 0.25, -7e-9], text: OLD };
+    expect(Math.abs(Math.fround(100.123456) - 100.123456)).toBeGreaterThan(1e-6);
+    expect(Math.abs(Math.fround(-12345.678901) + 12345.678901)).toBeGreaterThan(1e-4);
+    const row = { id: "m8", agentId: "", content: NEW, embedding: Float32Array.from(staged.embedding), embeddedContentHash: null };
+    expect(holdsOwnStaleVector(row, staged)).toBe(true);
+  });
+
+  it("a large-magnitude component that differs by more than the relative tolerance does not match", () => {
+    const staged = { embedding: [100.123456, -12345.678901, 3.4e30, 0.25], text: OLD };
+    const off = [100.123456 * (1 + 1e-5), -12345.678901, 3.4e30, 0.25];
+    expect(holdsOwnStaleVector({ id: "m9", agentId: "", content: NEW, embedding: off }, staged)).toBe(false);
+    const offLarge = [100.123456, -12345.678901, 3.4e30 * (1 + 1e-5), 0.25];
+    expect(holdsOwnStaleVector({ id: "m10", agentId: "", content: NEW, embedding: offLarge }, staged)).toBe(false);
+  });
+
   it("a skill row's embedding text is its trigger: a changed trigger is a changed text", () => {
     const staged = { embedding: vector(3), text: "when to use the old trigger" };
     const row = { id: "m7", agentId: "", tags: ["skill"], trigger: "when to use the new trigger", content: "body", embedding: [...staged.embedding] };
