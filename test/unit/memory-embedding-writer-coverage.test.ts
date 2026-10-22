@@ -70,9 +70,9 @@ add("Memory", ["writer:super.patch#1"], "GATED",
   "Memory.patch() ordinary write — a partial merge that can store a caller-supplied embedding stamp; calls noteWriteStamp (flair#2425).");
 // ── LOCAL: replaces a stored stamp with the current local model ID ──
 add("Memory", ["writer:(databases as any).flair.Memory.update#1"], "LOCAL",
-  "Memory.patch() re-embed (flair#2465): an incremental update of only embedding/embeddingModel/updatedAt for a locally computed vector and getModelId(); noteWriteStamp.");
+  "Memory.patch() re-embed (flair#2465): an incremental update of only embedding/embeddingModel/updatedAt/embeddedContentHash, plus instanceToken on a legacy row that has none (flair#2478), for a locally computed vector and getModelId(); noteWriteStamp.");
 add("migrations/embedding-stamp", ["writer:table.update#1"], "LOCAL",
-  "Content-suffix fallback (flair#2465): an incremental update of only embedding/embeddingModel/updatedAt for a locally computed vector and current model ID — never a full-row put. Written under the id's per-id Memory write lock: one non-waiting acquisition per attempt, after that attempt's vector is computed; a retry acquires it again (flair#2478).");
+  "Content-suffix fallback (flair#2465): an incremental update of only embedding/embeddingModel/updatedAt/embeddedContentHash for a locally computed vector and current model ID — never a full-row put. Written under the id's per-id Memory write lock: one non-waiting acquisition per attempt, after that attempt's vector is computed; a retry acquires it again (flair#2478).");
 
 // ── DELEGATED: embedding handling occurs in the resource write path ──
 add("MemoryArchive", ["writer:Memory.put#1"], "DELEGATED", "Existing row through Memory.put().");
