@@ -5,6 +5,8 @@ const [mode, file] = process.argv.slice(2);
 try {
   if (mode === "realpath") process.stdout.write(realpathSync(file));
   else if (mode === "password") process.stdout.write(randomBytes(18).toString("base64url"));
+  // readAdminPassFileSecure's read and trim (src/lib/auth-resolve.ts): the value flair init takes from --admin-pass-file.
+  else if (mode === "admin-pass") process.stdout.write(readFileSync(file, "utf-8").replace(/\s+$/, ""));
   else if (mode === "pid" || mode === "version") {
     const data = JSON.parse(readFileSync(file, "utf8"));
     process.stdout.write(mode === "pid" ? String(data.pid || "") : String(data.version) + "\n");
