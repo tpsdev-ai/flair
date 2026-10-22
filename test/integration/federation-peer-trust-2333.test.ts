@@ -1302,12 +1302,24 @@ describe("flair#2691 — a re-pair write dropped in the confirmation-to-commit w
       const competitorKey = b64url(competitor.publicKey);
       await seedPeer(peer, pub);
       if (withToken) await seedToken(token);
+      const seededPeer = await readPeer(peer);
       const { response, competed, released, paused } = await withPaused(
         withToken ? "federation-pair-repair-token-before-commit" : "federation-pair-repair-before-commit",
         () => pairRequest(pairBody(peer, pub, k.secretKey, withToken ? token : undefined)),
         async () => {
-          // The re-pair has written its row in its owned transaction but not
-          // committed. A competing direct write for the same Peer commits here.
+          // While the pause holds, the re-pair's own transaction has not
+          // committed: the Peer read still returns the seeded row, with none of
+          // this attempt's staged values.
+          const inPause = await readPeer(peer);
+          expect(inPause?.publicKey, "the committed Peer still holds the seeded key while the re-pair is paused").toBe(pub);
+          expect(inPause, "the committed Peer carries none of this attempt's staged values while the re-pair is paused").toEqual(seededPeer);
+          if (withToken) {
+            const tokenInPause = await readToken(token);
+            expect(tokenInPause?.consumedBy, "the pairing token is still unconsumed while the re-pair is paused").toBeUndefined();
+            expect(tokenInPause?.pairAttemptWriteId, "no consume staged by this attempt is committed while the re-pair is paused").toBeUndefined();
+          }
+          // The re-pair's row is staged but not committed. A competing direct
+          // write for the same Peer commits here.
           return updatePeer(peer, { publicKey: competitorKey });
         },
       );
