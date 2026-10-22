@@ -498,6 +498,30 @@ export function isLocalBase(base: string): boolean {
 // ─── HTTP + response handling ───────────────────────────────────────────────
 
 /**
+ * The signing context of a `signedOnly` request (flair#2749), for its
+ * no-credentials 403 hint: the agent id the request names, if any, and the
+ * directory the tier-5 floor reads keys from.
+ */
+export interface SignedOnlyHintContext {
+  agentId?: string;
+  keysDir: string;
+}
+
+function noCredentialsHint(isLocal: boolean, signedOnly: SignedOnlyHintContext | undefined): string {
+  if (signedOnly) {
+    // No admin password leaves a signedOnly request, so only an agent key helps.
+    const remedy = signedOnly.agentId
+      ? `Provide the key of agent '${signedOnly.agentId}' at ${join(defaultKeysDir(), `${signedOnly.agentId}.key`)} ` +
+        `(or set FLAIR_KEY_DIR to a directory containing ${signedOnly.agentId}.key).`
+      : `Provide the key of an agent registered on the target instance at ${join(signedOnly.keysDir, "<agent-id>.key")}.`;
+    return `This request can send only an Ed25519 agent signature; the admin password is not sent on this path. ${remedy}`;
+  }
+  return isLocal
+    ? "Set FLAIR_ADMIN_PASS, or run `flair init` to provision ~/.flair/admin-pass or an agent key."
+    : "Set FLAIR_ADMIN_PASS (remote targets have no local admin-pass fallback).";
+}
+
+/**
  * Perform the actual Flair REST call with an already-resolved Authorization
  * header (or none) and classify the response. Shared by the primary
  * (tiers 1-4) attempt and each tier-5 floor attempt below, so both paths
@@ -510,7 +534,7 @@ export async function sendJsonRequest(
   body: unknown,
   authHeader: string | undefined,
   isLocal: boolean,
-  transport: { refuseRedirects?: boolean } = {},
+  transport: { refuseRedirects?: boolean; signedOnly?: SignedOnlyHintContext } = {},
 ): Promise<any> {
   const res = await fetch(url.href, {
     method,
@@ -537,9 +561,7 @@ export async function sendJsonRequest(
     // resource rejected a credential-less call. Name the fix instead of
     // surfacing the raw "forbidden" body — never a stack trace.
     if (res.status === 403 && !authHeader) {
-      const hint = isLocal
-        ? "Set FLAIR_ADMIN_PASS, or run `flair init` to provision ~/.flair/admin-pass or an agent key."
-        : "Set FLAIR_ADMIN_PASS (remote targets have no local admin-pass fallback).";
+      const hint = noCredentialsHint(isLocal, transport.signedOnly);
       throw new ApiHttpError(403, `HTTP 403: no credentials sent. ${hint}`, /* noCredentials */ true);
     }
     throw new ApiHttpError(res.status, text || `HTTP ${res.status}`);
@@ -865,7 +887,10 @@ export async function authedRequest(
   }
 
   try {
-    return await sendJsonRequest(url, method, body, authHeader, isLocal, { refuseRedirects: opts.refuseRedirects });
+    return await sendJsonRequest(url, method, body, authHeader, isLocal, {
+      refuseRedirects: opts.refuseRedirects,
+      ...(opts.signedOnly ? { signedOnly: { agentId: opts.agentId, keysDir } } : {}),
+    });
   } catch (err: unknown) {
     // Tier 5 — the floor. Only engages when NOTHING above resolved to
     // anything sendable (see module header for why a rejected credential
