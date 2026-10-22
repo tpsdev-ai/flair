@@ -23,6 +23,7 @@ const CLI = join(process.cwd(), "dist", "cli.js");
 const AGENT_ID = "agent-a";
 const MEMORY_ID = "m-restored";
 const SOUL_ID = `soul-${AGENT_ID}`;
+const WARMUP_AGENT_ID = "agent-warmup";
 const RESTORED_TEXT = "restored after a provider stall";
 const PROVIDER_BOUND_MS = 300;
 const PROVIDER_DELAY_MS = 900;
@@ -54,25 +55,50 @@ function assertOwnInstance(h: HarperInstance): void {
   }
 }
 
-async function agentMemories(h: HarperInstance): Promise<any[]> {
+function adminAuth(h: HarperInstance): string {
+  return "Basic " + btoa(`${h.admin.username}:${h.admin.password}`);
+}
+
+async function opsSearch(h: HarperInstance, body: Record<string, unknown>): Promise<any[]> {
   const res = await fetch(h.opsURL, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: "Basic " + btoa(`${h.admin.username}:${h.admin.password}`),
-    },
-    body: JSON.stringify({
-      operation: "search_by_conditions",
-      database: "flair",
-      table: "Memory",
-      operator: "and",
-      conditions: [{ search_attribute: "agentId", search_type: "equals", search_value: AGENT_ID }],
-      get_attributes: ["id", "content"],
-    }),
+    headers: { "Content-Type": "application/json", Authorization: adminAuth(h) },
+    body: JSON.stringify({ database: "flair", table: "Memory", ...body }),
     signal: AbortSignal.timeout(15_000),
   });
   if (!res.ok) throw new Error(`ops search returned ${res.status}: ${await res.text()}`);
   return (await res.json()) as any[];
+}
+
+async function agentMemories(h: HarperInstance): Promise<any[]> {
+  return opsSearch(h, {
+    operation: "search_by_conditions",
+    operator: "and",
+    conditions: [{ search_attribute: "agentId", search_type: "equals", search_value: AGENT_ID }],
+    get_attributes: ["id", "content"],
+  });
+}
+
+/**
+ * Load the embedding model before the restore, so the short provider bound is
+ * not spent on a first-call model download or load. A POST embeds outside the
+ * write lock, so it waits for the model. Each attempt writes a row for another
+ * agent; the first row stored with a vector ends it.
+ */
+async function warmEmbeddingModel(h: HarperInstance): Promise<void> {
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const id = `warm-up-${attempt}`;
+    const res = await fetch(`${h.httpURL}/Memory`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: adminAuth(h) },
+      body: JSON.stringify({ id, agentId: WARMUP_AGENT_ID, content: `warm-up ${attempt}`, durability: "standard", createdAt }),
+      signal: AbortSignal.timeout(100_000),
+    });
+    if (!res.ok) throw new Error(`warm-up POST returned ${res.status}: ${await res.text()}`);
+    const [row] = await opsSearch(h, { operation: "search_by_id", ids: [id], get_attributes: ["id", "embedding"] });
+    if (Array.isArray(row?.embedding) && row.embedding.length > 0) return;
+  }
+  throw new Error("the embedding model did not load: three warm-up rows were stored without a vector");
 }
 
 function runRestore(): Promise<{ code: number; stdout: string; stderr: string }> {
@@ -117,6 +143,7 @@ function runRestore(): Promise<{ code: number; stdout: string; stderr: string }>
 beforeAll(async () => {
   harper = await startHarper({ serverEnv: { ...SERVER_ENV } });
   assertOwnInstance(harper);
+  await warmEmbeddingModel(harper);
   home = mkdtempSync(join(tmpdir(), "flair-2769-real-"));
   mkdirSync(join(home, ".flair"), { recursive: true });
   // The admin password lives OUTSIDE the test HOME, read only through --admin-pass-file.
@@ -131,7 +158,7 @@ beforeAll(async () => {
     rootOverride: join(home, ".flair", "snapshots"),
   });
   snapshotStem = basename(created.path).replace(/\.tar\.gz$/, "");
-}, 300_000);
+}, 420_000);
 
 afterAll(async () => {
   try {

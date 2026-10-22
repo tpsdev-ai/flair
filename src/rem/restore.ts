@@ -90,10 +90,10 @@ export interface RestoreOpts {
   /** When true, plan and report what would happen — no API mutations. */
   dryRun?: boolean;
   /**
-   * After the PUT loop, GET back the agent's memories + souls and diff
-   * against the snapshot to detect silent failures (schema coercion, 4xx
-   * responses the apiCall layer masked, partial accepts). Default true.
-   * Disable only for tests that intentionally simulate inconsistent state.
+   * After the PUT loop, GET back the agent's memories + souls and compare
+   * their ids with the snapshot's: snapshot ids that are missing and ids the
+   * snapshot does not hold are reported. Row content is not compared. Default
+   * true. Disable only for tests that intentionally simulate inconsistent state.
    */
   verifyPostRestore?: boolean;
   /** Override tmpdir for testing. */
@@ -127,8 +127,7 @@ export interface RestoreResult {
   /**
    * Post-restore state verification. Populated when verifyPostRestore is on
    * (default). `missing*` IDs were in the snapshot but absent from Harper
-   * afterwards (silent PUT failure). `extra*` IDs were present afterwards
-   * but not in the snapshot (silent DELETE failure / lingering rows).
+   * afterwards. `extra*` IDs were present afterwards but not in the snapshot.
    * Both fields being empty means the agent's memory and soul ids match the
    * snapshot's; row content is not compared.
    */
@@ -383,10 +382,10 @@ export async function applySnapshot(opts: RestoreOpts): Promise<RestoreResult> {
   }
 
   // 7. Verify post-restore state (default on; opt-out via verifyPostRestore=false).
-  //    Catches silent failures: Harper schema coercion, 4xx responses the
-  //    apiCall layer masked as ok, partial-DELETE leftovers. Per-ID diff,
-  //    not just counts — count parity can hide simultaneous PUT+DELETE
-  //    failures that wash out numerically.
+  //    Compares ids only: it reports snapshot ids missing from the agent's
+  //    rows and ids present that the snapshot does not hold; row content is
+  //    not compared. Per-ID diff, not just counts — count parity can hide
+  //    simultaneous PUT+DELETE failures that wash out numerically.
   if (opts.verifyPostRestore !== false) {
     try {
       const verifyMem = asArray(await opts.apiCall("GET", `/Memory?agentId=${encodeURIComponent(opts.agentId)}`));
