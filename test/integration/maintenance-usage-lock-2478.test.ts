@@ -4,7 +4,10 @@
  * The maintenance archive/expiry writer (resources/MemoryMaintenance.ts) and the
  * usage-count writer (resources/usage-recording.ts, POST /RecordUsage and
  * citation-on-write) take the per-memory-id write lock (resources/memory-write-lock.ts)
- * for the id they write. Each decides on the committed row it reads under the
+ * for the id they write. The real-Harper write trace (test/helpers/embedding-writer-race.ts)
+ * asserts the archive writer's committed update names only `archived` and
+ * `archivedAt`, and the usage writer's only `usageCount` and its commit marker
+ * `writeBackWriteId`; the expiry writer writes no fields (it deletes the row). Each decides on the committed row it reads under the
  * lock, stages an update of only the fields it owns, commits before releasing,
  * and confirms its result on the committed row. A writer that cannot take the
  * lock skips the row and reports it.
@@ -38,6 +41,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import nacl from "tweetnacl";
 import { HARPER_STOP_BUDGET_MS, startHarper, stopHarper, type HarperInstance } from "../helpers/harper-lifecycle";
+import type { ProbeComponent } from "../helpers/component-with-replay-probe";
+import { RaceHarness, composeTracedComponent } from "../helpers/embedding-writer-race";
 
 interface TestAgent { id: string; publicKey: Uint8Array; secretKey: Uint8Array; }
 const newAgent = (id: string): TestAgent => ({ id, ...nacl.sign.keyPair() });
@@ -47,6 +52,17 @@ let harper: HarperInstance;
 let pauseDir: string;
 let home: string;
 let authHeader: string;
+let component: ProbeComponent;
+let h: RaceHarness;
+
+/** The writers' own incremental field sets, as the real-Harper write trace
+ *  records them. `writeBackWriteId` is the shared write-back helper's commit
+ *  marker for a non-idempotent plan (resources/write-back.ts), written beside
+ *  `usageCount`. */
+const ARCHIVE_WRITER = "maintenance-archive";
+const USAGE_WRITER = "usage-count";
+const ARCHIVE_FIELDS = ["archived", "archivedAt"];
+const USAGE_FIELDS = ["usageCount", "writeBackWriteId"];
 
 async function opsCall(body: Record<string, unknown>): Promise<any> {
   const res = await fetch(harper.opsURL, {
@@ -170,7 +186,13 @@ beforeAll(async () => {
   if (process.env.HARPER_HTTP_URL) throw new Error("requires an isolated Harper; unset HARPER_HTTP_URL");
   home = mkdtempSync(join(tmpdir(), "flair-2478-3b1-home-"));
   pauseDir = mkdtempSync(join(tmpdir(), "flair-2478-3b1-pause-"));
-  harper = await startHarper({ serverEnv: { FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_TEST_PAUSE_DIR: pauseDir }, homeDir: home });
+  component = composeTracedComponent();
+  harper = await startHarper({
+    cwd: component.dir, harperBinDir: component.sourceRoot,
+    serverEnv: { FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_TEST_PAUSE_DIR: pauseDir }, homeDir: home,
+  });
+  h = new RaceHarness(pauseDir);
+  h.harper = harper;
   authHeader = "Basic " + Buffer.from(`${harper.admin.username}:${harper.admin.password}`).toString("base64");
   const http = new URL(harper.httpURL);
   const ops = new URL(harper.opsURL);
@@ -189,9 +211,14 @@ beforeAll(async () => {
 }, 240_000);
 
 afterAll(async () => {
-  if (harper) await stopHarper(harper).catch(() => {});
+  if (harper) {
+    const installDir = harper.installDir;
+    await stopHarper(harper).catch(() => {});
+    rmSync(installDir, { recursive: true, force: true, maxRetries: 4 });
+  }
   if (home) rmSync(home, { recursive: true, force: true });
   if (pauseDir) rmSync(pauseDir, { recursive: true, force: true });
+  component?.cleanup();
 }, HARPER_STOP_BUDGET_MS);
 
 describe("flair#2478 slice 3b — the maintenance archive writer (real Harper)", () => {
@@ -206,6 +233,8 @@ describe("flair#2478 slice 3b — the maintenance archive writer (real Harper)",
     expect(row?.content).toBe(`content of ${id}`);
     expect(row?.visibility).toBe("shared");
     expect(row?.usageCount).toBe(4);
+    h.expectIncrementalWrites(id, ARCHIVE_WRITER, ARCHIVE_FIELDS);
+    expect(h.writesBy(id, ARCHIVE_WRITER)).toHaveLength(1);
   }, 60_000);
 
   it("held after staging: an owner PUT is refused memory_busy; after release the archive and the owner's content and visibility are stored", async () => {
@@ -221,6 +250,7 @@ describe("flair#2478 slice 3b — the maintenance archive writer (real Harper)",
     await assertReleased(point);
     expect(stats.archived, JSON.stringify(stats)).toBe(1);
     expect((await readRow(id))?.archived).toBe(true);
+    h.expectIncrementalWrites(id, ARCHIVE_WRITER, ARCHIVE_FIELDS);
     const put = await ownerWrite(owner, "PUT", id, { content: "owner text after the archive committed" });
     expect(put.status, `owner PUT after release: ${await put.clone().text()}`).toBeLessThan(300);
     const row = await readRow(id);
@@ -345,6 +375,8 @@ describe("flair#2478 slice 3b — the usage-count writer (real Harper)", () => {
     expect((await readRow(id))?.usageCount).toBe(3);
     expect((await readRow(id))?.content).toBe(`content of ${id}`);
     expect((await readLedger(owner.id, id))?.id).toBe(`${owner.id}:${id}`);
+    h.expectIncrementalWrites(id, USAGE_WRITER, USAGE_FIELDS);
+    expect(h.writesBy(id, USAGE_WRITER)).toHaveLength(1);
   }, 60_000);
 
   it("held after the count is staged: an owner PUT is refused memory_busy; after release the count and the owner's content and visibility are stored", async () => {
@@ -360,6 +392,7 @@ describe("flair#2478 slice 3b — the usage-count writer (real Harper)", () => {
     await assertReleased(point);
     expect(res.status, `RecordUsage: ${await res.clone().text()}`).toBe(200);
     expect((await readRow(id))?.usageCount).toBe(1);
+    h.expectIncrementalWrites(id, USAGE_WRITER, USAGE_FIELDS);
     const put = await ownerWrite(owner, "PUT", id, { content: "owner text after the count" });
     expect(put.status, `owner PUT after release: ${await put.clone().text()}`).toBeLessThan(300);
     const row = await readRow(id);
