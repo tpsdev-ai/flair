@@ -482,8 +482,7 @@ export async function mcpHandler(request: any): Promise<any> {
  * resolved the way handleToolCall resolves it (same sub lookup, same
  * active-principal rule), so each tool's `tools/list` gate is decided for the
  * agent the call would run as. A subject that resolves to no principal — or
- * whose resolution is refused — gets no gated tool; its calls are denied
- * anyway (handleToolCall).
+ * whose resolution is refused — gets no gated tool.
  *
  * JIT provisioning is off here: a listing is a read and must not create a
  * principal.

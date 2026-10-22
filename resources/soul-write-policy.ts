@@ -27,10 +27,10 @@ export async function authorizeSoulWrite(context: any) {
 }
 
 /**
- * Whether this context's soul write would be admitted: the decision
- * {@link authorizeSoulWrite} returns, so a surface that must decide BEFORE a
- * write (the /mcp `tools/list` gate) asks the same question the write does
- * instead of restating the rule.
+ * Whether this context's soul write would pass source authorization: the
+ * decision {@link authorizeSoulWrite} returns, so a surface that must decide
+ * BEFORE a write (the /mcp `tools/list` gate) asks the write's
+ * source-authorization question instead of restating the rule.
  */
 export async function soulWriteAllowed(context: any): Promise<boolean> {
   return (await authorizeSoulWrite(context)).denied === null;
