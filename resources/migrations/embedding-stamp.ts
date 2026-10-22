@@ -187,8 +187,8 @@
  * CONTENT_SUFFIX_REGEN_ATTEMPTS (3) attempts; an unreadable read-back, or the
  * attempts exhausted, is logged as unconfirmed and leaves the row uncounted
  * for the next scan. A retry after an unconfirmed attempt compares the row's
- * stored vector with the vector that attempt staged (within a float32
- * tolerance), not the stored text hash (null for a row with an empty owner): a
+ * stored vector with the vector that attempt staged (within a relative
+ * tolerance that accepts a float32 round trip), not the stored text hash (null for a row with an empty owner): a
  * match beside a changed text is not treated as current, so the retry
  * re-embeds the current text. A row whose stamp is not current or whose stored
  * hash does not match its text is re-embedded whatever vector it holds; the
@@ -638,11 +638,14 @@ export function createEmbeddingStampMigration(
           let unconfirmed = false;
           // The vector and text of this row's last unconfirmed attempt.
           let ownUnconfirmed: StagedVector | undefined;
-          // One guard over the whole retry loop (flair#2478): once an attempt's
-          // committed write is unconfirmed, the unconfirmed outcome is logged
-          // exactly once on every exit of this row's loop, a break, a refusal
-          // or a thrown error (a retry's fresh read, for instance); a thrown
-          // error still propagates to the runner after the line is logged.
+          // One guard over the whole retry loop (flair#2478): when the loop ends
+          // without a verified attempt after an attempt whose committed write is
+          // unconfirmed, by a break, a refusal or a thrown error, the unconfirmed
+          // outcome is logged exactly once. A later verified attempt sets `ok`,
+          // and nothing is logged. An error the loop itself throws (a retry's
+          // fresh read of the row) propagates to the runner after the line is
+          // logged; an error inside an attempt is caught by regenContentSuffixRow
+          // and ends the loop as a skipped attempt.
           try {
             for (let attempt = 1; attempt <= CONTENT_SUFFIX_REGEN_ATTEMPTS; attempt++) {
               const rowNow = attempt === 1 ? existing : await table.get(id);
@@ -651,7 +654,7 @@ export function createEmbeddingStampMigration(
               // write. Leave it uncounted; a later scan decides whether anything
               // still needs re-embedding. A row whose stored vector matches the
               // vector this loop's last unconfirmed attempt staged (within a
-              // float32 tolerance, holdsOwnStaleVector) while its text changed is
+              // relative tolerance, holdsOwnStaleVector) while its text changed is
               // not current, whatever its stored hash says: a row with an empty
               // owner stores a null hash, which passes the hash comparison for any
               // text (flair#2478). Who stored a matching vector is not known.

@@ -24,7 +24,7 @@
  *    row, commits, and verifies the committed row before the release. After a
  *    readable read-back mismatch it retries, at most 3 attempts; a retry
  *    after an unconfirmed attempt, finding the vector that attempt staged
- *    (a float32-tolerance match) beside a changed text, re-embeds the current
+ *    (a match within a relative tolerance) beside a changed text, re-embeds the current
  *    text, also for a row with an empty owner (whose stored text hash is null).
  *
  * Owner PUT/PATCH/DELETE refuse a `.content`-suffixed id, so the fallback's

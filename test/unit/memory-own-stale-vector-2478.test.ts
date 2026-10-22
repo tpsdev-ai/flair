@@ -5,7 +5,9 @@
  * staged (resources/memory-embed-hash.ts `holdsOwnStaleVector`).
  *
  * It matches when the row's stored vector equals the staged vector element by
- * element within a float32 tolerance while the row's text is no longer the
+ * element within a relative tolerance (1e-6 of the larger magnitude, at least
+ * 1e-6, which accepts a float32 round trip at any magnitude) while the row's
+ * text is no longer the
  * staged text: the row holds a vector equal to the writer's computation for a
  * text it no longer has. A match does not say which writer stored the vector.
  * The check compares vectors, not the stored text hash: a row with an empty

@@ -207,9 +207,11 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
     // locked; a retry acquires it again.
     // A held id, an id with an unresolved write outcome, or a store with no lock
     // is skipped and logged, and that attempt writes nothing. After an earlier
-    // attempt of this call committed unconfirmed, every terminal exit (a lock
-    // miss, a row now gone or already embedded, a provider that returned no
-    // vector) logs the outcome as unconfirmed instead. A skipped backfill is not
+    // attempt of this call committed unconfirmed, every exit that ends the call
+    // without a verified write (a lock miss, a row now gone or already embedded,
+    // a provider that returned no vector, a thrown error, which is logged and not
+    // rethrown) logs the outcome as unconfirmed instead; a later verified write
+    // is logged as written. A skipped backfill is not
     // retried by this call. The backfill starts only from the post-response hook
     // at the end of this middleware (the "Embedding backfill" block below),
     // which a successful HTTP Memory POST, PUT or PATCH reaches when a verified
@@ -241,7 +243,8 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
     //
     // The backfill writes a row whose vector is missing or has at most 100
     // entries, whatever stored it. A row holding a longer vector counts as
-    // already embedded and is skipped, except one whose stored vector matches, within a float32 tolerance, the
+    // already embedded and is skipped, except one whose stored vector matches,
+    // within a relative tolerance that accepts a float32 round trip, the
     // vector an earlier unconfirmed attempt of this call staged, while its text
     // is no longer the text that vector was computed from (holdsOwnStaleVector):
     // the row holds a vector equal to this call's computation for a text it no
@@ -255,8 +258,9 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
     let ownUnconfirmed: StagedVector | undefined;
     const alreadyEmbedded = (row: any): boolean => row.embedding?.length > 100 && !holdsOwnStaleVector(row, ownUnconfirmed);
     // After an earlier attempt of this call committed and its read-back did not
-    // confirm it, every terminal exit logs the outcome as unconfirmed; an exit
-    // that wrote nothing says so for its own attempt only (flair#2478).
+    // confirm it, every exit that ends the call without a verified write logs
+    // the outcome as unconfirmed; an exit that wrote nothing says so for its own
+    // attempt only (flair#2478).
     const endAfterUnconfirmed = (ended: string): void => {
       if (unconfirmed) console.warn(`[auto-embed] ${memoryId}: ${ended}; an earlier attempt's vector was not confirmed on the committed row; outcome: unconfirmed`, { outcome: "unconfirmed" });
     };
