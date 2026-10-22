@@ -317,8 +317,9 @@ async function regenViaHttpPatch(
  *  after an earlier attempt of the same request committed unconfirmed answers
  *  `write_outcome_unknown` instead. `write_outcome_unknown` means the id has an
  *  unresolved write, which can be this request's own re-embed (a committed row
- *  it could not read back, or one whose read-back did not show the write before
- *  a later attempt failed), so that write may have committed. The
+ *  it could not read back, or one whose read-back did not show the write, or a
+ *  step after a commit that failed before any read-back), so that write may have
+ *  committed. The
  *  row is uncounted; the next scan decides whether it is still stale. Logs the
  *  refusal's code. */
 async function logRegenRefusal(id: string, res: Response): Promise<void> {

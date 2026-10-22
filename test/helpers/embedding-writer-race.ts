@@ -8,8 +8,14 @@
  *    with the lock helper's callback wrapped so every traced `put`/`update`
  *    names the lock phase it ran under (`unattributed` outside any lock);
  *  - the armable Memory read failure (FAILING_MEMORY_READ_MODULE_SRC), so a
- *    case can make one post-commit verification read fail.
- * Nothing under resources/ or src/ changes or references either addition.
+ *    case can make one Memory read of a named id fail (`arm.memory-get-fail.<id>`
+ *    in the pause directory, consumed by the first read);
+ *  - the armable write-stamp failure ({@link GUARD_STAMP_FAILURE_MODULE_SRC}), so
+ *    a case can make the next embedding-space write-stamp notification throw
+ *    (`arm.guard-stamp-fail`, consumed by the first call), through the guard's
+ *    own test seam `_setGuardModelIdForTests`.
+ * Both are inert unless armed. Nothing under resources/ or src/ changes or
+ * references these additions.
  *
  * Every instance is an ephemeral, home-isolated Harper this process started;
  * {@link assertOwnInstance} refuses any other target before the first call.
@@ -36,7 +42,29 @@ export const LEGACY_REEMBED_UPDATE_FIELDS = [...EMBEDDING_UPDATE_FIELDS, "instan
 export interface TestAgent { id: string; publicKey: Uint8Array; secretKey: Uint8Array }
 export const newAgent = (id: string): TestAgent => ({ id, ...nacl.sign.keyPair() });
 
-/** The composed component (trace + lock attribution + armable read failure). */
+/** The armable write-stamp failure: while `arm.guard-stamp-fail` exists in the
+ *  pause directory, the next model-id read the embedding-space guard makes
+ *  (noteWriteStamp's first step) removes it and throws; otherwise it returns
+ *  the provider's model id, as the guard's default getter does. */
+export const GUARD_STAMP_FAILURE_MODULE_REL = join("dist", "resources", "zz-test-guard-stamp-failure-2478.js");
+export const GUARD_STAMP_FAILURE_MODULE_SRC = `import { existsSync, unlinkSync } from "node:fs";
+import { join } from "node:path";
+import { getModelId } from "./embeddings-provider.js";
+import { _setGuardModelIdForTests } from "./embedding-space-guard.js";
+_setGuardModelIdForTests(() => {
+  const dir = process.env.FLAIR_TEST_PAUSE_DIR;
+  if (dir) {
+    const arm = join(dir, "arm.guard-stamp-fail");
+    if (existsSync(arm)) {
+      unlinkSync(arm);
+      throw new Error("test component: forced write-stamp failure");
+    }
+  }
+  return getModelId();
+});
+`;
+
+/** The composed component (trace + lock attribution + armable read and write-stamp failures). */
 export function composeTracedComponent(): ProbeComponent {
   const component = componentWithReplayProbe({ probe: {
     source: join("test", "fixtures", "memory-write-trace-2478", "probe.js"),
@@ -51,6 +79,7 @@ export function composeTracedComponent(): ProbeComponent {
     'import { traceMemoryWriter } from "./zz-memory-write-trace-2478.js";\n' +
     lockSource.replace(invocation, "value: await traceMemoryWriter(options.phase, () => fn(scope))"));
   writeFileSync(join(component.dir, FAILING_MEMORY_READ_MODULE_REL), FAILING_MEMORY_READ_MODULE_SRC);
+  writeFileSync(join(component.dir, GUARD_STAMP_FAILURE_MODULE_REL), GUARD_STAMP_FAILURE_MODULE_SRC);
   return component;
 }
 

@@ -1805,7 +1805,8 @@ function storedInstanceToken(row: any): string | null {
  * If the stored text is no longer the text the vector was computed from, this
  * recomputes from the stored text (at most REEMBED_WRITE_ATTEMPTS times).
  * If the text keeps changing across the REEMBED_WRITE_ATTEMPTS attempts, it returns
- * reembed_row_changed (409) and writes nothing. A row absent at the attempt's
+ * reembed_row_changed (409) and writes nothing, when no attempt has committed
+ * (otherwise 503 write_outcome_unknown, see flair#2478 below). A row absent at the attempt's
  * own re-read, a row with no text, or a caller no longer authorized for the row
  * is refused the same way the first read refused it.
  *
@@ -1815,7 +1816,8 @@ function storedInstanceToken(row: any): string | null {
  * instanceToken, contentHash, createdAt) and the same embedding text, compared
  * as text. A row gone or changed in either at confirmation aborts the owned
  * transaction (the staged write is discarded) and the caller answers
- * stored_row_changed (409). A same-id replacement with the same identity and
+ * stored_row_changed (409) when no earlier attempt has committed, otherwise
+ * 503 write_outcome_unknown (flair#2478 below). A same-id replacement with the same identity and
  * text passes. Post-commit verification retries surviving differences in
  * compared fields, identity or text from a fresh read within the attempt bound.
  *
@@ -1829,14 +1831,16 @@ function storedInstanceToken(row: any): string | null {
  * The calling PATCH holds the row's per-id write lock across this write and its
  * commit.
  *
- * flair#2478: once an attempt has committed and its post-commit read-back was
- * readable but did not show the write, the row may hold that attempt's write.
- * Every later exit of the call (a refusal, a 409, a provider timeout, an
- * unusable vector, a thrown error, or the final attempt's mismatch) then
- * answers `503 write_outcome_unknown` and marks the id outcome-unknown, never
- * a refusal that says nothing was written. The one exception is a later
- * attempt whose fresh read finds no row: no write of this call remains on one,
- * so it answers 404 as before and does not fence the id.
+ * flair#2478: once an attempt's commit has resolved and no read-back has shown
+ * its write (the read-back mismatched, or a step after the commit, such as the
+ * write-stamp notifier, threw before it), the row may hold that write. Every
+ * exit of the call from then on, other than a later verified success, answers
+ * `503 write_outcome_unknown` and marks the id outcome-unknown: a refusal, a
+ * 409 (exhausted text changes or a change seen at a confirmation), a provider
+ * timeout, an unusable vector, the final attempt's mismatch, or any thrown
+ * error. The one exception is a later attempt whose fresh read finds no row:
+ * no write of this call remains on one, so it answers 404 as before and does
+ * not fence the id.
  */
 async function reembedStoredRow(
   id: string,
@@ -1845,17 +1849,40 @@ async function reembedStoredRow(
   auth: AgentAuthVerdict,
   ctx: any,
 ): Promise<ReembedResult> {
+  // flair#2478: one guard over every attempt. Once an attempt's commit has
+  // resolved and no read-back has shown its write, the call answers either the
+  // verified success, the deleted-row 404, or write_outcome_unknown (marking
+  // the id): the attempts settle their refusals through `settle`, and any
+  // thrown error, the write-stamp notifier after a commit included, lands here.
+  const state = { committedUnconfirmed: false };
+  try {
+    return await reembedAttempts(id, preRead, vector, auth, ctx, state);
+  } catch (err) {
+    if (!state.committedUnconfirmed) throw err;
+    console.warn(`[reembed] ${id}: a committed attempt's write is not confirmed; the call ended with an error (${(err as Error)?.name ?? "unknown"}); outcome: unconfirmed`);
+    return { response: writeOutcomeUnknownFor(id) };
+  }
+}
+
+/** The attempts of {@link reembedStoredRow}. `state.committedUnconfirmed` is set
+ *  when an attempt's commit resolves, before anything else runs, and stays set
+ *  unless that attempt's read-back shows the write (which answers success). */
+async function reembedAttempts(
+  id: string,
+  preRead: Record<string, any>,
+  vector: number[],
+  auth: AgentAuthVerdict,
+  ctx: any,
+  state: { committedUnconfirmed: boolean },
+): Promise<ReembedResult> {
   let textToEmbed = skillEmbedText(preRead);
   let embedding = vector;
-  // flair#2478: set once an attempt has committed and its post-commit read-back
-  // was readable but did not show the write. From then on the row may hold that
-  // attempt's write, so every later exit of this call answers
-  // write_outcome_unknown and marks the id, never a refusal that says nothing
-  // was written.
-  let priorUnconfirmed = false;
+  // Every refusal of a later attempt, once a committed write is unconfirmed,
+  // answers write_outcome_unknown and marks the id, never a refusal that says
+  // nothing was written.
   const settle = (response: Response, ended: string): ReembedResult => {
-    if (!priorUnconfirmed) return { response };
-    console.warn(`[reembed] ${id}: an earlier attempt committed and its read-back did not show the write; this attempt ended with ${ended}; outcome: unconfirmed`);
+    if (!state.committedUnconfirmed) return { response };
+    console.warn(`[reembed] ${id}: a committed attempt's write is not confirmed; this attempt ended with ${ended}; outcome: unconfirmed`);
     return { response: writeOutcomeUnknownFor(id) };
   };
   for (let attempt = 1; attempt <= REEMBED_WRITE_ATTEMPTS; attempt++) {
@@ -1899,7 +1926,8 @@ async function reembedStoredRow(
         // the vector was computed from (`textToEmbed`). The text check catches an
         // edit that changed the text but no identity field. A row gone or changed
         // at confirmation aborts this owned transaction, discarding the staged
-        // write; the caller answers stored_row_changed (409). Only a text change
+        // write; the caller answers stored_row_changed (409), or write_outcome_unknown
+        // when an earlier attempt committed unconfirmed. Only a text change
         // is logged. Neither the staged vector, its hash, nor a staged legacy
         // token is written. Post-commit verification retries surviving
         // differences in compared fields, identity or text from a fresh read.
@@ -1925,7 +1953,6 @@ async function reembedStoredRow(
       // The owned transaction was aborted by the throw; this attempt wrote
       // nothing (an earlier unconfirmed attempt may have; settle answers that).
       if (err instanceof CommittedRowChanged) return settle(storedRowChangedRefusal("Memory"), "stored_row_changed");
-      if (priorUnconfirmed) return settle(writeOutcomeUnknownResponse(), `an error (${(err as Error)?.name ?? "unknown"})`);
       throw err;
     }
     if (outcome.kind === "withheld") return settle(outcome.response, "a withheld storage result");
@@ -1933,7 +1960,7 @@ async function reembedStoredRow(
       // The fresh read finds no row, so no write of this call remains on one:
       // 404 states that even after an earlier unconfirmed attempt, and the id is
       // not fenced (an outcome-unknown mark lasts until restart).
-      if (priorUnconfirmed) console.warn(`[reembed] ${id}: an earlier attempt committed and its read-back did not show the write; the row is now absent, so no write of this call remains on it; answered not_found`);
+      if (state.committedUnconfirmed) console.warn(`[reembed] ${id}: a committed attempt's write is not confirmed, but the row is now absent, so no write of this call remains on it; answered not_found`);
       return { response: NOT_FOUND() };
     }
     if (outcome.kind === "forbidden") return settle(FORBIDDEN("forbidden: cannot write memory owned by another agent"), "forbidden");
@@ -1952,7 +1979,6 @@ async function reembedStoredRow(
         recomputed = await embedUnderLock(textToEmbed, "memory-reembed-recompute");
       } catch (err) {
         if (err instanceof MemoryProviderTimeout) return settle(memoryProviderTimeoutResponse(), "memory_provider_timeout");
-        if (priorUnconfirmed) return settle(writeOutcomeUnknownResponse(), `an error (${(err as Error)?.name ?? "unknown"})`);
         throw err;
       }
       if (!isUsableEmbeddingVector(recomputed)) {
@@ -1961,6 +1987,9 @@ async function reembedStoredRow(
       embedding = recomputed;
       continue;
     }
+    // The commit has resolved: until a read-back shows the write, every exit of
+    // the call is settled as unknown (the notifier below included).
+    state.committedUnconfirmed = true;
     noteWriteStamp(outcome.model, preRead);
     const verifyPause = txnPausePoint("memory-reembed-verify");
     if (verifyPause) await verifyPause;
@@ -1986,16 +2015,15 @@ async function reembedStoredRow(
       // still lacks one), so a post-commit mismatch retries from the next
       // attempt's fresh read. A post-commit mismatch on the final attempt is an
       // unconfirmed outcome (the commit resolved, so nothing here proves no
-      // write landed). From here on every exit of this call is settled as
-      // unknown (priorUnconfirmed): a later refusal, provider timeout or error
-      // answers write_outcome_unknown and marks the id. Text changes that exhaust
-      // the attempts through recomputation answer 409 reembed_row_changed only
-      // when no earlier attempt committed.
+      // write landed). state.committedUnconfirmed stays set, so every later
+      // exit of this call is settled as unknown: a later refusal, provider
+      // timeout or error answers write_outcome_unknown and marks the id. Text
+      // changes that exhaust the attempts through recomputation, and a change
+      // seen at a confirmation, answer 409 only when no attempt has committed.
       if (attempt === REEMBED_WRITE_ATTEMPTS) {
         console.warn(`[reembed] ${id}: the committed vector was not confirmed after ${REEMBED_WRITE_ATTEMPTS} attempts; outcome: unconfirmed`);
         return { response: writeOutcomeUnknownFor(id) };
       }
-      priorUnconfirmed = true;
       continue;
     }
     // flair#2561: the response names the row and its new updatedAt, and

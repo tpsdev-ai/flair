@@ -11,16 +11,20 @@
  * trace, the legacy row included). Each attempt re-reads the committed row inside
  * its own transaction and embeds the stored text. A text change seen at that
  * read recomputes the vector (at most 3 attempts in all, then `409
- * reembed_row_changed`); a change visible at the confirmation after staging
- * aborts with `409 stored_row_changed` and writes nothing; a change committed
+ * reembed_row_changed` when no attempt has committed); a change visible at the
+ * confirmation after staging aborts that attempt, which writes nothing, and
+ * answers `409 stored_row_changed` when no attempt has committed; a change committed
  * after that confirmation, before the commit, is seen only by the post-commit
  * read-back, which on a readable mismatch retries from a fresh read within the
  * same 3 attempts (recomputing for the changed text) and on the last attempt
  * answers `503 write_outcome_unknown`; an unreadable read-back answers `503
- * write_outcome_unknown`. Once an attempt has committed without its read-back
- * showing the write, every later exit of the request answers `503
- * write_outcome_unknown` and fences the id (a provider timeout on the retry
- * included), except a retry that finds the row gone, which answers 404. A `200`
+ * write_outcome_unknown`. Once an attempt's commit has resolved and no
+ * read-back has shown the write (its read-back mismatched, or a step after the
+ * commit threw), every exit of the request other than a later verified success
+ * answers `503 write_outcome_unknown` and fences the id: both 409s above, a
+ * provider timeout on the retry, and a thrown error such as the write-stamp
+ * notifier's after a later commit, except a retry that finds the row gone,
+ * which answers 404. A `200`
  * answer means the read-back showed the vector beside the text it was computed
  * from.
  *
@@ -38,15 +42,18 @@
  *    commit window; an uncontended positive control; an unreadable post-commit
  *    read (`503 write_outcome_unknown`, the id is fenced); a retry's provider
  *    call that outlasts its bound after an attempt committed unconfirmed (`503
- *    write_outcome_unknown`, the id is fenced); a provider call that outlasts its
- *    bound on the first attempt (`503 memory_provider_timeout`, nothing written).
+ *    write_outcome_unknown`, the id is fenced); a later attempt whose write-stamp
+ *    notifier throws after its commit, after an attempt committed unconfirmed
+ *    (`503 write_outcome_unknown`, the id is fenced); a provider call that
+ *    outlasts its bound on the first attempt (`503 memory_provider_timeout`,
+ *    nothing written).
  *
  * Seeded rows carry an explicit visibility, an incarnation token and the
  * current model's bare stamp, so the boot migrations leave them alone.
  * Home-isolated ephemeral Harper; every URL is asserted to be this test's own.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HARPER_STOP_BUDGET_MS, startHarper, stopHarper } from "../helpers/harper-lifecycle";
@@ -481,7 +488,7 @@ describe("flair#2478 — the re-embed's unknown and bounded outcomes (real Harpe
       h.letGo(CONFIRMED);
       h.letGo(recompute);
     }
-    expect(h.serverLog()).toContain(`[reembed] ${id}: an earlier attempt committed and its read-back did not show the write; this attempt ended with memory_provider_timeout; outcome: unconfirmed`);
+    expect(h.serverLog()).toContain(`[reembed] ${id}: a committed attempt's write is not confirmed; this attempt ended with memory_provider_timeout; outcome: unconfirmed`);
     // Attempt 1's write landed: the row holds the old text's vector beside the new text.
     const stored = await h.readRow(id);
     expect(stored.content).toBe(EDITED);
@@ -494,6 +501,54 @@ describe("flair#2478 — the re-embed's unknown and bounded outcomes (real Harpe
     expect(res.status, body).toBe(503);
     expect(JSON.parse(body).error).toBe("write_outcome_unknown");
   }, 150_000);
+
+  it("after an attempt committed and its read-back did not show the write, a later attempt whose write-stamp notifier throws after its commit answers write_outcome_unknown and fences the id", async () => {
+    // Attempt 1 commits after the text changed in its confirmation-to-commit
+    // window and waits before its read-back, which then does not show the
+    // write. The retry recomputes for the new text and commits; the
+    // embedding-space notifier that runs after that commit is armed to throw.
+    const id = "rl2478-unknown-after-notifier";
+    const verify = "memory-reembed-verify";
+    const fault = join(pauseDir, "arm.guard-stamp-fail");
+    await seed(id);
+    h.arm(CONFIRMED);
+    h.arm(verify);
+    const pending = reembed(id);
+    try {
+      await h.assertPaused(CONFIRMED);
+      await h.rawUpdate(id, { content: EDITED });
+      await h.release(CONFIRMED);
+      // Attempt 1 has committed and notified; the next notification is the retry's.
+      await h.assertPaused(verify);
+      writeFileSync(fault, "");
+      await h.release(verify);
+      const res = await pending;
+      const text = await res.text();
+      expect(res.status, text).toBe(503);
+      expect(JSON.parse(text)).toEqual({
+        error: "write_outcome_unknown",
+        outcome: "unconfirmed",
+        message: "the write outcome is unknown. Read the affected row before writing again.",
+      });
+      expect(existsSync(fault), "the notifier fault was not consumed").toBe(false);
+    } finally {
+      h.letGo(CONFIRMED);
+      h.letGo(verify);
+      rmSync(fault, { force: true });
+    }
+    expect(h.serverLog()).toContain(`[reembed] ${id}: a committed attempt's write is not confirmed; the call ended with an error (Error); outcome: unconfirmed`);
+    // The retry's write landed before its notifier threw.
+    const stored = await h.readRow(id);
+    expect(stored.content).toBe(EDITED);
+    await expectBoundTo(stored, EDITED, ORIGINAL);
+    h.expectIncrementalWrites(id, WRITER);
+    expect(h.writesBy(id, WRITER)).toHaveLength(2);
+    // The id is fenced, as after any unconfirmed outcome.
+    const res = await ownerWrite("PUT", id, OWNER_TEXT);
+    const body = await res.text();
+    expect(res.status, body).toBe(503);
+    expect(JSON.parse(body).error).toBe("write_outcome_unknown");
+  }, 120_000);
 
   it("a provider call that outlasts its bound under the lock is refused memory_provider_timeout and writes nothing", async () => {
     const installDir = h.harper.installDir;
