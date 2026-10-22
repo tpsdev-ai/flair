@@ -1366,3 +1366,59 @@ describe("flair#2691 — a re-pair write dropped in the confirmation-to-commit w
     }, 90_000);
   }
 });
+
+describe("flair#2763 — a refused re-pair under a field-level competing update (real Harper)", () => {
+  for (const withToken of [true, false]) {
+    for (const shape of ["publicKey", "revoked"] as const) {
+      it(`${withToken ? "token" : "no-token"} re-pair refuses a field-level ${shape} change and leaves its last-writer marker`, async () => {
+        const token = `pt-2763-${withToken}-${shape}-${sfx}`;
+        const k = nacl.sign.keyPair();
+        const competitor = nacl.sign.keyPair();
+        const peer = `f2763-${withToken}-${shape}-${sfx}`;
+        const pub = b64url(k.publicKey);
+        const competitorKey = b64url(competitor.publicKey);
+        await seedPeer(peer, pub);
+        if (withToken) await seedToken(token);
+        const seededPeer = await readPeer(peer);
+        const tokenBefore = withToken ? await readToken(token) : null;
+        const { response, competed, released, paused } = await withPaused(
+          withToken ? "federation-pair-repair-token-before-commit" : "federation-pair-repair-before-commit",
+          () => pairRequest(pairBody(peer, pub, k.secretKey, withToken ? token : undefined)),
+          () => updatePeer(peer, shape === "publicKey" ? { publicKey: competitorKey } : { status: "revoked" }),
+        );
+        expect(paused, "the re-pair was not paused before its owned transaction committed").toBe(true);
+        expect(released, "the re-pair was not released by this test").toBe("go");
+        expect(competed?.status, "the competing field-level update committed").toBe(200);
+        expect(competed?.row, "the competitor's update is on the row while the re-pair is paused").toEqual(
+          shape === "publicKey"
+            ? { ...seededPeer, publicKey: competitorKey, updatedAt: expect.any(String) }
+            : { ...seededPeer, status: "revoked", updatedAt: expect.any(String) },
+        );
+        const body = await response.json() as any;
+        expect(response.status, JSON.stringify(body)).toBe(withToken ? 409 : 503);
+        expect(body.error).toBe(withToken ? "peer_pair_unconfirmed" : "write_outcome_unknown");
+        expect(body.outcome).toBe("unconfirmed");
+        expect(body.paired, "the refused re-pair does not report paired").toBeUndefined();
+        const committed = await readPeer(peer);
+        if (shape === "publicKey") {
+          expect(committed?.publicKey, "the competing key is the committed key").toBe(competitorKey);
+        } else {
+          expect(committed?.status, "the competing revoke stays revoked").toBe("revoked");
+        }
+        // A field-level competitor does not write pairAttemptWriteId, so the
+        // refused attempt's id stays on the merged row: it is a last-WRITER
+        // marker, not a confirmation. Its own updatedAt is not the row's when
+        // the competing update carries one; the competitor's value is kept.
+        expect(committed?.pairAttemptWriteId, "the committed Peer carries the refused attempt's last-writer marker").toBeTruthy();
+        expect(committed?.updatedAt, "the row's updatedAt is the competing update's").toBe(competed?.row?.updatedAt);
+        if (withToken) {
+          const tokenRow = await readToken(token);
+          expect(tokenRow, "the token keeps its seed fields and carries this attempt's consume").toEqual({
+            ...tokenBefore, consumedBy: peer, consumedAt: expect.any(String),
+            pairAttemptWriteId: committed?.pairAttemptWriteId,
+          });
+        }
+      }, 90_000);
+    }
+  }
+});
