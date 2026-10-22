@@ -139,7 +139,7 @@ async function withPausedPatch<R>(
 beforeAll(async () => {
   pauseDir = mkdtempSync(join(tmpdir(), "flair-2696-patch-pause-"));
   harper = await startHarper({
-    env: { FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_TEST_PAUSE_DIR: pauseDir },
+    serverEnv: { FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_TEST_PAUSE_DIR: pauseDir },
   });
   assertOwnInstance(harper);
   await seed({

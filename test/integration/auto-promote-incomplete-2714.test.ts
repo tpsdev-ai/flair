@@ -298,7 +298,7 @@ beforeAll(async () => {
   harper = await startHarper({
     cwd: appDir,
     harperBinDir: process.cwd(),
-    env: { FLAIR_TEST_PAUSE_DIR: faultDir, FLAIR_ENABLE_TEST_FAULT_INJECTION: "1" },
+    serverEnv: { FLAIR_TEST_PAUSE_DIR: faultDir, FLAIR_ENABLE_TEST_FAULT_INJECTION: "1" },
   });
   assertOwnInstance(harper);
 }, 240_000);

@@ -352,7 +352,7 @@ describe("flair#2573 slice 2 — crafted-vector writes with a failed embedding b
     absentPath = join(homeDir, "absent-model", "nomic-embed-text-absent.gguf");
     component = componentWithoutMigrationBoot({ sourceRoot: ROOT });
     expect(existsSync(component.omittedTriggerPath)).toBe(false);
-    harper = await startHarper({ cwd: component.dir, harperBinDir: component.sourceRoot, env: { FLAIR_RECALL_HARNESS_MODEL_PATH: absentPath } });
+    harper = await startHarper({ cwd: component.dir, harperBinDir: component.sourceRoot, serverEnv: { FLAIR_RECALL_HARNESS_MODEL_PATH: absentPath } });
     assertOwnInstance(harper);
     h = makeHarness(() => harper);
     await h.register();

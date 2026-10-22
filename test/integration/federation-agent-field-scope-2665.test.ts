@@ -165,7 +165,7 @@ beforeAll(async () => {
   // in an ephemeral store.
   keystore.setPrivateKeySeed(SENDER_ID, senderSeed);
 
-  receiver = await startHarper({ env: { FLAIR_ADMIN_AGENTS: `${CONFIGURED_ABSENT},${CONFIGURED_LOCAL}` } });
+  receiver = await startHarper({ serverEnv: { FLAIR_ADMIN_AGENTS: `${CONFIGURED_ABSENT},${CONFIGURED_LOCAL}` } });
   sender = await startHarper();
   assertOwnInstance(receiver, "receiver");
   assertOwnInstance(sender, "sender");

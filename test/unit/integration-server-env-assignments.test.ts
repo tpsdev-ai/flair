@@ -2,7 +2,9 @@
 // startHarper's serverEnv. A bare assignment on the test process instead only
 // reaches the spawned Harper by inheritance and can leak into later tests, so it
 // is allowed only where listed: per (file, variable) with its reader, or, for a
-// site whose key the scan cannot read, per site with what it writes.
+// site whose key the scan cannot read, per site with what it writes. A FLAIR_*
+// key in the object literal passed as startHarper's `env` has the same problem
+// from the other side: local spawns get it, external mode ignores it.
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
@@ -74,19 +76,24 @@ const UNSCANNABLE_ALLOWED: ReadonlyArray<{ file: string; text: string; sites: nu
     file: "test/integration/federation-presence-reoffer-2666.test.ts",
     text: "process.env[PRESENCE_SEND_FLAG_ENV]",
     sites: 2,
-    reason: "sets FLAIR_FEDERATION_PRESENCE_SEND, which the in-process runFederationSyncOnce() call reads, and deletes it in afterAll",
+    reason: "sets FLAIR_FEDERATION_PRESENCE_SEND, which the in-process runFederationSyncOnce() call reads, and deletes it in afterAll; both receiver boots declare it removed through serverEnv",
   },
   {
     file: "test/integration/federation-presence-send-2578.test.ts",
     text: "process.env[PRESENCE_SEND_FLAG_ENV]",
     sites: 2,
-    reason: "sets FLAIR_FEDERATION_PRESENCE_SEND, which the in-process runFederationSyncOnce() call reads, and deletes it in afterAll",
+    reason: "sets FLAIR_FEDERATION_PRESENCE_SEND, which the in-process runFederationSyncOnce() call reads, and deletes it in afterAll; the receiver declares it removed through serverEnv",
   },
 ];
+
+// FLAIR_* keys in the object literal passed as startHarper's `env`, per
+// (file, variable) with the reason the key must stay there.
+const ENV_OBJECT_ALLOWED: ReadonlyArray<{ file: string; variable: string; reason: string }> = [];
 
 type Source = { file: string; text: string };
 type Write = { file: string; variable: string; line: number };
 type Unscannable = { file: string; text: string; line: number };
+type EnvKey = { file: string; variable: string; line: number };
 
 function integrationFiles(dir: string): string[] {
   const found: string[] = [];
@@ -196,8 +203,9 @@ const staleEntries = (writes: Write[]): string[] => {
   );
 };
 
+const siteKey = (entry: { file: string; text: string }): string => `${entry.file}\u0000${entry.text}`;
+
 const unscannableMismatches = (unscannable: Unscannable[]): string[] => {
-  const siteKey = (entry: { file: string; text: string }): string => `${entry.file}\u0000${entry.text}`;
   const found = new Map<string, Unscannable[]>();
   for (const entry of unscannable) found.set(siteKey(entry), [...(found.get(siteKey(entry)) ?? []), entry]);
   const listed = new Map(UNSCANNABLE_ALLOWED.map((entry) => [siteKey(entry), entry]));
@@ -214,6 +222,58 @@ const unscannableMismatches = (unscannable: Unscannable[]): string[] => {
   return mismatches;
 };
 
+// A FLAIR_* key of the object literal passed as startHarper's `env`: dot,
+// literal-string and shorthand property names. A local spawn merges it, external
+// mode ignores it, so a suite that needs it on the server must use serverEnv.
+function harperEnvKeys(sources: Source[]): EnvKey[] {
+  const keys: EnvKey[] = [];
+  for (const { file, text } of sources) {
+    const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+    const line = (node: ts.Node): number => source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1;
+    const visit = (node: ts.Node): void => {
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "startHarper") {
+        const options = node.arguments[0] === undefined ? undefined : unwrap(node.arguments[0]);
+        if (options !== undefined && ts.isObjectLiteralExpression(options)) {
+          for (const property of options.properties) {
+            if (!ts.isPropertyAssignment(property)) continue;
+            const option = ts.isIdentifier(property.name) || ts.isStringLiteral(property.name) ? property.name.text : undefined;
+            if (option !== "env") continue;
+            const env = unwrap(property.initializer);
+            if (!ts.isObjectLiteralExpression(env)) continue;
+            for (const entry of env.properties) {
+              if (!ts.isPropertyAssignment(entry) && !ts.isShorthandPropertyAssignment(entry)) continue;
+              const name = entry.name;
+              const variable = ts.isIdentifier(name) || ts.isStringLiteral(name) ? name.text : undefined;
+              if (variable !== undefined && variable.startsWith("FLAIR_")) keys.push({ file, variable, line: line(entry) });
+            }
+          }
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
+  }
+  return keys;
+}
+
+const unexpectedHarperEnvKeys = (
+  keys: EnvKey[],
+  allowed: ReadonlyArray<{ file: string; variable: string; reason: string }> = ENV_OBJECT_ALLOWED,
+): string[] => {
+  const listed = new Set(allowed.filter((entry) => entry.reason.trim().length > 0).map(key));
+  return keys.filter((entry) => !listed.has(key(entry))).map((entry) => `${entry.file}:${entry.line} ${entry.variable}`);
+};
+
+const staleEnvObjectEntries = (
+  keys: EnvKey[],
+  allowed: ReadonlyArray<{ file: string; variable: string; reason: string }> = ENV_OBJECT_ALLOWED,
+): string[] => {
+  const current = new Set(keys.map(key));
+  return allowed.filter((entry) => entry.reason.trim().length === 0 || !current.has(key(entry))).map(
+    (entry) => `${entry.file}: ${entry.variable}`,
+  );
+};
+
 test("test/integration has no =, compound assignment or delete on process.env.FLAIR_* (dot or literal bracket key), and no FLAIR_* key in an object literal passed to Object.assign(process.env, ...), outside the allowlist", () => {
   expect(unexpectedWrites(scan(integrationSources()).writes)).toEqual([]);
 });
@@ -224,6 +284,14 @@ test("test/integration's non-literal bracket keys on process.env and Object.assi
 
 test("every allowlist entry matches a write the scan finds and carries a reason", () => {
   expect(staleEntries(scan(integrationSources()).writes)).toEqual([]);
+});
+
+test("test/integration passes no FLAIR_* key to startHarper's env object literal outside the allowlist", () => {
+  expect(unexpectedHarperEnvKeys(harperEnvKeys(integrationSources()))).toEqual([]);
+});
+
+test("every startHarper env allowlist entry matches a key the scan finds and carries a reason", () => {
+  expect(staleEnvObjectEntries(harperEnvKeys(integrationSources()))).toEqual([]);
 });
 
 describe("scan fixtures (in-memory sources)", () => {
@@ -282,6 +350,40 @@ describe("scan fixtures (in-memory sources)", () => {
     expect(unscannableMismatches(scan([{ file: FIXTURE, text }]).unscannable)).toContain(
       `${FIXTURE}:1 process.env[name] (listed sites: 0)`,
     );
+  });
+
+  const harperEnvIn = (text: string): string[] => harperEnvKeys([{ file: FIXTURE, text }]).map((entry) => `${entry.line} ${entry.variable}`);
+
+  test("a FLAIR_* key in startHarper's env object literal counts in dot, literal-string and shorthand form", () => {
+    const text = [
+      'startHarper({ env: { FLAIR_X: "1" } });',
+      'startHarper({ cwd: ".", env: { "FLAIR_Y": "1" } });',
+      'const FLAIR_Z = "1";',
+      "startHarper({ env: { FLAIR_Z } });",
+    ].join("\n");
+    expect(harperEnvIn(text)).toEqual(["1 FLAIR_X", "2 FLAIR_Y", "4 FLAIR_Z"]);
+  });
+
+  test("startHarper's serverEnv, non-FLAIR env keys, calls without options and other callees do not count", () => {
+    const text = [
+      'startHarper({ env: { OTHER: "1" } });',
+      'startHarper({ serverEnv: { FLAIR_S: "1" }, env: { NODE_OPTIONS: "--x" } });',
+      "startHarper();",
+      "otherHarper({ env: { FLAIR_X: \"1\" } });",
+    ].join("\n");
+    expect(harperEnvIn(text)).toEqual([]);
+  });
+
+  test("an env-key allowlist entry passes with a reason; a reasonless or vanished entry is a finding", () => {
+    const keys = harperEnvKeys([{ file: FIXTURE, text: 'startHarper({ env: { FLAIR_X: "1" } });' }]);
+    const listed = [{ file: FIXTURE, variable: "FLAIR_X", reason: "an in-process reader needs it" }];
+    expect(unexpectedHarperEnvKeys(keys, listed)).toEqual([]);
+    expect(staleEnvObjectEntries(keys, listed)).toEqual([]);
+    const reasonless = [{ file: FIXTURE, variable: "FLAIR_X", reason: " " }];
+    expect(unexpectedHarperEnvKeys(keys, reasonless)).toEqual([`${FIXTURE}:1 FLAIR_X`]);
+    expect(staleEnvObjectEntries(keys, reasonless)).toEqual([`${FIXTURE}: FLAIR_X`]);
+    const vanished = [{ file: FIXTURE, variable: "FLAIR_Y", reason: "an in-process reader needs it" }];
+    expect(staleEnvObjectEntries(keys, vanished)).toEqual([`${FIXTURE}: FLAIR_Y`]);
   });
 
   test("commenting out an allowlisted file's writes makes the stale check fail", () => {
