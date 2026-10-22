@@ -6,8 +6,8 @@
 // stamped author is the run's owner; a pointer with an empty author is outside
 // it. Fleet-wide admin maintenance (no agent named) removes every orphan pointer
 // row, the empty-author one included. With no concurrent writer, a pointer whose
-// Memory row is live is not removed in any mode. Every run here is a real run: a
-// dry run skips the sweep and is not exercised.
+// Memory row is live is not removed in any mode. A dry run skips the sweep; the
+// dry runs here check how an admin `agentId` is refused or accepted.
 //
 // (e) replaces an in-scope orphan pointer with another author's row after the
 // sweep's final confirmation read, while the sweep is held at its
@@ -38,6 +38,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getModelId } from "../../resources/embeddings-provider.ts";
+import { AGENT_ID_RULE } from "../../src/lib/agent-id-rule.ts";
 import { startHarper, stopHarper, HARPER_STOP_BUDGET_MS, type HarperInstance } from "../helpers/harper-lifecycle";
 import { componentWithReplayProbe, type ProbeComponent, type ProbeFiles } from "../helpers/component-with-replay-probe";
 
@@ -51,6 +52,8 @@ const READ_PROBE: ProbeFiles = {
 };
 const READ_PROBE_LOG = "maintenance-read-probe-2084.jsonl";
 const MEMORY_READ_PROBE_LOG = "maintenance-memory-read-probe-2084.jsonl";
+/** The 400 body an admin run's refused agentId gets: it names the shared agent-id rule. */
+const AGENT_ID_REFUSAL = { error: `agentId must be a string matching ${AGENT_ID_RULE}` };
 
 interface TestAgent {
   id: string;
@@ -373,7 +376,7 @@ describe("MemoryMaintenance orphan sweep is scoped to the run's owner (real Harp
       });
       const text = await res.text();
       expect(res.status, `agentId=${JSON.stringify(agentId)}: ${text.slice(0, 300)}`).toBe(400);
-      expect(JSON.parse(text), `agentId=${JSON.stringify(agentId)}: ${text.slice(0, 300)}`).toEqual({ error: "agentId must be a non-blank string" }); // assertion: the refusal names the field and the rule
+      expect(JSON.parse(text), `agentId=${JSON.stringify(agentId)}: ${text.slice(0, 300)}`).toEqual(AGENT_ID_REFUSAL); // assertion: the refusal names the field and the rule
       for (const [id, o] of before) {
         expect(await readPointer(id), `agentId=${JSON.stringify(agentId)}: ${id} pointer changed`).toBe(o.pointer);
         expect(await readMemory(id), `agentId=${JSON.stringify(agentId)}: ${id} Memory row changed`).toBe(o.memory);
@@ -396,7 +399,7 @@ describe("MemoryMaintenance orphan sweep is scoped to the run's owner (real Harp
       });
       const text = await res.text();
       expect(res.status, `agentId=${JSON.stringify(agentId)}: ${text.slice(0, 300)}`).toBe(400); // assertion: a padded agentId is refused
-      expect(JSON.parse(text), `agentId=${JSON.stringify(agentId)}: ${text.slice(0, 300)}`).toEqual({ error: "agentId must be a non-blank string" });
+      expect(JSON.parse(text), `agentId=${JSON.stringify(agentId)}: ${text.slice(0, 300)}`).toEqual(AGENT_ID_REFUSAL);
       for (const [id, o] of before) {
         expect(await readPointer(id), `agentId=${JSON.stringify(agentId)}: ${id} pointer changed`).toBe(o.pointer);
         expect(await readMemory(id), `agentId=${JSON.stringify(agentId)}: ${id} Memory row changed`).toBe(o.memory);
@@ -418,9 +421,76 @@ describe("MemoryMaintenance orphan sweep is scoped to the run's owner (real Harp
       });
       const text = await res.text();
       expect(res.status, `dryRun agentId=${JSON.stringify(agentId)}: ${text.slice(0, 300)}`).toBe(400); // assertion: a dry run refuses a present agentId that is not a string, is blank when trimmed, or differs from its trimmed form
-      expect(JSON.parse(text), `dryRun agentId=${JSON.stringify(agentId)}: ${text.slice(0, 300)}`).toEqual({ error: "agentId must be a non-blank string" });
+      expect(JSON.parse(text), `dryRun agentId=${JSON.stringify(agentId)}: ${text.slice(0, 300)}`).toEqual(AGENT_ID_REFUSAL);
     }
   }, 60_000);
+
+  it("(a) an admin run refuses an agentId outside the shared agent-id rule, dry run or not, and changes nothing", async () => {
+    const outside = ["agent/name", "a".repeat(65)];
+    expect(outside[1].length).toBe(65); // control: one character over the rule's 64
+    await seedOrphans("rule");
+    // An orphan pointer stamped with each refused id: a run scoped to that id
+    // would remove it.
+    for (const [i, author] of outside.entries()) {
+      const id = `mm-rule-outside-${i}-${SFX}`;
+      await insertRows("MemoryHostSource", [pointerRow(id, author)]);
+      expect(JSON.parse(await readPointer(id)).length, `${id} pointer was seeded`).toBe(1);
+      outstanding.set(id, author);
+    }
+    const before = await snapshotOrphans();
+    for (const agentId of outside) {
+      for (const dryRun of [false, true]) {
+        const label = `dryRun=${dryRun} agentId=${JSON.stringify(agentId)}`;
+        const res = await fetch(`${harper.httpURL}/MemoryMaintenance`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: basicHeader() },
+          body: JSON.stringify({ agentId, dryRun }),
+          signal: AbortSignal.timeout(60_000),
+        });
+        const text = await res.text();
+        expect(res.status, `${label}: ${text.slice(0, 300)}`).toBe(400); // assertion: an id outside the rule is refused
+        expect(JSON.parse(text), `${label}: ${text.slice(0, 300)}`).toEqual(AGENT_ID_REFUSAL); // assertion: the refusal names the rule
+        for (const [id, o] of before) {
+          expect(await readPointer(id), `${label}: ${id} pointer changed`).toBe(o.pointer);
+          expect(await readMemory(id), `${label}: ${id} Memory row changed`).toBe(o.memory);
+        }
+      }
+    }
+    await expectLiveUnchanged("refused admin runs");
+    // A non-admin run still ignores the field.
+    const own = await maintain({ kind: "agent", agent: agentA, body: { agentId: "agent/name" } });
+    expect(own.stats?.agent).toBe(agentA.id); // control: the field is ignored for a non-admin caller
+    await expectSweptOnly(agentA.id, own, before);
+    const rest = await snapshotOrphans();
+    const fleet = await maintain({ kind: "admin", body: {} });
+    expect(fleet.stats?.agent).toBe("all"); // control: an absent agentId is fleet-wide
+    await expectSweptOnly(null, fleet, rest); // control: the orphans the refused runs left were removable
+  }, 120_000);
+
+  it("(a) an admin run accepts a valid agentId that names no agent and removes nothing, dry run or not", async () => {
+    const unknown = "a".repeat(64);
+    expect(await readRows("Agent", "id", unknown)).toBe("[]"); // control: no agent has this id
+    expect(await readRows("Memory", "agentId", unknown)).toBe("[]"); // control: no Memory row has this owner
+    expect(await readRows("MemoryHostSource", "authorId", unknown)).toBe("[]"); // control: no pointer row has this author
+    await seedOrphans("unknown");
+    const before = await snapshotOrphans();
+    for (const dryRun of [false, true]) {
+      const label = `dryRun=${dryRun}`;
+      const body = await maintain({ kind: "admin", body: { agentId: unknown, dryRun } });
+      expect(body.message, label).toBe(dryRun ? "Dry run complete" : "Maintenance complete"); // assertion: accepted
+      expect(body.stats?.agent, label).toBe(unknown); // control: the run is scoped to the named id
+      expect({ total: body.total, expired: body.expired, archived: body.archived, orphans: body.orphans, skipped: body.skipped }, label)
+        .toEqual({ total: 0, expired: 0, archived: 0, orphans: 0, skipped: 0 }); // assertion: nothing was counted
+      for (const [id, o] of before) {
+        expect(await readPointer(id), `${label}: ${id} pointer changed`).toBe(o.pointer); // assertion: nothing was removed
+        expect(await readMemory(id), `${label}: ${id} Memory row changed`).toBe(o.memory);
+      }
+      await expectLiveUnchanged(`admin run naming an unknown id, ${label}`);
+    }
+    const fleet = await maintain({ kind: "admin", body: {} });
+    expect(fleet.stats?.agent).toBe("all"); // control: an absent agentId is fleet-wide
+    await expectSweptOnly(null, fleet, before);
+  }, 120_000);
 
   it("(b) an admin run naming an agent reads only that agent's pointer rows", async () => {
     await clearLeftoverOrphans();
