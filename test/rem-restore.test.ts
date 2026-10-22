@@ -14,6 +14,7 @@ import { mkdirSync, rmSync, readFileSync, writeFileSync, existsSync, mkdtempSync
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { applySnapshot, type ApiCall, type OpsSearch } from "../src/rem/restore.ts";
+import { ApiHttpError } from "../src/lib/auth-resolve.ts";
 import { buildOpsSearch } from "../src/commands/rem.ts";
 import { createSnapshot } from "../src/rem/snapshot.ts";
 import { create as tarCreate, extract as tarExtract } from "tar";
@@ -565,6 +566,136 @@ describe("applySnapshot — failure modes", () => {
     expect(r.preRestoreSnapshotPath).toBeDefined();
     expect(existsSync(r.preRestoreSnapshotPath!)).toBe(true);
   });
+});
+
+
+/** The server's provider-bound refusal, as `sendJsonRequest` surfaces it: 503 with the body in the message. */
+function providerTimeout(): ApiHttpError {
+  return new ApiHttpError(
+    503,
+    JSON.stringify({
+      error: "memory_provider_timeout",
+      message: "the embedding provider did not answer within its bound; nothing was written, retry",
+    }),
+  );
+}
+
+/**
+ * A target whose Memory PUT fails with the queued errors in order and writes
+ * the row on every other attempt. Reads reflect the writes, so the restore's
+ * own verification pass sees a clean state after a successful retry.
+ */
+function retryingTarget(putFailures: unknown[]): {
+  api: ApiCall;
+  calls: Array<{ method: string; path: string; body?: unknown }>;
+  state: { memories: Map<string, any>; souls: Map<string, any> };
+} {
+  const calls: Array<{ method: string; path: string; body?: unknown }> = [];
+  const state = { memories: new Map<string, any>(), souls: new Map<string, any>() };
+  let memoryPuts = 0;
+  const api: ApiCall = async (method, path, body) => {
+    calls.push({ method, path, body });
+    if (method === "GET" && path.startsWith("/Memory?")) return Array.from(state.memories.values());
+    if (method === "GET" && path.startsWith("/Soul?")) return Array.from(state.souls.values());
+    if (method === "DELETE") return { ok: true };
+    if (method === "PUT" && path.startsWith("/Memory/")) {
+      const failure = putFailures[memoryPuts++];
+      if (failure) throw failure;
+      state.memories.set(decodeURIComponent(path.split("/")[2]), body);
+      return { ok: true };
+    }
+    if (method === "PUT" && path.startsWith("/Soul/")) {
+      state.souls.set(decodeURIComponent(path.split("/")[2]), body);
+      return { ok: true };
+    }
+    throw new Error(`unexpected api: ${method}:${path}`);
+  };
+  return { api, calls, state };
+}
+
+describe("applySnapshot — provider-timeout retry (flair#2769)", () => {
+  it("restores a memory write refused with 503 memory_provider_timeout once, then succeeding, and reports the row as retried", async () => {
+    const snapshotPath = await makeTestSnapshot();
+    const { api, calls, state } = retryingTarget([providerTimeout()]);
+
+    const r = await applySnapshot({
+      agentId: "test-agent",
+      snapshotPath,
+      flairVersion: "0.0.0-test",
+      apiCall: api,
+      preRestoreSnapshotRoot: snapshotRoot,
+      tmpRootOverride: testRoot,
+    });
+
+    expect(r.status).toBe("completed");
+    expect(r.errors).toEqual([]);
+    expect(r.restored.memories).toBe(2);
+    expect(r.retried.memories).toEqual(["m1"]);
+    expect(state.memories.get("m1")).toBeDefined();
+    expect(calls.filter((c) => c.method === "PUT" && c.path.startsWith("/Memory/")).length).toBe(3);
+    expect(r.verified?.missingMemoryIds).toEqual([]);
+  }, 20_000);
+
+  it("records the row as failed when the retry is refused with the same timeout", async () => {
+    const snapshotPath = await makeTestSnapshot();
+    const { api, calls } = retryingTarget([providerTimeout(), providerTimeout()]);
+
+    const r = await applySnapshot({
+      agentId: "test-agent",
+      snapshotPath,
+      flairVersion: "0.0.0-test",
+      apiCall: api,
+      preRestoreSnapshotRoot: snapshotRoot,
+      tmpRootOverride: testRoot,
+    });
+
+    expect(r.status).toBe("failed");
+    expect(r.restored.memories).toBe(1); // m2 still restores; m1 stays failed
+    expect(r.retried.memories).toEqual(["m1"]);
+    expect(r.errors.some((e) => e.startsWith("put-memory m1:") && e.includes("memory_provider_timeout"))).toBe(true);
+    expect(calls.filter((c) => c.method === "PUT" && c.path.startsWith("/Memory/")).length).toBe(3);
+  }, 20_000);
+
+  it("does not retry a 503 with a different error code", async () => {
+    const snapshotPath = await makeTestSnapshot();
+    const { api, calls } = retryingTarget([
+      new ApiHttpError(503, JSON.stringify({ error: "memory_busy", caller: "agent-a" })),
+    ]);
+
+    const r = await applySnapshot({
+      agentId: "test-agent",
+      snapshotPath,
+      flairVersion: "0.0.0-test",
+      apiCall: api,
+      preRestoreSnapshotRoot: snapshotRoot,
+      tmpRootOverride: testRoot,
+    });
+
+    expect(r.status).toBe("failed");
+    expect(r.retried.memories).toEqual([]);
+    expect(calls.filter((c) => c.method === "PUT" && c.path.startsWith("/Memory/")).length).toBe(2);
+    expect(r.errors.some((e) => e.startsWith("put-memory m1:") && e.includes("memory_busy"))).toBe(true);
+  }, 20_000);
+
+  it("does not retry a 503 whose message text names the code but whose error field does not", async () => {
+    const snapshotPath = await makeTestSnapshot();
+    const { api, calls } = retryingTarget([
+      new ApiHttpError(503, JSON.stringify({ error: "memory_busy", message: "memory_provider_timeout would be retried" })),
+    ]);
+
+    const r = await applySnapshot({
+      agentId: "test-agent",
+      snapshotPath,
+      flairVersion: "0.0.0-test",
+      apiCall: api,
+      preRestoreSnapshotRoot: snapshotRoot,
+      tmpRootOverride: testRoot,
+    });
+
+    expect(r.retried.memories).toEqual([]);
+    expect(calls.filter((c) => c.method === "PUT" && c.path.startsWith("/Memory/")).length).toBe(2);
+    expect(r.errors.some((e) => e.startsWith("put-memory m1:"))).toBe(true);
+  }, 20_000);
 });
 
 describe("buildOpsSearch — CLI-wired candidate list uses the ops root", () => {
