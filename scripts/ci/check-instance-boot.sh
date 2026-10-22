@@ -44,10 +44,15 @@
 #   PORT          Harper HTTP port (default 19926, the current default)
 #   OPS_PORT      operations API port (default 19925)
 #   PASS_FILE     admin-pass input file handed to `flair init --admin-pass-file`
-#                 (default: a new 0600 file in a private temp directory, removed on
-#                 exit). It is kept apart from $HOME/.flair/admin-pass, which init
-#                 itself writes: init refuses to replace an existing admin-pass it
-#                 cannot verify against a running instance.
+#                 (default: a new 0600 file in a fresh directory under $RUNNER_TEMP,
+#                 or /tmp when RUNNER_TEMP is unset, removed on exit; the script
+#                 fails (exit 1) when that directory resolves inside LOG_DIR, the
+#                 working directory or $GITHUB_WORKSPACE). The default is kept
+#                 apart from $HOME/.flair/admin-pass, which init itself writes:
+#                 init refuses to replace an existing admin-pass it cannot verify
+#                 against a running instance. An explicit PASS_FILE is not
+#                 removed; at step 1 the script writes a generated password into
+#                 it when it is missing or empty, and sets its mode to 0600.
 #   LOG_DIR       command-log directory (default $PWD/instance-boot-logs)
 #   HEALTH_TIMEOUT        seconds to wait for /Health (default 180)
 #   LISTENER_TIMEOUT      seconds to wait for the supervised pid to bind (default 120)
@@ -70,7 +75,10 @@ OPS_PORT="${OPS_PORT:-19925}"
 FLAIR_AGENT_ID="${FLAIR_AGENT_ID:-canary}"
 PASS_TMP=""
 if [ -z "${PASS_FILE:-}" ]; then
-  PASS_TMP="$(mktemp -d)"
+  # An explicit base rather than mktemp's default location (checked below).
+  PASS_TMP="$(mktemp -d "${RUNNER_TEMP:-/tmp}/flair-boot-pass.XXXXXX")"
+  # The generated input file holds the admin password: remove it on exit.
+  trap 'rm -rf "${PASS_TMP:?}"' EXIT
   PASS_FILE="$PASS_TMP/admin-pass-input"
 fi
 LOG_DIR="${LOG_DIR:-$PWD/instance-boot-logs}"
@@ -88,13 +96,22 @@ OS="$(uname -s)"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 mkdir -p "$LOG_DIR" "$(dirname "$PASS_FILE")"
-# The generated input file holds the admin password: remove it on exit.
-if [ -n "$PASS_TMP" ]; then
-  trap 'rm -rf "${PASS_TMP:?}"' EXIT
-fi
 
 log() { printf '\n=== %s ===\n' "$*"; }
 fail() { echo "::error::check-instance-boot: $*" >&2; exit 1; }
+
+# Refuse a generated input directory that resolves inside LOG_DIR, the working
+# directory or $GITHUB_WORKSPACE.
+if [ -n "$PASS_TMP" ]; then
+  PASS_TMP_REAL="$(cd "$PASS_TMP" && pwd -P)" || fail "cannot resolve ${PASS_TMP}"
+  for tree in "$LOG_DIR" "$PWD" ${GITHUB_WORKSPACE:+"$GITHUB_WORKSPACE"}; do
+    tree_real="$(cd "$tree" && pwd -P)" || fail "cannot resolve ${tree}"
+    case "$PASS_TMP_REAL/" in
+      "${tree_real%/}"/*)
+        fail "admin-pass input directory ${PASS_TMP_REAL} is inside ${tree_real}; set RUNNER_TEMP to a directory outside LOG_DIR, the working directory and \$GITHUB_WORKSPACE" ;;
+    esac
+  done
+fi
 
 # Resolve the executable once; fail-closed if it is not there. `command -v`
 # handles both a bare name and an absolute path.

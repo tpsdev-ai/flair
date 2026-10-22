@@ -1,25 +1,29 @@
 /**
  * check-instance-boot-2739.test.ts — flair#2739.
  *
- * scripts/ci/check-instance-boot.sh hands `flair init` the admin password only
- * through `--admin-pass-file`. By default it writes a generated password to a
- * 0600 file inside a fresh `mktemp -d` directory and removes that directory on
- * exit through an EXIT trap, installed before the flair-binary check. An
- * explicitly supplied PASS_FILE is used as given and left in place.
+ * scripts/ci/check-instance-boot.sh keeps the admin password out of `flair
+ * init`'s argv: init is handed `--admin-pass-file`, and also inherits the
+ * HDB_ADMIN_PASSWORD and FLAIR_ADMIN_PASS environment variables the script
+ * exports with the same value. By default the script writes a generated
+ * password to a 0600 file inside a fresh `mktemp -d` directory under
+ * RUNNER_TEMP (or /tmp), fails when that directory resolves inside LOG_DIR, the
+ * working directory or GITHUB_WORKSPACE, and removes it on exit through an
+ * EXIT trap installed right after `mktemp -d`. An explicit PASS_FILE is not
+ * removed; at the init step the script writes a generated password into it
+ * when it is missing or empty, and sets its mode to 0600.
  *
  * The live canary proves the default path boots; it does not read the file's
  * location, mode or lifetime. This pins them hermetically: a stub FLAIR_BIN
  * records its argv and the stat of the `--admin-pass-file` it is handed, then
  * exits non-zero so the script takes its init-failure path at once. HOME,
- * TMPDIR and LOG_DIR are sandbox directories, and FLAIR_PREFIX points at an
- * empty sandbox package dir so the script never asks npm. No flair, no Harper,
- * no port.
+ * TMPDIR, RUNNER_TEMP and LOG_DIR default to sandbox directories, the script
+ * runs from a sandbox working directory, and FLAIR_PREFIX points at an empty
+ * sandbox package dir so the script never asks npm. No flair, no Harper, no
+ * port.
  *
- * Where `mktemp -d` puts its directory is platform-defined (GNU honours TMPDIR;
- * darwin uses the per-user temp dir and ignores TMPDIR), so a pass-through
- * `mktemp` shim first on PATH records the directory it returned. The tests
- * read the script's temp directory from that record, never from a location
- * guess, and remove a leaked one after the assertions have run.
+ * A pass-through `mktemp` shim first on PATH records the directory each call
+ * returned. The tests read the script's temp directory from that record, never
+ * from a location guess, and remove a leaked one after the assertions have run.
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
@@ -31,6 +35,7 @@ import {
   realpathSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -76,6 +81,8 @@ interface Sandbox {
   root: string;
   home: string;
   tmp: string;
+  work: string;
+  runnerTemp: string;
   logs: string;
   prefix: string;
   shim: string;
@@ -94,10 +101,12 @@ function sandbox(): Sandbox {
   const root = realpathSync(tempDir("flair-instance-boot-2739-"));
   const home = join(root, "home");
   const tmp = join(root, "tmp");
+  const work = join(root, "work");
+  const runnerTemp = join(root, "runner-temp");
   const logs = join(root, "logs");
   const prefix = join(root, "prefix");
   const shim = join(root, "shim");
-  for (const dir of [home, tmp, shim, join(prefix, "bin"), join(prefix, "lib", "node_modules", "@tpsdev-ai", "flair")]) {
+  for (const dir of [home, tmp, work, runnerTemp, shim, join(prefix, "bin"), join(prefix, "lib", "node_modules", "@tpsdev-ai", "flair")]) {
     mkdirSync(dir, { recursive: true });
   }
 
@@ -121,26 +130,46 @@ function sandbox(): Sandbox {
   );
   chmodSync(join(shim, "mktemp"), 0o755);
 
-  return { root, home, tmp, logs, prefix, shim, stub, record: join(root, "flair-stub-record.json"), mktempRecord };
+  return {
+    root,
+    home,
+    tmp,
+    work,
+    runnerTemp,
+    logs,
+    prefix,
+    shim,
+    stub,
+    record: join(root, "flair-stub-record.json"),
+    mktempRecord,
+  };
 }
 
-/** Run the boot check with ONLY the sandbox environment (plus PATH, mktemp shim first). */
-function runBoot(sb: Sandbox, extra: Record<string, string> = {}) {
+/**
+ * Run the boot check from the sandbox working directory with ONLY the sandbox
+ * environment (plus PATH, mktemp shim first). An `extra` value of undefined
+ * unsets that variable.
+ */
+function runBoot(sb: Sandbox, extra: Record<string, string | undefined> = {}) {
+  const env: Record<string, string> = {};
+  const merged: Record<string, string | undefined> = {
+    PATH: `${sb.shim}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+    HOME: sb.home,
+    TMPDIR: sb.tmp,
+    RUNNER_TEMP: sb.runnerTemp,
+    LOG_DIR: sb.logs,
+    FLAIR_BIN: sb.stub,
+    FLAIR_PREFIX: sb.prefix,
+    FLAIR_STUB_RECORD: sb.record,
+    ...extra,
+  };
+  for (const [key, value] of Object.entries(merged)) if (value !== undefined) env[key] = value;
   const result = spawnSync("bash", [SCRIPT], {
-    cwd: sb.root,
+    cwd: sb.work,
     encoding: "utf8",
     timeout: 20_000,
     killSignal: "SIGKILL",
-    env: {
-      PATH: `${sb.shim}:${process.env.PATH ?? "/usr/bin:/bin"}`,
-      HOME: sb.home,
-      TMPDIR: sb.tmp,
-      LOG_DIR: sb.logs,
-      FLAIR_BIN: sb.stub,
-      FLAIR_PREFIX: sb.prefix,
-      FLAIR_STUB_RECORD: sb.record,
-      ...extra,
-    },
+    env,
   });
   mktempSeen.push(...mktempDirs(sb));
   expect(result.error).toBeUndefined();
@@ -172,16 +201,36 @@ function isUnder(child: string, parent: string): boolean {
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
-function writeOperatorPassFile(sb: Sandbox): string {
+function writeOperatorPassFile(sb: Sandbox, mode = 0o600): string {
   const passFile = join(sb.root, "operator", "admin-pass-input");
   mkdirSync(dirname(passFile), { recursive: true });
   writeFileSync(passFile, OPERATOR_VALUE);
-  chmodSync(passFile, 0o600);
+  chmodSync(passFile, mode);
   return passFile;
 }
 
+/** Each case puts RUNNER_TEMP where the generated directory must not resolve. */
+const OVERLAPS: Array<[string, (sb: Sandbox) => Record<string, string>]> = [
+  ["inside LOG_DIR", (sb) => ({ RUNNER_TEMP: join(sb.logs, "runner-temp") })],
+  ["inside the working directory", (sb) => ({ RUNNER_TEMP: join(sb.work, "runner-temp") })],
+  [
+    "inside GITHUB_WORKSPACE",
+    (sb) => ({ RUNNER_TEMP: join(sb.root, "workspace", "_temp"), GITHUB_WORKSPACE: join(sb.root, "workspace") }),
+  ],
+  [
+    "inside LOG_DIR through a symlink",
+    (sb) => {
+      const target = join(sb.logs, "runner-temp");
+      mkdirSync(target, { recursive: true });
+      const link = join(sb.root, "runner-temp-link");
+      symlinkSync(target, link);
+      return { RUNNER_TEMP: link };
+    },
+  ],
+];
+
 describe("check-instance-boot.sh — the admin-pass input file handed to flair init (flair#2739)", () => {
-  test("default path: the --admin-pass-file is under neither HOME nor LOG_DIR, inside the script's own mktemp -d directory", () => {
+  test("default path: the --admin-pass-file is inside the script's own mktemp -d directory, outside the sandbox HOME and LOG_DIR", () => {
     const sb = sandbox();
     const r = runBoot(sb);
     expect(r.status).toBe(1);
@@ -213,6 +262,59 @@ describe("check-instance-boot.sh — the admin-pass input file handed to flair i
     expect(existsSync(passDir)).toBe(false);
   }, CASE_BUDGET_MS);
 
+  test("default path, TMPDIR inside LOG_DIR: the directory is still made directly under RUNNER_TEMP, outside LOG_DIR", () => {
+    const sb = sandbox();
+    const tmpInLogs = join(sb.logs, "tmp");
+    mkdirSync(tmpInLogs, { recursive: true });
+    const r = runBoot(sb, { TMPDIR: `${tmpInLogs}/` });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("flair init failed");
+    const passFile = resolve(passFileArg(readRecord(sb)));
+    expect(dirname(dirname(passFile))).toBe(sb.runnerTemp);
+    expect(isUnder(passFile, sb.logs)).toBe(false);
+    expect(mktempDirs(sb)).toEqual([dirname(passFile)]);
+  }, CASE_BUDGET_MS);
+
+  test("default path, RUNNER_TEMP unset: the directory is made directly under /tmp", () => {
+    const sb = sandbox();
+    const r = runBoot(sb, { RUNNER_TEMP: undefined });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("flair init failed");
+    const passFile = passFileArg(readRecord(sb));
+    expect(dirname(dirname(passFile))).toBe("/tmp");
+    expect(mktempDirs(sb)).toEqual([dirname(resolve(passFile))]);
+  }, CASE_BUDGET_MS);
+
+  test.each(OVERLAPS)(
+    "RUNNER_TEMP %s: the script fails before flair init, and the temp directory is removed",
+    (_where, place) => {
+      const sb = sandbox();
+      const extra = place(sb);
+      mkdirSync(extra.RUNNER_TEMP!, { recursive: true });
+      const r = runBoot(sb, extra);
+      expect(r.status).toBe(1);
+      expect(r.stderr).toContain("admin-pass input directory");
+      expect(r.stderr).toContain("is inside");
+      expect(existsSync(sb.record)).toBe(false);
+      const made = mktempDirs(sb);
+      expect(made).toHaveLength(1);
+      expect(existsSync(made[0]!)).toBe(false);
+    },
+    CASE_BUDGET_MS,
+  );
+
+  test("LOG_DIR cannot be created: the script fails before flair init, and the temp directory is still removed", () => {
+    const sb = sandbox();
+    const notADir = join(sb.root, "not-a-dir");
+    writeFileSync(notADir, "");
+    const r = runBoot(sb, { LOG_DIR: join(notADir, "logs") });
+    expect(r.status).toBe(1);
+    expect(existsSync(sb.record)).toBe(false);
+    const made = mktempDirs(sb);
+    expect(made).toHaveLength(1);
+    expect(existsSync(made[0]!)).toBe(false);
+  }, CASE_BUDGET_MS);
+
   test("FLAIR_BIN does not exist: DID NOT RUN (exit 2), and the temp directory is still removed", () => {
     const sb = sandbox();
     const r = runBoot(sb, { FLAIR_BIN: join(sb.prefix, "bin", "no-such-flair") });
@@ -224,7 +326,7 @@ describe("check-instance-boot.sh — the admin-pass input file handed to flair i
     expect(existsSync(made[0]!)).toBe(false);
   }, CASE_BUDGET_MS);
 
-  test("an explicit PASS_FILE is passed as given and left in place, unchanged", () => {
+  test("an explicit nonempty 0600 PASS_FILE is passed as given and left in place with the same content and mode", () => {
     const sb = sandbox();
     const passFile = writeOperatorPassFile(sb);
 
@@ -239,6 +341,21 @@ describe("check-instance-boot.sh — the admin-pass input file handed to flair i
     expect(statSync(passFile).mode & 0o777).toBe(0o600);
     // No temp directory is made for an explicit file.
     expect(mktempDirs(sb)).toEqual([]);
+  }, CASE_BUDGET_MS);
+
+  test("an explicit nonempty PASS_FILE at mode 0644 is set to 0600 before flair init receives it, content unchanged", () => {
+    const sb = sandbox();
+    const passFile = writeOperatorPassFile(sb, 0o644);
+
+    const r = runBoot(sb, { PASS_FILE: passFile });
+    expect(r.status).toBe(1);
+    const rec = readRecord(sb);
+    expect(passFileArg(rec)).toBe(passFile);
+    expect(rec.pass?.mode).toBe(0o600);
+    expect(rec.pass?.value).toBe(OPERATOR_VALUE);
+
+    expect(readFileSync(passFile, "utf8")).toBe(OPERATOR_VALUE);
+    expect(statSync(passFile).mode & 0o777).toBe(0o600);
   }, CASE_BUDGET_MS);
 
   test("flair init's argv carries no password value, and the script prints none", () => {
