@@ -2,9 +2,8 @@
 //
 // A `signedOnly` request with no agent key sends no Authorization header. Real
 // Harper refuses an anonymous read of /Memory with 403, and `authedRequest`
-// must report that 403 with the signed-only hint and `noCredentials`, whatever
-// body the 403 carries. A raw anonymous request to the same route records the
-// body shape Harper sends. The keys directory each request falls back to is an
+// must report that 403 with the signed-only hint and `noCredentials`. A raw
+// anonymous request to the same route records the body shape Harper sends. The keys directory each request falls back to is an
 // empty temp directory, so the agent-key fallback finds no key.
 //
 // MODEL: test/integration/auth-middleware-e2e.test.ts (real Harper, an
