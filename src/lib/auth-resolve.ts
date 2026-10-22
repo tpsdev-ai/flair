@@ -550,22 +550,23 @@ export async function sendJsonRequest(
   if (transport.refuseRedirects && res.status >= 300 && res.status < 400) {
     throw new ApiHttpError(res.status, `HTTP ${res.status}: the instance answered with a redirect, which this request does not follow`);
   }
+  // 403 with no credentials sent at all is the flair#634 case: a gated
+  // resource rejected a credential-less call. Name the fix instead of
+  // surfacing the raw "forbidden" body — never a stack trace. Classified
+  // before the empty-body shortcut below, so a zero-length 403 gets the same
+  // hint and noCredentials as one with a body (flair#2749).
+  if (res.status === 403 && !authHeader) {
+    await res.text();
+    const hint = noCredentialsHint(isLocal, transport.signedOnly);
+    throw new ApiHttpError(403, `HTTP 403: no credentials sent. ${hint}`, /* noCredentials */ true);
+  }
   // Handle 204 No Content (e.g., PUT upsert returns empty body)
   if (res.status === 204 || res.headers.get("content-length") === "0") {
     if (!res.ok) throw new ApiHttpError(res.status, `HTTP ${res.status}`);
     return { ok: true };
   }
   const text = await res.text();
-  if (!res.ok) {
-    // 403 with no credentials sent at all is the flair#634 case: a gated
-    // resource rejected a credential-less call. Name the fix instead of
-    // surfacing the raw "forbidden" body — never a stack trace.
-    if (res.status === 403 && !authHeader) {
-      const hint = noCredentialsHint(isLocal, transport.signedOnly);
-      throw new ApiHttpError(403, `HTTP 403: no credentials sent. ${hint}`, /* noCredentials */ true);
-    }
-    throw new ApiHttpError(res.status, text || `HTTP ${res.status}`);
-  }
+  if (!res.ok) throw new ApiHttpError(res.status, text || `HTTP ${res.status}`);
   if (!text) return { ok: true };
   return JSON.parse(text);
 }
