@@ -1568,7 +1568,7 @@ export function register(program: Command): void {
     .description("Restore from a REM snapshot (inspect by default; --apply rewinds Harper state)")
     .option("--agent <id>", "Agent id (or FLAIR_AGENT_ID env)")
     .option("--target <dir>", "Directory to extract into (default: <snapshot>.restored, only used without --apply)")
-    .option("--dry-run", "Plan-only — list contents or planned counts without writing")
+    .option("--dry-run", "Plan-only — list contents or planned counts without writing; with --apply to a non-loopback target and no --admin-pass or --admin-pass-file, credentials are resolved signed-only (no Basic credential is sent)")
     .option("--apply", "Live replay: rewind Harper state to the snapshot (irreversible without the pre-restore snapshot)")
     .action(async (date: string, opts: any) => {
       const { listSnapshots, extractSnapshot } = await import("../rem/snapshot.js");
@@ -1613,9 +1613,9 @@ export function register(program: Command): void {
           console.error(`Error: ${err.message}`);
           process.exit(1);
         }
-        // Candidates are only reachable through the ops port (Harper has no
-        // REST search_by_conditions route), so the dry-run candidate count
-        // needs admin creds too. Dry-run treats credential resolution as
+        // Candidates are only reachable through the operations API (Harper
+        // has no REST search_by_conditions route), so the dry-run candidate
+        // count needs admin creds too. Dry-run treats credential resolution as
         // best-effort — a plan-only command must not fail on a bad credential
         // file — while --apply requires creds (Soul rewrite) and fails loudly.
         let adminPass: string | undefined;
@@ -1653,12 +1653,16 @@ export function register(program: Command): void {
         // --apply --dry-run may not), every Memory, Soul and MemoryCandidate
         // read, delete and write sends it explicitly:
         // --admin-pass, --admin-pass-file, or the default resolveLocalAdminPass
-        // fell back to. A dry run without one reads through the shared
-        // resolver's own tiers.
+        // fell back to. A dry run to a non-loopback target without one reads
+        // signed-only: no Basic credential is sent, and FLAIR_ADMIN_PASS and the
+        // local admin-password file are not read for a target this machine's
+        // secret was not given for. A loopback dry run without one keeps the
+        // shared resolver's own tiers.
+        const signedOnly = !!opts.dryRun && !adminPass && !restoreTarget.loopback;
         const targetApi = (method: string, path: string, body?: unknown) =>
           api(method, path, body, adminPass
             ? { baseUrl: restoreTarget.baseUrl, explicitAdminPass: adminPass, adminUser: opts.adminUser, agentId: null, refuseRedirects: true }
-            : { baseUrl: restoreTarget.baseUrl, refuseRedirects: true });
+            : { baseUrl: restoreTarget.baseUrl, refuseRedirects: true, ...(signedOnly ? { signedOnly: true } : {}) });
         const opsSearch = adminPass
           ? buildOpsSearch({ opsUrl: restoreTarget.opsUrl, adminUser: opts.adminUser, adminPass })
           : undefined;

@@ -1,6 +1,6 @@
 - **`flair rem restore --apply` lists candidates through the operations API on its target's host, after a preflight check of that pair.** For a loopback target URL (`localhost` or `[::1]` included), that operations API and the restore's reads and writes are reached on 127.0.0.1.
 
-  The writes go to `FLAIR_URL` (on 127.0.0.1 for a loopback URL), or to the local instance when it is unset. The
+  The writes go to the resolved base URL (`FLAIR_URL`'s scheme, host, port and path, with a loopback host pinned to 127.0.0.1), or to the local instance when it is unset. The
   candidate listing goes to the operations API on that same host, at
   `FLAIR_OPS_PORT` when it is set and otherwise at the port derived from
   `FLAIR_URL`; a target URL without a port has HTTP port 80 or 443. Before any
@@ -18,7 +18,11 @@
   over after it passes. Restore's REST calls do not follow redirects, and each
   Memory, Soul and candidate read, delete and write of a live replay carries
   the admin credential restore resolved (`--admin-pass`, `--admin-pass-file`, or the
-  default), so no local admin-password file is needed when a flag gives one. A
+  default), so no local admin-password file is needed when a flag gives one. An
+  `--apply --dry-run` to a non-loopback target without `--admin-pass` or
+  `--admin-pass-file` resolves credentials signed-only and sends no Basic
+  credential; `FLAIR_ADMIN_PASS` and the local admin-password file are read only
+  for a loopback target. A
   `FLAIR_OPS_TARGET` does not select the listing endpoint: restore refuses
   while it is set to anything but that endpoint's root URL, a value of only
   whitespace included (an empty value counts as unset). Restore refuses a

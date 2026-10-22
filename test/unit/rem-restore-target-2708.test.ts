@@ -19,6 +19,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import nacl from "tweetnacl";
 import { createSnapshot } from "../../src/rem/snapshot.ts";
 import { establishRestorePair, resolveRestoreTarget, type RestoreTarget } from "../../src/commands/rem.ts";
 import { resolveOpsUrlFromTarget } from "../../src/cli.ts";
@@ -29,6 +30,14 @@ const cliPath = join(import.meta.dirname, "..", "..", "src", "cli.ts");
 const fetchLogPreload = join(import.meta.dirname, "..", "helpers", "fetch-request-log-preload.ts");
 const AGENT_ID = "agent-a";
 const SECRET = "s3cr3t-value-2708";
+
+/** Write a signing key into `home`'s key store, in the raw-seed form `flair init` writes. */
+function writeAgentKey(home: string, agentId: string): void {
+  const keysDir = join(home, ".flair", "keys");
+  mkdirSync(keysDir, { recursive: true });
+  const kp = nacl.sign.keyPair();
+  writeFileSync(join(keysDir, `${agentId}.key`), Buffer.from(kp.secretKey.slice(0, 32)));
+}
 
 const dirs: string[] = [];
 const instances: StubInstance[] = [];
@@ -89,6 +98,8 @@ async function runRestore(args: {
   env: Record<string, string | undefined>;
   /** The admin credential flags; default `--admin-pass <STUB_ADMIN_PASS>`. */
   credential?: string[];
+  /** Append `--dry-run`. */
+  dryRun?: boolean;
 }): Promise<{ code: number | null; stdout: string; stderr: string; fetches: FetchRecord[] }> {
   const fetchLog = join(args.home, "fetch-log.jsonl");
   const env: Record<string, string | undefined> = {
@@ -109,7 +120,7 @@ async function runRestore(args: {
   };
   for (const [key, value] of Object.entries(env)) if (value === undefined) delete env[key];
   const child = Bun.spawn(
-    ["bun", "--preload", fetchLogPreload, cliPath, "rem", "restore", args.date, "--agent", AGENT_ID, "--apply", ...(args.credential ?? ["--admin-pass", STUB_ADMIN_PASS])],
+    ["bun", "--preload", fetchLogPreload, cliPath, "rem", "restore", args.date, "--agent", AGENT_ID, "--apply", ...(args.dryRun ? ["--dry-run"] : []), ...(args.credential ?? ["--admin-pass", STUB_ADMIN_PASS])],
     { env: env as Record<string, string>, timeout: 30_000, stdout: "pipe", stderr: "pipe" },
   );
   const stdout = await new Response(child.stdout).text();
@@ -179,6 +190,54 @@ describe("flair#2708 — rem restore target (CLI)", () => {
     expect(a.requests()).toEqual([]);
   }, 60_000);
 
+  test("an --apply dry run to a non-loopback target sends no Basic credential even with FLAIR_ADMIN_PASS set, and reads with the signed request", async () => {
+    // 127.0.0.2 is a local address but not a loopback host restore pins; the
+    // stub binds it explicitly, so the target is non-loopback while no request
+    // leaves this machine.
+    const b = await startInstance({ ...driftedSeed(), hostname: "127.0.0.2", auth: "signed" });
+    const { home, date } = await makeHome();
+    writeAgentKey(home, AGENT_ID);
+
+    const result = await runRestore({
+      home,
+      date,
+      dryRun: true,
+      credential: [],
+      env: { FLAIR_URL: `http://127.0.0.2:${b.httpPort}`, FLAIR_OPS_PORT: String(b.opsPort), FLAIR_ADMIN_PASS: STUB_ADMIN_PASS },
+    });
+
+    // The stub accepts the signed request, so a dry-run status means the reads
+    // completed on the agent key alone.
+    expect(result.code, result.stderr).toBe(0);
+    expect(result.stdout).toContain("Status:       dry-run");
+    expect(b.requests().length).toBeGreaterThan(0);
+    expect(b.requests().filter((r) => r.auth === "basic")).toEqual([]);
+    expect(b.requests().some((r) => r.auth === "signature")).toBe(true);
+    expect(b.requests().some((r) => r.endpoint === "http" && r.method === "GET" && r.path === "/Memory")).toBe(true);
+    // No candidate listing: that read needs the admin credential.
+    expect(b.requests().some((r) => r.endpoint === "ops")).toBe(false);
+  }, 60_000);
+
+  test("the same --apply dry run on a loopback target sends the admin credential from FLAIR_ADMIN_PASS", async () => {
+    const b = await startInstance();
+    const { home, date } = await makeHome();
+    writeAgentKey(home, AGENT_ID);
+
+    const result = await runRestore({
+      home,
+      date,
+      dryRun: true,
+      credential: [],
+      env: { FLAIR_URL: b.httpUrl, FLAIR_ADMIN_PASS: STUB_ADMIN_PASS },
+    });
+
+    expect(result.code, result.stderr).toBe(0);
+    expect(result.stdout).toContain("Status:       dry-run");
+    expect(b.requests().length).toBeGreaterThan(0);
+    // The key on disk was not needed: every request carried the admin credential.
+    expect(b.requests().every((r) => r.auth === "basic")).toBe(true);
+  }, 60_000);
+
   test("refuses before any request when FLAIR_OPS_PORT conflicts with the configured pair", async () => {
     const a = await startInstance();
     const b = await startInstance();
@@ -210,7 +269,7 @@ describe("flair#2708 — rem restore target (CLI)", () => {
     expect(result.stderr).toContain("nothing was listed, deleted or written");
 
     // A answered one configuration read and nothing else: no listing there.
-    expect(a.requests()).toEqual([{ endpoint: "ops", method: "POST", path: "/", operation: "get_configuration" }]);
+    expect(a.requests()).toEqual([{ endpoint: "ops", method: "POST", path: "/", operation: "get_configuration", auth: "basic" }]);
     // B, the write target, received nothing at all.
     expect(b.requests()).toEqual([]);
     expect(result.fetches.map((f) => f.host)).toEqual([hostOf(a, "ops")]);

@@ -32,6 +32,8 @@ export interface StubRequest {
   path: string;
   operation?: string;
   table?: string;
+  /** What kind of `Authorization` header the request carried; absent when it carried none. */
+  auth?: "basic" | "signature" | "other";
 }
 
 /** The admin password a stub instance requires unless the seed names another. */
@@ -45,6 +47,16 @@ export interface StubSeed {
   redirectWritesTo?: string;
   /** The admin password every request must carry as `Basic admin:<adminPass>`; default {@link STUB_ADMIN_PASS}. */
   adminPass?: string;
+  /** Address both ports bind on; default `127.0.0.1`. */
+  hostname?: string;
+  /**
+   * How the instance authorizes. `admin-basic` (default) accepts only
+   * `Basic admin:<adminPass>` and answers 401 to everything else. `signed`
+   * also accepts a `TPS-Ed25519 ` signature, and answers a request with no
+   * `Authorization` header at all with 403, as a gated resource does: that is
+   * the answer the shared resolver's agent-key fallback engages on.
+   */
+  auth?: "admin-basic" | "signed";
 }
 
 export interface StubInstance {
@@ -52,6 +64,8 @@ export interface StubInstance {
   opsPort: number;
   httpUrl: string;
   opsUrl: string;
+  /** The address both ports are bound on. */
+  hostname: string;
   pid: number;
   /** Every request this instance received, in order, including ones it answered 401 or 400. */
   requests: () => StubRequest[];
@@ -71,15 +85,30 @@ const tables = {
 const ports = { http: 0, ops: 0 };
 const log = (entry) => appendFileSync(logPath, JSON.stringify(entry) + "\n");
 const expectedAuth = "Basic " + Buffer.from("admin:" + seed.adminPass).toString("base64");
-const unauthorized = (req) => req.headers.get("authorization") !== expectedAuth;
+const authKind = (req) => {
+  const h = req.headers.get("authorization");
+  if (!h) return undefined;
+  if (h.startsWith("Basic ")) return "basic";
+  return h.startsWith("TPS-Ed25519 ") ? "signature" : "other";
+};
+// The status a request gets: 403 only for a credential-less request to a
+// signed-accepting instance, which is what the resolver's fallback reads.
+const refusal = (req) => {
+  const h = req.headers.get("authorization");
+  if (h === expectedAuth) return 0;
+  if (seed.auth === "signed" && h?.startsWith("TPS-Ed25519 ")) return 0;
+  if (seed.auth === "signed" && !h) return 403;
+  return 401;
+};
 // Neither step can throw, so every request reaches its log line.
 const readText = async (req) => { try { return await req.text(); } catch { return ""; } };
 const parseJson = (text) => { try { return text ? JSON.parse(text) : undefined; } catch { return undefined; } };
 
 async function opsFetch(req) {
   const body = parseJson(await readText(req));
-  log({ endpoint: "ops", method: req.method, path: new URL(req.url).pathname, operation: body?.operation, table: body?.table });
-  if (unauthorized(req)) return new Response("unauthorized", { status: 401 });
+  log({ endpoint: "ops", method: req.method, path: new URL(req.url).pathname, operation: body?.operation, table: body?.table, auth: authKind(req) });
+  const refused = refusal(req);
+  if (refused) return new Response(refused === 403 ? "forbidden" : "unauthorized", { status: refused });
   if (body?.operation === "get_configuration") {
     return Response.json({ http: { port: ports.http }, operationsApi: { network: { port: ports.ops } } });
   }
@@ -93,8 +122,9 @@ async function opsFetch(req) {
 async function httpFetch(req) {
   const url = new URL(req.url);
   const text = await readText(req);
-  log({ endpoint: "http", method: req.method, path: url.pathname });
-  if (unauthorized(req)) return new Response("unauthorized", { status: 401 });
+  log({ endpoint: "http", method: req.method, path: url.pathname, auth: authKind(req) });
+  const refused = refusal(req);
+  if (refused) return new Response(refused === 403 ? "forbidden" : "unauthorized", { status: refused });
   const body = parseJson(text);
   if (req.method === "PUT" && body === undefined) return new Response("malformed body", { status: 400 });
   if (seed.redirectWritesTo && (req.method === "PUT" || req.method === "DELETE")) {
@@ -116,10 +146,10 @@ async function httpFetch(req) {
 let started = null;
 for (let attempt = 0; attempt < 50 && !started; attempt++) {
   let ops;
-  try { ops = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: opsFetch }); } catch { continue; }
+  try { ops = Bun.serve({ hostname: seed.hostname ?? "127.0.0.1", port: 0, fetch: opsFetch }); } catch { continue; }
   if (ops.port + 1 > 65535) { ops.stop(true); continue; }
   try {
-    const http = Bun.serve({ hostname: "127.0.0.1", port: ops.port + 1, fetch: httpFetch });
+    const http = Bun.serve({ hostname: seed.hostname ?? "127.0.0.1", port: ops.port + 1, fetch: httpFetch });
     started = { ops, http };
   } catch { ops.stop(true); }
 }
@@ -183,8 +213,9 @@ export async function startStubInstance(seed: StubSeed = {}): Promise<StubInstan
   }
   return {
     ...ports,
-    httpUrl: `http://127.0.0.1:${ports.httpPort}`,
-    opsUrl: `http://127.0.0.1:${ports.opsPort}`,
+    hostname: seed.hostname ?? "127.0.0.1",
+    httpUrl: `http://${seed.hostname ?? "127.0.0.1"}:${ports.httpPort}`,
+    opsUrl: `http://${seed.hostname ?? "127.0.0.1"}:${ports.opsPort}`,
     pid: proc.pid,
     requests: () => {
       if (!existsSync(logPath)) return [];
