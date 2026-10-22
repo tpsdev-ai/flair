@@ -21,7 +21,10 @@
  * The refusal test starts instance B, a second real Harper, and runs with NO
  * configured pair (no config file in HOME): FLAIR_URL names B and
  * FLAIR_OPS_PORT names A's operations port. Restore must refuse before any
- * listing, delete or write, and both instances keep every row.
+ * listing, delete or write, and both instances keep every row. That run loads
+ * test/helpers/fetch-request-log-preload.ts through `node --import`, and its
+ * request log must hold one request: a POST to A's operations port, the pair
+ * check's configuration read.
  *
  * The last test runs the non-loopback branch of the preflight pair check
  * (`establishRestorePair` with a target marked non-loopback) against the two real
@@ -31,16 +34,18 @@
  * once each has its own row.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename } from "node:path";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { startHarper, stopHarpers, type HarperInstance, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { nodeBin } from "../helpers/node-runtime";
 import { createSnapshot } from "../../src/rem/snapshot.ts";
 import { establishRestorePair, type RestoreTarget } from "../../src/commands/rem.ts";
 
 const CLI = join(process.cwd(), "dist", "cli.js");
+const FETCH_LOG_PRELOAD = join(import.meta.dirname, "..", "helpers", "fetch-request-log-preload.ts");
 const AGENT_ID = "agent-a";
 const MEMORY_ID = "m-restored";
 const EXTRA_MEMORY_ID = "m-extra";
@@ -103,7 +108,8 @@ function candidateRow(id: string, claim: string) {
   return { id, agentId: AGENT_ID, claim, generatedAt: new Date().toISOString(), status: "pending" };
 }
 
-function runRestore(env: Record<string, string | undefined>, credential: string[], date: string) {
+/** With `fetchLog`, the CLI loads the request-log preload, which appends each `fetch` the CLI sends to that file. */
+function runRestore(env: Record<string, string | undefined>, credential: string[], date: string, fetchLog?: string) {
   const childEnv: Record<string, string | undefined> = {
     ...process.env,
     HOME: home,
@@ -116,12 +122,14 @@ function runRestore(env: Record<string, string | undefined>, credential: string[
     FLAIR_ADMIN_USER: undefined,
     HDB_ADMIN_PASSWORD: undefined,
     FLAIR_AGENT_ID: undefined,
+    FLAIR_TEST_FETCH_LOG: fetchLog,
     NO_COLOR: "1",
     ...env,
   };
   for (const [key, value] of Object.entries(childEnv)) if (value === undefined) delete childEnv[key];
+  const preload = fetchLog ? ["--import", pathToFileURL(FETCH_LOG_PRELOAD).href] : [];
   const child = Bun.spawn(
-    [nodeBin({ env: childEnv as Record<string, string> }), CLI, "rem", "restore", date, "--agent", AGENT_ID, "--apply", ...credential],
+    [nodeBin({ env: childEnv as Record<string, string> }), ...preload, CLI, "rem", "restore", date, "--agent", AGENT_ID, "--apply", ...credential],
     { env: childEnv as Record<string, string>, timeout: 60_000, stdout: "pipe", stderr: "pipe" },
   );
   return (async () => {
@@ -254,13 +262,18 @@ describe("flair#2708 — rem restore on a real instance", () => {
     expect(before[`${a.httpURL} MemoryCandidate`]).toContainEqual({ id: "c-on-a", claim: "a candidate on instance A" });
 
     const aOps = new URL(a.opsURL).port;
-    const result = await runRestore({ FLAIR_URL: b.httpURL, FLAIR_OPS_PORT: aOps }, ["--admin-pass", b.admin.password], snapshotStem);
+    const fetchLog = join(home, "refusal-fetch-log.jsonl");
+    const result = await runRestore({ FLAIR_URL: b.httpURL, FLAIR_OPS_PORT: aOps }, ["--admin-pass", b.admin.password], snapshotStem, fetchLog);
 
     expect(result.code, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`).not.toBe(0);
     expect(result.stderr).toContain(
       `operations port ${aOps} belongs to the instance serving HTTP port ${new URL(a.httpURL).port}, not restore target ${b.httpURL}`,
     );
     expect(result.stderr).toContain("nothing was listed, deleted or written");
+    // The request log holds one request, a POST to A's operations port: the
+    // configuration read whose answer names A's HTTP port in the refusal above.
+    const requests = readFileSync(fetchLog, "utf-8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    expect(requests).toEqual([{ method: "POST", host: `127.0.0.1:${aOps}`, path: "/" }]);
     expect(result.stdout).not.toContain("Deleted:");
     expect(await snapshotRows()).toEqual(before);
   }, 300_000);
