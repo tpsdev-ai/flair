@@ -27,8 +27,8 @@ server, which has them sign in at the identity provider configured under
 configures GitHub. The access token the app receives carries the login as its
 subject; for GitHub, that is the account's username.
 
-`/mcp` answers `initialize`, `ping` and `tools/list` for any valid token, and
-refuses a `tools/call` for an unknown tool name, before it looks at the mapping.
+`/mcp` answers `initialize` and `ping` for any valid token, and refuses a
+`tools/call` for an unknown tool name, before it looks at the mapping.
 On a `tools/call` for a known tool, Flair looks for a `Credential` of kind `idp`
 whose `idpSubject` is that login, that names a principal, and whose status is
 not `revoked`, and acts as that principal. There is no fallback to an anonymous
@@ -47,6 +47,10 @@ or admin identity:
   [Revoking access](#revoking-access).
 - **The credential or the principal could not be read:** refused with code
   `-32000` and a message starting `unavailable:`.
+
+A `tools/list` reads the mapping the same way and answers each case above
+except **No mapping** with the same error; with no mapping it returns a tool
+list.
 
 ### Map a person to a principal
 
