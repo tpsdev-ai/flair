@@ -260,9 +260,15 @@ if [ ! -s "$PASS_FILE" ]; then
 fi
 chmod 600 "$PASS_FILE"
 # Keep the secret out of argv for the *later* calls too (init reads the file
-# itself; these are for the already-running health/stop path).
-export HDB_ADMIN_PASSWORD="$(cat "$PASS_FILE")"
-export FLAIR_ADMIN_PASS="$HDB_ADMIN_PASSWORD"
+# itself; these are for the already-running health/stop path). Read before
+# exporting, so a failed or empty read stops here; the messages name the file,
+# not its content.
+admin_pass="$(cat "$PASS_FILE")" \
+  || fail "cannot read admin-pass input file ${PASS_FILE}; set PASS_FILE to a readable file holding the password"
+[ -n "$admin_pass" ] \
+  || fail "admin-pass input file ${PASS_FILE} is empty; set PASS_FILE to a file holding the password"
+export HDB_ADMIN_PASSWORD="$admin_pass"
+export FLAIR_ADMIN_PASS="$admin_pass"
 
 "$FLAIR_BIN" init \
   --port "$PORT" \

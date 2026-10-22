@@ -47,10 +47,14 @@ const SCRIPT = join(REPO, "scripts", "ci", "check-instance-boot.sh");
 const CASE_BUDGET_MS = 30_000;
 const OPERATOR_VALUE = "operator-supplied-test-value-2739\n";
 
-/** What the stub flair saw: its argv and the pass file as it was when flair got it. */
+/**
+ * What the stub flair saw: its argv, the pass file as it was when flair got it, and the
+ * LENGTH of each password-bearing variable it inherited (null when unset).
+ */
 interface Recorded {
   argv: string[];
   pass: null | { path: string; mode?: number; dirMode?: number; value?: string; error?: string };
+  envLengths: Record<string, number | null>;
 }
 
 /** The stub's recorder. `.cjs` so it is CommonJS whatever surrounds it. */
@@ -73,7 +77,11 @@ if (at >= 0 && at + 1 < argv.length) {
     pass = { path: file, error: String(error) };
   }
 }
-fs.writeFileSync(process.env.FLAIR_STUB_RECORD, JSON.stringify({ argv, pass }));
+const envLengths = {};
+for (const name of ["HDB_ADMIN_PASSWORD", "FLAIR_ADMIN_PASS"]) {
+  envLengths[name] = name in process.env ? process.env[name].length : null;
+}
+fs.writeFileSync(process.env.FLAIR_STUB_RECORD, JSON.stringify({ argv, pass, envLengths }));
 process.exit(3);
 `;
 
@@ -181,6 +189,16 @@ function readRecord(sb: Sandbox): Recorded {
   return JSON.parse(readFileSync(sb.record, "utf8")) as Recorded;
 }
 
+/** The stub's record, or null when the stub never ran. */
+function readRecordIfAny(sb: Sandbox): Recorded | null {
+  try {
+    return JSON.parse(readFileSync(sb.record, "utf8")) as Recorded;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
 /** Every path the script's `mktemp` calls returned, in order. */
 function mktempDirs(sb: Sandbox): string[] {
   if (!existsSync(sb.mktempRecord)) return [];
@@ -208,6 +226,31 @@ function writeOperatorPassFile(sb: Sandbox, mode = 0o600): string {
   chmodSync(passFile, mode);
   return passFile;
 }
+
+/** Explicit pass files whose read fails for every uid, or yields an empty value. */
+const UNUSABLE: Array<[string, (sb: Sandbox) => string, string]> = [
+  [
+    "is a directory, so reading it fails",
+    (sb) => {
+      const dir = join(sb.root, "operator", "pass-dir");
+      mkdirSync(dir, { recursive: true });
+      // A nonempty directory, so the script's `-s` test sees it as present and nonempty.
+      writeFileSync(join(dir, "entry"), "");
+      return dir;
+    },
+    "cannot read admin-pass input file",
+  ],
+  [
+    "holds only a newline, so the read is empty",
+    (sb) => {
+      const file = join(sb.root, "operator", "admin-pass-input");
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(file, "\n");
+      return file;
+    },
+    "is empty",
+  ],
+];
 
 /** Each case puts RUNNER_TEMP where the generated directory must not resolve. */
 const OVERLAPS: Array<[string, (sb: Sandbox) => Record<string, string>]> = [
@@ -357,6 +400,27 @@ describe("check-instance-boot.sh — the admin-pass input file handed to flair i
     expect(readFileSync(passFile, "utf8")).toBe(OPERATOR_VALUE);
     expect(statSync(passFile).mode & 0o777).toBe(0o600);
   }, CASE_BUDGET_MS);
+
+  test.each(UNUSABLE)(
+    "an explicit PASS_FILE that %s: the script exits 1 naming the file, and flair init never runs",
+    (_what, make, reason) => {
+      const sb = sandbox();
+      const passFile = make(sb);
+      try {
+        const r = runBoot(sb, { PASS_FILE: passFile });
+        expect(r.status).toBe(1);
+        // The script exports the password right before flair init, so init never running
+        // means no process inherited those exports, empty or otherwise.
+        expect(readRecordIfAny(sb)).toBeNull();
+        expect(r.stderr).toContain(reason);
+        expect(r.stderr).toContain(passFile);
+      } finally {
+        // The script set the path to 0600; a directory needs its search bit back for cleanup.
+        chmodSync(passFile, 0o700);
+      }
+    },
+    CASE_BUDGET_MS,
+  );
 
   test("flair init's argv carries no password value, and the script prints none", () => {
     for (const explicit of [false, true]) {
