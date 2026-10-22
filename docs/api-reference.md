@@ -138,7 +138,7 @@ From `RECORD_TYPES` in `resources/record-types.ts`:
 
 | Scope | Meaning | Tables |
 |-------|---------|--------|
-| **open-within-org** | Base scope: own rows at any visibility plus other agents' non-private rows; non-admin reads of retained closed skills additionally require readable current authority. | Memory |
+| **open-within-org** | Base scope: own rows at any visibility plus other agents' non-private rows; non-admin Memory by-id and collection reads of retained closed skills additionally require readable current authority. | Memory |
 | **owner-only** | Only the owning agent (plus admin / internal) | Relationship, WorkspaceState, Asset, MemoryCandidate |
 | **none** | Any verified agent reads every row; no visibility field | Soul, OrgEvent, OrgSkillAssignment |
 
@@ -258,7 +258,7 @@ registrations; its key field is the fingerprint, not the key.
 Skill-tagged Memory rows embed from `trigger` (the recall signal), not
 `content`. MCP tools: `skill_store`, `skill_search`, `skill_get`.
 
-For non-admin callers, a retained closed skill payload must pass both its
+For non-admin Memory by-id and collection reads, a retained closed skill payload must pass both its
 stored owner/visibility check and its subject's current-authority check: a
 readable live skill referenced by a matching create/update head, or a readable
 delete head with `memoryId: null`. Missing, invalid or unreadable authority

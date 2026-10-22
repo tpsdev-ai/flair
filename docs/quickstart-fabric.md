@@ -121,7 +121,7 @@ Same connector, different panel. This is the field-verified sequence — includi
 
 5. The next tool call picks up the key — a miss is not cached. A 401 names the agent and the paths that were looked in. If those are not where `flair agent add` wrote the file, the MCP process's home differs from the shell; set `FLAIR_KEY_PATH` to the absolute path of the `.key` file.
 
-6. Verify: ask the agent to "load my Flair bootstrap". You should get soul + memories **including shared org context** — findings written by teammate agents. A shared-visibility write from this agent passes every org agent's base visibility check; retained closed-skill reads also apply the current-authority check.
+6. Verify: ask the agent to "load my Flair bootstrap". You should get soul + memories **including shared org context** — findings written by teammate agents. A shared-visibility write from this agent passes every org agent's base visibility check; non-admin Memory by-id and collection reads of retained closed skills also apply the current-authority check.
 
 **Account-wide connectors are shared.** A connector added at the Grok Bot account level is one identity used by every agent on that account. For per-agent identity, give each agent its own MCP entry with its own `FLAIR_AGENT_ID` — and register each id (steps 2–5).
 

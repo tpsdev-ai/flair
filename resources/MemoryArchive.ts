@@ -21,7 +21,9 @@
  * Scope: reads use Memory.get()'s read policy; non-admin callers may archive
  * or restore only their own memories (Memory.put()'s ownership gate,
  * stampAttribution), while administrators may act on another agent's memory.
- * Anonymous HTTP is denied (401).
+ * Anonymous HTTP is refused by allowCreate() before post() runs, with the
+ * status Harper returns for a denied allowCreate() (403 for SkillScan's same
+ * allowVerified() gate in test/integration/gate4-authgate.test.ts).
  *
  * Registered automatically at /MemoryArchive via config.yaml's
  * `jsResource: files: dist/resources/*.js` (named export → export name).

@@ -202,7 +202,7 @@ Soul entries and relevant memories, in one block sized to a token budget. Paste 
 | You want to... | Go to |
 |----------------|-------|
 | Add more agents to the same instance | `flair agent add <id>` |
-| Share a memory with your other agents | `flair memory add --visibility shared` — a bare write lands `private`, see [step 4](#who-can-read-it); a shared memory passes the instance-wide base visibility check without a grant; retained closed-skill reads also apply the current-authority check ([auth.md](auth.md)) |
+| Share a memory with your other agents | `flair memory add --visibility shared` — a bare write lands `private`, see [step 4](#who-can-read-it); a shared memory passes the instance-wide base visibility check without a grant; non-admin Memory by-id and collection reads of retained closed skills also apply the current-authority check ([auth.md](auth.md)) |
 | Import memories from agentic-stack / Mem0 / etc. | [bridges.md](bridges.md) |
 | Sync memories across machines | [federation.md](federation.md) |
 | Integrate with OpenClaw, Claude Code, Cursor | [README.md#integration](../README.md#integration) |

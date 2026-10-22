@@ -50,7 +50,7 @@ No agent can write into another agent's memory — that's enforced server-side b
 
 The reverse also holds, and it is the part worth internalising: a `standard` or `ephemeral` write lands `private`, so an agent's day-to-day working context is *not* team-searchable by default. Commit something at `permanent`/`persistent` durability, or pass `visibility: shared`, when you mean the team to find it. An agent that needs something owner-only whatever its durability (a draft not ready for the team, a sensitive finding pre-disclosure) marks it `visibility: private` explicitly.
 
-When agents need to *coordinate* — a direct, targeted handoff rather than ambient searchable memory — they pass **explicit messages** through TPS mail (a separate signed delivery channel; see [tpsdev-ai/cli](https://github.com/tpsdev-ai/cli)). That's a different concern from memory visibility: TPS mail is for "I need you, specifically, to see this now"; Flair memory is the shared, searchable record, subject to visibility, lifecycle filters and the current-authority check on retained closed-skill reads.
+When agents need to *coordinate* — a direct, targeted handoff rather than ambient searchable memory — they pass **explicit messages** through TPS mail (a separate signed delivery channel; see [tpsdev-ai/cli](https://github.com/tpsdev-ai/cli)). That's a different concern from memory visibility: TPS mail is for "I need you, specifically, to see this now"; Flair memory is the shared, searchable record, subject to visibility, lifecycle filters and, on non-admin Memory by-id and collection reads of retained closed skills, the current-authority check.
 
 ## Why these splits
 
