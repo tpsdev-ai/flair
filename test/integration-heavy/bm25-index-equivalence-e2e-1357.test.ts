@@ -208,12 +208,8 @@ describe("flair#1357 — indexed vs legacy lexical leg, real Harper, same data d
     // that mkdtemp'd its own directory OWNS it, and stopHarper would delete it
     // between the two boots — taking the store this test exists to re-open.
     dataDir = await mkdtemp(join(tmpdir(), "flair-test-1357-eq-"));
-    const prev = process.env.FLAIR_BM25_INDEX;
-    process.env.FLAIR_BM25_INDEX = "false";
     let h: HarperInstance;
-    try { h = await startHarper({ installDir: dataDir }); } finally {
-      if (prev === undefined) delete process.env.FLAIR_BM25_INDEX; else process.env.FLAIR_BM25_INDEX = prev;
-    }
+    h = await startHarper({ installDir: dataDir, serverEnv: { FLAIR_BM25_INDEX: "false" } });
     expect(h.ownsInstallDir).toBe(false);
 
     const res = await adminOp(h, {
@@ -240,21 +236,15 @@ describe("flair#1357 — indexed vs legacy lexical leg, real Harper, same data d
     await stopHarper(h);
 
     // ── BOOT 2: the persistent index ─────────────────────────────────────────
-    process.env.FLAIR_BM25_INDEX = "true";
     let hi: HarperInstance;
-    try { hi = await startHarper({ installDir: dataDir }); } finally {
-      if (prev === undefined) delete process.env.FLAIR_BM25_INDEX; else process.env.FLAIR_BM25_INDEX = prev;
-    }
+    hi = await startHarper({ installDir: dataDir, serverEnv: { FLAIR_BM25_INDEX: "true" } });
     indexedResults = await runQueries(hi, owner);
     await stopHarper(hi);
     delete process.env.ZZ_NO_FEED;
 
     // ── BOOT 3: legacy AGAIN — the pure control, at the SAME boot distance ────
-    process.env.FLAIR_BM25_INDEX = "false";
     let hc: HarperInstance;
-    try { hc = await startHarper({ installDir: dataDir }); } finally {
-      if (prev === undefined) delete process.env.FLAIR_BM25_INDEX; else process.env.FLAIR_BM25_INDEX = prev;
-    }
+    hc = await startHarper({ installDir: dataDir, serverEnv: { FLAIR_BM25_INDEX: "false" } });
     legacyRestart = await runQueries(hc, owner);
     await stopHarper(hc);
   }, 900_000);

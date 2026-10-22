@@ -11,6 +11,8 @@ let rows: any[] = [];
 let missingFromIndex = new Set<string>();
 let indexVisits = 0;
 let countIndexVisits = false;
+let failConfirmFor = new Set<string>();
+let agentScans = new Map<string, number>();
 let indexQueries: Array<{ conditions: any[]; confirmation: boolean }> = [];
 
 function makeRows(count: number, agentId = "agent-a", prefix = "r"): any[] {
@@ -26,6 +28,8 @@ beforeEach(() => {
   missingFromIndex = new Set();
   indexVisits = 0;
   countIndexVisits = false;
+  failConfirmFor = new Set();
+  agentScans = new Map();
   indexQueries = [];
 });
 
@@ -37,6 +41,14 @@ mock.module("harper", () => ({
         search: (query?: any, options?: any) => (async function* () {
           const agentCondition = query?.conditions?.find((condition: any) => condition.attribute === "agentId");
           if (query?.conditions) indexQueries.push({ conditions: query.conditions, confirmation: options !== undefined });
+          if (agentCondition) {
+            const agentId = String(agentCondition.value);
+            const scan = (agentScans.get(agentId) ?? 0) + 1;
+            agentScans.set(agentId, scan);
+            // The first agentId scan per agent is the drift probe; a later one
+            // is that agent's post-write confirmation scan.
+            if (failConfirmFor.has(agentId) && scan >= 2) throw new Error(`index scan failed for ${agentId}`);
+          }
           const selected = agentCondition
             ? rows.filter((row) => row.agentId === agentCondition.value && !missingFromIndex.has(row.id))
             : rows;
@@ -83,6 +95,19 @@ test("reports a written row that the committed agentId index does not list", asy
     message: "MemoryReindex: row r1 was confirmed after commit but is now absent from the agentId index query (index unconfirmed)",
     outcome: "unconfirmed",
   });
+});
+
+test("a confirmation scan that fails reports that agent's written rows as errors and leaves the other agent's rows reindexed", async () => {
+  rows = [...makeRows(2, "agent-a", "a"), ...makeRows(2, "agent-b", "b")];
+  failConfirmFor = new Set(["agent-b"]);
+  const result = await reindexer().post({ batchSize: 10 });
+  expect(result.stats.reindexed).toBe(2);
+  expect(result.stats.errors).toBe(2);
+  expect(result.stats.errorSamples).toEqual([
+    { id: "b0", message: "index scan failed for agent-b" },
+    { id: "b1", message: "index scan failed for agent-b" },
+  ]);
+  expect(result.stats.totalMissing).toBe(0);
 });
 
 test("confirms each agent's rows with a scan scoped to that agent", async () => {

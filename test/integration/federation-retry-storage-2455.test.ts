@@ -163,15 +163,8 @@ describe("flair#2455 — FederationRetry storage, gating and the operator query 
 
   beforeAll(async () => {
     pauseDir = mkdtempSync(join(tmpdir(), "flair-2455-storage-pause-"));
-    const saved = process.env.FLAIR_TEST_PAUSE_DIR;
-    process.env.FLAIR_TEST_PAUSE_DIR = pauseDir;
-    try {
-      component = componentWithRetryProbe();
-      harper = await startHarper({ cwd: component.dir });
-    } finally {
-      if (saved === undefined) delete process.env.FLAIR_TEST_PAUSE_DIR;
-      else process.env.FLAIR_TEST_PAUSE_DIR = saved;
-    }
+    component = componentWithRetryProbe();
+    harper = await startHarper({ serverEnv: { FLAIR_TEST_PAUSE_DIR: pauseDir }, cwd: component.dir });
     assertOwnInstance(harper);
     tmpHome = join(tmpdir(), `flair-2455-home-${sfx}`);
     mkdirSync(join(tmpHome, ".flair", "keys"), { recursive: true });

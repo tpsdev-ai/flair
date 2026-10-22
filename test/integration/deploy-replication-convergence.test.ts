@@ -71,7 +71,8 @@ interface OpsNode {
 }
 
 /**
- * A minimal Harper operations API: POST / with {operation:"get_components"}.
+ * A minimal Harper operations API: POST / with {operation:"get_components"}
+ * (and set_configuration, which deploy() sends before Harper deploys).
  * `failWith` makes the node answer that status instead — a node that is up but
  * refuses to answer, which must never read as "converged".
  */
@@ -90,6 +91,13 @@ async function startOpsNode(tree: () => unknown, failWith?: number): Promise<Ops
         op = JSON.parse(body)?.operation;
       } catch {
         /* fall through to 400 */
+      }
+      if (op === "set_configuration") {
+        // deploy() sends the MQTT-off configuration before Harper deploys
+        // (test/unit/deploy-mqtt-off.test.ts); not part of the convergence poll.
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ message: "Configuration successfully set." }));
+        return;
       }
       if (op !== "get_components") {
         res.writeHead(400).end("unsupported operation");
@@ -187,6 +195,8 @@ describe("flair#878 (integration): a peer-replication error over real HTTP", () 
     try {
       const result = await deploy({
         target: `http://localhost:${origin.port}`,
+        // This file's target answers operations on the target port itself.
+        opsUrl: `http://localhost:${origin.port}`,
         fabricUser: FABRIC_USER,
         fabricPassword: FABRIC_PASSWORD,
         packageRoot: root,
@@ -219,6 +229,8 @@ describe("flair#878 (integration): a peer-replication error over real HTTP", () 
     try {
       const err = await deploy({
         target: `http://localhost:${origin.port}`,
+        // This file's target answers operations on the target port itself.
+        opsUrl: `http://localhost:${origin.port}`,
         fabricUser: FABRIC_USER,
         fabricPassword: FABRIC_PASSWORD,
         packageRoot: root,
@@ -256,6 +268,8 @@ describe("flair#878 (integration): a peer-replication error over real HTTP", () 
     try {
       const err = await deploy({
         target: `http://localhost:${origin.port}`,
+        // This file's target answers operations on the target port itself.
+        opsUrl: `http://localhost:${origin.port}`,
         fabricUser: FABRIC_USER,
         fabricPassword: FABRIC_PASSWORD,
         packageRoot: root,
