@@ -77,11 +77,30 @@ const REQUIRED_ENTRY_FIELDS = [
   "approvedBy",
 ];
 
-// The two observations the gate can run. `bun` is the lockfile observation
-// (`bun audit`); `npm-install` is the installed-tree observation (`npm audit
-// --omit=dev --json` on the packed-and-installed prefix). An allowlist entry
-// declares which of these it expects to see its advisory in.
-const VALID_SOURCES = new Set(["bun", "npm-install", "npm-install-adk"]);
+/**
+ * The consumer-install observations. Each is one published package, packed and
+ * installed with npm --omit=dev outside this repo (so without its overrides),
+ * then audited with `npm audit --omit=dev --json`. npm overrides in a package
+ * do not apply to its consumers, so the workspace's bun lockfile does not show
+ * what a consumer of each package resolves (flair#1498, flair#2398,
+ * flair#2757). Every input is MANDATORY: the gate refuses to run without each
+ * flag. `source` is the name an allowlist entry's
+ * `sources` uses for that tree. `vendor`, when set, is the only direct
+ * dependency a vendor-pinned entry's chain may name second.
+ */
+export const CONSUMER_INSTALLS = [
+  { flag: "--npm-install-prefix", source: "npm-install", package: "@tpsdev-ai/flair" },
+  { flag: "--adk-npm-install-prefix", source: "npm-install-adk", package: "@tpsdev-ai/adk-flair", vendor: "@google/adk" },
+  { flag: "--mcp-npm-install-prefix", source: "npm-install-mcp", package: "@tpsdev-ai/flair-mcp" },
+  { flag: "--openclaw-npm-install-prefix", source: "npm-install-openclaw", package: "@tpsdev-ai/openclaw-flair" },
+  { flag: "--pi-npm-install-prefix", source: "npm-install-pi", package: "@tpsdev-ai/pi-flair" },
+  { flag: "--n8n-npm-install-prefix", source: "npm-install-n8n", package: "@tpsdev-ai/n8n-nodes-flair" },
+];
+
+// The observations the gate runs. `bun` is the lockfile observation (`bun
+// audit`); the others are the consumer-install observations above. An
+// allowlist entry declares which of these it expects to see its advisory in.
+const VALID_SOURCES = new Set(["bun", ...CONSUMER_INSTALLS.map((input) => input.source)]);
 
 const VALID_CLASSES = new Set([
   // No patched version exists anywhere yet. Nothing to do but wait upstream.
@@ -608,16 +627,25 @@ export function vendorPinnedNodeProblems(adv, npmPrefix) {
   return problems;
 }
 
-function adkVendorPinnedNodeProblems(adv, npmPrefix, entry) {
+/**
+ * For a vendor-pinned entry on a consumer-install observation other than the
+ * root tarball's: the entry's `introducedBy` chain must start at that input's
+ * package (then its `vendor`, when set) and end at the advisory's package, each
+ * later link must be a declared dependency of the one before it and resolve on
+ * disk, every reported node must be the chain's resolved node, and the
+ * installed version must equal the entry's `version`.
+ */
+function consumerVendorPinnedNodeProblems(adv, npmPrefix, entry, input) {
   if (!Array.isArray(adv.nodes) || adv.nodes.length === 0) {
     return [`${adv.ghsa} (${adv.package}): npm audit reported no nodes.`];
   }
   try {
     const chain = entry.introducedBy.split(" -> ");
-    if (chain[0] !== "@tpsdev-ai/adk-flair" || chain[1] !== "@google/adk" ||
+    if (chain.length < 2 || chain[0] !== input.package ||
+        (input.vendor !== undefined && chain[1] !== input.vendor) ||
         chain.at(-1) !== adv.package ||
         !chain.every((pkg) => /^(?:@[a-z0-9._-]+\/)?[a-z0-9._-]+$/.test(pkg))) {
-      throw new Error("invalid ADK dependency chain");
+      throw new Error(`invalid ${input.package} dependency chain`);
     }
     const prefix = resolve(npmPrefix);
     let parent = prefix;
@@ -657,11 +685,11 @@ function adkVendorPinnedNodeProblems(adv, npmPrefix, entry) {
         }
         return [];
       } catch (e) {
-        return [`${adv.ghsa} (${adv.package}): cannot verify ADK node ${JSON.stringify(node)} version: ${e.message}.`];
+        return [`${adv.ghsa} (${adv.package}): cannot verify ${input.package} node ${JSON.stringify(node)} version: ${e.message}.`];
       }
     });
   } catch (e) {
-    return [`${adv.ghsa} (${adv.package}): cannot verify ADK dependency chain: ${e.message}.`];
+    return [`${adv.ghsa} (${adv.package}): cannot verify ${input.package} dependency chain: ${e.message}.`];
   }
 }
 
@@ -688,44 +716,37 @@ async function main() {
   }
   const todayStr = today.toISOString().slice(0, 10);
 
-  // --npm-install-prefix <dir>: the npm-install observation is MANDATORY. The
-  // gate refuses to run without it — a bun-only pass is the exact escape
-  // Sherlock's verdict forbade (a PR whose tarball lane is skipped or optional
-  // would merge with the npm observation never made). Both observations run in
-  // every invocation.
-  const npmPrefixIdx = process.argv.indexOf("--npm-install-prefix");
-  const npmPrefix = npmPrefixIdx !== -1 ? process.argv[npmPrefixIdx + 1] : null;
-  if (!npmPrefix) {
-    console.error(
-      "DEPENDENCY AUDIT GATE: missing --npm-install-prefix <dir> — the npm-install observation is mandatory; the gate refuses to run bun-only.",
-    );
-    process.exit(2);
+  // Every consumer-install observation is MANDATORY. The gate refuses to run
+  // without each one: a PR whose tarball lane is skipped or optional would merge
+  // with that observation never made, and a check that can be skipped is not a
+  // check.
+  const prefixes = new Map();
+  const missing = [];
+  for (const input of CONSUMER_INSTALLS) {
+    const idx = process.argv.indexOf(input.flag);
+    const value = idx !== -1 ? process.argv[idx + 1] : undefined;
+    if (!value || value.startsWith("--")) missing.push(input);
+    else prefixes.set(input.source, value);
   }
-
-  // --adk-npm-install-prefix <dir>: the consumer install of the published ADK
-  // package, observed the same way as the root tarball. MANDATORY for the same
-  // reason --npm-install-prefix is: a check that can be skipped is not a check.
-  // npm overrides in a package do not apply to its consumers, so the root
-  // tarball's clean tree says nothing about what a consumer of @tpsdev-ai/adk-flair
-  // resolves; an install of that tarball is what shows it (flair#2398).
-  const adkPrefixIdx = process.argv.indexOf("--adk-npm-install-prefix");
-  const adkPrefix = adkPrefixIdx !== -1 ? process.argv[adkPrefixIdx + 1] : null;
-  if (!adkPrefix) {
+  for (const input of missing) {
     console.error(
-      "DEPENDENCY AUDIT GATE: missing --adk-npm-install-prefix <dir> — the published ADK package's consumer-install observation is mandatory; the gate refuses to run without it.",
+      input.source === "npm-install"
+        ? "DEPENDENCY AUDIT GATE: missing --npm-install-prefix <dir> — the npm-install observation is mandatory; the gate refuses to run bun-only."
+        : `DEPENDENCY AUDIT GATE: missing ${input.flag} <dir> — the published ${input.package} package's consumer-install observation is mandatory; the gate refuses to run without it.`,
     );
-    process.exit(2);
   }
+  if (missing.length) process.exit(2);
 
   let allowlist;
   let advisories;
   try {
     allowlist = loadAllowlist();
     advisories = flattenAdvisories(runBunAudit());
-    advisories = advisories.concat(flattenNpmAdvisories(runNpmAudit(npmPrefix)));
-    advisories = advisories.concat(
-      flattenNpmAdvisories(runNpmAudit(adkPrefix), "npm-install-adk"),
-    );
+    for (const input of CONSUMER_INSTALLS) {
+      advisories = advisories.concat(
+        flattenNpmAdvisories(runNpmAudit(prefixes.get(input.source)), input.source),
+      );
+    }
   } catch (e) {
     console.error(`\n  DEPENDENCY AUDIT GATE: FAILED TO RUN\n\n  ${e.message}\n`);
     console.error("  The gate fails closed: an audit that cannot run is not an audit that passed.\n");
@@ -801,10 +822,15 @@ async function main() {
       continue;
     }
 
-    if (entry.class === "vendor-pinned" && (adv.source === "npm-install" || adv.source === "npm-install-adk")) {
-      const nodeProblems = adv.source === "npm-install-adk"
-        ? adkVendorPinnedNodeProblems(adv, adkPrefix, entry)
-        : vendorPinnedNodeProblems(adv, npmPrefix);
+    if (entry.class === "vendor-pinned" && adv.source !== "bun") {
+      const nodeProblems = adv.source === "npm-install"
+        ? vendorPinnedNodeProblems(adv, prefixes.get(adv.source))
+        : consumerVendorPinnedNodeProblems(
+            adv,
+            prefixes.get(adv.source),
+            entry,
+            CONSUMER_INSTALLS.find((input) => input.source === adv.source),
+          );
       if (nodeProblems.length) {
         for (const problem of nodeProblems) fail(problem);
         blocked.push(adv);

@@ -22,6 +22,14 @@ const ALLOWLIST = JSON.parse(
   readFileSync(join(REPO_ROOT, ".github", "audit-allowlist.json"), "utf8"),
 );
 const TEST_YML = readFileSync(join(REPO_ROOT, ".github", "workflows", "test.yml"), "utf8");
+/** The consumer-install inputs flair#2757 added. Fixtures that test other inputs pass them too. */
+const ADDED_CONSUMER_FLAGS = [
+  "--mcp-npm-install-prefix",
+  "--openclaw-npm-install-prefix",
+  "--pi-npm-install-prefix",
+  "--n8n-npm-install-prefix",
+];
+const addedConsumerArgs = (prefix: string) => ADDED_CONSUMER_FLAGS.flatMap((flag) => [flag, prefix]);
 
 /**
  * These tests exist because the audit step's original defect was not a wrong
@@ -96,6 +104,178 @@ describe("the gate refuses to run bun-only", () => {
     expect(res.stderr).toContain("--adk-npm-install-prefix");
     expect(res.stderr).toContain("consumer-install observation");
   }, 6_000);
+});
+
+// ─── The other published packages' consumer installs (flair#2757) ────────────
+
+describe("the consumer installs of the other published packages (flair#2757)", () => {
+  // Listed here, not imported from the gate, so dropping one from the gate's
+  // required inputs fails the missing-input case below.
+  const INPUTS = [
+    { flag: "--mcp-npm-install-prefix", source: "npm-install-mcp", pkg: "@tpsdev-ai/flair-mcp" },
+    { flag: "--openclaw-npm-install-prefix", source: "npm-install-openclaw", pkg: "@tpsdev-ai/openclaw-flair" },
+    { flag: "--pi-npm-install-prefix", source: "npm-install-pi", pkg: "@tpsdev-ai/pi-flair" },
+    { flag: "--n8n-npm-install-prefix", source: "npm-install-n8n", pkg: "@tpsdev-ai/n8n-nodes-flair" },
+  ];
+  const ALL = [
+    { flag: "--npm-install-prefix", source: "npm-install" },
+    { flag: "--adk-npm-install-prefix", source: "npm-install-adk" },
+    ...INPUTS,
+  ];
+  const GHSA = "GHSA-0000-0000-2757";
+  const report = (nodes = ["node_modules/hono"]) => ({
+    vulnerabilities: { hono: { nodes, via: [{
+      url: `https://github.com/advisories/${GHSA}`, title: "Fixture advisory", severity: "high", range: "<4.0.1",
+    }] } },
+  });
+  const entry = (sources: string[], extra: Record<string, unknown> = {}) => ({
+    ghsa: GHSA, package: "hono", severity: "high", class: "remediation-available", sources,
+    approvedBy: "fixture", introducedBy: "fixture -> hono", reason: "Fixture entry.",
+    added: "2026-10-01", expires: "2026-11-01", removeWhen: "the fixture tree resolves hono >= 4.0.1",
+    ...extra,
+  });
+
+  /**
+   * The real gate with stand-in tools: `bun` reports nothing, and `npm` prints
+   * `reports[source]` in that input's prefix and an empty report in every other
+   * prefix. `omit` leaves that flag off the command line.
+   */
+  function runGate(opts: {
+    omit?: string;
+    reports?: Record<string, object>;
+    entries?: object[];
+    setup?: (prefixes: Record<string, string>) => void;
+  } = {}) {
+    const root = mkdtempSync(join(tmpdir(), "flair-audit-consumers-"));
+    try {
+      for (const dir of ["scripts", ".github", "bin", "home", "tmp"]) mkdirSync(join(root, dir));
+      writeFileSync(join(root, "scripts/audit-gate.mjs"), readFileSync(join(REPO_ROOT, "scripts/audit-gate.mjs")));
+      writeFileSync(join(root, ".github/audit-allowlist.json"), JSON.stringify({
+        policy: ALLOWLIST.policy, entries: opts.entries ?? [],
+      }));
+      const prefixes: Record<string, string> = {};
+      for (const { source } of ALL) {
+        prefixes[source] = join(root, `prefix-${source}`);
+        mkdirSync(prefixes[source]!);
+      }
+      opts.setup?.(prefixes);
+      const cases = Object.entries(opts.reports ?? {})
+        .map(([source, body]) => `  */prefix-${source}) printf '%s\\n' '${JSON.stringify(body)}' ;;\n`)
+        .join("");
+      const empty = JSON.stringify({ vulnerabilities: {} });
+      writeFileSync(join(root, "bin/npm"), `#!/bin/sh\ncase "$PWD" in\n${cases}  *) printf '%s\\n' '${empty}' ;;\nesac\n`);
+      writeFileSync(join(root, "bin/bun"), "#!/bin/sh\nprintf '{}\\n'\n");
+      chmodSync(join(root, "bin/npm"), 0o755);
+      chmodSync(join(root, "bin/bun"), 0o755);
+      writeFileSync(join(root, "offline.mjs"), "globalThis.fetch = async () => { throw new Error('fixture offline'); };\n");
+      const args = ALL.flatMap(({ flag, source }) => (flag === opts.omit ? [] : [flag, prefixes[source]!]));
+      return spawnSync(
+        process.execPath,
+        ["--import", join(root, "offline.mjs"), join(root, "scripts/audit-gate.mjs"), ...args],
+        {
+          encoding: "utf8",
+          timeout: 10_000,
+          env: {
+            ...process.env,
+            PATH: `${join(root, "bin")}:${process.env.PATH}`,
+            HOME: join(root, "home"),
+            TMPDIR: join(root, "tmp"),
+            AUDIT_GATE_TODAY: "2026-10-01",
+          },
+        },
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  it("passes when every consumer install reports nothing", () => {
+    const res = runGate();
+    expect(res.error).toBeUndefined();
+    expect(res.status).toBe(0);
+    expect(res.stdout).toContain("PASS —");
+  }, 12_000);
+
+  for (const input of INPUTS) {
+    it(`exits non-zero naming ${input.flag} when it is absent`, () => {
+      const res = runGate({ omit: input.flag });
+      expect(res.error).toBeUndefined();
+      expect(res.status).toBe(2);
+      expect(res.stderr).toContain(`missing ${input.flag} <dir>`);
+      expect(res.stderr).toContain(input.pkg);
+      expect(res.stdout).not.toContain("PASS —");
+    }, 12_000);
+
+    it(`fails the gate on an advisory that only ${input.pkg}'s consumer install reports`, () => {
+      const res = runGate({ reports: { [input.source]: report() } });
+      expect(res.error).toBeUndefined();
+      expect(res.status).toBe(1);
+      expect(res.stdout).toContain("advisories reported: 1 (1 high)");
+      expect(res.stdout).toContain(`HIGH ${GHSA} in hono (<4.0.1) is NOT allowlisted`);
+      expect(res.stdout).not.toContain("PASS —");
+    }, 12_000);
+
+    it(`allowlists that advisory under the ${input.source} source and not under npm-install`, () => {
+      const listed = runGate({ reports: { [input.source]: report() }, entries: [entry([input.source])] });
+      expect(listed.error).toBeUndefined();
+      expect(listed.status).toBe(0);
+      expect(listed.stdout).toContain("PASS —");
+      const mislabelled = runGate({ reports: { [input.source]: report() }, entries: [entry(["npm-install"])] });
+      expect(mislabelled.status).toBe(1);
+      expect(mislabelled.stdout).toContain(`observed in [${input.source}]. SOURCES MISMATCH`);
+      expect(mislabelled.stdout).not.toContain("PASS —");
+    }, 24_000);
+  }
+
+  describe("a vendor-pinned entry on one of these sources", () => {
+    const vendorEntry = (introducedBy = "@tpsdev-ai/flair-mcp -> @modelcontextprotocol/sdk -> hono") =>
+      entry(["npm-install-mcp"], { class: "vendor-pinned", version: "4.0.0", introducedBy });
+    const installChain = (prefixes: Record<string, string>) => {
+      const rows: [string, object][] = [
+        ["node_modules/@tpsdev-ai/flair-mcp", {
+          name: "@tpsdev-ai/flair-mcp", version: "1.0.0", dependencies: { "@modelcontextprotocol/sdk": "1.0.0" },
+        }],
+        ["node_modules/@modelcontextprotocol/sdk", {
+          name: "@modelcontextprotocol/sdk", version: "1.0.0", dependencies: { hono: "4.0.0" },
+        }],
+        ["node_modules/hono", { name: "hono", version: "4.0.0" }],
+      ];
+      for (const [node, manifest] of rows) {
+        mkdirSync(join(prefixes["npm-install-mcp"]!, node), { recursive: true });
+        writeFileSync(join(prefixes["npm-install-mcp"]!, node, "package.json"), JSON.stringify(manifest));
+      }
+    };
+
+    it("passes when its chain resolves to the reported node at the entry's version", () => {
+      const res = runGate({ reports: { "npm-install-mcp": report() }, entries: [vendorEntry()], setup: installChain });
+      expect(res.error).toBeUndefined();
+      expect(res.status).toBe(0);
+      expect(res.stdout).toContain("PASS —");
+    }, 12_000);
+
+    it("blocks a reported node outside its chain", () => {
+      const outside = "node_modules/other/node_modules/hono";
+      const res = runGate({
+        reports: { "npm-install-mcp": report(["node_modules/hono", outside]) },
+        entries: [vendorEntry()],
+        setup: installChain,
+      });
+      expect(res.status).toBe(1);
+      expect(res.stdout).toContain(`node "${outside}" is outside the dependency chain`);
+      expect(res.stdout).not.toContain("PASS —");
+    }, 12_000);
+
+    it("blocks a chain that does not start at the observed package", () => {
+      const res = runGate({
+        reports: { "npm-install-mcp": report() },
+        entries: [vendorEntry("@tpsdev-ai/pi-flair -> @modelcontextprotocol/sdk -> hono")],
+        setup: installChain,
+      });
+      expect(res.status).toBe(1);
+      expect(res.stdout).toContain("invalid @tpsdev-ai/flair-mcp dependency chain");
+      expect(res.stdout).not.toContain("PASS —");
+    }, 12_000);
+  });
 });
 
 // ─── Vendor-pinned entries cover their npm-audit-reported nodes ──────────────
@@ -262,7 +442,7 @@ esac
         return [name, statSync(path).isFile() ? readFileSync(path).toString("base64") : "<dir>"];
       });
       const before = snapshot();
-      const res = spawnSync(process.execPath, ["--import", join(root, "offline.mjs"), join(root, "scripts/audit-gate.mjs"), "--npm-install-prefix", adk ? join(root, "adk-prefix") : root, "--adk-npm-install-prefix", adk ? root : join(root, "adk-prefix")], {
+      const res = spawnSync(process.execPath, ["--import", join(root, "offline.mjs"), join(root, "scripts/audit-gate.mjs"), "--npm-install-prefix", adk ? join(root, "adk-prefix") : root, "--adk-npm-install-prefix", adk ? root : join(root, "adk-prefix"), ...addedConsumerArgs(join(root, "adk-prefix"))], {
         encoding: "utf8",
         timeout: 10_000,
         env: { ...process.env, PATH: `${join(root, "bin")}:${process.env.PATH}`, HOME: join(root, "home"), TMPDIR: join(root, "tmp"), AUDIT_GATE_TODAY: "2026-10-01" },
@@ -795,7 +975,7 @@ describe("the gate fails closed on a refused stage answer, stand-in tools (flair
       chmodSync(join(root, "bin/npm"), 0o755);
       return spawnSync(
         process.execPath,
-        [join(root, "scripts", "audit-gate.mjs"), "--npm-install-prefix", root, "--adk-npm-install-prefix", root],
+        [join(root, "scripts", "audit-gate.mjs"), "--npm-install-prefix", root, "--adk-npm-install-prefix", root, ...addedConsumerArgs(root)],
         {
           encoding: "utf8",
           timeout: 10_000,

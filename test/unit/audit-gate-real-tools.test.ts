@@ -49,6 +49,10 @@ const DEP = "audit-fixture-dep";
 const GHSA = "GHSA-0000-0000-0001";
 const BULK_REQUEST = "POST /-/npm/v1/security/advisories/bulk";
 const PASS_MARKER = "PASS —";
+/** The consumer-install inputs flair#2757 added; every gate case here points them at a fixture prefix. */
+const addedConsumerArgs = (prefix: string) =>
+  ["--mcp-npm-install-prefix", "--openclaw-npm-install-prefix", "--pi-npm-install-prefix", "--n8n-npm-install-prefix"]
+    .flatMap((flag) => [flag, prefix]);
 
 /** The advisory the "advisory" registry answer lists for DEP. */
 const ADVISORY_ANSWER = {
@@ -340,7 +344,7 @@ async function gateCase(
     const f = makeFixture({ bunRegistry: bunRegistry.url, npmRegistry: npmRegistry.url, ...lockfiles });
     const run = await runProcess(
       process.execPath,
-      [join(f.root, "scripts", "audit-gate.mjs"), "--npm-install-prefix", f.prefix, "--adk-npm-install-prefix", f.prefix],
+      [join(f.root, "scripts", "audit-gate.mjs"), "--npm-install-prefix", f.prefix, "--adk-npm-install-prefix", f.prefix, ...addedConsumerArgs(f.prefix)],
       f.root,
       f.env,
       GATE_TIMEOUT_MS,
@@ -411,10 +415,10 @@ describe("audit gate with the real bun and npm against a local registry (flair#2
       expect(run.timedOut).toBe(false);
       expect(run.status).toBe(1);
       expect(run.stderr).not.toContain("FAILED TO RUN");
-      // bun's report, the root-tarball npm report, and the ADK consumer-install
-      // npm report each reach the fixture registry and see the same advisory, so
-      // the gate counts three (flair#2398 added the third observation).
-      expect(run.stdout).toContain("advisories reported: 3 (3 high)");
+      // bun's report and each of the six consumer-install npm reports reach the
+      // fixture registry and see the same advisory, so the gate counts seven
+      // (flair#2398 added the ADK observation, flair#2757 four more).
+      expect(run.stdout).toContain("advisories reported: 7 (7 high)");
       expect(run.stdout).toContain(`HIGH ${GHSA} in ${DEP} (<1.0.1) is NOT allowlisted`);
       expect(run.stdout).not.toContain(PASS_MARKER);
       expect(bunRequests).toContain(BULK_REQUEST);
@@ -495,7 +499,7 @@ describe("ADK uuid paths from real npm audit", () => {
         }));
         const run = await runProcess(process.execPath, [
           join(f.root, "scripts/audit-gate.mjs"), "--npm-install-prefix", f.prefix,
-          "--adk-npm-install-prefix", adkPrefix,
+          "--adk-npm-install-prefix", adkPrefix, ...addedConsumerArgs(f.prefix),
         ], f.root, f.env, GATE_TIMEOUT_MS);
         expect(run.timedOut).toBe(false);
         expect(run.stderr).not.toContain("FAILED TO RUN");
