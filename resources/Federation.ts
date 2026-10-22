@@ -1611,6 +1611,12 @@ export class FederationSync extends Resource {
                 // id's lock the in-transaction row is the committed row, so the
                 // update cannot carry back a field another writer changed.
                 if (row == null) return { idempotent: true, write: mergedData };
+                // A field the merge stripped (a pointer attribute on a dirty
+                // row) is absent from mergedData; an incremental update cannot
+                // remove it, so rewrite the whole row as before.
+                if (Object.keys(row).some((field) => !Object.hasOwn(mergedData, field))) {
+                  return { idempotent: true, write: mergedData };
+                }
                 const patch: Record<string, unknown> = {};
                 for (const [field, value] of Object.entries(mergedData)) {
                   if (!isDeepStrictEqual(row[field], value)) patch[field] = value;

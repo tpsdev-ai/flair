@@ -2,7 +2,8 @@
 
   `POST /FederationSync` takes the id's lock, once and without waiting, before
   it merges an incoming Memory row. The merge writes only the fields it
-  selected as an incremental update, decides on the committed row read under
+  selected as an incremental update (a row carrying an attribute the merge
+  strips is rewritten whole), decides on the committed row read under
   the lock, and confirms that row before its commit. A record whose lock is
   held, whose id carries an unresolved write outcome, or whose store has no
   lock writes nothing and is skipped as `merge_target_busy`: the skip is

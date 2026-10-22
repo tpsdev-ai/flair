@@ -19,6 +19,8 @@ import { signBodyFresh } from "../../resources/federation-crypto.js";
 import { startHarper, stopHarper, HARPER_STOP_BUDGET_MS } from "../helpers/harper-lifecycle";
 import { RaceHarness, composeTracedComponent, expectRefused, newAgent, waitForPath } from "../helpers/embedding-writer-race";
 import type { ProbeComponent } from "../helpers/component-with-replay-probe";
+import { installFakeHarperTransaction } from "../helpers/fake-harper-txn.ts";
+import { WriteBackConflictError, writeBackCommittedRow } from "../../resources/write-back.js";
 
 const owner = newAgent("frl-owner");
 const peerKeys = nacl.sign.keyPair();
@@ -237,4 +239,72 @@ describe("flair#2478 slice 3c — the batch reindex writer holds the id's lock (
     expect(body.stats.skippedSamples, JSON.stringify(body.stats)).toContainEqual({ id, reason: "busy" });
     expect((await h.readRow(id))?.content, "the skipped reindex still changed the row").toBe(`held ${id}`);
   }, 120_000);
+});
+
+describe("flair#2478 slice 3c — the write-back identity check on an incremental update", () => {
+  const id = "frl-identity-row";
+  const basis = { id, agentId: "frl-identity-agent", instanceToken: "token-a", contentHash: "hash-a", createdAt: "2026-01-01T00:00:00.000Z" };
+
+  /** A table whose committed store is separate from the staged write, so the
+   *  post-commit read is what the identity check sees. */
+  function fakeTable() {
+    const committed = new Map<string, any>([[id, { ...basis }]]);
+    const txn = installFakeHarperTransaction((rid: string, row: any) => { committed.set(rid, { ...row }); });
+    return {
+      committed,
+      txn,
+      table: {
+        get: async (rid: string) => (committed.has(rid) ? { ...committed.get(rid) } : null),
+        update: async (rid: string, patch: Record<string, unknown>) => {
+          const row = { ...(committed.get(rid) ?? {}), ...patch };
+          if (!txn.stage(rid, row)) committed.set(rid, row);
+        },
+        put: async (row: any) => {
+          if (!txn.stage(row.id, row)) committed.set(row.id, row);
+        },
+      },
+    };
+  }
+
+  it("accepts an update that stages contentHash, and refuses one whose committed identity is neither the prior row's nor the staged value", async () => {
+    const accepted = fakeTable();
+    try {
+      const decision = await writeBackCommittedRow(
+        accepted.table,
+        id,
+        () => ({ idempotent: true, update: { contentHash: "hash-b", content: "merged" } }),
+        { label: "identity-accepted", expectedRow: { ...basis } },
+      );
+      expect("update" in decision).toBe(true);
+      expect(accepted.committed.get(id)?.contentHash, "the staged identity field did not commit").toBe("hash-b");
+    } finally {
+      accepted.txn.restore();
+    }
+
+    const refused = fakeTable();
+    try {
+      let failure: unknown;
+      try {
+        await writeBackCommittedRow(
+          refused.table,
+          id,
+          () => ({ idempotent: true, update: { contentHash: "hash-b", content: "merged" } }),
+          {
+            label: "identity-refused",
+            expectedRow: { ...basis },
+            attempts: 1,
+            // A writer that takes no lock commits a third identity after this
+            // attempt's update committed.
+            pauseBeforeVerify: async () => { refused.committed.set(id, { ...basis, contentHash: "hash-c", content: "other" }); },
+          },
+        );
+      } catch (err) {
+        failure = err;
+      }
+      expect(failure).toBeInstanceOf(WriteBackConflictError);
+      expect((failure as WriteBackConflictError).outcome).toBe("unconfirmed");
+    } finally {
+      refused.txn.restore();
+    }
+  }, 30_000);
 });
