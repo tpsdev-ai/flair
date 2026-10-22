@@ -263,7 +263,7 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
     // the outcome as unconfirmed; an exit that wrote nothing says so for its own
     // attempt only (flair#2478).
     const endAfterUnconfirmed = (ended: string): void => {
-      if (unconfirmed) console.warn(`[auto-embed] ${memoryId}: ${ended}; an earlier attempt's vector was not confirmed on the committed row; outcome: unconfirmed`, { outcome: "unconfirmed" });
+      if (unconfirmed) console.warn("[auto-embed] %s: %s; an earlier attempt's vector was not confirmed on the committed row; outcome: unconfirmed", memoryId, ended, { outcome: "unconfirmed" });
     };
     for (let attempt = 1; attempt <= WRITE_BACK_ATTEMPTS; attempt++) {
       const record = await table.get(memoryId, {});
@@ -328,7 +328,7 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
         }, { phase: "auto-embed" });
         if (locked.kind !== "done") {
           if (unconfirmed) endAfterUnconfirmed(`skipped; the per-id write lock answered ${locked.kind}, so this attempt wrote nothing`);
-          else console.warn(`[auto-embed] ${memoryId}: skipped; the per-id write lock answered ${locked.kind}, so nothing was written`);
+          else console.warn("[auto-embed] %s: skipped; the per-id write lock answered %s, so nothing was written", memoryId, locked.kind);
           return;
         }
         const outcome = locked.value;
@@ -336,7 +336,7 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
           noteWriteStamp(outcome.update.embeddingModel as string | null | undefined, replaced);
           console.log(`[auto-embed] ${memoryId}: ${(outcome.update.embedding as number[]).length}d`);
         } else if (unconfirmed) {
-          console.warn(`[auto-embed] ${memoryId}: an earlier attempt's vector was not confirmed on the committed row, and the row is now skipped; outcome: unconfirmed`, { outcome: "unconfirmed" });
+          console.warn("[auto-embed] %s: an earlier attempt's vector was not confirmed on the committed row, and the row is now skipped; outcome: unconfirmed", memoryId, { outcome: "unconfirmed" });
         }
         return;
       } catch (err) {

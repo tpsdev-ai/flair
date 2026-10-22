@@ -1859,7 +1859,7 @@ async function reembedStoredRow(
     return await reembedAttempts(id, preRead, vector, auth, ctx, state);
   } catch (err) {
     if (!state.committedUnconfirmed) throw err;
-    console.warn(`[reembed] ${id}: a committed attempt's write is not confirmed; the call ended with an error (${(err as Error)?.name ?? "unknown"}); outcome: unconfirmed`);
+    console.warn("[reembed] %s: a committed attempt's write is not confirmed; the call ended with an error (%s); outcome: unconfirmed", id, (err as Error)?.name ?? "unknown");
     return { response: writeOutcomeUnknownFor(id) };
   }
 }
@@ -1882,7 +1882,7 @@ async function reembedAttempts(
   // nothing was written.
   const settle = (response: Response, ended: string): ReembedResult => {
     if (!state.committedUnconfirmed) return { response };
-    console.warn(`[reembed] ${id}: a committed attempt's write is not confirmed; this attempt ended with ${ended}; outcome: unconfirmed`);
+    console.warn("[reembed] %s: a committed attempt's write is not confirmed; this attempt ended with %s; outcome: unconfirmed", id, ended);
     return { response: writeOutcomeUnknownFor(id) };
   };
   for (let attempt = 1; attempt <= REEMBED_WRITE_ATTEMPTS; attempt++) {
@@ -1960,7 +1960,7 @@ async function reembedAttempts(
       // The fresh read finds no row, so no write of this call remains on one:
       // 404 states that even after an earlier unconfirmed attempt, and the id is
       // not fenced (an outcome-unknown mark lasts until restart).
-      if (state.committedUnconfirmed) console.warn(`[reembed] ${id}: a committed attempt's write is not confirmed, but the row is now absent, so no write of this call remains on it; answered not_found`);
+      if (state.committedUnconfirmed) console.warn("[reembed] %s: a committed attempt's write is not confirmed, but the row is now absent, so no write of this call remains on it; answered not_found", id);
       return { response: NOT_FOUND() };
     }
     if (outcome.kind === "forbidden") return settle(FORBIDDEN("forbidden: cannot write memory owned by another agent"), "forbidden");

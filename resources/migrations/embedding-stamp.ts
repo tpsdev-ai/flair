@@ -336,7 +336,7 @@ async function logRegenRefusal(id: string, res: Response): Promise<void> {
   } catch {
     // An unreadable refusal body is logged as unnamed.
   }
-  console.warn(`[embedding-stamp] ${id}: the re-embed request was refused 503 ${code}; the row is uncounted and the next scan decides whether it is still stale`);
+  console.warn("[embedding-stamp] %s: the re-embed request was refused 503 %s; the row is uncounted and the next scan decides whether it is still stale", id, code);
 }
 
 /** A vector this migration may stamp as current: a non-empty array of finite numbers. */
@@ -671,9 +671,9 @@ export function createEmbeddingStampMigration(
                 // This attempt wrote nothing. After an earlier unconfirmed attempt
                 // of this loop the row may hold that attempt's write, so the line
                 // says the outcome is unknown (the unconfirmed line below follows).
-                console.warn(unconfirmed
-                  ? `[embedding-stamp] ${id}: the per-id write lock answered ${attemptResult.outcome}; this attempt wrote nothing, but an earlier attempt's write was not confirmed, so the outcome is unknown; the row is uncounted and the next scan decides whether it is still stale`
-                  : `[embedding-stamp] ${id}: the per-id write lock answered ${attemptResult.outcome}; nothing was written; the row is uncounted and the next scan decides whether it is still stale`);
+                console.warn("[embedding-stamp] %s: the per-id write lock answered %s; %s; the row is uncounted and the next scan decides whether it is still stale", id, attemptResult.outcome, unconfirmed
+                  ? "this attempt wrote nothing, but an earlier attempt's write was not confirmed, so the outcome is unknown"
+                  : "nothing was written");
                 break;
               }
               if (attemptResult.kind === "skipped") break;
@@ -692,7 +692,7 @@ export function createEmbeddingStampMigration(
             }
           } finally {
             if (!ok && unconfirmed) {
-              console.warn(`[embedding-stamp] ${id}: the content-suffix re-embed did not confirm its committed row; outcome: unconfirmed, the row is uncounted and a later scan decides pending state`);
+              console.warn("[embedding-stamp] %s: the content-suffix re-embed did not confirm its committed row; outcome: unconfirmed, the row is uncounted and a later scan decides pending state", id);
             }
           }
         } else {
