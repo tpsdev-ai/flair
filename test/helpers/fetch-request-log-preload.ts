@@ -1,6 +1,6 @@
 /**
- * fetch-request-log-preload.ts — a `bun --preload` module that records every
- * `fetch` the process sends.
+ * fetch-request-log-preload.ts — a `bun --preload` or `node --import` module
+ * that records every `fetch` the process sends.
  *
  * When FLAIR_TEST_FETCH_LOG names a file, each call appends one JSON line
  * `{ method, host, path }` (host is `hostname:port`; user info and the query are

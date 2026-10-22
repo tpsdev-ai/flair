@@ -4,7 +4,8 @@
  * These are the auth-critical assertions the integration harness can't make at
  * the unit level:
  *
- *   - tools/list returns EXACTLY the 14 curated tools (no raw CRUD, no extras).
+ *   - tools/list returns EXACTLY the curated TOOLS definitions the caller may
+ *     list (no raw CRUD, no extras).
  *   - sub → Agent resolution: an existing Credential(kind:"idp", idpSubject=sub)
  *     maps to its principalId; an unknown sub with JIT OFF is DENIED (not run as
  *     anonymous/admin); an unknown sub with JIT ON provisions a NON-admin agent.
@@ -283,8 +284,8 @@ afterAll(() => {
 });
 
 // ─── tools/list ──────────────────────────────────────────────────────────────
-describe("tools/list — exactly the 18 curated tools", () => {
-  it("returns the pinned tool names", async () => {
+describe("tools/list — the advertised tool definitions", () => {
+  it("returns the pinned tool names for a token subject with no principal", async () => {
     const res = await mcpHandler(post({ jsonrpc: "2.0", id: 1, method: "tools/list" }, { sub: "s" }));
     const body = await parse(res);
     const names = body.result.tools.map((t: any) => t.name).sort();
@@ -305,13 +306,26 @@ describe("tools/list — exactly the 18 curated tools", () => {
       "skill_search",
       "skill_store",
       "soul_get",
-      "soul_set",
       "team_directory",
     ]);
     // No raw create_/delete_ resource mutators leaked in. (memory_update
     // itself is a curated semantic tool, not a raw `update_<resource>`
     // mutator — it's explicitly allow-listed here rather than excluded.)
     expect(names.some((n: string) => /^(create|delete)_/.test(n))).toBe(false);
+  });
+
+  it("omits soul_set for a resolved agent principal, admin or not (flair#2689)", async () => {
+    for (const role of ["agent", "admin"]) {
+      credentials = [{ id: `cred-${role}`, principalId: `agt_${role}`, kind: "idp", idpSubject: `sub-${role}`, status: "active" }];
+      agents = { [`agt_${role}`]: { id: `agt_${role}`, role, status: "active" } };
+      const res = await mcpHandler(post({ jsonrpc: "2.0", id: 1, method: "tools/list" }, { sub: `sub-${role}` }));
+      const body = await parse(res);
+      const names = body.result.tools.map((t: any) => t.name);
+      expect(names).not.toContain("soul_set");
+      // Every other tool is still advertised: the gate removes soul_set only.
+      expect(names).toContain("soul_get");
+      expect(names.length).toBe(17);
+    }
   });
 
   it("record_usage schema states the memoryId+memoryIds merge contract (flair#1410)", async () => {
