@@ -188,7 +188,12 @@ export function replicatedPairUnsupportedReason(): string | null {
   return null;
 }
 
-export async function startReplicatedPair(opts: { mutateConfig?: (shipped: string) => string } = {}): Promise<ReplicatedPair> {
+export async function startReplicatedPair(opts: {
+  mutateConfig?: (shipped: string) => string;
+  /** Server environment for both nodes, merged the same way `startHarper`
+   *  merges it; an `undefined` entry removes that variable from both. */
+  serverEnv?: Record<string, string | undefined>;
+} = {}): Promise<ReplicatedPair> {
   if (!PRO_INSTALL_DIR) {
     throw new Error("FLAIR_TEST_HARPER_PRO_DIR is not set; a replicated pair needs a Harper Pro install root");
   }
@@ -209,6 +214,7 @@ export async function startReplicatedPair(opts: { mutateConfig?: (shipped: strin
       multiWorkerUnsafe: false,
       nodeHostname: hostA,
       env: { REPLICATION_SECUREPORT: `${hostA}:${replicationPort}` },
+      serverEnv: opts.serverEnv,
     });
     b = await startHarper({
       cwd: workDirB,
@@ -216,6 +222,7 @@ export async function startReplicatedPair(opts: { mutateConfig?: (shipped: strin
       harperBinDir: PRO_INSTALL_DIR,
       nodeHostname: hostB,
       env: { REPLICATION_SECUREPORT: `${hostB}:${replicationPort}` },
+      serverEnv: opts.serverEnv,
     });
   } catch (err) {
     if (b) { try { await stopHarper(b); } catch { /* best effort */ } }

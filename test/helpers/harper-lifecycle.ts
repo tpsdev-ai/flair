@@ -924,13 +924,18 @@ export interface StartHarperOptions {
    * generated ports for the run child only, so the install child keeps any
    * port values the merge carries.
    *
+   * An entry whose value is `undefined` REMOVES that variable from the child's
+   * environment: it is applied after `env`, so an inherited or `env` value is
+   * dropped. Use it for a variable the suite needs absent, where an ambient
+   * value on the runner would otherwise leak in.
+   *
    * In external mode (`HARPER_HTTP_URL` set) a non-empty serverEnv is refused
-   * with an error naming each variable and value the external service must have
-   * been started with. The helper cannot change an already-running service's
-   * environment, and skipping instead would leave a security-relevant suite
-   * looking green.
+   * with an error naming each variable the external service must have been
+   * started with; an entry with an `undefined` value counts as non-empty. The
+   * helper cannot change an already-running service's environment, and skipping
+   * instead would leave a security-relevant suite looking green.
    */
-  serverEnv?: Record<string, string>;
+  serverEnv?: Record<string, string | undefined>;
   /**
    * Node identity for this instance (Harper's NODE_HOSTNAME). Defaults to
    * 127.0.0.1. A replicated pair needs distinct identities so `add_node` can
@@ -978,14 +983,20 @@ export function applyMultiWorkerUnsafeSpawnOption(
 
 /**
  * The inherited environment with the suite's declared overrides applied:
- * `env` first, then `serverEnv`. Secret stripping and the helper's own
- * variables are applied after this merge and take precedence over it.
+ * `env` first, then `serverEnv`; a `serverEnv` entry whose value is `undefined`
+ * removes the variable. Secret stripping and the helper's own variables are
+ * applied after this merge and take precedence over it.
  */
 export function buildHarperServerEnv(
-  inherited: Record<string, string>,
+  inherited: Record<string, string | undefined>,
   opts: Pick<StartHarperOptions, "env" | "serverEnv">,
 ): Record<string, string> {
-  return { ...inherited, ...opts.env, ...opts.serverEnv };
+  const merged: Record<string, string | undefined> = { ...inherited, ...opts.env, ...opts.serverEnv };
+  const env: Record<string, string> = {};
+  for (const [name, value] of Object.entries(merged)) {
+    if (value !== undefined) env[name] = value;
+  }
+  return env;
 }
 
 export async function startHarper(opts: StartHarperOptions = {}): Promise<HarperInstance> {
@@ -1006,7 +1017,9 @@ export async function startHarper(opts: StartHarperOptions = {}): Promise<Harper
   if (HARPER_HTTP_URL) {
     const serverEnv = opts.serverEnv ?? {};
     if (Object.keys(serverEnv).length > 0) {
-      const required = Object.entries(serverEnv).map(([name, value]) => `${name}=${value}`).join(", ");
+      const required = Object.entries(serverEnv)
+        .map(([name, value]) => (value === undefined ? `${name} (removed)` : `${name}=${value}`))
+        .join(", ");
       throw new Error(
         `[harper-lifecycle] refused serverEnv in external mode (HARPER_HTTP_URL is set): ` +
         `the external service must have been started with ${required}`,
