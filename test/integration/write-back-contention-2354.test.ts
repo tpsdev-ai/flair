@@ -465,13 +465,20 @@ describe("flair#2653 — usage contributions across agents (real Harper)", () =>
       () => authSend(harper, reflectAgent, "POST", "/RecordUsage", { memoryIds: [id] }),
       async () => {
         expect((await readRow(harper, id))?.usageCount).toBe(5);
-        const second = await authSend(harper, feedAgent, "POST", "/RecordUsage", { memoryIds: [id] });
-        expect(second.status, await second.clone().text()).toBe(200);
-        expect(await second.json()).toEqual({ recorded: true });
+        // A raw operations write takes no per-id lock: it commits the same
+        // count with another writer's commit marker in this writer's
+        // confirmation-to-commit window (flair#2478 slice 3b: a second
+        // contribution to the same id would instead be skipped).
+        const marker = randomUUID();
+        expect(await updateRow(harper, { id, usageCount: 6, writeBackWriteId: marker })).toBe(200);
+        await adminOp(harper, {
+          operation: "upsert", database: "flair", table: "MemoryUsage",
+          records: [{ id: `${feedAgent.id}:${id}`, agentId: feedAgent.id, memoryId: id, createdAt: new Date().toISOString() }],
+        });
         const row = await readRow(harper, id);
         expect(row.usageCount).toBe(6);
-        expect(row.writeBackWriteId).toBeString();
-        return row.writeBackWriteId as string;
+        expect(row.writeBackWriteId).toBe(marker);
+        return marker;
       });
     expect(paused).toBe(true);
     expect(released).toBe("go");
@@ -483,7 +490,6 @@ describe("flair#2653 — usage contributions across agents (real Harper)", () =>
     const settled = readFileSync(attemptLog, "utf8").split("\n")
       .filter((line) => line.startsWith(`usage-recording\t${id}\t`) && line.split("\t").length === 4);
     expect(settled).toEqual([
-      `usage-recording\t${id}\t1\tapplied`,
       `usage-recording\t${id}\t1\tunconfirmed`,
     ]);
     for (const agent of [reflectAgent, feedAgent]) {
@@ -500,8 +506,14 @@ describe("flair#2653 — usage contributions across agents (real Harper)", () =>
       () => authSend(harper, reflectAgent, "POST", "/RecordUsage", { memoryIds: [id] }),
       async () => {
         expect((await readRow(harper, id))?.usageCount).toBe(1);
-        const second = await authSend(harper, feedAgent, "POST", "/RecordUsage", { memoryIds: [id] });
-        expect(second.status, await second.clone().text()).toBe(200);
+        // A raw operations write takes no per-id lock: it increments the count
+        // in this writer's post-commit verification window (flair#2478 slice
+        // 3b: a second contribution to the same id would instead be skipped).
+        expect(await updateRow(harper, { id, usageCount: 2 })).toBe(200);
+        await adminOp(harper, {
+          operation: "upsert", database: "flair", table: "MemoryUsage",
+          records: [{ id: `${feedAgent.id}:${id}`, agentId: feedAgent.id, memoryId: id, createdAt: new Date().toISOString() }],
+        });
         expect((await readRow(harper, id))?.usageCount).toBe(2);
       });
     expect(paused).toBe(true);
