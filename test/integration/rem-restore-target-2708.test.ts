@@ -136,7 +136,8 @@ function runRestore(env: Record<string, string | undefined>, credential: string[
   for (const [key, value] of Object.entries(childEnv)) if (value === undefined) delete childEnv[key];
   const child = Bun.spawn(
     [nodeBin({ env: childEnv as Record<string, string> }), CLI, "rem", "restore", date, "--agent", AGENT_ID, "--apply", ...credential],
-    { env: childEnv as Record<string, string>, timeout: RESTORE_CHILD_TIMEOUT_MS, stdout: "pipe", stderr: "pipe" },
+    // The deadline below is RESTORE_CHILD_TIMEOUT_MS, written as a number so the CLI spawn-budget gate can read it.
+    { env: childEnv as Record<string, string>, timeout: 90_000, stdout: "pipe", stderr: "pipe" },
   );
   return (async () => {
     const stdout = await new Response(child.stdout).text();
