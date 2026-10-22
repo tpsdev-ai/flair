@@ -130,7 +130,7 @@ async function handOff(point: string, next: string): Promise<void> {
 async function bootHarper(extraEnv: Record<string, string> = {}, installDir?: string): Promise<void> {
   h.harper = await startHarper({
     homeDir: home, cwd: component.dir, harperBinDir: component.sourceRoot, ...(installDir ? { installDir } : {}),
-    env: { FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_TEST_PAUSE_DIR: pauseDir, ...extraEnv },
+    serverEnv: { FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_TEST_PAUSE_DIR: pauseDir, ...extraEnv },
   });
   h.assertOwnInstance();
 }
@@ -142,7 +142,8 @@ beforeAll(async () => {
   component = composeTracedComponent();
   h = new RaceHarness(pauseDir);
   await bootHarper();
-  // Seeded before the first request, so the server's admin set includes it.
+  // An administrator by its Agent row's role: the middleware decides admin from the
+  // Agent row it verifies the signature against (resources/agent-auth.ts agentIsAdmin).
   await h.seedAgent(adminAgent, "admin");
   await h.seedAgent(owner);
   for (const text of [ORIGINAL, OWNER_TEXT, EDITED]) await vectorOf(text);

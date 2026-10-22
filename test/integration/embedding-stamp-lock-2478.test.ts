@@ -151,7 +151,7 @@ async function waitForRun(predicate: (run: { processed: number; touchedIds: stri
 async function boot(extraEnv: Record<string, string> = {}): Promise<void> {
   h.harper = await startHarper({
     homeDir: home, cwd: component.dir, harperBinDir: component.sourceRoot, ...(installDir ? { installDir } : {}),
-    env: { FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_TEST_PAUSE_DIR: pauseDir, ...extraEnv },
+    serverEnv: { FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_TEST_PAUSE_DIR: pauseDir, ...extraEnv },
   });
   h.assertOwnInstance();
   installDir = h.harper.installDir;

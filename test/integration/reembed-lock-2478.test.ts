@@ -100,7 +100,7 @@ async function expectBoundTo(row: any, text: string, other?: string): Promise<vo
 async function bootHarper(extraEnv: Record<string, string> = {}, installDir?: string): Promise<void> {
   h.harper = await startHarper({
     homeDir: home, cwd: component.dir, harperBinDir: component.sourceRoot, ...(installDir ? { installDir } : {}),
-    env: { FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_TEST_PAUSE_DIR: pauseDir, ...extraEnv },
+    serverEnv: { FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_TEST_PAUSE_DIR: pauseDir, ...extraEnv },
   });
   h.assertOwnInstance();
 }
