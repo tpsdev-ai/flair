@@ -183,6 +183,10 @@ function getAdminPass(): string | null {
 
 async function backfillEmbedding(memoryId: string): Promise<void> {
   let unconfirmed = false;
+  // Whether the attempt that just ended saw its write confirmed on the committed
+  // row, so a failure after the commit is not reported as the outcome of an
+  // earlier attempt.
+  let lastAttemptConfirmed = false;
   try {
     const table = (databases as any).flair.Memory;
     // flair#2484: compute the vector before the owned write transaction opens.
@@ -211,7 +215,8 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
     // without a verified write (a lock miss, a row now gone or already embedded,
     // a provider that returned no vector, a thrown error, which is logged and not
     // rethrown) logs the outcome as unconfirmed instead; a later verified write
-    // is logged as written. A skipped backfill is not
+    // is logged as written, or, when its write-stamp notification then fails,
+    // as confirmed with that failure named. A skipped backfill is not
     // retried by this call. The backfill starts only from the post-response hook
     // at the end of this middleware (the "Embedding backfill" block below),
     // which a successful HTTP Memory POST, PUT or PATCH reaches when a verified
@@ -266,6 +271,7 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
       if (unconfirmed) console.warn("[auto-embed] %s: %s; an earlier attempt's vector was not confirmed on the committed row; outcome: unconfirmed", memoryId, ended, { outcome: "unconfirmed" });
     };
     for (let attempt = 1; attempt <= WRITE_BACK_ATTEMPTS; attempt++) {
+      lastAttemptConfirmed = false;
       const record = await table.get(memoryId, {});
       const text = record ? skillEmbedText(record) : undefined;
       if (typeof text !== "string" || text.length === 0) {
@@ -321,9 +327,12 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
             },
           );
           // Test-only: the update has committed and been read back; the lock is
-          // still held.
-          const committed = txnPausePoint("backfill-embedding-committed");
-          if (committed) await committed;
+          // still held. A plan that skipped wrote nothing, so it does not reach
+          // this point.
+          if (!("skip" in written)) {
+            const committed = txnPausePoint("backfill-embedding-committed");
+            if (committed) await committed;
+          }
           return written;
         }, { phase: "auto-embed" });
         if (locked.kind !== "done") {
@@ -333,6 +342,7 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
         }
         const outcome = locked.value;
         if ("update" in outcome) {
+          lastAttemptConfirmed = true;
           noteWriteStamp(outcome.update.embeddingModel as string | null | undefined, replaced);
           console.log(`[auto-embed] ${memoryId}: ${(outcome.update.embedding as number[]).length}d`);
         } else if (unconfirmed) {
@@ -345,6 +355,10 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
       }
     }
   } catch (err: any) {
+    if (lastAttemptConfirmed) {
+      console.error("[auto-embed] %s for %s: the vector is confirmed on the committed row; the embedding-space write-stamp notification failed: %s", "Outcome confirmed", memoryId, err.message, { outcome: "stamp_notification_failed" });
+      return;
+    }
     console.error("[auto-embed] %s for %s: %s", unconfirmed ? "Outcome unconfirmed" : "Failed", memoryId, err.message, ...(unconfirmed ? [{ outcome: "unconfirmed" }] : err instanceof WriteBackConflictError ? [{ outcome: err.outcome }] : []));
   }
 }

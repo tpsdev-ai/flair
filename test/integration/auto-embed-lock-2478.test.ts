@@ -32,8 +32,10 @@
  * stored); an uncontended control; an unreadable read-back (logged; the id is
  * not fenced); an id fenced by an owner write's unknown outcome (skipped); an
  * attempt that committed unconfirmed followed by a held id on the retry (logged
- * as an unconfirmed outcome); the locked-provider bound (the backfill computes
- * its vector before the lock).
+ * as an unconfirmed outcome), and one followed by a confirmed retry whose
+ * write-stamp notification throws (logged as confirmed); a plan that skips (it
+ * never reaches the after-commit pause); the locked-provider bound (the
+ * backfill computes its vector before the lock).
  *
  * The backfill is triggered by a metadata-only owner PATCH (no text change, so
  * the PATCH itself embeds nothing) on a row whose stored vector is short. A
@@ -45,7 +47,7 @@
  * Home-isolated ephemeral Harper; every URL is asserted to be this test's own.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HARPER_STOP_BUDGET_MS, startHarper, stopHarper } from "../helpers/harper-lifecycle";
@@ -136,6 +138,18 @@ async function handOff(point: string, next: string): Promise<void> {
   h.arm(next);
   await h.release(point);
 }
+/** Poll the write-back attempt log for a line matching `pattern`. */
+async function waitForAttemptLine(pattern: RegExp, timeoutMs = 30_000): Promise<boolean> {
+  const path = join(pauseDir, "attempts.write-back");
+  const seen = () => existsSync(path) && readFileSync(path, "utf8").split("\n").some((line) => pattern.test(line));
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (seen()) return true;
+    await Bun.sleep(50);
+  }
+  return seen();
+}
+const attemptOutcome = (id: string, outcome: string) => new RegExp(`^backfillEmbedding\\t${id}\\t\\d+\\t${outcome}$`);
 
 async function bootHarper(extraEnv: Record<string, string> = {}, installDir?: string): Promise<void> {
   h.harper = await startHarper({
@@ -287,26 +301,31 @@ describe("flair#2478 — owner writes that hold or change the id first (real Har
     }, 120_000);
   }
 
-  it("an owner PUT committed while the vector was computed: the backfill re-reads the committed row and writes nothing over it", async () => {
+  it("an owner PUT committed while the vector was computed: the backfill re-reads the committed row, writes nothing over it, and never reaches the after-commit pause", async () => {
     const id = "ael-owner-committed";
     await seed(id);
     h.arm(ENTRY);
+    h.arm(COMMITTED);
     await trigger(id);
     try {
       await h.assertPaused(ENTRY);
       const put = await ownerWrite("PUT", id, OWNER_TEXT);
       expect(put.status, await put.clone().text()).toBe(200);
-      await handOff(ENTRY, COMMITTED);
-      await h.assertPaused(COMMITTED);
+      await h.release(ENTRY);
+      expect(await waitForAttemptLine(attemptOutcome(id, "skipped")), "the skipped attempt was not recorded").toBe(true);
+      // The attempt returned; give a pause a skipped plan must not take time to claim.
+      await Bun.sleep(500);
+      expect(existsSync(join(pauseDir, "claimed.backfill-embedding-committed")), "a skipped plan claimed the after-commit pause").toBe(false);
+      expect(existsSync(join(pauseDir, "paused.backfill-embedding-committed")), "a skipped plan paused after a commit that did not happen").toBe(false);
       const row = await h.readRow(id);
       expect(row.content).toBe(OWNER_TEXT);
       expect(row.visibility).toBe("private");
       await expectBoundTo(row, OWNER_TEXT, ORIGINAL);
       expect(h.writesBy(id, WRITER), "the backfill wrote over the owner's committed row").toEqual([]);
-      await h.release(COMMITTED);
     } finally {
       h.letGo(ENTRY);
-      h.letGo(COMMITTED);
+      h.clearMarkers(ENTRY);
+      h.clearMarkers(COMMITTED);
     }
   }, 120_000);
 });
@@ -323,19 +342,16 @@ describe("flair#2478 — an owner DELETE racing the backfill never leaves a row 
         const del = await h.signed(owner, "DELETE", memPath(id));
         expect(del.status, await del.clone().text()).toBe(200);
         expect(await h.readRow(id)).toBeNull();
-        if (point === COMMITTED) {
-          await h.release(point);
-        } else {
-          // The backfill's retry re-reads the absent row and returns through
-          // the after-commit point.
-          await handOff(point, COMMITTED);
-          await h.assertPaused(COMMITTED);
+        await h.release(point);
+        if (point !== COMMITTED) {
+          // The attempt that reaches the lock again finds no row and skips;
+          // it never reaches the after-commit point.
+          expect(await waitForAttemptLine(attemptOutcome(id, "skipped")), "the backfill did not finish after the DELETE").toBe(true);
           expect(await h.readRow(id), "the backfill wrote a row after the DELETE").toBeNull();
-          await h.release(COMMITTED);
         }
       } finally {
         h.letGo(point);
-        h.letGo(COMMITTED);
+        h.clearMarkers(point);
       }
       await Bun.sleep(250);
       expect(await h.readRow(id), "a row exists after the DELETE answered success").toBeNull();
@@ -517,6 +533,40 @@ describe("flair#2478 — the backfill's unknown outcomes and the fence (real Har
     const stored = await h.readRow(id);
     expect(stored.content).toBe(OWNER_TEXT);
     expect(stored.visibility).toBe("private");
+  }, 120_000);
+
+  it("an earlier unconfirmed attempt, then a confirmed write whose write-stamp notification throws, logs the confirmed outcome, not unconfirmed", async () => {
+    // Attempt 1 commits after the text changed in its confirmation-to-commit
+    // window, so its read-back is readable but does not show the write. The
+    // retry commits the new text's vector and is confirmed on the committed
+    // row; the write-stamp notification after that commit is armed to throw.
+    const id = "ael-confirmed-then-stamp-fails";
+    const fault = join(pauseDir, "arm.guard-stamp-fail");
+    await seed(id);
+    h.arm(CONFIRMED);
+    await trigger(id);
+    try {
+      await h.assertPaused(CONFIRMED);
+      await h.rawUpdate(id, { content: EDITED });
+      // Attempt 1 has passed the entry point; this arms the retry's.
+      h.arm(ENTRY);
+      await h.release(CONFIRMED);
+      await h.assertPaused(ENTRY);
+      writeFileSync(fault, "");
+      await h.release(ENTRY);
+      expect(
+        await h.waitForLogMatch(new RegExp(`\\[auto-embed\\][^\\n]*Outcome confirmed[^\\n]*${id}`)),
+        "the confirmed outcome was not logged",
+      ).toBe(true);
+      const log = h.serverLog();
+      expect(log, "a confirmed write was logged as an unconfirmed outcome").not.toMatch(new RegExp(`\\[auto-embed\\][^\\n]*Outcome unconfirmed[^\\n]*${id}`));
+      expect(log, "the notification failure was not named").toContain("the embedding-space write-stamp notification failed");
+      await expectBoundTo(await h.readRow(id), EDITED);
+    } finally {
+      h.letGo(CONFIRMED);
+      h.letGo(ENTRY);
+      rmSync(fault, { force: true });
+    }
   }, 120_000);
 
   it("under a 1 ms locked-provider bound the backfill still stores its vector: it is computed before the lock", async () => {

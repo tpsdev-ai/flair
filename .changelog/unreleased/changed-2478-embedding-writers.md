@@ -32,8 +32,8 @@
   first and takes the id's lock with one non-waiting acquisition per
   attempt (a retry acquires it again); a held id or an id with an
   unresolved write outcome is skipped and logged, and after an earlier
-  unconfirmed attempt of the same backfill the log says the outcome is
-  unconfirmed. Holding the lock, it
+  unconfirmed attempt of the same backfill an exit that ends without a
+  verified write logs the outcome as unconfirmed. Holding the lock, it
   writes only if the committed row's text is the text it embedded, and it
   reads the committed row back, text included, before the release. If that
   read-back is readable and finds the text changed, its retry compares the
