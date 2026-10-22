@@ -383,7 +383,7 @@ describe("flair#2478 — an owner DELETE racing the backfill never leaves a row 
   }, 120_000);
 });
 
-describe("flair#2478 — the backfill stores a vector only for the text it was computed from (real Harper)", () => {
+describe("flair#2478 — the backfill racing a text change at the tested points (after its vector before the lock, after staging, between its confirmation and its commit, an empty-owner row): the final read-back finds the new text's vector; an unreadable read-back is logged (real Harper)", () => {
   for (const [point, label] of [
     [ENTRY, "after its vector, before the lock"],
     [STAGED, "after staging"],

@@ -341,7 +341,7 @@ describe("flair#2478 — an owner DELETE racing the re-embed never leaves a row 
   }, 120_000);
 });
 
-describe("flair#2478 — the re-embed stores a vector only for the text it was computed from (real Harper)", () => {
+describe("flair#2478 — a re-embed racing a text change at the tested points (after its first read, after staging, between its confirmation and its commit, an empty-owner row): the final read-back finds the new text's vector or the write is refused (real Harper)", () => {
   it("text changed after the re-embed's first read, before its vector: the vector for the new text is stored", async () => {
     const id = "rl2478-drift-plan";
     const point = "memory-reembed";
