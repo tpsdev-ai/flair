@@ -311,7 +311,9 @@ describe("flair#2478 — the migration's HTTP delegation holds the id's lock thr
         // The next row reached the gate, so this row's request was answered.
         await h.assertPaused(GATE);
         expect(h.writesBy(id, HTTP_WRITER), `${id}: the refused request wrote`).toEqual([]);
-        expect(serverLog()).toContain(`[embedding-stamp] ${id}: the re-embed request was refused 503 memory_busy`);
+        const refused = `[embedding-stamp] ${id}: the re-embed request was refused 503 memory_busy`;
+        expect(await h.waitForLog(refused), `the refusal of ${id} was not logged within 30s: ${refused}`).toBe(true);
+        expect(serverLog()).toContain(refused);
         expect((await h.readRow(id)).content).toBe(ORIGINAL);
         await h.release(point);
       } finally {
@@ -346,7 +348,9 @@ describe("flair#2478 — the migration's HTTP delegation holds the id's lock thr
     writeFileSync(join(pauseDir, "arm.memory-get-fail.esl-b4"), "");
     await h.release("memory-reembed-verify");
     expect(await waitForCycleDone(90_000), "the cycle did not finish").toBe(true);
-    expect(serverLog()).toContain("[embedding-stamp] esl-b4: the re-embed request was refused 503 write_outcome_unknown");
+    const unreadable = "[embedding-stamp] esl-b4: the re-embed request was refused 503 write_outcome_unknown";
+    expect(await h.waitForLog(unreadable), `the unreadable-read refusal was not logged within 30s: ${unreadable}`).toBe(true);
+    expect(serverLog()).toContain(unreadable);
     await expectRefused(await ownerWrite("PUT", "esl-b4", OWNER_TEXT), "write_outcome_unknown");
     expect(runs()[0]).toEqual({ processed: 1, touchedIds: ["esl-b3"] });
     for (const id of ["esl-b1", "esl-b2", "esl-b4"]) expect(touched(id), `${id} was counted`).toBe(0);
@@ -423,15 +427,17 @@ describe("flair#2478 — the migration's `.content`-suffix fallback writes under
 
     // c8: another writer holds the id when the fallback tries its lock.
     await h.assertPaused(S_GATE);
-    expect(serverLog()).toContain(`[embedding-stamp] ${c7}: the content-suffix re-embed did not confirm its committed row; outcome: unconfirmed`);
+    const unconfirmedC7 = `[embedding-stamp] ${c7}: the content-suffix re-embed did not confirm its committed row; outcome: unconfirmed`;
+    expect(await h.waitForLog(unconfirmedC7), `the unconfirmed outcome of ${c7} was not logged within 30s: ${unconfirmedC7}`).toBe(true);
+    expect(serverLog()).toContain(unconfirmedC7);
     h.arm("memory-patch-entry");
     const holder = suffixWrite("PATCH", c8);
     try {
       await h.assertPaused("memory-patch-entry");
       await h.release(S_GATE);
-      const deadline = Date.now() + 30_000;
-      while (Date.now() < deadline && !serverLog().includes(`[embedding-stamp] ${c8}: the per-id write lock answered busy`)) await Bun.sleep(100);
-      expect(serverLog()).toContain(`[embedding-stamp] ${c8}: the per-id write lock answered busy`);
+      const busyC8 = `[embedding-stamp] ${c8}: the per-id write lock answered busy`;
+      expect(await h.waitForLog(busyC8), `the held retry of ${c8} was not logged as busy within 30s: ${busyC8}`).toBe(true);
+      expect(serverLog()).toContain(busyC8);
       expect(h.writesBy(c8, SUFFIX_WRITER), "the fallback wrote a held id").toEqual([]);
       await expectStillStale(c8, ORIGINAL);
       await h.release("memory-patch-entry");
@@ -493,7 +499,9 @@ describe("flair#2478 — the migration's `.content`-suffix fallback writes under
       await h.release(S_GATE);
       const line = `[embedding-stamp] ${f1}: the per-id write lock answered busy; this attempt wrote nothing, but an earlier attempt's write was not confirmed, so the outcome is unknown`;
       expect(await h.waitForLog(line), "the held retry was not logged as an unknown outcome").toBe(true);
-      expect(serverLog()).toContain(`[embedding-stamp] ${f1}: the content-suffix re-embed did not confirm its committed row; outcome: unconfirmed`);
+      const unconfirmedF1 = `[embedding-stamp] ${f1}: the content-suffix re-embed did not confirm its committed row; outcome: unconfirmed`;
+      expect(await h.waitForLog(unconfirmedF1), `the unconfirmed outcome of ${f1} was not logged within 30s: ${unconfirmedF1}`).toBe(true);
+      expect(serverLog()).toContain(unconfirmedF1);
       expect(serverLog()).not.toContain(`[embedding-stamp] ${f1}: the per-id write lock answered busy; nothing was written`);
       // Only attempt 1 wrote, and the row was not counted.
       expect(h.writesBy(f1, SUFFIX_WRITER)).toHaveLength(1);
@@ -536,6 +544,7 @@ describe("flair#2478 — the migration's `.content`-suffix fallback writes under
       rmSync(readFault, { force: true });
     }
     const line = `[embedding-stamp] ${f2}: the content-suffix re-embed did not confirm its committed row; outcome: unconfirmed`;
+    expect(await h.waitForLog(line), `the unconfirmed outcome of ${f2} was not logged within 30s: ${line}`).toBe(true);
     expect(serverLog().split(line).length - 1, "the unconfirmed outcome was not logged exactly once").toBe(1);
     expect(h.writesBy(f2, SUFFIX_WRITER)).toHaveLength(1);
     expect(touched(f2), `${f2} was counted`).toBe(0);
@@ -552,7 +561,9 @@ describe("flair#2478 — the migration under the locked-provider bound (real Har
     expect(await waitForRun((run) => run.touchedIds.includes("esl-d2.content")), "the fallback row was not counted").toBe(true);
     await expectBoundTo(await h.readRow("esl-d2.content"), ORIGINAL);
     h.expectIncrementalWrites("esl-d2.content", SUFFIX_WRITER);
-    expect(serverLog()).toContain("[embedding-stamp] esl-d1: the re-embed request was refused 503 memory_provider_timeout");
+    const refused = "[embedding-stamp] esl-d1: the re-embed request was refused 503 memory_provider_timeout";
+    expect(await h.waitForLog(refused), `the provider-timeout refusal of esl-d1 was not logged within 30s: ${refused}`).toBe(true);
+    expect(serverLog()).toContain(refused);
     await expectStillStale("esl-d1", ORIGINAL);
     expect(touched("esl-d1")).toBe(0);
   }, 240_000);

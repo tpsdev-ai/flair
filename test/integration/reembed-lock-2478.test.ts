@@ -489,7 +489,9 @@ describe("flair#2478 — the re-embed's unknown and bounded outcomes (real Harpe
       h.letGo(CONFIRMED);
       h.letGo(recompute);
     }
-    expect(h.serverLog()).toContain(`[reembed] ${id}: a committed attempt's write is not confirmed; this attempt ended with memory_provider_timeout; outcome: unconfirmed`);
+    const logged = `[reembed] ${id}: a committed attempt's write is not confirmed; this attempt ended with memory_provider_timeout; outcome: unconfirmed`;
+    expect(await h.waitForLog(logged), `the server log did not record the unconfirmed provider-timeout outcome within 30s: ${logged}`).toBe(true);
+    expect(h.serverLog()).toContain(logged);
     // Attempt 1's write landed: the row holds the old text's vector beside the new text.
     const stored = await h.readRow(id);
     expect(stored.content).toBe(EDITED);
@@ -537,7 +539,9 @@ describe("flair#2478 — the re-embed's unknown and bounded outcomes (real Harpe
       h.letGo(verify);
       rmSync(fault, { force: true });
     }
-    expect(h.serverLog()).toContain(`[reembed] ${id}: a committed attempt's write is not confirmed; the call ended with an error (Error); outcome: unconfirmed`);
+    const logged = `[reembed] ${id}: a committed attempt's write is not confirmed; the call ended with an error (Error); outcome: unconfirmed`;
+    expect(await h.waitForLog(logged), `the server log did not record the unconfirmed notifier-failure outcome within 30s: ${logged}`).toBe(true);
+    expect(h.serverLog()).toContain(logged);
     // The retry's write landed before its notifier threw.
     const stored = await h.readRow(id);
     expect(stored.content).toBe(EDITED);
