@@ -1018,7 +1018,8 @@ export async function startHarper(opts: StartHarperOptions = {}): Promise<Harper
     const serverEnv = opts.serverEnv ?? {};
     if (Object.keys(serverEnv).length > 0) {
       const required = Object.entries(serverEnv)
-        .map(([name, value]) => (value === undefined ? `${name} (removed)` : `${name}=${value}`))
+        // Names only: a declared value may be a fixture secret, and this message reaches the CI log.
+        .map(([name, value]) => (value === undefined ? `${name} (removed)` : name))
         .join(", ");
       throw new Error(
         `[harper-lifecycle] refused serverEnv in external mode (HARPER_HTTP_URL is set): ` +
@@ -1072,7 +1073,7 @@ export async function startHarper(opts: StartHarperOptions = {}): Promise<Harper
   // Deny-list: strip CI secrets from the inherited env so Harper's child
   // process (and any log dump on failure) doesn't leak them onto a public
   // CI runner (Sherlock review on #467).
-  const parentEnv = buildHarperServerEnv(process.env as Record<string, string>, opts);
+  const parentEnv = buildHarperServerEnv(process.env as Record<string, string | undefined>, opts);
   delete parentEnv.GITHUB_TOKEN;
   delete parentEnv.NPM_TOKEN;
 
