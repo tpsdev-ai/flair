@@ -3,10 +3,10 @@
  * (flair#2478 slice 1). The ordinary owner PUT and PATCH (resources/Memory.ts,
  * the HTTP re-embed PATCH included) run under it, and so do the automatic
  * writers converted so far: the visibility backfill and the promotion stamps
- * (slice 2), and the embedding backfill that follows a Memory write
- * (resources/auth-middleware.ts) and the embedding-stamp migration's
- * `.content`-suffix fallback (slice 3). The other Memory writers convert in
- * later parts.
+ * (slice 2), and the embedding backfill that follows a Memory write signed by
+ * a verified Ed25519 agent (resources/auth-middleware.ts) and the
+ * embedding-stamp migration's `.content`-suffix fallback (slice 3). The other
+ * Memory writers convert in later parts.
  *
  * A writer that must make its read, decision and write on one committed basis
  * runs under one key per ID of `Memory.primaryStore`'s lock: `["memory", fullStoredId]`.
@@ -270,7 +270,8 @@ export async function withMemoryWriteLock<T>(
  *  Whether the id is visited again is each writer's own rule (a later scan
  *  decides whether a migration row is still stale; the embedding backfill runs
  *  again only after the id's next successful HTTP Memory POST, PUT or PATCH
- *  through the auth middleware). */
+ *  signed by a verified Ed25519 agent, the requests that reach the auth
+ *  middleware's post-response hook; a Basic-admin write starts none). */
 export async function withMemoryWriteLockOnce<T>(
   store: unknown,
   ids: readonly (string | number)[],

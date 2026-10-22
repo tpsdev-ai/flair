@@ -205,10 +205,14 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
     // after the vector is computed: no provider call runs while the id is locked.
     // A held id, an id with an unresolved write outcome, or a store with no lock
     // is skipped and logged, and nothing is written. A skipped backfill is not
-    // retried by this call: the next successful HTTP Memory write of the id that
-    // passes through this middleware starts another (a raw or direct table write
-    // starts none), and a row with a stale or missing stamp is re-embedded by
-    // the embedding-stamp migration. Holding the lock, the helper's first read
+    // retried by this call. The backfill starts only from the post-response hook
+    // at the end of this middleware (the "Embedding backfill" block below),
+    // which a successful HTTP Memory POST, PUT or PATCH reaches when a verified
+    // Ed25519 agent signed it; a valid Basic-admin request returns earlier
+    // (the super_user and Basic branches call nextLayer directly) and starts
+    // none, and neither does a raw or direct table write. So the id's next such
+    // signed write starts another, and a row with a stale or missing stamp is
+    // re-embedded by the embedding-stamp migration. Holding the lock, the helper's first read
     // is the committed row: a row whose text changed, or that has a vector of
     // more than 100 entries, is not written (a changed text is re-read and
     // re-embedded after the lock is released). The update commits, and the

@@ -1,7 +1,8 @@
 /**
  * auto-embed-lock-2478.test.ts — flair#2478 slice 3 (embeddings): the auth
  * middleware's embedding backfill (resources/auth-middleware.ts
- * `backfillEmbedding`, run after a successful Memory write) against owner
+ * `backfillEmbedding`, started by the middleware's post-response hook after a
+ * successful Memory write signed by a verified Ed25519 agent) against owner
  * writes of the same id, real Harper.
  *
  * The backfill reads the row and computes its vector with no lock held, then
@@ -29,13 +30,16 @@
  * locked-provider bound (the backfill computes its vector before the lock).
  *
  * The backfill is triggered by a metadata-only owner PATCH (no text change, so
- * the PATCH itself embeds nothing) on a row whose stored vector is short.
+ * the PATCH itself embeds nothing) on a row whose stored vector is short. A
+ * valid Basic-admin Memory write returns from the middleware before that hook
+ * and starts no backfill (pinned below, beside a signed write of the same row
+ * that does).
  * Seeded rows carry an explicit visibility, an incarnation token and the
  * current model's bare stamp, so the boot migrations leave them alone.
  * Home-isolated ephemeral Harper; every URL is asserted to be this test's own.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HARPER_STOP_BUDGET_MS, startHarper, stopHarper } from "../helpers/harper-lifecycle";
@@ -206,6 +210,43 @@ describe("flair#2478 — the auth auto-embed holds the id's lock through its com
       }, 120_000);
     }
   }
+});
+
+describe("flair#2478 — what starts the backfill (real Harper)", () => {
+  it("a Basic-admin Memory write starts no backfill; a signed owner's write of the same row does", async () => {
+    // The backfill starts only from the auth middleware's post-response hook,
+    // which a Memory write signed by a verified Ed25519 agent reaches; a valid
+    // Basic-admin request returns before it (resources/auth-middleware.ts).
+    const id = "ael-basic-admin";
+    const subject = "a Basic-admin metadata edit";
+    await seed(id);
+    h.arm(ENTRY);
+    try {
+      const res = await h.admin("PATCH", memPath(id), { subject });
+      expect(res.status, await res.clone().text()).toBe(204);
+      expect((await h.readRow(id))?.subject, "the Basic-admin write did not land").toBe(subject);
+      // A started backfill claims ENTRY once its vector is computed, as the
+      // signed write below does. This one must not.
+      const claimed = join(pauseDir, `claimed.${ENTRY}`);
+      const deadline = Date.now() + 5_000;
+      while (Date.now() < deadline && !existsSync(claimed)) await Bun.sleep(100);
+      expect(existsSync(claimed), "a Basic-admin write started a backfill").toBe(false);
+      expect(h.writesBy(id, WRITER), "a backfill wrote after the Basic-admin write").toEqual([]);
+      await expectUnembedded(id, ORIGINAL);
+
+      // The same row, written by its signed owner: the backfill starts.
+      await trigger(id);
+      await h.assertPaused(ENTRY);
+      await h.release(ENTRY);
+    } finally {
+      h.letGo(ENTRY);
+    }
+    const row = await waitForVector(id);
+    expect(row.content).toBe(ORIGINAL);
+    await expectBoundTo(row, ORIGINAL);
+    h.expectIncrementalWrites(id, WRITER, FIELDS);
+    expect(h.writesBy(id, WRITER)).toHaveLength(1);
+  }, 120_000);
 });
 
 describe("flair#2478 — owner writes that hold or change the id first (real Harper)", () => {
