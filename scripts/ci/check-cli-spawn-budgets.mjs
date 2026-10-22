@@ -537,22 +537,25 @@ function textNamesCliEntry(text, ids) {
 /** All spawn-family calls in the file (node forms + Bun forms), with CLI-entry targeting. */
 export function findSpawnCalls(source) {
   const scan = maskLiteralsAndComments(source);
+  // Same indices as `source`, comment bodies blanked; the `timeout` is read from
+  // this (flair#2774).
+  const code = maskComments(source);
   const ids = cliEntryIdentifiers(source);
   const aliases = aliasedSpawnFns(source);
   const constDecls = new Map();
   for (const m of scan.matchAll(/(?:^|\n)\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*/g)) {
     const after = m.index + m[0].length;
     const lineEnd = source.indexOf("\n", after);
-    constDecls.set(m[1], source.slice(after, lineEnd === -1 ? source.length : lineEnd));
+    constDecls.set(m[1], { start: after, end: lineEnd === -1 ? source.length : lineEnd });
   }
   const calls = [];
   const lineOf = (index) => source.slice(0, index).split("\n").length;
   const textAt = (span) => (span ? source.slice(span.start, span.end) : "");
-  const resolveOptText = (optSpan) => {
-    const own = textAt(optSpan);
-    const trimmed = own.trim();
-    if (optSpan && /^[A-Za-z_$][\w$]*$/.test(trimmed)) return constDecls.get(trimmed) ?? "";
-    return own;
+  // The options span itself, or the one-line initializer of the identifier it names.
+  const resolveOptSpan = (optSpan) => {
+    const trimmed = textAt(optSpan).trim();
+    if (optSpan && /^[A-Za-z_$][\w$]*$/.test(trimmed)) return constDecls.get(trimmed) ?? null;
+    return optSpan ?? null;
   };
   // Bun.spawn / Bun.spawnSync — argv array FIRST, options SECOND (flair#1825).
   for (const m of scan.matchAll(/(^|[^\w$.])Bun\.(spawn|spawnSync)\s*\(/g)) {
@@ -561,17 +564,19 @@ export function findSpawnCalls(source) {
     const args = topLevelArgs(scan, open);
     if (!args) continue;
     const argvText = BUN_ARGV_ARG_INDICES.map((i) => textAt(args.spans[i])).join(" ");
-    const optText = resolveOptText(args.spans[BUN_OPTIONS_ARG_INDEX]);
+    const optSpan = resolveOptSpan(args.spans[BUN_OPTIONS_ARG_INDEX]);
+    const optText = textAt(optSpan);
+    const optCode = optSpan ? code.slice(optSpan.start, optSpan.end) : "";
     calls.push({
       fn,
       index: m.index,
       line: lineOf(m.index),
       text: `${argvText} ; ${optText}`,
-      // The OPTIONS text is kept separately: a `timeout` is read from HERE only,
-      // never from argv (round 9 item 2).
-      optText,
+      // The OPTIONS text is kept separately, comments masked (flair#2774): a
+      // `timeout` is read from HERE only, never from argv (round 9 item 2).
+      optCode,
       isCliEntry: textNamesCliEntry(argvText, ids),
-      hasTimeout: /(^|[^\w$.])timeout\s*[:=]/.test(optText),
+      hasTimeout: /(^|[^\w$.])timeout\s*[:=]/.test(optCode),
     });
   }
   // node child_process forms — bare, or via a named alias (flair#1825).
@@ -583,22 +588,24 @@ export function findSpawnCalls(source) {
     const args = topLevelArgs(scan, open);
     if (!args) continue;
     const argvText = (ARGV_ARG_INDICES.get(fn) ?? [0, 1]).map((i) => textAt(args.spans[i])).join(" ");
-    const optText = resolveOptText(args.spans[OPTIONS_ARG_INDEX.get(fn)]);
+    const optSpan = resolveOptSpan(args.spans[OPTIONS_ARG_INDEX.get(fn)]);
+    const optText = textAt(optSpan);
+    const optCode = optSpan ? code.slice(optSpan.start, optSpan.end) : "";
     calls.push({
       fn: raw,
       index: m.index,
       line: lineOf(m.index),
       text: `${argvText} ; ${optText}`,
-      optText,
+      optCode,
       isCliEntry: textNamesCliEntry(argvText, ids),
-      hasTimeout: /(^|[^\w$.])timeout\s*[:=]/.test(optText),
+      hasTimeout: /(^|[^\w$.])timeout\s*[:=]/.test(optCode),
     });
   }
   // A numeric `timeout:` value, so a case budget can be checked against the sum
   // of the waits inside it (flair#1825).
   for (const call of calls) {
     // OPTIONS ONLY: an argv element must never decide `hasTimeout` (round 9 item 2).
-    const m = (call.optText ?? "").match(/(?:^|[^\w$.])timeout\s*[:=]\s*([^\s,;)}\]]+)/);
+    const m = (call.optCode ?? "").match(/(?:^|[^\w$.])timeout\s*[:=]\s*([^\s,;)}\]]+)/);
     // ONLY the EXACT token `[1-9][0-9]*` (underscores allowed) is a deadline:
     // `timeout: 0` is NO timeout (node and Bun), and `1e999` / `10000-10000` are
     // expressions, not positive integers — all are unbounded (flair#1825 r6).

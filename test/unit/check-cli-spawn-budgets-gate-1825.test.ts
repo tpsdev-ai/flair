@@ -491,6 +491,55 @@ describe("round 9: post-separator digit cap + options-only timeout (flair#1825)"
   });
 });
 
+describe("a timeout written in a comment does not decide the deadline (flair#2774)", () => {
+  function offendersFor(src: string) {
+    const dir = mkdtempSync(join(tmpdir(), "spawn-scan-2774-"));
+    repos.push(dir);
+    writeTree(dir, { "test/x.test.ts": src });
+    return scanTree(dir);
+  }
+  const spawnNoTimeout = (src: string) => offendersFor(src).spawnOffenders.some((o: any) => o.kind === "spawn-no-timeout");
+  const bunSrc = (opts: string) => `test("t", () => {\n  Bun.spawn(["bun", "src/cli.ts", "status"], ${opts});\n}, 120_000);\n`;
+  const nodeSrc = (opts: string) => `test("t", () => {\n  spawnSync("bun", ["src/cli.ts", "status"], ${opts});\n}, 120_000);\n`;
+
+  const COMMENTED_ONLY = {
+    line: "{\n    env,\n    // timeout: 5000,\n  }",
+    block: "{ env, /* timeout: 5000 */ }",
+  };
+  const REAL_AFTER_COMMENT = {
+    line: "{\n    env,\n    // timeout: SOME_CONSTANT would be read here\n    timeout: 90_000,\n  }",
+    block: "{ env, /* timeout: SOME_CONSTANT */ timeout: 90_000 }",
+  };
+
+  for (const kind of ["line", "block"] as const) {
+    it(`${kind} comment: a commented-out timeout and no real one is reported as no deadline`, () => {
+      for (const src of [bunSrc(COMMENTED_ONLY[kind]), nodeSrc(COMMENTED_ONLY[kind])]) {
+        const [call] = findSpawnCalls(src).calls;
+        expect(call.isCliEntry).toBe(true);
+        expect(call.hasTimeout).toBe(false);
+        expect(call.timeoutMs).toBeNull();
+        expect(spawnNoTimeout(src)).toBe(true);
+      }
+    });
+
+    it(`${kind} comment: a real timeout after a comment naming another is accepted with the real value`, () => {
+      for (const src of [bunSrc(REAL_AFTER_COMMENT[kind]), nodeSrc(REAL_AFTER_COMMENT[kind])]) {
+        const [call] = findSpawnCalls(src).calls;
+        expect(call.hasTimeout).toBe(true);
+        expect(call.timeoutMs).toBe(90000);
+        expect(spawnNoTimeout(src)).toBe(false);
+      }
+    });
+  }
+
+  it("an options identifier whose one-line initializer carries only a commented-out timeout is no deadline", () => {
+    const src = `const opts = { env }; // timeout: 5000\ntest("t", () => {\n  Bun.spawn(["bun", "src/cli.ts"], opts);\n}, 120_000);\n`;
+    const [call] = findSpawnCalls(src).calls;
+    expect(call.timeoutMs).toBeNull();
+    expect(spawnNoTimeout(src)).toBe(true);
+  });
+});
+
 describe("round 10: the SEED stdout says exactly what it guarantees (flair#1825)", () => {
   const root = join(import.meta.dirname, "..", "..");
   // The seed path runs only while the base has NO baseline file, and origin/main

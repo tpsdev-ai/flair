@@ -30,6 +30,7 @@ export interface SpawnCall {
   text: string;
   isCliEntry: boolean;
   hasTimeout: boolean;
+  timeoutMs?: number | null;
   scope?: string;
 }
 
