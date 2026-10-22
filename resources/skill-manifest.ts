@@ -125,9 +125,10 @@ function isPast(value: unknown, now: number): boolean {
 }
 
 /**
- * The rows passed to resolveSkillRef: skill-tagged, readable by the target agent
- * (`isReadable`, the read-scope predicate `skill_get` applies), not archived,
- * and not closed (`validTo`) or expired (`expiresAt`).
+ * The rows passed to resolveSkillRef. Candidates must be skill-tagged, pass the
+ * supplied read-scope predicate (`isReadable`), be unarchived, and have neither
+ * `validTo` nor `expiresAt` parsing to a past time; this helper does not apply
+ * the closed-skill current-authority check.
  */
 export function resolvableSkillRows(
   rows: SkillRow[],

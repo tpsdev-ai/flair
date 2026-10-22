@@ -211,7 +211,7 @@ gate("MemoryBootstrap's task-relevant selection consults the guard against a rea
   beforeAll(async () => {
     pauseDir = mkdtempSync(join(tmpdir(), "flair-2559-boot-pause-"));
     writeFileSync(join(pauseDir, `arm.${POINT}`), "");
-    h = await startHarper({ serverEnv: { [TEST_FAULT_INJECTION_ENV]: "1", [TEST_PAUSE_DIR_ENV]: pauseDir }, env: { FLAIR_RETRIEVAL_MODE: "vector-only" } });
+    h = await startHarper({ serverEnv: { [TEST_FAULT_INJECTION_ENV]: "1", [TEST_PAUSE_DIR_ENV]: pauseDir, FLAIR_RETRIEVAL_MODE: "vector-only" } });
     expect(h.external).toBe(false);
     expect(h.ownsInstallDir).toBe(true);
     await adminOp(h, {

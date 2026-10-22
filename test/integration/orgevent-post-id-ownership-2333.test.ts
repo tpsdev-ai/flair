@@ -114,8 +114,10 @@ beforeAll(async () => {
   const clockPreload = fileURLToPath(new URL("../helpers/harper-freeze-clock.cjs", import.meta.url));
   harper = await startHarper({
     cwd: component.dir,
-    env: {
+    serverEnv: {
       FLAIR_TEST_FROZEN_NOW: String(Date.now()),
+    },
+    env: {
       NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --require=${clockPreload}`.trim(),
     },
   });

@@ -43,7 +43,7 @@ beforeAll(async () => {
     probe.replaceAll('"../../resources/', '"./'));
   harper = await startHarper({
     cwd: appDir, harperBinDir: root,
-    env: { FLAIR_GRAPH_HEAL_TEST_DATA_DIR: dataDir },
+    serverEnv: { FLAIR_GRAPH_HEAL_TEST_DATA_DIR: dataDir },
   });
   expect(harper.external).toBe(false);
   expect(harper.ownsInstallDir).toBe(true);

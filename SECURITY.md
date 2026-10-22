@@ -63,8 +63,8 @@ Reads are open **within an org**; writes are isolated per agent. Enforced at
 the database layer (Harper resource `search()` override via a single
 centralized read-scope rule), not application logic:
 
-- `GET /Memory/` — returns the authenticated agent's own memories (any
-  visibility) plus every **non-private** memory in the org
+- `GET /Memory/` — applies the owner/visibility base scope and omits retained
+  closed skill payloads that fail the non-admin reader's current-authority check
 - `POST /MemorySearch` — same read scope: own memories plus all non-private
 - `POST /Memory` — writes are attributed to the authenticated agent; an
   agent cannot write as another (write isolation)
@@ -118,11 +118,16 @@ its own ownership rule.
 The guard exempts administrator and in-process calls. OrgEvent POST id
 selection also applies to administrator and in-process calls.
 
+Credential records are owner-scoped by `principalId`: non-admin callers read and
+modify only their own records, and administrators and trusted internal callers
+are unscoped. Anonymous HTTP access is refused.
+
 ### Cross-Agent Access (within an org)
 
-Within an org, an agent reads every non-private memory directly — no grant
-required. This is deliberate: the goal is relevance (surface what's useful to
-the org) over secrecy. A writer keeps something private by marking it
+Within an org, non-private memories pass the base read-scope check without a
+grant; non-admin by-id and collection reads of retained closed skills
+additionally require readable current authority. This is deliberate: the goal
+is relevance (surface what's useful to the org) over secrecy. A writer keeps something private by marking it
 `visibility: private`, which keeps it strictly owner-only. The access boundary
 that stays hard is the **federation edge** (cross-instance / cross-org), not
 within-org reads.

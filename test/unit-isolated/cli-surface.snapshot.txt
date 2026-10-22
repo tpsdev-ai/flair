@@ -1498,7 +1498,7 @@ flair rem restore
       description: Directory to extract into (default: <snapshot>.restored, only used without --apply)
       attr: target
     --dry-run
-      description: Plan-only — list contents or planned counts without writing
+      description: Plan-only — list contents or planned counts without writing; with --apply to a non-loopback target and no --admin-pass or --admin-pass-file, credentials are resolved signed-only (no Basic credential is sent)
       attr: dryRun
     --apply
       description: Live replay: rewind Harper state to the snapshot (irreversible without the pre-restore snapshot)
@@ -4659,7 +4659,10 @@ Options:
   --target <dir>            Directory to extract into (default:
                             <snapshot>.restored, only used without --apply)
   --dry-run                 Plan-only — list contents or planned counts without
-                            writing
+                            writing; with --apply to a non-loopback target and
+                            no --admin-pass or --admin-pass-file, credentials
+                            are resolved signed-only (no Basic credential is
+                            sent)
   --apply                   Live replay: rewind Harper state to the snapshot
                             (irreversible without the pre-restore snapshot)
   -h, --help                display help for command

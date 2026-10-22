@@ -84,9 +84,11 @@ beforeAll(async () => {
   // in an ephemeral store, never the developer's ~/.flair.
   keystore.setPrivateKeySeed(SENDER_ID, senderSeed);
 
-  // The hub starts with Presence receipt OFF (the default).
-  receiver = await startHarper({ env: { FLAIR_FEDERATION_PRESENCE_RECEIVE: "0" } });
-  sender = await startHarper({ env: { FLAIR_FEDERATION_PRESENCE_SEND: "1" } });
+  // The hub starts with Presence receipt OFF (the default). Both receivers
+  // declare the sender flag removed: the test process holds it for the
+  // in-process sync, and the receiver must not inherit it.
+  receiver = await startHarper({ serverEnv: { FLAIR_FEDERATION_PRESENCE_RECEIVE: "0", FLAIR_FEDERATION_PRESENCE_SEND: undefined } });
+  sender = await startHarper({ serverEnv: { FLAIR_FEDERATION_PRESENCE_SEND: "1" } });
   assertOwnInstance(receiver, "receiver");
   assertOwnInstance(sender, "sender");
 
@@ -141,7 +143,7 @@ describe("flair#2666 — a receive-disabled refusal does not pass the Presence w
     await stopHarper(receiver, { keepInstallDir: true });
     receiver = await startHarper({
       installDir: dir,
-      env: { FLAIR_FEDERATION_PRESENCE_RECEIVE: "1" },
+      serverEnv: { FLAIR_FEDERATION_PRESENCE_RECEIVE: "1", FLAIR_FEDERATION_PRESENCE_SEND: undefined },
     });
     assertOwnInstance(receiver, "restarted receiver");
     // Point the sender's Peer endpoint at the restarted hub's URL (the port may

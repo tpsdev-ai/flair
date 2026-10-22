@@ -160,7 +160,7 @@ async function recreate(how: Recreate, id: string, kp: nacl.SignKeyPair): Promis
 }
 
 beforeAll(async () => {
-  harper = await startHarper({ env: { FLAIR_ADMIN_AGENTS: CONFIGURED } });
+  harper = await startHarper({ serverEnv: { FLAIR_ADMIN_AGENTS: CONFIGURED } });
   for (const url of [harper.httpURL, harper.opsURL]) {
     const u = new URL(url);
     expect(["127.0.0.1", "localhost"], `${url} must be loopback`).toContain(u.hostname);

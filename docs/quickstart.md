@@ -154,7 +154,7 @@ flair memory add --agent local --visibility shared \
 
 `--visibility` takes exactly `private` or `shared` — a value it doesn't recognise is an error, not a guess — and overrides the durability rule in both directions. The `visibility` field in the response is the value the memory actually landed on, so read it rather than assuming.
 
-Once a memory is `shared`, **every** agent on this instance can read it, with no grant to set up. That is the shipped model: reads open within one instance, closed at the federation edge. Full picture in [SECURITY.md](../SECURITY.md).
+A shared memory passes every agent's base visibility check without a grant; retained closed skills additionally require readable current authority on non-admin by-id and collection reads. That is the shipped model: reads open within one instance, closed at the federation edge. Full picture in [SECURITY.md](../SECURITY.md).
 
 ## 5. Find it back by meaning
 
@@ -202,7 +202,7 @@ Soul entries and relevant memories, in one block sized to a token budget. Paste 
 | You want to... | Go to |
 |----------------|-------|
 | Add more agents to the same instance | `flair agent add <id>` |
-| Share a memory with your other agents | `flair memory add --visibility shared` — a bare write lands `private`, see [step 4](#who-can-read-it); a shared one is readable by every agent on the instance, no grant needed ([auth.md](auth.md)) |
+| Share a memory with your other agents | `flair memory add --visibility shared` — a bare write lands `private`, see [step 4](#who-can-read-it); a shared memory passes the instance-wide base visibility check without a grant; non-admin Memory by-id and collection reads of retained closed skills also apply the current-authority check ([auth.md](auth.md)) |
 | Import memories from agentic-stack / Mem0 / etc. | [bridges.md](bridges.md) |
 | Sync memories across machines | [federation.md](federation.md) |
 | Integrate with OpenClaw, Claude Code, Cursor | [README.md#integration](../README.md#integration) |

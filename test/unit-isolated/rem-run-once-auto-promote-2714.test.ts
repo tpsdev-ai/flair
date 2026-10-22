@@ -54,7 +54,8 @@ test("flair rem nightly run-once prints incomplete and unconfirmed auto-promotio
       throw new Error("unexpected route " + path);
     },
     resolveOpsPort: () => 1, applyAdminPassFile: () => {}, addSharedCredentialOptions: (command) => command,
-    readPortFromConfig: () => null, resolveHttpPort: () => 1, humanBytes: String, relativeTime: String,
+    readPortFromConfig: () => null, resolveHttpPort: () => 1, resolveOpsUrlFromTarget: () => { throw new Error("unused"); }, resolveAgentHomeTarget: () => ({ httpPort: 1, opsPort: 1 }), INSTANCE_TARGET_REMEDY: "",
+    humanBytes: String, relativeTime: String,
     DEFAULT_PORT: 1, pkgVersion: "fixture",
   });
   try {

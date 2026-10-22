@@ -611,8 +611,10 @@ describe("catch-up delivers events that share one server time in ID order", () =
     frozenAt = Date.now();
     const clockPreload = fileURLToPath(new URL("../helpers/harper-freeze-clock.cjs", import.meta.url));
     frozen = await startHarper({
-      env: {
+      serverEnv: {
         FLAIR_TEST_FROZEN_NOW: String(frozenAt),
+      },
+      env: {
         NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --require=${clockPreload}`.trim(),
       },
     });

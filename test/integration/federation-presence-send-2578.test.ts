@@ -93,8 +93,8 @@ beforeAll(async () => {
   // in an ephemeral store, never the developer's ~/.flair.
   keystore.setPrivateKeySeed(SENDER_ID, senderSeed);
 
-  receiver = await startHarper({ env: { FLAIR_FEDERATION_PRESENCE_RECEIVE: "1" } });
-  sender = await startHarper({ env: { FLAIR_FEDERATION_PRESENCE_SEND: "1" } });
+  receiver = await startHarper({ serverEnv: { FLAIR_FEDERATION_PRESENCE_RECEIVE: "1", FLAIR_FEDERATION_PRESENCE_SEND: undefined } });
+  sender = await startHarper({ serverEnv: { FLAIR_FEDERATION_PRESENCE_SEND: "1" } });
   assertOwnInstance(receiver, "receiver");
   assertOwnInstance(sender, "sender");
 

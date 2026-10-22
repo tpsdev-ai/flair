@@ -3,21 +3,27 @@
  *
  * POST /MemoryArchive — sets or clears the `archived` visibility flag on a
  * memory by id:
- *   - `action: "basement"` → archived=true + stamps archivedAt (and archivedBy)
+ *   - `action: "basement"` sets `archived: true` and `archivedBy` to the
+ *     caller; Memory.put() supplies `archivedAt` when it is absent or falsy.
  *   - `action: "restore"`  → archived=false + clears archivedAt/archivedBy
  *
- * `archived` is a VISIBILITY flag, not a deletion: basementing removes a
- * memory from bootstrap + default search but leaves the row, its provenance,
- * and its history fully intact (still retrievable via memory_get and
- * memory_search(includeArchived:true)). Restore is the deliberate, GLOBAL
- * inverse — it un-retires the memory for EVERY session, not a session-local
- * view (per-session reuse is drawers, Deliverable B, which does not exist
- * yet). The CLI help text must make that global scope explicit.
+ * `archived` is a VISIBILITY flag, not a deletion. Basementing retains the row
+ * and excludes it from bootstrap and default semantic search; the write still
+ * applies Memory.put()'s validation, redaction and provenance stamping.
+ * By-id retrieval remains subject to Memory's read checks; `includeArchived:
+ * true` removes the semantic-search archive filter while retaining the other
+ * retrieval filters. Restore is the deliberate inverse: it clears the archive
+ * state globally, not in a session-local view (per-session reuse is drawers,
+ * Deliverable B, which does not exist yet); other read and retrieval
+ * conditions still apply. The CLI help text must make that global scope
+ * explicit.
  *
- * Own-lane scope: the read uses Memory.get()'s read-scope gate and the write
- * uses Memory.put()'s ownership gate (stampAttribution), so a caller can
- * neither read nor write another agent's memory here. Anonymous HTTP is
- * denied (401).
+ * Scope: reads use Memory.get()'s read policy; non-admin callers may archive
+ * or restore only their own memories (Memory.put()'s ownership gate,
+ * stampAttribution), while administrators may act on another agent's memory.
+ * Anonymous HTTP is refused by allowCreate() before post() runs, with the
+ * status Harper returns for a denied allowCreate() (403 for SkillScan's same
+ * allowVerified() gate in test/integration/gate4-authgate.test.ts).
  *
  * Registered automatically at /MemoryArchive via config.yaml's
  * `jsResource: files: dist/resources/*.js` (named export → export name).
@@ -39,9 +45,11 @@ function json(status: number, body: unknown): Response {
 
 /**
  * A refusal or failure from Memory.get()/Memory.put() is a Harper `Response`
- * (it carries `.status` + `.json`); a successful read/write is a plain record.
- * Return the Response as-is so the endpoint answers with THAT HTTP status and
- * its named error, and pass a record through unchanged.
+ * (it carries `.status` + `.json`). A successful read returns the readable
+ * memory, and a successful ordinary write returns a write receipt; returned
+ * refusal Responses retain their HTTP status and body. Return the Response
+ * as-is so the endpoint answers with THAT HTTP status and its named error, and
+ * pass a successful result through unchanged.
  * Returning an unwrapped write refusal would serialize it as HTTP 200;
  * unwrapping a read refusal would replace it with the generic 404 below.
  */
@@ -72,6 +80,9 @@ export class MemoryArchive extends Resource {
 
     // Read the existing record — Memory.get()'s read-scope gate applies (own +
     // org-non-private only). A non-readable id returns a 404 Response.
+    // Non-admin reads of retained closed skill payloads also apply
+    // `closedSkillPayloadReadable`; a failed check returns 404 by id or omits
+    // the collection row.
     const existing = await Memory.get(id, ctx);
     const readRefusal = asResponse(existing);
     if (readRefusal) return readRefusal;
@@ -91,8 +102,9 @@ export class MemoryArchive extends Resource {
     // flair#2275: re-read the row INSIDE a transaction this call OWNS and build
     // the write from THAT read — never from the basis above, which another
     // writer may have changed before the write. Unequal persisted rows are
-    // refused (409); a non-readable row returns 404. Changes after the re-read
-    // are not checked.
+    // refused (409); a non-readable row returns 404. This comparison covers
+    // changes through the archive's re-read; Memory.put() subsequently performs
+    // its own stored-row comparisons and post-commit verification.
     return await withOwnedTransaction(ctx, async (c) => {
       const reread = await Memory.get(id, c);
       const rereadRefusal = asResponse(reread);
@@ -112,9 +124,10 @@ export class MemoryArchive extends Resource {
       };
       if (archived) {
         // archivedBy is set by the caller (Memory.put() stamps archivedAt when
-        // archived===true). The content is unchanged, so the existing embedding
-        // stays valid — do NOT clear it (clearing would force a needless re-embed
-        // and, if the embedding engine is unavailable, silently drop the vector).
+        // archived===true). The archive request retains the existing embedding
+        // and delegates text redaction and embedding handling to Memory.put() —
+        // do NOT clear it (clearing would force a needless re-embed and, if the
+        // embedding engine is unavailable, silently drop the vector).
         merged.archivedBy = auth.agentId;
       } else {
         delete merged.archivedAt;

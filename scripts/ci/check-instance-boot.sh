@@ -43,7 +43,19 @@
 #                 init leaves doctor with a legitimate "keys directory missing".
 #   PORT          Harper HTTP port (default 19926, the current default)
 #   OPS_PORT      operations API port (default 19925)
-#   PASS_FILE     admin-pass file (default $HOME/.flair/admin-pass)
+#   PASS_FILE     admin-pass input file handed to `flair init --admin-pass-file`
+#                 (default: a new 0600 file in a fresh directory under $RUNNER_TEMP,
+#                 or /tmp when RUNNER_TEMP is unset, removed on exit). The default
+#                 is kept apart from $HOME/.flair/admin-pass, which init itself
+#                 writes: init refuses to replace an existing admin-pass it cannot
+#                 verify against a running instance. An explicit PASS_FILE is not
+#                 removed; its directory must exist, and at step 1 the script
+#                 writes a generated password into it when it is missing or empty,
+#                 and sets its mode to 0600. For either, before the file is
+#                 created, filled or chmodded, the script resolves the file's
+#                 directory (following symlinks on the file itself) and fails
+#                 (exit 1) when that directory cannot be resolved, or is LOG_DIR,
+#                 the working directory or $GITHUB_WORKSPACE or lies under one.
 #   LOG_DIR       command-log directory (default $PWD/instance-boot-logs)
 #   HEALTH_TIMEOUT        seconds to wait for /Health (default 180)
 #   LISTENER_TIMEOUT      seconds to wait for the supervised pid to bind (default 120)
@@ -64,7 +76,14 @@ FLAIR_BIN="${FLAIR_BIN:-flair}"
 PORT="${PORT:-19926}"
 OPS_PORT="${OPS_PORT:-19925}"
 FLAIR_AGENT_ID="${FLAIR_AGENT_ID:-canary}"
-PASS_FILE="${PASS_FILE:-$HOME/.flair/admin-pass}"
+PASS_TMP=""
+if [ -z "${PASS_FILE:-}" ]; then
+  # An explicit base rather than mktemp's default location (checked below).
+  PASS_TMP="$(mktemp -d "${RUNNER_TEMP:-/tmp}/flair-boot-pass.XXXXXX")"
+  # The generated input file holds the admin password: remove it on exit.
+  trap 'rm -rf "${PASS_TMP:?}"' EXIT
+  PASS_FILE="$PASS_TMP/admin-pass-input"
+fi
 LOG_DIR="${LOG_DIR:-$PWD/instance-boot-logs}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-180}"
 LISTENER_TIMEOUT="${LISTENER_TIMEOUT:-120}"
@@ -79,10 +98,39 @@ OS="$(uname -s)"
 # ritual both invoke it by path).
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-mkdir -p "$LOG_DIR" "$(dirname "$PASS_FILE")"
+mkdir -p "$LOG_DIR"
 
 log() { printf '\n=== %s ===\n' "$*"; }
 fail() { echo "::error::check-instance-boot: $*" >&2; exit 1; }
+
+# Print the physical directory a write to file $1 lands in: symlinks on the file
+# itself are followed (at most 32), then its directory is resolved with cd -P.
+# Returns non-zero when that directory cannot be resolved.
+pass_file_dir() {
+  local path="$1" target hops=0
+  while [ -L "$path" ]; do
+    [ "$hops" -lt 32 ] || return 1
+    target="$(readlink "$path")" || return 1
+    case "$target" in
+      /*) path="$target" ;;
+      *) path="$(dirname "$path")/$target" ;;
+    esac
+    hops=$((hops + 1))
+  done
+  (cd -P "$(dirname "$path")" && pwd -P)
+}
+
+# One location rule for the generated default and an explicit PASS_FILE, applied
+# before the file is created, filled or chmodded.
+PASS_DIR_REAL="$(pass_file_dir "$PASS_FILE")" \
+  || fail "cannot resolve the directory of admin-pass input file ${PASS_FILE}; create that directory first"
+for tree in "$LOG_DIR" "$PWD" ${GITHUB_WORKSPACE:+"$GITHUB_WORKSPACE"}; do
+  tree_real="$(cd -P "$tree" && pwd -P)" || fail "cannot resolve ${tree}"
+  case "$PASS_DIR_REAL/" in
+    "${tree_real%/}"/*)
+      fail "admin-pass input file ${PASS_FILE} resolves inside ${tree_real}; point PASS_FILE (or, for the generated default, RUNNER_TEMP) outside LOG_DIR, the working directory and \$GITHUB_WORKSPACE" ;;
+  esac
+done
 
 # Resolve the executable once; fail-closed if it is not there. `command -v`
 # handles both a bare name and an absolute path.
@@ -231,9 +279,15 @@ if [ ! -s "$PASS_FILE" ]; then
 fi
 chmod 600 "$PASS_FILE"
 # Keep the secret out of argv for the *later* calls too (init reads the file
-# itself; these are for the already-running health/stop path).
-export HDB_ADMIN_PASSWORD="$(cat "$PASS_FILE")"
-export FLAIR_ADMIN_PASS="$HDB_ADMIN_PASSWORD"
+# itself; these are for the already-running health/stop path). Read before the
+# credential variables are exported, so a failed or empty read stops here; the
+# messages name the file, not its content.
+admin_pass="$(cat "$PASS_FILE")" \
+  || fail "cannot read admin-pass input file ${PASS_FILE}; set PASS_FILE to a readable file holding the password"
+[ -n "$admin_pass" ] \
+  || fail "admin-pass input file ${PASS_FILE} is empty; set PASS_FILE to a file holding the password"
+export HDB_ADMIN_PASSWORD="$admin_pass"
+export FLAIR_ADMIN_PASS="$admin_pass"
 
 "$FLAIR_BIN" init \
   --port "$PORT" \

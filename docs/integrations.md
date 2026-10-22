@@ -1,8 +1,8 @@
 # Flair integrations
 
-Where Flair already runs. Each integration can reach one shared Flair memory store; signed requests identify an agent, while other verified agents may read its non-private records.
+Where Flair already runs. Each integration can reach one shared Flair memory store; signed requests identify an agent. Reads follow each resource's policy: Memory uses owner/visibility scope with an additional current-authority check for retained closed skills, while Credential records are owner-only for non-admin callers.
 
-> **The point.** Memory can follow an agent across orchestrators. Integrations using an ordinary Ed25519 agent key can write under that identity and read their own plus other agents' non-private records. Administrator agent roles have broader authority. n8n signs with Agent Private Key selected; its deprecated Admin Password path uses administrator Basic only with an empty key. stdio MCP, Pi, LangGraph, and the wake runner can use administrator Basic auth when no signing key resolves. Administrator Basic auth can read private records and write under any agent ID. Choose an integration with its authentication and recall behavior in mind.
+> **The point.** Memory can follow an agent across orchestrators. Integrations using an ordinary Ed25519 agent key can write under that identity. Reads follow each resource's policy: Memory uses owner/visibility scope with an additional current-authority check for retained closed skills, while Credential records are owner-only for non-admin callers. Administrator agent roles have broader authority. n8n signs with Agent Private Key selected; its deprecated Admin Password path uses administrator Basic only with an empty key. stdio MCP, Pi, LangGraph, and the wake runner can use administrator Basic auth when no signing key resolves. Administrator Basic auth can read private records and write under any agent ID. Choose an integration with its authentication and recall behavior in mind.
 
 ---
 

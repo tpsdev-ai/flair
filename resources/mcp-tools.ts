@@ -488,8 +488,11 @@ async function skillSearch(agent: ResolvedAgent, args: any) {
  * A thin wrapper over Memory.get() — the SAME by-id read as memory_get, under
  * the SAME read-scope gate (makeByIdReadGate → resolveReadScope): a non-admin
  * caller cannot read another agent's private skill; administrators retain
- * access, exactly as a private memory does. skill_get is the disclosure step after skill_search's catalog:
- * it returns the full procedure (`content`) + trigger + metadata.
+ * access, exactly as a private memory does. Non-admin reads of retained closed
+ * skill payloads also apply `closedSkillPayloadReadable`; a failed check
+ * returns 404 by id or omits the collection row. skill_get is the disclosure
+ * step after skill_search's catalog: it returns the full procedure
+ * (`content`) + trigger + metadata.
  *
  * It is a SKILL tool, not a general reader: a readable id that is NOT a skill
  * returns the same 404 as an unreadable id. Returning it would (a) make
@@ -628,13 +631,18 @@ async function memoryUpdate(agent: ResolvedAgent, args: any) {
 
 // ── flair#1472 memory_basement / memory_restore ──────────────────────────────
 // The user-facing archive action. `archived` is a VISIBILITY flag, not a
-// deletion: basementing a memory removes it from bootstrap + default search
-// but leaves the row, its provenance, and its history fully intact (still
-// retrievable via memory_get and memory_search(includeArchived:true)). Restore
-// is the deliberate, GLOBAL inverse — it un-retires the memory for EVERY
-// session, not a session-local view (that is drawers, Deliverable B, which does
-// not exist yet). Non-admin agent reads use Memory.get()'s owner-and-
-// visibility scope; administrator and trusted internal reads are unfiltered.
+// deletion. Basementing retains the row and excludes it from bootstrap and
+// default semantic search; the write still applies Memory.put()'s validation,
+// redaction and provenance stamping. By-id retrieval remains subject to
+// Memory's read checks; `includeArchived: true` removes the semantic-search
+// archive filter while retaining the other retrieval filters. Restore is the
+// deliberate inverse: it clears the archive state globally, not in a
+// session-local view (that is drawers, Deliverable B, which does not exist
+// yet); other read and retrieval conditions still apply. Non-admin agent reads
+// use Memory.get()'s owner-and-visibility scope; administrator and trusted
+// internal reads are unfiltered. Non-admin reads of retained closed skill
+// payloads also apply `closedSkillPayloadReadable`; a failed check returns 404
+// by id or omits the collection row.
 // Mutating another agent's record requires administrator or trusted internal
 // authority (Memory.put()'s stampAttribution gate).
 async function memoryBasement(agent: ResolvedAgent, args: any) {
@@ -651,9 +659,10 @@ async function memoryBasement(agent: ResolvedAgent, args: any) {
     updatedAt: new Date().toISOString(),
   };
   // Memory.put() stamps archivedAt when archived===true (see Memory.ts). The
-  // content is unchanged, so the existing embedding stays valid — do NOT clear
-  // it (clearing would force a needless re-embed and, if the embedding engine
-  // is unavailable, would silently drop the vector).
+  // archive request retains the existing embedding and delegates text
+  // redaction and embedding handling to Memory.put() — do NOT clear it
+  // (clearing would force a needless re-embed and, if the embedding engine is
+  // unavailable, would silently drop the vector).
   if (agent.clientId) merged.claimedClient = agent.clientId;
   // flair#2541 — the write path redacts the row it re-puts; report the stored
   // text from that write's own response (redactedWriteEcho).
@@ -693,7 +702,9 @@ async function memoryGet(agent: ResolvedAgent, args: any) {
   // `RequestTarget` (never a bare string), and still dispatches through
   // Memory.get() → makeByIdReadGate → resolveReadScope, so the scope model is
   // unchanged: non-admin agents can read their own and other agents'
-  // non-private records; administrator reads are unfiltered. See
+  // non-private records; administrator reads are unfiltered. Non-admin reads of
+  // retained closed skill payloads also apply `closedSkillPayloadReadable`; a
+  // failed check returns 404 by id or omits the collection row. See
   // resources/in-process.ts:223.
   //
   // flair#744 slice 1 — opt-in inline trust block. The instance call passed

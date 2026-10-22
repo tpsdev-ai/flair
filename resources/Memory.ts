@@ -1995,7 +1995,9 @@ export class Memory extends (databases as any).flair.Memory {
    * does not disclose whether another agent's private record exists.
    * Anonymous HTTP requests are denied by allowRead(), while administrator
    * and trusted internal reads are unfiltered. Wired through
-   * record-type-kit.ts's makeByIdReadGate.
+   * record-type-kit.ts's makeByIdReadGate. Non-admin reads of retained closed
+   * skill payloads also apply `closedSkillPayloadReadable`; a failed check
+   * returns 404 by id or omits the collection row.
    */
   async get(target?: any, opts?: { includeTrust?: boolean }) {
     // Collection / query reads — the `GET /Memory/?<query>` form and the bare
@@ -2083,7 +2085,9 @@ export class Memory extends (databases as any).flair.Memory {
    * Non-admin calls are scoped to the reader's own records at any visibility
    * plus every other agent's non-private records — the shipped open-within-org
    * read model. MemoryGrant is NOT consulted on reads; the one place the scope
-   * is resolved is memory-read-scope.ts's resolveReadScope().
+   * is resolved is memory-read-scope.ts's resolveReadScope(). Non-admin reads
+   * of retained closed skill payloads also apply `closedSkillPayloadReadable`;
+   * a failed check returns 404 by id or omits the collection row.
    */
   async search(query?: any) {
     // Access request context via Harper's Resource instance context.
@@ -2112,7 +2116,9 @@ export class Memory extends (databases as any).flair.Memory {
     // memoryReadScope (record-type-kit.ts's makeReadScope(), parameterized
     // from RECORD_TYPES.Memory — see this file's header — delegating
     // "open-within-org" to memory-read-scope.ts's resolveReadScope()
-    // unchanged) so get() above and search() here cannot drift.
+    // unchanged) so get() above and search() here cannot drift. Non-admin reads
+    // of retained closed skill payloads also apply `closedSkillPayloadReadable`;
+    // a failed check returns 404 by id or omits the collection row.
     //
     // The scope condition is nested as the outermost AND block via
     // makeScopedSearch (record-type-kit.ts) — same correct composition

@@ -510,6 +510,7 @@ export async function sendJsonRequest(
   body: unknown,
   authHeader: string | undefined,
   isLocal: boolean,
+  transport: { refuseRedirects?: boolean } = {},
 ): Promise<any> {
   const res = await fetch(url.href, {
     method,
@@ -518,7 +519,13 @@ export async function sendJsonRequest(
       ...(authHeader ? { authorization: authHeader } : {}),
     },
     body: body ? JSON.stringify(body) : undefined,
+    // "manual" hands back the 3xx itself, so the refusal can name its status;
+    // the location it names is never requested.
+    ...(transport.refuseRedirects ? { redirect: "manual" as const } : {}),
   });
+  if (transport.refuseRedirects && res.status >= 300 && res.status < 400) {
+    throw new ApiHttpError(res.status, `HTTP ${res.status}: the instance answered with a redirect, which this request does not follow`);
+  }
   // Handle 204 No Content (e.g., PUT upsert returns empty body)
   if (res.status === 204 || res.headers.get("content-length") === "0") {
     if (!res.ok) throw new ApiHttpError(res.status, `HTTP ${res.status}`);
@@ -554,6 +561,7 @@ export async function tryAgentKeyFloor(
   method: string,
   body: unknown,
   keysDir: string,
+  transport: { refuseRedirects?: boolean } = {},
 ): Promise<any> {
   let keyFiles: string[] = [];
   try {
@@ -567,7 +575,7 @@ export async function tryAgentKeyFloor(
     const keyPath = join(keysDir, kf);
     try {
       const authHeader = buildEd25519Auth(agentId, method, requestTarget(url), keyPath);
-      return await sendJsonRequest(url, method, body, authHeader, isLocal);
+      return await sendJsonRequest(url, method, body, authHeader, isLocal, transport);
     } catch {
       // This key didn't work (unregistered, bad signature, network blip on
       // this one attempt) — try the next one.
@@ -710,6 +718,16 @@ export interface AuthedRequestOptions {
    * proven, such as `flair doctor`'s listener-only fallback.
    */
   signedOnly?: boolean;
+  /**
+   * Refuse a redirect instead of following it (flair#2708): the location a 3xx
+   * names receives no request, and that attempt throws `ApiHttpError` with its
+   * status. When the request falls back across agent keys (no resolved
+   * credential), the fallback loop catches that error like any other attempt's,
+   * so the caller can receive an earlier attempt's answer or a later key's
+   * success instead. Unset, a redirect is followed (fetch's default), as for
+   * every caller that does not pass this.
+   */
+  refuseRedirects?: boolean;
 }
 
 /** The Authorization scheme of an Ed25519 agent signature (buildEd25519Auth). */
@@ -847,13 +865,13 @@ export async function authedRequest(
   }
 
   try {
-    return await sendJsonRequest(url, method, body, authHeader, isLocal);
+    return await sendJsonRequest(url, method, body, authHeader, isLocal, { refuseRedirects: opts.refuseRedirects });
   } catch (err: unknown) {
     // Tier 5 — the floor. Only engages when NOTHING above resolved to
     // anything sendable (see module header for why a rejected credential
     // does not retry here).
     if (err instanceof ApiHttpError && err.noCredentials) {
-      const floorResult = await tryAgentKeyFloor(url, method, body, keysDir);
+      const floorResult = await tryAgentKeyFloor(url, method, body, keysDir, { refuseRedirects: opts.refuseRedirects });
       if (floorResult !== undefined) return floorResult;
     }
     throw err;

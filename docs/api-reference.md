@@ -56,8 +56,9 @@ the schema section so the catalog is complete.
 | **Federation body-sig** | Ed25519 over the request body + timestamp/nonce; pairing uses a one-time token | `/FederationPair`, `/FederationSync`. Harper role gate is open; the handler is the auth boundary. |
 | **OAuth bearer** | Access token from Flair's AS or `@harperfast/oauth` | `/mcp` only, and only when `FLAIR_MCP_OAUTH=true` plus a public issuer. Off by default (path 404s). |
 
-Anonymous HTTP is denied on every agent-facing table (and on `GET /Presence`, which needs a verified reader unless the instance enables the public-roster opt-in). A by-id miss and a
-by-id deny both return **404**, never 403, so ids are not an existence oracle.
+Anonymous HTTP is denied on every agent-facing table (and on `GET /Presence`, which needs a verified reader unless the instance enables the public-roster opt-in). By-id refusal
+status is resource-specific: Memory returns **404** for missing or unreadable rows, while Credential
+refuses a non-admin's by-id read of another principal's credential.
 
 **PATCH updates existing rows.** On every table, a PATCH from a caller that is
 not an administrator or a trusted internal call does not create or modify its
@@ -137,18 +138,18 @@ From `RECORD_TYPES` in `resources/record-types.ts`:
 
 | Scope | Meaning | Tables |
 |-------|---------|--------|
-| **open-within-org** | Own rows (any visibility) plus every other agent's non-private rows | Memory |
+| **open-within-org** | Base scope: own rows at any visibility plus other agents' non-private rows; non-admin Memory by-id and collection reads of retained closed skills additionally require readable current authority. | Memory |
 | **owner-only** | Only the owning agent (plus admin / internal) | Relationship, WorkspaceState, Asset, MemoryCandidate |
 | **none** | Any verified agent reads every row; no visibility field | Soul, OrgEvent, OrgSkillAssignment |
 
-These three scopes are **not** in `RECORD_TYPES`. Each is hand-implemented on its
-own resource:
+The following resources implement their read scopes outside `RECORD_TYPES`.
 
 | Scope | Meaning | Table | Enforced in |
 |-------|---------|-------|-------------|
 | **party** | Sender or recipient only | Message | `resources/Message.ts` |
 | **own-ledger** | Non-admin reads: only the contributing agent's rows, about memories it can read. Admin / internal reads: unfiltered | MemoryUsage | `resources/MemoryUsage.ts` |
 | **owner-or-grantee** | Either party on the grant | MemoryGrant | `resources/MemoryGrant.ts` |
+| **owner-only** | Non-admin reads match `principalId` to the caller; administrator/internal reads are unfiltered | Credential | `resources/Credential.ts` |
 
 Writes stamp `agentId` (or `authorId` / `from`) from the authenticated
 principal. A body that names a different owner is rejected or overwritten
@@ -213,12 +214,14 @@ does not apply this rule: its `params.agentId` is only an assignee filter.
 | POST / PUT / PATCH / DELETE | `/Soul` | **Operator / internal** | Not Ed25519. Learned Memory text cannot be copied in as Soul. See [docs/auth.md](auth.md#soul-authorship). |
 | POST | `/FeedSouls` | Ed25519 | Soul change feed (verified). |
 
-`Credential` (GET/POST verified; extra credentials for a principal; through
-this resource only an administrator or the server creates a `kind: "idp"`
-credential, changes its kind or identity fields, or reactivates it, and its
-owner may relabel, revoke or delete it, see
-[Who writes a mapping](access-control.md#who-writes-a-mapping)) and
-`Integration` (legacy 0.x platform rows; verified, prefer Credential) sit on
+`Credential` (extra credentials for a principal) requires authenticated HTTP
+access: non-admin by-id reads and writes are limited to the caller's
+`principalId`, while administrators and trusted internal callers may access
+other principals' credentials. Through this resource only an administrator or the server creates a
+`kind: "idp"` credential, changes its kind or identity fields, or reactivates
+it, and its owner may relabel, revoke or delete it (see
+[Who writes a mapping](access-control.md#who-writes-a-mapping)). `Credential`
+and `Integration` (legacy 0.x platform rows; verified, prefer Credential) sit on
 the same identity plane. `AgentKeyRegistration`
 (agent-key-registration.graphql) is the admin-read-only audit log of committed
 registrations; its key field is the fingerprint, not the key.
@@ -227,7 +230,7 @@ registrations; its key field is the fingerprint, not the key.
 
 | Method | Path | Auth | Read / write |
 |--------|------|------|--------------|
-| GET | `/Memory`, `/Memory/<id>` | Ed25519 | open-within-org. By-id deny = 404. |
+| GET | `/Memory`, `/Memory/<id>` | Ed25519 | Open-within-org base scope, with the additional current-authority check for non-admin reads of retained closed skills; denied by-id reads return 404 and denied collection rows are omitted. |
 | POST / PUT / PATCH | `/Memory` | Ed25519 | Own `agentId` only. Auto-embed on write. Visibility defaults from durability (`permanent`/`persistent` → `shared`, `standard`/`ephemeral` → `private`). Identified client older than 0.18.0 → **426** `stale_flair_client` (missing version is served). |
 | PATCH | `/Memory/<id>`, body `{"embedding": null, "embeddingModel": null}` | Ed25519 | Owner or admin. Re-embeds the stored row, writing `embedding`, `embeddingModel` and `updatedAt`, and answers `{ id, updatedAt }` (what `flair reembed` sends; it reads `embeddingModel` from the stored row afterwards). |
 | DELETE | `/Memory/<id>` | Ed25519 | Owner or admin. `permanent` owner-delete is allowed. |
@@ -241,7 +244,7 @@ registrations; its key field is the fingerprint, not the key.
 | POST | `/PromoteMemoryCandidate` | Ed25519 | Promote/reject with required rationale. |
 | POST | `/AutoPromoteCandidates` | Ed25519 | Auto-promote of eligible per-user ADK and continuity candidates. Answers `promoted` (memory ids), `skipped` (`{ id, reason }`), `incomplete` (`{ memoryId, candidateId, error }`: memory written and stamped, candidate update threw, candidate read back `pending`), `unconfirmed` (the same throw where the read-back did not confirm the promotion on this memory, plus `readBack` with what it found), `count` (`promoted` only) and `considered`. A later sweep can adopt the recorded memory of a candidate still pending, without a second memory, only when the memory's identity is present on the candidate and the memory still passes the sweep's checks. See [docs/rem.md](rem.md#auto-promote-adk-only). |
 | POST | `/FeedMemories` | Ed25519 | Ingest path; `agentId` stamped from the caller (`stamp-strict`). |
-| POST | `/MemoryArchive` | Ed25519 | Basement / restore (`memory_basement` / `memory_restore` on `/mcp`). |
+| POST | `/MemoryArchive` | Ed25519 | Basement / restore. Accepts `{ id, action: "basement" \| "restore" }`; a successful ordinary-memory operation returns HTTP 200 with Memory.put()'s write receipt, including `id`, `written`, `deduplicated` and any returned visibility or redaction fields. Read the memory to inspect its archive state. Read/write refusals retain their HTTP status and body; a persisted-row change detected by the archive's re-read returns `409 memory_changed`. |
 | POST | `/MemoryMaintenance` | Ed25519 or admin | Hygiene: expire ephemeral, archive old standard. Agent-scoped unless admin. |
 | POST | `/MemoryReindex` | Admin / verified per handler | Embedding / HNSW rebuild. |
 | POST | `/MemoryConsolidate` | Ed25519 | Dedup / consolidate. |
@@ -254,6 +257,21 @@ registrations; its key field is the fingerprint, not the key.
 
 Skill-tagged Memory rows embed from `trigger` (the recall signal), not
 `content`. MCP tools: `skill_store`, `skill_search`, `skill_get`.
+
+For non-admin Memory by-id and collection reads, a retained closed skill payload must pass both its
+stored owner/visibility check and its subject's current-authority check: a
+readable live skill referenced by a matching create/update head, or a readable
+delete head with `memoryId: null`. Missing, invalid or unreadable authority
+denies the payload even to its owner: by-id reads return 404 and collection
+reads omit it. Administrator and trusted internal reads are not subject to this additional
+check.
+
+Superseding a skill closes its predecessor with `validTo`; deleting a
+non-reserved skill closes its live head and appends a delete version while
+retaining the Memory row. Skill writes through Memory POST/PUT and
+`FeedMemories` that supply a non-null `archived` value other than `false` or a
+nonempty `validTo` are refused with `400 skill_state_requires_delete`, so basementing a
+skill is refused.
 
 #### Client version gate (HTTP 426 `stale_flair_client`)
 
@@ -389,8 +407,8 @@ comes from the token `sub`, never from tool arguments.
 | `memory_update` | Memory read-modify-write (in-place or `supersedes` version) |
 | `memory_get` | `GET /Memory/<id>` |
 | `memory_delete` | `DELETE /Memory/<id>` |
-| `memory_basement` | `POST /MemoryArchive` (archive) |
-| `memory_restore` | `POST /MemoryArchive` (restore) |
+| `memory_basement` | Memory read-modify-write setting `archived: true` |
+| `memory_restore` | Memory read-modify-write setting `archived: false` and removing `archivedAt` and `archivedBy` |
 | `skill_store` / `skill_search` / `skill_get` | Skill-tagged Memory |
 | `bootstrap` | `POST /BootstrapMemories` |
 | `soul_get` | `GET /Soul` |
@@ -583,7 +601,7 @@ ed25519 / idp) and **Integration** (legacy platform connection).
 | **OrgSkillAssignment** | memory.graphql | yes | Org-scope skill assignment (`skillName`, `skillRef`, `priority`, server-stamped `writer` / `sourceClass`) |
 | **OrgSkillAssignmentHistory** | memory.graphql | no | One row per accepted OrgSkillAssignment resource write (`assignmentId`, `op`, `actor`, `sourceClass`, `previousHash`) |
 | **MemoryDeletionHistory** | memory.graphql | no | History of confirmed physical deletions of permanent/persistent Memory rows through `Memory.delete` (including CLI hygiene and agent remove), appended in the delete transaction. Non-durable deletes, including maintenance expiry, append no history (`memoryId`, `memoryInstanceToken`, `durability`, `actor`, `sourceClass`, `at`); read by `flair integrity check` for history-backed attributions. `replicate: true` is declared explicitly to state the database default (a table replicates unless it opts out) |
-| **InstructionVersion** | memory.graphql | yes (read only) | History for single-row Soul resource writes and skill writes through Memory post/put/delete and FeedMemories (excluding `_reindex` and reserved-seed deletes). InstructionVersion resource REST clients cannot write or delete version records; the server appends them, and when a request's close fails it attempts to remove the version that request appended only while that version is still the head, reporting a compensation failure when the removal cannot be confirmed. Soul collection deletes and InstructionVersion REST writes are refused. The administrator operations API (`upsert` / `delete` under admin auth) is the separate raw-table exception described below. The operator's reserved seed row keeps its fixed id and is versioned in place. Skill writers share a subject-type lock, select rows where `archived !== true` and `validTo` is not a nonempty string, and refuse stale create/update targets or predecessors and ambiguous heads. Reads authorize `soul` subjects under Soul's verified-agent rule. Ordinary skill readers require readable stored visibility and current authority: matching subjects, a live skill Memory row owned by the head's owner, or a delete head with null `memoryId`; authority references require nonempty owners and explicit private/shared visibility. Admin/internal keep unfiltered skill reads; unknown subject types deny. `Memory.skillSubjectId` is nullable and server-owned. |
+| **InstructionVersion** | memory.graphql | yes (read only) | History for single-row Soul resource writes and skill writes through Memory post/put/delete and FeedMemories (excluding `_reindex` and reserved-seed deletes). InstructionVersion resource REST clients cannot write or delete version records; the server appends them, and when a request's close fails it attempts to remove the version that request appended only while that version is still the head, reporting a compensation failure when the removal cannot be confirmed. Soul collection deletes and InstructionVersion REST writes are refused. The administrator operations API (`upsert` / `delete` under admin auth) is the separate raw-table exception described below. The operator's reserved seed row keeps its fixed id and is versioned in place. Skill writers share a subject-type lock, select rows where `archived !== true`, `validTo` is not a nonempty string, and `expiresAt` is absent or a valid future timestamp, and refuse stale create/update targets or predecessors and ambiguous heads. Reads authorize `soul` subjects under Soul's verified-agent rule. Ordinary skill readers require readable stored visibility and current authority: matching subjects, a live skill Memory row owned by the head's owner, or a delete head with null `memoryId`; authority references require nonempty owners and explicit private/shared visibility. Admin/internal keep unfiltered skill reads; unknown subject types deny. `Memory.skillSubjectId` is nullable and server-owned. |
 | **WorkspaceState** | workspace.graphql | yes | Current work (`ref`, `provider`, `phase`, `entities`) |
 | **OrgEvent** | event.graphql | yes | Org-visible event (`authorId`, `kind`, `summary`, `entities`) |
 | **AgentReadPosition** | agent.graphql | no | Per-agent watermark (`agentId`, `stream`, `position`). HTTP via `/AgentReadPosition`, not raw-table REST. |
