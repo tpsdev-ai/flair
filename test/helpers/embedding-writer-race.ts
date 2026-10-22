@@ -2,8 +2,9 @@
  * embedding-writer-race.ts — shared real-Harper plumbing for the flair#2478
  * slice 3 embedding-writer suites (test/integration/*-lock-2478.test.ts).
  *
- * The composed component is a private copy of the built tree with two
- * test-only additions, the shapes slice 2 and flair#2656 already use:
+ * The composed component is a private copy of the built tree with three
+ * test-only additions (the first two are shapes slice 2 and flair#2656 already
+ * use):
  *  - the Memory write trace (test/fixtures/memory-write-trace-2478/probe.js),
  *    with the lock helper's callback wrapped so every traced `put`/`update`
  *    names the lock phase it ran under (`unattributed` outside any lock);
@@ -14,8 +15,8 @@
  *    a case can make the next embedding-space write-stamp notification throw
  *    (`arm.guard-stamp-fail`, consumed by the first call), through the guard's
  *    own test seam `_setGuardModelIdForTests`.
- * Both are inert unless armed. Nothing under resources/ or src/ changes or
- * references these additions.
+ * The two failure hooks are inert unless armed. Nothing under resources/ or src/
+ * changes or references these additions.
  *
  * Every instance is an ephemeral, home-isolated Harper this process started;
  * {@link assertOwnInstance} refuses any other target before the first call.
