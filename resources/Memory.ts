@@ -461,10 +461,10 @@ function writeOutcomeUnknownFor(id: any): Response {
  *  `pausePoint` (test-only, inert unless the fault-injection opt-in is set and
  *  armed) holds the provider call inside its bound; the pause's own limit
  *  outlasts the bound, so an armed pause ends in the bound's refusal. */
-function embedUnderLock(text: string, pausePoint?: string): Promise<number[] | null> {
+function embedUnderLock(text: string, pausePoint?: (limitMs: number) => Promise<void> | undefined): Promise<number[] | null> {
   return boundLockedProviderCall(async () => {
     if (pausePoint) {
-      const pause = txnPausePoint(pausePoint, process.env, memoryLockedProviderTimeoutMs() + PAUSE_LIMIT_MS);
+      const pause = pausePoint(memoryLockedProviderTimeoutMs() + PAUSE_LIMIT_MS);
       if (pause) await pause;
     }
     return getEmbedding(text, "document");
@@ -1976,7 +1976,7 @@ async function reembedAttempts(
       try {
         // Test-only pause point: inert unless the fault-injection opt-in is set
         // and armed; it holds this provider call inside its bound.
-        recomputed = await embedUnderLock(textToEmbed, "memory-reembed-recompute");
+        recomputed = await embedUnderLock(textToEmbed, (limitMs) => txnPausePoint("memory-reembed-recompute", process.env, limitMs));
       } catch (err) {
         if (err instanceof MemoryProviderTimeout) return settle(memoryProviderTimeoutResponse(), "memory_provider_timeout");
         throw err;
