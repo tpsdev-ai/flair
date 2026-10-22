@@ -10,6 +10,7 @@ import { Command } from "commander";
 import { buildTargetUrl as buildDeployUrl, deploy as deployToFabric, validateOptions as validateDeployOptions } from "../deploy.js";
 import { renderFleetSweepTable, sweepFleet } from "../fleet-verify.js";
 import { readCheckpointFile, verifyCheckpoint } from "../memory-id-checkpoint.js";
+import { deployUrlRefusal, safeUrl } from "../mqtt-off-deploy.js";
 
 export type DeployCli = {
   fleetSweepCallerExitMessage: (...args: any[]) => any;
@@ -42,13 +43,17 @@ function shellSingleQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-/** Print the same next steps after a successful deploy and in the CLI example test. */
+/**
+ * Print the same next steps after a successful deploy and in the CLI example
+ * test. The target is printed through safeUrl (scheme, host, port and path
+ * only), then shell-quoted.
+ */
 export function printDeployNextSteps(url: string): void {
   const dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
   console.log(`\nNext steps:`);
   console.log(dim(`  1. Set an admin password in Fabric Studio (Cluster Settings → Admin)`));
   console.log(dim(`  2. Save that password in an owner-only file (chmod 600), then seed your first agent:`));
-  console.log(`     flair agent add my-agent --target ${shellSingleQuote(url)} --admin-pass-file /path/to/admin-password`);
+  console.log(`     flair agent add my-agent --target ${shellSingleQuote(safeUrl(url))} --admin-pass-file /path/to/admin-password`);
 }
 
 export function register(program: Command): void {
@@ -76,6 +81,7 @@ program
   .option("--pkg-version <semver>", "Override version label (default: installed package version)")
   .option("--no-replicated", "Disable cluster-wide replication (default: replicated=true)")
   .option("--no-restart", "Do not restart the component after deploy (default: restart=true)")
+  .option("--keep-mqtt-config", "Leave the target's MQTT configuration as it is (default: set every MQTT listener off in the target's configuration before deploying, then, after the deploy's restart, request the shared workers' restart for an isolated application and read the saved configuration back; --no-restart and --no-verify skip those two; the listeners are not probed)")
   .option("--dry-run", "Resolve package, validate args, skip the deploy call")
   .option("--package-root <dir>", "Override package root (mainly for testing)")
   .option("--deployment-timeout <ms>", "Milliseconds harper waits for cluster-wide peer replication (env: FABRIC_DEPLOYMENT_TIMEOUT; default: 600000 — harper's own 120s default is too short for Fabric)")
@@ -83,7 +89,7 @@ program
   .option("--no-verify", "Skip post-deploy served-API verification (default: verify — on by design, so the CLI can't report success on an empty/broken deploy)")
   .option("--verify-timeout <ms>", "Milliseconds to wait for the served API to settle after harper's post-deploy restart before verifying (default: 300000)")
   .option("--verify-resource <name>", "Resource to verify is serving after deploy (repeatable; default: derived from the deployed package's dist/resources)", (val: string, prev: string[]) => [...prev, val], [] as string[])
-  .option("--ops-target <url>", "Operations API URL override for the Memory checkpoint report (env: FLAIR_OPS_TARGET)")
+  .option("--ops-target <url>", "Operations API URL override for the MQTT-off configuration, restart and read-back and the Memory checkpoint report (env: FLAIR_OPS_TARGET)")
   .option("--memory-checkpoint <path>", "After deploy, verify this instance's Memory ids against a `flair memory checkpoint` file and add a Memory id/tier check line to the report")
   .option("--deploy-retries <n>", "Retry the full harper deploy this many times, ONLY when peer replication is positively observed not to converge (default: 0 — retrying re-runs harper's component install and can escalate a transient replication warning into a hard ENOTEMPTY install failure; see flair#878)", "0")
   .option("--ignore-replication-errors", "If peer replication still hasn't converged, treat it as a non-fatal warning and succeed with an origin-only deploy (the peer catches up via federation sync or a later deploy)")
@@ -95,6 +101,25 @@ program
     const red = (s: string) => `\x1b[31m${s}\x1b[0m`;
     const yellow = (s: string) => `\x1b[33m${s}\x1b[0m`;
     const dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
+
+    // Every URL the deploy takes is checked before anything is printed: it
+    // needs an allowed scheme and a host, and a user name, password, query or
+    // fragment is refused (src/mqtt-off-deploy.ts). An operations API URL
+    // derived from a target that passes keeps its scheme, host and path with
+    // the operations port (deploy() checks it again).
+    {
+      const fabricOrg = opts.fabricOrg ?? process.env.FABRIC_ORG;
+      const fabricCluster = opts.fabricCluster ?? process.env.FABRIC_CLUSTER;
+      const earlyTarget: string | undefined = opts.target ?? (fabricOrg && fabricCluster ? buildDeployUrl({ fabricOrg, fabricCluster } as any) : undefined);
+      const refusal = deployUrlRefusal([
+        [earlyTarget, "deploy target URL (--target)"],
+        [opts.opsTarget || process.env.FLAIR_OPS_TARGET, "operations API URL (--ops-target / FLAIR_OPS_TARGET)"],
+      ]);
+      if (refusal) {
+        console.error(red(refusal));
+        process.exit(1);
+      }
+    }
 
     let fabricUser: string | undefined;
     let fabricPassword: string | undefined;
@@ -117,6 +142,7 @@ program
       version: opts.pkgVersion,
       replicated: opts.replicated !== false,
       restart: opts.restart !== false,
+      keepMqttConfig: opts.keepMqttConfig ?? false,
       dryRun: opts.dryRun ?? false,
       packageRoot: opts.packageRoot,
       deploymentTimeoutMs: Number(opts.deploymentTimeout ?? process.env.FABRIC_DEPLOYMENT_TIMEOUT ?? 600_000),
@@ -143,13 +169,18 @@ program
     for (const w of credWarnings) console.error(dim(w));
 
     const url = buildDeployUrl(deployOpts);
-    console.log(`${green("→")} Deploying ${deployOpts.project} to ${url}`);
+    console.log(`${green("→")} Deploying ${deployOpts.project} to ${safeUrl(url)}`);
     if (deployOpts.dryRun) console.log(dim("  (dry-run: skipping API call)"));
 
     try {
-      const result = await deployToFabric(deployOpts);
+      const result = await deployToFabric({
+        ...deployOpts,
+        // The target's operations API, resolved as for every remote command
+        // (--ops-target / FLAIR_OPS_TARGET, else derived from the target).
+        opsUrl: cli.resolveEffectiveOpsUrl({ target: url, opsTarget: opts.opsTarget }),
+      });
       if (result.dryRun) {
-        console.log(`${green("✓")} dry-run OK: ${result.project} ${result.version} ready to deploy to ${result.url}`);
+        console.log(`${green("✓")} dry-run OK: ${result.project} ${result.version} ready to deploy to ${safeUrl(result.url)}`);
         console.log(dim(`  package root: ${result.packageRoot}`));
         return;
       }
@@ -163,7 +194,7 @@ program
       } else {
         console.log(`\n${green("✓")} Flair ${result.version} deployed${deployOpts.verify ? " and verified serving" : ""}`);
       }
-      console.log(`\n  URL:     ${result.url}`);
+      console.log(`\n  URL:     ${safeUrl(result.url)}`);
       console.log(`  Project: ${result.project}`);
 
       if (opts.memoryCheckpoint) {

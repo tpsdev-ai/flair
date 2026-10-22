@@ -278,26 +278,19 @@ beforeAll(async () => {
   });
   mcpPrivateKeyPem = privateKey;
 
-  // startHarper copies process.env into the spawned Harper; restore it at once.
   pauseDir = mkdtempSync(join(tmpdir(), "flair-idpw-pause-"));
-  const envKeys = ["FLAIR_ENABLE_TEST_FAULT_INJECTION", "FLAIR_TEST_PAUSE_DIR", "FLAIR_MCP_OAUTH", "FLAIR_MCP_ISSUER", "FLAIR_MCP_JIT_PROVISION", "OAUTH_GITHUB_CLIENT_ID", "OAUTH_GITHUB_CLIENT_SECRET", "OAUTH_GITHUB_REDIRECT_URI"] as const;
-  const prior = envKeys.map((key) => [key, process.env[key]] as const);
-  process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION = "1";
-  process.env.FLAIR_TEST_PAUSE_DIR = pauseDir;
-  process.env.FLAIR_MCP_OAUTH = "true";
-  process.env.FLAIR_MCP_ISSUER = MCP_ISSUER;
-  process.env.OAUTH_GITHUB_CLIENT_ID = "idp-mapping-writes-client";
-  process.env.OAUTH_GITHUB_CLIENT_SECRET = "idp-mapping-writes-secret";
-  process.env.OAUTH_GITHUB_REDIRECT_URI = `${MCP_ISSUER}/oauth`;
-  delete process.env.FLAIR_MCP_JIT_PROVISION;
-  try {
-    harper = await startHarper();
-  } finally {
-    for (const [k, v] of prior) {
-      if (v === undefined) delete process.env[k];
-      else process.env[k] = v;
-    }
-  }
+  harper = await startHarper({
+    serverEnv: {
+      FLAIR_ENABLE_TEST_FAULT_INJECTION: "1",
+      FLAIR_TEST_PAUSE_DIR: pauseDir,
+      FLAIR_MCP_OAUTH: "true",
+      FLAIR_MCP_ISSUER: MCP_ISSUER,
+      FLAIR_MCP_JIT_PROVISION: "",
+      OAUTH_GITHUB_CLIENT_ID: "idp-mapping-writes-client",
+      OAUTH_GITHUB_CLIENT_SECRET: "idp-mapping-writes-secret",
+      OAUTH_GITHUB_REDIRECT_URI: `${MCP_ISSUER}/oauth`,
+    },
+  });
   assertOwnInstance(harper);
 
   await ops({

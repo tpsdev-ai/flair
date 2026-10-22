@@ -43,6 +43,11 @@ const FAKE_TARGET_HOST = "prod.acme.harperfabric.com";
 const FAKE_PEER_HOST = "node-b.acme.harperfabric.com";
 const FAKE_PEER_URL = "https://node-b.acme.harperfabric.com";
 
+// deploy() sends the MQTT-off set_configuration to the target's operations API
+// before Harper deploys (test/unit/deploy-mqtt-off.test.ts). These tests are
+// about other steps, so the target accepts it, with no network.
+const acceptingOperations = (async () => Response.json({ message: "Configuration successfully set." })) as unknown as typeof fetch;
+
 function fakeTree(project: string, mtime: string): unknown {
   return {
     name: "components",
@@ -472,6 +477,7 @@ describe("flair deploy: deploy() gating — --no-verify and --dry-run both skip 
         fabricUser: "admin",
         fabricPassword: "pw",
         packageRoot: pkgRoot,
+        operationsFetch: acceptingOperations,
         verify: false,
       });
       expect(result.dryRun).toBe(false);
@@ -497,6 +503,7 @@ describe("flair deploy: deploy() gating — --no-verify and --dry-run both skip 
         fabricUser: "admin",
         fabricPassword: "pw",
         packageRoot: pkgRoot,
+        operationsFetch: acceptingOperations,
         verify: false,
       });
       expect(result.dryRun).toBe(false);
@@ -686,6 +693,7 @@ if (behavior === 'success') {
           fabricUser: "admin",
           fabricPassword: "pw",
           packageRoot: pkgRoot,
+          operationsFetch: acceptingOperations,
           verify: false,
           deployRetries: 2,
           deployRetryBackoffMs: [1, 1],
@@ -710,6 +718,7 @@ if (behavior === 'success') {
         fabricUser: "admin",
         fabricPassword: "pw",
         packageRoot: pkgRoot,
+        operationsFetch: acceptingOperations,
         verify: false,
         deployRetries: 2,
         deployRetryBackoffMs: [1, 1],
@@ -737,6 +746,7 @@ if (behavior === 'success') {
           fabricUser: "admin",
           fabricPassword: "pw",
           packageRoot: pkgRoot,
+          operationsFetch: acceptingOperations,
           verify: false,
           deployRetries: 0,
         }),
@@ -762,6 +772,7 @@ if (behavior === 'success') {
         fabricUser: "admin",
         fabricPassword: "pw",
         packageRoot: pkgRoot,
+        operationsFetch: acceptingOperations,
         verify: false,
         deployRetries: 0,
         ignoreReplicationErrors: true,
@@ -790,6 +801,7 @@ if (behavior === 'success') {
         fabricUser: "admin",
         fabricPassword: "pw",
         packageRoot: pkgRoot,
+        operationsFetch: acceptingOperations,
         verify: false,
         deployRetries: 2,
         deployRetryBackoffMs: [1, 1],
@@ -823,6 +835,7 @@ if (behavior === 'success') {
         fabricUser: "admin",
         fabricPassword: "pw",
         packageRoot: pkgRoot,
+        operationsFetch: acceptingOperations,
         verify: false,
         deployRetries: 2,
         deployRetryBackoffMs: [1, 1],
@@ -853,6 +866,7 @@ if (behavior === 'success') {
         fabricUser: "admin",
         fabricPassword: "pw",
         packageRoot: pkgRoot,
+        operationsFetch: acceptingOperations,
         verify: false,
         deployRetries: 1,
         deployRetryBackoffMs: [1],
@@ -895,6 +909,7 @@ if (behavior === 'success') {
           fabricUser: "admin",
           fabricPassword: "pw",
           packageRoot: pkgRoot,
+          operationsFetch: acceptingOperations,
           verify: false,
           deployRetries: 2,
           deployRetryBackoffMs: [1, 1],
@@ -934,6 +949,7 @@ if (behavior === 'success') {
           fabricUser: "admin",
           fabricPassword: "pw",
           packageRoot: pkgRoot,
+          operationsFetch: acceptingOperations,
           verify: false,
           deployRetries: 2,
           deployRetryBackoffMs: [1, 1],
@@ -962,6 +978,7 @@ if (behavior === 'success') {
         fabricUser: "admin",
         fabricPassword: "pw",
         packageRoot: pkgRoot,
+        operationsFetch: acceptingOperations,
         verify: false,
         deployRetries: 1,
         deployRetryBackoffMs: [1],
@@ -985,6 +1002,7 @@ if (behavior === 'success') {
           fabricUser: "admin",
           fabricPassword: "pw",
           packageRoot: pkgRoot,
+          operationsFetch: acceptingOperations,
           verify: false,
           deployRetries: 0,
           convergenceCheck: false,

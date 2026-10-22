@@ -170,20 +170,7 @@ beforeAll(async () => {
   await cp(join(process.cwd(), "test/fixtures/inproc-app"), appDir, { recursive: true });
   await mkdir(join(appDir, "node_modules/@tpsdev-ai"), { recursive: true });
   await symlink(process.cwd(), join(appDir, "node_modules/@tpsdev-ai/flair"), "dir");
-  const saved = {
-    FLAIR_ENABLE_TEST_FAULT_INJECTION: process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION,
-    FLAIR_TEST_PAUSE_DIR: process.env.FLAIR_TEST_PAUSE_DIR,
-  };
-  process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION = "1";
-  process.env.FLAIR_TEST_PAUSE_DIR = pauseDir;
-  try {
-    harper = await startHarper({ cwd: appDir, harperBinDir: process.cwd() });
-  } finally {
-    for (const [key, value] of Object.entries(saved)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  }
+  harper = await startHarper({ serverEnv: { FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_TEST_PAUSE_DIR: pauseDir }, cwd: appDir, harperBinDir: process.cwd() });
   assertOwnInstance(harper);
   await ops({
     operation: "upsert", database: "flair", table: "Agent",

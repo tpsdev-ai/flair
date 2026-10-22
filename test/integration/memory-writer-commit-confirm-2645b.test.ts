@@ -214,28 +214,16 @@ beforeAll(async () => {
   pauseDir = mkdtempSync(join(tmpdir(), "flair-2645b-pause-"));
   stubDir = mkdtempSync(join(tmpdir(), "flair-2645b-stub-"));
   writeFileSync(join(stubDir, "generate-response.json"), JSON.stringify({ candidates: [] }));
-  const saved = {
-    FLAIR_ENABLE_TEST_FAULT_INJECTION: process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION,
-    FLAIR_TEST_PAUSE_DIR: process.env.FLAIR_TEST_PAUSE_DIR,
-  };
-  process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION = "1";
-  process.env.FLAIR_TEST_PAUSE_DIR = pauseDir;
-  try {
-    harper = await startHarper({
-      appendRootConfigYaml: [
-        "models:",
-        "  generative:",
-        "    default:",
-        `      backend: ${resolve(process.cwd(), "test/fixtures/stub-generative-backend.mjs")}`,
-        `      responseFile: ${join(stubDir, "generate-response.json")}`,
-      ].join("\n"),
-    });
-  } finally {
-    for (const [key, value] of Object.entries(saved)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  }
+  harper = await startHarper({
+    serverEnv: { FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_TEST_PAUSE_DIR: pauseDir },
+    appendRootConfigYaml: [
+      "models:",
+      "  generative:",
+      "    default:",
+      `      backend: ${resolve(process.cwd(), "test/fixtures/stub-generative-backend.mjs")}`,
+      `      responseFile: ${join(stubDir, "generate-response.json")}`,
+    ].join("\n"),
+  });
   assertOwnInstance(harper);
   await ops({
     operation: "upsert", database: "flair", table: "Agent",

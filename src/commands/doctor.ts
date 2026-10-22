@@ -21,6 +21,7 @@ import { AGENT_ID_RULE } from "../lib/agent-id-rule.js";
 import { agentHomeEndpoint, readAgentHomeRows, resolveTargetInstanceIdentity } from "../lib/agent-home.js";
 import { describeInstructionEventImpostors, readInstructionEventTables } from "../lib/instruction-event-doctor.js";
 import { describeLiveSkillTombstones, readSkillTombstoneTables } from "../lib/skill-tombstone-doctor.js";
+import { MQTT_CONFIGURATION_NOTE, mqttListenerSection, readInstanceConfiguration } from "../lib/mqtt-listener-doctor.js";
 import { readAgentRoster } from "../lib/agent-roster.js";
 import { flairConfigYamlCandidates, readPortFromYamlFile, resolveFlairConfigYaml } from "../lib/doctor-config-path.js";
 import { collectFederationEnv, describeFederationDriverFinding, federationPeersConfigured, loadYamlDoc } from "../lib/doctor-federation-driver.js";
@@ -2496,6 +2497,41 @@ program
             console.log(`     ${render.wrap(render.c.dim, "Report only:")} this check does not modify the store.`);
           }
         }
+      }
+
+      // 8f. MQTT listeners — report when the instance's root configuration
+      // starts an MQTT listener (TCP, TLS or the WebSocket path). Flair runs
+      // Harper with MQTT off; the read is the instance's own configuration,
+      // through the same verified ops endpoint and admin credential as the
+      // sections above. Read-only: nothing is changed. A configuration read
+      // that fails, or an answer that is not a recognizable root
+      // configuration (`{}` included), is NOT RUN and counted. It reports the
+      // saved configuration, not the running listeners, and prints that note
+      // on every path below, the two NOT RUN paths included.
+      console.log(`\n  ${render.wrap(render.c.bold, "MQTT listeners (configuration)")}`);
+      if (rosterNotRun) {
+        issues++;
+        console.log(`  ${render.icons.warn} MQTT listeners: NOT RUN — ${rosterNotRun.reason}`);
+        console.log(`     ${render.wrap(render.c.dim, MQTT_CONFIGURATION_NOTE)}`);
+        console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${rosterNotRun.remedy}`);
+      } else if (!rosterAdminPass || rosterOpsPort === null) {
+        issues++;
+        const reason = rosterProbe.credIssue
+          ? `the admin credential could not be resolved (${rosterProbe.credIssue})`
+          : rosterAdminPass ? "the ops endpoint was not verified" : "no admin credentials to read the instance configuration";
+        console.log(`  ${render.icons.warn} MQTT listeners: NOT RUN — ${reason}.`);
+        console.log(`     ${render.wrap(render.c.dim, MQTT_CONFIGURATION_NOTE)}`);
+      } else {
+        const configuration = await readInstanceConfiguration({
+          opsUrl: `http://127.0.0.1:${rosterOpsPort}/`,
+          authHeader: `Basic ${Buffer.from(`${resolveAdminUser()}:${rosterAdminPass}`).toString("base64")}`,
+          timeoutMs: 5000,
+        });
+        const section = mqttListenerSection(configuration);
+        if (section.status !== "ok") issues++;
+        console.log(`  ${section.status === "ok" ? render.icons.ok : render.icons.warn} ${section.line}`);
+        console.log(`     ${render.wrap(render.c.dim, section.note)}`);
+        if (section.fix) console.log(`     ${render.wrap(render.c.dim, "Fix:")} ${section.fix}`);
       }
     }
 

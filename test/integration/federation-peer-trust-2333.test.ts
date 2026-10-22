@@ -182,38 +182,25 @@ async function withPaused<T>(point: string, trigger: () => Promise<Response>, co
 
 beforeAll(async () => {
   pauseDir = mkdtempSync(join(tmpdir(), "flair-2333-pause-"));
-  const saved = {
-    FLAIR_ENABLE_TEST_FAULT_INJECTION: process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION,
-    FLAIR_TEST_PAUSE_DIR: process.env.FLAIR_TEST_PAUSE_DIR,
-  };
-  process.env.FLAIR_ENABLE_TEST_FAULT_INJECTION = "1";
-  process.env.FLAIR_TEST_PAUSE_DIR = pauseDir;
-  try {
-    // The whole file runs against a composed copy of the built component that
-    // adds the failing re-pair Peer-write module (test/helpers/
-    // host-pointer-failing-component.ts). It throws only for an armed peer ID.
-    component = componentWithFailingRepairPeerWrite();
-    appendFileSync(join(component.dir, FAILING_REPAIR_PEER_WRITE_MODULE_REL), `
+  // The whole file runs against a composed copy of the built component that
+  // adds the failing re-pair Peer-write module (test/helpers/
+  // host-pointer-failing-component.ts). It throws only for an armed peer ID.
+  component = componentWithFailingRepairPeerWrite();
+  appendFileSync(join(component.dir, FAILING_REPAIR_PEER_WRITE_MODULE_REL), `
 const peerGet = Peer.get;
 Peer.get = function (id, ...rest) {
   const dir = process.env.FLAIR_TEST_PAUSE_DIR;
   if (dir && typeof id === "string") {
-    const arm = join(dir, "arm.converted-peer-read-fail." + id);
-    if (existsSync(arm)) {
-      unlinkSync(arm);
-      throw new Error("test component: forced converted first-pair read-back failure");
-    }
+  const arm = join(dir, "arm.converted-peer-read-fail." + id);
+  if (existsSync(arm)) {
+    unlinkSync(arm);
+    throw new Error("test component: forced converted first-pair read-back failure");
+  }
   }
   return peerGet.call(this, id, ...rest);
 };
 `);
-    harper = await startHarper({ cwd: component.dir });
-  } finally {
-    for (const [key, value] of Object.entries(saved)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  }
+  harper = await startHarper({ serverEnv: { FLAIR_ENABLE_TEST_FAULT_INJECTION: "1", FLAIR_TEST_PAUSE_DIR: pauseDir }, cwd: component.dir });
   assertOwnInstance(harper);
 }, 240_000);
 
@@ -1184,10 +1171,12 @@ describe("flair#2656 — a first-time pair confirms the committed row after its 
       frozen = await startHarper({
         cwd: component.dir,
         env: {
+          NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --require=${clockPreload}`.trim(),
+        },
+        serverEnv: {
           FLAIR_ENABLE_TEST_FAULT_INJECTION: "1",
           FLAIR_TEST_PAUSE_DIR: pauseDir,
           FLAIR_TEST_FROZEN_NOW: String(frozenAt),
-          NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --require=${clockPreload}`.trim(),
         },
       });
       assertOwnInstance(frozen);

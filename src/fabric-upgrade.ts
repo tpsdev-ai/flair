@@ -33,6 +33,7 @@ import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
 import { createRegistryNoticePrinter, fetchDeclaredDependencies, fetchLatestVersion } from "./lib/npm-registry.js";
 import type { DeployOptions, DeployResult } from "./deploy.js";
+import { assertSafeUrl, safeUrl } from "./mqtt-off-deploy.js";
 
 /**
  * Minimum harper version whose component packager works when the
@@ -219,6 +220,12 @@ export interface FabricUpgradeOptions {
   check?: boolean; // plan only, do not deploy
   restart?: boolean;
   replicated?: boolean;
+  /** `--keep-mqtt-config`: deploy() leaves the target's MQTT configuration as it is (DeployOptions.keepMqttConfig). */
+  keepMqttConfig?: boolean;
+  /** `--no-verify` (`false`): deploy() skips its served-API verification and its post-restart MQTT step (DeployOptions.verify). */
+  verify?: boolean;
+  /** The target's operations API URL for deploy()'s MQTT-off configuration, restart and read-back (DeployOptions.opsUrl). */
+  opsUrl?: string;
   /**
    * flair#878: these were reachable from `flair deploy` but NOT from
    * `flair upgrade --target` — this module built its deploy() options by hand
@@ -478,11 +485,16 @@ export async function fabricUpgrade(
 ): Promise<FabricUpgradeResult> {
   const deps: FabricUpgradeDeps = { ...defaultDeps(), ...injected };
   const log = deps.log ?? (() => {});
+  // Every URL the upgrade uses has an allowed scheme and a host, and is
+  // scheme, host, port and path only; anything else is refused before
+  // anything is fetched or printed.
+  assertSafeUrl(opts.target, "deploy target URL");
+  if (opts.opsUrl !== undefined) assertSafeUrl(opts.opsUrl, "operations API URL");
 
   // Step 1 + diff.
   const plan = await planFabricUpgrade(opts, deps);
 
-  log(`Fabric:  ${plan.target}`);
+  log(`Fabric:  ${safeUrl(plan.target)}`);
   log(`Project: ${plan.project}`);
   log(
     `Version: ${plan.currentVersion ?? "(unknown)"} → ${plan.targetVersion}` +
@@ -526,7 +538,7 @@ export async function fabricUpgrade(
     const packageRoot = resolveStagedFlairRoot(stagingDir);
 
     // Step 3: REUSE deploy() — do not reimplement packaging/spawn.
-    log(`Deploying ${plan.project} ${plan.targetVersion} to ${plan.target} ...`);
+    log(`Deploying ${plan.project} ${plan.targetVersion} to ${safeUrl(plan.target)} ...`);
     const result = await deps.deploy({
       target: opts.target,
       project: plan.project,
@@ -534,7 +546,10 @@ export async function fabricUpgrade(
       fabricUser: opts.fabricUser,
       fabricPassword: opts.fabricPassword,
       restart: opts.restart,
+      verify: opts.verify,
       replicated: opts.replicated,
+      keepMqttConfig: opts.keepMqttConfig,
+      opsUrl: opts.opsUrl,
       packageRoot,
       // flair#878 — see FabricUpgradeOptions: these used to stop at this
       // boundary, which is why the upgrade path could not act on harper's own

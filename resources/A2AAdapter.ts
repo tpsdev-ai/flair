@@ -274,6 +274,7 @@ function callerCatchupReader(participantId: string, callerAgent: string, callerI
 }
 
 export class A2AAdapter extends Resource {
+
   // A2A discovery surface — agent-card metadata (GET) is intentionally
   // public so other agents/clients can discover this Flair as a memory
   // peer. POST is JSON-RPC for actions (message/send writes OrgEvents,
@@ -499,3 +500,35 @@ export class A2AAdapter extends Resource {
 
 // Expose exact lowercase endpoint required by A2A clients: POST /a2a
 export class a2a extends A2AAdapter {}
+
+/**
+ * Harper's REST layer dispatches a request whose `Accept` header is exactly
+ * `text/event-stream` as CONNECT, not POST (#2717), so a spec-shaped A2A
+ * client's `message/stream` POST reaches the resource's static connect instead
+ * of the post dispatch. The connect override forwards ANY POST whose body is a
+ * non-array object with string `jsonrpc` and `method` fields to the same static
+ * post dispatch (including `"jsonrpc": "1.0"`), which applies its
+ * authentication, caller-match and params checks; every other request keeps the
+ * default connect handling. post's answer is returned as post gives it: an SSE
+ * stream for an admitted message/stream, JSON-RPC objects for other methods and
+ * for refusals.
+ *
+ * Assigned after the class because Harper's typings describe the base static
+ * verb dispatch, not a subclass override.
+ */
+(A2AAdapter as any).connect = async function connect(this: any, target: any, _data: any, request?: any) {
+  let body: any;
+  try {
+    body = await request?.data;
+  } catch {
+    body = undefined;
+  }
+  if (
+    request?.method === "POST" &&
+    body && typeof body === "object" && !Array.isArray(body) &&
+    typeof body.jsonrpc === "string" && typeof body.method === "string"
+  ) {
+    return this.post(target, body, request);
+  }
+  return (Resource as any).connect.call(this, target, _data, request);
+};

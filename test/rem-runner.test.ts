@@ -27,6 +27,7 @@ import {
   formatAutoPromoted,
   type ApiCall,
   type RunnerOpts,
+  type RunnerLogRow,
 } from "../src/rem/runner.ts";
 import { extractSnapshot } from "../src/rem/snapshot.ts";
 import {
@@ -908,6 +909,12 @@ describe("ADK auto-promote wiring (#1205b-2)", () => {
     expect(formatAutoPromoted({ promoted: 0, skipped: 3, unconfirmed: 2 })).toBe(
       "Auto-promoted: 0 to own memory (3 skipped); 2 unconfirmed (memory written, candidate update threw, promotion on this row not confirmed)",
     );
+  });
+
+  it("formats an autoPromoted row written before the incomplete and unconfirmed counts existed", () => {
+    // Those rows carry only the two counts the sweep always wrote.
+    const row: Pick<RunnerLogRow, "autoPromoted"> = { autoPromoted: { promoted: 2, skipped: 1 } };
+    expect(formatAutoPromoted(row.autoPromoted!)).toBe("Auto-promoted: 2 to own memory (1 skipped)");
   });
 
   it("does NOT call /AutoPromoteCandidates for a NON-ADK agent (no adk tags)", async () => {

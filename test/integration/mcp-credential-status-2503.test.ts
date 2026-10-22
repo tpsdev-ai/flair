@@ -128,14 +128,7 @@ beforeAll(async () => {
   await mkdir(join(appDir, "node_modules", "@tpsdev-ai"), { recursive: true });
   await symlink(REPO_ROOT, join(appDir, "node_modules", "@tpsdev-ai", "flair"), "dir");
   // JIT ON for the whole file: a revoked mapping must NOT fall through to it.
-  const prior = process.env.FLAIR_MCP_JIT_PROVISION;
-  process.env.FLAIR_MCP_JIT_PROVISION = "1";
-  try {
-    harper = await startHarper({ cwd: appDir, harperBinDir: REPO_ROOT });
-  } finally {
-    if (prior === undefined) delete process.env.FLAIR_MCP_JIT_PROVISION;
-    else process.env.FLAIR_MCP_JIT_PROVISION = prior;
-  }
+  harper = await startHarper({ cwd: appDir, harperBinDir: REPO_ROOT, serverEnv: { FLAIR_MCP_JIT_PROVISION: "1" } });
   // Talk only to this test's own ephemeral instance.
   const http = new URL(harper.httpURL);
   const ops = new URL(harper.opsURL);
