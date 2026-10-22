@@ -6,11 +6,13 @@
  * HDB_ADMIN_PASSWORD and FLAIR_ADMIN_PASS environment variables the script
  * exports with the same value. By default the script writes a generated
  * password to a 0600 file inside a fresh `mktemp -d` directory under
- * RUNNER_TEMP (or /tmp), fails when that directory resolves inside LOG_DIR, the
- * working directory or GITHUB_WORKSPACE, and removes it on exit through an
- * EXIT trap installed right after `mktemp -d`. An explicit PASS_FILE is not
+ * RUNNER_TEMP (or /tmp) and removes that directory on exit through an EXIT
+ * trap installed right after `mktemp -d`. An explicit PASS_FILE is not
  * removed; at the init step the script writes a generated password into it
- * when it is missing or empty, and sets its mode to 0600.
+ * when it is missing or empty, and sets its mode to 0600. For either, before
+ * touching the file, the script resolves its directory (following symlinks on
+ * the file itself) and fails when it cannot, or when that directory is or lies
+ * under LOG_DIR, the working directory or GITHUB_WORKSPACE.
  *
  * The live canary proves the default path boots; it does not read the file's
  * location, mode or lifetime. This pins them hermetically: a stub FLAIR_BIN
@@ -252,6 +254,34 @@ const UNUSABLE: Array<[string, (sb: Sandbox) => string, string]> = [
   ],
 ];
 
+/** Explicit PASS_FILE paths that resolve into LOG_DIR, each with the path a write would land on; none exists beforehand. */
+const EXPLICIT_PROTECTED: Array<[string, (sb: Sandbox) => { passFile: string; landing: string }]> = [
+  [
+    "a missing file directly in LOG_DIR",
+    (sb) => ({ passFile: join(sb.logs, "admin-pass-input"), landing: join(sb.logs, "admin-pass-input") }),
+  ],
+  [
+    "a missing file in a directory that is a symlink into LOG_DIR",
+    (sb) => {
+      const target = join(sb.logs, "sub");
+      mkdirSync(target, { recursive: true });
+      const link = join(sb.root, "pass-dir-link");
+      symlinkSync(target, link);
+      return { passFile: join(link, "admin-pass-input"), landing: join(target, "admin-pass-input") };
+    },
+  ],
+  [
+    "a symlink that points into LOG_DIR",
+    (sb) => {
+      const landing = join(sb.logs, "admin-pass-input");
+      const link = join(sb.root, "operator", "pass-link");
+      mkdirSync(dirname(link), { recursive: true });
+      symlinkSync(landing, link);
+      return { passFile: link, landing };
+    },
+  ],
+];
+
 /** Each case puts RUNNER_TEMP where the generated directory must not resolve. */
 const OVERLAPS: Array<[string, (sb: Sandbox) => Record<string, string>]> = [
   ["inside LOG_DIR", (sb) => ({ RUNNER_TEMP: join(sb.logs, "runner-temp") })],
@@ -336,8 +366,7 @@ describe("check-instance-boot.sh — the admin-pass input file handed to flair i
       mkdirSync(extra.RUNNER_TEMP!, { recursive: true });
       const r = runBoot(sb, extra);
       expect(r.status).toBe(1);
-      expect(r.stderr).toContain("admin-pass input directory");
-      expect(r.stderr).toContain("is inside");
+      expect(r.stderr).toContain("resolves inside");
       expect(existsSync(sb.record)).toBe(false);
       const made = mktempDirs(sb);
       expect(made).toHaveLength(1);
@@ -367,6 +396,64 @@ describe("check-instance-boot.sh — the admin-pass input file handed to flair i
     const made = mktempDirs(sb);
     expect(made).toHaveLength(1);
     expect(existsSync(made[0]!)).toBe(false);
+  }, CASE_BUDGET_MS);
+
+  test.each(EXPLICIT_PROTECTED)(
+    "explicit PASS_FILE, %s: the script exits 1 before flair init, and nothing is written there",
+    (_what, place) => {
+      const sb = sandbox();
+      const { passFile, landing } = place(sb);
+      const r = runBoot(sb, { PASS_FILE: passFile });
+      expect(r.status).toBe(1);
+      expect(readRecordIfAny(sb)).toBeNull();
+      expect(r.stderr).toContain("resolves inside");
+      expect(r.stderr).toContain(passFile);
+      expect(existsSync(landing)).toBe(false);
+    },
+    CASE_BUDGET_MS,
+  );
+
+  test("explicit PASS_FILE, an existing 0644 file in the working directory: the script exits 1 before flair init, content and mode untouched", () => {
+    const sb = sandbox();
+    const passFile = join(sb.work, "admin-pass-input");
+    writeFileSync(passFile, OPERATOR_VALUE);
+    chmodSync(passFile, 0o644);
+
+    const r = runBoot(sb, { PASS_FILE: passFile });
+    expect(r.status).toBe(1);
+    expect(readRecordIfAny(sb)).toBeNull();
+    expect(r.stderr).toContain("resolves inside");
+    expect(readFileSync(passFile, "utf8")).toBe(OPERATOR_VALUE);
+    expect(statSync(passFile).mode & 0o777).toBe(0o644);
+  }, CASE_BUDGET_MS);
+
+  test("explicit PASS_FILE whose directory does not exist: the script exits 1 before flair init and does not create that directory", () => {
+    const sb = sandbox();
+    const missingDir = join(sb.root, "no-such-dir");
+    const r = runBoot(sb, { PASS_FILE: join(missingDir, "admin-pass-input") });
+    expect(r.status).toBe(1);
+    expect(readRecordIfAny(sb)).toBeNull();
+    expect(r.stderr).toContain("cannot resolve the directory of admin-pass input file");
+    expect(existsSync(missingDir)).toBe(false);
+  }, CASE_BUDGET_MS);
+
+  test("explicit PASS_FILE outside LOG_DIR, the working directory and GITHUB_WORKSPACE: a missing file is filled, handed to flair init at 0600, and left in place", () => {
+    const sb = sandbox();
+    const workspace = join(sb.root, "workspace");
+    mkdirSync(workspace, { recursive: true });
+    const passFile = join(sb.root, "operator", "admin-pass-input");
+    mkdirSync(dirname(passFile), { recursive: true });
+
+    const r = runBoot(sb, { PASS_FILE: passFile, GITHUB_WORKSPACE: workspace });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("flair init failed");
+    const rec = readRecord(sb);
+    expect(passFileArg(rec)).toBe(passFile);
+    expect(rec.pass?.mode).toBe(0o600);
+    const generated = rec.pass?.value ?? "";
+    expect(generated.trim().length).toBeGreaterThanOrEqual(16);
+    expect(readFileSync(passFile, "utf8")).toBe(generated);
+    expect(mktempDirs(sb)).toEqual([]);
   }, CASE_BUDGET_MS);
 
   test("an explicit nonempty 0600 PASS_FILE is passed as given and left in place with the same content and mode", () => {
@@ -409,7 +496,7 @@ describe("check-instance-boot.sh — the admin-pass input file handed to flair i
       try {
         const r = runBoot(sb, { PASS_FILE: passFile });
         expect(r.status).toBe(1);
-        // The script exports the password right before flair init, so init never running
+        // The script exports the credential variables right before flair init, so init never running
         // means no process inherited those exports, empty or otherwise.
         expect(readRecordIfAny(sb)).toBeNull();
         expect(r.stderr).toContain(reason);
