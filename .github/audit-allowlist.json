@@ -84,6 +84,21 @@
       "removeWhen": "flair moves to a harper release whose installed tree resolves @fastify/static >=10.1.2 (the same move that retires GHSA-83w8-p2f5-377r), through its npm-shrinkwrap or, for a release that ships none, its declared range; or flair stops depending on harper. As of 2026-10-22 no published harper release does."
     },
     {
+      "ghsa": "GHSA-389g-gv7q-r4x8",
+      "package": "fastify",
+      "severity": "low",
+      "class": "vendor-pinned",
+      "sources": [
+        "npm-install"
+      ],
+      "approvedBy": "tps-flint",
+      "introducedBy": "harper -> fastify",
+      "reason": "harper's npm-shrinkwrap pins fastify 5.12.5 in its installed tree: harper 5.3.1, the version flair pins (package.json:69), places it at node_modules/harper/node_modules/fastify in an npm install of flair. flair's own lockfile resolves the fixed version (the root override fastify ^5.12.7 resolves 5.12.7 in bun.lock). flair does not import fastify.",
+      "added": "2026-10-22",
+      "expires": "2026-11-05",
+      "removeWhen": "flair moves to a harper release whose installed tree resolves fastify >=5.12.6, through its npm-shrinkwrap or, for a release that ships none, its declared range; or flair stops depending on harper."
+    },
+    {
       "ghsa": "GHSA-rv73-9c8w-jp4c",
       "package": "validate.js",
       "severity": "moderate",
@@ -94,9 +109,9 @@
       ],
       "approvedBy": "tps-flint",
       "introducedBy": "harper -> validate.js",
-      "reason": "No fixed release exists — the latest published validate.js is itself inside the vulnerable range, and the package is effectively unmaintained. It is also resolved inside harper's pinned build, so even a future fix arrives via harper rather than directly. ReDoS in a validator flair does not invoke.",
-      "added": "2026-07-27",
-      "expires": "2026-10-25",
+      "reason": "Renewed 2026-10-22 after re-reading against harper 5.3.1, the version flair pins (package.json:69) (first added 2026-07-27). No fixed release exists: npm's latest validate.js is 0.13.1 (released 2019), inside the affected range (<=0.13.1). Resolved copies: one in bun.lock (validate.js 0.13.1, pulled only by harper's exact 0.13.1) and harper 5.3.1's npm-shrinkwrap pin 0.13.1 (node_modules/harper/node_modules/validate.js in an npm install of flair); harper 5.3.2 and 5.3.3 declare the same exact 0.13.1. flair's own code does not import validate.js.",
+      "added": "2026-10-22",
+      "expires": "2026-11-05",
       "removeWhen": "validate.js publishes a fixed release AND harper picks it up, or flair stops depending on harper. The gate flags the first half automatically."
     },
     {
