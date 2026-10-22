@@ -23,6 +23,7 @@ import {
   ABSOLUTE_MAX_MEMORIES_PER_RUN,
   DEFAULT_HEALTH_PREFLIGHT_MS,
   PENDING_NO_ADMIN_REASON,
+  formatCount,
   formatPendingCandidates,
   formatAutoPromoted,
   type ApiCall,
@@ -514,12 +515,17 @@ describe("failure modes", () => {
     const r = await runNightlyCycle(baseOpts({
       apiCall: makeApi({
         "GET:/Memory": () => { throw new Error("upstream is down"); },
+        "GET:/Soul": () => [],
       }),
     }));
     expect(r.status).toBe("failed");
     expect(r.snapshotPath).toBeUndefined();
     expect(r.logRow.errors.length).toBe(1);
     expect(r.logRow.errors[0]).toContain("upstream is down");
+    // flair#2684: the failed read is unknown, not an empty store.
+    expect(r.logRow.memoryCount).toEqual({ state: "unknown", reason: "upstream is down" });
+    expect(formatCount(r.logRow.memoryCount)).toBe("unknown (upstream is down)");
+    expect(formatCount(r.logRow.soulCount)).toBe("0");
 
     // Log row recorded.
     const rows = readLogRows();
@@ -538,6 +544,23 @@ describe("failure modes", () => {
     }));
     expect(r.status).toBe("failed");
     expect(r.logRow.errors[0]).toContain("soul gone");
+    // flair#2684: the Memory read still reports its exact count.
+    expect(formatCount(r.logRow.memoryCount)).toBe("1");
+    expect(r.logRow.soulCount).toEqual({ state: "unknown", reason: "soul gone" });
+    expect(r.logRow.errors).toEqual(["soul-count: soul gone"]);
+  });
+
+  it("reports an unrecognised Memory read body as unknown, not 0 (flair#2684)", async () => {
+    const r = await runNightlyCycle(baseOpts({
+      apiCall: makeApi({
+        "GET:/Memory": () => ({ error: "fixture" }),
+        "GET:/Soul": () => [],
+      }),
+    }));
+    expect(r.status).toBe("failed");
+    expect(r.logRow.memoryCount).toEqual({ state: "unknown", reason: "GET /Memory returned an unexpected response shape" });
+    expect(r.logRow.errors).toEqual(["memory-count: GET /Memory returned an unexpected response shape"]);
+    expect(formatCount(r.logRow.memoryCount)).toBe("unknown (GET /Memory returned an unexpected response shape)");
   });
 
   it("reports a failed candidate count as unknown with the error and fails the run (flair#2680)", async () => {
