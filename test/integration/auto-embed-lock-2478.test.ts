@@ -6,7 +6,8 @@
  * writes of the same id, real Harper.
  *
  * The backfill reads the row and computes its vector with no lock held, then
- * takes the id's per-id Memory write lock once (phase `auto-embed`). A held
+ * takes the id's per-id Memory write lock (phase `auto-embed`): one
+ * non-waiting acquisition per attempt, and a retry acquires it again. A held
  * id, or an id with an unresolved write outcome, is skipped and logged.
  * Holding the lock, the shared write-back helper's first read is the committed
  * row: a row that already holds a full vector is not written, and a row whose

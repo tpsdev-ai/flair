@@ -201,8 +201,10 @@ async function backfillEmbedding(memoryId: string): Promise<void> {
     // vector write.
     //
     // flair#2478 slice 3: the write runs under the id's per-id Memory write lock
-    // shared with the owner verbs (resources/memory-write-lock.ts), taken once,
-    // after the vector is computed: no provider call runs while the id is locked.
+    // shared with the owner verbs (resources/memory-write-lock.ts): one
+    // non-waiting acquisition per attempt of the loop below, taken after that
+    // attempt's vector is computed, so no provider call runs while the id is
+    // locked; a retry acquires it again.
     // A held id, an id with an unresolved write outcome, or a store with no lock
     // is skipped and logged, and nothing is written. A skipped backfill is not
     // retried by this call. The backfill starts only from the post-response hook

@@ -13,8 +13,9 @@
  *    (an owner write can make it current meanwhile, as the owner-first case
  *    shows).
  *  - The `.content`-suffix fallback: for an id the by-id PATCH cannot address,
- *    the migration computes the vector first, then takes the id's lock once
- *    (phase `embedding-stamp-content-suffix`). A held id or an outcome-unknown
+ *    the migration computes the vector first, then takes the id's lock
+ *    (phase `embedding-stamp-content-suffix`) with one non-waiting
+ *    acquisition per attempt; a retry acquires it again. A held id or an outcome-unknown
  *    marker is written nothing and left uncounted; the next scan decides
  *    whether it is still stale. Under the lock it re-reads the committed row
  *    and writes only if the row is the one it embedded; it stages an

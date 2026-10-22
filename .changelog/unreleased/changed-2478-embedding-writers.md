@@ -8,7 +8,8 @@
   same update.
 
   The embedding-stamp migration's `.content`-suffix fallback computes its
-  vector first, then takes the id's lock once. A held id, an id with an
+  vector first, then takes the id's lock with one non-waiting acquisition
+  per attempt (a retry acquires it again). A held id, an id with an
   unresolved write outcome, or a store with no lock is logged, written nothing
   and left uncounted; the next scan decides whether the row is still stale.
   Holding the lock, it writes only if the committed row is the one it
@@ -21,9 +22,9 @@
   The embedding backfill that follows a successful HTTP Memory write signed
   by a verified Ed25519 agent (a Basic-admin write returns from the auth
   middleware before that step and starts none) also computes its vector
-  first and takes the id's lock
-  once; a held id or an id with an unresolved write outcome is skipped and
-  logged. Holding the lock, it writes only if the committed row's text is the
+  first and takes the id's lock with one non-waiting acquisition per
+  attempt (a retry acquires it again); a held id or an id with an
+  unresolved write outcome is skipped and logged. Holding the lock, it writes only if the committed row's text is the
   text it embedded, and it reads the committed row back, text included, before
   the release. If the vector it committed no longer matches the row's text, its
   retry recognises that vector by the vector itself and re-embeds the current

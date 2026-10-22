@@ -172,8 +172,9 @@
  * this migration's read is the row it re-embeds; it writes only the embedding
  * fields (and gives a legacy row with no `instanceToken` one) and commits before
  * the lock is released. The `.content`-suffix fallback computes its vector
- * first, then takes the id's lock once (phase `embedding-stamp-content-suffix`):
- * a held id, an id with an unresolved write outcome, or a store with no lock is
+ * first, then takes the id's lock (phase `embedding-stamp-content-suffix`) with
+ * one non-waiting acquisition per attempt; a retry acquires it again. A held
+ * id, an id with an unresolved write outcome, or a store with no lock is
  * logged, written nothing, and left uncounted; the next scan decides whether it
  * is still stale. Under the lock it re-reads the committed row, writes only when
  * that row is the one it embedded, and commits and verifies the committed row
@@ -374,8 +375,9 @@ type ContentSuffixAttempt =
  * row with no such text is not embedded.
  *
  * The vector is computed BEFORE the id's per-id write lock is taken
- * (flair#2478): no provider call runs while the id is locked. The lock is tried
- * once; a held id, an unresolved-outcome marker or a store with no lock answers
+ * (flair#2478): no provider call runs while the id is locked. Each call of this
+ * function is one attempt and tries the lock once, without waiting (the
+ * caller's retry calls it again); a held id, an unresolved-outcome marker or a store with no lock answers
  * `lock` and writes nothing. Holding it, the attempt re-reads the committed row:
  * a row that is not the one the vector was computed for (gone, or any field
  * changed) is `skipped` and nothing is written; a later scan decides whether

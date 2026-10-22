@@ -263,7 +263,8 @@ export async function withMemoryWriteLock<T>(
   return acquire(lockStore(store), normalizeIds(ids), MEMORY_LOCK_ATTEMPTS, MEMORY_LOCK_WAIT_MS, fn, options);
 }
 
-/** One attempt, no wait, used by the automatic writers: the visibility
+/** One attempt, no wait, per call; a writer that retries calls it again and
+ *  acquires again. Used by the automatic writers: the visibility
  *  backfill, the automatic promotion stamp, the embedding backfill and the
  *  embedding-stamp migration's `.content`-suffix fallback. A held lock or a
  *  marker answers `busy`/`unknown`; the writer skips the id and writes nothing.
