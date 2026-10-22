@@ -480,9 +480,12 @@ export async function mcpHandler(request: any): Promise<any> {
 /**
  * The tools `tools/list` advertises to this request's caller. The caller is
  * resolved the way handleToolCall resolves it (same sub lookup, same
- * active-principal rule), so each tool's `tools/list` gate is decided for the
- * agent the call would run as. A subject that resolves to no principal — or
- * whose resolution is refused — gets no gated tool.
+ * active-principal rule), except that listing never JIT-provisions: for a
+ * mapped subject each tool's `tools/list` gate is decided for the agent the
+ * call would run as, while an unmapped subject lists with no principal even
+ * when JIT provisioning is on (a call by it may provision one). A subject that
+ * resolves to no principal — or whose resolution is refused — gets no gated
+ * tool.
  *
  * JIT provisioning is off here: a listing is a read and must not create a
  * principal.

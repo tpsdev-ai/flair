@@ -4,7 +4,8 @@
  * These are the auth-critical assertions the integration harness can't make at
  * the unit level:
  *
- *   - tools/list returns EXACTLY the 14 curated tools (no raw CRUD, no extras).
+ *   - tools/list returns EXACTLY the curated TOOLS definitions the caller may
+ *     list (no raw CRUD, no extras).
  *   - sub → Agent resolution: an existing Credential(kind:"idp", idpSubject=sub)
  *     maps to its principalId; an unknown sub with JIT OFF is DENIED (not run as
  *     anonymous/admin); an unknown sub with JIT ON provisions a NON-admin agent.

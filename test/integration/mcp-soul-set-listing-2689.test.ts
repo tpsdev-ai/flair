@@ -21,8 +21,9 @@
  *
  * Harness: an ephemeral Harper with MCP OAuth on and a pinned issuer; a signing
  * key this test controls is seeded into the table withMCPAuth verifies against,
- * and tokens are minted here with `jose`. Each token subject is linked to an
- * Agent through a `Credential(kind:"idp")` row — the mapping `resolveMapping`
+ * and tokens are minted here with `jose`. Each MAPPED test subject is linked to
+ * an Agent through a `Credential(kind:"idp")` row (the unmapped-subject case is
+ * deliberately not) — the mapping `resolveMapping`
  * reads. Every request goes to this test's own loopback instance on its
  * OS-assigned ports.
  *
