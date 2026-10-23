@@ -6,9 +6,10 @@
  * Each converted writer (the usage-count bump and the maintenance archive) writes
  * an INCREMENTAL update of only its named patch fields, never a full-row write of
  * the row it read. Both writers take the memory id's per-id write lock (flair#2478
- * slice 3b), so an owner PUT that starts while a writer holds the id is refused
- * `503 memory_busy` and cannot interleave with it; an owner PUT that commits
- * before the writer's read is the row the writer patches. These cases cover the
+ * slice 3b), so an ordinary owner PUT that starts while a writer holds the id
+ * cannot interleave with it, and is refused `503 memory_busy` only when the hold
+ * outlasts its wait budget; an owner PUT that commits before the writer's read
+ * is the row the writer patches. These cases cover the
  * second order: the owner PUT commits, then the writer's field-only write lands
  * beside the edit instead of reverting it.
  *
@@ -274,4 +275,3 @@ describe("flair#2470 — usage-count and archive patches write only their own fi
     expect(row.content, "the background write reverted the owner's committed edit").toBe(EDITED);
   }, 120_000);
 });
-

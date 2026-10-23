@@ -241,7 +241,7 @@ describe("flair#2478 slice 3b — the maintenance archive writer (real Harper)",
     expect(h.writesBy(id, ARCHIVE_WRITER)).toHaveLength(1);
   }, 60_000);
 
-  it("held after staging: an owner PUT is refused memory_busy; after release the archive and the owner's content and visibility are stored", async () => {
+  it("held after staging: an owner PUT is refused memory_busy; after release the archive and a later owner PUT's content and visibility are stored", async () => {
     const id = "mul-arc-staged";
     await seed(id, { validTo: PAST });
     const point = "maintenance-archive-staged";
@@ -255,11 +255,11 @@ describe("flair#2478 slice 3b — the maintenance archive writer (real Harper)",
     expect(stats.archived, JSON.stringify(stats)).toBe(1);
     expect((await readRow(id))?.archived).toBe(true);
     h.expectIncrementalWrites(id, ARCHIVE_WRITER, ARCHIVE_FIELDS);
-    const put = await ownerWrite(owner, "PUT", id, { content: "owner text after the archive committed" });
+    const put = await ownerWrite(owner, "PUT", id, { content: "owner text after the archive committed", visibility: "private" });
     expect(put.status, `owner PUT after release: ${await put.clone().text()}`).toBeLessThan(300);
     const row = await readRow(id);
     expect(row?.content).toBe("owner text after the archive committed");
-    expect(row?.visibility).toBe("shared");
+    expect(row?.visibility).toBe("private");
   }, 120_000);
 
   it("held past its confirmation, before the commit: an owner PATCH is refused memory_busy; both writes are stored afterwards", async () => {
@@ -383,7 +383,7 @@ describe("flair#2478 slice 3b — the usage-count writer (real Harper)", () => {
     expect(h.writesBy(id, USAGE_WRITER)).toHaveLength(1);
   }, 60_000);
 
-  it("held after the count is staged: an owner PUT is refused memory_busy; after release the count and the owner's content and visibility are stored", async () => {
+  it("held after the count is staged: an owner PUT is refused memory_busy; after release the count and a later owner PUT's content and visibility are stored", async () => {
     const id = "mul-use-staged";
     await seed(id);
     const point = "usage-count-staged";
@@ -397,11 +397,11 @@ describe("flair#2478 slice 3b — the usage-count writer (real Harper)", () => {
     expect(res.status, `RecordUsage: ${await res.clone().text()}`).toBe(200);
     expect((await readRow(id))?.usageCount).toBe(1);
     h.expectIncrementalWrites(id, USAGE_WRITER, USAGE_FIELDS);
-    const put = await ownerWrite(owner, "PUT", id, { content: "owner text after the count" });
+    const put = await ownerWrite(owner, "PUT", id, { content: "owner text after the count", visibility: "private" });
     expect(put.status, `owner PUT after release: ${await put.clone().text()}`).toBeLessThan(300);
     const row = await readRow(id);
     expect(row?.content).toBe("owner text after the count");
-    expect(row?.visibility).toBe("shared");
+    expect(row?.visibility).toBe("private");
   }, 120_000);
 
   it("held past its confirmation, before the commit: an owner PATCH is refused memory_busy; both writes are stored afterwards", async () => {
