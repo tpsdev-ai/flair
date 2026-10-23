@@ -99,15 +99,18 @@ async function updateRow(table: string, row: Record<string, unknown>): Promise<v
 async function deleteRow(table: string, id: string): Promise<void> {
   await ops({ operation: "delete", database: "flair", table, ids: [id] });
 }
-async function purgeRow(id: string): Promise<void> {
+async function purgeBusy(id: string): Promise<{ status: number; body: any }> {
   const res = await fetch(`${harper.httpURL}/MemoryPurge`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: basicAuth() },
     body: JSON.stringify({ ids: [id] }),
     signal: AbortSignal.timeout(30_000),
   });
-  const text = await res.text();
-  expect(res.status, `MemoryPurge: ${text.slice(0, 300)}`).toBe(200);
+  return { status: res.status, body: await res.json() };
+}
+async function purgeRow(id: string): Promise<void> {
+  const { status, body } = await purgeBusy(id);
+  expect(status, `MemoryPurge: ${JSON.stringify(body).slice(0, 300)}`).toBe(200);
 }
 
 function authSend(agent: TestAgent, method: string, path: string, body?: unknown): Promise<Response> {
@@ -207,16 +210,22 @@ describe("flair#2450 — the _reindex re-PUT confirms the stored row (real Harpe
     expect(await readRow("Memory", id), "the re-PUT re-created the deleted row").toBeNull();
   }, 60_000);
 
-  it("a PURGE between the read and the write is refused and the row stays purged", async () => {
+  // flair#2478 slice 3b: the purge takes its targets' per-id write locks, so a
+  // purge that arrives while the re-PUT holds the id is refused busy and
+  // deletes nothing; once the re-PUT has committed, a purge removes the row.
+  it("a PURGE between the read and the write is refused busy and lands once the re-PUT commits", async () => {
     const id = `csr2-reidx-purge-${Date.now()}`;
     await seed(id, randomUUID());
-    const { response, released, paused } = await withPaused("memory-reindex", () => reindexPut(id), () => purgeRow(id));
+    const { response, released, paused, competed } = await withPaused("memory-reindex", () => reindexPut(id), () => purgeBusy(id));
     expect(paused, "the reindex re-PUT was not paused").toBe(true);
     expect(released).toBe("go");
+    expect(competed?.status).toBe(503);
+    expect(competed?.body).toEqual({ error: "memory_busy", caller: "admin" });
     const text = await response.clone().text();
-    expect(response.status, text.slice(0, 200)).toBe(409);
-    expect(JSON.parse(text).error).toBe("stored_row_changed");
-    expect(await readRow("Memory", id), "the re-PUT re-created the purged row").toBeNull();
+    expect(response.status, text.slice(0, 200)).toBeLessThan(300);
+    expect(await readRow("Memory", id), "the refused purge deleted the row").not.toBeNull();
+    await purgeRow(id);
+    expect(await readRow("Memory", id), "the purge did not remove the row the re-PUT committed").toBeNull();
   }, 60_000);
 
   it("a same-id UPDATE with a new token is refused and not overwritten", async () => {

@@ -44,6 +44,20 @@ import { AGENT_ID_RULE, isValidAgentId } from "../src/lib/agent-id-rule.js";
 /** The 400 an admin run's refused `agentId` is answered with. */
 const INVALID_AGENT_ID_ERROR = `agentId must be a string matching ${AGENT_ID_RULE}`;
 
+/** The `remedy` the same 400 carries: what an operator can do today for a
+ *  legacy stored id outside the rule. An admin-scoped run needs a conforming
+ *  id. The agent's own authenticated run reaches its rows only when the stored
+ *  id can authenticate: the signed TPS-Ed25519 header cannot carry a colon or
+ *  whitespace. For an id the header cannot represent, a fleet-wide run reaches
+ *  its rows and also acts on other agents' eligible rows. */
+const INVALID_AGENT_ID_REMEDY =
+  "for a legacy stored agent id outside this rule, run that agent's own authenticated non-admin " +
+  "maintenance (POST /MemoryMaintenance with that agent's credential), which reaches its rows, when the " +
+  "stored id can authenticate: the signed TPS-Ed25519 header cannot carry a colon or whitespace. For an " +
+  "id the header cannot represent, omit agentId to run fleet-wide, which reaches that agent's rows and " +
+  "also expires and archives other agents' eligible rows. A run scoped to an admin agentId needs an id " +
+  "that matches the rule.";
+
 /** What a request's `agentId` says about the run's target, for an ADMIN
  *  request: it is a named target only when the field is a string that is
  *  non-blank when trimmed, equal to its trimmed form, and accepted by Flair's
@@ -107,7 +121,7 @@ export class MemoryMaintenance extends Resource {
     //     either matches the authenticated agent or is ignored.
     const requestedAgent = parseRequestedAgent(body);
     if (callerIsAdmin && requestedAgent.kind === "invalid") {
-      return new Response(JSON.stringify({ error: INVALID_AGENT_ID_ERROR }), {
+      return new Response(JSON.stringify({ error: INVALID_AGENT_ID_ERROR, remedy: INVALID_AGENT_ID_REMEDY }), {
         status: 400,
         headers: { "content-type": "application/json" },
       });

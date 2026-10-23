@@ -12,6 +12,7 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import ts from "typescript";
 import {
   runGate,
   scanTree,
@@ -443,15 +444,16 @@ test("t", async () => {
     for (const name of ["$sig", "_sig"]) expect(has(bad(name), "case-unbounded-fetch"), name).toBe(true);
   });
 
-  it("item 4: a 310-digit literal / `0` budget / `1__000` / `_1000` are all unknown", () => {
+  it("item 4: a 310-digit literal / `0` budget / `_1000` are unknown, and `1__000` (a syntax error) is refused", () => {
     const big = "9".repeat(310);
     expect(offendersFor(`test("t", () => {\n  Bun.spawn(["bun","src/cli.ts","status"], { timeout: ${big} });\n});\n`).spawnOffenders.some((o: any) => o.kind === "spawn-no-timeout")).toBe(true);
     // `0` as a bare CASE budget is not a budget → case-no-budget
     expect(has(`test("t", () => {\n  Bun.spawn(["bun","src/cli.ts","status"], { timeout: 5_000 });\n}, 0);\n`, "case-no-budget")).toBe(true);
-    // invalid underscore forms in a spawn timeout → unbounded
-    for (const lit of ["1__000", "_1000"]) {
-      expect(offendersFor(`test("t", () => {\n  Bun.spawn(["bun","src/cli.ts","status"], { timeout: ${lit} });\n});\n`).spawnOffenders.some((o: any) => o.kind === "spawn-no-timeout"), lit).toBe(true);
-    }
+    // invalid underscore forms in a spawn timeout: `_1000` is an identifier → unbounded;
+    // `1__000` does not parse, so the file is refused (flair#2774)
+    const withTimeout = (lit: string) => `test("t", () => {\n  Bun.spawn(["bun","src/cli.ts","status"], { timeout: ${lit} });\n});\n`;
+    expect(offendersFor(withTimeout("_1000")).spawnOffenders.some((o: any) => o.kind === "spawn-no-timeout")).toBe(true);
+    expect(() => offendersFor(withTimeout("1__000"))).toThrow(/^test\/x\.test\.ts:2:\d+: TypeScript cannot parse this file/);
   });
 });
 
@@ -491,6 +493,244 @@ describe("round 9: post-separator digit cap + options-only timeout (flair#1825)"
   });
 });
 
+describe("comments and literal text in a spawn's options (flair#2774)", () => {
+  function offendersFor(src: string) {
+    const dir = mkdtempSync(join(tmpdir(), "spawn-scan-2774-"));
+    repos.push(dir);
+    writeTree(dir, { "test/x.test.ts": src });
+    return scanTree(dir);
+  }
+  const spawnNoTimeout = (src: string) => offendersFor(src).spawnOffenders.some((o: any) => o.kind === "spawn-no-timeout");
+  const bunSrc = (opts: string) => `test("t", () => {\n  Bun.spawn(["bun", "src/cli.ts", "status"], ${opts});\n}, 120_000);\n`;
+  const nodeSrc = (opts: string) => `test("t", () => {\n  spawnSync("bun", ["src/cli.ts", "status"], ${opts});\n}, 120_000);\n`;
+
+  const COMMENTED_ONLY = {
+    line: "{\n    env,\n    // timeout: 5000,\n  }",
+    block: "{ env, /* timeout: 5000 */ }",
+  };
+  const REAL_AFTER_COMMENT = {
+    line: "{\n    env,\n    // timeout: SOME_CONSTANT would be read here\n    timeout: 90_000,\n  }",
+    block: "{ env, /* timeout: SOME_CONSTANT */ timeout: 90_000 }",
+  };
+
+  for (const kind of ["line", "block"] as const) {
+    it(`${kind} comment: a commented-out timeout and no real one is reported as no deadline`, () => {
+      for (const src of [bunSrc(COMMENTED_ONLY[kind]), nodeSrc(COMMENTED_ONLY[kind])]) {
+        const [call] = findSpawnCalls(src).calls;
+        expect(call.isCliEntry).toBe(true);
+        expect(call.hasTimeout).toBe(false);
+        expect(call.timeoutMs).toBeNull();
+        expect(spawnNoTimeout(src)).toBe(true);
+      }
+    });
+
+    it(`${kind} comment: a real timeout after a comment naming another is accepted with the real value`, () => {
+      for (const src of [bunSrc(REAL_AFTER_COMMENT[kind]), nodeSrc(REAL_AFTER_COMMENT[kind])]) {
+        const [call] = findSpawnCalls(src).calls;
+        expect(call.hasTimeout).toBe(true);
+        expect(call.timeoutMs).toBe(90000);
+        expect(spawnNoTimeout(src)).toBe(false);
+      }
+    });
+  }
+
+  const noDeadline = (opts: string) => {
+    for (const src of [bunSrc(opts), nodeSrc(opts)]) {
+      const [call] = findSpawnCalls(src).calls;
+      expect(call.isCliEntry).toBe(true);
+      expect(call.hasTimeout).toBe(false);
+      expect(call.timeoutMs).toBeNull();
+      expect(spawnNoTimeout(src)).toBe(true);
+    }
+  };
+
+  it("a timeout inside a string's contents is no deadline", () => {
+    noDeadline('{ env: { X: "timeout: 5000 ms" } }');
+    noDeadline('{ env: { X: "timeout: 5000" } }');
+  });
+
+  it("a timeout inside a template literal's or a regex literal's text, as TypeScript's parser reads them, is no deadline", () => {
+    noDeadline("{ env: { X: `timeout: 5000 ms` } }");
+    noDeadline("{ env, re: /timeout: 5000 ms/ }");
+  });
+
+  it("a quoted timeout value is no deadline", () => {
+    noDeadline('{ timeout: "5000" }');
+  });
+
+  it("a real timeout after a string containing another is accepted with the real value", () => {
+    const opts = '{ env: { X: "timeout: 1" }, timeout: 90_000 }';
+    for (const src of [bunSrc(opts), nodeSrc(opts)]) {
+      const [call] = findSpawnCalls(src).calls;
+      expect(call.hasTimeout).toBe(true);
+      expect(call.timeoutMs).toBe(90000);
+      expect(spawnNoTimeout(src)).toBe(false);
+    }
+  });
+
+  it("an options identifier whose one-line initializer carries only a commented-out timeout is no deadline", () => {
+    const src = `const opts = { env }; // timeout: 5000\ntest("t", () => {\n  Bun.spawn(["bun", "src/cli.ts"], opts);\n}, 120_000);\n`;
+    const [call] = findSpawnCalls(src).calls;
+    expect(call.timeoutMs).toBeNull();
+    expect(spawnNoTimeout(src)).toBe(true);
+  });
+});
+
+describe("comments and literals inside a template's ${…} in a spawn's options (flair#2774)", () => {
+  function offendersFor(src: string) {
+    const dir = mkdtempSync(join(tmpdir(), "spawn-scan-2774-"));
+    repos.push(dir);
+    writeTree(dir, { "test/x.test.ts": src });
+    return scanTree(dir);
+  }
+  const spawnNoTimeout = (src: string) => offendersFor(src).spawnOffenders.some((o: any) => o.kind === "spawn-no-timeout");
+
+  /**
+   * What a real JavaScript parser (TypeScript's) says the one spawn call's
+   * options carry: the numeric `timeout` property of the options object literal,
+   * or of the initializer of the identifier passed as options; null when the
+   * object has no such property.
+   */
+  function parsedTimeout(src: string): number | null {
+    const syntax = ts.transpileModule(src, { reportDiagnostics: true, compilerOptions: { target: ts.ScriptTarget.ES2022 } });
+    expect(syntax.diagnostics ?? []).toEqual([]);
+    const sf = ts.createSourceFile("x.test.ts", src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+    const inits = new Map<string, ts.Expression>();
+    const spawns: ts.CallExpression[] = [];
+    const visit = (n: ts.Node): void => {
+      if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.initializer) inits.set(n.name.text, n.initializer);
+      if (ts.isCallExpression(n) && ["Bun.spawn", "spawnSync"].includes(n.expression.getText(sf))) spawns.push(n);
+      ts.forEachChild(n, visit);
+    };
+    visit(sf);
+    expect(spawns.length).toBe(1);
+    const call = spawns[0];
+    let opts: ts.Expression | undefined = call.arguments[call.expression.getText(sf) === "Bun.spawn" ? 1 : 2];
+    if (opts && ts.isIdentifier(opts)) opts = inits.get(opts.text);
+    if (!opts || !ts.isObjectLiteralExpression(opts)) return null;
+    for (const p of opts.properties) {
+      if (ts.isPropertyAssignment(p) && p.name.getText(sf) === "timeout" && ts.isNumericLiteral(p.initializer)) return Number(p.initializer.text);
+    }
+    return null;
+  }
+
+  const ARGV = '["bun", "src/cli.ts", "status"]';
+  const bunSrcForParse = `test("t", () => {\n  Bun.spawn(${ARGV}, { timeout: 5000 });\n}, 120_000);\n`;
+  const forms = (opts: string): Record<string, string> => ({
+    "Bun.spawn, options literal": `test("t", () => {\n  Bun.spawn(${ARGV}, ${opts});\n}, 120_000);\n`,
+    "spawnSync, options literal": `test("t", () => {\n  spawnSync("bun", ${ARGV.replace('"bun", ', "")}, ${opts});\n}, 120_000);\n`,
+    "Bun.spawn, options identifier": `const opts = ${opts};\ntest("t", () => {\n  Bun.spawn(${ARGV}, opts);\n}, 120_000);\n`,
+    "spawnSync, options identifier": `const opts = ${opts};\ntest("t", () => {\n  spawnSync("bun", ${ARGV.replace('"bun", ', "")}, opts);\n}, 120_000);\n`,
+  });
+
+  /** The parser's answer, then findSpawnCalls and scanTree must both give it. */
+  function expectGateAgreesWithParser(src: string, expected: number | null) {
+    expect(parsedTimeout(src)).toBe(expected);
+    const { calls } = findSpawnCalls(src);
+    expect(calls.length).toBe(1);
+    expect(calls[0].isCliEntry).toBe(true);
+    expect(calls[0].timeoutMs ?? null).toBe(expected);
+    expect(calls[0].hasTimeout).toBe(expected !== null);
+    expect(spawnNoTimeout(src)).toBe(expected === null);
+  }
+
+  const CASES: Array<{ name: string; opts: string; expected: number | null; oneLine: boolean }> = [
+    { name: "a block comment inside ${…}", opts: "{ env: { X: `${/* timeout: 5000 */ 1}` } }", expected: null, oneLine: true },
+    { name: "a line comment inside ${…}", opts: "{ env: { X: `${1 // timeout: 5000 ms\n}` } }", expected: null, oneLine: false },
+    { name: "a string inside ${…}", opts: '{ env: { X: `${"timeout: 5000 ms"}` } }', expected: null, oneLine: true },
+    { name: "a nested template inside ${…}", opts: "{ env: { X: `${`timeout: 5000 ms`}` } }", expected: null, oneLine: true },
+    { name: "a comment in a nested template's own ${…}", opts: "{ env: { X: `${`a${/* timeout: 5000 */ 1}b`}` } }", expected: null, oneLine: true },
+    { name: "a regex literal inside ${…}", opts: "{ env: { X: `${String(/timeout: 5000 ms/)}` } }", expected: null, oneLine: true },
+    { name: "template text after a `{` inside a string in ${…}", opts: '{ env: { X: `${"{"} timeout: 5000 ms` } }', expected: null, oneLine: true },
+    { name: "control: a real options timeout after a ${…} holding a commented one", opts: "{ env: { X: `${/* timeout: 1 */ 1}` }, timeout: 90_000 }", expected: 90000, oneLine: true },
+  ];
+
+  for (const c of CASES) {
+    it(`${c.name}: the gate reads ${c.expected === null ? "no deadline" : c.expected}, as the parser does`, () => {
+      for (const [form, src] of Object.entries(forms(c.opts))) {
+        if (!c.oneLine && form.endsWith("identifier")) continue; // the gate reads a ONE-LINE initializer only
+        expectGateAgreesWithParser(src, c.expected);
+      }
+    });
+  }
+
+  // A regex literal right after a control statement's `)`: there `/` starts a
+  // regex, not a division (flair#2774).
+  const REGEX_AFTER_CONTROL_PAREN: Array<{ name: string; body: string }> = [
+    { name: "if (…)", body: 'if (false) /timeout: 5000 ms/.test("x");' },
+    { name: "while (…)", body: 'while (false) /timeout: 5000 ms/.test("x");' },
+    { name: "for (…)", body: 'for (;false;) /timeout: 5000 ms/.test("x");' },
+  ];
+  const iife = (body: string) => `(() => { ${body} return "1"; })()`;
+
+  for (const r of REGEX_AFTER_CONTROL_PAREN) {
+    it(`a regex literal after \`${r.name}\`, in the options and inside \${…}: the gate reads no deadline, as the parser does`, () => {
+      for (const opts of [`{ env: { X: ${iife(r.body)} } }`, `{ env: { X: \`\${${iife(r.body)}}\` } }`]) {
+        for (const src of Object.values(forms(opts))) expectGateAgreesWithParser(src, null);
+      }
+    });
+
+    it(`a real options timeout after a regex literal after \`${r.name}\` is read as 90000, as the parser does`, () => {
+      const opts = `{ env: { X: ${iife(r.body.replace("5000 ms", "1"))} }, timeout: 90_000 }`;
+      for (const src of Object.values(forms(opts))) expectGateAgreesWithParser(src, 90000);
+    });
+  }
+
+  it("a file TypeScript cannot parse is refused with its name, never scanned unmasked", () => {
+    // A missing comma: the unmasked text would still show `timeout: 5000`.
+    const broken = `test("t", () => {\n  Bun.spawn(${ARGV}, { env: {} timeout: 5000 });\n}, 120_000);\n`;
+    expect(() => findSpawnCalls(broken, "test/broken.test.ts")).toThrow(
+      /^test\/broken\.test\.ts:2:\d+: TypeScript cannot parse this file \(.+\); refusing to scan it unmasked/,
+    );
+    expect(() => offendersFor(broken)).toThrow(/^test\/x\.test\.ts:2:\d+: TypeScript cannot parse this file/);
+    // The gate's own CLI exits 1 with that message, before any baseline work.
+    const dir = mkdtempSync(join(tmpdir(), "spawn-scan-2774-"));
+    repos.push(dir);
+    writeTree(dir, { "test/x.test.ts": broken, "test/ok.test.ts": bunSrcForParse });
+    const script = join(import.meta.dirname, "..", "..", "scripts", "ci", "check-cli-spawn-budgets.mjs");
+    const r = spawnSync("node", [script, "--root", dir], { encoding: "utf8", timeout: 60_000 });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/check-cli-spawn-budgets: test\/x\.test\.ts:2:\d+: TypeScript cannot parse this file/);
+    expect(r.stdout).toBe("");
+  });
+
+  it("each file is parsed by its extension: JSX parses in .tsx, .jsx, .js and .mjs, and is refused in .ts", () => {
+    const jsx = `const el = <b>x</b>;\n${bunSrcForParse}`;
+    for (const name of ["test/a.test.tsx", "test/a.test.jsx", "test/a.test.js", "test/a.test.MJS"]) {
+      expect(findSpawnCalls(jsx, name).calls.length).toBe(1);
+    }
+    expect(() => findSpawnCalls(jsx, "test/a.test.ts")).toThrow(/^test\/a\.test\.ts:1:\d+: TypeScript cannot parse this file/);
+  });
+
+  it("control: a spawn written inside ${…} keeps its real options timeout, and a commented one there is no deadline", () => {
+    const inTemplate = (call: string) => `test("t", () => {\n  const s = \`pid \${${call}.pid}\`;\n}, 120_000);\n`;
+    for (const [opts, expected] of [
+      ["{ timeout: 5000 }", 5000],
+      ["{ env: {}, /* timeout: 5000 */ }", null],
+    ] as const) {
+      expectGateAgreesWithParser(inTemplate(`Bun.spawn(${ARGV}, ${opts})`), expected);
+      expectGateAgreesWithParser(inTemplate(`spawnSync("bun", ${ARGV.replace('"bun", ', "")}, ${opts})`), expected);
+      expectGateAgreesWithParser(`const opts = ${opts};\n${inTemplate(`Bun.spawn(${ARGV}, opts)`)}`, expected);
+      expectGateAgreesWithParser(`const opts = ${opts};\n${inTemplate(`spawnSync("bun", ${ARGV.replace('"bun", ', "")}, opts)`)}`, expected);
+    }
+  });
+
+  it("the timeout matcher reads a `timeout` key at ANY depth of the options code, not only a top-level key", () => {
+    // A real `timeout:` in an object written inside ${…} is code, so it stays
+    // readable. The gate counts it as the spawn's deadline, as it counts a
+    // nested object's key outside any template; the parser shows the options
+    // object itself carries no `timeout` in either case.
+    for (const opts of ["{ env: { X: `${JSON.stringify({ timeout: 5000 })}` } }", "{ env: { timeout: 5000 } }"]) {
+      for (const src of Object.values(forms(opts))) {
+        expect(parsedTimeout(src)).toBeNull();
+        const [call] = findSpawnCalls(src).calls;
+        expect(call.timeoutMs).toBe(5000);
+        expect(spawnNoTimeout(src)).toBe(false);
+      }
+    }
+  });
+});
+
 describe("round 10: the SEED stdout says exactly what it guarantees (flair#1825)", () => {
   const root = join(import.meta.dirname, "..", "..");
   // The seed path runs only while the base has NO baseline file, and origin/main
@@ -509,6 +749,8 @@ describe("round 10: the SEED stdout says exactly what it guarantees (flair#1825)
     }
   };
   const available = hasCommit(SEED_INTRODUCTION_BASE) && hasCommit(PRE_BASELINE_BASE);
+  // The real gate scans the full test tree, parsing each file with TypeScript's
+  // parser (flair#2774), hence the explicit timeout on this case.
   it.skipIf(!available)(`the SEED text names the ACTUAL base sha and says it DESCENDS from the anchor${available ? "" : " — skipped: the anchor or the pre-baseline commit is not in this checkout"}`, () => {
     const r = spawnSync("node", [join(root, "scripts", "ci", "check-cli-spawn-budgets.mjs")], {
       cwd: root,
