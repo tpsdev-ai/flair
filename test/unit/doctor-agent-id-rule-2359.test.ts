@@ -31,9 +31,12 @@ describe("flair#2359 — describeAgentIdRuleFinding", () => {
     const finding = describeAgentIdRuleFinding([{ id: "bad.id" }]);
     expect(finding!.fixHint).toContain("flair agent remove");
     expect(finding!.fixHint).toContain("deletes the agent's Memory and Soul rows");
-    expect(finding!.fixHint).toContain("run its own authenticated non-admin maintenance, which reaches them regardless of the stored id");
-    expect(finding!.fixHint).toContain("or run fleet-wide maintenance, which also expires and archives other agents' eligible rows");
+    expect(finding!.fixHint).toContain("run its own authenticated non-admin maintenance when the stored id can authenticate");
+    expect(finding!.fixHint).toContain("the signed TPS-Ed25519 header cannot carry a colon or whitespace");
+    expect(finding!.fixHint).toContain("that run deletes the agent's expired ephemeral Memory rows");
+    expect(finding!.fixHint).toContain("run fleet-wide maintenance, which reaches it and also expires and archives other agents' eligible rows");
     expect(finding!.fixHint).toContain("an admin-scoped run needs an id that matches the rule");
+    expect(finding!.fixHint).not.toContain("without deleting them");
   });
 
   it("reports every non-conforming id, sorted", () => {

@@ -34,9 +34,11 @@ const AGENT_ID_REFUSAL = {
   error: `agentId must be a string matching ${AGENT_ID_RULE}`,
   remedy:
     "for a legacy stored agent id outside this rule, run that agent's own authenticated non-admin " +
-    "maintenance (POST /MemoryMaintenance with that agent's credential), which reaches its rows; or " +
-    "omit agentId to run fleet-wide, which also expires and archives other agents' eligible rows. " +
-    "A run scoped to an admin agentId needs an id that matches the rule.",
+    "maintenance (POST /MemoryMaintenance with that agent's credential), which reaches its rows, when the " +
+    "stored id can authenticate: the signed TPS-Ed25519 header cannot carry a colon or whitespace. For an " +
+    "id the header cannot represent, omit agentId to run fleet-wide, which reaches that agent's rows and " +
+    "also expires and archives other agents' eligible rows. A run scoped to an admin agentId needs an id " +
+    "that matches the rule.",
 };
 
 let harper: HarperInstance;

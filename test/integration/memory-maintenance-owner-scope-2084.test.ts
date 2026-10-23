@@ -56,9 +56,11 @@ const MEMORY_READ_PROBE_LOG = "maintenance-memory-read-probe-2084.jsonl";
  *  rule and carries the remedy for a legacy stored id outside it. */
 const AGENT_ID_REMEDY =
   "for a legacy stored agent id outside this rule, run that agent's own authenticated non-admin " +
-  "maintenance (POST /MemoryMaintenance with that agent's credential), which reaches its rows; or " +
-  "omit agentId to run fleet-wide, which also expires and archives other agents' eligible rows. " +
-  "A run scoped to an admin agentId needs an id that matches the rule.";
+  "maintenance (POST /MemoryMaintenance with that agent's credential), which reaches its rows, when the " +
+  "stored id can authenticate: the signed TPS-Ed25519 header cannot carry a colon or whitespace. For an " +
+  "id the header cannot represent, omit agentId to run fleet-wide, which reaches that agent's rows and " +
+  "also expires and archives other agents' eligible rows. A run scoped to an admin agentId needs an id " +
+  "that matches the rule.";
 const AGENT_ID_REFUSAL = { error: `agentId must be a string matching ${AGENT_ID_RULE}`, remedy: AGENT_ID_REMEDY };
 
 interface TestAgent {
@@ -539,6 +541,45 @@ describe("MemoryMaintenance orphan sweep is scoped to the run's owner (real Harp
     expect(fleet.stats?.agent).toBe("all"); // control: an absent agentId is fleet-wide
     await expectSweptOnly(null, fleet, rest);
   }, 120_000);
+
+  it("(a) an agent whose stored id contains a colon cannot run its own maintenance, and the admin remedy names fleet-wide for it", async () => {
+    // Seeded the way the legacy-id case above seeds one: straight through the
+    // operations API, which does not apply the agent-id rule. The second
+    // colon-delimited segment is non-numeric, so the TPS-Ed25519 header cannot
+    // parse: the agent can never authenticate under this stored id.
+    const unrepresentable = makeAgent(`mm:legacy-${SFX}`);
+    expect(unrepresentable.id).toContain(":"); // control: the stored id carries a colon
+    expect(isValidAgentId(unrepresentable.id)).toBe(false); // control: the stored id is outside the rule
+    await insertRows("Agent", [
+      { id: unrepresentable.id, name: unrepresentable.id, role: "agent", publicKey: unrepresentable.publicKey, createdAt: new Date().toISOString() },
+    ]);
+    expect((JSON.parse(await readRows("Agent", "id", unrepresentable.id)) as unknown[]).length, "the colon-id agent row was seeded").toBe(1);
+
+    const own = await fetch(`${harper.httpURL}/MemoryMaintenance`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: ed25519(unrepresentable, "POST", "/MemoryMaintenance") },
+      body: JSON.stringify({}),
+      signal: AbortSignal.timeout(60_000),
+    });
+    const ownText = await own.text();
+    expect(own.status, ownText.slice(0, 300)).toBe(401); // assertion: the agent's own authenticated run is refused
+    expect(JSON.parse(ownText), ownText.slice(0, 300)).toEqual({ error: "invalid_authorization_header" }); // assertion: the exact refusal the signed header gets
+
+    const admin = await fetch(`${harper.httpURL}/MemoryMaintenance`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: basicHeader() },
+      body: JSON.stringify({ agentId: unrepresentable.id }),
+      signal: AbortSignal.timeout(60_000),
+    });
+    const adminText = await admin.text();
+    expect(admin.status, adminText.slice(0, 300)).toBe(400); // control: an admin-scoped run cannot name it
+    expect(JSON.parse(adminText), adminText.slice(0, 300)).toEqual(AGENT_ID_REFUSAL);
+    expect(AGENT_ID_REFUSAL.remedy).toContain("when the stored id can authenticate"); // assertion: the own-run option is qualified
+    expect(AGENT_ID_REFUSAL.remedy).toContain("omit agentId to run fleet-wide, which reaches that agent's rows"); // assertion: fleet-wide is named for an id the header cannot represent
+
+    const cleanup = await adminOp({ operation: "delete", database: "flair", table: "Agent", hash_values: [unrepresentable.id] });
+    expect(cleanup.status).toBe(200);
+  }, 90_000);
 
   it("(b) an admin run naming an agent reads only that agent's pointer rows", async () => {
     await clearLeftoverOrphans();

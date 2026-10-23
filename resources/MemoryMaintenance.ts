@@ -46,13 +46,17 @@ const INVALID_AGENT_ID_ERROR = `agentId must be a string matching ${AGENT_ID_RUL
 
 /** The `remedy` the same 400 carries: what an operator can do today for a
  *  legacy stored id outside the rule. An admin-scoped run needs a conforming
- *  id; the agent's own authenticated run and a fleet-wide run both reach its
- *  rows. A fleet-wide run also acts on other agents' eligible rows. */
+ *  id. The agent's own authenticated run reaches its rows only when the stored
+ *  id can authenticate: the signed TPS-Ed25519 header cannot carry a colon or
+ *  whitespace. For an id the header cannot represent, a fleet-wide run reaches
+ *  its rows and also acts on other agents' eligible rows. */
 const INVALID_AGENT_ID_REMEDY =
   "for a legacy stored agent id outside this rule, run that agent's own authenticated non-admin " +
-  "maintenance (POST /MemoryMaintenance with that agent's credential), which reaches its rows; or " +
-  "omit agentId to run fleet-wide, which also expires and archives other agents' eligible rows. " +
-  "A run scoped to an admin agentId needs an id that matches the rule.";
+  "maintenance (POST /MemoryMaintenance with that agent's credential), which reaches its rows, when the " +
+  "stored id can authenticate: the signed TPS-Ed25519 header cannot carry a colon or whitespace. For an " +
+  "id the header cannot represent, omit agentId to run fleet-wide, which reaches that agent's rows and " +
+  "also expires and archives other agents' eligible rows. A run scoped to an admin agentId needs an id " +
+  "that matches the rule.";
 
 /** What a request's `agentId` says about the run's target, for an ADMIN
  *  request: it is a named target only when the field is a string that is
